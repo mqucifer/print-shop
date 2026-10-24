@@ -1,0 +1,266 @@
+# Card movements no role performs.
+#
+# The line this holds, from crew#32: transitions a *role* performs stay in crew
+# code, because those carry an acting role and emit a `card.moved` event that
+# the audit trail and `crew capability` both read. Transitions nobody performs —
+# a person closing an issue, a pull request merged by hand, an item arriving on
+# the board — belong here.
+#
+# Why this file rather than the board's built-in workflows: the GraphQL API
+# exposes `enabled` on a ProjectV2Workflow and nothing else. No trigger, no
+# target, no mutation to create or configure one. A built-in workflow is
+# therefore unreadable after the fact and unreviewable before it — and there
+# is no way to tell whether one points at a Status option that still exists.
+# This file is the configuration, in the repository, reviewed like any change.
+#
+# The built-ins stay OFF. Two mechanisms moving the same cards is worse than
+# either alone, and only one of them can be read.
+
+name: board
+
+on:
+  issues:
+    types: [opened, closed]
+  pull_request:
+    types: [closed]
+  # The one-time sweep. Built-in workflows cannot do this at all: enabling one
+  # fixes the future and leaves every card already in the wrong column.
+  workflow_dispatch:
+
+env:
+  OWNER: mqucifer
+  PROJECT_NUMBER: "1"
+  # Where a newly added item lands. It has none of its own, and the board has
+  # no Todo column — which is why the built-in "Item added to project" could
+  # never have worked here.
+  ARRIVAL_STATUS: Needs Refinement
+  GOAL_STATUS: Inbox (Goals)
+  FINISHED_STATUS: Done
+  # mqucifer-crew's Client ID — public, unlike the private key, and readable
+  # from `gh api /apps/mqucifer-crew`. create-github-app-token deprecated
+  # `app-id` in favour of it.
+  BOARD_APP_CLIENT_ID: Iv23lirf0uh3m9vl1vjm
+  # The crew's App, as the author of the issues it opens.
+  CREW_BOT: mqucifer-crew[bot]
+
+jobs:
+  move:
+    runs-on: ubuntu-latest
+    steps:
+      # GITHUB_TOKEN is repository-scoped. Its `repository-projects` permission
+      # covers classic repo projects, not organization Projects v2, so it
+      # cannot write this board at all. The crew's own App already holds
+      # project write — this borrows it for a few minutes.
+      # v1 targets Node 20, which runners now force onto Node 24 with a
+      # deprecation warning. v3 targets Node 24 directly.
+      - name: Mint an App token
+        id: token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ env.BOARD_APP_CLIENT_ID }}
+          private-key: ${{ secrets.BOARD_APP_PRIVATE_KEY }}
+          owner: ${{ env.OWNER }}
+
+      - name: Resolve the board's ids
+        id: board
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          set -euo pipefail
+          gh api graphql -f query='
+            query($owner:String!, $number:Int!) {
+              organization(login:$owner) {
+                projectV2(number:$number) {
+                  id
+                  field(name:"Status") {
+                    ... on ProjectV2SingleSelectField {
+                      id
+                      options { id name }
+                    }
+                  }
+                }
+              }
+            }' -F owner="$OWNER" -F number="$PROJECT_NUMBER" > board.json
+
+          project_id=$(jq -r '.data.organization.projectV2.id' board.json)
+          field_id=$(jq -r '.data.organization.projectV2.field.id' board.json)
+
+          # A missing option is fatal rather than skipped. A silent no-op here
+          # is exactly the failure mode the built-in workflows have.
+          for name in "$ARRIVAL_STATUS" "$GOAL_STATUS" "$FINISHED_STATUS"; do
+            if ! jq -e --arg n "$name" \
+                 '.data.organization.projectV2.field.options[] | select(.name==$n)' \
+                 board.json > /dev/null; then
+              echo "::error::no Status option named '$name' on this board"
+              jq -r '.data.organization.projectV2.field.options[].name' board.json
+              exit 1
+            fi
+          done
+
+          {
+            echo "project_id=$project_id"
+            echo "field_id=$field_id"
+            echo "arrival_option=$(jq -r --arg n "$ARRIVAL_STATUS" \
+              '.data.organization.projectV2.field.options[]|select(.name==$n).id' board.json)"
+            echo "goal_option=$(jq -r --arg n "$GOAL_STATUS" \
+              '.data.organization.projectV2.field.options[]|select(.name==$n).id' board.json)"
+            echo "finished_option=$(jq -r --arg n "$FINISHED_STATUS" \
+              '.data.organization.projectV2.field.options[]|select(.name==$n).id' board.json)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Move this item
+        if: github.event_name != 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          NODE_ID: ${{ github.event.issue.node_id || github.event.pull_request.node_id }}
+          ACTION: ${{ github.event.action }}
+          AUTHOR: ${{ github.event.issue.user.login }}
+          IS_GOAL: ${{ contains(github.event.issue.labels.*.name, 'goal') }}
+        run: |
+          set -euo pipefail
+          # An item the board does not hold is not an error: the crew keeps
+          # some of its own issues off it, such as its onboarding and design
+          # records. An issue a person opens is added below.
+          # $number is deliberately not a GraphQL variable: the project is
+          # picked out of the result by jq below, and GraphQL refuses a
+          # declared variable the query does not use. Passing it here failed
+          # every pull_request run while the sweep, which does use it, passed.
+          item=$(gh api graphql -f query='
+            query($id:ID!) {
+              node(id:$id) {
+                ... on Issue {
+                  projectItems(first:20){ nodes {
+                    id project { number }
+                    fieldValueByName(name:"Status") {
+                      ... on ProjectV2ItemFieldSingleSelectValue { name }
+                    }
+                  } }
+                }
+                ... on PullRequest {
+                  projectItems(first:20){ nodes {
+                    id project { number }
+                    fieldValueByName(name:"Status") {
+                      ... on ProjectV2ItemFieldSingleSelectValue { name }
+                    }
+                  } }
+                }
+              }
+            }' -F id="$NODE_ID" \
+            | jq -c --argjson n "$PROJECT_NUMBER" \
+              '[.data.node.projectItems.nodes[]? | select(.project.number==$n)][0] // empty')
+
+          if [ -z "$item" ]; then
+            # A person's issue, such as a Goal or a bug, reached the board only
+            # if the board's built-in auto-add covered its repository, and it
+            # covered sprint-metrics but not crew-presentation (crew-presentation
+            # bug 98 sat off the board, unseen). The crew adds its own issues.
+            if [ "$ACTION" != opened ] || [ "$AUTHOR" = "$CREW_BOT" ]; then
+              echo "not on the board — nothing to do"
+              exit 0
+            fi
+            item_id=$(gh api graphql -f query='
+              mutation($project:ID!, $content:ID!) {
+                addProjectV2ItemById(input:{projectId:$project, contentId:$content}) {
+                  item { id }
+                }
+              }' \
+              -F project="${{ steps.board.outputs.project_id }}" \
+              -F content="$NODE_ID" \
+              --jq '.data.addProjectV2ItemById.item.id')
+            echo "added $NODE_ID to the board"
+            current=""
+          else
+            item_id=$(jq -r '.id' <<<"$item")
+            current=$(jq -r '.fieldValueByName.name // ""' <<<"$item")
+          fi
+
+          case "$ACTION" in
+            opened)
+              # Give a card a status only if it has none. The crew creates
+              # issues in the repositories it delivers to and sets their status
+              # within seconds; a runner takes far longer to start, so setting
+              # this unconditionally would land *after* the crew and knock a
+              # freshly refined story back to the arrival column.
+              if [ -n "$current" ]; then
+                echo "already in '$current' — leaving it"
+                exit 0
+              fi
+              # A Goal waits for the crew in Inbox (Goals), the only column
+              # the Product Owner reads Goals from. One filed parked, with
+              # needs:human and no `goal` label, arrives as any other issue.
+              if [ "$IS_GOAL" = true ]; then
+                option='${{ steps.board.outputs.goal_option }}'
+              else
+                option='${{ steps.board.outputs.arrival_option }}'
+              fi ;;
+            closed) option='${{ steps.board.outputs.finished_option }}' ;;
+            *)      echo "no rule for '$ACTION'"; exit 0 ;;
+          esac
+
+          gh api graphql -f query='
+            mutation($project:ID!, $item:ID!, $field:ID!, $option:String!) {
+              updateProjectV2ItemFieldValue(input:{
+                projectId:$project, itemId:$item, fieldId:$field,
+                value:{ singleSelectOptionId:$option }
+              }) { projectV2Item { id } }
+            }' \
+            -F project="${{ steps.board.outputs.project_id }}" \
+            -F item="$item_id" \
+            -F field="${{ steps.board.outputs.field_id }}" \
+            -F option="$option" > /dev/null
+          echo "moved $NODE_ID on $ACTION"
+
+      - name: Sweep every closed card that is not finished
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          set -euo pipefail
+          # Enabling a built-in workflow fixes the future and nothing already
+          # wrong. This is the same rule applied backwards, run deliberately.
+          gh api graphql --paginate -f query='
+            query($owner:String!, $number:Int!, $endCursor:String) {
+              organization(login:$owner) {
+                projectV2(number:$number) {
+                  items(first:100, after:$endCursor) {
+                    pageInfo { hasNextPage endCursor }
+                    nodes {
+                      id
+                      fieldValueByName(name:"Status") {
+                        ... on ProjectV2ItemFieldSingleSelectValue { name }
+                      }
+                      content {
+                        ... on Issue       { number state repository { name } }
+                        ... on PullRequest { number state repository { name } }
+                      }
+                    }
+                  }
+                }
+              }
+            }' -F owner="$OWNER" -F number="$PROJECT_NUMBER" \
+            | jq -r --arg done "$FINISHED_STATUS" '
+                .data.organization.projectV2.items.nodes[]
+                | select(.content.state == "CLOSED")
+                | select((.fieldValueByName.name // "") != $done)
+                | "\(.id)\t\(.content.repository.name)#\(.content.number)\t\(.fieldValueByName.name // "no status")"
+              ' > stranded.tsv
+
+          count=$(wc -l < stranded.tsv | tr -d ' ')
+          echo "$count closed cards are not in $FINISHED_STATUS"
+          cut -f2,3 stranded.tsv || true
+
+          while IFS=$'\t' read -r item_id label from; do
+            [ -z "$item_id" ] && continue
+            gh api graphql -f query='
+              mutation($project:ID!, $item:ID!, $field:ID!, $option:String!) {
+                updateProjectV2ItemFieldValue(input:{
+                  projectId:$project, itemId:$item, fieldId:$field,
+                  value:{ singleSelectOptionId:$option }
+                }) { projectV2Item { id } }
+              }' \
+              -F project="${{ steps.board.outputs.project_id }}" \
+              -F item="$item_id" \
+              -F field="${{ steps.board.outputs.field_id }}" \
+              -F option="${{ steps.board.outputs.finished_option }}" > /dev/null
+            echo "  $label: $from -> $FINISHED_STATUS"
+          done < stranded.tsv

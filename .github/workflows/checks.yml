@@ -1,0 +1,29 @@
+# The project's checks on every pull request, read from its record.
+#
+# `.github/crew/run_checks.py` runs the setup and checks the design in
+# `.crew/project.yaml` names, in the design's image, as the crew's sandbox does.
+# So CI always matches the design and no story writes it (mqucifer/crew ADR 0030).
+# Before the design is merged it has nothing to check and passes. Once the
+# skeleton has made it green, branch protection requires this job, `checks`.
+
+name: checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --require-hashes --no-deps -r .github/crew/requirements.txt
+      - run: python .github/crew/run_checks.py
