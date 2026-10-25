@@ -25,13 +25,22 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from print_shop.slicer.catalog import DEFAULT_ORCA_DIR, Catalog, CatalogError, import_presets
-from print_shop.slicer.store import STORE_DIR
+from print_shop.slicer.store import STORE_DIR, Store, check_pairings, unpaired
 
 
 def _git(*args: str, cwd: Path) -> str:
     return subprocess.run(
         ["git", *args], cwd=cwd, capture_output=True, text=True, check=True
     ).stdout.strip()
+
+
+def _report_pairings(store: Path) -> None:
+    """What `profiles/pairings.json` needs after this import: for the PR to fix."""
+    profiles = Store(store)
+    for name in unpaired(profiles):
+        print(f"no pairing yet in pairings.json: filament '{name}'")
+    for problem in check_pairings(profiles):
+        print(problem.split(": ", 1)[1].splitlines()[0])
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -59,6 +68,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"in the store, not in Orca (kept): {rel}")
     if not planned.written:
         print(f"Nothing changed: {len(planned.unchanged)} profiles match Orca.")
+        _report_pairings(args.store)
         return 0
     for rel in planned.written:
         print(f"changed: {rel}")
@@ -78,6 +88,7 @@ def main(argv: list[str] | None = None) -> int:
         ]
     )
     _git("commit", "-m", message, cwd=repo)
+    _report_pairings(args.store)
     print(f"\nCommitted on {branch}. To review it as a PR:")
     print(f"  git push -u origin {branch}")
     print("  gh pr create --fill --assignee mquarters")

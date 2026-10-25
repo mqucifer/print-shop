@@ -4,11 +4,11 @@
     uv run python scripts/print_job.py --serve [--record]
     uv run python scripts/print_job.py --list
 
-**The Sponsor says what's fitted:** the nozzle (mm) and the loaded filament, a
-type such as PLA or a profile's exact name. Without them a print is refused.
-The profiles come from print-shop's own `profiles/`, chosen by Orca's
-compatibility rule; on a tie it lists the candidates and stops, and
-`--machine`, `--process` and `--filament` then name the one to use.
+**The Sponsor says what's fitted:** the nozzle (mm) and the loaded filament
+preset by name (a type such as PLA works when only one preset has it).
+Without them a print is refused. The machine and process come from
+`profiles/pairings.json`, checked by Orca's compatibility rule; when it
+refuses or ties it says why, and `--machine` and `--process` name the ones.
 
 **This is the only place that arms the printer,** and only when the invocation
 says so: `PRINT_AGENT_ALLOW_HARDWARE=1` on this command's own line. Without it
@@ -49,9 +49,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--list", action="store_true", help="print the ledger and exit")
     parser.add_argument("--record", action="store_true", help="record the printer's replies")
     parser.add_argument("--nozzle", type=float, help="the fitted nozzle, in mm (0.4)")
-    parser.add_argument("--filament", help="the loaded filament: a type (PLA) or a profile name")
-    parser.add_argument("--machine", help="a machine profile's exact name, on a tie")
-    parser.add_argument("--process", help="a process profile's exact name, on a tie")
+    parser.add_argument("--filament", help="the loaded filament preset's name (or its type)")
+    parser.add_argument("--machine", help="a machine profile's exact name, over the pairing")
+    parser.add_argument("--process", help="a process profile's exact name, over the pairing")
     parser.add_argument(
         "--settings", type=Path, default=SETTINGS_PATH, help="the settings file (a path)"
     )

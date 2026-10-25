@@ -7,8 +7,14 @@ parent. They are seeded from the Sponsor's tuned Orca presets by
 `scripts/import_profiles.py`, and a change to one is a reviewed PR. Every print
 slices from these files, so an Orca update cannot change a print silently.
 
-**The Sponsor says what's fitted:** the nozzle and the loaded filament. Nothing
-is assumed. The rest is chosen by Orca's own compatibility rule, strictly:
+**The Sponsor says what's fitted:** the nozzle and the loaded filament preset
+(a material type works as a shortcut when only one preset has it). Nothing is
+assumed. `profiles/pairings.json` says which machine and process go with each
+filament on each nozzle: the Sponsor's knowledge, written once and reviewed by
+PR (mqucifer/print-shop#6, 2026-10-25). A filament with no pairing for the
+nozzle falls back to a search, and a tie there refuses.
+
+**Orca's own compatibility rule applies over a pairing, strictly:**
 
 - a machine fits when its `nozzle_diameter` is the fitted nozzle;
 - a process or filament fits a machine when its `compatible_printers` names
@@ -16,10 +22,9 @@ is assumed. The rest is chosen by Orca's own compatibility rule, strictly:
   checks it;
 - a filament fits a process when its `compatible_prints`, if any, names it.
 
-**On no match, or a tie, the choice refuses** and lists every candidate with
-why each was left out, so the Sponsor picks by name, and a mis-marked preset
-shows there. A tie between machines alone goes to the one whose name names
-the filament's type (the operator's call on mqucifer/print-shop#6).
+A pairing the rule forbids is refused, saying why, never allowed silently.
+On no match or a tie, the refusal lists every candidate with why each was
+left out, so the Sponsor picks by name, and a mis-marked preset shows there.
 
 Tested facts about Orca's CLI (2.3, on the Mac, 2026-10-25), which the rule
 keeps to:
@@ -45,15 +50,21 @@ __all__ = [
     "STORE_DIR",
     "Choice",
     "NoChoice",
+    "Pairing",
     "ProfileRef",
     "ProfilesUsed",
     "Store",
     "StoredProfile",
+    "check_pairings",
     "choose",
+    "unpaired",
 ]
 
 #: `profiles/` at the top of print-shop's checkout.
 STORE_DIR = Path(__file__).resolve().parents[3] / "profiles"
+
+#: The reviewed file saying which machine and process go with each filament.
+PAIRINGS = "pairings.json"
 
 
 class NoChoice(ValueError):
@@ -104,6 +115,7 @@ class Store:
     machines: list[StoredProfile] = field(default_factory=list, init=False)
     processes: list[StoredProfile] = field(default_factory=list, init=False)
     filaments: list[StoredProfile] = field(default_factory=list, init=False)
+    pairings: list[Pairing] = field(default_factory=list, init=False)
 
     def __post_init__(self) -> None:
         if not self.root.is_dir():
@@ -111,6 +123,22 @@ class Store:
         self.machines = self._load("machine")
         self.processes = self._load("process")
         self.filaments = self._load("filament")
+        path = self.root / PAIRINGS
+        if path.is_file():
+            try:
+                rows = json.loads(path.read_text())["pairings"]
+                self.pairings = [Pairing(**row) for row in rows]
+            except (json.JSONDecodeError, KeyError, TypeError) as exc:
+                raise ValueError(f"{path.name} cannot be read: {exc}") from exc
+
+    def pairing(self, filament: str, nozzle_mm: float) -> Pairing | None:
+        found = [
+            p for p in self.pairings
+            if p.filament == filament and abs(p.nozzle_mm - nozzle_mm) < 1e-6
+        ]
+        if len(found) > 1:
+            raise NoChoice(f"{PAIRINGS} pairs {found[0].label()} more than once")
+        return found[0] if found else None
 
     def _load(self, kind: str) -> list[StoredProfile]:
         found = []
@@ -150,11 +178,26 @@ class ProfilesUsed(BaseModel):
 
 
 @dataclass(frozen=True)
+class Pairing:
+    """One line of `profiles/pairings.json`: what goes with a filament on a nozzle."""
+
+    filament: str
+    nozzle_mm: float
+    machine: str
+    process: str
+    drafted: bool
+    why: str
+
+    def label(self) -> str:
+        return f"'{self.filament}' on a {self.nozzle_mm:g} mm nozzle"
+
+
+@dataclass(frozen=True)
 class Choice:
     machine: StoredProfile
     process: StoredProfile
     filament: StoredProfile
-    #: How the choice was made, when it wasn't the only candidate.
+    #: How the choice was made: the pairing used, and whether it is drafted.
     notes: tuple[str, ...] = ()
 
     def used(self, root: Path) -> ProfilesUsed:
@@ -182,77 +225,106 @@ def choose(
     machine: str | None = None,
     process: str | None = None,
 ) -> Choice:
-    """The machine, process and filament for the fitted nozzle and filament.
+    """The machine, process and filament for the fitted nozzle and loaded filament.
 
-    `filament` is a material type (`PLA`, `PETG`) or a profile's exact name.
-    `machine` and `process` are exact names, for when the Sponsor picks.
+    `filament` is a filament preset's exact name, or a material type (`PLA`)
+    that only one preset has. The machine and process come from the pairing
+    for that filament and nozzle; `machine` and `process`, exact names, take
+    their place when the Sponsor picks.
 
     Raises:
-        NoChoice: On no match or a tie, listing every candidate and why.
+        NoChoice: On an unknown or ambiguous filament, a pairing Orca's rule
+            forbids, or no single match without a pairing; each says why.
     """
-    out: list[str] = []  # why each profile was left out
-
-    machines = _named(store.machines, machine, "machine", out)
-    fitting_machines = []
-    for m in machines:
-        if m.nozzle_mm is None:
-            out.append(f"machine '{m.name}': names no nozzle_diameter")
-        elif abs(m.nozzle_mm - nozzle_mm) > 1e-6:
-            out.append(f"machine '{m.name}': a {m.nozzle_mm:g} mm nozzle")
-        else:
-            fitting_machines.append(m)
-
-    by_type = filament.casefold() not in {f.name.casefold() for f in store.filaments}
-    filaments = []
-    for f in store.filaments:
-        if by_type and f.filament_type.casefold() != filament.casefold():
-            out.append(f"filament '{f.name}': {f.filament_type or 'no type'}, not {filament}")
-        elif not by_type and f.name.casefold() != filament.casefold():
-            continue  # another name: not a candidate when one was named
-        else:
-            filaments.append(f)
-
-    processes = _named(store.processes, process, "process", out)
-
-    sets: list[tuple[StoredProfile, StoredProfile, StoredProfile]] = []
-    for m in fitting_machines:
-        for p in processes:
-            why = _process_misfit(p, m)
-            if why:
-                out.append(f"process '{p.name}' with machine '{m.name}': {why}")
-                continue
-            for f in filaments:
-                why = _filament_misfit(f, m, p)
-                if why:
-                    out.append(f"filament '{f.name}' with machine '{m.name}': {why}")
-                    continue
-                sets.append((m, p, f))
-
-    asked = f"a {nozzle_mm:g} mm nozzle and {filament}"
-    if not sets:
-        raise NoChoice(_refusal(f"No profiles fit {asked}.", [], out))
-
+    loaded = _the_filament(store, filament)
+    pairing = store.pairing(loaded.name, nozzle_mm)
+    machine = machine or (pairing.machine if pairing else None)
+    process = process or (pairing.process if pairing else None)
     notes: tuple[str, ...] = ()
-    distinct_machines = {m.path for m, _, _ in sets}
-    if len(distinct_machines) > 1 and machine is None:
-        kind = (sets[0][2].filament_type if not by_type else filament).casefold()
-        named = [s for s in sets if kind and kind in s[0].name.casefold()]
-        if named and len({m.path for m, _, _ in named}) == 1:
-            notes = (
-                f"machine '{named[0][0].name}' chosen over "
-                + ", ".join(
-                    f"'{n}'" for n in sorted({m.name for m, _, _ in sets} - {named[0][0].name})
-                )
-                + f": its name names {kind.upper()}",
-            )
-            sets = named
+    if pairing is not None:
+        notes = (
+            f"pairing for {pairing.label()}"
+            + (", DRAFTED, not yet confirmed by the Sponsor" if pairing.drafted else "")
+            + f": {pairing.why}",
+        )
 
+    out: list[str] = []  # why each profile was left out
+    named = _named(store.machines, machine, "machine", out)
+    machines = [m for m in named if _nozzle_fits(m, nozzle_mm, out)]
+    processes = _named(store.processes, process, "process", out)
+    sets: list[tuple[StoredProfile, StoredProfile]] = []
+    for m in machines:
+        for p in processes:
+            why = _process_misfit(p, m) or _filament_misfit(loaded, m, p)
+            if why:
+                out.append(f"'{m.name}' with '{p.name}': {why}")
+            else:
+                sets.append((m, p))
+
+    asked = f"a {nozzle_mm:g} mm nozzle and '{loaded.name}'"
+    if not sets:
+        head = f"No profiles fit {asked}."
+        if pairing is not None:
+            head = (
+                f"Orca's compatibility rule forbids the pairing for {pairing.label()} "
+                f"in profiles/pairings.json. Fix the pairing or the preset in a PR."
+            )
+        raise NoChoice(_refusal(head, [], out))
     if len(sets) > 1:
         lines = _ties(sets)
-        raise NoChoice(_refusal(f"Several profile sets fit {asked}; name one.", lines, out))
+        head = (
+            f"Several profile sets fit {asked}, and profiles/pairings.json has no pairing "
+            f"for it; name one, or add the pairing in a PR."
+        )
+        raise NoChoice(_refusal(head, lines, out))
 
-    m, p, f = sets[0]
-    return Choice(machine=m, process=p, filament=f, notes=notes)
+    m, p = sets[0]
+    return Choice(machine=m, process=p, filament=loaded, notes=notes)
+
+
+def check_pairings(store: Store) -> list[str]:
+    """Every pairing that names no preset or that Orca's rule forbids, and why."""
+    problems = []
+    for pairing in store.pairings:
+        try:
+            choose(store, nozzle_mm=pairing.nozzle_mm, filament=pairing.filament)
+        except NoChoice as exc:
+            problems.append(f"{pairing.label()}: {exc}")
+    return problems
+
+
+def unpaired(store: Store) -> list[str]:
+    """Filament presets no pairing names."""
+    paired = {p.filament for p in store.pairings}
+    return [f.name for f in store.filaments if f.name not in paired]
+
+
+def _the_filament(store: Store, filament: str) -> StoredProfile:
+    """The filament preset by exact name, else the only one of that material type."""
+    for f in store.filaments:
+        if f.name == filament:
+            return f
+    of_type = [f for f in store.filaments if f.filament_type.casefold() == filament.casefold()]
+    if len(of_type) == 1:
+        return of_type[0]
+    if of_type:
+        names = "\n".join(f'  "{f.name}"' for f in of_type)
+        raise NoChoice(
+            f"Several {filament} presets are in the store; name the one loaded "
+            f"(--filament):\n{names}"
+        )
+    have = "\n".join(f'  "{f.name}"  ({f.filament_type or "no type"})' for f in store.filaments)
+    raise NoChoice(f"No filament preset is called or typed '{filament}'. The store has:\n{have}")
+
+
+def _nozzle_fits(machine: StoredProfile, nozzle_mm: float, out: list[str]) -> bool:
+    if machine.nozzle_mm is None:
+        out.append(f"machine '{machine.name}': names no nozzle_diameter")
+        return False
+    if abs(machine.nozzle_mm - nozzle_mm) > 1e-6:
+        out.append(f"machine '{machine.name}': a {machine.nozzle_mm:g} mm nozzle")
+        return False
+    return True
 
 
 def _named(
@@ -299,10 +371,9 @@ def _filament_misfit(
     return ""
 
 
-def _ties(sets: list[tuple[StoredProfile, StoredProfile, StoredProfile]]) -> list[str]:
+def _ties(sets: list[tuple[StoredProfile, StoredProfile]]) -> list[str]:
     lines = []
-    for kind, flag, i in (("machine", "--machine", 0), ("process", "--process", 1),
-                          ("filament", "--filament", 2)):
+    for kind, flag, i in (("machine", "--machine", 0), ("process", "--process", 1)):
         names = sorted({s[i].name for s in sets})
         if len(names) > 1:
             lines.append(f"{kind} ({flag}):")

@@ -140,7 +140,6 @@
     "tree_support_tip_diameter": "2",
     "tree_support_wall_count": "0",
     "type": "process",
-    "version": "2.3.2.60",
     "wall_generator": "classic",
     "wall_infill_order": "inner wall/outer wall/infill",
     "wall_loops": "2",

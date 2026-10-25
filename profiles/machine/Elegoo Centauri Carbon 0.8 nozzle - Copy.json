@@ -191,7 +191,6 @@
     "thumbnails_format": "PNG",
     "type": "machine",
     "upward_compatible_machine": [],
-    "version": "2.3.2.60",
     "wipe": [
         "1"
     ],

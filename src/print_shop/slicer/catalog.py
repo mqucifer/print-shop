@@ -52,6 +52,11 @@ KINDS = ("machine", "process", "filament")
 #: the store is in a public repository, so these never leave the Mac.
 _PRIVATE_PREFIXES = ("print_host", "printhost")
 
+#: Metadata, not settings: the Orca version that saved the preset. Its
+#: four-part form (2.3.1.x) reads as an address to the repository's
+#: address check, and it would change the store with every Orca update.
+_METADATA = ("version",)
+
 #: The vendor folders searched first, in order, for a system parent.
 _FIRST_FOLDERS = ("Elegoo", "OrcaFilamentLibrary")
 
@@ -172,10 +177,11 @@ class Catalog:
 def flatten(catalog: Catalog, preset: Preset) -> dict[str, Any]:
     """The preset as print-shop stores it: whole, with its system parent named.
 
-    Keys holding the printer's address or credentials are left out.
+    Keys holding the printer's address or credentials are left out, and so is
+    Orca's version stamp.
     """
     resolved = catalog.resolve(preset)
-    for key in [k for k in resolved if k.startswith(_PRIVATE_PREFIXES)]:
+    for key in [k for k in resolved if k.startswith(_PRIVATE_PREFIXES) or k in _METADATA]:
         del resolved[key]
     resolved["inherits"] = catalog.system_parent(preset)
     return resolved

@@ -178,6 +178,5 @@
     "textured_plate_temp_initial_layer": [
         "60"
     ],
-    "type": "filament",
-    "version": "2.3.1.10"
+    "type": "filament"
 }

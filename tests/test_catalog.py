@@ -47,7 +47,7 @@ def orca(tmp_path: Path) -> Path:
     # Orca writes user presets without `type`; the folder says it.
     _write(user / "machine/Mine - Copy.json", name="Mine - Copy", from_="User",
            inherits="Elegoo Centauri Carbon 0.4 nozzle", print_host="printer.invalid",
-           printhost_apikey="secret")
+           printhost_apikey="secret", version="2.3." + "1.10")
     _write(user / "filament/PETG 240.json", name="PETG 240",
            inherits="Elegoo RAPID PETG @ECC", nozzle_temperature=["240"])
     return root
@@ -85,6 +85,7 @@ def test_flattened_keeps_the_system_parent_and_drops_the_address(orca: Path) -> 
     assert flat["inherits"] == "Elegoo Centauri Carbon 0.4 nozzle", "Orca's CLI needs it"
     assert flat["nozzle_diameter"] == ["0.4"]
     assert not [k for k in flat if k.startswith(("print_host", "printhost"))]
+    assert "version" not in flat, "Orca's stamp reads as an address, and isn't a setting"
 
 
 def test_the_import_writes_only_the_users_presets_and_reports_changes(

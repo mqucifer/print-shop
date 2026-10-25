@@ -70,13 +70,7 @@ def test_a_serving_run_slices_nothing(settings: Path, tmp_path: Path) -> None:
 
 
 def test_the_chosen_profiles_carry_their_store_files_and_commit() -> None:
-    choice = choose(
-        Store(STORE),
-        nozzle_mm=0.4,
-        filament="Elegoo PLA @ECC - Copy",
-        machine="Elegoo Centauri Carbon 0.4 nozzle - Copy",
-        process="0.20mm Standard @Elegoo CC 0.4 nozzle - Copy",
-    )
+    choice = choose(Store(STORE), nozzle_mm=0.4, filament="Elegoo PLA @ECC - Copy")
     used = profiles_for(choice, STORE).used
     assert used is not None
     assert used.machine.file == "machine/Elegoo Centauri Carbon 0.4 nozzle - Copy.json"
@@ -141,14 +135,8 @@ def test_the_script_does_not_arm_without_the_flag(
         script.main([str(part), *FITTED, "--settings", str(settings)])
 
 
-#: The fitted nozzle and filament, with the machine and process named, since
-#: the store ties on them for a 0.4 nozzle and PLA.
-FITTED = [
-    "--nozzle", "0.4",
-    "--filament", "Elegoo PLA @ECC - Copy",
-    "--machine", "Elegoo Centauri Carbon 0.4 nozzle - Copy",
-    "--process", "0.20mm Standard @Elegoo CC 0.4 nozzle - Copy",
-]
+#: The fitted nozzle and the loaded filament preset; its pairing names the rest.
+FITTED = ["--nozzle", "0.4", "--filament", "Elegoo PLA @ECC - Copy"]
 
 
 def test_the_script_refuses_a_print_without_the_nozzle_and_filament(
@@ -173,5 +161,5 @@ def test_the_script_lists_the_candidates_on_a_tie(
     )
     assert code == 2
     err = capsys.readouterr().err
-    assert "Several profile sets fit a 0.4 mm nozzle and PLA" in err
+    assert "Several PLA presets are in the store; name the one loaded" in err
     assert '"Elegoo PLA @ECC - Copy"' in err
