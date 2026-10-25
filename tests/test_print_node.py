@@ -46,6 +46,7 @@ from langgraph.types import Command
 
 from print_shop.core.contracts import Gate
 from print_shop.core.state import EntryPath, PrintStatus
+from print_shop.ledger import Ledger
 from print_shop.orchestrator.graph import build_graph, new_job
 from print_shop.printer.centauri import (
     READY_TO_START,
@@ -323,6 +324,7 @@ def build(
             outdir_root=tmp_path / "jobs",
             checkpointer=SqliteSaver(conn),
             printer=fake,
+            ledger=Ledger(tmp_path / "ledger.sqlite"),
         )
 
     try:

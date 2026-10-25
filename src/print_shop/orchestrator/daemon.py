@@ -33,6 +33,7 @@ from print_shop.core.mqtt import (
     state_topic,
 )
 from print_shop.expert.client import LLMConfig
+from print_shop.ledger import Ledger
 from print_shop.orchestrator.graph import build_graph
 from print_shop.printer.centauri import PrinterClient
 from print_shop.slicer.orca import Slicer, SlicerProfiles, slice_model
@@ -157,6 +158,7 @@ class Daemon:
         llm: LLMConfig | None = None,
         slicer: Slicer = slice_model,
         bridge: Callable[[MqttConfig], Bridge] | None = None,
+        ledger: Ledger | None = None,
     ) -> None:
         """`printer` is what the approval gate ultimately commands.
 
@@ -168,7 +170,9 @@ class Daemon:
         `llm` is the orientation model (`LLMConfig.from_settings()`); None
         means geometric orientation, said so at the gate. `slicer` and
         `bridge` default to the real Orca and the real broker; tests pass a
-        recorded slice and an in-memory broker.
+        recorded slice and an in-memory broker. `ledger` records each print
+        the agent starts; without one, an approval fails at the print node
+        rather than start a print that goes unrecorded.
         """
         self._cfg = cfg
         self._profiles = profiles
@@ -188,6 +192,7 @@ class Daemon:
             llm=llm,
             printer=printer,
             slicer=slicer,
+            ledger=ledger,
         )
 
         # MQTT bridge.

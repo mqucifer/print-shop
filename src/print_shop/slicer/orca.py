@@ -22,6 +22,7 @@ __all__ = [
     "SliceResult",
     "Slicer",
     "SlicerProfiles",
+    "parse_config_block",
     "parse_duration",
     "parse_gcode_header",
     "slice_model",
@@ -177,6 +178,34 @@ def parse_gcode_header(gcode_path: Path) -> SliceResult:
         material=material,
         layer_height_mm=layer_height_mm,
     )
+
+
+def parse_config_block(gcode_path: Path) -> dict[str, str]:
+    """Every setting Orca sliced with, from the G-code's config footer.
+
+    Orca writes them between ``; CONFIG_BLOCK_START`` and ``; CONFIG_BLOCK_END``
+    as ``; key = value``. Values are kept as Orca wrote them, unquoted; the
+    ledger stores the whole block, so a setting nobody thought to name today
+    is still there when a symptom needs explaining.
+
+    Raises:
+        RuntimeError: If the file has no config block. A slice without one
+            cannot be recorded, and recording it without settings would be a
+            ledger row that cannot answer the question it exists for.
+    """
+    settings: dict[str, str] = {}
+    inside = False
+    for line in gcode_path.read_text().splitlines():
+        if line == "; CONFIG_BLOCK_START":
+            inside = True
+        elif line == "; CONFIG_BLOCK_END":
+            if not settings:
+                break
+            return settings
+        elif inside and line.startswith("; ") and " = " in line:
+            key, _, value = line[2:].partition(" = ")
+            settings[key.strip()] = value.strip().strip('"')
+    raise RuntimeError(f"{gcode_path.name} has no Orca config block")
 
 
 def slice_model(

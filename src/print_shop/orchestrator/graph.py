@@ -44,10 +44,17 @@ from print_shop.expert.orientation import (
 )
 from print_shop.ingest.analyzer import analyze, verify_unchanged
 from print_shop.ingest.orientation import candidates, write_rotated
+from print_shop.ledger import Ledger, PrintRecord
 from print_shop.orchestrator.fitness import scoring_profiles
 from print_shop.printer.centauri import PreflightFailed, PrinterClient, preflight
 from print_shop.slicer.naming import job_id_from_filename, name_gcode
-from print_shop.slicer.orca import Slicer, SliceResult, SlicerProfiles, slice_model
+from print_shop.slicer.orca import (
+    Slicer,
+    SliceResult,
+    SlicerProfiles,
+    parse_config_block,
+    slice_model,
+)
 
 __all__ = ["build_graph", "graph_edges", "new_job"]
 
@@ -78,6 +85,7 @@ def build_graph(
     llm: LLMConfig | None = None,
     printer: PrinterClient | None = None,
     slicer: Slicer = slice_model,
+    ledger: Ledger | None = None,
 ) -> Any:
     """Build and compile the print pipeline graph.
 
@@ -104,6 +112,9 @@ def build_graph(
 
         slicer: What slices. The real Orca by default, a local process
             with no hardware behind it; tests replay a recorded slice.
+        ledger: Where each print the agent starts is recorded. **Required
+            to print:** ``print_node`` refuses to start a print the ledger
+            cannot record, the same way it refuses one nobody approved.
 
     Returns:
         A compiled LangGraph ``CompiledStateGraph``.
@@ -288,6 +299,12 @@ def build_graph(
                 "real machine. Refusing to arm hardware that nobody asked for."
             )
         client: PrinterClient = printer
+        if ledger is None:
+            raise RuntimeError(
+                "this graph was built without a ledger. Every print the agent "
+                "starts is recorded (mqucifer/print-shop#2); refusing to start "
+                "one that would not be."
+            )
 
         gcode = Path(state["gcode_path"])
         snapshot = client.snapshot()
@@ -303,7 +320,17 @@ def build_graph(
                 f"this job cannot account for."
             )
 
-        client.start(remote_name)
+        # Written before the printer is told anything, so a start that fails
+        # halfway is still on record.
+        ledger.record_start_requested(
+            _print_record(state, remote_name, gcode, snapshot.machine, snapshot.firmware)
+        )
+        try:
+            client.start(remote_name)
+        except Exception as exc:
+            ledger.record_start_failed(state["job_id"], f"{type(exc).__name__}: {exc}")
+            raise
+        ledger.record_started(state["job_id"])
         return {
             "print_status": PrintStatus.PRINTING,
             "print_attempts": state.get("print_attempts", 0) + 1,
@@ -371,6 +398,32 @@ def build_graph(
     graph.add_edge("print", END)
 
     return graph.compile(checkpointer=checkpointer)
+
+
+def _print_record(
+    state: PrintJobState, remote_name: str, gcode: Path, machine: str, firmware: str
+) -> PrintRecord:
+    """The ledger's row for this job, from state and the G-code Orca wrote."""
+    slice_result: SliceResult = state["slice"]
+    applied = state.get("applied_orientation", AppliedOrientation())
+    outcome = state.get("orientation")
+    accepted = outcome is not None and outcome.accepted
+    return PrintRecord(
+        job_id=state["job_id"],
+        stl_name=Path(state["stl_path"]).name,
+        stl_sha256=state.get("stl_sha256", ""),
+        rotation_deg=applied.rotation_deg,
+        orientation_source=outcome.proposal.source if accepted and outcome else "authored",
+        orientation_rationale=applied.rationale,
+        orientation_accepted=accepted,
+        gcode_name=remote_name,
+        print_time_s=slice_result.print_time_s,
+        filament_cm3=slice_result.filament_cm3,
+        layer_count=slice_result.layer_count,
+        slicer_config=parse_config_block(gcode),
+        printer_machine=machine,
+        printer_firmware=firmware,
+    )
 
 
 def build_volume_mm(

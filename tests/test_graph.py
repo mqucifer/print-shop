@@ -24,6 +24,7 @@ from langgraph.types import Command
 
 from print_shop.core.contracts import Gate, ungated_edges
 from print_shop.core.state import EntryPath, PrintStatus
+from print_shop.ledger import Ledger
 from print_shop.orchestrator.graph import build_graph, graph_edges, new_job
 from print_shop.slicer.naming import job_id_from_filename
 from print_shop.slicer.orca import SlicerProfiles
@@ -229,6 +230,7 @@ def test_approving_at_the_gate_reaches_the_printer(
         outdir_root=tmp_path / "jobs",
         checkpointer=SqliteSaver(conn),
         printer=fake,
+        ledger=Ledger(tmp_path / "ledger.sqlite"),
     )
     stl = write_stl("cube", tmp_path)
     job = new_job(stl, entry=EntryPath.STL_UPLOAD)

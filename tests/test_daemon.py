@@ -28,6 +28,7 @@ import pytest
 
 from print_shop.core.mqtt import MqttConfig
 from print_shop.env import SETTINGS_PATH
+from print_shop.ledger import Ledger
 from print_shop.orchestrator.daemon import (
     Decision,
     JobRejected,
@@ -155,6 +156,7 @@ def daemon(cfg: MqttConfig, tmp_path: Path) -> Any:
         profiles=profiles,
         workdir=tmp_path,
         printer=FakePrinter(snapshot_value=idle()),
+        ledger=Ledger(tmp_path / "ledger.sqlite"),
     )
     with d:
         yield d
