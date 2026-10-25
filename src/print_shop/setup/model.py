@@ -109,6 +109,8 @@ def propose_by_model(facts: PartFacts, ask: Ask, model: str) -> Proposal:
     refused: list[str] = []
     for s in suggestions:
         key, value = str(s.get("key")), str(s.get("value")).strip()
+        if key == "sparse_infill_density" and value and not value.endswith("%"):
+            value += "%"  # as Orca writes it; crew-code wrote "50" on 2026-10-25
         why = check(key, value, facts.presets)
         if key in {c.key for c in changes + kept}:
             why = "proposed twice"

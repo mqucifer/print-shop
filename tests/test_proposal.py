@@ -25,10 +25,17 @@ from print_shop.setup.features import Feature, measure
 from print_shop.setup.intake import Intake
 from print_shop.setup.knowledge import KNOWLEDGE, check
 from print_shop.setup.model import Ask, llm_ask, prompt, setup_llm
-from print_shop.setup.proposal import PartFacts, Proposal, Source
-from print_shop.slicer.orca import SlicerProfiles
+from print_shop.setup.proposal import PartFacts, Proposal, Source, apply
+from print_shop.slicer.orca import (
+    BedType,
+    SlicerProfiles,
+    parse_config_block,
+    slice_model,
+    with_bed_type,
+)
 from tests.fakes import DATA, STORE_PROFILES
 from tests.fixtures import write_stl
+from tests.test_graph import needs_orca
 
 #: The alias the PR's proposals are recorded with; `crew-code`, without
 #: thinking, is kept beside it for comparison.
@@ -128,6 +135,21 @@ def test_the_proposals_differ_for_reasons_traced_to_the_parts(tmp_path: Path) ->
         k for k, c in keys["vase"].items() if c.feature == "purpose" and "load" in c.reason
     }
     assert len({frozenset((c.key, c.value) for c in prop.changes) for prop in p.values()}) == 3
+
+
+@pytest.mark.slicer
+@needs_orca
+@pytest.mark.parametrize("part", list(INTAKES))
+def test_orca_slices_each_proposal_with_its_values(part: str, tmp_path: Path) -> None:
+    """The proposed values are ones Orca takes, and the G-code says it used them."""
+    proposal = _proposal(part, tmp_path)
+    pei = with_bed_type(STORE_PROFILES, BedType.TEXTURED_PEI, tmp_path / "p")
+    result = slice_model(
+        write_stl(part, tmp_path), apply(pei, proposal, tmp_path / "proposed"), tmp_path / "o"
+    )
+    config = parse_config_block(result.gcode_path)
+    for c in proposal.changes:
+        assert config[c.key] == c.value, c
 
 
 # --------------------------------------------------------------------------
