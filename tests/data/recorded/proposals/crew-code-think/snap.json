@@ -1,31 +1,46 @@
 {
-  "reasoning": "A 22 mm snap-fit hook, 16\u00d78 mm footprint, 1.87 mm section, that clips into a 1.2 mm ledge on a lid and is opened often. Load-light, functional, indoor PLA.\n\nWhat makes or breaks this part:\n\n1. The 90\u00b0 overhang (10 mm\u00b2) is a flat ceiling. It cannot self-support at any threshold angle \u2014 it will sag or fail without supports. This is the one hard requirement.\n\n2. The snap engagement: the hook must flex ~1.2 mm repeatedly. The 1.87 mm section provides that flexibility geometrically. Adding wall loops would stiffen the cantilever and risk preventing full engagement or causing the plastic to crack at the ledge contact point. Two walls is the right call \u2014 enough for a clean outer surface and adequate fatigue resistance at the engagement face, without over-constraining the flex.\n\n3. The 10 mm\u00b2 bridge: short enough to print as a bridge without support if it's a separate feature from the 90\u00b0 ceiling. At 10 mm\u00b2 (roughly 3 mm \u00d7 3 mm), PLA bridges at this span hold.\n\n4. Slenderness 2.8\u00d7: moderate. 22 mm is not tall enough to wobble, and the 128 mm\u00b2 bed contact (full footprint) anchors it well. No brim needed.\n\n5. Infill is nearly irrelevant at 1.87 mm section \u2014 with two walls (~0.84 mm), the infill pocket is under 1 mm wide. At 15% you get one or two lines. Pattern choice is a non-issue here.\n\n6. Layer height 0.2 mm: the 1.2 mm engagement surface gets ~6 layers of vertical resolution. Workable, but the stair-stepping will show on the hook tip. A design-side fix serves better than a slicer change here (see design_notes).\n\nChanges: only the overhang forces a hand. Enable supports and set them to tree, per the sponsor's standing preference. The threshold angle at 30\u00b0 already catches the 90\u00b0 ceiling; no adjustment needed.\n\nEverything else stays at preset. The part is small, load-light, PLA, and the geometry does the work.",
+  "reasoning": "This is a snap hook that clips over a 1.2 mm ledge on a lid, opened often. It's functional, light load, indoor. What makes it succeed or fail: the hook profile must be dimensionally accurate so it sits flush on the ledge and releases cleanly with repeated use; the ceiling under the hook arm (the 90\u00b0 overhang) cannot print without support; the part is small and slender with a small bed contact area, so it's prone to lifting. The section is thin (1.87 mm) and the walls dominate the structure. I loaded all seven reference groups because the part touches adhesion (small footprint, slender), supports (ceiling overhang, bridge), layer height (must fit the 1.2 mm ledge), and speed/cooling (thin sections, small layer times at the reduced layer height).",
   "changes": [
     {
       "key": "enable_support",
       "value": "1",
-      "feature": "overhang",
+      "feature": "steepest_overhang",
       "knowledge": "supports",
-      "reason": "the 10 mm\u00b2 overhang at 90\u00b0 is a flat ceiling; it will not bridge or self-support and will sag without a backing structure"
+      "reason": "A 90\u00b0 overhang is a ceiling \u2014 it cannot print unsupported at any layer height within the bound. The ceiling is the underside of the hook arm that clips over the ledge; it is inherent to the hook's function and cannot be chamfered to 45\u00b0 without destroying the clip geometry. This is not a design-out case; support is required."
     },
     {
       "key": "support_type",
       "value": "tree(auto)",
-      "feature": "overhang",
+      "feature": "steepest_overhang",
       "knowledge": "supports",
-      "reason": "the sponsor uses tree supports for any overhang that needs backing; the 90\u00b0 ceiling at 10 mm\u00b2 is a small, localised target where tree branches attach cleanly and remove easily from the hook body"
+      "reason": "The Sponsor's practice is tree supports whenever supports are used. The code bound allows only tree(auto). Set accordingly."
+    },
+    {
+      "key": "brim_type",
+      "value": "auto_brim",
+      "feature": "bed_contact",
+      "knowledge": "adhesion",
+      "reason": "Bed contact is 128 mm\u00b2, under the 200 mm\u00b2 trigger. Slenderness is 2.8\u00d7, over the 2.5\u00d7 trigger. Both adhesion conditions are met. auto_brim calculates a width from geometry and print parameters; for a small, tall part with a narrow footprint it will add enough perimeter to resist lifting during the print without a fixed-width brim that might be over- or under-sized."
+    },
+    {
+      "key": "layer_height",
+      "value": "0.12",
+      "feature": "flat_top",
+      "knowledge": "layer-height",
+      "reason": "The hook's profile where it engages the 1.2 mm ledge is a fine curved surface that must fit. At 0.20 mm the ledge height spans 6 layers; the staircase on the hook's curve will make the fit coarse and may prevent a clean release on repeated opening. At 0.12 mm the same 1.2 mm spans 10 layers, a noticeably smoother profile. 0.12 mm is within the wiki's optimal range (20\u201380% of 0.4 mm nozzle = 0.08\u20130.32 mm) and within the machine bound. Secondary benefit: the 10 mm\u00b2 bridge spans less vertical distance per layer, reducing sag."
     }
   ],
   "design_notes": [
-    "The 1.2 mm engagement face resolves to roughly 6 layers at 0.2 mm. If the hook tip is a smooth concave curve, stair-stepping will roughen the contact surface and accelerate wear at the ledge. A slightly more vertical hook profile at the tip (steeper entry angle) would make the contact face a near-vertical wall, which 0.2 mm layers reproduce accurately, and would also let the snap engage with a more positive click rather than a gradual ramp. This is a geometry change that serves the function better than any slicer setting."
+    "The 90\u00b0 ceiling under the hook arm is the snap geometry itself \u2014 it clips over the 1.2 mm ledge. It cannot be chamfered to 45\u00b0 or redesigned as a support-free overhang without changing the hook's function. Tree support is the correct solution; it is not a missed design-out opportunity.",
+    "The 10 mm\u00b2 bridge (flat downward face) will also fall within the tree support's reach at the 30\u00b0 threshold; it does not need a separate decision."
   ],
   "_call": {
     "model": "crew-code-think",
     "finish_reason": "stop",
-    "prompt_tokens": 1417,
-    "completion_tokens": 4663,
-    "reasoning_tokens": 3842,
-    "max_tokens": 8000,
-    "seconds": 167.9
+    "prompt_tokens": 6664,
+    "completion_tokens": 4828,
+    "reasoning_tokens": 3941,
+    "max_tokens": 16000,
+    "seconds": 179.3
   }
 }

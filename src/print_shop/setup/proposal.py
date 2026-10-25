@@ -8,8 +8,10 @@ goes back to my want for this to understand what it's doing." So:
 - **the reasoning is per part,** from its measured features (`features.py`)
   and the intake, and each change names the feature, or the purpose, behind
   it ("the 2 mm tab carries the load, so 4 walls");
-- **knowledge, not defaults** (`knowledge.py`): sourced effects the
-  reasoning cites, and bounds every value must fall in;
+- **a skill, not defaults:** what each setting does and when to change it
+  is the print-settings skill's (`skills/print-settings/`, loaded in layers
+  by `skill.py`); code holds only the bounds every value must fall in
+  (`bounds.py`);
 - **the model reasons** (`model.py`), inside those bounds. A value outside
   them is refused and recorded as refused;
 - **two guards** hold whatever the model says: a part with an overhang and
@@ -32,9 +34,9 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
+from print_shop.setup.bounds import SETTINGS
 from print_shop.setup.features import Feature
 from print_shop.setup.intake import Environment, Intake
-from print_shop.setup.knowledge import SETTINGS
 
 if TYPE_CHECKING:  # the slicer imports the job state, which imports this
     from print_shop.slicer.orca import SlicerProfiles
@@ -59,7 +61,7 @@ class Change(BaseModel):
     reason: str
     source: Source
     feature: str = ""  # the feature id behind it, or "purpose"
-    knowledge: str = ""  # the knowledge entry it cites
+    knowledge: str = ""  # the skill's reference group it cites
 
 
 class Proposal(BaseModel):
@@ -82,6 +84,11 @@ class Proposal(BaseModel):
     model: str = ""
     #: The call's finish reason and tokens, reasoning tokens included (`CallInfo`).
     call: dict[str, Any] = {}
+    #: The skill's reference groups the model read for this part, and the hash
+    #: of what it read (SKILL.md and those references), so a proposal can be
+    #: traced to the skill as it stood.
+    skill_groups: tuple[str, ...] = ()
+    skill_sha256: str = ""
 
     def get(self, key: str) -> Change | None:
         return next((c for c in self.changes if c.key == key), None)

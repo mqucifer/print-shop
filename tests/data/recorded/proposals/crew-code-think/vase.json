@@ -1,31 +1,38 @@
 {
-  "reasoning": "A 120 mm square-based vase with ~1 mm walls (section 1.98 mm), no overhangs, no bridges. Purely cosmetic \u2014 the outside surface is the product. Two things will make or break it: (1) the outer wall finish, because that's what's seen, and (2) the layer resolution, because a vase is a curved surface and staircase artefacts read as defects. Everything else \u2014 supports, brim, infill \u2014 is irrelevant here: zero overhang area means no support; a 2825 mm\u00b2 footprint at 2\u00d7 slenderness is well-adhered; and walls this thin leave no room for infill lines regardless of the density setting.",
+  "reasoning": "Decorative vase for dried flowers. Cosmetic, no load, no fit, indoor. The outside is what shows. 120 mm tall, 60\u00d760 mm footprint, 2\u00d7 slenderness, no overhang, no bridge, 1.98 mm section, 48 622 mm\u00b3 volume. A flat top of 2825 mm\u00b2 (the rim or a closed mouth). Success is surface quality on the exterior; failure is infill ghosting, visible layer lines, or a wobbly print.",
   "changes": [
     {
+      "key": "wall_loops",
+      "value": "3",
+      "feature": "section",
+      "knowledge": "walls-shells",
+      "reason": "The section is 1.98 mm and the outside is the visible surface; at 2 loops (0.8 mm of wall) the 15% infill ghosts through. 3 loops (1.2 mm) closes that gap and gives a clean exterior."
+    },
+    {
       "key": "layer_height",
-      "value": "0.12",
-      "feature": "purpose",
-      "knowledge": "layer_height",
-      "reason": "the outside is the visible surface and a vase is a curved form; 0.12 mm layers halve the step height that would otherwise show as ridges on the exterior"
+      "value": "0.16",
+      "feature": "flat_top",
+      "knowledge": "layer-height",
+      "reason": "The outside is what shows on a cosmetic piece; 0.16 mm is inside the optimal 0.08\u20130.32 mm band and cuts the visible step lines on the curved wall roughly in half versus 0.20 mm."
     },
     {
       "key": "outer_wall_speed",
-      "value": "100",
-      "feature": "purpose",
-      "knowledge": "speed",
-      "reason": "the exterior wall is the finished surface; dropping from the 160 ceiling to 100 gives the extruder time to lay down a consistent, glossy line instead of a rippled one"
+      "value": "120",
+      "feature": "section",
+      "knowledge": "speed-cooling",
+      "reason": "The exterior is the finished surface; slowing the outer wall from 160 to 120 mm/s gives the nozzle more residence time per line, reducing stringing and surface irregularity on the face the viewer sees."
     }
   ],
   "design_notes": [
-    "If the vase has a lip or lip-geometry on the rim that overhangs past 45\u00b0, a small chamfer or bevel on that feature in the CAD would let it print without support and give a cleaner edge than a support scar."
+    "No overhang and no bridge (both 0 mm\u00b2); the vase prints free-standing with no support. Nothing to design out."
   ],
   "_call": {
     "model": "crew-code-think",
     "finish_reason": "stop",
-    "prompt_tokens": 1413,
-    "completion_tokens": 4712,
-    "reasoning_tokens": 4301,
-    "max_tokens": 8000,
-    "seconds": 161.5
+    "prompt_tokens": 4898,
+    "completion_tokens": 3093,
+    "reasoning_tokens": 2611,
+    "max_tokens": 16000,
+    "seconds": 102.4
   }
 }

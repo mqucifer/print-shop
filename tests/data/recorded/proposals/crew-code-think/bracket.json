@@ -1,52 +1,67 @@
 {
-  "reasoning": "This is a mounting bracket: a plate with a flange that holds a 2 kg shelf and is screwed through. The failure modes are bending and shear in the flange under the shelf's weight, and cracking around the screw holes under tension and shear. The section is 4.76 mm, which is workable but not thick. No overhangs, no bridges, full-footprint bed contact, moderate slenderness \u2014 no printability concerns. The entire challenge is strength under load.",
+  "reasoning": "This is a load-bearing flange/bracket: it holds a 2 kg shelf in bending on the flange and is screwed through the plate. The load path runs from the shelf, through the flange (bending: compression on top, tension on bottom), through the plate at the screw holes (shear/compression), down to the mounting surface. The 4.76 mm section gives a solid cross-section, but at the preset's 15% zig-zag infill the core is mostly void, and the walls at only 2 loops leave most of the section as weak infill at the very surfaces where bending stress peaks. No overhangs, no bridges, no supports needed. Bed contact is generous (1800 mm\u00b2), slenderness is low (1.5\u00d7), so no adhesion or wobble concern.",
   "changes": [
     {
       "key": "wall_loops",
       "value": "4",
-      "feature": "purpose",
-      "knowledge": "walls",
-      "reason": "the flange carries the 2 kg shelf in bending and the plate resists shear at the screws, so 4 walls give more rigidity and interlayer bonding in the load path than 2"
+      "feature": "flat_top",
+      "knowledge": "walls-shells",
+      "reason": "The flange carries the 2 kg shelf in bending, so the outer surfaces (where walls sit) are where bending stress peaks. Two loops gives roughly 0.9 mm of solid wall in a 4.76 mm section; four gives roughly 1.9 mm, putting more load-bearing material at the high-stress surfaces."
+    },
+    {
+      "key": "bottom_shell_layers",
+      "value": "5",
+      "feature": "flat_top",
+      "knowledge": "walls-shells",
+      "reason": "Under the bending load the bottom of the flange is in tension \u2014 the side where failure initiates in PLA. Three layers at 0.2 mm gives 0.6 mm solid; five gives 1.0 mm, matching the top shell and giving the tension-critical surface more solid material."
     },
     {
       "key": "sparse_infill_density",
       "value": "40%",
-      "feature": "purpose",
+      "feature": "flat_top",
       "knowledge": "infill",
-      "reason": "the 4.76 mm section must resist the shelf's bending moment; 15% leaves too little material between the 4 walls to carry 2 kg without flexing or delaminating, so 40% adds the in-plane and through-thickness strength the flange needs"
+      "reason": "The part holds a 2 kg shelf; 15% leaves the 4.76 mm section mostly void between the walls. Raising to 40% adds shear and stiffness to the core without making the part solid."
     },
     {
       "key": "sparse_infill_pattern",
       "value": "gyroid",
-      "feature": "purpose",
+      "feature": "flat_top",
       "knowledge": "infill",
-      "reason": "the flange sees bending in one direction and shear in the perpendicular, so a pattern rated strongest in both X-Y and Z (gyroid) covers both load directions where zig-zag is weaker"
+      "reason": "The shelf can load the flange in any horizontal direction, so strength must be equal in all directions. Zig-zag has Low Z strength per the wiki table; gyroid has High in both X-Y and Z."
+    },
+    {
+      "key": "outer_wall_speed",
+      "value": "120",
+      "feature": "flat_top",
+      "knowledge": "speed-cooling",
+      "reason": "The load path depends on layer bonding at the outer walls, which carry the bending stress. Slowing from 160 to 120 improves adhesion between wall layers."
+    },
+    {
+      "key": "inner_wall_speed",
+      "value": "150",
+      "feature": "flat_top",
+      "knowledge": "speed-cooling",
+      "reason": "Same load-path reasoning: layer bonding through the inner walls contributes to the flange's bending strength. Keeping inner walls well clear of the volumetric limit reduces internal stress."
     },
     {
       "key": "nozzle_temperature",
       "value": "230",
-      "feature": "purpose",
+      "feature": "flat_top",
       "knowledge": "temperature",
-      "reason": "the shelf load puts the flange in bending, which stresses layer-to-layer bonding in Z; 230 \u00b0C improves that bonding within the filament's 190\u2013240 range"
-    },
-    {
-      "key": "fan_max_speed",
-      "value": "70",
-      "feature": "purpose",
-      "knowledge": "cooling",
-      "reason": "there are no overhangs or bridges to sharpen, and the 2 kg shelf load depends on interlayer adhesion; capping the fan at 70 instead of 100 keeps layer bonding stronger without sacrificing anything this geometry needs"
+      "reason": "The load path depends on layer bonding. The wiki says toward the warmer end for load-bearing parts; 230 is within the 190\u2013240 range and gives better inter-layer adhesion without risking degradation."
     }
   ],
   "design_notes": [
-    "If the flange is on the thin side (close to the 4.76 mm section), a small chamfer or fillet where the flange meets the plate would relieve the stress concentration at the bend and could let you drop infill back toward 30 % without losing strength."
+    "No overhang (0 mm\u00b2, 0\u00b0 steepest) and no bridge (0 mm\u00b2), so no supports are needed and no design-out chamfer applies.",
+    "Bed contact of 1800 mm\u00b2 and slenderness of 1.5\u00d7 are both well within safe limits; no brim or adhesion change is warranted."
   ],
   "_call": {
     "model": "crew-code-think",
     "finish_reason": "stop",
-    "prompt_tokens": 1417,
-    "completion_tokens": 3016,
-    "reasoning_tokens": 2345,
-    "max_tokens": 8000,
-    "seconds": 102.1
+    "prompt_tokens": 4964,
+    "completion_tokens": 4356,
+    "reasoning_tokens": 3327,
+    "max_tokens": 16000,
+    "seconds": 140.0
   }
 }

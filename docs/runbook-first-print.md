@@ -73,6 +73,12 @@ Before each print, `cd ~/Documents/git/print-shop && git pull && uv sync`, so it
 
    It reasons with `crew-code-think` (the `PRINT_SHOP_SETUP_MODEL` setting), which usually takes two to three minutes (up to about ten at its 16,000-token limit). If its answer is cut off at that limit, the review says CUT OFF and shows only the guards' changes; that is recorded, and nothing is retried. Type `ok` to go on to the gate. To correct a setting, type it by name, e.g. `layer_height=0.2 because it's a test cube`, and it slices again and shows the review again. Or type `stop`. Your corrections go in the ledger: they are what print-shop learns from.
 
+   **How a correction grows the skill.** The proposal reasons from the print-settings skill (`skills/print-settings/`): SKILL.md and a reference per setting group, distilled from Orca's wiki. A correction that would apply to other parts too, such as "never above 0.16 mm layers for a visible curve", becomes an edit there by PR:
+   - a "Change it when" line in the group's reference (`references/layer-height.md` for that example);
+   - or a line in SKILL.md's "The Sponsor's practice".
+
+   The PR quotes the correction and its job id (`--list` shows both). A correction for this part only needs nothing more: the ledger has it. Hard limits (a bound, tree supports) are code, in `src/print_shop/setup/bounds.py`, and change by PR too.
+
 2. **Approve at the gate.** The dashboard asks "Print this?". Check the numbers before you press:
    - Time: about 11 minutes (Orca's estimate for your presets is 10 m 54 s; the review shows the estimate with its changes);
    - Plastic: about 2.9 cm³;

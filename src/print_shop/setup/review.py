@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from print_shop.core.state import AppliedOrientation, SliceResult
-from print_shop.setup.knowledge import SETTINGS
+from print_shop.setup.bounds import SETTINGS
 from print_shop.setup.proposal import Change, Proposal, Source
 from print_shop.slicer.orca import SlicerProfiles
 
