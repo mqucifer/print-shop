@@ -1,0 +1,32 @@
+# This repository's own checks, until the crew takes it over.
+#
+# The template's checks.yml runs what `.crew/project.yaml` names, and that
+# record's intent is the Sponsor's, written at onboarding. Until then it has
+# nothing to check, so the checks run here. Nothing in CI reaches the printer,
+# Home Assistant, the MQTT broker, Orca or a model: those tests carry markers
+# and are deselected.
+
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run mypy src tests scripts
+      - run: uv run pytest -q -m "not slicer and not llm and not mqtt and not ha and not printer"
+      - run: uv run python scripts/check_addresses.py
