@@ -6,16 +6,19 @@ part's features, its presets, and the print-settings skill's practice and
 index (SKILL.md), and proposes what those leave undecided:
 
 - at most 4 questions, each tied to a feature id, or to "purpose" when the
-  features can't show what the part is for (the operator's note: purpose
-  often isn't measurable, so it may come first);
+  features can't show what the part is for. When none of the model's covers
+  purpose, print-shop asks it first, with `PURPOSE` (the Sponsor's choice on
+  mqucifer/print-shop#10), and keeps the model's first three;
 - 2 to 4 options each. An option carries the settings it implies, each
   inside its bound (`bounds.check`): an option out of bounds is dropped, and
   a question left with fewer than 2 options is dropped. Exactly one option is
   recommended, with why;
 - each option's impact on strength, surface and risk in one line, in the
-  model's words. Its time and filament are never the model's: `estimate`
-  slices the part with that option's settings, and an option Orca couldn't
-  slice says "no estimate".
+  model's words, which never restate its values: the settings line shown
+  beside it is written from the settings it applies (`settings_line`). Its
+  time and filament are never the model's: `estimate` slices the part with
+  that option's settings, and an option Orca couldn't slice says "no
+  estimate".
 
 A part whose features leave nothing to decide gets no questions. A failed or
 cut-off call gives no questions, saying so, and the proposal goes on.
@@ -46,10 +49,37 @@ _SYSTEM = (
     "features leave undecided, the way a careful colleague would: at most 4, each tied to "
     "the feature that makes it matter, or to the part's purpose when its shape can't show "
     "what it's for (ask that first). Each question has 2 to 4 concrete options; each option "
-    "lists the settings it implies, one line on its impact (strength, surface, risk), and "
-    "exactly one is recommended, with why, pointing at the part. Never ask what the features "
+    "lists the settings it implies, one line on its impact (strength, surface, risk) that "
+    "never restates a setting or a number (the settings are shown beside it), and exactly "
+    "one is recommended, with why, pointing at the part. Never ask what the features "
     "already answer, and never ask open-ended questions. A simple part may need none. Don't "
     "state times or filament: those come from the slicer.\n\n"
+)
+
+
+#: What the part is for, asked by print-shop whenever the model's questions
+#: don't (the Sponsor, 2026-10-25, on mqucifer/print-shop#10: "A load-bearing
+#: part can't print with the presets' strength just because the model didn't
+#: think to ask"). Its options set nothing: the proposal reads the answer and
+#: decides, so it can't stand in for per-part reasoning.
+PURPOSE = Question(
+    feature="purpose",
+    text="What is this part for? Its shape can't say.",
+    options=(
+        Option(label="decoration or display", settings={},
+               impact="nothing rests on it: strength stays as your presets have it, and the "
+                      "proposal looks at the surface"),
+        Option(label="handled, clipped or lightly loaded", settings={}, recommended=True,
+               why="when the shape can't say, a part that turns out decorative still prints "
+                   "well this way, while a weak functional part costs a print",
+               impact="the proposal strengthens its thin load paths a little; a little more "
+                      "time and filament"),
+        Option(label="carries a real load", settings={},
+               impact="the proposal strengthens the load path; noticeably more time and "
+                      "filament, and say the load in your own words with o"),
+        Option(label="a prototype or test fit", settings={},
+               impact="kept quick and cheap: your presets, unless a feature needs a change"),
+    ),
 )
 
 
@@ -102,9 +132,10 @@ def propose_questions(facts: PartFacts, ask: Ask) -> Asked:
                     schema([f.id for f in facts.features]))
         raw = list(reply["questions"])
     except CutOff as exc:
-        return Asked((), f"no questions: the model was cut off ({exc})", exc.info.model_dump())
+        return Asked((PURPOSE,), f"only purpose asked: the model was cut off ({exc})",
+                     exc.info.model_dump())
     except (RuntimeError, OSError, KeyError, TypeError) as exc:
-        return Asked((), f"no questions: the model was unavailable ({exc})"[:600])
+        return Asked((PURPOSE,), f"only purpose asked: the model was unavailable ({exc})"[:600])
 
     questions = []
     dropped = []
@@ -127,8 +158,10 @@ def propose_questions(facts: PartFacts, ask: Ask) -> Asked:
         questions.append(Question(feature=str(q["feature"]), text=str(q["text"]),
                                   options=tuple(_one_recommended(options))))
     note = "; ".join(f"dropped {d}" for d in dropped)
-    if not questions and not note:
-        note = "no questions: the part's features left nothing to ask"
+    if not any(q.feature == "purpose" for q in questions):
+        # The Sponsor's choice on mqucifer/print-shop#10: purpose is always asked.
+        questions = [PURPOSE, *questions[: MAX_QUESTIONS - 1]]
+        note = "; ".join(x for x in (note, "purpose asked by print-shop: the model didn't") if x)
     return Asked(tuple(questions), note, dict(reply.get("_call") or {}))
 
 
@@ -142,7 +175,7 @@ def estimate(
         options = []
         for o in q.options:
             found = None
-            if budget > 0:
+            if o.settings and budget > 0:
                 budget -= 1
                 found = slice_with(o.settings)
             options.append(o.model_copy(update={"estimate": found}))

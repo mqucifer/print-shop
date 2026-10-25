@@ -173,7 +173,10 @@ def test_a_correction_slices_again_and_the_ledger_keeps_it(
     job_id = daemon.submit(stl)
     daemon.wait_for_gate(job_id, timeout_s=30)
 
-    assert len(slicer.calls) == 4, "each option priced, sliced, corrected, sliced again"
+    assert len(slicer.calls) == 3, (
+        "the option that sets walls priced (the one that sets nothing isn't), sliced, "
+        "corrected, sliced again"
+    )
     first = sponsor.shown[0].proposal
     assert [(c.value, c.source) for c in first.changes] == [("3", Source.ANSWER)]
     assert first.refused == ("wall_loops=5: you answered it at the intake",)

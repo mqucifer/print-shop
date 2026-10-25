@@ -26,6 +26,7 @@ from print_shop.setup.features import Feature, measure
 from print_shop.setup.intake import Answer, Intake, Option, Question
 from print_shop.setup.model import Ask, llm_ask, prompt, setup_llm
 from print_shop.setup.proposal import PartFacts, Proposal, Source, apply
+from print_shop.setup.questions import PURPOSE
 from print_shop.setup.skill import groups_for, load
 from print_shop.slicer.orca import (
     BedType,
@@ -130,27 +131,34 @@ def test_every_change_names_its_feature_and_knowledge_and_stays_in_bounds(
 
 
 def test_the_proposals_differ_for_reasons_traced_to_the_parts(tmp_path: Path) -> None:
-    """What the recordings of 2026-10-25 show, findings included (mqucifer/print-shop#10).
+    """What the recordings of 2026-10-25 show (mqucifer/print-shop#10).
 
-    The vase was asked its purpose and the Sponsor answered "display", whose
-    option keeps the presets, so nothing changes. The bracket was asked
-    nothing: the model judged its shape needed no question, so its 2 kg shelf
-    was never asked about and nothing changed. That's a finding on the PR
-    (on an earlier run it did ask), not a pass. The snap fit was asked its
-    purpose (answered in words) and about its hook's overhang (tree support).
+    The vase was asked its purpose and answered "display", whose option keeps
+    the presets, so nothing changes. The model asked the bracket nothing, so
+    print-shop asked its purpose (the Sponsor's choice), answered in words:
+    a 2 kg shelf, and the load path is strengthened. The snap fit was asked
+    its purpose (in words: a clip) and about its hook's overhang (tree
+    support).
     """
     p = {part: _proposal(part, tmp_path) for part in PARTS}
     keys = {part: {c.key: c for c in prop.changes} for part, prop in p.items()}
-    assert keys["vase"] == {} and keys["bracket"] == {}
-    assert intake("bracket", tmp_path).questions == ()
+    assert keys["vase"] == {}
+
+    bracket = keys["bracket"]
+    assert intake("bracket", tmp_path).questions == (PURPOSE,)
+    assert bracket["wall_loops"].value == "4" and bracket["sparse_infill_density"].value == "40%"
+    # Each reason names the load. (Its feature tag needn't: crew-code-think
+    # tags these "flat_top" while the reasons are about the flange's bending,
+    # a finding on the PR, not something this test hides.)
+    assert all(any(w in c.reason for w in ("shelf", "2 kg", "load", "bend"))
+               for c in bracket.values())
 
     snap = keys["snap"]
     assert (snap["enable_support"].value, snap["enable_support"].source) == ("1", Source.ANSWER)
     assert snap["support_type"].value == "tree(auto)"
     assert snap["brim_type"].feature == "bed_contact", "128 mm2 on the plate"
     assert any("chamfer" in n for n in p["snap"].design_notes)
-    model = [c for c in snap.values() if c.source is Source.MODEL]
-    assert model and all(c.feature != "purpose" or "clip" in c.reason for c in model)
+    assert len({frozenset((c.key, c.value) for c in prop.changes) for prop in p.values()}) == 3
 
 
 @pytest.mark.slicer

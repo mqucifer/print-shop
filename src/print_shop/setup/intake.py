@@ -36,6 +36,7 @@ __all__ = [
     "Question",
     "cli_asker",
     "replay_asker",
+    "settings_line",
 ]
 
 
@@ -60,15 +61,71 @@ class Option(BaseModel):
 
     label: str
     settings: dict[str, str]  # Orca keys and values, each inside its bound
-    impact: str  # strength, surface, risk, in one line: the model's words
+    #: Its impact on strength, surface and risk, in the model's words. Never
+    #: its values: those are shown from `settings`, by the code (`settings_line`).
+    impact: str
     recommended: bool = False
     why: str = ""  # why it's recommended
     estimate: Estimate | None = None  # Orca's, or None: "no estimate"
 
     def line(self) -> str:
-        cost = self.estimate.line() if self.estimate else "no estimate"
+        """As the command shows it: what it sets comes from what it applies, never its text.
+
+        The operator, 2026-10-25: an option's settings once said 1 wall while
+        its text said 3 perimeters. So the settings line is written here from
+        `settings`, and the model's words are only the impact and the why.
+        """
+        if self.estimate is not None:
+            cost = self.estimate.line()
+        elif self.settings:
+            cost = "no estimate"
+        else:
+            cost = "sets nothing itself; the review shows Orca's estimate"
         rec = f"  [recommended: {self.why}]" if self.recommended else ""
-        return f"{self.label}: {self.impact}; {cost}{rec}"
+        return f"{self.label} ({settings_line(self.settings)}): {self.impact}; {cost}{rec}"
+
+
+_BRIMS = {"no_brim": "no brim", "auto_brim": "auto brim", "outer_only": "outer brim",
+           "brim_ears": "brim ears"}
+
+
+def settings_line(settings: dict[str, str]) -> str:
+    """Settings in a printer person's words: "3 walls, 20% gyroid infill, 0.16 mm layers"."""
+    if not settings:
+        return "your presets"
+    s = dict(settings)
+    parts = []
+    if "wall_loops" in s:
+        parts.append(f"{s.pop('wall_loops')} walls")
+    for key, what in (("top_shell_layers", "top layers"), ("bottom_shell_layers", "bottom layers")):
+        if key in s:
+            parts.append(f"{s.pop(key)} {what}")
+    density, pattern = s.pop("sparse_infill_density", ""), s.pop("sparse_infill_pattern", "")
+    if density or pattern:
+        parts.append(" ".join(x for x in (density, pattern, "infill") if x))
+    if "enable_support" in s:
+        parts.append("supports on" if s.pop("enable_support") == "1" else "no supports")
+    if "support_type" in s:
+        parts.append(f"{s.pop('support_type').replace('(auto)', '')} supports")
+    if "support_threshold_angle" in s:
+        parts.append(f"supports from {s.pop('support_threshold_angle')}°")
+    if "brim_type" in s:
+        brim = s.pop("brim_type")
+        parts.append(_BRIMS.get(brim, brim))
+    if "layer_height" in s:
+        parts.append(f"{s.pop('layer_height')} mm layers")
+    for key, what in (("outer_wall_speed", "outer wall"), ("inner_wall_speed", "inner wall"),
+                      ("sparse_infill_speed", "infill")):
+        if key in s:
+            parts.append(f"{what} {s.pop(key)} mm/s")
+    if "nozzle_temperature" in s:
+        parts.append(f"nozzle {s.pop('nozzle_temperature')} °C")
+    if "fan_max_speed" in s:
+        parts.append(f"fan up to {s.pop('fan_max_speed')}%")
+    if "fan_min_speed" in s:
+        parts.append(f"fan from {s.pop('fan_min_speed')}%")
+    parts += [f"{k} {v}" for k, v in s.items()]
+    return ", ".join(parts)
 
 
 class Question(BaseModel):

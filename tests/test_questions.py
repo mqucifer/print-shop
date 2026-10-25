@@ -21,10 +21,19 @@ from print_shop.ingest.analyzer import analyze
 from print_shop.setup import Proposer
 from print_shop.setup.bounds import check
 from print_shop.setup.features import Feature, measure
-from print_shop.setup.intake import Answer, Estimate, Intake, Question, parse, render, replay_asker
+from print_shop.setup.intake import (
+    Answer,
+    Estimate,
+    Intake,
+    Question,
+    parse,
+    render,
+    replay_asker,
+    settings_line,
+)
 from print_shop.setup.model import Ask, llm_ask, setup_llm
-from print_shop.setup.proposal import Change, PartFacts, Proposal, Source, apply
-from print_shop.setup.questions import MAX_SLICES, estimate
+from print_shop.setup.proposal import Change, PartFacts, Proposal, Source, answered, apply
+from print_shop.setup.questions import MAX_SLICES, PURPOSE, estimate
 from print_shop.slicer.orca import BedType, slice_model, with_bed_type
 from tests.fakes import DATA, STORE_PROFILES
 from tests.fixtures import write_stl
@@ -126,8 +135,9 @@ def test_an_option_out_of_bounds_is_dropped_and_so_is_a_question_left_with_one(
     asked = Proposer(ask_questions=_reply(hot, walls)).questions(
         features("bracket", tmp_path), STORE_PROFILES
     )
-    assert [q.text for q in asked.questions] == ["How strong?"]
-    assert [o.label for o in asked.questions[0].options] == ["light", "strong"]
+    assert [q.text for q in asked.questions if q is not PURPOSE] == ["How strong?"]
+    strong = next(q for q in asked.questions if q is not PURPOSE)
+    assert [o.label for o in strong.options] == ["light", "strong"]
     assert "'molten' in 'How hot?': nozzle_temperature=300: outside 190-240" in asked.note
     assert "'How hot?': fewer than 2 options in bounds" in asked.note
 
@@ -141,13 +151,59 @@ def test_exactly_one_option_is_recommended_whatever_the_model_marks(tmp_path: Pa
     assert [o.recommended for o in asked.questions[0].options] == [True, False]
 
 
-def test_a_part_may_get_no_questions_and_says_why(tmp_path: Path) -> None:
-    asked = Proposer(ask_questions=_reply()).questions(features("vase", tmp_path), STORE_PROFILES)
-    assert asked.questions == ()
-    assert asked.note == "no questions: the part's features left nothing to ask"
-    assert Proposer().questions(features("vase", tmp_path), STORE_PROFILES).note == (
-        "no questions: no model was asked"
+def test_purpose_is_always_asked_when_the_model_doesnt(tmp_path: Path) -> None:
+    """The Sponsor's choice on mqucifer/print-shop#10, on the part the model left unasked."""
+    asked = Proposer(ask_questions=replay(RECORDED / "bracket.json")).questions(
+        features("bracket", tmp_path), STORE_PROFILES
     )
+    assert [q.feature for q in asked.questions] == ["purpose"]
+    assert asked.questions[0] is PURPOSE
+    assert "purpose asked by print-shop: the model didn't" in asked.note
+    purpose = asked.questions[0]
+    assert 2 <= len(purpose.options) <= 4 and purpose.options[purpose.recommended].why
+    assert all(o.settings == {} for o in purpose.options), "the proposal decides, not a default"
+
+
+def test_the_purpose_question_counts_toward_four(tmp_path: Path) -> None:
+    walls = {"feature": "section", "text": "How strong?", "options": [
+        _option("light", wall_loops="2"), _option("strong", True, wall_loops="4")]}
+    asked = Proposer(ask_questions=_reply(*[walls] * 4)).questions(
+        features("bracket", tmp_path), STORE_PROFILES
+    )
+    assert [q.feature for q in asked.questions] == ["purpose", "section", "section", "section"]
+
+
+def test_without_a_model_only_purpose_is_asked(tmp_path: Path) -> None:
+    def down(system: str, user: str, schema: dict[str, Any]) -> dict[str, Any]:
+        raise RuntimeError("LiteLLM is down")
+
+    asked = Proposer(ask_questions=down).questions(features("vase", tmp_path), STORE_PROFILES)
+    assert asked.questions == (PURPOSE,)
+    assert asked.note.startswith("only purpose asked: the model was unavailable")
+
+
+@pytest.mark.parametrize("part", PARTS)
+def test_an_options_shown_settings_are_exactly_what_it_applies(part: str, tmp_path: Path) -> None:
+    """Shown from what it sets, never from the model's text (the operator, 2026-10-25)."""
+    for q in questions(part, tmp_path):
+        for o in q.options:
+            assert f"{o.label} ({settings_line(o.settings)}): " in o.line()
+    asked = intake(part, tmp_path)
+    facts = PartFacts(intake=asked, features=features(part, tmp_path), **_presets())
+    applied = {c.key: c.value for c in answered(facts)}
+    for _, option in asked.chosen():
+        shown = {k: v for k, v in option.settings.items() if v != facts.preset(k)}
+        assert applied == shown
+
+
+def test_the_settings_line_reads_as_a_printer_person_would() -> None:
+    assert settings_line({"wall_loops": "3", "sparse_infill_density": "20%",
+                          "sparse_infill_pattern": "gyroid", "layer_height": "0.16"}) == (
+        "3 walls, 20% gyroid infill, 0.16 mm layers"
+    )
+    assert settings_line({"enable_support": "1", "support_type": "tree(auto)",
+                          "brim_type": "auto_brim"}) == "supports on, tree supports, auto brim"
+    assert settings_line({}) == "your presets"
 
 
 def test_times_are_never_the_models_and_a_failed_slice_says_no_estimate() -> None:
@@ -225,8 +281,9 @@ def test_orca_prices_each_option_and_they_differ(tmp_path: Path) -> None:
                         filament_cm3=r.filament_cm3)
 
     priced = estimate(questions("snap", tmp_path), slice_with)
-    estimates = [o.estimate for q in priced for o in q.options]
-    assert all(e is not None for e in estimates)
+    estimates = [o.estimate for q in priced for o in q.options if o.settings]
+    assert all(e is not None for e in estimates), "every option that sets something is priced"
+    assert all(o.estimate is None for q in priced for o in q.options if not o.settings)
     assert len({e.print_time_s for e in estimates if e}) > 1, "the options cost differently"
 
 
