@@ -1,0 +1,108 @@
+{
+  "questions": [
+    {
+      "feature": "purpose",
+      "text": "What's it for? The 1.87 mm section, 2.8\u00d7 slenderness, and small 90\u00b0 ceiling are consistent with several roles; the shape alone can't say which.",
+      "options": [
+        {
+          "label": "Functional (holds, clips, or bears load)",
+          "settings": [
+            {
+              "key": "wall_loops",
+              "value": "1"
+            },
+            {
+              "key": "sparse_infill_density",
+              "value": "20%"
+            }
+          ],
+          "impact": "Stronger core and walls; the 1.87 mm section gets 3 perimeters before infill, so walls carry most of the load. Slightly more material.",
+          "recommended": false,
+          "why": ""
+        },
+        {
+          "label": "Decorative (a face shows)",
+          "settings": [
+            {
+              "key": "wall_loops",
+              "value": "2"
+            },
+            {
+              "key": "sparse_infill_density",
+              "value": "15%"
+            }
+          ],
+          "impact": "Lighter, faster; the 138 mm\u00b2 flat top is where finish lives, so top layers matter more than infill. Less structural margin.",
+          "recommended": false,
+          "why": ""
+        },
+        {
+          "label": "Prototype (check fit or shape)",
+          "settings": [
+            {
+              "key": "wall_loops",
+              "value": "2"
+            },
+            {
+              "key": "sparse_infill_density",
+              "value": "15%"
+            }
+          ],
+          "impact": "Preset values; no reason to spend extra material on a throwaway.",
+          "recommended": false,
+          "why": ""
+        }
+      ]
+    },
+    {
+      "feature": "overhang",
+      "text": "The 90\u00b0 ceiling (10 mm\u00b2) \u2014 a small horizontal face pointing straight down, the steepest overhang in the part.",
+      "options": [
+        {
+          "label": "Bridge, no support",
+          "settings": [
+            {
+              "key": "enable_support",
+              "value": "0"
+            }
+          ],
+          "impact": "Fastest, clean surface under the ceiling. At 10 mm\u00b2 the span is short (the whole part is 16 \u00d7 8 mm), so it should hold at 0.2 mm layers with the preset's fan. Risk: a slight sag if the span runs in a weak direction.",
+          "recommended": true,
+          "why": "Ten square millimetres on a 16 \u00d7 8 mm part is a very short span \u2014 at most a few millimetres. At 0.2 mm layer height with the preset's cooling, that will bridge cleanly. Tree support for a face this small introduces more surface artifacts (contact points, removal marks) than the bridge risk warrants."
+        },
+        {
+          "label": "Tree support",
+          "settings": [
+            {
+              "key": "enable_support",
+              "value": "1"
+            },
+            {
+              "key": "support_type",
+              "value": "tree(auto)"
+            }
+          ],
+          "impact": "Guaranteed flat ceiling. Support marks on a 10 mm\u00b2 area are easy to remove. Slightly longer print.",
+          "recommended": false,
+          "why": ""
+        },
+        {
+          "label": "Design note: chamfer the edge to 45\u00b0",
+          "settings": [],
+          "impact": "Eliminates the overhang entirely; the part prints with no special handling. This is a CAD change, not a slicer setting.",
+          "recommended": false,
+          "why": ""
+        }
+      ]
+    }
+  ],
+  "_call": {
+    "model": "crew-code-think",
+    "finish_reason": "stop",
+    "prompt_tokens": 1991,
+    "completion_tokens": 5351,
+    "reasoning_tokens": 4445,
+    "max_tokens": 16000,
+    "seconds": 371.9
+  }
+}

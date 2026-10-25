@@ -1,46 +1,52 @@
 {
-  "reasoning": "This is a snap hook that clips over a 1.2 mm ledge on a lid, opened often. It's functional, light load, indoor. What makes it succeed or fail: the hook profile must be dimensionally accurate so it sits flush on the ledge and releases cleanly with repeated use; the ceiling under the hook arm (the 90\u00b0 overhang) cannot print without support; the part is small and slender with a small bed contact area, so it's prone to lifting. The section is thin (1.87 mm) and the walls dominate the structure. I loaded all seven reference groups because the part touches adhesion (small footprint, slender), supports (ceiling overhang, bridge), layer height (must fit the 1.2 mm ledge), and speed/cooling (thin sections, small layer times at the reduced layer height).",
+  "reasoning": "This is a small snap clip (22 mm tall, 16\u00d78 mm footprint) whose hook engages a 1.2 mm ledge on a lid and is opened often. The critical failure mode is fatigue at the snap hook: the 1.87 mm section flexes every cycle. The 90\u00b0 ceiling (10 mm\u00b2) is the steepest overhang and also reads as the bridge face. Bed contact is 128 mm\u00b2 (under 200) and slenderness is 2.8\u00d7 (over 2.5), so both adhesion triggers are hit. The part is tiny (766 mm\u00b3), so material cost of any change is negligible; the decisions come down to whether the feature or purpose gives a reason to deviate from the Sponsor's preset.",
   "changes": [
     {
       "key": "enable_support",
       "value": "1",
       "feature": "steepest_overhang",
       "knowledge": "supports",
-      "reason": "A 90\u00b0 overhang is a ceiling \u2014 it cannot print unsupported at any layer height within the bound. The ceiling is the underside of the hook arm that clips over the ledge; it is inherent to the hook's function and cannot be chamfered to 45\u00b0 without destroying the clip geometry. This is not a design-out case; support is required."
+      "reason": "The 10 mm\u00b2 face at 90\u00b0 is a true ceiling \u2014 it cannot be bridged or self-supported. The intake already chose tree support; this sets it."
     },
     {
       "key": "support_type",
       "value": "tree(auto)",
       "feature": "steepest_overhang",
       "knowledge": "supports",
-      "reason": "The Sponsor's practice is tree supports whenever supports are used. The code bound allows only tree(auto). Set accordingly."
+      "reason": "Sponsor's practice: supports are tree when used. The intake confirmed it."
     },
     {
       "key": "brim_type",
       "value": "auto_brim",
       "feature": "bed_contact",
       "knowledge": "adhesion",
-      "reason": "Bed contact is 128 mm\u00b2, under the 200 mm\u00b2 trigger. Slenderness is 2.8\u00d7, over the 2.5\u00d7 trigger. Both adhesion conditions are met. auto_brim calculates a width from geometry and print parameters; for a small, tall part with a narrow footprint it will add enough perimeter to resist lifting during the print without a fixed-width brim that might be over- or under-sized."
+      "reason": "Bed contact is 128 mm\u00b2 (under 200 mm\u00b2) and slenderness is 2.8\u00d7 (over 2.5\u00d7). Both adhesion triggers are met. A small clip this tall and narrow will wobble or lift without extra bed grip; auto_brim will calculate a modest width from the geometry without over-bridging the 8 mm width."
     },
     {
-      "key": "layer_height",
-      "value": "0.12",
-      "feature": "flat_top",
-      "knowledge": "layer-height",
-      "reason": "The hook's profile where it engages the 1.2 mm ledge is a fine curved surface that must fit. At 0.20 mm the ledge height spans 6 layers; the staircase on the hook's curve will make the fit coarse and may prevent a clean release on repeated opening. At 0.12 mm the same 1.2 mm spans 10 layers, a noticeably smoother profile. 0.12 mm is within the wiki's optimal range (20\u201380% of 0.4 mm nozzle = 0.08\u20130.32 mm) and within the machine bound. Secondary benefit: the 10 mm\u00b2 bridge spans less vertical distance per layer, reducing sag."
+      "key": "outer_wall_speed",
+      "value": "120",
+      "feature": "section",
+      "knowledge": "speed-cooling",
+      "reason": "The 1.87 mm hook section is on a fatigue load path \u2014 it flexes every time the lid is opened. The outer wall is the primary structural element at this thickness, and layer bonding between its passes is what holds the hook together over cycles. Slowing the outer wall from 160 to 120 improves inter-layer adhesion at the hook without meaningful time cost on a 766 mm\u00b3 part."
+    },
+    {
+      "key": "sparse_infill_density",
+      "value": "20%",
+      "feature": "section",
+      "knowledge": "infill",
+      "reason": "The snap hook is on a load path that cycles. At 1.87 mm section with two 0.4 mm walls, the interior gap is ~1.07 mm; raising infill from 15% to 20% adds a few more backing lines behind the hook wall, giving the flexing section a small amount of internal support against delamination under repeated loading. Material cost is negligible at this part size."
     }
   ],
   "design_notes": [
-    "The 90\u00b0 ceiling under the hook arm is the snap geometry itself \u2014 it clips over the 1.2 mm ledge. It cannot be chamfered to 45\u00b0 or redesigned as a support-free overhang without changing the hook's function. Tree support is the correct solution; it is not a missed design-out opportunity.",
-    "The 10 mm\u00b2 bridge (flat downward face) will also fall within the tree support's reach at the 30\u00b0 threshold; it does not need a separate decision."
+    "The 10 mm\u00b2 face at 90\u00b0 (the ceiling under the hook) is the only feature that needs support. If the CAD were revised, a 45\u00b0 chamfer on that face would eliminate the overhang entirely and remove the need for support. That is a design change, not a slicer setting."
   ],
   "_call": {
     "model": "crew-code-think",
     "finish_reason": "stop",
-    "prompt_tokens": 6664,
-    "completion_tokens": 4828,
-    "reasoning_tokens": 3941,
+    "prompt_tokens": 6110,
+    "completion_tokens": 5230,
+    "reasoning_tokens": 4374,
     "max_tokens": 16000,
-    "seconds": 179.3
+    "seconds": 320.4
   }
 }

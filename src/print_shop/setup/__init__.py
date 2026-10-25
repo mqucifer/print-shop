@@ -16,7 +16,8 @@ from print_shop.expert.client import LLMConfig
 from print_shop.setup.features import Feature
 from print_shop.setup.intake import Intake
 from print_shop.setup.model import Ask, llm_ask, propose_by_model
-from print_shop.setup.proposal import PartFacts, Proposal, guard
+from print_shop.setup.proposal import PartFacts, Proposal, answered, guard
+from print_shop.setup.questions import Asked, propose_questions
 from print_shop.setup.skill import groups_for, load
 from print_shop.slicer.store import STORE_DIR
 
@@ -32,11 +33,38 @@ class Proposer:
 
     llm: LLMConfig | None = None
     ask: Ask | None = None  # a test's recorded reply in place of the real call
+    ask_questions: Ask | None = None  # the same, for the intake's questions
+
+    def questions(self, features: tuple[Feature, ...], profiles: SlicerProfiles) -> Asked:
+        """The intake's questions for this part, before any are answered."""
+        facts = self._facts(Intake(), features, profiles)
+        if self.ask_questions is not None:
+            return propose_questions(facts, self.ask_questions)
+        if self.llm is not None:
+            return propose_questions(facts, llm_ask(self.llm))
+        return Asked((), "no questions: no model was asked")
 
     def __call__(
         self, intake: Intake, features: tuple[Feature, ...], profiles: SlicerProfiles
     ) -> Proposal:
-        facts = PartFacts(
+        facts = self._facts(intake, features, profiles)
+        skill = load(groups_for(intake, features))
+        if self.ask is not None:
+            reasoned = propose_by_model(facts, skill, self.ask, "recorded")
+        elif self.llm is not None:
+            reasoned = propose_by_model(facts, skill, llm_ask(self.llm), self.llm.model)
+        else:
+            reasoned = Proposal(model="")
+        # The Sponsor's answers first: the model may not change what they chose.
+        reasoned = reasoned.model_copy(
+            update={"changes": tuple(answered(facts)) + reasoned.changes}
+        )
+        return guard(facts, reasoned)
+
+    def _facts(
+        self, intake: Intake, features: tuple[Feature, ...], profiles: SlicerProfiles
+    ) -> PartFacts:
+        return PartFacts(
             intake=intake,
             features=features,
             machine=json.loads(profiles.machine.read_text()),
@@ -45,14 +73,7 @@ class Proposer:
             standard_process=_standard(profiles, "process"),
             standard_filament=_standard(profiles, "filament"),
         )
-        skill = load(groups_for(intake, features))
-        if self.ask is not None:
-            reasoned = propose_by_model(facts, skill, self.ask, "recorded")
-        elif self.llm is not None:
-            reasoned = propose_by_model(facts, skill, llm_ask(self.llm), self.llm.model)
-        else:
-            reasoned = Proposal(model="")
-        return guard(facts, reasoned)
+
 
 
 def _standard(profiles: SlicerProfiles, kind: str) -> dict[str, Any]:

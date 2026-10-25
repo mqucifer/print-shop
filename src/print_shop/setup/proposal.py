@@ -36,15 +36,16 @@ from pydantic import BaseModel
 
 from print_shop.setup.bounds import SETTINGS
 from print_shop.setup.features import Feature
-from print_shop.setup.intake import Environment, Intake
+from print_shop.setup.intake import Intake
 
 if TYPE_CHECKING:  # the slicer imports the job state, which imports this
     from print_shop.slicer.orca import SlicerProfiles
 
-__all__ = ["Change", "PartFacts", "Proposal", "Source", "apply", "guard"]
+__all__ = ["Change", "PartFacts", "Proposal", "Source", "answered", "apply", "guard"]
 
 
 class Source(StrEnum):
+    ANSWER = "answer"  # the Sponsor's answer at the intake
     MODEL = "model"
     GUARD = "guard"  # a rule that holds whatever the model says
     SPONSOR = "sponsor"
@@ -142,6 +143,22 @@ class PartFacts:
         return _first(self.filament.get("filament_type", ""))
 
 
+def answered(facts: PartFacts) -> list[Change]:
+    """The settings of each option the Sponsor chose at the intake, as changes."""
+    changes: dict[str, Change] = {}
+    for question, option in facts.intake.chosen():
+        for key, value in option.settings.items():
+            preset = facts.preset(key)
+            if value == preset:
+                continue
+            changes[key] = Change(
+                key=key, preset=preset, value=value, source=Source.ANSWER,
+                reason=f"you chose '{option.label}': {option.impact}",
+                feature=question.feature,
+            )
+    return list(changes.values())
+
+
 def guard(facts: PartFacts, proposal: Proposal) -> Proposal:
     """The rules that hold whatever the model proposed, and the notes for the Sponsor."""
     changes = list(proposal.changes)
@@ -185,11 +202,6 @@ def guard(facts: PartFacts, proposal: Proposal) -> Proposal:
 
 def _notes(f: PartFacts) -> list[str]:
     notes = []
-    if f.filament_type == "PLA" and f.intake.environment in (Environment.OUTDOOR, Environment.HEAT):
-        notes.append(
-            f"PLA {f.intake.environment.value}: it softens near 60 C. That's the filament's "
-            "choice, which no setting changes"
-        )
     low = _first(f.filament.get("nozzle_temperature_range_low", ""))
     high = _first(f.filament.get("nozzle_temperature_range_high", ""))
     temp = f.preset("nozzle_temperature")

@@ -68,7 +68,7 @@ A print uses your tuning where there is one, and the standard where you haven't 
 
    It should say `ARMED`, and that it is recording to `~/print-shop/recordings/sdcp-<time>.jsonl`. If it says `Not armed`, the flag didn't reach it: stop with Ctrl-C and type it again on the same line.
 
-   **Then it asks what the part is for:** cosmetic or functional, any load, any fit, and where it will live. For the cube: `cosmetic`, `none`, `none`, `indoor`. (Or pass `--intake` a JSON file with the same answers; `tests/data/intake/cube.json` is the cube's.)
+   **Then a few questions about the part,** once it's oriented. They come from its measured features, and often from what its shape can't show, such as what it's for. There are at most four, and a simple part may get none. Each option shows what it would set, its impact on strength, surface and risk, and Orca's time and filament for it ("Orca: 11 min, 3.1 g", or "no estimate"). One option is marked recommended, with why. Answer with its number, or `o` and your own words. For the test cube, take the recommended option. To replay answers, pass `--answers file.json`, e.g. `{"answers": [{"choice": 1}]}`.
 
    **Then the settings review, here on the command line,** before Home Assistant's gate. It shows:
    - how the model read the part;

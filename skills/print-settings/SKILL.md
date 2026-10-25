@@ -14,11 +14,12 @@ The Sponsor tunes Orca presets per printer, nozzle and filament. This skill is f
 - **The presets are the Sponsor's tuning.** Keep a preset's value unless this part gives a reason. "No change" is a good answer.
 
 ## How to read a part
-1. **Say what it is and what makes it succeed or fail.** Use the intake (purpose, load, fit, where it lives) and the measured features: height, footprint, bed contact, slenderness, overhang and its steepest angle, bridge, flat top, section thickness, and volume. A load path, a surface that shows, a fit that must close, and a feature that will fail are what matter.
-2. **For each setting you change, name the feature or purpose that drives it, and point at the part:** "the 4.8 mm flange carries the shelf in bending, so 4 walls", not "load-bearing, so 4 walls".
-3. **Cite the reference group** your reasoning relies on, by its id below.
-4. **Stay inside each setting's bound.** The bounds come from the presets and the sources. A value outside one is refused, never clamped. Values are written as Orca writes them: numbers without units, infill density with `%`.
-5. **Say what you weighed and kept,** with why, so the Sponsor sees the setting was considered.
+1. **Ask first, briefly.** Before proposing, ask what the features leave undecided: at most 4 questions, each tied to the feature that makes it matter, or to the part's purpose when its shape can't show what it's for (ask that first). Each question gets 2 to 4 options, each with the settings it implies, one line on its impact, and exactly one recommended, with why. Never ask what the features already answer, and never ask open-ended questions; a simple part may need none. Time and filament come from the slicer, never from you.
+2. **Say what it is and what makes it succeed or fail.** Use the answers and the measured features: height, footprint, bed contact, slenderness, overhang and its steepest angle, bridge, flat top, section thickness, and volume. A load path, a surface that shows, a fit that must close, and a feature that will fail are what matter.
+3. **For each setting you change, name the feature or purpose that drives it, and point at the part:** "the 4.8 mm flange carries the shelf in bending, so 4 walls", not "load-bearing, so 4 walls".
+4. **Cite the reference group** your reasoning relies on, by its id below.
+5. **Stay inside each setting's bound.** What the Sponsor chose at the intake is set; don't change it. The bounds come from the presets and the sources. A value outside one is refused, never clamped. Values are written as Orca writes them: numbers without units, infill density with `%`.
+6. **Say what you weighed and kept,** with why, so the Sponsor sees the setting was considered.
 
 ## The references
 Each is distilled from OrcaSlicer's wiki, which stays the source. Every setting in them links to its page. Only the groups this part's features touch are loaded.
@@ -29,9 +30,11 @@ Each is distilled from OrcaSlicer's wiki, which stays the source. Every setting 
 | `infill` | `references/infill.md` | `sparse_infill_density`, `sparse_infill_pattern` | always |
 | `supports` | `references/supports.md` | `enable_support`, `support_type`, `support_threshold_angle` | it has an overhang or a bridge |
 | `adhesion` | `references/adhesion.md` | `brim_type` | under 200 mm² on the plate, or more than 2.5x as tall as its narrowest width |
-| `layer-height` | `references/layer-height.md` | `layer_height` | it's cosmetic, or it must fit something |
-| `speed-cooling` | `references/speed-cooling.md` | `outer_wall_speed`, `inner_wall_speed`, `sparse_infill_speed`, `fan_max_speed`, `fan_min_speed` | it's cosmetic, carries a load, or has an overhang or a bridge |
-| `temperature` | `references/temperature.md` | `nozzle_temperature` | it carries a load, must fit something, or lives outdoors or in heat |
+| `layer-height` | `references/layer-height.md` | `layer_height` | an intake option set it |
+| `speed-cooling` | `references/speed-cooling.md` | `outer_wall_speed`, `inner_wall_speed`, `sparse_infill_speed`, `fan_max_speed`, `fan_min_speed` | it has an overhang or a bridge |
+| `temperature` | `references/temperature.md` | `nozzle_temperature` | an intake option set it |
+
+Any group is also read when one of the intake's options set one of its settings.
 
 ## What holds whatever this skill says
 Code, not this skill, holds these guards (`src/print_shop/setup/bounds.py` and `proposal.py`):

@@ -24,6 +24,7 @@ from print_shop.printer.centauri import (
     PrinterConfig,
 )
 from print_shop.setup import Proposer
+from print_shop.setup.intake import Asker
 from print_shop.setup.model import setup_llm
 from print_shop.setup.review import Reviewer
 from print_shop.slicer.orca import BedType, SlicerProfiles, with_bed_type
@@ -87,6 +88,7 @@ def build_run(
     recorder: FrameRecorder | None = None,
     settings: Path | None = None,
     workdir: Path | None = None,
+    asker: Asker | None = None,
     reviewer: Reviewer | None = None,
 ) -> Run:
     """A daemon wired to the real broker, Orca, LiteLLM, ledger and a read-only watcher.
@@ -95,9 +97,11 @@ def build_run(
     armed it, or None, in which case an approval fails at the print node.
     `profiles` are the store's, chosen for the fitted nozzle and filament
     (`profiles_for`); None only serves the outcome gate, and slices nothing.
+    `asker` answers the intake's questions, proposed from the part's
+    features (`cli_asker`, or `replay_asker` for recorded answers), and
     `reviewer` is the Sponsor's review of the proposed settings on the
-    command (`cli_reviewer`); a job's settings are proposed from its intake
-    with `PRINT_SHOP_SETUP_MODEL` (default `crew-code-think`).
+    command (`cli_reviewer`). Both use `PRINT_SHOP_SETUP_MODEL` (default
+    `crew-code-think`).
 
     Raises:
         RuntimeError, FileNotFoundError: On missing settings, before a job starts.
@@ -122,6 +126,7 @@ def build_run(
         printer=printer,
         llm=llm,
         proposer=Proposer(llm=setup_llm(llm, env)),
+        asker=asker,
         reviewer=reviewer,
         ledger=ledger,
         # Read-only: watching needs a snapshot and nothing else.
@@ -182,6 +187,8 @@ def _setup_lines(row: Row) -> list[str]:
     if row.intake is None:
         return []
     lines = [f"intake         {row.intake.summary()}"]
+    if row.intake.note:
+        lines.append(f"               ({row.intake.note})")
     changes = row.proposal.changes if row.proposal else ()
     for c in changes:
         lines.append(f"  {c.key}: {c.preset or '-'} -> {c.value} ({c.source.value}) {c.reason}")

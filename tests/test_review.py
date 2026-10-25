@@ -21,7 +21,7 @@ from print_shop.ledger import Ledger
 from print_shop.orchestrator.daemon import Daemon
 from print_shop.runtime import describe
 from print_shop.setup import Proposer
-from print_shop.setup.intake import Intake, ask, read_intake
+from print_shop.setup.intake import replay_asker
 from print_shop.setup.proposal import Change, Proposal, Source
 from print_shop.setup.review import Review, ReviewRequest, parse_answer, render
 from tests.fakes import (
@@ -35,7 +35,8 @@ from tests.fakes import (
 from tests.fixtures import write_stl
 from tests.test_job_e2e import CFG
 
-INTAKE = read_intake(DATA / "intake" / "cube.json")
+#: The cube's one question, answered with its second option (3 walls).
+ANSWERS = DATA / "answers" / "cube.json"
 
 
 def _request(proposal: Proposal | None = None) -> ReviewRequest:
@@ -109,16 +110,6 @@ def test_an_unreadable_answer_says_why(answer: str, why: str) -> None:
     assert parse_answer(answer, _request()) == why
 
 
-def test_the_intake_is_asked_until_each_answer_is_a_choice() -> None:
-    answers = iter(["decorative", "cosmetic", "none", "none", "outdoor", ""])
-    said: list[str] = []
-    intake = ask(lambda _: next(answers), said.append)
-    assert intake == Intake.model_validate(
-        {"purpose": "cosmetic", "load": "none", "fit": "none", "environment": "outdoor"}
-    )
-    assert said == ["  one of: cosmetic, functional"]
-
-
 # --------------------------------------------------------------------------
 # Through the daemon: review, correct, slice again, then the gate
 # --------------------------------------------------------------------------
@@ -138,11 +129,20 @@ class Sponsor:
         return parsed
 
 
+def _questions(system: str, user: str, schema: dict[str, Any]) -> dict[str, Any]:
+    option = {"settings": [], "impact": "", "recommended": False, "why": ""}
+    return {"questions": [{"feature": "purpose", "text": "What is the cube for?", "options": [
+        {**option, "label": "a test print", "recommended": True, "why": "it's a cube"},
+        {**option, "label": "a gift", "settings": [{"key": "wall_loops", "value": "3"}],
+         "impact": "sturdier faces"},
+    ]}]}
+
+
 def _model(system: str, user: str, schema: dict[str, Any]) -> dict[str, Any]:
     return {
         "reasoning": "a cube for show",
-        "changes": [{"key": "wall_loops", "value": "3", "feature": "flat_top",
-                     "knowledge": "walls", "reason": "flat faces show the infill"}],
+        "changes": [{"key": "wall_loops", "value": "5", "feature": "flat_top",
+                     "knowledge": "walls-shells", "reason": "flat faces show the infill"}],
         "design_notes": [],
     }
 
@@ -159,7 +159,8 @@ def setup(tmp_path: Path) -> Iterator[tuple[Daemon, Sponsor, RecordedSlicer, Led
     bridge = MemoryBridge()
     daemon = Daemon(cfg=CFG, profiles=profiles, workdir=tmp_path / "work",
                     printer=FramePrinter(), slicer=slicer, bridge=lambda cfg: bridge,
-                    ledger=ledger, proposer=Proposer(ask=_model), reviewer=sponsor)
+                    ledger=ledger, proposer=Proposer(ask=_model, ask_questions=_questions),
+                    asker=replay_asker(ANSWERS), reviewer=sponsor)
     daemon.press = lambda d: bridge.deliver(command_topic(CFG), {"decision": d})  # type: ignore[attr-defined]
     with daemon:
         yield daemon, sponsor, slicer, ledger, write_stl("cube", tmp_path)
@@ -169,11 +170,13 @@ def test_a_correction_slices_again_and_the_ledger_keeps_it(
     setup: tuple[Daemon, Sponsor, RecordedSlicer, Ledger, Path],
 ) -> None:
     daemon, sponsor, slicer, ledger, stl = setup
-    job_id = daemon.submit(stl, INTAKE)
+    job_id = daemon.submit(stl)
     daemon.wait_for_gate(job_id, timeout_s=30)
 
-    assert len(slicer.calls) == 2, "sliced, corrected, sliced again"
-    assert [c.value for c in sponsor.shown[0].proposal.changes] == ["3"]
+    assert len(slicer.calls) == 4, "each option priced, sliced, corrected, sliced again"
+    first = sponsor.shown[0].proposal
+    assert [(c.value, c.source) for c in first.changes] == [("3", Source.ANSWER)]
+    assert first.refused == ("wall_loops=5: you answered it at the intake",)
     assert [(c.value, c.source) for c in sponsor.shown[1].proposal.changes] == [
         ("4", Source.SPONSOR)
     ]
@@ -181,7 +184,10 @@ def test_a_correction_slices_again_and_the_ledger_keeps_it(
     daemon.press("approve")  # type: ignore[attr-defined]
     assert daemon.wait_for_finish(job_id, timeout_s=30).printed
     row = ledger.get(job_id)
-    assert row is not None and row.intake == INTAKE
+    assert row is not None and row.intake is not None
+    assert row.intake.summary() == "What is the cube for? a gift"
+    option = row.intake.questions[0].options[1]
+    assert option.estimate is not None, "Orca's estimate, from the recorded slice"
     assert row.proposal is not None
     assert [(c.key, c.value) for c in row.proposal.changes] == [("wall_loops", "4")]
     assert [(c.key, c.preset, c.value) for c in row.corrections or ()] == [
@@ -195,7 +201,7 @@ def test_stop_at_the_review_never_reaches_the_gate(
 ) -> None:
     daemon, sponsor, _, ledger, stl = setup
     sponsor.answers = ["stop"]
-    job_id = daemon.submit(stl, INTAKE)
+    job_id = daemon.submit(stl)
     result = daemon.wait_for_finish(job_id, timeout_s=30)
     assert (result.approved, result.printed) == (False, False)
     assert "stopped at the settings review" in (result.error or "")

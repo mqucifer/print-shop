@@ -55,14 +55,34 @@ _SYSTEM = (
 )
 
 
-#: A value is a number (a density may end in %) or one of a setting's choices.
-#: Without it, crew-code-think wrote placeholders such as "reasoning_continue"
-#: for 4 of its 8 values on 2026-10-25; the bounds refused them all.
-_VALUE = "^(" + "|".join(
-    [r"[0-9]+(\.[0-9]+)?%?"]
-    + sorted({c.replace("(", r"\(").replace(")", r"\)") for s in SETTINGS.values()
-              for c in s.choices if not c.isdigit()})
-) + ")$"
+#: Each setting's value has its own shape, so the server can't accept a value
+#: that isn't one. With one pattern for every value, crew-code-think wrote
+#: placeholders ("reasoning_continue") and a layer height ("0.20") as a wall
+#: count and as enable_support, on 2026-10-25; the bounds refused them all,
+#: and a question whose options were all refused was lost.
+_SHAPES = {
+    "layer_height": r"^0\.[0-9]{1,3}$",
+    "sparse_infill_density": r"^[0-9]{1,3}%$",
+}
+_WHOLE = r"^[0-9]{1,3}$"
+
+#: Free text is capped, so an answer can't run on to the output limit: the
+#: vase's questions ran 13,500 tokens past their reasoning and were cut off.
+TEXT = {"type": "string", "maxLength": 400}
+SHORT = {"type": "string", "maxLength": 120}
+
+
+def setting_item(keys: list[str], *extra: tuple[str, dict[str, Any]]) -> dict[str, Any]:
+    """A `{key, value, ...}` object whose value is shaped for its key."""
+    shapes = []
+    for key in keys:
+        choices = SETTINGS[key].choices
+        value = ({"type": "string", "enum": list(choices)} if choices
+                 else {"type": "string", "pattern": _SHAPES.get(key, _WHOLE)})
+        props = {"key": {"type": "string", "enum": [key]}, "value": value, **dict(extra)}
+        shapes.append({"type": "object", "additionalProperties": False,
+                       "required": list(props), "properties": props})
+    return {"anyOf": shapes}
 
 
 def schema(feature_ids: list[str], skill: Skill) -> dict[str, Any]:
@@ -74,23 +94,18 @@ def schema(feature_ids: list[str], skill: Skill) -> dict[str, Any]:
             "additionalProperties": False,
             "required": ["reasoning", "changes", "design_notes"],
             "properties": {
-                "reasoning": {"type": "string"},
+                "reasoning": {"type": "string", "maxLength": 2000},
                 "changes": {
                     "type": "array",
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "required": ["key", "value", "feature", "knowledge", "reason"],
-                        "properties": {
-                            "key": {"type": "string", "enum": list(skill.settings)},
-                            "value": {"type": "string", "pattern": _VALUE},
-                            "feature": {"type": "string", "enum": [*feature_ids, "purpose"]},
-                            "knowledge": {"type": "string", "enum": list(skill.ids)},
-                            "reason": {"type": "string"},
-                        },
-                    },
+                    "maxItems": 12,
+                    "items": setting_item(
+                        list(skill.settings),
+                        ("feature", {"type": "string", "enum": [*feature_ids, "purpose"]}),
+                        ("knowledge", {"type": "string", "enum": list(skill.ids)}),
+                        ("reason", TEXT),
+                    ),
                 },
-                "design_notes": {"type": "array", "items": {"type": "string"}},
+                "design_notes": {"type": "array", "maxItems": 4, "items": TEXT},
             },
         },
     }
@@ -114,6 +129,7 @@ def propose_by_model(facts: PartFacts, skill: Skill, ask: Ask, model: str) -> Pr
     except (RuntimeError, OSError, KeyError, TypeError) as exc:
         return read.model_copy(update={"model": f"unavailable: {exc}"[:600]})
 
+    answered_keys = {k for _, o in facts.intake.chosen() for k in o.settings}
     changes: list[Change] = []
     kept: list[Change] = []
     refused: list[str] = []
@@ -124,6 +140,8 @@ def propose_by_model(facts: PartFacts, skill: Skill, ask: Ask, model: str) -> Pr
         why = check(key, value, facts.presets)
         if key not in skill.settings:
             why = "its skill group wasn't read for this part"
+        if key in answered_keys:
+            why = "you answered it at the intake"
         if key in {c.key for c in changes + kept}:
             why = "proposed twice"
         if why:
@@ -180,7 +198,9 @@ def llm_ask(config: LLMConfig) -> Ask:
 def prompt(facts: PartFacts, skill: Skill) -> str:
     """What the model is told about this part: the intake, features, presets and bounds."""
     lines = [
-        f"The part's intake: {facts.intake.summary()}.",
+        "The intake, asked of the person from the part's features, and their answers "
+        "(what they chose is already set; don't change it):",
+        *(f"- {line}" for line in _answers(facts)),
         f"Filament: {facts.filament.get('name')} ({facts.filament_type}). "
         f"Process: {facts.process.get('name')}.",
         "",
@@ -203,3 +223,17 @@ def _same(value: str, preset: str) -> bool:
         return float(value.rstrip("%")) == float(preset.rstrip("%"))
     except ValueError:
         return value == preset
+
+
+def _answers(facts: PartFacts) -> list[str]:
+    if not facts.intake.questions:
+        return ["no questions: the part's features left nothing to ask"]
+    lines = []
+    for q, a in zip(facts.intake.questions, facts.intake.answers, strict=True):
+        if a.choice is not None:
+            o = q.options[a.choice]
+            sets = ", ".join(f"{k}={v}" for k, v in o.settings.items()) or "no setting"
+            lines.append(f"{q.text} -> {o.label} ({sets})")
+        else:
+            lines.append(f"{q.text} -> in their words: {a.other}")
+    return lines

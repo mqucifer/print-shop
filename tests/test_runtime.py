@@ -140,7 +140,7 @@ def test_the_script_does_not_arm_without_the_flag(
 FITTED = [
     "--nozzle", "0.4",
     "--filament", "Elegoo PLA",
-    "--intake", str(DATA / "intake" / "cube.json"),
+    "--answers", str(DATA / "answers" / "cube.json"),
 ]
 
 

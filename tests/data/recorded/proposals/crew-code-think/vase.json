@@ -1,38 +1,17 @@
 {
-  "reasoning": "Decorative vase for dried flowers. Cosmetic, no load, no fit, indoor. The outside is what shows. 120 mm tall, 60\u00d760 mm footprint, 2\u00d7 slenderness, no overhang, no bridge, 1.98 mm section, 48 622 mm\u00b3 volume. A flat top of 2825 mm\u00b2 (the rim or a closed mouth). Success is surface quality on the exterior; failure is infill ghosting, visible layer lines, or a wobbly print.",
-  "changes": [
-    {
-      "key": "wall_loops",
-      "value": "3",
-      "feature": "section",
-      "knowledge": "walls-shells",
-      "reason": "The section is 1.98 mm and the outside is the visible surface; at 2 loops (0.8 mm of wall) the 15% infill ghosts through. 3 loops (1.2 mm) closes that gap and gives a clean exterior."
-    },
-    {
-      "key": "layer_height",
-      "value": "0.16",
-      "feature": "flat_top",
-      "knowledge": "layer-height",
-      "reason": "The outside is what shows on a cosmetic piece; 0.16 mm is inside the optimal 0.08\u20130.32 mm band and cuts the visible step lines on the curved wall roughly in half versus 0.20 mm."
-    },
-    {
-      "key": "outer_wall_speed",
-      "value": "120",
-      "feature": "section",
-      "knowledge": "speed-cooling",
-      "reason": "The exterior is the finished surface; slowing the outer wall from 160 to 120 mm/s gives the nozzle more residence time per line, reducing stringing and surface irregularity on the face the viewer sees."
-    }
-  ],
+  "reasoning": "The part is a 120 mm display column: 60\u00d760 mm base, ~2 mm section, no overhangs, no bridges. The intake set it to display/lightweight with wall_loops=2, 15% zig-zag infill, top_shell_layers=5. Those are fixed. I need to check bottom_shell_layers (preset 3) and confirm nothing else is triggered.",
+  "changes": [],
   "design_notes": [
-    "No overhang and no bridge (both 0 mm\u00b2); the vase prints free-standing with no support. Nothing to design out."
+    "No overhangs or bridges, so no supports and no speed/cooling changes are triggered.",
+    "Bed contact is 2825 mm\u00b2 and slenderness is 2\u00d7, both well within the adhesion thresholds (\u2265200 mm\u00b2, \u22642.5\u00d7), so no brim is needed."
   ],
   "_call": {
     "model": "crew-code-think",
     "finish_reason": "stop",
-    "prompt_tokens": 4898,
-    "completion_tokens": 3093,
-    "reasoning_tokens": 2611,
+    "prompt_tokens": 3477,
+    "completion_tokens": 1913,
+    "reasoning_tokens": 1725,
     "max_tokens": 16000,
-    "seconds": 102.4
+    "seconds": 99.2
   }
 }

@@ -17,7 +17,8 @@ from print_shop.setup.bounds import SETTINGS
 from print_shop.setup.features import measure
 from print_shop.setup.skill import GROUPS, SKILL_DIR, groups_for, load
 from tests.fixtures import write_stl
-from tests.test_proposal import INTAKES
+from tests.test_proposal import PARTS
+from tests.test_questions import intake
 
 _ROW = re.compile(r"^\| `([a-z-]+)` \| `references/([a-z-]+)\.md` \| (.+?) \| (.+?) \|$", re.M)
 
@@ -56,20 +57,32 @@ def test_each_reference_explains_each_setting_and_links_the_wiki(group: object) 
             assert label in body, (key, label)
 
 
-def test_a_part_loads_only_the_groups_its_features_touch(tmp_path: Path) -> None:
+def test_a_part_loads_the_groups_its_features_and_options_touch(tmp_path: Path) -> None:
     loaded = {}
-    for part, intake in INTAKES.items():
+    for part in PARTS:
         stl = write_stl(part, tmp_path)
         from print_shop.ingest.analyzer import analyze
 
         features = measure(stl, analyze(stl).bed_contact_area_mm2)
-        loaded[part] = [g.id for g in groups_for(intake, features)]
+        loaded[part] = [g.id for g in groups_for(intake(part, tmp_path), features)]
+    # The vase's purpose options set only walls, shells and infill; the bracket
+    # was asked nothing; the snap fit's hook brings supports and cooling, and
+    # its footprint adhesion.
     assert loaded == {
-        "vase": ["walls-shells", "infill", "layer-height", "speed-cooling"],
-        "bracket": ["walls-shells", "infill", "speed-cooling", "temperature"],
-        "snap": ["walls-shells", "infill", "supports", "adhesion", "layer-height",
-                 "speed-cooling", "temperature"],
+        "vase": ["walls-shells", "infill"],
+        "bracket": ["walls-shells", "infill"],
+        "snap": ["walls-shells", "infill", "supports", "adhesion", "speed-cooling"],
     }
+
+
+def test_an_option_that_sets_a_setting_brings_its_group() -> None:
+    from print_shop.setup.intake import Answer, Intake, Option, Question
+
+    option = Option(label="hot", settings={"nozzle_temperature": "230"}, impact="",
+                    recommended=True, why="")
+    asked = Intake(questions=(Question(feature="purpose", text="?", options=(option, option)),),
+                   answers=(Answer(choice=0),))
+    assert "temperature" in [g.id for g in groups_for(asked, ())]
 
 
 def test_what_was_read_is_recorded_by_hash() -> None:
