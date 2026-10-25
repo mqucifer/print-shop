@@ -1,0 +1,10 @@
+{
+    "inherits": "Elegoo PLA Silk @ECC",
+    "name": "Elegoo PLA Silk @ECC - Copy",
+    "nozzle_temperature": [
+        "220"
+    ],
+    "nozzle_temperature_initial_layer": [
+        "220"
+    ]
+}

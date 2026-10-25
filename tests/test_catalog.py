@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from print_shop.slicer.catalog import Catalog, CatalogError, flatten, import_presets
+from print_shop.slicer.catalog import Catalog, CatalogError, Scope, flatten, import_presets
 
 
 def _write(path: Path, **data: Any) -> Path:
@@ -50,7 +50,16 @@ def orca(tmp_path: Path) -> Path:
            printhost_apikey="secret", version="2.3." + "1.10")
     _write(user / "filament/PETG 240.json", name="PETG 240",
            inherits="Elegoo RAPID PETG @ECC", nozzle_temperature=["240"])
+    _write(user / "filament/PETG .8mm.json", name="PETG .8mm",
+           inherits="Elegoo Rapid PETG @ECC", nozzle_temperature=["265"])
     return root
+
+
+SCOPE = Scope(
+    standard={"machine": ("Elegoo Centauri Carbon 0.4 nozzle",), "process": (),
+              "filament": ("Elegoo Rapid PETG @ECC",)},
+    left_out={"PETG .8mm": "for the 0.8 nozzle"},
+)
 
 
 def test_a_parent_is_found_in_the_vendors_own_folder_first(orca: Path) -> None:
@@ -88,28 +97,48 @@ def test_flattened_keeps_the_system_parent_and_drops_the_address(orca: Path) -> 
     assert "version" not in flat, "Orca's stamp reads as an address, and isn't a setting"
 
 
-def test_the_import_writes_only_the_users_presets_and_reports_changes(
+def test_the_import_writes_the_standards_whole_and_the_tunings_as_overlays(
     orca: Path, tmp_path: Path
 ) -> None:
     store = tmp_path / "profiles"
-    first = import_presets(Catalog(orca), store)
-    assert first.written == ["filament/PETG 240.json", "machine/Mine - Copy.json"]
+    first = import_presets(Catalog(orca), store, SCOPE)
+    assert first.written == [
+        "standard/filament/Elegoo Rapid PETG @ECC.json",
+        "standard/machine/Elegoo Centauri Carbon 0.4 nozzle.json",
+        "tuned/filament/PETG 240.json",
+        "tuned/machine/Mine - Copy.json",
+    ]
+    assert first.not_imported == ["PETG .8mm: for the 0.8 nozzle"]
+    tuned = json.loads((store / "tuned/filament/PETG 240.json").read_text())
+    assert tuned == {"name": "PETG 240", "inherits": "Elegoo Rapid PETG @ECC",
+                     "nozzle_temperature": ["240"]}, "only what the Sponsor changed"
+    standard = json.loads((store / "standard/filament/Elegoo Rapid PETG @ECC.json").read_text())
+    assert standard["inherits"] == "" and standard["textured_plate_temp"] == ["60"]
 
-    _write(store / "process/Kept.json", name="Kept")
-    again = import_presets(Catalog(orca), store)
+    _write(store / "tuned/process/Kept.json", name="Kept")
+    again = import_presets(Catalog(orca), store, SCOPE)
     assert again.written == []
     assert again.unchanged == first.written
-    assert again.only_in_store == ["process/Kept.json"], "listed, never removed"
-    assert (store / "process/Kept.json").exists()
+    assert again.only_in_store == ["tuned/process/Kept.json"], "listed, never removed"
+
+
+def test_a_tuning_whose_standard_is_out_of_scope_is_not_imported(
+    orca: Path, tmp_path: Path
+) -> None:
+    narrow = Scope(standard={"machine": (), "process": (), "filament": ("Elegoo Rapid PETG @ECC",)},
+                   left_out={})
+    result = import_presets(Catalog(orca), tmp_path / "profiles", narrow)
+    assert ("Mine - Copy: its standard, 'Elegoo Centauri Carbon 0.4 nozzle', is not in "
+            "scope.json") in result.not_imported
 
 
 def test_a_dry_import_writes_nothing(orca: Path, tmp_path: Path) -> None:
     store = tmp_path / "profiles"
-    result = import_presets(Catalog(orca), store, write=False)
+    result = import_presets(Catalog(orca), store, SCOPE, write=False)
     assert result.written and not store.exists()
 
 
 def test_the_import_never_writes_to_orcas_folders(orca: Path, tmp_path: Path) -> None:
     before = {p: p.stat().st_mtime_ns for p in orca.rglob("*")}
-    import_presets(Catalog(orca), tmp_path / "profiles")
+    import_presets(Catalog(orca), tmp_path / "profiles", SCOPE)
     assert {p: p.stat().st_mtime_ns for p in orca.rglob("*")} == before

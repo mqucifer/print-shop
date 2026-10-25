@@ -38,8 +38,10 @@ __all__ = [
     "CatalogError",
     "Preset",
     "ImportResult",
+    "Scope",
     "flatten",
     "import_presets",
+    "overlay",
 ]
 
 #: Orca's data directory on macOS. The import reads it; slicing never does.
@@ -187,15 +189,33 @@ def flatten(catalog: Catalog, preset: Preset) -> dict[str, Any]:
     return resolved
 
 
+@dataclass(frozen=True)
+class Scope:
+    """`profiles/scope.json`: the standards imported whole, and the tunings left out."""
+
+    standard: dict[str, tuple[str, ...]]
+    left_out: dict[str, str]
+
+    @classmethod
+    def read(cls, path: Path) -> Scope:
+        data = json.loads(path.read_text())
+        return cls(
+            standard={kind: tuple(data["standard"].get(kind, ())) for kind in KINDS},
+            left_out=dict(data.get("left_out", {})),
+        )
+
+
 @dataclass
 class ImportResult:
     """What an import changed in the store, by file relative to it."""
 
     written: list[str] = field(default_factory=list)
     unchanged: list[str] = field(default_factory=list)
-    #: In the store and no longer among the Sponsor's presets. Kept, and listed:
-    #: removing a profile is a decision for the PR, not the import.
+    #: In the store and no longer imported. Kept, and listed: removing a
+    #: profile is a decision for the PR, not the import.
     only_in_store: list[str] = field(default_factory=list)
+    #: The Sponsor's presets not imported, each with why.
+    not_imported: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
 
@@ -204,21 +224,60 @@ def store_text(data: dict[str, Any]) -> str:
     return json.dumps(data, indent=4, sort_keys=True, ensure_ascii=False) + "\n"
 
 
-def import_presets(catalog: Catalog, store: Path, *, write: bool = True) -> ImportResult:
-    """Copy the Sponsor's Orca presets, flattened, into `store/<kind>/<name>.json`.
+#: Keys an overlay never carries: its identity is its name and its standard.
+_IDENTITY = ("name", "inherits", "from", "instantiation", "setting_id", "is_custom_defined",
+             "printer_settings_id", "print_settings_id", "filament_settings_id")
+
+
+def overlay(catalog: Catalog, preset: Preset, standard: Preset) -> dict[str, Any]:
+    """The Sponsor's tuning as only the keys that differ from its standard."""
+    tuned = flatten(catalog, preset)
+    base = flatten(catalog, standard)
+    changed = {
+        k: v for k, v in tuned.items() if k not in _IDENTITY and base.get(k) != v
+    }
+    return {"name": preset.name, "inherits": standard.name, **changed}
+
+
+def import_presets(
+    catalog: Catalog, store: Path, scope: Scope, *, write: bool = True
+) -> ImportResult:
+    """Orca's standards in scope, whole, and the Sponsor's tunings of them, as overlays.
+
+    `store/standard/<kind>/<name>.json` holds each standard, and
+    `store/tuned/<kind>/<name>.json` each tuning of one: only the keys it
+    changes, naming its standard in `inherits` (the Sponsor, 2026-10-25,
+    on mqucifer/print-shop#8: "start with the standards first").
 
     Raises:
         CatalogError: If a preset cannot be resolved; nothing is written then.
     """
     planned: dict[Path, str] = {}
+    result = ImportResult()
+    in_scope: dict[str, Preset] = {}
+    for kind in KINDS:
+        for name in scope.standard[kind]:
+            standard = catalog.get(name)
+            in_scope[standard.name] = standard
+            whole = {**flatten(catalog, standard), "inherits": ""}
+            planned[store / "standard" / kind / f"{_file_name(name)}.json"] = store_text(whole)
     for preset in catalog.user_presets():
-        if "/" in preset.name or preset.name.startswith("."):
-            raise CatalogError(f"preset name '{preset.name}' cannot be a file name")
-        planned[store / preset.kind / f"{preset.name}.json"] = store_text(
-            flatten(catalog, preset)
+        if preset.name in scope.left_out:
+            result.not_imported.append(f"{preset.name}: {scope.left_out[preset.name]}")
+            continue
+        # Its own system parent, not any ancestor: Orca's 0.8 nozzle machine
+        # itself inherits the 0.4, and the Sponsor's 0.8 copy isn't a 0.4 tuning.
+        parent = catalog.system_parent(preset)
+        if parent not in in_scope:
+            result.not_imported.append(
+                f"{preset.name}: its standard, '{parent or 'none'}', is not in scope.json"
+            )
+            continue
+        planned[store / "tuned" / preset.kind / f"{_file_name(preset.name)}.json"] = store_text(
+            overlay(catalog, preset, in_scope[parent])
         )
 
-    result = ImportResult(warnings=list(catalog.warnings))
+    result.warnings = list(catalog.warnings)
     for path, text in sorted(planned.items()):
         rel = path.relative_to(store).as_posix()
         if path.is_file() and path.read_text() == text:
@@ -228,11 +287,16 @@ def import_presets(catalog: Catalog, store: Path, *, write: bool = True) -> Impo
         if write:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text)
-    for kind in KINDS:
-        for path in sorted((store / kind).glob("*.json")):
-            if path not in planned:
-                result.only_in_store.append(path.relative_to(store).as_posix())
+    for path in sorted(store.glob("*/*/*.json")):
+        if path not in planned:
+            result.only_in_store.append(path.relative_to(store).as_posix())
     return result
+
+
+def _file_name(name: str) -> str:
+    if "/" in name or name.startswith("."):
+        raise CatalogError(f"preset name '{name}' cannot be a file name")
+    return name
 
 
 def _system_files(system: Path) -> list[Path]:

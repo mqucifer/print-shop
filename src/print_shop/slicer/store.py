@@ -1,34 +1,38 @@
-"""print-shop's own Orca profiles, in `profiles/`, and the choice of one set per print.
+"""print-shop's own Orca profiles: Orca's standards, and the Sponsor's tunings over them.
 
-The Sponsor, 2026-10-25, on mqucifer/print-shop#6: print-shop keeps its
-profiles in its repository, in Orca's own JSON, one file per machine, process
-and filament. Each is fully resolved and keeps `inherits` naming its system
-parent. They are seeded from the Sponsor's tuned Orca presets by
-`scripts/import_profiles.py`, and a change to one is a reviewed PR. Every print
-slices from these files, so an Orca update cannot change a print silently.
+The Sponsor, 2026-10-25, on mqucifer/print-shop#6 and #8: print-shop keeps its
+profiles in its repository, and starts "with the standards first":
 
-**The Sponsor says what's fitted:** the nozzle and the loaded filament preset
-(a material type works as a shortcut when only one preset has it). Nothing is
-assumed. `profiles/pairings.json` says which machine and process go with each
-filament on each nozzle: the Sponsor's knowledge, written once and reviewed by
-PR (mqucifer/print-shop#6, 2026-10-25). A filament with no pairing for the
-nozzle falls back to a search, and a tie there refuses.
+- `profiles/standard/<kind>/`: Orca's own system presets, whole, for what
+  `profiles/scope.json` covers (today the 0.4 mm machine, its 0.20 mm
+  process, and PLA and PETG);
+- `profiles/tuned/<kind>/`: each of the Sponsor's tuned presets as an
+  **overlay**, only the keys it changes, naming its standard in `inherits`.
 
-**Orca's own compatibility rule applies over a pairing, strictly:**
+Both are written by `scripts/import_profiles.py`, and a change to either is a
+reviewed PR. A print composes the profile it slices with (standard, then the
+tuning over it) into whole files, so Orca resolves nothing and an Orca update
+cannot change a print silently.
 
+**The Sponsor's model:** the machine (per nozzle), then the filament by
+manufacturer, type and variety, where "most of these settings will be based
+on the variety", then the nozzle, which sets speed, flow and heat through the
+machine and process. **The Sponsor says what's fitted:** the nozzle and the
+loaded filament. For each of machine, process and filament, **their tuning
+is used where there is one, and the standard only where they haven't
+tuned.** Several tunings of one standard (RAPID PETG at 270 C and at 240 C)
+refuse and list them, so the Sponsor picks by name.
+
+**Orca's compatibility rule applies, strictly,** over the composed profiles:
 - a machine fits when its `nozzle_diameter` is the fitted nozzle;
 - a process or filament fits a machine when its `compatible_printers` names
-  the machine or the machine's system parent (`inherits`), as Orca's CLI
-  checks it;
+  the machine or the machine's standard, as Orca's CLI checks it;
 - a filament fits a process when its `compatible_prints`, if any, names it.
-
-A pairing the rule forbids is refused, saying why, never allowed silently.
-On no match or a tie, the refusal lists every candidate with why each was
-left out, so the Sponsor picks by name, and a mis-marked preset shows there.
 
 Tested facts about Orca's CLI (2.3, on the Mac, 2026-10-25), which the rule
 keeps to:
-- a flattened machine without `inherits` exits 239, "process not compatible";
+- a whole tuned machine without `inherits` naming its standard exits 239,
+  "process not compatible";
 - a process whose `compatible_printers` is empty also exits 239, though Orca's
   UI reads an empty list as "every printer". Such a process is left out here.
 - a filament whose `compatible_printers` is empty slices.
@@ -38,8 +42,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
-from collections.abc import Iterable
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -50,21 +55,18 @@ __all__ = [
     "STORE_DIR",
     "Choice",
     "NoChoice",
-    "Pairing",
     "ProfileRef",
     "ProfilesUsed",
     "Store",
     "StoredProfile",
-    "check_pairings",
     "choose",
-    "unpaired",
+    "describe",
 ]
 
 #: `profiles/` at the top of print-shop's checkout.
 STORE_DIR = Path(__file__).resolve().parents[3] / "profiles"
 
-#: The reviewed file saying which machine and process go with each filament.
-PAIRINGS = "pairings.json"
+KINDS = ("machine", "process", "filament")
 
 
 class NoChoice(ValueError):
@@ -73,82 +75,99 @@ class NoChoice(ValueError):
 
 @dataclass(frozen=True)
 class StoredProfile:
-    """One profile file in the store."""
+    """A standard, or a tuning over one (`standard` set)."""
 
     kind: str
     path: Path
     data: dict[str, Any]
+    standard: StoredProfile | None = None
 
     @property
     def name(self) -> str:
         return str(self.data.get("name", self.path.stem))
 
     @property
-    def parent(self) -> str:
-        return str(self.data.get("inherits") or "")
+    def composed(self) -> dict[str, Any]:
+        """The whole profile: the standard, and this tuning's keys over it."""
+        if self.standard is None:
+            return self.data
+        # "from": "User" as Orca writes a user preset: with "system", Orca's CLI
+        # checks compatibility by the tuning's own name, ignores `inherits`, and
+        # exits 239 (tested 2026-10-25).
+        return {**self.standard.data, **self.data, "inherits": self.standard.name,
+                "from": "User"}
+
+    @property
+    def base_name(self) -> str:
+        """The standard's name: this one's own, if it is one."""
+        return self.standard.name if self.standard is not None else self.name
 
     @property
     def sha256(self) -> str:
         return hashlib.sha256(self.path.read_bytes()).hexdigest()
 
+    def get(self, key: str) -> str:
+        return _first(self.composed.get(key))
+
     @property
     def nozzle_mm(self) -> float | None:
-        return _first_float(self.data.get("nozzle_diameter"))
+        try:
+            return float(self.get("nozzle_diameter"))
+        except ValueError:
+            return None
 
     @property
     def filament_type(self) -> str:
-        return _first(self.data.get("filament_type"))
+        return self.get("filament_type")
 
-    def _names(self, key: str) -> list[str]:
-        value = self.data.get(key) or []
+    @property
+    def manufacturer(self) -> str:
+        return self.get("filament_vendor")
+
+    @property
+    def variety(self) -> str:
+        """The standard's name without Orca's printer suffix: "Elegoo Rapid PETG"."""
+        return re.sub(r"\s+@\S+$", "", self.base_name)
+
+    def names(self, key: str) -> list[str]:
+        value = self.composed.get(key) or []
         return [value] if isinstance(value, str) else [str(v) for v in value]
-
-    def condition(self, key: str) -> str:
-        return str(self.data.get(key) or "").strip()
 
 
 @dataclass
 class Store:
-    """Every profile under `root/{machine,process,filament}/`."""
+    """`root/standard/<kind>/` and `root/tuned/<kind>/`, each tuning tied to its standard."""
 
     root: Path = STORE_DIR
-    machines: list[StoredProfile] = field(default_factory=list, init=False)
-    processes: list[StoredProfile] = field(default_factory=list, init=False)
-    filaments: list[StoredProfile] = field(default_factory=list, init=False)
-    pairings: list[Pairing] = field(default_factory=list, init=False)
+    standards: dict[str, list[StoredProfile]] = field(default_factory=dict, init=False)
+    tunings: dict[str, list[StoredProfile]] = field(default_factory=dict, init=False)
 
     def __post_init__(self) -> None:
-        if not self.root.is_dir():
+        if not (self.root / "standard").is_dir():
             raise FileNotFoundError(f"no profile store at {self.root}")
-        self.machines = self._load("machine")
-        self.processes = self._load("process")
-        self.filaments = self._load("filament")
-        path = self.root / PAIRINGS
-        if path.is_file():
-            try:
-                rows = json.loads(path.read_text())["pairings"]
-                self.pairings = [Pairing(**row) for row in rows]
-            except (json.JSONDecodeError, KeyError, TypeError) as exc:
-                raise ValueError(f"{path.name} cannot be read: {exc}") from exc
+        for kind in KINDS:
+            self.standards[kind] = [
+                StoredProfile(kind, path, _read(path))
+                for path in sorted((self.root / "standard" / kind).glob("*.json"))
+            ]
+            by_name = {s.name: s for s in self.standards[kind]}
+            self.tunings[kind] = []
+            for path in sorted((self.root / "tuned" / kind).glob("*.json")):
+                data = _read(path)
+                standard = by_name.get(str(data.get("inherits", "")))
+                if standard is None:
+                    raise ValueError(
+                        f"{path.name} tunes '{data.get('inherits')}', which isn't a standard "
+                        f"{kind} in the store"
+                    )
+                self.tunings[kind].append(StoredProfile(kind, path, data, standard))
 
-    def pairing(self, filament: str, nozzle_mm: float) -> Pairing | None:
-        found = [
-            p for p in self.pairings
-            if p.filament == filament and abs(p.nozzle_mm - nozzle_mm) < 1e-6
-        ]
-        if len(found) > 1:
-            raise NoChoice(f"{PAIRINGS} pairs {found[0].label()} more than once")
-        return found[0] if found else None
+    def of(self, standard: StoredProfile) -> list[StoredProfile]:
+        """The Sponsor's tunings of `standard`."""
+        return [t for t in self.tunings[standard.kind] if t.standard is standard]
 
-    def _load(self, kind: str) -> list[StoredProfile]:
-        found = []
-        for path in sorted((self.root / kind).glob("*.json")):
-            try:
-                data = json.loads(path.read_text())
-            except (OSError, json.JSONDecodeError) as exc:
-                raise ValueError(f"profile {path.name} cannot be read: {exc}") from exc
-            found.append(StoredProfile(kind=kind, path=path, data=data))
-        return found
+    def all(self, kind: str) -> list[StoredProfile]:
+        return self.standards[kind] + self.tunings[kind]
 
 
 class ProfileRef(BaseModel):
@@ -157,8 +176,11 @@ class ProfileRef(BaseModel):
     model_config = {"frozen": True}
 
     name: str
-    file: str  # relative to the store, e.g. "machine/Elegoo ... - Copy.json"
+    file: str  # relative to the store, e.g. "tuned/filament/Elegoo PLA @ECC - Copy.json"
     sha256: str  # of the file's bytes
+    #: For a tuning, the standard it was composed over.
+    standard_file: str = ""
+    standard_sha256: str = ""
 
 
 class ProfilesUsed(BaseModel):
@@ -178,34 +200,35 @@ class ProfilesUsed(BaseModel):
 
 
 @dataclass(frozen=True)
-class Pairing:
-    """One line of `profiles/pairings.json`: what goes with a filament on a nozzle."""
-
-    filament: str
-    nozzle_mm: float
-    machine: str
-    process: str
-    drafted: bool
-    why: str
-
-    def label(self) -> str:
-        return f"'{self.filament}' on a {self.nozzle_mm:g} mm nozzle"
-
-
-@dataclass(frozen=True)
 class Choice:
     machine: StoredProfile
     process: StoredProfile
     filament: StoredProfile
-    #: How the choice was made: the pairing used, and whether it is drafted.
+    #: How each was chosen: the Sponsor's tuning, or the standard for want of one.
     notes: tuple[str, ...] = ()
+
+    def compose(self, workdir: Path) -> dict[str, Path]:
+        """Each profile written whole into `workdir`, as Orca slices with it."""
+        workdir.mkdir(parents=True, exist_ok=True)
+        out = {}
+        for kind, profile in (("machine", self.machine), ("process", self.process),
+                              ("filament", self.filament)):
+            path = workdir / f"{kind}.json"
+            path.write_text(json.dumps(profile.composed, indent=2))
+            out[kind] = path
+        return out
 
     def used(self, root: Path) -> ProfilesUsed:
         commit, dirty = _git_state(root)
 
         def ref(p: StoredProfile) -> ProfileRef:
+            standard = p.standard
             return ProfileRef(
-                name=p.name, file=p.path.relative_to(root).as_posix(), sha256=p.sha256
+                name=p.name,
+                file=p.path.relative_to(root).as_posix(),
+                sha256=p.sha256,
+                standard_file=standard.path.relative_to(root).as_posix() if standard else "",
+                standard_sha256=standard.sha256 if standard else "",
             )
 
         return ProfilesUsed(
@@ -225,134 +248,128 @@ def choose(
     machine: str | None = None,
     process: str | None = None,
 ) -> Choice:
-    """The machine, process and filament for the fitted nozzle and loaded filament.
+    """The machine, process and filament for the fitted nozzle and the loaded filament.
 
-    `filament` is a filament preset's exact name, or a material type (`PLA`)
-    that only one preset has. The machine and process come from the pairing
-    for that filament and nozzle; `machine` and `process`, exact names, take
-    their place when the Sponsor picks.
+    `filament` is a variety ("Elegoo Rapid PETG"), a standard's name, or one of
+    the Sponsor's tunings by name; a material type ("PLA") lists the varieties.
+    `machine` and `process` name a standard or a tuning, for when the Sponsor
+    picks.
 
     Raises:
-        NoChoice: On an unknown or ambiguous filament, a pairing Orca's rule
-            forbids, or no single match without a pairing; each says why.
+        NoChoice: On no match, several tunings of one standard, or a
+            combination Orca's rule forbids; each lists what to choose from.
     """
-    loaded = _the_filament(store, filament)
-    pairing = store.pairing(loaded.name, nozzle_mm)
-    machine = machine or (pairing.machine if pairing else None)
-    process = process or (pairing.process if pairing else None)
-    notes: tuple[str, ...] = ()
-    if pairing is not None:
-        notes = (
-            f"pairing for {pairing.label()}"
-            + (", DRAFTED, not yet confirmed by the Sponsor" if pairing.drafted else "")
-            + f": {pairing.why}",
-        )
-
-    out: list[str] = []  # why each profile was left out
-    named = _named(store.machines, machine, "machine", out)
-    machines = [m for m in named if _nozzle_fits(m, nozzle_mm, out)]
-    processes = _named(store.processes, process, "process", out)
-    sets: list[tuple[StoredProfile, StoredProfile]] = []
-    for m in machines:
-        for p in processes:
-            why = _process_misfit(p, m) or _filament_misfit(loaded, m, p)
-            if why:
-                out.append(f"'{m.name}' with '{p.name}': {why}")
-            else:
-                sets.append((m, p))
-
-    asked = f"a {nozzle_mm:g} mm nozzle and '{loaded.name}'"
-    if not sets:
-        head = f"No profiles fit {asked}."
-        if pairing is not None:
-            head = (
-                f"Orca's compatibility rule forbids the pairing for {pairing.label()} "
-                f"in profiles/pairings.json. Fix the pairing or the preset in a PR."
-            )
-        raise NoChoice(_refusal(head, [], out))
-    if len(sets) > 1:
-        lines = _ties(sets)
-        head = (
-            f"Several profile sets fit {asked}, and profiles/pairings.json has no pairing "
-            f"for it; name one, or add the pairing in a PR."
-        )
-        raise NoChoice(_refusal(head, lines, out))
-
-    m, p = sets[0]
-    return Choice(machine=m, process=p, filament=loaded, notes=notes)
-
-
-def check_pairings(store: Store) -> list[str]:
-    """Every pairing that names no preset or that Orca's rule forbids, and why."""
-    problems = []
-    for pairing in store.pairings:
-        try:
-            choose(store, nozzle_mm=pairing.nozzle_mm, filament=pairing.filament)
-        except NoChoice as exc:
-            problems.append(f"{pairing.label()}: {exc}")
-    return problems
-
-
-def unpaired(store: Store) -> list[str]:
-    """Filament presets no pairing names."""
-    paired = {p.filament for p in store.pairings}
-    return [f.name for f in store.filaments if f.name not in paired]
-
-
-def _the_filament(store: Store, filament: str) -> StoredProfile:
-    """The filament preset by exact name, else the only one of that material type."""
-    for f in store.filaments:
-        if f.name == filament:
-            return f
-    of_type = [f for f in store.filaments if f.filament_type.casefold() == filament.casefold()]
-    if len(of_type) == 1:
-        return of_type[0]
-    if of_type:
-        names = "\n".join(f'  "{f.name}"' for f in of_type)
+    notes: list[str] = []
+    m = _pick(store, "machine", machine, notes, lambda s: _nozzle_fits(s, nozzle_mm))
+    p = _pick(store, "process", process, notes, lambda s: not _process_misfit(s, m))
+    f = _the_filament(store, filament, notes)
+    why = _process_misfit(p, m) or _filament_misfit(f, m, p)
+    if why:
         raise NoChoice(
-            f"Several {filament} presets are in the store; name the one loaded "
-            f"(--filament):\n{names}"
+            f"'{f.name}' can't print with '{m.name}' and '{p.name}' by Orca's rule: {why}"
         )
-    have = "\n".join(f'  "{f.name}"  ({f.filament_type or "no type"})' for f in store.filaments)
-    raise NoChoice(f"No filament preset is called or typed '{filament}'. The store has:\n{have}")
+    return Choice(machine=m, process=p, filament=f, notes=tuple(notes))
 
 
-def _nozzle_fits(machine: StoredProfile, nozzle_mm: float, out: list[str]) -> bool:
-    if machine.nozzle_mm is None:
-        out.append(f"machine '{machine.name}': names no nozzle_diameter")
-        return False
-    if abs(machine.nozzle_mm - nozzle_mm) > 1e-6:
-        out.append(f"machine '{machine.name}': a {machine.nozzle_mm:g} mm nozzle")
-        return False
-    return True
+def _pick(
+    store: Store,
+    kind: str,
+    named: str | None,
+    notes: list[str],
+    fits: Callable[[StoredProfile], bool],
+) -> StoredProfile:
+    """The one standard that fits, then the Sponsor's tuning of it if there's one."""
+    if named is not None:
+        found = [s for s in store.all(kind) if s.name == named]
+        if not found:
+            have = "\n".join(f'  "{s.name}"' for s in store.all(kind)) or "  (none)"
+            raise NoChoice(f"No {kind} profile is called '{named}'. The store has:\n{have}")
+        if not fits(found[0]):
+            raise NoChoice(f"The {kind} '{named}' doesn't fit what's fitted")
+        return found[0]
+    standards = [s for s in store.standards[kind] if fits(s)]
+    if len(standards) != 1:
+        have = "\n".join(f'  "{s.name}"' for s in store.standards[kind]) or "  (none)"
+        what = "No" if not standards else "More than one"
+        raise NoChoice(f"{what} standard {kind} fits. The store's standards:\n{have}")
+    return _tuning_of(store, standards[0], f"--{kind}", notes)
 
 
-def _named(
-    profiles: Iterable[StoredProfile], name: str | None, kind: str, out: list[str]
-) -> list[StoredProfile]:
-    """All of them, or the one called `name`. A name nobody has is refused."""
-    profiles = list(profiles)
-    if name is None:
-        return profiles
-    found = [p for p in profiles if p.name == name]
-    if not found:
-        have = "\n".join(f"  {p.name}" for p in profiles) or "  (none)"
-        raise NoChoice(f"No {kind} profile is called '{name}'. The store has:\n{have}")
-    return found
+def _tuning_of(
+    store: Store, standard: StoredProfile, flag: str, notes: list[str]
+) -> StoredProfile:
+    tunings = store.of(standard)
+    if not tunings:
+        notes.append(f"{standard.kind} '{standard.name}': the standard; you haven't tuned it")
+        return standard
+    if len(tunings) > 1:
+        names = "\n".join(f'  "{t.name}"' for t in tunings)
+        raise NoChoice(
+            f"You've tuned '{standard.name}' more than once; name the one to use "
+            f"({flag}):\n{names}"
+        )
+    notes.append(f"{standard.kind} '{tunings[0].name}': your tuning of '{standard.name}'")
+    return tunings[0]
+
+
+def _the_filament(store: Store, filament: str, notes: list[str]) -> StoredProfile:
+    """By tuning name, standard name or variety; a type lists the varieties."""
+    want = filament.casefold()
+    for t in store.tunings["filament"]:
+        if t.name.casefold() == want:
+            notes.append(f"filament '{t.name}': your tuning of '{t.base_name}'")
+            return t
+    for s in store.standards["filament"]:
+        if want in (s.name.casefold(), s.variety.casefold()):
+            return _tuning_of(store, s, "--filament", notes)
+    of_type = [s for s in store.standards["filament"] if s.filament_type.casefold() == want]
+    if len(of_type) == 1:
+        return _tuning_of(store, of_type[0], "--filament", notes)
+    listing = _varieties(store, of_type or store.standards["filament"])
+    if of_type:
+        raise NoChoice(f"Several {filament} varieties are in the store; name the one loaded "
+                       f"(--filament):\n{listing}")
+    raise NoChoice(f"No filament in the store is called or typed '{filament}'. "
+                   f"The store has:\n{listing}")
+
+
+def _varieties(store: Store, standards: list[StoredProfile]) -> str:
+    """Manufacturer / type / variety, with the Sponsor's tunings under each."""
+    lines = []
+    for s in sorted(standards, key=lambda s: (s.manufacturer, s.filament_type, s.variety)):
+        lines.append(f'  "{s.variety}"  ({s.manufacturer} / {s.filament_type})')
+        lines += [f'      tuned: "{t.name}"' for t in store.of(s)]
+    return "\n".join(lines)
+
+
+def describe(store: Store) -> str:
+    """The store as `print_job.py --filaments` shows it."""
+    lines = []
+    for kind in ("machine", "process"):
+        for s in store.standards[kind]:
+            lines.append(f"{kind}: {s.name}")
+            lines += [f'    tuned: "{t.name}"' for t in store.of(s)]
+    lines += ["filament (manufacturer / type), by variety:",
+              _varieties(store, store.standards["filament"])]
+    return "\n".join(lines)
+
+
+def _nozzle_fits(machine: StoredProfile, nozzle_mm: float) -> bool:
+    return machine.nozzle_mm is not None and abs(machine.nozzle_mm - nozzle_mm) < 1e-6
 
 
 def _fits_printer(profile: StoredProfile, machine: StoredProfile) -> str:
     """Why `profile` doesn't fit `machine` by `compatible_printers`, or ''."""
-    if profile.condition("compatible_printers_condition"):
+    if _first(profile.composed.get("compatible_printers_condition")).strip():
         return "it has a compatible_printers_condition, which print-shop does not evaluate"
-    names = profile._names("compatible_printers")
-    if names and not {machine.name, machine.parent} & set(names):
+    names = profile.names("compatible_printers")
+    if names and not {machine.name, machine.base_name} & set(names):
         return f"its compatible_printers are {', '.join(names)}"
     return ""
 
 
 def _process_misfit(process: StoredProfile, machine: StoredProfile) -> str:
-    if not process._names("compatible_printers"):
+    if not process.names("compatible_printers"):
         return "its compatible_printers is empty, which Orca's CLI refuses (exit 239)"
     return _fits_printer(process, machine)
 
@@ -363,31 +380,12 @@ def _filament_misfit(
     why = _fits_printer(filament, machine)
     if why:
         return why
-    if filament.condition("compatible_prints_condition"):
+    if _first(filament.composed.get("compatible_prints_condition")).strip():
         return "it has a compatible_prints_condition, which print-shop does not evaluate"
-    prints = filament._names("compatible_prints")
-    if prints and not {process.name, process.parent} & set(prints):
+    prints = filament.names("compatible_prints")
+    if prints and not {process.name, process.base_name} & set(prints):
         return f"its compatible_prints are {', '.join(prints)}, not '{process.name}'"
     return ""
-
-
-def _ties(sets: list[tuple[StoredProfile, StoredProfile]]) -> list[str]:
-    lines = []
-    for kind, flag, i in (("machine", "--machine", 0), ("process", "--process", 1)):
-        names = sorted({s[i].name for s in sets})
-        if len(names) > 1:
-            lines.append(f"{kind} ({flag}):")
-            lines += [f'  "{n}"' for n in names]
-    return lines
-
-
-def _refusal(head: str, choices: list[str], out: list[str]) -> str:
-    parts = [head]
-    if choices:
-        parts += ["The candidates:", *choices]
-    if out:
-        parts += ["Left out:", *(f"  {line}" for line in dict.fromkeys(out))]
-    return "\n".join(parts)
 
 
 def _git_state(root: Path) -> tuple[str, bool]:
@@ -406,14 +404,17 @@ def _git_state(root: Path) -> tuple[str, bool]:
     return commit, bool(status)
 
 
+def _read(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"profile {path.name} cannot be read: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"profile {path.name} is not a JSON object")
+    return data
+
+
 def _first(value: Any) -> str:
     if isinstance(value, list):
         value = value[0] if value else ""
     return str(value or "")
-
-
-def _first_float(value: Any) -> float | None:
-    try:
-        return float(_first(value))
-    except ValueError:
-        return None

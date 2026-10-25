@@ -1,7 +1,9 @@
-"""The choice of profiles per print: the fitted nozzle, the loaded filament, the reviewed pairing.
+"""Choosing the profiles a print uses: standards first, the Sponsor's tuning over them.
 
-mqucifer/print-shop#6. The small store here is built per test; the last tests
-read the repository's own `profiles/`, as the Sponsor's prints will.
+mqucifer/print-shop#8, the Sponsor's answer of 2026-10-25: a variety uses
+their tuning where there is one and the standard where there isn't; several
+tunings of one are listed to choose from. The small store here is built per
+test; the last tests read the repository's own `profiles/`.
 """
 
 from __future__ import annotations
@@ -12,124 +14,100 @@ from typing import Any
 
 import pytest
 
-from print_shop.slicer.store import NoChoice, Store, check_pairings, choose, unpaired
+from print_shop.slicer.store import NoChoice, Store, choose, describe
 from tests.fakes import STORE
 
-M04 = "CC 0.4 - Copy"
-M04_TPU = "CC 0.4 - TPU"
-M08 = "CC 0.8 - Copy"
-P04 = "0.20mm - Copy"
-P_TPU = "0.30mm - TPU"
-P08 = "0.40mm - Copy"
+M04 = "CC 0.4 nozzle"
+M08 = "CC 0.8 nozzle"
 
 
-def _write(root: Path, kind: str, name: str, **data: Any) -> None:
-    path = root / kind / f"{name}.json"
+def _write(root: Path, where: str, kind: str, name: str, **data: Any) -> None:
+    path = root / where / kind / f"{name}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"name": name, **data}))
 
 
 @pytest.fixture
 def store(tmp_path: Path) -> Path:
-    """Two 0.4 machines and a 0.8, as the Sponsor's: copies of Orca's system machines."""
     root = tmp_path / "profiles"
-    _write(root, "machine", M04, inherits="CC 0.4", nozzle_diameter=["0.4"])
-    _write(root, "machine", M04_TPU, inherits="CC 0.4", nozzle_diameter=["0.4"])
-    _write(root, "machine", M08, inherits="CC 0.8", nozzle_diameter=["0.8"])
-    _write(root, "process", P04, inherits="0.20mm", compatible_printers=["CC 0.4"])
-    _write(root, "process", P_TPU, inherits="0.20mm", compatible_printers=["CC 0.4"])
-    _write(root, "process", P08, inherits="0.40mm", compatible_printers=["CC 0.8"])
-    _write(root, "filament", "PLA tuned", filament_type=["PLA"],
-           compatible_printers=["CC 0.4", "CC 0.8"])
-    _write(root, "filament", "PLA silk", filament_type=["PLA"])
-    _write(root, "filament", "TPU only on the copy", filament_type=["TPU"],
-           compatible_printers=[M04])
-    _write(root, "filament", "PETG", filament_type=["PETG"])
-    pairings = [
-        {"filament": "PLA tuned", "nozzle_mm": 0.4, "machine": M04, "process": P04,
-         "drafted": False, "why": "the tuned copies"},
-        {"filament": "PLA tuned", "nozzle_mm": 0.8, "machine": M08, "process": P08,
-         "drafted": True, "why": "the 0.8 copies"},
-        {"filament": "TPU only on the copy", "nozzle_mm": 0.4, "machine": M04_TPU,
-         "process": P_TPU, "drafted": True, "why": "TPU goes with TPU"},
-    ]
-    (root / "pairings.json").write_text(json.dumps({"pairings": pairings}))
+    _write(root, "standard", "machine", M04, nozzle_diameter=["0.4"], inherits="")
+    _write(root, "standard", "machine", M08, nozzle_diameter=["0.8"], inherits="")
+    _write(root, "standard", "process", "0.20mm", compatible_printers=[M04])
+    _write(root, "standard", "process", "0.40mm", compatible_printers=[M08])
+    _write(root, "standard", "filament", "Maker PLA @CC", filament_type=["PLA"],
+           filament_vendor=["Maker"], nozzle_temperature=["210"],
+           compatible_printers=[M04, M08])
+    _write(root, "standard", "filament", "Maker PLA Silk @CC", filament_type=["PLA"],
+           filament_vendor=["Maker"], compatible_printers=[M04])
+    _write(root, "standard", "filament", "Maker Rapid PETG @CC", filament_type=["PETG"],
+           filament_vendor=["Maker"], compatible_printers=[M04])
+    _write(root, "tuned", "machine", f"{M04} - Copy", inherits=M04, bed_mesh="on")
+    _write(root, "tuned", "filament", "PLA mine", inherits="Maker PLA @CC",
+           nozzle_temperature=["220"])
+    _write(root, "tuned", "filament", "PETG 270", inherits="Maker Rapid PETG @CC")
+    _write(root, "tuned", "filament", "PETG 240", inherits="Maker Rapid PETG @CC")
     return root
 
 
-def test_the_pairing_names_the_machine_and_process(store: Path) -> None:
-    choice = choose(Store(store), nozzle_mm=0.4, filament="PLA tuned")
-    assert (choice.machine.name, choice.process.name) == (M04, P04)
-    assert choice.notes == ("pairing for 'PLA tuned' on a 0.4 mm nozzle: the tuned copies",)
+def test_a_variety_uses_the_sponsors_tuning_over_its_standard(store: Path) -> None:
+    choice = choose(Store(store), nozzle_mm=0.4, filament="Maker PLA")
+    assert choice.filament.name == "PLA mine"
+    assert choice.filament.composed["nozzle_temperature"] == ["220"], "the tuning wins"
+    assert choice.filament.composed["filament_type"] == ["PLA"], "the rest is the standard's"
+    assert choice.filament.composed["inherits"] == "Maker PLA @CC"
+    assert choice.machine.name == f"{M04} - Copy", "the tuned machine is the default too"
+    assert choice.process.name == "0.20mm", "untuned: the standard"
+    assert "process '0.20mm': the standard; you haven't tuned it" in choice.notes
 
 
-def test_the_same_filament_on_another_nozzle_has_its_own_pairing(store: Path) -> None:
-    choice = choose(Store(store), nozzle_mm=0.8, filament="PLA tuned")
-    assert (choice.machine.name, choice.process.name) == (M08, P08)
-    assert "DRAFTED" in choice.notes[0], "a drafted pairing says so at the command"
+def test_an_untuned_variety_uses_the_standard(store: Path) -> None:
+    choice = choose(Store(store), nozzle_mm=0.4, filament="maker pla silk")
+    assert choice.filament.name == "Maker PLA Silk @CC" and choice.filament.standard is None
 
 
-def test_a_material_type_is_a_shortcut_only_when_one_preset_has_it(store: Path) -> None:
-    with pytest.raises(NoChoice) as tie:
-        choose(Store(store), nozzle_mm=0.4, filament="pla")
-    assert '"PLA tuned"' in str(tie.value) and '"PLA silk"' in str(tie.value)
-    choice = choose(
-        Store(store), nozzle_mm=0.4, filament="petg", machine=M04, process=P04
-    )
-    assert choice.filament.name == "PETG"
+def test_several_tunings_of_one_are_listed_to_choose_from(store: Path) -> None:
+    with pytest.raises(NoChoice) as listed:
+        choose(Store(store), nozzle_mm=0.4, filament="Maker Rapid PETG")
+    assert '"PETG 240"' in str(listed.value) and '"PETG 270"' in str(listed.value)
+    choice = choose(Store(store), nozzle_mm=0.4, filament="PETG 270")
+    assert choice.filament.name == "PETG 270"
 
 
-def test_an_unknown_filament_lists_what_the_store_has(store: Path) -> None:
-    with pytest.raises(NoChoice, match=r'"PLA silk"  \(PLA\)'):
-        choose(Store(store), nozzle_mm=0.4, filament="ASA")
+def test_a_type_lists_its_varieties_with_their_tunings(store: Path) -> None:
+    with pytest.raises(NoChoice) as listed:
+        choose(Store(store), nozzle_mm=0.4, filament="PLA")
+    text = str(listed.value)
+    assert '"Maker PLA"  (Maker / PLA)\n      tuned: "PLA mine"' in text
+    assert '"Maker PLA Silk"  (Maker / PLA)' in text
+    assert choose(Store(store), nozzle_mm=0.4, filament="petg 240").filament.name == "PETG 240"
 
 
-def test_a_pairing_orcas_rule_forbids_is_refused_saying_why(store: Path) -> None:
-    """The filament is marked for the copy machine only; the pairing names the TPU one."""
-    with pytest.raises(NoChoice) as refused:
-        choose(Store(store), nozzle_mm=0.4, filament="TPU only on the copy")
-    text = str(refused.value)
-    assert text.startswith("Orca's compatibility rule forbids the pairing")
-    assert f"its compatible_printers are {M04}" in text
+def test_the_nozzle_picks_the_machine_and_its_process(store: Path) -> None:
+    choice = choose(Store(store), nozzle_mm=0.8, filament="Maker PLA")
+    assert (choice.machine.name, choice.process.name) == (M08, "0.40mm")
 
 
-def test_without_a_pairing_a_tie_lists_the_candidates(store: Path) -> None:
-    with pytest.raises(NoChoice) as tie:
-        choose(Store(store), nozzle_mm=0.4, filament="PLA silk")
-    text = str(tie.value)
-    assert "no pairing" in text
-    assert f'"{M04}"' in text and f'"{M04_TPU}"' in text
-    assert f"machine '{M08}': a 0.8 mm nozzle" in text, "why each was left out"
+def test_a_filament_orcas_rule_forbids_is_refused(store: Path) -> None:
+    with pytest.raises(NoChoice, match="its compatible_printers are CC 0.4 nozzle"):
+        choose(Store(store), nozzle_mm=0.8, filament="Maker PLA Silk")
 
 
-def test_without_a_pairing_a_single_fit_is_chosen(store: Path) -> None:
-    choice = choose(Store(store), nozzle_mm=0.8, filament="PLA silk")
-    assert (choice.machine.name, choice.process.name, choice.notes) == (M08, P08, ())
+def test_no_machine_for_the_nozzle_says_what_there_is(store: Path) -> None:
+    with pytest.raises(NoChoice, match="No standard machine fits") as refused:
+        choose(Store(store), nozzle_mm=0.6, filament="Maker PLA")
+    assert f'"{M08}"' in str(refused.value)
 
 
-def test_the_sponsor_can_name_the_machine_and_process(store: Path) -> None:
-    choice = choose(
-        Store(store), nozzle_mm=0.4, filament="PLA tuned", machine=M04_TPU, process=P_TPU
-    )
-    assert (choice.machine.name, choice.process.name) == (M04_TPU, P_TPU)
-
-
-def test_a_named_machine_for_another_nozzle_is_refused(store: Path) -> None:
-    with pytest.raises(NoChoice, match="a 0.8 mm nozzle"):
-        choose(Store(store), nozzle_mm=0.4, filament="PLA tuned", machine=M08)
+def test_a_tuning_of_a_standard_the_store_lacks_is_refused(store: Path) -> None:
+    _write(store, "tuned", "process", "orphan", inherits="0.30mm")
+    with pytest.raises(ValueError, match="tunes '0.30mm', which isn't a standard process"):
+        Store(store)
 
 
 def test_a_process_with_no_printers_is_left_out_as_orcas_cli_refuses_it(store: Path) -> None:
-    _write(store, "process", "open", compatible_printers=[])
-    with pytest.raises(NoChoice, match=r"empty, which Orca's CLI refuses \(exit 239\)"):
-        choose(Store(store), nozzle_mm=0.4, filament="PLA tuned", machine=M04, process="open")
-
-
-def test_a_compatibility_condition_is_not_guessed(store: Path) -> None:
-    _write(store, "process", "conditional", compatible_printers=["CC 0.4"],
-           compatible_printers_condition="nozzle_diameter[0]==0.4")
-    with pytest.raises(NoChoice, match="does not evaluate"):
-        choose(Store(store), nozzle_mm=0.4, filament="PLA tuned", process="conditional")
+    _write(store, "standard", "process", "open", compatible_printers=[])
+    with pytest.raises(NoChoice, match="doesn't fit"):
+        choose(Store(store), nozzle_mm=0.4, filament="Maker PLA", process="open")
 
 
 # --------------------------------------------------------------------------
@@ -137,21 +115,23 @@ def test_a_compatibility_condition_is_not_guessed(store: Path) -> None:
 # --------------------------------------------------------------------------
 
 
-def test_every_filament_in_the_store_has_a_pairing() -> None:
-    assert unpaired(Store(STORE)) == []
+def test_the_stores_choices_are_the_sponsors() -> None:
+    store = Store(STORE)
+    pla = choose(store, nozzle_mm=0.4, filament="Elegoo PLA")
+    assert (pla.machine.name, pla.process.name, pla.filament.name) == (
+        "Elegoo Centauri Carbon 0.4 nozzle - Copy",
+        "0.20mm Standard @Elegoo CC 0.4 nozzle - Copy",
+        "Elegoo PLA @ECC - Copy",
+    )
+    assert choose(store, nozzle_mm=0.4, filament="Elegoo PETG").filament.name == "Elegoo PETG @ECC"
+    with pytest.raises(NoChoice, match="tuned 'Elegoo Rapid PETG @ECC' more than once"):
+        choose(store, nozzle_mm=0.4, filament="Elegoo Rapid PETG")
 
 
-def test_the_stores_forbidden_pairings_are_the_ones_waiting_on_the_sponsor() -> None:
-    """Drafted 2026-10-25 and listed on the PR for the Sponsor's fix.
-
-    Both INLAND TPU presets are marked for the "0.4 nozzle - Copy" machine
-    only, while TPU goes with the TPU machines. Fixing the preset (or the
-    pairing) in a PR removes them from this list.
-    """
-    problems = [p.split(":")[0] for p in check_pairings(Store(STORE))]
-    assert problems == [
-        "'INLAND TPU Basic @Elegoo Centauri Carbon 0.4 nozzle - Copy' on a 0.4 mm nozzle",
-        "'INLAND TPU Basic @Elegoo Centauri Carbon 0.4 nozzle - Copy' on a 0.6 mm nozzle",
-        "'INLAND TPU Basic correct' on a 0.4 mm nozzle",
-        "'INLAND TPU Basic correct' on a 0.6 mm nozzle",
-    ]
+def test_the_store_is_scoped_to_the_0_4_machine_and_pla_and_petg() -> None:
+    store = Store(STORE)
+    assert [m.nozzle_mm for m in store.all("machine")] == [0.4, 0.4]
+    assert {f.filament_type for f in store.all("filament")} == {"PLA", "PETG"}
+    with pytest.raises(NoChoice):
+        choose(store, nozzle_mm=0.8, filament="Elegoo PLA")
+    assert "  \"Elegoo Rapid PETG\"  (Elegoo / PETG)" in describe(store)

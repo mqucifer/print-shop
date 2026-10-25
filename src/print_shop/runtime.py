@@ -34,12 +34,13 @@ WORK_DIR = Path("~/print-shop/jobs").expanduser()
 #: Where the first print's recorder writes. Outside every checkout.
 RECORDINGS_DIR = Path("~/print-shop/recordings").expanduser()
 
-def profiles_for(choice: Choice, store_root: Path) -> SlicerProfiles:
-    """The chosen store profiles as the slicer takes them, with what the ledger keeps."""
+def profiles_for(choice: Choice, store_root: Path, workdir: Path) -> SlicerProfiles:
+    """The chosen profiles composed whole into `workdir`, with what the ledger keeps."""
+    paths = choice.compose(workdir)
     return SlicerProfiles(
-        machine=choice.machine.path,
-        process=choice.process.path,
-        filament=choice.filament.path,
+        machine=paths["machine"],
+        process=paths["process"],
+        filament=paths["filament"],
         used=choice.used(store_root),
     )
 
@@ -157,7 +158,9 @@ def _store_lines(row: Row) -> list[str]:
     commit = used.commit[:12] or "no commit"
     if used.store_dirty:
         commit += " + uncommitted changes"
-    return [f"store          profiles/ at {commit}"] + [
-        f"  {ref.file}  (sha256 {ref.sha256[:12]}…)"
-        for ref in (used.machine, used.process, used.filament)
-    ]
+    lines = [f"store          profiles/ at {commit}"]
+    for ref in (used.machine, used.process, used.filament):
+        lines.append(f"  {ref.file}  (sha256 {ref.sha256[:12]}…)")
+        if ref.standard_file:
+            lines.append(f"    over {ref.standard_file}  (sha256 {ref.standard_sha256[:12]}…)")
+    return lines

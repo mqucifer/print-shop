@@ -4,10 +4,11 @@
     uv run python scripts/import_profiles.py --dry-run  # only say what would change
 
 Run it after tuning something in Orca, from print-shop's own checkout with a
-clean working tree. It reads `~/Library/Application Support/OrcaSlicer`
-(`user/default/` and the system presets they inherit), and never writes there.
-Each preset is written whole, with its system parent kept as `inherits`, and
-without the printer's address.
+clean working tree. It reads `~/Library/Application Support/OrcaSlicer`, and
+never writes there. `profiles/scope.json` says what it covers: Orca's standard
+presets in scope are written whole to `profiles/standard/`, and each of the
+Sponsor's tunings of one to `profiles/tuned/`, as only the keys it changes.
+The printer's address is never copied.
 
 Changed files go on a new branch, `profiles/import-<time>`, as one commit. It
 doesn't push: the next commands are printed, and the PR is where a tuning
@@ -24,23 +25,20 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
-from print_shop.slicer.catalog import DEFAULT_ORCA_DIR, Catalog, CatalogError, import_presets
-from print_shop.slicer.store import STORE_DIR, Store, check_pairings, unpaired
+from print_shop.slicer.catalog import (
+    DEFAULT_ORCA_DIR,
+    Catalog,
+    CatalogError,
+    Scope,
+    import_presets,
+)
+from print_shop.slicer.store import STORE_DIR, Store
 
 
 def _git(*args: str, cwd: Path) -> str:
     return subprocess.run(
         ["git", *args], cwd=cwd, capture_output=True, text=True, check=True
     ).stdout.strip()
-
-
-def _report_pairings(store: Path) -> None:
-    """What `profiles/pairings.json` needs after this import: for the PR to fix."""
-    profiles = Store(store)
-    for name in unpaired(profiles):
-        print(f"no pairing yet in pairings.json: filament '{name}'")
-    for problem in check_pairings(profiles):
-        print(problem.split(": ", 1)[1].splitlines()[0])
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -57,18 +55,20 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         catalog = Catalog(args.orca_dir)
-        planned = import_presets(catalog, args.store, write=False)
+        scope = Scope.read(args.store / "scope.json")
+        planned = import_presets(catalog, args.store, scope, write=False)
     except CatalogError as exc:
         print(f"Nothing imported: {exc}", file=sys.stderr)
         return 1
 
     for warning in planned.warnings:
         print(f"warning: {warning}")
+    for line in planned.not_imported:
+        print(f"not imported: {line}")
     for rel in planned.only_in_store:
         print(f"in the store, not in Orca (kept): {rel}")
     if not planned.written:
         print(f"Nothing changed: {len(planned.unchanged)} profiles match Orca.")
-        _report_pairings(args.store)
         return 0
     for rel in planned.written:
         print(f"changed: {rel}")
@@ -77,7 +77,8 @@ def main(argv: list[str] | None = None) -> int:
 
     branch = f"profiles/import-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}"
     _git("switch", "-c", branch, cwd=repo)
-    import_presets(catalog, args.store)
+    import_presets(catalog, args.store, scope)
+    Store(args.store)  # every tuning names a standard in the store
     _git("add", "--", str(args.store), cwd=repo)
     message = "\n".join(
         [
@@ -88,7 +89,6 @@ def main(argv: list[str] | None = None) -> int:
         ]
     )
     _git("commit", "-m", message, cwd=repo)
-    _report_pairings(args.store)
     print(f"\nCommitted on {branch}. To review it as a PR:")
     print(f"  git push -u origin {branch}")
     print("  gh pr create --fill --assignee mquarters")
