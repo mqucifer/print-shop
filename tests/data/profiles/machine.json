@@ -1,0 +1,5 @@
+{
+  "name": "CI Centauri Carbon 0.4 nozzle",
+  "printable_area": ["0x0", "257x0", "257x257", "0x257"],
+  "printable_height": "257"
+}

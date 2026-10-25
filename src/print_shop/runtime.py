@@ -1,0 +1,155 @@
+"""The pieces a real run is built from, read from the Mac's settings.
+
+Everything here is unarmed. `scripts/print_job.py` adds the one armed piece,
+`live_printer()`, and only when its own invocation says so; nothing in
+`src/` calls it (`tests/test_print_node.py` asserts that). So a mistake here
+can at worst fail to print, never print.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+
+from print_shop.core.mqtt import MqttConfig
+from print_shop.env import SETTINGS_PATH, load_env
+from print_shop.expert.client import LLMConfig
+from print_shop.ledger import Ledger, Row, ledger_path
+from print_shop.orchestrator.daemon import Daemon
+from print_shop.orchestrator.outcome import end_name
+from print_shop.printer.centauri import (
+    CentauriClient,
+    FrameRecorder,
+    PrinterClient,
+    PrinterConfig,
+)
+from print_shop.slicer.orca import BedType, SlicerProfiles, with_bed_type
+
+__all__ = ["Run", "bed_type", "build_run", "describe", "orca_profiles", "recording_path"]
+
+#: Where a run's per-job files go (rotated STLs, G-code, the job checkpoint).
+WORK_DIR = Path("~/print-shop/jobs").expanduser()
+
+#: Where the first print's recorder writes. Outside every checkout.
+RECORDINGS_DIR = Path("~/print-shop/recordings").expanduser()
+
+#: Orca's own data directory on macOS, and the Elegoo Centauri Carbon profiles
+#: the prototype sliced with. Each can be moved in the settings.
+_ORCA_DATADIR = Path("~/Library/Application Support/OrcaSlicer").expanduser()
+_ELEGOO = Path("system/Elegoo")
+_MACHINE = _ELEGOO / "machine/ECC/Elegoo Centauri Carbon 0.4 nozzle.json"
+_PROCESS = _ELEGOO / "process/ECC/0.20mm Standard @Elegoo CC 0.4 nozzle.json"
+_FILAMENT = _ELEGOO / "filament/ECC/Elegoo PLA @ECC.json"
+
+
+def orca_profiles(env: dict[str, str]) -> SlicerProfiles:
+    """The profiles to slice with: `ORCA_*` in the settings, or the CC1 defaults.
+
+    Raises:
+        FileNotFoundError: If a profile is missing, before any job starts.
+    """
+    datadir = Path(env.get("ORCA_DATADIR") or _ORCA_DATADIR).expanduser()
+    machine = Path(env.get("ORCA_MACHINE") or datadir / _MACHINE).expanduser()
+    process = Path(env.get("ORCA_PROCESS") or datadir / _PROCESS).expanduser()
+    filament = Path(env.get("ORCA_FILAMENT") or datadir / _FILAMENT).expanduser()
+    for path in (machine, process, filament):
+        if not path.is_file():
+            raise FileNotFoundError(f"Orca profile not found: {path}")
+    return SlicerProfiles(machine=machine, process=process, filament=filament, datadir=datadir)
+
+
+def bed_type(env: dict[str, str]) -> BedType:
+    """The plate on the printer: `ORCA_BED_TYPE` in the settings, else textured PEI.
+
+    Textured PEI is the Sponsor's answer (2026-10-25, on mqucifer/print-shop#3).
+    The Elegoo process profile's own default, the Cool Plate, heats the bed to
+    only 35 C for PLA.
+
+    Raises:
+        ValueError: If the setting names a plate this code has not read back.
+    """
+    value = env.get("ORCA_BED_TYPE") or BedType.TEXTURED_PEI.value
+    try:
+        return BedType(value)
+    except ValueError:
+        known = ", ".join(repr(b.value) for b in BedType)
+        raise ValueError(f"ORCA_BED_TYPE={value!r} is not one of {known}") from None
+
+
+def recording_path() -> Path:
+    from datetime import UTC, datetime
+
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    return RECORDINGS_DIR / f"sdcp-{stamp}.jsonl"
+
+
+@dataclass
+class Run:
+    daemon: Daemon
+    ledger: Ledger
+    recorder: FrameRecorder | None
+
+
+def build_run(
+    *,
+    printer: PrinterClient | None,
+    recorder: FrameRecorder | None = None,
+    settings: Path | None = None,
+    workdir: Path | None = None,
+) -> Run:
+    """A daemon wired to the real broker, Orca, LiteLLM, ledger and a read-only watcher.
+
+    `printer` is what an approval commands: `live_printer()` when the caller
+    armed it, or None, in which case an approval fails at the print node.
+
+    Raises:
+        RuntimeError, FileNotFoundError: On missing settings, before a job starts.
+    """
+    path = settings or SETTINGS_PATH
+    env = load_env(path)
+    cfg = MqttConfig.from_env(path)
+    if not cfg.user:
+        raise RuntimeError(f"MQTT_USER is not set in {path}; the gates need the broker")
+    ledger = Ledger(ledger_path(path))
+    work = workdir or WORK_DIR
+    work.mkdir(parents=True, exist_ok=True)
+    daemon = Daemon(
+        cfg=cfg,
+        profiles=with_bed_type(orca_profiles(env), bed_type(env), work / "profiles"),
+        workdir=work,
+        printer=printer,
+        llm=LLMConfig.from_settings(path),
+        ledger=ledger,
+        # Read-only: watching needs a snapshot and nothing else.
+        watch_printer=CentauriClient(PrinterConfig.from_env(path), recorder=recorder),
+    )
+    return Run(daemon=daemon, ledger=ledger, recorder=recorder)
+
+
+def describe(row: Row) -> str:
+    """One print as the runbook's last step reads it back."""
+    lines = [
+        f"job            {row.job_id}",
+        f"part           {row.stl_name}  (sha256 {row.stl_sha256[:12]}…)",
+        f"orientation    {row.rotation_deg} by {row.orientation_source}"
+        f"{'' if row.orientation_accepted else ' (not accepted; authored pose)'}",
+        f"g-code         {row.gcode_name}  ~{row.print_time_s // 60} min,"
+        f" {row.filament_cm3} cm3, {row.layer_count} layers",
+        f"profiles       {row.slicer_settings.get('printer_settings_id', '?')} /"
+        f" {row.slicer_settings.get('print_settings_id', '?')} / {row.filament}",
+        f"plate          {row.slicer_settings.get('curr_bed_type', '?')},"
+        f" bed {row.slicer_settings.get('first_layer_bed_temperature', '?')} C",
+        f"printer        {row.printer_machine} {row.printer_firmware}",
+        f"asked to start {row.start_requested_at}",
+        f"started        {row.started_at or '-'}",
+    ]
+    if row.start_error:
+        lines.append(f"start error    {row.start_error}")
+    lines += [
+        f"ended          {row.ended_at or '-'}"
+        + (f"  (printer: {end_name(row.printer_end_status)})" if row.ended_at else ""),
+        f"outcome        {row.result or 'open: no answer yet'}"
+        + (f", {row.symptom}" if row.symptom else "")
+        + (f" — {row.note}" if row.note else ""),
+    ]
+    return "\n".join(lines)
