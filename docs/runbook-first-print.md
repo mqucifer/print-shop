@@ -64,8 +64,17 @@ Before each print, `cd ~/Documents/git/print-shop && git pull && uv sync`, so it
 
    It should say `ARMED`, and that it is recording to `~/print-shop/recordings/sdcp-<time>.jsonl`. If it says `Not armed`, the flag didn't reach it: stop with Ctrl-C and type it again on the same line.
 
+   **Then it asks what the part is for:** cosmetic or functional, any load, any fit, and where it will live. For the cube: `cosmetic`, `none`, `none`, `indoor`. (Or pass `--intake` a JSON file with the same answers; `tests/data/intake/cube.json` is the cube's.)
+
+   **Then the settings review, here on the command line,** before Home Assistant's gate. It shows:
+   - how the model read the part;
+   - each setting it changes from your presets, as `your value -> this print`, with the feature or purpose behind it and its source;
+   - what it weighed and kept, any design notes, and Orca's estimate.
+
+   It reasons with `crew-code-think` (the `PRINT_SHOP_SETUP_MODEL` setting), which takes two to three minutes. Type `ok` to go on to the gate. To correct a setting, type it by name, e.g. `layer_height=0.2 because it's a test cube`, and it slices again and shows the review again. Or type `stop`. Your corrections go in the ledger: they are what print-shop learns from.
+
 2. **Approve at the gate.** The dashboard asks "Print this?". Check the numbers before you press:
-   - Time: about 11 minutes (Orca's estimate is 10 m 54 s);
+   - Time: about 11 minutes (Orca's estimate for your presets is 10 m 54 s; the review shows the estimate with its changes);
    - Plastic: about 2.9 cm³;
    - Turned: a multiple of 90° on each axis. A cube sits flat on every face.
 
@@ -93,6 +102,7 @@ Before each print, `cd ~/Documents/git/print-shop && git pull && uv sync`, so it
    - [ ] the orientation is what the program printed at the gate, and its source is `model:crew-code` (or `geometric` if the model was unavailable);
    - [ ] the profiles are `Elegoo Centauri Carbon 0.4 nozzle - Copy`, `0.20mm Standard @Elegoo CC 0.4 nozzle - Copy` and `Elegoo PLA @ECC - Copy`, and the plate line reads `Textured PEI Plate, bed 60 C`;
    - [ ] the store lines name `profiles/` at the commit you pulled, with no uncommitted changes, and the three files above;
+   - [ ] the intake line is your answers, each changed setting is listed with who changed it, and a `corrected` line lists any setting you corrected at the review;
    - [ ] the printer is the Centauri Carbon with its firmware version;
    - [ ] asked to start, started and ended are in that order, and roughly match the clock;
    - [ ] the printer's end state is what the screen showed;

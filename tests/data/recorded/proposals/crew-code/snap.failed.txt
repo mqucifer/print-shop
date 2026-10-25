@@ -1,0 +1,1 @@
+unavailable: LLM reply is not a JSON object (cut off at max_tokens=8000): '{\n  "reasoning": "The part is a small, tall snap-fit hook (22 mm high, 16x8 mm footprint) designed to clip into a 1.2 mm led

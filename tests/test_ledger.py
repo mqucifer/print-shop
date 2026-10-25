@@ -225,7 +225,7 @@ def test_a_print_keeps_its_profiles_by_file_hash_and_commit(tmp_path: Path) -> N
     assert row is not None and row.profiles == _used()
 
 
-def test_a_version_1_ledger_gains_the_profiles_column_and_keeps_its_rows(
+def test_a_version_1_ledger_gains_the_new_columns_and_keeps_its_rows(
     tmp_path: Path,
 ) -> None:
     """The first ledger predates print-shop's own profiles: its rows say none, not a guess."""
@@ -233,7 +233,8 @@ def test_a_version_1_ledger_gains_the_profiles_column_and_keeps_its_rows(
     with Ledger(path) as ledger:
         ledger.record_start_requested(record())
     db = sqlite3.connect(path)
-    db.execute("ALTER TABLE prints DROP COLUMN profiles")
+    for column in ("profiles", "intake", "proposal", "corrections"):
+        db.execute(f"ALTER TABLE prints DROP COLUMN {column}")
     db.execute("PRAGMA user_version=1")
     db.commit()
     db.close()
@@ -241,6 +242,7 @@ def test_a_version_1_ledger_gains_the_profiles_column_and_keeps_its_rows(
     with Ledger(path) as again:
         row = again.get("job-1")
         assert row is not None and row.profiles is None
+        assert (row.intake, row.proposal, row.corrections) == (None, None, None)
         again.record_start_requested(record("job-2").model_copy(update={"profiles": _used()}))
         assert again.get("job-2").profiles == _used()  # type: ignore[union-attr]
-    assert sqlite3.connect(path).execute("PRAGMA user_version").fetchone()[0] == 2
+    assert sqlite3.connect(path).execute("PRAGMA user_version").fetchone()[0] == 3

@@ -1,0 +1,52 @@
+{
+  "reasoning": "This is a mounting bracket: a plate with a flange that holds a 2 kg shelf and is screwed through. The failure modes are bending and shear in the flange under the shelf's weight, and cracking around the screw holes under tension and shear. The section is 4.76 mm, which is workable but not thick. No overhangs, no bridges, full-footprint bed contact, moderate slenderness \u2014 no printability concerns. The entire challenge is strength under load.",
+  "changes": [
+    {
+      "key": "wall_loops",
+      "value": "4",
+      "feature": "purpose",
+      "knowledge": "walls",
+      "reason": "the flange carries the 2 kg shelf in bending and the plate resists shear at the screws, so 4 walls give more rigidity and interlayer bonding in the load path than 2"
+    },
+    {
+      "key": "sparse_infill_density",
+      "value": "40%",
+      "feature": "purpose",
+      "knowledge": "infill",
+      "reason": "the 4.76 mm section must resist the shelf's bending moment; 15% leaves too little material between the 4 walls to carry 2 kg without flexing or delaminating, so 40% adds the in-plane and through-thickness strength the flange needs"
+    },
+    {
+      "key": "sparse_infill_pattern",
+      "value": "gyroid",
+      "feature": "purpose",
+      "knowledge": "infill",
+      "reason": "the flange sees bending in one direction and shear in the perpendicular, so a pattern rated strongest in both X-Y and Z (gyroid) covers both load directions where zig-zag is weaker"
+    },
+    {
+      "key": "nozzle_temperature",
+      "value": "230",
+      "feature": "purpose",
+      "knowledge": "temperature",
+      "reason": "the shelf load puts the flange in bending, which stresses layer-to-layer bonding in Z; 230 \u00b0C improves that bonding within the filament's 190\u2013240 range"
+    },
+    {
+      "key": "fan_max_speed",
+      "value": "70",
+      "feature": "purpose",
+      "knowledge": "cooling",
+      "reason": "there are no overhangs or bridges to sharpen, and the 2 kg shelf load depends on interlayer adhesion; capping the fan at 70 instead of 100 keeps layer bonding stronger without sacrificing anything this geometry needs"
+    }
+  ],
+  "design_notes": [
+    "If the flange is on the thin side (close to the 4.76 mm section), a small chamfer or fillet where the flange meets the plate would relieve the stress concentration at the bend and could let you drop infill back toward 30 % without losing strength."
+  ],
+  "_call": {
+    "model": "crew-code-think",
+    "finish_reason": "stop",
+    "prompt_tokens": 1417,
+    "completion_tokens": 3016,
+    "reasoning_tokens": 2345,
+    "max_tokens": 8000,
+    "seconds": 102.1
+  }
+}

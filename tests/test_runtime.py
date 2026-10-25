@@ -12,7 +12,7 @@ import pytest
 from print_shop.ledger import Answer, Ledger, Result, Symptom
 from print_shop.runtime import build_run, describe, profiles_for
 from print_shop.slicer.store import Store, choose
-from tests.fakes import STORE, STORE_PROFILES
+from tests.fakes import DATA, STORE, STORE_PROFILES
 from tests.test_ledger import record
 
 
@@ -136,7 +136,11 @@ def test_the_script_does_not_arm_without_the_flag(
 
 
 #: The fitted nozzle and the loaded filament preset; its pairing names the rest.
-FITTED = ["--nozzle", "0.4", "--filament", "Elegoo PLA @ECC - Copy"]
+FITTED = [
+    "--nozzle", "0.4",
+    "--filament", "Elegoo PLA @ECC - Copy",
+    "--intake", str(DATA / "intake" / "cube.json"),
+]
 
 
 def test_the_script_refuses_a_print_without_the_nozzle_and_filament(

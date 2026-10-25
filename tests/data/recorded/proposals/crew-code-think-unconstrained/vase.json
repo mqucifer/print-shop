@@ -1,0 +1,36 @@
+{
+  "reasoning": "A decorative vase for dried flowers. The outside is what shows; nothing else matters structurally. 120 mm tall on a 60 mm base, no overhangs, no bridges, 1.98 mm wall section. Two walls at ~0.42 mm each leave ~1.14 mm for infill inside the wall. The part prints cleanly: no supports, no bridges, reasonable footprint for PLA. The only real demands are cosmetic (the exterior surface) and lightness (no load, no fit).",
+  "changes": [
+    {
+      "key": "layer_height",
+      "value": "0.16",
+      "feature": "purpose",
+      "knowledge": "layer_height",
+      "reason": "the exterior is a curved silhouette that is the visible face of the vase; at 0.2 mm the staircase effect on that curve is visible, so 0.16 mm resolves it without doubling print time"
+    },
+    {
+      "key": "outer_wall_speed",
+      "value": "100",
+      "feature": "purpose",
+      "knowledge": "speed",
+      "reason": "the outer wall is the surface the vase is judged by; slowing from the preset 160 gives a cleaner, more accurate finish on the face that shows"
+    },
+    {
+      "key": "sparse_infill_density",
+      "value": "10%",
+      "feature": "purpose",
+      "knowledge": "infill",
+      "reason": "the 1.98 mm section carries no load and has no fit tolerance; 10% fills the 1.14 mm gap between the two walls enough to give the shell body without the strength or mass a higher density would cost"
+    }
+  ],
+  "design_notes": [],
+  "_call": {
+    "model": "crew-code-think",
+    "finish_reason": "stop",
+    "prompt_tokens": 1413,
+    "completion_tokens": 4236,
+    "reasoning_tokens": 3819,
+    "max_tokens": 8000,
+    "seconds": 143.8
+  }
+}
