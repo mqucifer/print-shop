@@ -5,9 +5,13 @@
     uv run python scripts/print_job.py --list
     uv run python scripts/print_job.py --filaments
 
-**The Sponsor says what's fitted:** the nozzle (mm) and the loaded filament,
-by variety ("Elegoo Rapid PETG") or by the name of one of their tunings.
-Without them a print is refused. `--filaments` lists what's in `profiles/`.
+**What's fitted and loaded comes from the inventory** (`scripts/stock.py`,
+mqucifer/print-shop#11): the printer's fitted nozzle and loaded spool, which
+the print names. `--nozzle` and `--filament` may say the same, and anything
+else, not fitted or not loaded, is refused. Until the inventory is set up,
+the print says so and takes `--nozzle` and `--filament` (by variety, "Elegoo
+Rapid PETG", or by the name of one of the Sponsor's tunings), refusing
+without them. `--filaments` lists what's in `profiles/`.
 Their tuning is used where there is one, the standard where there isn't;
 several tunings of one are listed to choose from. `--machine` and
 `--process` name a profile, when the Sponsor picks.
@@ -34,6 +38,7 @@ from pathlib import Path
 
 from print_shop.arming import ALLOW_HARDWARE_ENV, hardware_allowed
 from print_shop.env import SETTINGS_PATH
+from print_shop.inventory import SETUP, Inventory, InventoryError, Material
 from print_shop.ledger import Ledger, ledger_path
 from print_shop.printer.centauri import FrameRecorder, PrinterClient, live_printer
 from print_shop.runtime import WORK_DIR, build_run, describe, profiles_for, recording_path
@@ -54,8 +59,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--record", action="store_true", help="record the printer's replies")
     parser.add_argument("--nozzle", type=float, help="the fitted nozzle, in mm (0.4)")
     parser.add_argument("--filament", help="the loaded filament: its variety, or a tuning's name")
-    parser.add_argument("--machine", help="a machine profile's exact name, over the pairing")
-    parser.add_argument("--process", help="a process profile's exact name, over the pairing")
+    parser.add_argument("--machine", help="a machine profile's exact name, to pick one")
+    parser.add_argument("--process", help="a process profile's exact name, to pick one")
+    parser.add_argument("--printer", help="which printer, when the inventory has several")
     parser.add_argument(
         "--settings", type=Path, default=SETTINGS_PATH, help="the settings file (a path)"
     )
@@ -77,21 +83,36 @@ def main(argv: list[str] | None = None) -> int:
 
     profiles: SlicerProfiles | None = None
     if args.stl is not None:
-        if args.nozzle is None or not args.filament:
-            parser.error("say what's fitted: --nozzle (mm) and --filament (PLA, or a name)")
+        material: Material | None = None
+        nozzle, filament = args.nozzle, args.filament
+        with Inventory(ledger_path(args.settings)) as inventory:
+            if not inventory.printers():
+                # Never skipped silently (the operator, 2026-10-25).
+                print(f"The inventory isn't set up ({SETUP}); using --nozzle and --filament.")
+                if nozzle is None or not filament:
+                    parser.error("say what's fitted: --nozzle (mm) and --filament (a variety)")
+            else:
+                try:
+                    material = inventory.for_print(nozzle, filament, args.printer)
+                except InventoryError as exc:
+                    print(exc, file=sys.stderr)
+                    return 2
+                nozzle, filament = material.nozzle_mm, material.tuning or material.variety
+                print(f"From the inventory: {material.line()}.")
+        assert nozzle is not None and filament is not None
         try:
             choice = choose(
                 Store(STORE_DIR),
-                nozzle_mm=args.nozzle,
-                filament=args.filament,
+                nozzle_mm=nozzle,
+                filament=filament,
                 machine=args.machine,
                 process=args.process,
             )
         except NoChoice as exc:
             print(exc, file=sys.stderr)
             return 2
-        profiles = profiles_for(choice, STORE_DIR, WORK_DIR / "composed")
-        print(f"Fitted: a {args.nozzle:g} mm nozzle and {args.filament}. Slicing with:")
+        profiles = profiles_for(choice, STORE_DIR, WORK_DIR / "composed", material)
+        print(f"Fitted: a {nozzle:g} mm nozzle and {filament}. Slicing with:")
         print(f"  machine   {choice.machine.name}")
         print(f"  process   {choice.process.name}")
         print(f"  filament  {choice.filament.name}")

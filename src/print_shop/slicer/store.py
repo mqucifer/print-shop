@@ -51,6 +51,8 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from print_shop.inventory import Material
+
 __all__ = [
     "STORE_DIR",
     "Choice",
@@ -197,6 +199,10 @@ class ProfilesUsed(BaseModel):
     filament: ProfileRef
     commit: str
     store_dirty: bool
+    #: The printer, fitted nozzle and loaded spool from the inventory, when
+    #: the print took them from it (mqucifer/print-shop#11). The ledger keeps
+    #: it beside the print, pointing at the spool.
+    material: Material | None = None
 
 
 @dataclass(frozen=True)
@@ -288,6 +294,14 @@ def _pick(
             raise NoChoice(f"The {kind} '{named}' doesn't fit what's fitted")
         return found[0]
     standards = [s for s in store.standards[kind] if fits(s)]
+    if not standards and kind == "machine":
+        # Out of scope is refused, never sliced with Orca's defaults (the
+        # operator, 2026-10-25, on mqucifer/print-shop#11).
+        sizes = ", ".join(f"{m.nozzle_mm:g} mm" for m in store.standards["machine"])
+        raise NoChoice(
+            f"No profile covers that nozzle: profiles/scope.json covers {sizes or 'none'}. "
+            "Adding a nozzle is a PR to scope.json, then an import."
+        )
     if len(standards) != 1:
         have = "\n".join(f'  "{s.name}"' for s in store.standards[kind]) or "  (none)"
         what = "No" if not standards else "More than one"

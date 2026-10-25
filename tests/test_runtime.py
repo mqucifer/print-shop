@@ -129,6 +129,7 @@ def test_the_script_does_not_arm_without_the_flag(
         raise Stop
 
     monkeypatch.setattr(script, "live_printer", no)
+    monkeypatch.setattr(script, "WORK_DIR", tmp_path / "jobs")
     monkeypatch.setattr(script, "build_run", stop)
     part = tmp_path / "part.stl"
     part.write_text("solid x\nendsolid x\n")
