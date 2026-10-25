@@ -12,6 +12,7 @@ import logging
 import time
 from collections.abc import Callable, Iterable
 from pathlib import Path
+from typing import Protocol
 
 import paho.mqtt.client as mqtt
 from paho.mqtt.enums import CallbackAPIVersion
@@ -31,6 +32,7 @@ MessageHandler = Callable[[str, bytes, bool], None]
 
 __all__ = [
     "ORIENTATION_TEMPLATE",
+    "Bridge",
     "MessageHandler",
     "MqttConfig",
     "MqttBridge",
@@ -242,6 +244,28 @@ def discovery_payloads(cfg: MqttConfig) -> Iterable[tuple[str, dict[str, object]
 # --------------------------------------------------------------------------
 # Bridge
 # --------------------------------------------------------------------------
+
+
+class Bridge(Protocol):
+    """What the daemon needs from a broker connection. `MqttBridge` is the real one.
+
+    A seam so the whole job can run in CI against an in-memory broker
+    (`tests/fakes.py`), with the daemon's own gate logic unchanged.
+    """
+
+    def __enter__(self) -> Bridge: ...
+
+    def __exit__(self, *exc: object) -> None: ...
+
+    def announce(self) -> None: ...
+
+    def publish_availability(self, online: bool) -> None: ...
+
+    def publish(
+        self, topic: str, payload: dict[str, object] | str, retain: bool = False, qos: int = 1
+    ) -> None: ...
+
+    def subscribe(self, topic: str, handler: MessageHandler) -> None: ...
 
 
 class MqttBridge:

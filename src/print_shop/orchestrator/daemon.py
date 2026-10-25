@@ -14,6 +14,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from enum import StrEnum
 from pathlib import Path
 from queue import Empty, Queue
@@ -24,15 +25,17 @@ from pydantic import BaseModel
 
 from print_shop.core.checkpoint import open_checkpointer
 from print_shop.core.mqtt import (
+    Bridge,
     MqttBridge,
     MqttConfig,
     command_topic,
     gate_topic,
     state_topic,
 )
+from print_shop.expert.client import LLMConfig
 from print_shop.orchestrator.graph import build_graph
 from print_shop.printer.centauri import PrinterClient
-from print_shop.slicer.orca import SlicerProfiles
+from print_shop.slicer.orca import Slicer, SlicerProfiles, slice_model
 
 __all__ = [
     "Decision",
@@ -151,6 +154,9 @@ class Daemon:
         profiles: SlicerProfiles,
         workdir: Path,
         printer: PrinterClient | None = None,
+        llm: LLMConfig | None = None,
+        slicer: Slicer = slice_model,
+        bridge: Callable[[MqttConfig], Bridge] | None = None,
     ) -> None:
         """`printer` is what the approval gate ultimately commands.
 
@@ -158,6 +164,11 @@ class Daemon:
         the gate, and an approval fails at the hardware boundary instead of
         reaching for a machine nobody named. Pass `live_printer()` to make it
         real. The default is inert on purpose — see `src/printer/centauri.py`.
+
+        `llm` is the orientation model (`LLMConfig.from_settings()`); None
+        means geometric orientation, said so at the gate. `slicer` and
+        `bridge` default to the real Orca and the real broker; tests pass a
+        recorded slice and an in-memory broker.
         """
         self._cfg = cfg
         self._profiles = profiles
@@ -174,11 +185,16 @@ class Daemon:
             profiles,
             outdir_root=workdir,
             checkpointer=self._checkpointer,
+            llm=llm,
             printer=printer,
+            slicer=slicer,
         )
 
         # MQTT bridge.
-        self._bridge: MqttBridge | None = None
+        self._make_bridge: Callable[[MqttConfig], Bridge] = bridge or (
+            lambda cfg: MqttBridge(cfg, owns_availability=True)
+        )
+        self._bridge: Bridge | None = None
 
         # Job tracking.
         self._job_lock = threading.Lock()
@@ -200,7 +216,7 @@ class Daemon:
     def __enter__(self) -> Daemon:
         # The daemon owns the lifecycle, so it alone sets the Last Will and
         # publishes availability.
-        self._bridge = MqttBridge(self._cfg, owns_availability=True)
+        self._bridge = self._make_bridge(self._cfg)
         self._bridge.__enter__()
         self._bridge.announce()
         self._bridge.publish_availability(online=True)

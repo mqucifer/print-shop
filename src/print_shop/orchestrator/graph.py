@@ -47,7 +47,7 @@ from print_shop.ingest.orientation import candidates, write_rotated
 from print_shop.orchestrator.fitness import scoring_profiles
 from print_shop.printer.centauri import PreflightFailed, PrinterClient, preflight
 from print_shop.slicer.naming import job_id_from_filename, name_gcode
-from print_shop.slicer.orca import SliceResult, SlicerProfiles, slice_model
+from print_shop.slicer.orca import Slicer, SliceResult, SlicerProfiles, slice_model
 
 __all__ = ["build_graph", "graph_edges", "new_job"]
 
@@ -77,6 +77,7 @@ def build_graph(
     checkpointer: BaseCheckpointSaver[Any] | None = None,
     llm: LLMConfig | None = None,
     printer: PrinterClient | None = None,
+    slicer: Slicer = slice_model,
 ) -> Any:
     """Build and compile the print pipeline graph.
 
@@ -100,6 +101,9 @@ def build_graph(
             build-it-from-the-environment fallback: that fallback existed for
             one afternoon and it started an unattended print from the test
             suite.
+
+        slicer: What slices. The real Orca by default, a local process
+            with no hardware behind it; tests replay a recorded slice.
 
     Returns:
         A compiled LangGraph ``CompiledStateGraph``.
@@ -168,11 +172,7 @@ def build_graph(
         active_profiles = (
             scoring_profiles(profiles, outdir) if overhang_area > 0 else profiles
         )
-        result = slice_model(
-            stl_path=stl_to_slice,
-            profiles=active_profiles,
-            outdir=outdir,
-        )
+        result = slicer(stl_to_slice, active_profiles, outdir)
         # Orca always writes `plate_1.gcode`. The printer's storage is one flat
         # namespace and `start_print` takes a bare name, so the file is renamed
         # to carry the job id before anything can upload it.

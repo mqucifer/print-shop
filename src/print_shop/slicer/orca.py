@@ -12,12 +12,20 @@ import re
 import signal
 import subprocess
 from pathlib import Path
+from typing import Protocol
 
 from pydantic import BaseModel
 
 from print_shop.core.state import SliceResult
 
-__all__ = ["SliceResult", "SlicerProfiles", "parse_duration", "slice_model"]
+__all__ = [
+    "SliceResult",
+    "Slicer",
+    "SlicerProfiles",
+    "parse_duration",
+    "parse_gcode_header",
+    "slice_model",
+]
 
 _DEFAULT_BINARY = Path("/Applications/OrcaSlicer.app/Contents/MacOS/OrcaSlicer")
 
@@ -57,6 +65,18 @@ class SlicerProfiles(BaseModel):
     datadir: Path | None = None
 
 
+class Slicer(Protocol):
+    """What the slice node calls. `slice_model` is the real one.
+
+    A seam so CI can replay a G-code the real Orca wrote once, through the
+    real header parser, on a runner that has no Orca.
+    """
+
+    def __call__(
+        self, stl_path: Path | str, profiles: SlicerProfiles, outdir: Path | str
+    ) -> SliceResult: ...
+
+
 
 
 def _first_value(raw: str) -> str:
@@ -70,7 +90,7 @@ def _first_value(raw: str) -> str:
     return re.split(r"[;,]", raw.strip())[0].strip().strip('"')
 
 
-def _parse_gcode_header(gcode_path: Path) -> SliceResult:
+def parse_gcode_header(gcode_path: Path) -> SliceResult:
     """Extract the metrics and settings Orca records in the G-code it writes.
 
     The metrics live in the header block at the top; the settings Orca used
@@ -242,4 +262,4 @@ def slice_model(
             f"stdout: {result.stdout}\nstderr: {result.stderr}"
         )
 
-    return _parse_gcode_header(gcode_path)
+    return parse_gcode_header(gcode_path)

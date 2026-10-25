@@ -1,0 +1,50 @@
+{
+  "_about": "SYNTHETIC SDCP payloads for a Centauri Carbon 1, built from pycentauri 0.9.x's models (Status.from_payload, Attributes.from_payload), not recorded from the machine. No test contacts the printer; the first real frames are recorded at the Sponsor's first deliberate print (mqucifer/print-shop#3) and replace these. {filename} is filled with the job's G-code name.",
+  "attributes": {
+    "MainboardID": "synthetic-mainboard",
+    "Name": "Centauri Carbon",
+    "MachineName": "Centauri Carbon",
+    "BrandName": "ELEGOO",
+    "FirmwareVersion": "V1.1.46",
+    "ProtocolVersion": "V3.0.0",
+    "Capabilities": ["FILE_TRANSFER", "PRINT_CONTROL", "VIDEO_STREAM"],
+    "RemainingMemory": 5098209280
+  },
+  "status": {
+    "idle": {
+      "CurrentStatus": [0],
+      "PrintInfo": {"Status": 0, "Filename": "", "CurrentLayer": 0, "TotalLayer": 0, "Progress": 0, "ErrNum": 0},
+      "TempOfNozzle": 24.0, "TempTargetNozzle": 0, "TempOfHotbed": 23.0, "TempTargetHotbed": 0
+    },
+    "preheating": {
+      "CurrentStatus": [1],
+      "PrintInfo": {"Status": 16, "Filename": "{filename}", "CurrentLayer": 0, "TotalLayer": 100, "Progress": 0, "ErrNum": 0},
+      "TempOfNozzle": 140.0, "TempTargetNozzle": 220, "TempOfHotbed": 48.0, "TempTargetHotbed": 60
+    },
+    "printing": {
+      "CurrentStatus": [1],
+      "PrintInfo": {"Status": 13, "Filename": "{filename}", "CurrentLayer": 40, "TotalLayer": 100, "Progress": 40, "ErrNum": 0},
+      "TempOfNozzle": 220.0, "TempTargetNozzle": 220, "TempOfHotbed": 60.0, "TempTargetHotbed": 60
+    },
+    "paused": {
+      "CurrentStatus": [1],
+      "PrintInfo": {"Status": 6, "Filename": "{filename}", "CurrentLayer": 41, "TotalLayer": 100, "Progress": 41, "ErrNum": 0},
+      "TempOfNozzle": 215.0, "TempTargetNozzle": 220, "TempOfHotbed": 60.0, "TempTargetHotbed": 60
+    },
+    "completed": {
+      "CurrentStatus": [0],
+      "PrintInfo": {"Status": 9, "Filename": "{filename}", "CurrentLayer": 100, "TotalLayer": 100, "Progress": 100, "ErrNum": 0},
+      "TempOfNozzle": 120.0, "TempTargetNozzle": 0, "TempOfHotbed": 55.0, "TempTargetHotbed": 0
+    },
+    "stopped": {
+      "CurrentStatus": [0],
+      "PrintInfo": {"Status": 8, "Filename": "{filename}", "CurrentLayer": 57, "TotalLayer": 100, "Progress": 57, "ErrNum": 0},
+      "TempOfNozzle": 180.0, "TempTargetNozzle": 0, "TempOfHotbed": 58.0, "TempTargetHotbed": 0
+    },
+    "error": {
+      "CurrentStatus": [0],
+      "PrintInfo": {"Status": 14, "Filename": "{filename}", "CurrentLayer": 12, "TotalLayer": 100, "Progress": 12, "ErrNum": 1},
+      "TempOfNozzle": 200.0, "TempTargetNozzle": 0, "TempOfHotbed": 59.0, "TempTargetHotbed": 0
+    }
+  }
+}

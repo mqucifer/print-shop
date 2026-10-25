@@ -49,8 +49,8 @@ from pathlib import Path
 from typing import Protocol
 
 from pycentauri import Printer
+from pycentauri.models import Attributes, Status
 from pycentauri.models import PrintStatus as SdcpPrintStatus
-from pycentauri.models import Status
 from pydantic import BaseModel
 
 from print_shop.core.contracts import NoAutoFix, Verdict, Violation
@@ -66,6 +66,7 @@ __all__ = [
     "PrinterSnapshot",
     "live_printer",
     "preflight",
+    "snapshot_from",
 ]
 
 #: `PrintInfo.Status` codes on which starting a new print is safe. A whitelist:
@@ -229,6 +230,24 @@ def preflight(snapshot: PrinterSnapshot, gcode_path: Path) -> Verdict:
     return Verdict(tuple(violations))
 
 
+def snapshot_from(status: Status, attributes: Attributes) -> PrinterSnapshot:
+    """The printer's two SDCP replies as one typed snapshot. Pure.
+
+    Split out of the client so recorded replies (`tests/data/sdcp/`) go through
+    the same conversion as live ones.
+    """
+    remaining = attributes.raw.get("RemainingMemory")
+    return PrinterSnapshot(
+        print_status=status.print_status,
+        active_filename=status.active_filename,
+        # Bytes. Absent means unknown, and unknown must not read as room:
+        # zero makes the free-space check refuse rather than guess.
+        free_bytes=int(remaining) if isinstance(remaining, int | str) else 0,
+        machine=attributes.machine_name or "",
+        firmware=attributes.firmware_version or "",
+    )
+
+
 # --------------------------------------------------------------------------
 # The real client
 # --------------------------------------------------------------------------
@@ -347,16 +366,7 @@ class CentauriClient:
         attributes = await asyncio.wait_for(
             printer.attributes(), timeout=self.config.request_timeout_s
         )
-        remaining = attributes.raw.get("RemainingMemory")
-        return PrinterSnapshot(
-            print_status=status.print_status,
-            active_filename=status.active_filename,
-            # Bytes. Absent means unknown, and unknown must not read as room:
-            # zero makes the free-space check refuse rather than guess.
-            free_bytes=int(remaining) if isinstance(remaining, int | str) else 0,
-            machine=attributes.machine_name or "",
-            firmware=attributes.firmware_version or "",
-        )
+        return snapshot_from(status, attributes)
 
     async def _upload(self, local_path: Path) -> str:
         printer = await self._connect()
