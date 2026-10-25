@@ -23,9 +23,9 @@ from print_shop.printer.centauri import (
     PrinterClient,
     PrinterConfig,
 )
-from print_shop.slicer.orca import SlicerProfiles
+from print_shop.slicer.orca import BedType, SlicerProfiles, with_bed_type
 
-__all__ = ["Run", "build_run", "describe", "orca_profiles", "recording_path"]
+__all__ = ["Run", "bed_type", "build_run", "describe", "orca_profiles", "recording_path"]
 
 #: Where a run's per-job files go (rotated STLs, G-code, the job checkpoint).
 WORK_DIR = Path("~/print-shop/jobs").expanduser()
@@ -56,6 +56,24 @@ def orca_profiles(env: dict[str, str]) -> SlicerProfiles:
         if not path.is_file():
             raise FileNotFoundError(f"Orca profile not found: {path}")
     return SlicerProfiles(machine=machine, process=process, filament=filament, datadir=datadir)
+
+
+def bed_type(env: dict[str, str]) -> BedType:
+    """The plate on the printer: `ORCA_BED_TYPE` in the settings, else textured PEI.
+
+    Textured PEI is the Sponsor's answer (2026-10-25, on mqucifer/print-shop#3).
+    The Elegoo process profile's own default, the Cool Plate, heats the bed to
+    only 35 C for PLA.
+
+    Raises:
+        ValueError: If the setting names a plate this code has not read back.
+    """
+    value = env.get("ORCA_BED_TYPE") or BedType.TEXTURED_PEI.value
+    try:
+        return BedType(value)
+    except ValueError:
+        known = ", ".join(repr(b.value) for b in BedType)
+        raise ValueError(f"ORCA_BED_TYPE={value!r} is not one of {known}") from None
 
 
 def recording_path() -> Path:
@@ -97,7 +115,7 @@ def build_run(
     work.mkdir(parents=True, exist_ok=True)
     daemon = Daemon(
         cfg=cfg,
-        profiles=orca_profiles(env),
+        profiles=with_bed_type(orca_profiles(env), bed_type(env), work / "profiles"),
         workdir=work,
         printer=printer,
         llm=LLMConfig.from_settings(path),
@@ -119,6 +137,8 @@ def describe(row: Row) -> str:
         f" {row.filament_cm3} cm3, {row.layer_count} layers",
         f"profiles       {row.slicer_settings.get('printer_settings_id', '?')} /"
         f" {row.slicer_settings.get('print_settings_id', '?')} / {row.filament}",
+        f"plate          {row.slicer_settings.get('curr_bed_type', '?')},"
+        f" bed {row.slicer_settings.get('first_layer_bed_temperature', '?')} C",
         f"printer        {row.printer_machine} {row.printer_firmware}",
         f"asked to start {row.start_requested_at}",
         f"started        {row.started_at or '-'}",

@@ -7,10 +7,12 @@ read the G-code it writes to local disk, and parse the header comments.
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import re
 import signal
 import subprocess
+from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
 
@@ -19,6 +21,7 @@ from pydantic import BaseModel
 from print_shop.core.state import SliceResult
 
 __all__ = [
+    "BedType",
     "SliceResult",
     "Slicer",
     "SlicerProfiles",
@@ -26,6 +29,7 @@ __all__ = [
     "parse_duration",
     "parse_gcode_header",
     "slice_model",
+    "with_bed_type",
 ]
 
 _DEFAULT_BINARY = Path("/Applications/OrcaSlicer.app/Contents/MacOS/OrcaSlicer")
@@ -64,6 +68,38 @@ class SlicerProfiles(BaseModel):
     process: Path
     filament: Path | None = None
     datadir: Path | None = None
+
+
+class BedType(StrEnum):
+    """The build plate, as Orca names it in `curr_bed_type`.
+
+    The plate sets the bed temperature: Orca takes it from the filament
+    profile's per-plate value (`cool_plate_temp`, `textured_plate_temp`, ...).
+    Only the plates whose slices have been read back are listed. The Elegoo
+    process profile defaults to the Cool Plate, 35 C for Elegoo PLA; this
+    printer has a textured PEI plate (the Sponsor, 2026-10-25, written on
+    mqucifer/print-shop#3), which takes 45 C.
+    """
+
+    COOL = "Cool Plate"
+    TEXTURED_PEI = "Textured PEI Plate"
+
+
+def with_bed_type(profiles: SlicerProfiles, bed: BedType, workdir: Path) -> SlicerProfiles:
+    """`profiles` with the process profile's plate set to `bed`.
+
+    Orca's command line has no bed-type option, so the process profile is
+    copied whole with `curr_bed_type` set, keeping its name and `inherits`.
+    A whole copy rather than an overlay, because an overlay names its parent
+    by `inherits` and Orca resolves that only in its own data directory: an
+    overlay on this copy (`scoring_profiles`) would not find it.
+    """
+    base = json.loads(Path(profiles.process).read_text())
+    derived = {**base, "curr_bed_type": bed.value}
+    workdir.mkdir(parents=True, exist_ok=True)
+    out = workdir / f"process_{bed.name.lower()}.json"
+    out.write_text(json.dumps(derived, indent=2))
+    return profiles.model_copy(update={"process": out})
 
 
 class Slicer(Protocol):

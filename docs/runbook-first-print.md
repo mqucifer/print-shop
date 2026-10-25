@@ -18,7 +18,7 @@ About 40 minutes: 10 to set up, about 17 printing, and the rest watching and ans
    | `PRINTER_HOST`, `PRINTER_MAINBOARD_ID` | the Centauri Carbon |
    | `CREW_LLM_API_KEY` | a LiteLLM key for the orientation model, issued by the operator. Not the proxy's master key |
 
-   Optional: `PRINT_SHOP_LEDGER` (default `~/print-shop/ledger.sqlite`), `PRINT_SHOP_LLM_URL` and `PRINT_SHOP_LLM_MODEL` (default LiteLLM at `127.0.0.1:4000`, alias `crew-code`), and `ORCA_DATADIR`, `ORCA_MACHINE`, `ORCA_PROCESS`, `ORCA_FILAMENT` (default Orca's Elegoo Centauri Carbon 0.4 nozzle, 0.20 mm Standard, Elegoo PLA).
+   Optional: `PRINT_SHOP_LEDGER` (default `~/print-shop/ledger.sqlite`), `PRINT_SHOP_LLM_URL` and `PRINT_SHOP_LLM_MODEL` (default LiteLLM at `127.0.0.1:4000`, alias `crew-code`), and `ORCA_DATADIR`, `ORCA_MACHINE`, `ORCA_PROCESS`, `ORCA_FILAMENT` (default Orca's Elegoo Centauri Carbon 0.4 nozzle, 0.20 mm Standard, Elegoo PLA), and `ORCA_BED_TYPE` (default `Textured PEI Plate`; the other value is `Cool Plate`).
 
 2. **Nothing from the prototype is running.** Both use the same topics. The prototype has no daemon command of its own, so one would only be running if someone started it by hand, from `~/Documents/git/3d-print-agent`. If one is, stop it.
 
@@ -34,7 +34,7 @@ About 40 minutes: 10 to set up, about 17 printing, and the rest watching and ans
 5. **At the printer:**
    - **The bed is clear and clean.** The agent treats a printer that just finished as ready, so it would print onto a part left on the plate (the prototype's BACKLOG). You are the check.
    - PLA is loaded: the profile slices for Elegoo PLA at 210 °C on the nozzle.
-   - **The plate.** The slice is for Orca's **Cool Plate**, which heats the bed to only **35 °C** (`M140 S35` in the G-code). The prototype's notes describe a textured PEI plate on this printer. If that's what is fitted, stop here and tell the operator before printing: the plate type is a slicer setting, and PLA at 35 °C on PEI may not stick.
+   - **The plate is the textured PEI plate,** textured side up. The slice is for it: Orca's `Textured PEI Plate`, which heats the bed to **45 °C** (`M140 S45` in the G-code). That's your answer of 2026-10-25 on mqucifer/print-shop#3. The Elegoo profile's own default, the Cool Plate, heats it to only 35 °C. If a different plate is fitted, stop and tell the operator: don't print.
    - You know where Home Assistant's emergency stop is. That is how a print is stopped: not this program, and not Ctrl-C.
 
 6. **A dry run, unarmed.** Run step 1 below without the flag first. It slices, the approval card appears, and pressing **No, stop** ends it. That proves the settings, the broker and the model without the printer. At the gate the program prints the orientation and why. If it says "Model endpoint was unavailable", orientation fell back to geometry: fine for this print, but tell the operator.
@@ -76,7 +76,7 @@ About 40 minutes: 10 to set up, about 17 printing, and the rest watching and ans
 2. **Check the row against what happened.** The program prints the row when you answer, or show it any time with `uv run python scripts/print_job.py --list`. Check:
    - [ ] the part is `cube.stl`, and the G-code name carries the job id;
    - [ ] the orientation is what the program printed at the gate, and its source is `model:crew-code` (or `geometric` if the model was unavailable);
-   - [ ] the profiles are the Centauri Carbon 0.4 nozzle, 0.20 mm Standard and Elegoo PLA, on the plate you checked;
+   - [ ] the profiles are the Centauri Carbon 0.4 nozzle, 0.20 mm Standard and Elegoo PLA, and the plate line reads `Textured PEI Plate, bed 45 C`;
    - [ ] the printer is the Centauri Carbon with its firmware version;
    - [ ] asked to start, started and ended are in that order, and roughly match the clock;
    - [ ] the printer's end state is what the screen showed;

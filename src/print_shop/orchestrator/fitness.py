@@ -35,7 +35,7 @@ def scoring_profiles(profiles: SlicerProfiles, workdir: Path) -> SlicerProfiles:
     The derived JSON is written into `workdir` so it survives independently of
     the caller's temp directory. `compatible_printers` is copied verbatim from
     the base profile — omit it and Orca exits 239 with "process not compatible
-    with printer".
+    with printer". So is the plate, `curr_bed_type`, when the base sets one.
     """
     base = json.loads(Path(profiles.process).read_text())
 
@@ -47,6 +47,10 @@ def scoring_profiles(profiles: SlicerProfiles, workdir: Path) -> SlicerProfiles:
         "compatible_printers": base["compatible_printers"],
     }
     derived.update(_SCORING_OVERRIDES)
+    # The overlay inherits from the system profile by name, so a plate set on
+    # the profile it was given (`with_bed_type`) would be lost: carry it.
+    if "curr_bed_type" in base:
+        derived["curr_bed_type"] = base["curr_bed_type"]
 
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)

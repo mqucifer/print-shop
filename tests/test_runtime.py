@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 from types import ModuleType
 
@@ -43,6 +44,8 @@ def test_a_run_is_unarmed_unless_handed_a_printer(settings: Path, tmp_path: Path
         assert run.daemon._watch_printer is not None
         assert run.daemon._watch_printer.enable_control is False  # type: ignore[attr-defined]
         assert run.ledger.path == tmp_path / "ledger.sqlite"
+        process = json.loads(run.daemon._profiles.process.read_text())
+        assert process["curr_bed_type"] == "Textured PEI Plate", "the Sponsor's plate"
     finally:
         run.ledger.close()
 

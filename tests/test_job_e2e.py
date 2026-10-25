@@ -20,6 +20,7 @@ from print_shop.core.mqtt import MqttConfig, command_topic, gate_topic, state_to
 from print_shop.ledger import Ledger
 from print_shop.orchestrator.daemon import Daemon
 from print_shop.slicer.naming import job_id_from_filename
+from print_shop.slicer.orca import SlicerProfiles
 from tests.fakes import CI_PROFILES, FramePrinter, MemoryBridge, RecordedSlicer
 from tests.fixtures import write_stl
 
@@ -35,7 +36,7 @@ CFG = MqttConfig(
 
 
 class Rig:
-    def __init__(self, tmp_path: Path) -> None:
+    def __init__(self, tmp_path: Path, profiles: SlicerProfiles = CI_PROFILES) -> None:
         self.bridge = MemoryBridge()
         self.printer = FramePrinter()
         self.slicer = RecordedSlicer()
@@ -43,7 +44,7 @@ class Rig:
         self.ledger = Ledger(tmp_path / "ledger.sqlite")
         self.daemon = Daemon(
             cfg=CFG,
-            profiles=CI_PROFILES,
+            profiles=profiles,
             workdir=tmp_path / "work",
             printer=self.printer,
             slicer=self.slicer,

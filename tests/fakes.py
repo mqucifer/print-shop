@@ -60,10 +60,13 @@ def installed_or_ci(real: SlicerProfiles) -> SlicerProfiles:
 
 @dataclass
 class RecordedSlicer:
-    """A `Slicer` that replays recordings keyed by the STL's sha256."""
+    """A `Slicer` that replays recordings keyed by the STL's sha256 and the plate."""
 
-    recordings: dict[str, Path] = field(
-        default_factory=lambda: {CUBE_SHA256: DATA / "recorded" / "cube.gcode"}
+    recordings: dict[tuple[str, str], Path] = field(
+        default_factory=lambda: {
+            (CUBE_SHA256, "Cool Plate"): DATA / "recorded" / "cube.gcode",
+            (CUBE_SHA256, "Textured PEI Plate"): DATA / "recorded" / "cube_pei.gcode",
+        }
     )
     calls: list[Path] = field(default_factory=list)
 
@@ -73,10 +76,14 @@ class RecordedSlicer:
         stl = Path(stl_path)
         self.calls.append(stl)
         digest = hashlib.sha256(stl.read_bytes()).hexdigest()
-        recording = self.recordings.get(digest)
+        # The plate is the one setting a recording varies by; the Elegoo
+        # process profile's own default is the Cool Plate.
+        process = json.loads(Path(profiles.process).read_text())
+        plate = process.get("curr_bed_type", "Cool Plate")
+        recording = self.recordings.get((digest, plate))
         if recording is None:
             raise RuntimeError(
-                f"no recorded slice for {stl.name} (sha256 {digest[:12]}); "
+                f"no recorded slice for {stl.name} (sha256 {digest[:12]}) on the {plate}; "
                 f"slice it once with the real Orca and add it to tests/data/recorded/"
             )
         out = Path(outdir)

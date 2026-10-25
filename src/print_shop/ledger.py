@@ -75,6 +75,7 @@ KEY_SETTINGS = (
     "nozzle_temperature",
     "hot_plate_temp",
     "curr_bed_type",
+    "first_layer_bed_temperature",
 )
 
 
