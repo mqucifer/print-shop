@@ -93,9 +93,11 @@ def test_a_filament_orcas_rule_forbids_is_refused(store: Path) -> None:
 
 
 def test_no_machine_for_the_nozzle_says_what_there_is(store: Path) -> None:
-    with pytest.raises(NoChoice, match="No standard machine fits") as refused:
+    with pytest.raises(NoChoice) as refused:
         choose(Store(store), nozzle_mm=0.6, filament="Maker PLA")
-    assert f'"{M08}"' in str(refused.value)
+    assert str(refused.value).startswith(
+        "No profile covers that nozzle: profiles/scope.json covers 0.4 mm, 0.8 mm."
+    ), "named as the scope, never sliced with Orca's defaults"
 
 
 def test_a_tuning_of_a_standard_the_store_lacks_is_refused(store: Path) -> None:

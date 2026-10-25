@@ -39,31 +39,45 @@ A print uses your tuning where there is one, and the standard where you haven't 
 
    Optional: `PRINT_SHOP_LEDGER` (default `~/print-shop/ledger.sqlite`), `PRINT_SHOP_LLM_URL` and `PRINT_SHOP_LLM_MODEL` (default LiteLLM at `127.0.0.1:4000`, alias `crew-code`), and `ORCA_BED_TYPE` (default `Textured PEI Plate`; the other value is `Cool Plate`). The `ORCA_MACHINE`, `ORCA_PROCESS`, `ORCA_FILAMENT` and `ORCA_DATADIR` keys are gone: the profiles come from `profiles/`, by what you say is fitted.
 
-2. **Nothing from the prototype is running.** Both use the same topics. The prototype has no daemon command of its own, so one would only be running if someone started it by hand, from `~/Documents/git/3d-print-agent`. If one is, stop it.
+2. **What's on hand, once** (mqucifer/print-shop#11). With no AMS to read, you tell print-shop what's fitted and loaded, one line each:
 
-3. **The dashboard.** In Home Assistant, replace the 3D Printing dashboard's raw configuration with `ha-configs/lovelace_3dprint.yaml` from this repository. It adds the outcome card ("How did it come out?"), which appears only when a print is waiting for an answer.
+   ```
+   uv run python scripts/stock.py printer add cc1 "Elegoo Centauri Carbon"
+   uv run python scripts/stock.py fit 0.4
+   uv run python scripts/stock.py add "Elegoo PLA" white --grams 1000
+   uv run python scripts/stock.py load 1
+   ```
 
-4. **The part.** The 20 mm test cube, the same one CI replays:
+   - `stock` alone lists what's on hand, loaded and fitted.
+   - `stock empty <id>` marks a spool used up.
+   - A variety you've tuned more than once asks which tuning the spool prints with, once, when you add it (`--tuning "…"`).
+   - Prints then take the fitted nozzle and the loaded spool by default, and say so.
+
+3. **Nothing from the prototype is running.** Both use the same topics. The prototype has no daemon command of its own, so one would only be running if someone started it by hand, from `~/Documents/git/3d-print-agent`. If one is, stop it.
+
+4. **The dashboard.** In Home Assistant, replace the 3D Printing dashboard's raw configuration with `ha-configs/lovelace_3dprint.yaml` from this repository. It adds the outcome card ("How did it come out?"), which appears only when a print is waiting for an answer.
+
+5. **The part.** The 20 mm test cube, the same one CI replays:
 
    ```
    cd ~/Documents/git/print-shop
    uv run python -c "from pathlib import Path; from tests.fixtures import write_stl; d = Path('~/print-shop/parts').expanduser(); d.mkdir(parents=True, exist_ok=True); print(write_stl('cube', d))"
    ```
 
-5. **At the printer:**
+6. **At the printer:**
    - **The bed is clear and clean.** The agent treats a printer that just finished as ready, so it would print onto a part left on the plate (the prototype's BACKLOG). You are the check.
-   - **The standard 0.4 mm nozzle is fitted,** and **Elegoo PLA is loaded.** You say so on the command line (`--nozzle 0.4 --filament "Elegoo PLA"`), and print-shop never assumes it. It uses your tunings: `Elegoo Centauri Carbon 0.4 nozzle - Copy`, `0.20mm Standard @Elegoo CC 0.4 nozzle - Copy` and `Elegoo PLA @ECC - Copy`, each over Elegoo's standard. The nozzle heats to 220 °C, your tuning's value. If another filament is loaded, name its variety, such as `"Elegoo PETG"`. A variety you've tuned more than once (`"Elegoo Rapid PETG"`) lists your tunings to name one, and a type (`PLA`) lists the varieties.
+   - **The standard 0.4 mm nozzle is fitted,** and **Elegoo PLA is loaded.** The inventory says so (step 2), and print-shop never assumes it. The print says "From the inventory: cc1 with a 0.4 mm nozzle; spool #1, Elegoo PLA, white". If what's at the printer differs, change the inventory first (`stock fit`, `stock load`). A nozzle the profiles don't cover (0.6 or 0.8 today) is refused, naming `profiles/scope.json`. It uses your tunings: `Elegoo Centauri Carbon 0.4 nozzle - Copy`, `0.20mm Standard @Elegoo CC 0.4 nozzle - Copy` and `Elegoo PLA @ECC - Copy`, each over Elegoo's standard. The nozzle heats to 220 °C, your tuning's value. If another filament is loaded, name its variety, such as `"Elegoo PETG"`. A variety you've tuned more than once (`"Elegoo Rapid PETG"`) lists your tunings to name one, and a type (`PLA`) lists the varieties.
    - **The plate is the textured PEI plate,** textured side up. The slice is for it: Orca's `Textured PEI Plate`, and your PLA preset heats it to **60 °C** (`M140 S60` in the G-code). An earlier version of this runbook said 45 °C. That came from slicing Orca's system files without their parents, so Orca filled the bed temperature from its own defaults; Elegoo's PLA profile, and your copy of it, say 60. If a different plate is fitted, stop and tell the operator: don't print.
    - You know where Home Assistant's emergency stop is. That is how a print is stopped: not this program, and not Ctrl-C.
 
-6. **A dry run, unarmed.** Run step 1 below without the flag first. It first prints what it was told is fitted and the three profiles it chose: your tuning, or the standard where you haven't tuned. It slices, the approval card appears, and pressing **No, stop** ends it. That proves the settings, the broker and the model without the printer. At the gate the program prints the orientation and why. If it says "Model endpoint was unavailable", orientation fell back to geometry: fine for this print, but tell the operator.
+7. **A dry run, unarmed.** Run step 1 below without the flag first. It first prints what it was told is fitted and the three profiles it chose: your tuning, or the standard where you haven't tuned. It slices, the approval card appears, and pressing **No, stop** ends it. That proves the settings, the broker and the model without the printer. At the gate the program prints the orientation and why. If it says "Model endpoint was unavailable", orientation fell back to geometry: fine for this print, but tell the operator.
 
 ## The print
 
 1. **Arm and run, in one command:**
 
    ```
-   PRINT_AGENT_ALLOW_HARDWARE=1 uv run python scripts/print_job.py ~/print-shop/parts/cube.stl --nozzle 0.4 --filament "Elegoo PLA" --record
+   PRINT_AGENT_ALLOW_HARDWARE=1 uv run python scripts/print_job.py ~/print-shop/parts/cube.stl --record
    ```
 
    It should say `ARMED`, and that it is recording to `~/print-shop/recordings/sdcp-<time>.jsonl`. If it says `Not armed`, the flag didn't reach it: stop with Ctrl-C and type it again on the same line.
@@ -111,6 +125,7 @@ A print uses your tuning where there is one, and the standard where you haven't 
    - [ ] the part is `cube.stl`, and the G-code name carries the job id;
    - [ ] the orientation is what the program printed at the gate, and its source is `model:crew-code` (or `geometric` if the model was unavailable);
    - [ ] the profiles are `Elegoo Centauri Carbon 0.4 nozzle - Copy`, `0.20mm Standard @Elegoo CC 0.4 nozzle - Copy` and `Elegoo PLA @ECC - Copy`, and the plate line reads `Textured PEI Plate, bed 60 C`;
+   - [ ] the material line names cc1, the 0.4 mm nozzle and your spool, by number and colour;
    - [ ] the store lines name `profiles/` at the commit you pulled, with no uncommitted changes, and each tuning's file over its standard's;
    - [ ] the intake line is your answers, each changed setting is listed with who changed it, and a `corrected` line lists any setting you corrected at the review;
    - [ ] the printer is the Centauri Carbon with its firmware version;
@@ -133,6 +148,10 @@ A print uses your tuning where there is one, and the standard where you haven't 
 |---|---|---|
 | `MQTT_USER is not set` or `CREW_LLM_API_KEY is not set` | the settings file is missing a key | add it; nothing was started |
 | `say what's fitted: --nozzle (mm) and --filament` | the nozzle or filament wasn't given | add both; nothing was started |
+| `The inventory isn't set up` | no printer in the inventory yet | do step 2 of Before, or give `--nozzle` and `--filament` |
+| `no nozzle is fitted` / `no spool is loaded` | the inventory doesn't say what's on the printer | `stock fit 0.4` / `stock load <id>` |
+| `the fitted nozzle on cc1 is …` / `loaded on cc1 is …` | what you named isn't what the inventory says is fitted or loaded | change the inventory to match the printer, then run again |
+| `No profile covers that nozzle` | the fitted nozzle is outside `profiles/scope.json` | fit the 0.4, or add the nozzle to the scope by PR |
 | `Several PLA varieties are in the store` | the filament was given by type | name the loaded variety, from the list |
 | `You've tuned '…' more than once` | that variety has several tunings | name the tuning you want, from the list |
 | `can't print with … by Orca's rule` | the filament isn't marked for this machine or process | don't print; tell the operator, and fix the preset in Orca, then re-import |

@@ -14,6 +14,7 @@ from pathlib import Path
 from print_shop.core.mqtt import MqttConfig
 from print_shop.env import SETTINGS_PATH, load_env
 from print_shop.expert.client import LLMConfig
+from print_shop.inventory import Material
 from print_shop.ledger import Ledger, Row, ledger_path
 from print_shop.orchestrator.daemon import Daemon
 from print_shop.orchestrator.outcome import end_name
@@ -38,14 +39,20 @@ WORK_DIR = Path("~/print-shop/jobs").expanduser()
 #: Where the first print's recorder writes. Outside every checkout.
 RECORDINGS_DIR = Path("~/print-shop/recordings").expanduser()
 
-def profiles_for(choice: Choice, store_root: Path, workdir: Path) -> SlicerProfiles:
-    """The chosen profiles composed whole into `workdir`, with what the ledger keeps."""
+def profiles_for(
+    choice: Choice, store_root: Path, workdir: Path, material: Material | None = None
+) -> SlicerProfiles:
+    """The chosen profiles composed whole into `workdir`, with what the ledger keeps.
+
+    `material` is the printer, nozzle and spool from the inventory, when the
+    print took them from it.
+    """
     paths = choice.compose(workdir)
     return SlicerProfiles(
         machine=paths["machine"],
         process=paths["process"],
         filament=paths["filament"],
-        used=choice.used(store_root),
+        used=choice.used(store_root).model_copy(update={"material": material}),
     )
 
 
@@ -148,6 +155,7 @@ def describe(row: Row) -> str:
         f" {row.slicer_settings.get('print_settings_id', '?')} / {row.filament}",
         *_store_lines(row),
         *_setup_lines(row),
+        *([f"material       {row.material.line()}"] if row.material else []),
         f"plate          {row.slicer_settings.get('curr_bed_type', '?')},"
         f" bed {row.slicer_settings.get('first_layer_bed_temperature', '?')} C",
         f"printer        {row.printer_machine} {row.printer_firmware}",

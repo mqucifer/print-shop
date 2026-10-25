@@ -39,6 +39,8 @@ from typing import Any
 from pydantic import BaseModel
 
 from print_shop.env import SETTINGS_PATH, load_env
+from print_shop.inventory import SCHEMA as INVENTORY_SCHEMA
+from print_shop.inventory import Material
 from print_shop.setup.intake import Intake
 from print_shop.setup.proposal import Change, Proposal
 from print_shop.slicer.store import ProfilesUsed
@@ -182,6 +184,8 @@ class Row(BaseModel):
     intake: Intake | None
     proposal: Proposal | None
     corrections: tuple[Change, ...] | None  # None: from before the review existed
+    #: The printer, nozzle and spool from the inventory (mqucifer/print-shop#11).
+    material: Material | None = None
     start_requested_at: str
     started_at: str | None
     start_error: str | None
@@ -292,6 +296,9 @@ class Ledger:
             for step in range(version + 1, SCHEMA_VERSION + 1):
                 self._conn.executescript(MIGRATIONS[step])
         self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        # The inventory's tables (mqucifer/print-shop#11) live in this file too,
+        # created if missing, without moving the ledger's schema version.
+        self._conn.executescript(INVENTORY_SCHEMA)
 
     def close(self) -> None:
         with self._lock:
@@ -360,6 +367,14 @@ class Ledger:
                 )
             except sqlite3.IntegrityError as exc:
                 raise LedgerError(f"job {record.job_id} is already in the ledger") from exc
+            material = record.profiles.material if record.profiles else None
+            if material is not None:
+                db.execute(
+                    "INSERT INTO print_material (job_id, printer_id, nozzle_mm, spool_id, spool)"
+                    " VALUES (?, ?, ?, ?, ?)",
+                    (record.job_id, material.printer_id, material.nozzle_mm,
+                     material.spool_id, material.model_dump_json()),
+                )
 
     def record_started(self, job_id: str) -> None:
         """The printer was seen to leave its ready state for this job."""
@@ -407,13 +422,13 @@ class Ledger:
 
     def get(self, job_id: str) -> Row | None:
         with self._lock:
-            row = self._conn.execute("SELECT * FROM prints WHERE job_id = ?", (job_id,)).fetchone()
+            row = self._conn.execute(_SELECT + " WHERE p.job_id = ?", (job_id,)).fetchone()
         return _row(row) if row is not None else None
 
     def rows(self) -> list[Row]:
         with self._lock:
             found = self._conn.execute(
-                "SELECT * FROM prints ORDER BY start_requested_at, rowid"
+                _SELECT + " ORDER BY p.start_requested_at, p.rowid"
             ).fetchall()
         return [_row(r) for r in found]
 
@@ -434,8 +449,17 @@ class Ledger:
         ]
 
 
+#: A print, and what it used from the inventory if it did.
+_SELECT = (
+    "SELECT p.*, m.spool AS material FROM prints p "
+    "LEFT JOIN print_material m ON m.job_id = p.job_id"
+)
+
+
 def _row(row: sqlite3.Row) -> Row:
     data = dict(row)
+    if data["material"] is not None:
+        data["material"] = Material.model_validate_json(data["material"])
     data["rotation_deg"] = tuple(json.loads(data["rotation_deg"]))
     data["orientation_accepted"] = bool(data["orientation_accepted"])
     data["slicer_settings"] = json.loads(data["slicer_settings"])
