@@ -18,11 +18,12 @@
 
 name: board
 
+# Off until the crew takes this repository over (ADR 0030 in mqucifer/crew).
+# It's a Claude-built alpha, tracked on the Crew roadmap board (project 2),
+# and this workflow would put its issues on the crew's delivery board
+# (project 1). Takeover restores these triggers:
+#   issues: types [opened, closed]; pull_request: types [closed]
 on:
-  issues:
-    types: [opened, closed]
-  pull_request:
-    types: [closed]
   # The one-time sweep. Built-in workflows cannot do this at all: enabling one
   # fixes the future and leaves every card already in the wrong column.
   workflow_dispatch:

@@ -16,3 +16,6 @@ is missing, so older projects catch up when the template changes.
 
 Nothing here depends on the project's language: that comes from its design. Stories
 don't change these files; the template does, by pull request.
+
+## Before the crew takes it over
+This repository is a Claude-built alpha, tracked on the Crew roadmap board (https://github.com/orgs/mqucifer/projects/2). Its board workflow (`.github/workflows/board.yml`) runs only by hand, so its issues stay off the crew's delivery board. **At takeover, restore its `issues` and `pull_request` triggers,** as the comment in that file says.
