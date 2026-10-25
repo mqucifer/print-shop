@@ -27,7 +27,7 @@ profiles, the way the plate is (`with_bed_type`).
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -57,6 +57,9 @@ class Change(BaseModel):
 
     key: str
     preset: str  # the preset's own value, as Orca writes it
+    #: Where the preset is the Sponsor's tuning of a standard (mqucifer/print-shop#8),
+    #: the standard's value, so the review shows standard -> tuning -> this print.
+    standard: str = ""
     value: str
     reason: str
     source: Source
@@ -109,6 +112,9 @@ class PartFacts:
     machine: dict[str, Any]
     process: dict[str, Any]
     filament: dict[str, Any]
+    #: The standards the process and filament tune, when they are tunings.
+    standard_process: dict[str, Any] = field(default_factory=dict)
+    standard_filament: dict[str, Any] = field(default_factory=dict)
 
     def feature(self, id: str) -> float:
         return next((f.value for f in self.features if f.id == id), 0.0)
@@ -117,6 +123,15 @@ class PartFacts:
         setting = SETTINGS.get(key)
         data = self.filament if setting is not None and setting.filament else self.process
         return _first(data.get(key, ""))
+
+    def standard(self, key: str) -> str:
+        """The standard's value for `key`, or '' when the preset is the standard itself."""
+        setting = SETTINGS.get(key)
+        data = (
+            self.standard_filament if setting is not None and setting.filament
+            else self.standard_process
+        )
+        return _first(data.get(key, "")) if data else ""
 
     @property
     def presets(self) -> dict[str, dict[str, Any]]:
@@ -157,8 +172,12 @@ def guard(facts: PartFacts, proposal: Proposal) -> Proposal:
             "past vertical: a chamfer to 45 degrees or a support designed into the part "
             "would print without Orca's supports. That's a design change, for the CAD side."
         ))
+    def with_standard(c: Change) -> Change:
+        return c.model_copy(update={"standard": facts.standard(c.key)})
+
     return proposal.model_copy(update={
-        "changes": tuple(changes),
+        "changes": tuple(with_standard(c) for c in changes),
+        "kept": tuple(with_standard(c) for c in proposal.kept),
         "design_notes": tuple(design),
         "notes": proposal.notes + tuple(_notes(facts)),
     })

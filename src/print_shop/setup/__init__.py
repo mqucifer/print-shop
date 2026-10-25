@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from print_shop.expert.client import LLMConfig
 from print_shop.setup.features import Feature
@@ -18,6 +18,7 @@ from print_shop.setup.intake import Intake
 from print_shop.setup.model import Ask, llm_ask, propose_by_model
 from print_shop.setup.proposal import PartFacts, Proposal, guard
 from print_shop.setup.skill import groups_for, load
+from print_shop.slicer.store import STORE_DIR
 
 if TYPE_CHECKING:  # the slicer imports the job state, which imports this
     from print_shop.slicer.orca import SlicerProfiles
@@ -41,6 +42,8 @@ class Proposer:
             machine=json.loads(profiles.machine.read_text()),
             process=json.loads(profiles.process.read_text()),
             filament=json.loads(profiles.filament.read_text()) if profiles.filament else {},
+            standard_process=_standard(profiles, "process"),
+            standard_filament=_standard(profiles, "filament"),
         )
         skill = load(groups_for(intake, features))
         if self.ask is not None:
@@ -50,3 +53,15 @@ class Proposer:
         else:
             reasoned = Proposal(model="")
         return guard(facts, reasoned)
+
+
+def _standard(profiles: SlicerProfiles, kind: str) -> dict[str, Any]:
+    """The standard a tuned profile was composed over, from the store, or {}."""
+    if profiles.used is None:
+        return {}
+    ref = getattr(profiles.used, kind)
+    if not ref.standard_file:
+        return {}
+    path = STORE_DIR / ref.standard_file
+    data: dict[str, Any] = json.loads(path.read_text()) if path.is_file() else {}
+    return data

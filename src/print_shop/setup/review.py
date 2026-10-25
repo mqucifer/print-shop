@@ -73,11 +73,14 @@ def render(request: ReviewRequest) -> str:
     changes = proposal.changes
     if changes:
         width = max(len(c.key) for c in changes)
-        lines.append(f"  {'setting'.ljust(width)}  your preset -> this print")
+        tuned = any(c.standard for c in changes)
+        head = "standard -> your tuning -> this print" if tuned else "your preset -> this print"
+        lines.append(f"  {'setting'.ljust(width)}  {head}")
         for c in changes:
             by = {Source.MODEL: "model", Source.GUARD: "guard", Source.SPONSOR: "you"}[c.source]
             cites = ", ".join(x for x in (c.feature, c.knowledge) if x)
-            lines.append(f"  {c.key.ljust(width)}  {c.preset or '-'} -> {c.value}")
+            was = f"{c.standard} -> {c.preset or '-'}" if c.standard else (c.preset or "-")
+            lines.append(f"  {c.key.ljust(width)}  {was} -> {c.value}")
             lines.append(f"  {''.ljust(width)}    {c.reason} [{by}{': ' + cites if cites else ''}]")
     else:
         lines.append("  No changes: your presets as they are.")
@@ -135,9 +138,12 @@ def parse_answer(answer: str, request: ReviewRequest) -> Review | str:
             return f"'{key}' isn't a setting in the {tier} preset"
         preset = data[key]
         preset = str(preset[0] if isinstance(preset, list) and preset else preset)
+        known = request.proposal.get(key) or next(
+            (c for c in request.proposal.kept if c.key == key), None
+        )
         corrections.append(
             Change(key=key, preset=preset, value=value, reason=reason or "your correction",
-                   source=Source.SPONSOR)
+                   source=Source.SPONSOR, standard=known.standard if known else "")
         )
     return Review(corrections=tuple(corrections))
 

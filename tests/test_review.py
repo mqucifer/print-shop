@@ -77,6 +77,14 @@ def test_a_cut_off_is_shown_as_one() -> None:
     assert "only the guards' changes stand" in text
 
 
+def test_a_tuned_preset_shows_standard_then_tuning_then_this_print() -> None:
+    hotter = Proposal(changes=(Change(key="nozzle_temperature", standard="210", preset="220",
+                                      value="230", source=Source.MODEL, reason="bonding"),))
+    text = render(_request(hotter))
+    assert "setting             standard -> your tuning -> this print" in text
+    assert "nozzle_temperature  210 -> 220 -> 230" in text
+
+
 def test_ok_approves_and_stop_stops() -> None:
     assert parse_answer("ok", _request()) == Review(approved=True)
     assert parse_answer(" stop ", _request()) == Review(stop=True)

@@ -168,6 +168,15 @@ def _reply(*changes: dict[str, str], reasoning: str = "read") -> Ask:
     return lambda system, user, schema: reply
 
 
+def test_a_change_shows_the_standard_under_the_sponsors_tuning(tmp_path: Path) -> None:
+    """Elegoo PLA's standard is 210 C; the Sponsor tuned it to 220 (mqucifer/print-shop#8)."""
+    hotter = {"key": "nozzle_temperature", "value": "230", "feature": "section",
+              "knowledge": "temperature", "reason": "the flange's layer bonding"}
+    change = _proposal("bracket", tmp_path, _reply(hotter)).get("nozzle_temperature")
+    assert change is not None
+    assert (change.standard, change.preset, change.value) == ("210", "220", "230")
+
+
 def test_a_value_outside_its_bound_is_refused_not_clamped(tmp_path: Path) -> None:
     too_hot = {"key": "nozzle_temperature", "value": "260", "feature": "purpose",
                "knowledge": "temperature", "reason": "stronger"}
