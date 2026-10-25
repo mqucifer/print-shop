@@ -1,6 +1,6 @@
 """Run one print job, or serve the outcome gate, on the Mac.
 
-    uv run python scripts/print_job.py PART.stl --nozzle 0.4 --filament PLA [--record]
+    uv run python scripts/print_job.py PART.stl --nozzle 0.4 --filament NAME [--intake F] [--record]
     uv run python scripts/print_job.py --serve [--record]
     uv run python scripts/print_job.py --list
 
@@ -9,6 +9,11 @@ preset by name (a type such as PLA works when only one preset has it).
 Without them a print is refused. The machine and process come from
 `profiles/pairings.json`, checked by Orca's compatibility rule; when it
 refuses or ties it says why, and `--machine` and `--process` name the ones.
+
+**Then what the part is for:** a few questions (or `--intake` a JSON file).
+The settings are proposed from them and the part's shape, over the presets,
+and shown here for review: `ok`, or correct a setting by name and it slices
+again. Home Assistant's approval gate comes after that, unchanged.
 
 **This is the only place that arms the printer,** and only when the invocation
 says so: `PRINT_AGENT_ALLOW_HARDWARE=1` on this command's own line. Without it
@@ -35,6 +40,8 @@ from print_shop.env import SETTINGS_PATH
 from print_shop.ledger import Ledger, ledger_path
 from print_shop.printer.centauri import FrameRecorder, PrinterClient, live_printer
 from print_shop.runtime import build_run, describe, profiles_for, recording_path
+from print_shop.setup.intake import Intake, ask, read_intake
+from print_shop.setup.review import cli_reviewer
 from print_shop.slicer.orca import SlicerProfiles
 from print_shop.slicer.store import STORE_DIR, NoChoice, Store, choose
 
@@ -52,6 +59,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--filament", help="the loaded filament preset's name (or its type)")
     parser.add_argument("--machine", help="a machine profile's exact name, over the pairing")
     parser.add_argument("--process", help="a process profile's exact name, over the pairing")
+    parser.add_argument("--intake", type=Path, help="what the part is for, as JSON (else asked)")
     parser.add_argument(
         "--settings", type=Path, default=SETTINGS_PATH, help="the settings file (a path)"
     )
@@ -69,6 +77,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"{args.stl} is not a file")
 
     profiles: SlicerProfiles | None = None
+    intake: Intake | None = None
     if args.stl is not None:
         if args.nozzle is None or not args.filament:
             parser.error("say what's fitted: --nozzle (mm) and --filament (PLA, or a name)")
@@ -90,6 +99,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  filament  {choice.filament.name}")
         for note in choice.notes:
             print(f"  ({note})")
+        try:
+            intake = read_intake(args.intake) if args.intake else ask()
+        except ValueError as exc:
+            parser.error(str(exc))
 
     recorder = FrameRecorder(recording_path()) if args.record else None
     printer: PrinterClient | None = None
@@ -102,7 +115,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Recording the printer's replies to {recorder.path}")
 
     run = build_run(
-        printer=printer, profiles=profiles, recorder=recorder, settings=args.settings
+        printer=printer,
+        profiles=profiles,
+        recorder=recorder,
+        settings=args.settings,
+        reviewer=cli_reviewer(),
     )
     try:
         with run.daemon:
@@ -111,8 +128,8 @@ def main(argv: list[str] | None = None) -> int:
                 while True:
                     time.sleep(1)
 
-            job_id = run.daemon.submit(args.stl)
-            print(f"Job {job_id}: slicing, then waiting for Approve in Home Assistant.")
+            job_id = run.daemon.submit(args.stl, intake)
+            print(f"Job {job_id}: proposing settings and slicing; the review follows here.")
             run.daemon.wait_for_gate(job_id, timeout_s=APPROVAL_WAIT_S)
             gate = run.daemon.pending_gate() or {}
             print("At the approval gate. Approve or Reject on the dashboard.")

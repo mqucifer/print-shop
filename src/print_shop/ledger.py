@@ -39,6 +39,8 @@ from typing import Any
 from pydantic import BaseModel
 
 from print_shop.env import SETTINGS_PATH, load_env
+from print_shop.setup.intake import Intake
+from print_shop.setup.proposal import Change, Proposal
 from print_shop.slicer.store import ProfilesUsed
 
 __all__ = [
@@ -149,6 +151,12 @@ class PrintRecord(BaseModel):
     printer_firmware: str
     #: print-shop's own profiles the slice used (mqucifer/print-shop#6).
     profiles: ProfilesUsed | None = None
+    #: What the part is for, the settings proposed over the presets (the
+    #: Sponsor's corrections in place), and the corrections on their own:
+    #: what the Sponsor would have tuned (mqucifer/print-shop#7).
+    intake: Intake | None = None
+    proposal: Proposal | None = None
+    corrections: tuple[Change, ...] = ()
 
 
 class Row(BaseModel):
@@ -171,6 +179,9 @@ class Row(BaseModel):
     printer_firmware: str
     filament: str
     profiles: ProfilesUsed | None
+    intake: Intake | None
+    proposal: Proposal | None
+    corrections: tuple[Change, ...] | None  # None: from before the review existed
     start_requested_at: str
     started_at: str | None
     start_error: str | None
@@ -207,6 +218,9 @@ CREATE TABLE IF NOT EXISTS prints (
     printer_firmware      TEXT NOT NULL,
     filament              TEXT NOT NULL,          -- the filament profile sliced with
     profiles              TEXT,                   -- JSON ProfilesUsed: store files, hashes, commit
+    intake                TEXT,                   -- JSON Intake: what the part is for
+    proposal              TEXT,                   -- JSON Proposal: changes over presets, why
+    corrections           TEXT,                   -- JSON [Change]: the Sponsor's, at the review
     start_requested_at    TEXT NOT NULL,          -- ISO-8601 UTC, before start()
     started_at            TEXT,                   -- the printer was seen to start
     start_error           TEXT,
@@ -224,12 +238,18 @@ CREATE TABLE IF NOT EXISTS prints (
 );
 """
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 #: What each version adds to the one before, applied in order to an older file.
 #: 2: the profiles a print used, by store file, hash and commit (print-shop#6).
 #: A row from before has none: NULL, not a guess.
-MIGRATIONS = {2: "ALTER TABLE prints ADD COLUMN profiles TEXT"}
+#: 3: the intake, the proposed settings and the Sponsor's corrections (print-shop#7).
+MIGRATIONS = {
+    2: "ALTER TABLE prints ADD COLUMN profiles TEXT",
+    3: "ALTER TABLE prints ADD COLUMN intake TEXT;"
+    " ALTER TABLE prints ADD COLUMN proposal TEXT;"
+    " ALTER TABLE prints ADD COLUMN corrections TEXT",
+}
 
 
 def ledger_path(settings: Path | None = None) -> Path:
@@ -270,7 +290,7 @@ class Ledger:
             self._conn.executescript(SCHEMA)
         else:
             for step in range(version + 1, SCHEMA_VERSION + 1):
-                self._conn.execute(MIGRATIONS[step])
+                self._conn.executescript(MIGRATIONS[step])
         self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
     def close(self) -> None:
@@ -310,8 +330,9 @@ class Ledger:
                         orientation_rationale, orientation_accepted, gcode_name,
                         print_time_s, filament_cm3, layer_count, slicer_settings,
                         slicer_config, slicer_config_sha256, printer_machine,
-                        printer_firmware, filament, profiles, start_requested_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        printer_firmware, filament, profiles, intake, proposal,
+                        corrections, start_requested_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         record.job_id,
                         record.stl_name,
@@ -331,6 +352,9 @@ class Ledger:
                         record.printer_firmware,
                         config.get("filament_settings_id", ""),
                         record.profiles.model_dump_json() if record.profiles else None,
+                        record.intake.model_dump_json() if record.intake else None,
+                        record.proposal.model_dump_json() if record.proposal else None,
+                        json.dumps([c.model_dump(mode="json") for c in record.corrections]),
                         _now(),
                     ),
                 )
@@ -417,5 +441,12 @@ def _row(row: sqlite3.Row) -> Row:
     data["slicer_settings"] = json.loads(data["slicer_settings"])
     if data["profiles"] is not None:
         data["profiles"] = ProfilesUsed.model_validate_json(data["profiles"])
+    if data["intake"] is not None:
+        data["intake"] = Intake.model_validate_json(data["intake"])
+    if data["proposal"] is not None:
+        data["proposal"] = Proposal.model_validate_json(data["proposal"])
+    if data["corrections"] is not None:
+        found = json.loads(data["corrections"])
+        data["corrections"] = tuple(Change.model_validate(c) for c in found)
     del data["slicer_config"]
     return Row.model_validate(data)

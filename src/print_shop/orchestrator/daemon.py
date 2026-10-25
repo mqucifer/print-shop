@@ -37,6 +37,9 @@ from print_shop.ledger import Ledger
 from print_shop.orchestrator.graph import build_graph
 from print_shop.orchestrator.outcome import OutcomeDesk, Watcher
 from print_shop.printer.centauri import PrinterClient
+from print_shop.setup import Proposer
+from print_shop.setup.intake import Intake
+from print_shop.setup.review import Reviewer
 from print_shop.slicer.orca import Slicer, SlicerProfiles, slice_model
 
 __all__ = [
@@ -162,6 +165,8 @@ class Daemon:
         ledger: Ledger | None = None,
         watch_printer: PrinterClient | None = None,
         watch_poll_s: float = 60.0,
+        proposer: Proposer | None = None,
+        reviewer: Reviewer | None = None,
     ) -> None:
         """`printer` is what the approval gate ultimately commands.
 
@@ -205,6 +210,8 @@ class Daemon:
             printer=printer,
             slicer=slicer,
             ledger=ledger,
+            proposer=proposer,
+            reviewer=reviewer,
         )
 
         # MQTT bridge.
@@ -293,8 +300,11 @@ class Daemon:
 
     # -- public API ---------------------------------------------------------
 
-    def submit(self, stl_path: Path | str) -> str:
+    def submit(self, stl_path: Path | str, intake: Intake | None = None) -> str:
         """Submit a new job. Returns the job_id.
+
+        `intake` is what the part is for; with a proposer, the job's settings
+        are proposed from it and reviewed (mqucifer/print-shop#7).
 
         Raises JobRejected if a job is already active.
         """
@@ -310,7 +320,7 @@ class Daemon:
 
         self._worker = threading.Thread(
             target=self._run_job,
-            args=(job_id, str(stl_path)),
+            args=(job_id, str(stl_path), intake),
             daemon=True,
         )
         self._worker_alive = True
@@ -426,7 +436,7 @@ class Daemon:
             # scoping exists to close.
             inbox.put(cmd)
 
-    def _run_job(self, job_id: str, stl_path: str) -> None:
+    def _run_job(self, job_id: str, stl_path: str, intake: Intake | None = None) -> None:
         """Run the graph for one job. Runs on a background thread."""
         thread_config = {"configurable": {"thread_id": job_id}}
         initial_state: dict[str, Any] = {
@@ -436,6 +446,8 @@ class Daemon:
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "stl_path": stl_path,
         }
+        if intake is not None:
+            initial_state["intake"] = intake
 
         try:
             # First invoke: run until the first interrupt (or completion).
