@@ -85,7 +85,8 @@ class BedType(StrEnum):
     Only the plates whose slices have been read back are listed. The Elegoo
     process profile defaults to the Cool Plate, 35 C for Elegoo PLA; this
     printer has a textured PEI plate (the Sponsor, 2026-10-25, written on
-    mqucifer/print-shop#3), which takes 45 C.
+    mqucifer/print-shop#3), which Elegoo's PLA heats to 60 C. Orca refuses
+    PETG on the Cool Plate outright (exit 195).
     """
 
     COOL = "Cool Plate"

@@ -49,7 +49,7 @@ def bed_type(env: dict[str, str]) -> BedType:
 
     Textured PEI is the Sponsor's answer (2026-10-25, on mqucifer/print-shop#3).
     The Elegoo process profile's own default, the Cool Plate, heats the bed to
-    only 35 C for PLA.
+    only 35 C for PLA, and Orca won't slice PETG for it.
 
     Raises:
         ValueError: If the setting names a plate this code has not read back.
