@@ -19,7 +19,11 @@ uv sync
 
 Before each print, `cd ~/Documents/git/print-shop && git pull && uv sync`, so it prints with the reviewed profiles on `main`. Every command below runs from there.
 
-**The profiles are print-shop's own,** in `profiles/`: your tuned Orca presets, imported whole, and `profiles/pairings.json`, which says which machine and process go with each filament on each nozzle. Orca's own folders are read only by the import (`profiles/README.md`), never by a print. After tuning something in Orca, `uv run python scripts/import_profiles.py` puts the change on a branch for a PR.
+**The profiles are print-shop's own,** in `profiles/`, scoped by `profiles/scope.json` to the 0.4 mm machine, its 0.20 mm process, and PLA and PETG:
+- `profiles/standard/` holds Orca's standard Elegoo presets, whole;
+- `profiles/tuned/` holds your tunings of them, each only the settings you changed.
+
+A print uses your tuning where there is one, and the standard where you haven't tuned. `uv run python scripts/print_job.py --filaments` lists them. Orca's own folders are read only by the import (`profiles/README.md`), never by a print. After tuning something in Orca, `uv run python scripts/import_profiles.py` puts the change on a branch for a PR.
 
 ## Before
 
@@ -48,18 +52,18 @@ Before each print, `cd ~/Documents/git/print-shop && git pull && uv sync`, so it
 
 5. **At the printer:**
    - **The bed is clear and clean.** The agent treats a printer that just finished as ready, so it would print onto a part left on the plate (the prototype's BACKLOG). You are the check.
-   - **The standard 0.4 mm nozzle is fitted,** and **Elegoo PLA is loaded.** You say so on the command line (`--nozzle 0.4 --filament "Elegoo PLA @ECC - Copy"`), and print-shop never assumes it. Its pairing gives your tuned `Elegoo Centauri Carbon 0.4 nozzle - Copy` machine and `0.20mm Standard @Elegoo CC 0.4 nozzle - Copy` process. The nozzle heats to 220 °C, your preset's value. If another filament is loaded, name its preset instead; a name it doesn't know, or a type with several presets (`PLA`), lists the presets to choose from.
+   - **The standard 0.4 mm nozzle is fitted,** and **Elegoo PLA is loaded.** You say so on the command line (`--nozzle 0.4 --filament "Elegoo PLA"`), and print-shop never assumes it. It uses your tunings: `Elegoo Centauri Carbon 0.4 nozzle - Copy`, `0.20mm Standard @Elegoo CC 0.4 nozzle - Copy` and `Elegoo PLA @ECC - Copy`, each over Elegoo's standard. The nozzle heats to 220 °C, your tuning's value. If another filament is loaded, name its variety, such as `"Elegoo PETG"`. A variety you've tuned more than once (`"Elegoo Rapid PETG"`) lists your tunings to name one, and a type (`PLA`) lists the varieties.
    - **The plate is the textured PEI plate,** textured side up. The slice is for it: Orca's `Textured PEI Plate`, and your PLA preset heats it to **60 °C** (`M140 S60` in the G-code). An earlier version of this runbook said 45 °C. That came from slicing Orca's system files without their parents, so Orca filled the bed temperature from its own defaults; Elegoo's PLA profile, and your copy of it, say 60. If a different plate is fitted, stop and tell the operator: don't print.
    - You know where Home Assistant's emergency stop is. That is how a print is stopped: not this program, and not Ctrl-C.
 
-6. **A dry run, unarmed.** Run step 1 below without the flag first. It first prints what it was told is fitted and the three profiles it chose. If the pairing is marked drafted, it says so; you can still print, and correcting it is a PR to `profiles/pairings.json`. It slices, the approval card appears, and pressing **No, stop** ends it. That proves the settings, the broker and the model without the printer. At the gate the program prints the orientation and why. If it says "Model endpoint was unavailable", orientation fell back to geometry: fine for this print, but tell the operator.
+6. **A dry run, unarmed.** Run step 1 below without the flag first. It first prints what it was told is fitted and the three profiles it chose: your tuning, or the standard where you haven't tuned. It slices, the approval card appears, and pressing **No, stop** ends it. That proves the settings, the broker and the model without the printer. At the gate the program prints the orientation and why. If it says "Model endpoint was unavailable", orientation fell back to geometry: fine for this print, but tell the operator.
 
 ## The print
 
 1. **Arm and run, in one command:**
 
    ```
-   PRINT_AGENT_ALLOW_HARDWARE=1 uv run python scripts/print_job.py ~/print-shop/parts/cube.stl --nozzle 0.4 --filament "Elegoo PLA @ECC - Copy" --record
+   PRINT_AGENT_ALLOW_HARDWARE=1 uv run python scripts/print_job.py ~/print-shop/parts/cube.stl --nozzle 0.4 --filament "Elegoo PLA" --record
    ```
 
    It should say `ARMED`, and that it is recording to `~/print-shop/recordings/sdcp-<time>.jsonl`. If it says `Not armed`, the flag didn't reach it: stop with Ctrl-C and type it again on the same line.
@@ -107,7 +111,7 @@ Before each print, `cd ~/Documents/git/print-shop && git pull && uv sync`, so it
    - [ ] the part is `cube.stl`, and the G-code name carries the job id;
    - [ ] the orientation is what the program printed at the gate, and its source is `model:crew-code` (or `geometric` if the model was unavailable);
    - [ ] the profiles are `Elegoo Centauri Carbon 0.4 nozzle - Copy`, `0.20mm Standard @Elegoo CC 0.4 nozzle - Copy` and `Elegoo PLA @ECC - Copy`, and the plate line reads `Textured PEI Plate, bed 60 C`;
-   - [ ] the store lines name `profiles/` at the commit you pulled, with no uncommitted changes, and the three files above;
+   - [ ] the store lines name `profiles/` at the commit you pulled, with no uncommitted changes, and each tuning's file over its standard's;
    - [ ] the intake line is your answers, each changed setting is listed with who changed it, and a `corrected` line lists any setting you corrected at the review;
    - [ ] the printer is the Centauri Carbon with its firmware version;
    - [ ] asked to start, started and ended are in that order, and roughly match the clock;
@@ -129,8 +133,9 @@ Before each print, `cd ~/Documents/git/print-shop && git pull && uv sync`, so it
 |---|---|---|
 | `MQTT_USER is not set` or `CREW_LLM_API_KEY is not set` | the settings file is missing a key | add it; nothing was started |
 | `say what's fitted: --nozzle (mm) and --filament` | the nozzle or filament wasn't given | add both; nothing was started |
-| `Several PLA presets are in the store` | the filament was given by type | name the loaded preset, from the list |
-| `Orca's compatibility rule forbids the pairing` | `profiles/pairings.json` pairs presets Orca won't slice together | don't print; tell the operator, and fix the pairing or the preset in a PR |
+| `Several PLA varieties are in the store` | the filament was given by type | name the loaded variety, from the list |
+| `You've tuned '…' more than once` | that variety has several tunings | name the tuning you want, from the list |
+| `can't print with … by Orca's rule` | the filament isn't marked for this machine or process | don't print; tell the operator, and fix the preset in Orca, then re-import |
 | `printer preflight failed — printer.ready` | the printer is busy, paused, or in error | clear it at the machine, then run again |
 | `printer preflight failed — printer.free_space` | the printer's storage is full | delete old files on the printer |
 | The approval card never appears | the broker or the dashboard is wrong | check the broker settings; re-paste the dashboard |

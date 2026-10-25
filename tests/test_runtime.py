@@ -69,12 +69,13 @@ def test_a_serving_run_slices_nothing(settings: Path, tmp_path: Path) -> None:
         run.ledger.close()
 
 
-def test_the_chosen_profiles_carry_their_store_files_and_commit() -> None:
-    choice = choose(Store(STORE), nozzle_mm=0.4, filament="Elegoo PLA @ECC - Copy")
-    used = profiles_for(choice, STORE).used
+def test_the_chosen_profiles_carry_their_store_files_and_commit(tmp_path: Path) -> None:
+    choice = choose(Store(STORE), nozzle_mm=0.4, filament="Elegoo PLA")
+    used = profiles_for(choice, STORE, tmp_path / "composed").used
     assert used is not None
-    assert used.machine.file == "machine/Elegoo Centauri Carbon 0.4 nozzle - Copy.json"
-    assert len(used.filament.sha256) == 64
+    assert used.machine.file == "tuned/machine/Elegoo Centauri Carbon 0.4 nozzle - Copy.json"
+    assert used.machine.standard_file == "standard/machine/Elegoo Centauri Carbon 0.4 nozzle.json"
+    assert len(used.filament.sha256) == len(used.filament.standard_sha256) == 64
     assert len(used.commit) == 40, "print-shop's commit, from its own checkout"
 
 
@@ -135,10 +136,10 @@ def test_the_script_does_not_arm_without_the_flag(
         script.main([str(part), *FITTED, "--settings", str(settings)])
 
 
-#: The fitted nozzle and the loaded filament preset; its pairing names the rest.
+#: The fitted nozzle and the loaded filament, by variety: the Sponsor's tuning of it.
 FITTED = [
     "--nozzle", "0.4",
-    "--filament", "Elegoo PLA @ECC - Copy",
+    "--filament", "Elegoo PLA",
     "--intake", str(DATA / "intake" / "cube.json"),
 ]
 
@@ -165,5 +166,5 @@ def test_the_script_lists_the_candidates_on_a_tie(
     )
     assert code == 2
     err = capsys.readouterr().err
-    assert "Several PLA presets are in the store; name the one loaded" in err
-    assert '"Elegoo PLA @ECC - Copy"' in err
+    assert "Several PLA varieties are in the store; name the one loaded" in err
+    assert '"Elegoo PLA Silk"  (Elegoo / PLA)' in err

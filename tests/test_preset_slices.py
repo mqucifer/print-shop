@@ -1,9 +1,11 @@
-"""The same part sliced for each nozzle and filament differs as the presets say.
+"""The same part sliced for each filament differs as its standard and the Sponsor's tuning say.
 
 mqucifer/print-shop#6, part 5, and the prototype's BACKLOG test ("Profile &
 material selection", items 1 and 2): the 20 mm cube is sliced with the store's
-profiles for a 0.4 and a 0.8 nozzle, in PLA and in PETG, and the G-code's
-own record of its settings must match each chosen preset. Each is sliced as a
+composed profiles, in PLA and in PETG, from a standard and from the Sponsor's
+tuning of one, and the G-code's own record of its settings must match each.
+The 0.8 nozzle is out of scope since the Sponsor's review of mqucifer/print-shop#8
+(the 0.4 machine, PLA and PETG first), so every case is on the 0.4. Each is sliced as a
 print is, for the textured PEI plate: Orca refuses PETG on its Cool Plate
 ("Cool Plate does not support filament 1", exit 195).
 
@@ -14,7 +16,6 @@ those through the same checks. `PRINT_SHOP_RECORD=1` rewrites them.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 from pathlib import Path
@@ -35,13 +36,22 @@ from tests.fixtures import write_stl
 from tests.test_graph import needs_orca
 
 RECORDED = DATA / "recorded" / "presets"
+#: filament, type, nozzle C, max fan %: Elegoo's standards against the Sponsor's tunings.
+EXPECTED = {
+    "pla-tuned": ("Elegoo PLA @ECC - Copy", "PLA", "220", "100"),
+    "pla-matte-standard": ("Elegoo PLA Matte @ECC", "PLA", "220", "80"),
+    "petg-standard": ("Elegoo PETG @ECC", "PETG", "250", "40"),
+    "petg-270-tuned": (
+        "Elegoo RAPID PETG 270Degree,MaxFanSpeed=50,AuxPartCoolingFan=100", "PETG", "270", "50"
+    ),
+}
 
-#: (label, fitted nozzle, loaded filament preset). Each pairing names the rest.
+#: (label, fitted nozzle, the loaded filament as the Sponsor names it).
 CASES = [
-    ("0.4-pla", 0.4, "Elegoo PLA @ECC - Copy"),
-    ("0.8-pla", 0.8, "Elegoo PLA @ECC - Copy .8mm"),
-    ("0.4-petg", 0.4, "Elegoo RAPID PETG 270Degree,MaxFanSpeed=50,AuxPartCoolingFan=100"),
-    ("0.8-petg", 0.8, "Elegoo RAPID PETG @ECC - .8mm"),
+    ("pla-tuned", 0.4, "Elegoo PLA"),
+    ("pla-matte-standard", 0.4, "Elegoo PLA Matte"),
+    ("petg-standard", 0.4, "Elegoo PETG"),
+    ("petg-270-tuned", 0.4, "Elegoo RAPID PETG 270Degree,MaxFanSpeed=50,AuxPartCoolingFan=100"),
 ]
 
 #: What is kept of a slice: Orca's comments and the temperature commands.
@@ -60,7 +70,9 @@ def assert_matches_presets(gcode: Path, choice: Choice) -> None:
     """The G-code's settings are the chosen presets' own values."""
     config = parse_config_block(gcode)
     header = parse_gcode_header(gcode)
-    machine, process, filament = choice.machine.data, choice.process.data, choice.filament.data
+    machine, process, filament = (
+        choice.machine.composed, choice.process.composed, choice.filament.composed
+    )
 
     assert config["printer_settings_id"] == choice.machine.name
     assert config["print_settings_id"] == choice.process.name
@@ -82,18 +94,16 @@ def test_the_recorded_slice_matches_its_presets(label: str, nozzle: float, filam
 
 
 def test_the_slices_differ_where_the_presets_do() -> None:
-    """Nozzle, layer height and temperature move with the nozzle and the filament."""
+    """The temperature and fans move with the filament, and with the Sponsor's tuning."""
     seen = {
         label: parse_config_block(RECORDED / f"cube-{label}.gcode") for label, _, _ in CASES
     }
-    keys = ("nozzle_diameter", "layer_height", "nozzle_temperature", "filament_type")
+    keys = ("filament_settings_id", "filament_type", "nozzle_temperature", "fan_max_speed")
     rows = {label: tuple(cfg[k] for k in keys) for label, cfg in seen.items()}
-    assert rows == {
-        "0.4-pla": ("0.4", "0.2", "220", "PLA"),
-        "0.8-pla": ("0.8", "0.4", "240", "PLA"),
-        "0.4-petg": ("0.4", "0.2", "270", "PETG"),
-        "0.8-petg": ("0.8", "0.4", "265", "PETG"),
-    }
+    assert rows == EXPECTED, rows
+    assert {cfg["printer_settings_id"] for cfg in seen.values()} == {
+        "Elegoo Centauri Carbon 0.4 nozzle - Copy"
+    }, "the Sponsor's tuned machine, for every filament"
 
 
 @pytest.mark.slicer
@@ -103,7 +113,8 @@ def test_orca_slices_each_with_its_presets(
     label: str, nozzle: float, filament: str, tmp_path: Path
 ) -> None:
     choice = _choice(nozzle, filament)
-    pei = with_bed_type(profiles_for(choice, STORE), BedType.TEXTURED_PEI, tmp_path / "p")
+    composed = profiles_for(choice, STORE, tmp_path / "composed")
+    pei = with_bed_type(composed, BedType.TEXTURED_PEI, tmp_path / "p")
     result = slice_model(write_stl("cube", tmp_path), pei, tmp_path / "o")
     assert_matches_presets(result.gcode_path, choice)
 
@@ -120,9 +131,9 @@ def test_orca_slices_each_with_its_presets(
     assert stamp.sub("", recorded.read_text()) == stamp.sub("", kept)
 
 
-def test_the_cases_cover_both_nozzles_and_both_materials() -> None:
+def test_the_cases_cover_both_materials_standard_and_tuned() -> None:
     covered = {
-        (n, json.loads(_choice(n, f).filament.path.read_text())["filament_type"][0])
+        (_choice(n, f).filament.filament_type, _choice(n, f).filament.standard is not None)
         for _, n, f in CASES
     }
-    assert covered == {(0.4, "PLA"), (0.8, "PLA"), (0.4, "PETG"), (0.8, "PETG")}
+    assert covered == {("PLA", True), ("PLA", False), ("PETG", True), ("PETG", False)}

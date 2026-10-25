@@ -1,0 +1,10 @@
+{
+    "inherits": "Elegoo PLA @ECC",
+    "name": "Elegoo PLA @ECC - Copy",
+    "nozzle_temperature": [
+        "220"
+    ],
+    "nozzle_temperature_initial_layer": [
+        "220"
+    ]
+}
