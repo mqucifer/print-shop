@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from print_shop.expert import client
+import print_shop.expert.client as client
 
 SRC = Path("src/print_shop")
 

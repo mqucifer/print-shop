@@ -43,8 +43,10 @@ rediscover them:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
@@ -60,6 +62,7 @@ __all__ = [
     "ALLOW_HARDWARE_ENV",
     "READY_TO_START",
     "CentauriClient",
+    "FrameRecorder",
     "PreflightFailed",
     "PrinterClient",
     "PrinterConfig",
@@ -248,6 +251,47 @@ def snapshot_from(status: Status, attributes: Attributes) -> PrinterSnapshot:
     )
 
 
+class FrameRecorder:
+    """Writes the printer's raw SDCP replies as JSON lines, for the first print.
+
+    No test contacts the printer, so `tests/data/sdcp/frames.json` is
+    synthetic. The runbook for the Sponsor's first deliberate print
+    (`docs/runbook-first-print.md`) switches this on, and what it records
+    replaces those frames. It writes outside every checkout, and redacts the
+    fields that identify or locate the machine before anything reaches disk.
+    """
+
+    #: Keys whose values are an address or an identity. Matched case-blind
+    #: as substrings, so a firmware that adds `MainboardIPv6` is covered too.
+    REDACTED = ("mainboard", "ip", "mac", "serial", "token", "password")
+
+    def __init__(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.path = path
+
+    def record(self, kind: str, payload: dict[str, object]) -> None:
+        line = {
+            "at": datetime.now(UTC).isoformat(timespec="milliseconds"),
+            "kind": kind,
+            "payload": self._redact(payload),
+        }
+        with self.path.open("a", encoding="utf-8") as out:
+            out.write(json.dumps(line, sort_keys=True) + "\n")
+
+    @classmethod
+    def _redact(cls, value: object) -> object:
+        if isinstance(value, dict):
+            return {
+                k: "redacted"
+                if any(word in str(k).lower() for word in cls.REDACTED)
+                else cls._redact(v)
+                for k, v in value.items()
+            }
+        if isinstance(value, list):
+            return [cls._redact(v) for v in value]
+        return value
+
+
 # --------------------------------------------------------------------------
 # The real client
 # --------------------------------------------------------------------------
@@ -313,6 +357,7 @@ class CentauriClient:
         *,
         enable_control: bool = False,
         auto_leveling: bool = False,
+        recorder: FrameRecorder | None = None,
     ) -> None:
         """`auto_leveling` is off by default, which is not pycentauri's default.
 
@@ -325,6 +370,7 @@ class CentauriClient:
         self.config = config
         self.enable_control = enable_control
         self.auto_leveling = auto_leveling
+        self.recorder = recorder
 
     # --- the protocol -----------------------------------------------------
 
@@ -366,6 +412,9 @@ class CentauriClient:
         attributes = await asyncio.wait_for(
             printer.attributes(), timeout=self.config.request_timeout_s
         )
+        if self.recorder is not None:
+            self.recorder.record("status", status.raw)
+            self.recorder.record("attributes", attributes.raw)
         return snapshot_from(status, attributes)
 
     async def _upload(self, local_path: Path) -> str:
@@ -440,6 +489,8 @@ class CentauriClient:
 
         async def until_busy() -> Status:
             async for status in printer.watch():
+                if self.recorder is not None:
+                    self.recorder.record("status", status.raw)
                 if (
                     status.print_status not in READY_TO_START
                     or status.active_filename is not None
@@ -485,7 +536,9 @@ class CentauriClient:
         return await self._snapshot_from(printer, status)
 
 
-def live_printer(*, auto_leveling: bool = False) -> CentauriClient:
+def live_printer(
+    *, auto_leveling: bool = False, recorder: FrameRecorder | None = None
+) -> CentauriClient:
     """Build a client that can actually move the machine.
 
     The only armed constructor in this project, and the only occurrence of
@@ -513,5 +566,8 @@ def live_printer(*, auto_leveling: bool = False) -> CentauriClient:
             f"{ALLOW_HARDWARE_ENV}=1 when you mean it."
         )
     return CentauriClient(
-        PrinterConfig.from_env(), enable_control=True, auto_leveling=auto_leveling
+        PrinterConfig.from_env(),
+        enable_control=True,
+        auto_leveling=auto_leveling,
+        recorder=recorder,
     )

@@ -41,6 +41,11 @@ __all__ = [
     "command_topic",
     "availability_topic",
     "discovery_payloads",
+    "outcome_note_topic",
+    "outcome_result_topic",
+    "outcome_submit_topic",
+    "outcome_symptom_topic",
+    "outcome_topic",
 ]
 
 
@@ -102,6 +107,27 @@ def availability_topic(cfg: MqttConfig) -> str:
     return f"{cfg.topic_prefix}/availability"
 
 
+def outcome_topic(cfg: MqttConfig) -> str:
+    """The outcome gate: the print on show, the draft answer, any error. Retained."""
+    return f"{cfg.topic_prefix}/outcome"
+
+
+def outcome_result_topic(cfg: MqttConfig) -> str:
+    return f"{cfg.topic_prefix}/outcome/set/result"
+
+
+def outcome_symptom_topic(cfg: MqttConfig) -> str:
+    return f"{cfg.topic_prefix}/outcome/set/symptom"
+
+
+def outcome_note_topic(cfg: MqttConfig) -> str:
+    return f"{cfg.topic_prefix}/outcome/set/note"
+
+
+def outcome_submit_topic(cfg: MqttConfig) -> str:
+    return f"{cfg.topic_prefix}/outcome/submit"
+
+
 # --------------------------------------------------------------------------
 # Discovery payloads
 # --------------------------------------------------------------------------
@@ -114,6 +140,30 @@ ORIENTATION_TEMPLATE = (
     "{% set o = value_json.orientation_deg %}"
     "{% if o is sequence and o is not string and o | length == 3 %}"
     "{{ o[0] | round(1) }}° / {{ o[1] | round(1) }}° / {{ o[2] | round(1) }}°"
+    "{% else %}—{% endif %}"
+)
+
+
+#: The outcome selects' options. "unset" is the empty choice; the rest are the
+#: ledger's own `Result` and `Symptom` values, which `tests/test_outcome.py`
+#: checks against these.
+OUTCOME_RESULTS = ("unset", "success", "failed")
+OUTCOME_SYMPTOMS = (
+    "unset",
+    "none",
+    "adhesion",
+    "warping",
+    "stringing",
+    "layer_shift",
+    "spaghetti",
+    "under_extrusion",
+    "other",
+)
+
+#: The part on show, with any refusal the dashboard should see.
+OUTCOME_PART_TEMPLATE = (
+    "{% if value_json.pending %}{{ value_json.stl_name }}"
+    "{% if value_json.error %} — {{ value_json.error[:150] }}{% endif %}"
     "{% else %}—{% endif %}"
 )
 
@@ -232,6 +282,83 @@ def discovery_payloads(cfg: MqttConfig) -> Iterable[tuple[str, dict[str, object]
                 "unique_id": f"{cfg.node_id}_reject",
                 "command_topic": command_topic(cfg),
                 "payload_press": json.dumps({"decision": "reject"}),
+                "availability_topic": avail,
+                "device": device,
+            },
+        ),
+        # The outcome gate (mqucifer/print-shop#2): when a print ends, the
+        # Sponsor says how it came out. The daemon holds the draft; Record
+        # commits it to the ledger. See `print_shop.orchestrator.outcome`.
+        (
+            f"{cfg.discovery_prefix}/binary_sensor/{cfg.node_id}/awaiting_outcome/config",
+            {
+                "name": "Awaiting Outcome",
+                "unique_id": f"{cfg.node_id}_awaiting_outcome",
+                "state_topic": outcome_topic(cfg),
+                "value_template": "{{ 'ON' if value_json.pending else 'OFF' }}",
+                "availability_topic": avail,
+                "device": device,
+            },
+        ),
+        (
+            f"{cfg.discovery_prefix}/sensor/{cfg.node_id}/outcome_part/config",
+            {
+                "name": "Outcome Part",
+                "unique_id": f"{cfg.node_id}_outcome_part",
+                "state_topic": outcome_topic(cfg),
+                "value_template": OUTCOME_PART_TEMPLATE,
+                "json_attributes_topic": outcome_topic(cfg),
+                "icon": "mdi:printer-3d-nozzle-alert-outline",
+                "availability_topic": avail,
+                "device": device,
+            },
+        ),
+        (
+            f"{cfg.discovery_prefix}/select/{cfg.node_id}/outcome_result/config",
+            {
+                "name": "Outcome Result",
+                "unique_id": f"{cfg.node_id}_outcome_result",
+                "command_topic": outcome_result_topic(cfg),
+                "state_topic": outcome_topic(cfg),
+                "value_template": "{{ value_json.result | default('unset') }}",
+                "options": list(OUTCOME_RESULTS),
+                "availability_topic": avail,
+                "device": device,
+            },
+        ),
+        (
+            f"{cfg.discovery_prefix}/select/{cfg.node_id}/outcome_symptom/config",
+            {
+                "name": "Outcome Symptom",
+                "unique_id": f"{cfg.node_id}_outcome_symptom",
+                "command_topic": outcome_symptom_topic(cfg),
+                "state_topic": outcome_topic(cfg),
+                "value_template": "{{ value_json.symptom | default('unset') }}",
+                "options": list(OUTCOME_SYMPTOMS),
+                "availability_topic": avail,
+                "device": device,
+            },
+        ),
+        (
+            f"{cfg.discovery_prefix}/text/{cfg.node_id}/outcome_note/config",
+            {
+                "name": "Outcome Note",
+                "unique_id": f"{cfg.node_id}_outcome_note",
+                "command_topic": outcome_note_topic(cfg),
+                "state_topic": outcome_topic(cfg),
+                "value_template": "{{ value_json.note | default('') }}",
+                "max": 255,
+                "availability_topic": avail,
+                "device": device,
+            },
+        ),
+        (
+            f"{cfg.discovery_prefix}/button/{cfg.node_id}/record_outcome/config",
+            {
+                "name": "Record Outcome",
+                "unique_id": f"{cfg.node_id}_record_outcome",
+                "command_topic": outcome_submit_topic(cfg),
+                "payload_press": "record",
                 "availability_topic": avail,
                 "device": device,
             },

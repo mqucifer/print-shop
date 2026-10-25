@@ -35,6 +35,7 @@ from print_shop.core.mqtt import (
 from print_shop.expert.client import LLMConfig
 from print_shop.ledger import Ledger
 from print_shop.orchestrator.graph import build_graph
+from print_shop.orchestrator.outcome import OutcomeDesk, Watcher
 from print_shop.printer.centauri import PrinterClient
 from print_shop.slicer.orca import Slicer, SlicerProfiles, slice_model
 
@@ -159,6 +160,8 @@ class Daemon:
         slicer: Slicer = slice_model,
         bridge: Callable[[MqttConfig], Bridge] | None = None,
         ledger: Ledger | None = None,
+        watch_printer: PrinterClient | None = None,
+        watch_poll_s: float = 60.0,
     ) -> None:
         """`printer` is what the approval gate ultimately commands.
 
@@ -173,6 +176,12 @@ class Daemon:
         recorded slice and an in-memory broker. `ledger` records each print
         the agent starts; without one, an approval fails at the print node
         rather than start a print that goes unrecorded.
+
+        `watch_printer` is a **read-only** client the outcome watcher polls
+        every `watch_poll_s` for the end of a print the ledger holds as
+        running; `CentauriClient(PrinterConfig.from_env())` is unarmed. With a
+        ledger the outcome gate runs either way; without a watcher nothing
+        sees a print end, and its row stays open, which is honest.
         """
         self._cfg = cfg
         self._profiles = profiles
@@ -216,6 +225,13 @@ class Daemon:
         # Results storage.
         self._results: dict[str, JobResult] = {}
 
+        # After the print: the outcome gate and what watches for the end.
+        self._ledger = ledger
+        self._watch_printer = watch_printer
+        self._watch_poll_s = watch_poll_s
+        self._desk: OutcomeDesk | None = None
+        self._watcher: Watcher | None = None
+
     # -- context manager ----------------------------------------------------
 
     def __enter__(self) -> Daemon:
@@ -235,9 +251,30 @@ class Daemon:
         self._bridge_publish(gate_topic(self._cfg), {"pending": False})
         self._bridge.subscribe(command_topic(self._cfg), self._on_command)
         self._publish_state({"status": "idle"})
+        if self._ledger is not None:
+            # Unlike the approval gate, the outcome gate is not cleared on
+            # start: its prints live in the ledger, not in this process, so a
+            # restart shows the oldest unanswered one again.
+            self._desk = OutcomeDesk(
+                ledger=self._ledger, cfg=self._cfg, publish=self._bridge_publish
+            )
+            for topic, handler in self._desk.topics.items():
+                self._bridge.subscribe(topic, handler)
+            self._desk.refresh()
+            if self._watch_printer is not None:
+                self._watcher = Watcher(
+                    ledger=self._ledger,
+                    printer=self._watch_printer,
+                    on_ended=self._desk.refresh,
+                    poll_s=self._watch_poll_s,
+                )
+                self._watcher.start()
         return self
 
     def __exit__(self, *exc: object) -> None:
+        if self._watcher is not None:
+            self._watcher.stop()
+            self._watcher = None
         if self._bridge is not None:
             # Same reasoning as on enter: never leave a retained pending gate
             # behind after a graceful shutdown.
@@ -514,6 +551,9 @@ class Daemon:
         self._at_gate.clear()
         # Idempotent: a gate that already closed (or never opened) is a no-op.
         self._close_gate()
+        if approved and self._watcher is not None:
+            # A print started, or a start raised and may have taken: look now.
+            self._watcher.poke()
 
     def _publish_state(self, fields: dict[str, Any]) -> None:
         """Publish a state update to the state topic.

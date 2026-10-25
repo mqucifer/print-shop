@@ -168,3 +168,41 @@ def test_the_approve_button_is_hidden_when_no_gate_is_pending(dashboard: Any) ->
         assert button not in ungated, (
             f"{button} also appears outside the gate conditional"
         )
+
+
+def test_the_outcome_controls_appear_only_while_a_print_awaits_an_answer(
+    dashboard: Any,
+) -> None:
+    """mqucifer/print-shop#2: the outcome is asked when a print ends.
+
+    A Record button that is always live invites an answer about nothing, so
+    the controls sit inside a conditional keyed on the outcome gate, and the
+    approval gate's buttons are never inside it.
+    """
+    controls = (
+        "select.3d_print_agent_outcome_result",
+        "select.3d_print_agent_outcome_symptom",
+        "text.3d_print_agent_outcome_note",
+        "button.3d_print_agent_record_outcome",
+    )
+    guarding = [
+        node
+        for node in _walk(dashboard)
+        if isinstance(node, dict)
+        and node.get("type") == "conditional"
+        and any(
+            cond.get("entity") == "binary_sensor.3d_print_agent_awaiting_outcome"
+            and cond.get("state") == "on"
+            for cond in node.get("conditions", [])
+        )
+    ]
+    assert guarding, "no conditional card is keyed on the outcome gate"
+    guarded = referenced_entities(guarding)
+    for control in controls:
+        assert control in guarded, f"{control} is not behind the outcome condition"
+    ungated = referenced_entities(
+        [c for c in dashboard["views"][0]["cards"] if c not in guarding]
+    )
+    for control in controls:
+        assert control not in ungated, f"{control} also appears outside it"
+    assert "button.3d_print_agent_approve" not in guarded

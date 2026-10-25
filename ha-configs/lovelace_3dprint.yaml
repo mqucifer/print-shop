@@ -105,6 +105,53 @@ views:
             *Nothing is waiting for approval right now.*
 
       # ------------------------------------------------------------------
+      # The outcome gate (mqucifer/print-shop#2). When a print ends, say how
+      # it came out; Record writes it to the ledger. It only appears while a
+      # print is waiting for an answer, and an unanswered print stays open —
+      # nothing guesses it from what the printer reports.
+      # ------------------------------------------------------------------
+      - type: conditional
+        conditions:
+          - condition: state
+            entity: binary_sensor.3d_print_agent_awaiting_outcome
+            state: "on"
+        card:
+          type: vertical-stack
+          cards:
+            - type: markdown
+              content: >
+                ## How did it come out?
+
+                **Part:** {{ state_attr('sensor.3d_print_agent_outcome_part', 'stl_name') }}
+
+                **The printer says:** {{ state_attr('sensor.3d_print_agent_outcome_part',
+                'printer_end') }}
+
+                {% set e = state_attr('sensor.3d_print_agent_outcome_part', 'error') %}
+                {%- if e %}**Not recorded:** {{ e }}{% endif %}
+
+            - type: entities
+              entities:
+                - entity: select.3d_print_agent_outcome_result
+                  name: Result
+                - entity: select.3d_print_agent_outcome_symptom
+                  name: What went wrong
+                - entity: text.3d_print_agent_outcome_note
+                  name: Note
+
+            - type: button
+              entity: button.3d_print_agent_record_outcome
+              name: "Record it"
+              icon: "mdi:notebook-check"
+              icon_height: 48px
+              show_state: false
+              tap_action:
+                action: perform-action
+                perform_action: button.press
+                target:
+                  entity_id: button.3d_print_agent_record_outcome
+
+      # ------------------------------------------------------------------
       # The numbers from the last slice.
       # ------------------------------------------------------------------
       - type: glance

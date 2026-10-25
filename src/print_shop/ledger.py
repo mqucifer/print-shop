@@ -381,6 +381,14 @@ class Ledger:
         """Ended and unanswered: the prints the outcome gate must ask about."""
         return [r for r in self.rows() if r.awaiting_answer]
 
+    def unconfirmed_starts(self) -> list[Row]:
+        """A start that raised and was never seen to begin. It may be printing."""
+        return [
+            r
+            for r in self.rows()
+            if r.start_error is not None and r.started_at is None and r.ended_at is None
+        ]
+
 
 def _row(row: sqlite3.Row) -> Row:
     data = dict(row)
