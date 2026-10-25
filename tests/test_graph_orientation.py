@@ -11,7 +11,6 @@ G-code exists that choice has to be visible in the print time and the filament.
 
 from __future__ import annotations
 
-import os
 import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
@@ -25,19 +24,17 @@ from print_shop.core.contracts import Gate, ungated_edges
 from print_shop.core.state import EntryPath
 from print_shop.orchestrator.graph import build_graph, graph_edges, new_job
 from print_shop.slicer.orca import SlicerProfiles
-from tests.fakes import installed_or_ci
+from tests.fakes import STORE_FILAMENT, STORE_MACHINE, STORE_PROCESS, installed_or_ci
 from tests.fixtures import write_stl
 
 ORCA = Path("/Applications/OrcaSlicer.app/Contents/MacOS/OrcaSlicer")
-DATADIR = Path(os.path.expanduser("~/Library/Application Support/OrcaSlicer"))
-_SYS = DATADIR / "system" / "Elegoo"
-MACHINE = _SYS / "machine" / "ECC" / "Elegoo Centauri Carbon 0.4 nozzle.json"
-PROCESS = _SYS / "process" / "ECC" / "0.20mm Standard @Elegoo CC 0.4 nozzle.json"
-FILAMENT = _SYS / "filament" / "ECC" / "Elegoo PLA @ECC.json"
+MACHINE = STORE_MACHINE
+PROCESS = STORE_PROCESS
+FILAMENT = STORE_FILAMENT
 
 needs_orca = pytest.mark.skipif(
     not (ORCA.exists() and MACHINE.exists() and PROCESS.exists()),
-    reason="OrcaSlicer or the Elegoo Centauri Carbon profiles are not installed",
+    reason="OrcaSlicer is not installed",
 )
 
 
@@ -48,7 +45,6 @@ def profiles() -> SlicerProfiles:
             machine=MACHINE,
             process=PROCESS,
             filament=FILAMENT if FILAMENT.exists() else None,
-            datadir=DATADIR,
         )
     )
 

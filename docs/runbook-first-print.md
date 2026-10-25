@@ -4,7 +4,26 @@
 
 **Only you arm the printer, and only for this one command.** No builder arms it. No test arms it: the test suite refuses an armed connection even with the flag set. The flag goes on the command line of the one run that should print, and nowhere else: not exported in a shell, and never in `.env`.
 
-About 40 minutes: 10 to set up, about 17 printing, and the rest watching and answering.
+About 35 minutes: 10 to set up, about 11 printing, and the rest watching and answering.
+
+## Once: print-shop's own checkout
+
+Prints run as commands on the Mac, from print-shop's own checkout, `~/Documents/git/print-shop`, on `main`. Never from a builder's folder (`.worktrees/…`), which is removed when its PR merges.
+
+```
+test -d ~/Documents/git/print-shop || git clone https://github.com/mqucifer/print-shop.git ~/Documents/git/print-shop
+cd ~/Documents/git/print-shop
+git switch main && git pull
+uv sync
+```
+
+Before each print, `cd ~/Documents/git/print-shop && git pull && uv sync`, so it prints with the reviewed profiles on `main`. Every command below runs from there.
+
+**The profiles are print-shop's own,** in `profiles/`, scoped by `profiles/scope.json` to the 0.4 mm machine, its 0.20 mm process, and PLA and PETG:
+- `profiles/standard/` holds Orca's standard Elegoo presets, whole;
+- `profiles/tuned/` holds your tunings of them, each only the settings you changed.
+
+A print uses your tuning where there is one, and the standard where you haven't tuned. `uv run python scripts/print_job.py --filaments` lists them. Orca's own folders are read only by the import (`profiles/README.md`), never by a print. After tuning something in Orca, `uv run python scripts/import_profiles.py` puts the change on a branch for a PR.
 
 ## Before
 
@@ -18,7 +37,7 @@ About 40 minutes: 10 to set up, about 17 printing, and the rest watching and ans
    | `PRINTER_HOST`, `PRINTER_MAINBOARD_ID` | the Centauri Carbon |
    | `CREW_LLM_API_KEY` | a LiteLLM key for the orientation model, issued by the operator. Not the proxy's master key |
 
-   Optional: `PRINT_SHOP_LEDGER` (default `~/print-shop/ledger.sqlite`), `PRINT_SHOP_LLM_URL` and `PRINT_SHOP_LLM_MODEL` (default LiteLLM at `127.0.0.1:4000`, alias `crew-code`), and `ORCA_DATADIR`, `ORCA_MACHINE`, `ORCA_PROCESS`, `ORCA_FILAMENT` (default Orca's Elegoo Centauri Carbon 0.4 nozzle, 0.20 mm Standard, Elegoo PLA), and `ORCA_BED_TYPE` (default `Textured PEI Plate`; the other value is `Cool Plate`).
+   Optional: `PRINT_SHOP_LEDGER` (default `~/print-shop/ledger.sqlite`), `PRINT_SHOP_LLM_URL` and `PRINT_SHOP_LLM_MODEL` (default LiteLLM at `127.0.0.1:4000`, alias `crew-code`), and `ORCA_BED_TYPE` (default `Textured PEI Plate`; the other value is `Cool Plate`). The `ORCA_MACHINE`, `ORCA_PROCESS`, `ORCA_FILAMENT` and `ORCA_DATADIR` keys are gone: the profiles come from `profiles/`, by what you say is fitted.
 
 2. **Nothing from the prototype is running.** Both use the same topics. The prototype has no daemon command of its own, so one would only be running if someone started it by hand, from `~/Documents/git/3d-print-agent`. If one is, stop it.
 
@@ -27,31 +46,31 @@ About 40 minutes: 10 to set up, about 17 printing, and the rest watching and ans
 4. **The part.** The 20 mm test cube, the same one CI replays:
 
    ```
-   cd ~/Documents/git/print-shop-ledger-wt
+   cd ~/Documents/git/print-shop
    uv run python -c "from pathlib import Path; from tests.fixtures import write_stl; d = Path('~/print-shop/parts').expanduser(); d.mkdir(parents=True, exist_ok=True); print(write_stl('cube', d))"
    ```
 
 5. **At the printer:**
    - **The bed is clear and clean.** The agent treats a printer that just finished as ready, so it would print onto a part left on the plate (the prototype's BACKLOG). You are the check.
-   - PLA is loaded: the profile slices for Elegoo PLA at 210 °C on the nozzle.
-   - **The plate is the textured PEI plate,** textured side up. The slice is for it: Orca's `Textured PEI Plate`, which heats the bed to **45 °C** (`M140 S45` in the G-code). That's your answer of 2026-10-25 on mqucifer/print-shop#3. The Elegoo profile's own default, the Cool Plate, heats it to only 35 °C. If a different plate is fitted, stop and tell the operator: don't print.
+   - **The standard 0.4 mm nozzle is fitted,** and **Elegoo PLA is loaded.** You say so on the command line (`--nozzle 0.4 --filament "Elegoo PLA"`), and print-shop never assumes it. It uses your tunings: `Elegoo Centauri Carbon 0.4 nozzle - Copy`, `0.20mm Standard @Elegoo CC 0.4 nozzle - Copy` and `Elegoo PLA @ECC - Copy`, each over Elegoo's standard. The nozzle heats to 220 °C, your tuning's value. If another filament is loaded, name its variety, such as `"Elegoo PETG"`. A variety you've tuned more than once (`"Elegoo Rapid PETG"`) lists your tunings to name one, and a type (`PLA`) lists the varieties.
+   - **The plate is the textured PEI plate,** textured side up. The slice is for it: Orca's `Textured PEI Plate`, and your PLA preset heats it to **60 °C** (`M140 S60` in the G-code). An earlier version of this runbook said 45 °C. That came from slicing Orca's system files without their parents, so Orca filled the bed temperature from its own defaults; Elegoo's PLA profile, and your copy of it, say 60. If a different plate is fitted, stop and tell the operator: don't print.
    - You know where Home Assistant's emergency stop is. That is how a print is stopped: not this program, and not Ctrl-C.
 
-6. **A dry run, unarmed.** Run step 1 below without the flag first. It slices, the approval card appears, and pressing **No, stop** ends it. That proves the settings, the broker and the model without the printer. At the gate the program prints the orientation and why. If it says "Model endpoint was unavailable", orientation fell back to geometry: fine for this print, but tell the operator.
+6. **A dry run, unarmed.** Run step 1 below without the flag first. It first prints what it was told is fitted and the three profiles it chose: your tuning, or the standard where you haven't tuned. It slices, the approval card appears, and pressing **No, stop** ends it. That proves the settings, the broker and the model without the printer. At the gate the program prints the orientation and why. If it says "Model endpoint was unavailable", orientation fell back to geometry: fine for this print, but tell the operator.
 
 ## The print
 
 1. **Arm and run, in one command:**
 
    ```
-   PRINT_AGENT_ALLOW_HARDWARE=1 uv run python scripts/print_job.py ~/print-shop/parts/cube.stl --record
+   PRINT_AGENT_ALLOW_HARDWARE=1 uv run python scripts/print_job.py ~/print-shop/parts/cube.stl --nozzle 0.4 --filament "Elegoo PLA" --record
    ```
 
    It should say `ARMED`, and that it is recording to `~/print-shop/recordings/sdcp-<time>.jsonl`. If it says `Not armed`, the flag didn't reach it: stop with Ctrl-C and type it again on the same line.
 
 2. **Approve at the gate.** The dashboard asks "Print this?". Check the numbers before you press:
-   - Time: about 17 minutes (Orca's estimate is 1,009 s);
-   - Plastic: about 3.3 cm³;
+   - Time: about 11 minutes (Orca's estimate is 10 m 54 s);
+   - Plastic: about 2.9 cm³;
    - Turned: a multiple of 90° on each axis. A cube sits flat on every face.
 
    Press **Yes, print it**. Anything else wrong: press **No, stop**.
@@ -76,7 +95,8 @@ About 40 minutes: 10 to set up, about 17 printing, and the rest watching and ans
 2. **Check the row against what happened.** The program prints the row when you answer, or show it any time with `uv run python scripts/print_job.py --list`. Check:
    - [ ] the part is `cube.stl`, and the G-code name carries the job id;
    - [ ] the orientation is what the program printed at the gate, and its source is `model:crew-code` (or `geometric` if the model was unavailable);
-   - [ ] the profiles are the Centauri Carbon 0.4 nozzle, 0.20 mm Standard and Elegoo PLA, and the plate line reads `Textured PEI Plate, bed 45 C`;
+   - [ ] the profiles are `Elegoo Centauri Carbon 0.4 nozzle - Copy`, `0.20mm Standard @Elegoo CC 0.4 nozzle - Copy` and `Elegoo PLA @ECC - Copy`, and the plate line reads `Textured PEI Plate, bed 60 C`;
+   - [ ] the store lines name `profiles/` at the commit you pulled, with no uncommitted changes, and each tuning's file over its standard's;
    - [ ] the printer is the Centauri Carbon with its firmware version;
    - [ ] asked to start, started and ended are in that order, and roughly match the clock;
    - [ ] the printer's end state is what the screen showed;
@@ -96,7 +116,10 @@ About 40 minutes: 10 to set up, about 17 printing, and the rest watching and ans
 | What you see | What it means | What to do |
 |---|---|---|
 | `MQTT_USER is not set` or `CREW_LLM_API_KEY is not set` | the settings file is missing a key | add it; nothing was started |
-| `Orca profile not found` | Orca's profiles moved | set `ORCA_*` in the settings |
+| `say what's fitted: --nozzle (mm) and --filament` | the nozzle or filament wasn't given | add both; nothing was started |
+| `Several PLA varieties are in the store` | the filament was given by type | name the loaded variety, from the list |
+| `You've tuned '…' more than once` | that variety has several tunings | name the tuning you want, from the list |
+| `can't print with … by Orca's rule` | the filament isn't marked for this machine or process | don't print; tell the operator, and fix the preset in Orca, then re-import |
 | `printer preflight failed — printer.ready` | the printer is busy, paused, or in error | clear it at the machine, then run again |
 | `printer preflight failed — printer.free_space` | the printer's storage is full | delete old files on the printer |
 | The approval card never appears | the broker or the dashboard is wrong | check the broker settings; re-paste the dashboard |

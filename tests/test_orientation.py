@@ -21,7 +21,6 @@ and the whole exercise is blind. With supports on the signal is unmissable:
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -30,19 +29,18 @@ from print_shop.core.state import Orientation
 from print_shop.ingest.orientation import AXIS_ALIGNED, candidates, write_rotated
 from print_shop.orchestrator.fitness import scoring_profiles, slice_candidate
 from print_shop.slicer.orca import SlicerProfiles
+from tests.fakes import STORE_FILAMENT, STORE_MACHINE, STORE_PROCESS
 from tests.fixtures import write_stl
 
 ORCA = Path("/Applications/OrcaSlicer.app/Contents/MacOS/OrcaSlicer")
-DATADIR = Path(os.path.expanduser("~/Library/Application Support/OrcaSlicer"))
-_SYS = DATADIR / "system" / "Elegoo"
-MACHINE = _SYS / "machine" / "ECC" / "Elegoo Centauri Carbon 0.4 nozzle.json"
-PROCESS = _SYS / "process" / "ECC" / "0.20mm Standard @Elegoo CC 0.4 nozzle.json"
-FILAMENT = _SYS / "filament" / "ECC" / "Elegoo PLA @ECC.json"
+MACHINE = STORE_MACHINE
+PROCESS = STORE_PROCESS
+FILAMENT = STORE_FILAMENT
 TOL = 1e-3
 
 needs_orca = pytest.mark.skipif(
     not (ORCA.exists() and MACHINE.exists() and PROCESS.exists()),
-    reason="OrcaSlicer or the Elegoo Centauri Carbon profiles are not installed",
+    reason="OrcaSlicer is not installed",
 )
 
 
@@ -52,7 +50,6 @@ def profiles() -> SlicerProfiles:
         machine=MACHINE,
         process=PROCESS,
         filament=FILAMENT if FILAMENT.exists() else None,
-        datadir=DATADIR,
     )
 
 

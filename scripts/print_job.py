@@ -1,8 +1,16 @@
 """Run one print job, or serve the outcome gate, on the Mac.
 
-    uv run python scripts/print_job.py PART.stl [--record]
+    uv run python scripts/print_job.py PART.stl --nozzle 0.4 --filament PLA [--record]
     uv run python scripts/print_job.py --serve [--record]
     uv run python scripts/print_job.py --list
+    uv run python scripts/print_job.py --filaments
+
+**The Sponsor says what's fitted:** the nozzle (mm) and the loaded filament,
+by variety ("Elegoo Rapid PETG") or by the name of one of their tunings.
+Without them a print is refused. `--filaments` lists what's in `profiles/`.
+Their tuning is used where there is one, the standard where there isn't;
+several tunings of one are listed to choose from. `--machine` and
+`--process` name a profile, when the Sponsor picks.
 
 **This is the only place that arms the printer,** and only when the invocation
 says so: `PRINT_AGENT_ALLOW_HARDWARE=1` on this command's own line. Without it
@@ -28,7 +36,10 @@ from print_shop.arming import ALLOW_HARDWARE_ENV, hardware_allowed
 from print_shop.env import SETTINGS_PATH
 from print_shop.ledger import Ledger, ledger_path
 from print_shop.printer.centauri import FrameRecorder, PrinterClient, live_printer
-from print_shop.runtime import build_run, describe, recording_path
+from print_shop.runtime import WORK_DIR, build_run, describe, profiles_for, recording_path
+from print_shop.slicer.orca import SlicerProfiles
+from print_shop.slicer.store import STORE_DIR, NoChoice, Store, choose
+from print_shop.slicer.store import describe as describe_store
 
 APPROVAL_WAIT_S = 3600.0  # the daemon's own gate gives up after an hour
 FINISH_WAIT_S = 900.0  # after the press: preflight, upload, and a five-minute start watch
@@ -39,13 +50,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("stl", nargs="?", type=Path, help="the part to print")
     parser.add_argument("--serve", action="store_true", help="only watch and ask outcomes")
     parser.add_argument("--list", action="store_true", help="print the ledger and exit")
+    parser.add_argument("--filaments", action="store_true", help="list profiles/ and exit")
     parser.add_argument("--record", action="store_true", help="record the printer's replies")
+    parser.add_argument("--nozzle", type=float, help="the fitted nozzle, in mm (0.4)")
+    parser.add_argument("--filament", help="the loaded filament: its variety, or a tuning's name")
+    parser.add_argument("--machine", help="a machine profile's exact name, over the pairing")
+    parser.add_argument("--process", help="a process profile's exact name, over the pairing")
     parser.add_argument(
         "--settings", type=Path, default=SETTINGS_PATH, help="the settings file (a path)"
     )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
+    if args.filaments:
+        print(describe_store(Store(STORE_DIR)))
+        return 0
     if args.list:
         with Ledger(ledger_path(args.settings)) as ledger:
             rows = ledger.rows()
@@ -55,6 +74,29 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("give a part to print, or --serve, or --list")
     if args.stl is not None and not args.stl.is_file():
         parser.error(f"{args.stl} is not a file")
+
+    profiles: SlicerProfiles | None = None
+    if args.stl is not None:
+        if args.nozzle is None or not args.filament:
+            parser.error("say what's fitted: --nozzle (mm) and --filament (PLA, or a name)")
+        try:
+            choice = choose(
+                Store(STORE_DIR),
+                nozzle_mm=args.nozzle,
+                filament=args.filament,
+                machine=args.machine,
+                process=args.process,
+            )
+        except NoChoice as exc:
+            print(exc, file=sys.stderr)
+            return 2
+        profiles = profiles_for(choice, STORE_DIR, WORK_DIR / "composed")
+        print(f"Fitted: a {args.nozzle:g} mm nozzle and {args.filament}. Slicing with:")
+        print(f"  machine   {choice.machine.name}")
+        print(f"  process   {choice.process.name}")
+        print(f"  filament  {choice.filament.name}")
+        for note in choice.notes:
+            print(f"  ({note})")
 
     recorder = FrameRecorder(recording_path()) if args.record else None
     printer: PrinterClient | None = None
@@ -66,7 +108,9 @@ def main(argv: list[str] | None = None) -> int:
     if recorder is not None:
         print(f"Recording the printer's replies to {recorder.path}")
 
-    run = build_run(printer=printer, recorder=recorder, settings=args.settings)
+    run = build_run(
+        printer=printer, profiles=profiles, recorder=recorder, settings=args.settings
+    )
     try:
         with run.daemon:
             if args.serve:

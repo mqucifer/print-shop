@@ -1,0 +1,19 @@
+{
+    "additional_cooling_fan_speed": [
+        "100"
+    ],
+    "fan_max_speed": [
+        "50"
+    ],
+    "inherits": "Elegoo Rapid PETG @ECC",
+    "name": "Elegoo RAPID PETG 270Degree,MaxFanSpeed=50,AuxPartCoolingFan=100",
+    "nozzle_temperature": [
+        "270"
+    ],
+    "nozzle_temperature_initial_layer": [
+        "270"
+    ],
+    "reduce_fan_stop_start_freq": [
+        "0"
+    ]
+}

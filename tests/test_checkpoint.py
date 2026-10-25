@@ -117,14 +117,7 @@ from print_shop.slicer.orca import SlicerProfiles
 from print_shop.core.state import EntryPath
 from tests.fixtures import write_stl
 
-D = Path(os.path.expanduser("~/Library/Application Support/OrcaSlicer"))
-S = D / "system" / "Elegoo"
-prof = SlicerProfiles(
-    machine=S / "machine/ECC/Elegoo Centauri Carbon 0.4 nozzle.json",
-    process=S / "process/ECC/0.20mm Standard @Elegoo CC 0.4 nozzle.json",
-    filament=S / "filament/ECC/Elegoo PLA @ECC.json",
-    datadir=D,
-)
+from tests.fakes import STORE_PROFILES as prof
 work = Path({str(tmp_path)!r})
 saver, conn = open_checkpointer(work / "jobs.sqlite")
 app = build_graph(prof, outdir_root=work / "jobs", checkpointer=saver)

@@ -17,20 +17,12 @@ A build volume you had to guess is not a build volume. It raises now.
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import pytest
 
 from print_shop.orchestrator.graph import build_volume_mm
-
-DATADIR = Path(os.path.expanduser("~/Library/Application Support/OrcaSlicer"))
-_SYS = DATADIR / "system" / "Elegoo"
-ECC = _SYS / "machine" / "ECC" / "Elegoo Centauri Carbon 0.4 nozzle.json"
-
-needs_profiles = pytest.mark.skipif(
-    not ECC.exists(), reason="the Elegoo Centauri Carbon profiles are not installed"
-)
+from tests.fakes import STORE_MACHINE
 
 
 def _profile(path: Path, **fields: object) -> Path:
@@ -44,9 +36,14 @@ def _profile(path: Path, **fields: object) -> Path:
 # --------------------------------------------------------------------------
 
 
-@needs_profiles
-def test_reads_the_real_elegoo_profile() -> None:
-    assert build_volume_mm(ECC) == (257.0, 257.0, 257.0)
+def test_reads_the_stores_machine_profile() -> None:
+    """The Sponsor's 0.4 nozzle, as imported: Orca's Elegoo profile says 256 mm.
+
+    It was 257 in the Orca this project was ported on; Orca 2.3's Elegoo
+    bundle says 256. The store keeps what was imported, so a print no longer
+    changes with an Orca update.
+    """
+    assert build_volume_mm(STORE_MACHINE) == (256.0, 256.0, 256.0)
 
 
 def test_reads_a_printer_that_is_not_257(tmp_path: Path) -> None:
@@ -159,46 +156,22 @@ def test_it_never_silently_returns_a_default(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------
-# Cross-tree inheritance — user profiles inherit from the system tree
+# A whole profile names a parent that is not beside it
 # --------------------------------------------------------------------------
 
-USER_OVERLAY = DATADIR / "user" / "default" / "machine" / (
-    "Elegoo Centauri Carbon 0.4 nozzle - Copy.json"
-)
 
+def test_a_whole_profile_is_read_without_walking_to_its_parent(tmp_path: Path) -> None:
+    """print-shop's profiles keep `inherits` for Orca's compatibility check.
 
-@pytest.mark.skipif(
-    not USER_OVERLAY.exists(), reason="no edited user machine profile installed"
-)
-def test_resolves_a_real_user_profile_that_inherits_from_the_system_tree() -> None:
-    """The profile a person actually edits in the Orca UI.
-
-    It lives under `user/default/machine/` and inherits a profile that lives
-    under `system/Elegoo/machine/ECC/`. Resolving `inherits` by searching only
-    sibling files fails here — and this is the profile someone is most likely
-    to point the pipeline at.
+    The system parent it names is not in the store, so the dimensions must be
+    read from the file itself, not looked for up the chain. Resolving Orca's
+    own tree is the catalog's job, at import (`tests/test_catalog.py`).
     """
-    assert build_volume_mm(USER_OVERLAY, datadir=DATADIR) == (257.0, 257.0, 257.0)
-
-
-def test_resolves_a_parent_in_a_different_subtree(tmp_path: Path) -> None:
-    _profile(
-        tmp_path / "system" / "Vendor" / "machine" / "XYZ" / "base.json",
-        name="vendor-base",
+    whole = _profile(
+        tmp_path / "machine" / "whole.json",
+        name="whole",
+        inherits="Elegoo Centauri Carbon 0.4 nozzle",
         printable_area=["0x0", "210x0", "210x210", "0x210"],
         printable_height="210",
     )
-    child = _profile(
-        tmp_path / "user" / "default" / "machine" / "mine.json",
-        name="mine",
-        inherits="vendor-base",
-    )
-    assert build_volume_mm(child, datadir=tmp_path) == (210.0, 210.0, 210.0)
-
-
-def test_an_unresolvable_parent_still_raises_with_a_datadir(tmp_path: Path) -> None:
-    child = _profile(
-        tmp_path / "user" / "machine" / "orphan2.json", name="o2", inherits="ghost"
-    )
-    with pytest.raises(ValueError):
-        build_volume_mm(child, datadir=tmp_path)
+    assert build_volume_mm(whole) == (210.0, 210.0, 210.0)

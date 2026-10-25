@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import tempfile
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,11 +30,26 @@ from pycentauri.models import Attributes, Status
 from print_shop.core.mqtt import Bridge, MessageHandler
 from print_shop.printer.centauri import PrinterSnapshot, snapshot_from
 from print_shop.slicer.orca import SliceResult, SlicerProfiles, parse_gcode_header
+from print_shop.slicer.store import Store, choose
 
 DATA = Path(__file__).parent / "data"
 
 #: The cube from `tests/fixtures.py`, as the real Orca sliced it (data/README.md).
 CUBE_SHA256 = "bd3eda612de075a1e177e7dbe8e97941c8393df936ccab0087cf24b910fa027a"
+
+#: print-shop's own profiles (`profiles/`): the Sponsor's tuned 0.4 nozzle
+#: machine, 0.20 mm process and Elegoo PLA, each composed over its standard
+#: as a print composes it. What a test that slices with the real Orca uses.
+STORE = Path(__file__).resolve().parents[1] / "profiles"
+_COMPOSED = choose(Store(STORE), nozzle_mm=0.4, filament="Elegoo PLA").compose(
+    Path(tempfile.mkdtemp(prefix="print-shop-store-"))
+)
+STORE_MACHINE = _COMPOSED["machine"]
+STORE_PROCESS = _COMPOSED["process"]
+STORE_FILAMENT = _COMPOSED["filament"]
+STORE_PROFILES = SlicerProfiles(
+    machine=STORE_MACHINE, process=STORE_PROCESS, filament=STORE_FILAMENT
+)
 
 CI_PROFILES = SlicerProfiles(
     machine=DATA / "profiles" / "machine.json",
@@ -42,11 +58,12 @@ CI_PROFILES = SlicerProfiles(
 
 
 def installed_or_ci(real: SlicerProfiles) -> SlicerProfiles:
-    """The Mac's Orca profiles where they are installed, the CI ones elsewhere.
+    """The store's profiles where they are, the CI ones elsewhere.
 
     For tests that build a graph but never slice: the graph reads only the
-    build volume from a profile, which both give as 257 mm. Tests that do
-    slice skip without Orca (`needs_orca`), whichever profiles they get.
+    build volume from a profile (256 mm in the store, 257 in the CI ones).
+    Tests that do slice skip without Orca (`needs_orca`), whichever profiles
+    they get.
     """
     if real.machine.is_file() and real.process.is_file():
         return real

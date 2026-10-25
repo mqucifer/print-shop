@@ -1,0 +1,7 @@
+{
+    "brim_type": "no_brim",
+    "inherits": "0.20mm Standard @Elegoo CC 0.4 nozzle",
+    "ironing_type": "top",
+    "name": "0.20mm Standard @Elegoo CC 0.4 nozzle - Copy",
+    "reduce_crossing_wall": "1"
+}

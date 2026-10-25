@@ -12,6 +12,7 @@ import os
 import re
 import signal
 import subprocess
+import tempfile
 from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
@@ -19,6 +20,7 @@ from typing import Protocol
 from pydantic import BaseModel
 
 from print_shop.core.state import SliceResult
+from print_shop.slicer.store import ProfilesUsed
 
 __all__ = [
     "BedType",
@@ -62,12 +64,17 @@ def parse_duration(text: str) -> int:
 
 
 class SlicerProfiles(BaseModel):
-    """Paths to OrcaSlicer profile files."""
+    """Paths to OrcaSlicer profile files, each whole: Orca resolves nothing.
+
+    `used` is what the ledger records of them: the store's files they came
+    from, by name and hash, and print-shop's commit. A derived copy
+    (`with_bed_type`, `scoring_profiles`) carries it unchanged.
+    """
 
     machine: Path
     process: Path
     filament: Path | None = None
-    datadir: Path | None = None
+    used: ProfilesUsed | None = None
 
 
 class BedType(StrEnum):
@@ -78,7 +85,8 @@ class BedType(StrEnum):
     Only the plates whose slices have been read back are listed. The Elegoo
     process profile defaults to the Cool Plate, 35 C for Elegoo PLA; this
     printer has a textured PEI plate (the Sponsor, 2026-10-25, written on
-    mqucifer/print-shop#3), which takes 45 C.
+    mqucifer/print-shop#3), which Elegoo's PLA heats to 60 C. Orca refuses
+    PETG on the Cool Plate outright (exit 195).
     """
 
     COOL = "Cool Plate"
@@ -91,8 +99,8 @@ def with_bed_type(profiles: SlicerProfiles, bed: BedType, workdir: Path) -> Slic
     Orca's command line has no bed-type option, so the process profile is
     copied whole with `curr_bed_type` set, keeping its name and `inherits`.
     A whole copy rather than an overlay, because an overlay names its parent
-    by `inherits` and Orca resolves that only in its own data directory: an
-    overlay on this copy (`scoring_profiles`) would not find it.
+    by `inherits`, and Orca slices with an empty data directory that has no
+    parents in it (`slice_model`).
     """
     base = json.loads(Path(profiles.process).read_text())
     derived = {**base, "curr_bed_type": bed.value}
@@ -255,7 +263,8 @@ def slice_model(
 
     Args:
         stl_path: Path to the input STL file.
-        profiles: Slicer profile paths (machine, process, optional filament, datadir).
+        profiles: Slicer profile paths (machine, process, optional filament),
+            each a whole profile, as print-shop's store keeps them.
         outdir: Directory where OrcaSlicer will write the G-code.
         binary: Path to the OrcaSlicer binary. Defaults to the macOS app path.
         timeout_s: Seconds to wait for the slicer before giving up.
@@ -282,10 +291,12 @@ def slice_model(
     if stale.exists():
         stale.unlink()
 
-    cmd: list[str] = [str(binary_path)]
-
-    if profiles.datadir is not None:
-        cmd += ["--datadir", str(profiles.datadir)]
+    # A throwaway data directory: Orca slices from exactly the files it is
+    # given, and never reads or writes the Sponsor's own Orca folders
+    # (mqucifer/print-shop#6). It is also the working directory, where Orca
+    # leaves a log when an STL won't load.
+    scratch = tempfile.TemporaryDirectory(prefix="orca-data-")
+    cmd: list[str] = [str(binary_path), "--datadir", scratch.name]
 
     settings = f"{profiles.machine};{profiles.process}"
     cmd += ["--load-settings", settings]
@@ -303,6 +314,7 @@ def slice_model(
         stderr=subprocess.PIPE,
         text=True,
         start_new_session=True,
+        cwd=scratch.name,
     )
     try:
         stdout, stderr = proc.communicate(timeout=timeout_s)
@@ -311,11 +323,19 @@ def slice_model(
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
         proc.wait()  # reap so the child does not become a zombie
         raise RuntimeError(f"OrcaSlicer timeout after {timeout_s}s") from exc
+    finally:
+        scratch.cleanup()
     result = subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
 
     if result.returncode != 0:
+        hint = (
+            " (239: Orca found the process not compatible with the machine; a whole"
+            " machine profile must keep `inherits` naming its system parent)"
+            if result.returncode == 239
+            else ""
+        )
         raise RuntimeError(
-            f"OrcaSlicer exited with code {result.returncode}:\n"
+            f"OrcaSlicer exited with code {result.returncode}{hint}:\n"
             f"stdout: {result.stdout}\n"
             f"stderr: {result.stderr}"
         )

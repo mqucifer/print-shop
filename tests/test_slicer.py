@@ -18,19 +18,13 @@ from pathlib import Path
 import pytest
 
 from print_shop.slicer.orca import SliceResult, SlicerProfiles, parse_duration, slice_model
+from tests.fakes import STORE_FILAMENT, STORE_MACHINE, STORE_PROCESS
 from tests.fixtures import write_stl
 
 ORCA = Path("/Applications/OrcaSlicer.app/Contents/MacOS/OrcaSlicer")
-DATADIR = Path(os.path.expanduser("~/Library/Application Support/OrcaSlicer"))
-_SYS = DATADIR / "system" / "Elegoo"
-MACHINE = _SYS / "machine" / "ECC" / "Elegoo Centauri Carbon 0.4 nozzle.json"
-PROCESS = _SYS / "process" / "ECC" / "0.20mm Standard @Elegoo CC 0.4 nozzle.json"
-FILAMENT = _SYS / "filament" / "ECC" / "Elegoo PLA @ECC.json"
+MACHINE, PROCESS, FILAMENT = STORE_MACHINE, STORE_PROCESS, STORE_FILAMENT
 
-needs_orca = pytest.mark.skipif(
-    not (ORCA.exists() and MACHINE.exists() and PROCESS.exists()),
-    reason="OrcaSlicer or the Elegoo Centauri Carbon profiles are not installed",
-)
+needs_orca = pytest.mark.skipif(not ORCA.exists(), reason="OrcaSlicer is not installed")
 
 
 # --------------------------------------------------------------------------
@@ -70,8 +64,7 @@ def profiles() -> SlicerProfiles:
     return SlicerProfiles(
         machine=MACHINE,
         process=PROCESS,
-        filament=FILAMENT if FILAMENT.exists() else None,
-        datadir=DATADIR,
+        filament=FILAMENT,
     )
 
 
@@ -113,9 +106,13 @@ def test_reports_geometry_matching_the_model(sliced: SliceResult) -> None:
 @pytest.mark.slicer
 @needs_orca
 def test_reports_the_numbers_orientation_will_be_scored_on(sliced: SliceResult) -> None:
-    """Print time and filament volume are the orientation fitness function."""
+    """Print time and filament volume are the orientation fitness function.
+
+    2.15 cm3 with the Sponsor's 0.20 mm process and PLA from the store; Orca's
+    system profiles, sliced without their parents, gave 2.39.
+    """
     assert 0 < sliced.print_time_s < 3600
-    assert sliced.filament_cm3 == pytest.approx(2.39, abs=0.2)
+    assert sliced.filament_cm3 == pytest.approx(2.15, abs=0.2)
     assert sliced.filament_mm > 0
 
 
@@ -201,7 +198,6 @@ def test_a_timeout_does_not_orphan_the_slicers_children(
     on a machine that is orchestrating multi-hour prints. Observed before the
     fix: every timeout left a live grandchild behind.
     """
-    import os
     import signal
     import time
 

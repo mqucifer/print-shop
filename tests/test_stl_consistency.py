@@ -82,18 +82,9 @@ def test_reads_without_loading_the_whole_file(tmp_path: Path) -> None:
 
 @pytest.fixture
 def profiles() -> Any:
-    from print_shop.slicer.orca import SlicerProfiles
+    from tests.fakes import STORE_PROFILES
 
-    datadir = Path.home() / "Library" / "Application Support" / "OrcaSlicer"
-    sysdir = datadir / "system" / "Elegoo"
-    return installed_or_ci(
-        SlicerProfiles(
-            machine=sysdir / "machine" / "ECC" / "Elegoo Centauri Carbon 0.4 nozzle.json",
-            process=sysdir / "process" / "ECC" / "0.20mm Standard @Elegoo CC 0.4 nozzle.json",
-            filament=sysdir / "filament" / "ECC" / "Elegoo PLA @ECC.json",
-            datadir=datadir,
-        )
-    )
+    return installed_or_ci(STORE_PROFILES)
 
 
 def test_ingest_records_the_hash_in_state(profiles: Any, tmp_path: Path) -> None:

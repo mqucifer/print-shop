@@ -39,6 +39,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from print_shop.env import SETTINGS_PATH, load_env
+from print_shop.slicer.store import ProfilesUsed
 
 __all__ = [
     "DEFAULT_PATH",
@@ -146,6 +147,8 @@ class PrintRecord(BaseModel):
     slicer_config: dict[str, str]
     printer_machine: str
     printer_firmware: str
+    #: print-shop's own profiles the slice used (mqucifer/print-shop#6).
+    profiles: ProfilesUsed | None = None
 
 
 class Row(BaseModel):
@@ -167,6 +170,7 @@ class Row(BaseModel):
     printer_machine: str
     printer_firmware: str
     filament: str
+    profiles: ProfilesUsed | None
     start_requested_at: str
     started_at: str | None
     start_error: str | None
@@ -202,6 +206,7 @@ CREATE TABLE IF NOT EXISTS prints (
     printer_machine       TEXT NOT NULL,
     printer_firmware      TEXT NOT NULL,
     filament              TEXT NOT NULL,          -- the filament profile sliced with
+    profiles              TEXT,                   -- JSON ProfilesUsed: store files, hashes, commit
     start_requested_at    TEXT NOT NULL,          -- ISO-8601 UTC, before start()
     started_at            TEXT,                   -- the printer was seen to start
     start_error           TEXT,
@@ -219,7 +224,12 @@ CREATE TABLE IF NOT EXISTS prints (
 );
 """
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+#: What each version adds to the one before, applied in order to an older file.
+#: 2: the profiles a print used, by store file, hash and commit (print-shop#6).
+#: A row from before has none: NULL, not a guess.
+MIGRATIONS = {2: "ALTER TABLE prints ADD COLUMN profiles TEXT"}
 
 
 def ledger_path(settings: Path | None = None) -> Path:
@@ -252,11 +262,15 @@ class Ledger:
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.execute("PRAGMA foreign_keys=ON")
         version = self._conn.execute("PRAGMA user_version").fetchone()[0]
-        if version not in (0, SCHEMA_VERSION):
+        if version > SCHEMA_VERSION:
             raise LedgerError(
                 f"{path} is schema version {version}; this code knows {SCHEMA_VERSION}"
             )
-        self._conn.executescript(SCHEMA)
+        if version == 0:
+            self._conn.executescript(SCHEMA)
+        else:
+            for step in range(version + 1, SCHEMA_VERSION + 1):
+                self._conn.execute(MIGRATIONS[step])
         self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
     def close(self) -> None:
@@ -296,8 +310,8 @@ class Ledger:
                         orientation_rationale, orientation_accepted, gcode_name,
                         print_time_s, filament_cm3, layer_count, slicer_settings,
                         slicer_config, slicer_config_sha256, printer_machine,
-                        printer_firmware, filament, start_requested_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        printer_firmware, filament, profiles, start_requested_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         record.job_id,
                         record.stl_name,
@@ -316,6 +330,7 @@ class Ledger:
                         record.printer_machine,
                         record.printer_firmware,
                         config.get("filament_settings_id", ""),
+                        record.profiles.model_dump_json() if record.profiles else None,
                         _now(),
                     ),
                 )
@@ -400,5 +415,7 @@ def _row(row: sqlite3.Row) -> Row:
     data["rotation_deg"] = tuple(json.loads(data["rotation_deg"]))
     data["orientation_accepted"] = bool(data["orientation_accepted"])
     data["slicer_settings"] = json.loads(data["slicer_settings"])
+    if data["profiles"] is not None:
+        data["profiles"] = ProfilesUsed.model_validate_json(data["profiles"])
     del data["slicer_config"]
     return Row.model_validate(data)

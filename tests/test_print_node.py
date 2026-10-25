@@ -32,7 +32,6 @@ has to do by hand before this path can be trusted.
 from __future__ import annotations
 
 import ast
-import os
 import sqlite3
 import uuid
 from collections.abc import Callable, Iterator
@@ -56,18 +55,17 @@ from print_shop.printer.centauri import (
 )
 from print_shop.slicer.naming import gcode_filename
 from print_shop.slicer.orca import SlicerProfiles
+from tests.fakes import STORE_FILAMENT, STORE_MACHINE, STORE_PROCESS
 from tests.fixtures import write_stl
 
 ORCA = Path("/Applications/OrcaSlicer.app/Contents/MacOS/OrcaSlicer")
-DATADIR = Path(os.path.expanduser("~/Library/Application Support/OrcaSlicer"))
-_SYS = DATADIR / "system" / "Elegoo"
-MACHINE = _SYS / "machine" / "ECC" / "Elegoo Centauri Carbon 0.4 nozzle.json"
-PROCESS = _SYS / "process" / "ECC" / "0.20mm Standard @Elegoo CC 0.4 nozzle.json"
-FILAMENT = _SYS / "filament" / "ECC" / "Elegoo PLA @ECC.json"
+MACHINE = STORE_MACHINE
+PROCESS = STORE_PROCESS
+FILAMENT = STORE_FILAMENT
 
 needs_orca = pytest.mark.skipif(
     not (ORCA.exists() and MACHINE.exists() and PROCESS.exists()),
-    reason="OrcaSlicer or the Elegoo Centauri Carbon profiles are not installed",
+    reason="OrcaSlicer is not installed",
 )
 
 #: Free space on the real machine when measured: ~5.1 GB.
@@ -297,7 +295,6 @@ def profiles() -> SlicerProfiles:
         machine=MACHINE,
         process=PROCESS,
         filament=FILAMENT if FILAMENT.exists() else None,
-        datadir=DATADIR,
     )
 
 
