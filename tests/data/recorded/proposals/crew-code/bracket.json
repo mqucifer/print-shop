@@ -1,0 +1,53 @@
+{
+  "reasoning": "The part is a functional, load-bearing bracket (holding a 2 kg shelf) with a large, flat footprint (1800 mm\u00b2) and no overhangs or bridges. The primary failure modes are shear stress at the screw holes and bending under the shelf load. The current preset is a generic 'Standard' profile that prioritizes speed over strength. To ensure the part can hold 2 kg without shearing or deforming, we need to increase structural integrity. This is achieved by increasing wall loops for better layer adhesion and shear strength, increasing infill density to support the internal structure, and using a stronger infill pattern (Gyroid) for isotropic strength. Since the footprint is large and flat, a brim is unnecessary. The lack of overhangs means supports are not needed. Speeds should be reduced slightly to ensure strong layer bonding, especially at the critical screw hole locations.",
+  "changes": [
+    {
+      "key": "wall_loops",
+      "value": "4",
+      "feature": "purpose",
+      "knowledge": "walls",
+      "reason": "The part must hold a 2 kg shelf via screws in the plate; increasing wall loops from 2 to 4 improves shear strength and layer adhesion at the load-bearing flange."
+    },
+    {
+      "key": "sparse_infill_density",
+      "value": "50",
+      "feature": "purpose",
+      "knowledge": "infill",
+      "reason": "The 2 kg load requires significant internal support to prevent bending or crushing; 15% infill is too low for a load-bearing bracket, so 50% is selected for adequate strength."
+    },
+    {
+      "key": "sparse_infill_pattern",
+      "value": "gyroid",
+      "feature": "purpose",
+      "knowledge": "infill",
+      "reason": "Gyroid provides the strongest and most isotropic internal structure for a load-bearing part, distributing the 2 kg shelf load evenly across the bracket."
+    },
+    {
+      "key": "outer_wall_speed",
+      "value": "120",
+      "feature": "purpose",
+      "knowledge": "speed",
+      "reason": "Slowing the outer walls from 160 to 120 mm/s improves layer bonding and dimensional accuracy at the critical screw hole locations, ensuring the holes do not deform under the 2 kg load."
+    },
+    {
+      "key": "inner_wall_speed",
+      "value": "150",
+      "feature": "purpose",
+      "knowledge": "speed",
+      "reason": "Reducing inner wall speed from 200 to 150 mm/s enhances adhesion between the walls and infill, crucial for a part that must withstand heavy shear forces."
+    }
+  ],
+  "design_notes": [
+    "The part has no overhangs or bridges, so supports are not needed. The large flat footprint (1800 mm\u00b2) provides excellent bed adhesion, so a brim is unnecessary and would only add material waste.",
+    "Consider adding a chamfer or fillet to the internal corners where the flange meets the vertical plate to reduce stress concentration, which would be more effective than any slicer setting for handling the 2 kg load."
+  ],
+  "_call": {
+    "model": "crew-code",
+    "finish_reason": "stop",
+    "prompt_tokens": 1393,
+    "completion_tokens": 753,
+    "reasoning_tokens": 0,
+    "max_tokens": 8000,
+    "seconds": 26.0
+  }
+}

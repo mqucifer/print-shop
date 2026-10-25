@@ -1,0 +1,31 @@
+{
+  "reasoning": "A 22 mm snap-fit hook, 16\u00d78 mm footprint, 1.87 mm section, that clips into a 1.2 mm ledge on a lid and is opened often. Load-light, functional, indoor PLA.\n\nWhat makes or breaks this part:\n\n1. The 90\u00b0 overhang (10 mm\u00b2) is a flat ceiling. It cannot self-support at any threshold angle \u2014 it will sag or fail without supports. This is the one hard requirement.\n\n2. The snap engagement: the hook must flex ~1.2 mm repeatedly. The 1.87 mm section provides that flexibility geometrically. Adding wall loops would stiffen the cantilever and risk preventing full engagement or causing the plastic to crack at the ledge contact point. Two walls is the right call \u2014 enough for a clean outer surface and adequate fatigue resistance at the engagement face, without over-constraining the flex.\n\n3. The 10 mm\u00b2 bridge: short enough to print as a bridge without support if it's a separate feature from the 90\u00b0 ceiling. At 10 mm\u00b2 (roughly 3 mm \u00d7 3 mm), PLA bridges at this span hold.\n\n4. Slenderness 2.8\u00d7: moderate. 22 mm is not tall enough to wobble, and the 128 mm\u00b2 bed contact (full footprint) anchors it well. No brim needed.\n\n5. Infill is nearly irrelevant at 1.87 mm section \u2014 with two walls (~0.84 mm), the infill pocket is under 1 mm wide. At 15% you get one or two lines. Pattern choice is a non-issue here.\n\n6. Layer height 0.2 mm: the 1.2 mm engagement surface gets ~6 layers of vertical resolution. Workable, but the stair-stepping will show on the hook tip. A design-side fix serves better than a slicer change here (see design_notes).\n\nChanges: only the overhang forces a hand. Enable supports and set them to tree, per the sponsor's standing preference. The threshold angle at 30\u00b0 already catches the 90\u00b0 ceiling; no adjustment needed.\n\nEverything else stays at preset. The part is small, load-light, PLA, and the geometry does the work.",
+  "changes": [
+    {
+      "key": "enable_support",
+      "value": "1",
+      "feature": "overhang",
+      "knowledge": "supports",
+      "reason": "the 10 mm\u00b2 overhang at 90\u00b0 is a flat ceiling; it will not bridge or self-support and will sag without a backing structure"
+    },
+    {
+      "key": "support_type",
+      "value": "tree(auto)",
+      "feature": "overhang",
+      "knowledge": "supports",
+      "reason": "the sponsor uses tree supports for any overhang that needs backing; the 90\u00b0 ceiling at 10 mm\u00b2 is a small, localised target where tree branches attach cleanly and remove easily from the hook body"
+    }
+  ],
+  "design_notes": [
+    "The 1.2 mm engagement face resolves to roughly 6 layers at 0.2 mm. If the hook tip is a smooth concave curve, stair-stepping will roughen the contact surface and accelerate wear at the ledge. A slightly more vertical hook profile at the tip (steeper entry angle) would make the contact face a near-vertical wall, which 0.2 mm layers reproduce accurately, and would also let the snap engage with a more positive click rather than a gradual ramp. This is a geometry change that serves the function better than any slicer setting."
+  ],
+  "_call": {
+    "model": "crew-code-think",
+    "finish_reason": "stop",
+    "prompt_tokens": 1417,
+    "completion_tokens": 4663,
+    "reasoning_tokens": 3842,
+    "max_tokens": 8000,
+    "seconds": 167.9
+  }
+}

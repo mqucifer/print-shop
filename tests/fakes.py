@@ -41,14 +41,14 @@ CUBE_SHA256 = "bd3eda612de075a1e177e7dbe8e97941c8393df936ccab0087cf24b910fa027a"
 #: machine, 0.20 mm process and Elegoo PLA, each composed over its standard
 #: as a print composes it. What a test that slices with the real Orca uses.
 STORE = Path(__file__).resolve().parents[1] / "profiles"
-_COMPOSED = choose(Store(STORE), nozzle_mm=0.4, filament="Elegoo PLA").compose(
-    Path(tempfile.mkdtemp(prefix="print-shop-store-"))
-)
+_CHOICE = choose(Store(STORE), nozzle_mm=0.4, filament="Elegoo PLA")
+_COMPOSED = _CHOICE.compose(Path(tempfile.mkdtemp(prefix="print-shop-store-")))
 STORE_MACHINE = _COMPOSED["machine"]
 STORE_PROCESS = _COMPOSED["process"]
 STORE_FILAMENT = _COMPOSED["filament"]
 STORE_PROFILES = SlicerProfiles(
-    machine=STORE_MACHINE, process=STORE_PROCESS, filament=STORE_FILAMENT
+    machine=STORE_MACHINE, process=STORE_PROCESS, filament=STORE_FILAMENT,
+    used=_CHOICE.used(STORE),
 )
 
 CI_PROFILES = SlicerProfiles(

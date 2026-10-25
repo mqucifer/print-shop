@@ -1,0 +1,31 @@
+{
+  "reasoning": "A 120 mm square-based vase with ~1 mm walls (section 1.98 mm), no overhangs, no bridges. Purely cosmetic \u2014 the outside surface is the product. Two things will make or break it: (1) the outer wall finish, because that's what's seen, and (2) the layer resolution, because a vase is a curved surface and staircase artefacts read as defects. Everything else \u2014 supports, brim, infill \u2014 is irrelevant here: zero overhang area means no support; a 2825 mm\u00b2 footprint at 2\u00d7 slenderness is well-adhered; and walls this thin leave no room for infill lines regardless of the density setting.",
+  "changes": [
+    {
+      "key": "layer_height",
+      "value": "0.12",
+      "feature": "purpose",
+      "knowledge": "layer_height",
+      "reason": "the outside is the visible surface and a vase is a curved form; 0.12 mm layers halve the step height that would otherwise show as ridges on the exterior"
+    },
+    {
+      "key": "outer_wall_speed",
+      "value": "100",
+      "feature": "purpose",
+      "knowledge": "speed",
+      "reason": "the exterior wall is the finished surface; dropping from the 160 ceiling to 100 gives the extruder time to lay down a consistent, glossy line instead of a rippled one"
+    }
+  ],
+  "design_notes": [
+    "If the vase has a lip or lip-geometry on the rim that overhangs past 45\u00b0, a small chamfer or bevel on that feature in the CAD would let it print without support and give a cleaner edge than a support scar."
+  ],
+  "_call": {
+    "model": "crew-code-think",
+    "finish_reason": "stop",
+    "prompt_tokens": 1413,
+    "completion_tokens": 4712,
+    "reasoning_tokens": 4301,
+    "max_tokens": 8000,
+    "seconds": 161.5
+  }
+}

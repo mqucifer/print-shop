@@ -1,0 +1,22 @@
+{
+  "reasoning": "A small snap hook (22 mm, 16\u00d78 mm) that clips over a 1.2 mm ledge on a lid and is flexed open and shut repeatedly. Light load, indoor, PLA. The critical failure mode is delamination or cracking at the hook's flex point under repeated bending. The section is 1.87 mm \u2014 thin for a 0.4 mm nozzle. With the preset's 2 walls (0.8 mm), the remaining 1.07 mm of the section is infill space; at 15% zig-zag that's one or two sparse lines that can pull out or crack under cyclic flex. Bumping to 3 walls (1.2 mm) puts more of the cross-section in continuous, well-bonded material where the bending stress is highest (the outer fibers), and the knowledge entry confirms that more wall loops raise layer adhesion. The infill gap drops to ~0.67 mm, which Orca will effectively leave solid or near-solid \u2014 fine for a light-load hook that wants to flex as a unit rather than have internal voids open and crack. I am not going to 4 walls: 1.6 mm of the 1.87 mm section would be walls, making the hook too rigid for a snap fit that must flex over a 1.2 mm ledge repeatedly; it would crack at the ledge rather than flex. The 10 mm\u00b2 bridge at 90\u00b0 is a small span (\u2264 ~5 mm) that PLA at 0.2 mm with fan at 100% bridges cleanly \u2014 no support needed. Bed contact is the full 128 mm\u00b2 footprint, PLA warps little, slenderness 2.8\u00d7 is moderate \u2014 no brim. Everything else in the preset serves this part without a reason to move it.",
+  "changes": [
+    {
+      "key": "wall_loops",
+      "value": "value_justification_placeholder",
+      "feature": "purpose",
+      "knowledge": "walls",
+      "reason": "the 1.87 mm hook section flexes over the 1.2 mm ledge each cycle, so 3 walls bond more of that cross-section and resist delamination at the bend point without making the hook too stiff to snap"
+    }
+  ],
+  "design_notes": [],
+  "_call": {
+    "model": "crew-code-think",
+    "finish_reason": "stop",
+    "prompt_tokens": 1417,
+    "completion_tokens": 5313,
+    "reasoning_tokens": 4252,
+    "max_tokens": 8000,
+    "seconds": 183.5
+  }
+}

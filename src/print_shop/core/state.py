@@ -22,6 +22,8 @@ from typing import NotRequired, TypedDict
 from pydantic import BaseModel
 
 from print_shop.core.contracts import Gate, GateDecision, Outcome
+from print_shop.setup.intake import Intake
+from print_shop.setup.proposal import Change, Proposal
 from print_shop.slicer.store import ProfilesUsed
 
 __all__ = [
@@ -199,6 +201,12 @@ class PrintJobState(TypedDict):
     #: The store's profiles the slice used, for the ledger. Kept in state so a
     #: job resumed by another process records what it was sliced with.
     profiles_used: NotRequired[ProfilesUsed | None]
+
+    #: What the part is for (mqucifer/print-shop#7), the settings proposed
+    #: from it over the presets, and the Sponsor's corrections at the review.
+    intake: NotRequired[Intake]
+    proposal: NotRequired[Proposal]
+    corrections: NotRequired[tuple[Change, ...]]
 
     # Gates. `pending_gate` set means the graph is parked awaiting a human.
     pending_gate: NotRequired[Gate]

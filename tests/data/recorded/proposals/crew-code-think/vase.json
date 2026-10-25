@@ -1,0 +1,17 @@
+{
+  "reasoning": "The part is a 120 mm display column: 60\u00d760 mm base, ~2 mm section, no overhangs, no bridges. The intake set it to display/lightweight with wall_loops=2, 15% zig-zag infill, top_shell_layers=5. Those are fixed. I need to check bottom_shell_layers (preset 3) and confirm nothing else is triggered.",
+  "changes": [],
+  "design_notes": [
+    "No overhangs or bridges, so no supports and no speed/cooling changes are triggered.",
+    "Bed contact is 2825 mm\u00b2 and slenderness is 2\u00d7, both well within the adhesion thresholds (\u2265200 mm\u00b2, \u22642.5\u00d7), so no brim is needed."
+  ],
+  "_call": {
+    "model": "crew-code-think",
+    "finish_reason": "stop",
+    "prompt_tokens": 3477,
+    "completion_tokens": 1913,
+    "reasoning_tokens": 1725,
+    "max_tokens": 16000,
+    "seconds": 99.2
+  }
+}

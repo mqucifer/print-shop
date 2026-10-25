@@ -1,0 +1,12 @@
+{
+  "questions": [],
+  "_call": {
+    "model": "crew-code-think",
+    "finish_reason": "stop",
+    "prompt_tokens": 1993,
+    "completion_tokens": 2250,
+    "reasoning_tokens": 2240,
+    "max_tokens": 16000,
+    "seconds": 180.7
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "note": "no questions: the model was cut off (cut off at max_tokens=16000 after 16000 tokens (2505 reasoning) and 514.7 s)",
+  "call": {
+    "model": "crew-code-think",
+    "finish_reason": "length",
+    "prompt_tokens": 1992,
+    "completion_tokens": 16000,
+    "reasoning_tokens": 2505,
+    "max_tokens": 16000,
+    "seconds": 514.7
+  }
+}
