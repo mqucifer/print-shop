@@ -77,7 +77,12 @@ def main(argv: list[str] | None = None) -> int:
             job_id = run.daemon.submit(args.stl)
             print(f"Job {job_id}: slicing, then waiting for Approve in Home Assistant.")
             run.daemon.wait_for_gate(job_id, timeout_s=APPROVAL_WAIT_S)
+            gate = run.daemon.pending_gate() or {}
             print("At the approval gate. Approve or Reject on the dashboard.")
+            print(f"  time        {int(gate.get('print_time_s') or 0) // 60} min")
+            print(f"  plastic     {gate.get('filament_cm3')} cm3")
+            print(f"  turned      {gate.get('orientation_deg')}")
+            print(f"  because     {gate.get('orientation_rationale')}")
             result = run.daemon.wait_for_finish(job_id, timeout_s=APPROVAL_WAIT_S + FINISH_WAIT_S)
             if result.error:
                 print(f"The job ended without printing: {result.error}")

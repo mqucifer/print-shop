@@ -189,3 +189,16 @@ def test_the_path_comes_from_the_settings(tmp_path: Path) -> None:
     assert ledger_path(settings) == tmp_path / "elsewhere.sqlite"
     assert ledger_path(tmp_path / "absent.env") == DEFAULT_PATH
     assert Path("~/print-shop/ledger.sqlite").expanduser() == DEFAULT_PATH
+
+
+def test_a_copy_of_the_file_alone_holds_every_row(ledger: Ledger, tmp_path: Path) -> None:
+    """The nightly archive copies files; the main file must not lag behind its WAL."""
+    import shutil
+
+    ended(ledger)
+    ledger.record_answer("job-1", Answer(result=Result.FAILED, symptom=Symptom.STRINGING))
+    copy = tmp_path / "copy.sqlite"
+    shutil.copyfile(ledger.path, copy)  # not the -wal, not the -shm
+    with Ledger(copy) as restored:
+        row = restored.get("job-1")
+    assert row is not None and row.symptom is Symptom.STRINGING

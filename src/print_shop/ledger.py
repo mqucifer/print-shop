@@ -234,8 +234,11 @@ def _now() -> str:
 class Ledger:
     """The ledger file, open for the life of the process.
 
-    One connection, shared by the daemon's threads under a lock. WAL, so the
-    nightly archive can read while a print is being recorded.
+    One connection, shared by the daemon's threads under a lock, in WAL mode.
+    The nightly archive (mqucifer/infra#36) copies files rather than reading
+    through SQLite, so every write is checkpointed into the main file at once:
+    a copy of `ledger.sqlite` alone, without its `-wal`, holds every row.
+    Writes are a handful a day, so the checkpoint costs nothing.
     """
 
     def __init__(self, path: Path) -> None:
@@ -275,6 +278,7 @@ class Ledger:
                 self._conn.execute("ROLLBACK")
                 raise
             self._conn.execute("COMMIT")
+            self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
     # --- writes, in the order a print goes through them ------------------
 

@@ -221,6 +221,8 @@ class Daemon:
         # opened it consumes it. None when no gate is open — a command that
         # arrives with no inbox has nothing to be an answer to, and is dropped.
         self._gate_inbox: Queue[Command] | None = None
+        #: What the open gate shows, for a caller to print beside the dashboard.
+        self._pending_gate: dict[str, Any] | None = None
 
         # Results storage.
         self._results: dict[str, JobResult] = {}
@@ -338,6 +340,11 @@ class Daemon:
             time.sleep(0.1)
         raise TimeoutError(f"timed out waiting for job {job_id} to finish")
 
+    def pending_gate(self) -> dict[str, Any] | None:
+        """The payload of the gate a job is parked at, or None. Read-only."""
+        gate = self._pending_gate
+        return dict(gate) if gate is not None else None
+
     def is_alive(self) -> bool:
         """Report whether the daemon process is still operational.
 
@@ -454,6 +461,7 @@ class Daemon:
         # the payload lives on `.value`.
         interrupt = result["__interrupt__"][0]
         gate_payload: dict[str, Any] = dict(interrupt.value)
+        self._pending_gate = {**gate_payload, "job_id": job_id}
 
         # Open a fresh inbox before publishing the gate, so a press that lands
         # the moment the dashboard updates has somewhere to go. It is scoped to
@@ -497,6 +505,7 @@ class Daemon:
         # We have our answer; close this gate's inbox so a stale press cannot
         # leak into the next gate.
         self._close_gate()
+        self._pending_gate = None
 
         # Clear the gate.
         self._bridge_publish(gate_topic(self._cfg), {"pending": False})

@@ -72,6 +72,9 @@ def test_an_approved_job_is_sliced_gated_uploaded_and_started(rig: Rig) -> None:
     assert gate["job_id"] == job_id
     assert gate["print_time_s"] == 1009, "the recorded slice's own estimate"
     assert rig.printer.calls == [], "nothing touches the printer before the gate"
+    shown = rig.daemon.pending_gate()
+    assert shown is not None and shown["job_id"] == job_id
+    assert shown["orientation_rationale"] == gate["orientation_rationale"]
 
     rig.press("approve")
     result = rig.daemon.wait_for_finish(job_id, timeout_s=30)
@@ -81,6 +84,7 @@ def test_an_approved_job_is_sliced_gated_uploaded_and_started(rig: Rig) -> None:
     started = rig.printer.calls[-1][1]
     assert job_id_from_filename(started) == job_id
     assert rig.bridge.retained_json(gate_topic(CFG)) == {"pending": False}
+    assert rig.daemon.pending_gate() is None
     assert rig.bridge.retained_json(state_topic(CFG))["status"] == "done"
     assert rig.slicer.calls == [rig.stl], "the cube sits flat, so it is sliced unrotated"
 
