@@ -4,7 +4,7 @@
 # record's intent is the Sponsor's, written at onboarding. Until then it has
 # nothing to check, so the checks run here. Nothing in CI reaches the printer,
 # Home Assistant, the MQTT broker, Orca or a model: those tests carry markers
-# and are deselected.
+# and are deselected. No test contacts the printer at all.
 
 name: ci
 
@@ -28,5 +28,5 @@ jobs:
       - run: uv sync --locked
       - run: uv run ruff check .
       - run: uv run mypy src tests scripts
-      - run: uv run pytest -q -m "not slicer and not llm and not mqtt and not ha and not printer"
+      - run: uv run pytest -q -m "not slicer and not llm and not mqtt and not ha"
       - run: uv run python scripts/check_addresses.py

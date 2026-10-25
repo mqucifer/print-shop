@@ -1,0 +1,166 @@
+# Lovelace dashboard for the 3D Print Agent — CURRENT, written against the
+# entity ids this project actually publishes.
+#
+# Every id below was read back from a live Home Assistant (2026.8.3) after
+# announcing, not predicted. `CONTRACTS_HA` in `tests/test_mqtt.py` holds the
+# same list and `tests/test_dashboard.py` checks this file against it.
+#
+# HA derives an entity id from `slugify(device name + entity name)`. A
+# discovery `object_id` does not override that — it was tried and measured as
+# ignored. So renaming the device "3D Print Agent", or any entity, renames the
+# entity id and unbinds the cards here.
+#
+# Built-in cards only — no HACS card dependencies — so it renders on a stock
+# Home Assistant.
+#
+# To use: Settings -> Dashboards -> + Add Dashboard -> New from scratch, then
+# open it, three-dot menu -> Edit -> Raw configuration editor, and paste the
+# `views:` block below.
+#
+# Entities come from MQTT Discovery. If a card shows "Entity not available",
+# the daemon has never announced to this broker — run `announce()` once.
+
+views:
+  - title: "3D Printing"
+    path: printing
+    icon: "mdi:printer-3d-nozzle"
+    cards:
+      # ------------------------------------------------------------------
+      # What is happening right now.
+      # ------------------------------------------------------------------
+      - type: markdown
+        content: >
+          # {% set s = states('sensor.3d_print_agent_status') %}
+          {%- if s == 'idle' %}Ready when you are
+          {%- elif s == 'analyzing' %}Looking at the model…
+          {%- elif s == 'awaiting_approval' %}Waiting for your OK
+          {%- elif s == 'done' %}Finished
+          {%- elif s == 'rejected' %}Cancelled
+          {%- elif s == 'failed' %}Something went wrong
+          {%- elif s in ['unknown', 'unavailable'] %}Printer agent is offline
+          {%- else %}{{ s }}{%- endif %}
+
+      - type: tile
+        entity: sensor.3d_print_agent_status
+        name: Status
+        icon: "mdi:state-machine"
+
+      # ------------------------------------------------------------------
+      # The approval gate. The buttons only appear when a job is actually
+      # parked at one — AGENTS.md rule 5 says a gate stops for a human, and a
+      # live Approve button with nothing behind it teaches people to ignore it.
+      # ------------------------------------------------------------------
+      - type: conditional
+        conditions:
+          - condition: state
+            entity: binary_sensor.3d_print_agent_awaiting_approval
+            state: "on"
+        card:
+          type: vertical-stack
+          cards:
+            - type: markdown
+              content: >
+                ## Print this?
+
+                **Time:** {{ (states('sensor.3d_print_agent_print_time') | float(0) / 60)
+                | round(0) | int }} minutes
+
+                **Plastic:** {{ states('sensor.3d_print_agent_filament') }} cm³
+
+                **Turned:** {{ states('sensor.3d_print_agent_orientation') }}
+
+            - type: horizontal-stack
+              cards:
+                - type: button
+                  entity: button.3d_print_agent_approve
+                  name: "Yes, print it"
+                  icon: "mdi:check-circle"
+                  icon_height: 48px
+                  show_state: false
+                  tap_action:
+                    action: perform-action
+                    perform_action: button.press
+                    target:
+                      entity_id: button.3d_print_agent_approve
+                - type: button
+                  entity: button.3d_print_agent_reject
+                  name: "No, stop"
+                  icon: "mdi:close-circle"
+                  icon_height: 48px
+                  show_state: false
+                  tap_action:
+                    action: perform-action
+                    perform_action: button.press
+                    target:
+                      entity_id: button.3d_print_agent_reject
+
+      - type: conditional
+        conditions:
+          - condition: state
+            entity: binary_sensor.3d_print_agent_awaiting_approval
+            state: "off"
+        card:
+          type: markdown
+          content: >
+            *Nothing is waiting for approval right now.*
+
+      # ------------------------------------------------------------------
+      # The numbers from the last slice.
+      # ------------------------------------------------------------------
+      - type: glance
+        title: Last slice
+        columns: 3
+        entities:
+          - entity: sensor.3d_print_agent_print_time
+            name: Time
+          - entity: sensor.3d_print_agent_filament
+            name: Plastic
+          - entity: sensor.3d_print_agent_orientation
+            name: Turned
+
+      # ------------------------------------------------------------------
+      # The machine itself. These entities belong to the Elegoo HACS
+      # integration, not to this project — ids read from the live instance.
+      # ------------------------------------------------------------------
+      - type: picture-glance
+        title: Centauri Carbon
+        camera_image: camera.centauri_carbon_chamber_camera
+        camera_view: live
+        entities:
+          - entity: light.centauri_carbon_chamber_light
+          - entity: sensor.centauri_carbon_nozzle_temperature
+          - entity: sensor.centauri_carbon_bed_temperature
+
+      - type: glance
+        columns: 3
+        entities:
+          - entity: sensor.centauri_carbon_print_status
+            name: Printer
+          - entity: sensor.centauri_carbon_nozzle_temperature
+            name: Nozzle
+          - entity: sensor.centauri_carbon_bed_temperature
+            name: Bed
+
+      # Progress only means anything while something is printing.
+      - type: conditional
+        conditions:
+          - condition: state
+            entity: sensor.centauri_carbon_print_status
+            state_not: idle
+        card:
+          type: vertical-stack
+          cards:
+            - type: gauge
+              entity: sensor.centauri_carbon_percent_complete
+              name: Progress
+              min: 0
+              max: 100
+            - type: glance
+              columns: 3
+              entities:
+                - entity: sensor.centauri_carbon_current_layer
+                  name: Layer
+                - entity: sensor.centauri_carbon_total_layers
+                  name: of
+                - entity: sensor.centauri_carbon_remaining_print_time
+                  name: Left

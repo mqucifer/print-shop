@@ -19,3 +19,12 @@ don't change these files; the template does, by pull request.
 
 ## Before the crew takes it over
 This repository is a Claude-built alpha, tracked on the Crew roadmap board (https://github.com/orgs/mqucifer/projects/2). Its board workflow (`.github/workflows/board.yml`) runs only by hand, so its issues stay off the crew's delivery board. **At takeover, restore its `issues` and `pull_request` triggers,** as the comment in that file says.
+
+## print-shop
+The print project's phase 1 (mqucifer/project-print `ROADMAP.md`, M13): one job from an STL to a print, behind a human approval in Home Assistant, and a ledger of each print the agent starts.
+
+The job is ported from the prototype, the local folder `3d-print-agent` (no remote), at its commit `1ef5f06`. `CONTRACTS.md` came with it and is the spec. Comments in the code that cite `AGENTS.md`, `PROJECT.md`, `CODE_REVIEW.md` or `BACKLOG.md` mean the prototype's files, which stay there: they hold the machine's addresses, and this repository is public.
+
+- **Settings** live on the Mac in `~/.config/print-shop/.env` (mode 600), read by `print_shop.env.load_env`, never sourced and never committed. `scripts/check_addresses.py` fails on any address in a tracked file, and on the Mac on any of those values.
+- **The printer is never armed by a test.** `tests/conftest.py` refuses an armed connection for the whole session, whatever the environment says.
+- **Checks:** `uv sync`, then `uv run ruff check .`, `uv run mypy src tests scripts`, `uv run pytest -q -m "not slicer and not llm and not mqtt and not ha"` and `uv run python scripts/check_addresses.py`. Drop `not slicer` on the Mac to slice with the real Orca. CI runs the same from `.github/workflows/ci.yml` until onboarding writes `.crew/project.yaml`.
