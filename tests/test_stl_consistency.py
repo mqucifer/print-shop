@@ -32,6 +32,7 @@ from typing import Any
 import pytest
 
 from print_shop.ingest.analyzer import StlChangedError, file_sha256
+from tests.fakes import RecordedSlicer, installed_or_ci
 from tests.fixtures import write_stl
 
 # --------------------------------------------------------------------------
@@ -85,11 +86,13 @@ def profiles() -> Any:
 
     datadir = Path.home() / "Library" / "Application Support" / "OrcaSlicer"
     sysdir = datadir / "system" / "Elegoo"
-    return SlicerProfiles(
-        machine=sysdir / "machine" / "ECC" / "Elegoo Centauri Carbon 0.4 nozzle.json",
-        process=sysdir / "process" / "ECC" / "0.20mm Standard @Elegoo CC 0.4 nozzle.json",
-        filament=sysdir / "filament" / "ECC" / "Elegoo PLA @ECC.json",
-        datadir=datadir,
+    return installed_or_ci(
+        SlicerProfiles(
+            machine=sysdir / "machine" / "ECC" / "Elegoo Centauri Carbon 0.4 nozzle.json",
+            process=sysdir / "process" / "ECC" / "0.20mm Standard @Elegoo CC 0.4 nozzle.json",
+            filament=sysdir / "filament" / "ECC" / "Elegoo PLA @ECC.json",
+            datadir=datadir,
+        )
     )
 
 
@@ -103,8 +106,10 @@ def test_ingest_records_the_hash_in_state(profiles: Any, tmp_path: Path) -> None
     from print_shop.core.state import EntryPath
     from print_shop.orchestrator.graph import build_graph, new_job
 
-    app = build_graph(profiles, outdir_root=tmp_path / "jobs")
-    job = new_job(str(write_stl("tee", tmp_path)), entry=EntryPath.STL_UPLOAD)
+    # The graph runs on to the gate, so it slices: with the recorded slice of
+    # the cube, so this runs where there is no Orca.
+    app = build_graph(profiles, outdir_root=tmp_path / "jobs", slicer=RecordedSlicer())
+    job = new_job(str(write_stl("cube", tmp_path)), entry=EntryPath.STL_UPLOAD)
     out = app.invoke(job, config={"configurable": {"thread_id": job["job_id"]}})
 
     assert out.get("stl_sha256"), "ingest did not record the STL hash"

@@ -41,6 +41,18 @@ CI_PROFILES = SlicerProfiles(
 )
 
 
+def installed_or_ci(real: SlicerProfiles) -> SlicerProfiles:
+    """The Mac's Orca profiles where they are installed, the CI ones elsewhere.
+
+    For tests that build a graph but never slice: the graph reads only the
+    build volume from a profile, which both give as 257 mm. Tests that do
+    slice skip without Orca (`needs_orca`), whichever profiles they get.
+    """
+    if real.machine.is_file() and real.process.is_file():
+        return real
+    return CI_PROFILES
+
+
 # --------------------------------------------------------------------------
 # Slicing
 # --------------------------------------------------------------------------

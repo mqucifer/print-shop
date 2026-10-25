@@ -28,6 +28,7 @@ from print_shop.ledger import Ledger
 from print_shop.orchestrator.graph import build_graph, graph_edges, new_job
 from print_shop.slicer.naming import job_id_from_filename
 from print_shop.slicer.orca import SlicerProfiles
+from tests.fakes import installed_or_ci
 from tests.fixtures import write_stl
 from tests.test_print_node import FakePrinter, idle
 
@@ -46,11 +47,13 @@ needs_orca = pytest.mark.skipif(
 
 @pytest.fixture
 def profiles() -> SlicerProfiles:
-    return SlicerProfiles(
-        machine=MACHINE,
-        process=PROCESS,
-        filament=FILAMENT if FILAMENT.exists() else None,
-        datadir=DATADIR,
+    return installed_or_ci(
+        SlicerProfiles(
+            machine=MACHINE,
+            process=PROCESS,
+            filament=FILAMENT if FILAMENT.exists() else None,
+            datadir=DATADIR,
+        )
     )
 
 

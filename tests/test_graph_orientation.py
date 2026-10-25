@@ -25,6 +25,7 @@ from print_shop.core.contracts import Gate, ungated_edges
 from print_shop.core.state import EntryPath
 from print_shop.orchestrator.graph import build_graph, graph_edges, new_job
 from print_shop.slicer.orca import SlicerProfiles
+from tests.fakes import installed_or_ci
 from tests.fixtures import write_stl
 
 ORCA = Path("/Applications/OrcaSlicer.app/Contents/MacOS/OrcaSlicer")
@@ -42,11 +43,13 @@ needs_orca = pytest.mark.skipif(
 
 @pytest.fixture
 def profiles() -> SlicerProfiles:
-    return SlicerProfiles(
-        machine=MACHINE,
-        process=PROCESS,
-        filament=FILAMENT if FILAMENT.exists() else None,
-        datadir=DATADIR,
+    return installed_or_ci(
+        SlicerProfiles(
+            machine=MACHINE,
+            process=PROCESS,
+            filament=FILAMENT if FILAMENT.exists() else None,
+            datadir=DATADIR,
+        )
     )
 
 
