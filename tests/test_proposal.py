@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from print_shop.expert.client import LLMConfig
+from print_shop.expert.client import CallInfo, CutOff, LLMConfig
 from print_shop.ingest.analyzer import analyze
 from print_shop.setup import Proposer
 from print_shop.setup.features import Feature, measure
@@ -239,3 +239,29 @@ def test_record_the_models_proposal(part: str, tmp_path: Path) -> None:
         (out / f"{part}.failed.txt").write_text(proposal.model + "\n")
         pytest.fail(proposal.model)
     (out / f"{part}.json").write_text(json.dumps(replies[0], indent=2) + "\n")
+
+
+def test_a_cut_off_reply_is_refused_and_its_cost_recorded(tmp_path: Path) -> None:
+    """The Sponsor's rule for a new limit: record every signal; never retry silently."""
+    info = CallInfo(model="crew-code-think", finish_reason="length", prompt_tokens=1417,
+                    completion_tokens=16000, reasoning_tokens=15200, max_tokens=16000,
+                    seconds=580.0)
+    calls: list[str] = []
+
+    def cut(system: str, user: str, schema: dict[str, Any]) -> dict[str, Any]:
+        calls.append(user)
+        raise CutOff("cut off at max_tokens=16000 after 16000 tokens", info)
+
+    proposal = _proposal("snap", tmp_path, cut)
+    assert len(calls) == 1, "no retry"
+    assert proposal.model == "cut off: cut off at max_tokens=16000 after 16000 tokens"
+    assert proposal.call["finish_reason"] == "length"
+    assert proposal.call["completion_tokens"] == 16000
+    assert [c.source for c in proposal.changes] == [Source.GUARD, Source.GUARD]
+
+
+def test_the_default_limit_follows_the_sponsors_rule() -> None:
+    base = LLMConfig(api_key="sk-test")  # type: ignore[arg-type]
+    config = setup_llm(base, {})
+    assert (config.model, config.max_tokens) == ("crew-code-think", 16000)
+    assert setup_llm(base, {"PRINT_SHOP_SETUP_MAX_TOKENS": "9000"}).max_tokens == 9000

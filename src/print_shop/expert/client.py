@@ -29,7 +29,7 @@ from pydantic import BaseModel, SecretStr
 
 from print_shop.env import SETTINGS_PATH, load_env
 
-__all__ = ["CallInfo", "LLMConfig", "complete_json", "complete_json_call"]
+__all__ = ["CallInfo", "CutOff", "LLMConfig", "complete_json", "complete_json_call"]
 
 #: LiteLLM on the Mac. Loopback, so it is not an address the check would flag,
 #: and not a host anyone outside this machine could reach.
@@ -94,6 +94,14 @@ class CallInfo(BaseModel):
     seconds: float
 
 
+class CutOff(RuntimeError):
+    """The reply ran to `max_tokens` and was cut off. Carries what the call cost."""
+
+    def __init__(self, message: str, info: CallInfo) -> None:
+        super().__init__(message)
+        self.info = info
+
+
 def complete_json(
     config: LLMConfig,
     system: str,
@@ -125,9 +133,9 @@ def complete_json_call(
         The parsed JSON object from the model's reply, and what the call cost.
 
     Raises:
+        CutOff: When `max_tokens` cut the reply off, with the call's cost.
         RuntimeError: On a non-2xx response, an empty answer, or a body that
-            will not parse, saying when `max_tokens` cut it off. The key is
-            never part of the message.
+            will not parse. The key is never part of the message.
     """
     body: dict[str, Any] = {
         "model": config.model,
@@ -177,21 +185,21 @@ def complete_json_call(
         max_tokens=config.max_tokens,
         seconds=round(time.monotonic() - started, 1),
     )
-    cut = (
-        f" (cut off at max_tokens={config.max_tokens})" if info.finish_reason == "length" else ""
-    )
+    if info.finish_reason == "length":
+        raise CutOff(
+            f"cut off at max_tokens={config.max_tokens} after {info.completion_tokens} tokens"
+            f" ({info.reasoning_tokens} reasoning) and {info.seconds} s",
+            info,
+        )
     if not text:
         # The model can think and then answer nothing (mqucifer/infra
         # `runbooks/empty-model-answers.md`). Say so rather than fail to parse.
-        raise RuntimeError(f"LLM returned an empty answer{cut}")
+        raise RuntimeError("LLM returned an empty answer")
 
     try:
         parsed: Any = json.loads(text)
     except json.JSONDecodeError as exc:
-        tail = f" ... {text[-200:]!r} ({len(text)} chars)" if cut else ""
-        raise RuntimeError(
-            f"LLM reply is not a JSON object{cut}: {text[:200]!r}{tail}"
-        ) from exc
+        raise RuntimeError(f"LLM reply is not a JSON object: {text[:200]!r}") from exc
     if not isinstance(parsed, dict):
         raise RuntimeError(f"LLM reply is not a JSON object: {text[:200]!r}")
     return parsed, info

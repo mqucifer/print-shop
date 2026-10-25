@@ -71,7 +71,7 @@ Before each print, `cd ~/Documents/git/print-shop && git pull && uv sync`, so it
    - each setting it changes from your presets, as `your value -> this print`, with the feature or purpose behind it and its source;
    - what it weighed and kept, any design notes, and Orca's estimate.
 
-   It reasons with `crew-code-think` (the `PRINT_SHOP_SETUP_MODEL` setting), which takes two to three minutes. Type `ok` to go on to the gate. To correct a setting, type it by name, e.g. `layer_height=0.2 because it's a test cube`, and it slices again and shows the review again. Or type `stop`. Your corrections go in the ledger: they are what print-shop learns from.
+   It reasons with `crew-code-think` (the `PRINT_SHOP_SETUP_MODEL` setting), which usually takes two to three minutes (up to about ten at its 16,000-token limit). If its answer is cut off at that limit, the review says CUT OFF and shows only the guards' changes; that is recorded, and nothing is retried. Type `ok` to go on to the gate. To correct a setting, type it by name, e.g. `layer_height=0.2 because it's a test cube`, and it slices again and shows the review again. Or type `stop`. Your corrections go in the ledger: they are what print-shop learns from.
 
 2. **Approve at the gate.** The dashboard asks "Print this?". Check the numbers before you press:
    - Time: about 11 minutes (Orca's estimate for your presets is 10 m 54 s; the review shows the estimate with its changes);

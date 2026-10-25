@@ -11,6 +11,8 @@ knowledge it relies on. Each value is checked against its setting's bound
 (`knowledge.check`), set by the presets or a source; one outside it is
 refused, saying why, and never clamped. A failed call is a proposal without
 the model's part, saying so: the guards still hold, and the Sponsor reviews.
+A reply cut off at the output limit is one such failure, never retried: its
+finish reason and tokens go in the proposal, and so in the ledger.
 """
 
 from __future__ import annotations
@@ -18,7 +20,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from print_shop.expert.client import LLMConfig, complete_json_call
+from print_shop.expert.client import CutOff, LLMConfig, complete_json_call
 from print_shop.setup.knowledge import KNOWLEDGE, SETTINGS, check
 from print_shop.setup.proposal import Change, PartFacts, Proposal, Source
 
@@ -31,9 +33,12 @@ MAX_TOKENS_KEY = "PRINT_SHOP_SETUP_MAX_TOKENS"
 
 #: The Sponsor expects these judgements to reason, so the thinking alias.
 DEFAULT_MODEL = "crew-code-think"
-#: Room for the reasoning and the answer: at the 27.5 tokens a second
-#: measured on the Spark (2026-10-08), about five minutes at most.
-DEFAULT_MAX_TOKENS = 8000
+#: Room for the reasoning and the answer. The Sponsor's standing rule for a
+#: new limit: start high, about 3x the most seen, record every signal, and
+#: tune it down from evidence. The most seen on 2026-10-25 was 5,313 tokens,
+#: and two replies were cut off at 8,000. At the 27.5 tokens a second
+#: measured on the Spark (2026-10-08), 16,000 is about ten minutes at most.
+DEFAULT_MAX_TOKENS = 16000
 
 #: How the model is called: `complete_json`, or a test's recorded reply.
 Ask = Callable[[str, str, dict[str, Any]], dict[str, Any]]
@@ -101,6 +106,9 @@ def propose_by_model(facts: PartFacts, ask: Ask, model: str) -> Proposal:
         suggestions = list(reply["changes"])
         reasoning = str(reply.get("reasoning", ""))
         design = tuple(str(n) for n in reply.get("design_notes", ()))
+    except CutOff as exc:
+        # Recorded, never retried: every cut-off is a signal for tuning the limit.
+        return Proposal(model=f"cut off: {exc}", call=exc.info.model_dump())
     except (RuntimeError, OSError, KeyError, TypeError) as exc:
         return Proposal(model=f"unavailable: {exc}"[:600])
 

@@ -89,7 +89,12 @@ def render(request: ReviewRequest) -> str:
         lines.append(f"  note: {note}")
     for refusal in proposal.refused:
         lines.append(f"  refused from the model: {refusal}")
-    if proposal.model.startswith("unavailable"):
+    if proposal.model.startswith("cut off"):
+        lines.append(
+            f"  CUT OFF: the model's answer was {proposal.model}. Nothing it proposed is "
+            "used; only the guards' changes stand. This is recorded, to tune the limit."
+        )
+    elif proposal.model.startswith("unavailable"):
         lines.append(f"  the model was {proposal.model}; only the guards' changes stand")
     elif not proposal.model:
         lines.append("  no model was asked; only the guards' changes stand")

@@ -69,6 +69,14 @@ def test_the_review_shows_each_change_against_the_preset_and_the_reasoning() -> 
     assert "flat face down" in text
 
 
+def test_a_cut_off_is_shown_as_one() -> None:
+    cut = Proposal(model="cut off: cut off at max_tokens=16000 after 16000 tokens",
+                   call={"finish_reason": "length"})
+    text = render(_request(cut))
+    assert "CUT OFF: the model's answer was cut off: cut off at max_tokens=16000" in text
+    assert "only the guards' changes stand" in text
+
+
 def test_ok_approves_and_stop_stops() -> None:
     assert parse_answer("ok", _request()) == Review(approved=True)
     assert parse_answer(" stop ", _request()) == Review(stop=True)
