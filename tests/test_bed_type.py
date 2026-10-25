@@ -26,7 +26,7 @@ from print_shop.slicer.orca import (
 )
 from tests.fakes import CI_PROFILES, RecordedSlicer
 from tests.fixtures import write_stl
-from tests.test_graph import DATADIR, FILAMENT, MACHINE, PROCESS, needs_orca
+from tests.test_graph import FILAMENT, MACHINE, PROCESS, needs_orca
 from tests.test_job_e2e import Rig
 
 #: The commands that heat the bed: set (M140) and set-and-wait (M190).
@@ -103,15 +103,29 @@ def test_a_pei_job_is_on_record_with_its_plate_and_bed(tmp_path: Path) -> None:
 
 @pytest.fixture
 def real() -> SlicerProfiles:
-    return SlicerProfiles(machine=MACHINE, process=PROCESS, filament=FILAMENT, datadir=DATADIR)
+    return SlicerProfiles(machine=MACHINE, process=PROCESS, filament=FILAMENT)
+
+
+def plate_temp(profiles: SlicerProfiles, key: str) -> int:
+    """The bed temperature the filament profile gives a plate (`textured_plate_temp`)."""
+    assert profiles.filament is not None
+    return int(json.loads(profiles.filament.read_text())[key][0])
 
 
 @pytest.mark.slicer
 @needs_orca
 def test_orca_heats_the_bed_for_pei(real: SlicerProfiles, tmp_path: Path) -> None:
+    """The bed is the filament profile's textured-plate temperature: 60 C for Elegoo PLA.
+
+    The recordings above say 45 C because they were sliced from Orca's system
+    file without its parents, which Orca's CLI does not resolve: every key the
+    file doesn't set came from Orca's built-in defaults (their
+    `filament_vendor` is "(Undefined)"). The store's profile is whole, so
+    Elegoo's own value applies, as it does in Orca's UI.
+    """
     pei = with_bed_type(real, BedType.TEXTURED_PEI, tmp_path / "p")
     result = slice_model(write_stl("cube", tmp_path), pei, tmp_path / "out")
-    assert bed_temps(result.gcode_path) == {45}
+    assert bed_temps(result.gcode_path) == {plate_temp(real, "textured_plate_temp")} == {60}
     assert parse_config_block(result.gcode_path)["curr_bed_type"] == "Textured PEI Plate"
 
 
@@ -124,5 +138,5 @@ def test_orca_keeps_the_plate_when_scoring_forces_supports(
     scored = scoring_profiles(pei, tmp_path / "s")
     result = slice_model(write_stl("tee", tmp_path), scored, tmp_path / "out")
     config = parse_config_block(result.gcode_path)
-    assert bed_temps(result.gcode_path) == {45}
+    assert bed_temps(result.gcode_path) == {plate_temp(real, "textured_plate_temp")}
     assert (config["curr_bed_type"], config["enable_support"]) == ("Textured PEI Plate", "1")

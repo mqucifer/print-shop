@@ -24,8 +24,9 @@ from print_shop.printer.centauri import (
     PrinterConfig,
 )
 from print_shop.slicer.orca import BedType, SlicerProfiles, with_bed_type
+from print_shop.slicer.store import Choice
 
-__all__ = ["Run", "bed_type", "build_run", "describe", "orca_profiles", "recording_path"]
+__all__ = ["Run", "bed_type", "build_run", "describe", "profiles_for", "recording_path"]
 
 #: Where a run's per-job files go (rotated STLs, G-code, the job checkpoint).
 WORK_DIR = Path("~/print-shop/jobs").expanduser()
@@ -33,29 +34,14 @@ WORK_DIR = Path("~/print-shop/jobs").expanduser()
 #: Where the first print's recorder writes. Outside every checkout.
 RECORDINGS_DIR = Path("~/print-shop/recordings").expanduser()
 
-#: Orca's own data directory on macOS, and the Elegoo Centauri Carbon profiles
-#: the prototype sliced with. Each can be moved in the settings.
-_ORCA_DATADIR = Path("~/Library/Application Support/OrcaSlicer").expanduser()
-_ELEGOO = Path("system/Elegoo")
-_MACHINE = _ELEGOO / "machine/ECC/Elegoo Centauri Carbon 0.4 nozzle.json"
-_PROCESS = _ELEGOO / "process/ECC/0.20mm Standard @Elegoo CC 0.4 nozzle.json"
-_FILAMENT = _ELEGOO / "filament/ECC/Elegoo PLA @ECC.json"
-
-
-def orca_profiles(env: dict[str, str]) -> SlicerProfiles:
-    """The profiles to slice with: `ORCA_*` in the settings, or the CC1 defaults.
-
-    Raises:
-        FileNotFoundError: If a profile is missing, before any job starts.
-    """
-    datadir = Path(env.get("ORCA_DATADIR") or _ORCA_DATADIR).expanduser()
-    machine = Path(env.get("ORCA_MACHINE") or datadir / _MACHINE).expanduser()
-    process = Path(env.get("ORCA_PROCESS") or datadir / _PROCESS).expanduser()
-    filament = Path(env.get("ORCA_FILAMENT") or datadir / _FILAMENT).expanduser()
-    for path in (machine, process, filament):
-        if not path.is_file():
-            raise FileNotFoundError(f"Orca profile not found: {path}")
-    return SlicerProfiles(machine=machine, process=process, filament=filament, datadir=datadir)
+def profiles_for(choice: Choice, store_root: Path) -> SlicerProfiles:
+    """The chosen store profiles as the slicer takes them, with what the ledger keeps."""
+    return SlicerProfiles(
+        machine=choice.machine.path,
+        process=choice.process.path,
+        filament=choice.filament.path,
+        used=choice.used(store_root),
+    )
 
 
 def bed_type(env: dict[str, str]) -> BedType:
@@ -93,6 +79,7 @@ class Run:
 def build_run(
     *,
     printer: PrinterClient | None,
+    profiles: SlicerProfiles | None,
     recorder: FrameRecorder | None = None,
     settings: Path | None = None,
     workdir: Path | None = None,
@@ -101,6 +88,8 @@ def build_run(
 
     `printer` is what an approval commands: `live_printer()` when the caller
     armed it, or None, in which case an approval fails at the print node.
+    `profiles` are the store's, chosen for the fitted nozzle and filament
+    (`profiles_for`); None only serves the outcome gate, and slices nothing.
 
     Raises:
         RuntimeError, FileNotFoundError: On missing settings, before a job starts.
@@ -115,7 +104,11 @@ def build_run(
     work.mkdir(parents=True, exist_ok=True)
     daemon = Daemon(
         cfg=cfg,
-        profiles=with_bed_type(orca_profiles(env), bed_type(env), work / "profiles"),
+        profiles=(
+            with_bed_type(profiles, bed_type(env), work / "profiles")
+            if profiles is not None
+            else None
+        ),
         workdir=work,
         printer=printer,
         llm=LLMConfig.from_settings(path),
@@ -137,6 +130,7 @@ def describe(row: Row) -> str:
         f" {row.filament_cm3} cm3, {row.layer_count} layers",
         f"profiles       {row.slicer_settings.get('printer_settings_id', '?')} /"
         f" {row.slicer_settings.get('print_settings_id', '?')} / {row.filament}",
+        *_store_lines(row),
         f"plate          {row.slicer_settings.get('curr_bed_type', '?')},"
         f" bed {row.slicer_settings.get('first_layer_bed_temperature', '?')} C",
         f"printer        {row.printer_machine} {row.printer_firmware}",
@@ -153,3 +147,17 @@ def describe(row: Row) -> str:
         + (f" — {row.note}" if row.note else ""),
     ]
     return "\n".join(lines)
+
+
+def _store_lines(row: Row) -> list[str]:
+    """Where the profiles came from: print-shop's store, by file, hash and commit."""
+    used = row.profiles
+    if used is None:
+        return ["store          - (sliced before print-shop kept its own profiles)"]
+    commit = used.commit[:12] or "no commit"
+    if used.store_dirty:
+        commit += " + uncommitted changes"
+    return [f"store          profiles/ at {commit}"] + [
+        f"  {ref.file}  (sha256 {ref.sha256[:12]}…)"
+        for ref in (used.machine, used.process, used.filament)
+    ]

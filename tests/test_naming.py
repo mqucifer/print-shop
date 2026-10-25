@@ -21,7 +21,6 @@ G-code is a claim about Orca's output format, and only Orca can settle it.
 
 from __future__ import annotations
 
-import os
 import uuid
 from pathlib import Path
 
@@ -37,18 +36,17 @@ from print_shop.slicer.naming import (
     sanitize_part,
 )
 from print_shop.slicer.orca import SlicerProfiles, slice_model
+from tests.fakes import STORE_FILAMENT, STORE_MACHINE, STORE_PROCESS
 from tests.fixtures import write_stl
 
 ORCA = Path("/Applications/OrcaSlicer.app/Contents/MacOS/OrcaSlicer")
-DATADIR = Path(os.path.expanduser("~/Library/Application Support/OrcaSlicer"))
-_SYS = DATADIR / "system" / "Elegoo"
-MACHINE = _SYS / "machine" / "ECC" / "Elegoo Centauri Carbon 0.4 nozzle.json"
-PROCESS = _SYS / "process" / "ECC" / "0.20mm Standard @Elegoo CC 0.4 nozzle.json"
-FILAMENT = _SYS / "filament" / "ECC" / "Elegoo PLA @ECC.json"
+MACHINE = STORE_MACHINE
+PROCESS = STORE_PROCESS
+FILAMENT = STORE_FILAMENT
 
 needs_orca = pytest.mark.skipif(
     not (ORCA.exists() and MACHINE.exists() and PROCESS.exists()),
-    reason="OrcaSlicer or the Elegoo Centauri Carbon profiles are not installed",
+    reason="OrcaSlicer is not installed",
 )
 
 
@@ -323,7 +321,6 @@ def test_the_settings_come_from_the_gcode_orca_wrote(tmp_path: Path) -> None:
         machine=MACHINE,
         process=PROCESS,
         filament=FILAMENT if FILAMENT.exists() else None,
-        datadir=DATADIR,
     )
     result = slice_model(write_stl("tee", tmp_path), profiles, tmp_path / "out")
 
@@ -333,5 +330,5 @@ def test_the_settings_come_from_the_gcode_orca_wrote(tmp_path: Path) -> None:
 
     job_id = str(uuid.uuid4())
     named = name_gcode(result, job_id=job_id, part="tee")
-    assert named.gcode_path.name == f"ECC_0.4_tee_PLA0.2_14m_{job_id}.gcode"
+    assert named.gcode_path.name == f"ECC_0.4_tee_PLA0.2_10m_{job_id}.gcode"
     assert job_id_from_filename(named.gcode_path.name) == job_id

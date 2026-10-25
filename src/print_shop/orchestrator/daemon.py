@@ -153,7 +153,7 @@ class Daemon:
         self,
         *,
         cfg: MqttConfig,
-        profiles: SlicerProfiles,
+        profiles: SlicerProfiles | None,
         workdir: Path,
         printer: PrinterClient | None = None,
         llm: LLMConfig | None = None,
@@ -169,6 +169,9 @@ class Daemon:
         the gate, and an approval fails at the hardware boundary instead of
         reaching for a machine nobody named. Pass `live_printer()` to make it
         real. The default is inert on purpose — see `src/printer/centauri.py`.
+
+        `profiles` None serves the outcome gate only: a job submitted to it
+        fails before slicing, saying the nozzle and filament were not given.
 
         `llm` is the orientation model (`LLMConfig.from_settings()`); None
         means geometric orientation, said so at the gate. `slicer` and

@@ -33,24 +33,18 @@ def scoring_profiles(profiles: SlicerProfiles, workdir: Path) -> SlicerProfiles:
     """Return a copy of `profiles` whose process profile forces supports on.
 
     The derived JSON is written into `workdir` so it survives independently of
-    the caller's temp directory. `compatible_printers` is copied verbatim from
-    the base profile — omit it and Orca exits 239 with "process not compatible
-    with printer". So is the plate, `curr_bed_type`, when the base sets one.
+    the caller's temp directory. It is the whole process profile with the
+    overrides on top, keeping its `inherits`, `compatible_printers` and plate
+    (`curr_bed_type`): Orca slices with an empty data directory, so an overlay
+    naming its parent would not resolve, and without `compatible_printers`
+    Orca exits 239, "process not compatible with printer".
     """
     base = json.loads(Path(profiles.process).read_text())
-
     derived: dict[str, object] = {
-        "type": "process",
+        **base,
+        **_SCORING_OVERRIDES,
         "name": f"{base['name']} + supports (scoring)",
-        "from": "User",
-        "inherits": base["name"],
-        "compatible_printers": base["compatible_printers"],
     }
-    derived.update(_SCORING_OVERRIDES)
-    # The overlay inherits from the system profile by name, so a plate set on
-    # the profile it was given (`with_bed_type`) would be lost: carry it.
-    if "curr_bed_type" in base:
-        derived["curr_bed_type"] = base["curr_bed_type"]
 
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)

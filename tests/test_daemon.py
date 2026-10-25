@@ -127,8 +127,6 @@ def _env_present() -> bool:
 needs_broker = pytest.mark.skipif(not _env_present(), reason="no MQTT credentials")
 
 ORCA = Path("/Applications/OrcaSlicer.app/Contents/MacOS/OrcaSlicer")
-DATADIR = Path.home() / "Library" / "Application Support" / "OrcaSlicer"
-_SYS = DATADIR / "system" / "Elegoo"
 needs_orca = pytest.mark.skipif(not ORCA.exists(), reason="OrcaSlicer not installed")
 
 
@@ -141,12 +139,12 @@ def cfg() -> MqttConfig:
 def daemon(cfg: MqttConfig, tmp_path: Path) -> Any:
     from print_shop.orchestrator.daemon import Daemon
     from print_shop.slicer.orca import SlicerProfiles
+    from tests.fakes import STORE_FILAMENT, STORE_MACHINE, STORE_PROCESS
 
     profiles = SlicerProfiles(
-        machine=_SYS / "machine" / "ECC" / "Elegoo Centauri Carbon 0.4 nozzle.json",
-        process=_SYS / "process" / "ECC" / "0.20mm Standard @Elegoo CC 0.4 nozzle.json",
-        filament=_SYS / "filament" / "ECC" / "Elegoo PLA @ECC.json",
-        datadir=DATADIR,
+        machine=STORE_MACHINE,
+        process=STORE_PROCESS,
+        filament=STORE_FILAMENT,
     )
     # An explicit double. This fixture drives real MQTT and presses real
     # Approve buttons, so a daemon here must never be able to reach a real

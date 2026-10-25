@@ -18,6 +18,7 @@ from print_shop.ledger import (
     ledger_path,
 )
 from print_shop.slicer.orca import parse_config_block
+from print_shop.slicer.store import ProfileRef, ProfilesUsed
 from tests.fakes import DATA
 
 CONFIG = parse_config_block(DATA / "recorded" / "cube.gcode")
@@ -202,3 +203,44 @@ def test_a_copy_of_the_file_alone_holds_every_row(ledger: Ledger, tmp_path: Path
     with Ledger(copy) as restored:
         row = restored.get("job-1")
     assert row is not None and row.symptom is Symptom.STRINGING
+
+
+def _used() -> ProfilesUsed:
+    def ref(kind: str, name: str) -> ProfileRef:
+        return ProfileRef(name=name, file=f"{kind}/{name}.json", sha256="ab" * 32)
+
+    return ProfilesUsed(
+        machine=ref("machine", "Elegoo Centauri Carbon 0.4 nozzle - Copy"),
+        process=ref("process", "0.20mm Standard @Elegoo CC 0.4 nozzle - Copy"),
+        filament=ref("filament", "Elegoo PLA @ECC - Copy"),
+        commit="c0ffee" * 6 + "c0ff",
+        store_dirty=False,
+    )
+
+
+def test_a_print_keeps_its_profiles_by_file_hash_and_commit(tmp_path: Path) -> None:
+    with Ledger(tmp_path / "l.sqlite") as ledger:
+        ledger.record_start_requested(record().model_copy(update={"profiles": _used()}))
+        row = ledger.get("job-1")
+    assert row is not None and row.profiles == _used()
+
+
+def test_a_version_1_ledger_gains_the_profiles_column_and_keeps_its_rows(
+    tmp_path: Path,
+) -> None:
+    """The first ledger predates print-shop's own profiles: its rows say none, not a guess."""
+    path = tmp_path / "l.sqlite"
+    with Ledger(path) as ledger:
+        ledger.record_start_requested(record())
+    db = sqlite3.connect(path)
+    db.execute("ALTER TABLE prints DROP COLUMN profiles")
+    db.execute("PRAGMA user_version=1")
+    db.commit()
+    db.close()
+
+    with Ledger(path) as again:
+        row = again.get("job-1")
+        assert row is not None and row.profiles is None
+        again.record_start_requested(record("job-2").model_copy(update={"profiles": _used()}))
+        assert again.get("job-2").profiles == _used()  # type: ignore[union-attr]
+    assert sqlite3.connect(path).execute("PRAGMA user_version").fetchone()[0] == 2

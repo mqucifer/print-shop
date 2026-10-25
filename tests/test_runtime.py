@@ -10,8 +10,9 @@ from types import ModuleType
 import pytest
 
 from print_shop.ledger import Answer, Ledger, Result, Symptom
-from print_shop.runtime import build_run, describe, orca_profiles
-from tests.fakes import DATA
+from print_shop.runtime import build_run, describe, profiles_for
+from print_shop.slicer.store import Store, choose
+from tests.fakes import STORE, STORE_PROFILES
 from tests.test_ledger import record
 
 
@@ -19,8 +20,6 @@ from tests.test_ledger import record
 def settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for key in ("MQTT_USER", "CREW_LLM_API_KEY", "PRINTER_HOST", "PRINT_SHOP_LEDGER"):
         monkeypatch.delenv(key, raising=False)
-    filament = tmp_path / "filament.json"
-    filament.write_text("{}")
     path = tmp_path / ".env"
     path.write_text(
         "MQTT_HOST=broker.invalid\n"
@@ -30,20 +29,19 @@ def settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "PRINTER_HOST=printer.invalid\n"
         "PRINTER_MAINBOARD_ID=feedface\n"
         f"PRINT_SHOP_LEDGER={tmp_path}/ledger.sqlite\n"
-        f"ORCA_DATADIR={tmp_path}\n"
-        f"ORCA_MACHINE={DATA}/profiles/machine.json\n"
-        f"ORCA_PROCESS={DATA}/profiles/process.json\n"
-        f"ORCA_FILAMENT={filament}\n"
     )
     return path
 
 
 def test_a_run_is_unarmed_unless_handed_a_printer(settings: Path, tmp_path: Path) -> None:
-    run = build_run(printer=None, settings=settings, workdir=tmp_path / "jobs")
+    run = build_run(
+        printer=None, profiles=STORE_PROFILES, settings=settings, workdir=tmp_path / "jobs"
+    )
     try:
         assert run.daemon._watch_printer is not None
         assert run.daemon._watch_printer.enable_control is False  # type: ignore[attr-defined]
         assert run.ledger.path == tmp_path / "ledger.sqlite"
+        assert run.daemon._profiles is not None
         process = json.loads(run.daemon._profiles.process.read_text())
         assert process["curr_bed_type"] == "Textured PEI Plate", "the Sponsor's plate"
     finally:
@@ -53,18 +51,37 @@ def test_a_run_is_unarmed_unless_handed_a_printer(settings: Path, tmp_path: Path
 def test_a_run_without_a_model_key_is_refused(settings: Path, tmp_path: Path) -> None:
     settings.write_text(settings.read_text().replace("CREW_LLM_API_KEY=sk-test\n", ""))
     with pytest.raises(RuntimeError, match="CREW_LLM_API_KEY"):
-        build_run(printer=None, settings=settings, workdir=tmp_path / "jobs")
+        build_run(printer=None, profiles=None, settings=settings, workdir=tmp_path / "jobs")
 
 
 def test_a_run_without_the_broker_is_refused(settings: Path, tmp_path: Path) -> None:
     settings.write_text(settings.read_text().replace("MQTT_USER=print-shop\n", ""))
     with pytest.raises(RuntimeError, match="MQTT_USER"):
-        build_run(printer=None, settings=settings, workdir=tmp_path / "jobs")
+        build_run(printer=None, profiles=None, settings=settings, workdir=tmp_path / "jobs")
 
 
-def test_a_missing_profile_is_found_before_a_job(tmp_path: Path) -> None:
-    with pytest.raises(FileNotFoundError, match="Orca profile"):
-        orca_profiles({"ORCA_DATADIR": str(tmp_path)})
+def test_a_serving_run_slices_nothing(settings: Path, tmp_path: Path) -> None:
+    """`--serve` names no nozzle: its daemon has no profiles, and says so if asked."""
+    run = build_run(printer=None, profiles=None, settings=settings, workdir=tmp_path / "jobs")
+    try:
+        assert run.daemon._profiles is None
+    finally:
+        run.ledger.close()
+
+
+def test_the_chosen_profiles_carry_their_store_files_and_commit() -> None:
+    choice = choose(
+        Store(STORE),
+        nozzle_mm=0.4,
+        filament="Elegoo PLA @ECC - Copy",
+        machine="Elegoo Centauri Carbon 0.4 nozzle - Copy",
+        process="0.20mm Standard @Elegoo CC 0.4 nozzle - Copy",
+    )
+    used = profiles_for(choice, STORE).used
+    assert used is not None
+    assert used.machine.file == "machine/Elegoo Centauri Carbon 0.4 nozzle - Copy.json"
+    assert len(used.filament.sha256) == 64
+    assert len(used.commit) == 40, "print-shop's commit, from its own checkout"
 
 
 def test_describe_says_an_open_print_is_open(tmp_path: Path) -> None:
@@ -121,4 +138,40 @@ def test_the_script_does_not_arm_without_the_flag(
     part = tmp_path / "part.stl"
     part.write_text("solid x\nendsolid x\n")
     with pytest.raises(Stop):
-        script.main([str(part), "--settings", str(settings)])
+        script.main([str(part), *FITTED, "--settings", str(settings)])
+
+
+#: The fitted nozzle and filament, with the machine and process named, since
+#: the store ties on them for a 0.4 nozzle and PLA.
+FITTED = [
+    "--nozzle", "0.4",
+    "--filament", "Elegoo PLA @ECC - Copy",
+    "--machine", "Elegoo Centauri Carbon 0.4 nozzle - Copy",
+    "--process", "0.20mm Standard @Elegoo CC 0.4 nozzle - Copy",
+]
+
+
+def test_the_script_refuses_a_print_without_the_nozzle_and_filament(
+    settings: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    part = tmp_path / "part.stl"
+    part.write_text("solid x\nendsolid x\n")
+    for missing in (["--nozzle", "0.4"], ["--filament", "PLA"], []):
+        with pytest.raises(SystemExit) as exit_:
+            _script().main([str(part), *missing, "--settings", str(settings)])
+        assert exit_.value.code == 2
+        assert "--nozzle (mm) and --filament" in capsys.readouterr().err
+
+
+def test_the_script_lists_the_candidates_on_a_tie(
+    settings: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    part = tmp_path / "part.stl"
+    part.write_text("solid x\nendsolid x\n")
+    code = _script().main(
+        [str(part), "--nozzle", "0.4", "--filament", "PLA", "--settings", str(settings)]
+    )
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "Several profile sets fit a 0.4 mm nozzle and PLA" in err
+    assert '"Elegoo PLA @ECC - Copy"' in err

@@ -1,8 +1,14 @@
 """Run one print job, or serve the outcome gate, on the Mac.
 
-    uv run python scripts/print_job.py PART.stl [--record]
+    uv run python scripts/print_job.py PART.stl --nozzle 0.4 --filament PLA [--record]
     uv run python scripts/print_job.py --serve [--record]
     uv run python scripts/print_job.py --list
+
+**The Sponsor says what's fitted:** the nozzle (mm) and the loaded filament, a
+type such as PLA or a profile's exact name. Without them a print is refused.
+The profiles come from print-shop's own `profiles/`, chosen by Orca's
+compatibility rule; on a tie it lists the candidates and stops, and
+`--machine`, `--process` and `--filament` then name the one to use.
 
 **This is the only place that arms the printer,** and only when the invocation
 says so: `PRINT_AGENT_ALLOW_HARDWARE=1` on this command's own line. Without it
@@ -28,7 +34,9 @@ from print_shop.arming import ALLOW_HARDWARE_ENV, hardware_allowed
 from print_shop.env import SETTINGS_PATH
 from print_shop.ledger import Ledger, ledger_path
 from print_shop.printer.centauri import FrameRecorder, PrinterClient, live_printer
-from print_shop.runtime import build_run, describe, recording_path
+from print_shop.runtime import build_run, describe, profiles_for, recording_path
+from print_shop.slicer.orca import SlicerProfiles
+from print_shop.slicer.store import STORE_DIR, NoChoice, Store, choose
 
 APPROVAL_WAIT_S = 3600.0  # the daemon's own gate gives up after an hour
 FINISH_WAIT_S = 900.0  # after the press: preflight, upload, and a five-minute start watch
@@ -40,6 +48,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--serve", action="store_true", help="only watch and ask outcomes")
     parser.add_argument("--list", action="store_true", help="print the ledger and exit")
     parser.add_argument("--record", action="store_true", help="record the printer's replies")
+    parser.add_argument("--nozzle", type=float, help="the fitted nozzle, in mm (0.4)")
+    parser.add_argument("--filament", help="the loaded filament: a type (PLA) or a profile name")
+    parser.add_argument("--machine", help="a machine profile's exact name, on a tie")
+    parser.add_argument("--process", help="a process profile's exact name, on a tie")
     parser.add_argument(
         "--settings", type=Path, default=SETTINGS_PATH, help="the settings file (a path)"
     )
@@ -56,6 +68,29 @@ def main(argv: list[str] | None = None) -> int:
     if args.stl is not None and not args.stl.is_file():
         parser.error(f"{args.stl} is not a file")
 
+    profiles: SlicerProfiles | None = None
+    if args.stl is not None:
+        if args.nozzle is None or not args.filament:
+            parser.error("say what's fitted: --nozzle (mm) and --filament (PLA, or a name)")
+        try:
+            choice = choose(
+                Store(STORE_DIR),
+                nozzle_mm=args.nozzle,
+                filament=args.filament,
+                machine=args.machine,
+                process=args.process,
+            )
+        except NoChoice as exc:
+            print(exc, file=sys.stderr)
+            return 2
+        profiles = profiles_for(choice, STORE_DIR)
+        print(f"Fitted: a {args.nozzle:g} mm nozzle and {args.filament}. Slicing with:")
+        print(f"  machine   {choice.machine.name}")
+        print(f"  process   {choice.process.name}")
+        print(f"  filament  {choice.filament.name}")
+        for note in choice.notes:
+            print(f"  ({note})")
+
     recorder = FrameRecorder(recording_path()) if args.record else None
     printer: PrinterClient | None = None
     if args.stl is not None and hardware_allowed():
@@ -66,7 +101,9 @@ def main(argv: list[str] | None = None) -> int:
     if recorder is not None:
         print(f"Recording the printer's replies to {recorder.path}")
 
-    run = build_run(printer=printer, recorder=recorder, settings=args.settings)
+    run = build_run(
+        printer=printer, profiles=profiles, recorder=recorder, settings=args.settings
+    )
     try:
         with run.daemon:
             if args.serve:

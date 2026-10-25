@@ -79,7 +79,7 @@ def new_job(stl_path: str | Path, *, entry: EntryPath) -> PrintJobState:
 
 
 def build_graph(
-    profiles: SlicerProfiles,
+    profiles: SlicerProfiles | None,
     outdir_root: Path,
     checkpointer: BaseCheckpointSaver[Any] | None = None,
     llm: LLMConfig | None = None,
@@ -90,7 +90,9 @@ def build_graph(
     """Build and compile the print pipeline graph.
 
     Args:
-        profiles: Slicer profile paths, closed over by the slice node.
+        profiles: Slicer profile paths, closed over by the slice node. None
+            for a daemon that only serves the outcome gate (`--serve`): a
+            job it is asked to slice fails at the orient node, saying so.
         outdir_root: Root directory for per-job output. Each job writes into
             ``outdir_root / job_id``.
         checkpointer: An already-constructed checkpointer. ``build_graph``
@@ -119,7 +121,7 @@ def build_graph(
     Returns:
         A compiled LangGraph ``CompiledStateGraph``.
     """
-    build_volume = build_volume_mm(profiles.machine, datadir=profiles.datadir)
+    build_volume = build_volume_mm(profiles.machine) if profiles is not None else None
 
     def ingest_node(state: PrintJobState) -> dict[str, Any]:
         """Analyze the STL and store the MeshReport in state."""
@@ -133,6 +135,11 @@ def build_graph(
         state so a gate can show a human what was proposed and what changed.
         """
         verify_unchanged(state["stl_path"], state.get("stl_sha256", ""))
+        if build_volume is None:
+            raise RuntimeError(
+                "this graph was built without profiles, so it cannot slice: give the "
+                "fitted nozzle and filament (scripts/print_job.py --nozzle --filament)"
+            )
 
         request = OrientationRequest(
             candidates=tuple(candidates(state["stl_path"])),
@@ -180,6 +187,7 @@ def build_graph(
         else:
             stl_to_slice = write_rotated(state["stl_path"], rotation_deg, outdir / "rotated.stl")
 
+        assert profiles is not None, "orient refuses a graph without profiles"
         active_profiles = (
             scoring_profiles(profiles, outdir) if overhang_area > 0 else profiles
         )
@@ -196,6 +204,7 @@ def build_graph(
             "applied_orientation": AppliedOrientation(
                 rotation_deg=rotation_deg, rationale=rationale
             ),
+            "profiles_used": profiles.used,
         }
 
     def review_proposal_node(state: PrintJobState) -> dict[str, Any]:
@@ -423,34 +432,25 @@ def _print_record(
         slicer_config=parse_config_block(gcode),
         printer_machine=machine,
         printer_firmware=firmware,
+        profiles=state.get("profiles_used"),
     )
 
 
-def build_volume_mm(
-    machine_profile: Path, datadir: Path | None = None
-) -> tuple[float, float, float]:
-    """Resolve the build volume from a machine profile, following ``inherits``.
+def build_volume_mm(machine_profile: Path) -> tuple[float, float, float]:
+    """The build volume from a machine profile, following ``inherits`` if it must.
 
-    Orca user profiles are thin overlays: they carry a handful of keys plus an
-    ``inherits`` field pointing at a parent profile by *name*.  This function
-    walks the inheritance chain (child keys win) until both ``printable_area``
-    and ``printable_height`` are resolved.
-
-    When *datadir* is given, ``inherits`` is resolved by searching the whole
-    tree beneath it (both ``system/**`` and ``user/**``) for a profile whose
-    ``name`` field matches — this is how Orca lays out edited user profiles,
-    which inherit from profiles under ``system/<Vendor>/machine/<Model>/``.
-    Without a datadir, the fallback is a search of the profile's sibling files.
+    print-shop's own profiles are whole (`print_shop.slicer.store`), so the
+    dimensions are in the file. A thin overlay, carrying a few keys and the
+    name of its parent in ``inherits``, is resolved from its sibling files,
+    child keys winning; Orca's own tree is resolved by
+    `print_shop.slicer.catalog`, at import.
 
     Raises:
         ValueError: If the dimensions cannot be resolved (missing keys,
             unparseable values, or an unresolvable ``inherits`` chain).
         FileNotFoundError: If the profile file does not exist.
     """
-    index: dict[str, Path] | None = None
-    if datadir is not None:
-        index = _name_index(datadir)
-    resolved = _resolve_profile(machine_profile, index=index)
+    resolved = _resolve_profile(machine_profile)
 
     area = resolved.get("printable_area")
     height = resolved.get("printable_height")
@@ -480,12 +480,15 @@ def build_volume_mm(
     return (x, y, z)
 
 
-def _resolve_profile(
-    profile_path: Path, index: dict[str, Path] | None = None
-) -> dict[str, Any]:
-    """Load a profile and resolve its ``inherits`` chain.
+_DIMENSIONS = ("printable_area", "printable_height")
 
-    Returns a merged dict where child keys override parent keys.
+
+def _resolve_profile(profile_path: Path) -> dict[str, Any]:
+    """Load a profile and resolve its ``inherits`` chain until the dimensions are known.
+
+    Returns a merged dict where child keys override parent keys. A profile
+    that already has the dimensions is not walked: a whole profile keeps
+    ``inherits`` naming a system parent that is not beside it.
     """
     try:
         data: dict[str, Any] = json.loads(profile_path.read_text())
@@ -495,11 +498,11 @@ def _resolve_profile(
         ) from exc
 
     inherits = data.get("inherits")
-    if inherits is None:
+    if not inherits or all(k in data for k in _DIMENSIONS):
         return data
 
-    parent = _find_parent(profile_path, inherits, index=index)
-    parent_data = _resolve_profile(parent, index=index)
+    parent = _find_parent(profile_path, inherits)
+    parent_data = _resolve_profile(parent)
     # Child keys win over parent keys.
     merged: dict[str, Any] = {**parent_data, **data}
     # Remove the 'inherits' key from the result; it is not a dimension.
@@ -507,44 +510,11 @@ def _resolve_profile(
     return merged
 
 
-def _name_index(root: Path) -> dict[str, Path]:
-    """Map ``name`` field to path for every profile under *root*.
-
-    Walks the whole tree (both ``system/**`` and ``user/**``) once so a deep
-    inheritance chain does not re-walk it. Profiles whose ``name`` matches a
-    later file keep the later one, so the walk order is deterministic.
-    """
-    index: dict[str, Path] = {}
-    for candidate in sorted(root.rglob("*.json")):
-        try:
-            data = json.loads(candidate.read_text())
-        except (OSError, json.JSONDecodeError):
-            continue
-        name = data.get("name")
-        if isinstance(name, str) and name not in index:
-            index[name] = candidate
-    return index
-
-
-def _find_parent(
-    profile_path: Path, name: str, index: dict[str, Path] | None = None
-) -> Path:
-    """Find the parent profile for an ``inherits`` reference.
-
-    With a prebuilt *index* (the datadir case), the parent is looked up by
-    ``name`` anywhere in the tree. Without one, it falls back to searching the
-    profile's sibling files.
-    """
-    if index is not None:
-        parent = index.get(name)
-        if parent is not None and parent != profile_path:
-            return parent
-        raise ValueError(
-            f"Cannot resolve inherits='{name}' in '{profile_path.name}': "
-            f"no profile with that name found in the datadir tree"
-        )
-
+def _find_parent(profile_path: Path, name: str) -> Path:
+    """Find the parent profile for an ``inherits`` reference among the profile's siblings."""
     for candidate in sorted(profile_path.parent.glob("*.json")):
+        if candidate == profile_path:
+            continue
         try:
             data = json.loads(candidate.read_text())
         except (OSError, json.JSONDecodeError):

@@ -22,6 +22,7 @@ from typing import NotRequired, TypedDict
 from pydantic import BaseModel
 
 from print_shop.core.contracts import Gate, GateDecision, Outcome
+from print_shop.slicer.store import ProfilesUsed
 
 __all__ = [
     "EntryPath",
@@ -195,6 +196,9 @@ class PrintJobState(TypedDict):
     #: Every key a node returns must be declared here — LangGraph silently
     #: drops undeclared keys, so an omission loses data with no error at all.
     applied_orientation: NotRequired[AppliedOrientation]
+    #: The store's profiles the slice used, for the ledger. Kept in state so a
+    #: job resumed by another process records what it was sliced with.
+    profiles_used: NotRequired[ProfilesUsed | None]
 
     # Gates. `pending_gate` set means the graph is parked awaiting a human.
     pending_gate: NotRequired[Gate]

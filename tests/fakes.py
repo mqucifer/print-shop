@@ -35,6 +35,17 @@ DATA = Path(__file__).parent / "data"
 #: The cube from `tests/fixtures.py`, as the real Orca sliced it (data/README.md).
 CUBE_SHA256 = "bd3eda612de075a1e177e7dbe8e97941c8393df936ccab0087cf24b910fa027a"
 
+#: print-shop's own profiles (`profiles/`): the Sponsor's 0.4 nozzle, its
+#: 0.20 mm process and Elegoo PLA, as the import wrote them. What a test that
+#: slices with the real Orca uses, as a print does.
+STORE = Path(__file__).resolve().parents[1] / "profiles"
+STORE_MACHINE = STORE / "machine" / "Elegoo Centauri Carbon 0.4 nozzle - Copy.json"
+STORE_PROCESS = STORE / "process" / "0.20mm Standard @Elegoo CC 0.4 nozzle - Copy.json"
+STORE_FILAMENT = STORE / "filament" / "Elegoo PLA @ECC - Copy.json"
+STORE_PROFILES = SlicerProfiles(
+    machine=STORE_MACHINE, process=STORE_PROCESS, filament=STORE_FILAMENT
+)
+
 CI_PROFILES = SlicerProfiles(
     machine=DATA / "profiles" / "machine.json",
     process=DATA / "profiles" / "process.json",
@@ -42,11 +53,12 @@ CI_PROFILES = SlicerProfiles(
 
 
 def installed_or_ci(real: SlicerProfiles) -> SlicerProfiles:
-    """The Mac's Orca profiles where they are installed, the CI ones elsewhere.
+    """The store's profiles where they are, the CI ones elsewhere.
 
     For tests that build a graph but never slice: the graph reads only the
-    build volume from a profile, which both give as 257 mm. Tests that do
-    slice skip without Orca (`needs_orca`), whichever profiles they get.
+    build volume from a profile (256 mm in the store, 257 in the CI ones).
+    Tests that do slice skip without Orca (`needs_orca`), whichever profiles
+    they get.
     """
     if real.machine.is_file() and real.process.is_file():
         return real
