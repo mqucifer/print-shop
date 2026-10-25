@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 from types import ModuleType
 
@@ -123,6 +124,10 @@ def test_with_an_inventory_the_print_takes_what_is_fitted_and_loaded(
     assert "filament  Elegoo PETG @ECC" in out
     used = seen["profiles"].used  # type: ignore[attr-defined]
     assert used.material.spool_id == 1, "the ledger will point at the spool"
+    # What #10's questions and proposal read is the loaded spool's preset.
+    filament = seen["profiles"].filament.read_text()  # type: ignore[attr-defined]
+    assert json.loads(filament)["name"] == "Elegoo PETG @ECC"
+    assert seen["asker"] is not None, "the questions are asked on the command line"
 
 
 def test_a_print_with_a_nozzle_outside_the_scope_is_refused_naming_it(

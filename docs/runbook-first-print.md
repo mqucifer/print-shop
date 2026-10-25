@@ -82,8 +82,23 @@ A print uses your tuning where there is one, and the standard where you haven't 
 
    It should say `ARMED`, and that it is recording to `~/print-shop/recordings/sdcp-<time>.jsonl`. If it says `Not armed`, the flag didn't reach it: stop with Ctrl-C and type it again on the same line.
 
+   **Then a few questions about the part,** once it's oriented. They come from its measured features, and often from what its shape can't show, such as what it's for. There are at most four, and a simple part may get none. Each option shows what it would set, its impact on strength, surface and risk, and Orca's time and filament for it ("Orca: 11 min, 3.1 g", or "no estimate"). One option is marked recommended, with why. Answer with its number, or `o` and your own words. For the test cube, take the recommended option. To replay answers, pass `--answers file.json`, e.g. `{"answers": [{"choice": 1}]}`.
+
+   **Then the settings review, here on the command line,** before Home Assistant's gate. It shows:
+   - how the model read the part;
+   - each setting it changes from your presets, as `your value -> this print`, with the feature or purpose behind it and its source;
+   - what it weighed and kept, any design notes, and Orca's estimate.
+
+   It reasons with `crew-code-think` (the `PRINT_SHOP_SETUP_MODEL` setting), which usually takes two to three minutes (up to about ten at its 16,000-token limit). If its answer is cut off at that limit, the review says CUT OFF and shows only the guards' changes; that is recorded, and nothing is retried. Type `ok` to go on to the gate. To correct a setting, type it by name, e.g. `layer_height=0.2 because it's a test cube`, and it slices again and shows the review again. Or type `stop`. Your corrections go in the ledger: they are what print-shop learns from.
+
+   **How a correction grows the skill.** The proposal reasons from the print-settings skill (`skills/print-settings/`): SKILL.md and a reference per setting group, distilled from Orca's wiki. A correction that would apply to other parts too, such as "never above 0.16 mm layers for a visible curve", becomes an edit there by PR:
+   - a "Change it when" line in the group's reference (`references/layer-height.md` for that example);
+   - or a line in SKILL.md's "The Sponsor's practice".
+
+   The PR quotes the correction and its job id (`--list` shows both). A correction for this part only needs nothing more: the ledger has it. Hard limits (a bound, tree supports) are code, in `src/print_shop/setup/bounds.py`, and change by PR too.
+
 2. **Approve at the gate.** The dashboard asks "Print this?". Check the numbers before you press:
-   - Time: about 11 minutes (Orca's estimate is 10 m 54 s);
+   - Time: about 11 minutes (Orca's estimate for your presets is 10 m 54 s; the review shows the estimate with its changes);
    - Plastic: about 2.9 cm³;
    - Turned: a multiple of 90° on each axis. A cube sits flat on every face.
 
@@ -112,6 +127,7 @@ A print uses your tuning where there is one, and the standard where you haven't 
    - [ ] the profiles are `Elegoo Centauri Carbon 0.4 nozzle - Copy`, `0.20mm Standard @Elegoo CC 0.4 nozzle - Copy` and `Elegoo PLA @ECC - Copy`, and the plate line reads `Textured PEI Plate, bed 60 C`;
    - [ ] the material line names cc1, the 0.4 mm nozzle and your spool, by number and colour;
    - [ ] the store lines name `profiles/` at the commit you pulled, with no uncommitted changes, and each tuning's file over its standard's;
+   - [ ] the intake line is your answers, each changed setting is listed with who changed it, and a `corrected` line lists any setting you corrected at the review;
    - [ ] the printer is the Centauri Carbon with its firmware version;
    - [ ] asked to start, started and ended are in that order, and roughly match the clock;
    - [ ] the printer's end state is what the screen showed;

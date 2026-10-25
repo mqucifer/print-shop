@@ -1,0 +1,14 @@
+{
+  "reasoning": "The part is a 60\u00d730\u00d746 mm solid block. No overhangs, no bridges, no thin features (section 4.76 mm). Bed contact 1800 mm\u00b2, slenderness 1.5\u00d7. It will not wobble or lift. The only surface that shows is the 1800 mm\u00b2 flat top. No load path, no fit, no feature that will fail. This is a non-structural block.",
+  "changes": [],
+  "design_notes": [],
+  "_call": {
+    "model": "crew-code-think",
+    "finish_reason": "stop",
+    "prompt_tokens": 3409,
+    "completion_tokens": 1207,
+    "reasoning_tokens": 1081,
+    "max_tokens": 16000,
+    "seconds": 81.5
+  }
+}

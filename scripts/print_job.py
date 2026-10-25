@@ -1,6 +1,6 @@
 """Run one print job, or serve the outcome gate, on the Mac.
 
-    uv run python scripts/print_job.py PART.stl --nozzle 0.4 --filament PLA [--record]
+    uv run python scripts/print_job.py PART.stl --nozzle 0.4 --filament NAME [--intake F] [--record]
     uv run python scripts/print_job.py --serve [--record]
     uv run python scripts/print_job.py --list
     uv run python scripts/print_job.py --filaments
@@ -15,6 +15,14 @@ without them. `--filaments` lists what's in `profiles/`.
 Their tuning is used where there is one, the standard where there isn't;
 several tunings of one are listed to choose from. `--machine` and
 `--process` name a profile, when the Sponsor picks.
+
+**Then a few questions about the part,** proposed from its shape once it's
+oriented: each with numbered options, what each would cost (Orca's estimate)
+and one recommended. Answer by number, or `o` and your own words. A part
+whose shape leaves nothing open gets none. `--answers file.json` replays
+recorded answers. The settings are then proposed and shown here for review:
+`ok`, or correct a setting by name and it slices again. Home Assistant's
+approval gate comes after that, unchanged.
 
 **This is the only place that arms the printer,** and only when the invocation
 says so: `PRINT_AGENT_ALLOW_HARDWARE=1` on this command's own line. Without it
@@ -42,6 +50,8 @@ from print_shop.inventory import SETUP, Inventory, InventoryError, Material
 from print_shop.ledger import Ledger, ledger_path
 from print_shop.printer.centauri import FrameRecorder, PrinterClient, live_printer
 from print_shop.runtime import WORK_DIR, build_run, describe, profiles_for, recording_path
+from print_shop.setup.intake import Asker, cli_asker, replay_asker
+from print_shop.setup.review import cli_reviewer
 from print_shop.slicer.orca import SlicerProfiles
 from print_shop.slicer.store import STORE_DIR, NoChoice, Store, choose
 from print_shop.slicer.store import describe as describe_store
@@ -62,6 +72,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--machine", help="a machine profile's exact name, to pick one")
     parser.add_argument("--process", help="a process profile's exact name, to pick one")
     parser.add_argument("--printer", help="which printer, when the inventory has several")
+    parser.add_argument("--answers", type=Path, help="recorded answers to the questions, as JSON")
     parser.add_argument(
         "--settings", type=Path, default=SETTINGS_PATH, help="the settings file (a path)"
     )
@@ -82,6 +93,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"{args.stl} is not a file")
 
     profiles: SlicerProfiles | None = None
+    asker: Asker | None = None
     if args.stl is not None:
         material: Material | None = None
         nozzle, filament = args.nozzle, args.filament
@@ -118,6 +130,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  filament  {choice.filament.name}")
         for note in choice.notes:
             print(f"  ({note})")
+        try:
+            asker = replay_asker(args.answers) if args.answers else cli_asker()
+        except ValueError as exc:
+            parser.error(str(exc))
 
     recorder = FrameRecorder(recording_path()) if args.record else None
     printer: PrinterClient | None = None
@@ -130,7 +146,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Recording the printer's replies to {recorder.path}")
 
     run = build_run(
-        printer=printer, profiles=profiles, recorder=recorder, settings=args.settings
+        printer=printer,
+        profiles=profiles,
+        recorder=recorder,
+        settings=args.settings,
+        asker=asker,
+        reviewer=cli_reviewer(),
     )
     try:
         with run.daemon:
@@ -140,7 +161,7 @@ def main(argv: list[str] | None = None) -> int:
                     time.sleep(1)
 
             job_id = run.daemon.submit(args.stl)
-            print(f"Job {job_id}: slicing, then waiting for Approve in Home Assistant.")
+            print(f"Job {job_id}: orienting, then a few questions about the part, here.")
             run.daemon.wait_for_gate(job_id, timeout_s=APPROVAL_WAIT_S)
             gate = run.daemon.pending_gate() or {}
             print("At the approval gate. Approve or Reject on the dashboard.")

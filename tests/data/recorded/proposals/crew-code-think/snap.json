@@ -1,0 +1,52 @@
+{
+  "reasoning": "This is a small snap clip (22 mm tall, 16\u00d78 mm footprint) whose hook engages a 1.2 mm ledge on a lid and is opened often. The critical failure mode is fatigue at the snap hook: the 1.87 mm section flexes every cycle. The 90\u00b0 ceiling (10 mm\u00b2) is the steepest overhang and also reads as the bridge face. Bed contact is 128 mm\u00b2 (under 200) and slenderness is 2.8\u00d7 (over 2.5), so both adhesion triggers are hit. The part is tiny (766 mm\u00b3), so material cost of any change is negligible; the decisions come down to whether the feature or purpose gives a reason to deviate from the Sponsor's preset.",
+  "changes": [
+    {
+      "key": "enable_support",
+      "value": "1",
+      "feature": "steepest_overhang",
+      "knowledge": "supports",
+      "reason": "The 10 mm\u00b2 face at 90\u00b0 is a true ceiling \u2014 it cannot be bridged or self-supported. The intake already chose tree support; this sets it."
+    },
+    {
+      "key": "support_type",
+      "value": "tree(auto)",
+      "feature": "steepest_overhang",
+      "knowledge": "supports",
+      "reason": "Sponsor's practice: supports are tree when used. The intake confirmed it."
+    },
+    {
+      "key": "brim_type",
+      "value": "auto_brim",
+      "feature": "bed_contact",
+      "knowledge": "adhesion",
+      "reason": "Bed contact is 128 mm\u00b2 (under 200 mm\u00b2) and slenderness is 2.8\u00d7 (over 2.5\u00d7). Both adhesion triggers are met. A small clip this tall and narrow will wobble or lift without extra bed grip; auto_brim will calculate a modest width from the geometry without over-bridging the 8 mm width."
+    },
+    {
+      "key": "outer_wall_speed",
+      "value": "120",
+      "feature": "section",
+      "knowledge": "speed-cooling",
+      "reason": "The 1.87 mm hook section is on a fatigue load path \u2014 it flexes every time the lid is opened. The outer wall is the primary structural element at this thickness, and layer bonding between its passes is what holds the hook together over cycles. Slowing the outer wall from 160 to 120 improves inter-layer adhesion at the hook without meaningful time cost on a 766 mm\u00b3 part."
+    },
+    {
+      "key": "sparse_infill_density",
+      "value": "20%",
+      "feature": "section",
+      "knowledge": "infill",
+      "reason": "The snap hook is on a load path that cycles. At 1.87 mm section with two 0.4 mm walls, the interior gap is ~1.07 mm; raising infill from 15% to 20% adds a few more backing lines behind the hook wall, giving the flexing section a small amount of internal support against delamination under repeated loading. Material cost is negligible at this part size."
+    }
+  ],
+  "design_notes": [
+    "The 10 mm\u00b2 face at 90\u00b0 (the ceiling under the hook) is the only feature that needs support. If the CAD were revised, a 45\u00b0 chamfer on that face would eliminate the overhang entirely and remove the need for support. That is a design change, not a slicer setting."
+  ],
+  "_call": {
+    "model": "crew-code-think",
+    "finish_reason": "stop",
+    "prompt_tokens": 6110,
+    "completion_tokens": 5230,
+    "reasoning_tokens": 4374,
+    "max_tokens": 16000,
+    "seconds": 320.4
+  }
+}

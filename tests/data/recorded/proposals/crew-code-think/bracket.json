@@ -1,0 +1,39 @@
+{
+  "reasoning": "The part is a shelf bracket: a 2 kg shelf sits on the flange, and the plate is screwed through. The features confirm it is a solid, low-overhang part (no overhangs, no bridges, 0\u00b0 steepest face) that sits flat on the bed with 1800 mm\u00b2 of contact and a 1.5\u00d7 slenderness ratio\u2014no adhesion or support concern. The section is 4.76 mm, so there is room for multiple wall loops and infill between them. The one thing that drives every change is the load path: the flange bends under 2 kg, and the plate resists the screw pull-out.",
+  "changes": [
+    {
+      "key": "wall_loops",
+      "value": "4",
+      "feature": "flat_top",
+      "knowledge": "walls-shells",
+      "reason": "The flange carries the 2 kg shelf in bending and the plate is screwed through; both are on the load path. Two walls (0.8 mm) is too thin to resist that bending and pull-out. Four walls (1.6 mm) give the shell the cross-section it needs. Ref: walls-shells \u2014 'Raise it for a part on a load path, or one that must be rigid.'"
+    },
+    {
+      "key": "sparse_infill_density",
+      "value": "40%",
+      "feature": "flat_top",
+      "knowledge": "infill",
+      "reason": "With 4 walls carrying the shell, the infill must share the bending load on the flange and prevent the walls from buckling under 2 kg. 15% is too sparse for a structural bracket; 40% fills enough of the 3.16 mm infill channel (section 4.76 mm minus 4 walls at 0.4 mm) to be load-sharing without approaching solid. Ref: infill \u2014 'Raise it for a part on a load path or one that must be strong.'"
+    },
+    {
+      "key": "sparse_infill_pattern",
+      "value": "cubic",
+      "feature": "flat_top",
+      "knowledge": "infill",
+      "reason": "The preset is zig-zag, rated Normal-low in X-Y and Low in Z strength. The flange bends in one primary direction but the bracket also sees shear at the screw points. Cubic gives High in both X-Y and Z at a normal-low print-time cost, spreading force in all directions. Gyroid would match its strength but at extra-high print time for no structural gain on a small part. Ref: infill pattern table \u2014 'C\u00fa"
+    }
+  ],
+  "design_notes": [
+    "No overhangs or bridges (0 mm\u00b2, 0\u00b0 steepest), so no supports are needed and no speed or fan changes apply.",
+    "Bed contact is 1800 mm\u00b2 and slenderness is 1.5\u00d7, both well within the adhesion thresholds; no brim is warranted."
+  ],
+  "_call": {
+    "model": "crew-code-think",
+    "finish_reason": "stop",
+    "prompt_tokens": 3435,
+    "completion_tokens": 3585,
+    "reasoning_tokens": 2886,
+    "max_tokens": 16000,
+    "seconds": 200.9
+  }
+}

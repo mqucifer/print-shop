@@ -1,0 +1,112 @@
+{
+  "questions": [
+    {
+      "feature": "purpose",
+      "text": "What is this part for? The 16 \u00d7 8 \u00d7 22 mm block with a 1.87 mm section could be a clip, a spacer, a stand, or a display piece. It drives wall count and infill at that thin section.",
+      "options": [
+        {
+          "label": "Functional (clip, hook, or latch)",
+          "settings": [
+            {
+              "key": "wall_loops",
+              "value": "0.20"
+            },
+            {
+              "key": "sparse_infill_density",
+              "value": "40%"
+            }
+          ],
+          "impact": "Strength: 3 walls (1.2 mm) carry the 1.87 mm section; 40% infill fills the remaining 0.67 mm channel solid enough for the bridge to grip under load.",
+          "recommended": false,
+          "why": ""
+        },
+        {
+          "label": "General structural (spacer, stand, or small bracket)",
+          "settings": [
+            {
+              "key": "wall_loops",
+              "value": "0.20"
+            },
+            {
+              "key": "sparse_infill_density",
+              "value": "30%"
+            }
+          ],
+          "impact": "Strength: 3 walls move most of the part's resistance into the periphery where the 1.87 mm cross-section is thinnest; 30% infill keeps it light without a hollow core.",
+          "recommended": true,
+          "why": "The 1.87 mm section is this part's constraint. At 2 walls the infill channel is barely 1 mm wide \u2014 3 walls make the periphery do the work, which is where a thin block actually resists bending."
+        },
+        {
+          "label": "Decorative or display",
+          "settings": [
+            {
+              "key": "wall_loops",
+              "value": "0.20"
+            },
+            {
+              "key": "sparse_infill_density",
+              "value": "15%"
+            }
+          ],
+          "impact": "Surface: 2 walls give a clean outer face; risk: at 0.8 mm of wall the part is flimsy to handle, and the 1.07 mm infill channel is too narrow for the infill to bond well to both walls.",
+          "recommended": false,
+          "why": ""
+        }
+      ]
+    },
+    {
+      "feature": "steepest_overhang",
+      "text": "The 10 mm\u00b2 face at 90\u00b0 is a true ceiling. The preset has enable_support=0, but even a short span will droop in PLA at 90\u00b0 without something beneath it. Support it or let it bridge?",
+      "options": [
+        {
+          "label": "Tree support under the bridge",
+          "settings": [
+            {
+              "key": "enable_support",
+              "value": "0.20"
+            }
+          ],
+          "impact": "Surface: the face prints flat against a small tree; risk: minimal \u2014 10 mm\u00b2 means a few branches, easy to snap off.",
+          "recommended": true,
+          "why": "At 90\u00b0 the face is pointing straight down. PLA has no time to stiffen before the next layer lands on a sagging string; a tree under 10 mm\u00b2 is the smallest possible support and the safest way to keep the bridge flat."
+        },
+        {
+          "label": "No support \u2014 bridge with cooling",
+          "settings": [
+            {
+              "key": "enable_support",
+              "value": "0.20"
+            },
+            {
+              "key": "fan_max_speed",
+              "value": "100"
+            },
+            {
+              "key": "outer_wall_speed",
+              "value": "80"
+            }
+          ],
+          "impact": "Surface: clean underside if the span is \u2264 3 mm; risk: past that, the bridge sags, the first layer pulls off, and the face is pitted.",
+          "recommended": false,
+          "why": ""
+        },
+        {
+          "label": "Design note \u2014 chamfer the face to 45\u00b0 in CAD",
+          "settings": [],
+          "impact": "Strength: a 45\u00b0 chamfer is inherently stronger than a 90\u00b0 ledge and needs no support; but it changes the model, so it's a design call, not a print setting.",
+          "recommended": false,
+          "why": ""
+        }
+      ]
+    }
+  ],
+  "_call": {
+    "model": "crew-code-think",
+    "finish_reason": "stop",
+    "prompt_tokens": 1991,
+    "completion_tokens": 7169,
+    "reasoning_tokens": 6111,
+    "max_tokens": 16000,
+    "seconds": 401.5
+  }
+}

@@ -47,6 +47,12 @@ from print_shop.ingest.orientation import candidates, write_rotated
 from print_shop.ledger import Ledger, PrintRecord
 from print_shop.orchestrator.fitness import scoring_profiles
 from print_shop.printer.centauri import PreflightFailed, PrinterClient, preflight
+from print_shop.setup import Proposer
+from print_shop.setup.features import measure
+from print_shop.setup.intake import Asker, Estimate, Intake
+from print_shop.setup.proposal import Change, Proposal, Source, apply
+from print_shop.setup.questions import estimate
+from print_shop.setup.review import Reviewer, ReviewRequest
 from print_shop.slicer.naming import job_id_from_filename, name_gcode
 from print_shop.slicer.orca import (
     Slicer,
@@ -69,13 +75,14 @@ def new_job(stl_path: str | Path, *, entry: EntryPath) -> PrintJobState:
     Returns:
         A ``PrintJobState`` with identity fields populated.
     """
-    return PrintJobState(
+    job = PrintJobState(
         job_id=str(uuid.uuid4()),
         trace_id=str(uuid.uuid4()),
         entry=entry,
         created_at=datetime.now(UTC).isoformat(),
         stl_path=str(stl_path),
     )
+    return job
 
 
 def build_graph(
@@ -86,6 +93,9 @@ def build_graph(
     printer: PrinterClient | None = None,
     slicer: Slicer = slice_model,
     ledger: Ledger | None = None,
+    proposer: Proposer | None = None,
+    asker: Asker | None = None,
+    reviewer: Reviewer | None = None,
 ) -> Any:
     """Build and compile the print pipeline graph.
 
@@ -117,6 +127,16 @@ def build_graph(
         ledger: Where each print the agent starts is recorded. **Required
             to print:** ``print_node`` refuses to start a print the ledger
             cannot record, the same way it refuses one nobody approved.
+        proposer: Proposes the intake's questions from the part's features,
+            then the print's settings over the presets from the answers
+            (mqucifer/print-shop#7, #10). None, or no asker, slices with the
+            presets as they are, supports forced on for an overhang as before.
+        asker: Answers the intake's questions: on the command line, or from
+            a recording. Each option's time and filament is Orca's estimate,
+            sliced before it's asked.
+        reviewer: The Sponsor's review of the proposed settings, after each
+            slice and before the approval gate; a correction slices again.
+            None skips the review, and the approval gate still stands.
 
     Returns:
         A compiled LangGraph ``CompiledStateGraph``.
@@ -188,10 +208,36 @@ def build_graph(
             stl_to_slice = write_rotated(state["stl_path"], rotation_deg, outdir / "rotated.stl")
 
         assert profiles is not None, "orient refuses a graph without profiles"
-        active_profiles = (
-            scoring_profiles(profiles, outdir) if overhang_area > 0 else profiles
-        )
-        result = slicer(stl_to_slice, active_profiles, outdir)
+        proposed: dict[str, Any] = {}
+        if proposer is not None and asker is not None:
+            contact = (
+                outcome.proposal.value.bed_contact_area_mm2
+                if outcome is not None and outcome.accepted
+                else state["mesh"].bed_contact_area_mm2
+            )
+            features = measure(stl_to_slice, contact)
+            intake = _ask(
+                proposer.questions(features, profiles),
+                asker,
+                lambda settings, n: _estimate(
+                    slicer, stl_to_slice, profiles, settings, outdir / "options" / str(n)
+                ),
+            )
+            proposed["intake"] = intake
+            result, reviewed = _propose_and_review(
+                proposer(intake, features, profiles),
+                profiles,
+                lambda p: slicer(stl_to_slice, p, outdir),
+                reviewer,
+                AppliedOrientation(rotation_deg=rotation_deg, rationale=rationale),
+                outdir / "proposed",
+            )
+            proposed.update(reviewed)
+        else:
+            active_profiles = (
+                scoring_profiles(profiles, outdir) if overhang_area > 0 else profiles
+            )
+            result = slicer(stl_to_slice, active_profiles, outdir)
         # Orca always writes `plate_1.gcode`. The printer's storage is one flat
         # namespace and `start_print` takes a bare name, so the file is renamed
         # to carry the job id before anything can upload it.
@@ -205,6 +251,7 @@ def build_graph(
                 rotation_deg=rotation_deg, rationale=rationale
             ),
             "profiles_used": profiles.used,
+            **proposed,
         }
 
     def review_proposal_node(state: PrintJobState) -> dict[str, Any]:
@@ -433,7 +480,80 @@ def _print_record(
         printer_machine=machine,
         printer_firmware=firmware,
         profiles=state.get("profiles_used"),
+        intake=state.get("intake"),
+        proposal=state.get("proposal"),
+        corrections=tuple(state.get("corrections", ())),
     )
+
+
+def _ask(
+    asked: Any, asker: Asker, slice_with: Any
+) -> Intake:
+    """The questions with Orca's estimate for each option, asked, with the answers."""
+    counter = iter(range(1, 1000))
+    questions = estimate(asked.questions, lambda settings: slice_with(settings, next(counter)))
+    return Intake(questions=questions, answers=asker(questions), note=asked.note,
+                  call=asked.call)
+
+
+def _estimate(
+    slicer: Slicer, stl: str | Path, profiles: SlicerProfiles, settings: dict[str, str],
+    outdir: Path,
+) -> Estimate | None:
+    """Orca's estimate for the presets with `settings` over them, or None if it couldn't."""
+    changes = tuple(Change(key=k, preset="", value=v, reason="", source=Source.ANSWER)
+                    for k, v in settings.items())
+    try:
+        result = slicer(stl, apply(profiles, Proposal(changes=changes), outdir), outdir)
+    except (RuntimeError, OSError, ValueError):
+        return None
+    return Estimate(print_time_s=result.print_time_s, filament_g=result.filament_g,
+                    filament_cm3=result.filament_cm3)
+
+
+def _propose_and_review(
+    proposal: Any,
+    profiles: SlicerProfiles,
+    slice_with: Any,
+    reviewer: Reviewer | None,
+    orientation: AppliedOrientation,
+    workdir: Path,
+) -> tuple[SliceResult, dict[str, Any]]:
+    """Slice with the proposal; with a reviewer, again after each correction until approved.
+
+    Raises:
+        RuntimeError: If the Sponsor stops at the review. Nothing was sent to
+            the printer, and the approval gate was never reached.
+    """
+    presets = tuple(
+        str(json.loads(p.read_text()).get("name", p.stem)) if p else "-"
+        for p in (profiles.machine, profiles.process, profiles.filament)
+    )
+    process = json.loads(profiles.process.read_text())
+    filament = json.loads(profiles.filament.read_text()) if profiles.filament else {}
+    corrections: list[Change] = []
+    while True:
+        result: SliceResult = slice_with(apply(profiles, proposal, workdir))
+        if reviewer is None:
+            break
+        review = reviewer(
+            ReviewRequest(
+                presets=(presets[0], presets[1], presets[2]),
+                proposal=proposal,
+                slice=result,
+                orientation=orientation,
+                profiles=profiles,
+                process=process,
+                filament=filament,
+            )
+        )
+        if review.stop:
+            raise RuntimeError("stopped at the settings review; nothing was sent to the printer")
+        if review.approved:
+            break
+        corrections += review.corrections
+        proposal = proposal.corrected(list(review.corrections))
+    return result, {"proposal": proposal, "corrections": tuple(corrections)}
 
 
 def build_volume_mm(machine_profile: Path) -> tuple[float, float, float]:

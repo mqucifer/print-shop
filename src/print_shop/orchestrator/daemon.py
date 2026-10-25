@@ -37,6 +37,9 @@ from print_shop.ledger import Ledger
 from print_shop.orchestrator.graph import build_graph
 from print_shop.orchestrator.outcome import OutcomeDesk, Watcher
 from print_shop.printer.centauri import PrinterClient
+from print_shop.setup import Proposer
+from print_shop.setup.intake import Asker
+from print_shop.setup.review import Reviewer
 from print_shop.slicer.orca import Slicer, SlicerProfiles, slice_model
 
 __all__ = [
@@ -162,6 +165,9 @@ class Daemon:
         ledger: Ledger | None = None,
         watch_printer: PrinterClient | None = None,
         watch_poll_s: float = 60.0,
+        proposer: Proposer | None = None,
+        asker: Asker | None = None,
+        reviewer: Reviewer | None = None,
     ) -> None:
         """`printer` is what the approval gate ultimately commands.
 
@@ -205,6 +211,9 @@ class Daemon:
             printer=printer,
             slicer=slicer,
             ledger=ledger,
+            proposer=proposer,
+            asker=asker,
+            reviewer=reviewer,
         )
 
         # MQTT bridge.

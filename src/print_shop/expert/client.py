@@ -20,6 +20,7 @@ failed call and the caller decides what to do with it.
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +29,7 @@ from pydantic import BaseModel, SecretStr
 
 from print_shop.env import SETTINGS_PATH, load_env
 
-__all__ = ["LLMConfig", "complete_json"]
+__all__ = ["CallInfo", "CutOff", "LLMConfig", "complete_json", "complete_json_call"]
 
 #: LiteLLM on the Mac. Loopback, so it is not an address the check would flag,
 #: and not a host anyone outside this machine could reach.
@@ -78,13 +79,46 @@ class LLMConfig(BaseModel):
         )
 
 
+class CallInfo(BaseModel):
+    """What one call cost and how it ended, without its text."""
+
+    model_config = {"frozen": True}
+
+    model: str
+    finish_reason: str  # "stop", or "length" when max_tokens cut it off
+    prompt_tokens: int
+    completion_tokens: int
+    #: Tokens spent thinking, when the alias thinks and the server reports it.
+    reasoning_tokens: int
+    max_tokens: int
+    seconds: float
+
+
+class CutOff(RuntimeError):
+    """The reply ran to `max_tokens` and was cut off. Carries what the call cost."""
+
+    def __init__(self, message: str, info: CallInfo) -> None:
+        super().__init__(message)
+        self.info = info
+
+
 def complete_json(
     config: LLMConfig,
     system: str,
     user: str,
     schema: dict[str, Any],
 ) -> dict[str, Any]:
-    """Send one chat completion and return the parsed JSON object in the reply.
+    """The parsed JSON object in one chat completion's reply (`complete_json_call`)."""
+    return complete_json_call(config, system, user, schema)[0]
+
+
+def complete_json_call(
+    config: LLMConfig,
+    system: str,
+    user: str,
+    schema: dict[str, Any],
+) -> tuple[dict[str, Any], CallInfo]:
+    """Send one chat completion and return the parsed JSON object in the reply, and its cost.
 
     The schema is enforced server-side via `response_format` with
     `strict: True`, so the reply is always valid JSON against it.
@@ -96,9 +130,10 @@ def complete_json(
         schema: JSON Schema with a `name` and `schema` key.
 
     Returns:
-        The parsed JSON object from the model's reply.
+        The parsed JSON object from the model's reply, and what the call cost.
 
     Raises:
+        CutOff: When `max_tokens` cut the reply off, with the call's cost.
         RuntimeError: On a non-2xx response, an empty answer, or a body that
             will not parse. The key is never part of the message.
     """
@@ -120,6 +155,7 @@ def complete_json(
     }
     headers = {"Authorization": f"Bearer {config.api_key.get_secret_value()}"}
 
+    started = time.monotonic()
     try:
         with httpx.Client(timeout=config.timeout_s) as client:
             resp = client.post(
@@ -133,9 +169,28 @@ def complete_json(
 
     try:
         payload = resp.json()
-        text = payload["choices"][0]["message"]["content"]
+        choice = payload["choices"][0]
+        text = choice["message"]["content"]
     except (json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
         raise RuntimeError(f"LLM endpoint returned an unexpected body: {exc}") from exc
+    usage = payload.get("usage") or {}
+    info = CallInfo(
+        model=str(payload.get("model", config.model)),
+        finish_reason=str(choice.get("finish_reason", "")),
+        prompt_tokens=int(usage.get("prompt_tokens") or 0),
+        completion_tokens=int(usage.get("completion_tokens") or 0),
+        reasoning_tokens=int(
+            (usage.get("completion_tokens_details") or {}).get("reasoning_tokens") or 0
+        ),
+        max_tokens=config.max_tokens,
+        seconds=round(time.monotonic() - started, 1),
+    )
+    if info.finish_reason == "length":
+        raise CutOff(
+            f"cut off at max_tokens={config.max_tokens} after {info.completion_tokens} tokens"
+            f" ({info.reasoning_tokens} reasoning) and {info.seconds} s",
+            info,
+        )
     if not text:
         # The model can think and then answer nothing (mqucifer/infra
         # `runbooks/empty-model-answers.md`). Say so rather than fail to parse.
@@ -147,4 +202,4 @@ def complete_json(
         raise RuntimeError(f"LLM reply is not a JSON object: {text[:200]!r}") from exc
     if not isinstance(parsed, dict):
         raise RuntimeError(f"LLM reply is not a JSON object: {text[:200]!r}")
-    return parsed
+    return parsed, info

@@ -1,0 +1,90 @@
+{
+  "questions": [
+    {
+      "feature": "purpose",
+      "text": "This is a plain 60 \u00d7 30 \u00d7 46 mm box with vertical walls, a flat 1800 mm\u00b2 top, a 4.76 mm section, and no overhangs or bridges. Its shape doesn't say what it's for. What is it for?",
+      "options": [
+        {
+          "label": "Functional / structural (housing, bracket, load-bearing)",
+          "settings": [
+            {
+              "key": "wall_loops",
+              "value": "3"
+            },
+            {
+              "key": "sparse_infill_density",
+              "value": "25%"
+            },
+            {
+              "key": "sparse_infill_pattern",
+              "value": "gyroid"
+            }
+          ],
+          "impact": "A third wall loop closes the 4.76 mm section to 1.2 mm of shell, and 25% gyroid gives near-isotropic strength through the 30 mm width where bending stress concentrates; slightly longer print.",
+          "recommended": false,
+          "why": ""
+        },
+        {
+          "label": "Container or enclosure (sealed top, holds contents)",
+          "settings": [
+            {
+              "key": "wall_loops",
+              "value": "2"
+            },
+            {
+              "key": "top_shell_layers",
+              "value": "6"
+            },
+            {
+              "key": "sparse_infill_density",
+              "value": "15%"
+            },
+            {
+              "key": "sparse_infill_pattern",
+              "value": "zig-zag"
+            }
+          ],
+          "impact": "Six top layers (1.2 mm solid) seal the 1800 mm\u00b2 flat top against leaks or debris; walls and infill stay at preset because the 4.76 mm section already carries the rim in shear.",
+          "recommended": false,
+          "why": ""
+        },
+        {
+          "label": "Decorative or display (surface finish shows)",
+          "settings": [
+            {
+              "key": "wall_loops",
+              "value": "3"
+            },
+            {
+              "key": "sparse_infill_density",
+              "value": "10%"
+            },
+            {
+              "key": "sparse_infill_pattern",
+              "value": "zig-zag"
+            }
+          ],
+          "impact": "A third wall loop smooths the 60 \u00d7 46 mm faces where layer lines are most visible; lighter infill saves material since the 4.76 mm section isn't loaded.",
+          "recommended": false,
+          "why": ""
+        },
+        {
+          "label": "General purpose (just needs to print well)",
+          "settings": [],
+          "impact": "Every preset value holds: 2 wall loops on the 4.76 mm section with 15% zig-zag give adequate strength for a simple box; 5 top layers close the 1800 mm\u00b2 flat top at 1.0 mm; no feature demands a deviation.",
+          "recommended": true,
+          "why": "The part has no overhang, no bridge, no slenderness risk, and a 4.76 mm section that's already thick relative to 2 wall loops; with no stated load or finish demand, the Sponsor's tuned preset is the right call."
+        }
+      ]
+    }
+  ],
+  "_call": {
+    "model": "crew-code-think",
+    "finish_reason": "stop",
+    "prompt_tokens": 1993,
+    "completion_tokens": 3291,
+    "reasoning_tokens": 2517,
+    "max_tokens": 16000,
+    "seconds": 110.8
+  }
+}

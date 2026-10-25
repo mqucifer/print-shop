@@ -131,11 +131,57 @@ NICKED_CUBE = Expected(
     is_manifold=False,
 )
 
+# --------------------------------------------------------------------------
+# Three parts with different purposes, for the settings proposal
+# (mqucifer/print-shop#7). Their features are what the proposals must trace
+# to: a tall thin-walled vase, a thick load-bearing bracket, and a snap fit
+# whose hook overhangs.
+# --------------------------------------------------------------------------
+
+
+def _vase() -> trimesh.Trimesh:
+    """A 120 mm tall cylinder, 60 mm across, with 2 mm walls and a 2 mm floor."""
+    outer = trimesh.creation.cylinder(radius=30, height=120, sections=96)
+    outer.apply_translation((0, 0, 60))
+    inner = trimesh.creation.cylinder(radius=28, height=120, sections=96)
+    inner.apply_translation((0, 0, 62))
+    vase: trimesh.Trimesh = trimesh.boolean.difference([outer, inner])
+    return vase
+
+
+def _bracket() -> trimesh.Trimesh:
+    """An L-bracket: a 60x30x6 mm plate flat on the bed, and a 6 mm flange standing 40 mm up."""
+    plate = trimesh.creation.box(extents=(60, 30, 6))
+    plate.apply_translation((30, 15, 3))
+    flange = trimesh.creation.box(extents=(6, 30, 40))
+    flange.apply_translation((3, 15, 26))
+    bracket: trimesh.Trimesh = trimesh.boolean.union([plate, flange])
+    return bracket
+
+
+def _snap() -> trimesh.Trimesh:
+    """A snap-fit clip: a 1.6 mm cantilever 18 mm tall on a base, a 1.2 mm hook at its tip.
+
+    The hook's flat underside is the overhang.
+    """
+    base = trimesh.creation.box(extents=(16, 8, 4))
+    base.apply_translation((8, 4, 2))
+    beam = trimesh.creation.box(extents=(1.6, 8, 18))
+    beam.apply_translation((7.2, 4, 13))
+    hook = trimesh.creation.box(extents=(1.2, 8, 2.5))
+    hook.apply_translation((8.6, 4, 20.75))
+    snap: trimesh.Trimesh = trimesh.boolean.union([base, beam, hook])
+    return snap
+
+
 _BUILDERS = {
     "cube": _cube,
     "tee": _tee,
     "open_box": _open_box,
     "nicked_cube": _nicked_cube,
+    "vase": _vase,
+    "bracket": _bracket,
+    "snap": _snap,
 }
 
 

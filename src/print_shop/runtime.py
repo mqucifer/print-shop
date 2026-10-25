@@ -24,6 +24,10 @@ from print_shop.printer.centauri import (
     PrinterClient,
     PrinterConfig,
 )
+from print_shop.setup import Proposer
+from print_shop.setup.intake import Asker
+from print_shop.setup.model import setup_llm
+from print_shop.setup.review import Reviewer
 from print_shop.slicer.orca import BedType, SlicerProfiles, with_bed_type
 from print_shop.slicer.store import Choice
 
@@ -91,6 +95,8 @@ def build_run(
     recorder: FrameRecorder | None = None,
     settings: Path | None = None,
     workdir: Path | None = None,
+    asker: Asker | None = None,
+    reviewer: Reviewer | None = None,
 ) -> Run:
     """A daemon wired to the real broker, Orca, LiteLLM, ledger and a read-only watcher.
 
@@ -98,6 +104,11 @@ def build_run(
     armed it, or None, in which case an approval fails at the print node.
     `profiles` are the store's, chosen for the fitted nozzle and filament
     (`profiles_for`); None only serves the outcome gate, and slices nothing.
+    `asker` answers the intake's questions, proposed from the part's
+    features (`cli_asker`, or `replay_asker` for recorded answers), and
+    `reviewer` is the Sponsor's review of the proposed settings on the
+    command (`cli_reviewer`). Both use `PRINT_SHOP_SETUP_MODEL` (default
+    `crew-code-think`).
 
     Raises:
         RuntimeError, FileNotFoundError: On missing settings, before a job starts.
@@ -110,6 +121,7 @@ def build_run(
     ledger = Ledger(ledger_path(path))
     work = workdir or WORK_DIR
     work.mkdir(parents=True, exist_ok=True)
+    llm = LLMConfig.from_settings(path)
     daemon = Daemon(
         cfg=cfg,
         profiles=(
@@ -119,7 +131,10 @@ def build_run(
         ),
         workdir=work,
         printer=printer,
-        llm=LLMConfig.from_settings(path),
+        llm=llm,
+        proposer=Proposer(llm=setup_llm(llm, env)),
+        asker=asker,
+        reviewer=reviewer,
         ledger=ledger,
         # Read-only: watching needs a snapshot and nothing else.
         watch_printer=CentauriClient(PrinterConfig.from_env(path), recorder=recorder),
@@ -139,6 +154,7 @@ def describe(row: Row) -> str:
         f"profiles       {row.slicer_settings.get('printer_settings_id', '?')} /"
         f" {row.slicer_settings.get('print_settings_id', '?')} / {row.filament}",
         *_store_lines(row),
+        *_setup_lines(row),
         *([f"material       {row.material.line()}"] if row.material else []),
         f"plate          {row.slicer_settings.get('curr_bed_type', '?')},"
         f" bed {row.slicer_settings.get('first_layer_bed_temperature', '?')} C",
@@ -171,4 +187,19 @@ def _store_lines(row: Row) -> list[str]:
         lines.append(f"  {ref.file}  (sha256 {ref.sha256[:12]}…)")
         if ref.standard_file:
             lines.append(f"    over {ref.standard_file}  (sha256 {ref.standard_sha256[:12]}…)")
+    return lines
+
+
+def _setup_lines(row: Row) -> list[str]:
+    """What the part was for, and each setting changed from the presets, by whom."""
+    if row.intake is None:
+        return []
+    lines = [f"intake         {row.intake.summary()}"]
+    if row.intake.note:
+        lines.append(f"               ({row.intake.note})")
+    changes = row.proposal.changes if row.proposal else ()
+    for c in changes:
+        lines.append(f"  {c.key}: {c.preset or '-'} -> {c.value} ({c.source.value}) {c.reason}")
+    if row.corrections:
+        lines.append(f"corrected      {', '.join(f'{c.key}={c.value}' for c in row.corrections)}")
     return lines

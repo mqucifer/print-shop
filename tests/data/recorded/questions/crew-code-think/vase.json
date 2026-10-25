@@ -1,0 +1,91 @@
+{
+  "questions": [
+    {
+      "feature": "purpose",
+      "text": "This is a 120 mm tall, thin-walled column (typical section \u2248 2 mm, no overhangs, no bridges). Its shape doesn't reveal what it's for. What is it for?",
+      "options": [
+        {
+          "label": "Display / lightweight",
+          "settings": [
+            {
+              "key": "wall_loops",
+              "value": "2"
+            },
+            {
+              "key": "sparse_infill_density",
+              "value": "15%"
+            },
+            {
+              "key": "sparse_infill_pattern",
+              "value": "zig-zag"
+            },
+            {
+              "key": "top_shell_layers",
+              "value": "5"
+            }
+          ],
+          "impact": "All preset values; light and quick to print. The 2-wall shell (\u22480.84 mm) plus 15% zig-zag is adequate for a part that won't carry load.",
+          "recommended": true,
+          "why": "The part's features give no reason to deviate: no overhang, no bridge, slenderness under the brim threshold, bed contact well above 200 mm\u00b2. Per the Sponsor's practice, the preset stands unless the part or its purpose provides a reason. Without a stated load or visible surface, it doesn't."
+        },
+        {
+          "label": "Structural / load-bearing",
+          "settings": [
+            {
+              "key": "wall_loops",
+              "value": "3"
+            },
+            {
+              "key": "sparse_infill_density",
+              "value": "50%"
+            },
+            {
+              "key": "sparse_infill_pattern",
+              "value": "grid"
+            },
+            {
+              "key": "top_shell_layers",
+              "value": "5"
+            }
+          ],
+          "impact": "3 walls (\u22481.26 mm) in a ~2 mm section leaves ~0.7 mm for infill; grid lines will be thin and Orca may merge some. Noticeably stiffer against bending and crushing, but print time increases.",
+          "recommended": false,
+          "why": "Would be the right call if this column carries a shelf or resists lateral force, but the part's geometry alone doesn't show that."
+        },
+        {
+          "label": "Visible top surface",
+          "settings": [
+            {
+              "key": "wall_loops",
+              "value": "2"
+            },
+            {
+              "key": "sparse_infill_density",
+              "value": "15%"
+            },
+            {
+              "key": "sparse_infill_pattern",
+              "value": "zig-zag"
+            },
+            {
+              "key": "top_shell_layers",
+              "value": "7"
+            }
+          ],
+          "impact": "The 2825 mm\u00b2 flat top gets 1.4 mm of solid layers instead of 1.0 mm; smoother, less layer-line visible. Marginally longer print; walls and infill unchanged.",
+          "recommended": false,
+          "why": "Matters only if the top face is a finished surface (e.g., the top of a vase, a lamp shade, or a display base). The shape doesn't confirm that."
+        }
+      ]
+    }
+  ],
+  "_call": {
+    "model": "crew-code-think",
+    "finish_reason": "stop",
+    "prompt_tokens": 1992,
+    "completion_tokens": 4051,
+    "reasoning_tokens": 3307,
+    "max_tokens": 16000,
+    "seconds": 253.7
+  }
+}
