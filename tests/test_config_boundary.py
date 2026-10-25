@@ -1,19 +1,18 @@
-"""Build-time configuration must not leak into the runtime.
+"""The runtime reaches a model only through LiteLLM, and build-time knobs stay out.
 
-`AGENTS.md` separates build-time words from runtime words, and the same split
-applies to configuration — with teeth, because the dev swarm and the print
-pipeline talk to the *same* SGLang server. A knob that belongs to the swarm
-changes the conditions the pipeline runs under, and the failure is quiet: if
-the swarm saturates the state pool, the pipeline's LLM call times out,
-`orient_node` catches `RuntimeError`, falls back to `propose_geometric`, and
-the job completes with an orientation no model ever proposed.
+Two boundaries, both asserted rather than trusted.
 
-The boundary itself is simple — `src/` names the served model and posts to the
-endpoint directly; it never names a pi profile, a dispatch variable, or a
-launcher flag. Simple, and exactly the kind of thing that erodes when someone
-debugging at 1am hardcodes a profile name to reproduce something.
+**Every model call goes through LiteLLM :4000** (mqucifer/project-print
+`CLAUDE.md`). The prototype's default posted to the Spark's SGLang by hostname
+and named the served model. Here `src/` names a LiteLLM alias, the only URL it
+holds is the proxy on loopback, and the thinking switch belongs to the alias's
+own settings, not to this code.
 
-So it is asserted rather than trusted.
+**Build-time configuration never appears in `src/`.** In the prototype the dev
+swarm and the print pipeline shared one server, so a knob set for the swarm
+changed the conditions the pipeline ran under, and the failure was quiet: a
+timed-out model call fell back to `propose_geometric` and the job completed
+with an orientation no model proposed.
 """
 
 from __future__ import annotations
@@ -23,10 +22,12 @@ from pathlib import Path
 
 import pytest
 
+from print_shop.expert import client
+
 SRC = Path("src/print_shop")
 
-#: Names that belong to the swarm. Each is how a pi dispatch is configured;
-#: none has any meaning to the print pipeline.
+#: Names that belong to the prototype's build swarm. None has any meaning to
+#: the print pipeline.
 BUILD_TIME_NAMES = (
     "WORK_MODEL",
     "REVIEW_MODEL",
@@ -38,16 +39,19 @@ BUILD_TIME_NAMES = (
     "append-system-prompt",
 )
 
-#: pi resolves these to an endpoint plus sampling settings. `src/` must name
-#: the served model instead — see `_DEFAULT_MODEL` in `src/expert/client.py`.
-#:
-#: The suffix is optional because the swarm collapsed six role profiles
-#: (`sglang-code`, `sglang-review`, ...) into one named `sglang` on 2026-09-16.
-#: Matching only the hyphenated form would have left this guard passing
-#: vacuously against the naming that now exists. The trailing slash is what
-#: makes this a profile reference rather than the served model id, which
-#: legitimately ends in `-sglang`.
-PI_PROFILE = re.compile(r"sglang(-[a-z]+)?/")
+#: What a direct call to the Spark would need: SGLang's port, the served
+#: model's id, or a pi profile. Any of them in `src/` means a path around the
+#: proxy.
+AROUND_THE_PROXY = (
+    re.compile(r":8888\b"),
+    re.compile(r"qwen[\w.-]*-sglang"),
+    re.compile(r"sglang(-[a-z]+)?/"),
+)
+
+#: Owned by the alias in LiteLLM's config. Sent from here, it would fight it.
+ALIAS_SETTINGS = ("enable_thinking", "chat_template_kwargs", "temperature")
+
+URL = re.compile(r"https?://[^\s\"'`)]+")
 
 
 def source_files() -> list[Path]:
@@ -63,30 +67,40 @@ def test_there_are_source_files_to_check() -> None:
 @pytest.mark.parametrize("name", BUILD_TIME_NAMES)
 def test_build_time_configuration_never_appears_in_src(name: str) -> None:
     offenders = [f for f in source_files() if name in f.read_text()]
-    assert not offenders, (
-        f"{name!r} is build-time configuration and appears in "
-        f"{[str(f) for f in offenders]}. See AGENTS.md, "
-        f"'Configuration: two systems that share one endpoint'."
-    )
+    assert not offenders, f"{name!r} is build-time configuration, in {offenders}"
 
 
-def test_src_names_the_served_model_not_a_pi_profile() -> None:
-    """`sglang/qwen3.8-27b-sglang` is a pi profile; the endpoint knows nothing of it."""
-    offenders = [f for f in source_files() if PI_PROFILE.search(f.read_text())]
-    assert not offenders, (
-        f"a pi profile name appears in {[str(f) for f in offenders]}. The "
-        f"runtime posts to the endpoint directly and must name the served "
-        f"model, e.g. 'qwen3.8-27b-sglang'."
-    )
+@pytest.mark.parametrize("pattern", AROUND_THE_PROXY, ids=lambda p: p.pattern)
+def test_src_has_no_way_around_the_proxy(pattern: re.Pattern[str]) -> None:
+    offenders = [f for f in source_files() if pattern.search(f.read_text())]
+    assert not offenders, f"{pattern.pattern!r} would reach the Spark directly: {offenders}"
 
 
-def test_the_runtime_endpoint_stays_overridable() -> None:
-    """The one deliberate seam: point the pipeline elsewhere without editing code.
+def test_the_only_url_in_src_is_the_proxy_on_loopback() -> None:
+    urls = {u for f in source_files() for u in URL.findall(f.read_text())}
+    assert urls == {"http://127.0.0.1:4000/v1"}, urls
 
-    If this ever becomes a hardcoded URL, running the pipeline against a
-    different server — or a stub — means patching source, and the boundary
-    this file protects stops being expressible.
-    """
-    client = (SRC / "expert" / "client.py").read_text()
-    for var in ("PRINT_AGENT_LLM_URL", "PRINT_AGENT_LLM_MODEL"):
-        assert var in client, f"{var} is the documented runtime override"
+
+@pytest.mark.parametrize("name", ALIAS_SETTINGS)
+def test_the_client_leaves_sampling_and_thinking_to_the_alias(name: str) -> None:
+    code = (SRC / "expert" / "client.py").read_text()
+    # The docstring may explain the choice; the code must not send it.
+    body = code.split('"""', 2)[2]
+    assert name not in body, f"{name!r} is the alias's setting, not the client's"
+
+
+def test_the_default_alias_is_one_the_proxy_serves() -> None:
+    """The crew's five aliases, all the 27B (the operator, 2026-10-24)."""
+    assert client.DEFAULT_MODEL in {
+        "crew-local",
+        "crew-draft",
+        "crew-analysis",
+        "crew-code",
+        "crew-code-think",
+    }
+
+
+def test_the_endpoint_stays_overridable_from_the_settings() -> None:
+    """Point the pipeline at another proxy, or a stub, without editing code."""
+    assert client.URL_KEY == "PRINT_SHOP_LLM_URL"
+    assert client.MODEL_KEY == "PRINT_SHOP_LLM_MODEL"

@@ -25,11 +25,14 @@ from __future__ import annotations
 import os
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 import pytest
+from pydantic import SecretStr
 
 from print_shop.core.contracts import EscalationReason, NoAutoFix, Proposal, propose_validate
 from print_shop.core.state import Orientation
+from print_shop.env import SETTINGS_PATH
 from print_shop.expert.client import LLMConfig
 from print_shop.expert.orientation import (
     MAX_OVERHANG_REGRESSION_MM2,
@@ -171,18 +174,44 @@ def test_a_hallucinated_choice_reaches_a_human(request_: OrientationRequest) -> 
 # --------------------------------------------------------------------------
 
 
-def _endpoint_up(cfg: LLMConfig) -> bool:
+#: The live tests read a key the way the daemon does. On the Mac a builder
+#: points this at its own key file, e.g.
+#: `PRINT_SHOP_LLM_SETTINGS=~/.config/crew/builders.env`; it is a path, never a key.
+LIVE_SETTINGS = Path(os.environ.get("PRINT_SHOP_LLM_SETTINGS", str(SETTINGS_PATH))).expanduser()
+
+
+def _live_config() -> LLMConfig | None:
     try:
-        urllib.request.urlopen(f"{cfg.base_url}/models", timeout=5)
+        return LLMConfig.from_settings(LIVE_SETTINGS)
+    except RuntimeError:
+        return None
+
+
+def _endpoint_up(cfg: LLMConfig | None) -> bool:
+    if cfg is None:
+        return False
+    request = urllib.request.Request(
+        f"{cfg.base_url}/models",
+        headers={"Authorization": f"Bearer {cfg.api_key.get_secret_value()}"},
+    )
+    try:
+        urllib.request.urlopen(request, timeout=5)
         return True
     except (urllib.error.URLError, OSError):
         return False
 
 
+LIVE = _live_config()
+
 needs_llm = pytest.mark.skipif(
-    not _endpoint_up(LLMConfig()),
-    reason="the local SGLang endpoint is not reachable",
+    not _endpoint_up(LIVE),
+    reason="no LiteLLM key in the settings, or LiteLLM :4000 is not answering",
 )
+
+
+def live() -> LLMConfig:
+    assert LIVE is not None
+    return LIVE
 
 
 @pytest.mark.llm
@@ -192,7 +221,7 @@ def test_the_model_returns_a_candidate_it_was_offered(
 ) -> None:
     """Structured output means it cannot answer in prose, but it can still
     answer with a rotation nobody offered. That is what the validator is for."""
-    proposal = propose_orientation(request_, LLMConfig())
+    proposal = propose_orientation(request_, live())
 
     assert isinstance(proposal.value, Orientation)
     assert proposal.source.startswith("model:")
@@ -212,7 +241,7 @@ def test_the_model_picks_the_orientation_with_no_overhang(
     validator is carrying the whole node.
     """
     outcome = propose_validate(
-        lambda r: propose_orientation(r, LLMConfig()), validate_orientation, request_
+        lambda r: propose_orientation(r, live()), validate_orientation, request_
     )
     assert outcome.accepted
     assert outcome.proposal.value.rotation_deg == (180.0, 0.0, 0.0)
@@ -234,16 +263,37 @@ def test_the_model_is_not_just_echoing_the_first_candidate() -> None:
     req = OrientationRequest(
         candidates=shuffled, build_volume_mm=BUILD_VOLUME, part_description=""
     )
-    proposal = propose_orientation(req, LLMConfig())
+    proposal = propose_orientation(req, live())
     assert proposal.value.rotation_deg == (180.0, 0.0, 0.0)
 
 
-def test_the_endpoint_is_configurable_from_the_environment() -> None:
-    """So this can point at a different host without a code change."""
-    cfg = LLMConfig()
-    assert cfg.base_url.startswith("http")
-    assert cfg.model
-    assert os.environ.get("PRINT_AGENT_LLM_URL") is None or cfg.base_url
+def test_the_config_is_read_from_the_settings(tmp_path: Path) -> None:
+    settings = tmp_path / ".env"
+    settings.write_text("CREW_LLM_API_KEY=sk-test\n")
+    cfg = LLMConfig.from_settings(settings)
+    assert cfg.base_url == "http://127.0.0.1:4000/v1"
+    assert cfg.model == "crew-code"
+    assert cfg.api_key.get_secret_value() == "sk-test"
+    assert "sk-test" not in repr(cfg)
+
+
+def test_the_endpoint_and_alias_can_be_changed_in_the_settings(tmp_path: Path) -> None:
+    settings = tmp_path / ".env"
+    settings.write_text(
+        "CREW_LLM_API_KEY=sk-test\n"
+        "PRINT_SHOP_LLM_URL=http://127.0.0.1:4001/v1\n"
+        "PRINT_SHOP_LLM_MODEL=crew-local\n"
+    )
+    cfg = LLMConfig.from_settings(settings)
+    assert (cfg.base_url, cfg.model) == ("http://127.0.0.1:4001/v1", "crew-local")
+
+
+def test_no_key_is_refused_rather_than_falling_back_quietly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("CREW_LLM_API_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="CREW_LLM_API_KEY"):
+        LLMConfig.from_settings(tmp_path / "absent.env")
 
 
 # --------------------------------------------------------------------------
@@ -251,7 +301,7 @@ def test_the_endpoint_is_configurable_from_the_environment() -> None:
 # --------------------------------------------------------------------------
 
 
-DEAD_LLM = LLMConfig(base_url="http://127.0.0.1:9/v1", timeout_s=2.0)
+DEAD_LLM = LLMConfig(api_key=SecretStr("unused"), base_url="http://127.0.0.1:9/v1", timeout_s=2.0)
 
 
 def test_an_unreachable_model_raises_rather_than_guessing(

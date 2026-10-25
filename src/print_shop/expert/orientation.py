@@ -18,7 +18,9 @@ from print_shop.core.state import Orientation
 from print_shop.expert.client import LLMConfig, complete_json
 
 __all__ = [
+    "ENDPOINT_UNAVAILABLE",
     "MAX_OVERHANG_REGRESSION_MM2",
+    "NO_MODEL_CONFIGURED",
     "OrientationRequest",
     "propose_geometric",
     "propose_orientation",
@@ -48,17 +50,25 @@ def _best(candidates: tuple[Orientation, ...]) -> Orientation:
     )
 
 
-def propose_geometric(request: OrientationRequest) -> Proposal[Orientation]:
+#: Why the geometric proposer ran, as the gate shows it.
+ENDPOINT_UNAVAILABLE = "Model endpoint was unavailable"
+NO_MODEL_CONFIGURED = "No model was configured for this job"
+
+
+def propose_geometric(
+    request: OrientationRequest, reason: str = ENDPOINT_UNAVAILABLE
+) -> Proposal[Orientation]:
     """Deterministic fallback proposer: pick the geometrically best candidate.
 
-    Used when the model endpoint is unreachable. The rationale states that the
-    model was unavailable so the approval gate shows a human exactly what
-    happened. This proposal goes through the same ``validate_orientation`` as
-    any other — it is a different proposer, not an escape hatch.
+    Used when the model endpoint is unreachable, or when no model was
+    configured. The rationale says which, so the approval gate (and the
+    ledger) shows a human exactly what happened. This proposal goes through
+    the same ``validate_orientation`` as any other — it is a different
+    proposer, not an escape hatch.
     """
     best = _best(request.candidates)
     rationale = (
-        f"Model endpoint was unavailable; fell back to geometric selection. "
+        f"{reason}; fell back to geometric selection. "
         f"Chose rotation {best.rotation_deg} with the lowest overhang "
         f"({best.overhang_area_mm2:.1f} mm2) and highest bed contact "
         f"({best.bed_contact_area_mm2:.1f} mm2) among the scored candidates."

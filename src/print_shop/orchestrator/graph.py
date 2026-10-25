@@ -36,6 +36,7 @@ from print_shop.core.contracts import Gate, GateDecision, approved_at, propose_v
 from print_shop.core.state import AppliedOrientation, EntryPath, PrintJobState, PrintStatus
 from print_shop.expert.client import LLMConfig
 from print_shop.expert.orientation import (
+    NO_MODEL_CONFIGURED,
     OrientationRequest,
     propose_geometric,
     propose_orientation,
@@ -87,8 +88,11 @@ def build_graph(
             passes it straight to ``compile()`` and never wraps it in a
             ``with`` block — the connection must stay open for the lifetime
             of the graph (CODE_REVIEW.md P0-3).
-        llm: Endpoint config for the orientation proposer. Defaults to
-            ``LLMConfig()`` (LiteLLM :4000).
+        llm: Endpoint config for the orientation proposer, from
+            ``LLMConfig.from_settings()`` (LiteLLM :4000). **No default
+            model:** None means no model is asked, and the geometric proposer
+            chooses, saying so. Like ``printer``, nothing here reaches for
+            configuration nobody passed.
         printer: The printer the ``print`` node commands. **No default.** A
             graph built without one cannot reach hardware — ``print_node``
             raises instead. Pass ``live_printer()`` to command the real
@@ -100,7 +104,6 @@ def build_graph(
     Returns:
         A compiled LangGraph ``CompiledStateGraph``.
     """
-    llm = llm if llm is not None else LLMConfig()
     build_volume = build_volume_mm(profiles.machine, datadir=profiles.datadir)
 
     def ingest_node(state: PrintJobState) -> dict[str, Any]:
@@ -123,6 +126,8 @@ def build_graph(
         )
 
         def proposer(req: OrientationRequest) -> Any:
+            if llm is None:
+                return propose_geometric(req, NO_MODEL_CONFIGURED)
             try:
                 return propose_orientation(req, llm)
             except (RuntimeError, OSError):
