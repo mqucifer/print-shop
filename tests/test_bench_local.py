@@ -38,8 +38,8 @@ def answers(tmp_path_factory: pytest.TempPathFactory) -> dict[str, dict[str, Any
     found: dict[str, dict[str, Any]] = {}
     for name, args in {
         "info": ["info", "frame.step"],
-        "panes": ["panes", "frame.step", "--pocket-z", str(local["pocket_z"]), "--lip-z", str(local["lip_z"]),
-                  "--clearance", str(local["play"]),],
+        "panes": ["panes", "frame.step", "--pocket-z", str(local["pocket_z"]),
+                  "--lip-z", str(local["lip_z"]), "--clearance", str(local["play"])],
         "thin": ["thin", "frame.step"],
         "render": ["render", "frame.step", "--views", "top", "iso"],
     }.items():  # fmt: skip
