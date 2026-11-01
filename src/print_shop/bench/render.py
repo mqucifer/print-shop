@@ -16,7 +16,7 @@ from PIL import Image, ImageDraw
 from vtk.util.numpy_support import numpy_to_vtk, numpy_to_vtkIdTypeArray, vtk_to_numpy
 
 from .report import Report, slug
-from .shapes import Part, load, slice_at
+from .shapes import NoAnswer, Part, load, slice_at
 
 COLOURS = [
     (0.55, 0.65, 0.80),
@@ -194,7 +194,66 @@ def _section_picture(part: Part, z: float, size: int) -> np.ndarray:
     return np.asarray(picture)
 
 
+def _variants(given: list[str]) -> list[tuple[str, list[str]]]:
+    """`NAME=a.step,b.step`, as (name, files), each name once."""
+    found: list[tuple[str, list[str]]] = []
+    for text in given:
+        name, _, files = text.partition("=")
+        if not name or not files:
+            raise NoAnswer(f"a variant is NAME=FILE[,FILE...], not {text}")
+        if name in (n for n, _ in found):
+            raise NoAnswer(f"two variants are named {name}")
+        found.append((name, files.split(",")))
+    return found
+
+
+def run_variants(args: Any, report: Report) -> None:
+    """A sheet for choosing between variants: a labelled row of each one's views."""
+    variants = _variants(args.variants)
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    size = args.size
+    rows = len(variants)
+    sheet = Image.new("RGB", (len(args.views) * size, rows * size), "white")
+    draw = ImageDraw.Draw(sheet)
+    problems = []
+    views: dict[str, Any] = {}
+    for row, (name, files) in enumerate(variants):
+        parts = [load(path) for path in files]
+        meshes = [m for part in parts for m in (p.fine() for p in part.pieces())]
+        for column, view in enumerate(args.views):
+            pixels = _render_view(meshes, view, size)
+            problem, facts = outline_problem(pixels, projected_shape(meshes, view), size)
+            views[f"{name} {view}"] = facts
+            sheet.paste(Image.fromarray(pixels), (column * size, row * size))
+            draw.text((column * size + 8, row * size + 8), f"{name}: {view}", fill=(20, 20, 20))
+            report.second(
+                f"{name} {view}: the mesh projects to {facts['projected_mm'][0]}x"
+                f"{facts['projected_mm'][1]} mm, the picture's outline within "
+                f"{facts.get('outline_differs', 'n/a')} of that shape"
+            )
+            if problem:
+                problems.append(f"{name} {view}: {problem}")
+        report.line(f"variant {name}: {', '.join(files)}")
+    path = out / f"variants-{slug('+'.join(n for n, _ in variants))[:60]}-sheet.png"
+    sheet.save(path)
+    report.wrote(str(path))
+    report.line(f"sheet of the variants: {path}")
+    report.numbers["views"] = views
+    if problems:
+        report.verdict("FAIL", "; ".join(problems))
+    else:
+        report.verdict("OK", f"{rows} variant(s), each picture the shape the mesh projects to")
+
+
 def run(args: Any, report: Report) -> None:
+    if args.variants:
+        if args.files:
+            raise NoAnswer("name the files by --variant, or give them plainly, not both")
+        run_variants(args, report)
+        return
+    if not args.files:
+        raise NoAnswer("name a file to draw")
     parts = [load(path) for path in args.files]
     for part in parts:
         report.notes += part.notes

@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import re
 import shutil
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -58,6 +60,13 @@ def bench(tmp_path_factory: pytest.TempPathFactory) -> Any:
     return ask
 
 
+@contextmanager
+def png_size(path: Path) -> Iterator[tuple[int, int]]:
+    """A PNG's width and height, from its header: nothing here has an image library."""
+    head = path.read_bytes()[16:24]
+    yield int.from_bytes(head[:4], "big"), int.from_bytes(head[4:], "big")
+
+
 def only_pair(answer: Answer) -> dict[str, Any]:
     pairs = answer.numbers["pairs"]
     assert len(pairs) == 1
@@ -65,6 +74,42 @@ def only_pair(answer: Answer) -> dict[str, Any]:
 
 
 # How every answer runs
+
+
+def test_a_sheet_of_variants_has_a_row_for_each_and_checks_each_picture(bench: Any) -> None:
+    answer = bench(
+        "render",
+        "--variant",
+        "A=block.step",
+        "--variant",
+        "B=block.step,block.step",
+        "--views",
+        "iso",
+        "top",
+        "--size",
+        "256",
+    )
+    assert answer.verdict == "OK"
+    assert sorted(answer.numbers["views"]) == ["A iso", "A top", "B iso", "B top"]
+    assert len(answer.record["second_check"]) == 4
+    assert answer.record["files"][-1].endswith("variants-A-B-sheet.png")
+    with png_size(bench.work / answer.record["files"][-1]) as size:
+        assert size == (512, 512)
+
+
+@pytest.mark.parametrize(
+    ("args", "says"),
+    [
+        (("render",), "name a file"),
+        (("render", "block.step", "--variant", "A=block.step"), "not both"),
+        (("render", "--variant", "A"), "NAME=FILE"),
+        (("render", "--variant", "A=block.step", "--variant", "A=block.step"), "two variants"),
+    ],
+)
+def test_a_render_that_cant_be_read_says_so(bench: Any, args: tuple[str, ...], says: str) -> None:
+    answer = bench(*args)
+    assert answer.verdict == "NO ANSWER"
+    assert says in answer.record["why"]
 
 
 def test_it_runs_with_no_network_inside_its_limits_as_the_invoking_user(bench: Any) -> None:

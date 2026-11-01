@@ -13,7 +13,7 @@ import subprocess
 import uuid
 from pathlib import Path
 
-IMAGE = "print-shop/bench:0.1"
+IMAGE = "print-shop/bench:0.2"
 BASE = (
     "python:3.12-slim-bookworm@sha256:"
     "6a0e06f5ba0b373d051aabd3fffb9b873f27f9a2a3a14bcbe37dee6f0e3bbc70"
@@ -27,6 +27,8 @@ IMAGE_LIMIT_GB = 4.0
 FLOOR_GB = 5.0
 #: The exit code of a process the kernel killed, as out-of-memory does.
 KILLED = 137
+#: The most one file may be, in bytes. /work is a folder on the Mac, with no quota of its own.
+MAX_FILE = str(2 * 1024**3)
 #: A command that runs longer than this has no answer, in seconds.
 TIMEOUT = 600
 HERE = Path(__file__).resolve().parent
@@ -97,10 +99,19 @@ def container(work: Path, command: list[str], name: str, workdir: str = "/work")
         "ALL",
         "--security-opt",
         "no-new-privileges",
+        # A script that prints without end mustn't fill Docker's disk through its log: what's
+        # attached still reads the output.
+        "--log-driver",
+        "none",
+        "--ulimit",
+        f"fsize={MAX_FILE}",
         "--user",
         user,
         "-e",
         "HOME=/tmp",
+        # What a script printed before it was stopped is what says where it had got to.
+        "-e",
+        "PYTHONUNBUFFERED=1",
         "-e",
         f"BENCH_IMAGE={IMAGE}",
         "-e",
@@ -121,6 +132,13 @@ def container(work: Path, command: list[str], name: str, workdir: str = "/work")
 def bench_command(args: list[str]) -> list[str]:
     """A bench command as the container runs it. `-I` so nothing in /work can shadow an import."""
     return ["python", "-I", "-c", ENTRY, *args]
+
+
+def helper(module: str, args: list[str]) -> list[str]:
+    """One of the bench package's own modules as the container runs it, `-I` too, so nothing a
+    run left in /work can stand in for it."""
+    entry = f"import sys; sys.path.insert(0, '/opt/bench'); from bench.{module} import main; main()"
+    return ["python", "-I", "-c", entry, *args]
 
 
 def run(

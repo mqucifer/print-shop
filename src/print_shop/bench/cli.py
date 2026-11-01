@@ -96,7 +96,15 @@ def parser() -> Parser:
     params.add_argument("--timeout", type=int, default=150, help="seconds for each of its 3 runs")
 
     render = sub.add_parser("render", help="pictures from the standard views")
-    render.add_argument("files", nargs="+")
+    render.add_argument("files", nargs="*")
+    render.add_argument(
+        "--variant",
+        dest="variants",
+        action="append",
+        default=[],
+        metavar="NAME=FILE[,FILE...]",
+        help="one of several variants: each gets its own labelled row of views, on one sheet",
+    )
     render.add_argument("--views", nargs="*", default=["iso", "top", "front", "side"])
     render.add_argument("--section", nargs="*", type=float, default=[], help="z heights to cut")
     render.add_argument("--size", type=int, default=768)

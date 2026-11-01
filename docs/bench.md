@@ -9,7 +9,7 @@ scripts/bench.py clearance a.step b.step     # any command below, over the curre
 scripts/bench.py python script.py            # your own script, in the same container
 ```
 
-A session inside the image can call the same commands directly, by mounting `src/print_shop/bench` read-only (`host.py` shows how). Nothing fences the model off: these are tools it may use, and it can write its own scripts.
+[The rounds](rounds.md) use it as a session's tool. A session inside the image can call the same commands directly, by mounting `src/print_shop/bench` read-only (`host.py` shows how). Nothing fences the model off: these are tools it may use, and it can write its own scripts.
 
 ## What comes back
 
@@ -35,7 +35,7 @@ An answer with no second check behind it becomes `NO ANSWER`, whatever it first 
 | `panes FRAME --pocket-z Z [--lip-z Z] --clearance C [--pane-thickness T]` | a pane from each opening, written to `panes/FRAME/`, its fit, and the edge with no lip | polygons on the section | the pane as a solid against the frame's walls over the pocket's height, and rays up from the edge |
 | `thin FILE [--nozzle N] [--layer L] [--min-body V]` | features under the nozzle's width, floors under a layer, and tiny pieces | sections opened by the nozzle | rays across each spot, level rays through the walls and straight rays through level floors, and OCCT's count of solids |
 | `pause FRAME --pocket-z Z --pane-thickness T [--layer L] [--first-layer F]` | the layer to pause after, and the room over the pane | sections layer by layer | the flat faces' heights |
-| `render FILE... [--views ...] [--section Z...]` | pictures from the standard views, and a sheet of them | VTK, offscreen | the mesh projected by arithmetic against the painted outline, and the section's area against its pixels |
+| `render FILE... [--views ...] [--section Z...]`, or `render --variant NAME=FILE[,FILE...]...` | pictures from the standard views, and a sheet of them, or a sheet with a labelled row for each variant | VTK, offscreen | the mesh projected by arithmetic against the painted outline, and the section's area against its pixels |
 | `params SCRIPT --set NAME=VALUE` | which dimensions, volumes and pieces moved when one parameter changed | each piece's figures, three runs | the meshes' symmetric difference, and a run with nothing changed as the control |
 
 `params` reads a number assigned once at the top level of a design's script (`BaseCircle = 20.0`), and runs the script in a scratch folder, so the design isn't touched. A parameter that moves nothing is `NO CHANGE`. On a Fusion copy, changing `BaseCircle` left the outer ring and motif in place while Fusion reported everything healthy (mqucifer/print-shop#15): this names each piece that moved and each that didn't.
@@ -65,8 +65,8 @@ A second check has to ask the same question as the first, or it only makes noise
 
 ## Limits
 
-- **Docker's disk is shared,** with LiteLLM's database, crew's workspaces and any running tick, and it filled on 2026-11-01. There's one image, `print-shop/bench:0.1`, of at most 4 GB. `build` refuses if that could leave under 5 GB free, and `check` says if the image or the disk is over. Its first layers are mqucifer/model-performance's CadQuery image, so where that's present it costs tens of MB.
-- **A container** has no network, 2 CPUs, 3 GiB with no swap, a read-only image, 1 GB of `/tmp`, the invoking user, no capabilities, and 600 s. `/work` is the only thing it writes, and the bench's code is mounted read-only, so changing the code never costs another image. Every package is pinned.
+- **Docker's disk is shared,** with LiteLLM's database, crew's workspaces and any running tick, and it filled on 2026-11-01. There's one image, `print-shop/bench:0.2`, of at most 4 GB (0.1 had no `lookup` or `docs` indexes, and may still be on a machine). `build` refuses if that could leave under 5 GB free, and `check` says if the image or the disk is over. Its first layers are mqucifer/model-performance's CadQuery image, so where that's present it costs tens of MB.
+- **A container** has no network, 2 CPUs, 3 GiB with no swap, a read-only image, 1 GB of `/tmp`, the invoking user, no capabilities, no log on Docker's disk, a 2 GiB limit on any file, and 600 s. `/work` is the only thing it writes, and the bench's code is mounted read-only, so changing the code never costs another image. Every package is pinned.
 - **It moves to another machine** by clone and `build`: CI builds it for amd64 and runs the planted cases there, and the Mac builds it for arm64.
 - **Accuracy:** the mesh is at 0.002 mm, and a figure is good to the band it prints. Nothing here has been compared with a print or sliced by Orca. A pause layer assumes a layer takes its outline from its mid-height, and the Centauri's mid-print pause hasn't been run.
 
