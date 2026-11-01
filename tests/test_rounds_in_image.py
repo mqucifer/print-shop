@@ -387,11 +387,12 @@ def test_generated_code_has_no_network_no_key_and_its_own_user(tmp_path: Path) -
     probe = (
         "import os, socket, json\n"
         "try:\n"
-        "    socket.create_connection(('1.1.1.1', 53), timeout=3)\n"
+        "    socket.create_connection(('example.com', 443), timeout=3)\n"
         "    net = 'reached'\n"
         "except OSError as exc:\n"
         "    net = type(exc).__name__\n"
         "print('NET', net)\n"
+        "print('ROUTES', len(open('/proc/net/route').read().splitlines()) - 1)\n"
         "print('KEY', [k for k in os.environ if 'CREW' in k or 'LITELLM' in k or 'API' in k])\n"
         "print('UID', os.getuid())\n"
         "try:\n"
@@ -403,6 +404,7 @@ def test_generated_code_has_no_network_no_key_and_its_own_user(tmp_path: Path) -
     (tmp_path / "probe.py").write_text(probe)
     done = Box(tmp_path).python("probe.py")
     assert "NET reached" not in done.output
+    assert "ROUTES 0" in done.output
     assert "KEY []" in done.output
     assert "UID 0" not in done.output
     assert "CODE read-only" in done.output
