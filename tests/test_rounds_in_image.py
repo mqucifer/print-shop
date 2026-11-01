@@ -19,7 +19,7 @@ import pytest
 from print_shop.bench import host
 from print_shop.rounds import transcript
 from print_shop.rounds.box import Box, Gone
-from print_shop.rounds.run import Refused, Run, only_session, what_next
+from print_shop.rounds.run import Refused, Run, only_session, summarise, what_next
 from print_shop.rounds.session import Limits
 from tests.rounds_fakes import Scripted, raw, tool
 
@@ -328,6 +328,11 @@ def test_a_run_goes_from_intake_through_refusals_and_a_pick_to_its_needs_met(
         model.bodies[0]["messages"] == transcript.rebuild(events, run.session.requests)["messages"]
     )
     assert (run.folder / "rounds" / "002" / "readings" / "gap.json").is_file()
+    figures = summarise(run.folder)
+    assert figures["ending"]["name"] == "met"
+    assert figures["requests_rebuilt"] == figures["requests_recorded"] == run.session.requests
+    assert figures["by_tool_and_outcome"]["done ok"] == 3
+    assert json.loads((run.folder / "summary.json").read_text())["rounds"] == 3
     assert (run.folder / "rounds" / "003" / "judged" / "block.step").is_file()
 
 
@@ -345,7 +350,7 @@ def test_a_part_left_over_from_an_earlier_script_doesnt_count(tmp_path: Path) ->
     )
     assert run.drive().name == "blocked"
     said = reply_of(run, "done")["reply"]
-    assert "the clean run didn't leave block.step" in said
+    assert "there's no block.step: a clean run has to leave it" in said
     assert (run.work / "block.step").is_file(), "the model's own copy is untouched"
     assert rows(run, "readings")[0]["passed"] == 0
 
@@ -473,12 +478,41 @@ def test_a_script_that_prints_without_end_costs_only_its_tail(tmp_path: Path) ->
 
 
 def test_a_run_past_its_time_is_stopped_and_says_so(tmp_path: Path) -> None:
-    (tmp_path / "slow.py").write_text("import time\ntime.sleep(60)\n")
+    (tmp_path / "slow.py").write_text("import time\nprint('got this far')\ntime.sleep(60)\n")
     began = time.monotonic()
     done = Box(tmp_path, timeout=3).python("slow.py")
     assert time.monotonic() - began < 30
     assert done.timed_out
     assert "past the 3 s limit" in done.output
+    assert "got this far" in done.output, (
+        "what it printed before it was stopped says where it got to"
+    )
+
+
+def test_needs_can_be_tried_before_theyre_settled(tmp_path: Path) -> None:
+    wrong_name = {
+        **SIZE_NEED,
+        "check": {"by": "bench", "command": "info block.step", "number": "nope", "at_most": 1},
+    }
+    run, _ = begin(
+        tmp_path,
+        [write("make.py", script(gap=0.5), run=True)],
+        [tool("needs", needs=[wrong_name, GAP_NEED, EYE_NEED], **{"try": "true"})],
+        [tool("needs", needs=[SIZE_NEED], **{"try": True})],
+        [tool("needs", needs=[SIZE_NEED])],
+        [tool("blocked", reason="enough")],
+    )
+    assert run.drive().name == "blocked"
+    tried = [e for e in replies(run) if e["name"] == "needs"]
+    assert "Nothing is settled" in tried[0]["reply"]
+    assert "volume, WOULDN'T PASS: this answer has no number `nope`" in tried[0]["reply"]
+    assert "gap, would pass" in tried[0]["reply"]
+    assert "look: for the Sponsor's eye" in tried[0]["reply"]
+    assert "volume, would pass" in tried[1]["reply"]
+    assert "settled" in tried[2]["reply"] and "Nothing is" not in tried[2]["reply"]
+    assert run.state.needs_version == 1, "a try settles nothing"
+    assert not list(run.folder.glob(".try-*")), "and leaves nothing"
+    assert not (run.work / "bench-out").exists(), "and touches none of the model's files"
 
 
 # Every ending, by name

@@ -109,6 +109,9 @@ def container(work: Path, command: list[str], name: str, workdir: str = "/work")
         user,
         "-e",
         "HOME=/tmp",
+        # What a script printed before it was stopped is what says where it had got to.
+        "-e",
+        "PYTHONUNBUFFERED=1",
         "-e",
         f"BENCH_IMAGE={IMAGE}",
         "-e",

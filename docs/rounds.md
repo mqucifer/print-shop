@@ -7,13 +7,14 @@ scripts/rounds.py start NAME --request FILE [--reference FILE]...
 scripts/rounds.py resume NAME [--note FILE] [--reopen-needs]
 scripts/rounds.py status NAME
 scripts/rounds.py stop NAME
+scripts/rounds.py summary NAME
 ```
 
 It needs the bench's image (`scripts/bench.py build`), and LiteLLM on :4000 with print-shop's key from `~/.config/print-shop/.env`. It uses `crew-code-think`, and probes nothing else. **A run names its code,** so `start` and `resume` refuse a checkout with uncommitted changes. As in `cad_eval`, run from a checkout nothing edits until it ends: `git worktree add --detach ../run-<commit> <commit>`. One session runs under a root at a time (`.session.lock`). Runs live in `~/print-shop/design-runs/`, off this public repository, and `start` refuses a folder inside it.
 
 ## A run
 
-**Intake.** From the request and any reference files, the model reads what it's given and asks what it needs, as an interview. `questions` writes them to a file and the process exits. A person relays them, writes the answers to the file it names, and runs `resume`. `needs` ends intake. Each need says how it's checked, by a bench command and its limit, or by the Sponsor's eye. A quote from the Sponsor is held to their words. Writing and running are open throughout, and nothing gates code on a plan.
+**Intake.** From the request and any reference files, the model reads what it's given and asks what it needs, as an interview. `questions` writes them to a file and the process exits. A person relays them, writes the answers to the file it names, and runs `resume`. `needs` ends intake. Each need says how it's checked, by a bench command and its limit, or by the Sponsor's eye. A quote from the Sponsor is held to their words. Writing and running are open throughout, and nothing gates code on a plan. `needs` with `try: true` reads each bench check against the files as they stand, and settles nothing.
 
 **Rounds.** The model makes and changes the part, and calls `done` when it believes the needs are met. The harness then runs the script again and each need's check itself, so the model's word and a tool's success don't count:
 - The clean run has a fresh container, over a plain copy of `work/` with no links, nothing a run left, and all geometry outside `references/` taken away.
@@ -77,6 +78,7 @@ Looking lessons up isn't here.
 | `asks/n/` | `question.md`, `sheet.png`, `variants/`, and `pick.json` |
 | `rounds/nnn/` | `judged/` (what the clean run left), `readings/` (each need's answer, in text and numbers), `run.txt`, `judgement.json`, `diff.patch` |
 | `final-sheet.png` | What passed, for the people who see the result. It decides nothing |
+| `summary.json` | A run's figures, from `scripts/rounds.py summary`, read from its events |
 
 ## Where each part came from
 
@@ -105,6 +107,17 @@ The session is ported from mqucifer/model-performance's `cad_eval` at 22ea8b7, n
 **New limits, found building this:**
 - A script that prints without end would have filled the Mac's memory and Docker's disk through its log. Only the end of a command's output is kept, and containers have no log.
 - `/work` is a folder on the Mac with no quota. A file is capped at 2 GiB, and `work_gb` ends a run.
+
+## The first real run
+
+On 2026-11-01, `crew-code-think` through LiteLLM, on a made-up LED tealight stand, with a Claude builder standing in for the Sponsor at the pick. Commit e8ab52a, image `sha256:c950cbb83857`, with a crew tick running as it started, so no timing claims. It went from intake to `met` in round 1: 37 calls, 2,918 s of model time. Its figures are in `~/print-shop/design-runs/tealight-1/summary.json`, and its readings in the ledger. One run on one small part, so it sets no limit either way. mqucifer/print-shop#17 has what it did and what it lacked. Fixed from it:
+- **`run` lost what a stopped script had printed,** since Python buffers its output into a pipe. A 600 s hang came back with nothing. Containers now run unbuffered.
+- **A need's check couldn't be tried before it was settled,** so the model guessed a number's name. `try: true` reads them.
+
+**Known limits it showed:**
+- **A need is only as honest as what it's checked against.** Here the fit's checked against a tealight the model drew from the request's numbers. That's right on this part, but no code holds a fixture to the request.
+- **The pick isn't held to the final part.** An eye need passes on the pick, and nothing compares what passes at `done` with the variant the Sponsor picked. Here the two read the same volume by the bench, and that comparison was by hand.
+- **A design made before `needs` is round 0.** `bench_calls` holds its readings with round 0, and `rounds` starts only at `needs`, so here one "round" follows 32 calls of real design work.
 
 ## Tests
 

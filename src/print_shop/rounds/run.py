@@ -21,6 +21,8 @@ import re
 import shutil
 import subprocess
 import traceback
+import uuid
+from collections import Counter
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
@@ -29,7 +31,7 @@ from typing import Any
 
 from print_shop.bench import host
 from print_shop.bench import usage as usage_module
-from print_shop.rounds import judge, needs, paths, prompt, skills
+from print_shop.rounds import judge, needs, paths, prompt, skills, transcript
 from print_shop.rounds.box import Box, Gone, Ran
 from print_shop.rounds.ledger import DesignLedger
 from print_shop.rounds.needs import Need
@@ -387,6 +389,8 @@ class Run:
         if wrong:
             said = "\n".join(f"- {w}" for w in wrong)
             return Judged("needs", "failed", f"The needs weren't taken:\n{said}", "misses")
+        if args.get("try") is True:
+            return self._try_needs(found)
         self.state.needs = needs.dump(found)
         self.state.needs_open = False
         self.state.needs_version += 1
@@ -402,6 +406,25 @@ class Run:
             self._start_round()
         self.save()
         return Judged("needs", "ok", f"The needs are settled. Round {self.state.round} starts now.")
+
+    def _try_needs(self, found: list[Need]) -> Judged:
+        """Each bench check against the files as they stand, settling nothing. The first real run
+        guessed a number's name, since a check that's wrong once settled would stop the run for a
+        person. It runs on a copy, with no clean run first, so it says only that a check works."""
+        scratch = self.folder / f".try-{uuid.uuid4().hex[:12]}"
+        lines = ["Nothing is settled. Each check, against your files as they stand:"]
+        try:
+            paths.copy_plain(self.work, scratch, skip_made=True)
+            for need in found:
+                if need.by == "eye":
+                    lines.append(f"- {need.id}: for the Sponsor's eye, so there's nothing to read.")
+                    continue
+                reading = judge.read_need(self.box, need, scratch, scratch / ".kept")
+                mark = "would pass" if reading.passed else "WOULDN'T PASS"
+                lines.append(f"- {need.id}, {mark}: {reading.why}. Limit: {need.limit()}.")
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+        return Judged("needs", "ok", "\n".join(lines), detail={"tried": True})
 
     def _usable(self, found: list[Need]) -> list[str]:
         """Whether each bench need's command can be read at all, by the bench's own parser."""
@@ -700,6 +723,47 @@ class Run:
             eyes = ", ".join(n.id for n in self._needs() if n.by == "eye") or "none yet"
             return "no_such_need", f"`need` names an eye need. They are: {eyes}."
         return None
+
+
+def summarise(folder: Path) -> dict[str, Any]:
+    """A run's figures, from its events and nothing else, saved beside them: `summary.json`."""
+    events = folder / "events.jsonl"
+    calls = [e for e in transcript.events_of(events) if e["kind"] == "call"]
+    tools = [e for e in transcript.events_of(events) if e["kind"] == "tool"]
+    requests = [e["n"] for e in transcript.events_of(events) if e["kind"] == "request"]
+    used: Counter[str] = Counter()
+    for call in calls:
+        used.update(call.get("usage") or {})
+    state = json.loads((folder / "state.json").read_text(encoding="utf-8"))
+    tally = Counter(f"{e['name']} {e['outcome']}" for e in tools)
+    found = {
+        "how_it_ran": "read from events.jsonl and state.json by `scripts/rounds.py summary`",
+        "ending": state["ending"],
+        "stop": state["stop"],
+        "rounds": state["round"],
+        "asks": state["asks"],
+        "questions": state["questions"],
+        "restarts": state["restarts"],
+        "harness": state["harness"],
+        "model_calls": len(calls),
+        "requests_recorded": len(requests),
+        "requests_rebuilt": sum(1 for n in requests if transcript.rebuild(events, n)["messages"]),
+        "model_seconds": round(sum(float(c.get("seconds") or 0) for c in calls), 1),
+        "longest_call_seconds": max((float(c.get("seconds") or 0) for c in calls), default=0.0),
+        "reasoning_chars": sum(int(c.get("reasoning_chars") or 0) for c in calls),
+        "completion_tokens": used["completion_tokens"],
+        "reasoning_tokens": used["reasoning_tokens"],
+        "largest_prompt_tokens": max(
+            (int((c.get("usage") or {}).get("prompt_tokens") or 0) for c in calls), default=0
+        ),
+        "runaways": sum(1 for c in calls if c.get("finish") in ("length", "runaway")),
+        "tool_calls": len(tools),
+        "by_tool_and_outcome": dict(sorted(tally.items())),
+        "compactions": sum(1 for e in transcript.events_of(events) if e["kind"] == "compacted"),
+        "call_retries": sum(1 for e in transcript.events_of(events) if e["kind"] == "call_retry"),
+    }
+    (folder / "summary.json").write_text(json.dumps(found, indent=1) + "\n", encoding="utf-8")
+    return found
 
 
 @contextmanager

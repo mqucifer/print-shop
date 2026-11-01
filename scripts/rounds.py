@@ -5,6 +5,7 @@ scripts/rounds.py start NAME --request FILE [--reference FILE]...   intake, then
 scripts/rounds.py resume NAME [--note FILE] [--reopen-needs]        go on after a stop
 scripts/rounds.py status NAME                                       where it stands
 scripts/rounds.py stop NAME                                         stop before its next call
+scripts/rounds.py summary NAME                                      its figures, in summary.json
 
 Exit: 0 its needs are met, 10 it's waiting for the Sponsor, 20 another named ending, 3 refused.
 """
@@ -27,6 +28,7 @@ from print_shop.rounds.run import (
     Run,
     only_session,
     repository_version,
+    summarise,
     what_next,
 )
 from print_shop.rounds.send import ALIAS, Sender
@@ -63,6 +65,7 @@ def main() -> int:
     resume.add_argument("--reopen-needs", action="store_true")
     sub.add_parser("status").add_argument("name")
     sub.add_parser("stop").add_argument("name")
+    sub.add_parser("summary").add_argument("name")
     args = top.parse_args()
     root = args.root.expanduser()
     folder = root / args.name
@@ -72,6 +75,9 @@ def main() -> int:
             state = json.loads((folder / "state.json").read_text(encoding="utf-8"))
             keys = ("stage", "round", "stop", "ending", "restarts")
             print(json.dumps({k: state[k] for k in keys}, indent=1))
+            return 0
+        if args.command == "summary":
+            print(json.dumps(summarise(folder), indent=1))
             return 0
         if args.command == "stop":
             (folder / "stop").touch()

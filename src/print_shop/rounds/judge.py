@@ -77,7 +77,7 @@ def read_need(box: Box, need: Need, judged: Path, kept: Path) -> Reading:
     missing = [f for f in need.files() if not (judged / f).is_file() or inside(judged, f) is None]
     if missing:
         named = ", ".join(missing)
-        return Reading(need.id, "bench", False, f"the clean run didn't leave {named}", None)
+        return Reading(need.id, "bench", False, f"there's no {named}: a clean run has to leave it")
     out = f".judge-{uuid.uuid4().hex[:12]}"
     argv = ["--out", out, *need.argv()]
     where = judged

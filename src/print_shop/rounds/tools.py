@@ -203,6 +203,14 @@ def specs() -> list[dict[str, Any]]:
             "needs",
             "Settle what the part must do, when you know enough: this ends intake, and the first "
             f"round starts. The harness runs each check itself at `done`. {NEED_SHAPE}",
+            {
+                "try": {
+                    "type": "boolean",
+                    "description": "true to read each bench check against your files as they "
+                    "stand, and settle nothing: whether its command, number and limit work. "
+                    "Optional.",
+                }
+            },
             needs={
                 "type": "array",
                 "description": "The needs.",
@@ -402,15 +410,12 @@ class WorkTools:
 
     def call(self, name: Any, raw: Any) -> Judged:
         args = parse(raw)
-        if (
-            name in ("write", "edit")
-            and isinstance(args, dict)
-            and isinstance(args.get("run"), str)
-        ):
-            # `run` sent as text, as `cad_eval`'s V5 model sent it, is read as the boolean it names.
-            said = args["run"].strip().lower()
-            if said in BOOLEAN_TEXT:
-                args = {**args, "run": BOOLEAN_TEXT[said]}
+        for key in ("run", "try"):
+            # Sent as text, as `cad_eval`'s V5 model sent `run`, it's read as the boolean it names.
+            if isinstance(args, dict) and isinstance(args.get(key), str):
+                said = args[key].strip().lower()
+                if said in BOOLEAN_TEXT:
+                    args = {**args, key: BOOLEAN_TEXT[said]}
         for key in ("needs", "variants"):
             # A list sent as its JSON text is read as the list.
             if isinstance(args, dict) and isinstance(args.get(key), str):
