@@ -33,7 +33,7 @@ An answer with no second check behind it becomes `NO ANSWER`, whatever it first 
 | `readback BEFORE AFTER [--cutter C] [--expect-delta V] [--min-share S]` | volume before and after, and how much of a cutter was in the body | the mesh | OCCT, or stacked sections |
 | `rays FILE --centre X,Y,Z [--axis A] [--d D] [--depth H]` | a cut feature measured from its axis: rays that hit nothing, the distance across, the wall beyond, the floor | rays on the mesh | a plane section, with a circle fit |
 | `panes FRAME --pocket-z Z [--lip-z Z] --clearance C [--pane-thickness T]` | a pane from each opening, written to `panes/FRAME/`, its fit, and the edge with no lip | polygons on the section | the pane as a solid against the frame's walls over the pocket's height, and rays up from the edge |
-| `thin FILE [--nozzle N] [--layer L] [--min-body V]` | features under the nozzle's width, floors under a layer, and tiny pieces | sections opened by the nozzle | rays across each spot and through the surface, and OCCT's count of solids |
+| `thin FILE [--nozzle N] [--layer L] [--min-body V]` | features under the nozzle's width, floors under a layer, and tiny pieces | sections opened by the nozzle | rays across each spot, level rays through the walls and straight rays through level floors, and OCCT's count of solids |
 | `pause FRAME --pocket-z Z --pane-thickness T [--layer L] [--first-layer F]` | the layer to pause after, and the room over the pane | sections layer by layer | the flat faces' heights |
 | `render FILE... [--views ...] [--section Z...]` | pictures from the standard views, and a sheet of them | VTK, offscreen | the mesh projected by arithmetic against the painted outline, and the section's area against its pixels |
 | `params SCRIPT --set NAME=VALUE` | which dimensions, volumes and pieces moved when one parameter changed | each piece's figures, three runs | the meshes' symmetric difference, and a run with nothing changed as the control |
@@ -55,11 +55,13 @@ The map's table, row by row. Each row that touches these commands is a planted c
 | Four-bar, nothing grounded, clevis assemblies | Success, or rc -1 | Motion: not in this bench |
 | Peak stress at a corner, contact with a missing constraint | A plain number, 0.0 MPa | Stress: not in this bench |
 
-Building this found four more, each now handled and said in the code:
+Building this found more, each now handled and said in the code:
 - **CadQuery's `tessellate` tolerance is relative,** a share of each edge's size, not the mm it looks like. On a real part that read as a 0.03 mm false gap. The bench meshes with absolute tolerances, through OCCT directly.
 - **Manifold's `RayHit.distance` is a fraction of the ray,** not a length.
 - **OCCT's adaptive volume moves with its accuracy setting** on a real file by far more than its own error estimate, so the bench reads its default, and checks it against the mesh.
 - **A coarser mesh isn't always further from the truth,** so how far a figure can rest on the chords comes from the chord tolerance times the curved surface's area.
+
+A second check has to ask the same question as the first, or it only makes noise. Running over our 51 reference parts showed that: rays along a surface's normal read a cone or a thread thinner than it prints, and the top of a cylinder on its side as thin when no layer prints it. So a wall's ray runs level, across the layer, and shallow slopes aren't read as walls. A sharp point, a feather edge, a cusp and a few stray rays are noted with where they are, and don't fail a part.
 
 ## Limits
 

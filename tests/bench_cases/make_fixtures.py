@@ -190,6 +190,13 @@ def thin_parts() -> None:
     save(base.union(box(5, 15, 9.6, 10.4, 2, 8)), "wall-0p8")
     # A thin fin low on a tall post: one section at mid-height doesn't cross it.
     save(box(0, 10, 0, 10, 0, 20).union(box(10, 20, 4.85, 5.15, 0, 2)), "fin-low")
+    # A cylinder on its side: narrow only in a strip at its top, which no layer prints.
+    save(along_y(2.5, -14, 14), "lying")
+    # A wire on its side, thin all along: narrower than the nozzle in every layer it has.
+    save(box(-10, 10, -10, -8, -3, 3).union(along_y(0.15, -8, 8)), "wire")
+    # A disc through a block: cusps where its curve meets the block's flat faces.
+    cusped = cq.Workplane("XY").box(5, 50, 80, centered=(False, True, True))
+    save(cusped.union(cq.Workplane("YZ").circle(26).extrude(30)), "cusped")
     # A floor thinner than a layer.
     floor = box(0, 20, 0, 20, 0, 5).cut(box(2, 18, 2, 18, 0.1, 5))
     save(floor, "floor-0p1")

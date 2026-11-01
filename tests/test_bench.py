@@ -510,6 +510,26 @@ def test_a_thin_wall_the_sections_cant_see_is_a_disagreement(bench: Any) -> None
     assert answer.numbers["thin_rays_not_at_a_point"] >= 5
 
 
+def test_a_cylinder_on_its_side_isnt_thin_at_its_top(bench: Any) -> None:
+    """A level ray there crosses a tiny chord, in a strip no layer prints: five reference parts
+    read falsely as thin this way."""
+    answer = bench("thin", "lying.step")
+    assert answer.verdict == "OK", answer.text
+    assert answer.numbers["thin_rays_not_at_a_point"] == 0
+
+
+def test_a_wire_on_its_side_is_thin_all_the_same(bench: Any) -> None:
+    answer = bench("thin", "wire.step", "--layer", "0.1")
+    assert answer.verdict == "FAIL", answer.text
+    assert answer.numbers["thinnest_across_mm"] < 0.4
+
+
+def test_a_cusp_where_a_curve_meets_a_flat_is_noted_and_isnt_thin(bench: Any) -> None:
+    answer = bench("thin", "cusped.step")
+    assert answer.verdict == "OK", answer.text
+    assert answer.numbers["thin_spots"] == 0
+
+
 def test_a_wall_wider_than_the_nozzle_passes(bench: Any) -> None:
     answer = bench("thin", "wall-0p8.step")
     assert answer.verdict == "OK", answer.text

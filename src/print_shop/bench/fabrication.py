@@ -44,6 +44,8 @@ WALK = 0.25
 SHARED = 0.01
 #: Where a pocket's walls are read for fit: this far inside its floor and ceiling, in mm.
 INSET = 0.01
+#: A surface steeper than this (the z of its unit normal) is a wall.
+WALL_SLOPE = 0.9
 #: The fewest rays through the surface that can stand for a thin wall.
 MIN_RAYS = 5
 #: A sharp point's least area, as a share of the nozzle's width squared. A 40 degree point
@@ -453,13 +455,23 @@ def run_thin(args: Any, report: Report) -> None:
     report.fact(
         "narrower_than_nozzle_mm3", round(lost_mm3, 3), how=f"sections opened by {nozzle} mm"
     )
+    report.numbers["too_small_at"] = too_small_rows[:50]
+    # Second method 1: rays across each thin spot the sections found. A small one they find
+    # wide is a cusp where a curve meets a flat, which opening by the nozzle nibbles: it isn't a
+    # thin spot, and is noted. A large one they find wide is a real difference between methods.
+    measured = [_across(built, r["x"], r["y"], r["z"], length) for r in thin_rows[:50]]
+    wide = [r for r, w in zip(thin_rows, measured, strict=False) if w >= nozzle + 2 * FINE[0]]
+    cusps = [r for r in wide if r["mm2"] < nozzle**2]
+    if cusps:
+        report.note(
+            f"{len(cusps)} small spot(s) the sections read as thin measure wider across by rays: "
+            f"a cusp where a curve meets a flat, at {cusps[:2]}"
+        )
+    thin_rows = [r for r in thin_rows if r not in cusps]
     report.fact("thin_spots", len(thin_rows), how=f"over {least} mm² in a layer")
     report.numbers["thin_at"] = thin_rows[:50]
-    report.numbers["too_small_at"] = too_small_rows[:50]
-    # Second method 1: rays across each thin spot the sections found.
-    widths = [_across(built, r["x"], r["y"], r["z"], length) for r in thin_rows[:50]]
-    widths = [w for w in widths if np.isfinite(w)]
-    unconfirmed = sum(w >= nozzle + 2 * FINE[0] for w in widths)
+    widths = [w for w in measured if np.isfinite(w) and w < nozzle + 2 * FINE[0]]
+    unconfirmed = len(wide) - len(cusps)
     if widths:
         report.fact("thinnest_across_mm", round(min(widths), 4), how="rays across the thin spots")
     # Second method 2: rays straight through the walls and floors from all over the surface.
@@ -573,6 +585,10 @@ def _through(
             met = hits(built, start, -normal, length)
             if met:
                 flats.append(met[0])
+            continue
+        # Nor is a shallow slope a wall. Near the top of a cylinder lying on its side, a level ray
+        # crosses a tiny chord, in a strip less than a layer tall that no layer ever prints.
+        if abs(normal[2]) > WALL_SLOPE:
             continue
         level = np.array([normal[0], normal[1], 0.0])
         level /= np.linalg.norm(level)
