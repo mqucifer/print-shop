@@ -1,0 +1,165 @@
+"""The commands, inside the image. `scripts/bench.py` runs them in a container from the machine.
+
+Exit codes: 0 the answer stands and nothing's wrong, 1 both methods agree that something's
+wrong, 2 there's no answer to rely on, 3 the command itself was wrong.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+from typing import Any, NoReturn
+
+from .report import Report
+from .shapes import NoAnswer
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        self.exit(3, f"usage error: {message}\n{self.format_usage()}")
+
+
+def _point(text: str) -> list[float]:
+    values = [float(v) for v in text.split(",")]
+    if len(values) != 3:
+        raise argparse.ArgumentTypeError("three numbers: x,y,z")
+    return values
+
+
+def parser() -> Parser:
+    top = Parser(prog="bench", description=__doc__)
+    top.add_argument("--out", default="bench-out", help="where reports are saved")
+    sub = top.add_subparsers(dest="command", required=True, parser_class=Parser)
+
+    info = sub.add_parser("info", help="a part's facts: size, volume two ways, flat heights")
+    info.add_argument("file")
+
+    clearance = sub.add_parser("clearance", help="overlap and gap between parts, every pair")
+    clearance.add_argument("files", nargs="+", help="parts, or one file of several solids")
+    clearance.add_argument("--min-gap", type=float, help="a gap under this in mm is TOO CLOSE")
+
+    readback = sub.add_parser("readback", help="volume before and after an operation")
+    readback.add_argument("before")
+    readback.add_argument("after")
+    readback.add_argument("--cutter", help="the cutter: reads how much of it was in the body")
+    readback.add_argument("--expect-delta", type=float, help="the change wanted, in mm³, signed")
+    readback.add_argument("--tol", type=float, help="how far from it may pass, in mm³")
+    readback.add_argument("--min-share", type=float, help="the least share of cutter in the body")
+
+    rays = sub.add_parser("rays", help="rays from a cut feature's axis, against a section")
+    rays.add_argument("file")
+    rays.add_argument("--centre", type=_point, required=True, help="x,y,z on the feature's axis")
+    rays.add_argument("--axis", choices=("x", "y", "z"), default="z")
+    rays.add_argument("--d", type=float, help="the diameter wanted, for a round feature")
+    rays.add_argument("--depth", type=float, help="how far it goes along the axis, signed")
+    rays.add_argument("--tol", type=float, default=0.05, help="tolerance on those, in mm")
+    rays.add_argument("--n", type=int, default=720, help="rays at each height")
+
+    panes = sub.add_parser("panes", help="panes from a frame's openings, and their fit")
+    panes.add_argument("frame")
+    panes.add_argument("--pocket-z", type=float, required=True, help="a height inside the pockets")
+    panes.add_argument("--lip-z", type=float, help="a height inside the lip above them")
+    panes.add_argument("--clearance", type=float, required=True, help="play round a pane, in mm")
+    panes.add_argument("--pane-thickness", type=float, help="in mm; else the pocket's height")
+    panes.add_argument("--nozzle", type=float, default=0.4)
+    panes.add_argument("--min-area", type=float, default=4.0, help="the smallest pane, in mm²")
+    panes.add_argument("--panes-out", dest="out_panes", default="panes", help="where panes go")
+
+    thin = sub.add_parser("thin", help="features narrower than the nozzle, and tiny pieces")
+    thin.add_argument("file")
+    thin.add_argument("--nozzle", type=float, default=0.4)
+    thin.add_argument("--layer", type=float, default=0.2)
+    thin.add_argument("--min-body", type=float, default=1.0, help="the smallest body, in mm³")
+    thin.add_argument("--samples", type=int, default=4000, help="rays through the surface")
+    thin.add_argument("--max-layers", type=int, default=400)
+    thin.add_argument(
+        "--wall-area",
+        type=float,
+        default=2.0,
+        help="thin wall by rays alone, in mm², before it counts as a disagreement",
+    )
+
+    pause = sub.add_parser("pause", help="the layer to pause after, to drop a pane in")
+    pause.add_argument("frame")
+    pause.add_argument("--pocket-z", type=float, required=True, help="a height inside the pockets")
+    pause.add_argument("--pane-thickness", type=float, required=True)
+    pause.add_argument("--layer", type=float, default=0.2)
+    pause.add_argument("--first-layer", type=float, default=0.2)
+    pause.add_argument("--max-gap", type=float, default=0.4, help="the most air over the pane")
+
+    params = sub.add_parser("params", help="re-run a design's script with one parameter changed")
+    params.add_argument("script", help="a Python script that writes STEP or STL files")
+    params.add_argument(
+        "--set", dest="change", required=True, help="NAME=VALUE, a top-level number"
+    )
+    params.add_argument("--timeout", type=int, default=150, help="seconds for each of its 3 runs")
+
+    render = sub.add_parser("render", help="pictures from the standard views")
+    render.add_argument("files", nargs="+")
+    render.add_argument("--views", nargs="*", default=["iso", "top", "front", "side"])
+    render.add_argument("--section", nargs="*", type=float, default=[], help="z heights to cut")
+    render.add_argument("--size", type=int, default=768)
+    render.add_argument("--renders-out", dest="out_renders", default="renders")
+    return top
+
+
+def _dispatch(args: Any, report: Report) -> None:
+    # Imported here so a usage error answers at once, with no CAD library to load.
+    if args.command == "info":
+        from .readback import run_info
+
+        run_info(args, report)
+    elif args.command == "clearance":
+        from .clearance import run
+
+        run(args, report)
+    elif args.command == "readback":
+        from .readback import run_readback
+
+        run_readback(args, report)
+    elif args.command == "rays":
+        from .readback import run_rays
+
+        run_rays(args, report)
+    elif args.command == "panes":
+        from .fabrication import run_panes
+
+        args.out = args.out_panes
+        run_panes(args, report)
+    elif args.command == "thin":
+        from .fabrication import run_thin
+
+        run_thin(args, report)
+    elif args.command == "pause":
+        from .fabrication import run_pause
+
+        run_pause(args, report)
+    elif args.command == "params":
+        from .params import run
+
+        run(args, report)
+    elif args.command == "render":
+        from .render import VIEWS, run
+
+        unknown = [v for v in args.views if v not in VIEWS]
+        if unknown:
+            raise NoAnswer(f"no view {unknown[0]}: they're {', '.join(VIEWS)}")
+        args.out = args.out_renders
+        run(args, report)
+
+
+def main(argv: list[str] | None = None) -> int:
+    given = sys.argv[1:] if argv is None else argv
+    args = parser().parse_args(given)
+    out = Path(args.out)
+    report = Report(args.command, given)
+    try:
+        _dispatch(args, report)
+    except NoAnswer as exc:
+        report.verdict("NO ANSWER", str(exc))
+    except Exception as exc:  # noqa: BLE001 - whatever fails is said, and saved
+        report.verdict("NO ANSWER", f"{type(exc).__name__}: {exc}"[:500])
+    report.save(out)
+    print(report.text, end="")
+    return report.exit_code

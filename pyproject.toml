@@ -48,6 +48,8 @@ markers = [
     "llm: calls a model through LiteLLM :4000 (deselect with -m 'not llm')",
     "mqtt: publishes to the real MQTT broker (deselect with -m 'not mqtt')",
     "ha: queries the real Home Assistant REST API (deselect with -m 'not ha')",
+    "bench: runs the CAD bench in its Docker image, built by scripts/bench.py build (deselect with -m 'not bench')",
+    "bench_local: runs the CAD bench on a file only the Mac holds, and skips where it's absent",
 ]
 
 [tool.ruff]
@@ -61,3 +63,10 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 python_version = "3.12"
 strict = true
 warn_unreachable = true
+
+# The bench's geometry code runs in its image (src/print_shop/bench/image), and these libraries
+# are there, not in this environment.
+[[tool.mypy.overrides]]
+module = ["cadquery.*", "cadquery", "OCP.*", "manifold3d.*", "manifold3d", "shapely.*", "shapely", "vtk.*", "vtk", "PIL.*"]
+ignore_missing_imports = true
+follow_imports = "skip"

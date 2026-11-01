@@ -32,3 +32,8 @@ node_modules/
 !.env.example
 *.pem
 *.key
+
+# What the CAD bench writes in a working directory
+bench-out/
+renders/
+panes/
