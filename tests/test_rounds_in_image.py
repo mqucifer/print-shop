@@ -179,7 +179,7 @@ def test_a_run_goes_from_intake_through_refusals_and_a_pick_to_its_needs_met(
     need_set = [GAP_NEED, SIZE_NEED, PARAM_NEED, EYE_NEED]
     run, model = again(
         run,
-        [tool("done", script="make.py")],
+        [tool("done", script="make.py", part=["block.step"])],
         [tool("needs", needs=[bad_quote])],
         [tool("needs", needs=[bad_command])],
         [tool("needs", needs=need_set)],
@@ -193,11 +193,11 @@ def test_a_run_goes_from_intake_through_refusals_and_a_pick_to_its_needs_met(
         [tool("bench", command="render block.step tab.step --views iso")],
         [tool("run", path="make.py")],
         # The checks refuse this `done`: the run doesn't end.
-        [tool("done", script="make.py")],
+        [tool("done", script="make.py", part=["block.step"])],
         [tool("edit", path="make.py", old="GAP = 2.0", new="GAP = 0.5", run=True)],
         [tool("bench", command="clearance block.step tab.step --min-gap 0.2")],
         # The bench now passes, and the eye need is still open.
-        [tool("done", script="make.py", fix_shape="narrowed the gap")],
+        [tool("done", script="make.py", part=["block.step"], fix_shape="narrowed the gap")],
         [write("b.py", script(gap=0.5, size=25.0).replace("block.step", "wide.step"), run=True)],
         [
             tool(
@@ -272,15 +272,20 @@ def test_a_run_goes_from_intake_through_refusals_and_a_pick_to_its_needs_met(
     run, model = again(run)
     with pytest.raises(Refused, match="isn't written"):
         run.resume()
-    (folder / "pick.json").write_text('{"pick": "Z", "reason": "no"}')
+    (folder / "pick.json").write_text('{"pick": "Z", "reason": "no", "by": "sponsor"}')
     with pytest.raises(Refused, match="the pick is one of A, B, or none"):
         run.resume()
-    (folder / "pick.json").write_text('{"pick": "A", "reason": ""}')
+    (folder / "pick.json").write_text('{"pick": "A", "reason": "", "by": "sponsor"}')
     with pytest.raises(Refused, match="reason"):
         run.resume()
     (folder / "pick.json").write_text('{"pick": "A", "reason": "The even one sits better."}')
+    with pytest.raises(Refused, match="says who picked"):
+        run.resume()
+    (folder / "pick.json").write_text(
+        '{"pick": "A", "reason": "The even one sits better.", "by": "sponsor"}'
+    )
 
-    run, model = again(run, [tool("done", script="make.py")])
+    run, model = again(run, [tool("done", script="make.py", part=["block.step"])])
     run.resume()
     assert run.session.messages[-1]["content"] == (
         "The Sponsor picked A. Their reason: The even one sits better."
@@ -313,6 +318,10 @@ def test_a_run_goes_from_intake_through_refusals_and_a_pick_to_its_needs_met(
     pick = rows(run, "picks")[0]
     assert (pick["pick"], pick["need"], pick["round"]) == ("A", "look", 2 + 1)
     assert pick["reason"] == "The even one sits better."
+    assert pick["picked_by"] == "sponsor"
+    assert json.loads(sorted(rows(run, "rounds"), key=lambda r: r["round"])[0]["part"]) == [
+        "block.step"
+    ]
     asked = rows(run, "questions")[0]
     assert asked["answers"] == "Make it 20 mm across."
     bench = rows(run, "bench_calls")
@@ -345,7 +354,7 @@ def test_a_part_left_over_from_an_earlier_script_doesnt_count(tmp_path: Path) ->
         [tool("needs", needs=[SIZE_NEED])],
         [write("make.py", script(gap=0.5), run=True)],
         [write("noop.py", "print('nothing to see')\n")],
-        [tool("done", script="noop.py")],
+        [tool("done", script="noop.py", part=["block.step"])],
         [tool("blocked", reason="I give up")],
     )
     assert run.drive().name == "blocked"
@@ -360,7 +369,7 @@ def test_a_script_that_fails_from_a_clean_start_is_said_with_its_output(tmp_path
         tmp_path,
         [tool("needs", needs=[SIZE_NEED])],
         [write("bad.py", "raise SystemExit('it broke')\n")],
-        [tool("done", script="bad.py")],
+        [tool("done", script="bad.py", part=["block.step"])],
         [tool("blocked", reason="stop")],
     )
     run.drive()
@@ -378,11 +387,225 @@ def test_nothing_a_run_plants_can_stand_in_for_the_bench(tmp_path: Path) -> None
         [write("trimesh.py", "raise SystemExit('forged')\n")],
         [write("bench-out/forged.json", '{"verdict": "OK", "numbers": {"volume_mesh_mm3": 1}}')],
         [tool("bench", command="info block.step")],
-        [tool("done", script="make.py")],
+        [tool("done", script="make.py", part=["block.step"])],
     )
     assert run.drive().name == "met"
     assert reply_of(run, "bench")["reply"].startswith("exit 0\nverdict: OK")
     assert rows(run, "readings")[0]["value"] == pytest.approx(2000.0, abs=1)
+
+
+# Who picked, and what a sheet draws
+
+
+def asked_a_pick(tmp_path: Path, **ask: Any) -> Run:
+    run, _ = begin(
+        tmp_path,
+        [tool("needs", needs=[SIZE_NEED, EYE_NEED])],
+        [write("make.py", script(gap=0.5), run=True)],
+        [
+            tool(
+                "ask",
+                question="Which proportions?",
+                need="look",
+                views="iso",
+                variants=[{"name": "A", "files": ["block.step"], "about": "the even one"}],
+                **ask,
+            )
+        ],
+    )
+    assert run.drive().name == "ask"
+    return run
+
+
+@pytest.mark.parametrize(
+    ("by", "whose"),
+    [
+        (None, "says who picked"),
+        ("", "says who picked"),
+        ("Sponsor", "says who picked"),
+        ("stand-in", "says who picked"),
+        ("stand-in:  ", "says who picked"),
+    ],
+)
+def test_a_pick_that_doesnt_say_who_made_it_is_refused(
+    tmp_path: Path, by: str | None, whose: str
+) -> None:
+    run = asked_a_pick(tmp_path)
+    found = {"pick": "A", "reason": "It sits better."}
+    (run.folder / "asks" / "1" / "pick.json").write_text(json.dumps({**found, "by": by}))
+    run, _ = again(run)
+    with pytest.raises(Refused, match=whose):
+        run.resume()
+
+
+def test_a_stand_ins_pick_is_marked_everywhere_and_never_says_the_sponsor_picked(
+    tmp_path: Path,
+) -> None:
+    """A Claude builder stood in for the Sponsor on the first real run, and every record called it
+    their pick: it could have passed for their taste in later training data."""
+    run = asked_a_pick(tmp_path)
+    (run.folder / "asks" / "1" / "pick.json").write_text(
+        '{"pick": "A", "reason": "It sits better.", "by": "stand-in: a Claude builder"}'
+    )
+    run, _ = again(run, [tool("done", script="make.py", part=["block.step"])])
+    run.resume()
+    said = run.session.messages[-1]["content"]
+    assert said == (
+        "A stand-in for the Sponsor (a Claude builder) picked A. Their reason: It sits better."
+    )
+    assert run.drive().name == "met"
+    assert rows(run, "picks")[0]["picked_by"] == "stand-in: a Claude builder"
+    reading = [r for r in rows(run, "readings") if r["need"] == "look"][0]
+    assert reading["passed"] == 1, "a run can be proved with no Sponsor there"
+    assert reading["why"].startswith("a stand-in for the Sponsor (a Claude builder) picked A")
+    state = json.loads((run.folder / "state.json").read_text())
+    assert state["picks"]["look"]["by"] == "stand-in: a Claude builder"
+    assert summarise(run.folder)["picked_by"] == {"look": "stand-in: a Claude builder"}
+    # Nothing a person or a later reader takes from this run calls it the Sponsor's.
+    records = [
+        run.session.events,
+        run.folder / "state.json",
+        run.folder / "rounds" / "001" / "judgement.json",
+        run.work / "record" / "ROUNDS.md",
+    ]
+    for path in records:
+        text = path.read_text()
+        assert "stand-in" in text, path
+        assert "Sponsor picked" not in text, path
+
+
+def test_the_sponsors_own_pick_says_so_everywhere(tmp_path: Path) -> None:
+    run = asked_a_pick(tmp_path)
+    (run.folder / "asks" / "1" / "pick.json").write_text(
+        '{"pick": "A", "reason": "It sits better.", "by": "sponsor"}'
+    )
+    run, _ = again(run, [tool("done", script="make.py", part=["block.step"])])
+    run.resume()
+    assert run.drive().name == "met"
+    reading = [r for r in rows(run, "readings") if r["need"] == "look"][0]
+    assert reading["why"].startswith("the Sponsor picked A")
+    assert "The Sponsor picked: A" in (run.work / "record" / "ROUNDS.md").read_text()
+
+
+FIXTURE_SCRIPT = (
+    script(gap=0.5)
+    + 'piece = cq.Workplane("XY").box(4, 4, 4).translate((0, 60, 0))\n'
+    + 'cq.exporters.export(piece, "test-piece.step")\n'
+)
+FIXTURE_NEED = {
+    "id": "apart",
+    "what": "the test piece stands clear of the block",
+    "source": "chosen",
+    "check": {"by": "bench", "command": "clearance block.step test-piece.step"},
+}
+
+
+def final_render(run: Run) -> dict[str, Any]:
+    made = run.folder / "rounds" / "001" / "judged" / "bench-out"
+    found = [json.loads(p.read_text()) for p in made.glob("render-*.json")]
+    assert len(found) == 1
+    return dict(found[0])
+
+
+def test_the_final_sheet_draws_the_part_and_leaves_out_what_only_a_need_names(
+    tmp_path: Path,
+) -> None:
+    """The first real run's final sheet drew its two test cylinders inside the stand."""
+    run, _ = begin(
+        tmp_path,
+        [tool("needs", needs=[FIXTURE_NEED])],
+        [write("make.py", FIXTURE_SCRIPT, run=True)],
+        [tool("done", script="make.py", part=["block.step"])],
+    )
+    assert run.drive().name == "met"
+    assert (run.folder / "final-sheet.png").is_file()
+    drawn = final_render(run)
+    assert "block.step" in drawn["argv"]
+    assert not any("test-piece" in word for word in drawn["argv"])
+    # 20 x 20 mm, with the tab's file and the piece left out: their outline would be wider.
+    assert drawn["numbers"]["views"]["top"]["projected_mm"] == [20.0, 20.0]
+    assert json.loads(rows(run, "rounds")[0]["part"]) == ["block.step"]
+
+
+def test_done_with_no_part_is_told_and_costs_only_that_call(tmp_path: Path) -> None:
+    run, _ = begin(
+        tmp_path,
+        [tool("needs", needs=[SIZE_NEED])],
+        [write("make.py", script(gap=0.5), run=True)],
+        [tool("done", script="make.py")],
+        [tool("done", script="make.py", part=[])],
+        [tool("done", script="make.py", part=["make.py"])],
+        [tool("done", script="make.py", part=["../outside.step"])],
+        [tool("done", script="make.py", part=["block.step"])],
+    )
+    assert run.drive().name == "met"
+    calls = [e for e in replies(run) if e["name"] == "done"]
+    assert [e["why"] for e in calls[:4]] == ["missing", "no_part", "not_geometry", "outside"]
+    assert run.state.round == 1, "none of those was a round"
+
+
+def test_a_part_a_clean_run_doesnt_leave_isnt_met(tmp_path: Path) -> None:
+    run, _ = begin(
+        tmp_path,
+        [tool("needs", needs=[SIZE_NEED])],
+        [write("make.py", script(gap=0.5), run=True)],
+        [tool("done", script="make.py", part=["stand.step"])],
+        [tool("blocked", reason="stop")],
+    )
+    assert run.drive().name == "blocked"
+    said = reply_of(run, "done")["reply"]
+    assert "not met yet" in said
+    assert "`part` names `stand.step`, which a clean run didn't leave." in said
+    assert rows(run, "rounds")[0]["met"] == 0
+    assert not (run.folder / "final-sheet.png").exists()
+
+
+def test_a_picks_sheet_can_hold_a_close_up_and_marks_a_test_piece(tmp_path: Path) -> None:
+    run, _ = begin(
+        tmp_path,
+        [tool("needs", needs=[FIXTURE_NEED, EYE_NEED])],
+        [write("make.py", FIXTURE_SCRIPT, run=True)],
+        [
+            tool(
+                "ask",
+                question="Which proportions?",
+                need="look",
+                views="top",
+                close="-5,0,2.5,4",
+                test_pieces=["test-piece.step"],
+                variants=[{"name": "A", "files": ["block.step"], "about": "the even one"}],
+            )
+        ],
+    )
+    assert run.drive().name == "ask"
+    folder = run.folder / "asks" / "1"
+    head = (folder / "sheet.png").read_bytes()[16:24]
+    width, height = int.from_bytes(head[:4], "big"), int.from_bytes(head[4:], "big")
+    assert (width, height) == (1024, 512), "the view, and the close-up beside it"
+    asked = json.loads((folder / "asked.json").read_text())
+    assert asked["test_pieces"] == ["test-piece.step"]
+    assert (folder / "test-pieces" / "test-piece.step").is_file()
+    said = rows(run, "bench_calls")
+    assert said == [], "`ask` isn't a bench call the model made"
+
+
+def test_a_picks_close_up_that_cant_be_read_doesnt_go_to_the_sponsor(tmp_path: Path) -> None:
+    run, _ = begin(
+        tmp_path,
+        [write("make.py", script(gap=0.5), run=True)],
+        [
+            tool(
+                "ask",
+                question="Which?",
+                close="500,500,0,4",
+                variants=[{"name": "A", "files": ["block.step"]}],
+            )
+        ],
+        [tool("blocked", reason="stop")],
+    )
+    assert run.drive().name == "blocked"
+    said = reply_of(run, "ask")
+    assert said["why"] == "no_sheet" and "nothing of the parts" in said["reply"]
 
 
 # The sandbox, for real
@@ -528,6 +751,7 @@ def endings(run: Run) -> str:
 
 EYE_ONLY = [tool("needs", needs=[EYE_NEED])]
 A_SCRIPT = [write("s.py", "print('hi')\n")]
+DONE_S = tool("done", script="s.py", part=["s.step"])
 
 
 @pytest.mark.parametrize(
@@ -539,13 +763,12 @@ A_SCRIPT = [write("s.py", "print('hi')\n")]
         ({"model_seconds": 0}, [], "model_time"),
         (
             {"rounds": 2},
-            [EYE_ONLY, A_SCRIPT, [tool("done", script="s.py")], [write("s.py", "print(1)\n")]]
-            + [[tool("done", script="s.py")]],
+            [EYE_ONLY, A_SCRIPT, [DONE_S], [write("s.py", "print(1)\n")], [DONE_S]],
             "round_cap",
         ),
         (
             {"stuck_rounds": 2},
-            [EYE_ONLY, A_SCRIPT] + [[tool("done", script="s.py")]] * 3,
+            [EYE_ONLY, A_SCRIPT] + [[DONE_S]] * 3,
             "stuck",
         ),
         (
@@ -568,7 +791,7 @@ def test_a_stuck_run_says_how_many_rounds_changed_nothing(tmp_path: Path) -> Non
         tmp_path,
         EYE_ONLY,
         A_SCRIPT,
-        *[[tool("done", script="s.py")]] * 3,
+        *[[DONE_S]] * 3,
         limits=Limits(stuck_rounds=2),
     )
     ending = run.drive()
@@ -586,7 +809,7 @@ def test_the_disk_floor_ends_it_before_a_call_and_between_rounds(
 
     levels = [host.FLOOR_GB + 1, host.FLOOR_GB - 0.1]
     monkeypatch.setattr(host, "free_gb", lambda: levels.pop(0))
-    run, _ = begin(tmp_path / "b", EYE_ONLY, A_SCRIPT, [tool("done", script="s.py")])
+    run, _ = begin(tmp_path / "b", EYE_ONLY, A_SCRIPT, [DONE_S])
     assert run.drive().name == "disk_floor"
 
 
@@ -710,8 +933,12 @@ def test_a_pick_of_none_leaves_the_need_open_and_says_why(tmp_path: Path) -> Non
         ],
     )
     assert run.drive().name == "ask"
-    (run.folder / "asks" / "1" / "pick.json").write_text('{"pick": "none", "reason": "Too plain."}')
-    run, _ = again(run, [tool("done", script="make.py")], [tool("blocked", reason="stop")])
+    (run.folder / "asks" / "1" / "pick.json").write_text(
+        '{"pick": "none", "reason": "Too plain.", "by": "sponsor"}'
+    )
+    run, _ = again(
+        run, [tool("done", script="make.py", part=["block.step"])], [tool("blocked", reason="stop")]
+    )
     run.resume()
     assert (
         "didn't pick any of them. Their reason: Too plain." in run.session.messages[-1]["content"]

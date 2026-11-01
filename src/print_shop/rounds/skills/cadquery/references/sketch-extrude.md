@@ -37,6 +37,9 @@ assert centred.plane.origin.toTuple() == (10.0, 5.0, 4.0)  # the face's centre
 - `.polyline(points).close()` for any outline: it must end in `.close()` before an
   `extrude`, or there's no closed wire to extrude. `.lineTo`, `.hLine`, `.vLine`,
   `.threePointArc` and `.spline` draw one segment at a time.
+- `.moveTo(x, y)` is how an outline starts somewhere else. `.polyline` draws from its
+  first point to the next, so with one point it draws nothing and doesn't move the
+  pen: the next segment starts from the workplane's origin, wherever the pen was.
 - Shapes are centred by default; `.rect(w, h, centered=False)` puts the corner at the
   origin.
 - A second shape inside the first makes a hole when extruded:
@@ -47,6 +50,11 @@ import cadquery as cq
 
 tri = cq.Workplane("XY").polyline([(0, 0), (10, 0), (0, 10)]).close().extrude(2)
 assert abs(tri.val().Volume() - 100) < 1e-6
+
+arc = cq.Workplane("XY").moveTo(5, 0).threePointArc((0, 5), (-5, 0))
+assert arc.val().startPoint().toTuple() == (5.0, 0.0, 0.0)
+one_point = cq.Workplane("XY").polyline([(5, 0)]).threePointArc((0, 5), (-5, 0))
+assert one_point.val().startPoint().Length < 1e-6  # the origin, not (5, 0)
 ```
 
 ## Making a solid

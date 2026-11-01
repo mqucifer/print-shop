@@ -12,6 +12,7 @@ import httpx
 import pytest
 
 from print_shop.rounds import needs, paths, send, skills, tools, transcript
+from print_shop.rounds import run as run_module
 from print_shop.rounds.box import Ran
 from print_shop.rounds.ledger import DesignLedger
 from print_shop.rounds.needs import Need
@@ -19,8 +20,8 @@ from print_shop.rounds.session import COMPACTED, SHOWN_BEFORE, Ending, Judged, L
 from print_shop.rounds.tools import WorkTools
 from tests.rounds_fakes import Scripted, tool
 
-#: The measured text, from mqucifer/model-performance `cad_eval/skills` at 22ea8b7.
-MEASURED_SKILLS_SHA = "9c0d01a7ae4dfa6d76bd0e710c70ae46e04259f631441bddd071f36ad64c9e26"
+#: The measured text, from mqucifer/model-performance `cad_eval/skills` at 98b3c5b.
+MEASURED_SKILLS_SHA = "dc0154e0a7ea87c7f34fc7d706cf49afc1b273927f7dc90e67dd98a69214187c"
 CAD_EVAL_SKILLS = Path("~/Documents/git/model-performance/cad_eval/skills").expanduser()
 
 # Host-side paths: where `cad_eval`'s sandbox escapes came from.
@@ -705,6 +706,35 @@ def test_the_ledger_gives_each_needs_reading_before_and_after(tmp_path: Path) ->
     assert rows[1]["diff"] == "the diff"
     assert rows[1]["fix_shape_model_said"] == "made it wider"
     assert ledger.rows("SELECT limits FROM runs")[0]["limits"] == '{"calls": 1}'
+
+
+def test_a_ledger_from_before_a_new_column_gains_it_and_keeps_its_rows(tmp_path: Path) -> None:
+    """The real ledger has a row from the first run, so a column can't only be in the schema."""
+    path = tmp_path / "ledger.sqlite"
+    old = sqlite3.connect(path)
+    old.executescript(
+        "CREATE TABLE runs (run TEXT PRIMARY KEY);"
+        "INSERT INTO runs VALUES ('r');"
+        "CREATE TABLE picks (run TEXT, ask INTEGER, pick TEXT, reason TEXT,"
+        " PRIMARY KEY (run, ask));"
+        "INSERT INTO picks VALUES ('r', 1, 'B', 'because');"
+        "CREATE TABLE rounds (run TEXT, round INTEGER, met INTEGER, PRIMARY KEY (run, round));"
+        "CREATE TABLE readings (run TEXT, round INTEGER, need TEXT, by TEXT, exit INTEGER,"
+        " verdict TEXT, number TEXT, value REAL, passed INTEGER, why TEXT);"
+    )
+    old.close()
+    for _ in range(2):  # Opening it twice adds nothing twice.
+        ledger = DesignLedger(path)
+    row = ledger.rows("SELECT * FROM picks")[0]
+    assert (row["pick"], row["reason"]) == ("B", "because")
+    assert row["picked_by"] is None, "nothing says who it was, so nothing says it was the Sponsor"
+
+
+def test_a_pick_says_who_picked_in_plain_words() -> None:
+    assert run_module.picked_by_words("sponsor") == "The Sponsor"
+    assert run_module.picked_by_words("stand-in: a Claude builder") == (
+        "A stand-in for the Sponsor (a Claude builder)"
+    )
 
 
 def test_the_ledger_is_its_own_file_and_refuses_an_unknown_run(tmp_path: Path) -> None:

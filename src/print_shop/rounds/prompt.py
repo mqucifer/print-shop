@@ -26,8 +26,9 @@ You may try things out while you work this out.
 scripts save parts with `cq.exporters.export(part, "<file>")`. Keep dimensions as numbers at the \
 top of the script, so a later change is one line. After a change, ask the `bench` what it did: \
 don't take a tool's success as an answer, including CadQuery's. `bench render` shows you the part.
-- When you believe the needs are met, call `done` with the script. It runs again from a clean \
-start in a fresh container, and the harness runs each need's check itself. Needs that fail come \
+- When you believe the needs are met, call `done` with the script and the files that are the \
+part. It runs again from a clean start in a fresh container, and the harness runs each need's \
+check itself. Needs that fail come \
 back to you, and you go on from what's there: the part, the script, and `record/ROUNDS.md`, which \
 the harness keeps with every round's readings.
 - Where form is at stake, make variants and `ask`: the Sponsor sees a sheet of them and picks, \

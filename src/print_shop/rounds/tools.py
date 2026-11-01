@@ -164,8 +164,8 @@ def specs() -> list[dict[str, Any]]:
             "bench",
             "Ask the bench about your files: any bench command, in a fresh container, with a "
             "second check by a different method behind each answer. The first line of the reply "
-            "is the verdict. `info`, `clearance`, `readback`, `rays`, `panes`, `thin`, `pause`, "
-            "`params`, `render` (its picture comes to you). `<command> --help` gives its "
+            "is the verdict. `info`, `clearance`, `readback`, `rays`, `panes`, `capture`, `thin`, "
+            "`pause`, `params`, `render` (its picture comes to you). `<command> --help` gives its "
             "arguments, and the `bench` skill says what each answers.",
             command="The command and its arguments, such as `clearance lid.step cup.step "
             "--min-gap 0.2` or `render part.step --views iso top`.",
@@ -232,12 +232,24 @@ def specs() -> list[dict[str, Any]]:
                     "description": "The views each variant is drawn in, by spaces: `iso top front` "
                     "unless you say.",
                 },
+                "close": {
+                    "type": "string",
+                    "description": "Close-ups added to each variant's row, by spaces, each "
+                    "`X,Y,Z,R` or `X,Y,Z,R,VIEW`: R mm all round that point, for what's too fine "
+                    "to judge whole.",
+                },
+                "test_pieces": {
+                    "type": "array",
+                    "description": "Files to show with each variant that aren't the part. They're "
+                    "drawn see-through in grey, and marked. Optional.",
+                    "items": {"type": "string"},
+                },
             },
             question="What you're asking them to judge.",
             variants={
                 "type": "array",
                 "description": 'Each variant: {"name": "A", "files": ["a.step"], "about": "what '
-                'sets it apart"}.',
+                'sets it apart"}. `files` are what they\'ll take for the part.',
                 "items": {"type": "object"},
             },
         ),
@@ -255,6 +267,13 @@ def specs() -> list[dict[str, Any]]:
                 }
             },
             script="The script that writes the part.",
+            part={
+                "type": "array",
+                "description": 'The files that are the part, such as `["stand.step"]`: it\'s what '
+                "the Sponsor's sheet of the result draws, so a test piece your script writes isn't "
+                "taken for the part.",
+                "items": {"type": "string"},
+            },
         ),
         _spec(
             "blocked",

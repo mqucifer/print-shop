@@ -20,13 +20,18 @@ It needs the bench's image (`scripts/bench.py build`), and LiteLLM on :4000 with
 - The clean run has a fresh container, over a plain copy of `work/` with no links, nothing a run left, and all geometry outside `references/` taken away.
 - Each bench need then runs in another fresh container, where no model code has run. `params` runs the script by its nature, on a scratch copy, so its reading is as good as its own second check.
 - `DISAGREE` and `NO ANSWER` never pass, whatever a need says.
-- An eye need passes on the Sponsor's pick, and on nothing else.
+- An eye need passes on a pick, and on nothing else. A stand-in's passes it too, so a run can be proved with no Sponsor there, and the reading says who it was.
+- A `part` a clean run didn't leave isn't met, whatever the needs read.
 
 Needs that fail go back in `done`'s reply, with each reading against its limit and the last round's, and the next round starts from what's there: the part, the script and `record/ROUNDS.md`. The conversation carries on, with its reasoning.
 
 **The needs are settled once.** They're what the work is checked against, so the model can't change them. `resume --reopen-needs` lets it, when a person decides a need's check is wrong.
 
-**Stopping for the Sponsor.** Only `ask`, where form is at stake: the model names variants, `render` makes a sheet, and the process exits. A person relays it, writes `pick.json` (`{"pick": "A", "reason": "..."}`, or `"none"`), and runs `resume`. A pick with no reason is refused, since the reason is what's learned from. After `needs`, `questions` is refused.
+**What's the part.** `done` names the files that are the part (`part: ["stand.step"]`), as a need can name a test piece beside it. `final-sheet.png` draws those alone. It's the model's word and it decides nothing else. A sheet's `files` are what the Sponsor takes for the part too, and `test_pieces` on `ask` shows others, see-through in grey and marked.
+
+**Stopping for the Sponsor.** Only `ask`, where form is at stake: the model names variants, `render` makes a sheet, and the process exits. It can add close-ups to each row (`close`), for what's too fine to judge whole. A person relays it, writes `pick.json`, and runs `resume`. A pick with no reason is refused, since the reason is what's learned from. After `needs`, `questions` is refused.
+
+**A pick says who made it,** so someone else's can't pass for the Sponsor's taste in later training data. `pick.json` is `{"pick": "A", "reason": "...", "by": "sponsor"}`, with `"pick": "none"` if nothing's right. Anyone else is `"by": "stand-in: a Claude builder"`, naming who. Anything else, or nothing, is refused. Text says "the Sponsor picked" only when they did: what the model's told, the reading, and `record/ROUNDS.md`. The ledger has it in `picks.picked_by`, and `summary.json` in `picked_by`. An empty `picked_by` says nothing of who it was.
 
 | Ending | When | Whose |
 |---|---|---|
@@ -56,10 +61,10 @@ Limits are in `session.Limits`, recorded on the run's row. The model isn't told 
 |---|---|
 | `runs` | What it ran on, read rather than typed: the commit, the skills' hash, the image's id, the alias and the limits. How it ended, its calls and tokens |
 | `needs` | Each version of the needs, and where each came from |
-| `rounds` | The starting state (each file's hash, the needs failing), the change (the script's diff), the clean run, and `fix_shape_model_said`, in the model's own words, with the vocabulary settled later. It decides nothing |
+| `rounds` | The starting state (each file's hash, the needs failing), the change (the script's diff), the clean run, the files `done` named as the `part`, and `fix_shape_model_said`, in the model's own words, with the vocabulary settled later. It decides nothing |
 | `readings` | Each need's check at each round's end: the verdict, the number, its limit, and how it ran |
 | `bench_calls` | Each bench answer the model asked for between those: calls to the first clean bench pass come from these (ADR 0010's fourth signal) |
-| `picks` | The question, the variants, the sheet, and the pick with its reason |
+| `picks` | The question, the variants, the sheet, and the pick with its reason and who made it (`picked_by`) |
 | `questions` | Intake's questions and answers |
 | `changes` (a view) | Each need's reading before and after each round, with the diff |
 
@@ -75,9 +80,9 @@ Looking lessons up isn't here.
 | `views/` | Each picture the model was shown |
 | `state.json`, `needs.json`, `needs/` | Where it stands, and the needs |
 | `questions/n.md`, `n.answers.md` | Each stop at intake |
-| `asks/n/` | `question.md`, `sheet.png`, `variants/`, and `pick.json` |
+| `asks/n/` | `question.md`, `sheet.png`, `variants/`, `test-pieces/` if it showed any, and `pick.json` |
 | `rounds/nnn/` | `judged/` (what the clean run left), `readings/` (each need's answer, in text and numbers), `run.txt`, `judgement.json`, `diff.patch` |
-| `final-sheet.png` | What passed, for the people who see the result. It decides nothing |
+| `final-sheet.png` | The `part` as it passed, for the people who see the result. It decides nothing |
 | `summary.json` | A run's figures, from `scripts/rounds.py summary`, read from its events |
 
 ## Where each part came from
@@ -93,7 +98,7 @@ The session is ported from mqucifer/model-performance's `cad_eval` at 22ea8b7, n
 | `needs.py` | The idea of `plan.py`: a quote held to the source | Needs, not a plan |
 | `judge.py` | `final_case` | A bench command per need, not hidden checks |
 | `bench/search.py`, `bench/hint.py`, `bench/image/*_index.py` | The same files | Started by `host.helper`, not on stdin |
-| `skills/cadquery`, `skills/references` | `skills/`, byte for byte, held by a hash and a test on the Mac | `skills/bench` is new. Where they say `inspect` or `measure`, the system prompt says what those are here |
+| `skills/cadquery`, `skills/references` | `skills/` at 98b3c5b, byte for byte, held by a hash and a test on the Mac | `skills/bench` is new. Where they say `inspect` or `measure`, the system prompt says what those are here |
 
 **Lessons carried, and how:**
 - **A link made in a container resolves on the host.** Each host-side open walks from the directory's fd with `O_NOFOLLOW`, and takes only a regular file. Tests make the links in a real container.
@@ -113,6 +118,8 @@ The session is ported from mqucifer/model-performance's `cad_eval` at 22ea8b7, n
 On 2026-11-01, `crew-code-think` through LiteLLM, on a made-up LED tealight stand, with a Claude builder standing in for the Sponsor at the pick. Commit e8ab52a, image `sha256:c950cbb83857`, with a crew tick running as it started, so no timing claims. It went from intake to `met` in round 1: 37 calls, 2,918 s of model time. Its figures are in `~/print-shop/design-runs/tealight-1/summary.json`, and its readings in the ledger. One run on one small part, so it sets no limit either way. mqucifer/print-shop#17 has what it did and what it lacked. Fixed from it:
 - **`run` lost what a stopped script had printed,** since Python buffers its output into a pipe. A 600 s hang came back with nothing. Containers now run unbuffered.
 - **A need's check couldn't be tried before it was settled,** so the model guessed a number's name. `try: true` reads them.
+
+mqucifer/print-shop#19 then took what else it lacked: close-ups, sheets of the part alone, and a pick that says who made it. **Its pick is a stand-in's, a Claude builder's, and isn't the Sponsor's taste.** Its records were corrected on the Mac: `picks.picked_by`, the reading's `why`, `pick.json`, `state.json`, `judgement.json` and `ROUNDS.md`. `events.jsonl` is left as it was sent, since it's what the model was told and every request rebuilds from it, and a last `correction` event says so. Anything reading it for training reads that event.
 
 **Known limits it showed:**
 - **A need is only as honest as what it's checked against.** Here the fit's checked against a tealight the model drew from the request's numbers. That's right on this part, but no code holds a fixture to the request.

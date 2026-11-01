@@ -82,6 +82,9 @@ CREATE TABLE IF NOT EXISTS rounds (
     met INTEGER,
     -- In the model's own words, marked as such by its name. It decides nothing.
     fix_shape_model_said TEXT,
+    -- The files `done` named as the part, in its words too: what's left of a need's files are
+    -- test pieces.
+    part TEXT,
     PRIMARY KEY (run, round)
 );
 CREATE TABLE IF NOT EXISTS readings (
@@ -129,6 +132,8 @@ CREATE TABLE IF NOT EXISTS picks (
     pick TEXT,
     reason TEXT,
     picked_at TEXT,
+    -- Who picked: `sponsor`, or `stand-in: <who>`, whose taste this isn't the Sponsor's.
+    picked_by TEXT,
     PRIMARY KEY (run, ask)
 );
 CREATE TABLE IF NOT EXISTS questions (
@@ -153,6 +158,10 @@ LEFT JOIN readings AS before
        ON before.run = after.run AND before.need = after.need AND before.round = after.round - 1;
 """
 
+#: Columns added after a ledger may already exist: `CREATE TABLE IF NOT EXISTS` leaves it alone.
+#: A pick from before `picked_by` has it empty, which says nothing of who made it.
+ADDED = (("picks", "picked_by", "TEXT"), ("rounds", "part", "TEXT"))
+
 
 def now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
@@ -170,6 +179,10 @@ class DesignLedger:
         path.parent.mkdir(parents=True, exist_ok=True)
         with self._open() as db:
             db.executescript(SCHEMA)
+            for table, column, kind in ADDED:
+                held = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
+                if column not in held:
+                    db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
 
     @contextmanager
     def _open(self) -> Iterator[sqlite3.Connection]:
@@ -274,11 +287,12 @@ class DesignLedger:
         seconds: float,
         met: bool,
         fix_shape_model_said: str | None,
+        part: list[str] | None = None,
     ) -> None:
         with self._open() as db:
             db.execute(
                 "UPDATE rounds SET ended_at=?, last_call=?, script=?, diff=?, end_files=?, "
-                "clean_run_exit=?, clean_run_seconds=?, met=?, fix_shape_model_said=? "
+                "clean_run_exit=?, clean_run_seconds=?, met=?, fix_shape_model_said=?, part=? "
                 "WHERE run=? AND round=?",
                 (
                     now(),
@@ -290,6 +304,7 @@ class DesignLedger:
                     seconds,
                     int(met),
                     fix_shape_model_said,
+                    _json(part),
                     run,
                     round_n,
                 ),
@@ -368,11 +383,11 @@ class DesignLedger:
                 (run, ask, round_n, need, question, _json(variants), sheet, now(), at_call),
             )
 
-    def picked(self, run: str, ask: int, pick: str, reason: str) -> None:
+    def picked(self, run: str, ask: int, pick: str, reason: str, by: str) -> None:
         with self._open() as db:
             db.execute(
-                "UPDATE picks SET pick=?, reason=?, picked_at=? WHERE run=? AND ask=?",
-                (pick, reason, now(), run, ask),
+                "UPDATE picks SET pick=?, reason=?, picked_at=?, picked_by=? WHERE run=? AND ask=?",
+                (pick, reason, now(), by, run, ask),
             )
 
     def question(self, run: str, n: int, text: str, at_call: int) -> None:

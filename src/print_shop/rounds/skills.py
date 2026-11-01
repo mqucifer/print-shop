@@ -1,7 +1,7 @@
 """What a session reads on demand: CadQuery, engineering values, and the bench.
 
 `skills/cadquery` and `skills/references` are mqucifer/model-performance's `cad_eval/skills` at
-22ea8b7, byte for byte, in the Agent Skills layout: the measured text, held to its source by a test
+98b3c5b, byte for byte, in the Agent Skills layout: the measured text, held to its source by a test
 on the Mac and by `SKILLS_SHA` everywhere. Each `SKILL.md` and `references/*.md` is a skill of its
 own, so a topic is read only when it's needed. The mechanism is crew's in small
 (`crew_org/session/skills.py`): the start names each in one line, and `skill` reads one.

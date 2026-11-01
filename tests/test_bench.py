@@ -145,6 +145,7 @@ def test_generated_code_runs_there_too_and_reaches_nothing(bench: Any) -> None:
         ("readback", "block.step", "block-seat.step"),
         ("rays", "block-seat.step", "--centre", "30,20,16", "--d", "22"),
         ("panes", "frame.step", "--pocket-z", "2", "--clearance", "0.1"),
+        ("capture", "frame.step", "--pocket-z", "2", "--clearance", "0.1", "--pane-thickness", "2"),
         ("thin", "wall-0p8.step"),
         ("pause", "frame.step", "--pocket-z", "2", "--pane-thickness", "2"),
         ("render", "block.step", "--views", "iso"),
@@ -535,6 +536,177 @@ def test_a_height_on_a_level_face_is_refused(bench: Any) -> None:
     assert "level face" in answer.text
 
 
+# Capture: held by the frame's shape, on both faces, with nothing depending on a bond
+
+
+def capture(bench: Any, frame: str, *more: str, thick: str = "2") -> Answer:
+    answer: Answer = bench(
+        "capture", frame, "--pocket-z", "2", "--clearance", "0.1", "--pane-thickness", thick, *more
+    )
+    return answer
+
+
+def test_a_pane_held_on_both_faces_says_by_how_much_two_ways(bench: Any) -> None:
+    """A 39.8 mm pane under a 36 mm window, each way: (39.8 - 36) / 2 of lip, by arithmetic."""
+    answer = capture(bench, "held.step")
+    assert answer.verdict == "OK", answer.text
+    pane = answer.numbers["panes"][0]
+    for face in (pane["up"], pane["down"]):
+        assert face["least_lip_mm"] == pytest.approx(1.9, abs=1e-3)
+        assert face["rays"]["least_lip_mm"] == pytest.approx(1.9, abs=0.03)
+        assert face["least_lip_with_play_mm"] == pytest.approx(1.8, abs=1e-3)
+        assert face["window_mm2"] == pytest.approx(36 * 36, abs=0.1)
+        assert face["lip_thick_mm"] == pytest.approx(1.0, abs=1e-3)
+        assert face["lip_thick_sections_mm"] == pytest.approx(1.0, abs=2e-3)
+        assert face["passes_at_shifts"] == face["passes_3d_at_shifts"] == 0
+        assert face["least_in_path_mm3"] > 0
+    assert answer.numbers["least_lip_mm"] == pytest.approx(1.9, abs=1e-3)
+    assert pane["overlap_3d_mm3"] == pytest.approx(0.0, abs=1e-3)
+
+
+def test_nothing_in_a_capture_answer_rests_on_a_bond(bench: Any) -> None:
+    text = capture(bench, "held.step").text
+    assert "nothing here reads a material or counts on a bond" in text
+    assert "adhesi" not in text.lower()
+
+
+@pytest.mark.parametrize(
+    ("frame", "thick", "way", "face"),
+    [("frame-open.step", "2", "upward", "up"), ("frame-bed.step", "2.8", "downward", "down")],
+)
+def test_a_pane_with_nothing_over_one_face_comes_out_that_way(
+    bench: Any, frame: str, thick: str, way: str, face: str
+) -> None:
+    answer = capture(bench, frame, thick=thick)
+    assert answer.verdict == "FAIL", answer.text
+    assert f"comes out {way}" in answer.text
+    read = answer.numbers["panes"][0][face]
+    assert read["passes_at_shifts"] == read["shifts_read"], "at every place its play lets it sit"
+    assert read["passes_3d_at_shifts"] == read["shifts_read"], "and as a solid"
+    assert read["no_lip_mm"] == pytest.approx(159.2, abs=1)
+
+
+def test_a_lip_narrower_than_the_play_lets_the_pane_through(bench: Any) -> None:
+    """A 0.05 mm lip in the pocket, and 0.1 mm of play: a section of the pocket would say it's
+    there, and the pane is smaller than the window."""
+    answer = capture(bench, "held-through.step")
+    assert answer.verdict == "FAIL", answer.text
+    assert "comes out upward" in answer.text
+    assert answer.numbers["panes"][0]["up"]["passes_3d_at_shifts"] >= 1
+
+
+def test_a_pane_that_only_passes_once_its_play_has_moved_it_comes_out(bench: Any) -> None:
+    answer = capture(bench, "held-shifted.step")
+    assert answer.verdict == "FAIL", answer.text
+    read = answer.numbers["panes"][0]["up"]
+    assert 0 < read["passes_at_shifts"] < read["shifts_read"], "centred, it's held"
+    assert 0 < read["passes_3d_at_shifts"] < read["shifts_read"], "by the second method too"
+    assert read["least_in_path_mm3"] == pytest.approx(0.0, abs=0.5)
+
+
+def test_a_lip_along_one_side_only_lets_it_swing_out(bench: Any) -> None:
+    answer = capture(bench, "held-hinge.step")
+    assert answer.verdict == "FAIL", answer.text
+    assert "swing out upward" in answer.text
+    read = answer.numbers["panes"][0]["up"]
+    assert read["passes_at_shifts"] == 0, "it can't slide out"
+    assert read["surrounds"] is False and read["rays"]["surrounds"] is False
+
+
+def test_a_thin_stretch_of_lip_is_named_with_where_it_is(bench: Any) -> None:
+    answer = capture(bench, "held-thin.step")
+    assert answer.verdict == "FAIL", answer.text
+    read = answer.numbers["panes"][0]["up"]
+    assert read["least_lip_mm"] == pytest.approx(0.1, abs=1e-3)
+    assert read["rays"]["least_lip_mm"] == pytest.approx(0.1, abs=0.03)
+    assert read["thin_mm"] == pytest.approx(36, abs=2), "the one long edge"
+    assert read["thin_at"][0] == pytest.approx(19.9, abs=0.01), "on the right-hand edge"
+    assert answer.numbers["panes"][0]["down"]["thin_mm"] == 0
+    # The same frame with a smaller limit holds.
+    assert capture(bench, "held-thin.step", "--min-lip", "0").verdict == "OK"
+
+
+def test_a_lip_thinner_than_a_layer_is_caught(bench: Any) -> None:
+    answer = capture(bench, "held-thin-lip.step")
+    assert answer.verdict == "FAIL", answer.text
+    read = answer.numbers["panes"][0]["up"]
+    assert read["lip_thick_mm"] == pytest.approx(0.1, abs=1e-3)
+    assert read["air_mm"] == pytest.approx(0.9, abs=1e-3), "the pocket's taller than the pane"
+
+
+def test_a_lip_that_stops_part_way_round_is_reported_and_its_end_isnt_thin(bench: Any) -> None:
+    """26 mm of edge with no lip, and the rest of it goes round: held, and said so."""
+    answer = capture(bench, "frame.step")
+    assert answer.verdict == "OK", answer.text
+    open_edge = answer.numbers["panes"][1]["up"]
+    assert open_edge["no_lip_mm"] == pytest.approx(26.0, abs=1)
+    assert open_edge["rays"]["no_lip_mm"] == pytest.approx(26.0, abs=1)
+    assert open_edge["least_lip_mm"] == pytest.approx(1.9, abs=1e-3), "not the lip's falling end"
+    assert open_edge["thin_mm"] == 0 and open_edge["surrounds"] is True
+    assert "may be deliberate" in answer.text
+
+
+def test_a_plain_hole_isnt_read_as_a_pane(bench: Any) -> None:
+    answer = capture(bench, "frame.step")
+    assert len(answer.numbers["panes"]) == 3
+    assert answer.numbers["plain_holes"][0]["mm2"] == pytest.approx(16.0, abs=0.01)
+
+
+def test_a_sloped_lip_is_read_at_its_narrowest_opening(bench: Any) -> None:
+    """Sloped back at 45 degrees, from 40 mm at the ceiling to 38 at the top: its section at any
+    one height would read a lip of its own, and what holds the pane is the narrowest."""
+    answer = capture(bench, "held-sloped.step")
+    assert answer.verdict == "OK", answer.text
+    read = answer.numbers["panes"][0]["up"]
+    assert read["least_lip_mm"] == pytest.approx(0.9, abs=1e-3)
+    assert read["rays"]["least_lip_mm"] == pytest.approx(0.9, abs=0.03)
+
+
+@pytest.mark.parametrize("frame", ["held-round.step", "held-round.stl"])
+def test_a_round_pane_reads_the_same_from_a_step_and_a_mesh(bench: Any, frame: str) -> None:
+    answer = capture(bench, frame)
+    assert answer.verdict == "OK", answer.text
+    assert answer.numbers["least_lip_mm"] == pytest.approx(1.9, abs=2e-3)
+    read = answer.numbers["panes"][0]["down"]
+    assert read["window_mm2"] == pytest.approx(3.14159265 * 18**2, abs=0.5), "less a mesh's chords"
+
+
+def test_a_pane_too_thick_for_its_pocket_is_in_the_frame(bench: Any) -> None:
+    answer = capture(bench, "held.step", thick="2.5")
+    assert answer.verdict == "FAIL", answer.text
+    assert "too thick" in answer.text
+    assert answer.numbers["panes"][0]["overlap_3d_mm3"] > 100
+
+
+def test_a_pane_whose_height_misses_the_pocket_is_told_so(bench: Any) -> None:
+    answer = capture(bench, "held.step", "--pane-floor-z", "2.5")
+    assert answer.verdict == "FAIL", answer.text
+    assert "misses --pocket-z" in answer.text
+
+
+def test_capture_on_no_opening_is_no_answer(bench: Any) -> None:
+    answer = bench(
+        "capture", "cube.step", "--pocket-z", "5", "--clearance", "0.1", "--pane-thickness", "2"
+    )
+    assert answer.verdict == "NO ANSWER", answer.text
+
+
+def test_capture_says_so_when_its_two_methods_differ(bench: Any) -> None:
+    done = host.run(["planted_capture.py"], bench.work, python=True)
+    assert done.returncode == 0, done.stderr
+    found = json.loads(done.stdout)
+    assert found["alike"] is None
+    assert "by rays" in found["rays_thinner"]
+    assert "no lip" in found["rays_more_open"]
+    assert "goes round" in found["surrounds"]
+    assert "sections only" in found["rays_none"]
+    assert found["rays_wider_is_natural"] is None
+    assert found["ramp"] == {"least": 1.9, "thin": 0.0}
+    assert found["slant"] == {"least": 1.9, "thin": 0.0}
+    assert found["taper"]["thin"] > 2, "a lip that tapers a long way is thin, not its end"
+    assert found["taper"]["least"] < 0.3
+
+
 # Thin features and small pieces
 
 
@@ -666,6 +838,51 @@ def test_a_pane_with_no_floor_stands_on_the_plate(bench: Any) -> None:
     assert "build plate" in answer.text
 
 
+def test_a_pane_standing_above_the_next_layer_is_a_fail_by_both_methods(bench: Any) -> None:
+    """The next layer's nozzle runs at z=3.2 over a pause at z=3, and this pane stands to 3.5."""
+    answer = bench("pause", "frame.step", "--pocket-z", "2", "--pane-thickness", "2.5")
+    assert answer.verdict == "FAIL" and answer.code == 1, answer.text
+    assert "nozzle would hit" in answer.text
+    row = answer.numbers["openings"][0]
+    assert row["pause_after_layer"] == row["pause_after_layer_faces"] == 15, "the methods agree"
+    assert row["pane_top_z"] == pytest.approx(3.5)
+    assert row["nozzle_over_pane_mm"] == pytest.approx(-0.3)
+
+
+@pytest.mark.parametrize(
+    ("thick", "verdict"), [("2", "OK"), ("2.0005", "OK"), ("2.002", "FAIL"), ("2.2", "FAIL")]
+)
+def test_a_pane_above_the_pause_by_more_than_the_mesh_can_say_is_a_fail(
+    bench: Any, thick: str, verdict: str
+) -> None:
+    """Above the pause and under the nozzle's height still squeezes the next layer into it."""
+    answer = bench("pause", "frame.stl", "--pocket-z", "2", "--pane-thickness", thick)
+    assert answer.verdict == verdict, answer.text
+
+
+def test_a_pane_too_tall_on_the_plate_is_a_fail(bench: Any) -> None:
+    answer = bench("pause", "frame-bed.step", "--pocket-z", "2", "--pane-thickness", "3.5")
+    assert answer.verdict == "FAIL", answer.text
+    assert "nozzle would hit" in answer.text
+
+
+def test_one_pane_too_tall_among_several_is_a_fail(bench: Any) -> None:
+    """Both openings close at the one layer, so the answer prints one line: the second's floor is
+    higher, so the same pane stands proud of it alone."""
+    answer = bench("pause", "frame-floors.step", "--pocket-z", "2", "--pane-thickness", "2")
+    assert answer.verdict == "FAIL", answer.text
+    assert "opening 2" in answer.record["why"] and "nozzle would hit" in answer.record["why"]
+    tops = [row["pane_top_z"] for row in answer.numbers["openings"]]
+    assert sorted(tops) == pytest.approx([3.0, 3.5])
+
+
+def test_an_opening_the_first_layer_closes_has_no_layer_to_pause_after(bench: Any) -> None:
+    """`tops[-1]`, the part's top, used to be read as the pause, so this could pass."""
+    answer = bench("pause", "frame-first.step", "--pocket-z", "0.05", "--pane-thickness", "7.9")
+    assert answer.verdict == "FAIL", answer.text
+    assert "no layer to pause" in answer.record["why"]
+
+
 # Renders
 
 
@@ -697,6 +914,139 @@ def test_a_renders_check_catches_a_wrong_picture(bench: Any) -> None:
     assert "nothing was drawn" in found["blank"]
     assert "outline" in found["wrong_shape"]
     assert "edge" in found["clipped"]
+
+
+def test_a_close_up_draws_a_3mm_hole_large_and_checks_it_against_arithmetic(bench: Any) -> None:
+    """The first real run's 3 mm holes were 27 px on its sheet, too small to see they were wrong."""
+    whole = bench("render", "plate-3mm.step", "--views", "top", "--size", "512")
+    assert whole.verdict == "OK", whole.text
+    answer = bench(
+        "render", "plate-3mm.step", "--views", "--close", "0,0,2,4", "--size", "512",
+        "--renders-out", "closes",
+    )  # fmt: skip
+    assert answer.verdict == "OK", answer.text
+    close = answer.numbers["close_ups"][0]
+    assert close["px_per_mm"] == 64.0 and close["across_mm"] == 8.0
+    # All but the hole, of an 8 mm square: arithmetic, by the picture and by the triangles.
+    wanted = 1 - 3.14159265 * 1.5**2 / 8**2
+    assert close["painted_share"] == pytest.approx(wanted, abs=0.01)
+    assert close["projected_share"] == pytest.approx(wanted, abs=0.01)
+    assert close["differs"] == 0
+    assert "second check: close 1" in answer.text
+    # Across the hole's centre: 3 mm at 64 px per mm, against about 14 px on the whole sheet.
+    done = host.run(
+        ["read_picture.py", f"{close['file']}:row=256", "renders/plate-3mm-top.png:row=256"],
+        bench.work,
+        python=True,
+    )
+    assert done.returncode == 0, done.stderr
+    near, far = json.loads(done.stdout)
+    assert near == pytest.approx(192, abs=4)
+    assert far < 20 < near
+
+
+def test_a_close_up_off_the_part_says_nothing_is_there(bench: Any) -> None:
+    answer = bench("render", "plate-3mm.step", "--views", "--close", "500,500,0,4")
+    assert answer.verdict == "FAIL", answer.text
+    assert "nothing of the parts" in answer.record["why"]
+
+
+def test_a_point_left_of_the_origin_isnt_taken_for_an_option(bench: Any) -> None:
+    assert bench("render", "plate-3mm.step", "--views", "--close", "-20,0,2,4").verdict == "OK"
+    across = bench("rays", "block-bore-x.step", "--centre", "-1,20,10", "--axis", "x")
+    assert "usage error" not in across.text
+
+
+def test_a_close_up_looks_along_the_view_it_names(bench: Any) -> None:
+    """A 20 mm window on the plate's 4 mm edge, from the front: a band across its middle."""
+    answer = bench("render", "plate-3mm.step", "--views", "--close", "0,-50,0,10,front")
+    assert answer.verdict == "OK", answer.text
+    assert answer.numbers["close_ups"][0]["projected_share"] == pytest.approx(0.2, abs=0.01)
+    assert answer.numbers["close_ups"][0]["painted_share"] == pytest.approx(0.2, abs=0.01)
+
+
+@pytest.mark.parametrize(
+    ("close", "says"),
+    [
+        ("0,0,2", "X,Y,Z,R"),
+        ("a,0,2,4", "X,Y,Z,R"),
+        ("0,0,2,0", "over nothing"),
+        ("0,0,2,4,underneath", "no view underneath"),
+    ],
+)
+def test_a_close_up_that_cant_be_read_says_so(bench: Any, close: str, says: str) -> None:
+    answer = bench("render", "plate-3mm.step", f"--close={close}")
+    assert answer.verdict == "NO ANSWER", answer.text
+    assert says in answer.record["why"]
+
+
+def test_a_close_ups_check_catches_a_wrong_picture(bench: Any) -> None:
+    done = host.run(["planted_render.py"], bench.work, python=True)
+    assert done.returncode == 0, done.stderr
+    found = json.loads(done.stdout)
+    assert found["close_right"] is None
+    assert "differs" in found["close_filled_hole"], "a hole drawn over"
+    assert "differs" in found["close_wrong_place"], "a picture aimed elsewhere"
+    assert "nothing of the parts" in found["close_blank"]
+
+
+def test_a_sheet_of_variants_can_hold_a_close_up_of_each(bench: Any) -> None:
+    answer = bench(
+        "render", "--variant", "A=plate-3mm.step", "--variant", "B=block-seat.step",
+        "--views", "top", "--close", "30,20,20,14", "--size", "256",
+        "--renders-out", "with-close",
+    )  # fmt: skip
+    # Variant A's plate reaches 50 mm, and has nothing at z over the point: both are drawn.
+    assert sorted(answer.numbers["views"]) == ["A close 1", "A top", "B close 1", "B top"]
+    assert answer.verdict == "OK", answer.text
+    with png_size(bench.work / answer.record["files"][-1]) as size:
+        assert size == (512, 512)
+
+
+def test_a_test_piece_is_drawn_grey_and_marked_and_the_part_isnt(bench: Any) -> None:
+    """The first real run's final sheet drew two test cylinders as if they were the part."""
+    answer = bench(
+        "render", "plate-3mm.step", "--test-piece", "plate-test-piece.step", "--views", "top",
+        "--size", "512", "--renders-out", "marked",
+    )  # fmt: skip
+    assert answer.verdict == "OK", answer.text
+    assert answer.numbers["test_pieces"] == ["plate-test-piece.step"]
+    assert "not the part" in answer.text
+    # Plate to x=50, and the piece from 60 to 80, on a picture 130 x 1.08 mm across.
+    scale = 512 / (130 * 1.08)
+    plain = bench(
+        "render", "plate-3mm.step", "--views", "top", "--size", "512", "--renders-out", "plain",
+    )  # fmt: skip
+    assert plain.numbers.get("test_pieces") is None
+    # The picture's centre is at x=15: the plate at x=-20, and the piece at x=70.
+    x_part = int(256 + (-20 - 15) * scale)
+    x_piece = int(256 + (70 - 15) * scale)
+    done = host.run(
+        ["read_picture.py", f"marked/plate-3mm-top.png:{x_part},256",
+         f"marked/plate-3mm-top.png:{x_piece},256"],
+        bench.work,
+        python=True,
+    )  # fmt: skip
+    assert done.returncode == 0, done.stderr
+    part, piece = json.loads(done.stdout)
+    assert max(piece) - min(piece) <= 2, f"a test piece is grey: {piece}"
+    assert piece[0] > 180, f"and see-through: {piece}"
+    assert max(part) - min(part) > 20, f"the part keeps its colour: {part}"
+
+
+def test_a_file_cant_be_the_part_and_a_test_piece(bench: Any) -> None:
+    answer = bench("render", "block.step", "--test-piece", "block.step")
+    assert answer.verdict == "NO ANSWER", answer.text
+    assert "as the part and as a test piece" in answer.record["why"]
+
+
+def test_a_sheet_of_variants_marks_a_test_piece_on_every_row(bench: Any) -> None:
+    answer = bench(
+        "render", "--variant", "A=block.step", "--variant", "B=block-seat.step",
+        "--test-piece", "cube.step", "--views", "top", "--size", "256",
+    )  # fmt: skip
+    assert answer.verdict == "OK", answer.text
+    assert answer.numbers["test_pieces"] == ["cube.step"]
 
 
 # The parameter check: a Fusion design reported healthy with its parameter driving part of it

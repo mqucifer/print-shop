@@ -753,6 +753,10 @@ def _pause_one(
             f"layer {closing + 1}'s mid-height is on the ceiling, so a slicer could close it there "
             "or one layer later: pause here is the earlier"
         )
+    if closing == 0:
+        # There's no layer before the first to pause after, and `tops[-1]` is the part's top.
+        problems.append(f"opening {name}: the first layer closes it, so there's no layer to pause")
+        return row
     # Layers count from 1: the layer closing it is number closing + 1, the pause after `closing`.
     top = float(tops[closing - 1])
     row["pause_top_z"] = round(top, 4)
@@ -760,6 +764,8 @@ def _pause_one(
     pane_top = floor + args.pane_thickness
     row["pane_top_z"] = round(pane_top, 4)
     row["room_over_pane_mm"] = round(top - pane_top, 4)
+    # The nozzle's tip lays the next layer one layer above the pause.
+    row["nozzle_over_pane_mm"] = round(top + args.layer - pane_top, 4)
     row["pocket_height_mm"] = (
         round(heights.ceiling - floor, 4) if heights.ceiling is not None else None
     )

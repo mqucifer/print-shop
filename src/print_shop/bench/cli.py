@@ -19,6 +19,24 @@ class Parser(argparse.ArgumentParser):
     def error(self, message: str) -> NoReturn:
         self.exit(3, f"usage error: {message}\n{self.format_usage()}")
 
+    def parse_args(self, args: Any = None, namespace: Any = None) -> Any:
+        given = sys.argv[1:] if args is None else list(args)
+        return super().parse_args(_coordinates_joined(given), namespace)
+
+
+def _coordinates_joined(given: list[str]) -> list[str]:
+    """`--close -5,0,2,4`, as `--close=-5,0,2,4`. To argparse a word starting with `-` that isn't
+    a plain number is an option, so a point left of the origin would be a usage error."""
+    joined: list[str] = []
+    words = iter(given)
+    for word in words:
+        if word in ("--close", "--centre"):
+            value = next(words, None)
+            joined.append(word if value is None else f"{word}={value}")
+        else:
+            joined.append(word)
+    return joined
+
 
 def _point(text: str) -> list[float]:
     values = [float(v) for v in text.split(",")]
@@ -66,6 +84,21 @@ def parser() -> Parser:
     panes.add_argument("--min-area", type=float, default=4.0, help="the smallest pane, in mm²")
     panes.add_argument("--panes-out", dest="out_panes", default="panes", help="where panes go")
 
+    capture = sub.add_parser("capture", help="whether each pane is held by shape, on both faces")
+    capture.add_argument("frame")
+    capture.add_argument("--pocket-z", type=float, required=True, help="a height in the pockets")
+    capture.add_argument("--clearance", type=float, required=True, help="play round a pane, in mm")
+    capture.add_argument("--pane-thickness", type=float, required=True)
+    capture.add_argument(
+        "--pane-floor-z",
+        type=float,
+        help="where a pane's underside sits; else the pocket's level floor, or the part's",
+    )
+    capture.add_argument(
+        "--min-lip", type=float, default=0.4, help="the least lip after its play, in mm"
+    )
+    capture.add_argument("--layer", type=float, default=0.2)
+
     thin = sub.add_parser("thin", help="features narrower than the nozzle, and tiny pieces")
     thin.add_argument("file")
     thin.add_argument("--nozzle", type=float, default=0.4)
@@ -107,6 +140,21 @@ def parser() -> Parser:
     )
     render.add_argument("--views", nargs="*", default=["iso", "top", "front", "side"])
     render.add_argument("--section", nargs="*", type=float, default=[], help="z heights to cut")
+    render.add_argument(
+        "--close",
+        action="append",
+        default=[],
+        metavar="X,Y,Z,R[,VIEW]",
+        help="a close-up: R mm all round that point, looking along a view (top, unless named)",
+    )
+    render.add_argument(
+        "--test-piece",
+        dest="test_pieces",
+        action="append",
+        default=[],
+        metavar="FILE",
+        help="drawn see-through in grey, and marked as not the part",
+    )
     render.add_argument("--size", type=int, default=768)
     render.add_argument("--renders-out", dest="out_renders", default="renders")
     return top
@@ -135,6 +183,10 @@ def _dispatch(args: Any, report: Report) -> None:
 
         args.out = args.out_panes
         run_panes(args, report)
+    elif args.command == "capture":
+        from .capture import run
+
+        run(args, report)
     elif args.command == "thin":
         from .fabrication import run_thin
 

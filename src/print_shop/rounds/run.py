@@ -33,8 +33,9 @@ from print_shop.bench import host
 from print_shop.bench import usage as usage_module
 from print_shop.rounds import judge, needs, paths, prompt, skills, transcript
 from print_shop.rounds.box import Box, Gone, Ran
+from print_shop.rounds.judge import SPONSOR, STAND_IN
 from print_shop.rounds.ledger import DesignLedger
-from print_shop.rounds.needs import Need
+from print_shop.rounds.needs import GEOMETRY, Need
 from print_shop.rounds.send import ALIAS
 from print_shop.rounds.session import Ending, Judged, Limits, Session
 from print_shop.rounds.tools import WorkTools, recorded
@@ -101,6 +102,13 @@ def repository_version() -> tuple[str, bool]:
     except (OSError, subprocess.SubprocessError):
         return "unknown", True
     return commit, bool(changed)
+
+
+def picked_by_words(by: str) -> str:
+    """Who picked, as a sentence's subject. "The Sponsor" is said only of the Sponsor."""
+    if by == SPONSOR:
+        return "The Sponsor"
+    return f"A stand-in for the Sponsor ({by[len(STAND_IN) :].strip()})"
 
 
 def _sha(text: str) -> str:
@@ -252,26 +260,35 @@ class Run:
         folder = self.folder / "asks" / str(n)
         path = folder / "pick.json"
         if not path.is_file():
-            raise Refused(f'the pick isn\'t written yet: {path}, {{"pick": ..., "reason": ...}}')
+            raise Refused(
+                f'the pick isn\'t written yet: {path}, {{"pick": ..., "reason": ..., "by": ...}}'
+            )
         asked = json.loads((folder / "asked.json").read_text(encoding="utf-8"))
         try:
             found = json.loads(path.read_text(encoding="utf-8"))
         except ValueError as exc:
             raise Refused(f"{path} isn't JSON: {exc}") from exc
         pick, reason = str(found.get("pick") or ""), str(found.get("reason") or "").strip()
+        by = str(found.get("by") or "").strip()
         names = [v["name"] for v in asked["variants"]]
         if pick not in [*names, "none"]:
             raise Refused(f"{path}: the pick is one of {', '.join(names)}, or none: not {pick!r}")
         if not reason:
             raise Refused(f"{path}: a pick needs its reason, which is what the ledger learns from")
-        self.ledger.picked(self.state.name, n, pick, reason)
+        if by != SPONSOR and not (by.startswith(STAND_IN) and by[len(STAND_IN) :].strip()):
+            raise Refused(
+                f'{path}: `by` says who picked: "{SPONSOR}" only if they did, or '
+                f'"{STAND_IN} <who>" for anyone standing in. Not {by!r}'
+            )
+        self.ledger.picked(self.state.name, n, pick, reason, by)
         need = asked.get("need")
         if pick != "none" and need:
-            self.state.picks[need] = {"pick": pick, "reason": reason, "ask": n}
+            self.state.picks[need] = {"pick": pick, "reason": reason, "ask": n, "by": by}
+        who = picked_by_words(by)
         if pick == "none":
-            said = f"The Sponsor didn't pick any of them. Their reason: {reason}"
+            said = f"{who} didn't pick any of them. Their reason: {reason}"
         else:
-            said = f"The Sponsor picked {pick}. Their reason: {reason}"
+            said = f"{who} picked {pick}. Their reason: {reason}"
         self.state.said.append(f'On your question "{asked["question"]}": {said}')
         self.session.say(said)
 
@@ -466,12 +483,15 @@ class Run:
         missing = self.tools._existing("done", args, "script")
         if missing is not None:
             return missing
+        part = self._part(args["part"])
+        if isinstance(part, Judged):
+            return part
         script = str(args["script"])
         n = self.state.round
         folder = self.folder / "rounds" / f"{n:03}"
         shutil.rmtree(folder / "judged", ignore_errors=True)
         wanted = self._needs()
-        judgement = judge.check(self.box, self.work, script, wanted, self.state.picks, folder)
+        judgement = judge.check(self.box, self.work, script, wanted, self.state.picks, folder, part)
         files = paths.snapshot(self.work)
         diff = self._diff(folder)
         (folder / "diff.patch").write_text(diff, encoding="utf-8")
@@ -488,6 +508,7 @@ class Run:
             judgement.seconds,
             judgement.met,
             str(args.get("fix_shape") or "") or None,
+            part,
         )
         reply = self._said_of(judgement, wanted)
         self._remember(judgement)
@@ -497,11 +518,26 @@ class Run:
         self._write_record()
         detail = {"round": n, "met": judgement.met, "code": judgement.code}
         if judgement.met:
-            self._final(wanted, folder)
+            self._final(part, folder)
             self.save()
             said = {"round": n, "script": script}
             return Judged("done", "ok", reply, detail=detail, ending=Ending(MET, said))
         return self._next_round(reply, detail)
+
+    def _part(self, given: list[Any]) -> list[str] | Judged:
+        """The files that are the part, as `done` names them. It's the model's word, and it's what
+        the people's sheet draws: a test piece a script writes is left off it."""
+        if not given or not all(isinstance(name, str) for name in given):
+            reply = '`part` names the files that are the part, such as `["stand.step"]`.'
+            return Judged("done", "failed", reply, "no_part")
+        for name in given:
+            if not name.lower().endswith(GEOMETRY):
+                reply = f"`part` names STEP or STL files, and `{name}` isn't one."
+                return Judged("done", "failed", reply, "not_geometry")
+            if paths.inside(self.work, name) is None:
+                reply = "Only files inside your directory, and never through a link."
+                return Judged("done", "failed", reply, "outside")
+        return list(given)
 
     def _next_round(self, reply: str, detail: dict[str, Any]) -> Judged:
         n = self.state.round
@@ -554,6 +590,9 @@ class Run:
         ]
         if judgement.code != 0:
             lines.append(f"Its output ended:\n{judgement.tail[-FAILURE_CHARS:]}")
+        elif judgement.part_missing:
+            named = ", ".join(f"`{name}`" for name in judgement.part_missing)
+            lines.append(f"`part` names {named}, which a clean run didn't leave.")
         for need, reading in zip(wanted, judgement.readings, strict=True):
             before = self.state.last_readings.get(need.id)
             was = ""
@@ -605,7 +644,8 @@ class Run:
             lines.append("")
         for row in self.ledger.rows("SELECT * FROM picks WHERE run=? ORDER BY ask", run):
             lines.append(
-                f"Asked in round {row['round']}: {row['question']} Picked: {row['pick']}. "
+                f"Asked in round {row['round']}: {row['question']} "
+                f"{picked_by_words(row['picked_by'] or SPONSOR)} picked: {row['pick']}. "
                 f"Reason: {row['reason']}"
             )
         paths.write_inside(self.work, "record/ROUNDS.md", "\n".join(lines) + "\n")
@@ -613,11 +653,10 @@ class Run:
         diff = (self.folder / "rounds" / f"{n:03}" / "diff.patch").read_text(encoding="utf-8")
         paths.write_inside(self.work, f"record/round-{n}.diff", diff)
 
-    def _final(self, wanted: list[Need], folder: Path) -> None:
-        """A sheet of what passed, for the people who see the result. It decides nothing."""
-        files = list(dict.fromkeys(f for n in wanted for f in n.files()))
-        if not files:
-            return
+    def _final(self, part: list[str], folder: Path) -> None:
+        """A sheet of what passed, for the people who see the result. It decides nothing. It draws
+        the part alone: what else a need names is a test piece, which isn't what passed."""
+        files = list(dict.fromkeys(part))
         judged = folder / "judged"
         args = ["render", *files, "--renders-out", "final-render"]
         done = self.box.bench(args, where=judged)
@@ -650,6 +689,13 @@ class Run:
                 {"name": variant["name"], "files": files, "about": str(variant.get("about") or "")}
             )
             command += ["--variant", f"{variant['name']}={','.join(files)}"]
+        pieces = [str(p) for p in args.get("test_pieces") or []]
+        for path in pieces:
+            missing = self.tools._existing("ask", {"path": path})
+            if missing is not None:
+                return missing
+            command += ["--test-piece", path]
+        command += [f"--close={close}" for close in str(args.get("close") or "").split()]
         n = self.state.asks + 1
         views = str(args.get("views") or " ".join(ASK_VIEWS)).split()
         out = f".pictures/ask-{n}"
@@ -672,7 +718,18 @@ class Run:
             kept.mkdir()
             for path in variant["files"]:
                 (kept / Path(path).name).write_bytes(paths.read_bytes_inside(self.work, path))
-        asked = {"question": question, "need": need, "variants": named, "round": self.state.round}
+        if pieces:
+            (folder / "test-pieces").mkdir()
+        for path in pieces:
+            kept = folder / "test-pieces" / Path(path).name
+            kept.write_bytes(paths.read_bytes_inside(self.work, path))
+        asked = {
+            "question": question,
+            "need": need,
+            "variants": named,
+            "test_pieces": pieces,
+            "round": self.state.round,
+        }
         (folder / "asked.json").write_text(json.dumps(asked, indent=1), encoding="utf-8")
         about = "\n".join(f"- **{v['name']}**: {v['about']}" for v in named)
         (folder / "question.md").write_text(
@@ -742,6 +799,7 @@ def summarise(folder: Path) -> dict[str, Any]:
         "stop": state["stop"],
         "rounds": state["round"],
         "asks": state["asks"],
+        "picked_by": {need: pick.get("by") for need, pick in state["picks"].items()},
         "questions": state["questions"],
         "restarts": state["restarts"],
         "harness": state["harness"],
@@ -792,7 +850,8 @@ def what_next(run: Run, ending: Ending) -> str:
         folder = run.folder / "asks" / str(ending.said["n"])
         return (
             f"waiting: {folder / 'question.md'} and its sheet. Write {folder / 'pick.json'}, "
-            f'{{"pick": "<a variant or none>", "reason": "..."}}, then: scripts/rounds.py resume '
+            f'{{"pick": "<a variant or none>", "reason": "...", "by": "{SPONSOR}"}}, or "by": '
+            f'"{STAND_IN} <who>" if someone stood in for them, then: scripts/rounds.py resume '
             f"{name}"
         )
     said = json.dumps(ending.said)

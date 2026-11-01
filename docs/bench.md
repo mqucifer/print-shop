@@ -33,12 +33,26 @@ An answer with no second check behind it becomes `NO ANSWER`, whatever it first 
 | `readback BEFORE AFTER [--cutter C] [--expect-delta V] [--min-share S]` | volume before and after, and how much of a cutter was in the body | the mesh | OCCT, or stacked sections |
 | `rays FILE --centre X,Y,Z [--axis A] [--d D] [--depth H]` | a cut feature measured from its axis: rays that hit nothing, the distance across, the wall beyond, the floor | rays on the mesh | a plane section, with a circle fit |
 | `panes FRAME --pocket-z Z [--lip-z Z] --clearance C [--pane-thickness T]` | a pane from each opening, written to `panes/FRAME/`, its fit, and the edge with no lip | polygons on the section | the pane as a solid against the frame's walls over the pocket's height, and rays up from the edge |
+| `capture FRAME --pocket-z Z --clearance C --pane-thickness T [--pane-floor-z F] [--min-lip M] [--layer L]` | whether each pane is held by shape on both faces, wherever its play lets it sit: the lip, how thick, where it's thin, and whether it can slide or swing out | sections stacked beyond the pocket, read as polygons | rays beside the pane's edge, and the pane as a solid swept out of the frame |
 | `thin FILE [--nozzle N] [--layer L] [--min-body V]` | features under the nozzle's width, floors under a layer, and tiny pieces | sections opened by the nozzle | rays across each spot, level rays through the walls and straight rays through level floors, and OCCT's count of solids |
 | `pause FRAME --pocket-z Z --pane-thickness T [--layer L] [--first-layer F]` | the layer to pause after, and the room over the pane | sections layer by layer | the flat faces' heights |
-| `render FILE... [--views ...] [--section Z...]`, or `render --variant NAME=FILE[,FILE...]...` | pictures from the standard views, and a sheet of them, or a sheet with a labelled row for each variant | VTK, offscreen | the mesh projected by arithmetic against the painted outline, and the section's area against its pixels |
+| `render FILE... [--views ...] [--section Z...] [--close X,Y,Z,R[,VIEW]]... [--test-piece FILE]...`, or `render --variant NAME=FILE[,FILE...]... [--close ...]... [--test-piece FILE]...` | pictures from the standard views, and a sheet of them, or a sheet with a labelled row for each variant. A close-up is R mm all round a point | VTK, offscreen | the mesh projected by arithmetic against the painted outline, each close-up's triangles projected and filled against its pixels, and the section's area against its pixels |
 | `params SCRIPT --set NAME=VALUE` | which dimensions, volumes and pieces moved when one parameter changed | each piece's figures, three runs | the meshes' symmetric difference, and a run with nothing changed as the control |
 
 `params` reads a number assigned once at the top level of a design's script (`BaseCircle = 20.0`), and runs the script in a scratch folder, so the design isn't touched. A parameter that moves nothing is `NO CHANGE`. On a Fusion copy, changing `BaseCircle` left the outer ring and motif in place while Fusion reported everything healthy (mqucifer/print-shop#15): this names each piece that moved and each that didn't.
+
+**A close-up** draws R mm all round a point along a view (`top` unless named), so a fine motif or a 3 mm hole can be judged: at 512 px and `R` of 4 that's 64 px per mm, where the first real run's 3 mm holes were 27 px. It looks along the view and doesn't cut anything, so what's inside a part needs `--section`. Nothing of the parts in the window is a `FAIL`, so one aimed wrongly doesn't read as a picture.
+
+**A test piece** is drawn see-through in grey, and each picture says it isn't the part. It's whatever the one asking says it is, as nothing can tell by looking. So a script writes test pieces to files of their own, and a piece inside the part's file is drawn as the part.
+
+**`capture`** answers whether the frame's shape holds each pane. It's how the Sponsor prints them, like a lens in a pair of sunglasses without the snap: a pane is set in at a pause and printed over to lock it in, not to bond it. So nothing here reads a material or counts on adhesion, and the frame's material is free. For each face of each pane:
+- **Can it slide out?** The pane is read at every place its play lets it sit, against everything beyond the pocket, by polygons and then as a solid swept out. Passing at any of them is `FAIL`, so a pane held only while it's centred isn't held.
+- **Can it swing out?** A lip that lies all to one side of the pane's centre is `FAIL`, as it can pivot about that lip.
+- **How much lip?** `least_lip_mm` is the narrowest round the edge, and `least_lip_with_play_mm` what's left once the pane has moved away from it. Under `--min-lip` after its play (0.4 mm, a nozzle's width, unless you say) is `FAIL`, with how much of the edge and where.
+- **How thick?** A lip under a layer at its root is `FAIL`, and `air_mm` is how far the pane can rattle before it reaches it.
+- **Edge with no lip** is reported and not judged, as in `panes`, if the rest goes round. Where a lip stops it falls away to nothing round a window's corner, which isn't counted as thin, and one that tapers over a long way is.
+
+A pane too thick for its pocket is `FAIL`, as is a height that misses the pane. It doesn't read a pane forced past a lip that bends. Pair it with `pause`, which says when the pane goes in and whether the nozzle clears it.
 
 ## Never take a tool's word
 
@@ -54,6 +68,14 @@ The map's table, row by row. Each row that touches these commands is a planted c
 | A parameter that drives only part of a design | Everything healthy | `params` names which pieces moved |
 | Four-bar, nothing grounded, clevis assemblies | Success, or rc -1 | Motion: not in this bench |
 | Peak stress at a corner, contact with a missing constraint | A plain number, 0.0 MPa | Stress: not in this bench |
+
+The Sponsor's way of printing panes adds three, each a planted case:
+
+| What could go wrong | What would look right | Here |
+|---|---|---|
+| A pane standing above the next layer, where the nozzle hits it | The layer count alone | `pause` is `FAIL`, by both methods' layer, among several openings, and on the plate. `nozzle_over_pane_mm` is how far the tip clears it |
+| A lip narrower than the pane's play | A lip in the section at one height | `capture` moves the pane by its play, and it comes out |
+| A lip down one side | A lip, and no way to slide out | `capture` is `FAIL`: it can swing out |
 
 Building this found more, each now handled and said in the code:
 - **CadQuery's `tessellate` tolerance is relative,** a share of each edge's size, not the mm it looks like. On a real part that read as a 0.03 mm false gap. The bench meshes with absolute tolerances, through OCCT directly.
