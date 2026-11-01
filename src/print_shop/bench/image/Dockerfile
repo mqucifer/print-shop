@@ -4,7 +4,7 @@
 # the code never costs Docker's disk another image. Built by `scripts/bench.py build`,
 # which refuses when the disk would fall below its floor. No container of it has a
 # network. It's built for arm64 on the Mac and amd64 in CI, from the same pins.
-FROM python:3.12-slim-bookworm@sha256:6a0e06f5ba0b373d051aabd3fffb9b873f27f9a2a3a14bcbe37dee6f0e3bbc70
+FROM python:3.12-slim-bookworm@sha256:6a0e06f5ba0b373d051aabd3fffb9b873f27f9a2a3a14bcbe37dee6f0e3bbc70 AS bench
 
 # These first three steps are mqucifer/model-performance's `cad_eval/image/Dockerfile`,
 # byte for byte (its requirements too, in base/). That's the CadQuery 2.8.0 its numbers
@@ -38,3 +38,25 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources \
 # outside /work and /tmp.
 ENV PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=/tmp NUMBA_CACHE_DIR=/tmp \
     VTK_DEFAULT_OPENGL_WINDOW=vtkOSOpenGLRenderWindow
+
+# CadQuery's own documentation and examples at its v2.8.0 tag, fetched by commit, for the rounds'
+# `docs` tool (mqucifer/print-shop#17). Apache-2.0: the index's builder checks the licence and
+# refuses without it. Each code block is run here, in this image, and marked as it ran. As in
+# mqucifer/model-performance's `cad_eval/image/Dockerfile.v2`, with its builders, but for where the
+# repository's name is given, since print-shop's source holds one URL (`test_config_boundary.py`).
+FROM bench AS docs
+ARG CADQUERY_COMMIT=fb4c6d41863aee270c46ab64397f0d2675e74be0
+ARG CADQUERY_REPOSITORY=https://github.com/CadQuery/cadquery
+ADD --keep-git-dir=false ${CADQUERY_REPOSITORY}.git#${CADQUERY_COMMIT} /src/cadquery
+COPY docs_index.py /build/docs_index.py
+RUN cd /tmp && python /build/docs_index.py /src/cadquery ${CADQUERY_COMMIT} v2.8.0 /build/docs.json \
+    ${CADQUERY_REPOSITORY}
+
+# The image itself: the bench, and the two indexes `lookup` and `docs` search. What's installed,
+# read at the build, not a list anyone wrote.
+FROM bench
+COPY lookup_index.py /build/lookup_index.py
+RUN mkdir -p /opt/cad-eval \
+    && cd /tmp && python /build/lookup_index.py /opt/cad-eval/lookup.json \
+    && rm -rf /build
+COPY --from=docs /build/docs.json /opt/cad-eval/docs.json

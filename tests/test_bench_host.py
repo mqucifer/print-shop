@@ -25,6 +25,8 @@ def test_the_container_has_no_network_and_is_capped(monkeypatch: pytest.MonkeyPa
     assert pairs["--cap-drop"] == "ALL"
     assert argv[argv.index(host.IMAGE) + 1 :] == ["python", "-V"]
     assert f"{host.HERE}:{host.MOUNT}:ro" in argv, "the bench's own code is read-only to it"
+    assert pairs["--log-driver"] == "none", "output mustn't fill Docker's disk through its log"
+    assert pairs["--ulimit"] == f"fsize={host.MAX_FILE}", "/work has no quota of its own"
 
 
 def test_a_bench_command_cant_be_shadowed_from_the_working_directory() -> None:
