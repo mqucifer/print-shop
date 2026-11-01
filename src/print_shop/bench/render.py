@@ -6,13 +6,14 @@ projected along the view by NumPy, and the painted pixels must cover the same ou
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import trimesh
 import vtk
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter
 from vtk.util.numpy_support import numpy_to_vtk, numpy_to_vtkIdTypeArray, vtk_to_numpy
 
 from .report import Report, slug
@@ -38,6 +39,46 @@ FEATURE_ANGLE = 30.0
 OUTLINE_SHARE = 0.03
 #: The picture's margin: its side over the parts' longer side.
 FILL = 1.08
+#: A close-up and the arithmetic's picture of it may differ by this share of its pixels, away from
+#: an outline's edge.
+CLOSE_SHARE = 0.005
+#: How far from the arithmetic's outline, in pixels, a painted line can stand: VTK's edges.
+CLOSE_EDGE = 2
+#: A test piece's grey, and how much of what's behind it shows through.
+TEST_PIECE_COLOUR = (0.6, 0.6, 0.6)
+TEST_PIECE_OPACITY = 0.35
+TEST_PIECE_MARK = "grey: a test piece, not the part"
+
+
+@dataclass
+class Close:
+    """A close-up: the point it's centred on, how far it reaches each way, and its view."""
+
+    centre: tuple[float, float, float]
+    reach: float
+    view: str
+
+    @property
+    def label(self) -> str:
+        x, y, z = self.centre
+        return f"close {x:g},{y:g},{z:g}, {2 * self.reach:g} mm across, {self.view}"
+
+
+def _close(text: str) -> Close:
+    """`X,Y,Z,R` or `X,Y,Z,R,VIEW`."""
+    words = text.split(",")
+    try:
+        if len(words) not in (4, 5):
+            raise ValueError
+        x, y, z, reach = (float(w) for w in words[:4])
+    except ValueError:
+        raise NoAnswer(f"a close-up is X,Y,Z,R or X,Y,Z,R,VIEW, not {text}") from None
+    view = words[4] if len(words) == 5 else "top"
+    if reach <= 0:
+        raise NoAnswer(f"a close-up's reach is over nothing: {text}")
+    if view not in VIEWS:
+        raise NoAnswer(f"no view {view}: they're {', '.join(VIEWS)}")
+    return Close((x, y, z), reach, view)
 
 
 def _poly(mesh: trimesh.Trimesh) -> Any:
@@ -53,7 +94,9 @@ def _poly(mesh: trimesh.Trimesh) -> Any:
     return data
 
 
-def _actors(data: Any, colour: tuple[float, float, float], renderer: Any) -> None:
+def _actors(
+    data: Any, colour: tuple[float, float, float], renderer: Any, opacity: float = 1.0
+) -> None:
     mapper = vtk.vtkPolyDataMapper()
     mapper.SetInputData(data)
     mapper.SetResolveCoincidentTopologyToPolygonOffset()
@@ -61,6 +104,7 @@ def _actors(data: Any, colour: tuple[float, float, float], renderer: Any) -> Non
     body.SetMapper(mapper)
     body.GetProperty().SetColor(*colour)
     body.GetProperty().SetInterpolationToFlat()
+    body.GetProperty().SetOpacity(opacity)
     renderer.AddActor(body)
     edges = vtk.vtkFeatureEdges()
     edges.SetInputData(data)
@@ -74,7 +118,7 @@ def _actors(data: Any, colour: tuple[float, float, float], renderer: Any) -> Non
     lines.SetInputConnection(edges.GetOutputPort())
     outline = vtk.vtkActor()
     outline.SetMapper(lines)
-    outline.GetProperty().SetColor(0, 0, 0)
+    outline.GetProperty().SetColor(*((0, 0, 0) if opacity == 1.0 else colour))
     outline.GetProperty().SetLineWidth(1.5)
     renderer.AddActor(outline)
 
@@ -136,7 +180,75 @@ def outline_problem(
     return None, facts
 
 
-def _render_view(parts: list[trimesh.Trimesh], view: str, size: int) -> np.ndarray:
+def projected_mask(meshes: list[trimesh.Trimesh], close: Close, size: int) -> np.ndarray:
+    """What a close-up should cover, by arithmetic: each triangle projected and filled, with no
+    renderer anywhere near it."""
+    right, top, _ = _axes(close.view)
+    centre = np.array(close.centre)
+    scale = size / (2 * close.reach)
+    mask = Image.new("L", (size, size), 0)
+    draw = ImageDraw.Draw(mask)
+    for mesh in meshes:
+        corners = np.asarray(mesh.vertices)[np.asarray(mesh.faces)] - centre
+        across = corners @ right * scale + size / 2
+        down = size / 2 - corners @ top * scale
+        seen = (
+            (across.max(axis=1) >= 0)
+            & (across.min(axis=1) <= size)
+            & (down.max(axis=1) >= 0)
+            & (down.min(axis=1) <= size)
+        )
+        for xs, ys in zip(across[seen].tolist(), down[seen].tolist(), strict=True):
+            draw.polygon(list(zip(xs, ys, strict=True)), fill=1)
+    return np.asarray(mask) > 0
+
+
+def close_problem(
+    pixels: np.ndarray, expected: np.ndarray, reach: float
+) -> tuple[str | None, dict[str, Any]]:
+    """Whether a close-up shows what the arithmetic says lies in it, away from an outline's edge,
+    where a line's width and a pixel's rounding aren't an answer either way."""
+    size = pixels.shape[0]
+    marked = (pixels[:, :, :3] < 250).any(axis=2)
+    facts: dict[str, Any] = {
+        "painted_share": round(float(marked.mean()), 4),
+        "projected_share": round(float(expected.mean()), 4),
+        "across_mm": round(2 * reach, 4),
+        "px_per_mm": round(size / (2 * reach), 2),
+    }
+    if not marked.any() and not expected.any():
+        return "nothing of the parts lies in it", facts
+    side = 2 * CLOSE_EDGE + 1
+    mask = Image.fromarray(expected.astype(np.uint8) * 255)
+    grown = np.asarray(mask.filter(ImageFilter.MaxFilter(side))) > 0
+    shrunk = np.asarray(mask.filter(ImageFilter.MinFilter(side))) > 0
+    worst = float((marked & ~grown).mean() + (~marked & shrunk).mean())
+    facts["differs"] = round(worst, 4)
+    if worst > CLOSE_SHARE:
+        return (
+            f"{worst:.1%} of the picture differs from what the mesh projects to, away from any "
+            "edge",
+            facts,
+        )
+    return None, facts
+
+
+def _stamped(pixels: np.ndarray, *lines: str) -> np.ndarray:
+    """A picture with words along its foot, once it's been checked: the check reads none of them."""
+    picture = Image.fromarray(pixels.copy())
+    draw = ImageDraw.Draw(picture)
+    for k, line in enumerate(reversed(lines)):
+        draw.text((8, picture.height - 16 * (k + 1)), line, fill=(20, 20, 20))
+    return np.asarray(picture)
+
+
+def _render_view(
+    parts: list[trimesh.Trimesh],
+    view: str,
+    size: int,
+    test_pieces: list[trimesh.Trimesh] | None = None,
+    close: Close | None = None,
+) -> np.ndarray:
     renderer = vtk.vtkRenderer()
     renderer.SetBackground(1, 1, 1)
     window = vtk.vtkRenderWindow()
@@ -145,9 +257,12 @@ def _render_view(parts: list[trimesh.Trimesh], view: str, size: int) -> np.ndarr
     window.AddRenderer(renderer)
     for k, mesh in enumerate(parts):
         _actors(_poly(mesh), COLOURS[k % len(COLOURS)], renderer)
+    # After the parts, so a see-through piece blends with what's behind it.
+    for mesh in test_pieces or []:
+        _actors(_poly(mesh), TEST_PIECE_COLOUR, renderer, TEST_PIECE_OPACITY)
     position, up = VIEWS[view]
     right, top, along = _axes(view)
-    points = np.vstack([np.asarray(m.vertices) for m in parts])
+    points = np.vstack([np.asarray(m.vertices) for m in [*parts, *(test_pieces or [])]])
     across, high = points @ right, points @ top
     # Aimed at the middle of the outline and scaled to it, so a long part isn't clipped.
     centre = (
@@ -161,8 +276,17 @@ def _render_view(parts: list[trimesh.Trimesh], view: str, size: int) -> np.ndarr
     camera.SetPosition(*(centre + 100 * np.array(position)))
     camera.SetViewUp(*up)
     renderer.ResetCamera()
+    scale = FILL * max(float(np.ptp(across)), float(np.ptp(high))) / 2
+    if close is not None:
+        # The depth isn't what a picture is aimed by: it stays the parts' own.
+        target = np.array(close.centre)
+        centre = right * (target @ right) + top * (target @ top) + along * (centre @ along)
+        scale = close.reach
+    # ResetCamera aimed it at the parts' box: back to our centre, looking the same way.
+    distance = camera.GetDistance()
     camera.SetFocalPoint(*centre)
-    camera.SetParallelScale(FILL * max(float(np.ptp(across)), float(np.ptp(high))) / 2)
+    camera.SetPosition(*(centre + along * distance))
+    camera.SetParallelScale(scale)
     renderer.ResetCameraClippingRange()
     window.Render()
     grab = vtk.vtkWindowToImageFilter()
@@ -194,6 +318,30 @@ def _section_picture(part: Part, z: float, size: int) -> np.ndarray:
     return np.asarray(picture)
 
 
+def _close_second(name: str, facts: dict[str, Any]) -> str:
+    return (
+        f"{name}: {facts['painted_share']:.1%} painted, {facts['projected_share']:.1%} by the "
+        f"mesh's triangles projected and filled, {facts.get('differs', 'n/a')} of the picture "
+        "differing away from an edge"
+    )
+
+
+def _not_both(files: list[str], pieces: list[str]) -> None:
+    both = sorted(set(files) & set(pieces))
+    if both:
+        raise NoAnswer(f"{both[0]} is named as the part and as a test piece")
+
+
+def _test_pieces(given: list[str], report: Report) -> list[trimesh.Trimesh]:
+    """What's drawn beside the part and marked as not being it. A test piece is whatever the one
+    asking says it is: nothing here can tell by looking."""
+    meshes = [m for path in given for m in (p.fine() for p in load(path).pieces())]
+    if given:
+        report.line(f"test pieces, grey, not the part: {', '.join(given)}")
+        report.numbers["test_pieces"] = list(given)
+    return meshes
+
+
 def _variants(given: list[str]) -> list[tuple[str, list[str]]]:
     """`NAME=a.step,b.step`, as (name, files), each name once."""
     found: list[tuple[str, list[str]]] = []
@@ -210,22 +358,41 @@ def _variants(given: list[str]) -> list[tuple[str, list[str]]]:
 def run_variants(args: Any, report: Report) -> None:
     """A sheet for choosing between variants: a labelled row of each one's views."""
     variants = _variants(args.variants)
+    closes = [_close(text) for text in args.close]
+    for _, files in variants:
+        _not_both(files, args.test_pieces)
+    pieces = _test_pieces(args.test_pieces, report)
+    marks = (TEST_PIECE_MARK,) if pieces else ()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     size = args.size
     rows = len(variants)
-    sheet = Image.new("RGB", (len(args.views) * size, rows * size), "white")
+    sheet = Image.new("RGB", ((len(args.views) + len(closes)) * size, rows * size), "white")
     draw = ImageDraw.Draw(sheet)
     problems = []
     views: dict[str, Any] = {}
     for row, (name, files) in enumerate(variants):
         parts = [load(path) for path in files]
         meshes = [m for part in parts for m in (p.fine() for p in part.pieces())]
+        for k, close in enumerate(closes):
+            column = len(args.views) + k
+            drawn = _render_view(meshes, close.view, size, pieces, close)
+            problem, facts = close_problem(
+                drawn, projected_mask([*meshes, *pieces], close, size), close.reach
+            )
+            views[f"{name} close {k + 1}"] = facts
+            sheet.paste(Image.fromarray(_stamped(drawn, *marks)), (column * size, row * size))
+            draw.text((column * size + 8, row * size + 8), f"{name}: {close.label}", fill=(20,) * 3)
+            report.second(_close_second(f"{name} close {k + 1}", facts))
+            if problem:
+                problems.append(f"{name} close {k + 1}: {problem}")
         for column, view in enumerate(args.views):
-            pixels = _render_view(meshes, view, size)
-            problem, facts = outline_problem(pixels, projected_shape(meshes, view), size)
+            pixels = _render_view(meshes, view, size, pieces)
+            problem, facts = outline_problem(
+                pixels, projected_shape([*meshes, *pieces], view), size
+            )
             views[f"{name} {view}"] = facts
-            sheet.paste(Image.fromarray(pixels), (column * size, row * size))
+            sheet.paste(Image.fromarray(_stamped(pixels, *marks)), (column * size, row * size))
             draw.text((column * size + 8, row * size + 8), f"{name}: {view}", fill=(20, 20, 20))
             report.second(
                 f"{name} {view}: the mesh projects to {facts['projected_mm'][0]}x"
@@ -254,10 +421,15 @@ def run(args: Any, report: Report) -> None:
         return
     if not args.files:
         raise NoAnswer("name a file to draw")
+    _not_both(args.files, args.test_pieces)
+    closes = [_close(text) for text in args.close]
     parts = [load(path) for path in args.files]
     for part in parts:
         report.notes += part.notes
     meshes = [m for part in parts for m in (p.fine() for p in part.pieces())]
+    pieces = _test_pieces(args.test_pieces, report)
+    drawn_all = [*meshes, *pieces]
+    marks = (TEST_PIECE_MARK,) if pieces else ()
     names = slug("+".join(Path(f).stem for f in args.files))[:60]
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -265,13 +437,14 @@ def run(args: Any, report: Report) -> None:
     views: dict[str, Any] = {}
     problems = []
     for view in args.views:
-        pixels = _render_view(meshes, view, args.size)
-        problem, facts = outline_problem(pixels, projected_shape(meshes, view), args.size)
+        pixels = _render_view(meshes, view, args.size, pieces)
+        problem, facts = outline_problem(pixels, projected_shape(drawn_all, view), args.size)
+        pixels_marked = _stamped(pixels, *marks)
         path = out / f"{names}-{view}.png"
-        Image.fromarray(pixels).save(path)
+        Image.fromarray(pixels_marked).save(path)
         report.wrote(str(path))
         views[view] = facts
-        pictures.append((view, pixels))
+        pictures.append((view, pixels_marked))
         report.line(
             f"{view}: {path}, painted {facts['painted_share']:.1%}, "
             f"{facts['painted_px'][0]}x{facts['painted_px'][1]} px"
@@ -297,6 +470,23 @@ def run(args: Any, report: Report) -> None:
         if abs(drawn - area) > max(0.05 * area, 5 / scale**2):
             problems.append(f"section z={z:g}: {drawn:.1f} mm² drawn, {area:.1f} mm² in the mesh")
         pictures.append((f"z={z:g}", pixels))
+    close_ups = []
+    for k, close in enumerate(closes):
+        pixels = _render_view(meshes, close.view, args.size, pieces, close)
+        problem, facts = close_problem(
+            pixels, projected_mask(drawn_all, close, args.size), close.reach
+        )
+        marked = _stamped(pixels, close.label, *marks)
+        path = out / f"{names}-close-{k + 1}.png"
+        Image.fromarray(marked).save(path)
+        report.wrote(str(path))
+        close_ups.append({"at": list(close.centre), "view": close.view, "file": str(path), **facts})
+        pictures.append((close.label, marked))
+        report.line(f"close {k + 1}: {path}, {close.label}, {facts['px_per_mm']} px per mm")
+        report.second(_close_second(f"close {k + 1}", facts))
+        if problem:
+            problems.append(f"close {k + 1}: {problem}")
+    report.numbers["close_ups"] = close_ups
     report.numbers["views"] = views
     if len(pictures) > 1:
         sheet = _sheet(pictures, args.size)

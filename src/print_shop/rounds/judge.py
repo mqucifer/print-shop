@@ -26,6 +26,9 @@ from print_shop.rounds.paths import copy_plain, inside, walk_plain
 from print_shop.rounds.tools import SAVED, recorded
 
 REFERENCES = "references"
+#: Who made a pick: `pick.json`'s `by`, the Sponsor or a named stand-in.
+SPONSOR = "sponsor"
+STAND_IN = "stand-in:"
 TEXT_KEPT = 200_000
 
 
@@ -37,10 +40,11 @@ class Judgement:
     tail: str
     readings: list[Reading] = field(default_factory=list)
     timed_out: bool = False
+    part_missing: list[str] = field(default_factory=list)
 
     @property
     def met(self) -> bool:
-        return self.code == 0 and all(r.passed for r in self.readings)
+        return self.code == 0 and not self.part_missing and all(r.passed for r in self.readings)
 
     def plain(self) -> dict[str, Any]:
         return {
@@ -49,6 +53,7 @@ class Judgement:
             "seconds": self.seconds,
             "timed_out": self.timed_out,
             "met": self.met,
+            "part_missing": self.part_missing,
             "tail": self.tail,
             "readings": [
                 {k: v for k, v in r.__dict__.items() if k not in ("text", "record")}
@@ -104,13 +109,18 @@ def read_need(box: Box, need: Need, judged: Path, kept: Path) -> Reading:
 
 
 def eye_reading(need: Need, picks: dict[str, dict[str, Any]]) -> Reading:
-    """An eye need passes on the Sponsor's pick, and on nothing else."""
+    """An eye need passes on a pick, and on nothing else. A stand-in's passes it too, so a run can
+    be proved with no Sponsor there, and its reading says who it was."""
     pick = picks.get(need.id)
     if pick is None:
         why = f"this is for the Sponsor's eye ({need.look_for}): `ask`, naming it as `need`"
         return Reading(need.id, "eye", False, why)
     reason = pick.get("reason")
-    return Reading(need.id, "eye", True, f"the Sponsor picked {pick['pick']}: {reason}")
+    if pick.get("by") == SPONSOR:
+        who = "the Sponsor"
+    else:
+        who = f"a stand-in for the Sponsor ({str(pick.get('by'))[len(STAND_IN) :].strip()})"
+    return Reading(need.id, "eye", True, f"{who} picked {pick['pick']}: {reason}")
 
 
 def check(
@@ -120,10 +130,15 @@ def check(
     needs: list[Need],
     picks: dict[str, dict[str, Any]],
     round_dir: Path,
+    part: list[str] | None = None,
 ) -> Judgement:
-    """`done`, as the harness runs it. A script that fails leaves every bench need unread."""
+    """`done`, as the harness runs it. A script that fails leaves every bench need unread, and a
+    part a clean run didn't leave isn't met, whatever the needs read."""
     judged = round_dir / "judged"
     judgement = run_clean(box, work, script, judged)
+    judgement.part_missing = [
+        f for f in part or [] if not (judged / f).is_file() or inside(judged, f) is None
+    ]
     (round_dir / "run.txt").write_text(judgement.tail, encoding="utf-8")
     for need in needs:
         if need.by == "eye":

@@ -19,7 +19,18 @@ from typing import Any
 
 SOURCES = ("request", "answer", "reference", "derived", "chosen")
 QUOTED = ("request", "answer")
-COMMANDS = ("info", "clearance", "readback", "rays", "panes", "thin", "pause", "params", "render")
+COMMANDS = (
+    "info",
+    "clearance",
+    "readback",
+    "rays",
+    "panes",
+    "capture",
+    "thin",
+    "pause",
+    "params",
+    "render",
+)
 #: Verdicts that are no answer: they never pass a need, whatever it says.
 UNSURE = ("DISAGREE", "NO ANSWER")
 GOOD = ("OK", "CLEAR", "TOUCHING")

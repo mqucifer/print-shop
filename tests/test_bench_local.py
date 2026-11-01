@@ -40,6 +40,9 @@ def answers(tmp_path_factory: pytest.TempPathFactory) -> dict[str, dict[str, Any
         "info": ["info", "frame.step"],
         "panes": ["panes", "frame.step", "--pocket-z", str(local["pocket_z"]),
                   "--lip-z", str(local["lip_z"]), "--clearance", str(local["play"])],
+        "capture": ["capture", "frame.step", "--pocket-z", str(local["pocket_z"]),
+                    "--clearance", str(local["play"]),
+                    "--pane-thickness", str(local["pane_thickness"])],
         "thin": ["thin", "frame.step"],
         "render": ["render", "frame.step", "--views", "top", "iso"],
     }.items():  # fmt: skip
@@ -78,6 +81,20 @@ def test_the_no_lip_edge_reads_the_same_by_sections_and_rays(
 ) -> None:
     for pane in answers["panes"]["numbers"]["panes"]:
         assert pane["no_lip_rays_mm"] == pytest.approx(pane["no_lip_mm"], abs=1.0)
+
+
+def test_capture_gives_an_answer_with_its_two_methods_agreeing(
+    answers: dict[str, dict[str, Any]],
+) -> None:
+    """Whether this frame holds its panes is the Sponsor's to judge from the figures, off this
+    repository. Here it's that the methods agree, and that the panes repeat as the design does."""
+    capture = answers["capture"]
+    assert capture["verdict"] not in ("DISAGREE", "NO ANSWER"), capture["why"]
+    panes = capture["numbers"]["panes"]
+    assert panes
+    for way in ("up", "down"):
+        lips = [p[way]["least_lip_mm"] for p in panes if p[way]["least_lip_mm"] is not None]
+        assert not lips or max(lips) - min(lips) < 0.05, way
 
 
 def test_the_renders_are_the_shape_the_mesh_projects_to(answers: dict[str, dict[str, Any]]) -> None:

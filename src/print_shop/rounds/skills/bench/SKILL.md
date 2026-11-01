@@ -29,10 +29,11 @@ The first line is the verdict. Then come the numbers, each with how it was read,
 | `readback BEFORE AFTER [--cutter C] [--expect-delta V] [--min-share S]` | volume before and after, and how much of a cutter was in the body |
 | `rays FILE --centre X,Y,Z [--axis A] [--d D] [--depth H]` | a cut feature measured from its axis: rays that hit nothing, the distance across, the wall beyond, the floor |
 | `panes FRAME --pocket-z Z [--lip-z Z] --clearance C [--pane-thickness T]` | a pane from each opening, written to `panes/FRAME/`, its fit, and the edge with no lip |
+| `capture FRAME --pocket-z Z --clearance C --pane-thickness T [--pane-floor-z F] [--min-lip M] [--layer L]` | whether each pane is held by shape on both faces, wherever its play lets it sit: the lip, how thick, where it's thin, and whether it can slide or swing out. Nothing depends on a bond |
 | `thin FILE [--nozzle N] [--layer L] [--min-body V]` | features under the nozzle's width, floors under a layer, and tiny pieces |
 | `pause FRAME --pocket-z Z --pane-thickness T [--layer L] [--first-layer F]` | the layer to pause after, and the room over the pane |
-| `render FILE... [--views iso top bottom front side] [--section Z...]` | pictures from the standard views, and a sheet of them, which come to you |
-| `render --variant A=a.step --variant B=b.step,c.step [--views ...]` | a sheet with a labelled row for each variant, to compare them |
+| `render FILE... [--views iso top bottom front side] [--section Z...] [--close X,Y,Z,R[,VIEW]]... [--test-piece FILE]...` | pictures from the standard views, and a sheet of them, which come to you. A close-up is R mm all round a point, along a view, for what's too fine to judge whole. A test piece is drawn see-through in grey, and marked as not the part |
+| `render --variant A=a.step --variant B=b.step,c.step [--views ...] [--close ...]... [--test-piece FILE]...` | a sheet with a labelled row for each variant, to compare them |
 | `params SCRIPT --set NAME=VALUE` | which dimensions, volumes and pieces moved when one parameter changed |
 
 `params` reads a number assigned once at the top level of your script (`WALL = 2.0`), and runs the script in a scratch folder, so your files aren't touched. A parameter that moves nothing is `NO CHANGE`. Top-level numbers are what let a later round change one thing and read what moved.

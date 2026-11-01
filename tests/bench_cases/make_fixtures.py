@@ -184,6 +184,76 @@ def frames() -> None:
     save(open_top, "frame-open")
 
 
+def pane_frame(window_up: Any, window_down: Any, name: str) -> None:
+    """A 40 mm pocket from z=1 to z=3 in a plate 4 tall, with a window cut each way out of it."""
+    plate = box(-30, 30, -30, 30, 0, 4).cut(box(-20, 20, -20, 20, 1, 3))
+    if window_up is not None:
+        plate = plate.cut(window_up)
+    if window_down is not None:
+        plate = plate.cut(window_down)
+    save(plate, name)
+
+
+def captured() -> None:
+    """Panes held by shape, and each way one isn't. Every lip is known by arithmetic."""
+    up = box(-18, 18, -18, 18, 3, 4)
+    down = box(-18, 18, -18, 18, 0, 1)
+    pane_frame(up, down, "held")
+    # Lip 0.05 mm in the pocket, so a pane with 0.1 mm of play falls straight through.
+    pane_frame(box(-19.95, 19.95, -19.95, 19.95, 3, 4), down, "held-through")
+    # Centred, a pane catches 0.1 mm of lip on one side. Moved by its play, it comes straight out.
+    pane_frame(box(-19.8, 20.5, -20, 20, 3, 4), down, "held-shifted")
+    # A lip along one edge only, and nothing else above: it swings out about that edge.
+    pane_frame(box(-25, 25, -25, 18, 3, 4), down, "held-hinge")
+    # A window off to one side: the pane has 1.9 mm of lip, and 0.1 mm along one edge.
+    pane_frame(box(-18, 19.8, -18, 18, 3, 4), down, "held-thin")
+    # A lip 0.1 mm thick, under a layer: the pocket's ceiling at 3.9.
+    thin_lip = box(-30, 30, -30, 30, 0, 4).cut(box(-20, 20, -20, 20, 1, 3.9))
+    save(thin_lip.cut(up).cut(down), "held-thin-lip")
+    # A lip that slopes back at 45 degrees, as a lip printed with no support does.
+    sloped = (
+        cq.Workplane("XY")
+        .workplane(offset=3)
+        .rect(40, 40)
+        .workplane(offset=1)
+        .rect(38, 38)
+        .loft(combine=True)
+    )
+    slope_frame = box(-30, 30, -30, 30, 0, 4).cut(box(-20, 20, -20, 20, 1, 3)).cut(sloped).cut(down)
+    save(slope_frame, "held-sloped")
+    # Round, in a mesh too, since a real pane isn't a square.
+    round_frame = (
+        cq.Workplane("XY")
+        .circle(30)
+        .extrude(4)
+        .cut(cq.Workplane("XY").workplane(offset=1).circle(20).extrude(2))
+        .cut(cq.Workplane("XY").workplane(offset=3).circle(18).extrude(1))
+        .cut(cq.Workplane("XY").circle(18).extrude(1))
+    )
+    save(round_frame, "held-round")
+    round_frame.val().exportStl("held-round.stl", tolerance=0.002)
+    # Two pockets under one ceiling, the second with its floor 0.5 mm higher.
+    floors = (
+        box(-50, 50, -30, 30, 0, 4)
+        .cut(box(-45, -5, -20, 20, 1, 3))
+        .cut(box(5, 45, -20, 20, 1.5, 3))
+        .cut(box(-43, -7, -18, 18, 3, 4))
+        .cut(box(7, 43, -18, 18, 3, 4))
+        .cut(box(-43, -7, -18, 18, 0, 1))
+        .cut(box(7, 43, -18, 18, 0, 1.5))
+    )
+    save(floors, "frame-floors")
+    # A pocket the first layer closes: a 0.1 mm slot on the plate, in a tall part.
+    first = box(-30, 30, -30, 30, 0, 8).cut(box(-20, 20, -20, 20, 0, 0.1))
+    save(first, "frame-first")
+
+
+def closes() -> None:
+    """A plate with a 3 mm hole through it, a part to judge close up. Its test piece sits apart."""
+    save(cq.Workplane("XY").box(100, 100, 4).faces(">Z").workplane().hole(3), "plate-3mm")
+    save(box(60, 80, -10, 10, -2, 2), "plate-test-piece")
+
+
 def thin_parts() -> None:
     base = box(0, 20, 0, 20, 0, 2)
     save(base.union(box(5, 15, 9.85, 10.15, 2, 8)), "wall-0p3")
@@ -270,6 +340,8 @@ if __name__ == "__main__":
     pockets()
     volumes()
     frames()
+    captured()
+    closes()
     thin_parts()
     designs()
     print("made")

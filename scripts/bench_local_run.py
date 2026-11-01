@@ -80,6 +80,8 @@ def triforce(out: Path) -> int:
             [*panes_args, "--clearance", play, "--pane-thickness", pane],
             ["thin", "frame.step", "--samples", "8000"],
             ["pause", "frame.step", "--pocket-z", pocket, "--pane-thickness", pane],
+            ["capture", "frame.step", "--pocket-z", pocket, "--clearance", play,
+             "--pane-thickness", pane],
             ["render", "frame.step", "--section", "1", pocket, lip],
         )
     ]
