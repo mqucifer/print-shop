@@ -13,7 +13,7 @@ the bench image, from `cup-1`'s request, its references and its scripts as each 
 Every name it uses, of a group, a file, a colour or a need, is read from those records as it runs,
 so nothing a run or a person wrote there is in this file. An eye need is answered by a stand-in's
 pick, which says so. The new run is kept, as the figures cited for it come from it:
-`~/print-shop/m18-truth-proof/` unless `M18_PROOF` names another folder, off the repository and
+`~/print-shop/proofs/m18-truth/` unless `M18_PROOF` names another folder, off the repository and
 outside the runs.
 """
 
@@ -36,7 +36,7 @@ from tests.rounds_fakes import Scripted, tool
 pytestmark = [pytest.mark.bench, pytest.mark.bench_local]
 
 RUN = Path("~/print-shop/design-runs/cup-1").expanduser()
-PROOF = Path(os.environ.get("M18_PROOF", "~/print-shop/m18-truth-proof")).expanduser()
+PROOF = Path(os.environ.get("M18_PROOF", "~/print-shop/proofs/m18-truth")).expanduser()
 #: A pane's name in the folder made by hand: its file's stem and number, its label, its colour.
 PANE = re.compile(r"([a-z]+_)(\d+)-(.+)-([a-z]+)\.step")
 STAND_IN = "stand-in: m18-truth, a Claude builder, reading a run back"
