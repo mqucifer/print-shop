@@ -29,7 +29,7 @@ import uuid
 from collections import Counter
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -37,10 +37,21 @@ from print_shop.bench import colours as colours_module
 from print_shop.bench import host
 from print_shop.bench import overlap as overlap_module
 from print_shop.bench import usage as usage_module
-from print_shop.rounds import judge, needs, paths, prompt, records, review, skills, transcript
+from print_shop.rounds import (
+    after_action,
+    judge,
+    lessons,
+    needs,
+    paths,
+    prompt,
+    records,
+    review,
+    skills,
+    transcript,
+)
 from print_shop.rounds.box import Box, Gone, Ran
 from print_shop.rounds.judge import SPONSOR, STAND_IN
-from print_shop.rounds.ledger import DesignLedger
+from print_shop.rounds.ledger import DesignLedger, now
 from print_shop.rounds.needs import GEOMETRY, UNSURE, Need, Reading
 from print_shop.rounds.send import ALIAS
 from print_shop.rounds.session import Ending, Judged, Limits, Session
@@ -286,6 +297,7 @@ class Run:
             alias=alias,
             limits=run.limits.recorded(),
         )
+        run._give_lessons()
         run.save()
         run._listen()
         run.session.begin(
@@ -293,6 +305,16 @@ class Run:
             {"role": "user", "content": run._start_text()},
         )
         return run
+
+    def _give_lessons(self) -> None:
+        """Every lesson about how to build a reviewer kept, into the first message, and a row of
+        `run_lessons` for each. `lessons.md` holds them as given, so a conversation started again
+        from the record has the same."""
+        kept = lessons.to_give(self.ledger)
+        if not kept:
+            return
+        (self.folder / "lessons.md").write_text(lessons.block(kept) + "\n", encoding="utf-8")
+        lessons.give(self.ledger, self.state.name, kept)
 
     def _listen(self) -> None:
         """Each event from here on goes to the ledger as it's kept."""
@@ -392,6 +414,122 @@ class Run:
         self.state.stop = None
         said = {"approval": stop["n"], "by": by, "note": note.strip()}
         return self._close(self.session._ended(Ending(APPROVED, said)))
+
+    # The after-action review, after the approval
+
+    def after_action_review(self) -> Ending:
+        """One more turn on this session, after a person's approval: the model writes its run's
+        lessons and scores those it was given (`after_action.py`). The run is approved whatever
+        happens here. How it ended is a row of `after_actions`, and so is a review that couldn't
+        begin."""
+        approval = self._reviewable()
+        n, first = self._after_action_begun(approval)
+        decided = self.ledger.rows(
+            "SELECT by, note FROM decisions WHERE run=? AND approval=? AND decision='approved' "
+            "ORDER BY id DESC LIMIT 1",
+            self.state.name,
+            approval,
+        )
+        if first and decided:
+            by, note = str(decided[0]["by"]), str(decided[0]["note"] or "")
+            said = f"{picked_by_words(by)} approved the part."
+            if note:
+                said += f" Their note:\n\n{note}"
+            self._relay("approved", by, note, said)
+        self.tools.only(after_action.TOOLS, after_action.spec())
+        self.session.say(after_action.ask(self.ledger, self.state.name, self.session.requests))
+        limits = self.session.limits
+        self.session.limits = replace(
+            limits, calls=self.session.calls + self.limits.after_action_calls
+        )
+        try:
+            ending = self.session.go()
+        except KeyboardInterrupt:
+            ending = self.session._ended(Ending("stopped", {"by": "signal"}))
+        except Gone as gone:
+            ending = self.session._ended(Ending("container_failed", {"error": str(gone)[:400]}))
+        except Exception as exc:  # noqa: BLE001 - it ends named, and the run stays approved
+            fault = self.folder / f"after-action-fault-{n}.txt"
+            fault.write_text(traceback.format_exc(), encoding="utf-8")
+            fell = {"error": type(exc).__name__, "trace": fault.name}
+            ending = self.session._ended(Ending("harness_fault", fell))
+        finally:
+            self.session.limits = limits
+        self._after_action_ended(n, ending)
+        return ending
+
+    def after_action_not_begun(self, why: str) -> Ending:
+        """A review that couldn't begin, such as with no key: said, and the run stays approved."""
+        approval = self._reviewable()
+        n, _ = self._after_action_begun(approval)
+        ending = Ending("not_begun", {"why": why[:400]})
+        self._after_action_ended(n, ending)
+        return ending
+
+    def _reviewable(self) -> int:
+        if (self.state.ending or {}).get("name") != APPROVED:
+            raise Refused("the after-action review comes after a person's approval")
+        approval = int((self.state.ending or {}).get("said", {}).get("approval") or 0)
+        if self.ledger.rows(
+            "SELECT 1 FROM after_actions WHERE run=? AND approval=? AND ended=?",
+            self.state.name,
+            approval,
+            after_action.REVIEWED,
+        ):
+            raise Refused(
+                f"approval {approval}'s after-action review is in: scripts/rounds.py lessons "
+                f"{self.state.name}"
+            )
+        return approval
+
+    def _after_action_begun(self, approval: int) -> tuple[int, bool]:
+        """Its row, and whether it's this approval's first try."""
+        tried = self.ledger.rows(
+            "SELECT n, approval FROM after_actions WHERE run=? ORDER BY n", self.state.name
+        )
+        n = len(tried) + 1
+        commit, dirty = repository_version()
+        self.state.harness.append(f"{commit}{'+changes' if dirty else ''}")
+        self.ledger.add(
+            "after_actions",
+            run=self.state.name,
+            n=n,
+            approval=approval,
+            begun_at=now(),
+            first_call=self.session.requests + 1,
+            harness_commit=self.state.harness[-1],
+        )
+        self.session._record("after_action", n=n, approval=approval, commit=self.state.harness[-1])
+        self.save()
+        return n, not any(int(t["approval"]) == approval for t in tried)
+
+    def _after_action_ended(self, n: int, ending: Ending) -> None:
+        self.ledger.change(
+            "UPDATE after_actions SET ended=?, ended_said=?, ended_at=?, last_call=? "
+            "WHERE run=? AND n=?",
+            ending.name,
+            json.dumps(ending.said, sort_keys=True),
+            now(),
+            self.session.requests,
+            self.state.name,
+            n,
+        )
+        # Its calls count, and the run's ending stays the person's approval.
+        self.ledger.change(
+            "UPDATE runs SET calls=?, usage=?, outcomes=? WHERE run=?",
+            self.session.calls,
+            json.dumps(dict(self.session.usage), sort_keys=True),
+            json.dumps(dict(self.session.outcomes), sort_keys=True),
+            self.state.name,
+        )
+        self.save()
+
+    def after_action(self, args: dict[str, Any]) -> Judged:
+        """The tool: refused before the approval, and held to the ledger after it."""
+        if (self.state.ending or {}).get("name") != APPROVED:
+            reply = "The after-action review comes after a person's approval."
+            return Judged(after_action.NAME, "failed", reply, "not_approved")
+        return after_action.take(self.ledger, self.state.name, args, self.session.requests)
 
     def send_back(self, by: str, note: str, reopen_needs: bool = False) -> None:
         """A person's no, with what's wrong, at the stop or by hand after approving it. It goes on
@@ -553,7 +691,9 @@ class Run:
             if p.is_file() and not p.is_symlink()
         )
         request = (self.folder / "request.md").read_text(encoding="utf-8")
-        return prompt.start(request, given, skills.start_line())
+        kept = self.folder / "lessons.md"
+        given_lessons = kept.read_text(encoding="utf-8") if kept.is_file() else ""
+        return prompt.start(request, given, skills.start_line(), given_lessons)
 
     def save(self) -> None:
         _write_atomic(self.folder / "state.json", json.dumps(asdict(self.state), indent=1))

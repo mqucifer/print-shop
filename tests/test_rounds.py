@@ -101,6 +101,9 @@ class Desk:
     def blocked(self, args: dict[str, Any]) -> Judged:
         return Judged("blocked", "ok", "", ending=Ending("blocked", {}))
 
+    def after_action(self, args: dict[str, Any]) -> Judged:
+        return Judged("after_action", "ok", "", ending=Ending("reviewed", {}))
+
     def bench_said(self, argv: list[str], ran: Ran, record: dict[str, Any] | None) -> None:
         self.bench.append(argv)
 

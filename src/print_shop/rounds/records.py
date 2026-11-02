@@ -151,6 +151,10 @@ class Recorder:
     def _on_resumed(self, event: dict[str, Any]) -> None:
         self._segment("resume", event.get("t"), self.requests + 1, event.get("commit"))
 
+    def _on_after_action(self, event: dict[str, Any]) -> None:
+        """The after-action review, after the approval: a process of its own."""
+        self._segment("after_action", event.get("t"), self.requests + 1, event.get("commit"))
+
     def _on_ended(self, event: dict[str, Any]) -> None:
         self._row(
             "stop",
