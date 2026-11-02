@@ -270,6 +270,12 @@ def thin_parts() -> None:
     # A floor thinner than a layer.
     floor = box(0, 20, 0, 20, 0, 5).cut(box(2, 18, 2, 18, 0.1, 5))
     save(floor, "floor-0p1")
+    # Two good bodies, and one.
+    save(box(0, 20, 0, 20, 0, 5), "one-body")
+    save(
+        cq.Workplane(obj=cq.Compound.makeCompound([base.val(), box(30, 50, 0, 20, 0, 2).val()])),
+        "two-bodies",
+    )
     # A body far too small to print, beside a good one.
     save(
         cq.Workplane(

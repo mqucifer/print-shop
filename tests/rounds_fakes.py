@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -14,6 +15,16 @@ def tool(name: str, /, **args: Any) -> dict[str, Any]:
 def raw(name: str, arguments: str) -> dict[str, Any]:
     """A tool call whose arguments are sent exactly as given."""
     return {"name": name, "raw": arguments}
+
+
+@dataclass
+class Spoken:
+    """A turn with its reasoning, its finish or its usage written out as well."""
+
+    calls: Any = ""
+    reasoning: str = ""
+    finish: str = "stop"
+    usage: dict[str, int] = field(default_factory=dict)
 
 
 class Scripted:
@@ -36,6 +47,13 @@ class Scripted:
         turn = self.turns.pop(0)
         n = len(self.bodies)
         message: dict[str, Any] = {"role": "assistant", "reasoning_content": f"thinking {n}"}
+        finish = "stop"
+        used = {"prompt_tokens": self.prompt_tokens, "completion_tokens": 10}
+        if isinstance(turn, Spoken):
+            message["reasoning_content"] = turn.reasoning or message["reasoning_content"]
+            finish = turn.finish
+            used = {**used, **turn.usage}
+            turn = turn.calls
         if isinstance(turn, str):
             message["content"] = turn
         else:
@@ -53,6 +71,12 @@ class Scripted:
             ]
         return {
             "id": f"response-{n}",
-            "choices": [{"message": message, "finish_reason": "stop"}],
-            "usage": {"prompt_tokens": self.prompt_tokens, "completion_tokens": 10},
+            "choices": [{"message": message, "finish_reason": finish}],
+            "usage": used,
         }
+
+
+def stream_of(*chunks: dict[str, Any]) -> bytes:
+    """A streamed answer, as LiteLLM sends one."""
+    lines = [f"data: {json.dumps(chunk)}\n\n" for chunk in chunks]
+    return "".join([*lines, "data: [DONE]\n\n"]).encode()

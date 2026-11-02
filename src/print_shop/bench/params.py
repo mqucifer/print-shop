@@ -9,6 +9,10 @@ with every figure staying the same. The run with nothing changed is the control:
 output moves on its own, what moved can't be put down to the parameter.
 
 A parameter is a number assigned once at the top level of the script (`BaseCircle = 20.0`).
+
+A parameter that leaves pieces behind reads `PARTIAL`, not `OK`: a need saying it moves every piece
+passed with one piece moved of several. `--max-left` says how many may stay, for a parameter that's
+meant to drive only some of them.
 """
 
 from __future__ import annotations
@@ -322,6 +326,7 @@ def run(args: Any, report: Report) -> None:
     total = sum(r.get("symmetric_mm3", 0.0) for pieces in rows.values() for r in pieces)
     report.fact("pieces_moved", len(moved))
     report.fact("pieces_not_moved", len(still))
+    report.numbers["pieces_left"] = still[:50]
     report.second(f"the meshes' symmetric difference over all pieces: {total:.3f} mm³")
     label = f"{name.strip()} {old:g} to {new:g}"
     if differs:
@@ -329,9 +334,13 @@ def run(args: Any, report: Report) -> None:
     elif not moved:
         report.verdict("NO CHANGE", f"{label} moved nothing: this parameter drives nothing")
     elif still:
-        report.verdict(
-            "OK",
-            f"{label} moved {len(moved)} piece(s), and {len(still)} didn't: {', '.join(still[:8])}",
+        said = (
+            f"{label} moved {len(moved)} piece(s), and {len(still)} didn't: {', '.join(still[:8])}"
         )
+        if len(still) > args.max_left:
+            limit = f"{args.max_left} may" if args.max_left else "none may"
+            report.verdict("PARTIAL", f"{said}. Pieces are left behind, and {limit} stay")
+        else:
+            report.verdict("OK", f"{said}, within --max-left {args.max_left}")
     else:
         report.verdict("OK", f"{label} moved all {len(moved)} piece(s)")

@@ -27,6 +27,8 @@ MAX_PATH = 200
 MADE = ("bench-out", "renders", "panes", ".pictures", "record", "__pycache__")
 #: What counts as text for a round's diff.
 TEXT = (".py", ".md", ".txt", ".json", ".csv", ".yaml", ".yml", ".toml")
+#: What's geometry, for what a pick saw and what a clean run left.
+HASHED = (".step", ".stp", ".stl", ".brep")
 #: A file bigger than this is named in a diff, not shown.
 DIFF_BYTES = 1_000_000
 
@@ -146,6 +148,24 @@ def snapshot(directory: Path) -> dict[str, str]:
             for chunk in iter(lambda: fh.read(1 << 20), b""):
                 digest.update(chunk)
         found[str(name)] = digest.hexdigest()
+    return found
+
+
+def content_hash(name: str, data: bytes) -> str:
+    """What a file holds, by its hash. A STEP file's header names the second it was written, so the
+    same part written twice differs in its bytes: for those, only its `DATA` counts."""
+    if PurePosixPath(name).suffix.lower() in (".step", ".stp"):
+        at = data.find(b"\nDATA;")
+        data = data[at:] if at >= 0 else data
+    return hashlib.sha256(data).hexdigest()
+
+
+def geometry_hashes(directory: Path) -> dict[str, str]:
+    """Each piece of geometry under a folder, by what it holds: what a pick is held to."""
+    found: dict[str, str] = {}
+    for name in walk_plain(directory):
+        if name.suffix.lower() in HASHED:
+            found[str(name)] = content_hash(str(name), read_bytes_inside(directory, str(name)))
     return found
 
 

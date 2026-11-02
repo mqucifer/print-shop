@@ -9,6 +9,10 @@ its own second check.
 
 What's kept for a round: the run's output, what the script wrote, and each reading's text and
 numbers.
+
+An eye need's pick holds only for what it saw. The sheet's files are held by what they contain, and
+the clean run has to leave the same, with some of it in the `part`. Otherwise the need is asked
+again, since a pick on an older design says nothing of this one.
 """
 
 from __future__ import annotations
@@ -22,7 +26,7 @@ from typing import Any
 
 from print_shop.rounds.box import Box
 from print_shop.rounds.needs import GEOMETRY, Need, Reading, judge
-from print_shop.rounds.paths import copy_plain, inside, walk_plain
+from print_shop.rounds.paths import copy_plain, geometry_hashes, inside, walk_plain
 from print_shop.rounds.tools import SAVED, recorded
 
 REFERENCES = "references"
@@ -41,6 +45,8 @@ class Judgement:
     readings: list[Reading] = field(default_factory=list)
     timed_out: bool = False
     part_missing: list[str] = field(default_factory=list)
+    # What the clean run left, each piece of geometry by what it holds.
+    left: dict[str, str] = field(default_factory=dict)
 
     @property
     def met(self) -> bool:
@@ -54,6 +60,7 @@ class Judgement:
             "timed_out": self.timed_out,
             "met": self.met,
             "part_missing": self.part_missing,
+            "left": self.left,
             "tail": self.tail,
             "readings": [
                 {k: v for k, v in r.__dict__.items() if k not in ("text", "record")}
@@ -108,9 +115,30 @@ def read_need(box: Box, need: Need, judged: Path, kept: Path) -> Reading:
     return reading
 
 
-def eye_reading(need: Need, picks: dict[str, dict[str, Any]]) -> Reading:
-    """An eye need passes on a pick, and on nothing else. A stand-in's passes it too, so a run can
-    be proved with no Sponsor there, and its reading says who it was."""
+def not_what_it_saw(
+    pick: dict[str, Any], left: dict[str, str], part: list[str] | None
+) -> str | None:
+    """Why a pick doesn't hold for what a clean run left, or None if it does."""
+    seen = pick.get("files")
+    if not seen:
+        return "it holds no record of the files on its sheet"
+    now = set(left.values())
+    changed = sorted(name for name, sha in seen.items() if sha not in now)
+    if changed:
+        return f"{', '.join(changed)} changed since, or a clean run didn't leave it"
+    if part and not set(seen.values()) & {left.get(name) for name in part}:
+        return f"none of `part` ({', '.join(part)}) was on its sheet"
+    return None
+
+
+def eye_reading(
+    need: Need,
+    picks: dict[str, dict[str, Any]],
+    left: dict[str, str],
+    part: list[str] | None = None,
+) -> Reading:
+    """An eye need passes on a pick that saw these files, and on nothing else. A stand-in's passes
+    it too, so a run can be proved with no Sponsor there, and its reading says who it was."""
     pick = picks.get(need.id)
     if pick is None:
         why = f"this is for the Sponsor's eye ({need.look_for}): `ask`, naming it as `need`"
@@ -120,6 +148,13 @@ def eye_reading(need: Need, picks: dict[str, dict[str, Any]]) -> Reading:
         who = "the Sponsor"
     else:
         who = f"a stand-in for the Sponsor ({str(pick.get('by'))[len(STAND_IN) :].strip()})"
+    stale = not_what_it_saw(pick, left, part)
+    if stale is not None:
+        why = (
+            f"{who} picked {pick['pick']} at ask {pick.get('ask')}, and that pick doesn't hold: "
+            f"{stale}. It's asked again: `ask`, naming it as `need`"
+        )
+        return Reading(need.id, "eye", False, why)
     return Reading(need.id, "eye", True, f"{who} picked {pick['pick']}: {reason}")
 
 
@@ -140,9 +175,11 @@ def check(
         f for f in part or [] if not (judged / f).is_file() or inside(judged, f) is None
     ]
     (round_dir / "run.txt").write_text(judgement.tail, encoding="utf-8")
+    # Before any check runs, as `panes` writes geometry of its own.
+    judgement.left = geometry_hashes(judged)
     for need in needs:
         if need.by == "eye":
-            judgement.readings.append(eye_reading(need, picks))
+            judgement.readings.append(eye_reading(need, picks, judgement.left, part))
         elif judgement.code != 0:
             why = f"the script didn't finish from a clean start: exit {judgement.code}"
             judgement.readings.append(Reading(need.id, "bench", False, why))

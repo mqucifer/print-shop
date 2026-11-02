@@ -18,7 +18,7 @@ The first line is the verdict. Then come the numbers, each with how it was read,
 | Exit | Verdicts | It means |
 |---|---|---|
 | 0 | `OK`, `CLEAR`, `TOUCHING` | both methods agree, and nothing's wrong |
-| 1 | `FAIL`, `INTERFERE`, `TOO CLOSE`, `NO CHANGE` | both methods agree that something's wrong |
+| 1 | `FAIL`, `INTERFERE`, `TOO CLOSE`, `NO CHANGE`, `PARTIAL` | both methods agree that something's wrong |
 | 2 | `DISAGREE`, `NO ANSWER` | there's no answer to rely on: read the numbers, and don't pick one |
 | 3 | | the command itself was wrong |
 
@@ -33,13 +33,24 @@ An answer with no second check behind it becomes `NO ANSWER`, whatever it first 
 | `readback BEFORE AFTER [--cutter C] [--expect-delta V] [--min-share S]` | volume before and after, and how much of a cutter was in the body | the mesh | OCCT, or stacked sections |
 | `rays FILE --centre X,Y,Z [--axis A] [--d D] [--depth H]` | a cut feature measured from its axis: rays that hit nothing, the distance across, the wall beyond, the floor | rays on the mesh | a plane section, with a circle fit |
 | `panes FRAME --pocket-z Z [--lip-z Z] --clearance C [--pane-thickness T]` | a pane from each opening, written to `panes/FRAME/`, its fit, and the edge with no lip | polygons on the section | the pane as a solid against the frame's walls over the pocket's height, and rays up from the edge |
-| `capture FRAME --pocket-z Z --clearance C --pane-thickness T [--pane-floor-z F] [--min-lip M] [--layer L]` | whether each pane is held by shape on both faces, wherever its play lets it sit: the lip, how thick, where it's thin, and whether it can slide or swing out | sections stacked beyond the pocket, read as polygons | rays beside the pane's edge, and the pane as a solid swept out of the frame |
-| `thin FILE [--nozzle N] [--layer L] [--min-body V]` | features under the nozzle's width, floors under a layer, and tiny pieces | sections opened by the nozzle | rays across each spot, level rays through the walls and straight rays through level floors, and OCCT's count of solids |
-| `pause FRAME --pocket-z Z --pane-thickness T [--layer L] [--first-layer F]` | the layer to pause after, and the room over the pane | sections layer by layer | the flat faces' heights |
+| `capture FRAME --pocket-z Z --clearance C --pane-thickness T [--pane-floor-z F] [--min-lip M] [--layer L] [--panes N]` | whether each pane is held by shape on both faces, wherever its play lets it sit: the lip, how thick, where it's thin, and whether it can slide or swing out | sections stacked beyond the pocket, read as polygons | rays beside the pane's edge, and the pane as a solid swept out of the frame |
+| `thin FILE [--nozzle N] [--layer L] [--min-body V] [--one-body]` | features under the nozzle's width, floors under a layer, and tiny pieces | sections opened by the nozzle | rays across each spot, level rays through the walls and straight rays through level floors, and OCCT's count of solids |
+| `pause FRAME --pocket-z Z --pane-thickness T [--layer L] [--first-layer F] [--max-gap G] [--min-room R]` | the layer to pause after, and the room over the pane | sections layer by layer | the flat faces' heights |
 | `render FILE... [--views ...] [--section Z...] [--close X,Y,Z,R[,VIEW]]... [--test-piece FILE]...`, or `render --variant NAME=FILE[,FILE...]... [--close ...]... [--test-piece FILE]...` | pictures from the standard views, and a sheet of them, or a sheet with a labelled row for each variant. A close-up is R mm all round a point | VTK, offscreen | the mesh projected by arithmetic against the painted outline, each close-up's triangles projected and filled against its pixels, and the section's area against its pixels |
-| `params SCRIPT --set NAME=VALUE` | which dimensions, volumes and pieces moved when one parameter changed | each piece's figures, three runs | the meshes' symmetric difference, and a run with nothing changed as the control |
+| `params SCRIPT --set NAME=VALUE [--max-left N]` | which dimensions, volumes and pieces moved when one parameter changed | each piece's figures, three runs | the meshes' symmetric difference, and a run with nothing changed as the control |
 
-`params` reads a number assigned once at the top level of a design's script (`BaseCircle = 20.0`), and runs the script in a scratch folder, so the design isn't touched. A parameter that moves nothing is `NO CHANGE`. On a Fusion copy, changing `BaseCircle` left the outer ring and motif in place while Fusion reported everything healthy (mqucifer/print-shop#15): this names each piece that moved and each that didn't.
+`params` reads a number assigned once at the top level of a design's script (`BaseCircle = 20.0`), and runs the script in a scratch folder, so the design isn't touched. A parameter that moves nothing is `NO CHANGE`. On a Fusion copy, changing `BaseCircle` left the outer ring and motif in place while Fusion reported everything healthy (mqucifer/print-shop#15): this names each piece that moved and each that didn't. One that leaves pieces behind is `PARTIAL`, and `--max-left N` says how many may stay and still read `OK`.
+
+**Checks hold what a need says** (mqucifer/print-shop#24). Each of these can now say what a need says, and fails otherwise:
+
+| A need's words | What used to pass | Now |
+|---|---|---|
+| A margin over a pane | No room at all: `--max-gap` is only a ceiling | `pause --min-room R`, and `least_room_over_pane_mm` is a number a need can limit |
+| One connected solid | Several bodies | `thin --one-body` |
+| Moves every piece | One piece moved of several | `params` is `PARTIAL` when pieces stay behind |
+| So many panes | Fewer panes read than files | `capture --panes N` |
+
+No command can tell what a need means, so these are asked for. With nothing asked, they read as they did, except `params`.
 
 **A close-up** draws R mm all round a point along a view (`top` unless named), so a fine motif or a 3 mm hole can be judged: at 512 px and `R` of 4 that's 64 px per mm, where the first real run's 3 mm holes were 27 px. It looks along the view and doesn't cut anything, so what's inside a part needs `--section`. Nothing of the parts in the window is a `FAIL`, so one aimed wrongly doesn't read as a picture.
 

@@ -26,14 +26,17 @@ You may try things out while you work this out.
 scripts save parts with `cq.exporters.export(part, "<file>")`. Keep dimensions as numbers at the \
 top of the script, so a later change is one line. After a change, ask the `bench` what it did: \
 don't take a tool's success as an answer, including CadQuery's. `bench render` shows you the part.
-- When you believe the needs are met, call `done` with the script and the files that are the \
-part. It runs again from a clean start in a fresh container, and the harness runs each need's \
-check itself. Needs that fail come \
-back to you, and you go on from what's there: the part, the script, and `record/ROUNDS.md`, which \
-the harness keeps with every round's readings.
+- When you believe the needs are met, call `done` with the script, the files that are the part, \
+what kind of change this round was, and your closing words to the person who'll look at it. It \
+runs again from a clean start in a fresh container, and the harness runs each need's check itself. \
+Needs that fail come back to you, and you go on from what's there: the part, the script, and \
+`record/ROUNDS.md`, which the harness keeps with every round's readings.
+- When every need passes, the run stops for approval: a person sees a sheet of the part and your \
+closing words, and approves it or sends it back with a note. Passing the checks doesn't mean it's \
+approved.
 - Where form is at stake, make variants and `ask`: the Sponsor sees a sheet of them and picks, \
-with a reason. That's the only thing that stops for them once the needs are settled. Everything \
-else is yours to decide, by the numbers.
+with a reason. A pick holds only for the files on its sheet, so if they change, the need is asked \
+again. Everything else is yours to decide, by the numbers.
 - If it truly can't be done, call `blocked` and say what's missing.
 
 Only your directory stays between commands: each `run` and each `bench` command is a fresh \

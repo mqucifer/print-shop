@@ -684,6 +684,15 @@ def test_a_pane_whose_height_misses_the_pocket_is_told_so(bench: Any) -> None:
     assert "misses --pocket-z" in answer.text
 
 
+def test_a_pane_count_a_need_asks_for_is_held(bench: Any) -> None:
+    """4 panes read against 5 files exited 0: a hole had joined two openings."""
+    answer = capture(bench, "held.step", "--panes", "1")
+    assert answer.verdict == "OK", answer.text
+    wrong = capture(bench, "held.step", "--panes", "2")
+    assert wrong.verdict == "FAIL" and wrong.code == 1
+    assert "1 pane(s) read, and 2 were asked for" in wrong.text
+
+
 def test_capture_on_no_opening_is_no_answer(bench: Any) -> None:
     answer = bench(
         "capture", "cube.step", "--pocket-z", "5", "--clearance", "0.1", "--pane-thickness", "2"
@@ -708,6 +717,17 @@ def test_capture_says_so_when_its_two_methods_differ(bench: Any) -> None:
 
 
 # Thin features and small pieces
+
+
+def test_several_bodies_fail_when_a_need_asks_for_one(bench: Any) -> None:
+    """3 bodies passed "one connected solid"."""
+    answer = bench("thin", "two-bodies.step")
+    assert answer.verdict == "OK" and answer.numbers["bodies"] == 2, answer.text
+    asked = bench("thin", "two-bodies.step", "--one-body")
+    assert asked.verdict == "FAIL" and asked.code == 1, asked.text
+    assert "2 separate bodies, and one was asked for" in asked.text
+    assert "OCCT has 2 solid(s)" in asked.text, "the second method"
+    assert bench("thin", "one-body.step", "--one-body").verdict == "OK"
 
 
 def test_a_wall_thinner_than_the_nozzle_is_caught_two_ways(bench: Any) -> None:
@@ -799,6 +819,19 @@ def test_a_first_layer_of_a_different_height_shifts_the_count(bench: Any) -> Non
     # Layer mids are 0.125, then 0.35, 0.55 and on: 3.15 is the first over the ceiling, layer 16.
     assert answer.numbers["openings"][0]["pause_after_layer"] == 15
     assert answer.numbers["openings"][0]["pause_top_z"] == pytest.approx(3.05)
+
+
+def test_a_pane_with_no_room_over_it_fails_when_a_need_asks_for_room(bench: Any) -> None:
+    """0.0 mm under the next layer exited 0 where a need said a 0.2 mm margin."""
+    args = ("pause", "frame.step", "--pocket-z", "2", "--pane-thickness")
+    answer = bench(*args, "2", "--min-room", "0.2")
+    assert answer.verdict == "FAIL" and answer.code == 1, answer.text
+    assert "under the 0.2 mm asked for" in answer.text
+    assert answer.numbers["least_room_over_pane_mm"] == pytest.approx(0.0)
+    held = bench(*args, "1.8", "--min-room", "0.2")
+    assert held.verdict == "OK", held.text
+    assert held.numbers["least_room_over_pane_mm"] == pytest.approx(0.2)
+    assert bench(*args, "2").verdict == "OK", "with nothing asked, a ceiling is still all it reads"
 
 
 def test_a_pane_too_thick_for_the_pause_is_caught(bench: Any) -> None:
@@ -1055,14 +1088,24 @@ def test_a_sheet_of_variants_marks_a_test_piece_on_every_row(bench: Any) -> None
 def test_a_parameter_driving_only_part_of_a_design_shows_which(bench: Any) -> None:
     """Like `BaseCircle` on the Fusion copy: the centre follows, the outer ring and motif don't."""
     answer = bench("params", "design.py", "--set", "BaseCircle=25")
-    assert answer.verdict == "OK", answer.text
+    assert answer.verdict == "PARTIAL" and answer.code == 1, answer.text
     assert answer.numbers["pieces_moved"] == 1
     assert answer.numbers["pieces_not_moved"] == 3
+    assert len(answer.numbers["pieces_left"]) == 3
     assert "and 3 didn't" in answer.text
     moved = [r for rows in answer.numbers["files"].values() for r in rows if r["moved"]]
     assert "radii [20.0] to [25.0]" in moved[0]["moved"]
     assert any(word.startswith("size x ") for word in moved[0]["moved"])
     assert any(word.startswith("volume ") for word in moved[0]["moved"])
+
+
+@pytest.mark.parametrize(("left", "verdict"), [("2", "PARTIAL"), ("3", "OK"), ("4", "OK")])
+def test_a_need_can_say_how_many_pieces_may_stay_behind(
+    bench: Any, left: str, verdict: str
+) -> None:
+    answer = bench("params", "design.py", "--set", "BaseCircle=25", "--max-left", left)
+    assert answer.verdict == verdict, answer.text
+    assert answer.numbers["pieces_not_moved"] == 3
 
 
 def test_a_parameter_that_drives_nothing_shows_up_at_once(bench: Any) -> None:
@@ -1076,7 +1119,7 @@ def test_a_feature_that_moved_with_no_figure_changing_is_seen_by_the_second_chec
     bench: Any,
 ) -> None:
     """A hole slid along a plate: same size, same volume, same radii, same heights."""
-    answer = bench("params", "design.py", "--set", "HolePlace=4")
+    answer = bench("params", "design.py", "--set", "HolePlace=4", "--max-left", "3")
     assert answer.verdict == "OK", answer.text
     assert answer.numbers["pieces_moved"] == 1
     assert "no figure changing" in answer.text

@@ -7,6 +7,10 @@
 Everything the model says is data here. It stops for the Sponsor at `questions` and `ask`, and
 `blocked` ends it. The process exits on each of those: a person writes the answer into a file, and
 `resume` goes on from the very message it stopped at.
+
+`met` means every need passed its check, and doesn't mean approved. Every need passing stops the
+run for approval, with a sheet of the part and the model's closing words: `done` can't end a run on
+its own. A person approves it, or sends it back with a note, and the ledger records which and who.
 """
 
 from __future__ import annotations
@@ -31,7 +35,7 @@ from typing import Any
 
 from print_shop.bench import host
 from print_shop.bench import usage as usage_module
-from print_shop.rounds import judge, needs, paths, prompt, skills, transcript
+from print_shop.rounds import judge, needs, paths, prompt, records, skills, transcript
 from print_shop.rounds.box import Box, Gone, Ran
 from print_shop.rounds.judge import SPONSOR, STAND_IN
 from print_shop.rounds.ledger import DesignLedger
@@ -41,16 +45,24 @@ from print_shop.rounds.session import Ending, Judged, Limits, Session
 from print_shop.rounds.tools import WorkTools, recorded
 
 DEFAULT_ROOT = Path("~/print-shop/design-runs").expanduser()
-#: Stops, which wait for a person and aren't endings.
-WAITING = ("questions", "ask")
 MET = "met"
+APPROVED = "approved"
+#: Stops, which wait for a person and aren't endings. `met` waits for approval.
+WAITING = ("questions", "ask", MET)
+#: Who a note is from, unless a person says.
+NOTE_FROM = "the people running this"
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 VARIANT = re.compile(r"[A-Za-z0-9_-]{1,24}")
 #: A failing need's bench text shown in the reply.
 FAILURE_CHARS = 4000
-#: The default views on an `ask`'s sheet, and each picture's side.
+#: The default views on an `ask`'s sheet and on the sheet at approval, and each picture's side.
 ASK_VIEWS = ("iso", "top", "front")
 ASK_SIZE = "512"
+#: The most rows of a sheet at approval the model is shown. The person always has it, and a very
+#: tall picture could fail the call that carries it, which isn't worth a run.
+SHOWN_ROWS = 4
+#: A sheet's row name, from a file's name where nobody gave it one.
+NOT_IN_A_NAME = re.compile(r"[^A-Za-z0-9_-]+")
 
 
 class Refused(RuntimeError):
@@ -79,6 +91,9 @@ class State:
     last_readings: dict[str, dict[str, Any]] = field(default_factory=dict)
     said: list[str] = field(default_factory=list)
     harness: list[str] = field(default_factory=list)
+    # Relayed notes: a source of their own, and kept for a conversation that starts from the record.
+    notes: list[str] = field(default_factory=list)
+    approvals: int = 0
 
 
 def repository_version() -> tuple[str, bool]:
@@ -111,6 +126,15 @@ def picked_by_words(by: str) -> str:
     return f"A stand-in for the Sponsor ({by[len(STAND_IN) :].strip()})"
 
 
+def _who_decides(by: str, path: object) -> None:
+    """A pick or a decision says who made it, so someone else's can't pass for the Sponsor's."""
+    if by != SPONSOR and not (by.startswith(STAND_IN) and by[len(STAND_IN) :].strip()):
+        raise Refused(
+            f'{path}: `by` says who picked: "{SPONSOR}" only if they did, or '
+            f'"{STAND_IN} <who>" for anyone standing in. Not {by!r}'
+        )
+
+
 def _sha(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
@@ -138,6 +162,7 @@ class Run:
         self.state: State
         self.ledger = DesignLedger(folder.parent / "ledger.sqlite")
         self.box = Box(self.work, self.limits.command_seconds)
+        self.recorder: records.Recorder | None = None
         self.tools = WorkTools(self.work, self.box, self, int(self.limits.work_gb * 10**9))
         self.session = Session(
             tools=self.tools,
@@ -201,11 +226,20 @@ class Run:
             limits=run.limits.recorded(),
         )
         run.save()
+        run._listen()
         run.session.begin(
             {"role": "system", "content": prompt.SYSTEM},
             {"role": "user", "content": run._start_text()},
         )
         return run
+
+    def _listen(self) -> None:
+        """Each event from here on goes to the ledger as it's kept."""
+        self.recorder = records.Recorder(
+            self.ledger, self.state.name, self.state.harness, self.limits.review_repeat_share
+        )
+        self.recorder.feed_all(transcript.events_of(self.session.events))
+        self.session.heard = self.recorder.feed
 
     @classmethod
     def load(
@@ -221,32 +255,106 @@ class Run:
         run = cls(folder, send, limits, alias, sleep)
         run.state = State(**json.loads((folder / "state.json").read_text(encoding="utf-8")))
         run.session.restore()
+        # What the ledger hasn't got yet: an older run's, or what a killed process didn't reach.
+        run._listen()
         return run
 
-    def resume(self, note: str = "", reopen_needs: bool = False) -> None:
+    def resume(
+        self, note: str = "", reopen_needs: bool = False, note_from: str = NOTE_FROM
+    ) -> None:
         """Take in what a person wrote, ready to go on. Refused until it's there."""
-        if self.state.ending and self.state.ending["name"] == MET:
-            raise Refused("this run met its needs and ended")
+        ending = (self.state.ending or {}).get("name")
+        if ending == MET:
+            raise Refused("this run ended at `met`, from before approval was a stop")
+        if ending == APPROVED:
+            raise Refused("this run is approved: only a send-back goes on from here")
         stop = self.state.stop
+        if stop and stop["kind"] == MET:
+            raise Refused(
+                f"this run is waiting for approval: {self.folder / 'approvals' / str(stop['n'])}. "
+                "It takes `--approve` or `--send-back`, with `--by`"
+            )
         if stop and stop["kind"] == "questions":
-            self._take_answers(int(stop["n"]))
+            self._take_answers(
+                int(stop["n"]), note_from if note_from != NOTE_FROM else records.ANSWERS_FROM
+            )
         elif stop and stop["kind"] == "ask":
             self._take_pick(int(stop["n"]))
+        self._go_on()
         if reopen_needs:
             self.state.needs_open = True
-            self.session.say(
+            self._relay(
+                "reopen_needs",
+                note_from,
                 "The needs may be settled again: send `needs` with the whole list if they should "
-                "change."
+                "change.",
             )
         if note.strip():
-            self.session.say(f"A note from the people running this:\n\n{note.strip()}")
+            self._note(note.strip(), note_from)
+        self.save()
+
+    def _go_on(self) -> None:
+        """A new process's part of the run, under the code it's running on."""
         commit, dirty = repository_version()
         self.state.harness.append(f"{commit}{'+changes' if dirty else ''}")
         self.state.stop = None
         self.state.ending = None
+        self.session._record("resumed", commit=self.state.harness[-1])
+        self.ledger.run_resumed(self.state.name)
+
+    def _relay(self, kind: str, who: str, text: str, message: str | None = None) -> None:
+        """Something a person sent, to the model and into the ledger: it's the largest cause of
+        change in a run. `text` is theirs, and `message` how it's put to the model."""
+        said = message if message is not None else text
+        self.session._record(
+            "relayed",
+            relay=kind,
+            **{"from": who},
+            text=text,
+            message=said,
+            at_call=self.session.requests + 1,
+            round=self.state.round,
+        )
+        self.session.say(said)
+
+    def _note(self, note: str, who: str) -> None:
+        self.state.notes.append(note)
+        self._relay("note", who, note, f"A note from the people running this:\n\n{note}")
+
+    def approve(self, by: str, note: str = "") -> Ending:
+        """A person's yes. It ends the run: the refinement pass and the delivery come after this."""
+        stop = self.state.stop
+        if not stop or stop["kind"] != MET:
+            raise Refused("this run isn't waiting for approval")
+        _who_decides(by, "--by")
+        self.ledger.decided(self.state.name, int(stop["n"]), "approved", by, note.strip())
+        self.state.stop = None
+        said = {"approval": stop["n"], "by": by, "note": note.strip()}
+        return self._close(self.session._ended(Ending(APPROVED, said)))
+
+    def send_back(self, by: str, note: str) -> None:
+        """A person's no, with what's wrong, at the stop or by hand after approving it. It goes on
+        as a new round. A pick on files that then change is asked again, as ever."""
+        stop = self.state.stop
+        ending = (self.state.ending or {}).get("name")
+        if not (stop and stop["kind"] == MET) and ending != APPROVED:
+            raise Refused("this run isn't waiting for approval, and isn't approved")
+        _who_decides(by, "--by")
+        if not note.strip():
+            raise Refused("a send-back needs its note: it's what the model goes on from")
+        n = int(stop["n"]) if stop else self.state.approvals
+        self.ledger.decided(self.state.name, n, "sent_back", by, note.strip())
+        self._go_on()
+        self.state.notes.append(note.strip())
+        message = (
+            f"{picked_by_words(by)} looked at the final part and sent it back, with this note:\n\n"
+            f"{note.strip()}"
+        )
+        self._relay("send_back", by, note.strip(), message)
+        self._start_round()
         self.save()
 
-    def _take_answers(self, n: int) -> None:
+    def _take_answers(self, n: int, who: str) -> None:
         path = self.folder / "questions" / f"{n}.answers.md"
         if not path.is_file() or not path.read_text(encoding="utf-8").strip():
             raise Refused(f"the answers aren't written yet: {path}")
@@ -254,7 +362,7 @@ class Run:
         said = f"The Sponsor's answers:\n\n{answers}"
         self.state.said.append(said)
         self.ledger.answered(self.state.name, n, answers)
-        self.session.say(said)
+        self._relay("answers", who, answers, said)
 
     def _take_pick(self, n: int) -> None:
         folder = self.folder / "asks" / str(n)
@@ -275,22 +383,29 @@ class Run:
             raise Refused(f"{path}: the pick is one of {', '.join(names)}, or none: not {pick!r}")
         if not reason:
             raise Refused(f"{path}: a pick needs its reason, which is what the ledger learns from")
-        if by != SPONSOR and not (by.startswith(STAND_IN) and by[len(STAND_IN) :].strip()):
-            raise Refused(
-                f'{path}: `by` says who picked: "{SPONSOR}" only if they did, or '
-                f'"{STAND_IN} <who>" for anyone standing in. Not {by!r}'
-            )
+        _who_decides(by, path)
         self.ledger.picked(self.state.name, n, pick, reason, by)
         need = asked.get("need")
+        if need:
+            # A "none" takes back any pick before it: the person has just said it isn't this.
+            self.state.picks.pop(need, None)
         if pick != "none" and need:
-            self.state.picks[need] = {"pick": pick, "reason": reason, "ask": n, "by": by}
+            seen = asked.get("seen") or records.seen_by_kept_files(folder)
+            files = (seen.get("variants") or {}).get(pick) or {}
+            self.state.picks[need] = {
+                "pick": pick,
+                "reason": reason,
+                "ask": n,
+                "by": by,
+                "files": files,
+            }
         who = picked_by_words(by)
         if pick == "none":
             said = f"{who} didn't pick any of them. Their reason: {reason}"
         else:
             said = f"{who} picked {pick}. Their reason: {reason}"
         self.state.said.append(f'On your question "{asked["question"]}": {said}')
-        self.session.say(said)
+        self._relay("pick", by, f"{pick}: {reason}", said)
 
     def drive(self) -> Ending:
         """Calls until a stop or an ending, every failure a named one."""
@@ -316,9 +431,11 @@ class Run:
         if ending.name not in WAITING:
             self.state.ending = asdict(ending)
         self.save()
+        # `met` is what the run rests in until a person decides, so the ledger says so.
+        resting = ending.name not in WAITING or ending.name == MET
         self.ledger.run_ended(
             self.state.name,
-            None if ending.name in WAITING else ending.name,
+            ending.name if resting else None,
             ending.said,
             calls=self.session.calls,
             usage=dict(self.session.usage),
@@ -335,7 +452,8 @@ class Run:
         """A conversation that wouldn't fit even compacted: a new one, from the record."""
         state = f"This is round {self.state.round}." if self.state.round else "This is intake."
         needs_json = json.dumps([n.plain() for n in self._needs()], indent=1)
-        text = prompt.again(self._start_text(), self.state.said, needs_json, state)
+        relayed = [f"A note from the people running this:\n\n{n}" for n in self.state.notes]
+        text = prompt.again(self._start_text(), [*self.state.said, *relayed], needs_json, state)
         self.session.begin(
             {"role": "system", "content": prompt.SYSTEM},
             {"role": "user", "content": text},
@@ -400,7 +518,9 @@ class Run:
             )
             return Judged("needs", "failed", reply, "needs_settled")
         request = (self.folder / "request.md").read_text(encoding="utf-8")
-        found, wrong = needs.read(args["needs"], "\n".join([request, *self.state.said]))
+        found, wrong = needs.read(
+            args["needs"], "\n".join([request, *self.state.said]), "\n".join(self.state.notes)
+        )
         if not wrong:
             wrong = self._usable(found)
         if wrong:
@@ -430,6 +550,7 @@ class Run:
         person. It runs on a copy, with no clean run first, so it says only that a check works."""
         scratch = self.folder / f".try-{uuid.uuid4().hex[:12]}"
         lines = ["Nothing is settled. Each check, against your files as they stand:"]
+        readings: list[dict[str, Any]] = []
         try:
             paths.copy_plain(self.work, scratch, skip_made=True)
             for need in found:
@@ -439,9 +560,22 @@ class Run:
                 reading = judge.read_need(self.box, need, scratch, scratch / ".kept")
                 mark = "would pass" if reading.passed else "WOULDN'T PASS"
                 lines.append(f"- {need.id}, {mark}: {reading.why}. Limit: {need.limit()}.")
+                readings.append(
+                    {
+                        "need": need.id,
+                        "command": need.command,
+                        "passed": reading.passed,
+                        "why": reading.why,
+                        "exit": reading.exit,
+                        "verdict": reading.verdict,
+                        "value": reading.value,
+                        "numbers": (reading.record or {}).get("numbers"),
+                    }
+                )
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
-        return Judged("needs", "ok", "\n".join(lines), detail={"tried": True})
+        detail = {"tried": True, "readings": readings}
+        return Judged("needs", "ok", "\n".join(lines), detail=detail)
 
     def _usable(self, found: list[Need]) -> list[str]:
         """Whether each bench need's command can be read at all, by the bench's own parser."""
@@ -483,9 +617,14 @@ class Run:
         missing = self.tools._existing("done", args, "script")
         if missing is not None:
             return missing
-        part = self._part(args["part"])
-        if isinstance(part, Judged):
-            return part
+        rows = self._part(args["part"])
+        if isinstance(rows, Judged):
+            return rows
+        part = [name for row in rows for name in row["files"]]
+        fix_shape, closing = str(args["fix_shape"]).strip(), str(args["closing"]).strip()
+        if not fix_shape or not closing:
+            reply = "`fix_shape` and `closing` each take your own words, and one is empty."
+            return Judged("done", "failed", reply, "empty")
         script = str(args["script"])
         n = self.state.round
         folder = self.folder / "rounds" / f"{n:03}"
@@ -507,8 +646,11 @@ class Run:
             judgement.code,
             judgement.seconds,
             judgement.met,
-            str(args.get("fix_shape") or "") or None,
+            fix_shape,
             part,
+            rows,
+            closing,
+            judgement.left,
         )
         reply = self._said_of(judgement, wanted)
         self._remember(judgement)
@@ -518,26 +660,109 @@ class Run:
         self._write_record()
         detail = {"round": n, "met": judgement.met, "code": judgement.code}
         if judgement.met:
-            self._final(part, folder)
-            self.save()
-            said = {"round": n, "script": script}
-            return Judged("done", "ok", reply, detail=detail, ending=Ending(MET, said))
+            return self._stop_for_approval(rows, folder, judgement, wanted, closing, reply, detail)
         return self._next_round(reply, detail)
 
-    def _part(self, given: list[Any]) -> list[str] | Judged:
-        """The files that are the part, as `done` names them. It's the model's word, and it's what
-        the people's sheet draws: a test piece a script writes is left off it."""
-        if not given or not all(isinstance(name, str) for name in given):
-            reply = '`part` names the files that are the part, such as `["stand.step"]`.'
-            return Judged("done", "failed", reply, "no_part")
-        for name in given:
-            if not name.lower().endswith(GEOMETRY):
-                reply = f"`part` names STEP or STL files, and `{name}` isn't one."
-                return Judged("done", "failed", reply, "not_geometry")
-            if paths.inside(self.work, name) is None:
-                reply = "Only files inside your directory, and never through a link."
-                return Judged("done", "failed", reply, "outside")
-        return list(given)
+    def _part(self, given: list[Any]) -> list[dict[str, Any]] | Judged:
+        """The files that are the part, as `done` names them, each entry a row of the sheet. It's
+        the model's word, and it's what the people's sheet draws: a test piece a script writes is
+        left off it, and two parts in one `part` aren't drawn on top of each other."""
+        shape = (
+            '`part` names the files that are the part: `["stand.step"]`, with files seen together '
+            'as {"name": "wide", "files": ["base.step", "lid.step"]}.'
+        )
+        if not given:
+            return Judged("done", "failed", shape, "no_part")
+        rows: list[dict[str, Any]] = []
+        for entry in given:
+            if isinstance(entry, str):
+                stem = NOT_IN_A_NAME.sub("_", Path(entry).stem)[:24].strip("_") or "part"
+                row: dict[str, Any] = {"name": stem, "files": [entry]}
+            elif isinstance(entry, dict) and set(entry) == {"name", "files"}:
+                row = {"name": str(entry["name"]), "files": entry["files"]}
+                if not VARIANT.fullmatch(str(row["name"])):
+                    return Judged("done", "failed", f"`{row['name']}` won't do. {shape}", "no_part")
+            else:
+                return Judged("done", "failed", shape, "no_part")
+            files = row["files"]
+            if not (isinstance(files, list) and files and all(isinstance(f, str) for f in files)):
+                return Judged("done", "failed", shape, "no_part")
+            for name in files:
+                if not name.lower().endswith(GEOMETRY):
+                    reply = f"`part` names STEP or STL files, and `{name}` isn't one."
+                    return Judged("done", "failed", reply, "not_geometry")
+                if paths.inside(self.work, name) is None or "," in name:
+                    reply = "Only files inside your directory, and never through a link."
+                    return Judged("done", "failed", reply, "outside")
+            taken = [r["name"] for r in rows]
+            row["name"] = next(
+                candidate
+                for k in range(1, len(rows) + 2)
+                if (candidate := row["name"] if k == 1 else f"{row['name']}-{k}") not in taken
+            )
+            rows.append(row)
+        return rows
+
+    def _stop_for_approval(
+        self,
+        rows: list[dict[str, Any]],
+        folder: Path,
+        judgement: judge.Judgement,
+        wanted: list[Need],
+        closing: str,
+        reply: str,
+        detail: dict[str, Any],
+    ) -> Judged:
+        """Every need passed, so a person looks: the sheet of the part, and the model's words."""
+        self.state.approvals += 1
+        n = self.state.approvals
+        stop = self.folder / "approvals" / str(n)
+        stop.mkdir(parents=True)
+        image, why_not = self._final(rows, folder)
+        sheet: Path | None = None
+        if image is not None:
+            sheet = stop / "sheet.png"
+            sheet.write_bytes(image)
+        (stop / "closing.md").write_text(closing + "\n", encoding="utf-8")
+        lines = [
+            f"# Round {self.state.round}: every need passed its check. It isn't approved yet.",
+            "",
+            f"The sheet: {sheet}" if sheet else f"The sheet couldn't be made: {why_not}",
+            "",
+            "## What the model said",
+            "",
+            closing,
+            "",
+            "## Each need",
+            "",
+        ]
+        for need, reading in zip(wanted, judgement.readings, strict=True):
+            limit = f" Limit: {need.limit()}." if need.by == "bench" else ""
+            lines.append(f"- **{need.id}** ({need.what}): {reading.why}.{limit}")
+        (stop / "stop.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        part_hashes = {name: judgement.left.get(name) for row in rows for name in row["files"]}
+        self.ledger.approval_asked(
+            self.state.name,
+            n,
+            round=self.state.round,
+            at_call=self.session.requests,
+            sheet=str(sheet) if sheet else None,
+            sheet_sha=hashlib.sha256(image).hexdigest() if image else None,
+            part_rows=rows,
+            part_hashes=part_hashes,
+            closing=closing,
+        )
+        self.state.stop = {"kind": MET, "n": n}
+        self.save()
+        reply += (
+            "\n\nThe run stops here for approval: a person sees the sheet and your closing words. "
+            "It isn't approved yet, and if it's sent back, their note comes in your next message."
+        )
+        said = {"round": self.state.round, "script": judgement.script, "approval": n}
+        images = []
+        if image and len(rows) <= SHOWN_ROWS:
+            images = [(f"approvals/{n}/sheet.png", base64.b64encode(image).decode())]
+        return Judged("done", "ok", reply, images=images, detail=detail, ending=Ending(MET, said))
 
     def _next_round(self, reply: str, detail: dict[str, Any]) -> Judged:
         n = self.state.round
@@ -653,18 +878,23 @@ class Run:
         diff = (self.folder / "rounds" / f"{n:03}" / "diff.patch").read_text(encoding="utf-8")
         paths.write_inside(self.work, f"record/round-{n}.diff", diff)
 
-    def _final(self, part: list[str], folder: Path) -> None:
-        """A sheet of what passed, for the people who see the result. It decides nothing. It draws
-        the part alone: what else a need names is a test piece, which isn't what passed."""
-        files = list(dict.fromkeys(part))
+    def _final(self, rows: list[dict[str, Any]], folder: Path) -> tuple[bytes | None, str]:
+        """A sheet of what passed, for the people who see the result: one part a row, not all of
+        `part` in one scene. It decides nothing. It draws the part alone: what else a need names is
+        a test piece, which isn't what passed. It gives the picture, or why there's none."""
         judged = folder / "judged"
-        args = ["render", *files, "--renders-out", "final-render"]
+        args = ["render", "--renders-out", "final-render", "--size", ASK_SIZE]
+        for row in rows:
+            args += ["--variant", f"{row['name']}={','.join(row['files'])}"]
+        args += ["--views", *ASK_VIEWS]
         done = self.box.bench(args, where=judged)
         record = recorded(done.output, judged) or {}
         sheets = [str(f) for f in record.get("files") or [] if str(f).endswith("-sheet.png")]
-        if sheets and paths.inside(judged, sheets[-1]) is not None:
-            target = self.folder / "final-sheet.png"
-            target.write_bytes(paths.read_bytes_inside(judged, sheets[-1]))
+        if not sheets or paths.inside(judged, sheets[-1]) is None:
+            return None, done.output[-FAILURE_CHARS:]
+        image = paths.read_bytes_inside(judged, sheets[-1])
+        (self.folder / "final-sheet.png").write_bytes(image)
+        return image, ""
 
     def blocked(self, args: dict[str, Any]) -> Judged:
         reason = args["reason"]
@@ -723,12 +953,18 @@ class Run:
         for path in pieces:
             kept = folder / "test-pieces" / Path(path).name
             kept.write_bytes(paths.read_bytes_inside(self.work, path))
+        seen = {
+            "variants": {v["name"]: self._held(v["files"]) for v in named},
+            "test_pieces": self._held(pieces),
+            "sheet": hashlib.sha256(image).hexdigest(),
+        }
         asked = {
             "question": question,
             "need": need,
             "variants": named,
             "test_pieces": pieces,
             "round": self.state.round,
+            "seen": seen,
         }
         (folder / "asked.json").write_text(json.dumps(asked, indent=1), encoding="utf-8")
         about = "\n".join(f"- **{v['name']}**: {v['about']}" for v in named)
@@ -744,6 +980,7 @@ class Run:
             named,
             str(folder / "sheet.png"),
             self.session.requests,
+            seen,
         )
         self.state.stop = {"kind": "ask", "n": n}
         self.save()
@@ -758,6 +995,13 @@ class Run:
             images=[(f"asks/{n}/sheet.png", encoded)],
             ending=Ending("ask", {"n": n}),
         )
+
+    def _held(self, files: list[str]) -> dict[str, str]:
+        """Each file as it stands now, by what it holds: what a sheet of them saw."""
+        return {
+            str(name): paths.content_hash(str(name), paths.read_bytes_inside(self.work, str(name)))
+            for name in files
+        }
 
     def _ask_problem(
         self, question: str, variants: list[Any], need: str | None
@@ -800,6 +1044,7 @@ def summarise(folder: Path) -> dict[str, Any]:
         "rounds": state["round"],
         "asks": state["asks"],
         "picked_by": {need: pick.get("by") for need, pick in state["picks"].items()},
+        "approvals": state.get("approvals", 0),
         "questions": state["questions"],
         "restarts": state["restarts"],
         "harness": state["harness"],
@@ -853,6 +1098,16 @@ def what_next(run: Run, ending: Ending) -> str:
             f'{{"pick": "<a variant or none>", "reason": "...", "by": "{SPONSOR}"}}, or "by": '
             f'"{STAND_IN} <who>" if someone stood in for them, then: scripts/rounds.py resume '
             f"{name}"
+        )
+    if ending.name == MET:
+        # What the person is asked for, and the model's closing words: nowhere else reaches them.
+        folder = run.folder / "approvals" / str(ending.said["approval"])
+        closing = (folder / "closing.md").read_text(encoding="utf-8").strip()
+        return (
+            f"waiting for approval: every need passed its check, which doesn't mean it's approved. "
+            f"{folder / 'stop.md'} and its sheet. The model's closing words:\n\n{closing}\n\n"
+            f'Then: scripts/rounds.py resume {name} --approve --by "{SPONSOR}", or --send-back '
+            f'--by "{SPONSOR}" --note FILE. Someone else is --by "{STAND_IN} <who>".'
         )
     said = json.dumps(ending.said)
     return f"ended: {ending.name} {said}. The ledger and records are in {run.folder}"

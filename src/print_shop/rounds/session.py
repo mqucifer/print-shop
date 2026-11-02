@@ -72,6 +72,9 @@ class Limits:
     work_gb: float = 40.0
     max_tokens: int = 65536
     compact_at: int = COMPACT_AT
+    # A call whose reasoning repeats earlier text past this share gets a row for review. It decides
+    # nothing, and nothing cuts a call for it.
+    review_repeat_share: float = 0.5
 
     def recorded(self) -> dict[str, Any]:
         return asdict(self)
@@ -138,6 +141,8 @@ class Session:
     runaways: list[dict[str, int]] = field(default_factory=list)
     # Each tool reply's facts, by its message's index, for compaction.
     replies: dict[int, dict[str, Any]] = field(default_factory=dict)
+    # Told each event as it's kept, for the ledger.
+    heard: Callable[[dict[str, Any]], None] | None = None
 
     def begin(self, *start: dict[str, Any]) -> None:
         """A new conversation. An earlier one in the same run stays in the records."""
@@ -348,7 +353,13 @@ class Session:
         if self.last_prompt and self.estimate() >= self.limits.compact_at:
             before = self.estimate()
             self.compact()
-            self._record("compacted", estimated=before, estimated_after=self.estimate())
+            self._record(
+                "compacted",
+                estimated=before,
+                estimated_after=self.estimate(),
+                prompt_before=self.last_prompt,
+                before_call=self.requests + 1,
+            )
             if self.estimate() >= self.limits.compact_at:
                 full = {"estimated": self.estimate(), "limit": self.limits.compact_at}
                 return {}, Ending("context_full", full)
@@ -365,6 +376,9 @@ class Session:
         at = datetime.now(UTC)
         began = time.monotonic()
         answer: dict[str, Any] = {}
+        keep = getattr(self.send, "keep_stream", None)
+        if callable(keep):
+            keep(self.events.parent / "streams" / f"{n}.jsonl")
         for attempt in range(self.limits.call_retries + 1):
             try:
                 answer = self.send(body)
@@ -419,6 +433,11 @@ class Session:
             message=message,
             usage=used,
             **({"runaway": runaway} if runaway else {}),
+            **(
+                {"stream": answer["stream"]}
+                if isinstance(answer, dict) and "stream" in answer
+                else {}
+            ),
         )
         if not choices:
             return {}, Ending("call_failed", {"error": "no choices"})
@@ -500,8 +519,11 @@ class Session:
         self.messages.append({"role": "user", "content": content})
 
     def _record(self, kind: str, **detail: Any) -> None:
+        event = {"kind": kind, "t": datetime.now(UTC).isoformat(timespec="seconds"), **detail}
         with self.events.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps({"kind": kind, **detail}, default=str) + "\n")
+            fh.write(json.dumps(event, default=str) + "\n")
+        if self.heard is not None:
+            self.heard(event)
 
     def snapshot(self) -> None:
         """What's come since the last request, so a resume goes on from this very message."""

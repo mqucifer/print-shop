@@ -109,8 +109,9 @@ PAGE = {
     }
 }
 NEED_SHAPE = (
-    "Each need: `id`; `what` it must do; `source` (`request` or `answer` with `quote`, their own "
-    'words; `reference`, `derived` or `chosen`); and `check`, either {"by": "bench", "command": '
+    "Each need: `id`; `what` it must do; `source` (`request`, `answer` or `note` with `quote`, the "
+    'words as you were sent them; `reference`, `derived` or `chosen`); and `check`, either {"by": '
+    '"bench", "command": '
     '"clearance lid.step cup.step --min-gap 0.2", "verdicts": [...] (optional: which verdicts '
     'pass, exit 0 by default), "number": "pairs.0.gap_mesh_mm", "at_least": 0.2, "at_most": 0.6 '
     '(optional: a number in that answer, and its limit)} or {"by": "eye", "look_for": "what the '
@@ -249,7 +250,7 @@ def specs() -> list[dict[str, Any]]:
             variants={
                 "type": "array",
                 "description": 'Each variant: {"name": "A", "files": ["a.step"], "about": "what '
-                'sets it apart"}. `files` are what they\'ll take for the part.',
+                "sets it apart\"}. `files` are what they'll take for the part.",
                 "items": {"type": "object"},
             },
         ),
@@ -258,22 +259,21 @@ def specs() -> list[dict[str, Any]]:
             "When you believe the needs are met. The script is run again from a clean start in a "
             "fresh container, with every STEP and STL outside `references/` taken away first, and "
             "the harness runs each need's check itself. Needs that fail come back to you, and the "
-            "next round starts.",
-            {
-                "fix_shape": {
-                    "type": "string",
-                    "description": "From the second round on: what kind of change this round was, "
-                    "in your own words. It's kept, marked as yours, and decides nothing. Optional.",
-                }
-            },
+            "next round starts. When every need passes, the run stops for approval.",
             script="The script that writes the part.",
             part={
                 "type": "array",
                 "description": 'The files that are the part, such as `["stand.step"]`: it\'s what '
-                "the Sponsor's sheet of the result draws, so a test piece your script writes isn't "
-                "taken for the part.",
-                "items": {"type": "string"},
+                "the sheet of the result draws, so a test piece your script writes isn't taken for "
+                "the part. Each entry is one row of that sheet. Files seen together are one entry, "
+                '{"name": "wide", "files": ["base.step", "lid.step"]}.',
+                "items": {},
             },
+            fix_shape="What kind of change this round was, in your own words. It's kept, marked as "
+            "yours, and decides nothing.",
+            closing="Your closing words to the person who'll look at the part, if every need "
+            "passes: what it is, anything you couldn't do or check, and what they should look at. "
+            "They reach that person with the sheet.",
         ),
         _spec(
             "blocked",
