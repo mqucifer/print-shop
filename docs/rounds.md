@@ -6,7 +6,7 @@ The local model works in rounds on the bench, and every round is recorded (mquci
 scripts/rounds.py start NAME --request FILE [--reference FILE]...
 scripts/rounds.py resume NAME [--note FILE] [--from WHO] [--reopen-needs]
 scripts/rounds.py resume NAME --approve --by WHO [--note FILE]
-scripts/rounds.py resume NAME --send-back --by WHO --note FILE
+scripts/rounds.py resume NAME --send-back --by WHO --note FILE [--reopen-needs]
 scripts/rounds.py status NAME
 scripts/rounds.py stop NAME
 scripts/rounds.py summary NAME
@@ -29,21 +29,33 @@ It needs the bench's image (`scripts/bench.py build`), and LiteLLM on :4000 with
 
 Needs that fail go back in `done`'s reply, with each reading against its limit and the last round's, and the next round starts from what's there: the part, the script and `record/ROUNDS.md`. The conversation carries on, with its reasoning.
 
-**The needs are settled once.** They're what the work is checked against, so the model can't change them. `resume --reopen-needs` lets it, when a person decides a need's check is wrong.
+**The needs are settled once.** They're what the work is checked against, so the model can't change them. `resume --reopen-needs` lets it, when a person decides a need's check is wrong, and so does `--send-back --reopen-needs`: on `cup-1` the model tried to restate its checks after a send-back, was refused, and ran the missing ones as plain checks, so the approval rested on checks that weren't in its needs.
+
+**Checks are held in the harness, not in a note** (mqucifer/print-shop#26). On `cup-1` a lesson about checking, given to the model in its request, held until a check stood in its way, and then the check was changed. So these are refusals:
+- **A need can't pass on `FAIL`,** as it can't on `DISAGREE`. On `cup-1` one passed `capture` on FAIL.
+- **A need whose check fails on the files as they stand can't be dropped, or changed to a check that passes, without a reason** (`why_changed`, by the old need's id). The harness reads the old check, and the new one, against the files first. A change to a check that fails too needs none. Each swap is in `need_swaps`, and shown once, at the next ask or stop for approval, with both checks, both readings and the reason.
+- **Every file of the `part` passes `thin`** at the nozzle's width before the run stops for approval, whatever the needs say. Two panes the Sponsor found too thin in Orca passed every need, as no need ran `thin` on a pane. `DISAGREE` or `NO ANSWER` there is said at the stop and in the README, and taken as neither.
+- **Files printed together can't take the same space.** `done` names `groups`, the ways the part prints, each with its own files, and a file of `part` in no group prints with every group, as panes do. With no `groups`, the whole `part` is one. A pair in one group that shares more than 0.5 mm³, by Manifold and again by OCCT's `common`, isn't met. `clearance` across 16 files ran past 600 s, so this is a helper that asks only that (`bench/overlap.py`).
+
+Each of these is in the ledger's `standing` table, by file and its hash, and a round where every need passed and these didn't has `met` 0.
 
 `done` also asks what kind of change the round was (`fix_shape`) and for the model's closing words (`closing`), so neither column is empty. Both are in its own words, kept as such, and decide nothing.
 
 **What's the part.** `done` names the files that are the part (`part: ["stand.step"]`), as a need can name a test piece beside it. Each entry is one row of the sheet, and files seen together are one entry: `{"name": "wide", "files": ["base.step", "lid.step"]}`. `final-sheet.png` draws those alone, so two outlines in one `part` aren't drawn on top of each other. It's the model's word and it decides nothing else. A sheet's `files` are what the Sponsor takes for the part too, and `test_pieces` on `ask` shows others, see-through in grey and marked.
 
-**Approval is a stop.** The Sponsor's definition of done (2026-11-02): design rounds, their approval, a refinement pass whose findings go in the ledger, then the learn loop. `met` means every need passed its check, and doesn't mean approved. When every need passes, the run stops instead of ending, and `done` can't end it. `approvals/n/` has the sheet of the final part and `stop.md`, with each reading and the model's closing words, and `what_next` prints those words too. The model is shown the same sheet.
+**Approval is a stop.** The Sponsor's definition of done (2026-11-02): design rounds, their approval, a refinement pass whose findings go in the ledger, then the learn loop. `met` means every need passed its check, and every file the harness's own, and doesn't mean approved. When they do, the run stops instead of ending, and `done` can't end it. `approvals/n/` has the sheet of the final part, drawn in the `looks` `done` gave, and `stop.md`, with each reading, `thin` on each file, any need swapped since the last stop, and the model's closing words, and `what_next` prints those words too. The model is shown the same sheet.
+
+**The delivered result is `review/`,** written by the harness at each stop for approval from its records, into `approvals/n/review/` and copied to the run's `review/`. One folder a group, lettered (`A-two-parts`, `B-one-frame-with-pause`), holds its own files under their names and every shared file, each named by its number, its label and its colour from `looks` (`pane_01-cup-blue.step`). Its README gives the size, which files take the same space and so are never loaded together, a table of the shared files, each requirement's reading against its limit and the files its check read, `thin` on each file, and what wasn't checked: files no need's check named, eye needs that passed on a pick, `thin`'s unsure answers and the swaps. The model's closing words are under their own heading. Nothing in it is sliced or printed.
 - `resume --approve --by WHO` ends the run as `approved`, with no model call and no key.
 - `resume --send-back --by WHO --note FILE` goes on as a new round, with the note. A plain `resume` is refused here.
 - Anyone else is `--by "stand-in: <who>"`, as at a pick. `decisions` holds which, and who.
-- A send-back after approval is by hand, with the same `--send-back`. It becomes automatic only once there are more mechanical checks or agreements ahead of time. The refinement pass and the delivered result are the next issue after mqucifer/print-shop#24.
+- A send-back after approval is by hand, with the same `--send-back`. It becomes automatic only once there are more mechanical checks or agreements ahead of time. The refinement pass is still to come; the delivered result is `review/`, below.
 
-**Stopping for the Sponsor.** Only `ask`, where form is at stake: the model names variants, `render` makes a sheet, and the process exits. It can add close-ups to each row (`close`), for what's too fine to judge whole. A person relays it, writes `pick.json`, and runs `resume`. A pick with no reason is refused, since the reason is what's learned from. After `needs`, `questions` is refused.
+**Stopping for the Sponsor.** Only `ask`, where form is at stake, in two calls. `ask` names the variants and `render` draws the sheet, which goes to the model and not yet to the Sponsor. It can add close-ups (`close`), cut-throughs (`cuts`: `z=3`, or `x=50,y=20:40` for a pane in its pocket) and each file's colour and label (`looks`). Then `send_ask` sends it with `says`, what the model says the sheet shows: on both real runs it described the design it meant, not what a bench picture showed. A file changed in between is refused, and a new `ask` replaces the drawing. Whatever the question says, the harness reads each settled need's check and `thin` against the sheet's files as they stand, and any that fail go beside the question in `question.md`, with what the bench says it drew and any need swapped since the last stop. On `cup-1` a question said a pane was split where `capture` read one. The process then exits. A person relays it, writes `pick.json`, and runs `resume`. A pick with no reason is refused, since the reason is what's learned from. After `needs`, `questions` is refused.
 
-**A pick says who made it,** so someone else's can't pass for the Sponsor's taste in later training data. `pick.json` is `{"pick": "A", "reason": "...", "by": "sponsor"}`, with `"pick": "none"` if nothing's right. Anyone else is `"by": "stand-in: a Claude builder"`, naming who. Anything else, or nothing, is refused. Text says "the Sponsor picked" only when they did: what the model's told, the reading, and `record/ROUNDS.md`. The ledger has it in `picks.picked_by`, and `summary.json` in `picked_by`. An empty `picked_by` says nothing of who it was.
+**A pick is about the look.** A build fault found at an ask goes in `"fix_first"` in `pick.json`, apart from the pick: it reaches the model as its own message, is `picks.fix_first`, and is an intervention of its own kind. On `cup-1` the Sponsor was asked to answer `none` for one, which mixed two answers. The pick still holds only for the files it saw, so the fix means asking again.
+
+**A pick says who made it,** so someone else's can't pass for the Sponsor's taste in later training data. `pick.json` is `{"pick": "A", "reason": "...", "by": "sponsor"}`, with `"pick": "none"` if nothing's right, and `"fix_first": "..."` if there's a fault to fix. Any other key is refused. Anyone else is `"by": "stand-in: a Claude builder"`, naming who. Anything else, or nothing, is refused. Text says "the Sponsor picked" only when they did: what the model's told, the reading, and `record/ROUNDS.md`. The ledger has it in `picks.picked_by`, and `summary.json` in `picked_by`. An empty `picked_by` says nothing of who it was.
 
 | Ending | When | Whose |
 |---|---|---|
@@ -85,9 +97,11 @@ Limits are in `session.Limits`, recorded on the run's row. The model isn't told 
 | `phases`, `round_costs` (views) | Calls, seconds and tokens, split by what a person sent or by round |
 | `runaways` | A call that hit the limit, was cut, or whose reasoning repeats, for review. See below |
 | `tries` | Each reading from a `try` |
-| `approvals`, `decisions` | Each stop for approval, with its sheet's hash, the part's hashes and the closing words, and each yes or send-back, and who |
+| `approvals`, `decisions` | Each stop for approval, with its sheet's hash, the part's hashes, the closing words and the delivered folder's groups and files (`review`), and each yes or send-back, and who |
+| `standing` | Each check the harness ran itself, whatever the needs say: `thin` on each file at `done`, and the needs' checks and `thin` at an ask, each with its file's hash. `unsure` is the bench with no answer to rely on |
+| `need_swaps` | Each need changed or dropped while its check failed on the files, with the old check and the new, both readings, the model's reason, and where it was shown |
 
-`picks.seen` holds each variant's files, its test pieces and its sheet, by hash. `rounds` gains `part_rows`, `closing_model_said` and `judged_files`, what the clean run left by hash.
+`picks.seen` holds each variant's files, its test pieces and its sheet, by hash, `picks.said_of_sheet_model_said` what the model said the sheet shows, in its own words, and `picks.fix_first` a fault sent back apart from the pick. `rounds` gains `part_rows`, `closing_model_said` and `judged_files`, what the clean run left by hash.
 
 Looking lessons up isn't here.
 
@@ -114,9 +128,10 @@ The Sponsor: "When we get these run-away calls or repeating itself constantly it
 | `views/` | Each picture the model was shown |
 | `state.json`, `needs.json`, `needs/` | Where it stands, and the needs |
 | `questions/n.md`, `n.answers.md` | Each stop at intake |
-| `asks/n/` | `question.md`, `sheet.png`, `variants/`, `test-pieces/` if it showed any, and `pick.json` |
-| `rounds/nnn/` | `judged/` (what the clean run left), `readings/` (each need's answer, in text and numbers), `run.txt`, `judgement.json`, `diff.patch` |
-| `approvals/n/` | `sheet.png`, `stop.md` and `closing.md`, for the person who decides |
+| `asks/n/` | `question.md`, `sheet.png`, `variants/`, `test-pieces/` if it showed any, `asked.json` with the looks, the model's words on the sheet and the standing checks, and `pick.json` |
+| `rounds/nnn/` | `judged/` (what the clean run left), `readings/` (each need's answer, in text and numbers), `standing/` and `standing.json` (`thin` on each file, and which files take the same space), `run.txt`, `judgement.json`, `diff.patch` |
+| `approvals/n/` | `sheet.png`, `stop.md`, `closing.md` and `review/`, for the person who decides |
+| `review/` | The latest stop's folder to print from: one folder a group, and its README |
 | `streams/n.jsonl` | A call's tool-call arguments as they arrived, if they didn't all come whole |
 | `final-sheet.png` | The latest `part` to pass, one row each, for the people who see the result. It decides nothing |
 | `summary.json` | A run's figures, from `scripts/rounds.py summary`, read from its events |
@@ -164,4 +179,6 @@ mqucifer/print-shop#19 then took what else it lacked: close-ups, sheets of the p
 
 ## Tests
 
-`uv run pytest -q tests/test_rounds.py tests/test_records.py` needs no Docker. `test_records.py` reads back a run made up in its old shape. `uv run pytest -q tests/test_rounds_in_image.py`, under the `bench` mark, has a scripted fake model drive a real run in real containers, with no model call: every tool, every ending, a resume after `ask`, a failing need going back, and a `done` the checks refuse not ending the run. The part is made up in the test, of plain boxes.
+`uv run pytest -q tests/test_rounds.py tests/test_records.py tests/test_delivered.py` needs no Docker. `test_records.py` reads back a run made up in its old shape. `uv run pytest -q tests/test_rounds_in_image.py`, under the `bench` mark, has a scripted fake model drive a real run in real containers, with no model call: every tool, every ending, a resume after `ask`, a failing need going back, and a `done` the checks refuse not ending the run. The part is made up in the test, of plain boxes.
+
+`tests/test_rounds_cup_local.py` (`-m bench_local`) reads `cup-1` back where the Mac holds it, and skips elsewhere: its request, references, needs and each round's scripts, with every name read from the run's own folder, so nothing of it is in this repository. `needs` refuses the version that passed on FAIL, round 1 doesn't stop for approval as `thin` fails two panes, and round 2's `review/` holds the same files, by what they hold, under the same names as the folder made by hand. Its run is kept in `~/print-shop/proofs/m18-truth/`, with `figures.json`.

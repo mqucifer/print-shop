@@ -35,6 +35,9 @@ COMMANDS = (
 )
 #: Verdicts that are no answer: they never pass a need, whatever it says.
 UNSURE = ("DISAGREE", "NO ANSWER")
+#: The bench saying that what it checks is wrong. On `cup-1` a need passed on `capture`'s FAIL:
+#: a need can't ask for the check to fail.
+WRONG = ("FAIL",)
 GOOD = ("OK", "CLEAR", "TOUCHING")
 GEOMETRY = (".step", ".stp", ".stl", ".brep")
 
@@ -178,6 +181,12 @@ def _bench_check(need: Need, check: dict[str, Any], wrong: list[str], shown: str
     for verdict in need.verdicts:
         if verdict in UNSURE:
             wrong.append(f"{shown}: {verdict} is no answer, so it can't pass a need")
+        elif verdict in WRONG:
+            wrong.append(
+                f"{shown}: {verdict} is the bench saying what `{need.command.split(' ')[0]}` "
+                "checks is wrong, so it can't pass a need. If the check reads the part wrongly, "
+                "give one that reads it, or say so in `blocked`"
+            )
     need.number = str(check.get("number") or "")
     need.at_least = _bound(check, "at_least", wrong, shown)
     need.at_most = _bound(check, "at_most", wrong, shown)

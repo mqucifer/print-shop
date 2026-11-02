@@ -277,6 +277,43 @@ CREATE TABLE IF NOT EXISTS decisions (
     at TEXT NOT NULL,
     FOREIGN KEY (run, approval) REFERENCES approvals(run, n)
 );
+CREATE TABLE IF NOT EXISTS standing (
+    -- A check the harness runs itself on files to be printed or shown, whatever the needs say:
+    -- `thin` on each file before the stop for approval and at an ask, and the needs' own checks on
+    -- what an ask shows. `stop` is done, ask or approval.
+    id INTEGER PRIMARY KEY,
+    run TEXT NOT NULL REFERENCES runs(run),
+    round INTEGER NOT NULL,
+    at_call INTEGER NOT NULL,
+    stop TEXT NOT NULL,
+    ask INTEGER,
+    check_name TEXT NOT NULL,
+    file TEXT,
+    command TEXT NOT NULL,
+    passed INTEGER NOT NULL,
+    -- 1 where the bench had no answer to rely on: said, and not taken as a pass or a fail.
+    unsure INTEGER NOT NULL,
+    verdict TEXT,
+    why TEXT NOT NULL,
+    numbers TEXT,
+    file_sha TEXT
+);
+CREATE TABLE IF NOT EXISTS need_swaps (
+    -- A need changed or dropped while its old check failed on the files as they stood, and the new
+    -- one passes or there is none: the reason the model gave, and both checks, shown at the next
+    -- stop. On `cup-1` two needs were weakened this way so they would pass.
+    run TEXT NOT NULL REFERENCES runs(run),
+    version INTEGER NOT NULL,
+    need TEXT NOT NULL,
+    old_check TEXT NOT NULL,
+    old_reading TEXT NOT NULL,
+    new_check TEXT,
+    new_reading TEXT,
+    reason TEXT NOT NULL,
+    at_call INTEGER NOT NULL,
+    shown_at TEXT,
+    PRIMARY KEY (run, version, need)
+);
 CREATE VIEW IF NOT EXISTS phases AS
 SELECT calls.run, calls.phase, MIN(calls.n) AS first_call, MAX(calls.n) AS last_call,
        COUNT(*) AS calls, SUM(calls.seconds) AS seconds,
@@ -311,6 +348,12 @@ ADDED = (
     ("rounds", "part_rows", "TEXT"),
     ("rounds", "closing_model_said", "TEXT"),
     ("rounds", "judged_files", "TEXT"),
+    # What the model said its sheet shows, after seeing it and before it went: its own words.
+    ("picks", "said_of_sheet_model_said", "TEXT"),
+    # A build fault sent back apart from the pick, which is about the look.
+    ("picks", "fix_first", "TEXT"),
+    # The groups and files of the delivered folder at a stop, and where it was written.
+    ("approvals", "review", "TEXT"),
 )
 
 
@@ -571,12 +614,63 @@ class DesignLedger:
                 ),
             )
 
-    def picked(self, run: str, ask: int, pick: str, reason: str, by: str) -> None:
+    def picked(
+        self, run: str, ask: int, pick: str, reason: str, by: str, fix_first: str | None = None
+    ) -> None:
         with self._open() as db:
             db.execute(
-                "UPDATE picks SET pick=?, reason=?, picked_at=?, picked_by=? WHERE run=? AND ask=?",
-                (pick, reason, now(), by, run, ask),
+                "UPDATE picks SET pick=?, reason=?, picked_at=?, picked_by=?, fix_first=? "
+                "WHERE run=? AND ask=?",
+                (pick, reason, now(), by, fix_first, run, ask),
             )
+
+    def sheet_said(self, run: str, ask: int, said: str) -> None:
+        self.change(
+            "UPDATE picks SET said_of_sheet_model_said=? WHERE run=? AND ask=?", said, run, ask
+        )
+
+    def stood(self, run: str, **row: Any) -> None:
+        """One standing check's reading."""
+        numbers = row.pop("numbers", None)
+        with self._open() as db:
+            db.execute(
+                "INSERT INTO standing (run, round, at_call, stop, ask, check_name, file, command, "
+                "passed, unsure, verdict, why, numbers, file_sha) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    run,
+                    row["round"],
+                    row["at_call"],
+                    row["stop"],
+                    row.get("ask"),
+                    row["check"],
+                    row.get("file"),
+                    row["command"],
+                    int(bool(row["passed"])),
+                    int(bool(row.get("unsure"))),
+                    row.get("verdict"),
+                    row["why"],
+                    _json(numbers) if numbers is not None else None,
+                    row.get("file_sha"),
+                ),
+            )
+
+    def swapped(self, run: str, version: int, at_call: int, swap: dict[str, Any]) -> None:
+        self.add(
+            "need_swaps",
+            run=run,
+            version=version,
+            need=swap["need"],
+            old_check=_json(swap["old"]),
+            old_reading=swap["old_reading"],
+            new_check=_json(swap["new"]) if swap.get("new") else None,
+            new_reading=swap.get("new_reading"),
+            reason=swap["reason"],
+            at_call=at_call,
+        )
+
+    def swaps_shown(self, run: str, where: str) -> None:
+        self.change("UPDATE need_swaps SET shown_at=? WHERE run=? AND shown_at IS NULL", where, run)
 
     def approval_asked(self, run: str, n: int, **facts: Any) -> None:
         self.add(
@@ -591,6 +685,7 @@ class DesignLedger:
             part_rows=_json(facts["part_rows"]),
             part_hashes=_json(facts["part_hashes"]),
             closing_model_said=facts["closing"],
+            review=_json(facts.get("review")) if facts.get("review") else None,
         )
 
     def decided(self, run: str, approval: int, decision: str, by: str, note: str) -> None:

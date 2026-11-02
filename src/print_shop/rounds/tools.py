@@ -108,6 +108,16 @@ PAGE = {
         "description": "Which page of the matches, from 1. Optional: the first.",
     }
 }
+LOOKS = {
+    "looks": {
+        "type": "object",
+        "description": 'Each file\'s colour and a short label: {"pane_1.step": {"colour": "blue", '
+        '"label": "cup"}, "frame.step": {"colour": "grey", "label": "frame"}}. A colour is a name '
+        "such as blue, amber or clear, perhaps with light or dark, or #rrggbb. The sheet draws "
+        "each file in its colour, numbered, with a legend; a file with none takes a colour no "
+        "other file has. Optional.",
+    }
+}
 NEED_SHAPE = (
     "Each need: `id`; `what` it must do; `source` (`request`, `answer` or `note` with `quote`, the "
     'words as you were sent them; `reference`, `derived` or `chosen`); and `check`, either {"by": '
@@ -203,14 +213,24 @@ def specs() -> list[dict[str, Any]]:
         _spec(
             "needs",
             "Settle what the part must do, when you know enough: this ends intake, and the first "
-            f"round starts. The harness runs each check itself at `done`. {NEED_SHAPE}",
+            f"round starts. The harness runs each check itself at `done`. A check can't pass on "
+            "FAIL. Settled again after they're reopened, a need whose check fails on your files "
+            "as they stand can't be dropped, or changed to one that passes, without a reason. "
+            f"{NEED_SHAPE}",
             {
                 "try": {
                     "type": "boolean",
                     "description": "true to read each bench check against your files as they "
                     "stand, and settle nothing: whether its command, number and limit work. "
                     "Optional.",
-                }
+                },
+                "why_changed": {
+                    "type": "object",
+                    "description": "When needs are settled again: for each need whose check "
+                    "fails on your files and that this list drops or changes to a check that "
+                    'passes, why, by its id: {"panes-held": "..."}. A person reads it at the next '
+                    "stop, beside both checks. Optional.",
+                },
             },
             needs={
                 "type": "array",
@@ -220,10 +240,20 @@ def specs() -> list[dict[str, Any]]:
         ),
         _spec(
             "ask",
-            "Stop for the Sponsor, where form is at stake: name the variants, and `render` makes "
-            "a sheet of them, which comes to you too. The run waits for their pick and reason. "
-            "Everything else is yours to settle by the bench.",
+            "Where form is at stake: name the variants, and `render` draws a sheet of them, which "
+            "comes to you first. Nothing goes to the Sponsor until `send_ask`, where you say what "
+            "the sheet shows. The harness also runs the needs' checks and `thin` on these files, "
+            "and puts any that fail beside the question. Everything else is yours to settle by "
+            "the bench.",
             {
+                **LOOKS,
+                "cuts": {
+                    "type": "string",
+                    "description": "Cut-throughs added to each variant's row, by spaces: `z=3` "
+                    "level at 3 mm, `x=50` upright through x=50, or `x=50,y=20:40` for that "
+                    "stretch of it, as a pane sits in its pocket. Each file is cut in its colour. "
+                    "Optional.",
+                },
                 "need": {
                     "type": "string",
                     "description": "The eye need this answers, if it answers one. Optional.",
@@ -255,11 +285,34 @@ def specs() -> list[dict[str, Any]]:
             },
         ),
         _spec(
+            "send_ask",
+            "Send the sheet `ask` drew to the Sponsor, saying what it shows. The run waits for "
+            "their pick and reason. Refused if a file on it changed since it was drawn.",
+            says="What the sheet shows, picture by picture, as drawn: which files you can see, "
+            "in which colours, and anything that isn't what you meant. It reaches the Sponsor "
+            "with the question.",
+        ),
+        _spec(
             "done",
             "When you believe the needs are met. The script is run again from a clean start in a "
             "fresh container, with every STEP and STL outside `references/` taken away first, and "
             "the harness runs each need's check itself. Needs that fail come back to you, and the "
-            "next round starts. When every need passes, the run stops for approval.",
+            "next round starts. Every file in `part` is also read by `thin`, at the nozzle's "
+            "width, and files printed together mustn't take the same space. When all of that "
+            "passes, the run stops for approval, and the harness writes the folder to print "
+            "from, one folder for each of `groups`.",
+            {
+                **LOOKS,
+                "groups": {
+                    "type": "array",
+                    "description": "The ways the part prints, each with its own files: "
+                    '[{"name": "two-parts", "files": ["frame_base.step", "cap.step"], "about": '
+                    '"how it prints"}, {"name": "one-frame", "files": ["frame.step"], "about": '
+                    '"with the pause"}]. Files of `part` in no group print with every group, as '
+                    "panes do. Optional: one group of all of `part`.",
+                    "items": {"type": "object"},
+                },
+            },
             script="The script that writes the part.",
             part={
                 "type": "array",
@@ -289,6 +342,7 @@ class Desk(Protocol):
     def questions(self, args: dict[str, Any]) -> Judged: ...
     def needs(self, args: dict[str, Any]) -> Judged: ...
     def ask(self, args: dict[str, Any]) -> Judged: ...
+    def send_ask(self, args: dict[str, Any]) -> Judged: ...
     def done(self, args: dict[str, Any]) -> Judged: ...
     def blocked(self, args: dict[str, Any]) -> Judged: ...
     def bench_said(self, argv: list[str], ran: Ran, record: dict[str, Any] | None) -> None: ...
@@ -435,7 +489,7 @@ class WorkTools:
                 said = args[key].strip().lower()
                 if said in BOOLEAN_TEXT:
                     args = {**args, key: BOOLEAN_TEXT[said]}
-        for key in ("needs", "variants"):
+        for key in ("needs", "variants", "groups", "looks", "why_changed"):
             # A list sent as its JSON text is read as the list.
             if isinstance(args, dict) and isinstance(args.get(key), str):
                 with contextlib.suppress(ValueError):
@@ -443,7 +497,7 @@ class WorkTools:
         bad = self._well_formed(name, args)
         if bad is not None:
             return bad
-        if name in ("questions", "needs", "ask", "done", "blocked"):
+        if name in ("questions", "needs", "ask", "send_ask", "done", "blocked"):
             found: Judged = getattr(self.desk, name)(args)
             return found
         answered: Judged = getattr(self, f"_{name}")(args)

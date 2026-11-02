@@ -60,9 +60,11 @@ class Box:
         """A bench command. Only the bench's own: `build` and `check` aren't in the image."""
         return self._run(host.bench_command(args), where, timeout)
 
-    def helper(self, module: str, args: list[str], timeout: int = 120) -> Ran:
+    def helper(
+        self, module: str, args: list[str], timeout: int = 120, where: Path | None = None
+    ) -> Ran:
         """One of the bench package's modules that isn't a bench command."""
-        return self._run(host.helper(module, args), None, timeout)
+        return self._run(host.helper(module, args), where, timeout)
 
     def _run(self, command: list[str], where: Path | None, timeout: int | None) -> Ran:
         limit = self.timeout if timeout is None else timeout

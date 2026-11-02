@@ -176,6 +176,25 @@ def parser() -> Parser:
         metavar="FILE",
         help="drawn see-through in grey, and marked as not the part",
     )
+    render.add_argument(
+        "--look",
+        dest="looks",
+        action="append",
+        default=[],
+        metavar="FILE=COLOUR[:LABEL]",
+        help="a file's colour, by name or #rrggbb, and a short label: drawn, numbered and named in "
+        "the legend. A file with none takes a colour no other file on the sheet has",
+    )
+    render.add_argument(
+        "--cut",
+        dest="cuts",
+        action="append",
+        default=[],
+        metavar="AXIS=AT[,AXIS=FROM:TO]",
+        help="a cut-through as a view: every file cut by a plane, each in its colour. z=3 is level "
+        "at 3 mm; x=50 is upright through x=50, seen from +x; y=40 from the front. A window, "
+        "such as x=50,y=20:40, draws only that stretch of the plane",
+    )
     render.add_argument("--size", type=int, default=768)
     render.add_argument("--renders-out", dest="out_renders", default="renders")
     return top

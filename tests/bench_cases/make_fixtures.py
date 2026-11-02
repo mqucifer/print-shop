@@ -393,6 +393,45 @@ cq.exporters.export(cq.Workplane().box(Size, Size, Size), "twice.step")
     Path("design-nothing.py").write_text("Size = 10.0\nprint(Size)\n")
 
 
+SHEETS_X = 100.0
+
+
+def sheets() -> None:
+    """What a sheet must show: panes in their pockets, a pane with a hole round an island of
+    frame, files that would share a colour in a cycle of 5, a file hidden in another, and two
+    that take the same space. All 100 mm along x, clear of the other cases, as `capture` names a
+    file beside a frame whose outline it shares."""
+
+    def save(shape: Any, name: str) -> None:
+        cq.exporters.export(shape.translate((SHEETS_X, 0, 0)), f"{name}.step")
+
+    # A frame 60 x 40 x 5 with two pockets at z 2 to 4, each with a window through, and its panes.
+    frame = box(0, 60, 0, 40, 0, 5)
+    for x0 in (5, 32):
+        frame = frame.cut(box(x0, x0 + 23, 5, 35, 2, 4))
+        frame = frame.cut(box(x0 + 1.5, x0 + 21.5, 6.5, 33.5, 0, 5))
+    save(frame, "glass-frame")
+    for k, x0 in enumerate((5, 32)):
+        save(box(x0 + 0.2, x0 + 22.8, 5.2, 34.8, 2, 3.8), f"glass-pane-{k + 1}")
+    # One opening with an island of frame standing in it: its pane has a
+    # hole for the island. At z=3 the frame is the outer ring and the island, 8 x 8 mm.
+    island = box(0, 40, 0, 40, 0, 4).cut(box(5, 35, 5, 35, 1, 3))
+    island = island.cut(box(7, 33, 7, 33, 0, 1)).cut(box(7, 33, 7, 33, 3, 4))
+    island = island.union(box(16, 24, 16, 24, 0, 4))
+    save(island, "island-frame")
+    holed = box(5.2, 34.8, 5.2, 34.8, 1, 2.8).cut(box(15.8, 24.2, 15.8, 24.2, 1, 2.8))
+    save(holed, "holed-pane")
+    # Seven boxes in a row: a cycle of 5 colours would draw the 6th in the 1st's.
+    for k in range(7):
+        save(box(12 * k, 12 * k + 10, 0, 10, 0, 3), f"row-{k + 1}")
+    # A box wholly inside another, which no view can show.
+    save(box(0, 20, 0, 20, 0, 10), "outer")
+    save(box(5, 10, 5, 10, 2, 6), "hidden")
+    # Two that take the same space: 10 x 10 x 3 of them shared.
+    save(box(0, 20, 0, 10, 0, 3), "share-a")
+    save(box(10, 30, 0, 10, 0, 3), "share-b")
+
+
 if __name__ == "__main__":
     near_touching()
     boxes()
@@ -406,4 +445,5 @@ if __name__ == "__main__":
     closes()
     thin_parts()
     designs()
+    sheets()
     print("made")
