@@ -63,7 +63,7 @@ def script(gap: float, size: float = 20.0) -> str:
     )
 
 
-GAP_NEED = {
+GAP_NEED: dict[str, Any] = {
     "id": "gap",
     "what": "a 0.5 mm gap between block and tab",
     "source": "request",
@@ -100,6 +100,10 @@ EYE_NEED = {
     "quote": "it should look good",
     "check": {"by": "eye", "look_for": "whether the proportions please"},
 }
+
+
+#: After `ask` draws its sheet, the model says what it shows, and only then does it go.
+SENT = [tool("send_ask", says="The block, in the colour the legend gives it.")]
 
 
 def begin(
@@ -245,6 +249,7 @@ def test_a_run_goes_from_intake_through_refusals_and_a_pick_to_its_needs_met(
             ),
             tool("bench", command="info block.step"),
         ],
+        SENT,
     )
     run.resume()
     assert run.session.messages[-1]["content"].startswith("The Sponsor's answers:")
@@ -438,6 +443,7 @@ def asked_a_pick(tmp_path: Path, **ask: Any) -> Run:
                 **ask,
             )
         ],
+        SENT,
     )
     assert run.drive().name == "ask"
     return run
@@ -602,12 +608,13 @@ def test_a_picks_sheet_can_hold_a_close_up_and_marks_a_test_piece(tmp_path: Path
                 variants=[{"name": "A", "files": ["block.step"], "about": "the even one"}],
             )
         ],
+        SENT,
     )
     assert run.drive().name == "ask"
     folder = run.folder / "asks" / "1"
     head = (folder / "sheet.png").read_bytes()[16:24]
     width, height = int.from_bytes(head[:4], "big"), int.from_bytes(head[4:], "big")
-    assert (width, height) == (1024, 512), "the view, and the close-up beside it"
+    assert (width, height) == (1024, 512 + legend_px(1, 1024)), "the view and the close-up"
     asked = json.loads((folder / "asked.json").read_text())
     assert asked["test_pieces"] == ["test-piece.step"]
     assert (folder / "test-pieces" / "test-piece.step").is_file()
@@ -962,6 +969,7 @@ def test_a_pick_of_none_leaves_the_need_open_and_says_why(tmp_path: Path) -> Non
                 variants=[{"name": "A", "files": ["block.step"]}],
             )
         ],
+        SENT,
     )
     assert run.drive().name == "ask"
     (run.folder / "asks" / "1" / "pick.json").write_text(
@@ -1058,6 +1066,7 @@ def asked_with_needs(tmp_path: Path, *need_list: dict[str, Any], **ask: Any) -> 
                 **ask,
             )
         ],
+        SENT,
     )
     assert run.drive().name == "ask"
     return run
@@ -1088,6 +1097,7 @@ def test_every_note_and_answer_relayed_is_a_row_saying_who_when_and_at_which_cal
                 variants=[{"name": "A", "files": ["block.step"]}],
             )
         ],
+        SENT,
     )
     run.resume()
     assert run.drive().name == "ask"
@@ -1109,8 +1119,9 @@ def test_every_note_and_answer_relayed_is_a_row_saying_who_when_and_at_which_cal
         ("note", "the people running this", "And a little taller."),
     ]
     assert all(r["at"] for r in found)
-    # The answer reached call 2, and what arrived together is one phase.
-    assert [r["at_call"] for r in found] == [2, 5, 5, 6, 6]
+    # The answer reached call 2, and what arrived together is one phase. `ask` and `send_ask`
+    # are two calls.
+    assert [r["at_call"] for r in found] == [2, 6, 6, 7, 7]
     assert [r["phase"] for r in found] == [1, 2, 2, 3, 3]
     assert found[1]["round"] == 1
     # Each went to the model as the row says.
@@ -1168,16 +1179,17 @@ def test_tokens_and_seconds_split_by_what_a_person_sent_and_by_round(tmp_path: P
     assert run.drive().name == "blocked"
 
     calls = rows(run, "calls")
-    assert [c["n"] for c in sorted(calls, key=lambda c: c["n"])] == [1, 2, 3, 4, 5]
+    # `ask` and `send_ask` are two calls.
+    assert [c["n"] for c in sorted(calls, key=lambda c: c["n"])] == [1, 2, 3, 4, 5, 6]
     phases = run.ledger.rows("SELECT * FROM phases WHERE run=? ORDER BY phase", run.state.name)
-    assert [(p["first_call"], p["last_call"]) for p in phases] == [(1, 3), (4, 5)]
+    assert [(p["first_call"], p["last_call"]) for p in phases] == [(1, 4), (5, 6)]
     assert phases[0]["begun_by"] is None
     assert phases[1]["begun_by"] == "pick from sponsor; note from the people running this"
-    assert sum(p["completion_tokens"] for p in phases) == 50
+    assert sum(p["completion_tokens"] for p in phases) == 60
     by_round = run.ledger.rows(
         "SELECT * FROM round_costs WHERE run=? ORDER BY round", run.state.name
     )
-    assert [(r["round"], r["calls"]) for r in by_round] == [(0, 2), (1, 3)]
+    assert [(r["round"], r["calls"]) for r in by_round] == [(0, 2), (1, 4)]
     assert by_round[0]["completion_tokens"] == 20
 
 
@@ -1429,6 +1441,7 @@ def test_a_pick_holds_the_hashes_of_what_was_on_its_sheet(tmp_path: Path) -> Non
                 ],
             )
         ],
+        SENT,
     )
     assert run.drive().name == "ask"
     seen = json.loads(rows(run, "picks")[0]["seen"])
@@ -1469,6 +1482,7 @@ def test_a_pick_on_files_that_changed_doesnt_hold_and_the_need_is_asked_again(
         [write("make.py", script(gap=0.5, size=18.0), run=True)],
         [done()],
         [ask_again],
+        SENT,
     )
     run.resume()
     assert run.drive().name == "ask"
@@ -1505,7 +1519,7 @@ def test_a_pick_of_none_takes_back_the_one_before_it(tmp_path: Path) -> None:
         views="iso",
         variants=[{"name": "A", "files": ["block.step"]}],
     )
-    run, _ = again(run, [ask_again])
+    run, _ = again(run, [ask_again], SENT)
     run.resume()
     assert run.drive().name == "ask"
     (run.folder / "asks" / "2" / "pick.json").write_text(
@@ -1606,6 +1620,11 @@ def met_with_a_sheet(tmp_path: Path, **more: Any) -> Run:
     )
     assert run.drive().name == "met"
     return run
+
+
+def legend_px(files: int, width: int) -> int:
+    """The legend's height under a sheet, as `render` draws it: a line for each few files."""
+    return 18 * -(-files // max(1, width // 440)) + 8
 
 
 def sheet_size(path: Path) -> tuple[int, int]:
@@ -1710,7 +1729,7 @@ def test_a_sheet_at_the_stop_shows_one_part_a_row(tmp_path: Path) -> None:
         part=["block.step", {"name": "second", "files": ["tab.step"]}],
     )
     sheet = run.folder / "approvals" / "1" / "sheet.png"
-    assert sheet_size(sheet) == (3 * 512, 2 * 512), "three views, two rows"
+    assert sheet_size(sheet) == (3 * 512, 2 * 512 + legend_px(2, 3 * 512)), "three views, 2 rows"
     assert sheet.read_bytes() == (run.folder / "final-sheet.png").read_bytes()
     drawn = final_render(run)
     assert drawn["numbers"]["views"]["block top"]["projected_mm"] == [20.0, 20.0]
@@ -1723,21 +1742,27 @@ def test_a_sheet_too_tall_to_send_stays_with_the_person(tmp_path: Path) -> None:
     many = script(gap=0.5) + "".join(
         f'cq.exporters.export(block, "copy{i}.step")\n' for i in range(4)
     )
+    copies = ["block.step", *[f"copy{i}.step" for i in range(4)]]
     run, _ = begin(
         tmp_path,
         [tool("needs", needs=[SIZE_NEED])],
         [write("make.py", many, run=True)],
-        [done(part=["block.step", *[f"copy{i}.step" for i in range(4)]])],
+        # Five copies in one place: each prints on its own, or they'd take the same space.
+        [done(part=copies, groups=[{"name": f"g{k}", "files": [f]} for k, f in enumerate(copies)])],
     )
     assert run.drive().name == "met"
-    assert sheet_size(run.folder / "approvals" / "1" / "sheet.png") == (3 * 512, 5 * 512)
+    tall = (3 * 512, 5 * 512 + legend_px(5, 3 * 512))
+    assert sheet_size(run.folder / "approvals" / "1" / "sheet.png") == tall
     events = transcript.events_of(run.session.events)
     assert not any(e["kind"] == "picture" for e in events)
 
 
 def test_files_seen_together_are_one_row(tmp_path: Path) -> None:
     run = met_with_a_sheet(tmp_path, part=[{"name": "whole", "files": ["block.step", "tab.step"]}])
-    assert sheet_size(run.folder / "approvals" / "1" / "sheet.png") == (3 * 512, 512)
+    assert sheet_size(run.folder / "approvals" / "1" / "sheet.png") == (
+        3 * 512,
+        512 + legend_px(2, 3 * 512),
+    )
 
 
 def test_the_command_line_approves_with_no_model_and_no_key(tmp_path: Path) -> None:
@@ -1793,3 +1818,284 @@ def test_a_live_runs_rows_are_what_reading_it_back_gives(tmp_path: Path) -> None
     for table in tables:
         again_read = [dict(r) for r in fresh.rows(f"SELECT * FROM {table}")]  # noqa: S608
         assert again_read == live[table], table
+
+
+# Requirements, pictures and the delivered result say what's true (mqucifer/print-shop#26)
+
+#: The block with a fin standing out 8 mm from its side, `FIN` mm thick: under the nozzle's 0.4 mm,
+#: `thin` fails it.
+FIN_LINES = (
+    'fin = cq.Workplane("XY").box(8, FIN, 5).translate((-SIZE / 2 - 4 + 0.01, 0, 0))\n'
+    "block = block.union(fin)\n"
+)
+FIN_SCRIPT = (
+    script(gap=0.5)
+    .replace("tab = ", f"{FIN_LINES}tab = ")
+    .replace("GAP = 0.5\n", "GAP = 0.5\nFIN = {fin}\n")
+)
+#: The block made two ways, as a frame is: whole, or as a base and a top that print together.
+TWO_WAYS = script(gap=0.5) + (
+    'cq.exporters.export(cq.Workplane("XY").box(20, 20, 3).translate((0, 0, -1)), "base.step")\n'
+    'cq.exporters.export(cq.Workplane("XY").box(20, 20, 2).translate((0, 0, 1.5)), "top.step")\n'
+)
+TWO_WAYS_PART = ["block.step", "base.step", "top.step", "tab.step"]
+TWO_WAYS_GROUPS = [
+    {"name": "one-piece", "files": ["block.step"], "about": "printed whole"},
+    {"name": "two-pieces", "files": ["base.step", "top.step"], "about": "base, then top"},
+]
+LOOKS = {
+    "tab.step": {"colour": "amber", "label": "the tab"},
+    "block.step": {"colour": "grey", "label": "block"},
+}
+
+
+def test_the_run_doesnt_stop_for_approval_with_a_file_under_the_nozzles_width(
+    tmp_path: Path,
+) -> None:
+    """On `cup-1` two panes the Sponsor found too thin in Orca passed every need."""
+    run, _ = begin(
+        tmp_path,
+        [tool("needs", needs=[SIZE_NEED])],
+        [write("make.py", FIN_SCRIPT.format(fin=0.2), run=True)],
+        [done(part=["block.step", "tab.step"])],
+        [write("make.py", FIN_SCRIPT.format(fin=2.0), run=True)],
+        [done(part=["block.step", "tab.step"])],
+    )
+    assert run.drive().name == "met"
+    first, second = [e["reply"] for e in replies(run) if e["name"] == "done"]
+    assert "Round 1: not met yet. Every need passed" in first
+    assert "- block.step, TOO THIN: FAIL: " in first and "narrower than the 0.4 mm nozzle" in first
+    assert "the thinnest 0.200 mm" in first and "- tab.step, ok:" in first
+    assert "Round 2: every need is met." in second
+    assert run.state.stop == {"kind": "met", "n": 1}
+    stood = rows(run, "standing")
+    assert {(r["round"], r["file"], r["passed"]) for r in stood} == {
+        (1, "block.step", 0),
+        (1, "tab.step", 1),
+        (2, "block.step", 1),
+        (2, "tab.step", 1),
+    }
+    assert all(r["stop"] == "done" and r["file_sha"] for r in stood)
+    met_column = {r["round"]: r["met"] for r in rows(run, "rounds")}
+    assert met_column == {1: 0, 2: 1}, "a met is only what was checked"
+    stop = (run.folder / "approvals" / "1" / "stop.md").read_text()
+    assert "Every file to be printed, by `thin`" in stop and "`block.step`, ok" in stop
+
+
+def test_files_printed_together_cant_take_the_same_space(tmp_path: Path) -> None:
+    """Both real runs handed over `frame` beside `frame_base` and `cap`, its two halves."""
+    run, _ = begin(
+        tmp_path,
+        [tool("needs", needs=[SIZE_NEED])],
+        [write("make.py", TWO_WAYS, run=True)],
+        [done(part=TWO_WAYS_PART)],
+        [done(part=TWO_WAYS_PART, groups=TWO_WAYS_GROUPS, looks=LOOKS)],
+    )
+    assert run.drive().name == "met"
+    first = [e["reply"] for e in replies(run) if e["name"] == "done"][0]
+    assert "`block.step` and `base.step` share 1200 mm³, 1200 by OCCT" in first
+    assert "the group `part` prints them together" in first
+    review = run.folder / "review"
+    assert sorted(p.name for p in (review / "A-one-piece").iterdir()) == [
+        "block.step",
+        "tab-the-tab-amber.step",
+    ]
+    assert sorted(p.name for p in (review / "B-two-pieces").iterdir()) == [
+        "base.step",
+        "tab-the-tab-amber.step",
+        "top.step",
+    ]
+    judged = run.folder / "rounds" / "002" / "judged"
+    assert (review / "B-two-pieces" / "top.step").read_bytes() == (judged / "top.step").read_bytes()
+    readme = (review / "README.md").read_text()
+    assert "**Open one folder only.**" in readme
+    assert "| **volume**: the block is the size chosen |" in readme
+    assert "| `tab-the-tab-amber.step` | `tab.step` | the tab | amber |" in readme
+    assert "**Size:** 30.5 x 20 x 5 mm" in readme
+    # The folder's own copy is the stop's.
+    assert (run.folder / "approvals" / "1" / "review" / "README.md").read_text() == readme
+    asked = rows(run, "approvals")[0]
+    held = json.loads(asked["review"])
+    assert [g["folder"] for g in held["groups"]] == ["A-one-piece", "B-two-pieces"]
+    assert "A-one-piece" in (run.folder / "approvals" / "1" / "stop.md").read_text()
+
+
+def test_a_group_that_names_a_file_outside_the_part_is_told(tmp_path: Path) -> None:
+    run, _ = begin(
+        tmp_path,
+        [tool("needs", needs=[SIZE_NEED])],
+        [write("make.py", script(gap=0.5), run=True)],
+        [done(groups=[{"name": "one", "files": ["tab.step"]}])],
+        [done(looks={"block.step": {"colour": "sparkly"}})],
+        [tool("blocked", reason="stop")],
+    )
+    assert run.drive().name == "blocked"
+    told = [e for e in replies(run) if e["name"] == "done"]
+    assert told[0]["why"] == "not_a_group" and "isn't in `part`" in told[0]["reply"]
+    assert told[1]["why"] == "not_a_look" and "sparkly" in told[1]["reply"]
+    assert not rows(run, "readings"), "neither cost a clean run"
+
+
+def failing_gap_then_stopped(tmp_path: Path) -> Run:
+    """Needs settled with a gap the part misses, a round that says so, and a stop."""
+    run, _ = begin(
+        tmp_path,
+        [tool("needs", needs=[GAP_NEED, SIZE_NEED])],
+        [write("make.py", script(gap=2.0), run=True)],
+        [done()],
+        [tool("blocked", reason="stop")],
+    )
+    assert run.drive().name == "blocked"
+    return run
+
+
+def test_a_need_whose_check_fails_isnt_swapped_for_one_that_passes_without_a_reason(
+    tmp_path: Path,
+) -> None:
+    """On `cup-1` `capture` was swapped for `clearance`, and `pause` pointed at a file with no
+    pockets, so both passed."""
+    run = failing_gap_then_stopped(tmp_path)
+    looser = {**GAP_NEED, "check": {"by": "bench", "command": "clearance block.step tab.step"}}
+    reason = "The gap was chosen too fine for this printer."
+    run, _ = again(
+        run,
+        [tool("needs", needs=[SIZE_NEED])],
+        [tool("needs", needs=[looser, SIZE_NEED])],
+        [tool("needs", needs=[SIZE_NEED], why_changed={"gap": reason})],
+        [done()],
+    )
+    run.resume(reopen_needs=True)
+    assert run.drive().name == "met"
+    said = [e for e in replies(run) if e["name"] == "needs"][-3:]
+    assert [e["outcome"] for e in said] == ["failed", "failed", "ok"]
+    assert said[0]["why"] == "swapped_failing"
+    assert "`gap`'s check, `clearance block.step tab.step --min-gap 0.2`" in said[0]["reply"]
+    assert "is 2, over 0.55. This set drops it" in said[0]["reply"]
+    assert "changes its check to `clearance block.step tab.step`" in said[1]["reply"]
+    assert "the person at the next stop sees both checks and your reason" in said[2]["reply"]
+    swap = rows(run, "need_swaps")[0]
+    assert (swap["need"], swap["reason"], swap["new_check"]) == ("gap", reason, None)
+    assert swap["shown_at"] == "approval 1"
+    stop = (run.folder / "approvals" / "1" / "stop.md").read_text()
+    assert "## Needs changed while their old check failed" in stop
+    assert "was `clearance block.step tab.step --min-gap 0.2`" in stop and reason in stop
+    assert reason in (run.folder / "review" / "README.md").read_text()
+    assert run.state.swaps == [], "shown once"
+
+
+def test_a_need_changed_to_a_check_that_fails_too_needs_no_reason(tmp_path: Path) -> None:
+    run = failing_gap_then_stopped(tmp_path)
+    tighter = {**GAP_NEED, "check": {**GAP_NEED["check"], "at_most": 0.5}}
+    run, _ = again(run, [tool("needs", needs=[tighter, SIZE_NEED])], [tool("blocked", reason="x")])
+    run.resume(reopen_needs=True)
+    assert run.drive().name == "blocked"
+    assert reply_of(run, "needs")["outcome"] == "ok"
+    assert not rows(run, "need_swaps")
+
+
+def test_an_asks_sheet_goes_to_the_model_first_and_only_then_with_its_words(
+    tmp_path: Path,
+) -> None:
+    """On both real runs the model described the design it meant, not what the sheet showed."""
+    run, _ = begin(
+        tmp_path,
+        [tool("needs", needs=[GAP_NEED, EYE_NEED])],
+        [write("make.py", script(gap=2.0), run=True)],
+        [tool("send_ask", says="nothing yet")],
+        [
+            tool(
+                "ask",
+                question="Which proportions?",
+                need="look",
+                views="top",
+                cuts="z=0",
+                looks={"block.step": {"colour": "blue", "label": "block"}},
+                variants=[{"name": "A", "files": ["block.step", "tab.step"], "about": "even"}],
+            )
+        ],
+        [write("make.py", script(gap=2.5), run=True)],
+        [tool("send_ask", says="The block, blue.")],
+        [
+            tool(
+                "ask",
+                question="Which proportions?",
+                need="look",
+                views="top",
+                looks={"block.step": {"colour": "blue", "label": "block"}},
+                variants=[{"name": "A", "files": ["block.step", "tab.step"], "about": "even"}],
+            )
+        ],
+        [tool("send_ask", says="The block in blue, the tab beside it in another colour.")],
+    )
+    assert run.drive().name == "ask"
+    sent = [e for e in replies(run) if e["name"] == "send_ask"]
+    assert sent[0]["why"] == "no_draft"
+    assert sent[1]["why"] == "changed", "a file changed after its sheet was drawn"
+    drawn = [e for e in replies(run) if e["name"] == "ask"]
+    assert all(e["outcome"] == "ok" for e in drawn)
+    assert "hasn't gone to the Sponsor" in drawn[0]["reply"]
+    assert "drawn: 1 block.step: block (blue)" in drawn[0]["reply"]
+    # The harness's own reading of what the sheet shows: the gap fails, as `done` would say.
+    assert (
+        "clearance block.step tab.step --min-gap 0.2: `pairs.0.gap_mesh_mm` is 2"
+        in drawn[0]["reply"]
+    )
+    pictures = [e for e in transcript.events_of(run.session.events) if e["kind"] == "picture"]
+    assert len(pictures) == 2, "each drawn sheet is shown to the model"
+    assert len(rows(run, "picks")) == 1, "only what was sent is asked"
+    folder = run.folder / "asks" / "1"
+    question = (folder / "question.md").read_text()
+    assert "## What the model says the sheet shows" in question
+    assert "The block in blue, the tab beside it in another colour." in question
+    assert "## Checks that don't pass on these files" in question
+    assert "`clearance block.step tab.step --min-gap 0.2`: `pairs.0.gap_mesh_mm` is 2.5" in question
+    assert '"fix_first"' in question
+    pick = rows(run, "picks")[0]
+    assert pick["said_of_sheet_model_said"].startswith("The block in blue")
+    at_ask = [r for r in rows(run, "standing") if r["stop"] == "ask"]
+    assert {r["check_name"] for r in at_ask} == {"need gap", "printable"}
+    assert all(r["ask"] == 1 for r in at_ask)
+    asked = json.loads((folder / "asked.json").read_text())
+    assert asked["says_model_said"].startswith("The block in blue")
+    assert asked["looks"] == {"block.step": {"colour": "blue", "label": "block"}}
+
+
+def test_a_fault_to_fix_first_goes_back_apart_from_the_pick(tmp_path: Path) -> None:
+    """The Sponsor was asked to answer `none` for a build fault, which mixed two answers."""
+    run = asked_with_needs(tmp_path, SIZE_NEED, EYE_NEED)
+    folder = run.folder / "asks" / "1"
+    (folder / "pick.json").write_text(
+        json.dumps({"pick": "A", "reason": "It reads.", "by": "sponsor", "fix": "x"})
+    )
+    run, model = again(run, [tool("blocked", reason="stop")])
+    with pytest.raises(Refused, match="holds pick, reason, by and fix_first"):
+        run.resume()
+    (folder / "pick.json").write_text(
+        json.dumps(
+            {"pick": "A", "reason": "It reads.", "by": "sponsor", "fix_first": "Split pane 9."}
+        )
+    )
+    run.resume()
+    assert run.drive().name == "blocked"
+    told = [m["content"] for m in model.bodies[0]["messages"] if m["role"] == "user"][-2:]
+    assert told[0] == "The Sponsor picked A. Their reason: It reads."
+    assert told[1] == "Apart from the look, the Sponsor says to fix this first:\n\nSplit pane 9."
+    assert rows(run, "picks")[0]["fix_first"] == "Split pane 9."
+    kinds = [(r["kind"], r["text"]) for r in rows(run, "interventions")]
+    assert ("fix_first", "Split pane 9.") in kinds
+    assert run.state.picks["look"]["pick"] == "A", "the pick stands as a pick"
+
+
+def test_a_send_back_can_reopen_the_needs(tmp_path: Path) -> None:
+    """On `cup-1` the model tried to put its checks right after a send-back, and was refused."""
+    run = met_with_a_sheet(tmp_path)
+    run, _ = again(
+        run,
+        [tool("needs", needs=[SIZE_NEED, {**SIZE_NEED, "id": "printable"}])],
+        [tool("blocked", reason="stop")],
+    )
+    run.send_back("sponsor", "Add the check you were missing.", reopen_needs=True)
+    assert run.drive().name == "blocked"
+    assert reply_of(run, "needs")["outcome"] == "ok"
+    kinds = [r["kind"] for r in rows(run, "interventions")]
+    assert kinds[-2:] == ["send_back", "reopen_needs"]

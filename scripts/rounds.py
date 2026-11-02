@@ -4,7 +4,8 @@
 scripts/rounds.py start NAME --request FILE [--reference FILE]...   intake, then rounds
 scripts/rounds.py resume NAME [--note FILE] [--from WHO] [--reopen-needs]   go on after a stop
 scripts/rounds.py resume NAME --approve --by WHO [--note FILE]      a person's yes, with no call
-scripts/rounds.py resume NAME --send-back --by WHO --note FILE      a person's no, as a new round
+scripts/rounds.py resume NAME --send-back --by WHO --note FILE [--reopen-needs]
+                                                                  a person's no, as a new round
 scripts/rounds.py status NAME                                       where it stands
 scripts/rounds.py stop NAME                                         stop before its next call
 scripts/rounds.py summary NAME                                      its figures, in summary.json
@@ -122,7 +123,7 @@ def main() -> int:
                 (folder / "stop").unlink(missing_ok=True)
                 note = args.note.read_text(encoding="utf-8") if args.note else ""
                 if args.send_back:
-                    run.send_back(args.by, note)
+                    run.send_back(args.by, note, args.reopen_needs)
                 else:
                     run.resume(note, args.reopen_needs, args.note_from)
             ending = run.drive()

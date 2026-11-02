@@ -18,6 +18,8 @@ again, since a pick on an older design says nothing of this one.
 from __future__ import annotations
 
 import json
+import re
+import shlex
 import shutil
 import uuid
 from dataclasses import dataclass, field
@@ -25,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from print_shop.rounds.box import Box
-from print_shop.rounds.needs import GEOMETRY, Need, Reading, judge
+from print_shop.rounds.needs import GEOMETRY, UNSURE, Need, Reading, judge
 from print_shop.rounds.paths import copy_plain, geometry_hashes, inside, walk_plain
 from print_shop.rounds.tools import SAVED, recorded
 
@@ -34,6 +36,7 @@ REFERENCES = "references"
 SPONSOR = "sponsor"
 STAND_IN = "stand-in:"
 TEXT_KEPT = 200_000
+NOT_IN_A_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 
 
 @dataclass
@@ -113,6 +116,66 @@ def read_need(box: Box, need: Need, judged: Path, kept: Path) -> Reading:
             shutil.rmtree(scratch, ignore_errors=True)
         shutil.rmtree(where / out, ignore_errors=True)
     return reading
+
+
+@dataclass
+class Standing:
+    """A check the harness runs on a file whatever the needs say. `unsure` is the bench having no
+    answer to rely on, said, and taken as neither a pass nor a fail."""
+
+    check: str
+    file: str
+    command: str
+    passed: bool
+    unsure: bool
+    verdict: str
+    why: str
+    numbers: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def failed(self) -> bool:
+        return not self.passed and not self.unsure
+
+    def plain(self) -> dict[str, Any]:
+        return {k: v for k, v in self.__dict__.items() if k != "numbers"}
+
+
+#: Every file to be printed is read by `thin`, at the nozzle's width: on `cup-1` two panes the
+#: Sponsor found too thin in Orca passed every need, as no need ran `thin` on a pane.
+PRINTABLE = "printable"
+
+
+def printable(box: Box, files: list[str], where: Path, kept: Path) -> list[Standing]:
+    """`thin` on each file, each in a fresh container."""
+    found = []
+    for name in files:
+        command = f"thin {shlex.quote(name)}"
+        need = Need(
+            f"thin-{NOT_IN_A_NAME.sub('_', name)}"[:80],
+            "nothing narrower than the nozzle",
+            "derived",
+            "bench",
+            command=command,
+            verdicts=["OK"],
+        )
+        reading = read_need(box, need, where, kept)
+        unsure = reading.verdict in UNSURE or reading.exit in (2, 3) or not reading.verdict
+        # The bench's own words, which say where and how thin, over the need's "must be OK".
+        said = str((reading.record or {}).get("why") or "")
+        why = f"{reading.verdict}: {said}" if reading.verdict and said else reading.why
+        found.append(
+            Standing(
+                PRINTABLE,
+                name,
+                command,
+                reading.passed,
+                unsure and not reading.passed,
+                reading.verdict,
+                why,
+                dict((reading.record or {}).get("numbers") or {}),
+            )
+        )
+    return found
 
 
 def not_what_it_saw(

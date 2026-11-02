@@ -30,11 +30,15 @@ don't take a tool's success as an answer, including CadQuery's. `bench render` s
 what kind of change this round was, and your closing words to the person who'll look at it. It \
 runs again from a clean start in a fresh container, and the harness runs each need's check itself. \
 Needs that fail come back to you, and you go on from what's there: the part, the script, and \
-`record/ROUNDS.md`, which the harness keeps with every round's readings.
-- When every need passes, the run stops for approval: a person sees a sheet of the part and your \
-closing words, and approves it or sends it back with a note. Passing the checks doesn't mean it's \
-approved.
-- Where form is at stake, make variants and `ask`: the Sponsor sees a sheet of them and picks, \
+`record/ROUNDS.md`, which the harness keeps with every round's readings. Whatever the needs say, \
+every file of the part is read by `bench thin` at the nozzle's width, and files printed together \
+mustn't take the same space: `groups` names the ways it prints, and `looks` each file's colour \
+and label.
+- When every need passes, the run stops for approval: a person sees a sheet of the part, your \
+closing words, and the folder to print from, and approves it or sends it back with a note. Passing \
+the checks doesn't mean it's approved.
+- Where form is at stake, make variants and `ask`: it draws a sheet of them and shows it to you \
+first. Then `send_ask`, saying what the sheet shows as drawn, and the Sponsor sees it and picks, \
 with a reason. A pick holds only for the files on its sheet, so if they change, the need is asked \
 again. Everything else is yours to decide, by the numbers.
 - If it truly can't be done, call `blocked` and say what's missing.

@@ -67,6 +67,11 @@ def png_size(path: Path) -> Iterator[tuple[int, int]]:
     yield int.from_bytes(head[:4], "big"), int.from_bytes(head[4:], "big")
 
 
+def legend_px(files: int, width: int) -> int:
+    """The legend's height under a sheet, as `render` draws it: a line for each few files."""
+    return 18 * -(-files // max(1, width // 440)) + 8
+
+
 def only_pair(answer: Answer) -> dict[str, Any]:
     pairs = answer.numbers["pairs"]
     assert len(pairs) == 1
@@ -94,7 +99,7 @@ def test_a_sheet_of_variants_has_a_row_for_each_and_checks_each_picture(bench: A
     assert len(answer.record["second_check"]) == 4
     assert answer.record["files"][-1].endswith("variants-A-B-sheet.png")
     with png_size(bench.work / answer.record["files"][-1]) as size:
-        assert size == (512, 512)
+        assert size == (512, 512 + legend_px(1, 512)), "two rows, and the legend"
 
 
 @pytest.mark.parametrize(
@@ -1033,7 +1038,7 @@ def test_a_sheet_of_variants_can_hold_a_close_up_of_each(bench: Any) -> None:
     assert sorted(answer.numbers["views"]) == ["A close 1", "A top", "B close 1", "B top"]
     assert answer.verdict == "OK", answer.text
     with png_size(bench.work / answer.record["files"][-1]) as size:
-        assert size == (512, 512)
+        assert size == (512, 512 + legend_px(2, 512))
 
 
 def test_a_test_piece_is_drawn_grey_and_marked_and_the_part_isnt(bench: Any) -> None:
@@ -1165,3 +1170,153 @@ def test_the_design_script_itself_is_left_as_it_was(bench: Any) -> None:
     bench("params", "design.py", "--set", "BaseCircle=25")
     assert (bench.work / "design.py").read_text() == before
     assert not (bench.work / "design.step").exists(), "its runs stay in scratch"
+
+
+# A sheet shows what it's asked about (mqucifer/print-shop#26)
+
+
+def pixels(bench: Any, *where: str) -> list[Any]:
+    done = host.run(["read_picture.py", *where], bench.work, python=True)
+    assert done.returncode == 0, done.stderr
+    return list(json.loads(done.stdout))
+
+
+def test_each_file_is_drawn_in_the_colour_given_and_named_in_the_legend(bench: Any) -> None:
+    """On `cup-1` a cycle of 5 colours drew a pane in the frame's, and nothing said which."""
+    answer = bench(
+        "render", "glass-frame.step", "glass-pane-1.step", "glass-pane-2.step", "--views", "top",
+        "--look", "glass-frame.step=grey:frame", "--look", "glass-pane-1.step=blue:cup",
+        "--look", "glass-pane-2.step=amber:steam", "--size", "512", "--renders-out", "looks",
+    )  # fmt: skip
+    assert answer.verdict == "OK", answer.text
+    assert "drawn: 2 glass-pane-1.step: cup (blue)" in answer.text
+    files = {f["file"]: f for f in answer.numbers["files"]}
+    assert files["glass-pane-1.step"]["rgb"] == [40, 90, 220]
+    # 7.9 px a mm about (30, 20): a point on each pane, away from its number.
+    cup, steam = pixels(bench, "looks/glass-frame-glass-pane-1-glass-pane-2-top.png:98,319",
+                        "looks/glass-frame-glass-pane-1-glass-pane-2-top.png:312,319")  # fmt: skip
+    assert cup[2] > cup[0] + 60, f"blue: {cup}"
+    assert steam[0] > steam[2] + 60, f"amber: {steam}"
+    # Every file was seen in the view drawn, so nothing's said hidden.
+    assert all(px > 0 for px in answer.numbers["seen_px"]["top"].values())
+    assert "not seen" not in answer.text
+
+
+def test_a_file_with_no_colour_never_takes_another_files(bench: Any) -> None:
+    rows = [f"row-{k}.step" for k in range(1, 8)]
+    answer = bench("render", *rows, "--views", "top", "--size", "256", "--renders-out", "seven")
+    assert answer.verdict == "OK", answer.text
+    drawn = [tuple(f["rgb"]) for f in answer.numbers["files"]]
+    assert len(set(drawn)) == 7
+    assert all(
+        sum(abs(a - b) for a, b in zip(one, other, strict=True)) > 60
+        for i, one in enumerate(drawn)
+        for other in drawn[i + 1 :]
+    ), drawn
+    assert answer.record["files"][-1].endswith("-sheet.png"), "more than one file has a legend"
+
+
+def test_a_file_no_view_shows_is_said_to_be_hidden(bench: Any) -> None:
+    answer = bench("render", "outer.step", "hidden.step", "--views", "top", "iso", "--size", "256")
+    assert answer.verdict == "OK", answer.text
+    assert answer.numbers["seen_px"]["top"]["hidden.step"] == 0
+    assert answer.numbers["seen_px"]["top"]["outer.step"] > 1000
+    assert "not seen in any view drawn: hidden.step" in answer.text
+
+
+def test_a_colour_the_sheet_cant_draw_is_no_answer(bench: Any) -> None:
+    answer = bench("render", "outer.step", "--look", "outer.step=sparkly")
+    assert answer.verdict == "NO ANSWER"
+    assert "isn't a colour the sheet can draw" in answer.record["why"]
+    answer = bench("render", "outer.step", "--look", "nothere.step=blue")
+    assert answer.verdict == "NO ANSWER" and "isn't drawn here" in answer.record["why"]
+
+
+def test_a_level_cut_draws_each_file_in_its_pocket_and_an_island_in_its_opening(
+    bench: Any,
+) -> None:
+    """`render --section` dropped an island of frame inside an opening, and drew one file."""
+    answer = bench(
+        "render", "island-frame.step", "holed-pane.step", "--views", "top", "--cut", "z=2",
+        "--look", "island-frame.step=grey", "--look", "holed-pane.step=green:background",
+        "--size", "512", "--renders-out", "island",
+    )  # fmt: skip
+    assert answer.verdict == "OK", answer.text
+    cut = answer.numbers["cuts"]["cut z=2"]
+    # The ring, 40² less 30², and the 8 mm island; the pane, 29.6² less its 8.4 mm hole.
+    assert cut["files"]["island-frame.step"]["area_mm2"] == pytest.approx(1600 - 900 + 64, abs=0.5)
+    assert cut["files"]["island-frame.step"]["area_occt_mm2"] == pytest.approx(764, abs=0.5)
+    assert cut["files"]["holed-pane.step"]["area_mm2"] == pytest.approx(29.6**2 - 8.4**2, abs=0.5)
+    assert cut["overlaps"] == []
+    # The island's middle is the frame's grey, drawn over the pane's opening: at (20, 20), the
+    # picture's centre, which the numbers stay off.
+    (island,) = pixels(bench, "island/island-frame-holed-pane-cut-z-2.png:256,280")
+    assert max(island) - min(island) < 12 and island[0] < 200, f"grey: {island}"
+
+
+def test_an_upright_cut_shows_a_pane_in_its_pocket_over_a_window_of_the_plane(bench: Any) -> None:
+    answer = bench(
+        "render", "glass-frame.step", "glass-pane-1.step", "--views", "--cut", "y=20,x=0:12",
+        "--size", "512", "--renders-out", "upright",
+    )  # fmt: skip
+    assert answer.verdict == "OK", answer.text
+    cut = answer.numbers["cuts"]["cut y=20, x 0 to 12"]
+    assert (cut["right"], cut["up"]) == ("x", "z")
+    # Across the whole plane: the frame's 60 x 5 less the two pockets and windows; the pane 2.
+    assert cut["files"]["glass-pane-1.step"]["area_mm2"] == pytest.approx(22.6 * 1.8, abs=0.05)
+    # 12 mm across the picture: about 39 px a mm, so a 1.8 mm pane is 70 px tall.
+    assert cut["px_per_mm"] == pytest.approx(512 / (12 * 1.1), rel=0.01)
+
+
+def test_a_cut_says_where_two_files_take_the_same_space(bench: Any) -> None:
+    answer = bench("render", "share-a.step", "share-b.step", "--views", "--cut", "z=1.5")
+    assert answer.verdict == "OK", answer.text
+    (overlap,) = answer.numbers["cuts"]["cut z=1.5"]["overlaps"]
+    assert overlap["files"] == ["share-a.step", "share-b.step"]
+    assert overlap["area_mm2"] == pytest.approx(100, abs=0.1)
+    assert "overlap by 100.00 mm²" in answer.text
+
+
+@pytest.mark.parametrize(
+    ("cut", "says"),
+    [
+        ("w=3", "starts with x, y or z"),
+        ("z=3,z=0:4", "a window is x="),
+        ("x=50,y=4:2", "low to high"),
+    ],
+)
+def test_a_cut_that_cant_be_read_says_so(bench: Any, cut: str, says: str) -> None:
+    answer = bench("render", "outer.step", "--views", "--cut", cut)
+    assert answer.verdict == "NO ANSWER" and says in answer.record["why"], answer.text
+
+
+def test_a_sheet_of_variants_draws_cuts_and_colours_on_each_row(bench: Any) -> None:
+    answer = bench(
+        "render", "--variant", "A=glass-frame.step,glass-pane-1.step",
+        "--variant", "B=glass-frame.step,glass-pane-2.step", "--views", "top", "--cut", "z=3",
+        "--look", "glass-pane-1.step=red:one", "--size", "256",
+    )  # fmt: skip
+    assert answer.verdict == "OK", answer.text
+    assert set(answer.numbers["cuts"]) == {"A cut z=3", "B cut z=3"}
+    numbered = {f["file"]: f["number"] for f in answer.numbers["files"]}
+    assert numbered == {"glass-frame.step": 1, "glass-pane-1.step": 2, "glass-pane-2.step": 3}
+    with png_size(bench.work / answer.record["files"][-1]) as size:
+        assert size == (512, 512 + legend_px(3, 512))
+
+
+def test_the_overlap_helper_reads_what_two_files_share_by_two_methods(bench: Any) -> None:
+    done = host.run(
+        ["-I", "-c", "import sys; sys.path.insert(0, '/opt/bench'); from bench.overlap import "
+         "main; main()", "share-a.step", "share-b.step", "outer.step", "row-7.step"],
+        bench.work,
+        python=True,
+    )  # fmt: skip
+    line = next(x for x in done.stdout.splitlines() if x.startswith("ROUNDS_OVERLAP "))
+    found = json.loads(line[len("ROUNDS_OVERLAP ") :])
+    pairs = {tuple(p["files"]): p for p in found["pairs"]}
+    assert pairs[("share-a.step", "share-b.step")]["mesh_mm3"] == pytest.approx(300, abs=0.5)
+    assert pairs[("share-a.step", "share-b.step")]["occt_mm3"] == pytest.approx(300, abs=0.01)
+    # outer and share-a share 20 x 10 x 3, and row-7 is far from both.
+    assert pairs[("share-a.step", "outer.step")]["mesh_mm3"] == pytest.approx(600, abs=0.5)
+    assert not any("row-7.step" in p for p in pairs)
+    assert found["files"]["outer.step"]["bounds_mm"][1] == pytest.approx([20, 20, 10], abs=0.01)

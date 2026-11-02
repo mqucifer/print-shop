@@ -16,16 +16,16 @@ import vtk
 from PIL import Image, ImageDraw, ImageFilter
 from vtk.util.numpy_support import numpy_to_vtk, numpy_to_vtkIdTypeArray, vtk_to_numpy
 
+from . import colours as colours_module
+from . import cut as cut_module
 from .report import Report, slug
 from .shapes import NoAnswer, Part, load, slice_at
 
-COLOURS = [
-    (0.55, 0.65, 0.80),
-    (0.90, 0.65, 0.40),
-    (0.55, 0.78, 0.55),
-    (0.75, 0.60, 0.82),
-    (0.85, 0.80, 0.45),
-]
+#: A sheet's legend: one line of it, and the room an entry takes along it.
+LEGEND_LINE = 18
+LEGEND_ENTRY = 440
+#: A file's number on a picture, drawn after the picture is checked.
+MARK_PAD = 2
 #: Where the camera sits from the centre, and the picture's up.
 VIEWS = {
     "top": ((0.0, 0.0, 1.0), (0.0, 1.0, 0.0)),
@@ -95,7 +95,11 @@ def _poly(mesh: trimesh.Trimesh) -> Any:
 
 
 def _actors(
-    data: Any, colour: tuple[float, float, float], renderer: Any, opacity: float = 1.0
+    data: Any,
+    colour: tuple[float, float, float],
+    renderer: Any,
+    opacity: float = 1.0,
+    flat: bool = False,
 ) -> None:
     mapper = vtk.vtkPolyDataMapper()
     mapper.SetInputData(data)
@@ -106,6 +110,10 @@ def _actors(
     body.GetProperty().SetInterpolationToFlat()
     body.GetProperty().SetOpacity(opacity)
     renderer.AddActor(body)
+    if flat:
+        # Unlit and with no outline: each pixel is exactly its file's colour, to count.
+        body.GetProperty().LightingOff()
+        return
     edges = vtk.vtkFeatureEdges()
     edges.SetInputData(data)
     edges.SetFeatureAngle(FEATURE_ANGLE)
@@ -242,12 +250,33 @@ def _stamped(pixels: np.ndarray, *lines: str) -> np.ndarray:
     return np.asarray(picture)
 
 
+def _aim(points: np.ndarray, view: str, close: Close | None = None) -> tuple[np.ndarray, float]:
+    """Where a picture looks and how far it reaches from there, in mm: the middle of the outline
+    and half its longer side, so a long part isn't clipped, or a close-up's own."""
+    right, top, along = _axes(view)
+    across, high = points @ right, points @ top
+    centre = (
+        right * (across.min() + across.max()) / 2
+        + top * (high.min() + high.max()) / 2
+        + along * float((points @ along).mean())
+    )
+    scale = FILL * max(float(np.ptp(across)), float(np.ptp(high))) / 2
+    if close is not None:
+        # The depth isn't what a picture is aimed by: it stays the parts' own.
+        target = np.array(close.centre)
+        centre = right * (target @ right) + top * (target @ top) + along * (centre @ along)
+        scale = close.reach
+    return centre, scale
+
+
 def _render_view(
     parts: list[trimesh.Trimesh],
     view: str,
     size: int,
     test_pieces: list[trimesh.Trimesh] | None = None,
     close: Close | None = None,
+    colours: list[tuple[float, float, float]] | None = None,
+    flat: bool = False,
 ) -> np.ndarray:
     renderer = vtk.vtkRenderer()
     renderer.SetBackground(1, 1, 1)
@@ -255,33 +284,25 @@ def _render_view(
     window.SetOffScreenRendering(1)
     window.SetSize(size, size)
     window.AddRenderer(renderer)
-    for k, mesh in enumerate(parts):
-        _actors(_poly(mesh), COLOURS[k % len(COLOURS)], renderer)
+    shades = colours or [
+        (r / 255, g / 255, b / 255) for r, g, b in colours_module.distinct(len(parts), [])
+    ]
+    for mesh, colour in zip(parts, shades, strict=True):
+        _actors(_poly(mesh), colour, renderer, flat=flat)
     # After the parts, so a see-through piece blends with what's behind it.
     for mesh in test_pieces or []:
         _actors(_poly(mesh), TEST_PIECE_COLOUR, renderer, TEST_PIECE_OPACITY)
     position, up = VIEWS[view]
     right, top, along = _axes(view)
     points = np.vstack([np.asarray(m.vertices) for m in [*parts, *(test_pieces or [])]])
-    across, high = points @ right, points @ top
-    # Aimed at the middle of the outline and scaled to it, so a long part isn't clipped.
-    centre = (
-        right * (across.min() + across.max()) / 2
-        + top * (high.min() + high.max()) / 2
-        + along * float((points @ along).mean())
-    )
+    centre, scale = _aim(points, view)
     camera = renderer.GetActiveCamera()
     camera.ParallelProjectionOn()
     camera.SetFocalPoint(*centre)
     camera.SetPosition(*(centre + 100 * np.array(position)))
     camera.SetViewUp(*up)
     renderer.ResetCamera()
-    scale = FILL * max(float(np.ptp(across)), float(np.ptp(high))) / 2
-    if close is not None:
-        # The depth isn't what a picture is aimed by: it stays the parts' own.
-        target = np.array(close.centre)
-        centre = right * (target @ right) + top * (target @ top) + along * (centre @ along)
-        scale = close.reach
+    centre, scale = _aim(points, view, close)
     # ResetCamera aimed it at the parts' box: back to our centre, looking the same way.
     distance = camera.GetDistance()
     camera.SetFocalPoint(*centre)
@@ -355,44 +376,258 @@ def _variants(given: list[str]) -> list[tuple[str, list[str]]]:
     return found
 
 
+@dataclass
+class Shown:
+    """One file on a sheet: its geometry, how it's drawn, and its number on the pictures."""
+
+    name: str
+    whole: Part
+    parts: list[Part]
+    rgb: tuple[int, int, int]
+    colour: str
+    label: str
+    number: int
+    anchor: np.ndarray
+
+    @property
+    def meshes(self) -> list[trimesh.Trimesh]:
+        return [p.fine() for p in self.parts]
+
+    @property
+    def shade(self) -> tuple[float, float, float]:
+        return (self.rgb[0] / 255, self.rgb[1] / 255, self.rgb[2] / 255)
+
+    @property
+    def said(self) -> str:
+        """How the legend names it: its number, file, label and colour."""
+        label = f": {self.label}" if self.label else ""
+        colour = self.colour or "a colour of the sheet's, none was given"
+        return f"{self.number} {self.name}{label} ({colour})"
+
+
+def _looks(given: list[str]) -> dict[str, colours_module.Look]:
+    found: dict[str, colours_module.Look] = {}
+    for text in given:
+        try:
+            look = colours_module.parse(text)
+        except colours_module.NotAColour as exc:
+            raise NoAnswer(str(exc)) from None
+        if look.file in found:
+            raise NoAnswer(f"two looks name {look.file}")
+        found[look.file] = look
+    return found
+
+
+def _anchor(parts: list[Part]) -> np.ndarray:
+    """A point inside a file, where its number goes: in its largest piece's section halfway up,
+    so it lands on the pane and not in its opening, or its box's middle if that misses it."""
+    biggest = max(parts, key=lambda p: float(np.prod(np.ptp(p.extent(), axis=0)[:2])))
+    low, high = biggest.extent()
+    middle: np.ndarray = (low + high) / 2
+    try:
+        cut = slice_at(biggest.manifold(), float(middle[2]))
+    except NoAnswer:
+        return middle
+    if cut.is_empty:
+        return middle
+    spot = max(cut.geoms, key=lambda g: g.area).representative_point()
+    return np.array([spot.x, spot.y, middle[2]])
+
+
+def _shown(names: list[str], looks: dict[str, colours_module.Look]) -> list[Shown]:
+    """Each file once, numbered in the order it's first named. A file with no look takes a colour
+    no other file here has, so none is drawn in another's colour."""
+    order = list(dict.fromkeys(names))
+    unknown = sorted(set(looks) - set(order))
+    if unknown:
+        raise NoAnswer(f"a look names {unknown[0]}, which isn't drawn here")
+    given = [looks[n].rgb for n in order if n in looks]
+    spare = iter(colours_module.distinct(sum(1 for n in order if n not in looks), given))
+    found = []
+    for k, name in enumerate(order):
+        whole = load(name)
+        parts = whole.pieces()
+        look = looks.get(name)
+        rgb = look.rgb if look else next(spare)
+        found.append(
+            Shown(
+                name,
+                whole,
+                parts,
+                rgb,
+                look.colour if look else "",
+                look.label if look else "",
+                k + 1,
+                _anchor(parts),
+            )
+        )
+    return found
+
+
+def _numbered(pixels: np.ndarray, marks: list[tuple[int, float, float]]) -> np.ndarray:
+    """Each file's number where it is, once the picture's been checked: the check reads none."""
+    picture = Image.fromarray(pixels.copy())
+    draw = ImageDraw.Draw(picture)
+    size = picture.width
+    for number, x, y in marks:
+        if not (0 <= x < size and 0 <= y < picture.height):
+            continue
+        text = str(number)
+        left, top, right, bottom = draw.textbbox((x, y), text, anchor="mm")
+        draw.rectangle(
+            (left - MARK_PAD, top - MARK_PAD, right + MARK_PAD, bottom + MARK_PAD),
+            fill=(255, 255, 255),
+            outline=(20, 20, 20),
+        )
+        draw.text((x, y), text, fill=(20, 20, 20), anchor="mm")
+    return np.asarray(picture)
+
+
+def _marks(
+    shown: list[Shown],
+    view: str,
+    size: int,
+    points: np.ndarray,
+    close: Close | None = None,
+) -> list[tuple[int, float, float]]:
+    """Where each file's number lands in a view, by the same arithmetic that aims the camera."""
+    right, top, _ = _axes(view)
+    centre, scale = _aim(points, view, close)
+    found = []
+    for one in shown:
+        across = float((one.anchor - centre) @ right)
+        up = float((one.anchor - centre) @ top)
+        per_mm = size / (2 * scale)
+        found.append((one.number, size / 2 + across * per_mm, size / 2 - up * per_mm))
+    return found
+
+
+def _id_shade(k: int) -> tuple[float, float, float]:
+    """The k-th file's colour in the counting pass: steps of 8 that rounding can't confuse."""
+    return (8 * (k % 30 + 1) / 255, 8 * (k // 30) / 255, 0.0)
+
+
+def _seen(
+    shown: list[Shown],
+    view: str,
+    size: int,
+    pieces: list[trimesh.Trimesh],
+    close: Close | None = None,
+) -> dict[str, int]:
+    """How many pixels of each file a view shows: drawn again unlit, one exact colour a file, and
+    counted. A file at 0 is hidden in that view, inside or behind another."""
+    meshes = [m for one in shown for m in one.meshes]
+    owner = [k for k, one in enumerate(shown) for _ in one.meshes]
+    shades = [_id_shade(k) for k in owner]
+    pixels = _render_view(meshes, view, size, pieces, close, shades, flat=True).astype(int)
+    found = {}
+    for k, one in enumerate(shown):
+        want = np.array([round(c * 255) for c in _id_shade(k)])
+        found[one.name] = int((np.abs(pixels - want).max(axis=2) <= 3).sum())
+    return found
+
+
+def _legend(shown: list[Shown], width: int) -> Image.Image:
+    """What each number and colour is: a strip under the sheet."""
+    across = max(1, width // LEGEND_ENTRY)
+    lines = int(np.ceil(len(shown) / across))
+    strip = Image.new("RGB", (width, LEGEND_LINE * lines + 8), "white")
+    draw = ImageDraw.Draw(strip)
+    for i, one in enumerate(shown):
+        x = 8 + (i % across) * LEGEND_ENTRY
+        y = 4 + (i // across) * LEGEND_LINE
+        draw.rectangle((x, y + 2, x + 12, y + 14), fill=one.rgb, outline=(20, 20, 20))
+        draw.text((x + 18, y + 2), one.said[: LEGEND_ENTRY // 7], fill=(20, 20, 20))
+    return strip
+
+
+def _with_legend(sheet: Image.Image, shown: list[Shown]) -> Image.Image:
+    strip = _legend(shown, sheet.width)
+    whole = Image.new("RGB", (sheet.width, sheet.height + strip.height), "white")
+    whole.paste(sheet, (0, 0))
+    whole.paste(strip, (0, sheet.height))
+    return whole
+
+
+def _cuts(given: list[str]) -> list[cut_module.Cut]:
+    return [cut_module.parse(text) for text in given]
+
+
+def _say_seen(report: Report, name: str, seen: dict[str, dict[str, int]]) -> None:
+    """Which files a row's views don't show at all, so a claim about them can't rest on it."""
+    names = next(iter(seen.values()), {})
+    hidden = [f for f in names if all(v.get(f, 0) == 0 for v in seen.values())]
+    if hidden:
+        report.line(
+            f"{name}not seen in any view drawn: {', '.join(hidden)} (inside or behind another file)"
+        )
+
+
+def _cut_column(
+    shown: list[Shown], cut: cut_module.Cut, size: int, report: Report, name: str
+) -> tuple[np.ndarray, list[str]]:
+    drawn = cut_module.draw([(s.name, s.parts, s.rgb) for s in shown], cut, size)
+    for line in drawn.seconds:
+        report.second(f"{name}{line}")
+    for line in drawn.notes:
+        report.line(f"{name}{line}")
+    report.numbers.setdefault("cuts", {})[f"{name}{cut.label}"] = drawn.numbers
+    marks = [(shown[k].number, x, y) for k, x, y in drawn.marks]
+    return _numbered(drawn.pixels, marks), [f"{name}{p}" for p in drawn.problems]
+
+
 def run_variants(args: Any, report: Report) -> None:
-    """A sheet for choosing between variants: a labelled row of each one's views."""
+    """A sheet for choosing between variants: a labelled row of each one's views, each file in its
+    colour, numbered, and named in the legend under it."""
     variants = _variants(args.variants)
     closes = [_close(text) for text in args.close]
+    cuts = _cuts(args.cuts)
     for _, files in variants:
         _not_both(files, args.test_pieces)
     pieces = _test_pieces(args.test_pieces, report)
+    looks = _looks(args.looks)
+    everyone = _shown([f for _, files in variants for f in files], looks)
+    by_name = {s.name: s for s in everyone}
     marks = (TEST_PIECE_MARK,) if pieces else ()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     size = args.size
     rows = len(variants)
-    sheet = Image.new("RGB", ((len(args.views) + len(closes)) * size, rows * size), "white")
+    columns = len(args.views) + len(closes) + len(cuts)
+    sheet = Image.new("RGB", (columns * size, rows * size), "white")
     draw = ImageDraw.Draw(sheet)
     problems = []
     views: dict[str, Any] = {}
+    seen_all: dict[str, Any] = {}
     for row, (name, files) in enumerate(variants):
-        parts = [load(path) for path in files]
-        meshes = [m for part in parts for m in (p.fine() for p in part.pieces())]
+        shown = [by_name[f] for f in dict.fromkeys(files)]
+        meshes = [m for one in shown for m in one.meshes]
+        shades = [one.shade for one in shown for _ in one.meshes]
+        points = np.vstack([np.asarray(m.vertices) for m in [*meshes, *pieces]])
+        seen: dict[str, dict[str, int]] = {}
         for k, close in enumerate(closes):
             column = len(args.views) + k
-            drawn = _render_view(meshes, close.view, size, pieces, close)
+            drawn = _render_view(meshes, close.view, size, pieces, close, shades)
             problem, facts = close_problem(
                 drawn, projected_mask([*meshes, *pieces], close, size), close.reach
             )
             views[f"{name} close {k + 1}"] = facts
-            sheet.paste(Image.fromarray(_stamped(drawn, *marks)), (column * size, row * size))
+            where = _marks(shown, close.view, size, points, close)
+            numbered = _numbered(_stamped(drawn, *marks), where)
+            sheet.paste(Image.fromarray(numbered), (column * size, row * size))
             draw.text((column * size + 8, row * size + 8), f"{name}: {close.label}", fill=(20,) * 3)
             report.second(_close_second(f"{name} close {k + 1}", facts))
             if problem:
                 problems.append(f"{name} close {k + 1}: {problem}")
         for column, view in enumerate(args.views):
-            pixels = _render_view(meshes, view, size, pieces)
+            pixels = _render_view(meshes, view, size, pieces, None, shades)
             problem, facts = outline_problem(
                 pixels, projected_shape([*meshes, *pieces], view), size
             )
             views[f"{name} {view}"] = facts
-            sheet.paste(Image.fromarray(_stamped(pixels, *marks)), (column * size, row * size))
+            seen[view] = _seen(shown, view, size, pieces)
+            numbered = _numbered(_stamped(pixels, *marks), _marks(shown, view, size, points))
+            sheet.paste(Image.fromarray(numbered), (column * size, row * size))
             draw.text((column * size + 8, row * size + 8), f"{name}: {view}", fill=(20, 20, 20))
             report.second(
                 f"{name} {view}: the mesh projects to {facts['projected_mm'][0]}x"
@@ -401,16 +636,39 @@ def run_variants(args: Any, report: Report) -> None:
             )
             if problem:
                 problems.append(f"{name} {view}: {problem}")
+        for k, cut in enumerate(cuts):
+            column = len(args.views) + len(closes) + k
+            pixels, found = _cut_column(shown, cut, size, report, f"{name} ")
+            problems += found
+            sheet.paste(Image.fromarray(pixels), (column * size, row * size))
+            draw.text((column * size + 8, row * size + 8), f"{name}: {cut.label}", fill=(20,) * 3)
+        seen_all[name] = seen
+        _say_seen(report, f"{name}: ", seen)
         report.line(f"variant {name}: {', '.join(files)}")
+    sheet = _with_legend(sheet, everyone)
     path = out / f"variants-{slug('+'.join(n for n, _ in variants))[:60]}-sheet.png"
     sheet.save(path)
     report.wrote(str(path))
     report.line(f"sheet of the variants: {path}")
+    for one in everyone:
+        report.line(f"drawn: {one.said}")
     report.numbers["views"] = views
+    report.numbers["seen_px"] = seen_all
+    report.numbers["files"] = [_file_numbers(one) for one in everyone]
     if problems:
         report.verdict("FAIL", "; ".join(problems))
     else:
         report.verdict("OK", f"{rows} variant(s), each picture the shape the mesh projects to")
+
+
+def _file_numbers(one: Shown) -> dict[str, Any]:
+    return {
+        "number": one.number,
+        "file": one.name,
+        "label": one.label,
+        "colour": one.colour,
+        "rgb": list(one.rgb),
+    }
 
 
 def run(args: Any, report: Report) -> None:
@@ -423,12 +681,17 @@ def run(args: Any, report: Report) -> None:
         raise NoAnswer("name a file to draw")
     _not_both(args.files, args.test_pieces)
     closes = [_close(text) for text in args.close]
-    parts = [load(path) for path in args.files]
+    cuts = _cuts(args.cuts)
+    shown = _shown(args.files, _looks(args.looks))
+    parts = [one.whole for one in shown]
     for part in parts:
         report.notes += part.notes
-    meshes = [m for part in parts for m in (p.fine() for p in part.pieces())]
+    meshes = [m for one in shown for m in one.meshes]
+    shades = [one.shade for one in shown for _ in one.meshes]
     pieces = _test_pieces(args.test_pieces, report)
     drawn_all = [*meshes, *pieces]
+    points = np.vstack([np.asarray(m.vertices) for m in drawn_all])
+    seen: dict[str, dict[str, int]] = {}
     marks = (TEST_PIECE_MARK,) if pieces else ()
     names = slug("+".join(Path(f).stem for f in args.files))[:60]
     out = Path(args.out)
@@ -437,9 +700,10 @@ def run(args: Any, report: Report) -> None:
     views: dict[str, Any] = {}
     problems = []
     for view in args.views:
-        pixels = _render_view(meshes, view, args.size, pieces)
+        pixels = _render_view(meshes, view, args.size, pieces, None, shades)
         problem, facts = outline_problem(pixels, projected_shape(drawn_all, view), args.size)
-        pixels_marked = _stamped(pixels, *marks)
+        seen[view] = _seen(shown, view, args.size, pieces)
+        pixels_marked = _numbered(_stamped(pixels, *marks), _marks(shown, view, args.size, points))
         path = out / f"{names}-{view}.png"
         Image.fromarray(pixels_marked).save(path)
         report.wrote(str(path))
@@ -472,11 +736,14 @@ def run(args: Any, report: Report) -> None:
         pictures.append((f"z={z:g}", pixels))
     close_ups = []
     for k, close in enumerate(closes):
-        pixels = _render_view(meshes, close.view, args.size, pieces, close)
+        pixels = _render_view(meshes, close.view, args.size, pieces, close, shades)
         problem, facts = close_problem(
             pixels, projected_mask(drawn_all, close, args.size), close.reach
         )
-        marked = _stamped(pixels, close.label, *marks)
+        marked = _numbered(
+            _stamped(pixels, close.label, *marks),
+            _marks(shown, close.view, args.size, points, close),
+        )
         path = out / f"{names}-close-{k + 1}.png"
         Image.fromarray(marked).save(path)
         report.wrote(str(path))
@@ -486,10 +753,24 @@ def run(args: Any, report: Report) -> None:
         report.second(_close_second(f"close {k + 1}", facts))
         if problem:
             problems.append(f"close {k + 1}: {problem}")
+    for cut in cuts:
+        pixels, found = _cut_column(shown, cut, args.size, report, "")
+        problems += found
+        path = out / f"{names}-{slug(cut.name)}.png"
+        Image.fromarray(pixels).save(path)
+        report.wrote(str(path))
+        pictures.append((cut.label, pixels))
+        report.line(f"{cut.label}: {path}")
     report.numbers["close_ups"] = close_ups
     report.numbers["views"] = views
-    if len(pictures) > 1:
-        sheet = _sheet(pictures, args.size)
+    report.numbers["seen_px"] = seen
+    report.numbers["files"] = [_file_numbers(one) for one in shown]
+    for one in shown:
+        report.line(f"drawn: {one.said}")
+    _say_seen(report, "", seen)
+    # More than one file needs its legend, which only a sheet carries.
+    if len(pictures) > 1 or len(shown) > 1:
+        sheet = _with_legend(_sheet(pictures, args.size), shown)
         path = out / f"{names}-sheet.png"
         sheet.save(path)
         report.wrote(str(path))

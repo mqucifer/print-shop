@@ -90,7 +90,10 @@ class Desk:
         return Judged("needs", "ok", f"{len(args['needs'])} needs")
 
     def ask(self, args: dict[str, Any]) -> Judged:
-        return Judged("ask", "ok", "asked")
+        return Judged("ask", "ok", "drawn")
+
+    def send_ask(self, args: dict[str, Any]) -> Judged:
+        return Judged("send_ask", "ok", "asked")
 
     def done(self, args: dict[str, Any]) -> Judged:
         return Judged("done", "ok", "not met yet")
@@ -318,6 +321,14 @@ def test_a_need_is_held_to_its_shape() -> None:
         ([{**bench_need(), "extra": 1}], "only id"),
     ):
         assert any(says in w for w in needs.read(bad, "")[1]), says
+
+
+def test_a_need_cant_pass_on_the_benchs_fail() -> None:
+    """On `cup-1` a need passed on `capture`'s FAIL."""
+    wrong = needs.read([bench_need(verdicts=["FAIL"], number="least_lip_mm", at_least=1.0)], "")[1]
+    assert len(wrong) == 1
+    assert "FAIL is the bench saying what `clearance` checks is wrong" in wrong[0]
+    assert not needs.read([bench_need(verdicts=["OK", "TOUCHING"])], "")[1]
 
 
 def test_a_quote_from_the_sponsor_is_held_to_their_words() -> None:
