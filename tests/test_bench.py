@@ -1474,11 +1474,12 @@ def test_a_level_cut_draws_each_file_in_its_pocket_and_an_island_in_its_opening(
 
 def test_an_upright_cut_shows_a_pane_in_its_pocket_over_a_window_of_the_plane(bench: Any) -> None:
     answer = bench(
-        "render", "glass-frame.step", "glass-pane-1.step", "--views", "--cut", "y=20,x=0:12",
+        "render", "glass-frame.step", "glass-pane-1.step", "--views", "--cut", "y=20,x=100:112",
         "--size", "512", "--renders-out", "upright",
     )  # fmt: skip
     assert answer.verdict == "OK", answer.text
-    cut = answer.numbers["cuts"]["cut y=20, x 0 to 12"]
+    # The sheet's cases are 100 mm along x.
+    cut = answer.numbers["cuts"]["cut y=20, x 100 to 112"]
     assert (cut["right"], cut["up"]) == ("x", "z")
     # Across the whole plane: the frame's 60 x 5 less the two pockets and windows; the pane 2.
     assert cut["files"]["glass-pane-1.step"]["area_mm2"] == pytest.approx(22.6 * 1.8, abs=0.05)
@@ -1537,4 +1538,4 @@ def test_the_overlap_helper_reads_what_two_files_share_by_two_methods(bench: Any
     # outer and share-a share 20 x 10 x 3, and row-7 is far from both.
     assert pairs[("share-a.step", "outer.step")]["mesh_mm3"] == pytest.approx(600, abs=0.5)
     assert not any("row-7.step" in p for p in pairs)
-    assert found["files"]["outer.step"]["bounds_mm"][1] == pytest.approx([20, 20, 10], abs=0.01)
+    assert found["files"]["outer.step"]["bounds_mm"][1] == pytest.approx([120, 20, 10], abs=0.01)

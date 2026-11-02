@@ -393,10 +393,18 @@ cq.exporters.export(cq.Workplane().box(Size, Size, Size), "twice.step")
     Path("design-nothing.py").write_text("Size = 10.0\nprint(Size)\n")
 
 
+SHEETS_X = 100.0
+
+
 def sheets() -> None:
     """What a sheet must show: panes in their pockets, a pane with a hole round an island of
     frame, files that would share a colour in a cycle of 5, a file hidden in another, and two
-    that take the same space."""
+    that take the same space. All 100 mm along x, clear of the other cases, as `capture` names a
+    file beside a frame whose outline it shares."""
+
+    def save(shape: Any, name: str) -> None:
+        cq.exporters.export(shape.translate((SHEETS_X, 0, 0)), f"{name}.step")
+
     # A frame 60 x 40 x 5 with two pockets at z 2 to 4, each with a window through, and its panes.
     frame = box(0, 60, 0, 40, 0, 5)
     for x0 in (5, 32):
