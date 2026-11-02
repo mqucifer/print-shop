@@ -166,8 +166,8 @@ def specs() -> list[dict[str, Any]]:
             "Ask the bench about your files: any bench command, in a fresh container, with a "
             "second check by a different method behind each answer. The first line of the reply "
             "is the verdict. `info`, `clearance`, `readback`, `rays`, `panes`, `capture`, `thin`, "
-            "`pause`, `params`, `render` (its picture comes to you). `<command> --help` gives its "
-            "arguments, and the `bench` skill says what each answers.",
+            "`pause`, `wall`, `params`, `render` (its picture comes to you). `<command> --help` "
+            "gives its arguments, and the `bench` skill says what each answers.",
             command="The command and its arguments, such as `clearance lid.step cup.step "
             "--min-gap 0.2` or `render part.step --views iso top`.",
         ),

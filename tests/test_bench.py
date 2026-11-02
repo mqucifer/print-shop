@@ -148,6 +148,7 @@ def test_generated_code_runs_there_too_and_reaches_nothing(bench: Any) -> None:
         ("capture", "frame.step", "--pocket-z", "2", "--clearance", "0.1", "--pane-thickness", "2"),
         ("thin", "wall-0p8.step"),
         ("pause", "frame.step", "--pocket-z", "2", "--pane-thickness", "2"),
+        ("wall", "hang.step", "--hole", "50,121.5,2"),
         ("render", "block.step", "--views", "iso"),
         ("params", "design.py", "--set", "Thickness=4"),
     ],
@@ -536,6 +537,53 @@ def test_a_height_on_a_level_face_is_refused(bench: Any) -> None:
     assert "level face" in answer.text
 
 
+@pytest.mark.parametrize("command", ["capture", "pause"])
+def test_a_height_on_a_level_face_is_refused_with_the_pockets_middle(
+    bench: Any, command: str
+) -> None:
+    """On `cup-1` the model and the operator both gave the pocket's floor. The refusal says the
+    middle either side, and how many openings each has: the pocket runs from 1 to 3."""
+    answer = bench(
+        command,
+        "frame.step",
+        "--pocket-z",
+        "1",
+        "--pane-thickness",
+        "2",
+        *(("--clearance", "0.1") if command == "capture" else ()),
+    )
+    assert answer.verdict == "NO ANSWER"
+    assert "above it, z=2 is midway between the faces at 1 and 3 (4 opening(s) there)" in (
+        answer.text
+    )
+    assert "below it, z=0.5 is midway between the faces at 0 and 1" in answer.text
+
+
+def test_panes_from_an_opening_with_an_island_have_a_hole_round_it(bench: Any) -> None:
+    """A 60 by 40 mm opening less a 20 by 16 mm island, at 0.1 mm of play: 59.8 x 39.8 less
+    20.2 x 16.2, by arithmetic. The window over it is split by the island's lip and two bridges."""
+    answer = bench(
+        "panes",
+        "island/frame-island.step",
+        "--pocket-z",
+        "2",
+        "--lip-z",
+        "3.5",
+        "--clearance",
+        "0.1",
+    )
+    assert answer.verdict == "OK", answer.text
+    assert "opening 1 has 1 island(s) of frame inside it" in answer.text
+    pane = answer.numbers["panes"][0]
+    assert pane["holes"] == 1
+    assert pane["pane_mm2"] == pytest.approx(59.8 * 39.8 - 20.2 * 16.2, abs=0.01)
+    assert pane["gap_3d_mm"] == pytest.approx(0.1, abs=0.005)
+    assert pane["overlap_3d_mm3"] == pytest.approx(0.0, abs=1e-3)
+    assert pane["window_mm2"] == pytest.approx(56 * 36 - 24 * 20 - 2 * 8 * 2, abs=0.01)
+    assert pane["no_lip_mm"] == 0 and pane["no_lip_rays_mm"] == 0
+    assert any(f.endswith("pane-1.step") for f in answer.record["files"]), "with its hole"
+
+
 # Capture: held by the frame's shape, on both faces, with nothing depending on a bond
 
 
@@ -714,6 +762,176 @@ def test_capture_says_so_when_its_two_methods_differ(bench: Any) -> None:
     assert found["slant"] == {"least": 1.9, "thin": 0.0}
     assert found["taper"]["thin"] > 2, "a lip that tapers a long way is thin, not its end"
     assert found["taper"]["least"] < 0.3
+
+
+# An island of frame inside an opening: a pane with holes (`cup-1`)
+
+
+def test_a_pane_with_a_hole_round_an_island_is_held_and_read_two_ways(bench: Any) -> None:
+    """Read as one solid pane, it was "in the frame by 253 mm³: too thick for its pocket", the
+    island's volume. Every lip is 1.9 mm with 0.1 mm of play, round the island's too."""
+    answer = capture(bench, "island/frame-island.step", "--panes", "2")
+    assert answer.verdict == "OK", answer.text
+    assert "opening 1 has 1 island(s) of frame inside it" in answer.text
+    assert "its pane is read with a hole round each" in answer.text
+    pane = answer.numbers["panes"][0]
+    assert pane["holes"] == 1
+    assert pane["overlap_3d_mm3"] == pytest.approx(0.0, abs=1e-3)
+    assert pane["pane_mm2"] == pytest.approx(59.8 * 39.8 - 20.2 * 16.2, abs=0.01)
+    for face in (pane["up"], pane["down"]):
+        assert face["least_lip_mm"] == pytest.approx(1.9, abs=1e-3)
+        assert face["rays"]["least_lip_mm"] == pytest.approx(1.9, abs=0.03)
+        assert face["no_lip_mm"] == 0 and face["rays"]["no_lip_mm"] == 0
+        assert face["passes_at_shifts"] == face["passes_3d_at_shifts"] == 0
+        assert face["surrounds"] and face["rays"]["surrounds"]
+
+
+def test_each_pane_says_where_it_is_and_which_file_it_is(bench: Any) -> None:
+    """The bench numbers the larger opening first, so its pane 1 is `pane_2.step`: said with its
+    centre and size, and matched by outline and by a point inside it."""
+    answer = capture(bench, "island/frame-island.step")
+    one, two = answer.numbers["panes"]
+    assert one["file"] == "pane_2.step" and two["file"] == "pane_1.step"
+    assert one["file_share"] == pytest.approx(1.0, abs=1e-3) and one["file_holds_point"]
+    assert one["centre"] == [0.0, 0.0] and one["size_mm"] == [59.8, 39.8]
+    assert two["size_mm"] == [15.8, 11.8]
+    assert "pane 1 (at 0,0, 59.8 x 39.8 mm, 1 hole(s), pane_2.step)" in answer.text
+    assert "pane numbers are the bench's own" in answer.text
+
+
+def test_a_pane_no_file_matches_says_so(bench: Any) -> None:
+    answer = capture(bench, "held.step")
+    assert answer.numbers["panes"][0]["file"] is None
+    assert "no file beside the frame is it" in answer.text
+
+
+def test_an_island_too_near_the_edge_for_the_play_is_gone_round_open_and_said(bench: Any) -> None:
+    """0.15 mm from the edge, with 0.1 mm of play each side: no pane passes between, so it wraps
+    the island as a C, as `cup-1`'s first round did, and is held."""
+    answer = capture(bench, "frame-island-open.step")
+    assert answer.verdict == "OK", answer.text
+    assert "goes round 1 of them open, not with a hole" in answer.text
+    assert "0.150 mm from another edge at 29.85" in answer.text
+    assert answer.numbers["panes"][0]["holes"] == 0
+
+
+def test_an_island_a_pane_cant_go_round_is_named(bench: Any) -> None:
+    """Within twice the play of the edge top and bottom: the pane comes apart in two, and the
+    bench says so, by name, rather than read either piece."""
+    answer = capture(bench, "frame-island-split.step")
+    assert answer.verdict == "FAIL", answer.text
+    assert "opening 1 (at 0.00,0.00, 60.00 x 40.00 mm) leaves 2 piece(s) of pane" in answer.text
+    assert "it has 1 island(s) inside it" in answer.text
+
+
+def test_frame_standing_in_a_panes_place_is_said_with_where(bench: Any) -> None:
+    """A pane set below its pocket's floor meets the frame at the bottom only."""
+    answer = capture(bench, "held.step", "--pane-floor-z", "0.5", thick="2")
+    assert answer.verdict == "FAIL", answer.text
+    assert "it's set below the pocket's floor" in answer.text
+    assert answer.numbers["panes"][0]["overlap_at"][1][2] == pytest.approx(1.0, abs=0.02)
+
+
+def test_the_pause_over_a_pane_with_a_hole_is_read_by_both_methods(bench: Any) -> None:
+    """Sections read the hole round one point of the opening, which an island could stand on: on
+    `cup-1` that was a ceiling mid-pocket, at layer 15 against 21 by the flat faces."""
+    answer = bench(
+        "pause",
+        "island/frame-island.step",
+        "--pocket-z",
+        "2",
+        "--pane-thickness",
+        "1.8",
+        "--min-room",
+        "0.2",
+    )
+    assert answer.verdict == "OK", answer.text
+    assert "opening 1 has 1 island(s) of frame inside it" in answer.text
+    rows = answer.numbers["openings"]
+    assert [r["islands"] for r in rows] == [1, 0]
+    for row in rows:
+        assert row["pause_after_layer"] == row["pause_after_layer_faces"] == 15
+        assert row["room_over_pane_mm"] == pytest.approx(0.2, abs=1e-4)
+
+
+def test_a_section_draws_the_island_inside_an_opening(bench: Any) -> None:
+    """80 x 60 less the 60 x 40 opening, plus a 20 x 16 island less its 16 x 12 pocket."""
+    answer = bench("render", "island/frame-island.step", "--views", "top", "--section", "2")
+    assert answer.verdict == "OK", answer.text
+    assert answer.numbers["sections"] == [{"z": 2.0, "pieces": 2, "islands": 1, "mm2": 2528.0}]
+    assert "1 of them island(s) inside an opening, drawn: 128.0 mm²" in answer.text
+    drawn = re.search(r"section z=2: 2528.0 mm² by the mesh, ([\d.]+) mm² by pixels", answer.text)
+    assert drawn and float(drawn.group(1)) == pytest.approx(2528, rel=0.02)
+
+
+def test_a_section_drawing_that_drops_an_island_is_caught_and_the_piece_named(bench: Any) -> None:
+    done = host.run(["planted_section.py"], bench.work, python=True)
+    assert done.returncode == 0, done.stderr
+    found = json.loads(done.stdout)
+    assert found["pieces"] == 2
+    assert found["now"] == []
+    assert found["old_way"] == ["a 128.0 mm² piece at -9.00,3.00"]
+
+
+# The wall round a hole
+
+
+def test_the_wall_round_a_hanging_hole_is_read_two_ways(bench: Any) -> None:
+    """A 3 mm hole at y=121.5 in a rail from 117 to 125: 2.0 mm to the outside by arithmetic,
+    3.0 to the window. `thin`'s thinnest flat was quoted for this on `cup-1`."""
+    answer = bench("wall", "hang.step", "--hole", "50,121.5,2", "--min-wall", "2")
+    assert answer.verdict == "OK", answer.text
+    numbers = answer.numbers
+    assert numbers["least_wall_mm"] == pytest.approx(2.0, abs=1e-3)
+    assert numbers["least_wall_rays_mm"] == pytest.approx(2.0, abs=0.01)
+    assert numbers["least_wall_toward"] == "the part's outside"
+    assert numbers["least_wall_from"][:2] == pytest.approx([50.0, 123.0], abs=0.01)
+    assert numbers["hole_fit_d_mm"] == pytest.approx(3.0, abs=0.01)
+    assert numbers["hole_from"] == pytest.approx(0.1) and numbers["hole_to"] == pytest.approx(3.9)
+
+
+def test_any_point_inside_the_hole_names_it(bench: Any) -> None:
+    """Not its centre: `rays` wanted the axis, and on `cup-1` the model couldn't aim it."""
+    answer = bench("wall", "hang.step", "--hole", "49,122.3,3.95")
+    assert answer.verdict == "OK", answer.text
+    assert answer.numbers["least_wall_mm"] == pytest.approx(2.0, abs=1e-3)
+
+
+def test_a_wall_under_what_a_need_asks_fails_and_says_toward_what(bench: Any) -> None:
+    answer = bench("wall", "hang-thin.step", "--hole", "50,121.5,2", "--min-wall", "2")
+    assert answer.verdict == "FAIL" and answer.code == 1, answer.text
+    assert answer.numbers["least_wall_mm"] == pytest.approx(1.0, abs=1e-3)
+    assert answer.numbers["least_wall_rays_mm"] == pytest.approx(1.0, abs=0.01)
+    assert (
+        answer.numbers["least_wall_toward"] == "the opening round 50.00,64.50 (80.00 x 109.00 mm)"
+    )
+
+
+def test_the_wall_round_a_hole_along_another_axis(bench: Any) -> None:
+    answer = bench("wall", "bore-y.step", "--hole", "10,15,5", "--axis", "y")
+    assert answer.verdict == "OK", answer.text
+    assert answer.numbers["least_wall_mm"] == pytest.approx(3.5, abs=1e-3)
+    assert answer.numbers["least_wall_rays_mm"] == pytest.approx(3.5, abs=0.01)
+    assert answer.numbers["hole_from"] == pytest.approx(0.1) and answer.numbers[
+        "hole_to"
+    ] == pytest.approx(29.9)
+
+
+def test_a_least_wall_between_corners_is_a_disagreement_said_why(bench: Any) -> None:
+    """1.414 mm corner to corner, by arithmetic, and no ray square to the hole's wall crosses it."""
+    answer = bench("wall", "corners.step", "--hole", "6,6,2")
+    assert answer.verdict == "DISAGREE" and answer.code == 2, answer.text
+    assert answer.numbers["least_wall_mm"] == pytest.approx(2**0.5, abs=1e-3)
+    assert "isn't square to the hole, as between two corners" in answer.text
+
+
+@pytest.mark.parametrize(
+    ("point", "says"), [("5,5,2", "it's in material"), ("50,130,2", "open to the outside")]
+)
+def test_a_point_not_in_a_closed_hole_is_no_answer(bench: Any, point: str, says: str) -> None:
+    answer = bench("wall", "hang.step", "--hole", point)
+    assert answer.verdict == "NO ANSWER", answer.text
+    assert says in answer.text
 
 
 # Thin features and small pieces

@@ -36,6 +36,7 @@ An answer with no second check behind it becomes `NO ANSWER`, whatever it first 
 | `capture FRAME --pocket-z Z --clearance C --pane-thickness T [--pane-floor-z F] [--min-lip M] [--layer L] [--panes N]` | whether each pane is held by shape on both faces, wherever its play lets it sit: the lip, how thick, where it's thin, and whether it can slide or swing out | sections stacked beyond the pocket, read as polygons | rays beside the pane's edge, and the pane as a solid swept out of the frame |
 | `thin FILE [--nozzle N] [--layer L] [--min-body V] [--one-body]` | features under the nozzle's width, floors under a layer, and tiny pieces | sections opened by the nozzle | rays across each spot, level rays through the walls and straight rays through level floors, and OCCT's count of solids |
 | `pause FRAME --pocket-z Z --pane-thickness T [--layer L] [--first-layer F] [--max-gap G] [--min-room R]` | the layer to pause after, and the room over the pane | sections layer by layer | the flat faces' heights |
+| `wall FILE --hole X,Y,Z [--axis A] [--min-wall W]` | the least wall round one hole, along its whole length, and toward what: the part's outside or another opening | sections across the hole, a layer apart, as polygons | rays out to the hole's wall, then through it along the wall's normal |
 | `render FILE... [--views ...] [--section Z...] [--close X,Y,Z,R[,VIEW]]... [--test-piece FILE]...`, or `render --variant NAME=FILE[,FILE...]... [--close ...]... [--test-piece FILE]...` | pictures from the standard views, and a sheet of them, or a sheet with a labelled row for each variant. A close-up is R mm all round a point | VTK, offscreen | the mesh projected by arithmetic against the painted outline, each close-up's triangles projected and filled against its pixels, and the section's area against its pixels |
 | `params SCRIPT --set NAME=VALUE [--max-left N]` | which dimensions, volumes and pieces moved when one parameter changed | each piece's figures, three runs | the meshes' symmetric difference, and a run with nothing changed as the control |
 
@@ -51,6 +52,19 @@ An answer with no second check behind it becomes `NO ANSWER`, whatever it first 
 | So many panes | Fewer panes read than files | `capture --panes N` |
 
 No command can tell what a need means, so these are asked for. With nothing asked, they read as they did, except `params`.
+
+**An island of frame inside an opening** (mqucifer/print-shop#27). On `cup-1` one pane had holes cut in it for others, so the frame's walls round those holes stood inside its opening, joined to the rest only through the lips above and below. Every command read that opening as one solid pane, and nothing said so: `capture` read the island's volume as a pane "too thick for its pocket", `pause` read it as a ceiling mid-pocket, and `render --section` drew the opening over it. Now an opening is the hole less any island inside it, so its pane has a hole round each, and:
+- `capture`, `pause`, `panes` and `render --section` read it, and say "opening N has 1 island(s) of frame inside it". `capture` reads the lip round each hole of a pane as it does the outer edge, ring by ring.
+- An island closer to the opening's edge than twice the play can't have pane between: the pane goes round it open, and `capture` says so with where. One a pane can't go round at all is named, with the opening's centre and size, and not read.
+- `pause` reads what each layer leaves free of the whole opening, not the hole round one point of it, which could stand on an island.
+- A section is drawn piece by piece, so an island shows. Its line counts the pieces and islands, and one that fails its own area check names each piece it didn't draw.
+- `panes` writes a pane with holes as a STEP too, checked by its volume.
+
+**`capture` says where each pane is.** Its numbers are its own, largest opening first, and the model read its "pane 1" as `pane_1.step` for 33 calls. Each pane is now said with its centre, its size, its holes and, where a file beside the frame has its outline, that file: the outlines' sections at the pocket's height share 90%, and OCCT finds a point inside the bench's pane inside the file's solid. Two files lying in one opening with no wall between are named. A pane that meets the frame where it sits says whether that's the ceiling (too thick), the floor (set too low), or frame standing in its place, with where.
+
+**A height on a level face** is still refused, and the refusal now says the middle of the stretch either side, with how many openings each has.
+
+**`wall`** answers what `thin`'s `thinnest_flat_mm` was quoted for on `cup-1`: the hanging hole's wall. Any point inside the hole names it, and it reads the hole's whole length. The sections take the least distance from the hole's edge to any other edge of the material round it. The rays never touch a section, and meet them where the wall is least, as the least wall runs square to the hole's wall. Between two corners it isn't square to either, rays read it thicker, and that's `DISAGREE`, said why. Material beyond the hole's ends isn't counted. `least_wall_mm` is the number a need limits, or `--min-wall`, which holds a wall drawn at the limit within the mesh's chords.
 
 **A close-up** draws R mm all round a point along a view (`top` unless named), so a fine motif or a 3 mm hole can be judged: at 512 px and `R` of 4 that's 64 px per mm, where the first real run's 3 mm holes were 27 px. It looks along the view and doesn't cut anything, so what's inside a part needs `--section`. Nothing of the parts in the window is a `FAIL`, so one aimed wrongly doesn't read as a picture.
 
@@ -87,6 +101,9 @@ The Sponsor's way of printing panes adds three, each a planted case:
 | A pane standing above the next layer, where the nozzle hits it | The layer count alone | `pause` is `FAIL`, by both methods' layer, among several openings, and on the plate. `nozzle_over_pane_mm` is how far the tip clears it |
 | A lip narrower than the pane's play | A lip in the section at one height | `capture` moves the pane by its play, and it comes out |
 | A lip down one side | A lip, and no way to slide out | `capture` is `FAIL`: it can swing out |
+| A pane with a hole round an island of frame (`cup-1`) | "Too thick for its pocket", a ceiling mid-pocket, a section with no walls | `capture` holds it by its lips round every ring, `pause` agrees by both methods, and the section draws the island |
+| A pane number taken for a file's (`cup-1`) | `pane 1` | each pane is said with where it is, and its file |
+| A hole's wall quoted from the whole part's thinnest flat (`cup-1`) | `thinnest_flat_mm` 2.0 | `wall` reads that hole, and `FAIL`s under `--min-wall` |
 
 Building this found more, each now handled and said in the code:
 - **CadQuery's `tessellate` tolerance is relative,** a share of each edge's size, not the mm it looks like. On a real part that read as a 0.03 mm false gap. The bench meshes with absolute tolerances, through OCCT directly.
@@ -98,7 +115,7 @@ A second check has to ask the same question as the first, or it only makes noise
 
 ## Limits
 
-- **Docker's disk is shared,** with LiteLLM's database, crew's workspaces and any running tick, and it filled on 2026-11-01. There's one image, `print-shop/bench:0.2`, of at most 4 GB (0.1 had no `lookup` or `docs` indexes, and may still be on a machine). `build` refuses if that could leave under 5 GB free, and `check` says if the image or the disk is over. Its first layers are mqucifer/model-performance's CadQuery image, so where that's present it costs tens of MB.
+- **Docker's disk is shared,** with LiteLLM's database, crew's workspaces and any running tick, and it filled on 2026-11-01. There's one image, `print-shop/bench:0.3`, of at most 4 GB. It holds what 0.2 did, with the bench's version as a label: the bench code is mounted, so 0.3 marks the bench that reads islands and holes (mqucifer/print-shop#27) and shares all of 0.2's layers (0.1 had no `lookup` or `docs` indexes; either may still be on a machine). `build` refuses if that could leave under 5 GB free, and `check` says if the image or the disk is over. Its first layers are mqucifer/model-performance's CadQuery image, so where that's present it costs tens of MB.
 - **A container** has no network, 2 CPUs, 3 GiB with no swap, a read-only image, 1 GB of `/tmp`, the invoking user, no capabilities, no log on Docker's disk, a 2 GiB limit on any file, and 600 s. `/work` is the only thing it writes, and the bench's code is mounted read-only, so changing the code never costs another image. Every package is pinned.
 - **It moves to another machine** by clone and `build`: CI builds it for amd64 and runs the planted cases there, and the Mac builds it for arm64.
 - **Accuracy:** the mesh is at 0.002 mm, and a figure is good to the band it prints. Nothing here has been compared with a print or sliced by Orca. A pause layer assumes a layer takes its outline from its mid-height, and the Centauri's mid-print pause hasn't been run.
