@@ -609,6 +609,8 @@ def _bodies(part: Part, built: Any, args: Any, report: Report) -> dict[str, list
     small = [v for v in volumes if v < args.min_body]
     if small:
         problems.append(f"{len(small)} body(ies) under {args.min_body} mm³, the least {small[0]}")
+    if args.one_body and len(bodies) > 1:
+        problems.append(f"{len(bodies)} separate bodies, and one was asked for")
     if part.is_brep:
         solids = len(part.shape.Solids())
         report.second(f"OCCT has {solids} solid(s)")
@@ -665,6 +667,9 @@ def run_pause(args: Any, report: Report) -> None:
         return
     closing = [r for r in rows if r["pause_after_layer"] is not None]
     report.fact("openings_closing", len(closing))
+    rooms = [r["room_over_pane_mm"] for r in closing if "room_over_pane_mm" in r]
+    if rooms:
+        report.fact("least_room_over_pane_mm", min(rooms), how="the tightest opening")
     alike = {(r["pause_after_layer"], r["pause_after_layer_faces"]) for r in closing}
     for row in closing[:1] if len(alike) == 1 else closing:
         report.line(_pause_line(row))
@@ -780,6 +785,11 @@ def _pause_one(
         problems.append(
             f"opening {name}: {top - pane_top:.3f} mm above the pane at the pause, over "
             f"{args.max_gap} mm: the next layer bridges too far above it"
+        )
+    elif args.min_room is not None and row["room_over_pane_mm"] < args.min_room:
+        problems.append(
+            f"opening {name}: {row['room_over_pane_mm']} mm above the pane at the pause, under the "
+            f"{args.min_room} mm asked for"
         )
     return row
 

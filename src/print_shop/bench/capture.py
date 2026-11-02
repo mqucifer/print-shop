@@ -472,6 +472,8 @@ def run(args: Any, report: Report) -> None:
     faces = [p[key] for p in panes for key in ("up", "down")]
     lips = [f["least_lip_mm"] for f in faces if f["least_lip_mm"] is not None]
     report.fact("panes_read", len(panes))
+    if args.panes is not None and len(panes) != args.panes:
+        problems.append(f"{len(panes)} pane(s) read, and {args.panes} were asked for")
     if lips:
         report.fact("least_lip_mm", min(lips), how="round every pane's edge, on both faces")
     free = sum(f["no_lip_mm"] for f in faces)

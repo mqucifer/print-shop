@@ -98,12 +98,18 @@ def parser() -> Parser:
         "--min-lip", type=float, default=0.4, help="the least lip after its play, in mm"
     )
     capture.add_argument("--layer", type=float, default=0.2)
+    capture.add_argument(
+        "--panes", type=int, help="how many panes there must be: any other count is FAIL"
+    )
 
     thin = sub.add_parser("thin", help="features narrower than the nozzle, and tiny pieces")
     thin.add_argument("file")
     thin.add_argument("--nozzle", type=float, default=0.4)
     thin.add_argument("--layer", type=float, default=0.2)
     thin.add_argument("--min-body", type=float, default=1.0, help="the smallest body, in mm³")
+    thin.add_argument(
+        "--one-body", action="store_true", help="more than one connected body is FAIL"
+    )
     thin.add_argument("--samples", type=int, default=4000, help="rays through the surface")
     thin.add_argument("--max-layers", type=int, default=400)
     thin.add_argument(
@@ -120,6 +126,7 @@ def parser() -> Parser:
     pause.add_argument("--layer", type=float, default=0.2)
     pause.add_argument("--first-layer", type=float, default=0.2)
     pause.add_argument("--max-gap", type=float, default=0.4, help="the most air over the pane")
+    pause.add_argument("--min-room", type=float, help="the least air over the pane: under is FAIL")
 
     params = sub.add_parser("params", help="re-run a design's script with one parameter changed")
     params.add_argument("script", help="a Python script that writes STEP or STL files")
@@ -127,6 +134,12 @@ def parser() -> Parser:
         "--set", dest="change", required=True, help="NAME=VALUE, a top-level number"
     )
     params.add_argument("--timeout", type=int, default=150, help="seconds for each of its 3 runs")
+    params.add_argument(
+        "--max-left",
+        type=int,
+        default=0,
+        help="how many pieces may stay where they are and still read OK: over that is PARTIAL",
+    )
 
     render = sub.add_parser("render", help="pictures from the standard views")
     render.add_argument("files", nargs="*")

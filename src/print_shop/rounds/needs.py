@@ -17,8 +17,9 @@ import shlex
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-SOURCES = ("request", "answer", "reference", "derived", "chosen")
-QUOTED = ("request", "answer")
+#: `note` is a person's note relayed to the model, so a Sponsor's words aren't marked `derived`.
+SOURCES = ("request", "answer", "note", "reference", "derived", "chosen")
+QUOTED = ("request", "answer", "note")
 COMMANDS = (
     "info",
     "clearance",
@@ -95,8 +96,9 @@ def _bound(entry: dict[str, Any], key: str, wrong: list[str], shown: str) -> flo
     return float(value)
 
 
-def read(raw: Any, said_by_sponsor: str) -> tuple[list[Need], list[str]]:
-    """The needs, or what's wrong with them. `said_by_sponsor` is the request and the answers."""
+def read(raw: Any, said_by_sponsor: str, notes: str = "") -> tuple[list[Need], list[str]]:
+    """The needs, or what's wrong with them. `said_by_sponsor` is the request and the answers, and
+    `notes` what was relayed: each is its own source, so a need says which it came from."""
     wrong: list[str] = []
     try:
         entries = json.loads(raw) if isinstance(raw, str) else raw
@@ -107,6 +109,7 @@ def read(raw: Any, said_by_sponsor: str) -> tuple[list[Need], list[str]]:
     found: list[Need] = []
     seen: set[str] = set()
     theirs = normal(said_by_sponsor)
+    relayed = normal(notes)
     for entry in entries:
         if not isinstance(entry, dict):
             wrong.append("each need is an object")
@@ -132,9 +135,14 @@ def read(raw: Any, said_by_sponsor: str) -> tuple[list[Need], list[str]]:
         if source in QUOTED:
             if not quote.strip():
                 wrong.append(f"{shown} comes from the {source}: give its `quote`, their own words")
-            elif normal(quote) not in theirs:
+            elif source == "note" and normal(quote) not in relayed:
+                wrong.append(f'{shown} quotes "{quote}", which isn\'t in a note you were sent')
+            elif source != "note" and normal(quote) not in theirs:
+                hint = (
+                    ", but is in a note: its `source` is `note`" if normal(quote) in relayed else ""
+                )
                 wrong.append(
-                    f'{shown} quotes "{quote}", which isn\'t in the request or the answers'
+                    f'{shown} quotes "{quote}", which isn\'t in the request or the answers{hint}'
                 )
         check = entry.get("check")
         if not isinstance(check, dict):

@@ -4,30 +4,42 @@ The local model works in rounds on the bench, and every round is recorded (mquci
 
 ```
 scripts/rounds.py start NAME --request FILE [--reference FILE]...
-scripts/rounds.py resume NAME [--note FILE] [--reopen-needs]
+scripts/rounds.py resume NAME [--note FILE] [--from WHO] [--reopen-needs]
+scripts/rounds.py resume NAME --approve --by WHO [--note FILE]
+scripts/rounds.py resume NAME --send-back --by WHO --note FILE
 scripts/rounds.py status NAME
 scripts/rounds.py stop NAME
 scripts/rounds.py summary NAME
+scripts/rounds.py read-back NAME [--ledger FILE]
 ```
 
 It needs the bench's image (`scripts/bench.py build`), and LiteLLM on :4000 with print-shop's key from `~/.config/print-shop/.env`. It uses `crew-code-think`, and probes nothing else. **A run names its code,** so `start` and `resume` refuse a checkout with uncommitted changes. As in `cad_eval`, run from a checkout nothing edits until it ends: `git worktree add --detach ../run-<commit> <commit>`. One session runs under a root at a time (`.session.lock`). Runs live in `~/print-shop/design-runs/`, off this public repository, and `start` refuses a folder inside it.
 
 ## A run
 
-**Intake.** From the request and any reference files, the model reads what it's given and asks what it needs, as an interview. `questions` writes them to a file and the process exits. A person relays them, writes the answers to the file it names, and runs `resume`. `needs` ends intake. Each need says how it's checked, by a bench command and its limit, or by the Sponsor's eye. A quote from the Sponsor is held to their words. Writing and running are open throughout, and nothing gates code on a plan. `needs` with `try: true` reads each bench check against the files as they stand, and settles nothing.
+**Intake.** From the request and any reference files, the model reads what it's given and asks what it needs, as an interview. `questions` writes them to a file and the process exits. A person relays them, writes the answers to the file it names, and runs `resume`. `needs` ends intake. Each need says how it's checked, by a bench command and its limit, or by the Sponsor's eye. A quote from the Sponsor is held to their words. Writing and running are open throughout, and nothing gates code on a plan. `needs` with `try: true` reads each bench check against the files as they stand, and settles nothing. Each reading reaches the ledger's `tries`. A need's `source` says where it came from: `request`, `answer` or `note`, each with a quote held to that source's words, so what a person relayed in a note isn't marked `derived`.
 
 **Rounds.** The model makes and changes the part, and calls `done` when it believes the needs are met. The harness then runs the script again and each need's check itself, so the model's word and a tool's success don't count:
 - The clean run has a fresh container, over a plain copy of `work/` with no links, nothing a run left, and all geometry outside `references/` taken away.
 - Each bench need then runs in another fresh container, where no model code has run. `params` runs the script by its nature, on a scratch copy, so its reading is as good as its own second check.
 - `DISAGREE` and `NO ANSWER` never pass, whatever a need says.
 - An eye need passes on a pick, and on nothing else. A stand-in's passes it too, so a run can be proved with no Sponsor there, and the reading says who it was.
+- **A pick holds only for what it saw.** Each file on its sheet is held by a hash of what it contains, and the clean run has to leave the same, with some of the `part` among them. Otherwise the need fails, saying which file changed, and it's asked again. A STEP file's header names the second it was written, so its hash starts at its `DATA` section, or every clean run would count as a change. A pick of `none` takes back any pick before it, and a pick from before this holds for nothing.
 - A `part` a clean run didn't leave isn't met, whatever the needs read.
 
 Needs that fail go back in `done`'s reply, with each reading against its limit and the last round's, and the next round starts from what's there: the part, the script and `record/ROUNDS.md`. The conversation carries on, with its reasoning.
 
 **The needs are settled once.** They're what the work is checked against, so the model can't change them. `resume --reopen-needs` lets it, when a person decides a need's check is wrong.
 
-**What's the part.** `done` names the files that are the part (`part: ["stand.step"]`), as a need can name a test piece beside it. `final-sheet.png` draws those alone. It's the model's word and it decides nothing else. A sheet's `files` are what the Sponsor takes for the part too, and `test_pieces` on `ask` shows others, see-through in grey and marked.
+`done` also asks what kind of change the round was (`fix_shape`) and for the model's closing words (`closing`), so neither column is empty. Both are in its own words, kept as such, and decide nothing.
+
+**What's the part.** `done` names the files that are the part (`part: ["stand.step"]`), as a need can name a test piece beside it. Each entry is one row of the sheet, and files seen together are one entry: `{"name": "wide", "files": ["base.step", "lid.step"]}`. `final-sheet.png` draws those alone, so two outlines in one `part` aren't drawn on top of each other. It's the model's word and it decides nothing else. A sheet's `files` are what the Sponsor takes for the part too, and `test_pieces` on `ask` shows others, see-through in grey and marked.
+
+**Approval is a stop.** The Sponsor's definition of done (2026-11-02): design rounds, their approval, a refinement pass whose findings go in the ledger, then the learn loop. `met` means every need passed its check, and doesn't mean approved. When every need passes, the run stops instead of ending, and `done` can't end it. `approvals/n/` has the sheet of the final part and `stop.md`, with each reading and the model's closing words, and `what_next` prints those words too. The model is shown the same sheet.
+- `resume --approve --by WHO` ends the run as `approved`, with no model call and no key.
+- `resume --send-back --by WHO --note FILE` goes on as a new round, with the note. A plain `resume` is refused here.
+- Anyone else is `--by "stand-in: <who>"`, as at a pick. `decisions` holds which, and who.
+- A send-back after approval is by hand, with the same `--send-back`. It becomes automatic only once there are more mechanical checks or agreements ahead of time. The refinement pass and the delivered result are the next issue after mqucifer/print-shop#24.
 
 **Stopping for the Sponsor.** Only `ask`, where form is at stake: the model names variants, `render` makes a sheet, and the process exits. It can add close-ups to each row (`close`), for what's too fine to judge whole. A person relays it, writes `pick.json`, and runs `resume`. A pick with no reason is refused, since the reason is what's learned from. After `needs`, `questions` is refused.
 
@@ -35,7 +47,7 @@ Needs that fail go back in `done`'s reply, with each reading against its limit a
 
 | Ending | When | Whose |
 |---|---|---|
-| `met` | Every need passed in the harness's own check | |
+| `approved` | A person said yes at the stop for approval | a person |
 | `blocked` | The model said what's missing | the model's reason, read by hand: a missing tool may be what it names |
 | `no_tool_call` | That many replies in a row with no tool call (`quiet`) | the model |
 | `stuck` | That many rounds refused with nothing in `work/` changed (`stuck_rounds`) | the model |
@@ -47,7 +59,7 @@ Needs that fail go back in `done`'s reply, with each reading against its limit a
 | `harness_fault` | A bug of ours, its trace in `harness-fault.txt` | the harness |
 | `stopped` | The `stop` file or a signal | a person |
 
-`questions` and `ask` aren't endings: the run waits. **`resume` goes on after any of them but `met`,** from the very message it stopped at, with `--note` adding a message. A crash loses at most the last call's answer, and that call is made again.
+`questions`, `ask` and `met` aren't endings: the run waits, and `met` is what it rests in until a person decides. A run from before approval was a stop that says `met` stays ended, and `resume` refuses it. **`resume` goes on after any other,** from the very message it stopped at, with `--note` adding a message, and `--from` saying who the note is from. A crash loses at most the last call's answer, and that call is made again. A conversation started from the record keeps the notes as well.
 
 A conversation that won't fit even compacted starts again from the record, keeping the request, the answers, the needs and the files. Its reasoning is what's lost, and `restarts` counts them.
 
@@ -67,8 +79,30 @@ Limits are in `session.Limits`, recorded on the run's row. The model isn't told 
 | `picks` | The question, the variants, the sheet, and the pick with its reason and who made it (`picked_by`) |
 | `questions` | Intake's questions and answers |
 | `changes` (a view) | Each need's reading before and after each round, with the diff |
+| `interventions` | Every note, answer, pick and send-back relayed to the model: when, at which call, who it's from, its text. The largest cause of change in a run |
+| `timeline` | Each start, stop, resume, compaction and restart, in order. A compaction has its size before and after, estimated and measured, and each process its harness commit, where `runs.harness_commit` holds only the first |
+| `calls` | Each call's seconds, tokens, finish and share of repeated reasoning, with its round, its phase (how many times a person had sent something) and its process |
+| `phases`, `round_costs` (views) | Calls, seconds and tokens, split by what a person sent or by round |
+| `runaways` | A call that hit the limit, was cut, or whose reasoning repeats, for review. See below |
+| `tries` | Each reading from a `try` |
+| `approvals`, `decisions` | Each stop for approval, with its sheet's hash, the part's hashes and the closing words, and each yes or send-back, and who |
+
+`picks.seen` holds each variant's files, its test pieces and its sheet, by hash. `rounds` gains `part_rows`, `closing_model_said` and `judged_files`, what the clean run left by hash.
 
 Looking lessons up isn't here.
+
+**Written from the events.** `records.py` takes a run's events one at a time, live or from the file, and a second reading adds nothing, so a table doesn't depend on when it was read, and a process that was killed catches up when it's next loaded. `read-back` does it for a run that ended, and only reads its folder. A run from before these tables reads back with less: a note's sender is only "the people running this", its time is its first call's, and who made a pick comes from `picks.picked_by`, never from the message's words, since a stand-in's pick was once told to the model as the Sponsor's. Nothing is backfilled where it wasn't recorded: `fix_shape`, closing words, chunk times, lost arguments, and a need's `source`.
+
+**The ledger only gains.** Tables and columns are added on open, and existing rows stay. An older checkout may still be running against it, so nothing is added to a table it inserts into by position (`needs`, `readings`).
+
+### Runaways are evidence
+
+The Sponsor: "When we get these run-away calls or repeating itself constantly its almost ALWAYS has been some issue with its context or tool or skill not working well. So to me these are not throwaways - its the obvious spot to look for fixes first." **Nothing here cuts a call or limits thinking.** Crew's whitespace cut is still the only cut.
+
+- **A tool call's arguments are kept as they arrive,** in `streams/n.jsonl`, on the disk before the next piece comes. It stays if they didn't all come whole. `calls.stream` has the chunks' times, the longest gap and how far the arguments got.
+- **It can't keep what never arrives.** On one real run the arguments of a call cut off at the limit never arrived, and the likely cause is the server holding them back until they're complete, which hasn't been probed. If so, `tokens_unaccounted` on the row, and `tool_args_chars` of 0, are what show it.
+- **A row in `runaways`** is a call with a `finish` of `length` or `runaway`, or whose reasoning repeats earlier text past `Limits.review_repeat_share` (0.5, recorded on the run). Repetition counts sentences of 25 characters or more that match an earlier one word for word, by characters, over calls with at least 2,000 characters of such sentences. Paraphrase isn't counted, so it's a floor.
+- **`doing`** is what it was calling, with any path, and how its text and reasoning ended. **`lacked`** is the evidence code can give: the skills read and not read, the compactions so far, the last bench answer, the last refusals and the needs failing. What it really lacked is a reviewer's call, which `review_note` is for.
 
 ## A run's folder
 
@@ -82,7 +116,9 @@ Looking lessons up isn't here.
 | `questions/n.md`, `n.answers.md` | Each stop at intake |
 | `asks/n/` | `question.md`, `sheet.png`, `variants/`, `test-pieces/` if it showed any, and `pick.json` |
 | `rounds/nnn/` | `judged/` (what the clean run left), `readings/` (each need's answer, in text and numbers), `run.txt`, `judgement.json`, `diff.patch` |
-| `final-sheet.png` | The `part` as it passed, for the people who see the result. It decides nothing |
+| `approvals/n/` | `sheet.png`, `stop.md` and `closing.md`, for the person who decides |
+| `streams/n.jsonl` | A call's tool-call arguments as they arrived, if they didn't all come whole |
+| `final-sheet.png` | The latest `part` to pass, one row each, for the people who see the result. It decides nothing |
 | `summary.json` | A run's figures, from `scripts/rounds.py summary`, read from its events |
 
 ## Where each part came from
@@ -123,9 +159,9 @@ mqucifer/print-shop#19 then took what else it lacked: close-ups, sheets of the p
 
 **Known limits it showed:**
 - **A need is only as honest as what it's checked against.** Here the fit's checked against a tealight the model drew from the request's numbers. That's right on this part, but no code holds a fixture to the request.
-- **The pick isn't held to the final part.** An eye need passes on the pick, and nothing compares what passes at `done` with the variant the Sponsor picked. Here the two read the same volume by the bench, and that comparison was by hand.
+- **The pick wasn't held to the final part.** An eye need passed on the pick, and nothing compared what passed at `done` with the variant the Sponsor picked. Here the two read the same volume by the bench, and that comparison was by hand. mqucifer/print-shop#24 holds a pick to its files.
 - **A design made before `needs` is round 0.** `bench_calls` holds its readings with round 0, and `rounds` starts only at `needs`, so here one "round" follows 32 calls of real design work.
 
 ## Tests
 
-`uv run pytest -q tests/test_rounds.py` needs no Docker. `uv run pytest -q tests/test_rounds_in_image.py`, under the `bench` mark, has a scripted fake model drive a real run in real containers, with no model call: every tool, every ending, a resume after `ask`, a failing need going back, and a `done` the checks refuse not ending the run. The part is made up in the test, of plain boxes.
+`uv run pytest -q tests/test_rounds.py tests/test_records.py` needs no Docker. `test_records.py` reads back a run made up in its old shape. `uv run pytest -q tests/test_rounds_in_image.py`, under the `bench` mark, has a scripted fake model drive a real run in real containers, with no model call: every tool, every ending, a resume after `ask`, a failing need going back, and a `done` the checks refuse not ending the run. The part is made up in the test, of plain boxes.

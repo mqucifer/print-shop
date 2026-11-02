@@ -10,13 +10,23 @@ The only cut is crew's: the content running on as whitespace past `RUNAWAY_CHARS
 (`crew_org.calls` at the commit `cad_eval` pins, 099879fe). A call that thinks to the token limit
 ends as `length`, and the session goes on.
 
+A tool call's arguments are kept as they arrive, in a file of their own, so one cut off at the
+limit can be read: `keep_stream` names the file before a call, and it stays unless they all came
+whole, which the call's event then holds. On a real run a call lost most of its tokens as arguments
+that never arrived, and the times of its chunks weren't kept either, so the answer also says when
+chunks came and how far the arguments got. If a server holds arguments back until they're complete
+there's nothing here to keep, and those figures are what show it. This is all recording: nothing
+cuts a call for it.
+
 The key is read once, in this process, and never shown or recorded. Nothing probes SGLang.
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any
+import time
+from pathlib import Path
+from typing import Any, TextIO
 
 import httpx
 
@@ -43,6 +53,7 @@ class Sender:
         if not found:
             raise LookupError(f"{API_KEY} isn't in {SETTINGS_PATH}")
         self.served: dict[str, str] = {}
+        self.spool: Path | None = None
         self._client = httpx.Client(
             base_url=base_url,
             headers={"Authorization": f"Bearer {found}"},
@@ -61,6 +72,10 @@ class Sender:
             )
         return alias in {model.get("id") for model in response.json().get("data", [])}
 
+    def keep_stream(self, path: Path) -> None:
+        """Where the next call's tool-call arguments go as they arrive."""
+        self.spool = path
+
     def wire(self, body: dict[str, Any]) -> dict[str, Any]:
         """The body as it's sent: streamed, with the usage in its last chunk."""
         return {**body, "stream": True, "stream_options": {"include_usage": True}}
@@ -74,6 +89,16 @@ class Sender:
         response_id = ""
         served = ""
         run = 0
+        began = last = time.monotonic()
+        stream: dict[str, Any] = {
+            "chunks": 0,
+            "first_chunk_s": None,
+            "longest_gap_s": 0.0,
+            "longest_gap_ended_s": None,
+            "tool_call_started_s": None,
+            "tool_args_chars": 0,
+        }
+        spool: TextIO | None = None
         with self._client.stream("POST", "/chat/completions", json=self.wire(body)) as response:
             self.served = served_headers(response.headers)
             if response.status_code >= 400:
@@ -90,6 +115,14 @@ class Sender:
                 if data == "[DONE]":
                     break
                 chunk = json.loads(data)
+                moment = time.monotonic()
+                stream["chunks"] += 1
+                if stream["first_chunk_s"] is None:
+                    stream["first_chunk_s"] = round(moment - began, 3)
+                if moment - last > stream["longest_gap_s"]:
+                    stream["longest_gap_s"] = round(moment - last, 3)
+                    stream["longest_gap_ended_s"] = round(moment - began, 3)
+                last = moment
                 response_id = chunk.get("id") or response_id
                 served = chunk.get("model") or served
                 usage = chunk.get("usage") or usage
@@ -103,10 +136,23 @@ class Sender:
                         run = run + len(piece) if not kept else len(piece) - len(kept)
                     for part in delta.get("tool_calls") or []:
                         assemble(calls, part)
+                        if stream["tool_call_started_s"] is None:
+                            stream["tool_call_started_s"] = round(moment - began, 3)
+                        piece = (part.get("function") or {}).get("arguments") or ""
+                        stream["tool_args_chars"] += len(piece)
+                        spool = self._kept(spool, moment - began, part)
                     finish = choice.get("finish_reason") or finish
                 if run >= RUNAWAY_CHARS:
                     finish = "runaway"
                     break
+        stream["ended_s"] = round(time.monotonic() - began, 3)
+        target = self.spool
+        if spool is not None and target is not None:
+            spool.close()
+            if self._whole(calls) and finish not in ("length", "runaway"):
+                target.unlink(missing_ok=True)
+            else:
+                stream["kept"] = f"{target.parent.name}/{target.name}"
         message: dict[str, Any] = {
             "role": "assistant",
             "content": "".join(content),
@@ -119,7 +165,35 @@ class Sender:
             "model": served,
             "choices": [{"message": message, "finish_reason": finish}],
             "usage": usage,
+            "stream": stream,
         }
+
+    def _kept(self, spool: TextIO | None, at: float, part: dict[str, Any]) -> TextIO | None:
+        """One piece of a tool call, on the disk before the next arrives."""
+        if self.spool is None:
+            return None
+        if spool is None:
+            self.spool.parent.mkdir(parents=True, exist_ok=True)
+            spool = self.spool.open("a", encoding="utf-8")
+        function = part.get("function") or {}
+        piece = {
+            "at_s": round(at, 3),
+            "index": part.get("index"),
+            "name": function.get("name"),
+            "arguments": function.get("arguments"),
+        }
+        spool.write(json.dumps(piece) + "\n")
+        spool.flush()
+        return spool
+
+    @staticmethod
+    def _whole(calls: dict[int, dict[str, Any]]) -> bool:
+        for call in calls.values():
+            try:
+                json.loads(call["function"]["arguments"] or "{}")
+            except ValueError:
+                return False
+        return True
 
     def close(self) -> None:
         self._client.close()
