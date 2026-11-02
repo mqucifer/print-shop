@@ -373,9 +373,18 @@ def to_give(ledger: DesignLedger) -> list[dict[str, Any]]:
     return [dict(r) for r in found]
 
 
+def writer(written_by: str) -> str:
+    """Who wrote a lesson, as a sentence names them."""
+    if written_by == MODEL:
+        return "the model"
+    if written_by == SPONSOR:
+        return "the Sponsor"
+    return written_by.removeprefix(STAND_IN).strip()
+
+
 def line(found: dict[str, Any]) -> str:
     """One lesson as a run is given it, with where it came from."""
-    who = "the model" if found["written_by"] == MODEL else found["written_by"]
+    who = writer(found["written_by"])
     return f"- **Lesson {found['id']}**, from `{found['run']}`, written by {who}: {found['text']}"
 
 

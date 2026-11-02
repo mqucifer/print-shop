@@ -389,6 +389,9 @@ def test_a_reviewer_loads_lessons_from_a_file_checked_whole_first(tmp_path: Path
         lessons.load(ledger, steps_file(tmp_path, steps), BY)
     # One about checking was given by hand once, as a record: code never gives one.
     assert [g["id"] for g in lessons.to_give(ledger)] == [a["id"]]
+    assert lessons.line(a).startswith(
+        f"- **Lesson {a['id']}**, from `older`, written by a reviewer in a test: Lay it out"
+    )
 
 
 def test_a_ledger_from_before_lessons_gains_them_and_keeps_its_rows(tmp_path: Path) -> None:
