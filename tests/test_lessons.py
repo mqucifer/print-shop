@@ -196,8 +196,13 @@ def candidates(tmp_path: Path) -> tuple[DesignLedger, list[int]]:
 
 def test_each_step_is_signed_and_kept_with_why(tmp_path: Path) -> None:
     ledger, (build, check, context) = candidates(tmp_path)
-    with pytest.raises(lessons.Refused, match="says who"):
-        lessons.accept(ledger, build, "the operator")
+    for unsigned in ("the operator", "operator project-print-6a", "reviewer:", "reviewer: "):
+        with pytest.raises(lessons.Refused, match="says who"):
+            lessons.accept(ledger, build, unsigned)
+    # A reviewer signs as one: it isn't standing in for the Sponsor's taste.
+    lessons.accept(ledger, context, "reviewer: the operator")
+    assert lessons.one(ledger, context)["status_by"] == "reviewer: the operator"
+    assert lessons.writer("reviewer: the operator") == "the operator"
     with pytest.raises(lessons.Refused, match="never given as a note"):
         lessons.accept(ledger, check, BY)
     lessons.accept(ledger, check, BY, "refusal")
@@ -223,6 +228,13 @@ def test_each_step_is_signed_and_kept_with_why(tmp_path: Path) -> None:
         lessons.promote(ledger, check, BY, "note", "nowhere")
     lessons.promote(ledger, check, BY, "refusal", "mqucifer/print-shop#26")
     assert lessons.one(ledger, check)["became_where"] == "mqucifer/print-shop#26"
+
+
+def test_a_reviewers_signature_is_for_lessons_and_not_for_a_decision(tmp_path: Path) -> None:
+    run = waiting(tmp_path)
+    with pytest.raises(Refused, match="says who picked"):
+        run.approve("reviewer: the operator")
+    assert not run.ledger.rows("SELECT * FROM decisions")
 
 
 def test_the_listing_shows_each_lesson_with_what_the_ledger_holds_where_it_points(

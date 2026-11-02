@@ -9,8 +9,8 @@ checking held until a check got in the way, and then the check was changed. So:
   after-action review (`after_action.py`). Each is a `candidate`, keyed to the ledger's calls and
   readings, and a person can write one too.
 - **A reviewer checks each against the ledger** (the operator, for now): `accept`, `edit` or
-  `reject`, signed as a pick is. A lesson about checking is never given as a note: it's accepted
-  only as what it `becomes`, a refusal or a bench check, which is built in the harness.
+  `reject`, signed `reviewer: <who>`. A lesson about checking is never given as a note: it's
+  accepted only as what it `becomes`, a refusal or a bench check, which is built in the harness.
 - **`start` gives every kept lesson about how to build** to every run, in its first message, under
   `HEADING`, each saying where it came from, and `run_lessons` has each one given. Matching by part
   comes with more lessons.
@@ -33,6 +33,9 @@ from print_shop.rounds.judge import SPONSOR, STAND_IN
 from print_shop.rounds.ledger import DesignLedger, now
 
 MODEL = "model"
+#: Whoever checks lessons signs as this: the operator, for now. It's for lesson steps only, since a
+#: reviewer isn't standing in for the Sponsor's taste, and picks and decisions don't take it.
+REVIEWER = "reviewer:"
 KINDS = {"build": "how to build", "check": "what to check", "context": "context"}
 SCORES = {"used": "used", "not_used": "not used", "in_the_way": "got in the way"}
 #: What a lesson about checking becomes, instead of a note.
@@ -71,12 +74,14 @@ class Refused(RuntimeError):
 
 
 def signed(by: str, what: str = "--by") -> str:
-    """Who did it, as a pick is signed: the Sponsor, or someone standing in, named."""
+    """Who did it: a reviewer, named, or as a pick is signed, the Sponsor or someone standing in
+    for them, named."""
     by = by.strip()
-    if by != SPONSOR and not (by.startswith(STAND_IN) and by[len(STAND_IN) :].strip()):
+    named = any(by.startswith(p) and by[len(p) :].strip() for p in (REVIEWER, STAND_IN))
+    if by != SPONSOR and not named:
         raise Refused(
-            f'{what} says who: "{SPONSOR}" only if it\'s them, or "{STAND_IN} <who>" for anyone '
-            f"else. Not {by!r}"
+            f'{what} says who: "{REVIEWER} <who>" for whoever checks lessons, "{SPONSOR}" only '
+            f'if it\'s them, or "{STAND_IN} <who>" for anyone standing in for them. Not {by!r}'
         )
     return by
 
@@ -379,7 +384,7 @@ def writer(written_by: str) -> str:
         return "the model"
     if written_by == SPONSOR:
         return "the Sponsor"
-    return written_by.removeprefix(STAND_IN).strip()
+    return written_by.removeprefix(REVIEWER).removeprefix(STAND_IN).strip()
 
 
 def line(found: dict[str, Any]) -> str:
