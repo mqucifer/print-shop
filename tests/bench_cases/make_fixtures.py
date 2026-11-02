@@ -248,6 +248,60 @@ def captured() -> None:
     save(first, "frame-first")
 
 
+def island_frame(island: tuple[float, float, float, float], name: str) -> Any:
+    """`cup-1`'s shape from boxes: a 60 by 40 mm pocket from z=1 to z=3 with an island of frame
+    inside it, a 2 mm ring round a 16 by 12 mm pocket of its own. The island's joined to the rest
+    only through the lips above and below it, by a bridge each side, so its pane has a hole.
+    Every lip is 2 mm, so 1.9 mm with 0.1 mm of play."""
+    x0, x1, y0, y1 = island
+    plate = box(-40, 40, -30, 30, 0, 4).cut(box(-30, 30, -20, 20, 1, 3))
+    for z0, z1 in ((0, 1), (3, 4)):
+        plate = plate.cut(box(-28, 28, -18, 18, z0, z1))
+        lip = (max(x0 - 2, -30), min(x1 + 2, 30), max(y0 - 2, -20), min(y1 + 2, 20))
+        plate = plate.union(box(*lip, z0, z1))
+        if y0 > -18:
+            plate = plate.union(box(-1, 1, -18, y0, z0, z1)).union(box(-1, 1, y1, 18, z0, z1))
+    plate = plate.union(box(x0, x1, y0, y1, 1, 3))
+    plate = plate.cut(box(-8, 8, -6, 6, 1, 3))
+    plate = plate.cut(box(-6, 6, -4, 4, 0, 1)).cut(box(-6, 6, -4, 4, 3, 4))
+    save(plate, name)
+    return plate
+
+
+def islands() -> None:
+    """Frames with an island of frame inside an opening, each read by arithmetic."""
+    Path("island").mkdir(exist_ok=True)
+    island_frame((-10, 10, -8, 8), "island/frame-island")
+    # Its panes, named as a model might: the bench numbers the larger opening first, so its
+    # pane 1 is pane_2.step. On `cup-1` reading one for the other cost 33 calls.
+    save(box(-7.9, 7.9, -5.9, 5.9, 1, 3), "island/pane_1")
+    save(
+        box(-29.9, 29.9, -19.9, 19.9, 1, 3).cut(box(-10.1, 10.1, -8.1, 8.1, 1, 3)), "island/pane_2"
+    )
+    # An island 0.15 mm from the opening's right-hand edge: with 0.1 mm of play the pane can't
+    # pass between, so it goes round the island open, as a C, as on `cup-1`'s first round.
+    island_frame((-10, 29.85, -8, 8), "frame-island-open")
+    # An island 0.15 mm from the top and the bottom: the pane round it comes apart in two.
+    island_frame((-10, 10, -19.85, 19.85), "frame-island-split")
+
+
+def hanging() -> None:
+    """Holes whose least wall is known by arithmetic."""
+    # A 3 mm hole at y=121.5 in a top rail from y=117 to 125: 2.0 mm to the outside, 3.0 to the
+    # window below.
+    plate = box(0, 100, 0, 125, 0, 4).cut(box(10, 90, 10, 117, 0, 4))
+    save(plate.cut(cq.Workplane("XY").center(50, 121.5).circle(1.5).extrude(4)), "hang")
+    # The window runs up to y=119: 1.0 mm below the hole, toward the window.
+    plate = box(0, 100, 0, 125, 0, 4).cut(box(10, 90, 10, 119, 0, 4))
+    save(plate.cut(cq.Workplane("XY").center(50, 121.5).circle(1.5).extrude(4)), "hang-thin")
+    # Along y, through a block 10 tall: 3.5 mm above and below it, 8.5 each side.
+    bore = cq.Workplane("XZ").center(10, 5).circle(1.5).extrude(-30)
+    save(box(0, 20, 0, 30, 0, 10).cut(bore), "bore-y")
+    # A square hole and a square opening corner to corner: the least wall, 1.414 mm, runs between
+    # two corners, square to neither, so rays square to the hole's wall can't read it.
+    save(box(0, 20, 0, 20, 0, 4).cut(box(5, 8, 5, 8, 0, 4)).cut(box(9, 12, 9, 12, 0, 4)), "corners")
+
+
 def closes() -> None:
     """A plate with a 3 mm hole through it, a part to judge close up. Its test piece sits apart."""
     save(cq.Workplane("XY").box(100, 100, 4).faces(">Z").workplane().hole(3), "plate-3mm")
@@ -378,6 +432,8 @@ if __name__ == "__main__":
     volumes()
     frames()
     captured()
+    islands()
+    hanging()
     closes()
     thin_parts()
     designs()

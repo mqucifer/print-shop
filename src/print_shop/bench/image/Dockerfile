@@ -60,3 +60,6 @@ RUN mkdir -p /opt/cad-eval \
     && cd /tmp && python /build/lookup_index.py /opt/cad-eval/lookup.json \
     && rm -rf /build
 COPY --from=docs /build/docs.json /opt/cad-eval/docs.json
+# The bench's version, as `print_shop.bench.host.IMAGE` names it. 0.3 reads islands inside an
+# opening and the wall round a hole (mqucifer/print-shop#27); its code is mounted, not copied in.
+LABEL org.opencontainers.image.version="0.3"

@@ -29,6 +29,7 @@ COMMANDS = (
     "capture",
     "thin",
     "pause",
+    "wall",
     "params",
     "render",
 )
