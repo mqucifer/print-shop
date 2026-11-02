@@ -34,7 +34,14 @@ The first line is the verdict. Then come the numbers, each with how it was read,
 | `pause FRAME --pocket-z Z --pane-thickness T [--layer L] [--first-layer F] [--max-gap G] [--min-room R]` | the layer to pause after, and the room over the pane. `--max-gap` is the most it may be, and `--min-room` the least |
 | `render FILE... [--views iso top bottom front side] [--section Z...] [--close X,Y,Z,R[,VIEW]]... [--test-piece FILE]...` | pictures from the standard views, and a sheet of them, which come to you. A close-up is R mm all round a point, along a view, for what's too fine to judge whole. A test piece is drawn see-through in grey, and marked as not the part |
 | `render --variant A=a.step --variant B=b.step,c.step [--views ...] [--close ...]... [--test-piece FILE]...` | a sheet with a labelled row for each variant, to compare them |
+| `wall FILE --hole X,Y,Z [--axis A] [--min-wall W]` | the least wall round one hole, along its whole length, and toward what: the part's outside or another opening. Any point inside the hole names it |
 | `params SCRIPT --set NAME=VALUE [--max-left N]` | which dimensions, volumes and pieces moved when one parameter changed |
+
+**`capture`'s and `pause`'s numbers are the bench's own,** largest opening first, not your files'. Each pane is said with its centre, its size and, where a pane file beside the frame has its outline, that file's name. Its "pane 1" isn't `pane_1.step` unless it says so.
+
+**An opening with an island of frame inside it,** joined to the rest only above or below, holds a pane with a hole round the island. `capture`, `pause`, `panes` and `render --section` read it, and say "opening N has 1 island(s) of frame inside it". Where an island comes closer to the opening's edge than twice the play, the pane goes round it open, and where a pane can't go round it at all, the bench names the opening rather than read it.
+
+**When a bench reading and your design disagree, cut a section** (`render FILE --section Z`) at the height in question, and read its verdict before its picture: a section that fails its own check names the piece it couldn't draw.
 
 `params` reads a number assigned once at the top level of your script (`WALL = 2.0`), and runs the script in a scratch folder, so your files aren't touched. A parameter that moves nothing is `NO CHANGE`, and one that leaves pieces behind is `PARTIAL`, naming them. `--max-left N` says how many may stay and still read `OK`, for a parameter that's meant to drive only some of them. Top-level numbers are what let a later round change one thing and read what moved.
 
@@ -54,6 +61,6 @@ A bench need names a command as you'd give it, and what must hold. The harness r
  "check": {"by": "bench", "command": "clearance lid.step cup.step --min-gap 0.2"}}
 ```
 
-A check should hold what the need says. A need saying "a 0.2 mm margin" asks `pause --min-room 0.2`, "one connected solid" asks `thin --one-body`, "at least 7 panes" asks `capture --panes 7` for each outline, and "moves every piece" asks `params` with no `--max-left`.
+A check should hold what the need says. A need saying "a 0.2 mm margin" asks `pause --min-room 0.2`, "one connected solid" asks `thin --one-body`, "at least 7 panes" asks `capture --panes 7` for each outline, "2 mm of wall round the hanging hole" asks `wall --hole X,Y,Z --min-wall 2` at that hole (not `thin`, whose thinnest figures are the whole part's), and "moves every piece" asks `params` with no `--max-left`.
 
 By default a need passes on exit 0. `verdicts` names which verdicts pass instead, such as `["INTERFERE"]` for a press fit. `number` names a number in the answer's saved JSON (`bench-out/*.json`, under `numbers`), with dots for anything nested (`pairs.0.gap_mesh_mm`), and `at_least` or `at_most` its limit. `DISAGREE` and `NO ANSWER` never pass. To see a number's name, run the command yourself first: names differ between commands. Once settled, needs don't change, so send them with `try: true` first: each check is read against your files as they stand, and nothing is settled.

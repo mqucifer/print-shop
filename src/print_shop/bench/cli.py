@@ -30,7 +30,7 @@ def _coordinates_joined(given: list[str]) -> list[str]:
     joined: list[str] = []
     words = iter(given)
     for word in words:
-        if word in ("--close", "--centre"):
+        if word in ("--close", "--centre", "--hole"):
             value = next(words, None)
             joined.append(word if value is None else f"{word}={value}")
         else:
@@ -119,6 +119,14 @@ def parser() -> Parser:
         help="thin wall by rays alone, in mm², before it counts as a disagreement",
     )
 
+    wall = sub.add_parser("wall", help="the least wall round one hole, along its whole length")
+    wall.add_argument("file")
+    wall.add_argument("--hole", type=_point, required=True, help="x,y,z: any point inside the hole")
+    wall.add_argument("--axis", choices=("x", "y", "z"), default="z", help="the hole's axis")
+    wall.add_argument("--min-wall", type=float, help="the least wall wanted, in mm: under is FAIL")
+    wall.add_argument("--layer", type=float, default=0.2, help="sections a layer apart")
+    wall.add_argument("--n", type=int, default=360, help="rays at each height")
+
     pause = sub.add_parser("pause", help="the layer to pause after, to drop a pane in")
     pause.add_argument("frame")
     pause.add_argument("--pocket-z", type=float, required=True, help="a height inside the pockets")
@@ -204,6 +212,10 @@ def _dispatch(args: Any, report: Report) -> None:
         from .fabrication import run_thin
 
         run_thin(args, report)
+    elif args.command == "wall":
+        from .wall import run as run_wall
+
+        run_wall(args, report)
     elif args.command == "pause":
         from .fabrication import run_pause
 

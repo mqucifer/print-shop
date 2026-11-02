@@ -100,24 +100,48 @@ def _write_pane(polygon: Any, z0: float, thickness: float, stem: Path) -> list[s
         raise NoAnswer(f"{stem.name}'s mesh isn't closed")
     mesh.export(str(stem.with_suffix(".stl")))
     wrote = [str(stem.with_suffix(".stl"))]
-    points = list(polygon.exterior.coords)[:-1]
-    if len(points) <= STEP_POINTS and not polygon.interiors:
-        solid = cq.Workplane("XY").workplane(offset=z0).polyline(points).close().extrude(thickness)
-        cq.exporters.export(solid, str(stem.with_suffix(".step")))
-        wrote.append(str(stem.with_suffix(".step")))
+    rings = [list(r.coords)[:-1] for r in (polygon.exterior, *polygon.interiors)]
+    if sum(len(r) for r in rings) <= STEP_POINTS:
+        sketch = cq.Workplane("XY").workplane(offset=z0)
+        for ring in rings:
+            sketch = sketch.polyline(ring).close()
+        # CadQuery nests the inner rings as holes. Checked, as a ring it didn't nest would fill.
+        solid = sketch.extrude(thickness)
+        wanted = float(polygon.area) * thickness
+        if abs(float(solid.val().Volume()) - wanted) <= max(1e-3, 1e-4 * wanted):
+            cq.exporters.export(solid, str(stem.with_suffix(".step")))
+            wrote.append(str(stem.with_suffix(".step")))
     return wrote
 
 
-def _between_faces(mesh: trimesh.Trimesh, z: float, name: str) -> None:
-    """A section exactly on a level face could read either side of it, so it's refused."""
-    for flat in flat_heights(mesh, least=0.01):
-        if abs(flat["z"] - z) <= LEVEL:
-            raise NoAnswer(f"{name}={z} is on a level face: choose a height between two faces")
+def _between_faces(mesh: trimesh.Trimesh, z: float, name: str, built: Any = None) -> None:
+    """A section exactly on a level face could read either side of it, so it's refused, and the
+    refusal says the middle of the stretch either side of the face, with how many openings each
+    has: on `cup-1` the model and the operator both tripped on it."""
+    flats = sorted(f["z"] for f in flat_heights(mesh, least=0.01))
+    if not any(abs(f - z) <= LEVEL for f in flats):
+        return
+    low, high = (float(v) for v in np.asarray(mesh.bounds)[:, 2])
+    below = max([f for f in flats if f < z - LEVEL] + [low])
+    above = min([f for f in flats if f > z + LEVEL] + [high])
+    offers = []
+    for start, end, where in ((z, above, "above it"), (below, z, "below it")):
+        if end - start <= 2 * LEVEL:
+            continue
+        middle = round((start + end) / 2, 4)
+        text = f"{where}, z={middle:g} is midway between the faces at {start:g} and {end:g}"
+        if built is not None:
+            text += f" ({len(_openings(slice_at(built, middle)))} opening(s) there)"
+        offers.append(text)
+    raise NoAnswer(
+        f"{name}={z} is on a level face: choose a height between two faces"
+        + (": " + "; ".join(offers) if offers else "")
+    )
 
 
 def _section(part: Part, z: float, report: Report, name: str) -> Any:
     """A section, with its area checked by a different method."""
-    _between_faces(part.fine(), z, f"{name}-z")
+    _between_faces(part.fine(), z, f"{name}-z", part.manifold())
     found, area, other, how = section_checked(part, z)
     report.fact(f"{name}_section_mm2", round(area, 3), how=f"mesh at z={z}")
     if other is None:
@@ -133,21 +157,66 @@ def _section(part: Part, z: float, report: Report, name: str) -> Any:
 
 
 def _openings(section: Any) -> list[Any]:
-    holes = [shapely.Polygon(r) for poly in section.geoms for r in poly.interiors]
-    return sorted((h for h in holes if h.area >= MIN_OPENING), key=lambda h: -h.area)
+    """Each closed hole in a section, largest first, less any island of material inside it.
+
+    An island is frame inside an opening, joined to the rest only above or below, as the walls
+    round a pane with holes in it are (`cup-1`). Its pane is the opening less the island, so the
+    opening comes back as a polygon with a hole for each island. The island's own holes are
+    openings of their own.
+    """
+    filled = [shapely.Polygon(p.exterior) for p in section.geoms]
+    found = []
+    for poly in section.geoms:
+        for ring in poly.interiors:
+            hole = shapely.Polygon(ring)
+            if hole.area < MIN_OPENING:
+                continue
+            islands = [
+                f for f in filled if f.area < hole.area and hole.contains(f.representative_point())
+            ]
+            if islands:
+                hole = hole.difference(shapely.union_all(islands))
+                if hole.geom_type != "Polygon":
+                    # An island that touches the hole's edge isn't an island: it would be one
+                    # polygon with the frame. What's left is kept whole, as its largest piece.
+                    hole = max(getattr(hole, "geoms", [hole]), key=lambda g: g.area)
+            if hole.area >= MIN_OPENING:
+                found.append(hole)
+    return sorted(found, key=lambda h: -h.area)
+
+
+def islands_line(k: int, opening: Any, what: str) -> str | None:
+    """Says so, by name, when an opening has islands inside it, and how they're read."""
+    count = len(opening.interiors)
+    if not count:
+        return None
+    return (
+        f"opening {k + 1} has {count} island(s) of frame inside it, joined to the rest only above "
+        f"or below: {what}"
+    )
+
+
+def _window_over(opening: Any, windows: list[Any]) -> Any:
+    """Every window that opens over an opening, as one: an island's lip can split a window."""
+    over = [w for w in windows if w.intersection(opening).area > 0]
+    return shapely.union_all(over) if over else shapely.Polygon()
 
 
 def _no_lip_by_rays(frame: Any, opening: Any, z: float, length: float) -> float:
     """Walk the opening's edge just inside it, and look up: mm of edge with nothing above."""
-    ring = opening.exterior
-    inward = opening.buffer(-BESIDE, join_style="mitre").exterior
-    count = max(8, int(ring.length / WALK))
-    step = ring.length / count
-    missed = 0
-    for k in range(count):
-        at = inward.interpolate(k / count, normalized=True)
-        missed += not hits(frame, np.array([at.x, at.y, z]), np.array([0.0, 0.0, 1.0]), length)
-    return float(missed * step)
+    inside = opening.buffer(-BESIDE, join_style="mitre")
+    rings = [r for p in getattr(inside, "geoms", [inside]) for r in (p.exterior, *p.interiors)]
+    found = 0.0
+    for ring in rings:
+        count = max(8, int(ring.length / WALK))
+        step = ring.length / count
+        missed = 0
+        for k in range(count):
+            at = ring.interpolate(k / count, normalized=True)
+            up = np.array([0.0, 0.0, 1.0])
+            missed += not hits(frame, np.array([at.x, at.y, z]), up, length)
+        found += missed * step
+    return float(found)
 
 
 def run_panes(args: Any, report: Report) -> None:
@@ -181,12 +250,15 @@ def run_panes(args: Any, report: Report) -> None:
     length = 2 * diagonal(mesh)
     holes: list[dict[str, Any]] = []
     for k, opening in enumerate(openings):
+        said = islands_line(k, opening, "its pane is read with a hole round each")
+        if said:
+            report.line(said)
         if _plain_hole(opening, windows):
             holes.append(
                 {
                     "opening": k + 1,
                     "mm2": round(float(opening.area), 3),
-                    "perimeter_mm": round(float(opening.exterior.length), 3),
+                    "perimeter_mm": round(float(opening.boundary.length), 3),
                 }
             )
             report.line(
@@ -245,12 +317,19 @@ def _pane(
         row.update(gap_3d_mm=None, overlap_3d_mm3=None, pane_mm2=0.0, gap_2d_mm=None)
         return row
     pane = pane.simplify(1e-5)
-    edge_nearest = float(pane.exterior.distance(opening.exterior))
+    # Round every ring, an island's too: the least of them, and the most, so a ring that's
+    # further off than the rest isn't hidden.
+    gaps = [
+        float(shapely.LinearRing(r.coords).distance(opening.boundary))
+        for r in (pane.exterior, *pane.interiors)
+    ]
+    edge_nearest = min(gaps)
     row.update(
         pane_mm2=round(float(pane.area), 3),
         centre=[round(float(pane.centroid.x), 3), round(float(pane.centroid.y), 3)],
-        perimeter_mm=round(float(pane.exterior.length), 3),
+        perimeter_mm=round(float(pane.boundary.length), 3),
         gap_2d_mm=round(edge_nearest, 4),
+        holes=len(pane.interiors),
     )
     # What a nozzle's line can't fill in the pane, and whether it's big enough to print.
     half = args.nozzle / 2
@@ -297,8 +376,10 @@ def _pane(
         differs.append(
             f"pane {name}'s gap is {gap:.4f} mm in 3D, {edge_nearest:.4f} in the section"
         )
-    if abs(edge_nearest - args.clearance) > 1e-3:
-        differs.append(f"pane {name}'s measured gap is {edge_nearest:.4f} mm in the section")
+    if max(abs(g - args.clearance) for g in gaps) > 1e-3:
+        differs.append(
+            f"pane {name}'s measured gap is {min(gaps):.4f} to {max(gaps):.4f} mm in the section"
+        )
     if windows:
         _lip(row, name, pane, opening, windows, built, args, length, differs)
     thickness = args.pane_thickness or (ceiling - floor)
@@ -310,8 +391,7 @@ def _plain_hole(opening: Any, windows: list[Any]) -> bool:
     """An opening the lip's height leaves just as open has nothing to hold a pane in."""
     if not windows:
         return False
-    window = max(windows, key=lambda w: w.intersection(opening).area)
-    return bool(opening.difference(window).area <= PLAIN * opening.area)
+    return bool(opening.difference(_window_over(opening, windows)).area <= PLAIN * opening.area)
 
 
 def _lip(
@@ -326,10 +406,10 @@ def _lip(
     differs: list[str],
 ) -> None:
     """What holds the pane in: the lip above it, and how much of its edge has none."""
-    window = max(windows, key=lambda w: w.intersection(opening).area)
-    if window.intersection(opening).area <= 0:
+    window = _window_over(opening, windows)
+    if window.is_empty:
         return
-    shared = window.exterior.intersection(opening.exterior.buffer(SHARED)).length
+    shared = window.boundary.intersection(opening.boundary.buffer(SHARED)).length
     row.update(
         window_mm2=round(float(window.area), 3),
         window_uncovered_mm2=round(float(window.difference(pane).area), 3),
@@ -636,7 +716,7 @@ def run_pause(args: Any, report: Report) -> None:
     count = int(np.ceil(round((high - low - first) / height, 6))) + 1
     tops = layer_tops(first, height, low, count)
     mids = np.r_[low + first / 2, tops[:-1] + height / 2]
-    _between_faces(mesh, args.pocket_z, "pocket-z")
+    _between_faces(mesh, args.pocket_z, "pocket-z", built)
     section = slice_at(built, args.pocket_z)
     openings = _openings(section)
     if not openings:
@@ -651,6 +731,9 @@ def run_pause(args: Any, report: Report) -> None:
     problems: list[str] = []
     differs: list[str] = []
     for k, opening in enumerate(openings):
+        said = islands_line(k, opening, "read as a pane with a hole round each")
+        if said:
+            report.line(said)
         row = _pause_one(k, opening, sections, mids, tops, mesh, args, problems, differs)
         rows.append(row)
     report.numbers["openings"] = rows
@@ -710,20 +793,10 @@ def _pause_one(
 ) -> dict[str, Any]:
     """One opening's pause layer, by its sections layer by layer and by its flat faces."""
     name = str(k + 1)
-    point = opening.representative_point()
     heights = pocket_heights(mesh, opening, args.pocket_z)
-    areas = []
-    for section in sections:
-        found = next(
-            (
-                shapely.Polygon(r)
-                for poly in section.geoms
-                for r in poly.interiors
-                if shapely.Polygon(r).contains(point)
-            ),
-            None,
-        )
-        areas.append(float(found.area) if found is not None else 0.0)
+    # What of the opening each layer leaves free. Not the hole round one point of it, which an
+    # island inside the opening can stand on: on `cup-1` that read as a ceiling mid-pocket.
+    areas = [float(opening.difference(section).area) for section in sections]
     here = int(np.searchsorted(mids, args.pocket_z))
     here = min(here, len(mids) - 1)
     full = float(opening.area)
@@ -739,6 +812,7 @@ def _pause_one(
         closing_faces = int(above[0]) if above.size else None
     row: dict[str, Any] = {
         "opening": name,
+        "islands": len(opening.interiors),
         "pocket_floor_z": heights.floor,
         "pocket_ceiling_z": heights.ceiling,
         "pause_after_layer": closing,

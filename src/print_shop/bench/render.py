@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import shapely
 import trimesh
 import vtk
 from PIL import Image, ImageDraw, ImageFilter
@@ -298,8 +299,24 @@ def _render_view(
     return np.asarray(pixels[:, :, :3], dtype=np.uint8)
 
 
+def islands(section: Any) -> list[Any]:
+    """The pieces of a section that lie inside another's hole: frame joined to the rest only above
+    or below, as the walls round a pane with holes are."""
+    holes = [shapely.Polygon(r) for poly in section.geoms for r in poly.interiors]
+    return [
+        poly
+        for poly in section.geoms
+        if any(h.contains(poly.representative_point()) for h in holes)
+    ]
+
+
 def _section_picture(part: Part, z: float, size: int) -> np.ndarray:
-    """A plane section drawn from Shapely's polygons, material dark on white."""
+    """A plane section drawn from Shapely's polygons, material dark on white.
+
+    Each piece is drawn on its own and laid over the rest, so an island inside another piece's
+    hole isn't painted over by that hole: on `cup-1` the drawing dropped the islands, and the
+    operator read the picture as a frame with no walls.
+    """
     section = slice_at(part.manifold(), z)
     low, high = np.asarray(section.bounds).reshape(2, 2)
     scale = 0.9 * size / float(max(high - low))
@@ -309,13 +326,40 @@ def _section_picture(part: Part, z: float, size: int) -> np.ndarray:
         xy = (np.asarray(ring.coords) - low) * scale + margin
         return [(float(x), float(size - y)) for x, y in xy]
 
-    picture = Image.new("RGB", (size, size), "white")
-    draw = ImageDraw.Draw(picture)
+    material = np.zeros((size, size), dtype=bool)
     for poly in section.geoms:
-        draw.polygon(pixel(poly.exterior), fill=(70, 70, 80))
+        mask = Image.new("1", (size, size), 0)
+        draw = ImageDraw.Draw(mask)
+        draw.polygon(pixel(poly.exterior), fill=1)
         for hole in poly.interiors:
-            draw.polygon(pixel(hole), fill=(255, 255, 255))
-    return np.asarray(picture)
+            draw.polygon(pixel(hole), fill=0)
+        material |= np.asarray(mask, dtype=bool)
+    picture = np.full((size, size, 3), 255, dtype=np.uint8)
+    picture[material] = (70, 70, 80)
+    return picture
+
+
+def _pieces_missing(section: Any, pixels: np.ndarray, size: int) -> list[str]:
+    """Which pieces of a section the picture doesn't show, by each one's own pixels."""
+    low, high = np.asarray(section.bounds).reshape(2, 2)
+    scale = 0.9 * size / float(max(high - low))
+    margin = (size - (high - low) * scale) / 2
+    dark = pixels[:, :, 0] < 250
+    missing = []
+    for poly in section.geoms:
+        mask = Image.new("1", (size, size), 0)
+        draw = ImageDraw.Draw(mask)
+        xy = (np.asarray(poly.exterior.coords) - low) * scale + margin
+        draw.polygon([(float(x), float(size - y)) for x, y in xy], fill=1)
+        for hole in poly.interiors:
+            xy = (np.asarray(hole.coords) - low) * scale + margin
+            draw.polygon([(float(x), float(size - y)) for x, y in xy], fill=0)
+        inside = np.asarray(mask, dtype=bool)
+        drawn = float((dark & inside).sum()) / scale**2
+        if poly.area > 5 / scale**2 and drawn < 0.5 * poly.area:
+            c = poly.representative_point()
+            missing.append(f"a {poly.area:.1f} mm² piece at {c.x:.2f},{c.y:.2f}")
+    return missing
 
 
 def _close_second(name: str, facts: dict[str, Any]) -> str:
@@ -461,14 +505,30 @@ def run(args: Any, report: Report) -> None:
         Image.fromarray(pixels).save(path)
         report.wrote(str(path))
         share, _ = painted(pixels)
-        area = float(slice_at(parts[0].manifold(), z).area)
-        low, high = np.asarray(slice_at(parts[0].manifold(), z).bounds).reshape(2, 2)
+        section = slice_at(parts[0].manifold(), z)
+        area = float(section.area)
+        low, high = np.asarray(section.bounds).reshape(2, 2)
         scale = 0.9 * args.size / float(max(high - low))
         drawn = float((pixels[:, :, 0] < 250).sum()) / scale**2
-        report.line(f"section z={z:g}: {path}, painted {share:.1%}")
+        inner = islands(section)
+        text = f"section z={z:g}: {path}, painted {share:.1%}, {len(section.geoms)} piece(s)"
+        if inner:
+            text += f", {len(inner)} of them island(s) inside an opening, drawn: " + ", ".join(
+                f"{i.area:.1f} mm² at {i.representative_point().x:.2f},"
+                f"{i.representative_point().y:.2f}"
+                for i in inner[:5]
+            )
+        report.line(text)
+        report.numbers.setdefault("sections", []).append(
+            {"z": z, "pieces": len(section.geoms), "islands": len(inner), "mm2": round(area, 3)}
+        )
         report.second(f"section z={z:g}: {area:.1f} mm² by the mesh, {drawn:.1f} mm² by pixels")
         if abs(drawn - area) > max(0.05 * area, 5 / scale**2):
-            problems.append(f"section z={z:g}: {drawn:.1f} mm² drawn, {area:.1f} mm² in the mesh")
+            missing = _pieces_missing(section, pixels, args.size)
+            problems.append(
+                f"section z={z:g}: {drawn:.1f} mm² drawn, {area:.1f} mm² in the mesh"
+                + (f": not drawn, {'; '.join(missing[:5])}" if missing else "")
+            )
         pictures.append((f"z={z:g}", pixels))
     close_ups = []
     for k, close in enumerate(closes):
