@@ -18,7 +18,7 @@ from print_shop.rounds.ledger import DesignLedger
 from print_shop.rounds.needs import Need
 from print_shop.rounds.session import COMPACTED, SHOWN_BEFORE, Ending, Judged, Limits, Session
 from print_shop.rounds.tools import WorkTools
-from tests.rounds_fakes import Scripted, tool
+from tests.rounds_fakes import Scripted, raw, tool
 
 #: The measured text, from mqucifer/model-performance `cad_eval/skills` at 98b3c5b.
 MEASURED_SKILLS_SHA = "dc0154e0a7ea87c7f34fc7d706cf49afc1b273927f7dc90e67dd98a69214187c"
@@ -564,6 +564,55 @@ def test_a_session_comes_back_from_its_events(tmp_path: Path) -> None:
         rebuilt = transcript.rebuild(s.events, n)
         body = (model.bodies + again.bodies)[n - 1]
         assert rebuilt["messages"] == body["messages"], n
+
+
+@pytest.mark.parametrize("cut_off", ["", '{"path": "a.py", "cont'])
+def test_a_cut_off_tool_call_goes_back_as_json_and_is_told_as_malformed(
+    tmp_path: Path, cut_off: str
+) -> None:
+    model = Scripted([raw("write", cut_off)], [tool("stop")])
+    s = session(tmp_path, model)
+    assert s.go().name == "blocked"
+    sent = model.bodies[1]["messages"]
+    called = next(m for m in sent if m.get("tool_calls"))
+    assert called["tool_calls"][0]["function"]["arguments"] == "{}"
+    for n in (1, 2):
+        assert transcript.rebuild(s.events, n)["messages"] == model.bodies[n - 1]["messages"]
+    came = [e for e in transcript.events_of(s.events) if e.get("kind") == "tool"]
+    assert came[0]["arguments"] == cut_off, "the record keeps what the model sent"
+
+
+def test_a_run_that_stopped_on_a_cut_off_call_can_resume(tmp_path: Path) -> None:
+    model = Scripted([raw("write", "")], [tool("stop")])
+    s = session(tmp_path, model)
+    assert s.go().name == "blocked"
+    # As a run from before the fix left it: the bad arguments in its records.
+    for i, m in enumerate(s.messages):
+        if m.get("tool_calls"):
+            bad = {
+                **m,
+                "tool_calls": [
+                    {**m["tool_calls"][0], "function": {"name": "write", "arguments": ""}}
+                ],
+            }
+            s.messages[i] = bad
+            s._record("rewrite", index=i, message=bad)
+    again = Scripted([tool("stop")])
+    back = Session(
+        tools=Echo(),
+        send=again,
+        alias="crew-code-think",
+        events=s.events,
+        limits=Limits(),
+        sleep=lambda _: None,
+    )
+    back.restore()
+    assert back.go().name == "blocked"
+    for m in again.bodies[0]["messages"]:
+        for call in m.get("tool_calls") or []:
+            json.loads(call["function"]["arguments"])
+    last = transcript.rebuild(s.events, 3)["messages"]
+    assert last == again.bodies[0]["messages"]
 
 
 def test_a_new_conversation_after_one_that_wouldnt_fit_still_rebuilds(tmp_path: Path) -> None:

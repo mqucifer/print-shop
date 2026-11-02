@@ -156,6 +156,12 @@ class Session:
         call's answer, and that call is made again: what its tools did is on the disk."""
         self.messages = conversation(self.events)
         self.logged = len(self.messages)
+        # A run from before `_sendable` may hold a call the server refuses to read back.
+        for i, m in enumerate(self.messages):
+            calls = m.get("tool_calls")
+            if calls and _sendable(calls) != calls:
+                self.messages[i] = {**m, "tool_calls": _sendable(calls)}
+                self._record("rewrite", index=i, message=self.messages[i])
         for event in events_of(self.events):
             kind = event.get("kind")
             if kind == "request":
@@ -206,7 +212,7 @@ class Session:
                 # served template keeps it, across a tool reply and an inserted user message.
                 kept["reasoning_content"] = message["reasoning_content"]
             if tool_calls:
-                kept["tool_calls"] = tool_calls
+                kept["tool_calls"] = _sendable(tool_calls)
             self.messages.append(kept)
             if not tool_calls:
                 quiet += 1
@@ -510,6 +516,22 @@ class Session:
         self.snapshot()
         self._record("ended", name=ending.name, said=ending.said)
         return ending
+
+
+def _sendable(tool_calls: list[Any]) -> list[Any]:
+    """The calls as they can go back to the server, which refuses a past turn whose arguments
+    aren't JSON, and ends the run. A reply cut off at the token limit leaves them empty or partial.
+    The call was told back as malformed, and its event keeps what came."""
+    fixed: list[Any] = []
+    for call in tool_calls:
+        function = call.get("function") or {} if isinstance(call, dict) else {}
+        raw = function.get("arguments")
+        try:
+            json.loads(raw) if isinstance(raw, str) else None
+        except ValueError:
+            call = {**call, "function": {**function, "arguments": "{}"}}
+        fixed.append(call)
+    return fixed
 
 
 def _arguments(raw: Any) -> dict[str, Any]:
