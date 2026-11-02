@@ -11,7 +11,10 @@ The exceptions are marked as such: `rounds.fix_shape_model_said` holds what kind
 was, in the model's own words, with the vocabulary settled later, and `rounds.closing_model_said`
 what it said to the person at the end. They decide nothing.
 
-Looking lessons up isn't here. `changes` gives each need's reading before and after each round.
+Lessons are here (`lessons`, `run_lessons`, `lesson_scores`, `lesson_steps`, and `after_actions`
+for the model's review that writes them): `lessons.py` says how they're checked and given. Looking a
+lesson up when a reading fails isn't here yet. `changes` gives each need's reading before and after
+each round.
 
 `records.py` writes `calls`, `interventions`, `timeline`, `runaways` and `tries` from a run's
 events, so a run's own records can be read back through them. Older code can still be running
@@ -201,7 +204,7 @@ CREATE TABLE IF NOT EXISTS interventions (
 CREATE TABLE IF NOT EXISTS timeline (
     run TEXT NOT NULL REFERENCES runs(run),
     seq INTEGER NOT NULL,
-    -- start, resume, stop, compaction or restart.
+    -- start, resume, stop, compaction, restart or after_action.
     kind TEXT NOT NULL,
     name TEXT,
     at TEXT,
@@ -314,6 +317,85 @@ CREATE TABLE IF NOT EXISTS need_swaps (
     shown_at TEXT,
     PRIMARY KEY (run, version, need)
 );
+CREATE TABLE IF NOT EXISTS after_actions (
+    -- Each try at the after-action review, a model call on the run's own session after a
+    -- person's approval. The run stays approved whatever this says.
+    run TEXT NOT NULL REFERENCES runs(run),
+    n INTEGER NOT NULL,
+    approval INTEGER NOT NULL,
+    begun_at TEXT NOT NULL,
+    first_call INTEGER NOT NULL,
+    harness_commit TEXT NOT NULL,
+    -- `reviewed`, or the ending that stopped it, and what it said.
+    ended TEXT,
+    ended_said TEXT,
+    ended_at TEXT,
+    last_call INTEGER,
+    PRIMARY KEY (run, n)
+);
+CREATE TABLE IF NOT EXISTS lessons (
+    -- What a run taught, for the next: written by the model in its after-action review, or by a
+    -- person, and checked by a reviewer before any reaches another run.
+    id INTEGER PRIMARY KEY,
+    -- The run it came from.
+    run TEXT NOT NULL REFERENCES runs(run),
+    -- `model`, or the person who wrote it, signed as a pick is.
+    written_by TEXT NOT NULL,
+    written_at TEXT NOT NULL,
+    -- The after-action review's call, for the model's.
+    at_call INTEGER,
+    -- The fix's shape, in its writer's words, with the vocabulary settled later.
+    fix_shape TEXT NOT NULL,
+    -- build (how to build), check (what to check) or context.
+    kind TEXT NOT NULL,
+    text TEXT NOT NULL,
+    -- The calls and readings that show it, by the ledger's keys.
+    evidence TEXT NOT NULL,
+    -- candidate; accepted, edited or rejected; given; held or broken; promoted or retired.
+    status TEXT NOT NULL,
+    status_by TEXT,
+    status_at TEXT,
+    -- A lesson about checking becomes a refusal or a bench check, never a note: which.
+    becomes TEXT,
+    -- What it became once promoted (note, skill, bench_check or refusal), and where.
+    became TEXT,
+    became_where TEXT
+);
+CREATE TABLE IF NOT EXISTS lesson_steps (
+    -- Each change to a lesson, who made it and why: an edit keeps the words it replaced.
+    id INTEGER PRIMARY KEY,
+    lesson INTEGER NOT NULL REFERENCES lessons(id),
+    status TEXT NOT NULL,
+    by TEXT NOT NULL,
+    why TEXT,
+    was TEXT,
+    run TEXT,
+    at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS run_lessons (
+    -- Each lesson a run was given, and the words it was given in.
+    run TEXT NOT NULL REFERENCES runs(run),
+    lesson INTEGER NOT NULL REFERENCES lessons(id),
+    given_at TEXT NOT NULL,
+    -- `start`, in the first message, or by hand in the request, before there was code for it.
+    how TEXT NOT NULL,
+    text TEXT NOT NULL,
+    PRIMARY KEY (run, lesson)
+);
+CREATE TABLE IF NOT EXISTS lesson_scores (
+    -- Whether a run that was given a lesson used it: used, not_used or in_the_way, with the calls
+    -- that show it. The model scores at its after-action review, and a reviewer may score again.
+    id INTEGER PRIMARY KEY,
+    run TEXT NOT NULL,
+    lesson INTEGER NOT NULL,
+    score TEXT NOT NULL,
+    calls TEXT NOT NULL,
+    why TEXT,
+    by TEXT NOT NULL,
+    at_call INTEGER,
+    at TEXT NOT NULL,
+    FOREIGN KEY (run, lesson) REFERENCES run_lessons(run, lesson)
+);
 CREATE VIEW IF NOT EXISTS phases AS
 SELECT calls.run, calls.phase, MIN(calls.n) AS first_call, MAX(calls.n) AS last_call,
        COUNT(*) AS calls, SUM(calls.seconds) AS seconds,
@@ -403,6 +485,17 @@ class DesignLedger:
                 f"INSERT OR IGNORE INTO {table} ({names}) VALUES ({marks})",  # noqa: S608
                 tuple(row.values()),
             )
+
+    def insert(self, table: str, **row: Any) -> int:
+        """A new row, and its id."""
+        names = ", ".join(row)
+        marks = ", ".join("?" for _ in row)
+        with self._open() as db:
+            cursor = db.execute(
+                f"INSERT INTO {table} ({names}) VALUES ({marks})",  # noqa: S608
+                tuple(row.values()),
+            )
+            return int(cursor.lastrowid or 0)
 
     def change(self, sql: str, *args: Any) -> None:
         with self._open() as db:

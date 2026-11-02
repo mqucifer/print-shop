@@ -336,6 +336,10 @@ def specs() -> list[dict[str, Any]]:
     ]
 
 
+#: The tools that belong to the run, which `Desk` answers.
+DESK = ("questions", "needs", "ask", "send_ask", "done", "blocked", "after_action")
+
+
 class Desk(Protocol):
     """The tools that belong to the run, not to the working directory."""
 
@@ -345,6 +349,7 @@ class Desk(Protocol):
     def send_ask(self, args: dict[str, Any]) -> Judged: ...
     def done(self, args: dict[str, Any]) -> Judged: ...
     def blocked(self, args: dict[str, Any]) -> Judged: ...
+    def after_action(self, args: dict[str, Any]) -> Judged: ...
     def bench_said(self, argv: list[str], ran: Ran, record: dict[str, Any] | None) -> None: ...
 
 
@@ -481,6 +486,12 @@ class WorkTools:
         self.accepted = {s["function"]["name"]: s["function"]["parameters"] for s in self.specs}
         self.skills = skills.registry()
 
+    def only(self, names: tuple[str, ...], *more: dict[str, Any]) -> None:
+        """From here on, only these tools, and any `more` the run gives: after the approval, the
+        after-action review reads and writes its review, and nothing changes the part."""
+        self.specs = [s for s in specs() if s["function"]["name"] in names] + list(more)
+        self.accepted = {s["function"]["name"]: s["function"]["parameters"] for s in self.specs}
+
     def call(self, name: Any, raw: Any) -> Judged:
         args = parse(raw)
         for key in ("run", "try"):
@@ -489,7 +500,7 @@ class WorkTools:
                 said = args[key].strip().lower()
                 if said in BOOLEAN_TEXT:
                     args = {**args, key: BOOLEAN_TEXT[said]}
-        for key in ("needs", "variants", "groups", "looks", "why_changed"):
+        for key in ("needs", "variants", "groups", "looks", "why_changed", "lessons", "scores"):
             # A list sent as its JSON text is read as the list.
             if isinstance(args, dict) and isinstance(args.get(key), str):
                 with contextlib.suppress(ValueError):
@@ -497,7 +508,7 @@ class WorkTools:
         bad = self._well_formed(name, args)
         if bad is not None:
             return bad
-        if name in ("questions", "needs", "ask", "send_ask", "done", "blocked"):
+        if name in DESK:
             found: Judged = getattr(self.desk, name)(args)
             return found
         answered: Judged = getattr(self, f"_{name}")(args)

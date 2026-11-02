@@ -2,7 +2,8 @@
 
 As `cad_eval`'s orientation (`SYSTEM_BASE`, its #40 A2): the version, what's installed exactly,
 the two layers of the API, and to check a name before using it. The limits aren't in it, so a run
-says what a lower one would have done. Nothing here is from any run.
+says what a lower one would have done. Nothing here is from any run: lessons from earlier runs
+reach a run in its first message, from the ledger, and only once a reviewer has kept them.
 """
 
 from __future__ import annotations
@@ -56,14 +57,16 @@ you need them; where they say `inspect` or `measure`, those are `bench info` and
 here."""
 
 
-def start(request: str, given: list[tuple[str, int]], skills_line: str) -> str:
-    """The first message: the request, as they wrote it, and what came with it."""
+def start(request: str, given: list[tuple[str, int]], skills_line: str, lessons: str = "") -> str:
+    """The first message: the request, as they wrote it, what came with it, and the lessons a
+    reviewer kept from earlier runs, under their own heading (`lessons.block`)."""
     if given:
         named = "\n".join(f"- `references/{name}` ({size} bytes)" for name, size in given)
         files = f"What they gave you, in your directory:\n{named}"
     else:
         files = "They gave you nothing besides this."
-    return f"The Sponsor's request:\n\n{request.strip()}\n\n{files}\n\n{skills_line}"
+    kept = f"{lessons.strip()}\n\n" if lessons.strip() else ""
+    return f"The Sponsor's request:\n\n{request.strip()}\n\n{files}\n\n{kept}{skills_line}"
 
 
 def again(start_text: str, said: list[str], needs_json: str, state: str) -> str:

@@ -1773,7 +1773,8 @@ def test_the_command_line_approves_with_no_model_and_no_key(tmp_path: Path) -> N
         "--root",
         str(tmp_path),
     ]
-    env = {k: v for k, v in os.environ.items() if "KEY" not in k}
+    # A home of its own, so the after-action review finds no key and reaches no LiteLLM.
+    env = {k: v for k, v in os.environ.items() if "KEY" not in k} | {"HOME": str(tmp_path)}
     refused = subprocess.run(
         [*command, "resume", "proof", "--approve", "--by", "nobody"],
         capture_output=True,
@@ -1791,6 +1792,8 @@ def test_the_command_line_approves_with_no_model_and_no_key(tmp_path: Path) -> N
     )
     assert done_it.returncode == 0, done_it.stderr
     assert rows(run, "decisions")[0]["decision"] == "approved"
+    assert "the after-action review didn't begin" in done_it.stdout
+    assert rows(run, "after_actions")[0]["ended"] == "not_begun"
 
 
 # The bench check through a run's `read-back`, and a run from before all this

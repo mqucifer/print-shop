@@ -75,6 +75,9 @@ class Limits:
     # A call whose reasoning repeats earlier text past this share gets a row for review. It decides
     # nothing, and nothing cuts a call for it.
     review_repeat_share: float = 0.5
+    # The after-action review's calls, after the approval: it ends on `after_action`, and this is
+    # only so a review that never calls it ends by name.
+    after_action_calls: int = 30
 
     def recorded(self) -> dict[str, Any]:
         return asdict(self)

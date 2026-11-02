@@ -3,16 +3,27 @@
 
 scripts/rounds.py start NAME --request FILE [--reference FILE]...   intake, then rounds
 scripts/rounds.py resume NAME [--note FILE] [--from WHO] [--reopen-needs]   go on after a stop
-scripts/rounds.py resume NAME --approve --by WHO [--note FILE]      a person's yes, with no call
+scripts/rounds.py resume NAME --approve --by WHO [--note FILE]      a person's yes, then the
+                                                                  model's after-action review
 scripts/rounds.py resume NAME --send-back --by WHO --note FILE [--reopen-needs]
                                                                   a person's no, as a new round
 scripts/rounds.py status NAME                                       where it stands
 scripts/rounds.py stop NAME                                         stop before its next call
 scripts/rounds.py summary NAME                                      its figures, in summary.json
 scripts/rounds.py read-back NAME [--ledger FILE]                    its records, through the ledger
+scripts/rounds.py after-action NAME                                 the review again, if it failed
+
+scripts/rounds.py lessons [RUN] [--ledger FILE]                     what a run wrote, its evidence
+scripts/rounds.py lessons accept ID --by WHO [--becomes refusal|bench_check]
+scripts/rounds.py lessons edit ID --by WHO [--text FILE] [--kind K] [--shape S] [--why W]
+scripts/rounds.py lessons reject ID --by WHO --why W
+scripts/rounds.py lessons score RUN ID --score used|not_used|in_the_way --by WHO [--calls 1,2]
+scripts/rounds.py lessons retire ID --by WHO --why W
+scripts/rounds.py lessons promote ID --as note|skill|bench_check|refusal --where WHERE --by WHO
+scripts/rounds.py lessons load FILE --by WHO                        a reviewer's steps, in order
 
 Exit: 0 it's approved, 10 it's waiting for a person, approval included, 20 another named ending,
-3 refused.
+3 refused. An approval is 0 whether its after-action review finished or not: it's said.
 """
 
 from __future__ import annotations
@@ -25,7 +36,9 @@ import sys
 from pathlib import Path
 from types import FrameType
 
-from print_shop.rounds import records
+import httpx
+
+from print_shop.rounds import after_action, lessons, records
 from print_shop.rounds.ledger import DesignLedger
 from print_shop.rounds.run import (
     APPROVED,
@@ -61,6 +74,94 @@ def _ready(send: Sender) -> None:
         raise Refused(f"LiteLLM doesn't list {ALIAS} for this key")
 
 
+def _after_action(folder: Path) -> str:
+    """The model's after-action review on an approved run, and what came of it. The run is
+    approved whatever this says: a review that can't begin or doesn't finish is a row of
+    `after_actions`, and the reviewer can enter lessons by hand."""
+    name = folder.name
+    again = f"scripts/rounds.py after-action {name}"
+    try:
+        send = Sender()
+        _ready(send)
+    except (Refused, LookupError, httpx.HTTPError) as why:
+        # An HTTP error's own words can hold the proxy's address, which no record holds.
+        said = str(why)
+        if isinstance(why, httpx.HTTPStatusError):
+            said = f"LiteLLM answered {why.response.status_code}"
+        elif isinstance(why, httpx.HTTPError):
+            said = f"LiteLLM couldn't be reached ({type(why).__name__})"
+        Run.load(folder, _no_model).after_action_not_begun(said)
+        return (
+            f"the after-action review didn't begin: {said}. The run stays approved. Then: {again}, "
+            f"or lessons by hand with scripts/rounds.py lessons load FILE --by WHO"
+        )
+    run = Run.load(folder, send)
+    (folder / "stop").unlink(missing_ok=True)
+    ending = run.after_action_review()
+    if ending.name == after_action.REVIEWED:
+        return (
+            f"the after-action review is in: {ending.said}. For the reviewer: "
+            f"scripts/rounds.py lessons {name}"
+        )
+    return (
+        f"the after-action review ended {ending.name} {json.dumps(ending.said)}. The run stays "
+        f"approved. Then: {again}, or lessons by hand with scripts/rounds.py lessons load FILE "
+        "--by WHO"
+    )
+
+
+LESSON_ACTIONS = ("accept", "edit", "reject", "score", "retire", "promote", "load")
+
+
+def _lessons(args: argparse.Namespace, ledger: DesignLedger) -> str:
+    """The reviewer's step, or the listing."""
+    words = list(args.words)
+    if not words or words[0] not in LESSON_ACTIONS:
+        if len(words) > 1:
+            raise Refused(f"`lessons` lists one run, or every lesson: not {' '.join(words)}")
+        return lessons.listing(ledger, words[0] if words else None)
+    action, rest = words[0], words[1:]
+    wanted = {"score": 2, "load": 1}.get(action, 1)
+    if len(rest) != wanted:
+        raise Refused(f"`lessons {action}` takes {'RUN ID' if action == 'score' else 'one'}")
+    if action == "load":
+        ids = lessons.load(ledger, Path(rest[0]), args.by)
+        return f"loaded: {json.dumps(ids)}"
+    try:
+        lesson = int(rest[-1])
+    except ValueError as exc:
+        raise Refused(f"a lesson is its number: not {rest[-1]!r}") from exc
+    if action == "accept":
+        lessons.accept(ledger, lesson, args.by, args.becomes)
+    elif action == "edit":
+        text = args.text.read_text(encoding="utf-8") if args.text else None
+        lessons.edit(
+            ledger,
+            lesson,
+            args.by,
+            text=text,
+            kind=args.kind,
+            fix_shape=args.shape,
+            becomes=args.becomes,
+            why=args.why,
+        )
+    elif action == "reject":
+        lessons.reject(ledger, lesson, args.by, args.why)
+    elif action == "retire":
+        lessons.retire(ledger, lesson, args.by, args.why)
+    elif action == "promote":
+        lessons.promote(ledger, lesson, args.by, args.became or "", args.where)
+    elif action == "score":
+        by = lessons.signed(args.by)
+        calls = [int(c) for c in args.calls.split(",") if c.strip()] if args.calls else []
+        held, wrong = lessons.evidence(ledger, rest[0], calls, at_least_one=False)
+        if wrong:
+            raise Refused("; ".join(wrong))
+        lessons.score(ledger, rest[0], lesson, args.score or "", held, by, args.why)
+    found = lessons.one(ledger, lesson)
+    return f"lesson {lesson}: {found['status']}, by {found['status_by']}"
+
+
 def main() -> int:
     top = argparse.ArgumentParser(description=__doc__)
     top.add_argument(
@@ -86,9 +187,23 @@ def main() -> int:
     reading = sub.add_parser("read-back")
     reading.add_argument("name")
     reading.add_argument("--ledger", type=Path, help="this ledger, not the one beside the runs")
+    sub.add_parser("after-action").add_argument("name")
+    taught = sub.add_parser("lessons")
+    taught.add_argument("words", nargs="*", help="RUN, or a step: " + ", ".join(LESSON_ACTIONS))
+    taught.add_argument("--ledger", type=Path, help="this ledger, not the one beside the runs")
+    taught.add_argument("--by", default="", help="who: sponsor, or stand-in: <who>")
+    taught.add_argument("--why", default="")
+    taught.add_argument("--text", type=Path, help="a file of the lesson's new words")
+    taught.add_argument("--kind", choices=tuple(lessons.KINDS))
+    taught.add_argument("--shape", help="the fix's shape, in new words")
+    taught.add_argument("--becomes", choices=lessons.BECOMES)
+    taught.add_argument("--as", dest="became", choices=lessons.BECAME)
+    taught.add_argument("--where", default="", help="where it is now: owner/repo#n, or a path")
+    taught.add_argument("--score", choices=tuple(lessons.SCORES))
+    taught.add_argument("--calls", help="the calls that show it, by commas")
     args = top.parse_args()
     root = args.root.expanduser()
-    folder = root / args.name
+    folder = root / str(getattr(args, "name", ""))
     signal.signal(signal.SIGTERM, _interrupted)
     try:
         if args.command == "status":
@@ -107,12 +222,21 @@ def main() -> int:
             ledger = DesignLedger(args.ledger or root / "ledger.sqlite")
             print(json.dumps(records.read_back(folder, ledger), indent=1))
             return 0
+        if args.command == "lessons":
+            print(_lessons(args, DesignLedger(args.ledger or root / "ledger.sqlite")))
+            return 0
         with only_session(root):
             if args.command == "resume" and args.approve:
                 note = args.note.read_text(encoding="utf-8") if args.note else ""
                 ending = Run.load(folder, _no_model).approve(args.by, note)
                 print(f"approved, by {args.by}. The ledger holds it, in `decisions`.")
-                return 0 if ending.name == APPROVED else 20
+                if ending.name != APPROVED:
+                    return 20
+                print(_after_action(folder))
+                return 0
+            if args.command == "after-action":
+                print(_after_action(folder))
+                return 0
             send = Sender()
             _ready(send)
             if args.command == "start":
@@ -128,7 +252,7 @@ def main() -> int:
                     run.resume(note, args.reopen_needs, args.note_from)
             ending = run.drive()
             print(what_next(run, ending))
-    except (Refused, FileNotFoundError, LookupError) as refused:
+    except (Refused, lessons.Refused, FileNotFoundError, LookupError) as refused:
         print(f"refused: {refused}", file=sys.stderr)
         return 3
     return 10 if ending.name in WAITING else 20
