@@ -59,7 +59,7 @@ PICK_WORDS = re.compile(
 )
 #: How a `try` read a need, in its reply, for events that hold only that.
 TRIED_LINE = re.compile(r"- ([A-Za-z0-9._-]+), (would pass|WOULDN'T PASS): (.*)")
-TABLES = ("calls", "interventions", "timeline", "runaways", "tries")
+TABLES = ("calls", "interventions", "timeline", "runaways", "tries", "nudges")
 
 
 def repeated(text: str, seen: set[str]) -> tuple[int, int]:
@@ -105,6 +105,7 @@ class Recorder:
         self.interventions = 0
         self.timeline = 0
         self.tries = 0
+        self.nudges = 0
         self.after_stop = False
         self.last_stop: Any = None
         self.relayed: set[str] = set()
@@ -401,6 +402,23 @@ class Recorder:
         detail = event.get("detail") or {}
         if name == "needs" and detail.get("tried"):
             self._tried(event, detail)
+        if name == "bench" and isinstance(detail, dict) and detail.get("nudge"):
+            self._nudged(detail["nudge"])
+
+    def _nudged(self, nudge: dict[str, Any]) -> None:
+        """A check that kept failing, and the line its reply gained."""
+        self.nudges += 1
+        self.ledger.add(
+            "nudges",
+            run=self.run,
+            seq=self.nudges,
+            at_call=self.requests,
+            round=self._round_of(self.requests),
+            command=str(nudge["command"]),
+            files=_json(nudge["files"]),
+            failures=int(nudge["failures"]),
+            after=int(nudge["after"]),
+        )
 
     def _tried(self, event: dict[str, Any], detail: dict[str, Any]) -> None:
         readings = detail.get("readings") or _tried_from_reply(str(event.get("reply") or ""))

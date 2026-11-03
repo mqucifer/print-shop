@@ -8,6 +8,16 @@ reach a run in its first message, from the ledger, and only once a reviewer has 
 
 from __future__ import annotations
 
+#: What a run that's stuck is told: in the prompt where `blocked` is offered, in the refusals that
+#: point to it, and in the reply of a bench check that keeps failing (`nudge.py`). The Sponsor,
+#: 2026-11-03: "show what you have and ask what you need", and "failed and complete is a valid end".
+STUCK = (
+    "Show what you have and ask what you need: `ask` works at any point, with the files as they "
+    "stand, and its question can say what's in the way and what you need from them. Or, if it "
+    "can't be done, end with `blocked` and a clear account of what didn't work and why: a failed, "
+    "complete run is a valid end, and you'll be asked for its lessons after."
+)
+
 SYSTEM = """You design parts to be 3D printed, for the Sponsor, from what they ask for. You work \
 in a directory of your own, with what a designer has: their request and any files they gave, \
 Python with CadQuery, a bench that measures and draws what you make, the library's own \
@@ -42,7 +52,7 @@ the checks doesn't mean it's approved.
 first. Then `send_ask`, saying what the sheet shows as drawn, and the Sponsor sees it and picks, \
 with a reason. A pick holds only for the files on its sheet, so if they change, the need is asked \
 again. Everything else is yours to decide, by the numbers.
-- If it truly can't be done, call `blocked` and say what's missing.
+- If you're stuck, """ + STUCK[0].lower() + STUCK[1:] + """
 
 Only your directory stays between commands: each `run` and each `bench` command is a fresh \
 container with no network. `references/` holds what you were given, and a clean start keeps it.

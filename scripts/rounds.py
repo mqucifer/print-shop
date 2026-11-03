@@ -7,6 +7,8 @@ scripts/rounds.py resume NAME --approve --by WHO [--note FILE]      a person's y
                                                                   model's after-action review
 scripts/rounds.py resume NAME --send-back --by WHO --note FILE [--reopen-needs]
                                                                   a person's no, as a new round
+scripts/rounds.py resume NAME --close --by WHO --note FILE         ended without approval, then
+                                                                  the model's after-action review
 scripts/rounds.py status NAME                                       where it stands
 scripts/rounds.py stop NAME                                         stop before its next call
 scripts/rounds.py summary NAME                                      its figures, in summary.json
@@ -23,7 +25,8 @@ scripts/rounds.py lessons promote ID --as note|skill|bench_check|refusal --where
 scripts/rounds.py lessons load FILE --by WHO                        a reviewer's steps, in order
 
 Exit: 0 it's approved, 10 it's waiting for a person, approval included, 20 another named ending,
-3 refused. An approval is 0 whether its after-action review finished or not: it's said.
+closed included, 3 refused. An approval is 0, and a close 20, whether its after-action review
+finished or not: it's said. A close is refused while a session runs under the root, as a resume is.
 """
 
 from __future__ import annotations
@@ -75,11 +78,13 @@ def _ready(send: Sender) -> None:
 
 
 def _after_action(folder: Path) -> str:
-    """The model's after-action review on an approved run, and what came of it. The run is
-    approved whatever this says: a review that can't begin or doesn't finish is a row of
-    `after_actions`, and the reviewer can enter lessons by hand."""
+    """The model's after-action review on an approved or closed run, and what came of it. The run
+    stays as the person left it whatever this says: a review that can't begin or doesn't finish
+    is a row of `after_actions`, and the reviewer can enter lessons by hand."""
     name = folder.name
     again = f"scripts/rounds.py after-action {name}"
+    state = json.loads((folder / "state.json").read_text(encoding="utf-8"))
+    stays = f"The run stays {(state.get('ending') or {}).get('name')}."
     try:
         send = Sender()
         _ready(send)
@@ -92,8 +97,8 @@ def _after_action(folder: Path) -> str:
             said = f"LiteLLM couldn't be reached ({type(why).__name__})"
         Run.load(folder, _no_model).after_action_not_begun(said)
         return (
-            f"the after-action review didn't begin: {said}. The run stays approved. Then: {again}, "
-            f"or lessons by hand with scripts/rounds.py lessons load FILE --by WHO"
+            f"the after-action review didn't begin: {said}. {stays} Then: {again}, or lessons by "
+            f"hand with scripts/rounds.py lessons load FILE --by WHO"
         )
     run = Run.load(folder, send)
     (folder / "stop").unlink(missing_ok=True)
@@ -104,9 +109,8 @@ def _after_action(folder: Path) -> str:
             f"scripts/rounds.py lessons {name}"
         )
     return (
-        f"the after-action review ended {ending.name} {json.dumps(ending.said)}. The run stays "
-        f"approved. Then: {again}, or lessons by hand with scripts/rounds.py lessons load FILE "
-        "--by WHO"
+        f"the after-action review ended {ending.name} {json.dumps(ending.said)}. {stays} Then: "
+        f"{again}, or lessons by hand with scripts/rounds.py lessons load FILE --by WHO"
     )
 
 
@@ -180,6 +184,7 @@ def main() -> int:
     decision = resume.add_mutually_exclusive_group()
     decision.add_argument("--approve", action="store_true")
     decision.add_argument("--send-back", action="store_true")
+    decision.add_argument("--close", action="store_true", help="end it without approving it")
     resume.add_argument("--by", default="", help="who decided: sponsor, or stand-in: <who>")
     sub.add_parser("status").add_argument("name")
     sub.add_parser("stop").add_argument("name")
@@ -234,6 +239,20 @@ def main() -> int:
                     return 20
                 print(_after_action(folder))
                 return 0
+            if args.command == "resume" and args.close:
+                if args.reopen_needs:
+                    raise Refused("a closed run doesn't go on, so its needs aren't reopened")
+                if not args.note:
+                    raise Refused("a close needs --note FILE: the model's lessons start from it")
+                note = args.note.read_text(encoding="utf-8")
+                ending = Run.load(folder, _no_model).close(args.by, note)
+                was = ending.said["was"]["name"] or "not recorded as ended"
+                print(
+                    f"closed without approval, by {args.by}: it was {was}. The ledger holds it, "
+                    "in `decisions`."
+                )
+                print(_after_action(folder))
+                return 20
             if args.command == "after-action":
                 print(_after_action(folder))
                 return 0

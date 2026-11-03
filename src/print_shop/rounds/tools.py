@@ -240,11 +240,12 @@ def specs() -> list[dict[str, Any]]:
         ),
         _spec(
             "ask",
-            "Where form is at stake: name the variants, and `render` draws a sheet of them, which "
-            "comes to you first. Nothing goes to the Sponsor until `send_ask`, where you say what "
-            "the sheet shows. The harness also runs the needs' checks and `thin` on these files, "
-            "and puts any that fail beside the question. Everything else is yours to settle by "
-            "the bench.",
+            "Where form is at stake, or to show what you have and ask what you need when you're "
+            "stuck: name the variants, and `render` draws a sheet of them, which comes to you "
+            "first. One variant of the files as they stand will do. Nothing goes to the Sponsor "
+            "until `send_ask`, where you say what the sheet shows. The harness also runs the "
+            "needs' checks and `thin` on these files, and puts any that fail beside the question. "
+            "Everything else is yours to settle by the bench.",
             {
                 **LOOKS,
                 "cuts": {
@@ -350,7 +351,9 @@ class Desk(Protocol):
     def done(self, args: dict[str, Any]) -> Judged: ...
     def blocked(self, args: dict[str, Any]) -> Judged: ...
     def after_action(self, args: dict[str, Any]) -> Judged: ...
-    def bench_said(self, argv: list[str], ran: Ran, record: dict[str, Any] | None) -> None: ...
+    def bench_said(
+        self, argv: list[str], ran: Ran, record: dict[str, Any] | None
+    ) -> dict[str, Any] | None: ...
 
 
 def _trim(text: str) -> str:
@@ -752,13 +755,18 @@ class WorkTools:
         done = self.box.bench(argv)
         self.check_size()
         record = recorded(done.output, self.work)
-        self.desk.bench_said(argv, done, record)
+        nudged = self.desk.bench_said(argv, done, record)
         text = done.output
         if len(text) > BENCH_CHARS:
             text = f"{text[:BENCH_CHARS]}\n(cut here: the whole answer is in the saved file)"
         images = self._rendered(record) if done.code in (0, 1) else []
-        detail = {"code": done.code, "seconds": done.seconds}
-        return Judged("bench", "ok", f"exit {done.code}\n{text}", images=images, detail=detail)
+        detail: dict[str, Any] = {"code": done.code, "seconds": done.seconds}
+        reply = f"exit {done.code}\n{text}"
+        if nudged:
+            # A check that keeps failing: a line in its reply, never a limit (`nudge.py`).
+            reply += f"\n\n{nudged['said']}"
+            detail["nudge"] = {k: v for k, v in nudged.items() if k != "said"}
+        return Judged("bench", "ok", reply, images=images, detail=detail)
 
     def _rendered(self, record: dict[str, Any] | None) -> list[tuple[str, str]]:
         """The picture a `render` wrote: its sheet, if it made one, or its one view."""

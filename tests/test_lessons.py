@@ -170,10 +170,10 @@ def test_a_review_that_cant_begin_is_said(tmp_path: Path) -> None:
 
 def test_there_is_no_review_before_the_approval(tmp_path: Path) -> None:
     run = waiting(tmp_path)
-    with pytest.raises(Refused, match="after a person's approval"):
+    with pytest.raises(Refused, match="after a person's approval or close"):
         run.after_action_review()
     judged = run.after_action({"lessons": [], "scores": []})
-    assert judged.outcome == "failed" and judged.why == "not_approved"
+    assert judged.outcome == "failed" and judged.why == "not_decided"
     assert "after_action" not in {s["function"]["name"] for s in run.tools.specs}
 
 
@@ -242,7 +242,7 @@ def test_the_listing_shows_each_lesson_with_what_the_ledger_holds_where_it_point
 ) -> None:
     ledger, _ = candidates(tmp_path)
     shown = lessons.listing(ledger, "r")
-    assert "After-action review 1 (approval 1): reviewed, from call 4 to 4" in shown
+    assert "After-action review 1 (after approved by sponsor): reviewed, from call 4 to 4" in shown
     assert "## Lesson 1: candidate" in shown and "Written by** model, at call 4" in shown
     assert "call 1 (round 0): read" in shown
     assert "It was given" not in shown

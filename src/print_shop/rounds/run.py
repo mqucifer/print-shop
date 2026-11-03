@@ -42,6 +42,7 @@ from print_shop.rounds import (
     judge,
     lessons,
     needs,
+    nudge,
     paths,
     prompt,
     records,
@@ -60,6 +61,10 @@ from print_shop.rounds.tools import WorkTools, recorded
 DEFAULT_ROOT = Path("~/print-shop/design-runs").expanduser()
 MET = "met"
 APPROVED = "approved"
+#: A person ended it without approving it: it says the run ended without one.
+CLOSED = "closed"
+#: The endings an after-action review follows, each a person's decision.
+DECIDED = (APPROVED, CLOSED)
 #: Stops, which wait for a person and aren't endings. `met` waits for approval.
 WAITING = ("questions", "ask", MET)
 #: Who a note is from, unless a person says.
@@ -207,6 +212,13 @@ def _same_check(a: Need, b: Need) -> bool:
     )
 
 
+def _closed(name: str) -> str:
+    return (
+        "this run is closed: a person ended it without approving it. Nothing goes on from here "
+        f"but its after-action review: scripts/rounds.py after-action {name}"
+    )
+
+
 def _sha(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
@@ -351,6 +363,8 @@ class Run:
             raise Refused("this run ended at `met`, from before approval was a stop")
         if ending == APPROVED:
             raise Refused("this run is approved: only a send-back goes on from here")
+        if ending == CLOSED:
+            raise Refused(_closed(self.state.name))
         stop = self.state.stop
         if stop and stop["kind"] == MET:
             raise Refused(
@@ -410,37 +424,80 @@ class Run:
         if not stop or stop["kind"] != MET:
             raise Refused("this run isn't waiting for approval")
         _who_decides(by, "--by")
-        self.ledger.decided(self.state.name, int(stop["n"]), "approved", by, note.strip())
+        decision = self.ledger.decided(
+            self.state.name, int(stop["n"]), APPROVED, by, note.strip()
+        )
         self.state.stop = None
-        said = {"approval": stop["n"], "by": by, "note": note.strip()}
+        said = {"approval": stop["n"], "by": by, "note": note.strip(), "decision": decision}
         return self._close(self.session._ended(Ending(APPROVED, said)))
 
-    # The after-action review, after the approval
+    def close(self, by: str, note: str) -> Ending:
+        """A person ends the run without approving it, so it still gets its after-action review: a
+        run that didn't succeed has the most to teach (mqucifer/print-shop#32). It works on any
+        run that isn't approved, closed or running: stopped, `blocked`, cut off by a limit, or
+        waiting at a stop. That it isn't running is the caller's to hold, as `scripts/rounds.py`
+        does with the session's lock. A close isn't an approval, and nothing goes on from it."""
+        ending = (self.state.ending or {}).get("name")
+        if ending == APPROVED:
+            raise Refused("this run is approved: a close is for a run that ended without that")
+        if ending == CLOSED:
+            raise Refused(_closed(self.state.name))
+        _who_decides(by, "--by")
+        if not note.strip():
+            raise Refused("a close needs its note: it's what the model's lessons start from")
+        stop = self.state.stop
+        if stop:
+            was: dict[str, Any] = {"name": stop["kind"], "said": {"n": stop["n"]}}
+        elif self.state.ending:
+            was = {"name": self.state.ending["name"], "said": self.state.ending.get("said") or {}}
+        else:
+            was = {"name": None, "said": {}}
+        approval = int(stop["n"]) if stop and stop["kind"] == MET else None
+        decision = self.ledger.decided(self.state.name, approval, CLOSED, by, note.strip())
+        self.state.stop = None
+        self.state.draft = None
+        # A `stop` file that ended it has done its work, and would stop the review before its call.
+        (self.folder / "stop").unlink(missing_ok=True)
+        said = {"by": by, "note": note.strip(), "decision": decision, "was": was}
+        if approval is not None:
+            said["approval"] = approval
+        return self._close(self.session._ended(Ending(CLOSED, said)))
+
+    # The after-action review, after a person's approval or close
 
     def after_action_review(self) -> Ending:
-        """One more turn on this session, after a person's approval: the model writes its run's
-        lessons and scores those it was given (`after_action.py`). The run is approved whatever
-        happens here. How it ended is a row of `after_actions`, and so is a review that couldn't
-        begin."""
-        approval = self._reviewable()
-        n, first = self._after_action_begun(approval)
-        decided = self.ledger.rows(
-            "SELECT by, note FROM decisions WHERE run=? AND approval=? AND decision='approved' "
-            "ORDER BY id DESC LIMIT 1",
-            self.state.name,
-            approval,
-        )
+        """One more turn on this session, after a person's approval or close: the model writes
+        its run's lessons and scores those it was given (`after_action.py`). The run stays as the
+        person left it whatever happens here. How it ended is a row of `after_actions`, and so is
+        a review that couldn't begin."""
+        decision, approval = self._reviewable()
+        n, first = self._after_action_begun(decision, approval)
+        decided = self.ledger.rows("SELECT * FROM decisions WHERE id=?", decision)
+        closed = (self.state.ending or {}).get("name") == CLOSED
         if first and decided:
             by, note = str(decided[0]["by"]), str(decided[0]["note"] or "")
-            said = f"{picked_by_words(by)} approved the part."
-            if note:
-                said += f" Their note:\n\n{note}"
-            self._relay("approved", by, note, said)
+            if closed:
+                was = (self.state.ending or {}).get("said", {}).get("was") or {}
+                said = (
+                    f"{picked_by_words(by)} closed this run without approving it. "
+                    f"{after_action.how_it_ended(was)} Their note:\n\n{note}"
+                )
+                self._relay(CLOSED, by, note, said)
+            else:
+                said = f"{picked_by_words(by)} approved the part."
+                if note:
+                    said += f" Their note:\n\n{note}"
+                self._relay(APPROVED, by, note, said)
         self.tools.only(after_action.TOOLS, after_action.spec())
-        self.session.say(after_action.ask(self.ledger, self.state.name, self.session.requests))
+        self.session.say(
+            after_action.ask(self.ledger, self.state.name, self.session.requests, closed=closed)
+        )
         limits = self.session.limits
+        # Its own cap on calls, and none on time: a run cut off by `model_time` is reviewed too.
         self.session.limits = replace(
-            limits, calls=self.session.calls + self.limits.after_action_calls
+            limits,
+            calls=self.session.calls + self.limits.after_action_calls,
+            model_seconds=float("inf"),
         )
         try:
             ending = self.session.go()
@@ -448,7 +505,7 @@ class Run:
             ending = self.session._ended(Ending("stopped", {"by": "signal"}))
         except Gone as gone:
             ending = self.session._ended(Ending("container_failed", {"error": str(gone)[:400]}))
-        except Exception as exc:  # noqa: BLE001 - it ends named, and the run stays approved
+        except Exception as exc:  # noqa: BLE001 - it ends named, and the decision stands
             fault = self.folder / f"after-action-fault-{n}.txt"
             fault.write_text(traceback.format_exc(), encoding="utf-8")
             fell = {"error": type(exc).__name__, "trace": fault.name}
@@ -459,33 +516,50 @@ class Run:
         return ending
 
     def after_action_not_begun(self, why: str) -> Ending:
-        """A review that couldn't begin, such as with no key: said, and the run stays approved."""
-        approval = self._reviewable()
-        n, _ = self._after_action_begun(approval)
+        """A review that couldn't begin, such as with no key: said, and the decision stands."""
+        decision, approval = self._reviewable()
+        n, _ = self._after_action_begun(decision, approval)
         ending = Ending("not_begun", {"why": why[:400]})
         self._after_action_ended(n, ending)
         return ending
 
-    def _reviewable(self) -> int:
-        if (self.state.ending or {}).get("name") != APPROVED:
-            raise Refused("the after-action review comes after a person's approval")
-        approval = int((self.state.ending or {}).get("said", {}).get("approval") or 0)
+    def _reviewable(self) -> tuple[int, int | None]:
+        """The decision the review follows, by its id in `decisions`, and its approval if it has
+        one. An approval from before a decision's id was kept is found by its approval."""
+        ending = self.state.ending or {}
+        if ending.get("name") not in DECIDED:
+            raise Refused("the after-action review comes after a person's approval or close")
+        said = ending.get("said") or {}
+        approval = int(said["approval"]) if said.get("approval") is not None else None
+        decision = said.get("decision")
+        if decision is None:
+            found = self.ledger.rows(
+                "SELECT id FROM decisions WHERE run=? AND approval IS ? AND decision=? "
+                "ORDER BY id DESC LIMIT 1",
+                self.state.name,
+                approval,
+                ending["name"],
+            )
+            if not found:
+                raise Refused(f"the ledger has no decision for this run's {ending['name']} ending")
+            decision = found[0]["id"]
         if self.ledger.rows(
-            "SELECT 1 FROM after_actions WHERE run=? AND approval=? AND ended=?",
+            "SELECT 1 FROM after_actions WHERE run=? AND decision=? AND ended=?",
             self.state.name,
-            approval,
+            int(decision),
             after_action.REVIEWED,
         ):
             raise Refused(
-                f"approval {approval}'s after-action review is in: scripts/rounds.py lessons "
-                f"{self.state.name}"
+                f"this run was {ending['name']}, and its after-action review is in: "
+                f"scripts/rounds.py lessons {self.state.name}"
             )
-        return approval
+        return int(decision), approval
 
-    def _after_action_begun(self, approval: int) -> tuple[int, bool]:
-        """Its row, and whether it's this approval's first try."""
+    def _after_action_begun(self, decision: int, approval: int | None) -> tuple[int, bool]:
+        """Its row, and whether the decision has yet to reach the model: a try that didn't begin,
+        with no key, never told it."""
         tried = self.ledger.rows(
-            "SELECT n, approval FROM after_actions WHERE run=? ORDER BY n", self.state.name
+            "SELECT n, decision, ended FROM after_actions WHERE run=? ORDER BY n", self.state.name
         )
         n = len(tried) + 1
         commit, dirty = repository_version()
@@ -495,13 +569,21 @@ class Run:
             run=self.state.name,
             n=n,
             approval=approval,
+            decision=decision,
             begun_at=now(),
             first_call=self.session.requests + 1,
             harness_commit=self.state.harness[-1],
         )
-        self.session._record("after_action", n=n, approval=approval, commit=self.state.harness[-1])
+        self.session._record(
+            "after_action",
+            n=n,
+            approval=approval,
+            decision=decision,
+            commit=self.state.harness[-1],
+        )
         self.save()
-        return n, not any(int(t["approval"]) == approval for t in tried)
+        told = [t for t in tried if t["decision"] == decision and t["ended"] != "not_begun"]
+        return n, not told
 
     def _after_action_ended(self, n: int, ending: Ending) -> None:
         self.ledger.change(
@@ -514,7 +596,7 @@ class Run:
             self.state.name,
             n,
         )
-        # Its calls count, and the run's ending stays the person's approval.
+        # Its calls count, and the run's ending stays the person's decision.
         self.ledger.change(
             "UPDATE runs SET calls=?, usage=?, outcomes=? WHERE run=?",
             self.session.calls,
@@ -525,10 +607,10 @@ class Run:
         self.save()
 
     def after_action(self, args: dict[str, Any]) -> Judged:
-        """The tool: refused before the approval, and held to the ledger after it."""
-        if (self.state.ending or {}).get("name") != APPROVED:
-            reply = "The after-action review comes after a person's approval."
-            return Judged(after_action.NAME, "failed", reply, "not_approved")
+        """The tool: refused before a person's approval or close, and held to the ledger after."""
+        if (self.state.ending or {}).get("name") not in DECIDED:
+            reply = "The after-action review comes after a person approves or closes the run."
+            return Judged(after_action.NAME, "failed", reply, "not_decided")
         return after_action.take(self.ledger, self.state.name, args, self.session.requests)
 
     def send_back(self, by: str, note: str, reopen_needs: bool = False) -> None:
@@ -538,6 +620,8 @@ class Run:
         check it found missing, and the model was refused when it tried."""
         stop = self.state.stop
         ending = (self.state.ending or {}).get("name")
+        if ending == CLOSED:
+            raise Refused(_closed(self.state.name))
         if not (stop and stop["kind"] == MET) and ending != APPROVED:
             raise Refused("this run isn't waiting for approval, and isn't approved")
         _who_decides(by, "--by")
@@ -703,7 +787,12 @@ class Run:
 
     # The tools that belong to the run
 
-    def bench_said(self, argv: list[str], ran: Ran, record: dict[str, Any] | None) -> None:
+    def bench_said(
+        self, argv: list[str], ran: Ran, record: dict[str, Any] | None
+    ) -> dict[str, Any] | None:
+        """Kept in the ledger, and a nudge if the same check has failed `nudge.AFTER` times in a
+        row or more. It's counted from the ledger, so a run resumed on newer code counts what it
+        did before."""
         self.ledger.bench_call(
             self.state.name,
             self.state.round,
@@ -714,12 +803,31 @@ class Run:
             paths.snapshot(self.work),
             ran.seconds,
         )
+        if ran.code in (0, nudge.USAGE):
+            return None
+        check = nudge.check_of(argv)
+        earlier = [
+            (json.loads(r["argv"]), int(r["exit"]))
+            for r in self.ledger.rows(
+                "SELECT argv, exit FROM bench_calls WHERE run=? ORDER BY id", self.state.name
+            )
+        ]
+        failures = nudge.failing(earlier, check)
+        if failures < nudge.AFTER:
+            return None
+        return {
+            "command": check[0],
+            "files": list(check[1]),
+            "failures": failures,
+            "after": nudge.AFTER,
+            "said": nudge.said(check, failures),
+        }
 
     def questions(self, args: dict[str, Any]) -> Judged:
         if not self.state.needs_open:
             reply = (
                 "The needs are settled, so this doesn't stop for the Sponsor. Form goes through "
-                "`ask`, and the rest is yours to decide. If it can't be done, `blocked` says why."
+                f"`ask`, and the rest is yours to decide. If you're stuck: {prompt.STUCK}"
             )
             return Judged("questions", "failed", reply, "needs_settled")
         text = args["questions"].strip()
@@ -741,7 +849,7 @@ class Run:
         if not self.state.needs_open:
             reply = (
                 "The needs are settled: they're what your work is checked against, so they don't "
-                "change from here. If one can't be met or its check is wrong, `blocked` says so."
+                f"change from here. If one can't be met or its check is wrong: {prompt.STUCK}"
             )
             return Judged("needs", "failed", reply, "needs_settled")
         request = (self.folder / "request.md").read_text(encoding="utf-8")
