@@ -418,6 +418,7 @@ class Recorder:
             files=_json(nudge["files"]),
             failures=int(nudge["failures"]),
             after=int(nudge["after"]),
+            calls=_json(nudge["calls"]) if nudge.get("calls") is not None else None,
         )
 
     def _tried(self, event: dict[str, Any], detail: dict[str, Any]) -> None:

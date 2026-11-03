@@ -15,9 +15,10 @@ from typing import Any
 
 import pytest
 
-from print_shop.rounds import after_action, lessons, nudge, prompt, records, transcript
+from print_shop.rounds import after_action, lessons, needs, nudge, prompt, records, transcript
 from print_shop.rounds.box import Ran
 from print_shop.rounds.ledger import DesignLedger
+from print_shop.rounds.needs import Need
 from print_shop.rounds.run import CLOSED, Refused, Run
 from print_shop.rounds.session import Limits
 from tests.rounds_fakes import Scripted, tool
@@ -188,49 +189,112 @@ def test_a_check_is_its_command_and_its_files_whatever_its_other_arguments() -> 
         ("a.step", "b.stl"),
     )
     assert nudge.check_of(["render", "a.step", "--cut=x=50,y=20:40"]) == ("render", ("a.step",))
-    capture, thin = (["capture", "a.step"], ["thin", "a.step"])
-    calls = [(capture, 1), (capture, 0), (capture, 1), (thin, 1), (capture, 3), (capture, 2)]
-    assert nudge.failing(calls, nudge.check_of(capture)) == 2, "a pass starts it again"
-    assert nudge.failing(calls, nudge.check_of(thin)) == 1
+    assert nudge.options(
+        ["thin", "a.step", "--one-body", "--nozzle=0.4", "--views", "iso", "top", "--layer", "0.2"]
+    ) == {"--one-body": (), "--nozzle": ("0.4",), "--views": ("iso", "top"), "--layer": ("0.2",)}
+    assert nudge.differences(
+        ["capture", "a.step", "--min-lip", "0.25", "--layer", "0.20", "--panes", "30"],
+        ["capture", "a.step", "--min-lip", "1.2", "--layer", "0.2", "--pocket-z", "3"],
+    ) == [
+        ("--min-lip", "0.25", "1.2"),
+        ("--panes", "30", None),
+        ("--pocket-z", None, "3"),
+    ], "0.20 is 0.2"
+
+
+NEED = "capture frame.step --pocket-z 3 --min-lip 1.2 --panes 15"
+WANTED = [nudge.Wanted("panes-held", NEED, NEED.split())]
+
+
+def tried(at_call: int, lip: str, code: int, panes: str = "15") -> nudge.Try:
+    argv = ["capture", "frame.step", "--pocket-z", "3", "--min-lip", lip, "--panes", panes]
+    return nudge.Try(at_call, argv, code, "OK" if code == 0 else "FAIL", f"lip short at {lip}")
+
+
+def test_a_pass_starts_the_count_again_only_as_a_need_checks_it() -> None:
+    check = ("capture", ("frame.step",))
+    thin = nudge.Try(3, ["thin", "frame.step"], 1)
+    calls = [tried(1, "1.2", 1), tried(2, "0.35", 1), thin, tried(4, "0.3", 3), tried(5, "0.25", 0)]
+    # The pass at 0.25 isn't the need's, so the count goes on through it, and a wrong command is
+    # left out. With no need for the check, any pass starts it again.
+    assert [t.at_call for t in nudge.streak(calls, check, WANTED)] == [1, 2, 5]
+    assert nudge.failures(nudge.streak(calls, check, WANTED)) == 2
+    assert nudge.streak(calls, check, []) == []
+    assert nudge.streak([*calls, tried(6, "1.2", 0)], check, WANTED) == [], "the need's pass"
+    assert [t.at_call for t in nudge.streak(calls, ("thin", ("frame.step",)), [])] == [3]
+
+
+def test_a_needs_check_with_other_arguments_says_so_and_what_done_checks() -> None:
+    assert nudge.off_need(tried(1, "1.2", 0).argv, WANTED) == []
+    found = nudge.off_need(tried(1, "0.25", 0, panes="30").argv, WANTED)
+    assert nudge.off_need_said(found) == (
+        "This is `panes-held`'s check with other arguments: `--min-lip 0.25`, the need says "
+        "`1.2`; `--panes 30`, the need says `15`. `done` checks the need's command, "
+        f"`{NEED}`, so this reading isn't the need's."
+    )
+    fewer = nudge.off_need(["capture", "frame.step", "--layer", "0.3"], WANTED)
+    said = nudge.off_need_said(fewer)
+    assert "`--layer 0.3`, the need doesn't give it" in said
+    assert "no `--min-lip`, the need says `--min-lip 1.2`" in said
+    other = [*WANTED, nudge.Wanted("loose", "capture frame.step", ["capture", "frame.step"])]
+    assert nudge.off_need(["capture", "frame.step"], other) == [], "it's one need's command"
 
 
 class Answers:
-    """A box that answers each bench command with the next exit, and runs nothing."""
+    """A box that answers each bench command with the next exit, and runs nothing. It saves a
+    record as the bench does, so the ledger has each verdict and why."""
 
-    def __init__(self, *codes: int) -> None:
+    def __init__(self, work: Path, *codes: int) -> None:
+        self.work = work
         self.codes = list(codes)
         self.asked: list[list[str]] = []
 
     def bench(self, args: list[str], where: Path | None = None, timeout: int | None = None) -> Ran:
         self.asked.append(args)
+        n = len(self.asked)
         code = self.codes.pop(0)
-        return Ran(code, f"verdict: {'OK' if code == 0 else 'FAIL'}: as scripted\n", 0.1)
+        verdict = {0: "OK", 2: "NO ANSWER"}.get(code, "FAIL")
+        why = f"try {n}, {' '.join(args[1:])}"
+        out = self.work / "bench-out"
+        out.mkdir(exist_ok=True)
+        (out / f"{n}.json").write_text(json.dumps({"verdict": verdict, "why": why}))
+        return Ran(code, f"verdict: {verdict}: {why}\nsaved: bench-out/{n}.txt and .json\n", 0.1)
 
 
-def benched(root: Path, *commands: str, codes: tuple[int, ...]) -> tuple[Run, list[dict[str, Any]]]:
+def benched(
+    root: Path, *commands: str, codes: tuple[int, ...], settled: list[str] | None = None
+) -> tuple[Run, list[dict[str, Any]]]:
     model = Scripted(
         *[[tool("bench", command=c)] for c in commands],
         [tool("blocked", reason="Out of turns.")],
     )
     run = Run.start(root, "r", "A block.", [], model, sleep=lambda _: None)
-    box: Any = Answers(*codes)
+    if settled is not None:
+        run.state.needs = needs.dump(
+            [
+                Need(f"need-{i}", "held", "request", "bench", command=c, verdicts=["OK"])
+                for i, c in enumerate(settled, 1)
+            ]
+        )
+        run.state.needs_open = False
+    box: Any = Answers(run.work, *codes)
     run.tools.box = box
     assert run.drive().name == "blocked"
     told = [e for e in transcript.events_of(run.session.events) if e["kind"] == "tool"]
     return run, told[: len(commands)]
 
 
-def test_a_check_that_keeps_failing_is_nudged_to_ask_or_end_and_nothing_is_cut(
+def test_a_check_that_keeps_failing_is_nudged_with_why_and_nothing_is_cut(
     tmp_path: Path,
 ) -> None:
-    lip = "capture frame.step --pocket-z 2 --clearance 0.4 --pane-thickness 2 --min-lip"
+    lip = "capture frame.step --pocket-z 2 --clearance 0.4 --min-lip"
     commands = (
         f"{lip} 1.2",
         f"{lip} 0.8",
         "thin frame.step",
         f"{lip} 0.45",
-        "capture frame.step --pocket-z 2 --clearance 0.4",  # the command was wrong
-        f"{lip} 0.35",
+        "capture frame.step --pocket-z 2",  # the command was wrong
+        f"{lip} 0.35 --layer 0.3",
         f"{lip} 0.3",
         f"{lip} 1.2",
     )
@@ -238,25 +302,77 @@ def test_a_check_that_keeps_failing_is_nudged_to_ask_or_end_and_nothing_is_cut(
     nudged = [i for i, e in enumerate(told) if prompt.STUCK in e["reply"]]
     assert nudged == [5, 6], "from the 4th failure of capture on frame.step, its arguments aside"
     assert told[5]["reply"].endswith(
-        "`capture` on `frame.step` has failed 4 times in a row, whatever its other arguments. "
+        "\n\n`capture` on `frame.step` has failed 4 times in a row, whatever its other arguments:\n"
+        "- call 1, `--pocket-z 2 --clearance 0.4 --min-lip 1.2`, the first try: FAIL: try 1, "
+        "frame.step --pocket-z 2 --clearance 0.4 --min-lip 1.2\n"
+        "- call 2, `--min-lip 0.8` (first try: `--min-lip 1.2`): FAIL: try 2, frame.step "
+        "--pocket-z 2 --clearance 0.4 --min-lip 0.8\n"
+        "- call 4, `--min-lip 0.45` (first try: `--min-lip 1.2`): NO ANSWER: try 4, frame.step "
+        "--pocket-z 2 --clearance 0.4 --min-lip 0.45\n"
+        "- call 6, `--layer 0.3` (first try: none), `--min-lip 0.35` (first try: `--min-lip "
+        "1.2`): FAIL: try 6, frame.step --pocket-z 2 --clearance 0.4 --min-lip 0.35 --layer 0.3\n"
         f"{prompt.STUCK}"
     )
+    assert "call 5" not in told[5]["reply"], "the wrong command isn't a try"
     assert told[6]["detail"]["nudge"] == {
         "command": "capture",
         "files": ["frame.step"],
         "failures": 5,
         "after": nudge.AFTER,
+        "calls": [1, 2, 4, 6, 7],
     }
     assert told[7]["outcome"] == "ok" and "nudge" not in told[7]["detail"]
-    kept = rows(run.ledger, "SELECT seq, at_call, command, files, failures, after FROM nudges")
+    kept = rows(run.ledger, "SELECT seq, at_call, command, failures, after, calls FROM nudges")
     assert kept == [
-        {"seq": 1, "at_call": 6, "command": "capture", "files": '["frame.step"]', "failures": 4,
-         "after": 4},
-        {"seq": 2, "at_call": 7, "command": "capture", "files": '["frame.step"]', "failures": 5,
-         "after": 4},
+        {"seq": 1, "at_call": 6, "command": "capture", "failures": 4, "after": 4,
+         "calls": "[1, 2, 4, 6]"},
+        {"seq": 2, "at_call": 7, "command": "capture", "failures": 5, "after": 4,
+         "calls": "[1, 2, 4, 6, 7]"},
     ]
     records.read_back(run.folder, run.ledger)
     assert len(rows(run.ledger, "SELECT * FROM nudges")) == 2, "a second reading adds nothing"
+
+
+def test_a_pass_with_other_arguments_than_the_needs_is_said_and_doesnt_end_the_count(
+    tmp_path: Path,
+) -> None:
+    """As `suncatcher-2` did: a pass at `--min-lip 0.25` after four failures, where its need runs
+    `capture` at 1.2."""
+    commands = [
+        f"capture frame.step --pocket-z 3 --min-lip {lip} --panes {panes}"
+        for lip, panes in (("1.2", "15"), ("0.35", "29"), ("0.45", "29"), ("0.3", "30"))
+    ]
+    commands += [
+        "capture frame.step --pocket-z 3 --min-lip 0.25 --panes 30",
+        NEED,
+        "capture frame.step --pocket-z 3 --min-lip 1.1 --panes 15",
+        "thin frame.step --nozzle 0.4",
+    ]
+    run, told = benched(
+        tmp_path, *commands, codes=(1, 1, 1, 1, 0, 0, 1, 0), settled=[NEED, "info frame.step"]
+    )
+    passed = told[4]["reply"]
+    assert passed.startswith("exit 0\n")
+    assert (
+        "This is `need-1`'s check with other arguments: `--min-lip 0.25`, the need says `1.2`; "
+        "`--panes 30`, the need says `15`. `done` checks the need's command"
+    ) in passed
+    assert "has failed 4 times without passing as a need checks it" in passed
+    assert (
+        "- call 5, `--min-lip 0.25` (first try: `--min-lip 1.2`), `--panes 30` (first try: "
+        "`--panes 15`): OK, but not as a need checks it: try 5"
+    ) in passed
+    assert told[4]["detail"]["nudge"]["calls"] == [1, 2, 3, 4, 5]
+    assert told[4]["detail"]["off_need"][0]["need"] == "need-1"
+    assert "off_need" not in told[0]["detail"], "the need's own command"
+    assert "off_need" in told[1]["detail"] and prompt.STUCK not in told[1]["reply"], (
+        "the need's check with other arguments is said on any try"
+    )
+    # The need's own command passes: nothing's said, and the count starts again.
+    assert told[5]["reply"].count("\n\n") == 0 and "nudge" not in told[5]["detail"]
+    assert "off_need" in told[6]["detail"] and "nudge" not in told[6]["detail"]
+    # A check no need runs says nothing of needs.
+    assert told[7]["detail"] == {"code": 0, "seconds": 0.1}
 
 
 def test_a_run_resumed_on_this_code_counts_the_failures_it_had_before(tmp_path: Path) -> None:
@@ -274,7 +390,7 @@ def test_a_run_resumed_on_this_code_counts_the_failures_it_had_before(tmp_path: 
         [tool("blocked", reason="It can't hold.")],
     )
     run.resume()
-    box: Any = Answers(1)
+    box: Any = Answers(run.work, 1)
     run.tools.box = box
     assert run.drive().name == "blocked"
     told = [e for e in transcript.events_of(run.session.events) if e["kind"] == "tool"]

@@ -763,9 +763,10 @@ class WorkTools:
         detail: dict[str, Any] = {"code": done.code, "seconds": done.seconds}
         reply = f"exit {done.code}\n{text}"
         if nudged:
-            # A check that keeps failing: a line in its reply, never a limit (`nudge.py`).
+            # A need's check run with other arguments, or one that keeps failing: lines in its
+            # reply, never a limit (`nudge.py`).
             reply += f"\n\n{nudged['said']}"
-            detail["nudge"] = {k: v for k, v in nudged.items() if k != "said"}
+            detail.update(nudged["detail"])
         return Judged("bench", "ok", reply, images=images, detail=detail)
 
     def _rendered(self, record: dict[str, Any] | None) -> list[tuple[str, str]]:

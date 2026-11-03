@@ -342,17 +342,19 @@ CREATE TABLE IF NOT EXISTS after_actions (
 );
 CREATE TABLE IF NOT EXISTS nudges (
     -- A bench check that kept failing, by its command and the files it names whatever its other
-    -- arguments, and the line its reply gained: show what you have and ask what you need, or end
-    -- with `blocked`. It's a line in a reply and never a limit. Written from the run's events.
+    -- arguments, and the lines its reply gained: each try and why, then show what you have and ask
+    -- what you need, or end with `blocked`. It's never a limit. Written from the run's events.
     run TEXT NOT NULL REFERENCES runs(run),
     seq INTEGER NOT NULL,
     at_call INTEGER NOT NULL,
     round INTEGER,
     command TEXT NOT NULL,
     files TEXT NOT NULL,
-    -- The failures in a row it followed, and how many it takes.
+    -- The failures it followed, without a pass as a need checks it, and how many it takes.
     failures INTEGER NOT NULL,
     after INTEGER NOT NULL,
+    -- Each try it named, by call, a pass with other arguments than a need's among them.
+    calls TEXT,
     PRIMARY KEY (run, seq)
 );
 CREATE TABLE IF NOT EXISTS lessons (

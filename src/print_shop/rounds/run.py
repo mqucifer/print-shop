@@ -790,9 +790,10 @@ class Run:
     def bench_said(
         self, argv: list[str], ran: Ran, record: dict[str, Any] | None
     ) -> dict[str, Any] | None:
-        """Kept in the ledger, and a nudge if the same check has failed `nudge.AFTER` times in a
-        row or more. It's counted from the ledger, so a run resumed on newer code counts what it
-        did before."""
+        """Kept in the ledger, and what its reply gains, if anything (`nudge.py`): that it's a
+        need's check run with other arguments, and a nudge once the check has failed
+        `nudge.AFTER` times without passing as a need checks it. It's counted from the ledger, so
+        a run resumed on newer code counts what it did before."""
         self.ledger.bench_call(
             self.state.name,
             self.state.round,
@@ -803,25 +804,43 @@ class Run:
             paths.snapshot(self.work),
             ran.seconds,
         )
-        if ran.code in (0, nudge.USAGE):
+        if ran.code == nudge.USAGE:
             return None
+        wanted = [
+            nudge.Wanted(n.id, n.command, n.argv())
+            for n in self._needs()
+            if n.by == "bench" and n.command
+        ]
+        lines: list[str] = []
+        detail: dict[str, Any] = {}
+        off = nudge.off_need(argv, wanted)
+        if off:
+            lines.append(nudge.off_need_said(off))
+            detail["off_need"] = off
         check = nudge.check_of(argv)
         earlier = [
-            (json.loads(r["argv"]), int(r["exit"]))
+            nudge.Try(
+                int(r["at_call"]), json.loads(r["argv"]), int(r["exit"]), r["verdict"], r["why"]
+            )
             for r in self.ledger.rows(
-                "SELECT argv, exit FROM bench_calls WHERE run=? ORDER BY id", self.state.name
+                "SELECT at_call, argv, exit, verdict, why FROM bench_calls WHERE run=? ORDER BY id",
+                self.state.name,
             )
         ]
-        failures = nudge.failing(earlier, check)
-        if failures < nudge.AFTER:
+        tries = nudge.streak(earlier, check, wanted)
+        failed = nudge.failures(tries)
+        if tries and failed >= nudge.AFTER:
+            lines.append(nudge.said(check, tries, wanted))
+            detail["nudge"] = {
+                "command": check[0],
+                "files": list(check[1]),
+                "failures": failed,
+                "after": nudge.AFTER,
+                "calls": [one.at_call for one in tries],
+            }
+        if not lines:
             return None
-        return {
-            "command": check[0],
-            "files": list(check[1]),
-            "failures": failures,
-            "after": nudge.AFTER,
-            "said": nudge.said(check, failures),
-        }
+        return {"said": "\n\n".join(lines), "detail": detail}
 
     def questions(self, args: dict[str, Any]) -> Judged:
         if not self.state.needs_open:
