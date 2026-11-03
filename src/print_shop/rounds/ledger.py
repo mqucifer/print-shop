@@ -16,15 +16,17 @@ for the model's review that writes them): `lessons.py` says how they're checked 
 lesson up when a reading fails isn't here yet. `changes` gives each need's reading before and after
 each round.
 
-`records.py` writes `calls`, `interventions`, `timeline`, `runaways` and `tries` from a run's
-events, so a run's own records can be read back through them. Older code can still be running
+`records.py` writes `calls`, `interventions`, `timeline`, `runaways`, `tries` and `nudges` from a
+run's events, so a run's own records can be read back through them. Older code can still be running
 against this file, from a checkout nothing edits until it ends: tables and columns are only added,
-and never to one it inserts into by position (`needs`, `readings`).
+and never to one it inserts into by position (`needs`, `readings`). Two tables were made again once,
+keeping every row, as a close needs columns that may be empty (`_made_again`).
 """
 
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -272,8 +274,10 @@ CREATE TABLE IF NOT EXISTS approvals (
 CREATE TABLE IF NOT EXISTS decisions (
     id INTEGER PRIMARY KEY,
     run TEXT NOT NULL REFERENCES runs(run),
-    approval INTEGER NOT NULL,
-    -- approved or sent_back. Who: `sponsor`, or `stand-in: <who>`.
+    -- The stop for approval it answers. A close of a run that never reached one has none.
+    approval INTEGER,
+    -- approved, sent_back or closed: a close ends a run without approving it. Who: `sponsor`, or
+    -- `stand-in: <who>`.
     decision TEXT NOT NULL,
     by TEXT NOT NULL,
     note TEXT,
@@ -319,10 +323,11 @@ CREATE TABLE IF NOT EXISTS need_swaps (
 );
 CREATE TABLE IF NOT EXISTS after_actions (
     -- Each try at the after-action review, a model call on the run's own session after a
-    -- person's approval. The run stays approved whatever this says.
+    -- person's approval or close. The run stays as they left it whatever this says.
     run TEXT NOT NULL REFERENCES runs(run),
     n INTEGER NOT NULL,
-    approval INTEGER NOT NULL,
+    -- The approval it follows, if it follows one: a closed run may have none.
+    approval INTEGER,
     begun_at TEXT NOT NULL,
     first_call INTEGER NOT NULL,
     harness_commit TEXT NOT NULL,
@@ -331,7 +336,26 @@ CREATE TABLE IF NOT EXISTS after_actions (
     ended_said TEXT,
     ended_at TEXT,
     last_call INTEGER,
+    -- The decision it follows, approved or closed, by `decisions.id`.
+    decision INTEGER REFERENCES decisions(id),
     PRIMARY KEY (run, n)
+);
+CREATE TABLE IF NOT EXISTS nudges (
+    -- A bench check that kept failing, by its command and the files it names whatever its other
+    -- arguments, and the lines its reply gained: each try and why, then show what you have and ask
+    -- what you need, or end with `blocked`. It's never a limit. Written from the run's events.
+    run TEXT NOT NULL REFERENCES runs(run),
+    seq INTEGER NOT NULL,
+    at_call INTEGER NOT NULL,
+    round INTEGER,
+    command TEXT NOT NULL,
+    files TEXT NOT NULL,
+    -- The failures it followed, without a pass as a need checks it, and how many it takes.
+    failures INTEGER NOT NULL,
+    after INTEGER NOT NULL,
+    -- Each try it named, by call, a pass with other arguments than a need's among them.
+    calls TEXT,
+    PRIMARY KEY (run, seq)
 );
 CREATE TABLE IF NOT EXISTS lessons (
     -- What a run taught, for the next: written by the model in its after-action review, or by a
@@ -439,6 +463,50 @@ ADDED = (
 )
 
 
+#: The approval decision a review from before `after_actions.decision` followed: its approval's.
+APPROVAL_OF = (
+    "(SELECT d.id FROM decisions AS d WHERE d.run = {a}.run AND d.approval = {a}.approval AND "
+    "d.decision = 'approved' AND d.at <= {a}.begun_at ORDER BY d.id DESC LIMIT 1)"
+)
+FOLLOWED = (
+    f"UPDATE after_actions SET decision = {APPROVAL_OF.format(a='after_actions')} "
+    "WHERE decision IS NULL AND approval IS NOT NULL"
+)
+#: Tables made again once, by `DesignLedger._made_again`, and how each copies its rows.
+REMADE = (
+    (
+        "decisions",
+        "INSERT INTO decisions_remade (id, run, approval, decision, by, note, at) "
+        "SELECT id, run, approval, decision, by, note, at FROM decisions",
+    ),
+    (
+        "after_actions",
+        "INSERT INTO after_actions_remade (run, n, approval, begun_at, first_call, harness_commit, "
+        "ended, ended_said, ended_at, last_call, decision) "
+        "SELECT a.run, a.n, a.approval, a.begun_at, a.first_call, a.harness_commit, a.ended, "
+        f"a.ended_said, a.ended_at, a.last_call, {APPROVAL_OF.format(a='a')} "
+        "FROM after_actions AS a",
+    ),
+)
+
+
+def _body(table: str) -> str:
+    """A table's columns and keys, as `SCHEMA` makes it."""
+    found = re.search(rf"CREATE TABLE IF NOT EXISTS {table} \((.*?)\n\);", SCHEMA, re.DOTALL)
+    if found is None:
+        raise LookupError(f"no table {table} in SCHEMA")
+    return found.group(1)
+
+
+def _columns(table: str) -> list[str]:
+    lines = [line.strip() for line in _body(table).splitlines()]
+    return [
+        line.split()[0]
+        for line in lines
+        if line and not line.startswith(("--", "PRIMARY KEY", "FOREIGN KEY"))
+    ]
+
+
 def now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
@@ -459,6 +527,40 @@ class DesignLedger:
                 held = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
                 if column not in held:
                     db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
+        self._made_again()
+
+    def _made_again(self) -> None:
+        """A close may follow no stop for approval, and a review names the decision it follows
+        (mqucifer/print-shop#32), so `decisions.approval` and `after_actions.approval` may be
+        empty, and `after_actions` gains `decision`. SQLite can't drop a NOT NULL in place, so each
+        table is made again as `SCHEMA` has it and every row copied, in one transaction. A review
+        from before names the approval decision of its approval, which is what it followed. An
+        older checkout still running against this file inserts by column name into both."""
+        db = sqlite3.connect(self.path, timeout=60, isolation_level=None)
+        db.row_factory = sqlite3.Row
+        try:
+            db.execute("PRAGMA foreign_keys = OFF")
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                for table, copy in REMADE:
+                    held = {r["name"]: r for r in db.execute(f"PRAGMA table_info({table})")}
+                    if all(c in held for c in _columns(table)) and not held["approval"]["notnull"]:
+                        continue
+                    db.execute(f"CREATE TABLE {table}_remade ({_body(table)})")
+                    db.execute(copy)
+                    db.execute(f"DROP TABLE {table}")
+                    db.execute(f"ALTER TABLE {table}_remade RENAME TO {table}")
+                # A review written since by older code, which doesn't know the column.
+                db.execute(FOLLOWED)
+                for table, _ in REMADE:
+                    if db.execute(f"PRAGMA foreign_key_check({table})").fetchall():
+                        raise sqlite3.IntegrityError(f"{table} made again breaks a reference")
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+        finally:
+            db.close()
 
     @contextmanager
     def _open(self) -> Iterator[sqlite3.Connection]:
@@ -781,13 +883,19 @@ class DesignLedger:
             review=_json(facts.get("review")) if facts.get("review") else None,
         )
 
-    def decided(self, run: str, approval: int, decision: str, by: str, note: str) -> None:
-        with self._open() as db:
-            db.execute(
-                "INSERT INTO decisions (run, approval, decision, by, note, at) "
-                "VALUES (?,?,?,?,?,?)",
-                (run, approval, decision, by, note or None, now()),
-            )
+    def decided(
+        self, run: str, approval: int | None, decision: str, by: str, note: str
+    ) -> int:
+        """A person's decision, and its id: a review names the one it follows."""
+        return self.insert(
+            "decisions",
+            run=run,
+            approval=approval,
+            decision=decision,
+            by=by,
+            note=note or None,
+            at=now(),
+        )
 
     def question(self, run: str, n: int, text: str, at_call: int) -> None:
         with self._open() as db:

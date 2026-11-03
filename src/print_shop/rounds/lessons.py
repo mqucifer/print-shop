@@ -523,11 +523,19 @@ def listing(ledger: DesignLedger, run: str | None = None) -> str:
 
 def _run_listing(ledger: DesignLedger, run: str) -> list[str]:
     lines = [f"# Lessons from `{run}`", ""]
-    reviews = ledger.rows("SELECT * FROM after_actions WHERE run=? ORDER BY n", run)
+    reviews = ledger.rows(
+        "SELECT a.*, d.decision AS followed, d.by AS decided_by FROM after_actions AS a "
+        "LEFT JOIN decisions AS d ON d.id = a.decision WHERE a.run=? ORDER BY a.n",
+        run,
+    )
     for r in reviews:
         ended = r["ended"] or "unfinished"
+        if r["followed"]:
+            after = f"after {r['followed']} by {r['decided_by']}"
+        else:
+            after = f"after approval {r['approval']}"
         lines.append(
-            f"After-action review {r['n']} (approval {r['approval']}): {ended}, from call "
+            f"After-action review {r['n']} ({after}): {ended}, from call "
             f"{r['first_call']} to {r['last_call'] or '?'}, {r['ended_said'] or ''}".rstrip(", ")
         )
     if reviews:

@@ -1,13 +1,17 @@
-"""The after-action review: one more turn on a run's own session, after a person's approval.
+"""The after-action review: one more turn on a run's own session, after a person's decision.
 
 The model writes its run's lessons while it still has its context (the Sponsor, 2026-11-02), and
-scores each lesson it was given at the start. It's its own tool, `after_action`, apart from
+scores each lesson it was given at the start. It follows an approval, or a close: a run that ended
+without approval gets one too once a person closes it (mqucifer/print-shop#32), as "It still has
+learnings" (the Sponsor, 2026-11-03). Then it's asked what didn't work and why, what would have
+changed it, and what it would do first next time. It's its own tool, `after_action`, apart from
 `review.py`, which writes the folder a person prints from: the two are never the same word, in
 code, in what the model's told, or in the ledger.
 
-- It runs after the approval is recorded, so the run is approved whatever happens here. A failure
-  is a row of `after_actions`, and the reviewer can enter lessons by hand (`lessons.load`).
-- Only `read` and `after_action` work in it: the part is approved, and its files stay as they are.
+- It runs after the decision is recorded, so the run stays approved or closed whatever happens
+  here. A failure is a row of `after_actions`, and the reviewer can enter lessons by hand
+  (`lessons.load`).
+- Only `read` and `after_action` work in it: its files stay as they are.
 - Each lesson names the calls that show it, from an index of the run the ledger gives, and each is
   held to the ledger before it's kept. Each is a `candidate` until a reviewer checks it.
 - Nothing cuts a call or limits thinking. The review's calls have a high cap of their own
@@ -36,9 +40,10 @@ def spec() -> dict[str, Any]:
         "type": "function",
         "function": {
             "name": NAME,
-            "description": "Your after-action review, after the approval: what this run taught, "
-            "for the next run, and whether you used each lesson you were given at the start. A "
-            "reviewer checks each lesson against the ledger before any reaches another run.",
+            "description": "Your after-action review, at the end of the run: what this run "
+            "taught, for the next run, and whether you used each lesson you were given at the "
+            "start. A reviewer checks each lesson against the ledger before any reaches another "
+            "run.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -118,8 +123,46 @@ def index(ledger: DesignLedger, run: str, upto: int | None = None) -> list[str]:
     return lines
 
 
-def ask(ledger: DesignLedger, run: str, upto: int) -> str:
-    """What the model is asked, with the lessons it was given and the run's index."""
+#: How a run that was closed had ended, said to the model: a stop waits for a person, and isn't an
+#: ending of its own.
+STOPS = {
+    "questions": "It was waiting for the answers to your questions ({n}).",
+    "ask": "It was waiting at ask {n}, for a pick.",
+    "met": "It was waiting at stop {n} for approval: every need had passed its check.",
+}
+#: What each part of a lesson is, and what's said of the scores, for either kind of review.
+SHAPE = (
+    "Each has the fix's shape in a few words of your own, its kind (`build`: how to build; "
+    "`check`: what to check; `context`: about the job or the people), its text, and the calls "
+    "that show it, by their numbers below, with any readings by round and need. A lesson about "
+    "checking doesn't reach the next run as a note: a reviewer may make it a check in the harness "
+    "instead."
+)
+SCORES = (
+    "- **Scores:** for each lesson you were given, whether you used it, didn't, or it got in the "
+    "way, with the calls that show it."
+)
+
+
+def how_it_ended(was: dict[str, Any]) -> str:
+    """A closed run's ending before the close, in a line: its name and what it said."""
+    name = was.get("name")
+    said = was.get("said") or {}
+    if name is None:
+        return "Its process ended with no ending recorded."
+    if name in STOPS:
+        # A run from before approval was a stop ended at `met`, saying its approval.
+        return STOPS[name].format(n=said.get("n", said.get("approval", "?")))
+    if name == "blocked":
+        return f"It ended `blocked`, with your reason: {said.get('reason', '')}"
+    shown = f": {json.dumps(said, sort_keys=True)}" if said else ""
+    return f"It ended `{name}`{shown}."
+
+
+def ask(ledger: DesignLedger, run: str, upto: int, closed: bool = False) -> str:
+    """What the model is asked, with the lessons it was given and the run's index. After a close
+    it isn't told the part is approved: it's asked what didn't work and why, what would have
+    changed it, and what it would do first next time."""
     given = lessons.given_to(ledger, run)
     if given:
         lines = [f"- Lesson {g['lesson']}, given {g['how']}: {g['text']}" for g in given]
@@ -127,21 +170,31 @@ def ask(ledger: DesignLedger, run: str, upto: int) -> str:
     else:
         was_given = "You were given no lessons at the start, so `scores` is an empty list."
     calls = "\n".join(index(ledger, run, upto))
+    if closed:
+        opening = (
+            "This run is closed without approval. Before it ends, write your after-action review "
+            "with `after_action`, while the whole run is still in your mind. A run that didn't "
+            "succeed has the most to teach, and a clear account of it is a good result. It's for "
+            "the next run, which starts with only what a reviewer keeps.\n\n"
+            "- **Lessons:** what didn't work, and why; what would have changed it: a tool's "
+            "reply, a check, a lesson, the request, or a stage; and what you'd do first next "
+            f"time. {SHAPE}\n"
+        )
+        now = "the run is closed"
+    else:
+        opening = (
+            "The part is approved. Before this run ends, write your after-action review with "
+            "`after_action`, while the whole run is still in your mind. It's for the next run, "
+            "which starts with only what a reviewer keeps.\n\n"
+            "- **Lessons:** what you'd tell a designer starting a part like this, from what "
+            "happened here: what cost you calls, what worked, and what you'd do first next time. "
+            f"{SHAPE}\n"
+        )
+        now = "the part is approved"
     return (
-        "The part is approved. Before this run ends, write your after-action review with "
-        "`after_action`, while the whole run is still in your mind. It's for the next run, which "
-        "starts with only what a reviewer keeps.\n\n"
-        "- **Lessons:** what you'd tell a designer starting a part like this, from what happened "
-        "here: what cost you calls, what worked, and what you'd do first next time. Each has the "
-        "fix's shape in a few words of your own, its kind (`build`: how to build; `check`: what "
-        "to check; `context`: about the job or the people), its text, and the calls that show "
-        "it, by their numbers below, with any readings by round and need. A lesson about "
-        "checking doesn't reach the next run as a note: a reviewer may make it a check in the "
-        "harness instead.\n"
-        "- **Scores:** for each lesson you were given, whether you used it, didn't, or it got in "
-        "the way, with the calls that show it.\n\n"
-        "A reviewer checks each against the ledger. Only `read` and `after_action` work now: the "
-        "part is approved, and its files stay as they are.\n\n"
+        f"{opening}{SCORES}\n\n"
+        f"A reviewer checks each against the ledger. Only `read` and `after_action` work now: "
+        f"{now}, and its files stay as they are.\n\n"
         f"{was_given}\n\nThis run, call by call, as the ledger has it:\n{calls}"
     )
 

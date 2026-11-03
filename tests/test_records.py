@@ -227,7 +227,14 @@ def test_an_old_run_reads_back_through_the_new_tables_and_its_folder_isnt_touche
     ledger = old_ledger(tmp_path)
     counts = records.read_back(folder, ledger)
     assert hashes_of(folder) == before, "it only reads"
-    assert counts == {"calls": 5, "interventions": 3, "timeline": 7, "runaways": 1, "tries": 2}
+    assert counts == {
+        "calls": 5,
+        "interventions": 3,
+        "timeline": 7,
+        "runaways": 1,
+        "tries": 2,
+        "nudges": 0,
+    }
 
     # What a person sent, known by its words, at the call it reached and that call's time.
     said = [dict(r) for r in ledger.rows("SELECT * FROM interventions ORDER BY seq")]
