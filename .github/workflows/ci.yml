@@ -72,9 +72,8 @@ jobs:
           retention-days: 1
 
   # The `-m bench` tests on that image, in four parts at once, three tests at a time in each.
-  # Measured on mqucifer/print-shop#35: two at a time left the runner's 4 CPUs idle between
-  # containers, four at a time was no faster than three, and six parts saved less than the noise
-  # between runs while holding more runners. `--shard` deals the tests the markers chose in turn,
+  # Measured on mqucifer/print-shop#35: three at a time finished sooner than two, four no sooner
+  # than three, and six parts saved less than the noise between runs while holding more runners. `--shard` deals the tests the markers chose in turn,
   # and the `ci` job checks the four parts are the whole, each test in exactly one. `-rps` names
   # each test that passed or was skipped, so a run's log is the list of what ran.
   bench:
