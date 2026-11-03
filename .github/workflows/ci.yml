@@ -53,6 +53,8 @@ jobs:
         run: echo "tag=$(uv run python -c 'from print_shop.bench.host import IMAGE; print(IMAGE)')" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@v3
       - uses: docker/build-push-action@v6
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: false
         with:
           context: src/print_shop/bench/image
           platforms: linux/amd64
@@ -82,20 +84,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { parts: 4, part: 1, n: 2 }
-          - { parts: 4, part: 2, n: 2 }
-          - { parts: 4, part: 3, n: 2 }
-          - { parts: 4, part: 4, n: 2 }
           - { parts: 4, part: 1, n: 3 }
           - { parts: 4, part: 2, n: 3 }
           - { parts: 4, part: 3, n: 3 }
           - { parts: 4, part: 4, n: 3 }
-          - { parts: 6, part: 1, n: 2 }
-          - { parts: 6, part: 2, n: 2 }
-          - { parts: 6, part: 3, n: 2 }
-          - { parts: 6, part: 4, n: 2 }
-          - { parts: 6, part: 5, n: 2 }
-          - { parts: 6, part: 6, n: 2 }
+          - { parts: 4, part: 1, n: 4 }
+          - { parts: 4, part: 2, n: 4 }
+          - { parts: 4, part: 3, n: 4 }
+          - { parts: 4, part: 4, n: 4 }
+          - { parts: 6, part: 1, n: 3 }
+          - { parts: 6, part: 2, n: 3 }
+          - { parts: 6, part: 3, n: 3 }
+          - { parts: 6, part: 4, n: 3 }
+          - { parts: 6, part: 5, n: 3 }
+          - { parts: 6, part: 6, n: 3 }
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
