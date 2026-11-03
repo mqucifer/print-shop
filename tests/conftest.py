@@ -56,3 +56,34 @@ def _disarm_the_printer() -> Iterator[None]:
         yield
     finally:
         monkeypatch.undo()
+
+
+# CI's split of the slow tests (mqucifer/print-shop#34)
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--shard",
+        default=None,
+        metavar="I/N",
+        help="run only part I of N of the tests the markers selected, as CI's matrix does",
+    )
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Keep every Nth test from the Ith, after `-m` has chosen, so the N parts are the whole.
+
+    Last, so it splits only what the markers kept; dealt in turn, so each part gets a share of
+    every file. Collection's order is fixed, so each xdist worker keeps the same part.
+    """
+    shard = config.getoption("--shard")
+    if shard is None:
+        return
+    part, _, parts = str(shard).partition("/")
+    i, n = int(part), int(parts)
+    if not 1 <= i <= n:
+        raise pytest.UsageError(f"--shard {shard}: I must be from 1 to N")
+    kept = items[i - 1 :: n]
+    config.hook.pytest_deselected(items=[t for t in items if t not in kept])
+    items[:] = kept
