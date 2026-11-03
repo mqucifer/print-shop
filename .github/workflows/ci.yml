@@ -31,6 +31,7 @@ jobs:
       - run: uv run pytest -q -m "not slicer and not llm and not mqtt and not ha and not bench and not bench_local"
       - run: uv run python scripts/check_addresses.py
       - run: uv run python scripts/check_shards.py 4 -m bench
+      - run: uv run python scripts/check_shards.py 6 -m bench
 
   # The CAD bench's image, built once per push for amd64 here (arm64 on the Mac), so this is
   # also the proof it can move to an x86 machine. A pull request builds from the layers GitHub's
@@ -76,10 +77,25 @@ jobs:
     needs: image
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    name: bench (${{ matrix.part }}/${{ matrix.parts }}, -n ${{ matrix.n }})
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        include:
+          - { parts: 4, part: 1, n: 2 }
+          - { parts: 4, part: 2, n: 2 }
+          - { parts: 4, part: 3, n: 2 }
+          - { parts: 4, part: 4, n: 2 }
+          - { parts: 4, part: 1, n: 3 }
+          - { parts: 4, part: 2, n: 3 }
+          - { parts: 4, part: 3, n: 3 }
+          - { parts: 4, part: 4, n: 3 }
+          - { parts: 6, part: 1, n: 2 }
+          - { parts: 6, part: 2, n: 2 }
+          - { parts: 6, part: 3, n: 2 }
+          - { parts: 6, part: 4, n: 2 }
+          - { parts: 6, part: 5, n: 2 }
+          - { parts: 6, part: 6, n: 2 }
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -91,4 +107,4 @@ jobs:
           name: bench-image
       - run: zstd -d --stdout bench-image.tar.zst | docker load && rm bench-image.tar.zst
       - run: uv run python scripts/bench.py check
-      - run: uv run pytest -q -m bench --shard ${{ matrix.shard }}/4 -n 2 --durations=40
+      - run: uv run pytest -q -m bench --shard ${{ matrix.part }}/${{ matrix.parts }} -n ${{ matrix.n }} -rps --durations=0
