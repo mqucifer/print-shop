@@ -17,11 +17,11 @@ Each is used in one sense only, here and in every bench reply.
 - **pocket**: the space in the frame a pane sits in, from the pocket's floor to its top.
 - **play**: the gap all round between a pane's edge and its pocket's wall.
 - **opening**: where light passes through the frame: the pocket less its lips.
-- **lip**: the frame over a pane's edge, on each face, from the pocket's wall to the opening's edge.
-- **lip before play**: the lip as drawn, from the pocket's wall to the opening's edge.
-- **lip after play**: the lip before play less the play: what still covers the pane's edge once the pane has slid to one side. `capture --min-lip` and its `least_lip_with_play_mm` are after play. A request's lip figure is after play unless it says before.
+- **lip**: the frame over a pane's edge, on each face: how far it covers the pane, from the pane's edge to the opening's edge.
+- **lip before play**: the lip with the pane in the middle of its pocket. `capture`'s `least_lip_mm`.
+- **lip after play**: the lip before play less the play: what still covers the pane's edge once it has slid as far as its play lets it, to the other side. `capture --min-lip` holds this, and it's `capture`'s `least_lip_with_play_mm`. A request's lip figure is after play unless it says before.
 
-With a lip before play of 1.2 mm and play of 0.25 mm, the lip after play is 0.95 mm.
+With play of 0.25 mm and the opening 1.45 mm in from the pocket's wall, the lip before play is 1.2 mm and the lip after play 0.95 mm.
 
 ## The workflow
 
@@ -55,10 +55,10 @@ import shapely
 
 leading = 1.0  # the leading's width between cells, mm
 play = 0.25  # from the request
-lip = 1.2  # lip before play, for this cell
+lip = 1.2  # lip before play, for this cell: the lip after play is lip - play
 pocket = cell.buffer(-leading / 2, join_style="mitre")
 pane = pocket.buffer(-play, join_style="mitre")
-opening = pocket.buffer(-lip, join_style="mitre")
+opening = pane.buffer(-lip, join_style="mitre")
 frame_2d = outline.difference(
     shapely.unary_union([c.buffer(-leading / 2, join_style="mitre") for c in cells])
 )

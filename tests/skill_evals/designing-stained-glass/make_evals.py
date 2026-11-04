@@ -32,7 +32,8 @@ def save(shape: Any, folder: str, name: str) -> None:
 
 
 def cell(frame: Any, x0: float, x1: float, y0: float, y1: float, lip: float, floor: bool) -> Any:
-    """A square pocket, and its opening `lip` in from it on both faces, or only above."""
+    """A square pocket, and its opening `lip` in from the pocket's wall on both faces, or only
+    above. With 0.25 mm of play, the lip before play is `lip` less 0.25, and after play less 0.5."""
     frame = frame.cut(box(x0, x1, y0, y1, *POCKET))
     above = box(x0 + lip, x1 - lip, y0 + lip, y1 - lip, POCKET[1], 4)
     frame = frame.cut(above)
@@ -46,7 +47,8 @@ def pane(x0: float, x1: float, y0: float, y1: float) -> Any:
 
 
 def light() -> None:
-    """Three cells with lips of 1.5 mm. `pane_a` is 225 of 306.25 mm² open, 73.5%. `pane_b` has a
+    """Three cells, each opening 1.5 mm in from its pocket: lips of 1.25 mm before play and 1.0
+    after. `pane_a` is 225 of 306.25 mm² open, 73.5%. `pane_b` has a
     floor under it, 0%. `pane_c` is a small cell, 25 of 56.25 mm², 44.4%: under the request's 50%
     by its lip, not by a floor."""
     frame = box(0, 60, 0, 24, 0, 4)
@@ -58,7 +60,8 @@ def light() -> None:
 
 
 def lip_after_play() -> None:
-    """One cell with a lip of 1.0 mm before play: 0.75 mm after its 0.25 mm of play."""
+    """One cell whose opening is 1.0 mm in from its pocket: a lip of 0.75 mm before play, and
+    0.5 mm after its 0.25 mm of play."""
     save(cell(box(0, 30, 0, 30, 0, 4), 5, 25, 5, 25, 1.0, floor=False), "lip", "frame")
     save(pane(5, 25, 5, 25), "lip", "pane_1")
 

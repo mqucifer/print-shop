@@ -26,9 +26,9 @@
       "files": ["lip/frame.step", "lip/pane_1.step"],
       "baseline": "On `suncatcher-2` the model read a lip before play as the need's figure, which is after it, and lowered `--min-lip` try by try until `capture` passed.",
       "expected_behavior": [
-        "Runs `capture frame.step --pocket-z 2 --clearance 0.25 --pane-thickness 1 --min-lip 1.0` and reads its lip after play as 0.75 mm, under the 1.0 asked.",
-        "Says, in its own words, that the lip is 1.0 mm before play and 0.75 mm after it.",
-        "Widens the lip to at least 1.25 mm before play, rather than changing `--min-lip`.",
+        "Runs `capture frame.step --pocket-z 2 --clearance 0.25 --pane-thickness 1 --min-lip 1.0` and reads its lip after play as 0.5 mm (`least_lip_with_play_mm`), under the 1.0 asked.",
+        "Says, in its own words, that the lip is 0.75 mm before play and 0.5 mm after it.",
+        "Widens the lip to at least 1.25 mm before play (1.0 after), rather than changing `--min-lip`.",
         "Its `pane-hold` need runs `capture` with `--clearance 0.25 --min-lip 1.0`.",
         "No `capture` call uses a `--min-lip` under 1.0."
       ]
