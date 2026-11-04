@@ -85,6 +85,331 @@ NEAREST_SHARE = 0.5
 MATCH_LARGER = 3.0
 #: Files over this many bytes aren't read to match panes.
 MATCH_BYTES = 20_000_000
+#: How far out from a pane's edge the frame beyond its face is looked for, in mm. Past this,
+#: that face has no frame over the pane at all.
+OVER_REACH = 10.0
+#: A hole beyond a pane's face within this of the pocket's wall is as wide as the pocket, in mm:
+#: the band two ways of reading a lip may differ by.
+OVER_BAND = LIP_BAND
+#: The most stretches of a pane's edge one problem names: the rest are in the numbers.
+OVER_SAID = 3
+
+
+@dataclass
+class Over:
+    """What the frame has beyond one face of a pane, at one spot of its edge: what it is, and a
+    figure in mm. `held` is a lip at the limit or over it; `thin` a lip under it, by how far it
+    covers the pane; `inside` frame that starts a way in from the pane's edge; `short`, `pocket`
+    and `wider` a hole that stops short of the pane, is the pocket's own outline, or is wider than
+    it, by how far the frame's edge is out from the pane's; `none` no frame within reach."""
+
+    what: str
+    mm: float
+    #: For a hole, how much wider than the pocket it is, in mm: under 0 is narrower.
+    beyond_wall: float | None = None
+
+
+def _say_over(found: Over, held: float, play: float, side: str) -> str:
+    """One kind of spot, as a reply says it."""
+    if found.what == "thin":
+        return (
+            f"the frame covers it by only {found.mm:g} mm, where {held + play:g} is needed: "
+            f"{held:g} after {play:g} mm of play"
+        )
+    if found.what == "inside":
+        return f"nothing covers its edge: the frame over it starts {found.mm:g} mm in from it"
+    if found.what == "pocket":
+        return (
+            f"the hole is as wide as the pocket, so nothing overhangs the pane on that face: the "
+            f"pocket's cut may run through the {side} face"
+        )
+    if found.what == "wider":
+        return (
+            f"the hole is {found.beyond_wall:g} mm wider than the pocket, so the frame starts "
+            f"{found.mm:g} mm out from the pane's edge"
+        )
+    if found.what == "short":
+        return (
+            f"the hole is {-(found.beyond_wall or 0.0):g} mm narrower than the pocket, and stops "
+            f"{found.mm:g} mm short of the pane's edge"
+        )
+    return f"there's no frame within {OVER_REACH:g} mm of its edge"
+
+
+def _classify(
+    at_edge: bool,
+    lip: float,
+    inside: float | None,
+    out: float | None,
+    wall: float | None,
+    held: float,
+    play: float,
+) -> Over:
+    """One spot of a pane's edge, from what's beyond its face: a lip at its edge (`lip` wide), or
+    frame starting `inside` in from it, or frame `out` from it, against the pocket's wall `wall`
+    out from it. Both methods read their spots into this, so they're judged alike."""
+    if at_edge:
+        return Over("held" if lip - play >= held else "thin", round(lip, 3))
+    if inside is not None:
+        return Over("inside", round(inside, 3))
+    if out is None:
+        return Over("none", OVER_REACH)
+    beyond = out - wall if wall is not None else 0.0
+    what = "pocket" if abs(beyond) <= OVER_BAND else "wider" if beyond > 0 else "short"
+    return Over(what, round(out, 3), round(beyond, 3))
+
+
+def _first_along(starts: np.ndarray, ways: np.ndarray, length: float, shape: Any) -> np.ndarray:
+    """How far along each line from a start, in mm, it first meets a shape: NaN where it doesn't."""
+    ends = starts + ways * length
+    lines = shapely.linestrings(np.stack([starts, ends], axis=1))
+    met = shapely.intersection(lines, shape)
+    far = np.asarray(shapely.distance(shapely.points(starts), met), dtype=float)
+    far[np.asarray(shapely.is_empty(met))] = np.nan
+    return far
+
+
+def _own(pane: Any, points: np.ndarray, ways: np.ndarray, far: np.ndarray) -> np.ndarray:
+    """Whether the frame met `far` in along each line is over that spot of the edge, not another:
+    no nearer the pane's edge anywhere else than here. Across a pane, the far edge's lip is its
+    own, and not frame over this spot."""
+    reached = points + ways * np.nan_to_num(far)[:, None]
+    edge = np.asarray(shapely.distance(shapely.points(reached), pane.boundary), dtype=float)
+    return np.isfinite(far) & (edge >= far - OVER_BAND)
+
+
+def _walk(covered: Any, start: float, stop: float) -> float | None:
+    """Where a reading along a line first changes from what it is at `start`, walking toward
+    `stop` in rays `INWARD_STEP` apart and then halving to `INWARD_FINE`. None if it doesn't."""
+    first = covered(start)
+    way = 1.0 if stop > start else -1.0
+    here = start
+    while (stop - here) * way > 0:
+        further = here + way * min(INWARD_STEP, abs(stop - here))
+        if covered(further) != first:
+            low, high = here, further
+            while abs(high - low) > INWARD_FINE:
+                middle = (low + high) / 2
+                low, high = (middle, high) if covered(middle) == first else (low, middle)
+            return (low + high) / 2
+        here = further
+    return None
+
+
+def _over(
+    up: bool,
+    pane: Any,
+    opening: Any,
+    stack: Stack,
+    built: Any,
+    args: Any,
+    limits: tuple[float, float],
+    surface: float,
+    held: float,
+    rim: tuple[np.ndarray, np.ndarray, list[Ring]],
+) -> dict[str, Any]:
+    """What the frame has beyond one face of a pane, all round its edge, and where.
+
+    The first method: every section beyond the pane's face, as one, read along the line square to
+    the pane's edge at each spot: whether it covers the edge, and by how much; if not, how far in
+    it starts; and if nothing's in, how far out its hole's edge is, against the pocket's wall on
+    the same line. The second: rays straight beyond the face, walked along the same line at the
+    middle of each stretch, with the pocket's wall found by a level ray at the pocket's height.
+    """
+    points, inward, rings = rim
+    play = args.clearance
+    low, high = limits
+    beyond = [
+        (float(h), s)
+        for h, s in zip(stack.heights, stack.sections, strict=True)
+        if (h > surface) == up and h != surface
+    ]
+    found: dict[str, Any] = {
+        "pane_face_z": round(surface, 4),
+        "frame_end_z": round(high if up else low, 4),
+        "heights_read": len(beyond),
+    }
+    if beyond:
+        found["read_from_z"] = round(min(h for h, _ in beyond), 4)
+        found["read_to_z"] = round(max(h for h, _ in beyond), 4)
+    near = pane.buffer(OVER_REACH + play)
+    lid = shapely.union_all([s for _, s in beyond]).intersection(near) if beyond else None
+    count = len(points)
+    reach = float(np.sqrt(pane.area))
+    if lid is None or lid.is_empty:
+        spots = [_classify(False, 0.0, None, None, None, held, play) for _ in range(count)]
+    else:
+        lid = lid.buffer(0)
+        at_edge = shapely.contains_xy(
+            lid, points[:, 0] + inward[:, 0] * BESIDE, points[:, 1] + inward[:, 1] * BESIDE
+        )
+        window = pane.difference(lid)
+        lips = (
+            np.asarray(shapely.distance(shapely.points(points), window), dtype=float)
+            if not window.is_empty
+            else np.full(count, np.inf)
+        )
+        ins = _first_along(points + inward * BESIDE, inward, reach, lid) + BESIDE
+        ins[~_own(pane, points, inward, ins)] = np.nan
+        outs = _first_along(points, -inward, OVER_REACH, lid)
+        walls = _first_along(points, -inward, OVER_REACH, opening.boundary)
+        spots = [
+            _classify(
+                bool(at_edge[k]),
+                float(lips[k]),
+                None if np.isnan(ins[k]) else float(ins[k]),
+                None if np.isnan(outs[k]) else float(outs[k]),
+                None if np.isnan(walls[k]) else float(walls[k]),
+                held,
+                play,
+            )
+            for k in range(count)
+        ]
+    stretches: list[dict[str, Any]] = []
+    for ring, (start, size, step) in enumerate(rings):
+        whats = np.array([spots[start + k].what for k in range(size)])
+        for kind in sorted(set(whats) - {"held"}):
+            for first, length in _runs(whats == kind):
+                index = [start + (first + k) % size for k in range(length)]
+                figures = [spots[i].mm for i in index]
+                walls_by = [
+                    float(b) for i in index if (b := spots[i].beyond_wall) is not None
+                ]
+                # Rays check the spot nearest the stretch's usual figure: a corner's isn't.
+                usual = float(np.median(figures))
+                middle = index[
+                    min(
+                        range(length),
+                        key=lambda k: (abs(figures[k] - usual) > SHARED, abs(k - length // 2)),
+                    )
+                ]
+                stretches.append(
+                    {
+                        "what": kind,
+                        "ring": ring,
+                        "edge_mm": round(length * step, 2),
+                        "whole_ring": length == size,
+                        "from": [round(float(v), 3) for v in points[index[0]]],
+                        "to": [round(float(v), 3) for v in points[index[-1]]],
+                        "middle": [round(float(v), 3) for v in points[middle]],
+                        "middle_mm": spots[middle].mm,
+                        "least_mm": round(min(figures), 3),
+                        "most_mm": round(max(figures), 3),
+                        **(
+                            {"beyond_wall_mm": round(float(np.median(walls_by)), 3)}
+                            if walls_by
+                            else {}
+                        ),
+                        "spots": length,
+                        "_middle": middle,
+                    }
+                )
+    stretches.sort(key=lambda s: -s["edge_mm"])
+    perimeter = sum(size * step for _, size, step in rings)
+    found["edge_mm"] = round(perimeter, 2)
+    found["not_held_mm"] = round(sum(s["edge_mm"] for s in stretches), 2)
+
+    # The second method, at the middle of each stretch of more than one spot.
+    z = args.pocket_z
+    origin_z = surface + INSET if up else surface - INSET
+    ray = np.array([0.0, 0.0, 1.0 if up else -1.0])
+    for stretch in stretches:
+        middle = stretch.pop("_middle")
+        if stretch["spots"] < 2:
+            continue
+        (x, y), way = points[middle], inward[middle]
+
+        def covered(d: float, x: float = x, y: float = y, way: np.ndarray = way) -> bool:
+            at = np.array([x + way[0] * d, y + way[1] * d, origin_z])
+            return bool(hits(built, at, ray, 1e4))
+
+        edge = covered(BESIDE)
+        lip = inside = out = None
+        if edge:
+            lip = _walk(covered, BESIDE, reach) or float("inf")
+        else:
+            inside = _walk(covered, BESIDE, reach)
+            if inside is not None and not _own(
+                pane, points[middle : middle + 1], inward[middle : middle + 1], np.array([inside])
+            )[0]:
+                inside = None
+            if inside is None:
+                out = _walk(covered, 0.0, -OVER_REACH)
+                out = -out if out is not None else None
+        level = hits(built, np.array([x, y, z]), np.array([-way[0], -way[1], 0.0]), OVER_REACH)
+        wall = level[0] if level else None
+        by_rays = _classify(edge, lip or 0.0, inside, out, wall, held, play)
+        stretch["rays"] = {
+            "what": by_rays.what,
+            "mm": by_rays.mm,
+            **({"beyond_wall_mm": by_rays.beyond_wall} if by_rays.beyond_wall is not None else {}),
+        }
+    found["stretches"] = stretches
+    return found
+
+
+def over_differs(over: dict[str, Any]) -> str | None:
+    """Where rays beyond a face read a stretch of its edge otherwise than the sections did."""
+    for stretch in over["stretches"]:
+        rays = stretch.get("rays")
+        if rays is None:
+            continue
+        x, y = stretch["middle"]
+        if rays["what"] != stretch["what"]:
+            return (
+                f"over its edge at {x:g},{y:g}, the sections read {stretch['what']} and rays "
+                f"{rays['what']}"
+            )
+        band = OVER_BAND + 2 * INWARD_FINE
+        if stretch["what"] != "none" and abs(rays["mm"] - stretch["middle_mm"]) > band:
+            return (
+                f"over its edge at {x:g},{y:g}, the sections read {stretch['middle_mm']:g} mm "
+                f"and rays {rays['mm']:g}"
+            )
+    return None
+
+
+def over_says(over: dict[str, Any], up: bool, held: float, play: float) -> str:
+    """What the frame has beyond one face of a pane, and where, as a reply says it."""
+    side, beyond = ("top", "over") if up else ("bottom", "under")
+    end = "top" if up else "bottom"
+    if not over["heights_read"]:
+        return (
+            f"The frame has nothing {'above' if up else 'below'} the pane's "
+            f"{'top' if up else 'floor'} at z={over['pane_face_z']:g}: its {end} is "
+            f"z={over['frame_end_z']:g}, so no frame is {beyond} the pane at all"
+        )
+    said = []
+    # One spot is a lip's falling end, or a corner: it's in the numbers, and not said.
+    sayable = [s for s in over["stretches"] if s["spots"] >= 2]
+    for stretch in sayable[:OVER_SAID]:
+        if stretch["whole_ring"]:
+            where = (
+                f"all round its edge, {stretch['edge_mm']:g} mm"
+                if stretch["ring"] == 0
+                else f"all round its hole {stretch['ring']}, {stretch['edge_mm']:g} mm"
+            )
+        else:
+            (x0, y0), (x1, y1) = stretch["from"], stretch["to"]
+            where = (
+                f"along {stretch['edge_mm']:g} mm of its edge, from {x0:g},{y0:g} "
+                f"to {x1:g},{y1:g}"
+            )
+        spot = Over(stretch["what"], stretch["least_mm"], stretch.get("beyond_wall_mm"))
+        text = _say_over(spot, held, play, side)
+        ranged = stretch["what"] not in ("pocket", "none")
+        if ranged and stretch["most_mm"] - stretch["least_mm"] > SHARED:
+            text += f" (at the least; {stretch['most_mm']:g} at the most)"
+        said.append(f"{where}, {text}")
+    more = len(sayable) - OVER_SAID
+    if not said:
+        said = [f"it covers {over['edge_mm'] - over['not_held_mm']:g} mm of its edge to the limit"]
+    return (
+        f"{beyond.capitalize()} it, the frame read from z={over['pane_face_z']:g} to its {end} "
+        f"at z={over['frame_end_z']:g}: "
+        + "; ".join(said)
+        + (f"; and {more} shorter stretch(es), in the numbers" if more > 0 else "")
+    )
 
 
 @dataclass
@@ -394,6 +719,13 @@ def _face(
     volumes = [_way_out(built, pane, s, z0, z1) for s in shifts]
     row["least_in_path_mm3"] = round(min(volumes), 4)
     row["passes_3d_at_shifts"] = sum(v <= allowed * (z1 - z0) for v in volumes)
+    # Held by less than the limit along most of its edge, or not at all: what the frame has beyond
+    # this face, and where (mqucifer/print-shop#46).
+    short = first["no_lip_mm"] + first["thin_mm"]
+    if row["passes_at_shifts"] or short >= 0.5 * float(pane.boundary.length):
+        row["over"] = _over(
+            up, pane, opening, stack, built, args, limits, surface, held, (points, inward, rings)
+        )
     return row
 
 
@@ -405,8 +737,11 @@ def _face_says(
     args: Any,
     problems: list[str],
     differs: list[str],
+    held: float | None = None,
 ) -> None:
-    """What one face comes to, for the verdict."""
+    """What one face comes to, for the verdict. `held` is the lip after play it's held to, if
+    not `--min-lip`'s."""
+    held = args.min_lip if held is None else held
     if rim_differ:
         differs.append(f"pane {name} {way}: {rim_differ}")
     if (face["passes_at_shifts"] > 0) != (face["passes_3d_at_shifts"] > 0):
@@ -419,21 +754,29 @@ def _face_says(
         differs.append(
             f"pane {name} {way}: its lip is {thick} mm thick by rays, {by_sections} by sections"
         )
+    over = face.get("over")
+    why = ""
+    if over is not None:
+        found = over_differs(over)
+        if found:
+            differs.append(f"pane {name} {way}: {found}")
+        why = ". " + over_says(over, way == "upward", held, args.clearance)
     if face["passes_at_shifts"]:
         problems.append(
             f"pane {name} comes out {way}: it passes the window at {face['passes_at_shifts']} of "
-            f"the {face['shifts_read']} places its play lets it sit"
+            f"the {face['shifts_read']} places its play lets it sit{why}"
         )
         return
     if not face["surrounds"]:
         problems.append(
             f"pane {name} can swing out {way}: what lip there is lies to one side of it, "
-            f"with {face['no_lip_mm']} mm of its edge free"
+            f"with {face['no_lip_mm']} mm of its edge free{why}"
         )
+        why = ""
     if face["thin_mm"] and args.min_visible is None:
         problems.append(
             f"pane {name}'s lip {way} is under {args.min_lip} mm after {args.clearance} mm of play "
-            f"for {face['thin_mm']} mm of its edge, near {face['thin_at']}"
+            f"for {face['thin_mm']} mm of its edge, near {face['thin_at']}{why}"
         )
     if thick is not None and thick < args.layer - 2 * TIE:
         problems.append(
@@ -850,12 +1193,25 @@ def run(args: Any, report: Report) -> None:
             )
             row[key] = face
             found = rim_differs(face, {**face, **face["rays"]}, face["rim_step_mm"])
-            _face_says(label[5:], way, face, found, args, problems, differs)
+            _face_says(label[5:], way, face, found, args, problems, differs, held)
             report.second(
                 f"pane {name} {way} by rays: least lip {face['rays']['least_lip_mm']} mm, "
                 f"{face['rays']['no_lip_mm']} mm of edge with none; as a solid swept out, "
                 f"{face['least_in_path_mm3']} mm³ of the frame in its way at the least"
             )
+            if "over" in face:
+                checked = [s for s in face["over"]["stretches"] if "rays" in s]
+                report.second(
+                    f"pane {name} {way}, beyond its face by rays at the middle of each stretch: "
+                    + (
+                        "; ".join(
+                            f"at {s['middle'][0]:g},{s['middle'][1]:g} {s['rays']['what']} "
+                            f"{s['rays']['mm']:g} mm, by sections {s['what']} {s['middle_mm']:g}"
+                            for s in checked[:OVER_SAID]
+                        )
+                        or "no stretch to walk"
+                    )
+                )
         if args.min_visible is not None:
             _share_says(label, row, pane, cover, built, through, args, report, problems, differs)
         panes.append(row)

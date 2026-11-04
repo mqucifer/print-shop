@@ -8,7 +8,11 @@ from typing import Any
 import numpy as np
 
 sys.path.insert(0, "/opt/bench")
-from bench.capture import rim_differs, rim_reading  # type: ignore[import-not-found]  # noqa: E402
+from bench.capture import (  # type: ignore[import-not-found]  # noqa: E402
+    over_differs,
+    rim_differs,
+    rim_reading,
+)
 
 STEP = 0.25
 COUNT = 160
@@ -45,6 +49,14 @@ taper = np.full(COUNT, 1.9)
 taper[:20] = 0.0
 taper[20:80] = np.linspace(0.05, 1.9, 60)
 ramped, tapered = read(ramp), read(taper)
+
+
+def over(what: str, mm: float, rays_what: str, rays_mm: float) -> Any:
+    """One stretch beyond a pane's face, read by sections and then by rays at its middle."""
+    stretch = {"what": what, "middle": [1.0, 2.0], "middle_mm": mm}
+    return over_differs({"stretches": [{**stretch, "rays": {"what": rays_what, "mm": rays_mm}}]})
+
+
 print(
     json.dumps(
         {
@@ -57,6 +69,9 @@ print(
             "ramp": {"least": ramped["least_lip_mm"], "thin": ramped["thin_mm"]},
             "slant": {"least": slanted["least_lip_mm"], "thin": slanted["thin_mm"]},
             "taper": {"least": tapered["least_lip_mm"], "thin": tapered["thin_mm"]},
+            "over_alike": over("pocket", 0.1, "pocket", 0.098),
+            "over_kind": over("pocket", 0.1, "wider", 2.1),
+            "over_figure": over("wider", 2.1, "wider", 1.6),
         }
     )
 )
