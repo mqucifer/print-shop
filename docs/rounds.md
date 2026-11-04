@@ -23,7 +23,9 @@ It needs the bench's image (`scripts/bench.py build`), and LiteLLM on :4000 with
 
 ## A run
 
-**Intake.** From the request and any reference files, the model reads what it's given and asks what it needs, as an interview. `questions` writes them to a file and the process exits. A person relays them, writes the answers to the file it names, and runs `resume`. `needs` ends intake. Each need says how it's checked, by a bench command and its limit, or by the Sponsor's eye. A quote from the Sponsor is held to their words. Writing and running are open throughout, and nothing gates code on a plan. `needs` with `try: true` reads each bench check against the files as they stand, and settles nothing. Each reading reaches the ledger's `tries`. A need's `source` says where it came from: `request`, `answer` or `note`, each with a quote held to that source's words, so what a person relayed in a note isn't marked `derived`.
+**Intake.** From the request and any reference files, the model reads what it's given and asks what it needs, as an interview. `questions` writes them to a file and the process exits. A person relays them, writes the answers to the file it names, and runs `resume`. Before its needs, it writes down how the job is built with `breakdown` (below). `needs` ends intake. Each need says how it's checked, by a bench command and its limit, or by the Sponsor's eye. A quote from the Sponsor is held to their words. Writing and running are open throughout. `needs` with `try: true` reads each bench check against the files as they stand, and settles nothing, so it needs no breakdown. Each reading reaches the ledger's `tries`. A need's `source` says where it came from: `request`, `answer` or `note`, each with a quote held to that source's words, so what a person relayed in a note isn't marked `derived`.
+
+**The breakdown comes first** (mqucifer/print-shop#36). In all three stained-glass runs the model read the reference for what's in it, not how it's built: on `suncatcher-2` it drew each ring as one loop where short bars cut them, and the frame came apart into three bodies. So `needs` is refused until `breakdown` has named the parts, what holds or connects each to the rest, and what the look rests on. It's held to its shape, not its words: each part named once, each join naming parts that are there, and with more than one part, every part in a join, since a part nothing holds is the one that comes apart. It's general to any part: a bracket's plate, arm and brace, or a lamp's shade and socket ring. It's kept in `breakdowns/n.json`, `breakdown.md` and `work/record/breakdown.md`, and the ledger's `breakdowns`. The model can send it again whenever it finds it wrong, and the plan stop shows the latest.
 
 **Rounds.** The model makes and changes the part, and calls `done` when it believes the needs are met. The harness then runs the script again and each need's check itself, so the model's word and a tool's success don't count:
 - The clean run has a fresh container, over a plain copy of `work/` with no links, nothing a run left, and all geometry outside `references/` taken away.
@@ -34,6 +36,62 @@ It needs the bench's image (`scripts/bench.py build`), and LiteLLM on :4000 with
 - A `part` a clean run didn't leave isn't met, whatever the needs read.
 
 Needs that fail go back in `done`'s reply, with each reading against its limit and the last round's, and the next round starts from what's there: the part, the script and `record/ROUNDS.md`. The conversation carries on, with its reasoning.
+
+## The request's form
+
+A request is free text, as it always was, with up to four headings of its own (`request.py`). Each line under them is one line of the request, `- ` or `1. ` before it or not, and a line that goes on indented is joined to the one above.
+
+| Heading | Its lines | Held how |
+|---|---|---|
+| `## Requirements` | What the part must do, ids `R1`, `R2` | Each is covered by a need that names it in `covers`, or `needs` is refused naming the lines left over, with their words |
+| `## Non-negotiables` | What mustn't change, ids `N1`, `N2` | Each is covered by a need marked `fixed`, whose quote is from that line. A need that covers one is fixed. Where the line holds a figure, the need says in `figure` how it's read, and where something changes it, which: a lip before or after play. The model is told to ask with `questions` where the request doesn't say |
+| `## Kind` | One word, such as `stained-glass` | Read and kept. Its toolset is mqucifer/print-shop#37's |
+| `## Stops` | What's shown before the run goes on, in order, ids `S1`, `S2` | Below. The line `no plan` leaves the plan out |
+
+Coverage is held by ids, as `needs` holds quotes, and nothing is guessed from words: the only reading of a line's words is whether it holds a digit. **A line is covered by an eye need only where no bench command measures it,** and the harness can't know that on its own, so an eye need that covers a line says why in `check.no_bench`, and the person reads it at the plan stop. Where mqucifer/print-shop#37 settles which command measures what, that list can hold it too.
+
+**A request in the old free form still runs.** With no `## Requirements` or `## Non-negotiables`, it has no lines, and nothing is checked for coverage. It still has the plan as its stop, and the breakdown before its needs. A run started before this has no form in its `state.json`, and carries on as it began: no lines, no stops, no breakdown asked for.
+
+The first message lists every line and stop by its id, and the ledger's `request_lines` keeps them. The `needs` table is inserted into by position by older code, so each need's `covers`, `fixed`, `figure` and `no_bench` are a row of `need_marks` instead.
+
+A worked example, of a part that isn't stained glass:
+
+```
+A wall bracket for a small shelf, in PETG. It should look plain and sturdy.
+
+## Requirements
+- It holds a 6 kg shelf without bending.
+- Two screw holes, 4.5 mm across, for the wall.
+- It should look plain, with no sharp corners.
+
+## Non-negotiables
+- The arm is 120 mm long, from the wall to its tip.
+- The plate is at least 4 mm thick, measured
+  after the countersinks are cut.
+
+## Kind
+bracket
+
+## Stops
+- the 2D profile of the arm
+- one bracket printed as a test, before the pair
+```
+
+Its needs cover `R1` to `R3`, `R3` by eye with its `no_bench`. `N1`'s need is `fixed`, quotes "The arm is 120 mm long", and says in `figure` that the length is from the wall face to the tip. `N2`'s is `fixed` too, and its `figure` says the thinnest is read after the countersinks, as the line says. The stops are `plan`, then `S1` and `S2`. `tests/test_intake.py` runs this request, and a lamp's.
+
+### A fixed need
+
+**Its check counts only at its own settings** (mqucifer/print-shop#37, criterion 2). `suncatcher-2` passed `capture` at `--min-lip 0.25` where the request said 1.2. A `bench` call of a fixed need's check with any other argument is answered first, after its exit and before the bench's own verdict, as `NOT THE REQUIREMENT`, with the need's words and its own command, from the first try, pass or fail. Its reading can't pass the need, as `done` runs the need's own command, and a pass at other settings doesn't start the nudge's count again. Its call's `detail` has `not_the_requirement`. A need that isn't fixed says the same, more quietly, after the bench's answer, as before.
+
+**It changes only by the Sponsor,** through `resume --reopen-needs` with a note, `--from sponsor` or `--from "stand-in: <who>"`, or a send-back with `--reopen-needs`, which has both. Any other reopening, such as a note from the people running this, opens the other needs and says the fixed ones stay. A `needs` that drops a fixed need, unmarks it, or changes its check, its quote, its lines or its `figure` is then refused, naming its check as it was. The opening holds for one settling.
+
+## Stops
+
+**A stop the request names is held** (mqucifer/print-shop#38). On `stainedglass-1` the plan was written at call 5 and nobody saw it, on `cup-1` the test of one pane was skipped, and on `suncatcher-2` the 2D layout's `ask` was skipped, and its fault cost a redesign. Each of `## Stops` is shown with `ask`, naming it in `stop`, in order. Until its ask has a pick, `done` and the next stop's ask are refused, and the refusal names the stop that's open. **A stop holds what's handed over, never the work:** writing, running, the bench and any other `ask` stay open throughout, and an ask that isn't the open stop says that it's still open.
+
+**The plan is the first stop,** `plan`, unless `## Stops` says `no plan`. It's asked once the breakdown and the needs are settled, as it shows both: the model's `plan`, in its words, the breakdown, each need with the lines it covers, whether it's fixed and how its figure is read, each line with the needs that cover it, and any figure of a non-negotiable that no fixed need's check carries. That last is said and never refused, since a figure may be one no bench command reads. The plan comes after the needs so the person sees what the work will be checked against, the fixed needs above all: a figure read the wrong way is caught there, before the first round, and `resume --reopen-needs` with the pick reopens them.
+
+**A pick passes the stop. `none` leaves it open:** what was shown wasn't right, so it's shown again before anything's handed over. The model's told which, and the next stop. `state.json` has each stop passed, with its ask, the pick, who made it and at which call. The ledger's `picks.stop` names the stop an ask showed, and the view `stops` gives each stop asked, what it is, at which call, and picked when and by whom.
 
 **The needs are settled once.** They're what the work is checked against, so the model can't change them. `resume --reopen-needs` lets it, when a person decides a need's check is wrong, and so does `--send-back --reopen-needs`: on `cup-1` the model tried to restate its checks after a send-back, was refused, and ran the missing ones as plain checks, so the approval rested on checks that weren't in its needs.
 
@@ -58,7 +116,7 @@ Each of these is in the ledger's `standing` table, by file and its hash, and a r
 - Anyone else is `--by "stand-in: <who>"`, as at a pick. `decisions` holds which, and who.
 - A send-back after approval is by hand, with the same `--send-back`. It becomes automatic only once there are more mechanical checks or agreements ahead of time. The refinement pass is still to come; the delivered result is `review/`, below.
 
-**Stopping for the Sponsor.** Only `ask`, where form is at stake or when the model is stuck, in two calls. It works at any stage, with one variant of the files as they stand, and the answer comes back as a pick and its reason, with any `fix_first` and `--note`. It needs a file to draw: a run with none yet can't show what it has. `ask` names the variants and `render` draws the sheet, which goes to the model and not yet to the Sponsor. It can add close-ups (`close`), cut-throughs (`cuts`: `z=3`, or `x=50,y=20:40` for a pane in its pocket) and each file's colour and label (`looks`). Then `send_ask` sends it with `says`, what the model says the sheet shows: on both real runs it described the design it meant, not what a bench picture showed. A file changed in between is refused, and a new `ask` replaces the drawing. Whatever the question says, the harness reads each settled need's check and `thin` against the sheet's files as they stand, and any that fail go beside the question in `question.md`, with what the bench says it drew and any need swapped since the last stop. On `cup-1` a question said a pane was split where `capture` read one. The process then exits. A person relays it, writes `pick.json`, and runs `resume`. A pick with no reason is refused, since the reason is what's learned from. After `needs`, `questions` is refused.
+**Stopping for the Sponsor.** Only `ask`, where form is at stake, at a stop, or when the model is stuck, in two calls. It works at any stage, with one variant of the files as they stand, and the answer comes back as a pick and its reason, with any `fix_first` and `--note`. **It needs no part file:** `pictures` shows PNG or JPEG files the model made, such as a 2D layout drawn with matplotlib, as they are, and at the plan stop `plan` is its text. A picture is shown to the model first, by the same reading as `read`, and goes in `asks/n/pictures/`, held by its hash as a variant's files are. On `cup-1` the model read its own matplotlib drawing right, and the bench's render wrong, so a plan goes as the model drew it, with no render in between and no container needed for geometry that isn't there yet. With no variants, the pick is `yes` or `none`. `ask` names the variants and `render` draws the sheet, which goes to the model and not yet to the Sponsor. It can add close-ups (`close`), cut-throughs (`cuts`: `z=3`, or `x=50,y=20:40` for a pane in its pocket) and each file's colour and label (`looks`). Then `send_ask` sends it with `says`, what the model says the sheet shows: on both real runs it described the design it meant, not what a bench picture showed. A file changed in between is refused, and a new `ask` replaces the drawing. Whatever the question says, the harness reads each settled need's check and `thin` against the sheet's files as they stand, and any that fail go beside the question in `question.md`, with what the bench says it drew and any need swapped since the last stop. On `cup-1` a question said a pane was split where `capture` read one. The process then exits. A person relays it, writes `pick.json`, and runs `resume`. A pick with no reason is refused, since the reason is what's learned from. After `needs`, `questions` is refused.
 
 **A pick is about the look.** A build fault found at an ask goes in `"fix_first"` in `pick.json`, apart from the pick: it reaches the model as its own message, is `picks.fix_first`, and is an intervention of its own kind. On `cup-1` the Sponsor was asked to answer `none` for one, which mixed two answers. The pick still holds only for the files it saw, so the fix means asking again.
 
@@ -108,6 +166,10 @@ Limits are in `session.Limits`, recorded on the run's row. The model isn't told 
 | `approvals`, `decisions` | Each stop for approval, with its sheet's hash, the part's hashes, the closing words and the delivered folder's groups and files (`review`), and each yes, send-back or close, and who. A close of a run that never stopped for approval has no `approval` |
 | `standing` | Each check the harness ran itself, whatever the needs say: `thin` on each file at `done`, and the needs' checks and `thin` at an ask, each with its file's hash. `unsure` is the bench with no answer to rely on |
 | `need_swaps` | Each need changed or dropped while its check failed on the files, with the old check and the new, both readings, the model's reason, and where it was shown |
+| `request_lines` | The request's lines, stops and kind, by id (`R1`, `N1`, `plan`, `S1`, `kind`) |
+| `breakdowns` | Each breakdown the model wrote, at which call |
+| `need_marks` | Each need's `covers`, `fixed`, `figure` and `no_bench`, by version: apart from `needs`, which older code inserts into by position |
+| `stops` (a view) | Each stop asked, from `picks.stop`: what it is, its ask and call, and the pick, when and by whom |
 
 `picks.seen` holds each variant's files, its test pieces and its sheet, by hash, `picks.said_of_sheet_model_said` what the model said the sheet shows, in its own words, and `picks.fix_first` a fault sent back apart from the pick. `rounds` gains `part_rows`, `closing_model_said` and `judged_files`, what the clean run left by hash.
 
@@ -183,7 +245,8 @@ A run that's `blocked`, stopped, cut off by a limit, or judged not to be going a
 | `views/` | Each picture the model was shown |
 | `state.json`, `needs.json`, `needs/` | Where it stands, and the needs |
 | `questions/n.md`, `n.answers.md` | Each stop at intake |
-| `asks/n/` | `question.md`, `sheet.png`, `variants/`, `test-pieces/` if it showed any, `asked.json` with the looks, the model's words on the sheet and the standing checks, and `pick.json` |
+| `breakdown.md`, `breakdowns/n.json` | The latest breakdown, and each one |
+| `asks/n/` | `question.md`, `sheet.png` if it drew variants, `variants/`, `test-pieces/` and `pictures/` if it showed any, `asked.json` with the stop, the plan, the looks, the model's words on the sheet and the standing checks, and `pick.json` |
 | `rounds/nnn/` | `judged/` (what the clean run left), `readings/` (each need's answer, in text and numbers), `standing/` and `standing.json` (`thin` on each file, and which files take the same space), `run.txt`, `judgement.json`, `diff.patch` |
 | `approvals/n/` | `sheet.png`, `stop.md`, `closing.md` and `review/`, for the person who decides |
 | `review/` | The latest stop's folder to print from: one folder a group, and its README |
@@ -237,6 +300,8 @@ mqucifer/print-shop#19 then took what else it lacked: close-ups, sheets of the p
 ## Tests
 
 `uv run pytest -q tests/test_rounds.py tests/test_records.py tests/test_delivered.py` needs no Docker. `test_records.py` reads back a run made up in its old shape. `uv run pytest -q tests/test_rounds_in_image.py`, under the `bench` mark, has a scripted fake model drive a real run in real containers, with no model call: every tool, every ending, a resume after `ask`, a failing need going back, and a `done` the checks refuse not ending the run. The part is made up in the test, of plain boxes.
+
+`tests/test_intake.py` needs no Docker: the request's form, a bracket's and a lamp's, and one in the old form, the breakdown before the needs, every line covered or the lines left over named, a fixed need's check at other settings from the first try and its change only by the Sponsor, and the stops, the plan first with no part file, `done` and the next stop held, `none` leaving one open, and the record. The in-image tests' requests say `no plan`, as their runs aren't about stops, and each settles its needs after a breakdown.
 
 `tests/test_close.py` needs no Docker: a close after each kind of ending, what the model's told and asked, the refusals, the lock on the command line, the nudge counted by command and file and from a resumed run's earlier calls, and a ledger from before made again with every row kept. `tests/test_lessons.py` needs no Docker: the after-action review on a run put at its stop, each refusal, the reviewer's steps, giving at the start, scoring and retiring, a file of steps, and the command line with no key. `tests/test_lessons_in_image.py`, under `bench`, goes the whole way in real containers: a run met by the harness's checks, approved, its review, the reviewer's step by the command line, and the next run starting with the lesson, using it and scoring it.
 
