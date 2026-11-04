@@ -1586,8 +1586,23 @@ def test_each_panes_rim_is_sized_to_keep_its_visible_share(bench: Any) -> None:
     assert rims[5.5]["visible_pct"] == pytest.approx(60.0, abs=0.1)
     unheld = bench("capture", "rims/unheld.step", *share)
     assert unheld.verdict == "FAIL", unheld.text
-    assert "set this pane's rim to 0.87 mm before play. It has 1.2 mm" in unheld.record["why"]
+    assert "set this pane's rim to 0.869 mm before play. It has 1.2 mm" in unheld.record["why"]
     assert "42.8% of it is visible, where 60% is wanted" in unheld.record["why"]
     assert "remove this pane. Even the smallest rim, 0.55 mm before play" in unheld.record["why"]
     done = host.run(["capture", "rims/held.step", *share[:-2]], bench.work)
     assert done.returncode == 3 and "no default for any of them" in done.stdout + done.stderr
+
+
+def test_the_rim_a_reply_names_passes_when_its_set(bench: Any) -> None:
+    """The figure is the rim needed rounded down to the thousandth: a cell built at it passes, so
+    following the reply ends the loop. At the hundredth, 0.5554 mm was told 0.56, which fails."""
+    share = ("--pocket-z", "2", "--clearance", "0.25", "--pane-thickness", "1",
+             "--full-rim", "1.2", "--least-rim", "0.55", "--min-visible", "60")  # fmt: skip
+    answer = bench("capture", "rims/thousandth.step", *share)
+    assert answer.verdict == "FAIL", answer.text
+    told = [p for p in answer.numbers["panes"] if p["rim"]["has_mm"] > 0.58]
+    held = [p for p in answer.numbers["panes"] if p["rim"]["has_mm"] < 0.58]
+    assert len(told) == len(held) == 1
+    assert held[0]["rim"]["set_mm"] == 0.555 and held[0]["rim"]["visible_pct"] >= 60.0
+    assert "set this pane's rim to 0.555 mm before play. It has 0.6 mm" in answer.record["why"]
+    assert answer.record["why"].count("set this pane's rim") == 1
