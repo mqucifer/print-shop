@@ -763,7 +763,13 @@ def test_a_run_past_its_time_is_stopped_and_says_so(tmp_path: Path) -> None:
 def test_needs_can_be_tried_before_theyre_settled(tmp_path: Path) -> None:
     wrong_name = {
         **SIZE_NEED,
-        "check": {"by": "bench", "command": "info block.step", "number": "nope", "at_most": 1},
+        "check": {
+            "by": "bench",
+            "measures": "size",
+            "command": "info block.step",
+            "number": "nope",
+            "at_most": 1,
+        },
     }
     run, _ = begin(
         tmp_path,
@@ -1050,7 +1056,8 @@ def test_references_are_copied_and_named_at_the_start(tmp_path: Path) -> None:
     first = model.bodies[0]["messages"][1]["content"]
     assert "`references/drawing.txt` (9 bytes)" in first
     assert REQUEST in first
-    assert "`bench`," in first and "`cadquery`," in first
+    assert "`using-the-bench`," in first and "`cadquery`," in first
+    assert "This run's toolset is the core" in first
     assert (run.work / "references" / "drawing.txt").read_text() == "a drawing"
 
 
@@ -1211,7 +1218,13 @@ def test_tokens_and_seconds_split_by_what_a_person_sent_and_by_round(tmp_path: P
 def test_a_try_reaches_the_ledger_with_its_reading(tmp_path: Path) -> None:
     wrong_name = {
         **SIZE_NEED,
-        "check": {"by": "bench", "command": "info block.step", "number": "nope", "at_most": 1},
+        "check": {
+            "by": "bench",
+            "measures": "size",
+            "command": "info block.step",
+            "number": "nope",
+            "at_most": 1,
+        },
     }
     run, _ = begin(
         tmp_path,
@@ -1978,7 +1991,10 @@ def test_a_need_whose_check_fails_isnt_swapped_for_one_that_passes_without_a_rea
     """On `cup-1` `capture` was swapped for `clearance`, and `pause` pointed at a file with no
     pockets, so both passed."""
     run = failing_gap_then_stopped(tmp_path)
-    looser = {**GAP_NEED, "check": {"by": "bench", "command": "clearance block.step tab.step"}}
+    looser = {
+        **GAP_NEED,
+        "check": {"by": "bench", "measures": "fit", "command": "clearance block.step tab.step"},
+    }
     reason = "The gap was chosen too fine for this printer."
     run, _ = again(
         run,
