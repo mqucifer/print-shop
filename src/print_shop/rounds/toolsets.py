@@ -268,9 +268,9 @@ def wrong_with(need: Need, toolset: Toolset) -> list[str]:
     measure = toolset.measure(need.measures)
     if measure is None:
         other = next((t for t in KINDS.values() if t.measure(need.measures)), None)
-        home = f": it's in the {other.title} toolset" if other is not None else ""
+        there = f": it's in the {other.title} toolset" if other is not None else ""
         return [
-            f"{shown}: `{need.measures}` isn't a measure of this run's toolset{home}. Its "
+            f"{shown}: `{need.measures}` isn't a measure of this run's toolset{there}. Its "
             f"measures are: {_listing(toolset)}"
         ]
     if command not in measure.commands:

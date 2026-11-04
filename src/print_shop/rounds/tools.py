@@ -366,6 +366,7 @@ class Desk(Protocol):
     def bench_said(
         self, argv: list[str], ran: Ran, record: dict[str, Any] | None
     ) -> dict[str, Any] | None: ...
+    def standing_said(self) -> str: ...
 
 
 def _trim(text: str) -> str:
@@ -739,6 +740,9 @@ class WorkTools:
         if done.code != 0:
             hinted = self._hint(done.output)
             reply += f"\n\n{hinted}" if hinted else ""
+        # A part file whose last `thin` failed, said until it passes (`unprintable.py`).
+        unprinted = self.desk.standing_said()
+        reply += f"\n\n{unprinted}" if unprinted else ""
         return Judged("run", "ok", reply, detail={"code": done.code, "seconds": done.seconds})
 
     def check_size(self) -> None:

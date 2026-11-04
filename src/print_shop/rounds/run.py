@@ -50,6 +50,7 @@ from print_shop.rounds import (
     skills,
     toolsets,
     transcript,
+    unprintable,
 )
 from print_shop.rounds.box import Box, Gone, Ran
 from print_shop.rounds.judge import SPONSOR, STAND_IN
@@ -121,6 +122,10 @@ class State:
     # is false for a run from before them, which keeps every command it had.
     kind: str | None = None
     toolsets: bool = False
+    # The files the latest `done` named as the part, and the call it was at: a file it left out
+    # has left the part, and a failing `thin` on it isn't said any more.
+    part: list[str] | None = None
+    part_at: int | None = None
 
 
 def repository_version() -> tuple[str, bool]:
@@ -857,6 +862,10 @@ class Run:
         ]
         tries = nudge.streak(earlier, check, wanted)
         failed = nudge.failures(tries)
+        failing = self._thin_failing()
+        if failing:
+            lines.append(unprintable.said(failing))
+            detail["thin_failing"] = [one.file for one in failing]
         if tries and failed >= nudge.AFTER:
             lines.append(nudge.said(check, tries, wanted))
             detail["nudge"] = {
@@ -869,6 +878,44 @@ class Run:
         if not lines:
             return None
         return {"said": "\n\n".join(lines), "detail": detail}
+
+    def _thin_failing(self) -> list[unprintable.Thin]:
+        """Each part file whose last `thin` failed, the model's or the harness's, and hasn't left
+        the part (`unprintable.py`)."""
+        readings: list[tuple[int, int, unprintable.Thin]] = []
+        for row in self.ledger.rows(
+            "SELECT id, at_call, argv, verdict, why FROM bench_calls WHERE run=? ORDER BY id",
+            self.state.name,
+        ):
+            name = unprintable.counted(json.loads(row["argv"]))
+            if name is not None:
+                thin = unprintable.Thin(
+                    int(row["at_call"]), name, str(row["verdict"] or ""), str(row["why"] or "")
+                )
+                readings.append((thin.at_call, 0, thin))
+        for row in self.ledger.rows(
+            "SELECT id, at_call, stop, file, verdict, why FROM standing WHERE run=? "
+            "AND check_name=? ORDER BY id",
+            self.state.name,
+            judge.PRINTABLE,
+        ):
+            thin = unprintable.Thin(
+                int(row["at_call"]),
+                str(row["file"]),
+                str(row["verdict"] or ""),
+                str(row["why"] or ""),
+                str(row["stop"]),
+            )
+            readings.append((thin.at_call, 1, thin))
+        readings.sort(key=lambda r: (r[0], r[1]))
+        present = {str(p) for p in paths.walk_plain(self.work, skip_made=True)}
+        return unprintable.failing(
+            [r[2] for r in readings], present, self.state.part, self.state.part_at
+        )
+
+    def standing_said(self) -> str:
+        """What a `run` reply gains: each part file whose last `thin` failed."""
+        return unprintable.said(self._thin_failing())
 
     def questions(self, args: dict[str, Any]) -> Judged:
         if not self.state.needs_open:
@@ -1103,6 +1150,7 @@ class Run:
         if isinstance(rows, Judged):
             return rows
         part = list(dict.fromkeys(name for row in rows for name in row["files"]))
+        self.state.part, self.state.part_at = part, self.session.requests
         looks = self._looks(args.get("looks"), part, "done")
         if isinstance(looks, Judged):
             return looks
@@ -1656,6 +1704,16 @@ class Run:
                 "you say:"
             )
             lines += [f"- {one.command}: {one.why}" for one in failing]
+        unprinted = self._thin_failing()
+        if unprinted:
+            lines.append(
+                "Part files whose last `thin` failed, which go beside the question too: "
+                + ", ".join(f"`{one.file}` (call {one.at_call})" for one in unprinted)
+            )
+        self.state.draft["thin_failing"] = [
+            {"file": one.file, "at_call": one.at_call, "why": one.why} for one in unprinted
+        ]
+        self.save()
         lines.append("A new `ask` draws a new sheet in place of this one.")
         encoded = base64.b64encode(image).decode()
         return Judged(
@@ -1774,6 +1832,19 @@ class Run:
                 "The harness ran these itself, whatever the needs and the question say.",
                 "",
                 *[f"- `{one['command']}`: {one['why']}" for one in failing],
+                "",
+            ]
+        unprinted = draft.get("thin_failing") or []
+        if unprinted:
+            lines += [
+                "## Part files whose last `thin` failed",
+                "",
+                "Each can't be printed as it stands, whatever the other files do.",
+                "",
+                *[
+                    f"- `{one['file']}`, at call {one['at_call']}: {one['why']}"
+                    for one in unprinted
+                ],
                 "",
             ]
         lines += self._swaps_said()
