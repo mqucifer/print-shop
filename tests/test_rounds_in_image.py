@@ -1406,7 +1406,13 @@ def test_streamed_arguments_are_kept_as_they_arrive_so_a_cut_off_call_can_be_rea
             ),
         ),
     ]
-    sender = send.Sender("the-key", transport=httpx.MockTransport(lambda _: answers.pop(0)))
+    def answer(request: httpx.Request) -> httpx.Response:
+        # `start` reads the alias's effort from the model info first, which says nothing here.
+        if request.url.path.endswith("/model/info"):
+            return httpx.Response(404)
+        return answers.pop(0)
+
+    sender = send.Sender("the-key", transport=httpx.MockTransport(answer))
     run = Run.start(tmp_path, "proof", REQUEST, [], sender, sleep=lambda _: None)
     assert run.drive().name == "blocked"
 

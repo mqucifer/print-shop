@@ -56,7 +56,7 @@ from print_shop.rounds.box import Box, Gone, Ran
 from print_shop.rounds.judge import SPONSOR, STAND_IN
 from print_shop.rounds.ledger import DesignLedger, now
 from print_shop.rounds.needs import GEOMETRY, UNSURE, Need, Reading
-from print_shop.rounds.send import ALIAS
+from print_shop.rounds.send import ALIAS, UNKNOWN
 from print_shop.rounds.session import Ending, Judged, Limits, Session
 from print_shop.rounds.tools import WorkTools, recorded
 
@@ -71,6 +71,9 @@ DECIDED = (APPROVED, CLOSED)
 WAITING = ("questions", "ask", MET)
 #: Who a note is from, unless a person says.
 NOTE_FROM = "the people running this"
+#: Each check's latest tries a conversation started again from the record is given: the rest
+#: are in `record/CHECKS.md`.
+AGAIN_TRIES = 6
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 VARIANT = re.compile(r"[A-Za-z0-9_-]{1,24}")
 #: A failing need's bench text shown in the reply.
@@ -273,6 +276,7 @@ class Run:
         )
         if sleep is not None:
             self.session.sleep = sleep
+        self.tools.at_call = lambda: self.session.requests
 
     # Starting and going on
 
@@ -322,6 +326,11 @@ class Run:
             harness=[f"{commit}{'+changes' if dirty else ''}"],
             form=form.plain(),
         )
+        read = getattr(send, "effort", None)
+        effort, effort_from = (
+            read(alias) if callable(read) else (UNKNOWN, "its sender doesn't read LiteLLM")
+        )
+        run.session._record("effort", alias=alias, effort=effort, said=effort_from)
         run.ledger.run_started(
             name,
             request_sha=run.state.request_sha,
@@ -332,6 +341,8 @@ class Run:
             image_id=host.image_id(),
             alias=alias,
             limits=run.limits.recorded(),
+            reasoning_effort=effort,
+            reasoning_effort_from=effort_from,
         )
         run.ledger.request_read(name, form)
         run._give_lessons()
@@ -347,7 +358,8 @@ class Run:
         """Every lesson about how to build a reviewer kept, into the first message, and a row of
         `run_lessons` for each. `lessons.md` holds them as given, so a conversation started again
         from the record has the same."""
-        kept = lessons.to_give(self.ledger)
+        form = self._form()
+        kept = lessons.to_give(self.ledger, form.kind if form is not None else None)
         if not kept:
             return
         (self.folder / "lessons.md").write_text(lessons.block(kept) + "\n", encoding="utf-8")
@@ -513,6 +525,8 @@ class Run:
         n, first = self._after_action_begun(decision, approval)
         decided = self.ledger.rows("SELECT * FROM decisions WHERE id=?", decision)
         closed = (self.state.ending or {}).get("name") == CLOSED
+        # What this review says to the model, for a new conversation if this one won't fit.
+        opening: list[str] = []
         if first and decided:
             by, note = str(decided[0]["by"]), str(decided[0]["note"] or "")
             if closed:
@@ -527,10 +541,13 @@ class Run:
                 if note:
                     said += f" Their note:\n\n{note}"
                 self._relay(APPROVED, by, note, said)
+            opening.append(said)
         self.tools.only(after_action.TOOLS, after_action.spec())
-        self.session.say(
-            after_action.ask(self.ledger, self.state.name, self.session.requests, closed=closed)
+        asked = after_action.ask(
+            self.ledger, self.state.name, self.session.requests, closed=closed
         )
+        self.session.say(asked)
+        opening.append(asked)
         limits = self.session.limits
         # Its own cap on calls, and none on time: a run cut off by `model_time` is reviewed too.
         self.session.limits = replace(
@@ -540,6 +557,13 @@ class Run:
         )
         try:
             ending = self.session.go()
+            # Near its limit, as `suncatcher-2`'s was after many compactions, the review goes on
+            # in a new conversation from the record, as a run does: the index is from the
+            # ledger, so it has the whole run (mqucifer/print-shop#40).
+            while ending.name == "context_full" and self.state.restarts < self.limits.restarts:
+                self.state.restarts += 1
+                self._from_the_record(opening)
+                ending = self.session.go()
         except KeyboardInterrupt:
             ending = self.session._ended(Ending("stopped", {"by": "signal"}))
         except Gone as gone:
@@ -815,17 +839,23 @@ class Run:
         ending = self._disk_floor_ending()
         return self.session._ended(ending) if ending is not None else None
 
-    def _from_the_record(self) -> None:
-        """A conversation that wouldn't fit even compacted: a new one, from the record."""
+    def _from_the_record(self, after: list[str] | None = None) -> None:
+        """A conversation that wouldn't fit even compacted: a new one, from the record, and then
+        `after`, what was said to it since, as the after-action review's decision and ask."""
         state = f"This is round {self.state.round}." if self.state.round else "This is intake."
         state = f"{state} {self._stops_said()}".strip()
         needs_json = json.dumps([n.plain() for n in self._needs()], indent=1)
         relayed = [f"A note from the people running this:\n\n{n}" for n in self.state.notes]
-        text = prompt.again(self._start_text(), [*self.state.said, *relayed], needs_json, state)
+        checks = nudge.record(self._bench_tries(), self._wanted(), last=AGAIN_TRIES)
+        text = prompt.again(
+            self._start_text(), [*self.state.said, *relayed], needs_json, state, checks
+        )
         self.session.begin(
             {"role": "system", "content": prompt.SYSTEM},
             {"role": "user", "content": text},
         )
+        for said in after or []:
+            self.session.say(said)
 
     def _start_text(self) -> str:
         given = sorted(
@@ -887,13 +917,11 @@ class Run:
             paths.snapshot(self.work),
             ran.seconds,
         )
+        earlier = self._bench_tries()
+        wanted = self._wanted()
+        paths.write_inside(self.work, "record/CHECKS.md", nudge.record(earlier, wanted))
         if ran.code == nudge.USAGE:
             return None
-        wanted = [
-            nudge.Wanted(n.id, n.command, n.argv(), n.fixed, n.quote)
-            for n in self._needs()
-            if n.by == "bench" and n.command
-        ]
         lines: list[str] = []
         detail: dict[str, Any] = {}
         off = nudge.off_need(argv, wanted)
@@ -906,15 +934,6 @@ class Run:
         if lead:
             detail["not_the_requirement"] = [one["need"] for one in off if one.get("fixed")]
         check = nudge.check_of(argv)
-        earlier = [
-            nudge.Try(
-                int(r["at_call"]), json.loads(r["argv"]), int(r["exit"]), r["verdict"], r["why"]
-            )
-            for r in self.ledger.rows(
-                "SELECT at_call, argv, exit, verdict, why FROM bench_calls WHERE run=? ORDER BY id",
-                self.state.name,
-            )
-        ]
         tries = nudge.streak(earlier, check, wanted)
         failed = nudge.failures(tries)
         if tries and failed >= nudge.AFTER:
@@ -954,6 +973,26 @@ class Run:
             "Send it again if you find it's wrong."
         )
         return Judged("breakdown", "ok", reply, detail={"breakdown": n})
+
+    def _wanted(self) -> list[nudge.Wanted]:
+        """The settled needs that run a bench check."""
+        return [
+            nudge.Wanted(n.id, n.command, n.argv(), n.fixed, n.quote)
+            for n in self._needs()
+            if n.by == "bench" and n.command
+        ]
+
+    def _bench_tries(self) -> list[nudge.Try]:
+        """Every bench call of this run, oldest first, as the ledger keeps it."""
+        return [
+            nudge.Try(
+                int(r["at_call"]), json.loads(r["argv"]), int(r["exit"]), r["verdict"], r["why"]
+            )
+            for r in self.ledger.rows(
+                "SELECT at_call, argv, exit, verdict, why FROM bench_calls WHERE run=? ORDER BY id",
+                self.state.name,
+            )
+        ]
 
     def questions(self, args: dict[str, Any]) -> Judged:
         if not self.state.needs_open:
@@ -2181,6 +2220,14 @@ def summarise(folder: Path) -> dict[str, Any]:
         "tool_calls": len(tools),
         "by_tool_and_outcome": dict(sorted(tally.items())),
         "compactions": sum(1 for e in transcript.events_of(events) if e["kind"] == "compacted"),
+        "reasoning_effort": next(
+            (
+                {"effort": e["effort"], "from": e["said"]}
+                for e in transcript.events_of(events)
+                if e["kind"] == "effort"
+            ),
+            {"effort": UNKNOWN, "from": "not recorded: a run from before mqucifer/print-shop#40"},
+        ),
         "call_retries": sum(1 for e in transcript.events_of(events) if e["kind"] == "call_retry"),
     }
     (folder / "summary.json").write_text(json.dumps(found, indent=1) + "\n", encoding="utf-8")

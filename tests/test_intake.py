@@ -612,3 +612,23 @@ def test_a_request_with_no_plan_holds_only_its_own_stops(tmp_path: Path) -> None
 def test_the_prompt_says_the_stops_hold_what_is_handed_over_not_the_work() -> None:
     assert "Writing, running, the bench and any other `ask` stay open throughout" in prompt.SYSTEM
     assert "it needs no part file" in prompt.SYSTEM
+
+
+def test_the_requests_kind_picks_the_lessons_for_that_kind_of_part(tmp_path: Path) -> None:
+    from print_shop.rounds import lessons
+    from tests.test_lessons import BY, lesson
+    from tests.test_loop import written
+
+    ledger, (general, bracket) = written(
+        tmp_path, lesson("Name each height once."), lesson("Fillet the arm's root.")
+    )
+    for n in (general, bracket):
+        lessons.accept(ledger, n, BY)
+    lessons.edit(ledger, bracket, BY, part_kind="bracket", why="only for brackets")
+    for name, text in (("bracket", BRACKET), ("lamp", LAMP)):
+        Run.start(tmp_path, name, text, [], Scripted(), sleep=lambda _: None)
+    given = {
+        name: [r["lesson"] for r in ledger.rows("SELECT lesson FROM run_lessons WHERE run=?", name)]
+        for name in ("bracket", "lamp")
+    }
+    assert given == {"bracket": [general, bracket], "lamp": [general]}

@@ -54,10 +54,11 @@ don't take a tool's success as an answer, including CadQuery's. `bench render` s
 what kind of change this round was, and your closing words to the person who'll look at it. It \
 runs again from a clean start in a fresh container, and the harness runs each need's check itself. \
 Needs that fail come back to you, and you go on from what's there: the part, the script, and \
-`record/ROUNDS.md`, which the harness keeps with every round's readings. Whatever the needs say, \
-every file of the part is read by `bench thin` at the nozzle's width, and files printed together \
-mustn't take the same space: `groups` names the ways it prints, and `looks` each file's colour \
-and label.
+`record/ROUNDS.md`, which the harness keeps with every round's readings. `record/CHECKS.md` \
+holds every bench check you've run, each try with its settings and what the bench said. Whatever \
+the needs say, every file of the part is read by `bench thin` at the nozzle's width, and files \
+printed together mustn't take the same space: `groups` names the ways it prints, and `looks` each \
+file's colour and label.
 - When every need passes, the run stops for approval: a person sees a sheet of the part, your \
 closing words, and the folder to print from, and approves it or sends it back with a note. Passing \
 the checks doesn't mean it's approved.
@@ -100,13 +101,18 @@ def start(
     return f"The Sponsor's request:\n\n{request.strip()}\n\n{files}\n\n{lines}{kept}{skills_line}"
 
 
-def again(start_text: str, said: list[str], needs_json: str, state: str) -> str:
+def again(
+    start_text: str, said: list[str], needs_json: str, state: str, checks: str = ""
+) -> str:
     """A new conversation from the record, when the last one wouldn't fit any more: nothing's
-    lost but its reasoning, as the part, the script and the record are all on the disk."""
+    lost but its reasoning, as the part, the script and the record are all on the disk. Each
+    check's latest tries come with it (`nudge.record`), so it can compare them without reading
+    back what it tried (mqucifer/print-shop#39)."""
     answers = "\n\n".join(said)
+    tried = f"{checks.strip()}\n\n" if checks.strip() else ""
     return (
         f"{start_text}\n\n{answers}\n\nThe needs, as settled:\n{needs_json}\n\n{state}\n\n"
-        "An earlier conversation about this ran out of room, and this one goes on from what's "
-        "there. Your files are as you left them: list and read what you need, starting with "
-        "`record/ROUNDS.md`."
+        f"{tried}An earlier conversation about this ran out of room, and this one goes on from "
+        "what's there. Your files are as you left them: list and read what you need, starting "
+        "with `record/ROUNDS.md` and `record/CHECKS.md`."
     )

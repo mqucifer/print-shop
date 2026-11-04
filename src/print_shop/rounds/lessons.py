@@ -1,4 +1,4 @@
-"""Lessons: what a run taught, checked by a reviewer, and given to the next run at its start.
+"""Lessons: what a run taught, checked by a reviewer, and sent to whoever acts on it.
 
 The first of M18's learn loop in code (mqucifer/print-shop#28, ADR 0010's decision 5 as changed on
 2026-11-02). Before this, the operator wrote lessons in a run's analysis and copied them into the
@@ -8,18 +8,25 @@ checking held until a check got in the way, and then the check was changed. So:
 - **The model writes its run's lessons** at the end, while it still has its context, in its
   after-action review (`after_action.py`). Each is a `candidate`, keyed to the ledger's calls and
   readings, and a person can write one too.
+- **A lesson's kind is its area, one of the five** (mqucifer/print-shop#40, sorted with the Sponsor
+  on 2026-11-03): what goes wrong. **Its routes say who acts on it:** the model, the harness, the
+  request, or the operator and stand-in, each with its own delivery and score (`ROUTES`). The model
+  proposes the routes, and the reviewer confirms or changes them.
 - **A reviewer checks each against the ledger** (the operator, for now): `accept`, `edit` or
-  `reject`, signed `reviewer: <who>`. A lesson about checking is never given as a note: it's
-  accepted only as what it `becomes`, a refusal or a bench check, which is built in the harness.
-- **`start` gives every kept lesson about how to build** to every run, in its first message, under
-  `HEADING`, each saying where it came from, and `run_lessons` has each one given. Matching by part
-  comes with more lessons.
-- **Each run scores what it was given**: used, not used, or got in the way. A lesson used is
-  `held`, one in the way `broken`. One given twice and not used, or that got in the way, is shown
-  to the reviewer to retire.
+  `reject`, signed `reviewer: <who>`. A lesson for the harness is never given as a note: it's
+  accepted only with what it `becomes` there, and built.
+- **Lessons for the model come in layers.** `start` gives the general ones, and those for the
+  request's kind of object, in the first message under `HEADING`, and `run_lessons` has each one
+  given. One folded into a kind's skill is read there instead. Each is keyed to the checks it's
+  about, by command and verdict (`lesson_keys`), for a look-up at the failure, which is the next
+  batch. "We can't just dump everything in context" (the Sponsor, 2026-11-03).
+- **Each route is scored:** the model's by the run's own review, the others by the analysis after
+  they're delivered (`promote`). A lesson's status follows each run's latest score on each route
+  (`settle`): used is `held`, in the way `broken`, and a correction replaces that run's earlier
+  score. Once its fix is built elsewhere and a run shows it holding, its text stops being given.
 
 Every change to a lesson is a row of `lesson_steps`, with who and why, and an edit keeps the words
-it replaced. Looking a lesson up when a reading fails comes later.
+it replaced. Lessons from before the five are sorted once when a ledger opens (`migrate`).
 """
 
 from __future__ import annotations
@@ -29,19 +36,48 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+from print_shop.rounds import nudge
 from print_shop.rounds.judge import SPONSOR, STAND_IN
 from print_shop.rounds.ledger import DesignLedger, now
 
 MODEL = "model"
+HARNESS = "the harness"
 #: Whoever checks lessons signs as this: the operator, for now. It's for lesson steps only, since a
 #: reviewer isn't standing in for the Sponsor's taste, and picks and decisions don't take it.
 REVIEWER = "reviewer:"
-KINDS = {"build": "how to build", "check": "what to check", "context": "context"}
+#: A lesson's kind: the area of what goes wrong, one of the five (mqucifer/print-shop#36 to #40).
+KINDS = {
+    "job": "understanding the job",
+    "verify": "verification",
+    "process": "process control",
+    "memory": "memory within a run",
+    "loop": "the learning loop",
+}
+#: The kinds from before the five, which `migrate` sorts each lesson from once.
+OLD_KINDS = {"build": "how to build", "check": "what to check", "context": "context"}
+#: Who acts on a lesson, and how each route delivers it and scores it (mqucifer/print-shop#40).
+ROUTES = {
+    "model": "the model: text the next run is given, scored by that run's own review",
+    "harness": "the harness: an issue in the next batch, promoted when merged, scored by the "
+    "next analysis",
+    "request": "the request: a line in the request template the operator writes from, scored "
+    "by the analysis",
+    "operator": "the operator and stand-in: a line in the checklist in `docs/rounds.md`, scored "
+    "by the analysis",
+}
 SCORES = {"used": "used", "not_used": "not used", "in_the_way": "got in the way"}
-#: What a lesson about checking becomes, instead of a note.
-BECOMES = ("refusal", "bench_check")
-#: What a lesson became, once promoted.
-BECAME = ("note", "skill", "bench_check", "refusal")
+#: What a lesson for the harness becomes, instead of a note.
+HARNESS_BECOMES = ("refusal", "bench_check", "toolset_check", "stop", "harness")
+#: What a lesson becomes outside the model's text: a request change, or a change in the harness.
+BECOMES = ("request", *HARNESS_BECOMES)
+#: What a lesson became, once delivered on a route, and the route each is on.
+BECAME = {
+    "note": "model",
+    "skill": "model",
+    "request": "request",
+    "checklist": "operator",
+    **dict.fromkeys(HARNESS_BECOMES, "harness"),
+}
 
 CANDIDATE = "candidate"
 ACCEPTED = "accepted"
@@ -54,6 +90,8 @@ PROMOTED = "promoted"
 RETIRED = "retired"
 #: Let through by a reviewer, and still live: given since, perhaps, and scored.
 KEPT = (ACCEPTED, EDITED, GIVEN, HELD, BROKEN)
+#: Statuses a score moves: a lesson given or delivered somewhere.
+SCORED = (GIVEN, HELD, BROKEN, PROMOTED)
 #: How a run's score moves a lesson it was given. Not using it says nothing of whether it holds.
 AFTER_SCORE = {"used": HELD, "in_the_way": BROKEN}
 #: How a lesson reached a run: in its first message, by code.
@@ -64,8 +102,8 @@ UNUSED_TO_RETIRE = 2
 HEADING = "## Lessons from earlier runs"
 ABOUT = (
     "Each of these was learned on an earlier run, written down after it, and kept by a reviewer. "
-    "They're about how to build. Use one where it fits your part, and leave it where it doesn't: "
-    "at the end you'll be asked which you used."
+    "Use one where it fits your part, and leave it where it doesn't: at the end you'll be asked "
+    "which you used."
 )
 
 
@@ -220,6 +258,131 @@ def evidence_lines(ledger: DesignLedger, run: str, held: dict[str, Any]) -> list
     return lines
 
 
+# Routes and keys
+
+
+def routes_of(ledger: DesignLedger, lesson: int) -> dict[str, dict[str, Any]]:
+    """A lesson's routes, each as `lesson_routes` holds it."""
+    found = ledger.rows("SELECT * FROM lesson_routes WHERE lesson=? ORDER BY route", lesson)
+    return {str(r["route"]): dict(r) for r in found}
+
+
+def keys_of(ledger: DesignLedger, lesson: int) -> list[dict[str, str]]:
+    found = ledger.rows(
+        "SELECT command, verdict FROM lesson_keys WHERE lesson=? ORDER BY command, verdict", lesson
+    )
+    return [{"command": str(r["command"]), "verdict": str(r["verdict"])} for r in found]
+
+
+def check_routes(given: Any, lesson: int | str) -> tuple[str, ...]:
+    if (
+        not isinstance(given, list | tuple)
+        or not given
+        or not all(isinstance(r, str) and r in ROUTES for r in given)
+    ):
+        raise Refused(
+            f"lesson {lesson}'s routes are one or more of {', '.join(ROUTES)}: who acts on it"
+        )
+    return tuple(sorted(set(given)))
+
+
+def _set_routes(
+    ledger: DesignLedger, lesson: int, routes: Iterable[str], by: str
+) -> dict[str, Any] | None:
+    """The lesson's routes, as given: a route it keeps keeps what it reached. What it had, if
+    that changed."""
+    had = routes_of(ledger, lesson)
+    wanted = set(routes)
+    if set(had) == wanted:
+        return None
+    for route in set(had) - wanted:
+        ledger.change("DELETE FROM lesson_routes WHERE lesson=? AND route=?", lesson, route)
+    for route in sorted(wanted - set(had)):
+        ledger.insert("lesson_routes", lesson=lesson, route=route, by=by, at=now())
+    return {"routes": sorted(had)}
+
+
+def check_keys(given: Any, lesson: int | str) -> list[dict[str, str]]:
+    if not isinstance(given, list) or not all(
+        isinstance(k, dict)
+        and set(k) <= {"command", "verdict"}
+        and isinstance(k.get("command"), str)
+        and k["command"].strip()
+        and isinstance(k.get("verdict", ""), str)
+        for k in given
+    ):
+        raise Refused(
+            f'lesson {lesson}\'s keys are a list of {{"command": "capture", "verdict": "FAIL"}}: '
+            "the checks it's about"
+        )
+    return [
+        {"command": k["command"].strip().split()[0], "verdict": k.get("verdict", "").strip()}
+        for k in given
+    ]
+
+
+def keys_from(ledger: DesignLedger, run: str, held: dict[str, Any]) -> list[dict[str, str]]:
+    """The failing checks a lesson's evidence shows, by command and verdict, as a look-up at a
+    failure would meet them: each bench answer at its calls that didn't pass (any exit but 0 or
+    3), and each reading it names that failed, by its need's command. Each once."""
+    found: list[dict[str, str]] = []
+    for n in held.get("calls") or []:
+        for b in ledger.rows(
+            "SELECT argv, verdict FROM bench_calls WHERE run=? AND at_call=? AND exit NOT IN "
+            "(0, ?) ORDER BY id",
+            run,
+            n,
+            nudge.USAGE,
+        ):
+            command = nudge.check_of(json.loads(b["argv"]))[0]
+            if command:
+                found.append({"command": command, "verdict": str(b["verdict"] or "")})
+    for reading in held.get("readings") or []:
+        rows = ledger.rows(
+            "SELECT r.verdict, n.command FROM readings AS r JOIN rounds AS o "
+            "ON o.run = r.run AND o.round = r.round JOIN needs AS n ON n.run = r.run "
+            "AND n.version = o.needs_version AND n.need = r.need "
+            "WHERE r.run=? AND r.round=? AND r.need=? AND r.passed=0",
+            run,
+            reading["round"],
+            reading["need"],
+        )
+        for r in rows:
+            if r["command"]:
+                command = nudge.check_of(str(r["command"]).split())[0]
+                found.append({"command": command, "verdict": str(r["verdict"] or "")})
+    return [dict(k) for k in dict.fromkeys(tuple(sorted(k.items())) for k in found)]
+
+
+def _set_keys(ledger: DesignLedger, lesson: int, keys: Iterable[dict[str, str]]) -> None:
+    ledger.change("DELETE FROM lesson_keys WHERE lesson=?", lesson)
+    for key in keys:
+        ledger.add("lesson_keys", lesson=lesson, command=key["command"], verdict=key["verdict"])
+
+
+def _becomes(routes: Iterable[str], becomes: str | None, lesson: int | str) -> str | None:
+    """What a lesson becomes outside the model's text: for the harness, one of
+    `HARNESS_BECOMES`, never a note; for the request alone, `request`; otherwise nothing."""
+    routes = set(routes)
+    if "harness" in routes:
+        if becomes not in HARNESS_BECOMES:
+            raise Refused(
+                f"lesson {lesson} is for the harness, so it's never given as a note: say what it "
+                f"becomes, {', '.join(HARNESS_BECOMES)} (`--becomes`), and build it"
+            )
+        return becomes
+    if "request" in routes:
+        if becomes not in (None, "request"):
+            raise Refused(f"lesson {lesson} is for the request: it becomes `request`")
+        return "request"
+    if becomes is not None:
+        raise Refused(
+            f"only a lesson for the harness or the request becomes something: lesson {lesson} "
+            f"is for {', '.join(sorted(routes))}"
+        )
+    return None
+
+
 # Writing one, and the reviewer's steps
 
 
@@ -232,11 +395,16 @@ def write(
     kind: str,
     text: str,
     held: dict[str, Any],
+    routes: Iterable[str],
     at_call: int | None = None,
+    keys: list[dict[str, str]] | None = None,
+    part_kind: str | None = None,
 ) -> int:
-    """A candidate: nothing reaches a run until a reviewer has let it through."""
+    """A candidate, with the routes its writer proposes: nothing reaches anyone until a reviewer
+    has let it through. Its keys are the checks its evidence shows, unless it names them."""
     if kind not in KINDS:
-        raise Refused(f"a lesson's kind is {', '.join(KINDS)}: not {kind!r}")
+        raise Refused(f"a lesson's kind is its area, {', '.join(KINDS)}: not {kind!r}")
+    proposed = check_routes(list(routes), "new")
     if not fix_shape.strip() or not text.strip():
         raise Refused("a lesson needs its fix's shape and its text")
     if not ledger.rows("SELECT 1 FROM runs WHERE run=?", run):
@@ -254,32 +422,35 @@ def write(
         status=CANDIDATE,
         status_by=written_by,
         status_at=now(),
+        part_kind=(part_kind or "").strip() or None,
     )
-    _step(ledger, lesson, CANDIDATE, written_by, "written", run=run)
+    _set_routes(ledger, lesson, proposed, written_by)
+    _set_keys(ledger, lesson, keys if keys is not None else keys_from(ledger, run, held))
+    _step(ledger, lesson, CANDIDATE, written_by, f"written, for {', '.join(proposed)}", run=run)
     return lesson
 
 
-def accept(ledger: DesignLedger, lesson: int, by: str, becomes: str | None = None) -> None:
-    """Let through. A lesson about checking only as a refusal or a bench check, never a note."""
+def accept(
+    ledger: DesignLedger,
+    lesson: int,
+    by: str,
+    becomes: str | None = None,
+    routes: Iterable[str] | None = None,
+) -> None:
+    """Let through, on the routes proposed or those the reviewer names. A lesson for the harness
+    only as what it becomes there, never a note."""
     by = signed(by)
     found = one(ledger, lesson)
     if found["status"] not in (CANDIDATE, REJECTED):
         raise Refused(f"lesson {lesson} is {found['status']}: only a candidate is accepted")
-    becomes = _becomes(found["kind"], becomes, lesson)
+    proposed = list(routes) if routes is not None else list(routes_of(ledger, lesson))
+    chosen = check_routes(proposed, lesson)
+    becomes = _becomes(chosen, becomes, lesson)
+    was = _set_routes(ledger, lesson, chosen, by)
     ledger.change("UPDATE lessons SET becomes=? WHERE id=?", becomes, lesson)
     _status(ledger, lesson, ACCEPTED, by)
-    _step(ledger, lesson, ACCEPTED, by, f"becomes {becomes}" if becomes else None)
-
-
-def _becomes(kind: str, becomes: str | None, lesson: int) -> str | None:
-    if kind == "check" and becomes not in BECOMES:
-        raise Refused(
-            f"lesson {lesson} is about checking, which is never given as a note: say what it "
-            f"becomes, {' or '.join(BECOMES)} (`--becomes`), and build it in the harness"
-        )
-    if kind != "check" and becomes is not None:
-        raise Refused(f"only a lesson about checking becomes a check: lesson {lesson} is {kind}")
-    return becomes
+    said = f"for {', '.join(chosen)}" + (f", becomes {becomes}" if becomes else "")
+    _step(ledger, lesson, ACCEPTED, by, said, was=_json(was) if was else None)
 
 
 def edit(
@@ -291,31 +462,47 @@ def edit(
     kind: str | None = None,
     fix_shape: str | None = None,
     becomes: str | None = None,
+    routes: Iterable[str] | None = None,
+    keys: list[dict[str, str]] | None = None,
+    part_kind: str | None = None,
     why: str = "",
 ) -> None:
     """The reviewer's own words, kept beside the ones they replace. A candidate edited is let
-    through as edited. A lesson made one about checking says what it becomes."""
+    through as edited. A lesson made one for the harness says what it becomes. `part_kind` "" makes
+    it general."""
     by = signed(by)
     found = one(ledger, lesson)
     if found["status"] in (REJECTED, RETIRED):
         raise Refused(f"lesson {lesson} is {found['status']}")
-    if text is None and kind is None and fix_shape is None:
-        raise Refused("an edit changes the text, the kind or the fix's shape")
+    if all(v is None for v in (text, kind, fix_shape, becomes, routes, keys, part_kind)):
+        raise Refused(
+            "an edit changes the text, the kind, the fix's shape, the routes, what it becomes, "
+            "its keys or its kind of part"
+        )
     if kind is not None and kind not in KINDS:
-        raise Refused(f"a lesson's kind is {', '.join(KINDS)}: not {kind!r}")
-    new_kind = kind or found["kind"]
-    if kind is None and becomes is None:
+        raise Refused(f"a lesson's kind is its area, {', '.join(KINDS)}: not {kind!r}")
+    had = routes_of(ledger, lesson)
+    chosen = check_routes(list(routes), lesson) if routes is not None else tuple(sorted(had))
+    if becomes is None and set(chosen) & {"harness", "request"}:
         becomes = found["becomes"]
-    becomes = _becomes(new_kind, becomes, lesson)
-    was = {k: found[k] for k in ("text", "kind", "fix_shape", "becomes")}
+    becomes = _becomes(chosen, becomes, lesson)
+    new_keys = check_keys(keys, lesson) if keys is not None else None
+    was: dict[str, Any] = {k: found[k] for k in ("text", "kind", "fix_shape", "becomes")}
+    was["part_kind"] = found.get("part_kind")
+    was["keys"] = keys_of(ledger, lesson)
+    was["routes"] = sorted(had)
     ledger.change(
-        "UPDATE lessons SET text=?, kind=?, fix_shape=?, becomes=? WHERE id=?",
+        "UPDATE lessons SET text=?, kind=?, fix_shape=?, becomes=?, part_kind=? WHERE id=?",
         (text or found["text"]).strip(),
-        new_kind,
+        kind or found["kind"],
         (fix_shape or found["fix_shape"]).strip(),
         becomes,
+        (part_kind.strip() or None) if part_kind is not None else found.get("part_kind"),
         lesson,
     )
+    _set_routes(ledger, lesson, chosen, by)
+    if new_keys is not None:
+        _set_keys(ledger, lesson, new_keys)
     if found["status"] in (CANDIDATE, ACCEPTED, EDITED):
         _status(ledger, lesson, EDITED, by)
     _step(ledger, lesson, EDITED, by, why.strip() or None, was=_json(was))
@@ -344,36 +531,60 @@ def retire(ledger: DesignLedger, lesson: int, by: str, why: str) -> None:
 
 
 def promote(ledger: DesignLedger, lesson: int, by: str, became: str, where: str) -> None:
-    """What it became, and where that is (`owner/repo#n`, or a path). A lesson about checking
-    becomes only what it was accepted as becoming, a refusal or a bench check."""
+    """Delivered on a route: what it became, and where that is (`owner/repo#n`, or a path). An
+    issue merged for the harness, a line in the request template or in `docs/rounds.md`'s
+    checklist, a skill or a note. For the harness, only what it was accepted as becoming. Only a
+    score after this says whether it holds there."""
     by = signed(by)
     found = one(ledger, lesson)
-    if found["status"] not in KEPT:
+    if found["status"] not in (*KEPT, PROMOTED):
         raise Refused(f"lesson {lesson} is {found['status']}: only a kept lesson is promoted")
     if became not in BECAME:
         raise Refused(f"a lesson becomes {', '.join(BECAME)}: not {became!r}")
-    if found["kind"] == "check" and became not in BECOMES:
-        raise Refused(f"lesson {lesson} is about checking: it becomes {' or '.join(BECOMES)}")
+    route = BECAME[became]
+    routes = routes_of(ledger, lesson)
+    if route not in routes:
+        raise Refused(
+            f"lesson {lesson} isn't for {route}, which {became} is: it's for "
+            f"{', '.join(routes) or 'no one'}. Change its routes first (`edit --routes`)"
+        )
+    if route == "harness" and became != found["becomes"]:
+        raise Refused(f"lesson {lesson} was accepted as becoming {found['becomes']}, not {became}")
     if not where.strip():
         raise Refused("say where it is now: `owner/repo#n`, or a path")
+    mark = ledger.rows("SELECT MAX(id) AS n FROM lesson_scores WHERE lesson=?", lesson)[0]["n"]
+    ledger.change(
+        "UPDATE lesson_routes SET became=?, became_where=?, delivered_at=?, after_score=? "
+        "WHERE lesson=? AND route=?",
+        became,
+        where.strip(),
+        now(),
+        int(mark or 0),
+        lesson,
+        route,
+    )
     ledger.change(
         "UPDATE lessons SET became=?, became_where=? WHERE id=?", became, where.strip(), lesson
     )
     _status(ledger, lesson, PROMOTED, by)
-    _step(ledger, lesson, PROMOTED, by, f"became {became}: {where.strip()}")
+    _step(ledger, lesson, PROMOTED, by, f"became {became}, for {route}: {where.strip()}")
 
 
 # Giving them to a run, and scoring them
 
 
-def to_give(ledger: DesignLedger) -> list[dict[str, Any]]:
-    """Every kept lesson about how to build, oldest first, and one promoted to a note. A lesson
-    about checking is never among them, whatever its status."""
+def to_give(ledger: DesignLedger, part_kind: str | None = None) -> list[dict[str, Any]]:
+    """What a run's first message holds: each kept lesson for the model whose text is still
+    given, oldest first, if it's general or for this kind of part. One folded into a skill is read
+    there, and one for the harness alone never reaches the model."""
     found = ledger.rows(
-        f"SELECT * FROM lessons WHERE kind='build' AND (status IN ({','.join('?' * len(KEPT))}) "  # noqa: S608
-        "OR (status=? AND became='note')) ORDER BY id",
+        "SELECT lessons.* FROM lessons JOIN lesson_routes AS r ON r.lesson = lessons.id "
+        f"AND r.route = 'model' AND r.ended_at IS NULL WHERE lessons.status IN "  # noqa: S608
+        f"({','.join('?' * len(KEPT))}, ?) AND COALESCE(r.became, '') != 'skill' "
+        "AND (lessons.part_kind IS NULL OR lessons.part_kind = ?) ORDER BY lessons.id",
         *KEPT,
         PROMOTED,
+        part_kind,
     )
     return [dict(r) for r in found]
 
@@ -387,10 +598,18 @@ def writer(written_by: str) -> str:
     return written_by.removeprefix(REVIEWER).removeprefix(STAND_IN).strip()
 
 
+def area(kind: str) -> str:
+    """A lesson's area in words, or its kind from before the five."""
+    return KINDS.get(kind) or OLD_KINDS.get(kind) or kind
+
+
 def line(found: dict[str, Any]) -> str:
-    """One lesson as a run is given it, with where it came from."""
+    """One lesson as a run is given it, with its area and where it came from."""
     who = writer(found["written_by"])
-    return f"- **Lesson {found['id']}**, from `{found['run']}`, written by {who}: {found['text']}"
+    return (
+        f"- **Lesson {found['id']}** ({area(found['kind'])}), from `{found['run']}`, written by "
+        f"{who}: {found['text']}"
+    )
 
 
 def block(given: list[dict[str, Any]]) -> str:
@@ -405,15 +624,15 @@ def give(
     run: str,
     given: Iterable[dict[str, Any]],
     how: str = AT_START,
-    by: str = "the harness",
+    by: str = HARNESS,
     texts: dict[int, str] | None = None,
 ) -> None:
     """A row of `run_lessons` for each, in the words it was given in, and each the first time
-    it's given is `given`. Only `start` gives one by code, and never one about checking: `how`
+    it's given is `given`. Only `start` gives one by code, and only one for the model: `how`
     otherwise records one given by hand before there was code for it."""
     for found in given:
-        if how == AT_START and found["kind"] != "build":
-            raise Refused(f"lesson {found['id']} is {found['kind']}: only how to build is given")
+        if how == AT_START and "model" not in routes_of(ledger, found["id"]):
+            raise Refused(f"lesson {found['id']} isn't for the model: it isn't given as text")
         text = (texts or {}).get(found["id"]) or line(found)
         ledger.add("run_lessons", run=run, lesson=found["id"], given_at=now(), how=how, text=text)
         if found["status"] in (ACCEPTED, EDITED):
@@ -439,13 +658,24 @@ def score(
     by: str,
     why: str | None = None,
     at_call: int | None = None,
+    route: str = "model",
 ) -> None:
-    """Whether a run used a lesson it was given. The latest score moves a kept lesson: used is
-    held, in the way is broken."""
+    """Whether a lesson held on one of its routes in a run: the model's by the run's own review,
+    of a lesson it was given; any other once it was delivered there, by the analysis. The status
+    then follows each run's latest score (`settle`)."""
     if scored not in SCORES:
         raise Refused(f"a score is {', '.join(SCORES)}: not {scored!r}")
-    if not ledger.rows("SELECT 1 FROM run_lessons WHERE run=? AND lesson=?", run, lesson):
-        raise Refused(f"`{run}` wasn't given lesson {lesson}")
+    routes = routes_of(ledger, lesson)
+    if route == "model":
+        # A lesson given as text is scored as such, whatever its routes are now.
+        if not ledger.rows("SELECT 1 FROM run_lessons WHERE run=? AND lesson=?", run, lesson):
+            raise Refused(f"`{run}` wasn't given lesson {lesson}")
+    elif route not in routes:
+        raise Refused(f"lesson {lesson} isn't for {route}: it's for {', '.join(routes) or 'none'}")
+    elif not routes[route]["delivered_at"]:
+        raise Refused(
+            f"lesson {lesson} hasn't reached {route} yet: `promote` it there first, then score it"
+        )
     ledger.insert(
         "lesson_scores",
         run=run,
@@ -456,34 +686,84 @@ def score(
         by=by,
         at_call=at_call,
         at=now(),
+        route=route,
     )
-    found = one(ledger, lesson)
-    moved = AFTER_SCORE.get(scored)
-    if moved and found["status"] in (GIVEN, HELD, BROKEN):
-        _status(ledger, lesson, moved, by)
-        _step(ledger, lesson, moved, by, f"scored {scored}", run=run)
+    settle(ledger, lesson, by)
 
 
-def latest_scores(ledger: DesignLedger, lesson: int) -> dict[str, dict[str, Any]]:
-    """Each run's latest score of a lesson, by run."""
-    found: dict[str, dict[str, Any]] = {}
+def latest_scores(ledger: DesignLedger, lesson: int) -> dict[tuple[str, str], dict[str, Any]]:
+    """Each run's latest score of a lesson on each route, by run and route, oldest first. A
+    score from before routes is the model's."""
+    found: dict[tuple[str, str], dict[str, Any]] = {}
     for row in ledger.rows("SELECT * FROM lesson_scores WHERE lesson=? ORDER BY id", lesson):
-        found[str(row["run"])] = dict(row)
+        key = (str(row["run"]), str(row["route"] or "model"))
+        found.pop(key, None)
+        found[key] = dict(row)
     return found
 
 
+def _since(routes: dict[str, dict[str, Any]]) -> int:
+    """The last score from before a lesson's latest delivery, by id: none counts after it."""
+    marks = [int(r["after_score"] or 0) for r in routes.values() if r["delivered_at"]]
+    return max(marks, default=0)
+
+
+def settle(ledger: DesignLedger, lesson: int, by: str, why: str | None = None) -> str:
+    """A scored lesson's status from each run's latest score on each route: the newest that says
+    anything, used as `held` and in the way as `broken`. A correction replaces that run's score,
+    so a lesson whose only score became `not_used` is back to `given`, or `promoted`. A score from
+    before its latest delivery says nothing of the fix delivered. Once a lesson built elsewhere
+    holds, its text stops being given to the model. Each change is a step."""
+    found = one(ledger, lesson)
+    if found["status"] not in SCORED:
+        return str(found["status"])
+    routes = routes_of(ledger, lesson)
+    since = _since(routes)
+    base = PROMOTED if found["became"] else GIVEN
+    counted = [row for row in latest_scores(ledger, lesson).values() if int(row["id"]) > since]
+    if not counted:
+        return str(found["status"])
+    moved, said, deciding = base, "no score since says whether it holds", None
+    for row in counted:
+        if row["score"] in AFTER_SCORE:
+            moved, deciding = AFTER_SCORE[row["score"]], row
+            said = f"scored {row['score']} on {row['route'] or 'model'}, on {row['run']}"
+    if moved != found["status"]:
+        _status(ledger, lesson, moved, by)
+        _step(ledger, lesson, moved, by, why or f"each run's latest score: {said}")
+    model = routes.get("model")
+    built = {
+        str(r["became"])
+        for r in routes.values()
+        if r["delivered_at"] and r["became"] in (*HARNESS_BECOMES, "skill")
+    }
+    if moved == HELD and deciding is not None and model and not model["ended_at"] and built:
+        ended = f"its fix is built ({', '.join(sorted(built))}) and {said}"
+        ledger.change(
+            "UPDATE lesson_routes SET ended_at=?, ended_why=? WHERE lesson=? AND route='model'",
+            now(),
+            ended,
+            lesson,
+        )
+        _step(ledger, lesson, moved, by, f"its text stops being given: {ended}")
+    return moved
+
+
 def to_retire(ledger: DesignLedger) -> list[tuple[dict[str, Any], str]]:
-    """Each live lesson given twice and not used, or that got in the way, and why."""
+    """Each live lesson given twice and not used, or that got in the way, and why: by each run's
+    latest score on each route since its latest delivery."""
     shown: list[tuple[dict[str, Any], str]] = []
     for row in ledger.rows(
-        f"SELECT * FROM lessons WHERE status IN ({','.join('?' * len(KEPT))}) "  # noqa: S608
-        "OR (status=? AND became='note') ORDER BY id",
-        *KEPT,
-        PROMOTED,
+        f"SELECT * FROM lessons WHERE status IN ({','.join('?' * len(SCORED))}) "  # noqa: S608
+        "OR status IN (?, ?) ORDER BY id",
+        *SCORED,
+        ACCEPTED,
+        EDITED,
     ):
-        scores = latest_scores(ledger, int(row["id"]))
-        in_the_way = sorted(r for r, s in scores.items() if s["score"] == "in_the_way")
-        unused = sorted(r for r, s in scores.items() if s["score"] == "not_used")
+        since = _since(routes_of(ledger, int(row["id"])))
+        scores = [s for s in latest_scores(ledger, int(row["id"])).values() if s["id"] > since]
+        in_the_way = sorted({str(s["run"]) for s in scores if s["score"] == "in_the_way"})
+        unused = sorted({str(s["run"]) for s in scores if s["score"] == "not_used"})
         if in_the_way:
             shown.append((dict(row), f"got in the way on {', '.join(in_the_way)}"))
         elif len(unused) >= UNUSED_TO_RETIRE:
@@ -494,10 +774,43 @@ def to_retire(ledger: DesignLedger) -> list[tuple[dict[str, Any], str]]:
 # What the reviewer reads
 
 
+def _routes_said(ledger: DesignLedger, lesson: int) -> str:
+    said = []
+    for route, r in routes_of(ledger, lesson).items():
+        if r["ended_at"]:
+            said.append(f"{route} (its text stopped: {r['ended_why']})")
+        elif r["delivered_at"]:
+            said.append(f"{route} ({r['became']}: {r['became_where']})")
+        else:
+            said.append(route)
+    return ", ".join(said) or "none"
+
+
+def _keys_said(ledger: DesignLedger, lesson: int) -> str:
+    keys = keys_of(ledger, lesson)
+    return ", ".join(f"`{k['command']}` {k['verdict'] or 'any'}" for k in keys) or "none"
+
+
+def waiting(ledger: DesignLedger) -> list[tuple[dict[str, Any], str]]:
+    """Each kept lesson for a route that hasn't reached it: the harness's issue to file, the
+    request template's line or the checklist's to write. The model's are given at `start`."""
+    found: list[tuple[dict[str, Any], str]] = []
+    for row in ledger.rows(
+        f"SELECT * FROM lessons WHERE status IN ({','.join('?' * len(KEPT))}) "  # noqa: S608
+        "OR status=? ORDER BY id",
+        *KEPT,
+        PROMOTED,
+    ):
+        for route, r in routes_of(ledger, int(row["id"])).items():
+            if route != "model" and not r["delivered_at"]:
+                found.append((dict(row), route))
+    return found
+
+
 def listing(ledger: DesignLedger, run: str | None = None) -> str:
     """With a run: the lessons it wrote, each with its evidence as the ledger has it, and the
-    lessons it was given with their scores. With none: every lesson in a line. Either way, any
-    to retire."""
+    lessons it was given with their scores. With none: every lesson in a line. Either way, what
+    waits to reach its route, and any to retire."""
     lines: list[str] = []
     if run is not None:
         if not ledger.rows("SELECT 1 FROM runs WHERE run=?", run):
@@ -507,11 +820,20 @@ def listing(ledger: DesignLedger, run: str | None = None) -> str:
         lines += ["# Every lesson", ""]
         for row in ledger.rows("SELECT * FROM lessons ORDER BY id"):
             lines.append(
-                f"- {row['id']}. [{row['status']}] {KINDS[row['kind']]}, from `{row['run']}`: "
-                f"{row['text'][:160]}"
+                f"- {row['id']}. [{row['status']}] {area(row['kind'])}, for "
+                f"{_routes_said(ledger, int(row['id']))}, from `{row['run']}`: {row['text'][:160]}"
             )
         if len(lines) == 2:
             lines.append("None yet.")
+        lines.append("")
+    pending = waiting(ledger)
+    if pending:
+        lines += ["## Waiting to reach their route, for the operator", ""]
+        lines += [
+            f"- Lesson {row['id']}, for {route}: {ROUTES[route].split(': ', 1)[1]}. Once it's "
+            f"there, `promote {row['id']} --as {_as_for(route, row)} --where ...`"
+            for row, route in pending
+        ]
         lines.append("")
     retiring = to_retire(ledger)
     if retiring:
@@ -519,6 +841,12 @@ def listing(ledger: DesignLedger, run: str | None = None) -> str:
         lines += [f"- Lesson {row['id']}: {why}. `retire {row['id']}`" for row, why in retiring]
         lines.append("")
     return "\n".join(lines)
+
+
+def _as_for(route: str, row: dict[str, Any]) -> str:
+    if route == "harness":
+        return str(row["becomes"] or "|".join(HARNESS_BECOMES))
+    return {"request": "request", "operator": "checklist"}.get(route, "note|skill")
 
 
 def _run_listing(ledger: DesignLedger, run: str) -> list[str]:
@@ -544,11 +872,15 @@ def _run_listing(ledger: DesignLedger, run: str) -> list[str]:
     if not written:
         lines += ["It has written none.", ""]
     for row in written:
+        n = int(row["id"])
         becomes = f", becomes {row['becomes']}" if row["becomes"] else ""
+        part = f", for {row['part_kind']} parts" if row["part_kind"] else ", general"
         lines += [
-            f"## Lesson {row['id']}: {row['status']}",
+            f"## Lesson {n}: {row['status']}",
             "",
-            f"- **Kind:** {KINDS[row['kind']]}{becomes}",
+            f"- **Kind:** {area(row['kind'])}{part}{becomes}",
+            f"- **For:** {_routes_said(ledger, n)}",
+            f"- **Keyed to:** {_keys_said(ledger, n)}",
             f"- **The fix's shape, in its writer's words:** {row['fix_shape']}",
             f"- **Written by** {row['written_by']}"
             + (f", at call {row['at_call']}" if row["at_call"] else ""),
@@ -573,6 +905,16 @@ def _run_listing(ledger: DesignLedger, run: str) -> list[str]:
                 f"- Lesson {g['lesson']} ({g['how']}, now {g['status']}): {said or 'not scored'}"
             )
         lines.append("")
+    scored = ledger.rows(
+        "SELECT * FROM lesson_scores WHERE run=? AND COALESCE(route, 'model') != 'model' "
+        "ORDER BY id",
+        run,
+    )
+    if scored:
+        lines += ["## Scored by the analysis", ""]
+        for r in scored:
+            lines.append(f"- Lesson {r['lesson']}, on {r['route']}: {_score_said(dict(r))}")
+        lines.append("")
     return lines
 
 
@@ -588,12 +930,14 @@ def _score_said(found: dict[str, Any]) -> str:
 
 def load(ledger: DesignLedger, path: Path, by: str) -> dict[str, int]:
     """A reviewer's steps from a JSON file, in order, by the same rules as at the command line:
-    `{"steps": [{"do": "write", "key": "a", "run": ..., "fix_shape": ..., "kind": ..., "text":
-    ..., "calls": [...], "readings": [...]}, {"do": "accept", "lesson": "a", "becomes": ...},
-    {"do": "give", "lesson": "a", "run": ..., "how": ..., "text": ...}, {"do": "score", ...},
-    {"do": "edit" | "reject" | "retire" | "promote", ...}]}`. A lesson is named by its `key` in
-    the file. It's all checked before anything is written, and refused whole if a lesson's text
-    is already in the ledger for its run, so it can't be loaded twice."""
+    `{"steps": [{"do": "write", "key": "a", "run": ..., "fix_shape": ..., "kind": ..., "routes":
+    [...], "text": ..., "calls": [...], "readings": [...], "keys": [...], "part_kind": ...},
+    {"do": "accept", "lesson": "a", "becomes": ..., "routes": [...]}, {"do": "give", "lesson":
+    "a", "run": ..., "how": ..., "text": ...}, {"do": "score", ..., "route": ...}, {"do": "edit" |
+    "reject" | "retire" | "promote", ...}]}`. A lesson is named by its `key` in the file, or by
+    its number if it's in the ledger already. It's all checked before anything is written, and
+    refused whole if a lesson's text is already in the ledger for its run, so it can't be loaded
+    twice."""
     by = signed(by)
     try:
         steps = json.loads(path.read_text(encoding="utf-8"))["steps"]
@@ -615,11 +959,15 @@ def load(ledger: DesignLedger, path: Path, by: str) -> dict[str, int]:
                 kind=step["kind"],
                 text=step["text"],
                 held=held,
+                routes=step["routes"],
+                keys=check_keys(step["keys"], step["key"]) if "keys" in step else None,
+                part_kind=step.get("part_kind"),
             )
             continue
-        lesson = ids[step["lesson"]]
+        named = step["lesson"]
+        lesson = named if isinstance(named, int) else ids[named]
         if do == "accept":
-            accept(ledger, lesson, by, step.get("becomes"))
+            accept(ledger, lesson, by, step.get("becomes"), step.get("routes"))
         elif do == "edit":
             edit(
                 ledger,
@@ -629,6 +977,9 @@ def load(ledger: DesignLedger, path: Path, by: str) -> dict[str, int]:
                 kind=step.get("kind"),
                 fix_shape=step.get("fix_shape"),
                 becomes=step.get("becomes"),
+                routes=step.get("routes"),
+                keys=step.get("keys"),
+                part_kind=step.get("part_kind"),
                 why=step.get("why", ""),
             )
         elif do == "reject":
@@ -638,7 +989,16 @@ def load(ledger: DesignLedger, path: Path, by: str) -> dict[str, int]:
             give(ledger, step["run"], [found], step["how"], by, {lesson: step["text"]})
         elif do == "score":
             held, _ = evidence(ledger, step["run"], step.get("calls") or [], at_least_one=False)
-            score(ledger, step["run"], lesson, step["score"], held, by, step.get("why"))
+            score(
+                ledger,
+                step["run"],
+                lesson,
+                step["score"],
+                held,
+                by,
+                step.get("why"),
+                route=step.get("route", "model"),
+            )
         elif do == "retire":
             retire(ledger, lesson, by, step["why"])
         elif do == "promote":
@@ -647,15 +1007,27 @@ def load(ledger: DesignLedger, path: Path, by: str) -> dict[str, int]:
 
 
 STEP_KEYS = {
-    "write": ({"key", "run", "fix_shape", "kind", "text", "calls"}, {"readings"}),
-    "accept": ({"lesson"}, {"becomes"}),
-    "edit": ({"lesson"}, {"text", "kind", "fix_shape", "becomes", "why"}),
+    "write": (
+        {"key", "run", "fix_shape", "kind", "routes", "text", "calls"},
+        {"readings", "keys", "part_kind"},
+    ),
+    "accept": ({"lesson"}, {"becomes", "routes"}),
+    "edit": (
+        {"lesson"},
+        {"text", "kind", "fix_shape", "becomes", "routes", "keys", "part_kind", "why"},
+    ),
     "reject": ({"lesson", "why"}, set()),
     "give": ({"lesson", "run", "how", "text"}, set()),
-    "score": ({"lesson", "run", "score"}, {"calls", "why"}),
+    "score": ({"lesson", "run", "score"}, {"calls", "why", "route"}),
     "retire": ({"lesson", "why"}, set()),
     "promote": ({"lesson", "as", "where"}, set()),
 }
+
+
+def _named(ledger: DesignLedger, lesson: Any, keys: set[str]) -> bool:
+    if isinstance(lesson, int) and not isinstance(lesson, bool):
+        return bool(ledger.rows("SELECT 1 FROM lessons WHERE id=?", lesson))
+    return lesson in keys
 
 
 def _check_file(ledger: DesignLedger, steps: Any) -> list[str]:
@@ -686,6 +1058,11 @@ def _check_file(ledger: DesignLedger, steps: Any) -> list[str]:
                 continue
             if step["kind"] not in KINDS:
                 wrong.append(f"step {i}: a kind is {', '.join(KINDS)}")
+            try:
+                check_routes(step["routes"], step["key"])
+                check_keys(step.get("keys", []), step["key"])
+            except Refused as refused:
+                wrong.append(f"step {i}: {refused}")
             if not str(step["fix_shape"]).strip() or not str(step["text"]).strip():
                 wrong.append(f"step {i}: it needs its fix's shape and its text")
             _, bad = evidence(ledger, step["run"], step["calls"], step.get("readings"))
@@ -694,8 +1071,11 @@ def _check_file(ledger: DesignLedger, steps: Any) -> list[str]:
                 "SELECT id FROM lessons WHERE run=? AND text=?", step["run"], step["text"].strip()
             ):
                 wrong.append(f"step {i}: `{step['key']}` is in the ledger already")
-        elif step["lesson"] not in keys:
-            wrong.append(f"step {i}: `{step['lesson']}` isn't a lesson written above it")
+        elif not _named(ledger, step["lesson"], keys):
+            wrong.append(
+                f"step {i}: `{step['lesson']}` isn't a lesson written above it, or one in the "
+                "ledger by its number"
+            )
         elif "run" in step:
             if not ledger.rows("SELECT 1 FROM runs WHERE run=?", step["run"]):
                 wrong.append(f"step {i}: `{step['run']}` isn't in this ledger")
@@ -703,3 +1083,105 @@ def _check_file(ledger: DesignLedger, steps: Any) -> list[str]:
                 _, bad = evidence(ledger, step["run"], step.get("calls") or [], at_least_one=False)
                 wrong += [f"step {i}: {w}" for w in bad]
     return wrong
+
+
+# Lessons from before the five areas, sorted once
+
+
+#: The real ledger's 24 lessons from before the five areas, by their run, number and old kind:
+#: each one's area, the builder's sort for the reviewer to check, and its routes as settled with
+#: the Sponsor on 2026-11-03 (mqucifer/print-shop#40): build lessons to the model, check lessons to
+#: the harness, 10 to the request and the operator, 13 to the operator and the model, and 14 and
+#: 19 to the model. A lesson that isn't one of these is sorted by its old kind (`BY_OLD_KIND`).
+SORTED: dict[tuple[str, int, str], tuple[str, tuple[str, ...]]] = {
+    ("stainedglass-1", 1, "build"): ("process", ("model",)),
+    ("stainedglass-1", 2, "build"): ("memory", ("model",)),
+    ("stainedglass-1", 3, "check"): ("verify", ("harness",)),
+    ("stainedglass-1", 4, "check"): ("verify", ("harness",)),
+    ("stainedglass-1", 5, "check"): ("verify", ("harness",)),
+    ("stainedglass-1", 6, "check"): ("verify", ("harness",)),
+    ("stainedglass-1", 7, "build"): ("process", ("model",)),
+    ("stainedglass-1", 8, "check"): ("verify", ("harness",)),
+    ("stainedglass-1", 9, "build"): ("job", ("model",)),
+    ("stainedglass-1", 10, "context"): ("job", ("operator", "request")),
+    ("stainedglass-1", 11, "build"): ("verify", ("model",)),
+    ("cup-1", 12, "check"): ("verify", ("harness",)),
+    ("cup-1", 13, "context"): ("verify", ("model", "operator")),
+    ("suncatcher-2", 14, "context"): ("job", ("model",)),
+    ("suncatcher-2", 15, "check"): ("process", ("harness",)),
+    ("suncatcher-2", 16, "check"): ("verify", ("harness",)),
+    ("suncatcher-2", 17, "build"): ("job", ("model",)),
+    ("suncatcher-2", 18, "check"): ("verify", ("harness",)),
+    ("suncatcher-2", 19, "context"): ("process", ("model",)),
+    ("suncatcher-2", 20, "build"): ("job", ("model",)),
+    ("suncatcher-2", 21, "check"): ("process", ("harness",)),
+    ("suncatcher-2", 22, "check"): ("verify", ("harness",)),
+    ("suncatcher-2", 23, "build"): ("memory", ("model",)),
+    ("suncatcher-2", 24, "check"): ("verify", ("harness",)),
+}
+#: Any other lesson from before: its area and routes by its old kind, as the Sponsor settled the
+#: routes, and a context lesson to the operator, who reads every one.
+BY_OLD_KIND: dict[str, tuple[str, tuple[str, ...]]] = {
+    "build": ("job", ("model",)),
+    "check": ("verify", ("harness",)),
+    "context": ("job", ("operator",)),
+}
+
+
+def migrate(ledger: DesignLedger) -> list[int]:
+    """Each lesson from before the five areas, sorted once, in place, with a step saying what it
+    was: its area, its routes, what it becomes, its keys from its evidence, and a lesson already
+    promoted as delivered on its route. Then, the first time, every lesson's status from each
+    run's latest score, each change a step (lesson 7's corrected score left it `broken`). Every
+    row is kept, and it's done again only for a lesson older code writes later."""
+    old = ledger.rows(
+        f"SELECT * FROM lessons WHERE kind IN ({','.join('?' * len(OLD_KINDS))}) "  # noqa: S608
+        "ORDER BY id",
+        *OLD_KINDS,
+    )
+    first = not ledger.rows("SELECT 1 FROM lesson_routes LIMIT 1")
+    for row in old:
+        lesson, kind = int(row["id"]), str(row["kind"])
+        area_, routes = SORTED.get((str(row["run"]), lesson, kind)) or BY_OLD_KIND[kind]
+        becomes = row["becomes"]
+        if "harness" not in routes:
+            becomes = "request" if "request" in routes else None
+        ledger.change("UPDATE lessons SET kind=?, becomes=? WHERE id=?", area_, becomes, lesson)
+        _set_routes(ledger, lesson, routes, HARNESS)
+        if not keys_of(ledger, lesson):
+            held = json.loads(row["evidence"])
+            _set_keys(ledger, lesson, keys_from(ledger, str(row["run"]), held))
+        if row["became"] and row["became"] in BECAME and BECAME[row["became"]] in routes:
+            mark = ledger.rows(
+                "SELECT MAX(id) AS n FROM lesson_scores WHERE lesson=?", lesson
+            )[0]["n"]
+            ledger.change(
+                "UPDATE lesson_routes SET became=?, became_where=?, delivered_at=?, "
+                "after_score=? WHERE lesson=? AND route=?",
+                row["became"],
+                row["became_where"],
+                row["status_at"] or now(),
+                int(mark or 0),
+                lesson,
+                BECAME[row["became"]],
+            )
+        was = {"kind": kind, "becomes": row["becomes"]}
+        _step(
+            ledger,
+            lesson,
+            str(row["status"]),
+            HARNESS,
+            f"sorted into the five areas (mqucifer/print-shop#40): {area_}, for "
+            f"{', '.join(routes)}" + (f", becomes {becomes}" if becomes else ""),
+            was=_json(was),
+        )
+    if old and first:
+        for row in ledger.rows("SELECT id FROM lessons ORDER BY id"):
+            settle(
+                ledger,
+                int(row["id"]),
+                HARNESS,
+                "put right once (mqucifer/print-shop#40): its status follows each run's latest "
+                "score",
+            )
+    return [int(r["id"]) for r in old]
