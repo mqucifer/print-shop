@@ -48,6 +48,8 @@ A request is free text, as it always was, with up to four headings of its own (`
 | `## Kind` | One word, such as `stained-glass` | Read and kept, and `start` gives the lessons for that kind of part (`lessons.part_kind`) with the general ones, and loads its toolset: its bench commands, measures and skill (below). A kind with no toolset of its own has the core |
 | `## Stops` | What's shown before the run goes on, in order, ids `S1`, `S2` | Below. The line `no plan` leaves the plan out |
 
+**A request's pictures and reference files go in at `start`** (`--reference`), with the request, so the plan is written from them.
+
 Coverage is held by ids, as `needs` holds quotes, and nothing is guessed from words: the only reading of a line's words is whether it holds a digit. **A line is covered by an eye need only where no bench command measures it,** and the harness can't know that on its own, so an eye need that covers a line says why in `check.no_bench`, and the person reads it at the plan stop. Where mqucifer/print-shop#37 settles which command measures what, that list can hold it too.
 
 **A request in the old free form still runs.** With no `## Requirements` or `## Non-negotiables`, it has no lines, and nothing is checked for coverage. It still has the plan as its stop, and the breakdown before its needs. A run started before this has no form in its `state.json`, and carries on as it began: no lines, no stops, no breakdown asked for.
