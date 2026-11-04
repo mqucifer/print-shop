@@ -45,7 +45,7 @@ A request is free text, as it always was, with up to four headings of its own (`
 |---|---|---|
 | `## Requirements` | What the part must do, ids `R1`, `R2` | Each is covered by a need that names it in `covers`, or `needs` is refused naming the lines left over, with their words |
 | `## Non-negotiables` | What mustn't change, ids `N1`, `N2` | Each is covered by a need marked `fixed`, whose quote is from that line. A need that covers one is fixed. Where the line holds a figure, the need says in `figure` how it's read, and where something changes it, which: a lip before or after play. The model is told to ask with `questions` where the request doesn't say |
-| `## Kind` | One word, such as `stained-glass` | Read and kept, and `start` gives the lessons for that kind of part (`lessons.part_kind`) with the general ones. Its toolset is mqucifer/print-shop#37's |
+| `## Kind` | One word, such as `stained-glass` | Read and kept, and `start` gives the lessons for that kind of part (`lessons.part_kind`) with the general ones, and loads its toolset: its bench commands, measures and skill (below). A kind with no toolset of its own has the core |
 | `## Stops` | What's shown before the run goes on, in order, ids `S1`, `S2` | Below. The line `no plan` leaves the plan out |
 
 Coverage is held by ids, as `needs` holds quotes, and nothing is guessed from words: the only reading of a line's words is whether it holds a digit. **A line is covered by an eye need only where no bench command measures it,** and the harness can't know that on its own, so an eye need that covers a line says why in `check.no_bench`, and the person reads it at the plan stop. Where mqucifer/print-shop#37 settles which command measures what, that list can hold it too.
@@ -158,7 +158,7 @@ Limits are in `session.Limits`, recorded on the run's row. The model isn't told 
 
 The Sponsor, 2026-11-03: "id be concerned with adding things like light-path commands unles its just a tool option or something, not everything is going to be a stained glass print." So the core stays general, and a check for one kind of object comes in that kind's toolset: its bench commands, the measures its needs may use, and its skills (`rounds/toolsets.py`). It's the first step to a shared core with toolsets per domain.
 
-- **The request's `## Kind`** names the kind, and a run with none has the core only: a `bench` call of another kind's command is refused, saying which toolset has it, and the `bench` tool's description, the `needs` tool's measures and the start's skills are the toolset's. The start says which toolset it is.
+- **The request's `## Kind`** names the kind, and a run with none, or with a kind that has no toolset of its own, has the core only: a `bench` call of another kind's command is refused, saying which toolset has it, and the `bench` tool's description, the `needs` tool's measures and the start's skills are the toolset's. The start says which toolset it is.
 - **A run from before toolsets** keeps every command it had, its skills, and its needs as they were: its `state.json` has no `toolsets`, and its recorded commands are in the ledger by name.
 - **Each command, sorted:**
 
