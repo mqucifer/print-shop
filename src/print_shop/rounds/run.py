@@ -22,6 +22,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import traceback
@@ -40,6 +41,7 @@ from print_shop.bench import usage as usage_module
 from print_shop.rounds import (
     after_action,
     breakdown,
+    holding,
     judge,
     lessons,
     needs,
@@ -139,6 +141,11 @@ class State:
     stops: dict[str, dict[str, Any]] = field(default_factory=dict)
     # Who opened the fixed needs, with a note, so they may change at the next `needs`.
     fixed_open: dict[str, Any] | None = None
+    # Each failing check the model said doesn't apply, and why: held out of the list of failing
+    # checks, and shown at the next stop (`holding.py`).
+    asides: list[dict[str, Any]] = field(default_factory=list)
+    # Each `needs` refused once they were settled, shown beside the next question.
+    needs_refused: list[dict[str, Any]] = field(default_factory=list)
 
 
 def repository_version() -> tuple[str, bool]:
@@ -286,6 +293,8 @@ class Run:
         )
         if sleep is not None:
             self.session.sleep = sleep
+        # After a compaction, each check whose latest try fails is said again (`holding.py`).
+        self.session.after_compaction = self.failing_said
         self.tools.at_call = lambda: self.session.requests
 
     # Starting and going on
@@ -436,7 +445,7 @@ class Run:
                 int(stop["n"]), note_from if note_from != NOTE_FROM else records.ANSWERS_FROM
             )
         elif stop and stop["kind"] == "ask":
-            self._take_pick(int(stop["n"]))
+            self._take_pick(int(stop["n"]), reopening=reopen_needs)
         self._go_on()
         if reopen_needs:
             self._reopen(note_from, bool(note.strip()))
@@ -737,7 +746,7 @@ class Run:
         self.ledger.answered(self.state.name, n, answers)
         self._relay("answers", who, answers, said)
 
-    def _take_pick(self, n: int) -> None:
+    def _take_pick(self, n: int, reopening: bool = False) -> None:
         folder = self.folder / "asks" / str(n)
         path = folder / "pick.json"
         if not path.is_file():
@@ -786,7 +795,7 @@ class Run:
             said = f"{who} said yes to it. Their reason: {reason}"
         else:
             said = f"{who} picked {pick}. Their reason: {reason}"
-        said += self._stop_picked(asked.get("stop"), n, pick, by)
+        said += self._stop_picked(asked.get("stop"), n, pick, by, reopening)
         self.state.said.append(f'On your question "{asked["question"]}": {said}')
         self._relay("pick", by, f"{pick}: {reason}", said)
         if fix_first:
@@ -799,18 +808,38 @@ class Run:
             self.state.said.append(first)
             self._relay("fix_first", by, fix_first, first)
 
-    def _stop_picked(self, stop: str | None, ask: int, pick: str, by: str) -> str:
+    def _stop_picked(
+        self, stop: str | None, ask: int, pick: str, by: str, reopening: bool = False
+    ) -> str:
         """A pick passes the stop its ask showed. `none` leaves it open: what was shown wasn't
-        right, so it's shown again before anything's handed over."""
+        right, so it's shown again before anything's handed over. A `none` at the plan reopens
+        the needs, as the plan shows them (mqucifer/print-shop#45): on `eval-tip-1` the reason
+        named a need's check, and the model was refused when it moved it. With `reopening`, the
+        person reopened them by hand too, which says so itself."""
         form = self._form()
         line = form.stop(stop) if form is not None and stop else None
         if line is None:
             return ""
         if pick == "none":
-            return (
+            said = (
                 f"\n\nThe stop `{line.id}`, {line.text}, is still open: show it again with `ask` "
                 "when it's ready. `done` waits for it."
             )
+            if line.id == forms.PLAN and not self.state.needs_open and not reopening:
+                self.state.needs_open = True
+                self.session._record("needs_reopened", by=by, at_ask=ask, why="plan_none")
+                fixed = [f"`{n.id}`" for n in self._needs() if n.fixed]
+                said += (
+                    " The plan shows the needs, so they're open again: if the reason is about one, "
+                    "send `needs` with the whole list, changed. If none should change, there's "
+                    "nothing to send."
+                )
+                if fixed:
+                    said += (
+                        f" The fixed needs, {', '.join(fixed)}, stay as they are: a "
+                        "non-negotiable's need changes only by the Sponsor, with a note."
+                    )
+            return said
         self.state.stops[line.id] = {
             "ask": ask,
             "pick": pick,
@@ -974,6 +1003,10 @@ class Run:
         if failing:
             lines.append(unprintable.said(failing))
             detail["thin_failing"] = [one.file for one in failing]
+        held = self._holding()
+        if held:
+            lines.append(holding.said(held))
+            detail["held"] = holding.plain(held)
         if tries and failed >= nudge.AFTER:
             lines.append(nudge.said(check, tries, wanted))
             detail["nudge"] = {
@@ -1067,8 +1100,262 @@ class Run:
         )
 
     def standing_said(self) -> str:
-        """What a `run` reply gains: each part file whose last `thin` failed."""
-        return unprintable.said(self._thin_failing())
+        """What a `run` reply gains: each part file whose last `thin` failed, and each check whose
+        latest try failed (`holding.py`)."""
+        said = [unprintable.said(self._thin_failing()), holding.said(self._holding())]
+        return "\n\n".join(one for one in said if one)
+
+    def failing_said(self) -> str:
+        """The message after a compaction: each check whose latest try fails, one or two lines
+        each, from the tries `record/CHECKS.md` keeps (mqucifer/print-shop#45). Empty when none
+        does. Session calls it through `after_compaction`."""
+        return holding.after_compaction(self._holding(), self._thin_failing())
+
+    def _held_tries(self) -> list[holding.Tried]:
+        """Every reading of a check, oldest first: the model's bench calls, each need's own
+        command read against its limit, and the harness's readings of the needs at `done` and at
+        an ask. `thin` at the harness's settings is `unprintable.py`'s."""
+        found: list[tuple[int, int, holding.Tried]] = []
+        wanted = self._needs()
+        for row in self.ledger.rows(
+            "SELECT at_call, argv, exit, verdict, why, numbers FROM bench_calls WHERE run=? "
+            "ORDER BY id",
+            self.state.name,
+        ):
+            argv = json.loads(row["argv"])
+            code = int(row["exit"])
+            if code == nudge.USAGE or unprintable.counted(argv) is not None:
+                continue
+            verdict, why = str(row["verdict"] or ""), str(row["why"] or "")
+            passed: bool | None = {0: True, 1: False}.get(code)
+            check = nudge.check_of(argv)
+            for need in wanted:
+                if (
+                    need.by == "bench"
+                    and need.command
+                    and nudge.check_of(need.argv()) == check
+                    and not nudge.differences(argv, need.argv())
+                ):
+                    record = {
+                        "verdict": verdict,
+                        "why": why,
+                        "numbers": json.loads(row["numbers"]) if row["numbers"] else {},
+                    }
+                    reading = needs.judge(need, code, f"verdict: {verdict}: {why}", record)
+                    unsure = not verdict or verdict in UNSURE
+                    passed = reading.passed or (None if unsure else False)
+                    if not reading.passed and not unsure:
+                        why = reading.why
+                    break
+            tried = holding.Tried(int(row["at_call"]), argv, passed, verdict, why)
+            found.append((tried.at_call, 0, tried))
+        for row in self.ledger.rows(
+            "SELECT at_call, command, passed, unsure, verdict, why FROM standing WHERE run=? "
+            "AND stop='ask' AND check_name LIKE 'need %' ORDER BY id",
+            self.state.name,
+        ):
+            passed = None if row["unsure"] else bool(row["passed"])
+            tried = holding.Tried(
+                int(row["at_call"]),
+                shlex.split(str(row["command"])),
+                passed,
+                str(row["verdict"] or ""),
+                str(row["why"] or ""),
+                "ask",
+            )
+            found.append((tried.at_call, 1, tried))
+        for row in self.ledger.rows(
+            "SELECT r.need, r.passed, r.verdict, r.why, o.last_call, o.needs_version FROM readings "
+            "AS r JOIN rounds AS o ON o.run = r.run AND o.round = r.round WHERE r.run=? AND "
+            "r.by='bench' AND o.last_call IS NOT NULL ORDER BY o.round",
+            self.state.name,
+        ):
+            command = self._need_command(int(row["needs_version"]), str(row["need"]))
+            if not command:
+                continue
+            unsure = not row["passed"] and (not row["verdict"] or row["verdict"] in UNSURE)
+            tried = holding.Tried(
+                int(row["last_call"]),
+                shlex.split(command),
+                None if unsure else bool(row["passed"]),
+                str(row["verdict"] or ""),
+                str(row["why"] or ""),
+                "done",
+            )
+            found.append((tried.at_call, 1, tried))
+        found.sort(key=lambda r: (r[0], r[1]))
+        return [r[2] for r in found]
+
+    def _need_command(self, version: int, need: str) -> str:
+        """A need's command as a version of the needs had it."""
+        kept = self.folder / "needs" / f"{version}.json"
+        if not kept.is_file():
+            return ""
+        for entry in json.loads(kept.read_text(encoding="utf-8")):
+            if entry.get("id") == need:
+                return str((entry.get("check") or {}).get("command") or entry.get("command") or "")
+        return ""
+
+    def _holding(self) -> list[holding.Held]:
+        """Each check whose failure is still open (`holding.py`)."""
+        present = {str(p) for p in paths.walk_plain(self.work, skip_made=True)}
+        asides = [
+            holding.Aside(int(a["at_call"]), (str(a["command"]), tuple(a["files"])), str(a["why"]))
+            for a in self.state.asides
+        ]
+        return holding.failing(
+            self._held_tries(),
+            self._wanted(),
+            present,
+            self.state.part,
+            self.state.part_at,
+            asides,
+        )
+
+    def set_aside(self, args: dict[str, Any]) -> Judged:
+        """A failing check the model says doesn't apply, with its reason: out of the list until it
+        fails again, and shown to the person at the next stop. A check a settled need runs is
+        `done`'s to decide, so it can't be set aside."""
+        why = str(args.get("why") or "").strip()
+        try:
+            argv = shlex.split(str(args.get("check") or ""))
+        except ValueError as exc:
+            return Judged("set_aside", "failed", f"`check` can't be read: {exc}", "not_a_command")
+        check = nudge.check_of(argv)
+        held = self._holding()
+        mine = [h for h in held if h.check == check]
+        if not why:
+            reply = "`why` says why the check doesn't apply, for the person at the next stop."
+            return Judged("set_aside", "failed", reply, "empty")
+        if not mine:
+            named = "; ".join(
+                f"`{h.check[0]}{''.join(' ' + f for f in h.check[1])}`" for h in held
+            )
+            reply = (
+                "That isn't a check whose latest try fails, by its command and files. "
+                + (f"The checks that fail: {named}." if named else "No check fails now.")
+            )
+            return Judged("set_aside", "failed", reply, "not_failing")
+        if mine[0].needs:
+            named = ", ".join(f"`{w.need}`" for w in mine[0].needs)
+            reply = (
+                f"{named} runs this check, so `done` decides it, and it can't be set aside. If the "
+                f"need's check is wrong: {prompt.STUCK}"
+            )
+            return Judged("set_aside", "failed", reply, "a_needs_check")
+        aside = {
+            "at_call": self.session.requests,
+            "round": self.state.round,
+            "command": check[0],
+            "files": list(check[1]),
+            "tries": [one.at_call for one in mine[0].tries],
+            "why": why,
+            "shown_at": None,
+        }
+        self.state.asides.append(aside)
+        self.ledger.set_aside(self.state.name, len(self.state.asides), aside)
+        self.save()
+        reply = (
+            "Set aside: it isn't named in your replies until it fails again. The person at the "
+            "next stop reads it, with your reason."
+        )
+        return Judged("set_aside", "ok", reply, detail={"set_aside": aside})
+
+    def _asides_said(self) -> list[str]:
+        """The checks set aside since the last stop, for the person there."""
+        shown = [a for a in self.state.asides if not a.get("shown_at")]
+        if not shown:
+            return []
+        lines = ["## Failing checks the model set aside", ""]
+        for aside in shown:
+            on = " ".join(aside["files"])
+            calls = ", ".join(str(c) for c in aside["tries"])
+            lines.append(
+                f"- `{aside['command']} {on}`, failed at call {calls}, set aside at call "
+                f"{aside['at_call']}: {aside['why']}"
+            )
+        return [*lines, ""]
+
+    def _off_part(self, printed: list[str]) -> list[tuple[str, str, str]]:
+        """Each bench need whose check names a file that's neither printed nor given: on
+        `eval-tip-1` the fit need ran `clearance` on a pocket the model modelled, and passed while
+        the frame had almost no lip at the tip. Each is its need, the file and its command."""
+        kept = {_plain_name(name) for name in printed}
+        found = []
+        for need in self._needs():
+            if need.by != "bench":
+                continue
+            for name in need.files():
+                plain = _plain_name(name)
+                if plain not in kept and not plain.startswith("references/"):
+                    found.append((need.id, name, need.command))
+        return found
+
+    def _needs_refused_said(self) -> list[str]:
+        """Each `needs` call refused since the last stop, for the person there: on `eval-tip-1`
+        the model tried to move a need onto the frame, was refused, and its ask didn't say so."""
+        if not self.state.needs_refused:
+            return []
+        lines = ["## `needs` calls refused since the last stop", ""]
+        for one in self.state.needs_refused:
+            lines.append(f"- call {one['at_call']}, refused ({one['why']}): {one['said']}")
+            lines += [f"  - {change}" for change in one["changes"]]
+        lines += [
+            "",
+            "If one of these should go ahead, `resume --reopen-needs` with the pick opens them.",
+            "",
+        ]
+        return lines
+
+    def _refused_needs(self, args: dict[str, Any], judged: Judged) -> Judged:
+        """A `needs` call refused after the needs were first settled, kept for the next question:
+        what it would have changed, need by need."""
+        if not self.state.needs_version or args.get("try") is True:
+            return judged
+        settled = {n.id: n for n in self._needs()}
+        sent = args.get("needs")
+        if isinstance(sent, str):
+            try:
+                sent = json.loads(sent)
+            except ValueError:
+                sent = None
+        changes: list[str] = []
+        named: set[str] = set()
+        for entry in sent if isinstance(sent, list) else []:
+            if not isinstance(entry, dict):
+                continue
+            nid = str(entry.get("id"))
+            named.add(nid)
+            given = entry.get("check")
+            check: dict[str, Any] = given if isinstance(given, dict) else {}
+            command = str(check.get("command") or "").strip().removeprefix("bench ").strip()
+            old = settled.get(nid)
+            if old is None:
+                changes.append(f"adds `{nid}`" + (f", checked by `{command}`" if command else ""))
+            elif command and command != old.command:
+                changes.append(f"`{nid}` from `{old.command}` to `{command}`")
+        changes += [f"drops `{nid}`" for nid in settled if sent and nid not in named]
+        first = judged.reply.splitlines()[0] if judged.reply else ""
+        self.state.needs_refused.append(
+            {
+                "at_call": self.session.requests,
+                "why": judged.why,
+                "said": first[:300],
+                "changes": changes or ["no check changed"],
+            }
+        )
+        self.save()
+        return judged
+
+    def _asides_shown(self, where: str) -> None:
+        for aside in self.state.asides:
+            if not aside.get("shown_at"):
+                aside["shown_at"] = where
+        self.ledger.change(
+            "UPDATE set_asides SET shown_at=? WHERE run=? AND shown_at IS NULL",
+            where,
+            self.state.name,
+        )
 
     def questions(self, args: dict[str, Any]) -> Judged:
         if not self.state.needs_open:
@@ -1093,10 +1380,20 @@ class Run:
         return Judged("questions", "ok", reply, ending=Ending("questions", {"n": n}))
 
     def needs(self, args: dict[str, Any]) -> Judged:
+        """The needs, settled or tried. One refused once they were first settled goes beside the
+        next question, so a person sees what the model tried to change."""
+        judged = self._settle(args)
+        if judged.outcome == "failed":
+            return self._refused_needs(args, judged)
+        return judged
+
+    def _settle(self, args: dict[str, Any]) -> Judged:
         if not self.state.needs_open:
             reply = (
                 "The needs are settled: they're what your work is checked against, so they don't "
-                f"change from here. If one can't be met or its check is wrong: {prompt.STUCK}"
+                f"change from here. If one can't be met or its check is wrong: {prompt.STUCK} "
+                "This refusal, with what it would have changed, goes beside your next question, "
+                "so the person there sees it."
             )
             return Judged("needs", "failed", reply, "needs_settled")
         trying = args.get("try") is True
@@ -1115,6 +1412,8 @@ class Run:
             "\n".join(self.state.notes),
             self.toolset,
         )
+        if not wrong and not trying:
+            wrong = needs.numbers_wrong(found)
         if not wrong and form is not None and not trying:
             wrong = forms.held(found, form) + self._fixed_kept(found)
         if not wrong:
@@ -1361,6 +1660,9 @@ class Run:
         if not fix_shape or not closing:
             reply = "`fix_shape` and `closing` each take your own words, and one is empty."
             return Judged("done", "failed", reply, "empty")
+        off = self._off_part(part)
+        if off:
+            return Judged("done", "failed", _off_part_refused(off), "need_off_part")
         script = str(args["script"])
         n = self.state.round
         folder = self.folder / "rounds" / f"{n:03}"
@@ -1412,14 +1714,26 @@ class Run:
             judgement.left,
         )
         reply = self._said_of(judgement, wanted, met, standing, clashes)
+        held = self._holding()
+        if held:
+            # Whatever the needs read: a check that failed and hasn't passed since (`holding.py`).
+            reply += f"\n\n{holding.said(held)}"
         self._remember(judgement)
         unchanged = files == self.state.last_files
         self.state.unchanged = self.state.unchanged + 1 if unchanged else 0
         self.state.last_files = files
         self._write_record()
-        detail = {"round": n, "met": met, "code": judgement.code}
+        detail: dict[str, Any] = {"round": n, "met": met, "code": judgement.code}
+        if held:
+            detail["held"] = holding.plain(held)
         if met:
-            delivered = {"groups": groups, "looks": looks, "standing": standing, "overlap": overlap}
+            delivered = {
+                "groups": groups,
+                "looks": looks,
+                "standing": standing,
+                "overlap": overlap,
+                "held": held,
+            }
             return self._stop_for_approval(
                 rows, folder, judgement, wanted, closing, reply, detail, delivered
             )
@@ -1625,7 +1939,18 @@ class Run:
         for one in delivered["standing"]:
             mark = "can't tell" if one.unsure else "ok"
             lines.append(f"- `{one.file}`, {mark}: {one.why}")
-        lines += ["", *self._swaps_said()]
+        lines.append("")
+        if delivered.get("held"):
+            lines += [
+                "## Checks whose latest try failed, which no need settles",
+                "",
+                "The model's own bench checks, or a need's at other settings: each failed and "
+                "hasn't passed since.",
+                "",
+                *holding.lines(delivered["held"]),
+                "",
+            ]
+        lines += [*self._asides_said(), *self._swaps_said()]
         groups = ", ".join(f"`{g['folder']}`" for g in made["groups"])
         lines += [
             "## The folder to print from",
@@ -1636,6 +1961,7 @@ class Run:
         if self.state.swaps:
             self.ledger.swaps_shown(self.state.name, f"approval {n}")
             self.state.swaps = []
+        self._asides_shown(f"approval {n}")
         part_hashes = {name: judgement.left.get(name) for row in rows for name in row["files"]}
         self.ledger.approval_asked(
             self.state.name,
@@ -1958,6 +2284,37 @@ class Run:
         self.state.draft["thin_failing"] = [
             {"file": one.file, "at_call": one.at_call, "why": one.why} for one in unprinted
         ]
+        held = self._holding()
+        if held:
+            lines.append(
+                "Checks whose latest try failed, which go beside the question too:\n"
+                + "\n".join(holding.lines(held))
+            )
+        self.state.draft["held"] = holding.lines(held)
+        # What's printed is what the sheet shows and the part `done` last named. With neither,
+        # as at the plan, each need checked on a file the model made is listed: `done` holds
+        # each to the part.
+        printed = [*drawn, *(self.state.part or [])]
+        off = self._off_part(printed)
+        if off:
+            what = (
+                "on a file that isn't on the sheet, in the part or given"
+                if printed
+                else "on a file you made, which `done` will hold to the part"
+            )
+            lines.append(
+                f"Needs checked {what}, which go beside the question too:\n"
+                + "\n".join(f"- `{need}`: `{file}`, in `{command}`" for need, file, command in off)
+            )
+        self.state.draft["off_part"] = [
+            {"need": need, "file": file, "command": command} for need, file, command in off
+        ]
+        self.state.draft["off_part_known"] = bool(printed)
+        if self.state.needs_refused:
+            lines.append(
+                f"Your {len(self.state.needs_refused)} refused `needs` call(s) since the last stop "
+                "go beside the question, so the person sees what you tried to change."
+            )
         self.save()
         open_stop = self._open_stop()
         if open_stop is not None and stop != open_stop.id:
@@ -2162,6 +2519,44 @@ class Run:
                 ],
                 "",
             ]
+        held = draft.get("held") or []
+        if held:
+            lines += [
+                "## Checks whose latest try failed",
+                "",
+                "The model's own bench checks, or a need's at other settings: each failed and "
+                "hasn't passed since, whatever the question says.",
+                "",
+                *held,
+                "",
+            ]
+        off = draft.get("off_part") or []
+        if off and draft.get("off_part_known", True):
+            lines += [
+                "## Needs checked on a file that isn't printed or given",
+                "",
+                "A need is checked on the files that will be printed, or on the given references. "
+                "`done` refuses these until the needs change, which takes `--reopen-needs`.",
+                "",
+            ]
+        elif off:
+            lines += [
+                "## Needs checked on a file the model made",
+                "",
+                "No part is named yet. A need is checked on the files that will be printed, or on "
+                "the given references: at `done`, each of these files has to be one of the part, "
+                "or the need is refused. A helper the model made to check against, such as a "
+                "pocket it modelled itself, isn't the part; `--reopen-needs` with the pick lets "
+                "the need move.",
+                "",
+            ]
+        if off:
+            lines += [
+                *[f"- `{o['need']}`: `{o['file']}`, in `{o['command']}`" for o in off],
+                "",
+            ]
+        lines += self._needs_refused_said()
+        lines += self._asides_said()
         lines += self._swaps_said()
         lines += [
             "## Answering",
@@ -2190,6 +2585,8 @@ class Run:
         if self.state.swaps:
             self.ledger.swaps_shown(self.state.name, f"ask {n}")
             self.state.swaps = []
+        self._asides_shown(f"ask {n}")
+        self.state.needs_refused = []
         self.state.draft = None
         self.state.stop = {"kind": "ask", "n": n}
         self.save()
@@ -2283,6 +2680,28 @@ class Run:
             eyes = ", ".join(n.id for n in self._needs() if n.by == "eye") or "none yet"
             return "no_such_need", f"`need` names an eye need. They are: {eyes}."
         return None
+
+
+def _plain_name(name: str) -> str:
+    return str(Path(name.removeprefix("/work/")).as_posix()).removeprefix("./")
+
+
+def _off_part_refused(off: list[tuple[str, str, str]]) -> str:
+    """`done`'s refusal of a need checked on a file that's neither printed nor given."""
+    lines = [
+        "Nothing was checked: a need is checked on the files that will be printed, or on the given "
+        "references, and these aren't:"
+    ]
+    lines += [
+        f"- `{need}` reads `{file}`, in `{command}`, which isn't in `part` or `references/`."
+        for need, file, command in off
+    ]
+    lines.append(
+        "If the file is printed, name it in `part`. Otherwise the need's check has to change, "
+        "and the needs are settled: show what you have with `ask`, and the need goes beside your "
+        "question, so a person can reopen them."
+    )
+    return "\n".join(lines)
 
 
 def summarise(folder: Path) -> dict[str, Any]:

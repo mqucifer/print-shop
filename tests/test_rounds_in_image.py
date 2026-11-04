@@ -233,11 +233,11 @@ def test_a_run_goes_from_intake_through_refusals_and_a_pick_to_its_needs_met(
         [tool("bench", command="render block.step tab.step --views iso")],
         [tool("run", path="make.py")],
         # The checks refuse this `done`: the run doesn't end.
-        [done()],
+        [done(part=["block.step", "tab.step"])],
         [tool("edit", path="make.py", old="GAP = 2.0", new="GAP = 0.5", run=True)],
         [tool("bench", command="clearance block.step tab.step --min-gap 0.2")],
         # The bench now passes, and the eye need is still open.
-        [done(fix_shape="narrowed the gap")],
+        [done(part=["block.step", "tab.step"], fix_shape="narrowed the gap")],
         [
             write(
                 "b.py",
@@ -334,7 +334,7 @@ def test_a_run_goes_from_intake_through_refusals_and_a_pick_to_its_needs_met(
         '{"pick": "A", "reason": "The even one sits better.", "by": "sponsor"}'
     )
 
-    run, model = again(run, [done()])
+    run, model = again(run, [done(part=["block.step", "tab.step"])])
     run.resume()
     assert run.session.messages[-1]["content"] == (
         "The Sponsor picked A. Their reason: The even one sits better."
@@ -374,7 +374,8 @@ def test_a_run_goes_from_intake_through_refusals_and_a_pick_to_its_needs_met(
     assert pick["reason"] == "The even one sits better."
     assert pick["picked_by"] == "sponsor"
     assert json.loads(sorted(rows(run, "rounds"), key=lambda r: r["round"])[0]["part"]) == [
-        "block.step"
+        "block.step",
+        "tab.step",
     ]
     asked = rows(run, "questions")[0]
     assert asked["answers"] == "Make it 20 mm across."
@@ -562,16 +563,39 @@ def final_render(run: Run) -> dict[str, Any]:
     return dict(found[0])
 
 
+GIVEN_SCRIPT = (
+    "import cadquery as cq\n"
+    'piece = cq.Workplane("XY").box(4, 4, 4).translate((0, 60, 0))\n'
+    'cq.exporters.export(piece, "references/test-piece.step")\n'
+)
+GIVEN_NEED = {
+    "id": "apart",
+    "what": "the block stands clear of the piece it's given",
+    "source": "chosen",
+    "check": {
+        "by": "bench",
+        "measures": "fit",
+        "command": "clearance block.step references/test-piece.step",
+    },
+}
+
+
 def test_the_final_sheet_draws_the_part_and_leaves_out_what_only_a_need_names(
     tmp_path: Path,
 ) -> None:
-    """The first real run's final sheet drew its two test cylinders inside the stand."""
+    """The first real run's final sheet drew its two test cylinders inside the stand. A need is
+    checked on the part or the given references (mqucifer/print-shop#45), so what only a need
+    names is a reference here, made in a container as it would be given."""
     run, _ = begin(
         tmp_path,
-        [BROKEN_DOWN, tool("needs", needs=[FIXTURE_NEED])],
-        [write("make.py", FIXTURE_SCRIPT, run=True)],
+        [BROKEN_DOWN, tool("needs", needs=[GIVEN_NEED])],
+        [write("make.py", script(gap=0.5), run=True)],
         [done()],
     )
+    (run.work / "given.py").write_text(GIVEN_SCRIPT)
+    assert run.box.python("given.py").code == 0
+    (run.work / "given.py").unlink()
+    assert (run.work / "references" / "test-piece.step").is_file()
     assert run.drive().name == "met"
     assert (run.folder / "final-sheet.png").is_file()
     drawn = final_render(run)
@@ -604,7 +628,7 @@ def test_a_part_a_clean_run_doesnt_leave_isnt_met(tmp_path: Path) -> None:
         tmp_path,
         [BROKEN_DOWN, tool("needs", needs=[SIZE_NEED])],
         [write("make.py", script(gap=0.5), run=True)],
-        [done(part=["stand.step"])],
+        [done(part=["block.step", "stand.step"])],
         [tool("blocked", reason="stop")],
     )
     assert run.drive().name == "blocked"
@@ -1543,7 +1567,16 @@ def test_a_pick_on_files_that_changed_doesnt_hold_and_the_need_is_asked_again(
 
 
 def test_a_pick_of_files_the_part_isnt_made_of_doesnt_hold(tmp_path: Path) -> None:
-    run = asked_with_needs(tmp_path, SIZE_NEED, EYE_NEED)
+    # A need is checked on the part (mqucifer/print-shop#45), so this one reads the tab.
+    check = {
+        "by": "bench",
+        "measures": "size",
+        "command": "info tab.step",
+        "number": "volume_mesh_mm3",
+        "at_most": 3000,
+    }
+    tab_size = {**SIZE_NEED, "id": "tab-volume", "check": check}
+    run = asked_with_needs(tmp_path, tab_size, EYE_NEED)
     picked(run)
     run, _ = again(run, [done(part=["tab.step"])], [tool("blocked", reason="stop")])
     run.resume()
@@ -1601,7 +1634,7 @@ def test_a_check_holds_what_a_need_says_at_done(
         tmp_path,
         [BROKEN_DOWN, tool("needs", needs=[need])],
         [write("make.py", made, run=True)],
-        [done()],
+        [done(part=["parts.step"])],
         [tool("blocked", reason="stop")],
     )
     assert run.drive().name == "blocked"
