@@ -33,6 +33,7 @@ from typing import Any
 
 from print_shop.rounds import paths, skills, transcript
 from print_shop.rounds.ledger import DesignLedger
+from print_shop.rounds.session import CHARS_PER_TOKEN, COPY_AT
 
 #: A sentence shorter than this is too plain to count as repeating.
 REPEAT_SENTENCE = 25
@@ -40,8 +41,6 @@ REPEAT_SENTENCE = 25
 REPEAT_LEAST_CHARS = 2000
 #: The share past which a call's reasoning gets a row, unless a run's limits say otherwise.
 REPEAT_SHARE = 0.5
-#: Characters a token, for what's in the text: `session.CHARS_PER_TOKEN`, measured.
-CHARS_PER_TOKEN = 2.7
 SENTENCES = re.compile(r"(?<=[.!?])\s+|\n+")
 PATH_IN_ARGUMENTS = re.compile(r'"path"\s*:\s*"([^"]{1,200})"')
 TAIL = 400
@@ -198,13 +197,18 @@ class Recorder:
         self.cut = {}
 
     def _on_rewrite(self, event: dict[str, Any]) -> None:
-        """A change to an earlier message: what compaction cuts, counted until its event."""
+        """A change to an earlier message: what compaction cuts, counted until its event. A cut-off
+        call's reasoning, withheld as it came, isn't compaction's."""
+        if event.get("why") == "cut_off":
+            return
         message = event.get("message") or {}
         content = str(message.get("content") or "")
         if message.get("role") == "tool" and content.startswith("(compacted: "):
             tool = content.removeprefix("(compacted: ").split(":", 1)[0]
             shrunk = self.cut.setdefault("replies_shrunk", {})
             shrunk[tool] = shrunk.get(tool, 0) + 1
+            if COPY_AT.search(content):
+                self.cut["files_one_copy"] = self.cut.get("files_one_copy", 0) + 1
         elif message.get("role") == "assistant":
             if "reasoning_content" in message and not message["reasoning_content"]:
                 self.cut["reasoning_dropped"] = self.cut.get("reasoning_dropped", 0) + 1
@@ -215,6 +219,20 @@ class Recorder:
             )
             if noted:
                 self.cut["texts_noted"] = self.cut.get("texts_noted", 0) + noted
+
+    def _on_quiet_reply(self, event: dict[str, Any]) -> None:
+        """A call that ended without a tool call, asked what's missing, and whether the next
+        request offered only the asking tools (mqucifer/print-shop#47)."""
+        said = {
+            k: event.get(k) for k in ("reasoning_tokens", "seconds", "finish", "after", "only")
+        }
+        self._row(
+            "asked",
+            name="ask_only" if event.get("only") else "what_is_missing",
+            at=event.get("t"),
+            at_call=int(event["n"]),
+            said=_json(said),
+        )
 
     # What a person sent
 

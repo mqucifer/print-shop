@@ -37,10 +37,19 @@ from print_shop.rounds.transcript import conversation, events_of
 # Crew's own line (`crew_org/session/conversation.py`), in a 262,144-token window that keeps
 # 65,536 for the answer.
 COMPACT_AT = 125_000
-# Characters a token, for what's come since the last measured prompt: measured on the served model
-# by `cad_eval.probe` (2026-10-27: ~2,160 characters, ~800 tokens).
-CHARS_PER_TOKEN = 2.7
+# Characters a token, for what's come since the last measured prompt, counted as `_chars` counts
+# them. Fitted on the 1,122 recorded prompts of 12 runs (mqucifer/print-shop#47): the median of the
+# prompt's growth against the characters' growth between calls, so the estimate reads as often low
+# as high. 2.7, from `cad_eval.probe`'s one prompt, read the growth about 21% high
+# (`~/print-shop/proofs/m18-ask/fit_chars.json`).
+CHARS_PER_TOKEN = 3.18
 COMPACTED = "(compacted: {what})"
+#: A line that is a compaction's note, which a file's text never is (mqucifer/print-shop#47).
+NOTE_LINE = re.compile(r"^\s*\(compacted: .*\)\s*$", re.MULTILINE)
+#: Where a reply carries a file's one current copy, after compaction made the rest notes.
+COPY = "\n\n(compacted: `{path}` whole, as your last edit left it. Its earlier text is notes:)\n"
+COPY_AT = re.compile(r"\n\n\(compacted: `(.+?)` whole, as your last edit left it\. [^\n]*\)\n")
+NUMBERED = re.compile(r"^ *(\d+)\| ?(.*)$")
 #: The most a shrunk reply keeps of each line it keeps.
 GIST_CHARS = 300
 #: A reply that says only how its command exited (mqucifer/print-shop#39).
@@ -51,7 +60,33 @@ ERROR_LINE = re.compile(r"^[A-Za-z_][\w.]*(?:Error|Exception|Exit|Interrupt|Warn
 RAN = "\n\nRan "
 # A picture's tokens in the next prompt, before a response reports them: `cad_eval`'s was 576.
 PICTURE_TOKENS = 600
+#: The reply to a call with no tool call where there's no `ask` to call: the after-action review.
 QUIET = "Call a tool to go on. If you can't, `blocked` says why."
+#: The tools a call that ends without acting is pointed to. `send_ask` is `ask`'s second half: an
+#: `ask` only draws the sheet, and nothing reaches the Sponsor until it's sent.
+ASKING = ("ask", "send_ask", "blocked")
+#: The reply to a call that ends without a tool call, where `ask` and `blocked` work.
+ASK_WHAT = (
+    "You reasoned for {reasoning} and ended without calling a tool.{cut} That usually means "
+    "something is missing: a figure, a reading, what a check's reply means, or a choice that's "
+    "the Sponsor's. Say what it is with `ask`, showing what you have, then `send_ask`. If it "
+    "can't be done without it, end with `blocked`, saying what's missing."
+)
+CUT_OFF = " It reached the answer's limit, so that reasoning isn't sent back."
+ONLY_ASKING = (
+    " It's happened again, {calls} after the last time, so until you've asked or ended, only "
+    "`ask`, `send_ask` and `blocked` work."
+)
+STILL_ONLY = " Only `ask`, `send_ask` and `blocked` work until you've asked or ended."
+NOT_NOW = (
+    "Not carried out: only `ask`, `send_ask` and `blocked` work until you've asked what's "
+    "missing or ended."
+)
+NOTE_AS_TEXT = (
+    "Not {done}: `{key}` holds a compaction note, `{note}`, not a file's text. Earlier calls "
+    "show notes like it where their text was taken out of the conversation to save room. "
+    "`{path}` is as it was, and `read` gives it whole."
+)
 SHOWN_BEFORE = (
     "(A picture was here. Only the latest turn's pictures stay in the conversation: `read` shows "
     "any of them again.)"
@@ -71,6 +106,11 @@ class Limits:
     stuck_rounds: int = 10
     # Replies in a row with no tool call.
     quiet: int = 10
+    # A call with no tool call this many calls or fewer after the last one gets a request whose
+    # only tools are `ask`, `send_ask` and `blocked`. On the 12 recorded runs, the repeats inside
+    # the two loops (`suncatcher-2` 248-261, `eval-tip-1` 70-114) came 1 to 14 calls apart, and
+    # the one gap outside them was 141 (`~/print-shop/proofs/m18-ask/quiet_calls.json`).
+    ask_within: int = 15
     # New conversations from the record, each after one that wouldn't fit.
     restarts: int = 50
     # A failed call is tried this many times more before the run ends on it.
@@ -151,10 +191,17 @@ class Session:
     outcomes: Counter[str] = field(default_factory=Counter)
     by_tool: Counter[str] = field(default_factory=Counter)
     runaways: list[dict[str, int]] = field(default_factory=list)
+    # The last call that ended without a tool call, and while it holds, the only tools offered.
+    quiet_at: int = 0
+    only: tuple[str, ...] = ()
+    last_seconds: float = 0.0
     # Each tool reply's facts, by its message's index, for compaction.
     replies: dict[int, dict[str, Any]] = field(default_factory=dict)
     # Told each event as it's kept, for the ledger.
     heard: Callable[[dict[str, Any]], None] | None = None
+    # Asked right after a compaction for what to say before the next call: the run's failing
+    # checks (mqucifer/print-shop#45). Empty text says nothing.
+    after_compaction: Callable[[], str] | None = None
 
     def begin(self, *start: dict[str, Any]) -> None:
         """A new conversation. An earlier one in the same run stays in the records."""
@@ -207,6 +254,12 @@ class Session:
                 self.compactions += 1
             elif kind == "picture":
                 self.views += 1
+            elif kind == "quiet_reply":
+                self.quiet_at = int(event["n"])
+                self.only = tuple(event.get("only") or ())
+            elif kind == "ended":
+                # Each stop ends what a quiet call asked for: the model asked, or ended.
+                self.only = ()
 
     def go(self) -> Ending:
         """Calls until something stops it."""
@@ -231,11 +284,14 @@ class Session:
             if tool_calls:
                 kept["tool_calls"] = _sendable(tool_calls)
             self.messages.append(kept)
+            finish = answer["choices"][0].get("finish_reason")
+            if finish == "length" and kept.get("reasoning_content"):
+                self._withhold_reasoning(len(self.messages) - 1)
             if not tool_calls:
                 quiet += 1
                 if quiet >= self.limits.quiet:
                     return self._ended(Ending("no_tool_call", {"limit": self.limits.quiet}))
-                self.say(QUIET)
+                self.say(self._quiet_reply(answer, message, finish))
                 continue
             quiet = 0
             try:
@@ -246,6 +302,62 @@ class Session:
                 return self._ended(Ending("work_full", {"error": str(full)}))
             if ending is not None:
                 return self._ended(ending)
+
+    def _withhold_reasoning(self, index: int) -> None:
+        """A call cut off at `max_tokens` goes back without its reasoning, its text and calls as
+        they came. On `suncatcher-2` each such call's 65k tokens were resent whole, as the newest
+        turn's, and calls 258-262 compacted once a call. The `call` event keeps all of it, and
+        the change is a rewrite, kept after a snapshot so the records can replay it."""
+        self.snapshot()
+        self.messages[index] = {**self.messages[index], "reasoning_content": ""}
+        self._record("rewrite", index=index, message=self.messages[index], why="cut_off")
+
+    def _asking(self) -> tuple[str, ...]:
+        """The asking tools this session offers: none in the after-action review."""
+        offered = {s["function"]["name"] for s in self.tools.specs}
+        return tuple(name for name in ASKING if name in offered)
+
+    def _offered(self) -> list[dict[str, Any]]:
+        if not self.only:
+            return self.tools.specs
+        return [s for s in self.tools.specs if s["function"]["name"] in self.only]
+
+    def _quiet_reply(self, answer: dict[str, Any], message: dict[str, Any], finish: Any) -> str:
+        """What a call that ended without a tool call is told: what's missing is asked for, not
+        action (mqucifer/print-shop#47). On the records, 12 of the 15 such calls followed 16k
+        tokens or more of reasoning, and 10 sat in the two loops. A second one soon after gets a
+        request whose only tools are the asking ones. Nothing cuts a call or limits thinking."""
+        asking = self._asking()
+        if not {"ask", "blocked"} <= set(asking):
+            return QUIET
+        n = self.requests
+        used = usage(answer)
+        tokens = used.get("reasoning_tokens")
+        if tokens is None:
+            tokens = int(len(str(message.get("reasoning_content") or "")) / CHARS_PER_TOKEN)
+        minutes = self.last_seconds / 60
+        took = f"{minutes:.0f} minutes" if minutes >= 2 else f"{self.last_seconds:.0f} seconds"
+        reasoning = f"{tokens:,} tokens ({took})"
+        again = bool(self.quiet_at) and n - self.quiet_at <= self.limits.ask_within
+        reply = ASK_WHAT.format(reasoning=reasoning, cut=CUT_OFF if finish == "length" else "")
+        if again:
+            self.only = asking
+            gap = n - self.quiet_at
+            reply += ONLY_ASKING.format(calls=f"{gap} call{'' if gap == 1 else 's'}")
+        elif self.only:
+            reply += STILL_ONLY
+        self._record(
+            "quiet_reply",
+            n=n,
+            reasoning_tokens=tokens,
+            seconds=round(self.last_seconds, 1),
+            finish=finish,
+            after=n - self.quiet_at if self.quiet_at else None,
+            only=list(self.only) or None,
+            reply=reply,
+        )
+        self.quiet_at = n
+        return reply
 
     def rewrite(self, index: int, content: Any) -> None:
         """Change an earlier message's content, and keep the change in the records."""
@@ -296,8 +408,14 @@ class Session:
 
         - Every assistant turn before the newest loses its reasoning.
         - **Each file's latest full text stays whole** (`cad_eval`'s review of #41): its last
-          `write` (the call), or its last whole `read` (the reply), and every `edit` of it after
-          that, call and reply.
+          `write` (the call), or its last whole `read` (the reply).
+        - **Once it's been edited, it's one current copy** (mqucifer/print-shop#47): the reply to
+          its last edit carries the file as the edits left it, numbered as `read` shows it, and
+          its `write` and edits become notes. Kept as a text and every edit since, it was 22.0k
+          tokens on `suncatcher-2` against 11.7k as one copy, and four of the seven refused edits
+          after its compactions were on one file kept as a write and 25 edits. Where the copy
+          can't be rebuilt from the conversation, or an edit is in the newest turn, the text and
+          every edit since stay whole, call and reply, as before.
         - The latest reply of `run`, of `bench` and of `done` stays whole, and so do the newest
           turn's. A run's reply through `write` or `edit` counts as `run`'s.
         - Every other `write` or `edit` call keeps its own keys, its text a note, and every other
@@ -306,21 +424,7 @@ class Session:
         - What the Sponsor said is never touched: it's in user messages.
         """
         last = max((i for i, m in enumerate(self.messages) if m["role"] == "assistant"), default=-1)
-        full: dict[str, set[tuple[str, int, int]]] = {}
-        for i, m in enumerate(self.messages):
-            for k, called in enumerate(m.get("tool_calls") or []):
-                function = called.get("function") or {}
-                path = str(_arguments(function.get("arguments")).get("path"))
-                if function.get("name") == "write":
-                    full[path] = {("call", i, k)}
-                elif function.get("name") == "edit":
-                    full.setdefault(path, set()).add(("call", i, k))
-            info = self.replies.get(i)
-            if info and info["ok"] and info["name"] == "read" and info["whole"]:
-                full[str(info["path"])] = {("reply", i, -1)}
-            elif info and info["ok"] and info["name"] == "edit":
-                full.setdefault(str(info["path"]), set()).add(("reply", i, -1))
-        kept = set().union(*full.values()) if full else set()
+        kept, copies = self._files(last)
         latest: dict[str, int] = {}
         for i, info in self.replies.items():
             for name in ("run", "bench", "done"):
@@ -338,28 +442,107 @@ class Session:
                     called_name = function.get("name")
                     if called_name in ("write", "edit") and ("call", i, k) not in kept:
                         args = _arguments(function.get("arguments"))
-                        size = len(str(function.get("arguments")))
-                        note = COMPACTED.format(what=f"{size} characters")
                         texts = ("content",) if called_name == "write" else ("old", "new")
-                        short = {**args, **{t: note for t in texts if t in args}}
-                        called = {
-                            **called,
-                            "function": {**function, "arguments": json.dumps(short)},
-                        }
+                        noted = all(NOTE_LINE.fullmatch(str(args[t])) for t in texts if t in args)
+                        if not noted:
+                            size = len(str(function.get("arguments")))
+                            note = COMPACTED.format(what=f"{size} characters")
+                            short = {**args, **{t: note for t in texts if t in args}}
+                            called = {
+                                **called,
+                                "function": {**function, "arguments": json.dumps(short)},
+                            }
                     calls.append(called)
                 if calls:
                     changed["tool_calls"] = calls
                 if changed != m:
                     self.messages[i] = changed
                     self._record("rewrite", index=i, message=changed)
-            elif (
-                m["role"] == "tool" and i < last and i not in stay and ("reply", i, -1) not in kept
-            ):
+            elif m["role"] == "tool" and i < last and ("reply", i, -1) not in kept:
                 content = str(m.get("content") or "")
-                if not content.startswith("(compacted:"):
+                found = COPY_AT.search(content)
+                body = content[: found.start()] if found else content
+                if i not in stay and not body.startswith("(compacted:"):
                     tool = (self.replies.get(i) or {}).get("name", "tool")
-                    self.rewrite(i, COMPACTED.format(what=f"{tool}: {gist(content)}"))
+                    body = COMPACTED.format(what=f"{tool}: {gist(body)}")
+                if i in copies:
+                    path, text = copies[i]
+                    body += COPY.format(path=path) + _numbered(text)
+                if body != content:
+                    self.rewrite(i, body)
         self.compactions += 1
+
+    def _files(self, last: int) -> tuple[set[tuple[str, int, int]], dict[int, tuple[str, str]]]:
+        """Each file's latest full text, what stays whole of it as (kind, message, call), and the
+        files that are one current copy instead: by the reply that carries it, its path and its
+        text, rebuilt from its text in the conversation and each edit since."""
+        full: dict[str, set[tuple[str, int, int]]] = {}
+        base: dict[str, tuple[str, int, int]] = {}
+        text: dict[str, str | None] = {}
+        asked: dict[int, tuple[str, dict[str, Any]]] = {}
+        for i, m in enumerate(self.messages):
+            for k, called in enumerate(m.get("tool_calls") or []):
+                function = called.get("function") or {}
+                args = _arguments(function.get("arguments"))
+                path = str(args.get("path"))
+                if function.get("name") == "write":
+                    full[path] = {("call", i, k)}
+                    base[path] = ("call", i, k)
+                    content = args.get("content")
+                    known = isinstance(content, str) and not NOTE_LINE.search(content)
+                    text[path] = content if known else None
+                    asked[self._reply_index(i, k)] = ("write", args)
+                elif function.get("name") == "edit":
+                    full.setdefault(path, set()).add(("call", i, k))
+                    asked[self._reply_index(i, k)] = ("edit", args)
+            if m["role"] != "tool":
+                continue
+            info = self.replies.get(i) or {}
+            content = str(m.get("content") or "")
+            what, args = asked.pop(i, ("", {}))
+            if what == "write" and not info.get("ok"):
+                text[str(args.get("path"))] = None
+            if info.get("ok") and info["name"] == "read" and info["whole"]:
+                path = str(info["path"])
+                full[path] = {("reply", i, -1)}
+                base[path] = ("reply", i, -1)
+                text[path] = _from_read(content)
+            elif info.get("ok") and info["name"] == "edit":
+                path = str(info["path"])
+                full.setdefault(path, set()).add(("reply", i, -1))
+                text[path] = _edited(text.get(path), args) if what == "edit" else None
+                found = COPY_AT.search(content)
+                if found is not None and found.group(1) == path:
+                    # An earlier compaction's copy: the file as it stood after this edit.
+                    full[path] = {("reply", i, -1)}
+                    base[path] = ("reply", i, -1)
+                    text[path] = _from_numbered(content[found.end() :])
+        kept: set[tuple[str, int, int]] = set()
+        copies: dict[int, tuple[str, str]] = {}
+        for path, members in full.items():
+            edited = [
+                i
+                for kind, i, _ in members
+                if kind == "reply"
+                and (kind, i, -1) != base.get(path)
+                and (self.replies.get(i) or {}).get("name") == "edit"
+            ]
+            current = text.get(path)
+            if current is None or not edited or any(i >= last for _, i, _ in members):
+                kept |= members
+            else:
+                copies[max(edited)] = (path, current)
+        return kept, copies
+
+    def _reply_index(self, i: int, k: int) -> int:
+        """Where the reply to message `i`'s `k`th call is: by its id, or else by its place."""
+        call_id = (self.messages[i].get("tool_calls") or [{}])[k].get("id")
+        j = i + 1
+        while j < len(self.messages) and self.messages[j]["role"] == "tool":
+            if call_id is not None and self.messages[j].get("tool_call_id") == call_id:
+                return j
+            j += 1
+        return i + 1 + k
 
     def _call(self) -> tuple[dict[str, Any], Ending | None]:
         if self.last_prompt and self.estimate() >= self.limits.compact_at:
@@ -372,6 +555,9 @@ class Session:
                 prompt_before=self.last_prompt,
                 before_call=self.requests + 1,
             )
+            restated = self.after_compaction() if self.after_compaction is not None else ""
+            if restated:
+                self.say(restated)
             if self.estimate() >= self.limits.compact_at:
                 full = {"estimated": self.estimate(), "limit": self.limits.compact_at}
                 return {}, Ending("context_full", full)
@@ -379,7 +565,7 @@ class Session:
         body = {
             "model": self.alias,
             "messages": self.messages,
-            "tools": self.tools.specs,
+            "tools": self._offered(),
             "tool_choice": "auto",
             "max_tokens": self.limits.max_tokens,
         }
@@ -413,6 +599,7 @@ class Session:
                 self._record("call_retry", n=n, **said)
                 self.sleep(self.limits.retry_wait_s * (attempt + 1))
         took = time.monotonic() - began
+        self.last_seconds = took
         self.model_s += took
         self.calls += 1
         choices = answer.get("choices") if isinstance(answer, dict) else None
@@ -468,11 +655,11 @@ class Session:
                     {"role": "tool", "tool_call_id": call_id, "content": NOT_CARRIED_OUT}
                 )
                 continue
-            judged = self.tools.call(name, function.get("arguments"))
+            args = _arguments(function.get("arguments"))
+            judged = self._refused(name, args) or self.tools.call(name, function.get("arguments"))
             self.outcomes[judged.outcome] += 1
             if isinstance(name, str):
                 self.by_tool[name] += 1
-            args = _arguments(function.get("arguments"))
             info = {
                 "name": name,
                 "path": args.get("path"),
@@ -505,6 +692,25 @@ class Session:
         if pictures:
             self._show(pictures)
         return ending
+
+    def _refused(self, name: Any, args: dict[str, Any]) -> Judged | None:
+        """What the session refuses before a tool sees it: any tool but the asking ones while only
+        they're offered, and a `write` or `edit` whose text holds a compaction's note. On
+        `eval-tip-1` at call 109 the model wrote a file whose whole text was a note, as earlier
+        `write` calls looked after compaction (mqucifer/print-shop#47)."""
+        if self.only and name not in self.only:
+            return Judged(str(name), "failed", NOT_NOW, "ask_only")
+        if name not in ("write", "edit"):
+            return None
+        for key in ("content", "new", "old"):
+            said = args.get(key)
+            found = NOTE_LINE.search(said) if isinstance(said, str) else None
+            if found is not None:
+                done = "written" if name == "write" else "changed"
+                note = _cut(found.group(0).strip())
+                reply = NOTE_AS_TEXT.format(done=done, key=key, note=note, path=args.get("path"))
+                return Judged(str(name), "failed", reply, "compaction_note")
+        return None
 
     def _keep_picture(self, picture: tuple[str, str]) -> None:
         """A picture the model was shown, kept in the run's records beside its events."""
@@ -547,6 +753,7 @@ class Session:
             self.logged = len(self.messages)
 
     def _ended(self, ending: Ending) -> Ending:
+        self.only = ()
         self.snapshot()
         self._record("ended", name=ending.name, said=ending.said)
         return ending
@@ -599,6 +806,54 @@ def gist(content: str) -> str:
         script, _, output = after.partition(": ")
         kept += f" Ran {script}: {_ran_gist(output)}"
     return kept
+
+
+def _numbered(text: str) -> str:
+    """A file's lines with their numbers, as `read` shows them."""
+    return "\n".join(f"{n:5}| {line}" for n, line in enumerate(text.splitlines(), 1))
+
+
+def _from_numbered(block: str) -> str | None:
+    """Numbered lines back to the text, or None where they aren't 1, 2, 3... in order."""
+    lines = []
+    for n, line in enumerate(block.split("\n") if block else [], 1):
+        found = NUMBERED.match(line)
+        if found is None or int(found.group(1)) != n:
+            return None
+        lines.append(found.group(2))
+    return "\n".join(lines)
+
+
+def _from_read(reply: str) -> str | None:
+    """The text a whole `read` showed: its head says `lines 1-N of N`."""
+    head, _, rest = reply.partition("\n")
+    found = re.search(r"lines 1-(\d+) of (\d+):$", head)
+    if found is None or found.group(1) != found.group(2):
+        return None
+    text = _from_numbered(rest)
+    return text if text is not None and len(text.splitlines()) == int(found.group(2)) else None
+
+
+def _edited(text: str | None, args: dict[str, Any]) -> str | None:
+    """An `edit` that was carried out, applied as `tools.WorkTools._edit` applies it, or None
+    where it can't be: the text isn't known, or its lines aren't there once."""
+    old, new = args.get("old"), args.get("new")
+    if text is None or not isinstance(old, str) or not isinstance(new, str):
+        return None
+    old, new = _trim(old), _trim(new)
+    lines, want = text.splitlines(), old.split("\n")
+    at = [i for i in range(len(lines) - len(want) + 1) if lines[i : i + len(want)] == want]
+    if len(at) != 1:
+        return None
+    i = at[0]
+    changed = lines[:i] + (new.split("\n") if new else []) + lines[i + len(want) :]
+    return "\n".join(changed) + ("\n" if text.endswith("\n") else "")
+
+
+def _trim(text: str) -> str:
+    """As `tools._trim`: one leading and one trailing newline off."""
+    text = text[1:] if text.startswith("\n") else text
+    return text[:-1] if text.endswith("\n") else text
 
 
 def _sendable(tool_calls: list[Any]) -> list[Any]:

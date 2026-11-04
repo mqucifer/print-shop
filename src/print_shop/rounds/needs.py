@@ -17,7 +17,7 @@ import shlex
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from print_shop.rounds import toolsets
+from print_shop.rounds import reports, toolsets
 from print_shop.rounds.toolsets import Toolset
 
 #: `note` is a person's note relayed to the model, so a Sponsor's words aren't marked `derived`.
@@ -251,6 +251,21 @@ def _bench_check(need: Need, check: dict[str, Any], wrong: list[str], shown: str
         wrong.append(f"{shown}: `number` needs its limit: `at_least`, `at_most` or both")
     if not need.number and (need.at_least is not None or need.at_most is not None):
         wrong.append(f"{shown}: a limit needs the `number` it holds")
+
+
+def numbers_wrong(found: list[Need]) -> list[str]:
+    """Each bench need whose `number` its command never reports (`reports.py`). On `eval-rings-1`
+    `wall` was settled with `min_wall_mm`, where it reports `least_wall_mm`. A `try` isn't held to
+    this: its reading says which numbers the answer has."""
+    wrong = []
+    for need in found:
+        if need.by != "bench" or not need.number:
+            continue
+        words = need.argv()
+        said = reports.wrong_number(words[0], need.number) if words else None
+        if said:
+            wrong.append(f"the need {need.id!r}: {said}")
+    return wrong
 
 
 def load(entries: list[dict[str, Any]]) -> list[Need]:
