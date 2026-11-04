@@ -234,6 +234,7 @@ def test_an_old_run_reads_back_through_the_new_tables_and_its_folder_isnt_touche
         "runaways": 1,
         "tries": 2,
         "nudges": 0,
+        "refusals": 0,
     }
 
     # What a person sent, known by its words, at the call it reached and that call's time.

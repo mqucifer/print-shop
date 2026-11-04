@@ -20,6 +20,7 @@ import base64
 import copy
 import hashlib
 import json
+import re
 import time
 from collections import Counter
 from collections.abc import Callable
@@ -40,6 +41,14 @@ COMPACT_AT = 125_000
 # by `cad_eval.probe` (2026-10-27: ~2,160 characters, ~800 tokens).
 CHARS_PER_TOKEN = 2.7
 COMPACTED = "(compacted: {what})"
+#: The most a shrunk reply keeps of each line it keeps.
+GIST_CHARS = 300
+#: A reply that says only how its command exited (mqucifer/print-shop#39).
+EXIT_ONLY = re.compile(r"^exit -?\d+(?: after [\d.]+ ?s)?$")
+#: A line that names an error, as Python prints its last: `TypeError: ...`, `cq.Error: ...`.
+ERROR_LINE = re.compile(r"^[A-Za-z_][\w.]*(?:Error|Exception|Exit|Interrupt|Warning)\b")
+#: Where a `write` or `edit` reply says what the run after it did.
+RAN = "\n\nRan "
 # A picture's tokens in the next prompt, before a response reports them: `cad_eval`'s was 576.
 PICTURE_TOKENS = 600
 QUIET = "Call a tool to go on. If you can't, `blocked` says why."
@@ -292,7 +301,8 @@ class Session:
         - The latest reply of `run`, of `bench` and of `done` stays whole, and so do the newest
           turn's. A run's reply through `write` or `edit` counts as `run`'s.
         - Every other `write` or `edit` call keeps its own keys, its text a note, and every other
-          tool reply shrinks to one line.
+          tool reply shrinks to what failed and why (`gist`): a bench answer's verdict and its
+          reason, or a run's last error, never only its exit code (mqucifer/print-shop#39).
         - What the Sponsor said is never touched: it's in user messages.
         """
         last = max((i for i, m in enumerate(self.messages) if m["role"] == "assistant"), default=-1)
@@ -347,9 +357,8 @@ class Session:
             ):
                 content = str(m.get("content") or "")
                 if not content.startswith("(compacted:"):
-                    first = content.splitlines()[0][:120] if content else ""
                     tool = (self.replies.get(i) or {}).get("name", "tool")
-                    self.rewrite(i, COMPACTED.format(what=f"{tool}: {first}"))
+                    self.rewrite(i, COMPACTED.format(what=f"{tool}: {gist(content)}"))
         self.compactions += 1
 
     def _call(self) -> tuple[dict[str, Any], Ending | None]:
@@ -541,6 +550,55 @@ class Session:
         self.snapshot()
         self._record("ended", name=ending.name, said=ending.said)
         return ending
+
+
+def _cut(line: str) -> str:
+    return line if len(line) <= GIST_CHARS else f"{line[:GIST_CHARS]}…"
+
+
+def _ran_gist(text: str) -> str:
+    """A run's reply, `exit N after S s` and its output, as its exit and its last error: the last
+    line that names one, or the last line it printed."""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    head, rest = lines[0], lines[1:]
+    errors = [line for line in rest if ERROR_LINE.match(line)]
+    last = errors[-1] if errors else (rest[-1] if rest else "it printed nothing")
+    return f"{head}; {_cut(last)}"
+
+
+def gist(content: str) -> str:
+    """What a tool reply keeps when compaction shrinks it: what failed and why. On `suncatcher-2`
+    139 of the shrunk replies said only `exit 1`, and after a summary the model couldn't compare
+    its failures (mqucifer/print-shop#39).
+
+    - A bench answer keeps its exit and its verdict line, with the reason, or its usage error.
+    - A run keeps its exit and its last error, or the last line it printed.
+    - A `write` or `edit` that ran a script keeps its first line and what the run did.
+    - Anything else keeps its first line, as before, and an exit alone gains the last line said."""
+    text = content.strip()
+    if not text:
+        return ""
+    body, ran, after = text.partition(RAN)
+    lines = [line.strip() for line in body.splitlines() if line.strip()]
+    first = lines[0]
+    if EXIT_ONLY.match(first):
+        said = next(
+            (line for line in lines if line.startswith(("verdict:", "usage error:"))), None
+        )
+        if said is not None:
+            kept = f"{first}, {_cut(said)}"
+        elif " after " in first:
+            kept = _ran_gist(body)
+        else:
+            kept = f"{first}; {_cut(lines[-1]) if len(lines) > 1 else 'nothing else was said'}"
+    else:
+        kept = _cut(first)
+    if ran:
+        script, _, output = after.partition(": ")
+        kept += f" Ran {script}: {_ran_gist(output)}"
+    return kept
 
 
 def _sendable(tool_calls: list[Any]) -> list[Any]:

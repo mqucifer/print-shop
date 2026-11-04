@@ -36,6 +36,15 @@ from print_shop.expert.client import API_KEY, DEFAULT_URL
 ALIAS = "crew-code-think"
 RUNAWAY_CHARS = 2000
 TIMEOUT_S = 3600.0
+#: What a run's record says when LiteLLM won't say what reasoning effort an alias sends.
+UNKNOWN = "unknown"
+#: Where in an alias's `litellm_params` its model info may hold the effort it sends: as a
+#: parameter of its own, or in the body it adds to each call, as SGLang's chat template reads it.
+EFFORT_AT = (
+    ("reasoning_effort",),
+    ("extra_body", "reasoning_effort"),
+    ("extra_body", "chat_template_kwargs", "reasoning_effort"),
+)
 # LiteLLM's headers that say what served a call: never the key's, the spend's or the budget's,
 # nor the address it reached. Rows and records hold no address (`cad_eval`'s second review of #41).
 PRIVATE = ("key", "spend", "cost", "budget", "user", "team", "api-base")
@@ -71,6 +80,17 @@ class Sender:
                 response=response,
             )
         return alias in {model.get("id") for model in response.json().get("data", [])}
+
+    def effort(self, alias: str) -> tuple[str, str]:
+        """The reasoning effort `alias` sends, as LiteLLM's model info says it for this key, and
+        where it was read; or `unknown`, and why (mqucifer/print-shop#40). `/model/info` is
+        LiteLLM's own answer, from its config: it costs no model call and reaches no SGLang.
+        Nothing else is kept from it, since it can name a server's address."""
+        try:
+            response = self._client.get("/model/info")
+        except httpx.HTTPError as exc:
+            return UNKNOWN, f"LiteLLM's model info didn't answer: {type(exc).__name__}"
+        return effort_in(response.status_code, response.content, alias)
 
     def keep_stream(self, path: Path) -> None:
         """Where the next call's tool-call arguments go as they arrive."""
@@ -197,6 +217,34 @@ class Sender:
 
     def close(self) -> None:
         self._client.close()
+
+
+def effort_in(status: int, body: bytes, alias: str) -> tuple[str, str]:
+    """The effort an alias sends, from LiteLLM's `/model/info` answer: `{"data": [{"model_name":
+    ..., "litellm_params": {...}, "model_info": {...}}]}`, one entry for each deployment."""
+    if status != 200:
+        return UNKNOWN, f"LiteLLM answered {status} for its model info"
+    try:
+        data = json.loads(body).get("data") or []
+    except (ValueError, AttributeError):
+        return UNKNOWN, "LiteLLM's model info wasn't the JSON it documents"
+    entries = [d for d in data if isinstance(d, dict) and d.get("model_name") == alias]
+    if not entries:
+        return UNKNOWN, f"LiteLLM's model info has no `{alias}` for this key"
+    found: dict[str, str] = {}
+    for entry in entries:
+        for path in EFFORT_AT:
+            value: Any = entry.get("litellm_params")
+            for key in path:
+                value = value.get(key) if isinstance(value, dict) else None
+            if isinstance(value, str) and value.strip():
+                found[value.strip()] = "litellm_params." + ".".join(path)
+    if len(found) == 1:
+        (value, where), = found.items()
+        return value, f"LiteLLM's /model/info for `{alias}`, {where}"
+    if found:
+        return UNKNOWN, f"`{alias}`'s deployments send {', '.join(sorted(found))}"
+    return UNKNOWN, f"LiteLLM's model info for `{alias}` doesn't name an effort"
 
 
 def served_headers(headers: Any) -> dict[str, str]:

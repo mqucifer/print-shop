@@ -27,6 +27,7 @@ import json
 import re
 import shlex
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -47,6 +48,11 @@ NEAR_CONTEXT = 5
 NEAR_RATIO = 0.6
 EDIT_CONTEXT = 4
 EDIT_LINES = 80
+#: How many differing lines a refused `edit` names, and how many lines may come between the lines
+#: it quoted for them to count as left out (mqucifer/print-shop#39: on `cup-1` and `suncatcher-2`,
+#: 8 of 18 refusals differed only in indentation, and 3 left lines out of the middle).
+SAID_LINES = 3
+APART_SLACK = 20
 BOOLEAN_TEXT = {"true": True, "false": False}
 PICTURES = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".heic")
 GEOMETRY = (".step", ".stp", ".stl", ".brep", ".3mf", ".obj", ".f3d")
@@ -337,6 +343,11 @@ def specs() -> list[dict[str, Any]]:
     ]
 
 
+#: The tools that run something, after which a file the model had may be otherwise.
+CHANGERS = ("run", "bench", "write", "edit")
+#: An `edit` refused as its lines aren't in the file as they are.
+MISSED = ("edit.closest", "edit.closest.indent", "edit.closest.apart", "edit.not_found")
+
 #: The tools that belong to the run, which `Desk` answers.
 DESK = ("questions", "needs", "ask", "send_ask", "done", "blocked", "after_action")
 
@@ -431,6 +442,20 @@ def refusal(path: str, text: str, old: str, new: str) -> tuple[str, str] | None:
         )
     if new and new in text:
         return "edit.already", f"`old` isn't in `{path}`, and `new` already is: it may be made."
+    found = _apart(lines, want)
+    if found is not None:
+        between = [
+            f"{a + 2}-{b}" if b - a > 2 else str(a + 2)
+            for a, b in zip(found, found[1:], strict=False)
+            if b > a + 1
+        ]
+        shown = "\n".join(numbered(lines, found[0], found[-1] + 1)[:EDIT_LINES])
+        return "edit.closest.apart", (
+            f"Your lines are all in `{path}`, in order, but not together: line"
+            f"{'s' if len(between) > 1 or '-' in between[0] else ''} {', '.join(between)} "
+            "come between them, and you left them out. Quote them too, or edit each part on its "
+            f"own:\n{shown}"
+        )
     size = len(want)
     best, best_at = 0.0, -1
     for i in range(max(1, len(lines) - size + 1)):
@@ -444,10 +469,68 @@ def refusal(path: str, text: str, old: str, new: str) -> tuple[str, str] | None:
             "edit.not_found",
             f"Those lines aren't in `{path}`, and nothing close is: read it with `read` first.",
         )
+    block = lines[best_at : best_at + size]
     shown = "\n".join(numbered(lines, best_at - NEAR_CONTEXT, best_at + size + NEAR_CONTEXT))
+    if [b.strip() for b in block] == [w.strip() for w in want]:
+        differ = [
+            f"line {best_at + k + 1} starts with {_indent(b)}, and yours with {_indent(w)}"
+            for k, (b, w) in enumerate(zip(block, want, strict=True))
+            if b != w
+        ]
+        more = f", and {len(differ) - SAID_LINES} more" if len(differ) > SAID_LINES else ""
+        return "edit.closest.indent", (
+            f"Those lines are in `{path}` at line {best_at + 1}, indented otherwise: "
+            f"{'; '.join(differ[:SAID_LINES])}{more}. Quote them as the file has them:\n{shown}"
+        )
+    lo = max(0, best_at - NEAR_CONTEXT)
+    window = lines[lo : best_at + size + NEAR_CONTEXT]
+    held = set(lines)
+    differ = []
+    for w in want:
+        if w.strip() and w not in held:
+            near = difflib.get_close_matches(w, window, 1, 0.0)
+            if near:
+                number = lo + window.index(near[0]) + 1
+                differ.append(f"`{w.strip()}` is line {number}'s `{near[0].strip()}`")
+            else:
+                differ.append(f"`{w.strip()}` isn't there")
+    said = f" Of yours, {'; '.join(differ[:SAID_LINES])}." if differ else ""
     return "edit.closest", (
-        f"Those lines aren't in `{path}`. The closest block starts at line {best_at + 1}:\n{shown}"
+        f"Those lines aren't in `{path}`.{said} The closest block starts at line {best_at + 1}:"
+        f"\n{shown}"
     )
+
+
+def _indent(line: str) -> str:
+    """A line's leading whitespace, said."""
+    lead = line[: len(line) - len(line.lstrip())]
+    if not lead:
+        return "no indent"
+    if set(lead) == {" "}:
+        return f"{len(lead)} space{'s' if len(lead) > 1 else ''}"
+    return f"`{lead!r}`"
+
+
+def _apart(lines: list[str], want: list[str]) -> list[int] | None:
+    """Where each line of `want` is, if every one is in the file in order and near the others,
+    but not together: the model left lines out of the middle. None otherwise."""
+    if len(want) < 2:
+        return None
+    span = len(want) + APART_SLACK
+    for i, line in enumerate(lines):
+        if line != want[0]:
+            continue
+        found, j = [i], i + 1
+        for w in want[1:]:
+            while j < len(lines) and j < i + span and lines[j] != w:
+                j += 1
+            if j >= len(lines) or j >= i + span:
+                break
+            found.append(j)
+            j += 1
+        if len(found) == len(want):
+            return found
+    return None
 
 
 def parse(raw: Any) -> Any:
@@ -488,6 +571,14 @@ class WorkTools:
         self.specs = specs()
         self.accepted = {s["function"]["name"]: s["function"]["parameters"] for s in self.specs}
         self.skills = skills.registry()
+        # The call each tool call is part of: the run sets it, as the ledger numbers calls.
+        self.at_call: Callable[[], int] = lambda: 0
+        # Each text file as the model last had it whole (its `write`, a whole `read`, or an
+        # `edit` of what it had), and at which call; as the harness last saw it; and the last
+        # change the model wasn't shown, by call and what made it (mqucifer/print-shop#39).
+        self.known: dict[str, tuple[str, int]] = {}
+        self.observed: dict[str, str | None] = {}
+        self.changed_by: dict[str, tuple[int, str]] = {}
 
     def only(self, names: tuple[str, ...], *more: dict[str, Any]) -> None:
         """From here on, only these tools, and any `more` the run gives: after the approval, the
@@ -515,7 +606,54 @@ class WorkTools:
             found: Judged = getattr(self.desk, name)(args)
             return found
         answered: Judged = getattr(self, f"_{name}")(args)
+        if name in CHANGERS:
+            self._observe(name, args)
         return answered
+
+    # What the model last had of each file, and what changed it since
+
+    def _hash(self, path: str) -> str | None:
+        try:
+            return paths.content_hash(path, read_bytes_inside(self.work, path))
+        except (Outside, OSError):
+            return None
+
+    def _had(self, path: str, text: str) -> None:
+        """The model has this file whole, as it now is."""
+        digest = paths.content_hash(path, text.encode())
+        self.known[path] = (digest, self.at_call())
+        self.observed[path] = digest
+        self.changed_by.pop(path, None)
+
+    def _observe(self, name: str, args: dict[str, Any]) -> None:
+        """After a call that runs something: each file the model had that's now otherwise, and
+        what changed it. A `write` or `edit` of the file itself has already said."""
+        what = {
+            "run": f"`run` of `{args.get('path')}`",
+            "bench": f"`bench {args.get('command')}`",
+        }.get(name, f"the run after your `{name}` of `{args.get('path')}`")
+        for path, was in self.observed.items():
+            now = self._hash(path)
+            if now != was:
+                self.observed[path] = now
+                self.changed_by[path] = (self.at_call(), what)
+
+    def _since(self, path: str, text: str) -> str:
+        """What the model's told when its lines aren't in a file: that the file has changed since
+        it last had it whole, and what changed it, if so."""
+        had = self.known.get(path)
+        if had is None or had[0] == paths.content_hash(path, text.encode()):
+            return ""
+        by = self.changed_by.get(path)
+        if by is None:
+            return (
+                f"`{path}` has changed since you last had it whole, at call {had[1]}: "
+                "`read` it before you edit it again.\n\n"
+            )
+        return (
+            f"`{path}` has changed since you last had it whole, at call {had[1]}: call {by[0]}'s "
+            f"{by[1]} changed it. `read` it before you edit it again.\n\n"
+        )
 
     def _well_formed(self, name: Any, args: Any) -> Judged | None:
         """The AST category: crew's `check_arguments` over these tools, then BFCL's type check."""
@@ -605,6 +743,7 @@ class WorkTools:
             return self._failed("write", "outside", outside)
         except OSError as exc:
             return self._failed("write", "not_written", f"It couldn't be written: {exc}")
+        self._had(str(args["path"]), args["content"])
         said = f"Wrote {args['path']} ({len(args['content'])} characters)."
         return self._then_run("write", said, script)
 
@@ -628,7 +767,9 @@ class WorkTools:
         old, new = _trim(args["old"]), _trim(args["new"])
         refused = refusal(args["path"], text, old, new)
         if refused is not None:
-            return self._failed("edit", refused[0], refused[1])
+            since = self._since(str(args["path"]), text) if refused[0] in MISSED else ""
+            detail = {"changed_since": self.changed_by.get(str(args["path"]))} if since else {}
+            return Judged("edit", "failed", since + refused[1], refused[0], detail=detail)
         lines = text.splitlines()
         want = old.split("\n")
         i = next(k for k in range(len(lines)) if lines[k : k + len(want)] == want)
@@ -653,6 +794,11 @@ class WorkTools:
             return self._failed("edit", "outside", outside)
         except OSError as exc:
             return self._failed("edit", "not_written", f"It couldn't be written: {exc}")
+        path = str(args["path"])
+        if self.known.get(path, ("",))[0] == paths.content_hash(path, text.encode()):
+            self._had(path, after)
+        else:
+            self.observed[path] = paths.content_hash(path, after.encode())
         said = f"Replaced lines in `{args['path']}`.{broken}\nIt now reads:\n"
         return self._then_run("edit", said + changed_lines(text, after), script)
 
@@ -685,6 +831,8 @@ class WorkTools:
         head = f"`{path}`, lines {start}-{end} of {len(lines)}:"
         more = f"\n(more: `start` {end + 1})" if end < len(lines) else ""
         whole = start == 1 and end >= len(lines)
+        if whole:
+            self._had(path, text)
         return Judged("read", "ok", f"{head}\n{shown}{more}", detail={"whole": whole})
 
     def _picture(self, path: str) -> Judged:
