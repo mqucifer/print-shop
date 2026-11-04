@@ -50,6 +50,10 @@ A request is free text, as it always was, with up to four headings of its own (`
 
 **A request's pictures and reference files go in at `start`** (`--reference`), with the request, so the plan is written from them.
 
+**An object the part must fit goes in with the request as a reference,** such as bought hardware or a tealight (`start --reference`). Whoever writes the request draws it from its maker's figures; the model never makes it. A need reads only the part and `references/` (mqucifer/print-shop#45), and on `tealight-1` the fit was checked against a tealight the model drew.
+
+**A request that gives a part to change says what else may change.** On `eval-tip-1` the model read a request for a pane as leaving the given frame as it was, and didn't ask.
+
 Coverage is held by ids, as `needs` holds quotes, and nothing is guessed from words: the only reading of a line's words is whether it holds a digit. **A line is covered by an eye need only where no bench command measures it,** and the harness can't know that on its own, so an eye need that covers a line says why in `check.no_bench`, and the person reads it at the plan stop. Where mqucifer/print-shop#37 settles which command measures what, that list can hold it too.
 
 **A request in the old free form still runs.** With no `## Requirements` or `## Non-negotiables`, it has no lines, and nothing is checked for coverage. It still has the plan as its stop, and the breakdown before its needs. A run started before this has no form in its `state.json`, and carries on as it began: no lines, no stops, no breakdown asked for.
