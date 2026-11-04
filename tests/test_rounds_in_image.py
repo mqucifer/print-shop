@@ -34,6 +34,14 @@ pytestmark = pytest.mark.bench
 
 REQUEST = (
     "A small block with a tab beside it. Keep a 0.5 mm gap between them, and it should look good."
+    "\n\n## Stops\n- no plan\n"
+)
+#: How it's built, before the needs (mqucifer/print-shop#36). The stops are `test_intake.py`'s.
+BROKEN_DOWN = tool(
+    "breakdown",
+    parts=[{"name": "block", "what": "a box"}, {"name": "tab", "what": "a smaller box"}],
+    joins=[{"parts": ["block", "tab"], "how": "apart, by the gap"}],
+    look=["two boxes side by side"],
 )
 
 
@@ -197,10 +205,10 @@ def test_a_run_goes_from_intake_through_refusals_and_a_pick_to_its_needs_met(
     run, model = again(
         run,
         [done()],
-        [tool("needs", needs=[bad_quote])],
-        [tool("needs", needs=[bad_command])],
-        [tool("needs", needs=need_set)],
-        [tool("needs", needs=need_set)],
+        [BROKEN_DOWN, tool("needs", needs=[bad_quote])],
+        [BROKEN_DOWN, tool("needs", needs=[bad_command])],
+        [BROKEN_DOWN, tool("needs", needs=need_set)],
+        [BROKEN_DOWN, tool("needs", needs=need_set)],
         # A name on the wrong class: the hint says where it is.
         [write("oops.py", 'import cadquery as cq\ncq.Workplane("XY").isValid()\n', run=True)],
         # The first try: the gap's wrong.
@@ -382,7 +390,7 @@ def test_a_run_goes_from_intake_through_refusals_and_a_pick_to_its_needs_met(
 def test_a_part_left_over_from_an_earlier_script_doesnt_count(tmp_path: Path) -> None:
     run, _ = begin(
         tmp_path,
-        [tool("needs", needs=[SIZE_NEED])],
+        [BROKEN_DOWN, tool("needs", needs=[SIZE_NEED])],
         [write("make.py", script(gap=0.5), run=True)],
         [write("noop.py", "print('nothing to see')\n")],
         [done("noop.py")],
@@ -398,7 +406,7 @@ def test_a_part_left_over_from_an_earlier_script_doesnt_count(tmp_path: Path) ->
 def test_a_script_that_fails_from_a_clean_start_is_said_with_its_output(tmp_path: Path) -> None:
     run, _ = begin(
         tmp_path,
-        [tool("needs", needs=[SIZE_NEED])],
+        [BROKEN_DOWN, tool("needs", needs=[SIZE_NEED])],
         [write("bad.py", "raise SystemExit('it broke')\n")],
         [done("bad.py")],
         [tool("blocked", reason="stop")],
@@ -412,7 +420,7 @@ def test_a_script_that_fails_from_a_clean_start_is_said_with_its_output(tmp_path
 def test_nothing_a_run_plants_can_stand_in_for_the_bench(tmp_path: Path) -> None:
     run, _ = begin(
         tmp_path,
-        [tool("needs", needs=[SIZE_NEED])],
+        [BROKEN_DOWN, tool("needs", needs=[SIZE_NEED])],
         [write("make.py", script(gap=0.5), run=True)],
         # Modules that would shadow the bench's own, and a forged answer in its folder.
         [write("trimesh.py", "raise SystemExit('forged')\n")],
@@ -431,7 +439,7 @@ def test_nothing_a_run_plants_can_stand_in_for_the_bench(tmp_path: Path) -> None
 def asked_a_pick(tmp_path: Path, **ask: Any) -> Run:
     run, _ = begin(
         tmp_path,
-        [tool("needs", needs=[SIZE_NEED, EYE_NEED])],
+        [BROKEN_DOWN, tool("needs", needs=[SIZE_NEED, EYE_NEED])],
         [write("make.py", script(gap=0.5), run=True)],
         [
             tool(
@@ -545,7 +553,7 @@ def test_the_final_sheet_draws_the_part_and_leaves_out_what_only_a_need_names(
     """The first real run's final sheet drew its two test cylinders inside the stand."""
     run, _ = begin(
         tmp_path,
-        [tool("needs", needs=[FIXTURE_NEED])],
+        [BROKEN_DOWN, tool("needs", needs=[FIXTURE_NEED])],
         [write("make.py", FIXTURE_SCRIPT, run=True)],
         [done()],
     )
@@ -562,7 +570,7 @@ def test_the_final_sheet_draws_the_part_and_leaves_out_what_only_a_need_names(
 def test_done_with_no_part_is_told_and_costs_only_that_call(tmp_path: Path) -> None:
     run, _ = begin(
         tmp_path,
-        [tool("needs", needs=[SIZE_NEED])],
+        [BROKEN_DOWN, tool("needs", needs=[SIZE_NEED])],
         [write("make.py", script(gap=0.5), run=True)],
         [tool("done", script="make.py", fix_shape="x", closing="y")],
         [done(part=[])],
@@ -579,7 +587,7 @@ def test_done_with_no_part_is_told_and_costs_only_that_call(tmp_path: Path) -> N
 def test_a_part_a_clean_run_doesnt_leave_isnt_met(tmp_path: Path) -> None:
     run, _ = begin(
         tmp_path,
-        [tool("needs", needs=[SIZE_NEED])],
+        [BROKEN_DOWN, tool("needs", needs=[SIZE_NEED])],
         [write("make.py", script(gap=0.5), run=True)],
         [done(part=["stand.step"])],
         [tool("blocked", reason="stop")],
@@ -595,7 +603,7 @@ def test_a_part_a_clean_run_doesnt_leave_isnt_met(tmp_path: Path) -> None:
 def test_a_picks_sheet_can_hold_a_close_up_and_marks_a_test_piece(tmp_path: Path) -> None:
     run, _ = begin(
         tmp_path,
-        [tool("needs", needs=[FIXTURE_NEED, EYE_NEED])],
+        [BROKEN_DOWN, tool("needs", needs=[FIXTURE_NEED, EYE_NEED])],
         [write("make.py", FIXTURE_SCRIPT, run=True)],
         [
             tool(
@@ -755,7 +763,7 @@ def test_needs_can_be_tried_before_theyre_settled(tmp_path: Path) -> None:
         [write("make.py", script(gap=0.5), run=True)],
         [tool("needs", needs=[wrong_name, GAP_NEED, EYE_NEED], **{"try": "true"})],
         [tool("needs", needs=[SIZE_NEED], **{"try": True})],
-        [tool("needs", needs=[SIZE_NEED])],
+        [BROKEN_DOWN, tool("needs", needs=[SIZE_NEED])],
         [tool("blocked", reason="enough")],
     )
     assert run.drive().name == "blocked"
@@ -782,7 +790,7 @@ def endings(run: Run) -> str:
     return str(ended[-1]["name"])
 
 
-EYE_ONLY = [tool("needs", needs=[EYE_NEED])]
+EYE_ONLY = [BROKEN_DOWN, tool("needs", needs=[EYE_NEED])]
 A_SCRIPT = [write("s.py", "print('hi')\n")]
 DONE_S = done("s.py", part=["s.step"])
 
@@ -922,7 +930,7 @@ def test_a_fault_in_the_harness_ends_named_with_its_trace_kept(
 def test_a_conversation_that_wont_fit_goes_on_from_the_record(tmp_path: Path) -> None:
     run, model = begin(
         tmp_path,
-        [tool("needs", needs=[EYE_NEED])],
+        [BROKEN_DOWN, tool("needs", needs=[EYE_NEED])],
         [tool("blocked", reason="after the new conversation")],
         limits=Limits(compact_at=500),
         prompt_tokens=10_000,
@@ -990,7 +998,7 @@ def test_needs_reopen_only_when_a_person_says_so(tmp_path: Path) -> None:
         tmp_path,
         EYE_ONLY,
         [tool("questions", questions="Can I change the needs?")],
-        [tool("needs", needs=[SIZE_NEED])],
+        [BROKEN_DOWN, tool("needs", needs=[SIZE_NEED])],
         [tool("blocked", reason="the need's check is wrong")],
     )
     assert run.drive().name == "blocked"
@@ -1055,7 +1063,7 @@ def asked_with_needs(tmp_path: Path, *need_list: dict[str, Any], **ask: Any) -> 
     run, _ = begin(
         tmp_path,
         [write("make.py", script(gap=0.5), run=True)],
-        [tool("needs", needs=list(need_list))],
+        [BROKEN_DOWN, tool("needs", needs=list(need_list))],
         [
             tool(
                 "ask",
@@ -1087,7 +1095,7 @@ def test_every_note_and_answer_relayed_is_a_row_saying_who_when_and_at_which_cal
     run, _ = again(
         run,
         [write("make.py", script(gap=0.5), run=True)],
-        [tool("needs", needs=[EYE_NEED])],
+        [BROKEN_DOWN, tool("needs", needs=[EYE_NEED])],
         [
             tool(
                 "ask",
@@ -1233,9 +1241,9 @@ def test_a_need_from_a_relayed_note_says_so_and_is_held_to_its_words(tmp_path: P
     }
     run, _ = again(
         run,
-        [tool("needs", needs=[{**from_note, "source": "answer"}])],
-        [tool("needs", needs=[{**from_note, "quote": "words nobody sent"}])],
-        [tool("needs", needs=[from_note])],
+        [BROKEN_DOWN, tool("needs", needs=[{**from_note, "source": "answer"}])],
+        [BROKEN_DOWN, tool("needs", needs=[{**from_note, "quote": "words nobody sent"}])],
+        [BROKEN_DOWN, tool("needs", needs=[from_note])],
         [tool("blocked", reason="stop")],
     )
     run.resume("It has to sit flat on a shelf, whatever else.")
@@ -1267,7 +1275,7 @@ def test_a_conversation_from_the_record_keeps_the_notes(tmp_path: Path) -> None:
 def test_done_asks_for_the_fixs_shape_and_its_closing_words(tmp_path: Path) -> None:
     run, _ = begin(
         tmp_path,
-        [tool("needs", needs=[SIZE_NEED])],
+        [BROKEN_DOWN, tool("needs", needs=[SIZE_NEED])],
         [write("make.py", script(gap=0.5), run=True)],
         [tool("done", script="make.py", part=["block.step"], closing="Here it is.")],
         [tool("done", script="make.py", part=["block.step"], fix_shape="first", closing="  ")],
@@ -1557,7 +1565,7 @@ def test_a_check_holds_what_a_need_says_at_done(
     )
     run, _ = begin(
         tmp_path,
-        [tool("needs", needs=[need])],
+        [BROKEN_DOWN, tool("needs", needs=[need])],
         [write("make.py", made, run=True)],
         [done()],
         [tool("blocked", reason="stop")],
@@ -1598,7 +1606,7 @@ def test_a_frames_check_holds_what_a_need_says_at_done(
     }
     run, _ = begin(
         tmp_path,
-        [tool("needs", needs=[need])],
+        [BROKEN_DOWN, tool("needs", needs=[need])],
         [write("frame.py", FRAME_SCRIPT, run=True)],
         [done("frame.py", part=["frame.step"])],
         [tool("blocked", reason="stop")],
@@ -1614,7 +1622,7 @@ def test_a_frames_check_holds_what_a_need_says_at_done(
 def met_with_a_sheet(tmp_path: Path, **more: Any) -> Run:
     run, _ = begin(
         tmp_path,
-        [tool("needs", needs=[SIZE_NEED])],
+        [BROKEN_DOWN, tool("needs", needs=[SIZE_NEED])],
         [write("make.py", script(gap=0.5), run=True)],
         [done(closing="I couldn't try the fit, so look at the shape.", **more)],
     )
@@ -1745,7 +1753,7 @@ def test_a_sheet_too_tall_to_send_stays_with_the_person(tmp_path: Path) -> None:
     copies = ["block.step", *[f"copy{i}.step" for i in range(4)]]
     run, _ = begin(
         tmp_path,
-        [tool("needs", needs=[SIZE_NEED])],
+        [BROKEN_DOWN, tool("needs", needs=[SIZE_NEED])],
         [write("make.py", many, run=True)],
         # Five copies in one place: each prints on its own, or they'd take the same space.
         [done(part=copies, groups=[{"name": f"g{k}", "files": [f]} for k, f in enumerate(copies)])],
@@ -1858,7 +1866,7 @@ def test_the_run_doesnt_stop_for_approval_with_a_file_under_the_nozzles_width(
     """On `cup-1` two panes the Sponsor found too thin in Orca passed every need."""
     run, _ = begin(
         tmp_path,
-        [tool("needs", needs=[SIZE_NEED])],
+        [BROKEN_DOWN, tool("needs", needs=[SIZE_NEED])],
         [write("make.py", FIN_SCRIPT.format(fin=0.2), run=True)],
         [done(part=["block.step", "tab.step"])],
         [write("make.py", FIN_SCRIPT.format(fin=2.0), run=True)],
@@ -1889,7 +1897,7 @@ def test_files_printed_together_cant_take_the_same_space(tmp_path: Path) -> None
     """Both real runs handed over `frame` beside `frame_base` and `cap`, its two halves."""
     run, _ = begin(
         tmp_path,
-        [tool("needs", needs=[SIZE_NEED])],
+        [BROKEN_DOWN, tool("needs", needs=[SIZE_NEED])],
         [write("make.py", TWO_WAYS, run=True)],
         [done(part=TWO_WAYS_PART)],
         [done(part=TWO_WAYS_PART, groups=TWO_WAYS_GROUPS, looks=LOOKS)],
@@ -1926,7 +1934,7 @@ def test_files_printed_together_cant_take_the_same_space(tmp_path: Path) -> None
 def test_a_group_that_names_a_file_outside_the_part_is_told(tmp_path: Path) -> None:
     run, _ = begin(
         tmp_path,
-        [tool("needs", needs=[SIZE_NEED])],
+        [BROKEN_DOWN, tool("needs", needs=[SIZE_NEED])],
         [write("make.py", script(gap=0.5), run=True)],
         [done(groups=[{"name": "one", "files": ["tab.step"]}])],
         [done(looks={"block.step": {"colour": "sparkly"}})],
@@ -1943,7 +1951,7 @@ def failing_gap_then_stopped(tmp_path: Path) -> Run:
     """Needs settled with a gap the part misses, a round that says so, and a stop."""
     run, _ = begin(
         tmp_path,
-        [tool("needs", needs=[GAP_NEED, SIZE_NEED])],
+        [BROKEN_DOWN, tool("needs", needs=[GAP_NEED, SIZE_NEED])],
         [write("make.py", script(gap=2.0), run=True)],
         [done()],
         [tool("blocked", reason="stop")],
@@ -1962,9 +1970,9 @@ def test_a_need_whose_check_fails_isnt_swapped_for_one_that_passes_without_a_rea
     reason = "The gap was chosen too fine for this printer."
     run, _ = again(
         run,
-        [tool("needs", needs=[SIZE_NEED])],
-        [tool("needs", needs=[looser, SIZE_NEED])],
-        [tool("needs", needs=[SIZE_NEED], why_changed={"gap": reason})],
+        [BROKEN_DOWN, tool("needs", needs=[SIZE_NEED])],
+        [BROKEN_DOWN, tool("needs", needs=[looser, SIZE_NEED])],
+        [BROKEN_DOWN, tool("needs", needs=[SIZE_NEED], why_changed={"gap": reason})],
         [done()],
     )
     run.resume(reopen_needs=True)
@@ -2002,7 +2010,7 @@ def test_an_asks_sheet_goes_to_the_model_first_and_only_then_with_its_words(
     """On both real runs the model described the design it meant, not what the sheet showed."""
     run, _ = begin(
         tmp_path,
-        [tool("needs", needs=[GAP_NEED, EYE_NEED])],
+        [BROKEN_DOWN, tool("needs", needs=[GAP_NEED, EYE_NEED])],
         [write("make.py", script(gap=2.0), run=True)],
         [tool("send_ask", says="nothing yet")],
         [
@@ -2094,7 +2102,7 @@ def test_a_send_back_can_reopen_the_needs(tmp_path: Path) -> None:
     run = met_with_a_sheet(tmp_path)
     run, _ = again(
         run,
-        [tool("needs", needs=[SIZE_NEED, {**SIZE_NEED, "id": "printable"}])],
+        [BROKEN_DOWN, tool("needs", needs=[SIZE_NEED, {**SIZE_NEED, "id": "printable"}])],
         [tool("blocked", reason="stop")],
     )
     run.send_back("sponsor", "Add the check you were missing.", reopen_needs=True)

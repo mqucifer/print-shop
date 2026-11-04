@@ -420,6 +420,39 @@ CREATE TABLE IF NOT EXISTS lesson_scores (
     at TEXT NOT NULL,
     FOREIGN KEY (run, lesson) REFERENCES run_lessons(run, lesson)
 );
+CREATE TABLE IF NOT EXISTS request_lines (
+    -- The request's set form (mqucifer/print-shop#36): each line by its id, its section
+    -- (`requirement`, `non_negotiable`, `kind` or `stop`) and its text. The plan stop is `plan`.
+    run TEXT NOT NULL REFERENCES runs(run),
+    line TEXT NOT NULL,
+    section TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    PRIMARY KEY (run, line)
+);
+CREATE TABLE IF NOT EXISTS breakdowns (
+    -- How the reference and the request are built, as the model wrote it before its needs: the
+    -- parts, what holds or connects what, and what the look rests on. Each call a version.
+    run TEXT NOT NULL REFERENCES runs(run),
+    n INTEGER NOT NULL,
+    at_call INTEGER NOT NULL,
+    body TEXT NOT NULL,
+    at TEXT NOT NULL,
+    PRIMARY KEY (run, n)
+);
+CREATE TABLE IF NOT EXISTS need_marks (
+    -- What ties each need of a version to the request: the lines it covers, whether it's a
+    -- non-negotiable's (`fixed`), how its figure is read, and why no bench command measures a
+    -- line an eye need covers. Apart from `needs`, which older code inserts into by position.
+    run TEXT NOT NULL REFERENCES runs(run),
+    version INTEGER NOT NULL,
+    need TEXT NOT NULL,
+    covers TEXT NOT NULL,
+    fixed INTEGER NOT NULL,
+    figure TEXT,
+    no_bench TEXT,
+    PRIMARY KEY (run, version, need)
+);
 CREATE VIEW IF NOT EXISTS phases AS
 SELECT calls.run, calls.phase, MIN(calls.n) AS first_call, MAX(calls.n) AS last_call,
        COUNT(*) AS calls, SUM(calls.seconds) AS seconds,
@@ -460,7 +493,16 @@ ADDED = (
     ("picks", "fix_first", "TEXT"),
     # The groups and files of the delivered folder at a stop, and where it was written.
     ("approvals", "review", "TEXT"),
+    # The request's stop an ask showed, by its id (`plan`, `S1`), if it was one.
+    ("picks", "stop", "TEXT"),
 )
+#: Each stop asked, at which call, and picked when and by whom: made once `picks.stop` is there.
+STOPS_VIEW = """CREATE VIEW IF NOT EXISTS stops AS
+SELECT picks.run, picks.stop, request_lines.text AS what, picks.ask, picks.round, picks.at_call,
+       picks.asked_at, picks.pick, picks.reason, picks.picked_at, picks.picked_by
+FROM picks LEFT JOIN request_lines
+       ON request_lines.run = picks.run AND request_lines.line = picks.stop
+WHERE picks.stop IS NOT NULL"""
 
 
 #: The approval decision a review from before `after_actions.decision` followed: its approval's.
@@ -527,6 +569,7 @@ class DesignLedger:
                 held = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
                 if column not in held:
                     db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
+            db.execute(STOPS_VIEW)
         self._made_again()
 
     def _made_again(self) -> None:
@@ -883,9 +926,7 @@ class DesignLedger:
             review=_json(facts.get("review")) if facts.get("review") else None,
         )
 
-    def decided(
-        self, run: str, approval: int | None, decision: str, by: str, note: str
-    ) -> int:
+    def decided(self, run: str, approval: int | None, decision: str, by: str, note: str) -> int:
         """A person's decision, and its id: a review names the one it follows."""
         return self.insert(
             "decisions",
@@ -911,3 +952,40 @@ class DesignLedger:
                 "UPDATE questions SET answers=?, answered_at=? WHERE run=? AND n=?",
                 (answers, now(), run, n),
             )
+
+    def request_read(self, run: str, form: Any) -> None:
+        """The request's lines and stops, as `request.read` found them."""
+        lines = [*form.requirements, *form.non_negotiables, *form.stops]
+        with self._open() as db:
+            for seq, line in enumerate(lines, 1):
+                db.execute(
+                    "INSERT OR REPLACE INTO request_lines VALUES (?,?,?,?,?)",
+                    (run, line.id, line.section, seq, line.text),
+                )
+            if form.kind:
+                db.execute(
+                    "INSERT OR REPLACE INTO request_lines VALUES (?,?,?,?,?)",
+                    (run, "kind", "kind", len(lines) + 1, form.kind),
+                )
+
+    def broken_down(self, run: str, n: int, at_call: int, body: dict[str, Any]) -> None:
+        self.add("breakdowns", run=run, n=n, at_call=at_call, body=_json(body), at=now())
+
+    def needs_marked(self, run: str, version: int, needs: list[Need]) -> None:
+        with self._open() as db:
+            for n in needs:
+                db.execute(
+                    "INSERT OR REPLACE INTO need_marks VALUES (?,?,?,?,?,?,?)",
+                    (
+                        run,
+                        version,
+                        n.id,
+                        _json(n.covers),
+                        int(n.fixed),
+                        n.figure or None,
+                        n.no_bench or None,
+                    ),
+                )
+
+    def stop_asked(self, run: str, ask: int, stop: str) -> None:
+        self.change("UPDATE picks SET stop=? WHERE run=? AND ask=?", stop, run, ask)

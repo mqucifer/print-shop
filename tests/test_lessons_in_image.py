@@ -21,7 +21,7 @@ from print_shop.bench import host
 from print_shop.rounds import after_action, lessons
 from print_shop.rounds.run import Run
 from tests.rounds_fakes import Scripted, tool
-from tests.test_rounds_in_image import SIZE_NEED, done, script, write
+from tests.test_rounds_in_image import BROKEN_DOWN, SIZE_NEED, done, script, write
 
 pytestmark = pytest.mark.bench
 
@@ -31,12 +31,13 @@ BY = "stand-in: a reviewer in a test"
 def met(root: Path, name: str, *more: Any) -> tuple[Run, Scripted]:
     """A run whose needs pass the harness's own checks: needs, a script, `done`, then `more`."""
     model = Scripted(
-        [tool("needs", needs=[SIZE_NEED])],
+        [BROKEN_DOWN, tool("needs", needs=[SIZE_NEED])],
         [write("make.py", script(gap=0.5), run=True)],
         [done()],
         *more,
     )
-    run = Run.start(root, name, "A block, 20 mm across.", [], model, sleep=lambda _: None)
+    request = "A block, 20 mm across.\n\n## Stops\n- no plan\n"
+    run = Run.start(root, name, request, [], model, sleep=lambda _: None)
     assert run.drive().name == "met"
     return run, model
 

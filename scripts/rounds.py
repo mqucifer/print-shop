@@ -213,8 +213,8 @@ def main() -> int:
     try:
         if args.command == "status":
             state = json.loads((folder / "state.json").read_text(encoding="utf-8"))
-            keys = ("stage", "round", "stop", "ending", "restarts")
-            print(json.dumps({k: state[k] for k in keys}, indent=1))
+            keys = ("stage", "round", "stop", "ending", "restarts", "stops")
+            print(json.dumps({k: state.get(k) for k in keys}, indent=1))
             return 0
         if args.command == "summary":
             print(json.dumps(summarise(folder), indent=1))

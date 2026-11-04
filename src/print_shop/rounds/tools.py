@@ -125,7 +125,11 @@ NEED_SHAPE = (
     '"clearance lid.step cup.step --min-gap 0.2", "verdicts": [...] (optional: which verdicts '
     'pass, exit 0 by default), "number": "pairs.0.gap_mesh_mm", "at_least": 0.2, "at_most": 0.6 '
     '(optional: a number in that answer, and its limit)} or {"by": "eye", "look_for": "what the '
-    'Sponsor judges"}.'
+    'Sponsor judges", "no_bench": "why no bench command measures it", where it covers a line}. '
+    'Where the request has lines: `covers`, the ids of the lines it covers (["R1"]); `fixed`: '
+    "true for a non-negotiable's need, quoting its line; and `figure`, for a fixed need whose "
+    "line holds a figure: how it's read, and where something changes it (such as before or after "
+    "play), which."
 )
 
 
@@ -211,11 +215,45 @@ def specs() -> list[dict[str, Any]]:
             questions="Your questions, as you'd say them.",
         ),
         _spec(
+            "breakdown",
+            "Before `needs`: write down how the reference and the request are built, not only "
+            "what they show: the parts, what holds or connects each part to the rest, and what "
+            "the look rests on. It's kept, `record/breakdown.md` holds it, and the first stop "
+            "shows it. Send it again whenever you find it was wrong.",
+            {
+                "from": {
+                    "type": "string",
+                    "description": "What you read it from: the request, and which references. "
+                    "Optional.",
+                }
+            },
+            parts={
+                "type": "array",
+                "description": 'Each part: {"name": "arm", "what": "what it is and does"}.',
+                "items": {"type": "object"},
+            },
+            joins={
+                "type": "array",
+                "description": 'What holds or connects what: {"parts": ["plate", "arm"], "how": '
+                '"..."}. With more than one part, every part is in a join.',
+                "items": {"type": "object"},
+            },
+            look={
+                "type": "array",
+                "description": "What the look rests on, a line each: what a person sees first, "
+                "and what would make it read wrong.",
+                "items": {"type": "string"},
+            },
+        ),
+        _spec(
             "needs",
-            "Settle what the part must do, when you know enough: this ends intake, and the first "
-            f"round starts. The harness runs each check itself at `done`. A check can't pass on "
-            "FAIL. Settled again after they're reopened, a need whose check fails on your files "
-            "as they stand can't be dropped, or changed to one that passes, without a reason. "
+            "Settle what the part must do, when you know enough and after `breakdown`: this ends "
+            "intake, and the first round starts. Where the request has lines, every requirement "
+            "is covered and every non-negotiable has a fixed need, or the needs are refused "
+            "naming the lines left over. The harness runs each check itself at `done`. A check "
+            "can't pass on FAIL. Settled again after they're reopened, a need whose check fails "
+            "on your files as they stand can't be dropped, or changed to one that passes, without "
+            "a reason, and a fixed need changes only by the Sponsor. "
             f"{NEED_SHAPE}",
             {
                 "try": {
@@ -240,13 +278,38 @@ def specs() -> list[dict[str, Any]]:
         ),
         _spec(
             "ask",
-            "Where form is at stake, or to show what you have and ask what you need when you're "
-            "stuck: name the variants, and `render` draws a sheet of them, which comes to you "
-            "first. One variant of the files as they stand will do. Nothing goes to the Sponsor "
-            "until `send_ask`, where you say what the sheet shows. The harness also runs the "
-            "needs' checks and `thin` on these files, and puts any that fail beside the question. "
-            "Everything else is yours to settle by the bench.",
+            "Where form is at stake, at each of the request's stops, or to show what you have and "
+            "ask what you need when you're stuck. It works at any point. Name the variants, and "
+            "`render` draws a sheet of them, which comes to you first: one variant of the files as "
+            "they stand will do. Or show pictures you made, such as a 2D layout, with no part "
+            "file. Nothing goes to the Sponsor until `send_ask`, where you say what it shows. The "
+            "harness also runs the needs' checks and `thin` on the variants' files, and puts any "
+            "that fail beside the question. Everything else is yours to settle by the bench.",
             {
+                "variants": {
+                    "type": "array",
+                    "description": 'Each variant: {"name": "A", "files": ["a.step"], "about": '
+                    '"what sets it apart"}. `files` are what they\'ll take for the part. '
+                    "Optional where there are `pictures` or a `plan`.",
+                    "items": {"type": "object"},
+                },
+                "stop": {
+                    "type": "string",
+                    "description": "The request's stop this shows, by its id: `plan`, `S1`. "
+                    "Optional.",
+                },
+                "plan": {
+                    "type": "string",
+                    "description": "At the `plan` stop: how you'll go about it, in your words. "
+                    "It goes to them with your breakdown and the needs.",
+                },
+                "pictures": {
+                    "type": "array",
+                    "description": "Pictures you made, such as a 2D layout drawn with "
+                    "matplotlib: PNG files in your directory. They're shown to you first, and go "
+                    "as they are. Optional.",
+                    "items": {"type": "string"},
+                },
                 **LOOKS,
                 "cuts": {
                     "type": "string",
@@ -278,12 +341,6 @@ def specs() -> list[dict[str, Any]]:
                 },
             },
             question="What you're asking them to judge.",
-            variants={
-                "type": "array",
-                "description": 'Each variant: {"name": "A", "files": ["a.step"], "about": "what '
-                "sets it apart\"}. `files` are what they'll take for the part.",
-                "items": {"type": "object"},
-            },
         ),
         _spec(
             "send_ask",
@@ -338,12 +395,13 @@ def specs() -> list[dict[str, Any]]:
 
 
 #: The tools that belong to the run, which `Desk` answers.
-DESK = ("questions", "needs", "ask", "send_ask", "done", "blocked", "after_action")
+DESK = ("breakdown", "questions", "needs", "ask", "send_ask", "done", "blocked", "after_action")
 
 
 class Desk(Protocol):
     """The tools that belong to the run, not to the working directory."""
 
+    def breakdown(self, args: dict[str, Any]) -> Judged: ...
     def questions(self, args: dict[str, Any]) -> Judged: ...
     def needs(self, args: dict[str, Any]) -> Judged: ...
     def ask(self, args: dict[str, Any]) -> Judged: ...
@@ -503,7 +561,19 @@ class WorkTools:
                 said = args[key].strip().lower()
                 if said in BOOLEAN_TEXT:
                     args = {**args, key: BOOLEAN_TEXT[said]}
-        for key in ("needs", "variants", "groups", "looks", "why_changed", "lessons", "scores"):
+        for key in (
+            "needs",
+            "variants",
+            "groups",
+            "looks",
+            "why_changed",
+            "lessons",
+            "scores",
+            "parts",
+            "joins",
+            "look",
+            "pictures",
+        ):
             # A list sent as its JSON text is read as the list.
             if isinstance(args, dict) and isinstance(args.get(key), str):
                 with contextlib.suppress(ValueError):
@@ -762,10 +832,14 @@ class WorkTools:
         images = self._rendered(record) if done.code in (0, 1) else []
         detail: dict[str, Any] = {"code": done.code, "seconds": done.seconds}
         reply = f"exit {done.code}\n{text}"
+        if nudged and nudged.get("lead"):
+            # A fixed need's check at other settings: said before the bench's own answer, so its
+            # verdict isn't read as the requirement's (mqucifer/print-shop#37).
+            reply = f"exit {done.code}\n{nudged['lead']}\n\n{text}"
         if nudged:
             # A need's check run with other arguments, or one that keeps failing: lines in its
             # reply, never a limit (`nudge.py`).
-            reply += f"\n\n{nudged['said']}"
+            reply += f"\n\n{nudged['said']}" if nudged["said"] else ""
             detail.update(nudged["detail"])
         return Judged("bench", "ok", reply, images=images, detail=detail)
 

@@ -40,6 +40,8 @@ UNSURE = ("DISAGREE", "NO ANSWER")
 WRONG = ("FAIL",)
 GOOD = ("OK", "CLEAR", "TOUCHING")
 GEOMETRY = (".step", ".stp", ".stl", ".brep")
+#: A need's keys that tie it to the request's lines (`request.py`).
+MARKS = ("covers", "fixed", "figure")
 
 
 def normal(text: str) -> str:
@@ -64,8 +66,14 @@ class Need:
     number: str = ""
     at_least: float | None = None
     at_most: float | None = None
-    # An eye need's.
+    # An eye need's, and why no bench command measures a line of the request it covers.
     look_for: str = ""
+    no_bench: str = ""
+    # The request's lines it covers (`request.py`), whether it's a non-negotiable's, and how a
+    # non-negotiable's figure is read, such as a lip before or after play.
+    covers: list[str] = field(default_factory=list)
+    fixed: bool = False
+    figure: str = ""
 
     def argv(self) -> list[str]:
         return shlex.split(self.command)
@@ -75,7 +83,11 @@ class Need:
         return [w for w in self.argv() if not w.startswith("-") and w.lower().endswith(GEOMETRY)]
 
     def plain(self) -> dict[str, Any]:
-        return {k: v for k, v in asdict(self).items() if v not in ("", [], None)}
+        """What it says, without what it leaves out: a need that isn't fixed doesn't say so."""
+        found = {k: v for k, v in asdict(self).items() if v not in ("", [], None)}
+        if not self.fixed:
+            found.pop("fixed", None)
+        return found
 
     def limit(self) -> str:
         """The limit as a reading's line says it."""
@@ -119,9 +131,12 @@ def read(raw: Any, said_by_sponsor: str, notes: str = "") -> tuple[list[Need], l
             wrong.append("each need is an object")
             continue
         shown = f"the need {str(entry.get('id'))!r}"
-        unknown = set(entry) - {"id", "what", "source", "quote", "check"}
+        unknown = set(entry) - {"id", "what", "source", "quote", "check", *MARKS}
         if unknown:
-            wrong.append(f"{shown}: it has only id, what, source, quote, check: not {unknown}")
+            wrong.append(
+                f"{shown}: it has only id, what, source, quote, check, covers, fixed and figure: "
+                f"not {unknown}"
+            )
         need_id = entry.get("id")
         if not isinstance(need_id, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,40}", need_id):
             wrong.append(f"{shown}: `id` is a short name, of letters, digits, `.`, `_` or `-`")
@@ -153,8 +168,10 @@ def read(raw: Any, said_by_sponsor: str, notes: str = "") -> tuple[list[Need], l
             wrong.append(f'{shown}: `check` is {{"by": "bench", ...}} or {{"by": "eye", ...}}')
             continue
         need = Need(need_id, what, str(source), str(check.get("by")), quote)
+        _marks(need, entry, wrong, shown)
         if check.get("by") == "eye":
             need.look_for = str(check.get("look_for") or "").strip()
+            need.no_bench = str(check.get("no_bench") or "").strip()
             if not need.look_for:
                 wrong.append(f"{shown}: `look_for` says what the Sponsor's eye is judging")
         elif check.get("by") == "bench":
@@ -163,6 +180,32 @@ def read(raw: Any, said_by_sponsor: str, notes: str = "") -> tuple[list[Need], l
             wrong.append(f"{shown}: `check.by` is bench or eye")
         found.append(need)
     return ([], wrong) if wrong else (found, [])
+
+
+def _marks(need: Need, entry: dict[str, Any], wrong: list[str], shown: str) -> None:
+    """What ties a need to the request's lines. Whether they're the right lines is `request.held`'s
+    to say, against the request."""
+    covers = entry.get("covers") or []
+    if isinstance(covers, str):
+        covers = [covers]
+    if not isinstance(covers, list) or not all(isinstance(c, str) for c in covers):
+        wrong.append(
+            f'{shown}: `covers` names the request\'s lines it covers, such as ["R1", "N2"]'
+        )
+        covers = []
+    need.covers = list(dict.fromkeys(c.strip() for c in covers))
+    fixed = entry.get("fixed", False)
+    if isinstance(fixed, str) and fixed.strip().lower() in ("true", "false"):
+        fixed = fixed.strip().lower() == "true"
+    if not isinstance(fixed, bool):
+        wrong.append(f"{shown}: `fixed` is true or false")
+        fixed = False
+    need.fixed = fixed
+    figure = entry.get("figure") or ""
+    if not isinstance(figure, str):
+        wrong.append(f"{shown}: `figure` says in words how its line's figure is read")
+        figure = ""
+    need.figure = figure.strip()
 
 
 def _bench_check(need: Need, check: dict[str, Any], wrong: list[str], shown: str) -> None:
@@ -197,6 +240,7 @@ def _bench_check(need: Need, check: dict[str, Any], wrong: list[str], shown: str
 
 
 def load(entries: list[dict[str, Any]]) -> list[Need]:
+    """Needs as kept, a need from before `covers` and `fixed` with neither."""
     return [Need(**entry) for entry in entries]
 
 
