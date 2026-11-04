@@ -63,6 +63,9 @@ class Wanted:
     need: str
     command: str
     argv: list[str]
+    #: A non-negotiable's need, and its words: its check counts only at its own settings.
+    fixed: bool = False
+    quote: str = ""
 
 
 def _words(argv: list[str]) -> list[str]:
@@ -161,24 +164,54 @@ def off_need(argv: list[str], wanted: list[Wanted]) -> list[dict[str, Any]]:
     if as_a_need(argv, mine):
         return []
     return [
-        {"need": w.need, "command": w.command, "differs": differences(argv, w.argv)} for w in mine
+        {
+            "need": w.need,
+            "command": w.command,
+            "differs": differences(argv, w.argv),
+            **({"fixed": True, "quote": w.quote} if w.fixed else {}),
+        }
+        for w in mine
     ]
+
+
+def _off_need_parts(one: dict[str, Any]) -> str:
+    parts = []
+    for name, got, wants in one["differs"]:
+        if wants is None:
+            parts.append(f"{_given(name, got)}, the need doesn't give it")
+        elif got is None:
+            parts.append(f"no `{name}`, the need says {_given(name, wants)}")
+        else:
+            parts.append(f"`{name} {got}`, the need says `{wants}`")
+    return "; ".join(parts)
+
+
+def not_the_requirement(found: list[dict[str, Any]]) -> str:
+    """What the model's told, before the bench's answer, of a fixed need's check run at other
+    settings: on `suncatcher-2` `capture` passed at `--min-lip 0.25` where the request said 1.2.
+    It's said on the first try, pass or fail, and the reading can't pass the need."""
+    lines = []
+    for one in found:
+        if not one.get("fixed"):
+            continue
+        words = f', "{one["quote"]}"' if one.get("quote") else ""
+        lines.append(
+            f"NOT THE REQUIREMENT: `{one['need']}` is fixed, a non-negotiable of the request"
+            f"{words}, and its check is `{one['command']}`. This try has {_off_need_parts(one)}. "
+            "Whatever it reads below, it isn't the requirement and can't pass it: `done` runs the "
+            "requirement's own command. A fixed need changes only by the Sponsor."
+        )
+    return "\n".join(lines)
 
 
 def off_need_said(found: list[dict[str, Any]]) -> str:
     """What the model's told of a need's check run with other arguments."""
     lines = []
     for one in found:
-        parts = []
-        for name, got, wants in one["differs"]:
-            if wants is None:
-                parts.append(f"{_given(name, got)}, the need doesn't give it")
-            elif got is None:
-                parts.append(f"no `{name}`, the need says {_given(name, wants)}")
-            else:
-                parts.append(f"`{name} {got}`, the need says `{wants}`")
+        if one.get("fixed"):
+            continue  # said first, by `not_the_requirement`
         lines.append(
-            f"This is `{one['need']}`'s check with other arguments: {'; '.join(parts)}. `done` "
+            f"This is `{one['need']}`'s check with other arguments: {_off_need_parts(one)}. `done` "
             f"checks the need's command, `{one['command']}`, so this reading isn't the need's."
         )
     return "\n".join(lines)
@@ -205,13 +238,10 @@ def said(check: Check, tries: list[Try], wanted: list[Wanted]) -> str:
     """The nudge, with why it fired: each try since the check last passed as a need checks it."""
     command, files = check
     on = f" on {', '.join(f'`{f}`' for f in files)}" if files else ""
-    since = (
-        "without passing as a need checks it" if wanted_for(check, wanted) else "in a row"
-    )
+    since = "without passing as a need checks it" if wanted_for(check, wanted) else "in a row"
     first = tries[0]
     lines = [
-        f"`{command}`{on} has failed {failures(tries)} times {since}, whatever its other "
-        "arguments:"
+        f"`{command}`{on} has failed {failures(tries)} times {since}, whatever its other arguments:"
     ]
     for one in tries:
         if one is first:
