@@ -1999,7 +1999,8 @@ class Run:
                 '"none", with the reason, if it isn\'t right.',
                 "",
             ]
-        lines += ["## What the model says it shows", "", says, ""]
+        what = "the sheet shows" if sheet is not None else "it shows"
+        lines += [f"## What the model says {what}", "", says, ""]
         if draft["bench_said"]:
             lines += [
                 "## What the bench says it drew",
