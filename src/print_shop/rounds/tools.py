@@ -34,10 +34,12 @@ from typing import Any, Protocol
 from print_shop.bench import hint as hint_module
 from print_shop.bench import picture as picture_module
 from print_shop.bench import search as search_module
-from print_shop.rounds import paths, skills
+from print_shop.rounds import paths, skills, toolsets
 from print_shop.rounds.box import Box, Ran
+from print_shop.rounds.needs import COMMANDS
 from print_shop.rounds.paths import Outside, a_path, inside, read_bytes_inside, read_inside
 from print_shop.rounds.session import Judged, WorkFull
+from print_shop.rounds.toolsets import Toolset
 
 MAX_CONTENT = 2_000_000
 RUN_TAIL = 8000
@@ -127,7 +129,7 @@ LOOKS = {
 NEED_SHAPE = (
     "Each need: `id`; `what` it must do; `source` (`request`, `answer` or `note` with `quote`, the "
     'words as you were sent them; `reference`, `derived` or `chosen`); and `check`, either {"by": '
-    '"bench", "command": '
+    '"bench", "measures": "fit", "command": '
     '"clearance lid.step cup.step --min-gap 0.2", "verdicts": [...] (optional: which verdicts '
     'pass, exit 0 by default), "number": "pairs.0.gap_mesh_mm", "at_least": 0.2, "at_most": 0.6 '
     '(optional: a number in that answer, and its limit)} or {"by": "eye", "look_for": "what the '
@@ -139,7 +141,18 @@ NEED_SHAPE = (
 )
 
 
-def specs() -> list[dict[str, Any]]:
+def _measures_said(toolset: Toolset) -> str:
+    if toolset.legacy:
+        return ""
+    named = "; ".join(f"`{m.name}`, {m.about} (`{m.usage}`)" for m in toolset.measures)
+    return (
+        " A bench need's `measures` says what it's about, and its command has to measure that: "
+        f"{named}."
+    )
+
+
+def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
+    commands = ", ".join(f"`{c}`" for c in toolset.commands)
     return [
         _spec(
             "write",
@@ -185,9 +198,8 @@ def specs() -> list[dict[str, Any]]:
             "bench",
             "Ask the bench about your files: any bench command, in a fresh container, with a "
             "second check by a different method behind each answer. The first line of the reply "
-            "is the verdict. `info`, `clearance`, `readback`, `rays`, `panes`, `capture`, `thin`, "
-            "`pause`, `wall`, `params`, `render` (its picture comes to you). `<command> --help` "
-            "gives its arguments, and the `bench` skill says what each answers.",
+            f"is the verdict. {commands} (`render`'s picture comes to you). `<command> --help` "
+            "gives its arguments, and the skills say what each answers.",
             command="The command and its arguments, such as `clearance lid.step cup.step "
             "--min-gap 0.2` or `render part.step --views iso top`.",
         ),
@@ -260,7 +272,7 @@ def specs() -> list[dict[str, Any]]:
             "can't pass on FAIL. Settled again after they're reopened, a need whose check fails "
             "on your files as they stand can't be dropped, or changed to one that passes, without "
             "a reason, and a fixed need changes only by the Sponsor. "
-            f"{NEED_SHAPE}",
+            f"{NEED_SHAPE}{_measures_said(toolset)}",
             {
                 "try": {
                     "type": "boolean",
@@ -423,6 +435,7 @@ class Desk(Protocol):
     def bench_said(
         self, argv: list[str], ran: Ran, record: dict[str, Any] | None
     ) -> dict[str, Any] | None: ...
+    def standing_said(self) -> str: ...
 
 
 def _trim(text: str) -> str:
@@ -626,9 +639,6 @@ class WorkTools:
         self.box = box
         self.desk = desk
         self.work_limit_bytes = work_limit_bytes
-        self.specs = specs()
-        self.accepted = {s["function"]["name"]: s["function"]["parameters"] for s in self.specs}
-        self.skills = skills.registry()
         # The call each tool call is part of: the run sets it, as the ledger numbers calls.
         self.at_call: Callable[[], int] = lambda: 0
         # Each text file as the model last had it whole (its `write`, a whole `read`, or an
@@ -637,11 +647,20 @@ class WorkTools:
         self.known: dict[str, tuple[str, int]] = {}
         self.observed: dict[str, str | None] = {}
         self.changed_by: dict[str, tuple[int, str]] = {}
+        self.use(toolsets.EVERY)
+
+    def use(self, toolset: Toolset) -> None:
+        """A run's toolset: its bench commands, what its needs may measure, and its skills."""
+        self.toolset = toolset
+        self.specs = specs(toolset)
+        self.accepted = {s["function"]["name"]: s["function"]["parameters"] for s in self.specs}
+        self.skills = skills.located(toolset.skills)
 
     def only(self, names: tuple[str, ...], *more: dict[str, Any]) -> None:
         """From here on, only these tools, and any `more` the run gives: after the approval, the
         after-action review reads and writes its review, and nothing changes the part."""
-        self.specs = [s for s in specs() if s["function"]["name"] in names] + list(more)
+        chosen = [s for s in specs(self.toolset) if s["function"]["name"] in names]
+        self.specs = chosen + list(more)
         self.accepted = {s["function"]["name"]: s["function"]["parameters"] for s in self.specs}
 
     def call(self, name: Any, raw: Any) -> Judged:
@@ -939,6 +958,9 @@ class WorkTools:
         if done.code != 0:
             hinted = self._hint(done.output)
             reply += f"\n\n{hinted}" if hinted else ""
+        # A part file whose last `thin` failed, said until it passes (`unprintable.py`).
+        unprinted = self.desk.standing_said()
+        reply += f"\n\n{unprinted}" if unprinted else ""
         return Judged("run", "ok", reply, detail={"code": done.code, "seconds": done.seconds})
 
     def check_size(self) -> None:
@@ -970,6 +992,9 @@ class WorkTools:
         argv = argv[1:] if argv[:1] == ["bench"] else argv
         if not argv:
             return self._failed("bench", "not_a_command", "`command` names a bench command.")
+        refused = self._not_in_toolset(argv[0])
+        if refused is not None:
+            return refused
         done = self.box.bench(argv)
         self.check_size()
         record = recorded(done.output, self.work)
@@ -991,6 +1016,19 @@ class WorkTools:
             detail.update(nudged["detail"])
         return Judged("bench", "ok", reply, images=images, detail=detail)
 
+    def _not_in_toolset(self, command: str) -> Judged | None:
+        """A command of another kind's toolset, which this run hasn't loaded."""
+        if command not in COMMANDS or command in self.toolset.commands:
+            return None
+        home = toolsets.where(command)
+        kind = f"the {home.title} toolset" if home is not None else "no toolset of this run's"
+        mine = ", ".join(f"`{c}`" for c in self.toolset.commands)
+        reply = (
+            f"`{command}` is in {kind}, and this run's is {self.toolset.title}: a request's "
+            f"`## Kind` loads a kind's commands. This run's are {mine}."
+        )
+        return self._failed("bench", "not_in_toolset", reply)
+
     def _rendered(self, record: dict[str, Any] | None) -> list[tuple[str, str]]:
         """The picture a `render` wrote: its sheet, if it made one, or its one view."""
         if not record or record.get("command") != "render":
@@ -1010,7 +1048,8 @@ class WorkTools:
         if found is None:
             named = ", ".join(f"`{n}`" for n in self.skills)
             return self._failed("skill", "unknown", f"No skill `{args['name']}`: {named}.")
-        return Judged("skill", "ok", found[1])
+        # Which file it read, for the record of how a run finds its skills (`skill_reads`).
+        return Judged("skill", "ok", found[1], detail={"file": found[2]})
 
     def _lookup(self, args: dict[str, Any]) -> Judged:
         return self._search("lookup", args)

@@ -78,6 +78,7 @@ GAP_NEED: dict[str, Any] = {
     "quote": "a 0.5 mm gap",
     "check": {
         "by": "bench",
+        "measures": "fit",
         "command": "clearance block.step tab.step --min-gap 0.2",
         "number": "pairs.0.gap_mesh_mm",
         "at_least": 0.45,
@@ -90,6 +91,7 @@ SIZE_NEED = {
     "source": "chosen",
     "check": {
         "by": "bench",
+        "measures": "size",
         "command": "info block.step",
         "number": "volume_mesh_mm3",
         "at_most": 3000,
@@ -99,7 +101,11 @@ PARAM_NEED = {
     "id": "gap-drives",
     "what": "the gap's a parameter that moves the tab",
     "source": "derived",
-    "check": {"by": "bench", "command": "params make.py --set GAP=3.0 --max-left 1"},
+    "check": {
+        "by": "bench",
+        "measures": "parameter",
+        "command": "params make.py --set GAP=3.0 --max-left 1",
+    },
 }
 EYE_NEED = {
     "id": "look",
@@ -119,6 +125,15 @@ def begin(
 ) -> tuple[Run, Scripted]:
     model = Scripted(*turns, **kw)
     run = Run.start(tmp_path, "proof", REQUEST, [], model, limits, sleep=lambda _: None)
+    return run, model
+
+
+def begin_stained_glass(tmp_path: Path, *turns: Any) -> tuple[Run, Scripted]:
+    """A run whose request names stained glass, as `## Kind` will, with its toolset."""
+    run, model = begin(tmp_path, *turns)
+    run.state.kind = "stained-glass"
+    run.tools.use(run.toolset)
+    run.save()
     return run, model
 
 
@@ -159,7 +174,7 @@ def test_a_run_goes_from_intake_through_refusals_and_a_pick_to_its_needs_met(
     run, model = begin(
         tmp_path,
         [tool("lookup", query="Solid.fuse"), tool("lookup", query="Workplane.box", page=1)],
-        [tool("docs", query="fillet edges"), tool("skill", name="bench")],
+        [tool("docs", query="fillet edges"), tool("skill", name="using-the-bench")],
         [raw("write", "not json")],
         [tool("questions", questions="How big should the block be?")],
     )
@@ -200,7 +215,7 @@ def test_a_run_goes_from_intake_through_refusals_and_a_pick_to_its_needs_met(
     (run.folder / "questions" / "1.answers.md").write_text("Make it 20 mm across.\n")
 
     bad_quote = {**GAP_NEED, "quote": "a gap of 9 mm"}
-    bad_command = {**SIZE_NEED, "check": {"by": "bench", "command": "info"}}
+    bad_command = {**SIZE_NEED, "check": {"by": "bench", "measures": "size", "command": "info"}}
     need_set = [GAP_NEED, SIZE_NEED, PARAM_NEED, EYE_NEED]
     run, model = again(
         run,
@@ -536,7 +551,7 @@ FIXTURE_NEED = {
     "id": "apart",
     "what": "the test piece stands clear of the block",
     "source": "chosen",
-    "check": {"by": "bench", "command": "clearance block.step test-piece.step"},
+    "check": {"by": "bench", "measures": "fit", "command": "clearance block.step test-piece.step"},
 }
 
 
@@ -756,7 +771,13 @@ def test_a_run_past_its_time_is_stopped_and_says_so(tmp_path: Path) -> None:
 def test_needs_can_be_tried_before_theyre_settled(tmp_path: Path) -> None:
     wrong_name = {
         **SIZE_NEED,
-        "check": {"by": "bench", "command": "info block.step", "number": "nope", "at_most": 1},
+        "check": {
+            "by": "bench",
+            "measures": "size",
+            "command": "info block.step",
+            "number": "nope",
+            "at_most": 1,
+        },
     }
     run, _ = begin(
         tmp_path,
@@ -1043,7 +1064,8 @@ def test_references_are_copied_and_named_at_the_start(tmp_path: Path) -> None:
     first = model.bodies[0]["messages"][1]["content"]
     assert "`references/drawing.txt` (9 bytes)" in first
     assert REQUEST in first
-    assert "`bench`," in first and "`cadquery`," in first
+    assert "`using-the-bench`," in first and "`cadquery`," in first
+    assert "This run's toolset is the core" in first
     assert (run.work / "references" / "drawing.txt").read_text() == "a drawing"
 
 
@@ -1204,7 +1226,13 @@ def test_tokens_and_seconds_split_by_what_a_person_sent_and_by_round(tmp_path: P
 def test_a_try_reaches_the_ledger_with_its_reading(tmp_path: Path) -> None:
     wrong_name = {
         **SIZE_NEED,
-        "check": {"by": "bench", "command": "info block.step", "number": "nope", "at_most": 1},
+        "check": {
+            "by": "bench",
+            "measures": "size",
+            "command": "info block.step",
+            "number": "nope",
+            "at_most": 1,
+        },
     }
     run, _ = begin(
         tmp_path,
@@ -1300,7 +1328,7 @@ CHATTER = " ".join(f"This is a sentence of its own about the block, number {i}."
 def test_a_call_whose_reasoning_repeats_gets_a_row_and_goes_on_uncut(tmp_path: Path) -> None:
     run, _ = begin(
         tmp_path,
-        [tool("skill", name="bench")],
+        [tool("skill", name="using-the-bench")],
         Spoken([write("a.txt", "x")], reasoning=CHATTER),
         Spoken([write("b.txt", "y")], reasoning=CHATTER),
         [tool("run", path="nope.py")],
@@ -1319,7 +1347,7 @@ def test_a_call_whose_reasoning_repeats_gets_a_row_and_goes_on_uncut(tmp_path: P
     assert doing["tool_calls"][0]["name"] == "write"
     assert doing["tool_calls"][0]["path"] == "c.txt"
     lacked = json.loads(flagged[1]["lacked"])
-    assert lacked["skills_read"] == ["bench"]
+    assert lacked["skills_read"] == ["using-the-bench"]
     assert "cadquery" in lacked["skills_not_read"]
     assert lacked["last_tool_calls_refused"] == [["run", "no_file"]]
     assert flagged[1]["review_note"] is None, "that's for a reviewer"
@@ -1549,20 +1577,20 @@ def test_a_pick_of_none_takes_back_the_one_before_it(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("command", "extra", "verdict_said"),
+    ("measures", "command", "extra", "verdict_said"),
     [
-        ("thin parts.step --one-body", {}, "2 separate bodies, and one was asked for"),
-        ("params make.py --set GAP=3.0", {}, "PARTIAL"),
+        ("one-piece", "thin parts.step --one-body", {}, "2 separate bodies, and one was asked for"),
+        ("parameter", "params make.py --set GAP=3.0", {}, "PARTIAL"),
     ],
 )
 def test_a_check_holds_what_a_need_says_at_done(
-    tmp_path: Path, command: str, extra: dict[str, Any], verdict_said: str
+    tmp_path: Path, measures: str, command: str, extra: dict[str, Any], verdict_said: str
 ) -> None:
     need = {
         "id": "holds",
         "what": "what the need says",
         "source": "chosen",
-        "check": {"by": "bench", "command": command, **extra},
+        "check": {"by": "bench", "measures": measures, "command": command, **extra},
     }
     made = (
         script(gap=0.5)
@@ -1592,25 +1620,30 @@ FRAME_SCRIPT = (
 
 
 @pytest.mark.parametrize(
-    ("command", "said"),
+    ("measures", "command", "said"),
     [
-        ("pause frame.step --pocket-z 2 --pane-thickness 2 --min-room 0.2", "under the 0.2 mm"),
         (
+            "insert",
+            "pause frame.step --pocket-z 2 --pane-thickness 2 --min-room 0.2",
+            "under the 0.2 mm",
+        ),
+        (
+            "pane-hold",
             "capture frame.step --pocket-z 2 --clearance 0.1 --pane-thickness 2 --panes 5",
             "1 pane(s) read, and 5 were asked for",
         ),
     ],
 )
 def test_a_frames_check_holds_what_a_need_says_at_done(
-    tmp_path: Path, command: str, said: str
+    tmp_path: Path, measures: str, command: str, said: str
 ) -> None:
     need = {
         "id": "holds",
         "what": "what the need says",
         "source": "chosen",
-        "check": {"by": "bench", "command": command},
+        "check": {"by": "bench", "measures": measures, "command": command},
     }
-    run, _ = begin(
+    run, _ = begin_stained_glass(
         tmp_path,
         [BROKEN_DOWN, tool("needs", needs=[need])],
         [write("frame.py", FRAME_SCRIPT, run=True)],
@@ -1972,7 +2005,10 @@ def test_a_need_whose_check_fails_isnt_swapped_for_one_that_passes_without_a_rea
     """On `cup-1` `capture` was swapped for `clearance`, and `pause` pointed at a file with no
     pockets, so both passed."""
     run = failing_gap_then_stopped(tmp_path)
-    looser = {**GAP_NEED, "check": {"by": "bench", "command": "clearance block.step tab.step"}}
+    looser = {
+        **GAP_NEED,
+        "check": {"by": "bench", "measures": "fit", "command": "clearance block.step tab.step"},
+    }
     reason = "The gap was chosen too fine for this printer."
     run, _ = again(
         run,

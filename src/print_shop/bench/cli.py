@@ -95,7 +95,27 @@ def parser() -> Parser:
         help="where a pane's underside sits; else the pocket's level floor, or the part's",
     )
     capture.add_argument(
-        "--min-lip", type=float, default=0.4, help="the least lip after its play, in mm"
+        "--min-lip",
+        type=float,
+        help="the least lip after its play, in mm, one rim everywhere: 0.4, a nozzle's width, "
+        "unless you say",
+    )
+    capture.add_argument(
+        "--full-rim",
+        type=float,
+        help="a rim sized to the visible share, from the request: the most rim each pane has, in "
+        "mm before play, from the pocket's wall to the opening's edge",
+    )
+    capture.add_argument(
+        "--least-rim",
+        type=float,
+        help="the least rim any pane may have to keep its share visible, in mm before play: a "
+        "pane that needs less is to be removed",
+    )
+    capture.add_argument(
+        "--min-visible",
+        type=float,
+        help="the least share of each pane, in percent, the frame covers on neither face",
     )
     capture.add_argument("--layer", type=float, default=0.2)
     capture.add_argument(
@@ -126,6 +146,37 @@ def parser() -> Parser:
     wall.add_argument("--min-wall", type=float, help="the least wall wanted, in mm: under is FAIL")
     wall.add_argument("--layer", type=float, default=0.2, help="sections a layer apart")
     wall.add_argument("--n", type=int, default=360, help="rays at each height")
+
+    light = sub.add_parser(
+        "light", help="the share of each pane open straight through the frame, as light passes"
+    )
+    light.add_argument("frame")
+    light.add_argument("panes", nargs="+", help="each pane's file")
+    light.add_argument(
+        "--with",
+        dest="with_files",
+        action="append",
+        default=[],
+        metavar="FILE",
+        help="another part of the frame, such as a cap printed apart: its shadow counts too",
+    )
+    light.add_argument(
+        "--min-open",
+        type=float,
+        help="the least share of each pane open, in percent, from the request: under is FAIL",
+    )
+    light.add_argument("--layer", type=float, default=0.2, help="the frame is cut a layer apart")
+    light.add_argument("--rays", type=int, default=4000, help="rays through each pane's footprint")
+
+    thickness = sub.add_parser("thickness", help="each pane's thickness, straight through")
+    thickness.add_argument("panes", nargs="+", help="each pane's file")
+    thickness.add_argument(
+        "--max", type=float, help="the most a pane may be, in mm, from the request: over is FAIL"
+    )
+    thickness.add_argument(
+        "--min", type=float, help="the least a pane may be, in mm, from the request: under is FAIL"
+    )
+    thickness.add_argument("--rays", type=int, default=2000, help="rays through each pane")
 
     pause = sub.add_parser("pause", help="the layer to pause after, to drop a pane in")
     pause.add_argument("frame")
@@ -235,6 +286,14 @@ def _dispatch(args: Any, report: Report) -> None:
         from .wall import run as run_wall
 
         run_wall(args, report)
+    elif args.command == "light":
+        from .glass import run_light
+
+        run_light(args, report)
+    elif args.command == "thickness":
+        from .glass import run_thickness
+
+        run_thickness(args, report)
     elif args.command == "pause":
         from .fabrication import run_pause
 
@@ -253,9 +312,40 @@ def _dispatch(args: Any, report: Report) -> None:
         run(args, report)
 
 
+#: `capture`'s lip after play when nothing's said: a nozzle's width.
+MIN_LIP = 0.4
+
+
+def rims_given(args: Any, top: Parser) -> None:
+    """`capture`'s rims: one, `--min-lip`, 0.4 mm unless given, or each pane's sized to the
+    visible share, with all three figures from the request and no `--min-lip`."""
+    if args.command != "capture":
+        return
+    by_share = (args.full_rim, args.least_rim, args.min_visible)
+    if any(v is not None for v in by_share):
+        if any(v is None for v in by_share):
+            top.error(
+                "capture: a rim sized to the visible share takes all three, from the request: "
+                "--full-rim, --least-rim and --min-visible. There's no default for any of them"
+            )
+        if args.min_lip is not None:
+            top.error("capture: --min-lip is one rim everywhere; --full-rim sizes each pane's")
+        if not args.clearance < args.least_rim <= args.full_rim:
+            top.error(
+                "capture: --least-rim is more than the play and no more than --full-rim, both "
+                "before play"
+            )
+        if not 0 < args.min_visible < 100:
+            top.error("capture: --min-visible is a share in percent, between 0 and 100")
+    elif args.min_lip is None:
+        args.min_lip = MIN_LIP
+
+
 def main(argv: list[str] | None = None) -> int:
     given = sys.argv[1:] if argv is None else argv
-    args = parser().parse_args(given)
+    top = parser()
+    args = top.parse_args(given)
+    rims_given(args, top)
     out = Path(args.out)
     report = Report(args.command, given)
     try:

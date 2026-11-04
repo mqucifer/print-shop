@@ -169,6 +169,10 @@ def test_cup_1_read_back_refuses_its_fail_need_and_its_thin_panes_and_delivers_t
     # It reads back what the run did, from before the plan was a stop: none is added.
     request = (RUN / "request.md").read_text() + "\n\n## Stops\n- no plan\n"
     run = Run.start(root, "read-back", request, references, model, Limits(), sleep=lambda _: None)
+    # cup-1 is from before toolsets: its needs name no `measures`, and it had every command.
+    run.state.toolsets = False
+    run.tools.use(run.toolset)
+    run.save()
     for name, text in scripts_of(1).items():
         (run.work / name).write_text(text)
     assert run.drive().name == "ask"

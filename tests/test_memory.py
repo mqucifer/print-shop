@@ -124,6 +124,9 @@ def test_the_record_keeps_each_checks_tries_against_the_needs_command(tmp_path: 
         [tool("blocked", reason="Out of turns.")],
     )
     run = Run.start(tmp_path, "r", "A block.", [], model, sleep=lambda _: None)
+    # `capture` is the stained-glass toolset's, as a request's `## Kind` loads it.
+    run.state.kind = "stained-glass"
+    run.tools.use(run.toolset)
     run.state.needs = needs.dump(
         [Need("held", "held", "request", "bench", command=NEED, verdicts=["OK"])]
     )
@@ -164,6 +167,9 @@ def test_a_new_conversation_after_context_full_is_given_each_checks_tries(
     run = Run.start(
         tmp_path, "r", "A block.", [], model, Limits(compact_at=500), sleep=lambda _: None
     )
+    # `capture` is the stained-glass toolset's, as a request's `## Kind` loads it.
+    run.state.kind = "stained-glass"
+    run.tools.use(run.toolset)
     box: Any = Answers(run.work, 1, 1)
     run.tools.box = box
     assert run.drive().name == "blocked"

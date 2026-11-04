@@ -510,6 +510,28 @@ CREATE TABLE IF NOT EXISTS need_marks (
     no_bench TEXT,
     PRIMARY KEY (run, version, need)
 );
+CREATE TABLE IF NOT EXISTS need_measures (
+    -- What each bench need of a version says it measures, from its toolset's short list
+    -- (mqucifer/print-shop#37). A table of its own, keyed as `need_marks`: that one is inserted
+    -- into by position, so a column added there would break older code writing to this ledger.
+    run TEXT NOT NULL REFERENCES runs(run),
+    version INTEGER NOT NULL,
+    need TEXT NOT NULL,
+    measures TEXT NOT NULL,
+    PRIMARY KEY (run, version, need)
+);
+CREATE TABLE IF NOT EXISTS skill_reads (
+    -- Each skill a run read, at which call, and the file it is: how a run finds its skills
+    -- (mqucifer/print-shop#37). `found` 0 is a name no skill of its toolset has.
+    run TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    at_call INTEGER NOT NULL,
+    round INTEGER,
+    name TEXT NOT NULL,
+    file TEXT,
+    found INTEGER NOT NULL,
+    PRIMARY KEY (run, seq)
+);
 CREATE VIEW IF NOT EXISTS phases AS
 SELECT calls.run, calls.phase, MIN(calls.n) AS first_call, MAX(calls.n) AS last_call,
        COUNT(*) AS calls, SUM(calls.seconds) AS seconds,
@@ -550,6 +572,9 @@ ADDED = (
     ("picks", "fix_first", "TEXT"),
     # The groups and files of the delivered folder at a stop, and where it was written.
     ("approvals", "review", "TEXT"),
+    # The run's toolset: its kind, bench commands and skills (mqucifer/print-shop#37). Empty for a
+    # run from before toolsets, which had every command.
+    ("runs", "toolset", "TEXT"),
     # The request's stop an ask showed, by its id (`plan`, `S1`), if it was one.
     ("picks", "stop", "TEXT"),
     # The route a score is on (mqucifer/print-shop#40): empty is the model's, from before.
@@ -757,6 +782,8 @@ class DesignLedger:
                     facts.get("reasoning_effort_from"),
                 ),
             )
+            if facts.get("toolset") is not None:
+                db.execute("UPDATE runs SET toolset=? WHERE run=?", (_json(facts["toolset"]), run))
 
     def run_ended(self, run: str, ending: str | None, said: Any, **totals: Any) -> None:
         """`ending` is None while it waits for the Sponsor: it hasn't ended."""
@@ -1075,6 +1102,12 @@ class DesignLedger:
                         n.no_bench or None,
                     ),
                 )
+                if n.measures:
+                    db.execute(
+                        "INSERT OR REPLACE INTO need_measures (run, version, need, measures) "
+                        "VALUES (?,?,?,?)",
+                        (run, version, n.id, n.measures),
+                    )
 
     def stop_asked(self, run: str, ask: int, stop: str) -> None:
         self.change("UPDATE picks SET stop=? WHERE run=? AND ask=?", stop, run, ask)

@@ -432,6 +432,46 @@ def sheets() -> None:
     save(box(10, 30, 0, 10, 0, 3), "share-b")
 
 
+def glass() -> None:
+    """A frame of three cells whose light and thickness are known by arithmetic (mqucifer/print-
+    shop#37). Each pane is 11.5 or 3.5 mm square in a pocket 0.25 mm larger all round, 1 mm thick.
+    - `pane_a`: a 10 mm opening, so 100 of 132.25 mm² open, 75.61%.
+    - `pane_b`: a floor under it, so none open: the fault on `suncatcher-2`'s first round.
+    - `pane_c`: a 2 mm opening, so 4 of 12.25 mm², 32.65%. Its opening is 3 mm from `pane_a`'s,
+      the narrowest band of frame a person sees.
+    """
+    Path("glass").mkdir(exist_ok=True)
+    frame = box(0, 42, 0, 20, 0, 4)
+    frame = frame.cut(box(5, 15, 5, 15, 0, 4)).cut(box(4, 16, 4, 16, 1.5, 2.5))
+    frame = frame.cut(box(18, 20, 9, 11, 0, 4)).cut(box(17, 21, 8, 12, 1.5, 2.5))
+    frame = frame.cut(box(25, 37, 4, 16, 1.5, 2.5)).cut(box(26, 36, 5, 15, 2.5, 4))
+    save(frame, "glass/frame")
+    save(box(4.25, 15.75, 4.25, 15.75, 1.5, 2.5), "glass/pane_a")
+    save(box(25.25, 36.75, 4.25, 15.75, 1.5, 2.5), "glass/pane_b")
+    save(box(17.25, 20.75, 8.25, 11.75, 1.5, 2.5), "glass/pane_c")
+    # A rim sized to the visible share (criterion 6), at a full rim of 1.2 mm, a least of 0.55,
+    # both before play, and 60% visible, with 0.25 mm of play and pockets at z 1.5 to 2.5.
+    # - A pane 19.5 mm square keeps 81.5% visible at the full rim, so it needs 1.2 mm.
+    # - One 5.5 mm square keeps 42.8% at 1.2 mm and 79.3% at 0.55: it needs the rim whose overlap
+    #   w leaves (5.5 - 2w)² = 60% of 30.25 mm², w = 0.6199, so 0.8699 mm before play.
+    # - One 1.5 mm square keeps 36% even at 0.55 mm: it's to be removed.
+    # `rims/held` has the first two at 1.2 and 0.87 mm; `rims/unheld` has the 5.5 mm pane at
+    # 1.2 mm, and the 1.5 mm one at 0.55.
+    Path("rims").mkdir(exist_ok=True)
+    for name, small_rim, tiny in (("held", 0.87, False), ("unheld", 1.2, True)):
+        rims = box(0, 40, 0, 24, 0, 4)
+        rims = rims.cut(box(2, 22, 2, 22, 1.5, 2.5)).cut(box(3.2, 20.8, 3.2, 20.8, 0, 4))
+        rims = rims.cut(box(26, 32, 9, 15, 1.5, 2.5))
+        rims = rims.cut(box(26 + small_rim, 32 - small_rim, 9 + small_rim, 15 - small_rim, 0, 4))
+        if tiny:
+            rims = rims.cut(box(35, 37, 11, 13, 1.5, 2.5))
+            rims = rims.cut(box(35.55, 36.45, 11.55, 12.45, 0, 4))
+        save(rims, f"rims/{name}")
+    # A pane twice as thick, and one with a ridge 0.5 mm higher along one edge.
+    save(box(0, 10, 0, 10, 0, 2), "glass/pane_thick")
+    save(box(0, 10, 0, 10, 0, 1).union(box(0, 10, 9.5, 10, 1, 1.5)), "glass/pane_ridge")
+
+
 if __name__ == "__main__":
     near_touching()
     boxes()
@@ -446,4 +486,5 @@ if __name__ == "__main__":
     thin_parts()
     designs()
     sheets()
+    glass()
     print("made")

@@ -265,6 +265,14 @@ class Answers:
         return Ran(code, f"verdict: {verdict}: {why}\nsaved: bench-out/{n}.txt and .json\n", 0.1)
 
 
+def stained_glass(run: Run) -> Run:
+    """A run whose request names stained glass, as `## Kind` will: `capture` is that kind's."""
+    run.state.kind = "stained-glass"
+    run.tools.use(run.toolset)
+    run.save()
+    return run
+
+
 def benched(
     root: Path, *commands: str, codes: tuple[int, ...], settled: list[str] | None = None
 ) -> tuple[Run, list[dict[str, Any]]]:
@@ -272,7 +280,7 @@ def benched(
         *[[tool("bench", command=c)] for c in commands],
         [tool("blocked", reason="Out of turns.")],
     )
-    run = Run.start(root, "r", "A block.", [], model, sleep=lambda _: None)
+    run = stained_glass(Run.start(root, "r", "A block.", [], model, sleep=lambda _: None))
     if settled is not None:
         run.state.needs = needs.dump(
             [
@@ -382,7 +390,7 @@ def test_a_pass_with_other_arguments_than_the_needs_is_said_and_doesnt_end_the_c
 def test_a_run_resumed_on_this_code_counts_the_failures_it_had_before(tmp_path: Path) -> None:
     """As `suncatcher-2` will be: five failures of one check from older code, then one more."""
     model = Scripted([tool("questions", questions="Anything?")])
-    run = Run.start(tmp_path, "r", "A block.", [], model, sleep=lambda _: None)
+    run = stained_glass(Run.start(tmp_path, "r", "A block.", [], model, sleep=lambda _: None))
     assert run.drive().name == "questions"
     for lip in ("1.2", "0.35", "0.45", "0.3", "0.25"):
         argv = ["capture", "frame.step", "--min-lip", lip]

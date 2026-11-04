@@ -45,7 +45,7 @@ A request is free text, as it always was, with up to four headings of its own (`
 |---|---|---|
 | `## Requirements` | What the part must do, ids `R1`, `R2` | Each is covered by a need that names it in `covers`, or `needs` is refused naming the lines left over, with their words |
 | `## Non-negotiables` | What mustn't change, ids `N1`, `N2` | Each is covered by a need marked `fixed`, whose quote is from that line. A need that covers one is fixed. Where the line holds a figure, the need says in `figure` how it's read, and where something changes it, which: a lip before or after play. The model is told to ask with `questions` where the request doesn't say |
-| `## Kind` | One word, such as `stained-glass` | Read and kept, and `start` gives the lessons for that kind of part (`lessons.part_kind`) with the general ones. Its toolset is mqucifer/print-shop#37's |
+| `## Kind` | One word, such as `stained-glass` | Read and kept, and `start` gives the lessons for that kind of part (`lessons.part_kind`) with the general ones, and loads its toolset: its bench commands, measures and skill (below). A kind with no toolset of its own has the core |
 | `## Stops` | What's shown before the run goes on, in order, ids `S1`, `S2` | Below. The line `no plan` leaves the plan out |
 
 Coverage is held by ids, as `needs` holds quotes, and nothing is guessed from words: the only reading of a line's words is whether it holds a digit. **A line is covered by an eye need only where no bench command measures it,** and the harness can't know that on its own, so an eye need that covers a line says why in `check.no_bench`, and the person reads it at the plan stop. Where mqucifer/print-shop#37 settles which command measures what, that list can hold it too.
@@ -94,6 +94,10 @@ Its needs cover `R1` to `R3`, `R3` by eye with its `no_bench`. `N1`'s need is `f
 **A pick passes the stop. `none` leaves it open:** what was shown wasn't right, so it's shown again before anything's handed over. The model's told which, and the next stop. `state.json` has each stop passed, with its ask, the pick, who made it and at which call. The ledger's `picks.stop` names the stop an ask showed, and the view `stops` gives each stop asked, what it is, at which call, and picked when and by whom.
 
 **The needs are settled once.** They're what the work is checked against, so the model can't change them. `resume --reopen-needs` lets it, when a person decides a need's check is wrong, and so does `--send-back --reopen-needs`: on `cup-1` the model tried to restate its checks after a send-back, was refused, and ran the missing ones as plain checks, so the approval rested on checks that weren't in its needs.
+
+**A need's check measures what it names** (mqucifer/print-shop#37). Each bench need says what it's about in `check.measures`, from its toolset's short list (`toolsets.py`), and `needs` refuses a command that doesn't measure that, naming the one that does. In all three stained-glass runs the hanging requirement was settled on a stand-in, the frame's bounds by `info` or the whole part's `thin`, where `wall` reads the wall round the hole: `"measures": "wall"` on `info frame.step` is refused, "`wall` does, as `wall FILE --hole X,Y,Z --min-wall W`". A short list the need declares, rather than words in its text, because words both miss and misfire: "wall" is in "the panes sit between the frame's walls" as well as "2 mm of wall round the hanging hole", and a refusal that fires wrongly stops a run. The declared list is exact against the command, and the person at a stop reads each need's `measures` beside its quote. The core's are `size` (`info`), `fit` (`clearance`), `cut` (`readback`), `hole` (`rays`), `wall` (`wall`), `printable` (`thin`), `one-piece` (`thin --one-body`), `insert` (`pause`) and `parameter` (`params`). `render` measures nothing: what only an eye can judge is an eye need. Stained glass adds `pane-hold` (`capture`), `pane-fit` (`panes`), `light` (`light`) and `pane-thickness` (`thickness`). **A `light` or `pane-thickness` limit is the request's:** the need gives one, as the command's option or a `number`, its source is `request`, `answer` or `note`, and the figure is in its quote. There's no default anywhere. A run from before toolsets reads its needs as it did, with no `measures`.
+
+**A part file whose last `thin` failed is said until it passes** (`unprintable.py`, `suncatcher-2`'s lesson 21). On `suncatcher-2` one pane failed `thin` nine times in a row, and the run moved on to other files without it passing. Every later `bench` and `run` reply, and `write` or `edit` with `run`, ends with each such file, the call it failed at and what `thin` said, and that a file failing `thin` can't be printed: fix it and run `thin` on it again before going on, or take it out of the part. It counts the model's own `thin` at the harness's settings (`--one-body` is the same check, stricter; a narrower `--nozzle` is another) and the harness's at `done` and `ask`, and `DISAGREE` or `NO ANSWER` leaves a file as it was. A file that's gone, or that a later `done` left out of `part`, has left the part. It isn't a refusal: `ask` stays open, and its draft and `question.md` list the files under "Part files whose last `thin` failed".
 
 **Checks are held in the harness, not in a note** (mqucifer/print-shop#26). On `cup-1` a lesson about checking, given to the model in its request, held until a check stood in its way, and then the check was changed. So these are refusals:
 - **A need can't pass on `FAIL`,** as it can't on `DISAGREE`. On `cup-1` one passed `capture` on FAIL.
@@ -150,6 +154,27 @@ A conversation that won't fit even compacted starts again from the record, keepi
 
 Limits are in `session.Limits`, recorded on the run's row. The model isn't told them, so a run says what a lower one would have done.
 
+## Toolsets
+
+The Sponsor, 2026-11-03: "id be concerned with adding things like light-path commands unles its just a tool option or something, not everything is going to be a stained glass print." So the core stays general, and a check for one kind of object comes in that kind's toolset: its bench commands, the measures its needs may use, and its skills (`rounds/toolsets.py`). It's the first step to a shared core with toolsets per domain.
+
+- **The request's `## Kind`** names the kind, and a run with none, or with a kind that has no toolset of its own, has the core only: a `bench` call of another kind's command is refused, saying which toolset has it, and the `bench` tool's description, the `needs` tool's measures and the start's skills are the toolset's. The start says which toolset it is.
+- **A run from before toolsets** keeps every command it had, its skills, and its needs as they were: its `state.json` has no `toolsets`, and its recorded commands are in the ledger by name.
+- **Each command, sorted:**
+
+| Command | Toolset | Why |
+|---|---|---|
+| `info`, `clearance`, `readback`, `rays`, `params`, `render` | core | any part has a size, fits, cuts, holes, parameters and a look |
+| `thin` | core | every printed file is read by it, whatever the kind |
+| `wall` | core | any part may hang from a hole, or carry a load through one |
+| `pause` | core | an insert dropped in mid-print, a nut or a magnet, is any kind's. It reads a closed nut's pocket as it reads a pane's (`~/print-shop/proofs/m18-verify/pause-nut.txt`) |
+| `capture`, `panes` | stained glass | they read a pane in its pocket, held by lips on both faces, which only this kind has |
+| `light`, `thickness` | stained glass | what a person sees through a pane |
+
+**The stained-glass skill**, `designing-stained-glass`, comes with its toolset, with its reference `checking-stained-glass` (mqucifer/print-shop#37). It's built to Anthropic's skill-authoring best practices, and its reader is the local model, so it says more than Claude would need: a workflow with a checklist from how the piece is built and the 2D layout through each bench check, run, fix, run again, with the request's stops in their places; each term (cell, pane, leading, pocket, play, opening, lip, and a lip before or after play) defined once; exact commands for the checks and open guidance for the design. It folds in lessons 1 (the 2D layout, the leading in one piece), 2 (heights named once), 17 (a lip per cell) and 20 (no sharp tips), in general terms. **Its evaluations came first:** `tests/skill_evals/designing-stained-glass/` has the gaps from the three runs' records (`gaps.md`), six scenarios each with a request, its files and the behaviour expected (`evals.json`), and the fixtures, made from scratch (`make_evals.py`). The operator runs them on the local model; `README.md` there says how. `tests/test_skill_rules.py` holds every skill to the rules: a name of lowercase letters, digits and hyphens, at most 64, in gerund form; a third-person description of at most 1,024 characters that says when to use it; `SKILL.md` under 500 lines; references one level deep, and any over 100 lines opening with its contents. `cadquery` and `references` are measured copies: their names aren't gerunds and their descriptions don't say when to read them, which the test lists and nobody edits. `bench`'s skill is now `using-the-bench`, and says when to use it.
+
+**How a run finds its skills** is in `skill_reads`: each `skill` call, at which call and round, the name asked for and the file it read, or `found` 0 for a name its toolset hasn't got. `runs.toolset` has the run's kind, commands and skills.
+
 ## The ledger
 
 `~/print-shop/design-runs/ledger.sqlite`, separate from the print ledger. Code writes it, from the first round. The model's account of itself isn't a source for any of it, but for one column marked as such.
@@ -173,6 +198,8 @@ Limits are in `session.Limits`, recorded on the run's row. The model isn't told 
 | `approvals`, `decisions` | Each stop for approval, with its sheet's hash, the part's hashes, the closing words and the delivered folder's groups and files (`review`), and each yes, send-back or close, and who. A close of a run that never stopped for approval has no `approval` |
 | `standing` | Each check the harness ran itself, whatever the needs say: `thin` on each file at `done`, and the needs' checks and `thin` at an ask, each with its file's hash. `unsure` is the bench with no answer to rely on |
 | `need_swaps` | Each need changed or dropped while its check failed on the files, with the old check and the new, both readings, the model's reason, and where it was shown |
+| `need_measures` | What each bench need of a version says it measures (`check.measures`): a table of its own, as `need_marks` is inserted into by position |
+| `skill_reads` | Each skill a run read: at which call and round, its name, the file, and whether its toolset has it |
 | `request_lines` | The request's lines, stops and kind, by id (`R1`, `N1`, `plan`, `S1`, `kind`) |
 | `breakdowns` | Each breakdown the model wrote, at which call |
 | `need_marks` | Each need's `covers`, `fixed`, `figure` and `no_bench`, by version: apart from `needs`, which older code inserts into by position |

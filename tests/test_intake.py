@@ -75,8 +75,16 @@ BROKEN_DOWN = tool(
 )
 
 
+#: What each command measures, as a need says it (mqucifer/print-shop#37).
+MEASURES = {"info": "size", "thin": "printable", "clearance": "fit", "wall": "wall"}
+
+
+def measured(check: dict[str, Any]) -> dict[str, Any]:
+    return {"measures": MEASURES[check["command"].split()[0]], **check}
+
+
 def bench(nid: str, command: str, **more: Any) -> dict[str, Any]:
-    check = {"by": "bench", "command": command, **more.pop("check", {})}
+    check = measured({"by": "bench", "command": command, **more.pop("check", {})})
     return {"id": nid, "what": f"what {nid} holds", "check": check, **more}
 
 
@@ -455,7 +463,9 @@ def test_a_pass_at_a_fixed_needs_other_settings_doesnt_start_the_count_again(
 def test_a_fixed_need_changes_only_by_the_sponsor_with_a_note(tmp_path: Path) -> None:
     run = begin(tmp_path, BRACKET, [BROKEN_DOWN], [tool("needs", needs=covered())])
     run.drive()
-    looser = covered(plate={"check": {"by": "bench", "command": "thin bracket.step --min 3"}})
+    looser = covered(
+        plate={"check": measured({"by": "bench", "command": "thin bracket.step --min 3"})}
+    )
     run = again(run, [tool("needs", needs=looser)])
     run.resume("Look at the plate again.", reopen_needs=True)
     run.drive()
@@ -542,7 +552,12 @@ def test_a_figure_no_fixed_need_carries_is_said_to_the_person(tmp_path: Path) ->
         tmp_path,
         BRACKET,
         [BROKEN_DOWN],
-        [tool("needs", needs=covered(arm={"check": {"by": "bench", "command": "info x.step"}}))],
+        [
+            tool(
+                "needs",
+                needs=covered(arm={"check": measured({"by": "bench", "command": "info x.step"})}),
+            )
+        ],
         [PLAN_ASK],
         SENT,
     )

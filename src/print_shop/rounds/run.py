@@ -49,7 +49,9 @@ from print_shop.rounds import (
     records,
     review,
     skills,
+    toolsets,
     transcript,
+    unprintable,
 )
 from print_shop.rounds import request as forms
 from print_shop.rounds.box import Box, Gone, Ran
@@ -121,6 +123,14 @@ class State:
     swaps: list[dict[str, Any]] = field(default_factory=list)
     # An ask drawn and shown to the model, which hasn't said what's in it yet, so it hasn't gone.
     draft: dict[str, Any] | None = None
+    # The kind the request names, whose toolset the run has: None for the core only. `toolsets`
+    # is false for a run from before them, which keeps every command it had.
+    kind: str | None = None
+    toolsets: bool = False
+    # The files the latest `done` named as the part, and the call it was at: a file it left out
+    # has left the part, and a failing `thin` on it isn't said any more.
+    part: list[str] | None = None
+    part_at: int | None = None
     # The request's set form (`request.py`), read at the start. None for a run started before it,
     # which carries on as it began: no lines held, no stops, and no breakdown asked for.
     form: dict[str, Any] | None = None
@@ -325,7 +335,10 @@ class Run:
             _sha(request),
             harness=[f"{commit}{'+changes' if dirty else ''}"],
             form=form.plain(),
+            kind=toolsets.key(form.kind) if form.kind else None,
+            toolsets=True,
         )
+        run.tools.use(run.toolset)
         read = getattr(send, "effort", None)
         effort, effort_from = (
             read(alias) if callable(read) else (UNKNOWN, "its sender doesn't read LiteLLM")
@@ -336,11 +349,16 @@ class Run:
             request_sha=run.state.request_sha,
             events=str(run.session.events),
             harness_commit=run.state.harness[0],
-            skills_sha=skills.sha(),
+            skills_sha=skills.sha(run.toolset.skills),
             image=host.IMAGE,
             image_id=host.image_id(),
             alias=alias,
             limits=run.limits.recorded(),
+            toolset={
+                "kind": run.toolset.kind,
+                "commands": list(run.toolset.commands),
+                "skills": list(run.toolset.skills),
+            },
             reasoning_effort=effort,
             reasoning_effort_from=effort_from,
         )
@@ -368,7 +386,11 @@ class Run:
     def _listen(self) -> None:
         """Each event from here on goes to the ledger as it's kept."""
         self.recorder = records.Recorder(
-            self.ledger, self.state.name, self.state.harness, self.limits.review_repeat_share
+            self.ledger,
+            self.state.name,
+            self.state.harness,
+            self.limits.review_repeat_share,
+            self.toolset.skills,
         )
         self.recorder.feed_all(transcript.events_of(self.session.events))
         self.session.heard = self.recorder.feed
@@ -386,6 +408,7 @@ class Run:
             raise Refused(f"{folder} isn't a run")
         run = cls(folder, send, limits, alias, sleep)
         run.state = State(**json.loads((folder / "state.json").read_text(encoding="utf-8")))
+        run.tools.use(run.toolset)
         run.session.restore()
         # What the ledger hasn't got yet: an older run's, or what a killed process didn't reach.
         run._listen()
@@ -868,7 +891,18 @@ class Run:
         given_lessons = kept.read_text(encoding="utf-8") if kept.is_file() else ""
         form = self._form()
         lines = forms.said(form) if form is not None else ""
-        return prompt.start(request, given, skills.start_line(), given_lessons, lines)
+        toolset = self.toolset
+        if toolset.legacy:
+            line = skills.start_line()
+        else:
+            asked = form.kind if form is not None else None
+            line = f"{toolset.said(asked)} {skills.start_line(toolset.skills)}"
+        return prompt.start(request, given, line, given_lessons, lines)
+
+    @property
+    def toolset(self) -> toolsets.Toolset:
+        """The run's toolset: its kind's, the core with no kind, or every command from before."""
+        return toolsets.of_run(self.state.kind, self.state.toolsets)
 
     def save(self) -> None:
         _write_atomic(self.folder / "state.json", json.dumps(asdict(self.state), indent=1))
@@ -936,6 +970,10 @@ class Run:
         check = nudge.check_of(argv)
         tries = nudge.streak(earlier, check, wanted)
         failed = nudge.failures(tries)
+        failing = self._thin_failing()
+        if failing:
+            lines.append(unprintable.said(failing))
+            detail["thin_failing"] = [one.file for one in failing]
         if tries and failed >= nudge.AFTER:
             lines.append(nudge.said(check, tries, wanted))
             detail["nudge"] = {
@@ -994,6 +1032,44 @@ class Run:
             )
         ]
 
+    def _thin_failing(self) -> list[unprintable.Thin]:
+        """Each part file whose last `thin` failed, the model's or the harness's, and hasn't left
+        the part (`unprintable.py`)."""
+        readings: list[tuple[int, int, unprintable.Thin]] = []
+        for row in self.ledger.rows(
+            "SELECT id, at_call, argv, verdict, why FROM bench_calls WHERE run=? ORDER BY id",
+            self.state.name,
+        ):
+            name = unprintable.counted(json.loads(row["argv"]))
+            if name is not None:
+                thin = unprintable.Thin(
+                    int(row["at_call"]), name, str(row["verdict"] or ""), str(row["why"] or "")
+                )
+                readings.append((thin.at_call, 0, thin))
+        for row in self.ledger.rows(
+            "SELECT id, at_call, stop, file, verdict, why FROM standing WHERE run=? "
+            "AND check_name=? ORDER BY id",
+            self.state.name,
+            judge.PRINTABLE,
+        ):
+            thin = unprintable.Thin(
+                int(row["at_call"]),
+                str(row["file"]),
+                str(row["verdict"] or ""),
+                str(row["why"] or ""),
+                str(row["stop"]),
+            )
+            readings.append((thin.at_call, 1, thin))
+        readings.sort(key=lambda r: (r[0], r[1]))
+        present = {str(p) for p in paths.walk_plain(self.work, skip_made=True)}
+        return unprintable.failing(
+            [r[2] for r in readings], present, self.state.part, self.state.part_at
+        )
+
+    def standing_said(self) -> str:
+        """What a `run` reply gains: each part file whose last `thin` failed."""
+        return unprintable.said(self._thin_failing())
+
     def questions(self, args: dict[str, Any]) -> Judged:
         if not self.state.needs_open:
             reply = (
@@ -1034,7 +1110,10 @@ class Run:
             return Judged("needs", "failed", reply, "no_breakdown")
         request = (self.folder / "request.md").read_text(encoding="utf-8")
         found, wrong = needs.read(
-            args["needs"], "\n".join([request, *self.state.said]), "\n".join(self.state.notes)
+            args["needs"],
+            "\n".join([request, *self.state.said]),
+            "\n".join(self.state.notes),
+            self.toolset,
         )
         if not wrong and form is not None and not trying:
             wrong = forms.held(found, form) + self._fixed_kept(found)
@@ -1271,6 +1350,7 @@ class Run:
         if isinstance(rows, Judged):
             return rows
         part = list(dict.fromkeys(name for row in rows for name in row["files"]))
+        self.state.part, self.state.part_at = part, self.session.requests
         looks = self._looks(args.get("looks"), part, "done")
         if isinstance(looks, Judged):
             return looks
@@ -1869,6 +1949,16 @@ class Run:
                 "you say:"
             )
             lines += [f"- {one.command}: {one.why}" for one in failing]
+        unprinted = self._thin_failing()
+        if unprinted:
+            lines.append(
+                "Part files whose last `thin` failed, which go beside the question too: "
+                + ", ".join(f"`{one.file}` (call {one.at_call})" for one in unprinted)
+            )
+        self.state.draft["thin_failing"] = [
+            {"file": one.file, "at_call": one.at_call, "why": one.why} for one in unprinted
+        ]
+        self.save()
         open_stop = self._open_stop()
         if open_stop is not None and stop != open_stop.id:
             lines.append(
@@ -2057,6 +2147,19 @@ class Run:
                 "The harness ran these itself, whatever the needs and the question say.",
                 "",
                 *[f"- `{one['command']}`: {one['why']}" for one in failing],
+                "",
+            ]
+        unprinted = draft.get("thin_failing") or []
+        if unprinted:
+            lines += [
+                "## Part files whose last `thin` failed",
+                "",
+                "Each can't be printed as it stands, whatever the other files do.",
+                "",
+                *[
+                    f"- `{one['file']}`, at call {one['at_call']}: {one['why']}"
+                    for one in unprinted
+                ],
                 "",
             ]
         lines += self._swaps_said()

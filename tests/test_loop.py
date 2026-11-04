@@ -286,6 +286,9 @@ def test_the_index_shows_the_harnesss_record_and_peoples_words_at_their_calls(
         [tool("blocked", reason="Out of turns.")],
     )
     run = Run.start(tmp_path, "r", "A block.", [], model, sleep=lambda _: None)
+    # `capture` is the stained-glass toolset's, as a request's `## Kind` loads it.
+    run.state.kind = "stained-glass"
+    run.tools.use(run.toolset)
     run.state.needs = needs.dump(
         [Need("held", "held", "request", "bench", command=f"{lip} 1.2", verdicts=["OK"])]
     )

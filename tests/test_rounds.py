@@ -11,7 +11,7 @@ from typing import Any
 import httpx
 import pytest
 
-from print_shop.rounds import needs, paths, send, skills, tools, transcript
+from print_shop.rounds import needs, paths, send, skills, tools, toolsets, transcript
 from print_shop.rounds import run as run_module
 from print_shop.rounds.box import Ran
 from print_shop.rounds.ledger import DesignLedger
@@ -106,6 +106,9 @@ class Desk:
 
     def after_action(self, args: dict[str, Any]) -> Judged:
         return Judged("after_action", "ok", "", ending=Ending("reviewed", {}))
+
+    def standing_said(self) -> str:
+        return ""
 
     def bench_said(self, argv: list[str], ran: Ran, record: dict[str, Any] | None) -> None:
         self.bench.append(argv)
@@ -279,17 +282,25 @@ def test_the_ported_skills_match_their_source_where_it_is_present() -> None:
 
 
 def test_each_skill_has_a_name_a_line_and_a_body() -> None:
-    found = skills.registry()
-    assert {"bench", "cadquery", "references"} <= set(found)
+    found = skills.registry(skills.ALL)
+    assert {"using-the-bench", "cadquery", "references", "designing-stained-glass"} <= set(found)
     for name, (about, body) in found.items():
         assert about.strip() and body.strip(), name
-        assert f"`{name}`" in skills.start_line()
+        assert f"`{name}`" in skills.start_line(skills.ALL)
 
 
-def test_the_bench_skill_names_every_command() -> None:
-    body = skills.registry()["bench"][1]
-    for command in needs.COMMANDS:
-        assert f"`{command} " in body, command
+@pytest.mark.parametrize("toolset", [toolsets.CORE, toolsets.STAINED_GLASS])
+def test_a_toolsets_skills_name_every_command_it_has_and_no_other(
+    toolset: toolsets.Toolset,
+) -> None:
+    """The core's `bench` skill says what each core command answers, and a kind's skill each of
+    its own: a run with the core only isn't told of `capture`."""
+    bodies = "\n".join(body for _, body in skills.registry(toolset.skills).values())
+    for command in toolset.commands:
+        assert f"`{command} " in bodies, command
+    core = skills.registry(toolsets.CORE.skills)["using-the-bench"][1]
+    for command in toolsets.STAINED_GLASS_COMMANDS:
+        assert f"`{command} " not in core, command
 
 
 # Needs
