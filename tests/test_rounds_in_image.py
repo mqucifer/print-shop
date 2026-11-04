@@ -70,6 +70,7 @@ GAP_NEED: dict[str, Any] = {
     "quote": "a 0.5 mm gap",
     "check": {
         "by": "bench",
+        "measures": "fit",
         "command": "clearance block.step tab.step --min-gap 0.2",
         "number": "pairs.0.gap_mesh_mm",
         "at_least": 0.45,
@@ -82,6 +83,7 @@ SIZE_NEED = {
     "source": "chosen",
     "check": {
         "by": "bench",
+        "measures": "size",
         "command": "info block.step",
         "number": "volume_mesh_mm3",
         "at_most": 3000,
@@ -91,7 +93,11 @@ PARAM_NEED = {
     "id": "gap-drives",
     "what": "the gap's a parameter that moves the tab",
     "source": "derived",
-    "check": {"by": "bench", "command": "params make.py --set GAP=3.0 --max-left 1"},
+    "check": {
+        "by": "bench",
+        "measures": "parameter",
+        "command": "params make.py --set GAP=3.0 --max-left 1",
+    },
 }
 EYE_NEED = {
     "id": "look",
@@ -111,6 +117,15 @@ def begin(
 ) -> tuple[Run, Scripted]:
     model = Scripted(*turns, **kw)
     run = Run.start(tmp_path, "proof", REQUEST, [], model, limits, sleep=lambda _: None)
+    return run, model
+
+
+def begin_stained_glass(tmp_path: Path, *turns: Any) -> tuple[Run, Scripted]:
+    """A run whose request names stained glass, as `## Kind` will, with its toolset."""
+    run, model = begin(tmp_path, *turns)
+    run.state.kind = "stained-glass"
+    run.tools.use(run.toolset)
+    run.save()
     return run, model
 
 
@@ -192,7 +207,7 @@ def test_a_run_goes_from_intake_through_refusals_and_a_pick_to_its_needs_met(
     (run.folder / "questions" / "1.answers.md").write_text("Make it 20 mm across.\n")
 
     bad_quote = {**GAP_NEED, "quote": "a gap of 9 mm"}
-    bad_command = {**SIZE_NEED, "check": {"by": "bench", "command": "info"}}
+    bad_command = {**SIZE_NEED, "check": {"by": "bench", "measures": "size", "command": "info"}}
     need_set = [GAP_NEED, SIZE_NEED, PARAM_NEED, EYE_NEED]
     run, model = again(
         run,
@@ -528,7 +543,7 @@ FIXTURE_NEED = {
     "id": "apart",
     "what": "the test piece stands clear of the block",
     "source": "chosen",
-    "check": {"by": "bench", "command": "clearance block.step test-piece.step"},
+    "check": {"by": "bench", "measures": "fit", "command": "clearance block.step test-piece.step"},
 }
 
 
@@ -1535,20 +1550,20 @@ def test_a_pick_of_none_takes_back_the_one_before_it(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("command", "extra", "verdict_said"),
+    ("measures", "command", "extra", "verdict_said"),
     [
-        ("thin parts.step --one-body", {}, "2 separate bodies, and one was asked for"),
-        ("params make.py --set GAP=3.0", {}, "PARTIAL"),
+        ("one-piece", "thin parts.step --one-body", {}, "2 separate bodies, and one was asked for"),
+        ("parameter", "params make.py --set GAP=3.0", {}, "PARTIAL"),
     ],
 )
 def test_a_check_holds_what_a_need_says_at_done(
-    tmp_path: Path, command: str, extra: dict[str, Any], verdict_said: str
+    tmp_path: Path, measures: str, command: str, extra: dict[str, Any], verdict_said: str
 ) -> None:
     need = {
         "id": "holds",
         "what": "what the need says",
         "source": "chosen",
-        "check": {"by": "bench", "command": command, **extra},
+        "check": {"by": "bench", "measures": measures, "command": command, **extra},
     }
     made = (
         script(gap=0.5)
@@ -1578,25 +1593,30 @@ FRAME_SCRIPT = (
 
 
 @pytest.mark.parametrize(
-    ("command", "said"),
+    ("measures", "command", "said"),
     [
-        ("pause frame.step --pocket-z 2 --pane-thickness 2 --min-room 0.2", "under the 0.2 mm"),
         (
+            "insert",
+            "pause frame.step --pocket-z 2 --pane-thickness 2 --min-room 0.2",
+            "under the 0.2 mm",
+        ),
+        (
+            "pane-hold",
             "capture frame.step --pocket-z 2 --clearance 0.1 --pane-thickness 2 --panes 5",
             "1 pane(s) read, and 5 were asked for",
         ),
     ],
 )
 def test_a_frames_check_holds_what_a_need_says_at_done(
-    tmp_path: Path, command: str, said: str
+    tmp_path: Path, measures: str, command: str, said: str
 ) -> None:
     need = {
         "id": "holds",
         "what": "what the need says",
         "source": "chosen",
-        "check": {"by": "bench", "command": command},
+        "check": {"by": "bench", "measures": measures, "command": command},
     }
-    run, _ = begin(
+    run, _ = begin_stained_glass(
         tmp_path,
         [tool("needs", needs=[need])],
         [write("frame.py", FRAME_SCRIPT, run=True)],
