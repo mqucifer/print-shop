@@ -696,7 +696,9 @@ def test_a_top_opening_wider_than_the_pocket_on_one_side_says_which_and_by_how_m
     answer = capture(bench, "held-wide-side.step")
     assert answer.verdict == "FAIL", answer.text
     assert "the hole is 2 mm wider than the pocket, so the frame starts 2.1 mm out" in answer.text
-    assert "the frame covers it by only 0.2 mm, where 0.5 is needed" in answer.text
+    assert "the frame covers it by only 0.2 to 0.283 mm, where 0.5 is needed" in answer.text, (
+        "0.2 along each edge, and 0.2 times the square root of 2 square to a corner"
+    )
     said = {s["what"]: s for s in answer.numbers["panes"][0]["up"]["over"]["stretches"]}
     wider = said["wider"]
     assert wider["edge_mm"] == pytest.approx(39.8, abs=1)
@@ -820,6 +822,8 @@ def test_capture_says_so_when_its_two_methods_differ(bench: Any) -> None:
     assert found["over_alike"] is None
     assert "the sections read pocket and rays wider" in found["over_kind"]
     assert "the sections read 2.1 mm and rays 1.6" in found["over_figure"]
+    assert found["over_lip_wider_by_rays"] is None, "beside a corner, as for the lip"
+    assert "a 0.2 mm lip and rays 0.1" in found["over_lip_narrower_by_rays"]
 
 
 # An island of frame inside an opening: a pane with holes (`cup-1`)

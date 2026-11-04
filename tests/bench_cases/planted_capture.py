@@ -72,6 +72,8 @@ print(
             "over_alike": over("pocket", 0.1, "pocket", 0.098),
             "over_kind": over("pocket", 0.1, "wider", 2.1),
             "over_figure": over("wider", 2.1, "wider", 1.6),
+            "over_lip_wider_by_rays": over("thin", 0.2, "held", 0.9),
+            "over_lip_narrower_by_rays": over("thin", 0.2, "thin", 0.1),
         }
     )
 )

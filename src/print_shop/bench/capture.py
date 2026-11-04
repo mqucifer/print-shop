@@ -91,7 +91,7 @@ OVER_REACH = 10.0
 #: A hole beyond a pane's face within this of the pocket's wall is as wide as the pocket, in mm:
 #: the band two ways of reading a lip may differ by.
 OVER_BAND = LIP_BAND
-#: The most stretches of a pane's edge one problem names: the rest are in the numbers.
+#: The most stretches whose rays one second-check line names: the rest are in the numbers.
 OVER_SAID = 3
 
 
@@ -109,29 +109,35 @@ class Over:
     beyond_wall: float | None = None
 
 
-def _say_over(found: Over, held: float, play: float, side: str) -> str:
-    """One kind of spot, as a reply says it."""
-    if found.what == "thin":
+def _span(low: float, high: float) -> str:
+    """Figures in mm as said: one, or the range they run over."""
+    return f"{low:g}" if high - low <= SHARED else f"{low:g} to {high:g}"
+
+
+def _say_over(what: str, mm: str, wall: str, held: float, play: float, side: str) -> str:
+    """One kind of stretch, as a reply says it: `mm` its figure, `wall` how much wider than the
+    pocket its hole is, each already said as one figure or a range."""
+    if what == "thin":
         return (
-            f"the frame covers it by only {found.mm:g} mm, where {held + play:g} is needed: "
+            f"the frame covers it by only {mm} mm, where {held + play:g} is needed: "
             f"{held:g} after {play:g} mm of play"
         )
-    if found.what == "inside":
-        return f"nothing covers its edge: the frame over it starts {found.mm:g} mm in from it"
-    if found.what == "pocket":
+    if what == "inside":
+        return f"nothing covers its edge: the frame over it starts {mm} mm in from it"
+    if what == "pocket":
         return (
             f"the hole is as wide as the pocket, so nothing overhangs the pane on that face: the "
             f"pocket's cut may run through the {side} face"
         )
-    if found.what == "wider":
+    if what == "wider":
         return (
-            f"the hole is {found.beyond_wall:g} mm wider than the pocket, so the frame starts "
-            f"{found.mm:g} mm out from the pane's edge"
+            f"the hole is {wall} mm wider than the pocket, so the frame starts {mm} mm out from "
+            "the pane's edge"
         )
-    if found.what == "short":
+    if what == "short":
         return (
-            f"the hole is {-(found.beyond_wall or 0.0):g} mm narrower than the pocket, and stops "
-            f"{found.mm:g} mm short of the pane's edge"
+            f"the hole is {wall} mm narrower than the pocket, and stops {mm} mm short of the "
+            "pane's edge"
         )
     return f"there's no frame within {OVER_REACH:g} mm of its edge"
 
@@ -355,12 +361,22 @@ def over_differs(over: dict[str, Any]) -> str | None:
         if rays is None:
             continue
         x, y = stretch["middle"]
+        band = OVER_BAND + 2 * INWARD_FINE
+        lips = {"held", "thin"}
+        if rays["what"] in lips and stretch["what"] in lips:
+            # Rays square to the edge read a lip wider beside a window's corner, never narrower,
+            # as `rim_differs` holds: so held by rays where sections read thin isn't a difference.
+            if rays["mm"] < stretch["middle_mm"] - band:
+                return (
+                    f"over its edge at {x:g},{y:g}, the sections read a {stretch['middle_mm']:g} "
+                    f"mm lip and rays {rays['mm']:g}"
+                )
+            continue
         if rays["what"] != stretch["what"]:
             return (
                 f"over its edge at {x:g},{y:g}, the sections read {stretch['what']} and rays "
                 f"{rays['what']}"
             )
-        band = OVER_BAND + 2 * INWARD_FINE
         if stretch["what"] != "none" and abs(rays["mm"] - stretch["middle_mm"]) > band:
             return (
                 f"over its edge at {x:g},{y:g}, the sections read {stretch['middle_mm']:g} mm "
@@ -379,36 +395,37 @@ def over_says(over: dict[str, Any], up: bool, held: float, play: float) -> str:
             f"{'top' if up else 'floor'} at z={over['pane_face_z']:g}: its {end} is "
             f"z={over['frame_end_z']:g}, so no frame is {beyond} the pane at all"
         )
-    said = []
-    # One spot is a lip's falling end, or a corner: it's in the numbers, and not said.
+    # One spot is a lip's falling end, or a corner: it's in the numbers, and not said. Each kind
+    # is said once, for all its stretches, with where its longest is.
     sayable = [s for s in over["stretches"] if s["spots"] >= 2]
-    for stretch in sayable[:OVER_SAID]:
-        if stretch["whole_ring"]:
+    kinds: dict[str, list[dict[str, Any]]] = {}
+    for stretch in sayable:
+        kinds.setdefault(stretch["what"], []).append(stretch)
+    said = []
+    for what, group in sorted(kinds.items(), key=lambda k: -sum(s["edge_mm"] for s in k[1])):
+        longest = max(group, key=lambda s: s["edge_mm"])
+        total = round(sum(s["edge_mm"] for s in group), 2)
+        if longest["whole_ring"] and len(group) == 1:
             where = (
-                f"all round its edge, {stretch['edge_mm']:g} mm"
-                if stretch["ring"] == 0
-                else f"all round its hole {stretch['ring']}, {stretch['edge_mm']:g} mm"
+                f"all round its edge, {total:g} mm"
+                if longest["ring"] == 0
+                else f"all round its hole {longest['ring']}, {total:g} mm"
             )
         else:
-            (x0, y0), (x1, y1) = stretch["from"], stretch["to"]
-            where = (
-                f"along {stretch['edge_mm']:g} mm of its edge, from {x0:g},{y0:g} "
-                f"to {x1:g},{y1:g}"
-            )
-        spot = Over(stretch["what"], stretch["least_mm"], stretch.get("beyond_wall_mm"))
-        text = _say_over(spot, held, play, side)
-        ranged = stretch["what"] not in ("pocket", "none")
-        if ranged and stretch["most_mm"] - stretch["least_mm"] > SHARED:
-            text += f" (at the least; {stretch['most_mm']:g} at the most)"
-        said.append(f"{where}, {text}")
-    more = len(sayable) - OVER_SAID
+            (x0, y0), (x1, y1) = longest["from"], longest["to"]
+            where = f"along {total:g} mm of its edge"
+            if len(group) > 1:
+                where += f", in {len(group)} stretches, the longest"
+            where += f" from {x0:g},{y0:g} to {x1:g},{y1:g}"
+        mm = _span(min(s["least_mm"] for s in group), max(s["most_mm"] for s in group))
+        walls = [abs(s["beyond_wall_mm"]) for s in group if "beyond_wall_mm" in s]
+        wall = _span(min(walls), max(walls)) if walls else ""
+        said.append(f"{where}, {_say_over(what, mm, wall, held, play, side)}")
     if not said:
         said = [f"it covers {over['edge_mm'] - over['not_held_mm']:g} mm of its edge to the limit"]
     return (
         f"{beyond.capitalize()} it, the frame read from z={over['pane_face_z']:g} to its {end} "
-        f"at z={over['frame_end_z']:g}: "
-        + "; ".join(said)
-        + (f"; and {more} shorter stretch(es), in the numbers" if more > 0 else "")
+        f"at z={over['frame_end_z']:g}: " + "; ".join(said)
     )
 
 
@@ -721,8 +738,10 @@ def _face(
     row["passes_3d_at_shifts"] = sum(v <= allowed * (z1 - z0) for v in volumes)
     # Held by less than the limit along most of its edge, or not at all: what the frame has beyond
     # this face, and where (mqucifer/print-shop#46).
+    # With a rim sized to the share, a short lip is the share's to say ("set this pane's rim").
     short = first["no_lip_mm"] + first["thin_mm"]
-    if row["passes_at_shifts"] or short >= 0.5 * float(pane.boundary.length):
+    mostly = args.min_visible is None and short >= 0.5 * float(pane.boundary.length)
+    if row["passes_at_shifts"] or not first["surrounds"] or mostly:
         row["over"] = _over(
             up, pane, opening, stack, built, args, limits, surface, held, (points, inward, rings)
         )
