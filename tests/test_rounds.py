@@ -101,6 +101,9 @@ class Desk:
     def done(self, args: dict[str, Any]) -> Judged:
         return Judged("done", "ok", "not met yet")
 
+    def set_aside(self, args: dict[str, Any]) -> Judged:
+        return Judged("set_aside", "ok", "set aside")
+
     def blocked(self, args: dict[str, Any]) -> Judged:
         return Judged("blocked", "ok", "", ending=Ending("blocked", {}))
 
@@ -108,6 +111,9 @@ class Desk:
         return Judged("after_action", "ok", "", ending=Ending("reviewed", {}))
 
     def standing_said(self) -> str:
+        return ""
+
+    def failing_said(self) -> str:
         return ""
 
     def bench_said(self, argv: list[str], ran: Ran, record: dict[str, Any] | None) -> None:

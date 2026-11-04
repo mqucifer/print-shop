@@ -405,6 +405,16 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
             "They reach that person with the sheet.",
         ),
         _spec(
+            "set_aside",
+            "Say why a failing bench check doesn't apply, so it's no longer named in your "
+            "replies. Each check whose latest try failed is named until it passes; the person at "
+            "the next stop reads your reason. A check a need runs can't be set aside: `done` "
+            "decides it. If the check fails again, it's named again.",
+            check="The check as your replies name it: its command and files, such as `capture "
+            "references/frame.step pane.step`.",
+            why="Why it doesn't apply, for the person at the next stop.",
+        ),
+        _spec(
             "blocked",
             "End the run without the part, saying what's missing. A person reads it.",
             reason="What's missing.",
@@ -418,7 +428,17 @@ CHANGERS = ("run", "bench", "write", "edit")
 MISSED = ("edit.closest", "edit.closest.indent", "edit.closest.apart", "edit.not_found")
 
 #: The tools that belong to the run, which `Desk` answers.
-DESK = ("breakdown", "questions", "needs", "ask", "send_ask", "done", "blocked", "after_action")
+DESK = (
+    "breakdown",
+    "questions",
+    "needs",
+    "ask",
+    "send_ask",
+    "done",
+    "set_aside",
+    "blocked",
+    "after_action",
+)
 
 
 class Desk(Protocol):
@@ -430,12 +450,14 @@ class Desk(Protocol):
     def ask(self, args: dict[str, Any]) -> Judged: ...
     def send_ask(self, args: dict[str, Any]) -> Judged: ...
     def done(self, args: dict[str, Any]) -> Judged: ...
+    def set_aside(self, args: dict[str, Any]) -> Judged: ...
     def blocked(self, args: dict[str, Any]) -> Judged: ...
     def after_action(self, args: dict[str, Any]) -> Judged: ...
     def bench_said(
         self, argv: list[str], ran: Ran, record: dict[str, Any] | None
     ) -> dict[str, Any] | None: ...
     def standing_said(self) -> str: ...
+    def failing_said(self) -> str: ...
 
 
 def _trim(text: str) -> str:
@@ -958,7 +980,8 @@ class WorkTools:
         if done.code != 0:
             hinted = self._hint(done.output)
             reply += f"\n\n{hinted}" if hinted else ""
-        # A part file whose last `thin` failed, said until it passes (`unprintable.py`).
+        # A part file whose last `thin` failed, and each check whose latest try failed, said
+        # until it passes (`unprintable.py`, `holding.py`).
         unprinted = self.desk.standing_said()
         reply += f"\n\n{unprinted}" if unprinted else ""
         return Judged("run", "ok", reply, detail={"code": done.code, "seconds": done.seconds})

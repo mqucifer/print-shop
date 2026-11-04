@@ -532,6 +532,21 @@ CREATE TABLE IF NOT EXISTS skill_reads (
     found INTEGER NOT NULL,
     PRIMARY KEY (run, seq)
 );
+CREATE TABLE IF NOT EXISTS set_asides (
+    -- A failing bench check the model said doesn't apply, with its reason, by its command and the
+    -- files it names, and the failed tries it set aside: out of the list of failing checks until
+    -- it fails again, and shown at the next stop (mqucifer/print-shop#45).
+    run TEXT NOT NULL REFERENCES runs(run),
+    seq INTEGER NOT NULL,
+    at_call INTEGER NOT NULL,
+    round INTEGER,
+    command TEXT NOT NULL,
+    files TEXT NOT NULL,
+    tries TEXT NOT NULL,
+    why TEXT NOT NULL,
+    shown_at TEXT,
+    PRIMARY KEY (run, seq)
+);
 CREATE VIEW IF NOT EXISTS phases AS
 SELECT calls.run, calls.phase, MIN(calls.n) AS first_call, MAX(calls.n) AS last_call,
        COUNT(*) AS calls, SUM(calls.seconds) AS seconds,
@@ -1021,6 +1036,19 @@ class DesignLedger:
             new_reading=swap.get("new_reading"),
             reason=swap["reason"],
             at_call=at_call,
+        )
+
+    def set_aside(self, run: str, seq: int, aside: dict[str, Any]) -> None:
+        self.add(
+            "set_asides",
+            run=run,
+            seq=seq,
+            at_call=aside["at_call"],
+            round=aside.get("round"),
+            command=aside["command"],
+            files=_json(aside["files"]),
+            tries=_json(aside["tries"]),
+            why=aside["why"],
         )
 
     def swaps_shown(self, run: str, where: str) -> None:

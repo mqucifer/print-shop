@@ -155,6 +155,9 @@ class Session:
     replies: dict[int, dict[str, Any]] = field(default_factory=dict)
     # Told each event as it's kept, for the ledger.
     heard: Callable[[dict[str, Any]], None] | None = None
+    # Asked right after a compaction for what to say before the next call: the run's failing
+    # checks (mqucifer/print-shop#45). Empty text says nothing.
+    after_compaction: Callable[[], str] | None = None
 
     def begin(self, *start: dict[str, Any]) -> None:
         """A new conversation. An earlier one in the same run stays in the records."""
@@ -372,6 +375,9 @@ class Session:
                 prompt_before=self.last_prompt,
                 before_call=self.requests + 1,
             )
+            restated = self.after_compaction() if self.after_compaction is not None else ""
+            if restated:
+                self.say(restated)
             if self.estimate() >= self.limits.compact_at:
                 full = {"estimated": self.estimate(), "limit": self.limits.compact_at}
                 return {}, Ending("context_full", full)
