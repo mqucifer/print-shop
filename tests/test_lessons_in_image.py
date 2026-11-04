@@ -42,8 +42,25 @@ def met(root: Path, name: str, *more: Any) -> tuple[Run, Scripted]:
 
 
 def reviewed(run: Run, *turns: Any) -> Run:
-    """Approved by a stand-in, then its after-action review, on the same session."""
+    """Approved by a stand-in, then its after-action review, on the same session. Each review
+    weighs everything a person said, and the approval it's told of as it begins."""
     run.approve(BY, "Fine.")
+    said = [
+        int(r["seq"])
+        for r in run.ledger.rows("SELECT seq FROM interventions WHERE run=?", run.state.name)
+    ]
+    people = [
+        {"said": n, "lesson": None, "why": "nothing to learn"} for n in [*said, len(said) + 1]
+    ]
+    turns = tuple(
+        [
+            {**c, "arguments": {"people": people, **c["arguments"]}}
+            if c["name"] == "after_action"
+            else c
+            for c in turn
+        ]
+        for turn in turns
+    )
     again = Run.load(run.folder, Scripted(*turns), sleep=lambda _: None)
     assert again.after_action_review().name == after_action.REVIEWED
     return again
