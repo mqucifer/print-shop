@@ -15,11 +15,11 @@ scripts/rounds.py read-back NAME [--ledger FILE]
 scripts/rounds.py after-action NAME
 scripts/rounds.py lessons [RUN] [--ledger FILE]
 scripts/rounds.py lessons accept|edit|reject|retire|promote ID --by WHO ...
-scripts/rounds.py lessons score RUN ID --score used|not_used|in_the_way --by WHO [--calls N,N]
+scripts/rounds.py lessons score RUN ID --score used|not_used|in_the_way --by WHO [--calls N,N] [--route R]
 scripts/rounds.py lessons load FILE --by WHO
 ```
 
-It needs the bench's image (`scripts/bench.py build`), and LiteLLM on :4000 with print-shop's key from `~/.config/print-shop/.env`. It uses `crew-code-think`, and probes nothing else. **A run names its code,** so `start` and `resume` refuse a checkout with uncommitted changes. As in `cad_eval`, run from a checkout nothing edits until it ends: `git worktree add --detach ../run-<commit> <commit>`. One session runs under a root at a time (`.session.lock`). Runs live in `~/print-shop/design-runs/`, off this public repository, and `start` refuses a folder inside it.
+It needs the bench's image (`scripts/bench.py build`), and LiteLLM on :4000 with print-shop's key from `~/.config/print-shop/.env`. It uses `crew-code-think`, and probes nothing else. **A run's record says what reasoning effort its alias sends** (`runs.reasoning_effort`, and `reasoning_effort` in `summary.json`), read at `start` from LiteLLM's own `/model/info` for this key: the alias's `litellm_params.reasoning_effort`, or its `extra_body`'s, or in `extra_body.chat_template_kwargs`. It's no model call, and SGLang isn't reached. If LiteLLM won't say, the record says `unknown` and why (`reasoning_effort_from`). Nothing else is kept from the answer, which can name a server's address. The effort stays as it is (the Sponsor, 2026-11-03): it's recorded, not changed. **A run names its code,** so `start` and `resume` refuse a checkout with uncommitted changes. As in `cad_eval`, run from a checkout nothing edits until it ends: `git worktree add --detach ../run-<commit> <commit>`. One session runs under a root at a time (`.session.lock`). Runs live in `~/print-shop/design-runs/`, off this public repository, and `start` refuses a folder inside it.
 
 ## A run
 
@@ -107,7 +107,7 @@ Limits are in `session.Limits`, recorded on the run's row. The model isn't told 
 | `questions` | Intake's questions and answers |
 | `changes` (a view) | Each need's reading before and after each round, with the diff |
 | `interventions` | Every note, answer, pick and send-back relayed to the model: when, at which call, who it's from, its text. The largest cause of change in a run |
-| `timeline` | Each start, stop, resume, compaction and restart, in order. A compaction has its size before and after, estimated and measured, and each process its harness commit, where `runs.harness_commit` holds only the first |
+| `timeline` | Each start, stop, resume, compaction and restart, in order. A compaction has its size before and after, estimated and measured, and what it cut (`said`), and each process its harness commit, where `runs.harness_commit` holds only the first |
 | `calls` | Each call's seconds, tokens, finish and share of repeated reasoning, with its round, its phase (how many times a person had sent something) and its process |
 | `phases`, `round_costs` (views) | Calls, seconds and tokens, split by what a person sent or by round |
 | `runaways` | A call that hit the limit, was cut, or whose reasoning repeats, for review. See below |
@@ -120,10 +120,14 @@ Limits are in `session.Limits`, recorded on the run's row. The model isn't told 
 
 | `after_actions` | Each try at a run's after-action review: the decision it follows (`decision`, an approval or a close, and `approval` if it has one), its calls, the commit, and how it ended (`reviewed`, `not_begun`, or the ending that stopped it) |
 | `nudges` | Each bench check that kept failing and the line its reply gained: its command, its files, the failures in a row and how many it takes |
-| `lessons` | Each lesson: the run it came from, who wrote it (`model`, or a person, signed `reviewer: <who>` or as at a pick), the fix's shape in its writer's words, its kind, its text, its evidence (calls and readings, by the ledger's keys), its status, what a lesson about checking `becomes`, and what it `became` once promoted, and where |
+| `lessons` | Each lesson: the run it came from, who wrote it (`model`, or a person, signed `reviewer: <who>` or as at a pick), the fix's shape in its writer's words, its kind (its area), its text, its evidence (calls and readings, by the ledger's keys), its status, what a lesson for the harness or the request `becomes`, what it `became` once promoted, and where, and the kind of part it's for (`part_kind`) |
+| `lesson_routes` | Each lesson's routes, who set each, where it was delivered and when, and when its text stopped being given, and why |
+| `lesson_keys` | The checks each lesson is about, by command and verdict |
+| `refusals` | Each tool call not carried out as asked: its call, tool, outcome and reason's code, from the events |
+| `said_weighed` | What the after-action review made of each thing a person said: the lesson it became, if any, and why |
 | `lesson_steps` | Each change to a lesson, who made it and why. An edit keeps the words it replaced |
 | `run_lessons` | Each lesson a run was given, how (`start`, or by hand in the request before this), and the words it was given in |
-| `lesson_scores` | Whether a run used each lesson it was given (`used`, `not_used`, `in_the_way`), with the calls that show it, by the model at its review or by a reviewer |
+| `lesson_scores` | Whether a lesson held on a route in a run (`used`, `not_used`, `in_the_way`), with the calls that show it: on the model's route by the model at its review or a reviewer, on the others by the analysis (`route`, empty from before) |
 
 Looking a lesson up when a reading fails isn't here yet.
 
@@ -145,9 +149,12 @@ The Sponsor: "When we get these run-away calls or repeating itself constantly it
 The first of the learn loop in code (mqucifer/print-shop#28, M18's "learning logic", ADR 0010's decision 5 as changed on 2026-11-02). Before this, the operator wrote lessons into a run's analysis and copied them into the next run's request by hand. On `cup-1` four were given that way. The two about how to build were followed. The one about checking held until a check got in the way, and then the check was changed.
 
 **The model writes its run's lessons, after the approval or a close, while it still has its context.** `resume --approve` records the decision and ends the run as `approved`, then makes one more turn on the same session. `after_action.py` holds it, apart from `review.py`, which writes the folder a person prints from: the two never share a name, in code, in what the model's told, or in the ledger.
-- The model is told the part is approved, with the person's note, and asked for its after-action review. The message lists the lessons it was given at the start, and the run call by call from the ledger: the tools each call made, each bench answer and its verdict, what a person sent before it, and each round's readings where the round ended. A lesson names its calls from that.
+- The model is told the part is approved, with the person's note, and asked for its after-action review. The message lists the lessons it was given at the start, and the run call by call from the ledger: the tools each call made, each bench answer and its verdict, and each round's readings where the round ended. A lesson names its calls from that.
+- **It sees the harness's record** (mqucifer/print-shop#40). On `suncatcher-2` the review missed the harness's part: replies cut to `exit 1`, the run hitting `context_full`, and that `blocked` was never weighed. So the index shows, at their calls, each compaction and what it cut (replies shrunk by tool, turns' reasoning dropped, texts made a note), each new conversation after `context_full`, and each refusal and failed edit (`refusals`), nudge and runaway. It's told that where the harness hid something, or a stop wasn't made, that's a lesson for the harness. On `suncatcher-2`'s record, read back through a copy of the ledger, it shows 24 compactions, the restart, both `context_full` stops, 7 failed edits, 6 other refusals and 14 runaways (`~/print-shop/proofs/m18-loop/index-suncatcher-2.json`).
+- **It sees what people said, in their words:** each note, answer, pick with its reason, fix-first, send-back and the decision itself, marked `[said N]`. Before, the index named only each one's kind and sender. `people` weighs each one: whether it should be a lesson, which of the review's lessons it became, and why. Every one is weighed, or nothing is kept, and each is a row of `said_weighed`.
+- **Near its limit, it goes on from the record.** `suncatcher-2`'s review ran on a conversation compacted many times. If the review's won't fit even compacted, it goes on in a new conversation from the record, as a run does, with the decision and the ask after it: the index is from the ledger, so it holds the whole run. The restart is in the timeline and `restarts`, and the review is recorded as ever. Nothing cuts a call, and compaction's limit is as it was.
 - Only `read` and `after_action` work in it: the files stay as approved.
-- `after_action` takes `lessons`, each with its fix's shape, its kind (`build`, `check` or `context`), its text, its calls and any readings, and `scores`, one for each lesson it was given: `used`, `not_used` or `in_the_way`, with the calls that show it. Every call must be one the ledger has of this run, every reading one it read, and every lesson given scored once, or nothing is kept and it's told what's wrong. Each lesson it writes is a `candidate`.
+- `after_action` takes `lessons`, each with its fix's shape, its kind (its area, below), the routes it proposes, its text, its calls and any readings and keys; `scores`, one for each lesson it was given: `used`, `not_used` or `in_the_way`, with the calls that show it; and `people`. Every call must be one the ledger has of this run, every reading one it read, every lesson given scored once, and everything a person said weighed once, or nothing is kept and it's told what's wrong. Each lesson it writes is a `candidate`.
 - **The run stays approved, whatever happens.** A review that can't begin, with no key or no LiteLLM, is a row of `after_actions` with `not_begun`, and so is one that ends any other way. `rounds.py after-action NAME` tries again, and a reviewer can enter lessons by hand. Its calls have a cap of their own (`Limits.after_action_calls`, 30), only so a review that never calls `after_action` ends by name. Nothing cuts a call or limits thinking. The timeline has the review as its own segment, and the approval and a close are interventions of their own kinds, `approved` and `closed`.
 
 ### A run that ends without approval
@@ -166,19 +173,51 @@ A run that's `blocked`, stopped, cut off by a limit, or judged not to be going a
 
 **A reviewer checks each against the ledger.** For now that's the operator, who signs `--by "reviewer: <who>"`: checking lessons is the reviewer's own job, not standing in for the Sponsor. `sponsor` and `stand-in: <who>` are taken too. Picks and decisions don't take `reviewer:`.
 - `lessons RUN` lists what the run wrote, each with what the ledger holds at each call and reading it names, then what it was given and how each was scored. `lessons` alone lists every lesson.
-- `accept`, `edit` (`--text FILE`, `--kind`, `--shape`) or `reject` (`--why`), each a row of `lesson_steps`.
-- **A lesson about checking is never given as a note.** It's accepted only with what it `--becomes`, `refusal` or `bench_check`, and built in the harness. Edited into one, it says the same. `promote ID --as refusal --where owner/repo#n` records it once built.
-- `lessons load FILE --by "reviewer: <who>"` takes a reviewer's steps from a file, in order, by the same rules: `{"steps": [{"do": "write", ...}, {"do": "accept", ...}, ...]}`, as `lessons.load` says. It's all checked before anything is written, and refused whole if a lesson is already there. It's how lessons are entered by hand, and how the operator enters the first rows.
+- `accept` (`--routes R,R`, `--becomes B`), `edit` (`--text FILE`, `--kind`, `--shape`, `--routes`, `--becomes`, `--keys capture:FAIL,thin`, `--part-kind K`) or `reject` (`--why`), each a row of `lesson_steps`.
+- **A lesson for the harness is never given as a note.** It's accepted only with what it `--becomes`: `refusal`, `bench_check`, `toolset_check`, `stop` or `harness`. One for the request alone becomes `request`.
+- `lessons load FILE --by "reviewer: <who>"` takes a reviewer's steps from a file, in order, by the same rules: `{"steps": [{"do": "write", ...}, {"do": "accept", ...}, ...]}`, as `lessons.load` says. A step names a lesson by its key in the file, or by its number if it's in the ledger. It's all checked before anything is written, and refused whole if a lesson is already there. It's how lessons are entered by hand, and how the operator enters the first rows.
 
-**The next run starts with what was kept.** `start` puts every kept lesson about how to build (`accepted`, `edited`, `given`, `held` or `broken`, and one promoted to a note) into the first message, after the request and its files, under `## Lessons from earlier runs`, each with its number, the run it came from and who wrote it. `lessons.md` in the run's folder holds them as given, so a conversation started again from the record has the same, and `run_lessons` has a row for each. For now every kept lesson goes to every run; matching by part comes with more lessons. Context lessons are for the people running it, and aren't given.
+### Areas, routes and layers (mqucifer/print-shop#40)
 
-**Scoring and retiring.** A run's latest score moves a lesson it was given: `used` is `held`, `in_the_way` is `broken`, and `not_used` leaves it. A reviewer can score again (`lessons score RUN ID`), and the latest counts. A lesson given twice and not used, or that got in the way, is listed for the reviewer under "To retire", and `retire ID --why` takes it out. Nothing retires one by code.
+**A lesson's kind is its area, one of the five** the batch was cut by with the Sponsor on 2026-11-03: `job` (understanding the job), `verify` (verification), `process` (process control), `memory` (memory within a run) and `loop` (the learning loop). The area says what goes wrong. "The learning loop is much like model training, and rounds are its data" (the Sponsor).
+
+**Its routes say who acts on it,** one or more, each with its own delivery and score. The model proposes them, and the reviewer confirms or changes them (`lesson_routes`).
+
+| Route | Delivered as | Scored by |
+|---|---|---|
+| `model` | text the next run is given: general lessons at the start, a kind's lessons in its skill | that run's own review, as before |
+| `harness` | an issue in the next batch, `promote`d when merged | the next analysis |
+| `request` | a line in the request template the operator writes from | the analysis |
+| `operator` | a line in the checklist below, for the operator and stand-in | the analysis |
+
+- **Delivered:** `promote ID --as B --where W` records it on its route: `note` or `skill` for the model, `request`, `checklist` for the operator, or what it became in the harness. The listing says what's waiting to reach each route.
+- **Scored:** `lessons score RUN ID --route R`, once it's delivered there. A lesson's status follows each run's latest score on each route since its latest delivery: the newest that says anything, `used` as `held` and `in_the_way` as `broken`. A correction replaces that run's earlier score, so a lesson whose only score was corrected to `not_used` is back to `given`, or `promoted`.
+- **A lesson can move route.** Once it's built into the harness or folded into a skill, and a run's score after that shows it holding, its text stops being given at the start, with a step saying why.
+
+**Lessons for the model come in layers, not all at once.** "We can't just dump everything in context" (the Sponsor, 2026-11-03).
+- `start` gives each kept lesson for the model that's general, or for the request's kind of part (`lessons.part_kind`, empty for a general one).
+- One promoted `--as skill` lives in that kind's skill, and isn't given at the start.
+- **Each is keyed to the checks it's about,** by command and verdict (`lesson_keys`): the failing bench answers and readings its evidence names, or the keys the model or the reviewer gives. They're there for a look-up at the failure, which is the next batch (the Sponsor, 2026-11-03).
+
+**Lessons from before the five are sorted once** when a ledger opens (`lessons.migrate`), each with a step keeping its old kind: build lessons to the model, check lessons to the harness, lesson 10 to the request and the operator, lesson 13 to the operator and the model, and 14 and 19 to the model, as settled with the Sponsor. Each one's area is the builder's sort, for the reviewer to check with `edit --kind`. Then, once, each lesson's status follows its scores, each change a step: lesson 7, corrected from `in_the_way` to `not_used`, reads `given`. `lesson_scores` is made again, every row kept, so a score on a route that isn't the model's needn't follow a lesson given as text. On a copy of the real ledger every row is kept and reads back: 26 routes, 12 keys and 25 steps are added, and a second open changes nothing (`~/print-shop/proofs/m18-loop/migration-ledger-copy.json`, `read-back-ledger-copy.json`). A lesson of an old kind written later by older code is sorted when the ledger next opens.
+
+### The reviewer's and the stand-in's checks
+
+For the operator, at each review and each ask (mqucifer/print-shop#40). It's the checklist the `operator` route delivers to.
+
+- **Check each candidate lesson against the run's analysis and against each person's note:** a finding in either that no lesson holds is a lesson missed.
+- **Write a lesson that's missing by hand,** with `lessons load`.
+- **Read a bench verdict before its picture.** On `cup-1` the stand-in gave a false cause, read from a picture whose check said FAIL.
+
+**The next run starts with what was kept for the model.** `start` puts each kept lesson for the model (`accepted`, `edited`, `given`, `held`, `broken` or `promoted`, its text still given, as above) into the first message, after the request and its files, under `## Lessons from earlier runs`, each with its number, its area, the run it came from and who wrote it. `lessons.md` in the run's folder holds them as given, so a conversation started again from the record has the same, and `run_lessons` has a row for each. A lesson for the harness, the request or the operator alone isn't given.
+
+**Scoring and retiring.** Each run's latest score moves a lesson, as above. A reviewer can score again (`lessons score RUN ID`), and the latest counts. A lesson given twice and not used, or that got in the way, is listed for the reviewer under "To retire", and `retire ID --why` takes it out. Nothing retires one by code.
 
 **Its statuses:** `candidate`, then `accepted`, `edited` or `rejected`, then `given`, then `held` or `broken`, then `promoted` or `retired`.
 
 **The first rows** are the lessons of `stainedglass-1`'s and `cup-1`'s analyses, written by the operator, with `cup-1`'s scores. Their words come from the Sponsor's runs, so they're a file off this repository, loaded with `lessons load` after this merges.
 
-**Not yet:** looking a lesson up when a reading fails, runs with and without a lesson to measure its gain, promotion into skills by code, and the crew's lessons (M16).
+**Not yet:** looking a lesson up when a reading fails (the next batch, by the keys above), runs with and without a lesson to measure its gain, promotion into skills by code, and the crew's lessons (M16).
 
 ## A run's folder
 
@@ -246,5 +285,7 @@ mqucifer/print-shop#19 then took what else it lacked: close-ups, sheets of the p
 `uv run pytest -q tests/test_rounds.py tests/test_records.py tests/test_delivered.py` needs no Docker. `test_records.py` reads back a run made up in its old shape. `uv run pytest -q tests/test_rounds_in_image.py`, under the `bench` mark, has a scripted fake model drive a real run in real containers, with no model call: every tool, every ending, a resume after `ask`, a failing need going back, and a `done` the checks refuse not ending the run. The part is made up in the test, of plain boxes.
 
 `tests/test_close.py` needs no Docker: a close after each kind of ending, what the model's told and asked, the refusals, the lock on the command line, the nudge counted by command and file and from a resumed run's earlier calls, and a ledger from before made again with every row kept. `tests/test_lessons.py` needs no Docker: the after-action review on a run put at its stop, each refusal, the reviewer's steps, giving at the start, scoring and retiring, a file of steps, and the command line with no key. `tests/test_lessons_in_image.py`, under `bench`, goes the whole way in real containers: a run met by the harness's checks, approved, its review, the reviewer's step by the command line, and the next run starting with the lesson, using it and scoring it.
+
+`tests/test_memory.py` needs no Docker: what a shrunk reply keeps, the latest replies staying whole, `record/CHECKS.md` and a new conversation given it, and each way a refused `edit` says how its lines differ, or that its file changed and which call changed it. `tests/test_loop.py` needs no Docker: routes proposed and confirmed, keys, layers by kind of part and skill, delivery and a score on each route, a corrected score, a lesson's text stopping once its fix holds, a ledger from before sorted once with every row kept, the review's index of the harness's record and people's words, the review near its limit, and the effort read from a fake of LiteLLM's documented `/model/info`.
 
 `tests/test_rounds_cup_local.py` (`-m bench_local`) reads `cup-1` back where the Mac holds it, and skips elsewhere: its request, references, needs and each round's scripts, with every name read from the run's own folder, so nothing of it is in this repository. `needs` refuses the version that passed on FAIL, round 1 doesn't stop for approval as `thin` fails two panes, and round 2's `review/` holds the same files, by what they hold, under the same names as the folder made by hand. Its run is kept in `~/print-shop/proofs/m18-truth/`, with `figures.json`.

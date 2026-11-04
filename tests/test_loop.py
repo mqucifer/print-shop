@@ -387,7 +387,7 @@ def model_info(*entries: dict[str, Any], status: int = 200) -> Any:
     return httpx.MockTransport(answer)
 
 
-ADDRESS = "http://10.0.0.9:30000/v1"
+ADDRESS = "http://served.example:30000/v1"
 
 
 def deployment(alias: str, **params: Any) -> dict[str, Any]:
@@ -428,7 +428,7 @@ def test_a_run_records_the_effort_its_alias_sends_as_litellm_says_it(
     sender = Sender(key="k", transport=model_info(*entries, status=status))
     effort, where = sender.effort("crew-code-think")
     assert effort == said[0] and said[1] in where
-    assert ADDRESS not in where and "10.0.0.9" not in where
+    assert ADDRESS not in where and "served.example" not in where
 
 
 def test_the_runs_row_and_summary_say_the_effort_or_that_its_unknown(tmp_path: Path) -> None:
