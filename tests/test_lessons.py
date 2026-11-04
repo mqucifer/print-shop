@@ -28,9 +28,19 @@ BY = "stand-in: a reviewer in a test"
 
 
 def lesson(
-    text: str = "Lay it out in 2D first.", kind: str = "build", **more: Any
+    text: str = "Lay it out in 2D first.",
+    kind: str = "job",
+    routes: tuple[str, ...] = ("model",),
+    **more: Any,
 ) -> dict[str, Any]:
-    return {"fix_shape": "plan in 2D", "kind": kind, "text": text, "calls": [1], **more}
+    return {
+        "fix_shape": "plan in 2D",
+        "kind": kind,
+        "routes": list(routes),
+        "text": text,
+        "calls": [1],
+        **more,
+    }
 
 
 def reviewed(*found: dict[str, Any], scores: Any = ()) -> list[dict[str, Any]]:
@@ -92,13 +102,17 @@ def test_the_model_writes_its_lessons_after_the_approval_each_held_to_the_ledger
         reviewed(lesson(calls=[99]), lesson(kind="advice")),
         [tool("write", path="x.py", content="")],
         reviewed(lesson(readings=[{"round": 1, "need": "gap"}])),
-        reviewed(lesson(), lesson("Check every pane.", kind="check", calls=[2, 3])),
+        reviewed(
+            lesson(),
+            lesson("Check every pane.", kind="verify", routes=("harness",), calls=[2, 3]),
+        ),
     )
     ending = run.after_action_review()
     assert ending.name == after_action.REVIEWED
     told = [e for e in transcript.events_of(run.session.events) if e["kind"] == "tool"][-4:]
     assert told[0]["outcome"] == "failed"
-    assert "no call 99" in told[0]["reply"] and "build, check or context" in told[0]["reply"]
+    assert "no call 99" in told[0]["reply"]
+    assert "kind is its area, job, verify, process, memory, loop" in told[0]["reply"]
     assert "There's no tool `write`" in told[1]["reply"]
     assert "no reading of `gap` in round 1" in told[2]["reply"]
     assert told[3]["outcome"] == "ok"
@@ -111,8 +125,8 @@ def test_the_model_writes_its_lessons_after_the_approval_each_held_to_the_ledger
     )
     written = rows(run.ledger, "SELECT * FROM lessons ORDER BY id")
     assert [(w["kind"], w["status"], w["written_by"]) for w in written] == [
-        ("build", "candidate", "model"),
-        ("check", "candidate", "model"),
+        ("job", "candidate", "model"),
+        ("verify", "candidate", "model"),
     ]
     assert written[0]["at_call"] == 7
     assert json.loads(written[1]["evidence"]) == {"calls": [2, 3], "readings": []}
@@ -186,8 +200,8 @@ def candidates(tmp_path: Path) -> tuple[DesignLedger, list[int]]:
         run,
         reviewed(
             lesson(),
-            lesson("Check every pane with thin.", kind="check"),
-            lesson("The Sponsor's picture comes late.", kind="context"),
+            lesson("Check every pane with thin.", kind="verify", routes=("harness",)),
+            lesson("The Sponsor's picture comes late.", routes=("operator",)),
         ),
     )
     run.after_action_review()
@@ -221,11 +235,13 @@ def test_each_step_is_signed_and_kept_with_why(tmp_path: Path) -> None:
     steps = rows(ledger, "SELECT * FROM lesson_steps WHERE lesson=? ORDER BY id", build)
     assert [(s["status"], s["by"]) for s in steps] == [("candidate", "model"), ("edited", BY)]
     assert json.loads(steps[1]["was"])["text"] == "Lay it out in 2D first."
-    # Made into one about checking, it says what it becomes.
+    # Sent to the harness, it says what it becomes there.
     with pytest.raises(lessons.Refused, match="never given as a note"):
-        lessons.edit(ledger, build, BY, kind="check")
-    with pytest.raises(lessons.Refused, match="it becomes refusal or bench_check"):
+        lessons.edit(ledger, build, BY, routes=["harness"])
+    with pytest.raises(lessons.Refused, match="isn't for model, which note is"):
         lessons.promote(ledger, check, BY, "note", "nowhere")
+    with pytest.raises(lessons.Refused, match="accepted as becoming refusal, not stop"):
+        lessons.promote(ledger, check, BY, "stop", "nowhere")
     lessons.promote(ledger, check, BY, "refusal", "mqucifer/print-shop#26")
     assert lessons.one(ledger, check)["became_where"] == "mqucifer/print-shop#26"
 
@@ -246,7 +262,9 @@ def test_the_listing_shows_each_lesson_with_what_the_ledger_holds_where_it_point
     assert "## Lesson 1: candidate" in shown and "Written by** model, at call 4" in shown
     assert "call 1 (round 0): read" in shown
     assert "It was given" not in shown
-    assert "1. [candidate] how to build" in lessons.listing(ledger)
+    assert "- **Kind:** understanding the job, general" in shown
+    assert "- **For:** model" in shown and "- **Keyed to:** none" in shown
+    assert "1. [candidate] understanding the job, for model, from `r`" in lessons.listing(ledger)
     with pytest.raises(lessons.Refused, match="isn't in this ledger"):
         lessons.listing(ledger, "nobody")
 
@@ -254,7 +272,7 @@ def test_the_listing_shows_each_lesson_with_what_the_ledger_holds_where_it_point
 # Giving them at the start, and scoring them
 
 
-def test_a_new_run_starts_with_the_kept_lessons_about_how_to_build_and_nothing_else(
+def test_a_new_run_starts_with_the_kept_lessons_for_the_model_and_nothing_else(
     tmp_path: Path,
 ) -> None:
     ledger, (build, check, context) = candidates(tmp_path)
@@ -266,7 +284,10 @@ def test_a_new_run_starts_with_the_kept_lessons_about_how_to_build_and_nothing_e
     run.drive()
     first = model.bodies[0]["messages"][1]["content"]
     assert lessons.HEADING in first
-    assert f"**Lesson {build}**, from `r`, written by the model: Lay it out in 2D first." in first
+    assert (
+        f"**Lesson {build}** (understanding the job), from `r`, written by the model: Lay it out "
+        "in 2D first."
+    ) in first
     assert "Check every pane" not in first and "comes late" not in first
     assert first.index("A frame.") < first.index(lessons.HEADING) < first.index("skill")
     given = rows(ledger, "SELECT * FROM run_lessons WHERE run='next'")
@@ -355,10 +376,10 @@ def test_a_reviewer_loads_lessons_from_a_file_checked_whole_first(tmp_path: Path
     waiting(tmp_path, "newer")
     ledger = run.ledger
     steps: list[dict[str, Any]] = [
-        {"do": "write", "key": "a", "run": "older", "fix_shape": "2D", "kind": "build"}
-        | {"text": "Lay it out in 2D.", "calls": [1, 2]},
-        {"do": "write", "key": "b", "run": "older", "fix_shape": "counts", "kind": "check"}
-        | {"text": "Count the panes.", "calls": [3]},
+        {"do": "write", "key": "a", "run": "older", "fix_shape": "2D", "kind": "job"}
+        | {"routes": ["model"], "text": "Lay it out in 2D.", "calls": [1, 2]},
+        {"do": "write", "key": "b", "run": "older", "fix_shape": "counts", "kind": "verify"}
+        | {"routes": ["harness"], "text": "Count the panes.", "calls": [3]},
         {"do": "accept", "lesson": "a"},
         {"do": "accept", "lesson": "b", "becomes": "bench_check"},
         {"do": "give", "lesson": "a", "run": "newer", "how": "by hand, in the request"}
@@ -366,21 +387,23 @@ def test_a_reviewer_loads_lessons_from_a_file_checked_whole_first(tmp_path: Path
         {"do": "give", "lesson": "b", "run": "newer", "how": "by hand, in the request"}
         | {"text": "Count them."},
         {"do": "score", "lesson": "a", "run": "newer", "score": "used", "calls": [1]},
-        {"do": "score", "lesson": "b", "run": "newer", "score": "in_the_way", "why": "bent"},
+        {"do": "score", "lesson": "b", "run": "newer", "score": "in_the_way", "why": "bent"}
+        | {"route": "model"},
         {"do": "promote", "lesson": "b", "as": "bench_check", "where": "mqucifer/print-shop#24"},
     ]
     bad = [
         *steps,
         {"do": "write", "key": "a", "run": "nobody", "fix_shape": "", "kind": "x"}
-        | {"text": "", "calls": []},
+        | {"routes": ["model"], "text": "", "calls": []},
         {"do": "write", "key": "c", "run": "older", "fix_shape": " ", "kind": "x"}
-        | {"text": "x", "calls": [1]},
+        | {"routes": ["nobody"], "text": "x", "calls": [1]},
     ]
     with pytest.raises(lessons.Refused) as refused:
         lessons.load(ledger, steps_file(tmp_path, bad), BY)
     assert "two lessons are `a`" in str(refused.value)
     assert "`nobody` isn't in this ledger" in str(refused.value)
-    assert "step 11: a kind is build, check, context" in str(refused.value)
+    assert "step 11: a kind is job, verify, process, memory, loop" in str(refused.value)
+    assert "step 11: lesson c's routes are one or more of model, harness" in str(refused.value)
     assert "step 11: it needs its fix's shape and its text" in str(refused.value)
     assert not ledger.rows("SELECT * FROM lessons"), "nothing was written"
     with pytest.raises(lessons.Refused, match="says who"):
@@ -402,7 +425,8 @@ def test_a_reviewer_loads_lessons_from_a_file_checked_whole_first(tmp_path: Path
     # One about checking was given by hand once, as a record: code never gives one.
     assert [g["id"] for g in lessons.to_give(ledger)] == [a["id"]]
     assert lessons.line(a).startswith(
-        f"- **Lesson {a['id']}**, from `older`, written by a reviewer in a test: Lay it out"
+        f"- **Lesson {a['id']}** (understanding the job), from `older`, written by a reviewer in "
+        "a test: Lay it out"
     )
 
 

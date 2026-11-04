@@ -74,14 +74,16 @@ def test_a_runs_lessons_are_checked_kept_given_to_the_next_run_and_scored(
                 lessons=[
                     {
                         "fix_shape": "one script for every file",
-                        "kind": "build",
+                        "kind": "job",
+                        "routes": ["model"],
                         "text": "One script exports every file: run it as you write it.",
                         "calls": [2, 3],
                         "readings": [{"round": 1, "need": "volume"}],
                     },
                     {
                         "fix_shape": "read the volume",
-                        "kind": "check",
+                        "kind": "verify",
+                        "routes": ["harness"],
                         "text": "Read the volume before calling done.",
                         "calls": [3],
                     },
@@ -107,11 +109,14 @@ def test_a_runs_lessons_are_checked_kept_given_to_the_next_run_and_scored(
     kept = cli(tmp_path, "lessons", "accept", str(check), "--by", BY, "--becomes", "bench_check")
     assert kept.returncode == 0, kept.stderr
 
-    # The next run starts with the one about how to build, and only that.
+    # The next run starts with the one for the model, and only that.
     second, model = met(tmp_path, "second")
     opening = model.bodies[0]["messages"][1]["content"]
     assert lessons.HEADING in opening
-    assert f"**Lesson {build}**, from `first`, written by the model: One script" in opening
+    assert (
+        f"**Lesson {build}** (understanding the job), from `first`, written by the model: One "
+        "script"
+    ) in opening
     assert "Read the volume" not in opening
     given = [dict(r) for r in second.ledger.rows("SELECT * FROM run_lessons WHERE run='second'")]
     assert [(g["lesson"], g["how"]) for g in given] == [(build, "start")]

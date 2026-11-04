@@ -31,7 +31,21 @@ NAME = "after_action"
 REVIEWED = "reviewed"
 #: The tools that work during it: reading what's there, and the review itself.
 TOOLS = ("read", NAME)
-LESSON_KEYS = {"fix_shape", "kind", "text", "calls", "readings"}
+LESSON_KEYS = {"fix_shape", "kind", "routes", "text", "calls", "readings", "keys"}
+LESSON_NEEDS = {"fix_shape", "kind", "routes", "text", "calls"}
+#: The five areas and the four routes, as the model is told them.
+AREAS_SAID = (
+    '"job" (understanding the job: the request, the references, what the part must do), '
+    '"verify" (verification: checking what was made, and reading what the checks say), '
+    '"process" (process control: stages, stops, asking, and when to end), "memory" (memory '
+    'within a run: keeping what was learned earlier in it), or "loop" (the learning loop: how '
+    "lessons and reviews work)"
+)
+ROUTES_SAID = (
+    '"model" (text the next run is given), "harness" (a change to the harness: a refusal, a '
+    'check or a stop), "request" (a line in the request the people running this write), or '
+    '"operator" (a line in the checklist of the people running this and anyone standing in)'
+)
 SCORE_KEYS = {"lesson", "score", "calls", "why"}
 
 
@@ -50,11 +64,13 @@ def spec() -> dict[str, Any]:
                     "lessons": {
                         "type": "array",
                         "description": 'Each lesson: {"fix_shape": "the fix\'s shape, in a few '
-                        'words of your own", "kind": "build" (how to build), "check" (what to '
-                        'check) or "context" (about the job or the people), "text": "what to tell '
-                        'the next run", "calls": [the call numbers that show it, from the index], '
-                        '"readings": [{"round": 1, "need": "gap"}] (optional)}. An empty list if '
-                        "this run taught nothing.",
+                        f'words of your own", "kind": its area, {AREAS_SAID}, "routes": who '
+                        f"should act on it, one or more of {ROUTES_SAID}, "
+                        '"text": "what to tell whoever acts on it", "calls": [the call numbers '
+                        'that show it, from the index], "readings": [{"round": 1, "need": "gap"}] '
+                        '(optional), "keys": [{"command": "capture", "verdict": "FAIL"}], the '
+                        "checks it's about (optional: the harness reads them from its calls)}. An "
+                        "empty list if this run taught nothing.",
                         "items": {"type": "object"},
                     },
                     "scores": {
@@ -132,11 +148,11 @@ STOPS = {
 }
 #: What each part of a lesson is, and what's said of the scores, for either kind of review.
 SHAPE = (
-    "Each has the fix's shape in a few words of your own, its kind (`build`: how to build; "
-    "`check`: what to check; `context`: about the job or the people), its text, and the calls "
-    "that show it, by their numbers below, with any readings by round and need. A lesson about "
-    "checking doesn't reach the next run as a note: a reviewer may make it a check in the harness "
-    "instead."
+    "Each has the fix's shape in a few words of your own; its kind, the area of what went wrong: "
+    f"{AREAS_SAID}; its routes, who should act on it: {ROUTES_SAID}; its text; and the calls that "
+    "show it, by their numbers below, with any readings by round and need. A fault the harness "
+    "hid from you, or a stop it should have made, is a lesson for the harness: it doesn't reach "
+    "the next run as a note, and a reviewer may build it as a check or a refusal instead."
 )
 SCORES = (
     "- **Scores:** for each lesson you were given, whether you used it, didn't, or it got in the "
@@ -210,16 +226,26 @@ def take(ledger: DesignLedger, run: str, args: dict[str, Any], at_call: int) -> 
             wrong.append(f"lesson {i} isn't an object")
             continue
         unknown = set(lesson) - LESSON_KEYS
-        missing = {"fix_shape", "kind", "text", "calls"} - set(lesson)
+        missing = LESSON_NEEDS - set(lesson)
         if unknown or missing:
             wrong.append(
-                f"lesson {i} takes fix_shape, kind, text, calls and perhaps readings"
+                f"lesson {i} takes fix_shape, kind, routes, text, calls, and perhaps readings and "
+                "keys"
                 + (f": it lacks {', '.join(sorted(missing))}" if missing else "")
                 + (f": not {', '.join(sorted(unknown))}" if unknown else "")
             )
             continue
         if lesson["kind"] not in lessons.KINDS:
-            wrong.append(f"lesson {i}'s kind is build, check or context: not {lesson['kind']!r}")
+            wrong.append(
+                f"lesson {i}'s kind is its area, {', '.join(lessons.KINDS)}: not "
+                f"{lesson['kind']!r}"
+            )
+        try:
+            lessons.check_routes(lesson["routes"], i)
+            if "keys" in lesson:
+                lessons.check_keys(lesson["keys"], i)
+        except lessons.Refused as refused:
+            wrong.append(str(refused))
         for key in ("fix_shape", "text"):
             if not isinstance(lesson[key], str) or not lesson[key].strip():
                 wrong.append(f"lesson {i} needs its {key.replace('_', ' ')}, in words")
@@ -263,7 +289,9 @@ def take(ledger: DesignLedger, run: str, args: dict[str, Any], at_call: int) -> 
             kind=lesson["kind"],
             text=lesson["text"],
             held=held,
+            routes=lesson["routes"],
             at_call=at_call,
+            keys=lessons.check_keys(lesson["keys"], 0) if "keys" in lesson else None,
         )
         for lesson, held in kept
     ]
