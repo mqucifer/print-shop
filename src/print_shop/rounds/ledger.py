@@ -420,6 +420,18 @@ CREATE TABLE IF NOT EXISTS lesson_scores (
     at TEXT NOT NULL,
     FOREIGN KEY (run, lesson) REFERENCES run_lessons(run, lesson)
 );
+CREATE TABLE IF NOT EXISTS skill_reads (
+    -- Each skill a run read, at which call, and the file it is: how a run finds its skills
+    -- (mqucifer/print-shop#37). `found` 0 is a name no skill of its toolset has.
+    run TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    at_call INTEGER NOT NULL,
+    round INTEGER,
+    name TEXT NOT NULL,
+    file TEXT,
+    found INTEGER NOT NULL,
+    PRIMARY KEY (run, seq)
+);
 CREATE VIEW IF NOT EXISTS phases AS
 SELECT calls.run, calls.phase, MIN(calls.n) AS first_call, MAX(calls.n) AS last_call,
        COUNT(*) AS calls, SUM(calls.seconds) AS seconds,
@@ -460,6 +472,9 @@ ADDED = (
     ("picks", "fix_first", "TEXT"),
     # The groups and files of the delivered folder at a stop, and where it was written.
     ("approvals", "review", "TEXT"),
+    # The run's toolset: its kind, bench commands and skills (mqucifer/print-shop#37). Empty for a
+    # run from before toolsets, which had every command.
+    ("runs", "toolset", "TEXT"),
 )
 
 
@@ -625,6 +640,8 @@ class DesignLedger:
                     _json(facts["limits"]),
                 ),
             )
+            if facts.get("toolset") is not None:
+                db.execute("UPDATE runs SET toolset=? WHERE run=?", (_json(facts["toolset"]), run))
 
     def run_ended(self, run: str, ending: str | None, said: Any, **totals: Any) -> None:
         """`ending` is None while it waits for the Sponsor: it hasn't ended."""

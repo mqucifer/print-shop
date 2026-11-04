@@ -17,6 +17,9 @@ import shlex
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from print_shop.rounds import toolsets
+from print_shop.rounds.toolsets import Toolset
+
 #: `note` is a person's note relayed to the model, so a Sponsor's words aren't marked `derived`.
 SOURCES = ("request", "answer", "note", "reference", "derived", "chosen")
 QUOTED = ("request", "answer", "note")
@@ -32,6 +35,8 @@ COMMANDS = (
     "wall",
     "params",
     "render",
+    "light",
+    "thickness",
 )
 #: Verdicts that are no answer: they never pass a need, whatever it says.
 UNSURE = ("DISAGREE", "NO ANSWER")
@@ -66,6 +71,8 @@ class Need:
     at_most: float | None = None
     # An eye need's.
     look_for: str = ""
+    # What a bench need is about, from its toolset's short list (`toolsets.py`).
+    measures: str = ""
 
     def argv(self) -> list[str]:
         return shlex.split(self.command)
@@ -100,9 +107,12 @@ def _bound(entry: dict[str, Any], key: str, wrong: list[str], shown: str) -> flo
     return float(value)
 
 
-def read(raw: Any, said_by_sponsor: str, notes: str = "") -> tuple[list[Need], list[str]]:
+def read(
+    raw: Any, said_by_sponsor: str, notes: str = "", toolset: Toolset | None = None
+) -> tuple[list[Need], list[str]]:
     """The needs, or what's wrong with them. `said_by_sponsor` is the request and the answers, and
-    `notes` what was relayed: each is its own source, so a need says which it came from."""
+    `notes` what was relayed: each is its own source, so a need says which it came from. With a
+    `toolset`, each bench need's check is in it and measures what the need says it's about."""
     wrong: list[str] = []
     try:
         entries = json.loads(raw) if isinstance(raw, str) else raw
@@ -158,7 +168,10 @@ def read(raw: Any, said_by_sponsor: str, notes: str = "") -> tuple[list[Need], l
             if not need.look_for:
                 wrong.append(f"{shown}: `look_for` says what the Sponsor's eye is judging")
         elif check.get("by") == "bench":
+            before = len(wrong)
             _bench_check(need, check, wrong, shown)
+            if toolset is not None and len(wrong) == before:
+                wrong += toolsets.wrong_with(need, toolset)
         else:
             wrong.append(f"{shown}: `check.by` is bench or eye")
         found.append(need)
@@ -167,6 +180,7 @@ def read(raw: Any, said_by_sponsor: str, notes: str = "") -> tuple[list[Need], l
 
 def _bench_check(need: Need, check: dict[str, Any], wrong: list[str], shown: str) -> None:
     need.command = str(check.get("command") or "").strip().removeprefix("bench ").strip()
+    need.measures = str(check.get("measures") or "").strip()
     try:
         words = need.argv()
     except ValueError as exc:

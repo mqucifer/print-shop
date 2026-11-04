@@ -151,7 +151,7 @@ def test_a_run_goes_from_intake_through_refusals_and_a_pick_to_its_needs_met(
     run, model = begin(
         tmp_path,
         [tool("lookup", query="Solid.fuse"), tool("lookup", query="Workplane.box", page=1)],
-        [tool("docs", query="fillet edges"), tool("skill", name="bench")],
+        [tool("docs", query="fillet edges"), tool("skill", name="using-the-bench")],
         [raw("write", "not json")],
         [tool("questions", questions="How big should the block be?")],
     )
@@ -1292,7 +1292,7 @@ CHATTER = " ".join(f"This is a sentence of its own about the block, number {i}."
 def test_a_call_whose_reasoning_repeats_gets_a_row_and_goes_on_uncut(tmp_path: Path) -> None:
     run, _ = begin(
         tmp_path,
-        [tool("skill", name="bench")],
+        [tool("skill", name="using-the-bench")],
         Spoken([write("a.txt", "x")], reasoning=CHATTER),
         Spoken([write("b.txt", "y")], reasoning=CHATTER),
         [tool("run", path="nope.py")],
@@ -1311,7 +1311,7 @@ def test_a_call_whose_reasoning_repeats_gets_a_row_and_goes_on_uncut(tmp_path: P
     assert doing["tool_calls"][0]["name"] == "write"
     assert doing["tool_calls"][0]["path"] == "c.txt"
     lacked = json.loads(flagged[1]["lacked"])
-    assert lacked["skills_read"] == ["bench"]
+    assert lacked["skills_read"] == ["using-the-bench"]
     assert "cadquery" in lacked["skills_not_read"]
     assert lacked["last_tool_calls_refused"] == [["run", "no_file"]]
     assert flagged[1]["review_note"] is None, "that's for a reviewer"

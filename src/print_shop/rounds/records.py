@@ -91,8 +91,11 @@ class Recorder:
         run: str,
         harness: list[str],
         repeat_share: float = REPEAT_SHARE,
+        skills_offered: tuple[str, ...] = skills.SETS,
     ) -> None:
         self.ledger = ledger
+        self.skills_offered = skills_offered
+        self.skill_reads = 0
         self.run = run
         # Read as it's used: a live run adds to it at each resume.
         self.harness = harness
@@ -353,7 +356,7 @@ class Recorder:
         }
         lacked = {
             "skills_read": sorted(self.skills_read),
-            "skills_not_read": sorted(set(skills.registry()) - self.skills_read),
+            "skills_not_read": sorted(set(skills.registry(self.skills_offered)) - self.skills_read),
             "compactions_so_far": self.compactions,
             "calls_since_compaction": self.calls_since_compaction,
             "prompt_tokens": used.get("prompt_tokens"),
@@ -392,6 +395,8 @@ class Recorder:
     def _on_tool(self, event: dict[str, Any]) -> None:
         name = event.get("name")
         arguments = _arguments(event.get("arguments"))
+        if name == "skill":
+            self._skill_read(event, arguments)
         if event.get("outcome") != "ok":
             self.refused.append([str(name), str(event.get("why") or event.get("outcome"))])
         elif name == "skill":
@@ -404,6 +409,21 @@ class Recorder:
             self._tried(event, detail)
         if name == "bench" and isinstance(detail, dict) and detail.get("nudge"):
             self._nudged(detail["nudge"])
+
+    def _skill_read(self, event: dict[str, Any], arguments: dict[str, Any]) -> None:
+        """Which skill a run read, at which call, and its file: how a run finds its skills."""
+        self.skill_reads += 1
+        detail = event.get("detail") or {}
+        self.ledger.add(
+            "skill_reads",
+            run=self.run,
+            seq=self.skill_reads,
+            at_call=self.requests,
+            round=self._round_of(self.requests),
+            name=str(arguments.get("name")),
+            file=detail.get("file") if isinstance(detail, dict) else None,
+            found=int(event.get("outcome") == "ok"),
+        )
 
     def _nudged(self, nudge: dict[str, Any]) -> None:
         """A check that kept failing, and the line its reply gained."""

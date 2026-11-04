@@ -48,6 +48,7 @@ from print_shop.rounds import (
     records,
     review,
     skills,
+    toolsets,
     transcript,
 )
 from print_shop.rounds.box import Box, Gone, Ran
@@ -116,6 +117,10 @@ class State:
     swaps: list[dict[str, Any]] = field(default_factory=list)
     # An ask drawn and shown to the model, which hasn't said what's in it yet, so it hasn't gone.
     draft: dict[str, Any] | None = None
+    # The kind the request names, whose toolset the run has: None for the core only. `toolsets`
+    # is false for a run from before them, which keeps every command it had.
+    kind: str | None = None
+    toolsets: bool = False
 
 
 def repository_version() -> tuple[str, bool]:
@@ -297,17 +302,25 @@ class Run:
             shutil.copyfile(reference, folder / "work" / "references" / reference.name)
         run = cls(folder, send, limits, alias, sleep)
         commit, dirty = repository_version()
-        run.state = State(name, _sha(request), harness=[f"{commit}{'+changes' if dirty else ''}"])
+        run.state = State(
+            name, _sha(request), harness=[f"{commit}{'+changes' if dirty else ''}"], toolsets=True
+        )
+        run.tools.use(run.toolset)
         run.ledger.run_started(
             name,
             request_sha=run.state.request_sha,
             events=str(run.session.events),
             harness_commit=run.state.harness[0],
-            skills_sha=skills.sha(),
+            skills_sha=skills.sha(run.toolset.skills),
             image=host.IMAGE,
             image_id=host.image_id(),
             alias=alias,
             limits=run.limits.recorded(),
+            toolset={
+                "kind": run.toolset.kind,
+                "commands": list(run.toolset.commands),
+                "skills": list(run.toolset.skills),
+            },
         )
         run._give_lessons()
         run.save()
@@ -331,7 +344,11 @@ class Run:
     def _listen(self) -> None:
         """Each event from here on goes to the ledger as it's kept."""
         self.recorder = records.Recorder(
-            self.ledger, self.state.name, self.state.harness, self.limits.review_repeat_share
+            self.ledger,
+            self.state.name,
+            self.state.harness,
+            self.limits.review_repeat_share,
+            self.toolset.skills,
         )
         self.recorder.feed_all(transcript.events_of(self.session.events))
         self.session.heard = self.recorder.feed
@@ -349,6 +366,7 @@ class Run:
             raise Refused(f"{folder} isn't a run")
         run = cls(folder, send, limits, alias, sleep)
         run.state = State(**json.loads((folder / "state.json").read_text(encoding="utf-8")))
+        run.tools.use(run.toolset)
         run.session.restore()
         # What the ledger hasn't got yet: an older run's, or what a killed process didn't reach.
         run._listen()
@@ -777,7 +795,17 @@ class Run:
         request = (self.folder / "request.md").read_text(encoding="utf-8")
         kept = self.folder / "lessons.md"
         given_lessons = kept.read_text(encoding="utf-8") if kept.is_file() else ""
-        return prompt.start(request, given, skills.start_line(), given_lessons)
+        toolset = self.toolset
+        if toolset.legacy:
+            line = skills.start_line()
+        else:
+            line = f"{toolset.said()} {skills.start_line(toolset.skills)}"
+        return prompt.start(request, given, line, given_lessons)
+
+    @property
+    def toolset(self) -> toolsets.Toolset:
+        """The run's toolset: its kind's, the core with no kind, or every command from before."""
+        return toolsets.of_run(self.state.kind, self.state.toolsets)
 
     def save(self) -> None:
         _write_atomic(self.folder / "state.json", json.dumps(asdict(self.state), indent=1))
@@ -873,7 +901,10 @@ class Run:
             return Judged("needs", "failed", reply, "needs_settled")
         request = (self.folder / "request.md").read_text(encoding="utf-8")
         found, wrong = needs.read(
-            args["needs"], "\n".join([request, *self.state.said]), "\n".join(self.state.notes)
+            args["needs"],
+            "\n".join([request, *self.state.said]),
+            "\n".join(self.state.notes),
+            self.toolset,
         )
         if not wrong:
             wrong = self._usable(found)
