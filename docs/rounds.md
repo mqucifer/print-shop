@@ -48,6 +48,8 @@ A request is free text, as it always was, with up to four headings of its own (`
 | `## Kind` | One word, such as `stained-glass` | Read and kept, and `start` gives the lessons for that kind of part (`lessons.part_kind`) with the general ones, and loads its toolset: its bench commands, measures and skill (below). A kind with no toolset of its own has the core |
 | `## Stops` | What's shown before the run goes on, in order, ids `S1`, `S2` | Below. The line `no plan` leaves the plan out |
 
+**A request's pictures and reference files go in at `start`** (`--reference`), with the request, so the plan is written from them.
+
 Coverage is held by ids, as `needs` holds quotes, and nothing is guessed from words: the only reading of a line's words is whether it holds a digit. **A line is covered by an eye need only where no bench command measures it,** and the harness can't know that on its own, so an eye need that covers a line says why in `check.no_bench`, and the person reads it at the plan stop. Where mqucifer/print-shop#37 settles which command measures what, that list can hold it too.
 
 **A request in the old free form still runs.** With no `## Requirements` or `## Non-negotiables`, it has no lines, and nothing is checked for coverage. It still has the plan as its stop, and the breakdown before its needs. A run started before this has no form in its `state.json`, and carries on as it began: no lines, no stops, no breakdown asked for.
@@ -297,6 +299,7 @@ For the operator, at each review and each ask (mqucifer/print-shop#40). It's the
 - **Check each candidate lesson against the run's analysis and against each person's note:** a finding in either that no lesson holds is a lesson missed.
 - **Write a lesson that's missing by hand,** with `lessons load`.
 - **Read a bench verdict before its picture.** On `cup-1` the stand-in gave a false cause, read from a picture whose check said FAIL.
+- **Give the reference pictures at the start,** with `start --reference`, not after the first round. On `stainedglass-1` the Sponsor's intent arrived late, after the plan had been written without it. The other half of that lesson, reading the plan at the first write, is now the plan stop (mqucifer/print-shop#38).
 
 **The next run starts with what was kept for the model.** `start` puts each kept lesson for the model (`accepted`, `edited`, `given`, `held`, `broken` or `promoted`, its text still given, as above) into the first message, after the request and its files, under `## Lessons from earlier runs`, each with its number, its area, the run it came from and who wrote it. `lessons.md` in the run's folder holds them as given, so a conversation started again from the record has the same, and `run_lessons` has a row for each. A lesson for the harness, the request or the operator alone isn't given.
 

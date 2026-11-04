@@ -16,6 +16,7 @@ pane forced past a lip that bends, since nothing here knows a material.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -70,6 +71,11 @@ RIM_TOL = 0.01
 SHARE_TOL = 0.5
 #: Halvings of the bisection for the rim needed: 2 mm of range to under a micrometre.
 HALVINGS = 40
+#: The rim a reply tells the model to set, in mm: the rim needed rounded down to this. Down keeps
+#: the share at least the one wanted, and the lip falls short of the need by under a thousandth,
+#: inside `RIM_TOL`. Rounded to the hundredth, a 2.71 mm pane needing 0.5554 mm was told 0.56,
+#: which leaves 59.48% visible, under 60% less `SHARE_TOL`, and was told 0.56 again.
+SET_STEP = 0.001
 #: A pane file is the pane the bench read if their outlines at the pocket's height share this much
 #: of what either covers.
 MATCH_SHARE = 0.9
@@ -462,7 +468,7 @@ def _share_says(
         has_mm=has,
     )
     name = label[5:]
-    needs = "none: it's to be removed" if rim["remove"] else f"{rim['needs_mm']:.2f} mm"
+    needs = "none: it's to be removed" if rim["remove"] else f"{rim['set_mm']:g} mm"
     report.line(
         f"pane {name}: {share:.1f}% visible, {args.min_visible:g}% wanted; its rim needs "
         f"{needs} before play, and has {has} mm at the least"
@@ -497,7 +503,7 @@ def _share_says(
     covered = share < args.min_visible - SHARE_TOL
     if not short and covered and has is not None and has <= rim["needs_mm"] + RIM_TOL:
         problems.append(
-            f"{label}: its rim is the {rim['needs_mm']:.2f} mm before play it needs, and only "
+            f"{label}: its rim is the {rim['set_mm']:g} mm before play it needs, and only "
             f"{share:.1f}% of it is visible, where {args.min_visible:g}% is wanted: the frame "
             "covers it elsewhere, as a floor under it or a bar across it would"
         )
@@ -509,7 +515,7 @@ def _share_says(
             if f["thin_mm"]
         )
         problems.append(
-            f"{label}: set this pane's rim to {rim['needs_mm']:.2f} mm before play. It has "
+            f"{label}: set this pane's rim to {rim['set_mm']:g} mm before play. It has "
             f"{has} mm at the least"
             + (f" ({where})" if where else "")
             + f", and {share:.1f}% of it is visible, where {args.min_visible:g}% is wanted"
@@ -549,7 +555,11 @@ def rim_needed(pane: Any, args: Any) -> dict[str, Any]:
             middle = (low + high) / 2
             low, high = (middle, high) if inset_share(pane, middle) >= share else (low, middle)
         need = low + play
-    found.update(remove=False, needs_mm=round(need, 4))
+    found.update(
+        remove=False,
+        needs_mm=round(need, 4),
+        set_mm=round(math.floor(need / SET_STEP + 1e-6) * SET_STEP, 3),
+    )
     # The second method: a grid in the pane, each point visible if it's at least the rim's
     # overlap from the pane's edge, against the inset's area.
     points, step = grid(pane, 4000)

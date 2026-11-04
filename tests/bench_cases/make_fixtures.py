@@ -467,6 +467,15 @@ def glass() -> None:
             rims = rims.cut(box(35, 37, 11, 13, 1.5, 2.5))
             rims = rims.cut(box(35.55, 36.45, 11.55, 12.45, 0, 4))
         save(rims, f"rims/{name}")
+    # A pane 2.71 mm square needs 0.5554 mm: the reply says 0.555, rounded down to the
+    # thousandth, which leaves 60.05% visible. `rims/thousandth` has one cell at 0.555, which
+    # passes, and one at 0.60, which is told to set 0.555.
+    rims = box(0, 12, 0, 6, 0, 4)
+    for x0, rim in ((1.0, 0.555), (7.0, 0.6)):
+        x1 = x0 + 3.21
+        rims = rims.cut(box(x0, x1, 1.0, 4.21, 1.5, 2.5))
+        rims = rims.cut(box(x0 + rim, x1 - rim, 1.0 + rim, 4.21 - rim, 0, 4))
+    save(rims, "rims/thousandth")
     # A pane twice as thick, and one with a ridge 0.5 mm higher along one edge.
     save(box(0, 10, 0, 10, 0, 2), "glass/pane_thick")
     save(box(0, 10, 0, 10, 0, 1).union(box(0, 10, 9.5, 10, 1, 1.5)), "glass/pane_ridge")
