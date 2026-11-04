@@ -264,3 +264,190 @@ def test_a_ledger_from_before_is_sorted_once_and_keeps_every_row(tmp_path: Path)
     assert late["kind"] == "verify" and sorted(lessons.routes_of(ledger, late["id"])) == [
         "harness"
     ]
+
+
+# What the review sees
+
+
+def test_the_index_shows_the_harnesss_record_and_peoples_words_at_their_calls(
+    tmp_path: Path,
+) -> None:
+    from print_shop.rounds import after_action, needs
+    from print_shop.rounds.needs import Need
+    from tests.rounds_fakes import Spoken
+    from tests.test_close import Answers
+
+    lip = "capture frame.step --min-lip"
+    model = Scripted(
+        [tool("write", path="a.py", content="x = 1\n")],
+        [tool("edit", path="a.py", old="x = 2", new="x = 3")],
+        *[[tool("bench", command=f"{lip} {v}")] for v in ("1.2", "0.8", "0.5", "0.3")],
+        Spoken([tool("read", path="a.py")], finish="length", usage={"completion_tokens": 900}),
+        [tool("blocked", reason="Out of turns.")],
+    )
+    run = Run.start(tmp_path, "r", "A block.", [], model, sleep=lambda _: None)
+    run.state.needs = needs.dump(
+        [Need("held", "held", "request", "bench", command=f"{lip} 1.2", verdicts=["OK"])]
+    )
+    run.state.needs_open = False
+    box: Any = Answers(run.work, 1, 1, 1, 1)
+    run.tools.box = box
+    assert run.drive().name == "blocked"
+    run._note("The light has to pass\nthrough every pane.", "sponsor")
+    run.session.compact()
+    run.session._record(
+        "compacted", estimated=130_000, estimated_after=40_000, prompt_before=1000, before_call=9
+    )
+    shown = "\n".join(after_action.index(run.ledger, "r"))
+    assert "2: edit\n   a failed edit: edit.closest" in shown
+    assert "6: bench `capture frame.step --min-lip 0.3` FAIL\n   nudged: `capture` on " in shown
+    assert "7: read\n   runaway (limit): 900 tokens" in shown
+    assert (
+        "[said 1] before call 9, note from sponsor:\n    > The light has to pass\n"
+        "    > through every pane."
+    ) in shown
+    assert (
+        "(before call 9: compaction at about 130,000 tokens: 5 tool replies shrunk to a line "
+        "(bench 3, edit 1, write 1); the reasoning of 7 turns dropped; 2 `write` or `edit` texts "
+        "made a note)"
+    ) in shown, "a whole read stays: it's the file's latest text"
+    cut = rows(run.ledger, "SELECT said FROM timeline WHERE kind='compaction'")[0]["said"]
+    assert json.loads(cut)["replies_shrunk"] == {"bench": 3, "edit": 1, "write": 1}
+    assert [r["why"] for r in rows(run.ledger, "SELECT why FROM refusals")] == ["edit.closest"]
+
+
+def test_the_review_weighs_each_thing_a_person_said(tmp_path: Path) -> None:
+    run = approved(tmp_path)
+    run, model = again(
+        run,
+        reviewed(lesson("Light passes through."), people=[]),
+        reviewed(lesson("Light passes through."), people=[{"said": 1, "lesson": 2, "why": "x"}]),
+        reviewed(
+            lesson("Light passes through."),
+            people=[{"said": 1, "lesson": 1, "why": "their note is a finding"}],
+        ),
+    )
+    assert run.after_action_review().name == "reviewed"
+    replies = [e["reply"] for e in rows_of_tools(run)]
+    assert "[said 1] weren't weighed: say of each whether it should be a lesson" in replies[-3]
+    assert "the number of one of your 1 lessons, or null" in replies[-2]
+    asked = model.bodies[0]["messages"][-1]["content"]
+    assert "[said 1] before call 4, approved from sponsor:\n    > Print it." in asked
+    assert "A person's finding that never became a lesson is a lesson missed." in asked
+    weighed = rows(run.ledger, "SELECT said, lesson, why, by FROM said_weighed")
+    assert weighed == [{"said": 1, "lesson": 1, "why": "their note is a finding", "by": "model"}]
+
+
+def rows_of_tools(run: Run) -> list[dict[str, Any]]:
+    from print_shop.rounds import transcript
+
+    return [e for e in transcript.events_of(run.session.events) if e["kind"] == "tool"]
+
+
+def test_a_review_near_its_limit_goes_on_from_the_record_and_is_recorded(tmp_path: Path) -> None:
+    from print_shop.rounds.session import Limits
+
+    run = approved(tmp_path)
+    model = Scripted(*[reviewed(lesson("Ask on the layout."))], prompt_tokens=10_000)
+    run = Run.load(run.folder, model, Limits(compact_at=500), sleep=lambda _: None)
+    assert run.after_action_review().name == "reviewed"
+    assert run.state.restarts == 1
+    sent = model.bodies[-1]["messages"]
+    assert [m["role"] for m in sent] == ["system", "user", "user", "user"]
+    assert "An earlier conversation about this ran out of room" in sent[1]["content"]
+    assert sent[2]["content"] == "The Sponsor approved the part. Their note:\n\nPrint it."
+    assert sent[3]["content"].startswith("The part is approved.")
+    assert {t["function"]["name"] for t in model.bodies[-1]["tools"]} == {"read", "after_action"}
+    tried = rows(run.ledger, "SELECT ended FROM after_actions")
+    assert tried == [{"ended": "reviewed"}]
+    line = rows(run.ledger, "SELECT kind, name FROM timeline ORDER BY seq")
+    review = [(r["kind"], r["name"]) for r in line][-5:]
+    assert review == [
+        ("after_action", None),
+        ("compaction", None),
+        ("stop", "context_full"),
+        ("restart", None),
+        ("stop", "reviewed"),
+    ]
+    assert rows(run.ledger, "SELECT COUNT(*) AS n FROM lessons")[0]["n"] == 1
+
+
+# The effort an alias sends
+
+
+def model_info(*entries: dict[str, Any], status: int = 200) -> Any:
+    """LiteLLM's `/model/info`, as its documentation gives it, and nothing else answering."""
+    import httpx
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        # LiteLLM answers it as `/model/info` and `/v1/model/info`, beside the calls' base.
+        assert request.url.path.endswith("/model/info"), "no model call, and no other path"
+        return httpx.Response(status, json={"data": list(entries)})
+
+    return httpx.MockTransport(answer)
+
+
+ADDRESS = "http://10.0.0.9:30000/v1"
+
+
+def deployment(alias: str, **params: Any) -> dict[str, Any]:
+    return {
+        "model_name": alias,
+        "litellm_params": {"model": "openai/served", "api_base": ADDRESS, **params},
+        "model_info": {"id": "abc", "mode": "chat"},
+    }
+
+
+@pytest.mark.parametrize(
+    ("entries", "status", "said"),
+    [
+        ([deployment("crew-code-think", reasoning_effort="low")], 200, ("low", "reasoning_effort")),
+        (
+            [deployment("crew-code-think", extra_body={"chat_template_kwargs": {"reasoning_effort": "high"}})],  # noqa: E501
+            200,
+            ("high", "extra_body.chat_template_kwargs.reasoning_effort"),
+        ),
+        ([deployment("crew-code-think")], 200, ("unknown", "doesn't name an effort")),
+        ([deployment("other", reasoning_effort="low")], 200, ("unknown", "has no `crew-code")),
+        ([], 403, ("unknown", "LiteLLM answered 403")),
+        (
+            [
+                deployment("crew-code-think", reasoning_effort="low"),
+                deployment("crew-code-think", reasoning_effort="high"),
+            ],
+            200,
+            ("unknown", "deployments send high, low"),
+        ),
+    ],
+)
+def test_a_run_records_the_effort_its_alias_sends_as_litellm_says_it(
+    entries: list[dict[str, Any]], status: int, said: tuple[str, str]
+) -> None:
+    from print_shop.rounds.send import Sender
+
+    sender = Sender(key="k", transport=model_info(*entries, status=status))
+    effort, where = sender.effort("crew-code-think")
+    assert effort == said[0] and said[1] in where
+    assert ADDRESS not in where and "10.0.0.9" not in where
+
+
+def test_the_runs_row_and_summary_say_the_effort_or_that_its_unknown(tmp_path: Path) -> None:
+    from print_shop.rounds.run import summarise
+
+    class Told(Scripted):
+        def effort(self, alias: str) -> tuple[str, str]:
+            return "low", f"LiteLLM's /model/info for `{alias}`, litellm_params.reasoning_effort"
+
+    model = Told([tool("blocked", reason="x")])
+    run = Run.start(tmp_path, "told", "A block.", [], model, sleep=lambda _: None)
+    run.drive()
+    row = rows(run.ledger, "SELECT reasoning_effort, reasoning_effort_from FROM runs")[0]
+    assert row["reasoning_effort"] == "low" and "litellm_params" in row["reasoning_effort_from"]
+    assert summarise(run.folder)["reasoning_effort"]["effort"] == "low"
+    quiet = Run.start(
+        tmp_path, "quiet", "A block.", [], Scripted([tool("blocked", reason="x")]),
+        sleep=lambda _: None,
+    )
+    quiet.drive()
+    found = rows(quiet.ledger, "SELECT reasoning_effort FROM runs WHERE run='quiet'")[0]
+    assert found["reasoning_effort"] == "unknown"

@@ -54,7 +54,7 @@ from print_shop.rounds.box import Box, Gone, Ran
 from print_shop.rounds.judge import SPONSOR, STAND_IN
 from print_shop.rounds.ledger import DesignLedger, now
 from print_shop.rounds.needs import GEOMETRY, UNSURE, Need, Reading
-from print_shop.rounds.send import ALIAS
+from print_shop.rounds.send import ALIAS, UNKNOWN
 from print_shop.rounds.session import Ending, Judged, Limits, Session
 from print_shop.rounds.tools import WorkTools, recorded
 
@@ -302,6 +302,11 @@ class Run:
         run = cls(folder, send, limits, alias, sleep)
         commit, dirty = repository_version()
         run.state = State(name, _sha(request), harness=[f"{commit}{'+changes' if dirty else ''}"])
+        read = getattr(send, "effort", None)
+        effort, effort_from = (
+            read(alias) if callable(read) else (UNKNOWN, "its sender doesn't read LiteLLM")
+        )
+        run.session._record("effort", alias=alias, effort=effort, said=effort_from)
         run.ledger.run_started(
             name,
             request_sha=run.state.request_sha,
@@ -312,6 +317,8 @@ class Run:
             image_id=host.image_id(),
             alias=alias,
             limits=run.limits.recorded(),
+            reasoning_effort=effort,
+            reasoning_effort_from=effort_from,
         )
         run._give_lessons()
         run.save()
@@ -478,6 +485,8 @@ class Run:
         n, first = self._after_action_begun(decision, approval)
         decided = self.ledger.rows("SELECT * FROM decisions WHERE id=?", decision)
         closed = (self.state.ending or {}).get("name") == CLOSED
+        # What this review says to the model, for a new conversation if this one won't fit.
+        opening: list[str] = []
         if first and decided:
             by, note = str(decided[0]["by"]), str(decided[0]["note"] or "")
             if closed:
@@ -492,10 +501,13 @@ class Run:
                 if note:
                     said += f" Their note:\n\n{note}"
                 self._relay(APPROVED, by, note, said)
+            opening.append(said)
         self.tools.only(after_action.TOOLS, after_action.spec())
-        self.session.say(
-            after_action.ask(self.ledger, self.state.name, self.session.requests, closed=closed)
+        asked = after_action.ask(
+            self.ledger, self.state.name, self.session.requests, closed=closed
         )
+        self.session.say(asked)
+        opening.append(asked)
         limits = self.session.limits
         # Its own cap on calls, and none on time: a run cut off by `model_time` is reviewed too.
         self.session.limits = replace(
@@ -505,6 +517,13 @@ class Run:
         )
         try:
             ending = self.session.go()
+            # Near its limit, as `suncatcher-2`'s was after many compactions, the review goes on
+            # in a new conversation from the record, as a run does: the index is from the
+            # ledger, so it has the whole run (mqucifer/print-shop#40).
+            while ending.name == "context_full" and self.state.restarts < self.limits.restarts:
+                self.state.restarts += 1
+                self._from_the_record(opening)
+                ending = self.session.go()
         except KeyboardInterrupt:
             ending = self.session._ended(Ending("stopped", {"by": "signal"}))
         except Gone as gone:
@@ -761,8 +780,9 @@ class Run:
         ending = self._disk_floor_ending()
         return self.session._ended(ending) if ending is not None else None
 
-    def _from_the_record(self) -> None:
-        """A conversation that wouldn't fit even compacted: a new one, from the record."""
+    def _from_the_record(self, after: list[str] | None = None) -> None:
+        """A conversation that wouldn't fit even compacted: a new one, from the record, and then
+        `after`, what was said to it since, as the after-action review's decision and ask."""
         state = f"This is round {self.state.round}." if self.state.round else "This is intake."
         needs_json = json.dumps([n.plain() for n in self._needs()], indent=1)
         relayed = [f"A note from the people running this:\n\n{n}" for n in self.state.notes]
@@ -774,6 +794,8 @@ class Run:
             {"role": "system", "content": prompt.SYSTEM},
             {"role": "user", "content": text},
         )
+        for said in after or []:
+            self.session.say(said)
 
     def _start_text(self) -> str:
         given = sorted(
@@ -1863,6 +1885,14 @@ def summarise(folder: Path) -> dict[str, Any]:
         "tool_calls": len(tools),
         "by_tool_and_outcome": dict(sorted(tally.items())),
         "compactions": sum(1 for e in transcript.events_of(events) if e["kind"] == "compacted"),
+        "reasoning_effort": next(
+            (
+                {"effort": e["effort"], "from": e["said"]}
+                for e in transcript.events_of(events)
+                if e["kind"] == "effort"
+            ),
+            {"effort": UNKNOWN, "from": "not recorded: a run from before mqucifer/print-shop#40"},
+        ),
         "call_retries": sum(1 for e in transcript.events_of(events) if e["kind"] == "call_retry"),
     }
     (folder / "summary.json").write_text(json.dumps(found, indent=1) + "\n", encoding="utf-8")

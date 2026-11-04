@@ -43,8 +43,14 @@ def lesson(
     }
 
 
-def reviewed(*found: dict[str, Any], scores: Any = ()) -> list[dict[str, Any]]:
-    return [tool("after_action", lessons=list(found), scores=list(scores))]
+#: What the review makes of the one thing a person said in these runs: their decision.
+DECIDED = ({"said": 1, "lesson": None, "why": "it's their decision, not a lesson"},)
+
+
+def reviewed(
+    *found: dict[str, Any], scores: Any = (), people: Any = DECIDED
+) -> list[dict[str, Any]]:
+    return [tool("after_action", lessons=list(found), scores=list(scores), people=list(people))]
 
 
 def waiting(root: Path, name: str = "r", *turns: Any) -> Run:

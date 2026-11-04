@@ -86,7 +86,11 @@ def test_a_run_that_ended_without_approval_is_closed_and_the_model_says_what_did
     assert rows(run.ledger, "SELECT ending FROM runs")[0]["ending"] == "closed"
     assert run.state.stop is None
 
-    run, model = again(run, reviewed(lesson("Ask before the third try.")))
+    # What a person said so far, and the close, relayed as the review begins.
+    said = [r["seq"] for r in rows(run.ledger, "SELECT seq FROM interventions ORDER BY seq")]
+    weighed = [*said, len(said) + 1]
+    people = [{"said": n, "lesson": None, "why": "nothing to learn"} for n in weighed]
+    run, model = again(run, reviewed(lesson("Ask before the third try."), people=people))
     assert run.after_action_review().name == after_action.REVIEWED
     messages = model.bodies[0]["messages"]
     assert messages[-2]["content"] == (

@@ -214,6 +214,8 @@ CREATE TABLE IF NOT EXISTS timeline (
     at_call INTEGER,
     segment INTEGER NOT NULL,
     harness_commit TEXT,
+    -- A stop's ending said, or what a compaction cut: replies shrunk by tool, turns' reasoning
+    -- dropped, and `write` or `edit` texts made a note.
     said TEXT,
     -- A compaction's estimate either side, and the prompts measured either side.
     estimated_before INTEGER,
@@ -358,6 +360,30 @@ CREATE TABLE IF NOT EXISTS nudges (
     calls TEXT,
     PRIMARY KEY (run, seq)
 );
+CREATE TABLE IF NOT EXISTS refusals (
+    -- Each tool call that wasn't carried out as asked: malformed, ill-typed, or refused, with the
+    -- reason's code (`edit.closest`, `not_settled`...). Written from the run's events, for the
+    -- after-action review's index (mqucifer/print-shop#40).
+    run TEXT NOT NULL REFERENCES runs(run),
+    seq INTEGER NOT NULL,
+    at_call INTEGER NOT NULL,
+    round INTEGER,
+    tool TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    why TEXT,
+    PRIMARY KEY (run, seq)
+);
+CREATE TABLE IF NOT EXISTS said_weighed (
+    -- What the after-action review made of each thing a person said (`interventions`): whether
+    -- it should be a lesson, which lesson of the review it became, and why.
+    run TEXT NOT NULL REFERENCES runs(run),
+    said INTEGER NOT NULL,
+    at_call INTEGER NOT NULL,
+    lesson INTEGER REFERENCES lessons(id),
+    why TEXT NOT NULL,
+    by TEXT NOT NULL,
+    PRIMARY KEY (run, said, at_call)
+);
 CREATE TABLE IF NOT EXISTS lessons (
     -- What a run taught, for the next: written by the model in its after-action review, or by a
     -- person, and checked by a reviewer before any reaches another run.
@@ -495,6 +521,9 @@ ADDED = (
     ("lesson_scores", "route", "TEXT"),
     # The kind of object a lesson is for, as a request names it: empty is a general lesson.
     ("lessons", "part_kind", "TEXT"),
+    # The reasoning effort the run's alias sends, read through LiteLLM, or `unknown`, and how.
+    ("runs", "reasoning_effort", "TEXT"),
+    ("runs", "reasoning_effort_from", "TEXT"),
 )
 
 
@@ -668,7 +697,8 @@ class DesignLedger:
         with self._open() as db:
             db.execute(
                 "INSERT INTO runs (run, started_at, request_sha, events, harness_commit, "
-                "skills_sha, image, image_id, alias, limits) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "skills_sha, image, image_id, alias, limits, reasoning_effort, "
+                "reasoning_effort_from) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     run,
                     now(),
@@ -680,6 +710,8 @@ class DesignLedger:
                     facts["image_id"],
                     facts["alias"],
                     _json(facts["limits"]),
+                    facts.get("reasoning_effort"),
+                    facts.get("reasoning_effort_from"),
                 ),
             )
 
