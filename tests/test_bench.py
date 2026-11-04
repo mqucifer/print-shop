@@ -1539,3 +1539,34 @@ def test_the_overlap_helper_reads_what_two_files_share_by_two_methods(bench: Any
     assert pairs[("share-a.step", "outer.step")]["mesh_mm3"] == pytest.approx(600, abs=0.5)
     assert not any("row-7.step" in p for p in pairs)
     assert found["files"]["outer.step"]["bounds_mm"][1] == pytest.approx([120, 20, 10], abs=0.01)
+
+
+# Light through each pane, and each pane's thickness (mqucifer/print-shop#37): the stained-glass
+# toolset's readings. In three runs light was measured by hand, and a floor went under panes.
+
+
+def test_light_through_each_pane_is_read_two_ways_and_a_floor_under_one_fails(bench: Any) -> None:
+    answer = bench(
+        "light", "glass/frame.step", "glass/pane_a.step", "glass/pane_b.step",
+        "glass/pane_c.step", "--min-open", "30",
+    )  # fmt: skip
+    assert answer.verdict == "FAIL", answer.text
+    assert "glass/pane_b.step 0.0%" in answer.record["why"], "the pane with a floor is named"
+    shares = {p["file"]: p for p in answer.numbers["panes"]}
+    assert shares["glass/pane_a.step"]["open_pct"] == pytest.approx(100 / 132.25 * 100, abs=0.05)
+    assert shares["glass/pane_c.step"]["open_pct"] == pytest.approx(4 / 12.25 * 100, abs=0.05)
+    for one in shares.values():
+        assert abs(one["open_pct"] - one["open_pct_rays"]) <= one["band_pct"]
+    assert answer.numbers["least_open_file"] == "glass/pane_b.step"
+    assert answer.numbers["narrowest_band_mm"] == pytest.approx(3.0, abs=0.01)
+
+
+def test_pane_thickness_is_read_two_ways_and_held_to_the_limit_given(bench: Any) -> None:
+    within = bench("thickness", "glass/pane_a.step", "glass/pane_ridge.step", "--max", "1.5")
+    assert within.verdict == "OK", within.text
+    rows = {r["file"]: r for r in within.numbers["files"]}
+    assert rows["glass/pane_ridge.step"]["thickest_rays_mm"] == pytest.approx(1.5, abs=0.005)
+    assert within.numbers["thinnest_mm"] == pytest.approx(1.0, abs=0.005)
+    over = bench("thickness", "glass/pane_a.step", "glass/pane_thick.step", "--max", "1.2")
+    assert over.verdict == "FAIL" and "glass/pane_thick.step 2.000 mm" in over.record["why"]
+    assert over.numbers["thickest_mm"] == pytest.approx(2.0, abs=0.005)

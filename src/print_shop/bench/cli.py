@@ -127,6 +127,37 @@ def parser() -> Parser:
     wall.add_argument("--layer", type=float, default=0.2, help="sections a layer apart")
     wall.add_argument("--n", type=int, default=360, help="rays at each height")
 
+    light = sub.add_parser(
+        "light", help="the share of each pane open straight through the frame, as light passes"
+    )
+    light.add_argument("frame")
+    light.add_argument("panes", nargs="+", help="each pane's file")
+    light.add_argument(
+        "--with",
+        dest="with_files",
+        action="append",
+        default=[],
+        metavar="FILE",
+        help="another part of the frame, such as a cap printed apart: its shadow counts too",
+    )
+    light.add_argument(
+        "--min-open",
+        type=float,
+        help="the least share of each pane open, in percent, from the request: under is FAIL",
+    )
+    light.add_argument("--layer", type=float, default=0.2, help="the frame is cut a layer apart")
+    light.add_argument("--rays", type=int, default=4000, help="rays through each pane's footprint")
+
+    thickness = sub.add_parser("thickness", help="each pane's thickness, straight through")
+    thickness.add_argument("panes", nargs="+", help="each pane's file")
+    thickness.add_argument(
+        "--max", type=float, help="the most a pane may be, in mm, from the request: over is FAIL"
+    )
+    thickness.add_argument(
+        "--min", type=float, help="the least a pane may be, in mm, from the request: under is FAIL"
+    )
+    thickness.add_argument("--rays", type=int, default=2000, help="rays through each pane")
+
     pause = sub.add_parser("pause", help="the layer to pause after, to drop a pane in")
     pause.add_argument("frame")
     pause.add_argument("--pocket-z", type=float, required=True, help="a height inside the pockets")
@@ -235,6 +266,14 @@ def _dispatch(args: Any, report: Report) -> None:
         from .wall import run as run_wall
 
         run_wall(args, report)
+    elif args.command == "light":
+        from .glass import run_light
+
+        run_light(args, report)
+    elif args.command == "thickness":
+        from .glass import run_thickness
+
+        run_thickness(args, report)
     elif args.command == "pause":
         from .fabrication import run_pause
 

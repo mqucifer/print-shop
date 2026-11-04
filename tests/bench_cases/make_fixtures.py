@@ -432,6 +432,28 @@ def sheets() -> None:
     save(box(10, 30, 0, 10, 0, 3), "share-b")
 
 
+def glass() -> None:
+    """A frame of three cells whose light and thickness are known by arithmetic (mqucifer/print-
+    shop#37). Each pane is 11.5 or 3.5 mm square in a pocket 0.25 mm larger all round, 1 mm thick.
+    - `pane_a`: a 10 mm opening, so 100 of 132.25 mm² open, 75.61%.
+    - `pane_b`: a floor under it, so none open: the fault on `suncatcher-2`'s first round.
+    - `pane_c`: a 2 mm opening, so 4 of 12.25 mm², 32.65%. Its opening is 3 mm from `pane_a`'s,
+      the narrowest band of frame a person sees.
+    """
+    Path("glass").mkdir(exist_ok=True)
+    frame = box(0, 42, 0, 20, 0, 4)
+    frame = frame.cut(box(5, 15, 5, 15, 0, 4)).cut(box(4, 16, 4, 16, 1.5, 2.5))
+    frame = frame.cut(box(18, 20, 9, 11, 0, 4)).cut(box(17, 21, 8, 12, 1.5, 2.5))
+    frame = frame.cut(box(25, 37, 4, 16, 1.5, 2.5)).cut(box(26, 36, 5, 15, 2.5, 4))
+    save(frame, "glass/frame")
+    save(box(4.25, 15.75, 4.25, 15.75, 1.5, 2.5), "glass/pane_a")
+    save(box(25.25, 36.75, 4.25, 15.75, 1.5, 2.5), "glass/pane_b")
+    save(box(17.25, 20.75, 8.25, 11.75, 1.5, 2.5), "glass/pane_c")
+    # A pane twice as thick, and one with a ridge 0.5 mm higher along one edge.
+    save(box(0, 10, 0, 10, 0, 2), "glass/pane_thick")
+    save(box(0, 10, 0, 10, 0, 1).union(box(0, 10, 9.5, 10, 1, 1.5)), "glass/pane_ridge")
+
+
 if __name__ == "__main__":
     near_touching()
     boxes()
@@ -446,4 +468,5 @@ if __name__ == "__main__":
     thin_parts()
     designs()
     sheets()
+    glass()
     print("made")
