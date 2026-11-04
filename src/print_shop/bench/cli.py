@@ -95,7 +95,22 @@ def parser() -> Parser:
         help="where a pane's underside sits; else the pocket's level floor, or the part's",
     )
     capture.add_argument(
-        "--min-lip", type=float, default=0.4, help="the least lip after its play, in mm"
+        "--min-lip",
+        type=float,
+        help="the least lip after its play, in mm: 0.4, a nozzle's width, unless you say. With "
+        "--narrow-under it's the request's larger rim, and has to be given",
+    )
+    capture.add_argument(
+        "--narrow-under",
+        type=float,
+        help="a width across a pane, in mm, from the request: where the pane is narrower than this "
+        "across its edge, that stretch is held to --narrow-min-lip instead",
+    )
+    capture.add_argument(
+        "--narrow-min-lip",
+        type=float,
+        help="the least lip after play where the pane is narrower than --narrow-under, in mm, "
+        "from the request",
     )
     capture.add_argument("--layer", type=float, default=0.2)
     capture.add_argument(
@@ -292,9 +307,30 @@ def _dispatch(args: Any, report: Report) -> None:
         run(args, report)
 
 
+#: `capture`'s lip after play when nothing's said: a nozzle's width.
+MIN_LIP = 0.4
+
+
+def rims_given(args: Any, top: Parser) -> None:
+    """`capture`'s rims: one, 0.4 mm unless given, or by width, with all three from the request."""
+    if args.command != "capture":
+        return
+    by_width = (args.narrow_under, args.narrow_min_lip)
+    if any(v is not None for v in by_width):
+        if any(v is None for v in (*by_width, args.min_lip)):
+            top.error(
+                "capture: a rim by width takes all three, from the request: --narrow-under, "
+                "--narrow-min-lip and --min-lip. There's no default for any of them"
+            )
+    elif args.min_lip is None:
+        args.min_lip = MIN_LIP
+
+
 def main(argv: list[str] | None = None) -> int:
     given = sys.argv[1:] if argv is None else argv
-    args = parser().parse_args(given)
+    top = parser()
+    args = top.parse_args(given)
+    rims_given(args, top)
     out = Path(args.out)
     report = Report(args.command, given)
     try:

@@ -89,6 +89,7 @@ Each bench need gives `measures`, what it's about, and its command has to measur
 
 - `--pocket-z` is a height inside the pocket, never on a level face: the pocket's floor plus half the pane's thickness.
 - `--min-lip` is the request's lip after play. `--clearance` is the play.
+- If the request gives a smaller rim for narrow panes, add `--narrow-under W --narrow-min-lip M`, both from the request: wherever the pane is under W mm straight across from its edge, that stretch is held to M, and everywhere else to `--min-lip`. The bench measures which stretches are narrow; you don't name them.
 - `--panes` is the number of panes, from the layout.
 - The hanging need is `wall` at the hole. `info`'s size and `thin`'s thinnest figures are the whole part's, not the wall round a hole.
 

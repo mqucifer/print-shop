@@ -1570,3 +1570,25 @@ def test_pane_thickness_is_read_two_ways_and_held_to_the_limit_given(bench: Any)
     over = bench("thickness", "glass/pane_a.step", "glass/pane_thick.step", "--max", "1.2")
     assert over.verdict == "FAIL" and "glass/pane_thick.step 2.000 mm" in over.record["why"]
     assert over.numbers["thickest_mm"] == pytest.approx(2.0, abs=0.005)
+
+
+def test_a_rim_is_held_by_how_wide_the_pane_is_across_each_stretch(bench: Any) -> None:
+    """Criterion 6: the smaller rim only where the pane is under the width across, measured."""
+    rims = ("capture", "rims/frame.step", "--pocket-z", "2", "--clearance", "0.25",
+            "--pane-thickness", "1", "--narrow-under", "7", "--min-lip", "1.0")  # fmt: skip
+    held = bench(*rims, "--narrow-min-lip", "0.5")
+    assert held.verdict == "OK", held.text
+    strip = next(p for p in held.numbers["panes"] if p["size_mm"][0] < 5)
+    square = next(p for p in held.numbers["panes"] if p["size_mm"][0] > 5)
+    # The strip's long sides are narrow, its ends and every corner of the square aren't.
+    assert strip["narrow"]["narrow_mm"] == pytest.approx(2 * 19.5, abs=1.0)
+    assert square["narrow"]["narrow_mm"] == 0 and strip["narrow"]["split_mm"] == 0
+    tight = bench(*rims, "--narrow-min-lip", "0.7")
+    assert tight.verdict == "FAIL", tight.text
+    narrow = next(p for p in tight.numbers["panes"] if p["size_mm"][0] < 5)
+    stretch = narrow["up"]["thin_stretches"][0]
+    assert stretch["width_mm"] == pytest.approx(3.5, abs=0.01)
+    assert stretch["lip_with_play_mm"] == pytest.approx(0.6, abs=0.01)
+    assert stretch["rim_mm"] == 0.7
+    done = host.run([*rims], bench.work)
+    assert done.returncode == 3 and "no default for any of them" in done.stdout + done.stderr

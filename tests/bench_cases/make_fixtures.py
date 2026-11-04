@@ -449,6 +449,15 @@ def glass() -> None:
     save(box(4.25, 15.75, 4.25, 15.75, 1.5, 2.5), "glass/pane_a")
     save(box(25.25, 36.75, 4.25, 15.75, 1.5, 2.5), "glass/pane_b")
     save(box(17.25, 20.75, 8.25, 11.75, 1.5, 2.5), "glass/pane_c")
+    # A rim by width (criterion 6): a square cell 20 mm across and a strip 4 mm across, pockets at
+    # z 1.5 to 2.5 for panes with 0.25 mm of play. The square's lips are 1.1 mm after play all
+    # round. The strip's long sides are 0.6 mm after play, where the pane is 3.5 mm across, and its
+    # ends 1.1 mm, where it's 19.5 mm across, end to end.
+    rims = box(0, 40, 0, 24, 0, 4)
+    rims = rims.cut(box(2, 22, 2, 22, 1.5, 2.5)).cut(box(3.6, 20.4, 3.6, 20.4, 0, 4))
+    rims = rims.cut(box(30, 34, 2, 22, 1.5, 2.5)).cut(box(31.1, 32.9, 3.6, 20.4, 0, 4))
+    Path("rims").mkdir(exist_ok=True)
+    save(rims, "rims/frame")
     # A pane twice as thick, and one with a ridge 0.5 mm higher along one edge.
     save(box(0, 10, 0, 10, 0, 2), "glass/pane_thick")
     save(box(0, 10, 0, 10, 0, 1).union(box(0, 10, 9.5, 10, 1, 1.5)), "glass/pane_ridge")

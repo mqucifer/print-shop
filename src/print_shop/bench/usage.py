@@ -17,14 +17,15 @@ MARK = "ROUNDS_USAGE "
 
 def main(argv: list[str] | None = None) -> None:
     # Here, so the host can read `MARK` with no CAD library.
-    from .cli import parser
+    from .cli import parser, rims_given
 
     found: list[str] = []
     for text in sys.argv[1:] if argv is None else argv:
         said = io.StringIO()
         try:
             with contextlib.redirect_stderr(said), contextlib.redirect_stdout(said):
-                parser().parse_args(json.loads(text))
+                top = parser()
+                rims_given(top.parse_args(json.loads(text)), top)
             found.append("")
         except SystemExit as stopped:
             found.append(said.getvalue().strip()[:600] or f"it stopped with {stopped.code}")
