@@ -311,9 +311,9 @@ def test_the_index_shows_the_harnesss_record_and_peoples_words_at_their_calls(
     ) in shown
     assert (
         "(before call 9: compaction at about 130,000 tokens: 5 tool replies shrunk to a line "
-        "(bench 3, edit 1, write 1); the reasoning of 7 turns dropped; 2 `write` or `edit` texts "
+        "(bench 3, edit 1, write 1); the reasoning of 6 turns dropped; 2 `write` or `edit` texts "
         "made a note)"
-    ) in shown, "a whole read stays: it's the file's latest text"
+    ) in shown, "a whole read stays, and call 7's reasoning went at once, cut off at the limit"
     cut = rows(run.ledger, "SELECT said FROM timeline WHERE kind='compaction'")[0]["said"]
     assert json.loads(cut)["replies_shrunk"] == {"bench": 3, "edit": 1, "write": 1}
     assert [r["why"] for r in rows(run.ledger, "SELECT why FROM refusals")] == ["edit.closest"]

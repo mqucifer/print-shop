@@ -115,7 +115,28 @@ def _cut_said(said: str | None) -> str:
         parts.append(f"the reasoning of {cut['reasoning_dropped']} turns dropped")
     if cut.get("texts_noted"):
         parts.append(f"{cut['texts_noted']} `write` or `edit` texts made a note")
+    if cut.get("files_one_copy"):
+        parts.append(f"{cut['files_one_copy']} edited files kept as one current copy")
     return "; ".join(parts) or "nothing"
+
+
+def _asked(said: str | None) -> str:
+    """A call that ended without a tool call, and what it was asked, from its timeline row."""
+    was = json.loads(said) if said else {}
+    tokens = was.get("reasoning_tokens")
+    seconds = was.get("seconds")
+    after = f"{tokens:,} tokens of reasoning" if isinstance(tokens, int) else "its reasoning"
+    took = f" in {seconds:.0f} s" if isinstance(seconds, int | float) else ""
+    cut = ""
+    if was.get("finish") == "length":
+        cut = ", cut off at the limit, its reasoning not sent back"
+    line = f"   no tool call, after {after}{took}{cut}: asked what's missing"
+    if was.get("only"):
+        named = ", ".join(f"`{name}`" for name in was["only"])
+        gap = was.get("after")
+        calls = f"{gap} call{'' if gap == 1 else 's'}"
+        line += f"; the next request offered only {named}, as it was {calls} after the last"
+    return line
 
 
 def index(ledger: DesignLedger, run: str, upto: int | None = None) -> list[str]:
@@ -123,7 +144,8 @@ def index(ledger: DesignLedger, run: str, upto: int | None = None) -> list[str]:
     and each round's readings where the round ended. Before a call, the words of whatever a
     person sent, each marked `[said N]`, and each compaction, with what it cut, and each new
     conversation. After it, each refusal and failed edit, nudge, runaway, and a conversation
-    that wouldn't fit (mqucifer/print-shop#40). It's what a lesson's calls are named from."""
+    that wouldn't fit (mqucifer/print-shop#40), and a call that ended without a tool call, with
+    what it was asked (mqucifer/print-shop#47). It's what a lesson's calls are named from."""
     ended = {
         int(r["last_call"]): int(r["round"])
         for r in ledger.rows(
@@ -134,7 +156,7 @@ def index(ledger: DesignLedger, run: str, upto: int | None = None) -> list[str]:
     after: dict[int, list[str]] = {}
     for t in ledger.rows(
         "SELECT kind, name, at_call, said, estimated_before, prompt_after FROM timeline "
-        "WHERE run=? AND kind IN ('compaction', 'restart', 'stop') ORDER BY seq",
+        "WHERE run=? AND kind IN ('compaction', 'restart', 'stop', 'asked') ORDER BY seq",
         run,
     ):
         at = int(t["at_call"] or 0)
@@ -149,6 +171,8 @@ def index(ledger: DesignLedger, run: str, upto: int | None = None) -> list[str]:
                 f"(before call {at}: a new conversation from the record, as the last one "
                 "wouldn't fit even compacted: its reasoning and tool replies are gone)"
             )
+        elif t["kind"] == "asked":
+            after.setdefault(at, []).append(_asked(t["said"]))
         elif t["name"] == "context_full":
             after.setdefault(at, []).append("   it wouldn't fit even compacted: context_full")
     for i in ledger.rows(
@@ -247,9 +271,11 @@ PEOPLE = (
 )
 HARNESS_SAID = (
     "The index shows the harness's part too: each compaction and what it cut from what you'd "
-    "seen, each new conversation after one that wouldn't fit, and each refusal, failed edit, "
-    "nudge and runaway, at its call. Where the harness hid something from you, or a stop it "
-    "should have made wasn't made, that's a lesson for the harness."
+    "seen, each new conversation after one that wouldn't fit, each refusal, failed edit, "
+    "nudge and runaway, and each call that ended without a tool call and was asked what was "
+    "missing, at its call. Say whether what you asked then named what was really missing. "
+    "Where the harness hid something from you, or a stop it should have made wasn't made, "
+    "that's a lesson for the harness."
 )
 
 
