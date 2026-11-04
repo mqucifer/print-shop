@@ -16,12 +16,14 @@ scripts/rounds.py read-back NAME [--ledger FILE]                    its records,
 scripts/rounds.py after-action NAME                                 the review again, if it failed
 
 scripts/rounds.py lessons [RUN] [--ledger FILE]                     what a run wrote, its evidence
-scripts/rounds.py lessons accept ID --by WHO [--becomes refusal|bench_check]
-scripts/rounds.py lessons edit ID --by WHO [--text FILE] [--kind K] [--shape S] [--why W]
+scripts/rounds.py lessons accept ID --by WHO [--routes R,R] [--becomes B]
+scripts/rounds.py lessons edit ID --by WHO [--text FILE] [--kind K] [--shape S] [--routes R,R]
+                                  [--becomes B] [--keys CMD:VERDICT,...] [--part-kind K] [--why W]
 scripts/rounds.py lessons reject ID --by WHO --why W
 scripts/rounds.py lessons score RUN ID --score used|not_used|in_the_way --by WHO [--calls 1,2]
+                                  [--route model|harness|request|operator]
 scripts/rounds.py lessons retire ID --by WHO --why W
-scripts/rounds.py lessons promote ID --as note|skill|bench_check|refusal --where WHERE --by WHO
+scripts/rounds.py lessons promote ID --as B --where WHERE --by WHO    delivered on its route
 scripts/rounds.py lessons load FILE --by WHO                        a reviewer's steps, in order
 
 Exit: 0 it's approved, 10 it's waiting for a person, approval included, 20 another named ending,
@@ -117,6 +119,21 @@ def _after_action(folder: Path) -> str:
 LESSON_ACTIONS = ("accept", "edit", "reject", "score", "retire", "promote", "load")
 
 
+def _listed(words: str | None) -> list[str] | None:
+    return [w.strip() for w in words.split(",") if w.strip()] if words is not None else None
+
+
+def _keys(words: str | None) -> list[dict[str, str]] | None:
+    """`capture:FAIL,thin` as keys: a command, and a verdict or none for any."""
+    if words is None:
+        return None
+    found = []
+    for word in _listed(words) or []:
+        command, _, verdict = word.partition(":")
+        found.append({"command": command, "verdict": verdict})
+    return found
+
+
 def _lessons(args: argparse.Namespace, ledger: DesignLedger) -> str:
     """The reviewer's step, or the listing."""
     words = list(args.words)
@@ -136,7 +153,7 @@ def _lessons(args: argparse.Namespace, ledger: DesignLedger) -> str:
     except ValueError as exc:
         raise Refused(f"a lesson is its number: not {rest[-1]!r}") from exc
     if action == "accept":
-        lessons.accept(ledger, lesson, args.by, args.becomes)
+        lessons.accept(ledger, lesson, args.by, args.becomes, _listed(args.routes))
     elif action == "edit":
         text = args.text.read_text(encoding="utf-8") if args.text else None
         lessons.edit(
@@ -147,6 +164,9 @@ def _lessons(args: argparse.Namespace, ledger: DesignLedger) -> str:
             kind=args.kind,
             fix_shape=args.shape,
             becomes=args.becomes,
+            routes=_listed(args.routes),
+            keys=_keys(args.keys),
+            part_kind=args.part_kind,
             why=args.why,
         )
     elif action == "reject":
@@ -161,7 +181,9 @@ def _lessons(args: argparse.Namespace, ledger: DesignLedger) -> str:
         held, wrong = lessons.evidence(ledger, rest[0], calls, at_least_one=False)
         if wrong:
             raise Refused("; ".join(wrong))
-        lessons.score(ledger, rest[0], lesson, args.score or "", held, by, args.why)
+        lessons.score(
+            ledger, rest[0], lesson, args.score or "", held, by, args.why, route=args.route
+        )
     found = lessons.one(ledger, lesson)
     return f"lesson {lesson}: {found['status']}, by {found['status_by']}"
 
@@ -202,7 +224,11 @@ def main() -> int:
     taught.add_argument("--kind", choices=tuple(lessons.KINDS))
     taught.add_argument("--shape", help="the fix's shape, in new words")
     taught.add_argument("--becomes", choices=lessons.BECOMES)
-    taught.add_argument("--as", dest="became", choices=lessons.BECAME)
+    taught.add_argument("--routes", help="who acts on it, by commas: " + ", ".join(lessons.ROUTES))
+    taught.add_argument("--route", default="model", choices=tuple(lessons.ROUTES))
+    taught.add_argument("--keys", help="the checks it's about: capture:FAIL,thin (any verdict)")
+    taught.add_argument("--part-kind", help="the kind of part it's for; empty makes it general")
+    taught.add_argument("--as", dest="became", choices=tuple(lessons.BECAME))
     taught.add_argument("--where", default="", help="where it is now: owner/repo#n, or a path")
     taught.add_argument("--score", choices=tuple(lessons.SCORES))
     taught.add_argument("--calls", help="the calls that show it, by commas")
@@ -213,8 +239,8 @@ def main() -> int:
     try:
         if args.command == "status":
             state = json.loads((folder / "state.json").read_text(encoding="utf-8"))
-            keys = ("stage", "round", "stop", "ending", "restarts")
-            print(json.dumps({k: state[k] for k in keys}, indent=1))
+            keys = ("stage", "round", "stop", "ending", "restarts", "stops")
+            print(json.dumps({k: state.get(k) for k in keys}, indent=1))
             return 0
         if args.command == "summary":
             print(json.dumps(summarise(folder), indent=1))

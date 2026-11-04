@@ -31,8 +31,23 @@ NAME = "after_action"
 REVIEWED = "reviewed"
 #: The tools that work during it: reading what's there, and the review itself.
 TOOLS = ("read", NAME)
-LESSON_KEYS = {"fix_shape", "kind", "text", "calls", "readings"}
+LESSON_KEYS = {"fix_shape", "kind", "routes", "text", "calls", "readings", "keys"}
+LESSON_NEEDS = {"fix_shape", "kind", "routes", "text", "calls"}
+#: The five areas and the four routes, as the model is told them.
+AREAS_SAID = (
+    '"job" (understanding the job: the request, the references, what the part must do), '
+    '"verify" (verification: checking what was made, and reading what the checks say), '
+    '"process" (process control: stages, stops, asking, and when to end), "memory" (memory '
+    'within a run: keeping what was learned earlier in it), or "loop" (the learning loop: how '
+    "lessons and reviews work)"
+)
+ROUTES_SAID = (
+    '"model" (text the next run is given), "harness" (a change to the harness: a refusal, a '
+    'check or a stop), "request" (a line in the request the people running this write), or '
+    '"operator" (a line in the checklist of the people running this and anyone standing in)'
+)
 SCORE_KEYS = {"lesson", "score", "calls", "why"}
+PEOPLE_KEYS = {"said", "lesson", "why"}
 
 
 def spec() -> dict[str, Any]:
@@ -50,11 +65,21 @@ def spec() -> dict[str, Any]:
                     "lessons": {
                         "type": "array",
                         "description": 'Each lesson: {"fix_shape": "the fix\'s shape, in a few '
-                        'words of your own", "kind": "build" (how to build), "check" (what to '
-                        'check) or "context" (about the job or the people), "text": "what to tell '
-                        'the next run", "calls": [the call numbers that show it, from the index], '
-                        '"readings": [{"round": 1, "need": "gap"}] (optional)}. An empty list if '
-                        "this run taught nothing.",
+                        f'words of your own", "kind": its area, {AREAS_SAID}, "routes": who '
+                        f"should act on it, one or more of {ROUTES_SAID}, "
+                        '"text": "what to tell whoever acts on it", "calls": [the call numbers '
+                        'that show it, from the index], "readings": [{"round": 1, "need": "gap"}] '
+                        '(optional), "keys": [{"command": "capture", "verdict": "FAIL"}], the '
+                        "checks it's about (optional: the harness reads them from its calls)}. An "
+                        "empty list if this run taught nothing.",
+                        "items": {"type": "object"},
+                    },
+                    "people": {
+                        "type": "array",
+                        "description": "One for each thing a person said, marked [said N] in the "
+                        'index: {"said": N, "lesson": the number of the lesson in your `lessons` '
+                        'that it became, from 1, or null, "why": "in a line: why it should or '
+                        "shouldn't be a lesson\"}. An empty list if no one said anything.",
                         "items": {"type": "object"},
                     },
                     "scores": {
@@ -66,37 +91,103 @@ def spec() -> dict[str, Any]:
                         "items": {"type": "object"},
                     },
                 },
-                "required": ["lessons", "scores"],
+                "required": ["lessons", "scores", "people"],
             },
         },
     }
 
 
+def _quoted(text: str) -> list[str]:
+    return [f"    > {line}" if line.strip() else "    >" for line in text.strip().splitlines()]
+
+
+def _cut_said(said: str | None) -> str:
+    """What a compaction cut, from its timeline row."""
+    cut = json.loads(said) if said else {}
+    if not cut:
+        return "what it cut isn't recorded"
+    parts = []
+    shrunk = cut.get("replies_shrunk") or {}
+    if shrunk:
+        each = ", ".join(f"{tool} {n}" for tool, n in sorted(shrunk.items()))
+        parts.append(f"{sum(shrunk.values())} tool replies shrunk to a line ({each})")
+    if cut.get("reasoning_dropped"):
+        parts.append(f"the reasoning of {cut['reasoning_dropped']} turns dropped")
+    if cut.get("texts_noted"):
+        parts.append(f"{cut['texts_noted']} `write` or `edit` texts made a note")
+    return "; ".join(parts) or "nothing"
+
+
 def index(ledger: DesignLedger, run: str, upto: int | None = None) -> list[str]:
-    """The run as the ledger has it, a line a call: the tools it called, each bench answer, what
-    a person sent before it, and each round's readings where the round ended. It's what a lesson's
-    calls are named from."""
+    """The run as the ledger has it, a line a call: the tools it called and each bench answer,
+    and each round's readings where the round ended. Before a call, the words of whatever a
+    person sent, each marked `[said N]`, and each compaction, with what it cut, and each new
+    conversation. After it, each refusal and failed edit, nudge, runaway, and a conversation
+    that wouldn't fit (mqucifer/print-shop#40). It's what a lesson's calls are named from."""
     ended = {
         int(r["last_call"]): int(r["round"])
         for r in ledger.rows(
             "SELECT round, last_call FROM rounds WHERE run=? AND last_call IS NOT NULL", run
         )
     }
+    before: dict[int, list[str]] = {}
+    after: dict[int, list[str]] = {}
+    for t in ledger.rows(
+        "SELECT kind, name, at_call, said, estimated_before, prompt_after FROM timeline "
+        "WHERE run=? AND kind IN ('compaction', 'restart', 'stop') ORDER BY seq",
+        run,
+    ):
+        at = int(t["at_call"] or 0)
+        if t["kind"] == "compaction":
+            size = f"at about {t['estimated_before']:,} tokens" if t["estimated_before"] else ""
+            then = f", {t['prompt_after']:,} after" if t["prompt_after"] else ""
+            before.setdefault(at, []).append(
+                f"(before call {at}: compaction {size}{then}: {_cut_said(t['said'])})"
+            )
+        elif t["kind"] == "restart":
+            before.setdefault(at, []).append(
+                f"(before call {at}: a new conversation from the record, as the last one "
+                "wouldn't fit even compacted: its reasoning and tool replies are gone)"
+            )
+        elif t["name"] == "context_full":
+            after.setdefault(at, []).append("   it wouldn't fit even compacted: context_full")
+    for i in ledger.rows(
+        "SELECT seq, kind, from_who, text, at_call FROM interventions WHERE run=? ORDER BY seq",
+        run,
+    ):
+        before.setdefault(int(i["at_call"]), []).extend(
+            [f"[said {i['seq']}] before call {i['at_call']}, {i['kind']} from {i['from_who']}:"]
+            + _quoted(str(i["text"]))
+        )
+    for r in ledger.rows(
+        "SELECT at_call, tool, outcome, why FROM refusals WHERE run=? ORDER BY seq", run
+    ):
+        what = "a failed edit" if r["tool"] == "edit" else f"`{r['tool']}` refused"
+        after.setdefault(int(r["at_call"]), []).append(
+            f"   {what}: {r['why'] or r['outcome']}"
+        )
+    for nudged in ledger.rows(
+        "SELECT at_call, command, files, failures FROM nudges WHERE run=? ORDER BY seq", run
+    ):
+        files = ", ".join(json.loads(nudged["files"]))
+        after.setdefault(int(nudged["at_call"]), []).append(
+            f"   nudged: `{nudged['command']}`{' on ' + files if files else ''} had failed "
+            f"{nudged['failures']} times without passing as a need checks it"
+        )
+    for r in ledger.rows(
+        "SELECT n, why, completion_tokens, reasoning_tokens FROM runaways WHERE run=? ORDER BY n",
+        run,
+    ):
+        after.setdefault(int(r["n"]), []).append(
+            f"   runaway ({r['why']}): {r['completion_tokens']} tokens, "
+            f"{r['reasoning_tokens']} of them reasoning"
+        )
     lines: list[str] = []
     for call in ledger.rows("SELECT n, tools FROM calls WHERE run=? ORDER BY n", run):
         n = int(call["n"])
         if upto is not None and n > upto:
             break
-        said = [
-            f"{i['kind']} from {i['from_who']}"
-            for i in ledger.rows(
-                "SELECT kind, from_who FROM interventions WHERE run=? AND at_call=? ORDER BY seq",
-                run,
-                n,
-            )
-        ]
-        if said:
-            lines.append(f"(before call {n}: {'; '.join(said)})")
+        lines += before.get(n, [])
         tools = json.loads(call["tools"] or "[]")
         benched = [
             f"`{' '.join(json.loads(b['argv']))}` {b['verdict'] or 'no verdict'}"
@@ -110,6 +201,7 @@ def index(ledger: DesignLedger, run: str, upto: int | None = None) -> list[str]:
         parts = [", ".join(named)] if named else []
         parts += [f"bench {b}" for b in benched]
         lines.append(f"{n}: {'; '.join(parts) or 'no tool'}")
+        lines += after.get(n, [])
         if n in ended:
             readings = ledger.rows(
                 "SELECT need, passed FROM readings WHERE run=? AND round=? ORDER BY need",
@@ -120,6 +212,11 @@ def index(ledger: DesignLedger, run: str, upto: int | None = None) -> list[str]:
                 f"{r['need']} {'passed' if r['passed'] else 'FAILED'}" for r in readings
             )
             lines.append(f"   round {ended[n]}'s readings: {read or 'none'}")
+    # What's sent after the last call shown, such as the decision the review follows.
+    shown = {int(c["n"]) for c in ledger.rows("SELECT n FROM calls WHERE run=?", run)}
+    for at in sorted(before):
+        if at not in shown or (upto is not None and at > upto):
+            lines += before[at]
     return lines
 
 
@@ -132,15 +229,27 @@ STOPS = {
 }
 #: What each part of a lesson is, and what's said of the scores, for either kind of review.
 SHAPE = (
-    "Each has the fix's shape in a few words of your own, its kind (`build`: how to build; "
-    "`check`: what to check; `context`: about the job or the people), its text, and the calls "
-    "that show it, by their numbers below, with any readings by round and need. A lesson about "
-    "checking doesn't reach the next run as a note: a reviewer may make it a check in the harness "
-    "instead."
+    "Each has the fix's shape in a few words of your own; its kind, the area of what went wrong: "
+    f"{AREAS_SAID}; its routes, who should act on it: {ROUTES_SAID}; its text; and the calls that "
+    "show it, by their numbers below, with any readings by round and need. A fault the harness "
+    "hid from you, or a stop it should have made, is a lesson for the harness: it doesn't reach "
+    "the next run as a note, and a reviewer may build it as a check or a refusal instead."
 )
 SCORES = (
     "- **Scores:** for each lesson you were given, whether you used it, didn't, or it got in the "
     "way, with the calls that show it."
+)
+PEOPLE = (
+    "- **What people said:** each note, answer, pick and its reason, fix-first, send-back and "
+    "decision is in the index in their words, marked [said N]. For each one, say whether it "
+    "should be a lesson, and if it is, which of your lessons it became (`people`). A person's "
+    "finding that never became a lesson is a lesson missed."
+)
+HARNESS_SAID = (
+    "The index shows the harness's part too: each compaction and what it cut from what you'd "
+    "seen, each new conversation after one that wouldn't fit, and each refusal, failed edit, "
+    "nudge and runaway, at its call. Where the harness hid something from you, or a stop it "
+    "should have made wasn't made, that's a lesson for the harness."
 )
 
 
@@ -192,11 +301,55 @@ def ask(ledger: DesignLedger, run: str, upto: int, closed: bool = False) -> str:
         )
         now = "the part is approved"
     return (
-        f"{opening}{SCORES}\n\n"
+        f"{opening}{SCORES}\n{PEOPLE}\n\n{HARNESS_SAID}\n\n"
         f"A reviewer checks each against the ledger. Only `read` and `after_action` work now: "
         f"{now}, and its files stay as they are.\n\n"
         f"{was_given}\n\nThis run, call by call, as the ledger has it:\n{calls}"
     )
+
+
+def _people(
+    ledger: DesignLedger, run: str, given: Any, written: int
+) -> tuple[list[tuple[int, int | None, str]], list[str]]:
+    """Each thing a person said, weighed once: whether it became one of the review's lessons,
+    and why. What's wrong, said, if any is missing or doesn't fit."""
+    said = {int(r["seq"]) for r in ledger.rows("SELECT seq FROM interventions WHERE run=?", run)}
+    wrong: list[str] = []
+    found: list[tuple[int, int | None, str]] = []
+    if given is None:
+        given = []
+    if not isinstance(given, list):
+        return [], ["`people` is a list, one for each [said N]"]
+    seen: set[int] = set()
+    for i, one in enumerate(given, 1):
+        if not isinstance(one, dict) or not {"said", "why"} <= set(one) <= PEOPLE_KEYS:
+            wrong.append(f"people {i} takes said, lesson and why")
+            continue
+        n, became, why = one["said"], one.get("lesson"), one["why"]
+        if not isinstance(n, int) or n not in said:
+            wrong.append(f"people {i}: there's no [said {n}]")
+            continue
+        if n in seen:
+            wrong.append(f"[said {n}] is weighed twice")
+        seen.add(n)
+        if became is not None and (
+            not isinstance(became, int) or isinstance(became, bool) or not 1 <= became <= written
+        ):
+            wrong.append(
+                f"people {i}'s lesson is the number of one of your {written} lessons, or null"
+            )
+            continue
+        if not isinstance(why, str) or not why.strip():
+            wrong.append(f"people {i} says why, in words")
+            continue
+        found.append((n, became, why.strip()))
+    missing = sorted(said - seen)
+    if missing:
+        wrong.append(
+            f"{', '.join(f'[said {n}]' for n in missing)} weren't weighed: say of each whether "
+            "it should be a lesson"
+        )
+    return found, wrong
 
 
 def take(ledger: DesignLedger, run: str, args: dict[str, Any], at_call: int) -> Judged:
@@ -210,16 +363,26 @@ def take(ledger: DesignLedger, run: str, args: dict[str, Any], at_call: int) -> 
             wrong.append(f"lesson {i} isn't an object")
             continue
         unknown = set(lesson) - LESSON_KEYS
-        missing = {"fix_shape", "kind", "text", "calls"} - set(lesson)
+        missing = LESSON_NEEDS - set(lesson)
         if unknown or missing:
             wrong.append(
-                f"lesson {i} takes fix_shape, kind, text, calls and perhaps readings"
+                f"lesson {i} takes fix_shape, kind, routes, text, calls, and perhaps readings and "
+                "keys"
                 + (f": it lacks {', '.join(sorted(missing))}" if missing else "")
                 + (f": not {', '.join(sorted(unknown))}" if unknown else "")
             )
             continue
         if lesson["kind"] not in lessons.KINDS:
-            wrong.append(f"lesson {i}'s kind is build, check or context: not {lesson['kind']!r}")
+            wrong.append(
+                f"lesson {i}'s kind is its area, {', '.join(lessons.KINDS)}: not "
+                f"{lesson['kind']!r}"
+            )
+        try:
+            lessons.check_routes(lesson["routes"], i)
+            if "keys" in lesson:
+                lessons.check_keys(lesson["keys"], i)
+        except lessons.Refused as refused:
+            wrong.append(str(refused))
         for key in ("fix_shape", "text"):
             if not isinstance(lesson[key], str) or not lesson[key].strip():
                 wrong.append(f"lesson {i} needs its {key.replace('_', ' ')}, in words")
@@ -251,6 +414,8 @@ def take(ledger: DesignLedger, run: str, args: dict[str, Any], at_call: int) -> 
     unscored = sorted(given - seen)
     if unscored:
         wrong.append(f"lessons {', '.join(map(str, unscored))} were given and aren't scored")
+    weighed, bad = _people(ledger, run, args.get("people"), len(args["lessons"]))
+    wrong += bad
     if wrong:
         said = "\n".join(f"- {w}" for w in wrong)
         return Judged(NAME, "failed", f"Nothing was kept:\n{said}", "misses")
@@ -263,7 +428,9 @@ def take(ledger: DesignLedger, run: str, args: dict[str, Any], at_call: int) -> 
             kind=lesson["kind"],
             text=lesson["text"],
             held=held,
+            routes=lesson["routes"],
             at_call=at_call,
+            keys=lessons.check_keys(lesson["keys"], 0) if "keys" in lesson else None,
         )
         for lesson, held in kept
     ]
@@ -271,10 +438,20 @@ def take(ledger: DesignLedger, run: str, args: dict[str, Any], at_call: int) -> 
         lessons.score(
             ledger, run, one["lesson"], one["score"], held, lessons.MODEL, one.get("why"), at_call
         )
+    for number, became, why in weighed:
+        ledger.add(
+            "said_weighed",
+            run=run,
+            said=number,
+            at_call=at_call,
+            lesson=ids[became - 1] if became is not None else None,
+            why=why,
+            by=lessons.MODEL,
+        )
     named = ", ".join(map(str, ids)) or "none"
     reply = (
         f"Kept for the reviewer: lessons {named}, and {len(scored)} scores. Nothing reaches "
         "another run until a reviewer accepts it. That's the end of this run."
     )
-    outcome: dict[str, Any] = {"lessons": ids, "scores": len(scored)}
+    outcome: dict[str, Any] = {"lessons": ids, "scores": len(scored), "people": len(weighed)}
     return Judged(NAME, "ok", reply, detail=outcome, ending=Ending(REVIEWED, outcome))

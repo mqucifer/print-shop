@@ -39,6 +39,7 @@ from print_shop.bench import overlap as overlap_module
 from print_shop.bench import usage as usage_module
 from print_shop.rounds import (
     after_action,
+    breakdown,
     judge,
     lessons,
     needs,
@@ -52,11 +53,12 @@ from print_shop.rounds import (
     transcript,
     unprintable,
 )
+from print_shop.rounds import request as forms
 from print_shop.rounds.box import Box, Gone, Ran
 from print_shop.rounds.judge import SPONSOR, STAND_IN
 from print_shop.rounds.ledger import DesignLedger, now
 from print_shop.rounds.needs import GEOMETRY, UNSURE, Need, Reading
-from print_shop.rounds.send import ALIAS
+from print_shop.rounds.send import ALIAS, UNKNOWN
 from print_shop.rounds.session import Ending, Judged, Limits, Session
 from print_shop.rounds.tools import WorkTools, recorded
 
@@ -71,6 +73,9 @@ DECIDED = (APPROVED, CLOSED)
 WAITING = ("questions", "ask", MET)
 #: Who a note is from, unless a person says.
 NOTE_FROM = "the people running this"
+#: Each check's latest tries a conversation started again from the record is given: the rest
+#: are in `record/CHECKS.md`.
+AGAIN_TRIES = 6
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 VARIANT = re.compile(r"[A-Za-z0-9_-]{1,24}")
 #: A failing need's bench text shown in the reply.
@@ -126,6 +131,14 @@ class State:
     # has left the part, and a failing `thin` on it isn't said any more.
     part: list[str] | None = None
     part_at: int | None = None
+    # The request's set form (`request.py`), read at the start. None for a run started before it,
+    # which carries on as it began: no lines held, no stops, and no breakdown asked for.
+    form: dict[str, Any] | None = None
+    breakdowns: int = 0
+    # Each stop passed: its ask, the pick, who made it and at which call.
+    stops: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Who opened the fixed needs, with a note, so they may change at the next `needs`.
+    fixed_open: dict[str, Any] | None = None
 
 
 def repository_version() -> tuple[str, bool]:
@@ -158,9 +171,14 @@ def picked_by_words(by: str) -> str:
     return f"A stand-in for the Sponsor ({by[len(STAND_IN) :].strip()})"
 
 
+def _decides(by: str) -> bool:
+    """The Sponsor, or someone who says they stand in for them and who."""
+    return by == SPONSOR or (by.startswith(STAND_IN) and bool(by[len(STAND_IN) :].strip()))
+
+
 def _who_decides(by: str, path: object) -> None:
     """A pick or a decision says who made it, so someone else's can't pass for the Sponsor's."""
-    if by != SPONSOR and not (by.startswith(STAND_IN) and by[len(STAND_IN) :].strip()):
+    if not _decides(by):
         raise Refused(
             f'{path}: `by` says who picked: "{SPONSOR}" only if they did, or '
             f'"{STAND_IN} <who>" for anyone standing in. Not {by!r}'
@@ -268,6 +286,7 @@ class Run:
         )
         if sleep is not None:
             self.session.sleep = sleep
+        self.tools.at_call = lambda: self.session.requests
 
     # Starting and going on
 
@@ -291,6 +310,10 @@ class Run:
             raise Refused(f"{resolved} is inside this repository, which is public")
         if not request.strip():
             raise Refused("the request is empty")
+        try:
+            form = forms.read(request)
+        except forms.NotAForm as exc:
+            raise Refused(str(exc)) from exc
         for reference in references:
             if not reference.is_file():
                 raise Refused(f"there's no reference file {reference}")
@@ -308,9 +331,19 @@ class Run:
         run = cls(folder, send, limits, alias, sleep)
         commit, dirty = repository_version()
         run.state = State(
-            name, _sha(request), harness=[f"{commit}{'+changes' if dirty else ''}"], toolsets=True
+            name,
+            _sha(request),
+            harness=[f"{commit}{'+changes' if dirty else ''}"],
+            form=form.plain(),
+            kind=toolsets.key(form.kind) if form.kind else None,
+            toolsets=True,
         )
         run.tools.use(run.toolset)
+        read = getattr(send, "effort", None)
+        effort, effort_from = (
+            read(alias) if callable(read) else (UNKNOWN, "its sender doesn't read LiteLLM")
+        )
+        run.session._record("effort", alias=alias, effort=effort, said=effort_from)
         run.ledger.run_started(
             name,
             request_sha=run.state.request_sha,
@@ -326,7 +359,10 @@ class Run:
                 "commands": list(run.toolset.commands),
                 "skills": list(run.toolset.skills),
             },
+            reasoning_effort=effort,
+            reasoning_effort_from=effort_from,
         )
+        run.ledger.request_read(name, form)
         run._give_lessons()
         run.save()
         run._listen()
@@ -340,7 +376,8 @@ class Run:
         """Every lesson about how to build a reviewer kept, into the first message, and a row of
         `run_lessons` for each. `lessons.md` holds them as given, so a conversation started again
         from the record has the same."""
-        kept = lessons.to_give(self.ledger)
+        form = self._form()
+        kept = lessons.to_give(self.ledger, form.kind if form is not None else None)
         if not kept:
             return
         (self.folder / "lessons.md").write_text(lessons.block(kept) + "\n", encoding="utf-8")
@@ -402,16 +439,32 @@ class Run:
             self._take_pick(int(stop["n"]))
         self._go_on()
         if reopen_needs:
-            self.state.needs_open = True
-            self._relay(
-                "reopen_needs",
-                note_from,
-                "The needs may be settled again: send `needs` with the whole list if they should "
-                "change.",
-            )
+            self._reopen(note_from, bool(note.strip()))
         if note.strip():
             self._note(note.strip(), note_from)
         self.save()
+
+    def _reopen(self, who: str, noted: bool) -> None:
+        """The needs may be settled again. A fixed need, a non-negotiable's, changes only by the
+        Sponsor, or someone standing in who says who, with a note: anyone else's reopening leaves
+        the fixed needs as they are (mqucifer/print-shop#37)."""
+        self.state.needs_open = True
+        fixed = [n.id for n in self._needs() if n.fixed]
+        said = (
+            "The needs may be settled again: send `needs` with the whole list if they should "
+            "change."
+        )
+        if noted and _decides(who):
+            self.state.fixed_open = {"by": who}
+            if fixed:
+                said += " The fixed needs may change too, as the note says."
+        elif fixed:
+            named = ", ".join(f"`{f}`" for f in fixed)
+            said += (
+                f" The fixed needs, {named}, stay as they are: a non-negotiable's need changes "
+                "only by the Sponsor, with a note."
+            )
+        self._relay("reopen_needs", who, said)
 
     def _go_on(self) -> None:
         """A new process's part of the run, under the code it's running on."""
@@ -447,9 +500,7 @@ class Run:
         if not stop or stop["kind"] != MET:
             raise Refused("this run isn't waiting for approval")
         _who_decides(by, "--by")
-        decision = self.ledger.decided(
-            self.state.name, int(stop["n"]), APPROVED, by, note.strip()
-        )
+        decision = self.ledger.decided(self.state.name, int(stop["n"]), APPROVED, by, note.strip())
         self.state.stop = None
         said = {"approval": stop["n"], "by": by, "note": note.strip(), "decision": decision}
         return self._close(self.session._ended(Ending(APPROVED, said)))
@@ -497,6 +548,8 @@ class Run:
         n, first = self._after_action_begun(decision, approval)
         decided = self.ledger.rows("SELECT * FROM decisions WHERE id=?", decision)
         closed = (self.state.ending or {}).get("name") == CLOSED
+        # What this review says to the model, for a new conversation if this one won't fit.
+        opening: list[str] = []
         if first and decided:
             by, note = str(decided[0]["by"]), str(decided[0]["note"] or "")
             if closed:
@@ -511,10 +564,13 @@ class Run:
                 if note:
                     said += f" Their note:\n\n{note}"
                 self._relay(APPROVED, by, note, said)
+            opening.append(said)
         self.tools.only(after_action.TOOLS, after_action.spec())
-        self.session.say(
-            after_action.ask(self.ledger, self.state.name, self.session.requests, closed=closed)
+        asked = after_action.ask(
+            self.ledger, self.state.name, self.session.requests, closed=closed
         )
+        self.session.say(asked)
+        opening.append(asked)
         limits = self.session.limits
         # Its own cap on calls, and none on time: a run cut off by `model_time` is reviewed too.
         self.session.limits = replace(
@@ -524,6 +580,13 @@ class Run:
         )
         try:
             ending = self.session.go()
+            # Near its limit, as `suncatcher-2`'s was after many compactions, the review goes on
+            # in a new conversation from the record, as a run does: the index is from the
+            # ledger, so it has the whole run (mqucifer/print-shop#40).
+            while ending.name == "context_full" and self.state.restarts < self.limits.restarts:
+                self.state.restarts += 1
+                self._from_the_record(opening)
+                ending = self.session.go()
         except KeyboardInterrupt:
             ending = self.session._ended(Ending("stopped", {"by": "signal"}))
         except Gone as gone:
@@ -660,13 +723,7 @@ class Run:
         )
         self._relay("send_back", by, note.strip(), message)
         if reopen_needs:
-            self.state.needs_open = True
-            self._relay(
-                "reopen_needs",
-                by,
-                "The needs may be settled again: send `needs` with the whole list if they should "
-                "change.",
-            )
+            self._reopen(by, True)
         self._start_round()
         self.save()
 
@@ -701,7 +758,7 @@ class Run:
         unknown = set(found) - {"pick", "reason", "by", "fix_first"}
         if unknown:
             raise Refused(f"{path}: a pick holds pick, reason, by and fix_first: not {unknown}")
-        names = [v["name"] for v in asked["variants"]]
+        names = [v["name"] for v in asked["variants"]] or ["yes"]
         if pick not in [*names, "none"]:
             raise Refused(f"{path}: the pick is one of {', '.join(names)}, or none: not {pick!r}")
         if not reason:
@@ -725,8 +782,11 @@ class Run:
         who = picked_by_words(by)
         if pick == "none":
             said = f"{who} didn't pick any of them. Their reason: {reason}"
+        elif not asked["variants"]:
+            said = f"{who} said yes to it. Their reason: {reason}"
         else:
             said = f"{who} picked {pick}. Their reason: {reason}"
+        said += self._stop_picked(asked.get("stop"), n, pick, by)
         self.state.said.append(f'On your question "{asked["question"]}": {said}')
         self._relay("pick", by, f"{pick}: {reason}", said)
         if fix_first:
@@ -738,6 +798,28 @@ class Run:
             )
             self.state.said.append(first)
             self._relay("fix_first", by, fix_first, first)
+
+    def _stop_picked(self, stop: str | None, ask: int, pick: str, by: str) -> str:
+        """A pick passes the stop its ask showed. `none` leaves it open: what was shown wasn't
+        right, so it's shown again before anything's handed over."""
+        form = self._form()
+        line = form.stop(stop) if form is not None and stop else None
+        if line is None:
+            return ""
+        if pick == "none":
+            return (
+                f"\n\nThe stop `{line.id}`, {line.text}, is still open: show it again with `ask` "
+                "when it's ready. `done` waits for it."
+            )
+        self.state.stops[line.id] = {
+            "ask": ask,
+            "pick": pick,
+            "by": by,
+            "at_call": self.session.requests,
+        }
+        after = self._open_stop()
+        then = f" The next is `{after.id}`, {after.text}." if after is not None else ""
+        return f"\n\nThe stop `{line.id}`, {line.text}, is passed.{then}"
 
     def drive(self) -> Ending:
         """Calls until a stop or an ending, every failure a named one."""
@@ -780,16 +862,23 @@ class Run:
         ending = self._disk_floor_ending()
         return self.session._ended(ending) if ending is not None else None
 
-    def _from_the_record(self) -> None:
-        """A conversation that wouldn't fit even compacted: a new one, from the record."""
+    def _from_the_record(self, after: list[str] | None = None) -> None:
+        """A conversation that wouldn't fit even compacted: a new one, from the record, and then
+        `after`, what was said to it since, as the after-action review's decision and ask."""
         state = f"This is round {self.state.round}." if self.state.round else "This is intake."
+        state = f"{state} {self._stops_said()}".strip()
         needs_json = json.dumps([n.plain() for n in self._needs()], indent=1)
         relayed = [f"A note from the people running this:\n\n{n}" for n in self.state.notes]
-        text = prompt.again(self._start_text(), [*self.state.said, *relayed], needs_json, state)
+        checks = nudge.record(self._bench_tries(), self._wanted(), last=AGAIN_TRIES)
+        text = prompt.again(
+            self._start_text(), [*self.state.said, *relayed], needs_json, state, checks
+        )
         self.session.begin(
             {"role": "system", "content": prompt.SYSTEM},
             {"role": "user", "content": text},
         )
+        for said in after or []:
+            self.session.say(said)
 
     def _start_text(self) -> str:
         given = sorted(
@@ -800,12 +889,15 @@ class Run:
         request = (self.folder / "request.md").read_text(encoding="utf-8")
         kept = self.folder / "lessons.md"
         given_lessons = kept.read_text(encoding="utf-8") if kept.is_file() else ""
+        form = self._form()
+        lines = forms.said(form) if form is not None else ""
         toolset = self.toolset
         if toolset.legacy:
             line = skills.start_line()
         else:
-            line = f"{toolset.said()} {skills.start_line(toolset.skills)}"
-        return prompt.start(request, given, line, given_lessons)
+            asked = form.kind if form is not None else None
+            line = f"{toolset.said(asked)} {skills.start_line(toolset.skills)}"
+        return prompt.start(request, given, line, given_lessons, lines)
 
     @property
     def toolset(self) -> toolsets.Toolset:
@@ -817,6 +909,28 @@ class Run:
 
     def _needs(self) -> list[Need]:
         return needs.load(self.state.needs)
+
+    def _form(self) -> forms.Form | None:
+        return forms.load(self.state.form)
+
+    def _open_stop(self) -> forms.Line | None:
+        """The first of the request's stops whose ask hasn't had a pick: `done` and the next stop
+        wait for it."""
+        form = self._form()
+        if form is None:
+            return None
+        return next((one for one in form.stops if one.id not in self.state.stops), None)
+
+    def _stops_said(self) -> str:
+        form = self._form()
+        if form is None or not form.stops:
+            return ""
+        passed = [f"`{one.id}`" for one in form.stops if one.id in self.state.stops]
+        open_stop = self._open_stop()
+        said = f"Stops passed: {', '.join(passed) or 'none yet'}."
+        if open_stop is not None:
+            said += f" Open: `{open_stop.id}`, {open_stop.text}."
+        return said
 
     # The tools that belong to the run
 
@@ -837,29 +951,23 @@ class Run:
             paths.snapshot(self.work),
             ran.seconds,
         )
+        earlier = self._bench_tries()
+        wanted = self._wanted()
+        paths.write_inside(self.work, "record/CHECKS.md", nudge.record(earlier, wanted))
         if ran.code == nudge.USAGE:
             return None
-        wanted = [
-            nudge.Wanted(n.id, n.command, n.argv())
-            for n in self._needs()
-            if n.by == "bench" and n.command
-        ]
         lines: list[str] = []
         detail: dict[str, Any] = {}
         off = nudge.off_need(argv, wanted)
+        lead = nudge.not_the_requirement(off)
         if off:
-            lines.append(nudge.off_need_said(off))
+            said_off = nudge.off_need_said(off)
+            if said_off:
+                lines.append(said_off)
             detail["off_need"] = off
+        if lead:
+            detail["not_the_requirement"] = [one["need"] for one in off if one.get("fixed")]
         check = nudge.check_of(argv)
-        earlier = [
-            nudge.Try(
-                int(r["at_call"]), json.loads(r["argv"]), int(r["exit"]), r["verdict"], r["why"]
-            )
-            for r in self.ledger.rows(
-                "SELECT at_call, argv, exit, verdict, why FROM bench_calls WHERE run=? ORDER BY id",
-                self.state.name,
-            )
-        ]
         tries = nudge.streak(earlier, check, wanted)
         failed = nudge.failures(tries)
         failing = self._thin_failing()
@@ -875,9 +983,54 @@ class Run:
                 "after": nudge.AFTER,
                 "calls": [one.at_call for one in tries],
             }
-        if not lines:
+        if not lines and not lead:
             return None
-        return {"said": "\n\n".join(lines), "detail": detail}
+        return {"said": "\n\n".join(lines), "detail": detail, "lead": lead}
+
+    def breakdown(self, args: dict[str, Any]) -> Judged:
+        """How the reference and the request are built, kept before the needs and shown at the
+        first stop (mqucifer/print-shop#36)."""
+        given = {k: args[k] for k in ("parts", "joins", "look", "from") if k in args}
+        found, wrong = breakdown.read(given)
+        if wrong:
+            said = "\n".join(f"- {w}" for w in wrong)
+            return Judged("breakdown", "failed", f"The breakdown wasn't kept:\n{said}", "misses")
+        self.state.breakdowns += 1
+        n = self.state.breakdowns
+        (self.folder / "breakdowns").mkdir(exist_ok=True)
+        (self.folder / "breakdowns" / f"{n}.json").write_text(
+            json.dumps(found, indent=1) + "\n", encoding="utf-8"
+        )
+        text = breakdown.text(found)
+        _write_atomic(self.folder / "breakdown.md", text)
+        paths.write_inside(self.work, "record/breakdown.md", text)
+        self.ledger.broken_down(self.state.name, n, self.session.requests, found)
+        self.save()
+        reply = (
+            f"Kept, as breakdown {n}: `record/breakdown.md` holds it, and the first stop shows it. "
+            "Send it again if you find it's wrong."
+        )
+        return Judged("breakdown", "ok", reply, detail={"breakdown": n})
+
+    def _wanted(self) -> list[nudge.Wanted]:
+        """The settled needs that run a bench check."""
+        return [
+            nudge.Wanted(n.id, n.command, n.argv(), n.fixed, n.quote)
+            for n in self._needs()
+            if n.by == "bench" and n.command
+        ]
+
+    def _bench_tries(self) -> list[nudge.Try]:
+        """Every bench call of this run, oldest first, as the ledger keeps it."""
+        return [
+            nudge.Try(
+                int(r["at_call"]), json.loads(r["argv"]), int(r["exit"]), r["verdict"], r["why"]
+            )
+            for r in self.ledger.rows(
+                "SELECT at_call, argv, exit, verdict, why FROM bench_calls WHERE run=? ORDER BY id",
+                self.state.name,
+            )
+        ]
 
     def _thin_failing(self) -> list[unprintable.Thin]:
         """Each part file whose last `thin` failed, the model's or the harness's, and hasn't left
@@ -946,6 +1099,15 @@ class Run:
                 f"change from here. If one can't be met or its check is wrong: {prompt.STUCK}"
             )
             return Judged("needs", "failed", reply, "needs_settled")
+        trying = args.get("try") is True
+        form = self._form()
+        if form is not None and not trying and not self.state.breakdowns:
+            reply = (
+                "The needs weren't taken: write down how it's built with `breakdown` first, the "
+                "parts, what holds or connects what, and what the look rests on. The needs come "
+                "from that."
+            )
+            return Judged("needs", "failed", reply, "no_breakdown")
         request = (self.folder / "request.md").read_text(encoding="utf-8")
         found, wrong = needs.read(
             args["needs"],
@@ -953,12 +1115,14 @@ class Run:
             "\n".join(self.state.notes),
             self.toolset,
         )
+        if not wrong and form is not None and not trying:
+            wrong = forms.held(found, form) + self._fixed_kept(found)
         if not wrong:
             wrong = self._usable(found)
         if wrong:
             said = "\n".join(f"- {w}" for w in wrong)
             return Judged("needs", "failed", f"The needs weren't taken:\n{said}", "misses")
-        if args.get("try") is True:
+        if trying:
             return self._try_needs(found)
         why_changed = args.get("why_changed") or {}
         swaps, refused = self._swaps(self._needs(), found, why_changed)
@@ -984,6 +1148,8 @@ class Run:
         _write_atomic(self.folder / "needs.json", text)
         paths.write_inside(self.work, "record/needs.json", text)
         self.ledger.needs_accepted(self.state.name, version, found, self.session.requests)
+        self.ledger.needs_marked(self.state.name, version, found)
+        self.state.fixed_open = None
         if self.state.stage == "intake":
             self.state.stage = "rounds"
             self._start_round()
@@ -996,6 +1162,32 @@ class Run:
                 "both checks and your reason."
             )
         return Judged("needs", "ok", reply)
+
+    def _fixed_kept(self, found: list[Need]) -> list[str]:
+        """Each fixed need settled before, kept as it was: its check, its words and its mark. Only
+        the Sponsor changes one, with a note (`_reopen`)."""
+        if self.state.fixed_open:
+            return []
+        kept = {n.id: n for n in found}
+        wrong = []
+        for old in self._needs():
+            new = kept.get(old.id)
+            if not old.fixed or (
+                new is not None
+                and new.fixed
+                and _same_check(old, new)
+                and new.quote == old.quote
+                and new.covers == old.covers
+                and new.figure == old.figure
+            ):
+                continue
+            check = old.command or f"the Sponsor's eye: {old.look_for}"
+            wrong.append(
+                f"`{old.id}` is fixed, a non-negotiable of the request, and changes only by the "
+                f"Sponsor, through `resume --reopen-needs` with their note. Send it as it was: "
+                f"`{check}`" + (f" ({old.limit()})" if old.by == "bench" else "")
+            )
+        return wrong
 
     def _read_now(self, found: list[Need]) -> list[Reading]:
         """Each bench need's check against the files as they stand, on a copy, with no clean run
@@ -1143,6 +1335,14 @@ class Run:
         if not self.state.needs:
             reply = "There are no needs yet, so there's nothing to check it against: `needs` first."
             return Judged("done", "failed", reply, "no_needs")
+        open_stop = self._open_stop()
+        if open_stop is not None:
+            reply = (
+                f"`done` waits for the stop `{open_stop.id}`, {open_stop.text}: until its `ask` "
+                f'has a pick, nothing is handed over. Show it with `ask`, `"stop": '
+                f'"{open_stop.id}"`. Writing, running and the bench are open meanwhile.'
+            )
+            return Judged("done", "failed", reply, "stop_open")
         missing = self.tools._existing("done", args, "script")
         if missing is not None:
             return missing
@@ -1626,16 +1826,29 @@ class Run:
         return Judged("blocked", "ok", "", ending=Ending("blocked", {"reason": reason}))
 
     def ask(self, args: dict[str, Any]) -> Judged:
-        """The sheet is drawn and shown to the model, and nothing goes yet: `send_ask` sends it,
-        with what the model says it shows. On both real runs the model described the design it
-        meant to make, not what a bench picture showed."""
+        """The sheet is drawn, or the pictures the model made are shown, to the model, and nothing
+        goes yet: `send_ask` sends it, with what the model says it shows. On both real runs the
+        model described the design it meant to make, not what a bench picture showed. It works at
+        any point, with the files as they stand. A stop of the request is shown here, in order,
+        and the plan, the first, needs no part file: its text, the breakdown, the needs, and any
+        picture the model drew (mqucifer/print-shop#38)."""
         question = args["question"].strip()
-        variants = args["variants"]
+        variants = args.get("variants") or []
         need = args.get("need") or None
+        stop = str(args.get("stop") or "").strip() or None
+        plan = str(args.get("plan") or "").strip()
+        pictures = [str(p) for p in args.get("pictures") or []]
         bad = self._ask_problem(question, variants, need)
+        if bad is None:
+            bad = self._stop_problem(stop, plan)
+        if bad is None and not (variants or pictures or plan):
+            bad = (
+                "nothing_shown",
+                "Show something: `variants` of your files, `pictures` you made, or at the plan "
+                "stop, the `plan`.",
+            )
         if bad is not None:
             return Judged("ask", "failed", bad[1], bad[0])
-        command = ["render"]
         named: list[dict[str, Any]] = []
         for variant in variants:
             files = variant["files"] if isinstance(variant["files"], list) else [variant["files"]]
@@ -1646,57 +1859,89 @@ class Run:
             named.append(
                 {"name": variant["name"], "files": files, "about": str(variant.get("about") or "")}
             )
-            command += ["--variant", f"{variant['name']}={','.join(files)}"]
         pieces = [str(p) for p in args.get("test_pieces") or []]
         for path in pieces:
             missing = self.tools._existing("ask", {"path": path})
             if missing is not None:
                 return missing
-            command += ["--test-piece", path]
+        shown: list[tuple[str, str]] = []
+        for path in pictures:
+            if Path(path).suffix.lower() not in (".png", ".jpg", ".jpeg"):
+                reply = f"`pictures` are PNG or JPEG files you made, and `{path}` isn't one."
+                return Judged("ask", "failed", reply, "not_a_picture")
+            seen_picture = self.tools.call("read", {"path": path})
+            if seen_picture.outcome != "ok":
+                return Judged("ask", "failed", seen_picture.reply, seen_picture.why)
+            shown += seen_picture.images
         drawn = list(dict.fromkeys(str(f) for v in named for f in v["files"]))
         looks = self._looks(args.get("looks"), drawn, "ask")
         if isinstance(looks, Judged):
             return looks
-        command += _look_args(looks)
-        command += [f"--close={close}" for close in str(args.get("close") or "").split()]
-        command += [f"--cut={cut}" for cut in str(args.get("cuts") or "").split()]
         n = self.state.asks + 1
-        views = str(args.get("views") or " ".join(ASK_VIEWS)).split()
         out = f".pictures/ask-{n}"
-        command += ["--views", *views, "--size", ASK_SIZE, "--renders-out", out]
-        done = self.box.bench(command)
-        record = recorded(done.output, self.work)
-        sheets = [str(f) for f in (record or {}).get("files") or [] if str(f).endswith(".png")]
-        if done.code != 0 or not sheets:
-            reply = f"The sheet couldn't be made, so nothing went:\n{done.output}"
-            return Judged("ask", "failed", reply[:FAILURE_CHARS], "no_sheet")
-        image = paths.read_bytes_inside(self.work, sheets[-1])
-        standing = self._standing_at_ask(drawn)
+        sheet: str | None = None
+        bench_said: list[str] = []
+        images: list[tuple[str, str]] = []
+        image = b""
+        if named:
+            command = ["render"]
+            for one in named:
+                command += ["--variant", f"{one['name']}={','.join(one['files'])}"]
+            for path in pieces:
+                command += ["--test-piece", path]
+            command += _look_args(looks)
+            command += [f"--close={close}" for close in str(args.get("close") or "").split()]
+            command += [f"--cut={cut}" for cut in str(args.get("cuts") or "").split()]
+            views = str(args.get("views") or " ".join(ASK_VIEWS)).split()
+            command += ["--views", *views, "--size", ASK_SIZE, "--renders-out", out]
+            done = self.box.bench(command)
+            record = recorded(done.output, self.work)
+            sheets = [str(f) for f in (record or {}).get("files") or [] if str(f).endswith(".png")]
+            if done.code != 0 or not sheets:
+                reply = f"The sheet couldn't be made, so nothing went:\n{done.output}"
+                return Judged("ask", "failed", reply[:FAILURE_CHARS], "no_sheet")
+            sheet = sheets[-1]
+            image = paths.read_bytes_inside(self.work, sheet)
+            bench_said = [line for line in done.output.splitlines() if _sheet_line(line)]
+            images.append((f"{out}/sheet.png", base64.b64encode(image).decode()))
+        standing = self._standing_at_ask(drawn) if drawn else []
         self.state.draft = {
             "question": question,
             "need": need,
+            "stop": stop,
+            "plan": plan,
             "variants": named,
             "test_pieces": pieces,
+            "pictures": pictures,
             "looks": looks,
             "round": self.state.round,
             "seen": {
                 "variants": {v["name"]: self._held(v["files"]) for v in named},
                 "test_pieces": self._held(pieces),
-                "sheet": hashlib.sha256(image).hexdigest(),
+                "pictures": self._held(pictures),
+                "sheet": hashlib.sha256(image).hexdigest() if sheet else None,
             },
-            "sheet": sheets[-1],
-            "bench_said": [line for line in done.output.splitlines() if _sheet_line(line)],
+            "sheet": sheet,
+            "bench_said": bench_said,
             "standing": [one.plain() for one in standing],
             "at_call": self.session.requests,
         }
         self.save()
+        what = "The sheet above is drawn" if sheet else "What's above is ready"
         lines = [
-            "The sheet above is drawn, and it hasn't gone to the Sponsor. Look at it, and send it "
-            "with `send_ask`, saying in `says` what the sheet shows: each picture as drawn, not "
-            "the design you meant. It reaches them with the question, in your words.",
-            "What the bench says it drew:",
-            *[f"- {line}" for line in self.state.draft["bench_said"]],
+            f"{what}, and it hasn't gone to the Sponsor. Look at it, and send it with `send_ask`, "
+            "saying in `says` what it shows: each picture as drawn, not the design you meant. It "
+            "reaches them with the question, in your words."
         ]
+        if bench_said:
+            lines += ["What the bench says it drew:", *[f"- {line}" for line in bench_said]]
+        if pictures:
+            lines.append(f"Your pictures go as they are: {', '.join(f'`{p}`' for p in pictures)}.")
+        if stop == forms.PLAN:
+            lines.append(
+                "With your plan go your latest breakdown and the needs as settled, with the "
+                "request's lines each covers."
+            )
         failing = [one for one in standing if not one.passed]
         if failing:
             lines.append(
@@ -1714,15 +1959,48 @@ class Run:
             {"file": one.file, "at_call": one.at_call, "why": one.why} for one in unprinted
         ]
         self.save()
+        open_stop = self._open_stop()
+        if open_stop is not None and stop != open_stop.id:
+            lines.append(
+                f"The stop `{open_stop.id}`, {open_stop.text}, is still open: `done` waits for it."
+            )
         lines.append("A new `ask` draws a new sheet in place of this one.")
-        encoded = base64.b64encode(image).decode()
         return Judged(
             "ask",
             "ok",
             "\n".join(lines),
-            images=[(f"{out}/sheet.png", encoded)],
-            detail={"drafted": n, "standing_failing": len(failing)},
+            images=images + shown,
+            detail={"drafted": n, "standing_failing": len(failing), "stop": stop},
         )
+
+    def _stop_problem(self, stop: str | None, plan: str) -> tuple[str, str] | None:
+        """A stop is shown in its turn: the next stop's ask waits for the one before it to have a
+        pick, and the plan shows what it rests on."""
+        if stop is None:
+            return None
+        form = self._form()
+        if form is None or form.stop(stop) is None:
+            named = ", ".join(f"`{one.id}`" for one in (form.stops if form else [])) or "none"
+            return "no_such_stop", f"`stop` names one of the request's stops: {named}."
+        open_stop = self._open_stop()
+        if stop not in self.state.stops and open_stop is not None and open_stop.id != stop:
+            return "stop_open", (
+                f"The stop `{open_stop.id}`, {open_stop.text}, is open: until its `ask` has a "
+                f'pick, `{stop}` waits. Show it first, with `"stop": "{open_stop.id}"`.'
+            )
+        if stop == forms.PLAN:
+            if not self.state.breakdowns:
+                return "no_breakdown", (
+                    "The plan shows your breakdown: write it with `breakdown` first."
+                )
+            if not self.state.needs_version:
+                return "no_needs", (
+                    "The plan shows the needs it'll be checked against: settle them with `needs` "
+                    "first."
+                )
+            if not plan:
+                return "no_plan", "At the plan stop, `plan` says how you'll go about it."
+        return None
 
     def _standing_at_ask(self, files: list[str]) -> list[judge.Standing]:
         """What an ask shows, read as it stands: each settled need's own check, and `thin` on each
@@ -1763,7 +2041,8 @@ class Run:
             reply = "`says` is what the sheet shows, in your words, and it's empty."
             return Judged("send_ask", "failed", reply, "empty")
         named = draft["variants"]
-        for variant in [*named, {"files": draft["test_pieces"]}]:
+        pictures = draft.get("pictures") or []
+        for variant in [*named, {"files": draft["test_pieces"]}, {"files": pictures}]:
             for path in variant["files"]:
                 if self.tools._existing("send_ask", {"path": str(path)}) is not None:
                     reply = f"`{path}` is gone since the sheet was drawn: `ask` again."
@@ -1771,9 +2050,14 @@ class Run:
         now = {
             "variants": {v["name"]: self._held(v["files"]) for v in named},
             "test_pieces": self._held(draft["test_pieces"]),
+            "pictures": self._held(pictures),
         }
         seen = draft["seen"]
-        if now["variants"] != seen["variants"] or now["test_pieces"] != seen["test_pieces"]:
+        if (
+            now["variants"] != seen["variants"]
+            or now["test_pieces"] != seen["test_pieces"]
+            or now["pictures"] != (seen.get("pictures") or {})
+        ):
             reply = (
                 "Files on the sheet changed since it was drawn, so it isn't what they'd see: "
                 "`ask` again."
@@ -1783,8 +2067,14 @@ class Run:
         self.state.asks = n
         folder = self.folder / "asks" / str(n)
         (folder / "variants").mkdir(parents=True)
-        image = paths.read_bytes_inside(self.work, draft["sheet"])
-        (folder / "sheet.png").write_bytes(image)
+        sheet = folder / "sheet.png" if draft.get("sheet") else None
+        if sheet is not None:
+            sheet.write_bytes(paths.read_bytes_inside(self.work, draft["sheet"]))
+        if pictures:
+            (folder / "pictures").mkdir()
+        for path in pictures:
+            kept = folder / "pictures" / Path(path).name
+            kept.write_bytes(paths.read_bytes_inside(self.work, path))
         for variant in named:
             kept = folder / "variants" / variant["name"]
             kept.mkdir()
@@ -1795,9 +2085,13 @@ class Run:
         for path in draft["test_pieces"]:
             kept = folder / "test-pieces" / Path(path).name
             kept.write_bytes(paths.read_bytes_inside(self.work, path))
+        stop = draft.get("stop")
         asked = {
             "question": draft["question"],
             "need": draft["need"],
+            "stop": stop,
+            "plan": draft.get("plan") or "",
+            "pictures": pictures,
             "variants": named,
             "test_pieces": draft["test_pieces"],
             "looks": draft["looks"],
@@ -1808,22 +2102,43 @@ class Run:
         }
         (folder / "asked.json").write_text(json.dumps(asked, indent=1), encoding="utf-8")
         about = "\n".join(f"- **{v['name']}**: {v['about']}" for v in named)
-        lines = [
-            draft["question"],
-            "",
-            about,
-            "",
-            f"The sheet: {folder / 'sheet.png'}",
-            "",
-            "## What the model says the sheet shows",
-            "",
-            says,
-            "",
-            "## What the bench says it drew",
-            "",
-            *[f"- {line}" for line in draft["bench_said"]],
-            "",
-        ]
+        form = self._form()
+        shown_stop = form.stop(stop) if form is not None and stop else None
+        lines = []
+        if shown_stop is not None:
+            lines += [
+                f"# Stop `{shown_stop.id}`: {shown_stop.text}",
+                "",
+                "The run hands nothing over until this has a pick: `done` and the next stop wait "
+                "for it. Writing and running go on meanwhile.",
+                "",
+            ]
+        lines += [draft["question"], ""]
+        if about:
+            lines += [about, ""]
+        if sheet is not None:
+            lines += [f"The sheet: {sheet}", ""]
+        if pictures:
+            lines += ["Pictures the model made:", ""]
+            lines += [f"- {folder / 'pictures' / Path(p).name}" for p in pictures]
+            lines.append("")
+        if not named:
+            lines += [
+                'With nothing to choose between, the pick is "yes" to go on from this, or '
+                '"none", with the reason, if it isn\'t right.',
+                "",
+            ]
+        what = "the sheet shows" if sheet is not None else "it shows"
+        lines += [f"## What the model says {what}", "", says, ""]
+        if draft["bench_said"]:
+            lines += [
+                "## What the bench says it drew",
+                "",
+                *[f"- {line}" for line in draft["bench_said"]],
+                "",
+            ]
+        if stop == forms.PLAN:
+            lines += self._plan_said(draft.get("plan") or "")
         failing = [one for one in draft["standing"] if not one["passed"]]
         if failing:
             lines += [
@@ -1863,11 +2178,13 @@ class Run:
             draft["need"],
             draft["question"],
             named,
-            str(folder / "sheet.png"),
+            str(sheet) if sheet is not None else "",
             self.session.requests,
             seen,
         )
         self.ledger.sheet_said(self.state.name, n, says)
+        if stop:
+            self.ledger.stop_asked(self.state.name, n, stop)
         for one in draft["standing"]:
             self._stood(judge.Standing(**one), "ask", self.work, ask=n)
         if self.state.swaps:
@@ -1882,6 +2199,62 @@ class Run:
         )
         return Judged("send_ask", "ok", reply, ending=Ending("ask", {"n": n}))
 
+    def _plan_said(self, plan: str) -> list[str]:
+        """The plan, as the person at its stop reads it: the model's words, how it says the part
+        is built, and the needs it'll be checked against, each by the request's lines."""
+        lines = ["## The plan, in the model's words", "", plan, ""]
+        kept = self.folder / "breakdown.md"
+        if kept.is_file():
+            body = kept.read_text(encoding="utf-8").strip().splitlines()
+            lines += ["## How the model says it's built", ""]
+            lines += [("#" + line if line.startswith("## ") else line) for line in body[2:]]
+            lines.append("")
+        lines += ["## The needs", ""]
+        for need in self._needs():
+            if need.by == "bench":
+                check = f"`{need.command}`, {need.limit()}"
+            else:
+                check = f"by eye: {need.look_for}"
+                if need.no_bench:
+                    check += f" (no bench command measures it: {need.no_bench})"
+            mark = "**fixed** " if need.fixed else ""
+            covers = f" covers {', '.join(need.covers)}." if need.covers else ""
+            lines.append(f"- {mark}**{need.id}** ({need.what}):{covers} Checked {check}")
+            if need.figure:
+                lines.append(f"  - its figure is read as: {need.figure}")
+        lines.append("")
+        form = self._form()
+        if form is not None and form.lines():
+            lines += ["## The request's lines, and the needs that cover each", ""]
+            for line in form.lines():
+                by = [n.id for n in self._needs() if line.id in n.covers]
+                lines.append(f"- `{line.id}`, covered by {', '.join(by) or 'none'}: {line.text}")
+            lines.append("")
+            lines += self._figures_left(form)
+        return lines
+
+    def _figures_left(self, form: forms.Form) -> list[str]:
+        """Each figure of a non-negotiable that no fixed need's check carries, for the person to
+        look at: it's said, never refused, as a figure may be one no bench command reads."""
+        found = []
+        for line in form.non_negotiables:
+            figures = re.findall(r"\d+(?:\.\d+)?", line.text)
+            carried: set[float] = set()
+            for need in self._needs():
+                if need.fixed and line.id in need.covers:
+                    for word in re.findall(r"-?\d+(?:\.\d+)?", need.command):
+                        carried.add(float(word))
+                    carried |= {b for b in (need.at_least, need.at_most) if b is not None}
+            left = [f for f in figures if float(f) not in carried]
+            if left:
+                found.append(
+                    f"- `{line.id}`: {', '.join(left)} isn't in the check of a fixed need that "
+                    "covers it"
+                )
+        if not found:
+            return []
+        return ["Figures of the non-negotiables no fixed need's check carries:", "", *found, ""]
+
     def _held(self, files: list[str]) -> dict[str, str]:
         """Each file as it stands now, by what it holds: what a sheet of them saw."""
         return {
@@ -1890,18 +2263,18 @@ class Run:
         }
 
     def _ask_problem(
-        self, question: str, variants: list[Any], need: str | None
+        self, question: str, variants: Any, need: str | None
     ) -> tuple[str, str] | None:
         if not question:
             return "empty", "`question` says what they're judging."
-        if not variants:
-            return "no_variants", "Name at least one variant: the Sponsor picks from a sheet."
+        if not isinstance(variants, list):
+            return "not_a_variant", 'Each variant is {"name": "A", "files": ["a.step"], ...}.'
         seen: set[str] = set()
         for variant in variants:
             shape = 'Each variant is {"name": "A", "files": ["a.step"], "about": "..."}.'
             if not isinstance(variant, dict) or "name" not in variant or "files" not in variant:
                 return "not_a_variant", shape
-            if not VARIANT.fullmatch(str(variant["name"])) or variant["name"] == "none":
+            if not VARIANT.fullmatch(str(variant["name"])) or variant["name"] in ("none", "yes"):
                 return "not_a_variant", f"`{variant['name']}` won't do as a short name. {shape}"
             if variant["name"] in seen:
                 return "not_a_variant", f"Two variants are named {variant['name']}."
@@ -1930,6 +2303,7 @@ def summarise(folder: Path) -> dict[str, Any]:
         "rounds": state["round"],
         "asks": state["asks"],
         "picked_by": {need: pick.get("by") for need, pick in state["picks"].items()},
+        "stops": state.get("stops") or {},
         "approvals": state.get("approvals", 0),
         "questions": state["questions"],
         "restarts": state["restarts"],
@@ -1949,6 +2323,14 @@ def summarise(folder: Path) -> dict[str, Any]:
         "tool_calls": len(tools),
         "by_tool_and_outcome": dict(sorted(tally.items())),
         "compactions": sum(1 for e in transcript.events_of(events) if e["kind"] == "compacted"),
+        "reasoning_effort": next(
+            (
+                {"effort": e["effort"], "from": e["said"]}
+                for e in transcript.events_of(events)
+                if e["kind"] == "effort"
+            ),
+            {"effort": UNKNOWN, "from": "not recorded: a run from before mqucifer/print-shop#40"},
+        ),
         "call_retries": sum(1 for e in transcript.events_of(events) if e["kind"] == "call_retry"),
     }
     (folder / "summary.json").write_text(json.dumps(found, indent=1) + "\n", encoding="utf-8")
@@ -1979,9 +2361,12 @@ def what_next(run: Run, ending: Ending) -> str:
         )
     if ending.name == "ask":
         folder = run.folder / "asks" / str(ending.said["n"])
+        asked = json.loads((folder / "asked.json").read_text(encoding="utf-8"))
+        choice = "<a variant or none>" if asked.get("variants") else "yes or none"
+        stop = f"the stop `{asked['stop']}`: " if asked.get("stop") else ""
         return (
-            f"waiting: {folder / 'question.md'} and its sheet. Write {folder / 'pick.json'}, "
-            f'{{"pick": "<a variant or none>", "reason": "...", "by": "{SPONSOR}"}}, or "by": '
+            f"waiting at {stop}{folder / 'question.md'}. Write {folder / 'pick.json'}, "
+            f'{{"pick": "{choice}", "reason": "...", "by": "{SPONSOR}"}}, or "by": '
             f'"{STAND_IN} <who>" if someone stood in for them. The pick is about the look: a '
             f'fault to fix first goes in "fix_first", apart from it. Then: scripts/rounds.py '
             f"resume {name}"

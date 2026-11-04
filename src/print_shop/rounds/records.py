@@ -59,7 +59,7 @@ PICK_WORDS = re.compile(
 )
 #: How a `try` read a need, in its reply, for events that hold only that.
 TRIED_LINE = re.compile(r"- ([A-Za-z0-9._-]+), (would pass|WOULDN'T PASS): (.*)")
-TABLES = ("calls", "interventions", "timeline", "runaways", "tries", "nudges")
+TABLES = ("calls", "interventions", "timeline", "runaways", "tries", "nudges", "refusals")
 
 
 def repeated(text: str, seen: set[str]) -> tuple[int, int]:
@@ -119,6 +119,9 @@ class Recorder:
         self.skills_read: set[str] = set()
         self.refused: deque[list[str]] = deque(maxlen=REFUSED_KEPT)
         self.last_bench = ""
+        self.refusals = 0
+        # What's been rewritten since the last request: a compaction's cut, before its event.
+        self.cut: dict[str, Any] = {}
 
     def feed(self, event: dict[str, Any]) -> None:
         kind = event.get("kind")
@@ -174,14 +177,44 @@ class Recorder:
         self.compacted_at = self.timeline + 1
         self.compactions += 1
         self.calls_since_compaction = 0
+        cut = _json(self.cut) if self.cut else None
         self._row(
             "compaction",
             at=event.get("t"),
             at_call=event.get("before_call", self.requests + 1),
+            said=cut,
             estimated_before=event.get("estimated"),
             estimated_after=event.get("estimated_after"),
             prompt_before=event.get("prompt_before", self.last_prompt),
         )
+        if cut is not None:
+            # A run read back from before this has its compaction's row, and what it cut empty.
+            self.ledger.change(
+                "UPDATE timeline SET said=? WHERE run=? AND seq=? AND said IS NULL",
+                cut,
+                self.run,
+                self.timeline,
+            )
+        self.cut = {}
+
+    def _on_rewrite(self, event: dict[str, Any]) -> None:
+        """A change to an earlier message: what compaction cuts, counted until its event."""
+        message = event.get("message") or {}
+        content = str(message.get("content") or "")
+        if message.get("role") == "tool" and content.startswith("(compacted: "):
+            tool = content.removeprefix("(compacted: ").split(":", 1)[0]
+            shrunk = self.cut.setdefault("replies_shrunk", {})
+            shrunk[tool] = shrunk.get(tool, 0) + 1
+        elif message.get("role") == "assistant":
+            if "reasoning_content" in message and not message["reasoning_content"]:
+                self.cut["reasoning_dropped"] = self.cut.get("reasoning_dropped", 0) + 1
+            noted = sum(
+                1
+                for call in message.get("tool_calls") or []
+                if "(compacted: " in str((call.get("function") or {}).get("arguments"))
+            )
+            if noted:
+                self.cut["texts_noted"] = self.cut.get("texts_noted", 0) + noted
 
     # What a person sent
 
@@ -246,6 +279,7 @@ class Recorder:
     def _on_request(self, event: dict[str, Any]) -> None:
         n = int(event["n"])
         self.requests = n
+        self.cut = {}
         if self.after_stop:
             # A conversation that wouldn't fit starts again from the record in the same process.
             if self.last_stop == "context_full" and event.get("from") == 0:
@@ -399,6 +433,17 @@ class Recorder:
             self._skill_read(event, arguments)
         if event.get("outcome") != "ok":
             self.refused.append([str(name), str(event.get("why") or event.get("outcome"))])
+            self.refusals += 1
+            self.ledger.add(
+                "refusals",
+                run=self.run,
+                seq=self.refusals,
+                at_call=self.requests,
+                round=self._round_of(self.requests),
+                tool=str(name),
+                outcome=str(event.get("outcome")),
+                why=str(event.get("why") or "") or None,
+            )
         elif name == "skill":
             self.skills_read.add(str(arguments.get("name")))
         elif name == "bench":

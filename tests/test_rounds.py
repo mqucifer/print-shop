@@ -83,6 +83,9 @@ class Desk:
     def __init__(self) -> None:
         self.bench: list[list[str]] = []
 
+    def breakdown(self, args: dict[str, Any]) -> Judged:
+        return Judged("breakdown", "ok", "kept")
+
     def questions(self, args: dict[str, Any]) -> Judged:
         return Judged("questions", "ok", "asked", ending=Ending("questions", {"n": 1}))
 

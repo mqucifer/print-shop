@@ -25,7 +25,7 @@ python3 -c "import json,sys; e={x['id']: x for x in json.load(open('<checkout>/t
   --reference light/pane_b.step --reference light/pane_c.step
 ```
 
-A stand-in answers its stops as for any run. Each scenario's request names `## Kind` stained glass, so the run has the stained-glass toolset once mqucifer/print-shop#36's request form is merged.
+A stand-in answers its stops as for any run. Each scenario's request is in the request's set form (mqucifer/print-shop#36) and names `## Kind` `stained-glass`, so the run has the stained-glass toolset, its commands and this skill.
 
 ## Scoring
 

@@ -15,6 +15,7 @@ import pytest
 from print_shop.rounds import needs, toolsets, transcript
 from print_shop.rounds.run import Run
 from tests.rounds_fakes import Scripted, tool
+from tests.test_intake import BROKEN_DOWN
 
 CORE = toolsets.CORE
 GLASS = toolsets.STAINED_GLASS
@@ -119,18 +120,28 @@ def test_a_kind_is_named_as_a_request_writes_it() -> None:
     assert toolsets.named("Stained glass") is GLASS
     assert toolsets.named("stained_glass") is GLASS
     assert toolsets.named(None) is CORE and toolsets.named("  ") is CORE
-    with pytest.raises(toolsets.UnknownKind, match="the kinds are `stained-glass`"):
-        toolsets.named("ceramics")
+    assert toolsets.named("ceramics") is CORE
+    assert "kind, 'ceramics', has no toolset of its own" in CORE.said("ceramics")
     assert toolsets.of_run("stained-glass", toolsets=False) is toolsets.EVERY
 
 
-def started(root: Path, *turns: Any, kind: str | None = None) -> Run:
+#: A request in the set form whose `## Kind` loads the stained-glass toolset.
+GLASS_REQUEST = f"""{REQUEST}
+
+## Requirements
+
+- At least 2 mm of wall round the hanging hole.
+
+## Kind
+
+stained-glass
+"""
+
+
+def started(root: Path, *turns: Any, request: str = REQUEST) -> tuple[Run, Scripted]:
     model = Scripted(*turns, [tool("blocked", reason="Out of turns.")])
-    run = Run.start(root, "r", REQUEST, [], model, sleep=lambda _: None)
-    if kind is not None:
-        run.state.kind = kind
-        run.tools.use(run.toolset)
-    return run
+    run = Run.start(root, "r", request, [], model, sleep=lambda _: None)
+    return run, model
 
 
 def replies(run: Run) -> list[dict[str, Any]]:
@@ -138,15 +149,14 @@ def replies(run: Run) -> list[dict[str, Any]]:
 
 
 def test_a_run_with_no_kind_has_the_core_only_and_says_so(tmp_path: Path) -> None:
-    run = started(
+    run, model = started(
         tmp_path,
         [tool("bench", command="capture frame.step --pocket-z 2")],
         [tool("skill", name="designing-stained-glass")],
         [tool("skill", name="using-the-bench")],
     )
     assert run.drive().name == "blocked"
-    first = json.loads(run.session.events.read_text().splitlines()[0])
-    start = next(m["content"] for m in first["append"] if m["role"] == "user")
+    start = model.bodies[0]["messages"][1]["content"]
     assert "This run's toolset is the core: the bench commands `info`" in start
     assert "designing-stained-glass" not in start
     told = replies(run)
@@ -165,24 +175,29 @@ def test_a_run_with_no_kind_has_the_core_only_and_says_so(tmp_path: Path) -> Non
 def test_a_stained_glass_run_reads_its_skill_and_its_needs_measure_what_they_name(
     tmp_path: Path,
 ) -> None:
-    hang = {**need("info frame.step", "wall"), "id": "hang"}
-    run = started(
+    """The request's `## Kind` loads the toolset: no stand-in sets it."""
+    hang = {**need("info frame.step", "wall"), "id": "hang", "covers": ["R1"]}
+    run, model = started(
         tmp_path,
         [tool("skill", name="designing-stained-glass")],
+        [BROKEN_DOWN],
         [tool("needs", needs=[hang])],
-        kind="stained-glass",
+        request=GLASS_REQUEST,
     )
     assert run.drive().name == "blocked"
-    told = replies(run)
+    assert run.toolset is toolsets.STAINED_GLASS and run.state.kind == "stained-glass"
+    start = model.bodies[0]["messages"][1]["content"]
+    assert "This run's toolset is stained glass" in start and "`designing-stained-glass`" in start
+    told = [e for e in replies(run) if e["name"] in ("skill", "needs")]
     assert told[0]["outcome"] == "ok" and "# Designing stained glass" in told[0]["reply"]
-    assert told[1]["why"] == "misses"
+    assert told[1]["why"] == "misses", told[1]["reply"]
     assert "`wall` does, as `wall FILE --hole X,Y,Z --min-wall W`" in told[1]["reply"]
     kept = run.ledger.rows("SELECT file FROM skill_reads")
     assert kept[0]["file"] == "designing-stained-glass/SKILL.md"
 
 
 def test_a_run_from_before_toolsets_keeps_every_command(tmp_path: Path) -> None:
-    run = started(tmp_path, [tool("questions", questions="Anything?")])
+    run, _ = started(tmp_path, [tool("questions", questions="Anything?")])
     assert run.drive().name == "questions"
     state = json.loads((run.folder / "state.json").read_text())
     del state["kind"], state["toolsets"]

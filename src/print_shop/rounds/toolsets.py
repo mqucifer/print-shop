@@ -64,12 +64,19 @@ class Toolset:
     def measure(self, name: str) -> Measure | None:
         return next((m for m in self.measures if m.name == name), None)
 
-    def said(self) -> str:
-        """The line the start gives: which toolset, and what it adds to the core."""
+    def said(self, asked: str | None = None) -> str:
+        """The line the start gives: which toolset, and what it adds to the core. `asked` is the
+        kind the request names, which may have no toolset of its own."""
         if self.kind is None:
+            own = (
+                f"The request's kind, {asked!r}, has no toolset of its own, so this run's "
+                if asked
+                else "This run's "
+            )
             return (
-                "This run's toolset is the core: the bench commands "
-                f"{_listed(self.commands)}. A request's `## Kind` adds a kind's own."
+                f"{own}toolset is the core: the bench commands {_listed(self.commands)}. A "
+                "request's `## Kind` adds a kind's own, where it has one: "
+                f"{', '.join(f'`{k}`' for k in KINDS)}."
             )
         return (
             f"This run's toolset is {self.title}: the core's bench commands and "
@@ -206,24 +213,18 @@ EVERY = Toolset(
 )
 
 
-class UnknownKind(ValueError):
-    """A kind no toolset has."""
-
-
 def key(kind: str) -> str:
     """A kind as a request may write it, `Stained glass`, as its toolset's key."""
     return re.sub(r"[\s_]+", "-", kind.strip().casefold())
 
 
 def named(kind: str | None) -> Toolset:
-    """The toolset for a kind, or the core for none."""
+    """The toolset for a kind: its own, or the core for none and for a kind with none of its
+    own. A request's `## Kind` is the request's words, and a kind's lessons are given by it
+    whether or not it has a toolset, so a kind with none isn't refused: the start says so."""
     if kind is None or not kind.strip():
         return CORE
-    found = KINDS.get(key(kind))
-    if found is None:
-        known = ", ".join(f"`{k}`" for k in KINDS)
-        raise UnknownKind(f"there's no toolset for the kind {kind!r}: the kinds are {known}")
-    return found
+    return KINDS.get(key(kind), CORE)
 
 
 def of_run(kind: str | None, toolsets: bool) -> Toolset:

@@ -27,6 +27,7 @@ import json
 import re
 import shlex
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -49,6 +50,11 @@ NEAR_CONTEXT = 5
 NEAR_RATIO = 0.6
 EDIT_CONTEXT = 4
 EDIT_LINES = 80
+#: How many differing lines a refused `edit` names, and how many lines may come between the lines
+#: it quoted for them to count as left out (mqucifer/print-shop#39: on `cup-1` and `suncatcher-2`,
+#: 8 of 18 refusals differed only in indentation, and 3 left lines out of the middle).
+SAID_LINES = 3
+APART_SLACK = 20
 BOOLEAN_TEXT = {"true": True, "false": False}
 PICTURES = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".heic")
 GEOMETRY = (".step", ".stp", ".stl", ".brep", ".3mf", ".obj", ".f3d")
@@ -127,7 +133,11 @@ NEED_SHAPE = (
     '"clearance lid.step cup.step --min-gap 0.2", "verdicts": [...] (optional: which verdicts '
     'pass, exit 0 by default), "number": "pairs.0.gap_mesh_mm", "at_least": 0.2, "at_most": 0.6 '
     '(optional: a number in that answer, and its limit)} or {"by": "eye", "look_for": "what the '
-    'Sponsor judges"}.'
+    'Sponsor judges", "no_bench": "why no bench command measures it", where it covers a line}. '
+    'Where the request has lines: `covers`, the ids of the lines it covers (["R1"]); `fixed`: '
+    "true for a non-negotiable's need, quoting its line; and `figure`, for a fixed need whose "
+    "line holds a figure: how it's read, and where something changes it (such as before or after "
+    "play), which."
 )
 
 
@@ -223,11 +233,45 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
             questions="Your questions, as you'd say them.",
         ),
         _spec(
+            "breakdown",
+            "Before `needs`: write down how the reference and the request are built, not only "
+            "what they show: the parts, what holds or connects each part to the rest, and what "
+            "the look rests on. It's kept, `record/breakdown.md` holds it, and the first stop "
+            "shows it. Send it again whenever you find it was wrong.",
+            {
+                "from": {
+                    "type": "string",
+                    "description": "What you read it from: the request, and which references. "
+                    "Optional.",
+                }
+            },
+            parts={
+                "type": "array",
+                "description": 'Each part: {"name": "arm", "what": "what it is and does"}.',
+                "items": {"type": "object"},
+            },
+            joins={
+                "type": "array",
+                "description": 'What holds or connects what: {"parts": ["plate", "arm"], "how": '
+                '"..."}. With more than one part, every part is in a join.',
+                "items": {"type": "object"},
+            },
+            look={
+                "type": "array",
+                "description": "What the look rests on, a line each: what a person sees first, "
+                "and what would make it read wrong.",
+                "items": {"type": "string"},
+            },
+        ),
+        _spec(
             "needs",
-            "Settle what the part must do, when you know enough: this ends intake, and the first "
-            f"round starts. The harness runs each check itself at `done`. A check can't pass on "
-            "FAIL. Settled again after they're reopened, a need whose check fails on your files "
-            "as they stand can't be dropped, or changed to one that passes, without a reason. "
+            "Settle what the part must do, when you know enough and after `breakdown`: this ends "
+            "intake, and the first round starts. Where the request has lines, every requirement "
+            "is covered and every non-negotiable has a fixed need, or the needs are refused "
+            "naming the lines left over. The harness runs each check itself at `done`. A check "
+            "can't pass on FAIL. Settled again after they're reopened, a need whose check fails "
+            "on your files as they stand can't be dropped, or changed to one that passes, without "
+            "a reason, and a fixed need changes only by the Sponsor. "
             f"{NEED_SHAPE}{_measures_said(toolset)}",
             {
                 "try": {
@@ -252,13 +296,38 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
         ),
         _spec(
             "ask",
-            "Where form is at stake, or to show what you have and ask what you need when you're "
-            "stuck: name the variants, and `render` draws a sheet of them, which comes to you "
-            "first. One variant of the files as they stand will do. Nothing goes to the Sponsor "
-            "until `send_ask`, where you say what the sheet shows. The harness also runs the "
-            "needs' checks and `thin` on these files, and puts any that fail beside the question. "
-            "Everything else is yours to settle by the bench.",
+            "Where form is at stake, at each of the request's stops, or to show what you have and "
+            "ask what you need when you're stuck. It works at any point. Name the variants, and "
+            "`render` draws a sheet of them, which comes to you first: one variant of the files as "
+            "they stand will do. Or show pictures you made, such as a 2D layout, with no part "
+            "file. Nothing goes to the Sponsor until `send_ask`, where you say what it shows. The "
+            "harness also runs the needs' checks and `thin` on the variants' files, and puts any "
+            "that fail beside the question. Everything else is yours to settle by the bench.",
             {
+                "variants": {
+                    "type": "array",
+                    "description": 'Each variant: {"name": "A", "files": ["a.step"], "about": '
+                    '"what sets it apart"}. `files` are what they\'ll take for the part. '
+                    "Optional where there are `pictures` or a `plan`.",
+                    "items": {"type": "object"},
+                },
+                "stop": {
+                    "type": "string",
+                    "description": "The request's stop this shows, by its id: `plan`, `S1`. "
+                    "Optional.",
+                },
+                "plan": {
+                    "type": "string",
+                    "description": "At the `plan` stop: how you'll go about it, in your words. "
+                    "It goes to them with your breakdown and the needs.",
+                },
+                "pictures": {
+                    "type": "array",
+                    "description": "Pictures you made, such as a 2D layout drawn with "
+                    "matplotlib: PNG files in your directory. They're shown to you first, and go "
+                    "as they are. Optional.",
+                    "items": {"type": "string"},
+                },
                 **LOOKS,
                 "cuts": {
                     "type": "string",
@@ -290,12 +359,6 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
                 },
             },
             question="What you're asking them to judge.",
-            variants={
-                "type": "array",
-                "description": 'Each variant: {"name": "A", "files": ["a.step"], "about": "what '
-                "sets it apart\"}. `files` are what they'll take for the part.",
-                "items": {"type": "object"},
-            },
         ),
         _spec(
             "send_ask",
@@ -349,13 +412,19 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
     ]
 
 
+#: The tools that run something, after which a file the model had may be otherwise.
+CHANGERS = ("run", "bench", "write", "edit")
+#: An `edit` refused as its lines aren't in the file as they are.
+MISSED = ("edit.closest", "edit.closest.indent", "edit.closest.apart", "edit.not_found")
+
 #: The tools that belong to the run, which `Desk` answers.
-DESK = ("questions", "needs", "ask", "send_ask", "done", "blocked", "after_action")
+DESK = ("breakdown", "questions", "needs", "ask", "send_ask", "done", "blocked", "after_action")
 
 
 class Desk(Protocol):
     """The tools that belong to the run, not to the working directory."""
 
+    def breakdown(self, args: dict[str, Any]) -> Judged: ...
     def questions(self, args: dict[str, Any]) -> Judged: ...
     def needs(self, args: dict[str, Any]) -> Judged: ...
     def ask(self, args: dict[str, Any]) -> Judged: ...
@@ -444,6 +513,20 @@ def refusal(path: str, text: str, old: str, new: str) -> tuple[str, str] | None:
         )
     if new and new in text:
         return "edit.already", f"`old` isn't in `{path}`, and `new` already is: it may be made."
+    found = _apart(lines, want)
+    if found is not None:
+        between = [
+            f"{a + 2}-{b}" if b - a > 2 else str(a + 2)
+            for a, b in zip(found, found[1:], strict=False)
+            if b > a + 1
+        ]
+        shown = "\n".join(numbered(lines, found[0], found[-1] + 1)[:EDIT_LINES])
+        return "edit.closest.apart", (
+            f"Your lines are all in `{path}`, in order, but not together: line"
+            f"{'s' if len(between) > 1 or '-' in between[0] else ''} {', '.join(between)} "
+            "come between them, and you left them out. Quote them too, or edit each part on its "
+            f"own:\n{shown}"
+        )
     size = len(want)
     best, best_at = 0.0, -1
     for i in range(max(1, len(lines) - size + 1)):
@@ -457,10 +540,68 @@ def refusal(path: str, text: str, old: str, new: str) -> tuple[str, str] | None:
             "edit.not_found",
             f"Those lines aren't in `{path}`, and nothing close is: read it with `read` first.",
         )
+    block = lines[best_at : best_at + size]
     shown = "\n".join(numbered(lines, best_at - NEAR_CONTEXT, best_at + size + NEAR_CONTEXT))
+    if [b.strip() for b in block] == [w.strip() for w in want]:
+        differ = [
+            f"line {best_at + k + 1} starts with {_indent(b)}, and yours with {_indent(w)}"
+            for k, (b, w) in enumerate(zip(block, want, strict=True))
+            if b != w
+        ]
+        more = f", and {len(differ) - SAID_LINES} more" if len(differ) > SAID_LINES else ""
+        return "edit.closest.indent", (
+            f"Those lines are in `{path}` at line {best_at + 1}, indented otherwise: "
+            f"{'; '.join(differ[:SAID_LINES])}{more}. Quote them as the file has them:\n{shown}"
+        )
+    lo = max(0, best_at - NEAR_CONTEXT)
+    window = lines[lo : best_at + size + NEAR_CONTEXT]
+    held = set(lines)
+    differ = []
+    for w in want:
+        if w.strip() and w not in held:
+            near = difflib.get_close_matches(w, window, 1, 0.0)
+            if near:
+                number = lo + window.index(near[0]) + 1
+                differ.append(f"`{w.strip()}` is line {number}'s `{near[0].strip()}`")
+            else:
+                differ.append(f"`{w.strip()}` isn't there")
+    said = f" Of yours, {'; '.join(differ[:SAID_LINES])}." if differ else ""
     return "edit.closest", (
-        f"Those lines aren't in `{path}`. The closest block starts at line {best_at + 1}:\n{shown}"
+        f"Those lines aren't in `{path}`.{said} The closest block starts at line {best_at + 1}:"
+        f"\n{shown}"
     )
+
+
+def _indent(line: str) -> str:
+    """A line's leading whitespace, said."""
+    lead = line[: len(line) - len(line.lstrip())]
+    if not lead:
+        return "no indent"
+    if set(lead) == {" "}:
+        return f"{len(lead)} space{'s' if len(lead) > 1 else ''}"
+    return f"`{lead!r}`"
+
+
+def _apart(lines: list[str], want: list[str]) -> list[int] | None:
+    """Where each line of `want` is, if every one is in the file in order and near the others,
+    but not together: the model left lines out of the middle. None otherwise."""
+    if len(want) < 2:
+        return None
+    span = len(want) + APART_SLACK
+    for i, line in enumerate(lines):
+        if line != want[0]:
+            continue
+        found, j = [i], i + 1
+        for w in want[1:]:
+            while j < len(lines) and j < i + span and lines[j] != w:
+                j += 1
+            if j >= len(lines) or j >= i + span:
+                break
+            found.append(j)
+            j += 1
+        if len(found) == len(want):
+            return found
+    return None
 
 
 def parse(raw: Any) -> Any:
@@ -498,6 +639,14 @@ class WorkTools:
         self.box = box
         self.desk = desk
         self.work_limit_bytes = work_limit_bytes
+        # The call each tool call is part of: the run sets it, as the ledger numbers calls.
+        self.at_call: Callable[[], int] = lambda: 0
+        # Each text file as the model last had it whole (its `write`, a whole `read`, or an
+        # `edit` of what it had), and at which call; as the harness last saw it; and the last
+        # change the model wasn't shown, by call and what made it (mqucifer/print-shop#39).
+        self.known: dict[str, tuple[str, int]] = {}
+        self.observed: dict[str, str | None] = {}
+        self.changed_by: dict[str, tuple[int, str]] = {}
         self.use(toolsets.EVERY)
 
     def use(self, toolset: Toolset) -> None:
@@ -522,7 +671,19 @@ class WorkTools:
                 said = args[key].strip().lower()
                 if said in BOOLEAN_TEXT:
                     args = {**args, key: BOOLEAN_TEXT[said]}
-        for key in ("needs", "variants", "groups", "looks", "why_changed", "lessons", "scores"):
+        for key in (
+            "needs",
+            "variants",
+            "groups",
+            "looks",
+            "why_changed",
+            "lessons",
+            "scores",
+            "parts",
+            "joins",
+            "look",
+            "pictures",
+        ):
             # A list sent as its JSON text is read as the list.
             if isinstance(args, dict) and isinstance(args.get(key), str):
                 with contextlib.suppress(ValueError):
@@ -534,7 +695,54 @@ class WorkTools:
             found: Judged = getattr(self.desk, name)(args)
             return found
         answered: Judged = getattr(self, f"_{name}")(args)
+        if name in CHANGERS:
+            self._observe(name, args)
         return answered
+
+    # What the model last had of each file, and what changed it since
+
+    def _hash(self, path: str) -> str | None:
+        try:
+            return paths.content_hash(path, read_bytes_inside(self.work, path))
+        except (Outside, OSError):
+            return None
+
+    def _had(self, path: str, text: str) -> None:
+        """The model has this file whole, as it now is."""
+        digest = paths.content_hash(path, text.encode())
+        self.known[path] = (digest, self.at_call())
+        self.observed[path] = digest
+        self.changed_by.pop(path, None)
+
+    def _observe(self, name: str, args: dict[str, Any]) -> None:
+        """After a call that runs something: each file the model had that's now otherwise, and
+        what changed it. A `write` or `edit` of the file itself has already said."""
+        what = {
+            "run": f"`run` of `{args.get('path')}`",
+            "bench": f"`bench {args.get('command')}`",
+        }.get(name, f"the run after your `{name}` of `{args.get('path')}`")
+        for path, was in self.observed.items():
+            now = self._hash(path)
+            if now != was:
+                self.observed[path] = now
+                self.changed_by[path] = (self.at_call(), what)
+
+    def _since(self, path: str, text: str) -> str:
+        """What the model's told when its lines aren't in a file: that the file has changed since
+        it last had it whole, and what changed it, if so."""
+        had = self.known.get(path)
+        if had is None or had[0] == paths.content_hash(path, text.encode()):
+            return ""
+        by = self.changed_by.get(path)
+        if by is None:
+            return (
+                f"`{path}` has changed since you last had it whole, at call {had[1]}: "
+                "`read` it before you edit it again.\n\n"
+            )
+        return (
+            f"`{path}` has changed since you last had it whole, at call {had[1]}: call {by[0]}'s "
+            f"{by[1]} changed it. `read` it before you edit it again.\n\n"
+        )
 
     def _well_formed(self, name: Any, args: Any) -> Judged | None:
         """The AST category: crew's `check_arguments` over these tools, then BFCL's type check."""
@@ -624,6 +832,7 @@ class WorkTools:
             return self._failed("write", "outside", outside)
         except OSError as exc:
             return self._failed("write", "not_written", f"It couldn't be written: {exc}")
+        self._had(str(args["path"]), args["content"])
         said = f"Wrote {args['path']} ({len(args['content'])} characters)."
         return self._then_run("write", said, script)
 
@@ -647,7 +856,9 @@ class WorkTools:
         old, new = _trim(args["old"]), _trim(args["new"])
         refused = refusal(args["path"], text, old, new)
         if refused is not None:
-            return self._failed("edit", refused[0], refused[1])
+            since = self._since(str(args["path"]), text) if refused[0] in MISSED else ""
+            detail = {"changed_since": self.changed_by.get(str(args["path"]))} if since else {}
+            return Judged("edit", "failed", since + refused[1], refused[0], detail=detail)
         lines = text.splitlines()
         want = old.split("\n")
         i = next(k for k in range(len(lines)) if lines[k : k + len(want)] == want)
@@ -672,6 +883,11 @@ class WorkTools:
             return self._failed("edit", "outside", outside)
         except OSError as exc:
             return self._failed("edit", "not_written", f"It couldn't be written: {exc}")
+        path = str(args["path"])
+        if self.known.get(path, ("",))[0] == paths.content_hash(path, text.encode()):
+            self._had(path, after)
+        else:
+            self.observed[path] = paths.content_hash(path, after.encode())
         said = f"Replaced lines in `{args['path']}`.{broken}\nIt now reads:\n"
         return self._then_run("edit", said + changed_lines(text, after), script)
 
@@ -704,6 +920,8 @@ class WorkTools:
         head = f"`{path}`, lines {start}-{end} of {len(lines)}:"
         more = f"\n(more: `start` {end + 1})" if end < len(lines) else ""
         whole = start == 1 and end >= len(lines)
+        if whole:
+            self._had(path, text)
         return Judged("read", "ok", f"{head}\n{shown}{more}", detail={"whole": whole})
 
     def _picture(self, path: str) -> Judged:
@@ -787,10 +1005,14 @@ class WorkTools:
         images = self._rendered(record) if done.code in (0, 1) else []
         detail: dict[str, Any] = {"code": done.code, "seconds": done.seconds}
         reply = f"exit {done.code}\n{text}"
+        if nudged and nudged.get("lead"):
+            # A fixed need's check at other settings: said before the bench's own answer, so its
+            # verdict isn't read as the requirement's (mqucifer/print-shop#37).
+            reply = f"exit {done.code}\n{nudged['lead']}\n\n{text}"
         if nudged:
             # A need's check run with other arguments, or one that keeps failing: lines in its
             # reply, never a limit (`nudge.py`).
-            reply += f"\n\n{nudged['said']}"
+            reply += f"\n\n{nudged['said']}" if nudged["said"] else ""
             detail.update(nudged["detail"])
         return Judged("bench", "ok", reply, images=images, detail=detail)
 

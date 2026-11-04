@@ -32,6 +32,7 @@ from print_shop.rounds import paths
 from print_shop.rounds.run import Run
 from print_shop.rounds.session import Limits
 from tests.rounds_fakes import Scripted, tool
+from tests.test_rounds_in_image import BROKEN_DOWN
 
 pytestmark = [pytest.mark.bench, pytest.mark.bench_local]
 
@@ -160,10 +161,13 @@ def test_cup_1_read_back_refuses_its_fail_need_and_its_thin_panes_and_delivers_t
     # Intake, and round 1's script as the run had it.
     round_1, round_2 = files_of(1), files_of(2)
     model = Scripted(
-        [tool("needs", needs=failing_version)], [tool("needs", needs=settled)], *asked(round_1)
+        [BROKEN_DOWN, tool("needs", needs=failing_version)],
+        [tool("needs", needs=settled)],
+        *asked(round_1),
     )
     references = sorted((RUN / "work" / "references").iterdir())
-    request = (RUN / "request.md").read_text()
+    # It reads back what the run did, from before the plan was a stop: none is added.
+    request = (RUN / "request.md").read_text() + "\n\n## Stops\n- no plan\n"
     run = Run.start(root, "read-back", request, references, model, Limits(), sleep=lambda _: None)
     # cup-1 is from before toolsets: its needs name no `measures`, and it had every command.
     run.state.toolsets = False

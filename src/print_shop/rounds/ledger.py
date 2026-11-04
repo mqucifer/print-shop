@@ -19,8 +19,9 @@ each round.
 `records.py` writes `calls`, `interventions`, `timeline`, `runaways`, `tries` and `nudges` from a
 run's events, so a run's own records can be read back through them. Older code can still be running
 against this file, from a checkout nothing edits until it ends: tables and columns are only added,
-and never to one it inserts into by position (`needs`, `readings`). Two tables were made again once,
-keeping every row, as a close needs columns that may be empty (`_made_again`).
+and never to one it inserts into by position (`needs`, `readings`). Three tables were made again
+once, keeping every row (`_made_again`): two as a close needs columns that may be empty, and
+`lesson_scores` as a lesson's routes are scored apart from what a run was given.
 """
 
 from __future__ import annotations
@@ -213,6 +214,8 @@ CREATE TABLE IF NOT EXISTS timeline (
     at_call INTEGER,
     segment INTEGER NOT NULL,
     harness_commit TEXT,
+    -- A stop's ending said, or what a compaction cut: replies shrunk by tool, turns' reasoning
+    -- dropped, and `write` or `edit` texts made a note.
     said TEXT,
     -- A compaction's estimate either side, and the prompts measured either side.
     estimated_before INTEGER,
@@ -357,6 +360,30 @@ CREATE TABLE IF NOT EXISTS nudges (
     calls TEXT,
     PRIMARY KEY (run, seq)
 );
+CREATE TABLE IF NOT EXISTS refusals (
+    -- Each tool call that wasn't carried out as asked: malformed, ill-typed, or refused, with the
+    -- reason's code (`edit.closest`, `not_settled`...). Written from the run's events, for the
+    -- after-action review's index (mqucifer/print-shop#40).
+    run TEXT NOT NULL REFERENCES runs(run),
+    seq INTEGER NOT NULL,
+    at_call INTEGER NOT NULL,
+    round INTEGER,
+    tool TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    why TEXT,
+    PRIMARY KEY (run, seq)
+);
+CREATE TABLE IF NOT EXISTS said_weighed (
+    -- What the after-action review made of each thing a person said (`interventions`): whether
+    -- it should be a lesson, which lesson of the review it became, and why.
+    run TEXT NOT NULL REFERENCES runs(run),
+    said INTEGER NOT NULL,
+    at_call INTEGER NOT NULL,
+    lesson INTEGER REFERENCES lessons(id),
+    why TEXT NOT NULL,
+    by TEXT NOT NULL,
+    PRIMARY KEY (run, said, at_call)
+);
 CREATE TABLE IF NOT EXISTS lessons (
     -- What a run taught, for the next: written by the model in its after-action review, or by a
     -- person, and checked by a reviewer before any reaches another run.
@@ -370,7 +397,8 @@ CREATE TABLE IF NOT EXISTS lessons (
     at_call INTEGER,
     -- The fix's shape, in its writer's words, with the vocabulary settled later.
     fix_shape TEXT NOT NULL,
-    -- build (how to build), check (what to check) or context.
+    -- The area it's about, one of the five: job, verify, process, memory or loop. Before
+    -- mqucifer/print-shop#40, build, check or context, each sorted once by `lessons.migrate`.
     kind TEXT NOT NULL,
     text TEXT NOT NULL,
     -- The calls and readings that show it, by the ledger's keys.
@@ -379,9 +407,10 @@ CREATE TABLE IF NOT EXISTS lessons (
     status TEXT NOT NULL,
     status_by TEXT,
     status_at TEXT,
-    -- A lesson about checking becomes a refusal or a bench check, never a note: which.
+    -- What a lesson for the harness becomes, never a note: a refusal, a bench check, a toolset
+    -- check, a stop or a harness change; or `request`, a change to the request.
     becomes TEXT,
-    -- What it became once promoted (note, skill, bench_check or refusal), and where.
+    -- What it became last, once promoted on a route (`lesson_routes` has each), and where.
     became TEXT,
     became_where TEXT
 );
@@ -407,18 +436,89 @@ CREATE TABLE IF NOT EXISTS run_lessons (
     PRIMARY KEY (run, lesson)
 );
 CREATE TABLE IF NOT EXISTS lesson_scores (
-    -- Whether a run that was given a lesson used it: used, not_used or in_the_way, with the calls
-    -- that show it. The model scores at its after-action review, and a reviewer may score again.
+    -- Whether a lesson held on one of its routes in a run: used, not_used or in_the_way, with the
+    -- calls that show it. The model scores what it was given at its after-action review, and a
+    -- reviewer may score again; the analysis scores the other routes (mqucifer/print-shop#40).
     id INTEGER PRIMARY KEY,
-    run TEXT NOT NULL,
-    lesson INTEGER NOT NULL,
+    run TEXT NOT NULL REFERENCES runs(run),
+    lesson INTEGER NOT NULL REFERENCES lessons(id),
     score TEXT NOT NULL,
     calls TEXT NOT NULL,
     why TEXT,
     by TEXT NOT NULL,
     at_call INTEGER,
     at TEXT NOT NULL,
-    FOREIGN KEY (run, lesson) REFERENCES run_lessons(run, lesson)
+    -- model, harness, request or operator: empty is the model's, from before routes.
+    route TEXT
+);
+CREATE TABLE IF NOT EXISTS lesson_routes (
+    -- Who acts on a lesson: the model, the harness, the request or the operator and stand-in
+    -- (mqucifer/print-shop#40). The model proposes them, and a reviewer confirms or changes them.
+    lesson INTEGER NOT NULL REFERENCES lessons(id),
+    route TEXT NOT NULL,
+    by TEXT NOT NULL,
+    at TEXT NOT NULL,
+    -- Where it reached on this route once delivered: what it became, and where that is.
+    became TEXT,
+    became_where TEXT,
+    delivered_at TEXT,
+    -- Only a score after the delivery, by `lesson_scores.id`, says whether it holds there.
+    after_score INTEGER,
+    -- A lesson for the model whose fix is built elsewhere and held stops being given as text.
+    ended_at TEXT,
+    ended_why TEXT,
+    PRIMARY KEY (lesson, route)
+);
+CREATE TABLE IF NOT EXISTS lesson_keys (
+    -- The checks a lesson is about, by command and verdict: what a look-up at a failure reads.
+    -- An empty verdict is any.
+    lesson INTEGER NOT NULL REFERENCES lessons(id),
+    command TEXT NOT NULL,
+    verdict TEXT NOT NULL,
+    PRIMARY KEY (lesson, command, verdict)
+);
+CREATE TABLE IF NOT EXISTS request_lines (
+    -- The request's set form (mqucifer/print-shop#36): each line by its id, its section
+    -- (`requirement`, `non_negotiable`, `kind` or `stop`) and its text. The plan stop is `plan`.
+    run TEXT NOT NULL REFERENCES runs(run),
+    line TEXT NOT NULL,
+    section TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    PRIMARY KEY (run, line)
+);
+CREATE TABLE IF NOT EXISTS breakdowns (
+    -- How the reference and the request are built, as the model wrote it before its needs: the
+    -- parts, what holds or connects what, and what the look rests on. Each call a version.
+    run TEXT NOT NULL REFERENCES runs(run),
+    n INTEGER NOT NULL,
+    at_call INTEGER NOT NULL,
+    body TEXT NOT NULL,
+    at TEXT NOT NULL,
+    PRIMARY KEY (run, n)
+);
+CREATE TABLE IF NOT EXISTS need_marks (
+    -- What ties each need of a version to the request: the lines it covers, whether it's a
+    -- non-negotiable's (`fixed`), how its figure is read, and why no bench command measures a
+    -- line an eye need covers. Apart from `needs`, which older code inserts into by position.
+    run TEXT NOT NULL REFERENCES runs(run),
+    version INTEGER NOT NULL,
+    need TEXT NOT NULL,
+    covers TEXT NOT NULL,
+    fixed INTEGER NOT NULL,
+    figure TEXT,
+    no_bench TEXT,
+    PRIMARY KEY (run, version, need)
+);
+CREATE TABLE IF NOT EXISTS need_measures (
+    -- What each bench need of a version says it measures, from its toolset's short list
+    -- (mqucifer/print-shop#37). A table of its own, keyed as `need_marks`: that one is inserted
+    -- into by position, so a column added there would break older code writing to this ledger.
+    run TEXT NOT NULL REFERENCES runs(run),
+    version INTEGER NOT NULL,
+    need TEXT NOT NULL,
+    measures TEXT NOT NULL,
+    PRIMARY KEY (run, version, need)
 );
 CREATE TABLE IF NOT EXISTS skill_reads (
     -- Each skill a run read, at which call, and the file it is: how a run finds its skills
@@ -475,7 +575,23 @@ ADDED = (
     # The run's toolset: its kind, bench commands and skills (mqucifer/print-shop#37). Empty for a
     # run from before toolsets, which had every command.
     ("runs", "toolset", "TEXT"),
+    # The request's stop an ask showed, by its id (`plan`, `S1`), if it was one.
+    ("picks", "stop", "TEXT"),
+    # The route a score is on (mqucifer/print-shop#40): empty is the model's, from before.
+    ("lesson_scores", "route", "TEXT"),
+    # The kind of object a lesson is for, as a request names it: empty is a general lesson.
+    ("lessons", "part_kind", "TEXT"),
+    # The reasoning effort the run's alias sends, read through LiteLLM, or `unknown`, and how.
+    ("runs", "reasoning_effort", "TEXT"),
+    ("runs", "reasoning_effort_from", "TEXT"),
 )
+#: Each stop asked, at which call, and picked when and by whom: made once `picks.stop` is there.
+STOPS_VIEW = """CREATE VIEW IF NOT EXISTS stops AS
+SELECT picks.run, picks.stop, request_lines.text AS what, picks.ask, picks.round, picks.at_call,
+       picks.asked_at, picks.pick, picks.reason, picks.picked_at, picks.picked_by
+FROM picks LEFT JOIN request_lines
+       ON request_lines.run = picks.run AND request_lines.line = picks.stop
+WHERE picks.stop IS NOT NULL"""
 
 
 #: The approval decision a review from before `after_actions.decision` followed: its approval's.
@@ -487,7 +603,10 @@ FOLLOWED = (
     f"UPDATE after_actions SET decision = {APPROVAL_OF.format(a='after_actions')} "
     "WHERE decision IS NULL AND approval IS NOT NULL"
 )
-#: Tables made again once, by `DesignLedger._made_again`, and how each copies its rows.
+#: Tables made again once, by `DesignLedger._made_again`, and how each copies its rows. Each is
+#: made again only while it's as it was: `decisions` and `after_actions` while `approval` can't be
+#: empty, and `lesson_scores` while a score needs the lesson given as text to the run, which a
+#: score on a route that isn't the model's has no row of (mqucifer/print-shop#40).
 REMADE = (
     (
         "decisions",
@@ -502,7 +621,22 @@ REMADE = (
         f"a.ended_said, a.ended_at, a.last_call, {APPROVAL_OF.format(a='a')} "
         "FROM after_actions AS a",
     ),
+    (
+        "lesson_scores",
+        "INSERT INTO lesson_scores_remade (id, run, lesson, score, calls, why, by, at_call, at, "
+        "route) SELECT id, run, lesson, score, calls, why, by, at_call, at, route "
+        "FROM lesson_scores",
+    ),
 )
+
+
+def _as_it_was(db: sqlite3.Connection, table: str) -> bool:
+    """Whether a table in `REMADE` is still as it was, and so is to be made again."""
+    held = {r["name"]: r for r in db.execute(f"PRAGMA table_info({table})")}
+    if table == "lesson_scores":
+        refers = {r["table"] for r in db.execute(f"PRAGMA foreign_key_list({table})")}
+        return "run_lessons" in refers
+    return not all(c in held for c in _columns(table)) or bool(held["approval"]["notnull"])
 
 
 def _body(table: str) -> str:
@@ -542,7 +676,11 @@ class DesignLedger:
                 held = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
                 if column not in held:
                     db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
+            db.execute(STOPS_VIEW)
         self._made_again()
+        from print_shop.rounds import lessons  # noqa: PLC0415 - lessons reads the ledger
+
+        lessons.migrate(self)
 
     def _made_again(self) -> None:
         """A close may follow no stop for approval, and a review names the decision it follows
@@ -550,7 +688,9 @@ class DesignLedger:
         empty, and `after_actions` gains `decision`. SQLite can't drop a NOT NULL in place, so each
         table is made again as `SCHEMA` has it and every row copied, in one transaction. A review
         from before names the approval decision of its approval, which is what it followed. An
-        older checkout still running against this file inserts by column name into both."""
+        older checkout still running against this file inserts by column name into both.
+        `lesson_scores` is made again so a score needn't follow a lesson given as text: one on
+        the harness's, the request's or the operator's route has none (mqucifer/print-shop#40)."""
         db = sqlite3.connect(self.path, timeout=60, isolation_level=None)
         db.row_factory = sqlite3.Row
         try:
@@ -558,8 +698,7 @@ class DesignLedger:
             db.execute("BEGIN IMMEDIATE")
             try:
                 for table, copy in REMADE:
-                    held = {r["name"]: r for r in db.execute(f"PRAGMA table_info({table})")}
-                    if all(c in held for c in _columns(table)) and not held["approval"]["notnull"]:
+                    if not _as_it_was(db, table):
                         continue
                     db.execute(f"CREATE TABLE {table}_remade ({_body(table)})")
                     db.execute(copy)
@@ -626,7 +765,8 @@ class DesignLedger:
         with self._open() as db:
             db.execute(
                 "INSERT INTO runs (run, started_at, request_sha, events, harness_commit, "
-                "skills_sha, image, image_id, alias, limits) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "skills_sha, image, image_id, alias, limits, reasoning_effort, "
+                "reasoning_effort_from) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     run,
                     now(),
@@ -638,6 +778,8 @@ class DesignLedger:
                     facts["image_id"],
                     facts["alias"],
                     _json(facts["limits"]),
+                    facts.get("reasoning_effort"),
+                    facts.get("reasoning_effort_from"),
                 ),
             )
             if facts.get("toolset") is not None:
@@ -900,9 +1042,7 @@ class DesignLedger:
             review=_json(facts.get("review")) if facts.get("review") else None,
         )
 
-    def decided(
-        self, run: str, approval: int | None, decision: str, by: str, note: str
-    ) -> int:
+    def decided(self, run: str, approval: int | None, decision: str, by: str, note: str) -> int:
         """A person's decision, and its id: a review names the one it follows."""
         return self.insert(
             "decisions",
@@ -928,3 +1068,46 @@ class DesignLedger:
                 "UPDATE questions SET answers=?, answered_at=? WHERE run=? AND n=?",
                 (answers, now(), run, n),
             )
+
+    def request_read(self, run: str, form: Any) -> None:
+        """The request's lines and stops, as `request.read` found them."""
+        lines = [*form.requirements, *form.non_negotiables, *form.stops]
+        with self._open() as db:
+            for seq, line in enumerate(lines, 1):
+                db.execute(
+                    "INSERT OR REPLACE INTO request_lines VALUES (?,?,?,?,?)",
+                    (run, line.id, line.section, seq, line.text),
+                )
+            if form.kind:
+                db.execute(
+                    "INSERT OR REPLACE INTO request_lines VALUES (?,?,?,?,?)",
+                    (run, "kind", "kind", len(lines) + 1, form.kind),
+                )
+
+    def broken_down(self, run: str, n: int, at_call: int, body: dict[str, Any]) -> None:
+        self.add("breakdowns", run=run, n=n, at_call=at_call, body=_json(body), at=now())
+
+    def needs_marked(self, run: str, version: int, needs: list[Need]) -> None:
+        with self._open() as db:
+            for n in needs:
+                db.execute(
+                    "INSERT OR REPLACE INTO need_marks VALUES (?,?,?,?,?,?,?)",
+                    (
+                        run,
+                        version,
+                        n.id,
+                        _json(n.covers),
+                        int(n.fixed),
+                        n.figure or None,
+                        n.no_bench or None,
+                    ),
+                )
+                if n.measures:
+                    db.execute(
+                        "INSERT OR REPLACE INTO need_measures (run, version, need, measures) "
+                        "VALUES (?,?,?,?)",
+                        (run, version, n.id, n.measures),
+                    )
+
+    def stop_asked(self, run: str, ask: int, stop: str) -> None:
+        self.change("UPDATE picks SET stop=? WHERE run=? AND ask=?", stop, run, ask)

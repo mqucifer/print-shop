@@ -11,7 +11,7 @@
         "G5",
         "G7"
       ],
-      "request": "Make the frame in `references/frame.step` let light through every pane. Its panes are `references/pane_a.step`, `references/pane_b.step` and `references/pane_c.step`, 1 mm thick, with 0.25 mm of play.\n\n## Kind\n\nstained glass\n\n## Requirements\n\n- Light passes through every pane, with at least 50% of each pane open straight through.\n- Each pane is held by a lip on both faces: a full rim of 1.5 mm and a smallest rim of 0.55 mm, both before its 0.25 mm of play, with at least 50% of each pane visible.\n- The frame is one piece.\n\n## Non-negotiables\n\n- At least 50% of each pane open straight through.\n",
+      "request": "Make the frame in `references/frame.step` let light through every pane. Its panes are `references/pane_a.step`, `references/pane_b.step` and `references/pane_c.step`, 1 mm thick, with 0.25 mm of play.\n\n## Kind\n\nstained-glass\n\n## Requirements\n\n- Light passes through every pane, with at least 50% of each pane open straight through.\n- Each pane is held by a lip on both faces: a full rim of 1.5 mm and a smallest rim of 0.55 mm, both before its 0.25 mm of play, with at least 50% of each pane visible.\n- The frame is one piece.\n\n## Non-negotiables\n\n- At least 50% of each pane open straight through.\n",
       "files": [
         "light/frame.step",
         "light/pane_a.step",
@@ -36,7 +36,7 @@
         "G6",
         "G7"
       ],
-      "request": "The frame in `references/frame.step` holds two panes, `references/pane_big.step` and `references/pane_small.step`, 1 mm thick in pockets from z 1.5 to 2.5 with 0.25 mm of play. Make their lips right.\n\n## Kind\n\nstained glass\n\n## Requirements\n\n- Each pane is held by a lip on both faces: a full rim of 1.2 mm and a smallest rim of 0.55 mm, both before its 0.25 mm of play.\n- At least 60% of each pane visible.\n\n## Non-negotiables\n\n- A full rim of 1.2 mm and a smallest of 0.55 mm, before play, and 60% of each pane visible.\n",
+      "request": "The frame in `references/frame.step` holds two panes, `references/pane_big.step` and `references/pane_small.step`, 1 mm thick in pockets from z 1.5 to 2.5 with 0.25 mm of play. Make their lips right.\n\n## Kind\n\nstained-glass\n\n## Requirements\n\n- Each pane is held by a lip on both faces: a full rim of 1.2 mm and a smallest rim of 0.55 mm, both before its 0.25 mm of play.\n- At least 60% of each pane visible.\n\n## Non-negotiables\n\n- A full rim of 1.2 mm and a smallest of 0.55 mm, before play, and 60% of each pane visible.\n",
       "files": [
         "rims/frame.step",
         "rims/pane_big.step",
@@ -56,7 +56,7 @@
       "gaps": [
         "G8"
       ],
-      "request": "The frame in `references/frame.step` hangs from the 3 mm hole in its tab, at x 20, y 43.5. Make it strong enough to hang.\n\n## Kind\n\nstained glass\n\n## Requirements\n\n- At least 2 mm of wall all round the hanging hole.\n- The pane, `references/pane_1.step`, stays held as it is.\n\n## Non-negotiables\n\n- At least 2 mm of wall round the hanging hole.\n",
+      "request": "The frame in `references/frame.step` hangs from the 3 mm hole in its tab, at x 20, y 43.5. Make it strong enough to hang.\n\n## Kind\n\nstained-glass\n\n## Requirements\n\n- At least 2 mm of wall all round the hanging hole.\n- The pane, `references/pane_1.step`, stays held as it is.\n\n## Non-negotiables\n\n- At least 2 mm of wall round the hanging hole.\n",
       "files": [
         "hanging/frame.step",
         "hanging/pane_1.step"
@@ -76,7 +76,7 @@
         "G10",
         "G11"
       ],
-      "request": "The frame in `references/frame.step` has one triangular cell, and its pane is `references/pane_tip.step`. Make a pane for it that prints cleanly.\n\n## Kind\n\nstained glass\n\n## Requirements\n\n- Every file to be printed prints cleanly: nothing narrower than the nozzle.\n- The pane fills its pocket, with 0.25 mm of play.\n",
+      "request": "The frame in `references/frame.step` has one triangular cell, and its pane is `references/pane_tip.step`. Make a pane for it that prints cleanly.\n\n## Kind\n\nstained-glass\n\n## Requirements\n\n- Every file to be printed prints cleanly: nothing narrower than the nozzle.\n- The pane fills its pocket, with 0.25 mm of play.\n",
       "files": [
         "tip/frame.step",
         "tip/pane_tip.step"
@@ -97,7 +97,7 @@
         "G3",
         "G13"
       ],
-      "request": "A round sun-catcher, 80 mm across: a centre disc of one pane, a ring of 8 panes round it and a ring of 8 more outside that, with a hanging tab at the top.\n\n## Kind\n\nstained glass\n\n## Requirements\n\n- Light passes through every pane, with at least 40% of each pane open straight through.\n- The frame is one piece, with no floor under any pane.\n- Panes 1.6 mm thick, with 0.25 mm of play.\n- Each pane is held by a lip on both faces: a full rim of 1.2 mm and a smallest rim of 0.55 mm, both before play, with at least 60% of each pane visible.\n- At least 2 mm of wall round the hanging hole.\n\n## Stops\n\n- The 2D layout.\n",
+      "request": "A round sun-catcher, 80 mm across: a centre disc of one pane, a ring of 8 panes round it and a ring of 8 more outside that, with a hanging tab at the top.\n\n## Kind\n\nstained-glass\n\n## Requirements\n\n- Light passes through every pane, with at least 40% of each pane open straight through.\n- The frame is one piece, with no floor under any pane.\n- Panes 1.6 mm thick, with 0.25 mm of play.\n- Each pane is held by a lip on both faces: a full rim of 1.2 mm and a smallest rim of 0.55 mm, both before play, with at least 60% of each pane visible.\n- At least 2 mm of wall round the hanging hole.\n\n## Stops\n\n- The 2D layout.\n",
       "files": [],
       "baseline": "On `suncatcher-2` each ring was one unbroken loop of leading, so the frame fell apart into three pieces, and a floor went under the panes to hold it together.",
       "expected_behavior": [
@@ -115,7 +115,7 @@
         "G14",
         "G13"
       ],
-      "request": "Make the frame in `references/frame.step` and its pane, `references/pane_1.step`, again for a pane of the thickness below.\n\n## Kind\n\nstained glass\n\n## Requirements\n\n- Panes from 1.5 to 1.8 mm thick.\n- Each pane is held by a lip on both faces of at least 1.0 mm after its 0.25 mm of play.\n\n## Non-negotiables\n\n- Panes from 1.5 to 1.8 mm thick.\n",
+      "request": "Make the frame in `references/frame.step` and its pane, `references/pane_1.step`, again for a pane of the thickness below.\n\n## Kind\n\nstained-glass\n\n## Requirements\n\n- Panes from 1.5 to 1.8 mm thick.\n- Each pane is held by a lip on both faces of at least 1.0 mm after its 0.25 mm of play.\n\n## Non-negotiables\n\n- Panes from 1.5 to 1.8 mm thick.\n",
       "files": [
         "thick/frame.step",
         "thick/pane_1.step"

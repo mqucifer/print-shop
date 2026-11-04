@@ -13,7 +13,7 @@ need's check with other arguments says so in its reply, pass or fail: `done` che
 
 **The nudge says why it fired,** a line a try: its call, the arguments that differ from the first
 try, and the start of what the bench said. It's the newest bench reply, so compaction keeps it
-whole, where older replies are cut to their first line (`exit 1`) and can't be compared.
+whole. Each try is in `record/CHECKS.md` too (`record`).
 
 `AFTER` is from the design runs' records (`~/print-shop/proofs/m18-close/streaks.json`): of 41 runs
 of failures of one check in a row, 35 were 3 or fewer, and the 6 of 4 or more include both of
@@ -63,6 +63,9 @@ class Wanted:
     need: str
     command: str
     argv: list[str]
+    #: A non-negotiable's need, and its words: its check counts only at its own settings.
+    fixed: bool = False
+    quote: str = ""
 
 
 def _words(argv: list[str]) -> list[str]:
@@ -161,24 +164,54 @@ def off_need(argv: list[str], wanted: list[Wanted]) -> list[dict[str, Any]]:
     if as_a_need(argv, mine):
         return []
     return [
-        {"need": w.need, "command": w.command, "differs": differences(argv, w.argv)} for w in mine
+        {
+            "need": w.need,
+            "command": w.command,
+            "differs": differences(argv, w.argv),
+            **({"fixed": True, "quote": w.quote} if w.fixed else {}),
+        }
+        for w in mine
     ]
+
+
+def _off_need_parts(one: dict[str, Any]) -> str:
+    parts = []
+    for name, got, wants in one["differs"]:
+        if wants is None:
+            parts.append(f"{_given(name, got)}, the need doesn't give it")
+        elif got is None:
+            parts.append(f"no `{name}`, the need says {_given(name, wants)}")
+        else:
+            parts.append(f"`{name} {got}`, the need says `{wants}`")
+    return "; ".join(parts)
+
+
+def not_the_requirement(found: list[dict[str, Any]]) -> str:
+    """What the model's told, before the bench's answer, of a fixed need's check run at other
+    settings: on `suncatcher-2` `capture` passed at `--min-lip 0.25` where the request said 1.2.
+    It's said on the first try, pass or fail, and the reading can't pass the need."""
+    lines = []
+    for one in found:
+        if not one.get("fixed"):
+            continue
+        words = f', "{one["quote"]}"' if one.get("quote") else ""
+        lines.append(
+            f"NOT THE REQUIREMENT: `{one['need']}` is fixed, a non-negotiable of the request"
+            f"{words}, and its check is `{one['command']}`. This try has {_off_need_parts(one)}. "
+            "Whatever it reads below, it isn't the requirement and can't pass it: `done` runs the "
+            "requirement's own command. A fixed need changes only by the Sponsor."
+        )
+    return "\n".join(lines)
 
 
 def off_need_said(found: list[dict[str, Any]]) -> str:
     """What the model's told of a need's check run with other arguments."""
     lines = []
     for one in found:
-        parts = []
-        for name, got, wants in one["differs"]:
-            if wants is None:
-                parts.append(f"{_given(name, got)}, the need doesn't give it")
-            elif got is None:
-                parts.append(f"no `{name}`, the need says {_given(name, wants)}")
-            else:
-                parts.append(f"`{name} {got}`, the need says `{wants}`")
+        if one.get("fixed"):
+            continue  # said first, by `not_the_requirement`
         lines.append(
-            f"This is `{one['need']}`'s check with other arguments: {'; '.join(parts)}. `done` "
+            f"This is `{one['need']}`'s check with other arguments: {_off_need_parts(one)}. `done` "
             f"checks the need's command, `{one['command']}`, so this reading isn't the need's."
         )
     return "\n".join(lines)
@@ -205,13 +238,10 @@ def said(check: Check, tries: list[Try], wanted: list[Wanted]) -> str:
     """The nudge, with why it fired: each try since the check last passed as a need checks it."""
     command, files = check
     on = f" on {', '.join(f'`{f}`' for f in files)}" if files else ""
-    since = (
-        "without passing as a need checks it" if wanted_for(check, wanted) else "in a row"
-    )
+    since = "without passing as a need checks it" if wanted_for(check, wanted) else "in a row"
     first = tries[0]
     lines = [
-        f"`{command}`{on} has failed {failures(tries)} times {since}, whatever its other "
-        "arguments:"
+        f"`{command}`{on} has failed {failures(tries)} times {since}, whatever its other arguments:"
     ]
     for one in tries:
         if one is first:
@@ -235,3 +265,69 @@ def said(check: Check, tries: list[Try], wanted: list[Wanted]) -> str:
         lines.append(f"- call {one.at_call}, {how}: {outcome}" + (f": {why}" if why else ""))
     lines.append(prompt.STUCK)
     return "\n".join(lines)
+
+
+#: How much of what the bench said each try in `record/CHECKS.md` keeps.
+RECORD_WHY_CHARS = 200
+CHECKS_HEADING = "# Each check's tries, as the bench answered them"
+CHECKS_ABOUT = (
+    "Every bench command you've run, by its check: its command and the files it names. Each try "
+    "gives its call, the settings that differ from the need's command (or, where no need runs "
+    "the check, from its first try), and what the bench said. `done` checks each need's own "
+    "command. The harness writes this after each bench call (mqucifer/print-shop#39)."
+)
+
+
+def _differs_said(argv: list[str], against: list[str], whose: str) -> str:
+    changed = [
+        f"{_given(name, got) if got is not None else f'no `{name}`'}"
+        f" ({whose}: {_given(name, was) if was is not None else 'none'})"
+        for name, got, was in differences(argv, against)
+    ]
+    return ", ".join(changed)
+
+
+def record(earlier: list[Try], wanted: list[Wanted], last: int | None = None) -> str:
+    """`record/CHECKS.md`: each check's tries, oldest first, so a summary or a new conversation
+    can compare them. A wrong command (exit 3) isn't a try. With `last`, each check keeps only its
+    latest tries, and says how many came before."""
+    checks: dict[Check, list[Try]] = {}
+    for one in earlier:
+        if one.exit == USAGE:
+            continue
+        checks.setdefault(check_of(one.argv), []).append(one)
+    lines = [CHECKS_HEADING, "", CHECKS_ABOUT, ""]
+    if not checks:
+        lines.append("No bench check has been run yet.")
+    for check, tries in checks.items():
+        command, files = check
+        on = f" on {', '.join(f'`{f}`' for f in files)}" if files else ""
+        lines.append(f"## `{command}`{on}")
+        mine = wanted_for(check, wanted)
+        if mine:
+            needs = "; ".join(f"`{w.need}` runs it as `{w.command}`" for w in mine)
+            lines.append(f"The needs: {needs}.")
+            against, whose = mine[0].argv, "the need"
+        else:
+            against, whose = tries[0].argv, "first try"
+            lines.append("No need runs it: each try is against its first.")
+        shown = tries if last is None else tries[-last:]
+        if len(shown) < len(tries):
+            lines.append(f"- ({len(tries) - len(shown)} earlier tries: `record/CHECKS.md`)")
+        for one in shown:
+            if one is tries[0] and not mine:
+                given = " ".join(
+                    f"{name} {' '.join(values)}".strip()
+                    for name, values in options(one.argv).items()
+                )
+                how = f"the first try, `{given}`" if given else "the first try, no options"
+            else:
+                how = _differs_said(one.argv, against, whose) or (
+                    "as the need runs it" if mine else "the same as the first"
+                )
+            outcome = one.verdict or ("passed" if one.exit == 0 else f"exit {one.exit}")
+            why = (one.why or "").strip().replace("\n", " ")
+            why = why if len(why) <= RECORD_WHY_CHARS else f"{why[:RECORD_WHY_CHARS]}…"
+            lines.append(f"- call {one.at_call}, {how}: {outcome}" + (f": {why}" if why else ""))
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"

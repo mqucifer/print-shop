@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from print_shop.rounds import skills, toolsets
+from print_shop.rounds import request, skills, toolsets
 
 EVALS = Path(__file__).parent / "skill_evals" / "designing-stained-glass"
 OURS = ("bench", "designing-stained-glass")
@@ -117,7 +117,8 @@ def test_the_evaluations_came_first_and_each_has_a_task_files_and_expected_behav
     made = (EVALS / "make_evals.py").read_text()
     for one in found["evals"]:
         assert one["request"].strip() and one["baseline"].strip(), one["id"]
-        assert "## Kind\n\nstained glass" in one["request"], one["id"]
+        form = request.read(one["request"])
+        assert toolsets.named(form.kind) is toolsets.STAINED_GLASS, one["id"]
         assert len(one["expected_behavior"]) >= 3, one["id"]
         assert set(one["gaps"]) <= gaps, one["id"]
         for name in one["files"]:
