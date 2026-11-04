@@ -17,7 +17,7 @@ from print_shop.rounds import paths, records
 from print_shop.rounds.ledger import DesignLedger
 from print_shop.rounds.needs import Need, read
 from print_shop.rounds.run import Run
-from print_shop.rounds.session import Limits
+from print_shop.rounds.session import CHARS_PER_TOKEN, Limits
 from tests.rounds_fakes import Scripted, tool
 
 
@@ -278,7 +278,8 @@ def test_an_old_run_reads_back_through_the_new_tables_and_its_folder_isnt_touche
     runaways = [dict(r) for r in ledger.rows("SELECT * FROM runaways ORDER BY n")]
     assert [(r["n"], r["why"]) for r in runaways] == [(4, "limit,repeats")]
     limit = runaways[0]
-    assert limit["tokens_unaccounted"] == 65536 - 2000 - 2
+    # Its text, "a plan", is counted at the session's characters a token.
+    assert limit["tokens_unaccounted"] == 65536 - 2000 - int(len("a plan") / CHARS_PER_TOKEN)
     assert json.loads(limit["doing"])["tool_calls"][0]["name"] == "write"
 
     # A `try`, from its reply, and what a pick saw, from the copies its folder kept.

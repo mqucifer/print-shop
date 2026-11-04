@@ -207,7 +207,8 @@ CREATE TABLE IF NOT EXISTS interventions (
 CREATE TABLE IF NOT EXISTS timeline (
     run TEXT NOT NULL REFERENCES runs(run),
     seq INTEGER NOT NULL,
-    -- start, resume, stop, compaction, restart or after_action.
+    -- start, resume, stop, compaction, restart, after_action, or asked: a call that ended
+    -- without a tool call, asked what's missing.
     kind TEXT NOT NULL,
     name TEXT,
     at TEXT,
