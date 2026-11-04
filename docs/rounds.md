@@ -297,6 +297,7 @@ For the operator, at each review and each ask (mqucifer/print-shop#40). It's the
 - **Check each candidate lesson against the run's analysis and against each person's note:** a finding in either that no lesson holds is a lesson missed.
 - **Write a lesson that's missing by hand,** with `lessons load`.
 - **Read a bench verdict before its picture.** On `cup-1` the stand-in gave a false cause, read from a picture whose check said FAIL.
+- **Give the reference pictures at the start,** with `start --reference`, not after the first round. On `stainedglass-1` the Sponsor's intent arrived late, after the plan had been written without it. The other half of that lesson, reading the plan at the first write, is now the plan stop (mqucifer/print-shop#38).
 
 **The next run starts with what was kept for the model.** `start` puts each kept lesson for the model (`accepted`, `edited`, `given`, `held`, `broken` or `promoted`, its text still given, as above) into the first message, after the request and its files, under `## Lessons from earlier runs`, each with its number, its area, the run it came from and who wrote it. `lessons.md` in the run's folder holds them as given, so a conversation started again from the record has the same, and `run_lessons` has a row for each. A lesson for the harness, the request or the operator alone isn't given.
 
