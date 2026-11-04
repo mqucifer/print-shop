@@ -69,6 +69,9 @@ DECIDED = (APPROVED, CLOSED)
 WAITING = ("questions", "ask", MET)
 #: Who a note is from, unless a person says.
 NOTE_FROM = "the people running this"
+#: Each check's latest tries a conversation started again from the record is given: the rest
+#: are in `record/CHECKS.md`.
+AGAIN_TRIES = 6
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 VARIANT = re.compile(r"[A-Za-z0-9_-]{1,24}")
 #: A failing need's bench text shown in the reply.
@@ -258,6 +261,7 @@ class Run:
         )
         if sleep is not None:
             self.session.sleep = sleep
+        self.tools.at_call = lambda: self.session.requests
 
     # Starting and going on
 
@@ -762,7 +766,10 @@ class Run:
         state = f"This is round {self.state.round}." if self.state.round else "This is intake."
         needs_json = json.dumps([n.plain() for n in self._needs()], indent=1)
         relayed = [f"A note from the people running this:\n\n{n}" for n in self.state.notes]
-        text = prompt.again(self._start_text(), [*self.state.said, *relayed], needs_json, state)
+        checks = nudge.record(self._bench_tries(), self._wanted(), last=AGAIN_TRIES)
+        text = prompt.again(
+            self._start_text(), [*self.state.said, *relayed], needs_json, state, checks
+        )
         self.session.begin(
             {"role": "system", "content": prompt.SYSTEM},
             {"role": "user", "content": text},
@@ -804,13 +811,11 @@ class Run:
             paths.snapshot(self.work),
             ran.seconds,
         )
+        earlier = self._bench_tries()
+        wanted = self._wanted()
+        paths.write_inside(self.work, "record/CHECKS.md", nudge.record(earlier, wanted))
         if ran.code == nudge.USAGE:
             return None
-        wanted = [
-            nudge.Wanted(n.id, n.command, n.argv())
-            for n in self._needs()
-            if n.by == "bench" and n.command
-        ]
         lines: list[str] = []
         detail: dict[str, Any] = {}
         off = nudge.off_need(argv, wanted)
@@ -818,15 +823,6 @@ class Run:
             lines.append(nudge.off_need_said(off))
             detail["off_need"] = off
         check = nudge.check_of(argv)
-        earlier = [
-            nudge.Try(
-                int(r["at_call"]), json.loads(r["argv"]), int(r["exit"]), r["verdict"], r["why"]
-            )
-            for r in self.ledger.rows(
-                "SELECT at_call, argv, exit, verdict, why FROM bench_calls WHERE run=? ORDER BY id",
-                self.state.name,
-            )
-        ]
         tries = nudge.streak(earlier, check, wanted)
         failed = nudge.failures(tries)
         if tries and failed >= nudge.AFTER:
@@ -841,6 +837,26 @@ class Run:
         if not lines:
             return None
         return {"said": "\n\n".join(lines), "detail": detail}
+
+    def _wanted(self) -> list[nudge.Wanted]:
+        """The settled needs that run a bench check."""
+        return [
+            nudge.Wanted(n.id, n.command, n.argv())
+            for n in self._needs()
+            if n.by == "bench" and n.command
+        ]
+
+    def _bench_tries(self) -> list[nudge.Try]:
+        """Every bench call of this run, oldest first, as the ledger keeps it."""
+        return [
+            nudge.Try(
+                int(r["at_call"]), json.loads(r["argv"]), int(r["exit"]), r["verdict"], r["why"]
+            )
+            for r in self.ledger.rows(
+                "SELECT at_call, argv, exit, verdict, why FROM bench_calls WHERE run=? ORDER BY id",
+                self.state.name,
+            )
+        ]
 
     def questions(self, args: dict[str, Any]) -> Judged:
         if not self.state.needs_open:
