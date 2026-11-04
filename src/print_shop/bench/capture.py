@@ -40,6 +40,7 @@ from .fabrication import (
     islands_line,
     pocket_heights,
 )
+from .glass import grid, shadow, span, visible, visible_by_rays
 from .report import Report
 from .shapes import NoAnswer, Part, flat_heights, hits, load, slice_at
 
@@ -60,12 +61,15 @@ LIP_BAND = 0.03
 END_SLOPE = 0.33
 #: Directions a pane is shifted in, by its play.
 SHIFTS = 8
-#: A pane's width across, read two ways at each point of its edge, may differ by this much, in mm,
-#: before it's a disagreement: the second way walks in by `WIDTH_STEP` and then halves it.
-WIDTH_STEP = 0.05
-WIDTH_BAND = 0.02
-#: The most failing stretches of one face said in a verdict: the rest are in the numbers.
-STRETCHES_SAID = 4
+#: A rim sized to the visible share (mqucifer/print-shop#37, criterion 6). The rim the pane has
+#: may fall short of the rim it needs by this much, in mm: the mesh's chords on both edges, with
+#: room for the bisection that finds the rim needed. Its visible share may fall short by
+#: `SHARE_TOL` percentage points: a rim drawn exactly at the need leaves exactly the share, so
+#: this is the same chords read as area, on a pane as small as the smallest the runs drew.
+RIM_TOL = 0.01
+SHARE_TOL = 0.5
+#: Halvings of the bisection for the rim needed: 2 mm of range to under a micrometre.
+HALVINGS = 40
 #: A pane file is the pane the bench read if their outlines at the pocket's height share this much
 #: of what either covers.
 MATCH_SHARE = 0.9
@@ -197,9 +201,8 @@ def rim_reading(
     points: np.ndarray,
     step: float,
     play: float,
-    min_lip: float | np.ndarray,
+    min_lip: float,
     rings: list[Ring] | None = None,
-    widths: np.ndarray | None = None,
 ) -> dict[str, Any]:
     """What the lip at each point of a pane's edge comes to.
 
@@ -234,74 +237,6 @@ def rim_reading(
     if counted.any():
         worst = np.nonzero(counted)[0][np.argmin(lips[counted])]
         found["thin_at"] = [round(float(v), 3) for v in points[worst]]
-    if widths is not None:
-        found["thin_stretches"] = _stretches(counted, lips, points, play, min_lip, widths, rings)
-    return found
-
-
-def _stretches(
-    counted: np.ndarray,
-    lips: np.ndarray,
-    points: np.ndarray,
-    play: float,
-    min_lip: float | np.ndarray,
-    widths: np.ndarray,
-    rings: list[Ring],
-) -> list[dict[str, Any]]:
-    """Each stretch of edge whose lip after play is under the rim it's held to: where it is, how
-    wide the pane is across it, its lip and that rim."""
-    need = np.broadcast_to(np.asarray(min_lip, dtype=float), lips.shape)
-    found = []
-    for start, count, ring_step in rings:
-        for first, length in _runs(counted[start : start + count]):
-            index = [start + (first + k) % count for k in range(length)]
-            worst = index[int(np.argmin(lips[index] - need[index]))]
-            found.append(
-                {
-                    "from": [round(float(v), 3) for v in points[index[0]]],
-                    "to": [round(float(v), 3) for v in points[index[-1]]],
-                    "at": [round(float(v), 3) for v in points[worst]],
-                    "length_mm": round(length * ring_step, 2),
-                    "width_mm": round(float(widths[index].min()), 3),
-                    "lip_with_play_mm": round(float(lips[worst] - play), 4),
-                    "rim_mm": round(float(need[worst]), 4),
-                }
-            )
-    return sorted(found, key=lambda f: f["lip_with_play_mm"] - f["rim_mm"])
-
-
-def widths_across(pane: Any, points: np.ndarray, inward: np.ndarray) -> np.ndarray:
-    """How wide the pane is at each point of its edge: straight across, inward at right angles to
-    the edge, to the far side, as `thin` reads a wall. By a line from each point to where it first
-    leaves the pane."""
-    x0, y0, x1, y1 = pane.bounds
-    reach = 2.0 * float(np.hypot(x1 - x0, y1 - y0))
-    start = points + inward * 1e-4
-    lines = shapely.linestrings(np.stack([start, start + inward * reach], axis=1))
-    crossed = shapely.intersection(lines, pane.boundary)
-    return np.asarray(shapely.distance(shapely.points(start), crossed), dtype=float) + 1e-4
-
-
-def widths_walked(pane: Any, points: np.ndarray, inward: np.ndarray) -> np.ndarray:
-    """The same, a different way: walking in by `WIDTH_STEP` while each step is still inside the
-    pane, then halving the last step until it's within `WIDTH_BAND`'s quarter."""
-    x0, y0, x1, y1 = pane.bounds
-    steps = int(np.ceil(2.0 * np.hypot(x1 - x0, y1 - y0) / WIDTH_STEP)) + 1
-    found = np.empty(len(points))
-    for i, (point, way) in enumerate(zip(points, inward, strict=True)):
-        ds = 1e-4 + WIDTH_STEP * np.arange(steps)
-        walked = point + np.outer(ds, way)
-        inside = shapely.contains_xy(pane, walked[:, 0], walked[:, 1])
-        out = int(np.argmin(inside)) if not inside.all() else steps - 1
-        low, high = float(ds[max(0, out - 1)]), float(ds[out])
-        while high - low > WIDTH_BAND / 4:
-            middle = (low + high) / 2
-            at = point + way * middle
-            if shapely.contains_xy(pane, at[0], at[1]):
-                low = middle
-            else:
-                high = middle
-        found[i] = low
     return found
 
 
@@ -381,8 +316,10 @@ def _face(
     args: Any,
     limits: tuple[float, float],
     surface: float,
+    min_lip: float | None = None,
 ) -> dict[str, Any]:
-    """One face of one pane: its window, lip and way out, by sections and then by the mesh."""
+    """One face of one pane: its window, lip and way out, by sections and then by the mesh.
+    `min_lip` is the lip after play it's held to, if not `--min-lip`'s."""
     low, high = limits
     z = args.pocket_z
     window = pane.difference(covered)
@@ -391,12 +328,12 @@ def _face(
     points, inward, rings = _rim(pane)
     step = max(r[2] for r in rings)
     edge = shapely.points(points)
-    need, widths = _rims(pane, points, inward, args)
     if window.is_empty:
         by_sections = np.full(len(points), np.inf)
     else:
         by_sections = np.asarray(shapely.distance(edge, window), dtype=float)
-    first = rim_reading(by_sections, points, step, args.clearance, need, rings, widths)
+    held = args.min_lip if min_lip is None else min_lip
+    first = rim_reading(by_sections, points, step, args.clearance, held, rings)
     row: dict[str, Any] = {
         "window_mm2": round(float(window.area), 3),
         "covered_mm2": round(float(pane.area - window.area), 3),
@@ -429,7 +366,7 @@ def _face(
             for (x, y), way in zip(points, inward, strict=True)
         ]
     )
-    second = rim_reading(by_rays, points, step, args.clearance, need, rings)
+    second = rim_reading(by_rays, points, step, args.clearance, held, rings)
     row["rays"] = {k: second[k] for k in ("least_lip_mm", "no_lip_mm", "surrounds")}
 
     # How thick the lip is at its root, and how much air lies between it and the pane's face.
@@ -452,44 +389,6 @@ def _face(
     row["least_in_path_mm3"] = round(min(volumes), 4)
     row["passes_3d_at_shifts"] = sum(v <= allowed * (z1 - z0) for v in volumes)
     return row
-
-
-def _rims(
-    pane: Any, points: np.ndarray, inward: np.ndarray, args: Any
-) -> tuple[float | np.ndarray, np.ndarray | None]:
-    """The rim each point of the edge is held to, and the pane's width across there: the smaller
-    rim where it's narrower than `--narrow-under`, the larger elsewhere. With no `--narrow-under`,
-    one rim all round, and no widths."""
-    if args.narrow_under is None:
-        return args.min_lip, None
-    widths = widths_across(pane, points, inward)
-    need = np.where(widths < args.narrow_under, args.narrow_min_lip, args.min_lip)
-    return need, widths
-
-
-def narrow_reading(pane: Any, args: Any) -> dict[str, Any]:
-    """Where a pane is narrow, by both ways of reading its width across, and whether they agree on
-    which stretches are narrow."""
-    points, inward, rings = _rim(pane)
-    across = widths_across(pane, points, inward)
-    walked = widths_walked(pane, points, inward)
-    spacing = np.concatenate([np.full(count, step) for _, count, step in rings])
-    narrow = across < args.narrow_under
-    # Only where the two ways differ by more than their band and fall either side of the width.
-    split = (narrow != (walked < args.narrow_under)) & (np.abs(across - walked) > WIDTH_BAND)
-    found: dict[str, Any] = {
-        "narrow_under_mm": args.narrow_under,
-        "narrow_mm": round(float(spacing[narrow].sum()), 2),
-        "edge_mm": round(float(spacing.sum()), 2),
-        "least_width_mm": round(float(across.min()), 3),
-        "least_width_walked_mm": round(float(walked.min()), 3),
-        "split_mm": round(float(spacing[split].sum()), 2),
-    }
-    if split.any():
-        worst = np.nonzero(split)[0][np.argmax(np.abs(across - walked)[split])]
-        found["split_at"] = [round(float(v), 3) for v in points[worst]]
-        found["split_widths_mm"] = [round(float(across[worst]), 3), round(float(walked[worst]), 3)]
-    return found
 
 
 def _face_says(
@@ -525,21 +424,7 @@ def _face_says(
             f"pane {name} can swing out {way}: what lip there is lies to one side of it, "
             f"with {face['no_lip_mm']} mm of its edge free"
         )
-    if face["thin_mm"] and args.narrow_under is not None:
-        stretches = face["thin_stretches"]
-        said = "; ".join(
-            f"near {f['at']}, {f['length_mm']} mm of edge where it's {f['width_mm']} mm across, "
-            f"a lip of {f['lip_with_play_mm']} mm after play, under its {f['rim_mm']} mm"
-            for f in stretches[:STRETCHES_SAID]
-        )
-        left = len(stretches) - STRETCHES_SAID
-        more = f", and {left} more" if left > 0 else ""
-        problems.append(
-            f"pane {name}'s lip {way} is under its rim after {args.clearance} mm of play "
-            f"({args.narrow_min_lip} mm where it's under {args.narrow_under} mm across, "
-            f"{args.min_lip} mm elsewhere) for {face['thin_mm']} mm of its edge: {said}{more}"
-        )
-    elif face["thin_mm"]:
+    if face["thin_mm"] and args.min_visible is None:
         problems.append(
             f"pane {name}'s lip {way} is under {args.min_lip} mm after {args.clearance} mm of play "
             f"for {face['thin_mm']} mm of its edge, near {face['thin_at']}"
@@ -549,6 +434,132 @@ def _face_says(
             f"pane {name}'s lip {way} is {thick} mm thick near {face['lip_thick_at']}, "
             f"under a {args.layer} mm layer"
         )
+
+
+def _share_says(
+    label: str,
+    row: dict[str, Any],
+    pane: Any,
+    cover: Any,
+    built: Any,
+    through: tuple[float, float],
+    args: Any,
+    report: Report,
+    problems: list[str],
+    differs: list[str],
+) -> None:
+    """A pane's visible share on the built frame and the rim it has, against the rim it needs:
+    what to set it to, or that it goes."""
+    rim = row["rim"]
+    region, share = visible(pane, cover)
+    by_rays, rays, band = visible_by_rays(pane, region, [built], *through, 4000)
+    lips = [row[k]["least_lip_mm"] for k in ("up", "down") if row[k]["least_lip_mm"] is not None]
+    has = round(min(lips) + args.clearance, 4) if lips else None
+    rim.update(
+        visible_pct=round(share, 2),
+        visible_rays_pct=round(by_rays, 2),
+        rays=rays,
+        has_mm=has,
+    )
+    name = label[5:]
+    needs = "none: it's to be removed" if rim["remove"] else f"{rim['needs_mm']:.2f} mm"
+    report.line(
+        f"pane {name}: {share:.1f}% visible, {args.min_visible:g}% wanted; its rim needs "
+        f"{needs} before play, and has {has} mm at the least"
+    )
+    report.second(
+        f"pane {name}'s visible share by rays straight up through the frame: {by_rays:.1f}% of "
+        f"{rays}, against {share:.1f}% by area; the rim it needs, {rim['needs_mm']} mm, leaves "
+        f"{rim.get('visible_at_need_grid_pct')}% by a grid against "
+        f"{rim.get('visible_at_need_pct')}% by inset"
+    )
+    if abs(share - by_rays) > band:
+        differs.append(
+            f"{name}: {share:.1f}% visible by area and {by_rays:.1f}% by rays, more than the "
+            f"{band:.1f} points a grid of {rays} can be off by"
+        )
+    if not rim["remove"] and abs(
+        rim["visible_at_need_pct"] - rim["visible_at_need_grid_pct"]
+    ) > rim["grid_band_pct"]:
+        differs.append(
+            f"{name}: at the rim it needs, {rim['visible_at_need_pct']}% is visible by inset and "
+            f"{rim['visible_at_need_grid_pct']}% by a grid"
+        )
+    if rim["remove"]:
+        problems.append(
+            f"{label}: remove this pane. Even the smallest rim, {args.least_rim:g} mm before "
+            f"play, leaves {rim['visible_at_least_pct']:.1f}% of it visible, and "
+            f"{args.min_visible:g}% is wanted"
+        )
+        return
+    faces = [row[k] for k in ("up", "down")]
+    short = [f for f in faces if f["thin_mm"]]
+    covered = share < args.min_visible - SHARE_TOL
+    if not short and covered and has is not None and has <= rim["needs_mm"] + RIM_TOL:
+        problems.append(
+            f"{label}: its rim is the {rim['needs_mm']:.2f} mm before play it needs, and only "
+            f"{share:.1f}% of it is visible, where {args.min_visible:g}% is wanted: the frame "
+            "covers it elsewhere, as a floor under it or a bar across it would"
+        )
+        return
+    if short or share < args.min_visible - SHARE_TOL:
+        where = "; ".join(
+            f"{way} short of it for {f['thin_mm']} mm of its edge, near {f['thin_at']}"
+            for way, f in zip(("above", "below"), faces, strict=True)
+            if f["thin_mm"]
+        )
+        problems.append(
+            f"{label}: set this pane's rim to {rim['needs_mm']:.2f} mm before play. It has "
+            f"{has} mm at the least"
+            + (f" ({where})" if where else "")
+            + f", and {share:.1f}% of it is visible, where {args.min_visible:g}% is wanted"
+        )
+
+
+def inset_share(pane: Any, overlap: float) -> float:
+    """The share of a pane, in percent, that a rim covering `overlap` of it all round leaves
+    visible: the pane's outline inset by that much, true distance with round joins, area against
+    area."""
+    return 100.0 * float(pane.buffer(-overlap, join_style="round").area) / float(pane.area)
+
+
+def rim_needed(pane: Any, args: Any) -> dict[str, Any]:
+    """The rim a pane needs, before play: the full rim if the share stays visible with it, the
+    widest that keeps it if not, and none if even the smallest rim can't, so the pane goes.
+
+    A rim before play runs from the pocket's wall, as the request gives it. On the pane, in the
+    middle of its pocket, it covers that less the play: what `inset_share` insets by."""
+    play = args.clearance
+    full, least, share = args.full_rim, args.least_rim, args.min_visible
+    found: dict[str, Any] = {
+        "full_rim_mm": full,
+        "least_rim_mm": least,
+        "min_visible_pct": share,
+        "visible_at_full_pct": round(inset_share(pane, full - play), 2),
+        "visible_at_least_pct": round(inset_share(pane, least - play), 2),
+    }
+    if found["visible_at_full_pct"] >= share:
+        need = full
+    elif inset_share(pane, least - play) < share:
+        found.update(remove=True, needs_mm=None)
+        return found
+    else:
+        low, high = least - play, full - play
+        for _ in range(HALVINGS):
+            middle = (low + high) / 2
+            low, high = (middle, high) if inset_share(pane, middle) >= share else (low, middle)
+        need = low + play
+    found.update(remove=False, needs_mm=round(need, 4))
+    # The second method: a grid in the pane, each point visible if it's at least the rim's
+    # overlap from the pane's edge, against the inset's area.
+    points, step = grid(pane, 4000)
+    far = np.asarray(shapely.distance(shapely.points(points), pane.boundary), dtype=float)
+    by_grid = 100.0 * float((far >= need - play).mean())
+    band = max(SHARE_TOL, 100.0 * 0.25 * 2 * float(pane.boundary.length) * step / pane.area)
+    found["visible_at_need_pct"] = round(inset_share(pane, need - play), 2)
+    found["visible_at_need_grid_pct"] = round(by_grid, 2)
+    found["grid_band_pct"] = round(band, 2)
+    return found
 
 
 def _clash_says(
@@ -735,6 +746,15 @@ def run(args: Any, report: Report) -> None:
     low, high = (float(v) for v in np.asarray(mesh.bounds)[:, 2])
     stack = _stack(built, mesh, args.layer)
     above, below = stack.beyond(args.pocket_z, True), stack.beyond(args.pocket_z, False)
+    if args.min_visible is not None:
+        # The frame's shadow along z, as `light` reads it, for each pane's visible share.
+        cover, _ = shadow([part], args.layer)
+        through = span([part])
+        report.line(
+            f"each pane's rim sized to keep {args.min_visible:g}% of it visible: "
+            f"{args.full_rim:g} mm before play where that keeps it, never under "
+            f"{args.least_rim:g} mm"
+        )
     panes: list[dict[str, Any]] = []
     holes: list[dict[str, Any]] = []
     problems: list[str] = []
@@ -804,29 +824,20 @@ def run(args: Any, report: Report) -> None:
         row["overlap_3d_mm3"] = round(float(clash.volume()), 4)
         if row["overlap_3d_mm3"] > 1e-3:
             problems.append(_clash_says(label, clash, row, floor, top, args))
-        if args.narrow_under is not None:
-            narrow = row["narrow"] = narrow_reading(pane, args)
-            report.line(
-                f"{label[5:]}: {narrow['narrow_mm']} of {narrow['edge_mm']} mm of its edge is "
-                f"under {args.narrow_under} mm across, the least {narrow['least_width_mm']} mm"
-            )
-            report.second(
-                f"pane {name}'s width across its edge, walked in step by step: least "
-                f"{row['narrow']['least_width_walked_mm']} mm, against "
-                f"{row['narrow']['least_width_mm']} by lines; {row['narrow']['split_mm']} mm of "
-                f"edge they put either side of {args.narrow_under} mm"
-            )
-            if row["narrow"]["split_mm"] > 0:
-                differs.append(
-                    f"{label[5:]}: its width across is {row['narrow']['split_widths_mm'][0]} mm "
-                    f"by a line and {row['narrow']['split_widths_mm'][1]} walked in, near "
-                    f"{row['narrow']['split_at']}, either side of {args.narrow_under} mm"
-                )
+        held = None
+        if args.min_visible is not None:
+            rim = row["rim"] = rim_needed(pane, args)
+            needs = rim["needs_mm"] if rim["needs_mm"] is not None else args.least_rim
+            # A rim before play covers that less the play on the pane in the middle of its
+            # pocket, and `rim_reading` holds the lip once the pane has slid: less the play again.
+            held = needs - 2 * args.clearance - RIM_TOL
         for key, up, covered, surface, way in (
             ("up", True, above, top, "upward"),
             ("down", False, below, floor, "downward"),
         ):
-            face = _face(up, pane, opening, stack, covered, built, args, (low, high), surface)
+            face = _face(
+                up, pane, opening, stack, covered, built, args, (low, high), surface, held
+            )
             row[key] = face
             found = rim_differs(face, {**face, **face["rays"]}, face["rim_step_mm"])
             _face_says(label[5:], way, face, found, args, problems, differs)
@@ -835,6 +846,8 @@ def run(args: Any, report: Report) -> None:
                 f"{face['rays']['no_lip_mm']} mm of edge with none; as a solid swept out, "
                 f"{face['least_in_path_mm3']} mm³ of the frame in its way at the least"
             )
+        if args.min_visible is not None:
+            _share_says(label, row, pane, cover, built, through, args, report, problems, differs)
         panes.append(row)
         report.line(_pane_line(label[5:], row))
     report.numbers["panes"] = panes

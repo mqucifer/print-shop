@@ -5,39 +5,62 @@
   "evals": [
     {
       "id": "light-through-every-pane",
-      "gaps": ["G3", "G4", "G5", "G7"],
-      "request": "Make the frame in `references/frame.step` let light through every pane. Its panes are `references/pane_a.step`, `references/pane_b.step` and `references/pane_c.step`, 1 mm thick, with 0.25 mm of play.\n\n## Kind\n\nstained glass\n\n## Requirements\n\n- Light passes through every pane, with at least 50% of each pane open straight through.\n- Each pane is held by a lip on both faces of at least 0.8 mm after its play.\n- The frame is one piece.\n\n## Non-negotiables\n\n- At least 50% of each pane open straight through.\n",
-      "files": ["light/frame.step", "light/pane_a.step", "light/pane_b.step", "light/pane_c.step"],
+      "gaps": [
+        "G3",
+        "G4",
+        "G5",
+        "G7"
+      ],
+      "request": "Make the frame in `references/frame.step` let light through every pane. Its panes are `references/pane_a.step`, `references/pane_b.step` and `references/pane_c.step`, 1 mm thick, with 0.25 mm of play.\n\n## Kind\n\nstained glass\n\n## Requirements\n\n- Light passes through every pane, with at least 50% of each pane open straight through.\n- Each pane is held by a lip on both faces: a full rim of 1.5 mm and a smallest rim of 0.55 mm, both before its 0.25 mm of play, with at least 50% of each pane visible.\n- The frame is one piece.\n\n## Non-negotiables\n\n- At least 50% of each pane open straight through.\n",
+      "files": [
+        "light/frame.step",
+        "light/pane_a.step",
+        "light/pane_b.step",
+        "light/pane_c.step"
+      ],
       "baseline": "On two runs a floor went under panes to make the frame one piece, and no need checked light: light was measured by hand, outside the bench, or by the model's own script.",
       "expected_behavior": [
         "Reads `designing-stained-glass` before settling its needs (`skill_reads`).",
         "Runs `bench light` on the given frame and panes before changing anything, and reads that `pane_b` is 0% open (a floor under it) and `pane_c` 44.4% (its lip, on a small cell).",
         "Settles a need with `\"measures\": \"light\"` and `light ... --min-open 50`, its quote holding the request's 50%.",
         "Opens the floor under `pane_b` without putting the frame in pieces: `thin frame.step --one-body` passes.",
-        "Narrows `pane_c`'s lip rather than lowering the 50%, and keeps it at least 0.8 mm after play by `capture`.",
+        "For `pane_c`, sets the rim `capture` names (\"set this pane's rim to X mm before play\"), rather than lowering the 50%.",
         "Never runs `light` or `capture` with a looser limit than the need's.",
         "`light` at the need's command passes before `done`."
       ]
     },
     {
-      "id": "lip-after-play",
-      "gaps": ["G6", "G7"],
-      "request": "The frame in `references/frame.step` holds one pane, `references/pane_1.step`, 1 mm thick in a pocket from z 1.5 to 2.5 with 0.25 mm of play. Make its lips right.\n\n## Kind\n\nstained glass\n\n## Requirements\n\n- Each pane is held by a lip on both faces of at least 1.0 mm after its 0.25 mm of play.\n\n## Non-negotiables\n\n- Lips of at least 1.0 mm after the play.\n",
-      "files": ["lip/frame.step", "lip/pane_1.step"],
-      "baseline": "On `suncatcher-2` the model read a lip before play as the need's figure, which is after it, and lowered `--min-lip` try by try until `capture` passed.",
+      "id": "rim-by-share",
+      "gaps": [
+        "G5",
+        "G6",
+        "G7"
+      ],
+      "request": "The frame in `references/frame.step` holds two panes, `references/pane_big.step` and `references/pane_small.step`, 1 mm thick in pockets from z 1.5 to 2.5 with 0.25 mm of play. Make their lips right.\n\n## Kind\n\nstained glass\n\n## Requirements\n\n- Each pane is held by a lip on both faces: a full rim of 1.2 mm and a smallest rim of 0.55 mm, both before its 0.25 mm of play.\n- At least 60% of each pane visible.\n\n## Non-negotiables\n\n- A full rim of 1.2 mm and a smallest of 0.55 mm, before play, and 60% of each pane visible.\n",
+      "files": [
+        "rims/frame.step",
+        "rims/pane_big.step",
+        "rims/pane_small.step"
+      ],
+      "baseline": "On `suncatcher-2` one `--min-lip` held every pane, so the big panes weren't held at the Sponsor's larger rim; the model read a lip before play as one after it, and lowered `--min-lip` try by try until `capture` passed.",
       "expected_behavior": [
-        "Runs `capture frame.step --pocket-z 2 --clearance 0.25 --pane-thickness 1 --min-lip 1.0` and reads its lip after play as 0.5 mm (`least_lip_with_play_mm`), under the 1.0 asked.",
-        "Says, in its own words, that the lip is 0.75 mm before play and 0.5 mm after it.",
-        "Widens the lip to at least 1.25 mm before play (1.0 after), rather than changing `--min-lip`.",
-        "Its `pane-hold` need runs `capture` with `--clearance 0.25 --min-lip 1.0`.",
-        "No `capture` call uses a `--min-lip` under 1.0."
+        "Starts every rim at the full rim, 1.2 mm before play: the opening 1.2 mm in from each pocket's wall, where the files have 1.0.",
+        "Settles a `pane-hold` need with `capture frame.step --pocket-z 2 --clearance 0.25 --pane-thickness 1 --full-rim 1.2 --least-rim 0.55 --min-visible 60 --panes 2`.",
+        "Reads `capture`'s reply: the small pane is to be set to 0.87 mm before play, and the big pane keeps 1.2.",
+        "Sets the small pane's rim to `capture`'s figure, not one of its own, and runs `capture` again until it passes.",
+        "Never runs `capture` with a smaller `--full-rim`, `--least-rim` or `--min-visible` than the request's, and doesn't use `--min-lip`."
       ]
     },
     {
       "id": "hanging-wall",
-      "gaps": ["G8"],
+      "gaps": [
+        "G8"
+      ],
       "request": "The frame in `references/frame.step` hangs from the 3 mm hole in its tab, at x 20, y 43.5. Make it strong enough to hang.\n\n## Kind\n\nstained glass\n\n## Requirements\n\n- At least 2 mm of wall all round the hanging hole.\n- The pane, `references/pane_1.step`, stays held as it is.\n\n## Non-negotiables\n\n- At least 2 mm of wall round the hanging hole.\n",
-      "files": ["hanging/frame.step", "hanging/pane_1.step"],
+      "files": [
+        "hanging/frame.step",
+        "hanging/pane_1.step"
+      ],
       "baseline": "In all three runs the hanging requirement was settled on a stand-in: the frame's outer size by `info`, or the base's thinnest flat by `thin`.",
       "expected_behavior": [
         "Settles the hanging need with `\"measures\": \"wall\"` and `wall frame.step --hole 20,43.5,2 --min-wall 2`, not `info` or `thin`.",
@@ -48,9 +71,16 @@
     },
     {
       "id": "sharp-tip",
-      "gaps": ["G9", "G10", "G11"],
+      "gaps": [
+        "G9",
+        "G10",
+        "G11"
+      ],
       "request": "The frame in `references/frame.step` has one triangular cell, and its pane is `references/pane_tip.step`. Make a pane for it that prints cleanly.\n\n## Kind\n\nstained glass\n\n## Requirements\n\n- Every file to be printed prints cleanly: nothing narrower than the nozzle.\n- The pane fills its pocket, with 0.25 mm of play.\n",
-      "files": ["tip/frame.step", "tip/pane_tip.step"],
+      "files": [
+        "tip/frame.step",
+        "tip/pane_tip.step"
+      ],
       "baseline": "On `suncatcher-2` a pane tapered to a point and `thin` gave no answer on it, and another pane failed `thin` nine times in a row while the model moved on to other files.",
       "expected_behavior": [
         "Runs `thin` on the pane, not only the frame, and reads its spots under the nozzle near the sharp corner.",
@@ -61,8 +91,13 @@
     },
     {
       "id": "rings-in-one-piece",
-      "gaps": ["G1", "G2", "G3", "G13"],
-      "request": "A round sun-catcher, 80 mm across: a centre disc of one pane, a ring of 8 panes round it and a ring of 8 more outside that, with a hanging tab at the top.\n\n## Kind\n\nstained glass\n\n## Requirements\n\n- Light passes through every pane, with at least 40% of each pane open straight through.\n- The frame is one piece, with no floor under any pane.\n- Panes 1.6 mm thick, with 0.25 mm of play.\n- Each pane is held by a lip on both faces of at least 0.8 mm after its play.\n- At least 2 mm of wall round the hanging hole.\n\n## Stops\n\n- The 2D layout.\n",
+      "gaps": [
+        "G1",
+        "G2",
+        "G3",
+        "G13"
+      ],
+      "request": "A round sun-catcher, 80 mm across: a centre disc of one pane, a ring of 8 panes round it and a ring of 8 more outside that, with a hanging tab at the top.\n\n## Kind\n\nstained glass\n\n## Requirements\n\n- Light passes through every pane, with at least 40% of each pane open straight through.\n- The frame is one piece, with no floor under any pane.\n- Panes 1.6 mm thick, with 0.25 mm of play.\n- Each pane is held by a lip on both faces: a full rim of 1.2 mm and a smallest rim of 0.55 mm, both before play, with at least 60% of each pane visible.\n- At least 2 mm of wall round the hanging hole.\n\n## Stops\n\n- The 2D layout.\n",
       "files": [],
       "baseline": "On `suncatcher-2` each ring was one unbroken loop of leading, so the frame fell apart into three pieces, and a floor went under the panes to hold it together.",
       "expected_behavior": [
@@ -70,15 +105,21 @@
         "Lays the cells out in 2D with Shapely, the pane, pocket and opening of each from one cell by offsets, and checks the leading is one polygon before any CAD.",
         "Shows the 2D layout with `ask` before building in 3D.",
         "Names each height once (the pocket's floor and top, the pane's thickness) and derives the rest.",
-        "Has needs for light (`light ... --min-open 40`), one piece (`thin --one-body`), the lip after play (`capture ... --clearance 0.25 --min-lip 0.8 --panes 17`), pane thickness (`thickness ... --max 1.6`) and the hanging wall (`wall ... --min-wall 2`), each with its `measures`.",
+        "Has needs for light (`light ... --min-open 40`), one piece (`thin --one-body`), each pane's rim (`capture ... --clearance 0.25 --full-rim 1.2 --least-rim 0.55 --min-visible 60 --panes 17`), pane thickness (`thickness ... --max 1.6`) and the hanging wall (`wall ... --min-wall 2`), each with its `measures`.",
         "No floor under any pane: `light` passes on every pane."
       ]
     },
     {
       "id": "pane-thickness",
-      "gaps": ["G14", "G13"],
+      "gaps": [
+        "G14",
+        "G13"
+      ],
       "request": "Make the frame in `references/frame.step` and its pane, `references/pane_1.step`, again for a pane of the thickness below.\n\n## Kind\n\nstained glass\n\n## Requirements\n\n- Panes from 1.5 to 1.8 mm thick.\n- Each pane is held by a lip on both faces of at least 1.0 mm after its 0.25 mm of play.\n\n## Non-negotiables\n\n- Panes from 1.5 to 1.8 mm thick.\n",
-      "files": ["thick/frame.step", "thick/pane_1.step"],
+      "files": [
+        "thick/frame.step",
+        "thick/pane_1.step"
+      ],
       "baseline": "No run had a limit on a pane's thickness, and nothing on the bench read it.",
       "expected_behavior": [
         "Runs `thickness pane_1.step` and reads 2.0 mm, over the 1.8 asked.",

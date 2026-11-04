@@ -33,7 +33,7 @@ def save(shape: Any, folder: str, name: str) -> None:
 
 def cell(frame: Any, x0: float, x1: float, y0: float, y1: float, lip: float, floor: bool) -> Any:
     """A square pocket, and its opening `lip` in from the pocket's wall on both faces, or only
-    above. With 0.25 mm of play, the lip before play is `lip` less 0.25, and after play less 0.5."""
+    above: a lip of `lip` before play, and `lip` less 0.25 mm after it."""
     frame = frame.cut(box(x0, x1, y0, y1, *POCKET))
     above = box(x0 + lip, x1 - lip, y0 + lip, y1 - lip, POCKET[1], 4)
     frame = frame.cut(above)
@@ -47,7 +47,7 @@ def pane(x0: float, x1: float, y0: float, y1: float) -> Any:
 
 
 def light() -> None:
-    """Three cells, each opening 1.5 mm in from its pocket: lips of 1.25 mm before play and 1.0
+    """Three cells, each opening 1.5 mm in from its pocket: lips of 1.5 mm before play and 1.25
     after. `pane_a` is 225 of 306.25 mm² open, 73.5%. `pane_b` has a
     floor under it, 0%. `pane_c` is a small cell, 25 of 56.25 mm², 44.4%: under the request's 50%
     by its lip, not by a floor."""
@@ -59,11 +59,16 @@ def light() -> None:
     save(frame, "light", "frame")
 
 
-def lip_after_play() -> None:
-    """One cell whose opening is 1.0 mm in from its pocket: a lip of 0.75 mm before play, and
-    0.5 mm after its 0.25 mm of play."""
-    save(cell(box(0, 30, 0, 30, 0, 4), 5, 25, 5, 25, 1.0, floor=False), "lip", "frame")
-    save(pane(5, 25, 5, 25), "lip", "pane_1")
+def rims() -> None:
+    """A cell 20 mm square and one 6 mm square, both with lips of 1.0 mm before play. At a full rim
+    of 1.2 mm, a smallest of 0.55 and 60% visible, `capture` says the big pane's rim is to be
+    1.2 mm and the small one's 0.87 mm, before play."""
+    frame = box(0, 40, 0, 24, 0, 4)
+    frame = cell(frame, 2, 22, 2, 22, 1.0, floor=False)
+    frame = cell(frame, 26, 32, 9, 15, 1.0, floor=False)
+    save(frame, "rims", "frame")
+    save(pane(2, 22, 2, 22), "rims", "pane_big")
+    save(pane(26, 32, 9, 15), "rims", "pane_small")
 
 
 def hanging() -> None:
@@ -100,7 +105,7 @@ def thick() -> None:
 
 if __name__ == "__main__":
     light()
-    lip_after_play()
+    rims()
     hanging()
     sharp_tip()
     thick()

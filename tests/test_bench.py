@@ -1572,23 +1572,22 @@ def test_pane_thickness_is_read_two_ways_and_held_to_the_limit_given(bench: Any)
     assert over.numbers["thickest_mm"] == pytest.approx(2.0, abs=0.005)
 
 
-def test_a_rim_is_held_by_how_wide_the_pane_is_across_each_stretch(bench: Any) -> None:
-    """Criterion 6: the smaller rim only where the pane is under the width across, measured."""
-    rims = ("capture", "rims/frame.step", "--pocket-z", "2", "--clearance", "0.25",
-            "--pane-thickness", "1", "--narrow-under", "7", "--min-lip", "1.0")  # fmt: skip
-    held = bench(*rims, "--narrow-min-lip", "0.5")
+def test_each_panes_rim_is_sized_to_keep_its_visible_share(bench: Any) -> None:
+    """Criterion 6: the full rim where it keeps the share visible, the widest that does where it
+    doesn't, and the pane removed where even the smallest can't."""
+    share = ("--pocket-z", "2", "--clearance", "0.25", "--pane-thickness", "1",
+             "--full-rim", "1.2", "--least-rim", "0.55", "--min-visible", "60")  # fmt: skip
+    held = bench("capture", "rims/held.step", *share)
     assert held.verdict == "OK", held.text
-    strip = next(p for p in held.numbers["panes"] if p["size_mm"][0] < 5)
-    square = next(p for p in held.numbers["panes"] if p["size_mm"][0] > 5)
-    # The strip's long sides are narrow, its ends and every corner of the square aren't.
-    assert strip["narrow"]["narrow_mm"] == pytest.approx(2 * 19.5, abs=1.0)
-    assert square["narrow"]["narrow_mm"] == 0 and strip["narrow"]["split_mm"] == 0
-    tight = bench(*rims, "--narrow-min-lip", "0.7")
-    assert tight.verdict == "FAIL", tight.text
-    narrow = next(p for p in tight.numbers["panes"] if p["size_mm"][0] < 5)
-    stretch = narrow["up"]["thin_stretches"][0]
-    assert stretch["width_mm"] == pytest.approx(3.5, abs=0.01)
-    assert stretch["lip_with_play_mm"] == pytest.approx(0.6, abs=0.01)
-    assert stretch["rim_mm"] == 0.7
-    done = host.run([*rims], bench.work)
+    rims = {p["size_mm"][0]: p["rim"] for p in held.numbers["panes"]}
+    assert rims[19.5]["needs_mm"] == 1.2
+    assert rims[19.5]["visible_pct"] == pytest.approx(81.46, abs=0.1)
+    assert rims[5.5]["needs_mm"] == pytest.approx(0.8699, abs=0.001)
+    assert rims[5.5]["visible_pct"] == pytest.approx(60.0, abs=0.1)
+    unheld = bench("capture", "rims/unheld.step", *share)
+    assert unheld.verdict == "FAIL", unheld.text
+    assert "set this pane's rim to 0.87 mm before play. It has 1.2 mm" in unheld.record["why"]
+    assert "42.8% of it is visible, where 60% is wanted" in unheld.record["why"]
+    assert "remove this pane. Even the smallest rim, 0.55 mm before play" in unheld.record["why"]
+    done = host.run(["capture", "rims/held.step", *share[:-2]], bench.work)
     assert done.returncode == 3 and "no default for any of them" in done.stdout + done.stderr

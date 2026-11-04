@@ -57,7 +57,7 @@ def _heights(part: Part, layer: float) -> list[float]:
     return sorted(set(round(h, 6) for h in found))
 
 
-def _shadow(frames: list[Part], layer: float) -> tuple[Any, int]:
+def shadow(frames: list[Part], layer: float) -> tuple[Any, int]:
     """The frame's shadow along z: the union of its sections, and how many were cut."""
     pieces = []
     cut = 0
@@ -79,7 +79,7 @@ def _footprint(pane: Part) -> Any:
     return shapely.unary_union(cuts)
 
 
-def _grid(region: Any, count: int) -> tuple[np.ndarray, float]:
+def grid(region: Any, count: int) -> tuple[np.ndarray, float]:
     """Points inside a region, about `count` of them, on a square grid offset by half a step."""
     x0, y0, x1, y1 = region.bounds
     step = float(np.sqrt(region.area / max(1, count)))
@@ -96,7 +96,31 @@ def _blocked(built: list[Any], x: float, y: float, low: float, high: float) -> b
     return any(m.ray_cast((x, y, low), (x, y, high)) for m in built)
 
 
-def _span(frames: list[Part]) -> tuple[float, float]:
+def visible(pane: Any, cover: Any) -> tuple[Any, float]:
+    """What of a pane the frame covers on neither face, and its share in percent: the pane less
+    the frame's shadow. `light` reads it for each pane file, and `capture` for each pane it reads
+    from the frame's openings, so the two are one measurement."""
+    region = pane.difference(cover)
+    return region, 100.0 * float(region.area) / float(pane.area)
+
+
+def visible_by_rays(
+    pane: Any, region: Any, built: list[Any], low: float, high: float, count: int
+) -> tuple[float, int, float]:
+    """The same share a different way: rays straight up through the frame from a grid in the
+    pane, open where none meets it. Its share, how many rays, and how far a grid that fine can be
+    from the area, in percentage points."""
+    points, step = grid(pane, count)
+    if not len(points):
+        raise NoAnswer("a pane is too small for a ray to land in")
+    clear = sum(1 for x, y in points if not _blocked(built, float(x), float(y), low, high))
+    edges = float(pane.boundary.length) + float(region.boundary.length)
+    band = max(FLOOR_PCT, 100.0 * EDGE_SHARE * edges * step / float(pane.area))
+    return 100.0 * clear / len(points), len(points), band
+
+
+def span(frames: list[Part]) -> tuple[float, float]:
+    """Heights below and above every frame part, for a ray straight up through them all."""
     lows, highs = zip(*(np.asarray(p.fine().bounds)[:, 2] for p in frames), strict=True)
     return float(min(lows)) - 1.0, float(max(highs)) + 1.0
 
@@ -112,9 +136,9 @@ def run_light(args: Any, report: Report) -> None:
     for part in frames:
         report.notes += part.notes
     panes = [(name, load(name)) for name in args.panes]
-    shadow, cut = _shadow(frames, args.layer)
+    cover, cut = shadow(frames, args.layer)
     built = [p.manifold() for p in frames]
-    low, high = _span(frames)
+    low, high = span(frames)
     report.line(
         f"the frame ({', '.join(p.name for p in frames)}) cut at {cut} heights, every layer of "
         f"{args.layer} mm and just inside each level face; light read straight along z"
@@ -126,15 +150,8 @@ def run_light(args: Any, report: Report) -> None:
         foot = _footprint(pane)
         if foot.is_empty or foot.area <= 0:
             raise NoAnswer(f"{name} has no section to read: is it a solid?")
-        open_region = foot.difference(shadow)
-        pct = 100.0 * float(open_region.area) / float(foot.area)
-        points, step = _grid(foot, args.rays)
-        if not len(points):
-            raise NoAnswer(f"{name} is too small for a ray to land in")
-        clear = sum(1 for x, y in points if not _blocked(built, float(x), float(y), low, high))
-        pct_rays = 100.0 * clear / len(points)
-        edges = float(foot.boundary.length) + float(open_region.boundary.length)
-        band = max(FLOOR_PCT, 100.0 * EDGE_SHARE * edges * step / float(foot.area))
+        open_region, pct = visible(foot, cover)
+        pct_rays, rays, band = visible_by_rays(foot, open_region, built, low, high, args.rays)
         x0, y0, x1, y1 = foot.bounds
         row = {
             "file": name,
@@ -143,7 +160,7 @@ def run_light(args: Any, report: Report) -> None:
             "open_mm2": round(float(open_region.area), 3),
             "open_pct": round(pct, 2),
             "open_pct_rays": round(pct_rays, 2),
-            "rays": len(points),
+            "rays": rays,
             "band_pct": round(band, 2),
         }
         rows.append(row)
@@ -154,7 +171,7 @@ def run_light(args: Any, report: Report) -> None:
         if abs(pct - pct_rays) > band:
             differs.append(
                 f"{name} is {pct:.1f}% open by the sections and {pct_rays:.1f}% by rays, "
-                f"more than the {band:.1f} points a grid of {len(points)} can be off by"
+                f"more than the {band:.1f} points a grid of {rays} can be off by"
             )
         opened += [(name, piece) for piece in _pieces(open_region)]
     report.numbers["panes"] = rows
@@ -253,7 +270,7 @@ def run_thickness(args: Any, report: Report) -> None:
         low, high = (float(v) for v in np.asarray(mesh.bounds)[:, 2])
         height = high - low
         foot = _footprint(pane)
-        points, _ = _grid(foot, args.rays)
+        points, _ = grid(foot, args.rays)
         if not len(points):
             raise NoAnswer(f"{name} is too small for a ray to land in")
         built = pane.manifold()

@@ -8,7 +8,7 @@ The baseline for `designing-stained-glass`, named from the records of the three 
 | G2 | Cut holes from a solid, so panes merged and the frame had separate bodies, found only once the bench read them | `stainedglass-1` | 1 | the skill's step 2: the 2D layout, the leading checked as one piece before any CAD |
 | G3 | Put a floor under panes to make the frame one piece, where light must pass through every pane | `stainedglass-1`, `suncatcher-2` | 16, 24 | step 2's bars, and the `light` check |
 | G4 | Never checked light through a pane on the bench: an open share printed by its own script, reported wrongly, or nothing | all three | 5, 16 | the `light` check in step 5, with its limit from the request |
-| G5 | One lip size for every cell, so a small cell lost almost all its light | `suncatcher-2` | 17 | step 2's lip per cell |
+| G5 | One lip size for every cell, so a small cell lost almost all its light, and one `--min-lip` for every pane, so nothing held the big panes at the Sponsor's larger rim | `suncatcher-2` | 17 | step 2's full rim, and `capture`'s rim sized to the visible share in step 6 |
 | G6 | Mixed up a lip before play with a lip after it, and read a need's figure the wrong way | `suncatcher-2` | 18 | the terms, defined once |
 | G7 | Lowered `capture --min-lip` try by try until it passed, where its need said otherwise | `suncatcher-2` | 18 | the feedback loop: a limit is never changed to pass |
 | G8 | Settled the hanging requirement on a stand-in, the frame's bounds by `info` or the whole part's `thin`, not the wall round the hole | all three | 9, 22 | the hanging check, by `wall` |

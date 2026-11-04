@@ -97,20 +97,25 @@ def parser() -> Parser:
     capture.add_argument(
         "--min-lip",
         type=float,
-        help="the least lip after its play, in mm: 0.4, a nozzle's width, unless you say. With "
-        "--narrow-under it's the request's larger rim, and has to be given",
+        help="the least lip after its play, in mm, one rim everywhere: 0.4, a nozzle's width, "
+        "unless you say",
     )
     capture.add_argument(
-        "--narrow-under",
+        "--full-rim",
         type=float,
-        help="a width across a pane, in mm, from the request: where the pane is narrower than this "
-        "across its edge, that stretch is held to --narrow-min-lip instead",
+        help="a rim sized to the visible share, from the request: the most rim each pane has, in "
+        "mm before play, from the pocket's wall to the opening's edge",
     )
     capture.add_argument(
-        "--narrow-min-lip",
+        "--least-rim",
         type=float,
-        help="the least lip after play where the pane is narrower than --narrow-under, in mm, "
-        "from the request",
+        help="the least rim any pane may have to keep its share visible, in mm before play: a "
+        "pane that needs less is to be removed",
+    )
+    capture.add_argument(
+        "--min-visible",
+        type=float,
+        help="the least share of each pane, in percent, the frame covers on neither face",
     )
     capture.add_argument("--layer", type=float, default=0.2)
     capture.add_argument(
@@ -312,16 +317,26 @@ MIN_LIP = 0.4
 
 
 def rims_given(args: Any, top: Parser) -> None:
-    """`capture`'s rims: one, 0.4 mm unless given, or by width, with all three from the request."""
+    """`capture`'s rims: one, `--min-lip`, 0.4 mm unless given, or each pane's sized to the
+    visible share, with all three figures from the request and no `--min-lip`."""
     if args.command != "capture":
         return
-    by_width = (args.narrow_under, args.narrow_min_lip)
-    if any(v is not None for v in by_width):
-        if any(v is None for v in (*by_width, args.min_lip)):
+    by_share = (args.full_rim, args.least_rim, args.min_visible)
+    if any(v is not None for v in by_share):
+        if any(v is None for v in by_share):
             top.error(
-                "capture: a rim by width takes all three, from the request: --narrow-under, "
-                "--narrow-min-lip and --min-lip. There's no default for any of them"
+                "capture: a rim sized to the visible share takes all three, from the request: "
+                "--full-rim, --least-rim and --min-visible. There's no default for any of them"
             )
+        if args.min_lip is not None:
+            top.error("capture: --min-lip is one rim everywhere; --full-rim sizes each pane's")
+        if not args.clearance < args.least_rim <= args.full_rim:
+            top.error(
+                "capture: --least-rim is more than the play and no more than --full-rim, both "
+                "before play"
+            )
+        if not 0 < args.min_visible < 100:
+            top.error("capture: --min-visible is a share in percent, between 0 and 100")
     elif args.min_lip is None:
         args.min_lip = MIN_LIP
 

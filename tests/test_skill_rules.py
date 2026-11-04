@@ -84,7 +84,7 @@ def test_the_stained_glass_toolset_offers_its_skill_and_the_core_doesnt() -> Non
 
 def test_the_stained_glass_skill_defines_each_term_once_and_folds_in_its_lessons() -> None:
     body = skills.registry(skills.ALL)["designing-stained-glass"][1]
-    for term in ("cell", "pane", "leading", "pocket", "play", "opening", "lip"):
+    for term in ("cell", "pane", "leading", "pocket", "play", "opening", "lip", "rim"):
         assert len(re.findall(rf"^- \*\*{term}\*\*:", body, re.MULTILINE)) == 1, term
     for term in ("lip before play", "lip after play"):
         assert f"- **{term}**:" in body, term
@@ -92,7 +92,7 @@ def test_the_stained_glass_skill_defines_each_term_once_and_folds_in_its_lessons
     for said in (
         'geom_type == "Polygon"',  # 1: the 2D layout, and the leading in one piece
         "Name each height once",  # 2
-        "A lip per cell",  # 17
+        "Every rim starts at the full rim",  # 17
         "No sharp tips",  # 20
     ):
         assert said in body, said

@@ -17,11 +17,12 @@ Each is used in one sense only, here and in every bench reply.
 - **pocket**: the space in the frame a pane sits in, from the pocket's floor to its top.
 - **play**: the gap all round between a pane's edge and its pocket's wall.
 - **opening**: where light passes through the frame: the pocket less its lips.
-- **lip**: the frame over a pane's edge, on each face: how far it covers the pane, from the pane's edge to the opening's edge.
-- **lip before play**: the lip with the pane in the middle of its pocket. `capture`'s `least_lip_mm`.
-- **lip after play**: the lip before play less the play: what still covers the pane's edge once it has slid as far as its play lets it, to the other side. `capture --min-lip` holds this, and it's `capture`'s `least_lip_with_play_mm`. A request's lip figure is after play unless it says before.
+- **lip**: the frame over a pane's edge, on each face. Its width is said before or after play.
+- **lip before play**: from the pocket's wall to the opening's edge.
+- **lip after play**: the lip before play less the play: how far the lip covers the pane, with the pane in the middle of its pocket. `capture`'s `least_lip_mm`.
+- **rim**: a request's figure for a lip before play, unless it says after: its **full rim**, the most a pane has, and its **smallest rim**, the least.
 
-With play of 0.25 mm and the opening 1.45 mm in from the pocket's wall, the lip before play is 1.2 mm and the lip after play 0.95 mm.
+With play of 0.25 mm and the opening 1.2 mm in from the pocket's wall, the lip before play is 1.2 mm and the lip after play 0.95 mm.
 
 ## The workflow
 
@@ -55,10 +56,10 @@ import shapely
 
 leading = 1.0  # the leading's width between cells, mm
 play = 0.25  # from the request
-lip = 1.2  # lip before play, for this cell: the lip after play is lip - play
+rim = 1.2  # the request's full rim: a lip before play, from the pocket's wall
 pocket = cell.buffer(-leading / 2, join_style="mitre")
 pane = pocket.buffer(-play, join_style="mitre")
-opening = pane.buffer(-lip, join_style="mitre")
+opening = pocket.buffer(-rim, join_style="mitre")
 frame_2d = outline.difference(
     shapely.unary_union([c.buffer(-leading / 2, join_style="mitre") for c in cells])
 )
@@ -66,7 +67,7 @@ assert frame_2d.geom_type == "Polygon", "the leading is in pieces: add bars"
 ```
 
 - **The leading is one piece:** `frame_2d.geom_type == "Polygon"`. A `MultiPolygon` is a frame in pieces. Add bars until it's one, before any CAD.
-- **A lip per cell:** a lip trades light against hold. One lip size for every cell can leave a small cell almost no opening. Print each cell's lip before and after play, and its open share, `opening.area / pane.area`. The least lip after play is the request's figure, or the Sponsor's to set: ask, don't choose a smaller one.
+- **Every rim starts at the full rim:** give every cell the request's full rim, and never less than its smallest rim. Don't work out a smaller one yourself. After you build, `capture` measures how much of each pane its rim leaves visible, and tells you which panes need a smaller rim and exactly what, or which pane to remove (step 6). Keep the rim of each cell a number of its own in the script, so one can change.
 - **No sharp tips:** a cell that tapers to a point (a triangle's apex, a feather's tip) gets its tip cut off or rounded in 2D, so no pane or pocket is narrower than two nozzle widths (0.8 mm).
 - Draw the layout to a picture with matplotlib and `read` it, each cell in its colour, before going on.
 
@@ -82,14 +83,15 @@ Each bench need gives `measures`, what it's about, and its command has to measur
 |---|---|---|
 | light through each pane | `light` | `light FRAME PANE... --min-open P` (P in percent) |
 | panes no thicker than | `pane-thickness` | `thickness PANE... --max T` |
-| each pane held by its lips | `pane-hold` | `capture FRAME --pocket-z Z --clearance PLAY --pane-thickness T --min-lip M --panes N` |
+| each pane held by its lips, at a full rim and a smallest rim, with a share of each pane visible | `pane-hold` | `capture FRAME --pocket-z Z --clearance PLAY --pane-thickness T --full-rim R --least-rim R2 --min-visible P --panes N` |
+| each pane held by one lip all round | `pane-hold` | `capture FRAME --pocket-z Z --clearance PLAY --pane-thickness T --min-lip M --panes N` |
 | the frame in one piece | `one-piece` | `thin FRAME --one-body` |
 | wall round the hanging hole | `wall` | `wall FRAME --hole X,Y,Z --min-wall W` |
 | room over the pane at the pause | `insert` | `pause FRAME --pocket-z Z --pane-thickness T --min-room R` |
 
 - `--pocket-z` is a height inside the pocket, never on a level face: the pocket's floor plus half the pane's thickness.
-- `--min-lip` is the request's lip after play. `--clearance` is the play.
-- If the request gives a smaller rim for narrow panes, add `--narrow-under W --narrow-min-lip M`, both from the request: wherever the pane is under W mm straight across from its edge, that stretch is held to M, and everywhere else to `--min-lip`. The bench measures which stretches are narrow; you don't name them.
+- `--full-rim` and `--least-rim` are the request's rims, before play, as it gives them; if it gives them after play, add the play. `--min-visible` is its share of each pane visible, in percent. `--clearance` is the play.
+- `--min-lip` is one lip for every pane, the lip after play less the play again, for a pane slid to one side. Use it only where the request gives one lip and no visible share.
 - `--panes` is the number of panes, from the layout.
 - The hanging need is `wall` at the hole. `info`'s size and `thin`'s thinnest figures are the whole part's, not the wall round a hole.
 
@@ -112,12 +114,14 @@ Run them in this order, as each depends on the one before:
 
 1. `thin FRAME --one-body`: the frame is one piece.
 2. `thin PANE` on **every** pane, one file at a time. A pane that fails `thin` can't be printed, whatever the others do: fix that file and run `thin` on it again before touching the next.
-3. `capture`: every pane is held on both faces.
+3. `capture`: every pane is held on both faces, and each rim is right. Its reply names each pane to change, and what to do:
+   - "set this pane's rim to X mm before play": set that cell's rim to exactly X, nothing else, and run `capture` again.
+   - "remove this pane": even the smallest rim hides too much of it. Take its cell out of the layout, joining it to the leading or to a neighbouring cell, and run every check again.
 4. `light`: every pane lets the light through.
 5. `thickness`: no pane is over the request's limit.
 6. `wall` at the hanging hole, and `pause`, if the request asks for them.
 
-A change for one check can break another, as a narrower lip lets more light through and holds less. After a fix, run the earlier checks again.
+A change for one check can break another, as a narrower rim lets more light through and holds less. After a fix, run the earlier checks again.
 
 When a check keeps failing and you can't see why, cut a section at its height (`render FRAME --section Z`) and read its verdict, then its picture. If it still fails after that, show what you have with `ask` and say what's in the way.
 

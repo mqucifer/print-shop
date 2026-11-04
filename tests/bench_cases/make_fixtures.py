@@ -449,15 +449,24 @@ def glass() -> None:
     save(box(4.25, 15.75, 4.25, 15.75, 1.5, 2.5), "glass/pane_a")
     save(box(25.25, 36.75, 4.25, 15.75, 1.5, 2.5), "glass/pane_b")
     save(box(17.25, 20.75, 8.25, 11.75, 1.5, 2.5), "glass/pane_c")
-    # A rim by width (criterion 6): a square cell 20 mm across and a strip 4 mm across, pockets at
-    # z 1.5 to 2.5 for panes with 0.25 mm of play. The square's lips are 1.1 mm after play all
-    # round. The strip's long sides are 0.6 mm after play, where the pane is 3.5 mm across, and its
-    # ends 1.1 mm, where it's 19.5 mm across, end to end.
-    rims = box(0, 40, 0, 24, 0, 4)
-    rims = rims.cut(box(2, 22, 2, 22, 1.5, 2.5)).cut(box(3.6, 20.4, 3.6, 20.4, 0, 4))
-    rims = rims.cut(box(30, 34, 2, 22, 1.5, 2.5)).cut(box(31.1, 32.9, 3.6, 20.4, 0, 4))
+    # A rim sized to the visible share (criterion 6), at a full rim of 1.2 mm, a least of 0.55,
+    # both before play, and 60% visible, with 0.25 mm of play and pockets at z 1.5 to 2.5.
+    # - A pane 19.5 mm square keeps 81.5% visible at the full rim, so it needs 1.2 mm.
+    # - One 5.5 mm square keeps 42.8% at 1.2 mm and 79.3% at 0.55: it needs the rim whose overlap
+    #   w leaves (5.5 - 2w)² = 60% of 30.25 mm², w = 0.6199, so 0.8699 mm before play.
+    # - One 1.5 mm square keeps 36% even at 0.55 mm: it's to be removed.
+    # `rims/held` has the first two at 1.2 and 0.87 mm; `rims/unheld` has the 5.5 mm pane at
+    # 1.2 mm, and the 1.5 mm one at 0.55.
     Path("rims").mkdir(exist_ok=True)
-    save(rims, "rims/frame")
+    for name, small_rim, tiny in (("held", 0.87, False), ("unheld", 1.2, True)):
+        rims = box(0, 40, 0, 24, 0, 4)
+        rims = rims.cut(box(2, 22, 2, 22, 1.5, 2.5)).cut(box(3.2, 20.8, 3.2, 20.8, 0, 4))
+        rims = rims.cut(box(26, 32, 9, 15, 1.5, 2.5))
+        rims = rims.cut(box(26 + small_rim, 32 - small_rim, 9 + small_rim, 15 - small_rim, 0, 4))
+        if tiny:
+            rims = rims.cut(box(35, 37, 11, 13, 1.5, 2.5))
+            rims = rims.cut(box(35.55, 36.45, 11.55, 12.45, 0, 4))
+        save(rims, f"rims/{name}")
     # A pane twice as thick, and one with a ridge 0.5 mm higher along one edge.
     save(box(0, 10, 0, 10, 0, 2), "glass/pane_thick")
     save(box(0, 10, 0, 10, 0, 1).union(box(0, 10, 9.5, 10, 1, 1.5)), "glass/pane_ridge")
