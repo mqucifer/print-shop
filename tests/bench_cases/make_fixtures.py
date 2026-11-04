@@ -207,6 +207,12 @@ def captured() -> None:
     pane_frame(box(-25, 25, -25, 18, 3, 4), down, "held-hinge")
     # A window off to one side: the pane has 1.9 mm of lip, and 0.1 mm along one edge.
     pane_frame(box(-18, 19.8, -18, 18, 3, 4), down, "held-thin")
+    # The pocket's cut run on through the top face, as a prism given the pocket's top for its
+    # depth would: the hole over the pane is the pocket's own outline, all round.
+    pane_frame(box(-20, 20, -20, 20, 3, 4), down, "held-pocket-through")
+    # A top opening 2 mm wider than the pocket on its right-hand side only, and 0.3 mm narrower
+    # on the others: 0.2 mm over a pane with 0.1 mm of play, under the 0.4 a lip needs after it.
+    pane_frame(box(-19.7, 22, -19.7, 19.7, 3, 4), down, "held-wide-side")
     # A lip 0.1 mm thick, under a layer: the pocket's ceiling at 3.9.
     thin_lip = box(-30, 30, -30, 30, 0, 4).cut(box(-20, 20, -20, 20, 1, 3.9))
     save(thin_lip.cut(up).cut(down), "held-thin-lip")

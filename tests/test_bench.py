@@ -615,6 +615,8 @@ def test_a_pane_held_on_both_faces_says_by_how_much_two_ways(bench: Any) -> None
         assert face["least_in_path_mm3"] > 0
     assert answer.numbers["least_lip_mm"] == pytest.approx(1.9, abs=1e-3)
     assert pane["overlap_3d_mm3"] == pytest.approx(0.0, abs=1e-3)
+    assert "over" not in pane["up"] and "over" not in pane["down"], "held: nothing to say why"
+    assert "Over it" not in answer.text and "Under it" not in answer.text
 
 
 def test_nothing_in_a_capture_answer_rests_on_a_bond(bench: Any) -> None:
@@ -637,6 +639,11 @@ def test_a_pane_with_nothing_over_one_face_comes_out_that_way(
     assert read["passes_at_shifts"] == read["shifts_read"], "at every place its play lets it sit"
     assert read["passes_3d_at_shifts"] == read["shifts_read"], "and as a solid"
     assert read["no_lip_mm"] == pytest.approx(159.2, abs=1)
+    # Why: no frame beyond that face at all, with the heights it read.
+    assert read["over"]["heights_read"] == 0
+    side, end = ("top", "top") if face == "up" else ("floor", "bottom")
+    assert f"nothing {'above' if face == 'up' else 'below'} the pane's {side}" in answer.text
+    assert f"its {end} is z={read['over']['frame_end_z']:g}" in answer.text
 
 
 def test_a_lip_narrower_than_the_play_lets_the_pane_through(bench: Any) -> None:
@@ -655,6 +662,51 @@ def test_a_pane_that_only_passes_once_its_play_has_moved_it_comes_out(bench: Any
     assert 0 < read["passes_at_shifts"] < read["shifts_read"], "centred, it's held"
     assert 0 < read["passes_3d_at_shifts"] < read["shifts_read"], "by the second method too"
     assert read["least_in_path_mm3"] == pytest.approx(0.0, abs=0.5)
+    # Why, edge by edge: 0.1 mm of lip on the left, the pocket's own outline top and bottom, and
+    # 0.5 mm wider than the pocket on the right.
+    said = {s["what"]: s for s in read["over"]["stretches"] if s["spots"] > 1}
+    assert said["thin"]["least_mm"] == pytest.approx(0.1, abs=1e-3)
+    assert said["pocket"]["edge_mm"] == pytest.approx(39.8, abs=1)
+    assert said["wider"]["beyond_wall_mm"] == pytest.approx(0.5, abs=1e-3)
+    assert all(s["rays"]["what"] == s["what"] for s in said.values())
+
+
+def test_a_pocket_cut_on_through_its_top_face_is_said_to_be_why(bench: Any) -> None:
+    """`eval-tip-1`: the pocket's cut ran from its floor through the top face, and `capture` said
+    only that the pane comes out. Its hole over the pane is the pocket's outline, all round."""
+    answer = capture(bench, "held-pocket-through.step")
+    assert answer.verdict == "FAIL", answer.text
+    assert "comes out upward" in answer.text
+    assert "the frame read from z=3 to its top at z=4: all round its edge, 159.2 mm" in answer.text
+    assert "the hole is as wide as the pocket" in answer.text
+    assert "the pocket's cut may run through the top face" in answer.text
+    pane = answer.numbers["panes"][0]
+    (stretch,) = pane["up"]["over"]["stretches"]
+    assert stretch["what"] == "pocket" and stretch["whole_ring"]
+    assert stretch["least_mm"] == pytest.approx(0.1, abs=1e-3), "out to the pocket's wall"
+    assert stretch["rays"]["what"] == "pocket"
+    assert stretch["rays"]["mm"] == pytest.approx(0.1, abs=0.01)
+    assert "over" not in pane["down"], "held below"
+
+
+def test_a_top_opening_wider_than_the_pocket_on_one_side_says_which_and_by_how_much(
+    bench: Any,
+) -> None:
+    """2 mm wider than the pocket on the right, and a 0.2 mm lip over the pane on the others."""
+    answer = capture(bench, "held-wide-side.step")
+    assert answer.verdict == "FAIL", answer.text
+    assert "the hole is 2 mm wider than the pocket, so the frame starts 2.1 mm out" in answer.text
+    assert "the frame covers it by only 0.2 to 0.283 mm, where 0.5 is needed" in answer.text, (
+        "0.2 along each edge, and 0.2 times the square root of 2 square to a corner"
+    )
+    said = {s["what"]: s for s in answer.numbers["panes"][0]["up"]["over"]["stretches"]}
+    wider = said["wider"]
+    assert wider["edge_mm"] == pytest.approx(39.8, abs=1)
+    assert wider["middle"][0] == pytest.approx(19.9, abs=1e-3), "on the right-hand edge"
+    assert wider["beyond_wall_mm"] == pytest.approx(2.0, abs=1e-3)
+    assert wider["rays"]["what"] == "wider"
+    assert wider["rays"]["mm"] == pytest.approx(2.1, abs=0.01)
+    assert said["thin"]["edge_mm"] == pytest.approx(119.4, abs=1)
 
 
 def test_a_lip_along_one_side_only_lets_it_swing_out(bench: Any) -> None:
@@ -767,6 +819,11 @@ def test_capture_says_so_when_its_two_methods_differ(bench: Any) -> None:
     assert found["slant"] == {"least": 1.9, "thin": 0.0}
     assert found["taper"]["thin"] > 2, "a lip that tapers a long way is thin, not its end"
     assert found["taper"]["least"] < 0.3
+    assert found["over_alike"] is None
+    assert "the sections read pocket and rays wider" in found["over_kind"]
+    assert "the sections read 2.1 mm and rays 1.6" in found["over_figure"]
+    assert found["over_lip_wider_by_rays"] is None, "beside a corner, as for the lip"
+    assert "a 0.2 mm lip and rays 0.1" in found["over_lip_narrower_by_rays"]
 
 
 # An island of frame inside an opening: a pane with holes (`cup-1`)
