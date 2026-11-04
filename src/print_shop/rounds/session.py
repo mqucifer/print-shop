@@ -191,17 +191,17 @@ class Session:
     outcomes: Counter[str] = field(default_factory=Counter)
     by_tool: Counter[str] = field(default_factory=Counter)
     runaways: list[dict[str, int]] = field(default_factory=list)
-    # Each tool reply's facts, by its message's index, for compaction.
-    replies: dict[int, dict[str, Any]] = field(default_factory=dict)
-    # Told each event as it's kept, for the ledger.
-    heard: Callable[[dict[str, Any]], None] | None = None
-    # Asked right after each compaction, for what the model should be told again then: a text
-    # said to it before the next call, or "" for nothing (mqucifer/print-shop#45 sets it).
-    after_compaction: Callable[[], str] | None = None
     # The last call that ended without a tool call, and while it holds, the only tools offered.
     quiet_at: int = 0
     only: tuple[str, ...] = ()
     last_seconds: float = 0.0
+    # Each tool reply's facts, by its message's index, for compaction.
+    replies: dict[int, dict[str, Any]] = field(default_factory=dict)
+    # Told each event as it's kept, for the ledger.
+    heard: Callable[[dict[str, Any]], None] | None = None
+    # Asked right after a compaction for what to say before the next call: the run's failing
+    # checks (mqucifer/print-shop#45). Empty text says nothing.
+    after_compaction: Callable[[], str] | None = None
 
     def begin(self, *start: dict[str, Any]) -> None:
         """A new conversation. An earlier one in the same run stays in the records."""
@@ -555,9 +555,9 @@ class Session:
                 prompt_before=self.last_prompt,
                 before_call=self.requests + 1,
             )
-            told = self.after_compaction() if self.after_compaction is not None else ""
-            if told:
-                self.say(told)
+            restated = self.after_compaction() if self.after_compaction is not None else ""
+            if restated:
+                self.say(restated)
             if self.estimate() >= self.limits.compact_at:
                 full = {"estimated": self.estimate(), "limit": self.limits.compact_at}
                 return {}, Ending("context_full", full)
