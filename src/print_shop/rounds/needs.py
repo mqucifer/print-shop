@@ -268,6 +268,24 @@ def numbers_wrong(found: list[Need]) -> list[str]:
     return wrong
 
 
+def verdicts_wrong(found: list[Need]) -> list[str]:
+    """Each bench need asking for a verdict its command never gives (`reports.py`). On
+    `eval-unnamed-1` a fit need on `clearance` asked for OK, where `clearance` says CLEAR: three
+    `done`s failed on it before the model asked."""
+    wrong = []
+    for need in found:
+        if need.by != "bench" or not need.verdicts:
+            continue
+        words = need.argv()
+        for verdict in need.verdicts:
+            if verdict in UNSURE or verdict in WRONG:
+                continue  # `read` refuses these already
+            said = reports.wrong_verdict(words[0], verdict) if words else None
+            if said:
+                wrong.append(f"the need {need.id!r}: {said}")
+    return wrong
+
+
 def load(entries: list[dict[str, Any]]) -> list[Need]:
     """Needs as kept, a need from before `covers` and `fixed` with neither."""
     return [Need(**entry) for entry in entries]

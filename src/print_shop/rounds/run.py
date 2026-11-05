@@ -41,6 +41,7 @@ from print_shop.bench import usage as usage_module
 from print_shop.rounds import (
     after_action,
     breakdown,
+    figures,
     holding,
     judge,
     lessons,
@@ -1413,9 +1414,10 @@ class Run:
             self.toolset,
         )
         if not wrong and not trying:
-            wrong = needs.numbers_wrong(found)
+            wrong = needs.numbers_wrong(found) + needs.verdicts_wrong(found)
         if not wrong and form is not None and not trying:
-            wrong = forms.held(found, form) + self._fixed_kept(found)
+            wrong = forms.held(found, form) + figures.wrong(found, form)
+            wrong += self._fixed_kept(found)
         if not wrong:
             wrong = self._usable(found)
         if wrong:
