@@ -69,3 +69,4 @@ assert abs(box.cut(a, b).val().Volume() - 192) < 1e-6  # only a was cut
 assert abs(box.cut(cq.Compound.makeCompound([a, b])).val().Volume() - 184) < 1e-6
 assert cq.Workplane().newObject(box.val()).solids().vals() == []
 assert len(cq.Workplane().add(box.val()).solids().vals()) == 1
+```

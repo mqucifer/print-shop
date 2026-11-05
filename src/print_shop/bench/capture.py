@@ -85,6 +85,13 @@ NEAREST_SHARE = 0.5
 MATCH_LARGER = 3.0
 #: Files over this many bytes aren't read to match panes.
 MATCH_BYTES = 20_000_000
+#: A pane file whose play differs from `--clearance` by more than this, in mm, is said: the coarse
+#: mesh's chords on both outlines (`shapes.COARSE`, 0.01 mm each).
+PLAY_TOL = 0.02
+#: A file covering less of a pocket than this isn't read as its pane, for the play.
+PLAY_SHARE = 0.5
+#: Points round a pane file's outline for its play's second reading.
+PLAY_POINTS = 400
 #: How far out from a pane's edge the frame beyond its face is looked for, in mm. Past this,
 #: that face has no frame over the pane at all.
 OVER_REACH = 10.0
@@ -1035,6 +1042,7 @@ def match_files(
     heights: tuple[float, float],
     panes: list[tuple[str, Any]],
     differs: list[str],
+    openings: dict[str, Any] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Which file beside the frame is each pane the bench read, if any.
 
@@ -1065,6 +1073,8 @@ def match_files(
         area = (x1 - x0) * (y1 - y0)
         best: tuple[float, str, Part] | None = None
         within: list[str] = []
+        in_pocket: list[str] = []
+        pocket = (openings or {}).get(name)
         for file, part, box in candidates:
             (fx0, fy0, _), (fx1, fy1, _) = box
             if fx0 > x1 or fx1 < x0 or fy0 > y1 or fy1 < y0:
@@ -1082,6 +1092,8 @@ def match_files(
             share = common / union if union else 0.0
             if outline.area and common >= MATCH_SHARE * float(outline.area):
                 within.append(file)
+            if pocket is not None and _lies_in(outline, pocket):
+                in_pocket.append(file)
             if best is None or share > best[0]:
                 best = (share, file, part)
         row: dict[str, Any] = {"file": None, "files_within": within}
@@ -1099,8 +1111,83 @@ def match_files(
                 )
         if row["file"] is not None:
             row["files_within"] = [f for f in within if f != row["file"]]
+        # The play is read from the pane's own file: the one matched, or, where `--clearance` is
+        # so far from the file's play that it doesn't match, the one file lying in the pocket.
+        play_file = row["file"] or (in_pocket[0] if len(in_pocket) == 1 else None)
+        if pocket is not None and play_file is not None:
+            row["play_file"] = play_file
+            row.update(file_play(pocket, sections[play_file]))
         matched[name] = row
     return matched
+
+
+def _lies_in(outline: Any, pocket: Any) -> bool:
+    """Whether a file's outline at the pocket's height is a pane in that pocket: nearly all of it
+    inside, and at least half the pocket, so a crumb of something else isn't read as its pane."""
+    area = float(outline.area)
+    inside = float(pocket.intersection(outline).area)
+    return area > 0 and inside >= MATCH_SHARE * area and area >= PLAY_SHARE * float(pocket.area)
+
+
+def file_play(opening: Any, outline: Any) -> dict[str, float]:
+    """How much play a pane's own file has in its pocket, all round (mqucifer/print-shop#54): the
+    room between them over the length round both, and, as the second reading, the median distance
+    from points round the file's outline to the pocket's wall. On `eval-choice-1` two plays had
+    one `--clearance`, and nothing said so."""
+    room = float(opening.area) - float(outline.area)
+    by_area = room / ((float(opening.length) + float(outline.length)) / 2)
+    rings = [outline.exterior, *outline.interiors] if outline.geom_type == "Polygon" else []
+    rings = rings or [g.exterior for g in getattr(outline, "geoms", [])]
+    points = [
+        ring.interpolate(t, normalized=True)
+        for ring in rings
+        for t in np.linspace(0.0, 1.0, PLAY_POINTS, endpoint=False)
+    ]
+    wall = opening.boundary
+    by_points = float(np.median([wall.distance(p) for p in points])) if points else by_area
+    return {"file_play_mm": round(by_area, 4), "file_play_by_points_mm": round(by_points, 4)}
+
+
+def plays_differ(panes: list[dict[str, Any]], clearance: float) -> list[dict[str, Any]]:
+    """Each pane whose own file has a play other than `--clearance`, by both readings."""
+    found = []
+    for row in panes:
+        play = row.get("file_play_mm")
+        if play is None or abs(play - clearance) <= PLAY_TOL:
+            continue
+        found.append(
+            {
+                "pane": row["pane"],
+                "file": row["play_file"],
+                "play_mm": play,
+                "by_points_mm": row["file_play_by_points_mm"],
+            }
+        )
+    return found
+
+
+def plays_say(found: list[dict[str, Any]], panes: list[dict[str, Any]], clearance: float) -> str:
+    """What capture says of panes whose files' plays differ from `--clearance`: where the files
+    have plays of their own, one run can't judge them all."""
+    each = "; ".join(
+        f"pane {one['pane']} ({one['file']}) has {one['play_mm']:g} mm"
+        + (
+            ""
+            if abs(one["by_points_mm"] - one["play_mm"]) <= PLAY_TOL
+            else f" by area and {one['by_points_mm']:g} mm by points round its edge"
+        )
+        for one in found
+    )
+    plays = sorted({round(one["play_mm"], 2) for one in found})
+    again = " and ".join(f"--clearance {p:g}" for p in plays)
+    said = f"each pane is read at {clearance:g} mm of play, and its own file says otherwise: {each}"
+    read = [row for row in panes if row.get("file_play_mm") is not None]
+    if len(found) == len(read) and len(plays) == 1:
+        return f"{said}. Run capture again at {again}"
+    return (
+        f"{said}. One run can't judge panes of different plays: run capture again at {again} and "
+        "read those panes there"
+    )
 
 
 def run(args: Any, report: Report) -> None:
@@ -1159,6 +1246,7 @@ def run(args: Any, report: Report) -> None:
         (low, high),
         [(str(k + 1), p) for k, _, p in readable],
         differs,
+        {str(k + 1): o for k, o, _ in readable},
     )
     report.note(
         "pane numbers are the bench's own, largest opening first, and not a file's: each is said "
@@ -1237,6 +1325,14 @@ def run(args: Any, report: Report) -> None:
         report.line(_pane_line(label[5:], row))
     report.numbers["panes"] = panes
     report.numbers["plain_holes"] = holes
+    differ = plays_differ(panes, args.clearance)
+    report.numbers["plays_differ"] = differ
+    if differ:
+        report.line(plays_say(differ, panes, args.clearance))
+        report.second(
+            "each such pane's play by points round its file's edge, to the pocket's wall: "
+            + ", ".join(f"pane {one['pane']} {one['by_points_mm']:g} mm" for one in differ)
+        )
     if not panes and not problems:
         raise NoAnswer("every opening is a plain hole, with nothing to hold a pane")
     faces = [p[key] for p in panes for key in ("up", "down")]

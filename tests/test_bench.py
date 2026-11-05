@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 
 from print_shop.bench import host
+from print_shop.rounds import skills
 
 pytestmark = pytest.mark.bench
 CASES = Path(__file__).parent / "bench_cases"
@@ -861,6 +862,63 @@ def test_each_pane_says_where_it_is_and_which_file_it_is(bench: Any) -> None:
     assert "pane numbers are the bench's own" in answer.text
 
 
+def test_panes_whose_files_have_another_play_are_named(bench: Any) -> None:
+    """One `--clearance` for two plays (`eval-choice-1`): the pane whose own file has 1.5 mm of
+    play, by arithmetic, is named though it doesn't match at 0.1, and the reply says one run can't
+    judge them all. At 1.5 the other is named."""
+    answer = capture(bench, "plays/frame.step")
+    differ = answer.numbers["plays_differ"]
+    assert [(d["pane"], d["file"]) for d in differ] == [("2", "pane_2.step")], answer.text
+    assert differ[0]["play_mm"] == pytest.approx(1.5, abs=0.005)
+    assert differ[0]["by_points_mm"] == pytest.approx(1.5, abs=0.005)
+    rows = {row["pane"]: row for row in answer.numbers["panes"]}
+    assert rows["1"]["file"] == rows["1"]["play_file"] == "pane_1.step"
+    assert rows["1"]["file_play_mm"] == pytest.approx(0.1, abs=0.005)
+    assert rows["2"]["file"] is None and rows["2"]["play_file"] == "pane_2.step"
+    assert "pane 2 (pane_2.step) has 1.5 mm" in answer.text
+    said = "One run can't judge panes of different plays: run capture again at --clearance 1.5"
+    assert said in answer.text
+    assert answer.verdict != "DISAGREE", "a reading, which judges nothing"
+    other = capture(bench, "plays/frame.step", "--clearance", "1.5")
+    assert [d["file"] for d in other.numbers["plays_differ"]] == ["pane_1.step"], other.text
+
+
+def test_info_reads_a_curve_stored_as_flat_strips_and_the_files_size(bench: Any) -> None:
+    """Not a failure: a reading of what bloats a file (mqucifer/print-shop#54)."""
+    faceted = bench("info", "ring-faceted.step")
+    curved = bench("info", "ring-curved.step")
+    assert faceted.verdict == curved.verdict == "OK", faceted.text + curved.text
+    assert faceted.numbers["flat_faces"] == 770 and faceted.numbers["small_flat_faces"] == 768
+    assert "flat faces under 1 mm by points along their edges: 768" in faceted.text
+    assert "768 flat face(s) under 1 mm across" in faceted.text
+    assert curved.numbers["flat_faces"] == 2 and curved.numbers["small_flat_faces"] == 0
+    assert faceted.numbers["file_kb"] > 100 * curved.numbers["file_kb"]
+    assert "flat strips" not in curved.text
+
+
+def test_the_skills_new_code_runs_in_the_image(bench: Any) -> None:
+    """Every Python block print-shop added to the skills, run as the model would run it."""
+    blocks = [
+        block
+        for name in (
+            "cadquery/references/layout-to-arcs.md",
+            "cadquery/references/errors.md",
+            "designing-stained-glass/SKILL.md",
+        )
+        for block in re.findall(
+            r"```python\n(.*?)```",
+            (skills.SKILLS / name).read_text().split(skills.ADDED)[-1],
+            re.DOTALL,
+        )
+        if "cadquery" in block
+    ]
+    assert len(blocks) == 4
+    for k, block in enumerate(blocks):
+        (bench.work / f"skill_block_{k}.py").write_text(block)
+        ran = host.run([f"skill_block_{k}.py"], bench.work, python=True)
+        assert ran.returncode == 0, f"block {k}:\n{block}\n{ran.stdout}{ran.stderr}"
+
+
 def test_a_pane_no_file_matches_says_so(bench: Any) -> None:
     answer = capture(bench, "held.step")
     assert answer.numbers["panes"][0]["file"] is None
@@ -1464,7 +1522,7 @@ def test_each_file_is_drawn_in_the_colour_given_and_named_in_the_legend(bench: A
         "--look", "glass-pane-2.step=amber:steam", "--size", "512", "--renders-out", "looks",
     )  # fmt: skip
     assert answer.verdict == "OK", answer.text
-    assert "drawn: 2 glass-pane-1.step: cup (blue)" in answer.text
+    assert "drawn: glass-pane-1.step: cup (blue)" in answer.text
     files = {f["file"]: f for f in answer.numbers["files"]}
     assert files["glass-pane-1.step"]["rgb"] == [40, 90, 220]
     # 7.9 px a mm about (30, 20): a point on each pane, away from its number.
@@ -1475,6 +1533,26 @@ def test_each_file_is_drawn_in_the_colour_given_and_named_in_the_legend(bench: A
     # Every file was seen in the view drawn, so nothing's said hidden.
     assert all(px > 0 for px in answer.numbers["seen_px"]["top"].values())
     assert "not seen" not in answer.text
+
+
+def test_each_file_is_marked_by_its_name_and_a_long_legend_wraps(bench: Any) -> None:
+    """The approval sheet marked `pane_1.step` "2" beside the model's own numbered layout, and a
+    legend was cut at its edge ("none was giv") (mqucifer/print-shop#54)."""
+    answer = bench(
+        "render", "island/frame-island.step", "island/pane_1.step", "--views", "top",
+        "--size", "128", "--look", "island/pane_1.step=blue:the small pane in the middle",
+        "--renders-out", "wrapped",
+    )  # fmt: skip
+    assert answer.verdict == "OK", answer.text
+    marks = {f["file"]: f["mark"] for f in answer.numbers["files"]}
+    assert marks == {"island/frame-island.step": "frame-island", "island/pane_1.step": "pane_1"}
+    assert "drawn: island/pane_1.step: the small pane in the middle (blue)" in answer.text
+    assert "drawn: island/frame-island.step (a colour of the sheet's, none was given)" in (
+        answer.text
+    )
+    with png_size(bench.work / answer.record["files"][-1]) as size:
+        assert size[0] == 256, "one view and two files: a sheet two pictures wide"
+        assert size[1] > 128 + legend_px(2, 256), "each entry's words wrap, and none is cut"
 
 
 def test_a_file_with_no_colour_never_takes_another_files(bench: Any) -> None:

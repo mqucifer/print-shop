@@ -2120,7 +2120,7 @@ def test_an_asks_sheet_goes_to_the_model_first_and_only_then_with_its_words(
     drawn = [e for e in replies(run) if e["name"] == "ask"]
     assert all(e["outcome"] == "ok" for e in drawn)
     assert "hasn't gone to the Sponsor" in drawn[0]["reply"]
-    assert "drawn: 1 block.step: block (blue)" in drawn[0]["reply"]
+    assert "drawn: block.step: block (blue)" in drawn[0]["reply"]
     # The harness's own reading of what the sheet shows: the gap fails, as `done` would say.
     assert (
         "clearance block.step tab.step --min-gap 0.2: `pairs.0.gap_mesh_mm` is 2"

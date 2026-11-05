@@ -63,5 +63,7 @@ COPY --from=docs /build/docs.json /opt/cad-eval/docs.json
 # The bench's version, as `print_shop.bench.host.IMAGE` names it. 0.3 reads islands inside an
 # opening and the wall round a hole (mqucifer/print-shop#27); 0.4 has `light` and `thickness`
 # (mqucifer/print-shop#37); 0.5's `capture` says what the frame lacks over or under a pane, and
-# where (mqucifer/print-shop#46). Its code is mounted, not copied in.
-LABEL org.opencontainers.image.version="0.5"
+# where (mqucifer/print-shop#46); 0.6's `info` reads small flat faces and the file's size,
+# `capture` names panes whose files have another play, and a sheet marks each file by its name
+# and wraps its legend (mqucifer/print-shop#54). Its code is mounted, not copied in.
+LABEL org.opencontainers.image.version="0.6"

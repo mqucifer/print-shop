@@ -291,6 +291,35 @@ def islands() -> None:
     island_frame((-10, 10, -19.85, 19.85), "frame-island-split")
 
 
+def plays() -> None:
+    """Two 40 mm pockets side by side, each with 2 mm lips, and a pane file for each: one with
+    0.1 mm of play all round, one with 1.5 (mqucifer/print-shop#54). On `eval-choice-1` two plays
+    had one `--clearance`, and nothing in `capture`'s reply said so. At 0.1 mm the bench's pane
+    shares 86% with the 1.5 mm file, too little to match it, as the eval's small pane did."""
+    Path("plays").mkdir(exist_ok=True)
+    frame = box(-50, 50, -30, 30, 0, 4)
+    for x in (-25, 25):
+        frame = frame.cut(box(x - 20, x + 20, -20, 20, 1, 3))
+        for z0, z1 in ((0, 1), (3, 4)):
+            frame = frame.cut(box(x - 18, x + 18, -18, 18, z0, z1))
+    save(frame, "plays/frame")
+    save(box(-44.9, -5.1, -19.9, 19.9, 1, 3), "plays/pane_1")
+    save(box(6.5, 43.5, -18.5, 18.5, 1, 3), "plays/pane_2")
+
+
+def rings() -> None:
+    """One 80 mm ring, 5 mm wide and 3 mm thick, built two ways (mqucifer/print-shop#54): from
+    polygons of 96 segments a quarter, as Shapely's points through `polyline` gave the runs, and
+    from two circles. Each of the 768 sides is a flat strip 0.57 and 0.50 mm wide, by arithmetic:
+    2 x 40 x sin(pi / 384) and 2 x 35 x sin(pi / 384)."""
+    angles = np.linspace(0, 2 * np.pi, 384, endpoint=False)
+    outer = [(40 * np.cos(a), 40 * np.sin(a)) for a in angles]
+    inner = [(35 * np.cos(a), 35 * np.sin(a)) for a in angles]
+    faceted = cq.Workplane("XY").polyline(outer).close().polyline(inner).close().extrude(3)
+    save(faceted, "ring-faceted")
+    save(cq.Workplane("XY").circle(40).circle(35).extrude(3), "ring-curved")
+
+
 def hanging() -> None:
     """Holes whose least wall is known by arithmetic."""
     # A 3 mm hole at y=121.5 in a top rail from y=117 to 125: 2.0 mm to the outside, 3.0 to the
@@ -496,6 +525,8 @@ if __name__ == "__main__":
     frames()
     captured()
     islands()
+    plays()
+    rings()
     hanging()
     closes()
     thin_parts()

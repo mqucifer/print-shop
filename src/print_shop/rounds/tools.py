@@ -122,8 +122,8 @@ LOOKS = {
         "description": 'Each file\'s colour and a short label: {"pane_1.step": {"colour": "blue", '
         '"label": "cup"}, "frame.step": {"colour": "grey", "label": "frame"}}. A colour is a name '
         "such as blue, amber or clear, perhaps with light or dark, or #rrggbb. The sheet draws "
-        "each file in its colour, numbered, with a legend; a file with none takes a colour no "
-        "other file has. Optional.",
+        "each file in its colour, marked by its name, with a legend; a file with none takes a "
+        "colour no other file has. A given file under `references/` may have one too. Optional.",
     }
 }
 NEED_SHAPE = (

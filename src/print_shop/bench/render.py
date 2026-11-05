@@ -22,10 +22,14 @@ from . import cut as cut_module
 from .report import Report, slug
 from .shapes import NoAnswer, Part, load, slice_at
 
-#: A sheet's legend: one line of it, and the room an entry takes along it.
+#: A sheet's legend: one line of it, and the room an entry takes along it. An entry's words wrap
+#: within it, and are never cut (mqucifer/print-shop#54: "none was giv").
 LEGEND_LINE = 18
 LEGEND_ENTRY = 440
-#: A file's number on a picture, drawn after the picture is checked.
+#: Where an entry's words start, after its colour's swatch, and the room kept at its right.
+LEGEND_TEXT = 18
+LEGEND_PAD = 10
+#: A file's mark on a picture, its name, drawn after the picture is checked.
 MARK_PAD = 2
 #: Where the camera sits from the centre, and the picture's up.
 VIEWS = {
@@ -422,7 +426,9 @@ def _variants(given: list[str]) -> list[tuple[str, list[str]]]:
 
 @dataclass
 class Shown:
-    """One file on a sheet: its geometry, how it's drawn, and its number on the pictures."""
+    """One file on a sheet: its geometry, how it's drawn, its number in order, and its mark on the
+    pictures: its own name, so `pane_1.step` is marked `pane_1`, as the model numbered it, and not
+    by the sheet's count (mqucifer/print-shop#54)."""
 
     name: str
     whole: Part
@@ -432,6 +438,7 @@ class Shown:
     label: str
     number: int
     anchor: np.ndarray
+    mark: str = ""
 
     @property
     def meshes(self) -> list[trimesh.Trimesh]:
@@ -443,10 +450,12 @@ class Shown:
 
     @property
     def said(self) -> str:
-        """How the legend names it: its number, file, label and colour."""
+        """How the legend names it: its mark, where that isn't its file's name, its file, label
+        and colour."""
         label = f": {self.label}" if self.label else ""
         colour = self.colour or "a colour of the sheet's, none was given"
-        return f"{self.number} {self.name}{label} ({colour})"
+        mark = "" if self.mark == Path(self.name).stem else f"{self.mark} "
+        return f"{mark}{self.name}{label} ({colour})"
 
 
 def _looks(given: list[str]) -> dict[str, colours_module.Look]:
@@ -488,7 +497,10 @@ def _shown(names: list[str], looks: dict[str, colours_module.Look]) -> list[Show
     given = [looks[n].rgb for n in order if n in looks]
     spare = iter(colours_module.distinct(sum(1 for n in order if n not in looks), given))
     found = []
+    stems = [Path(n).stem for n in order]
     for k, name in enumerate(order):
+        stem = Path(name).stem
+        mark = stem if stems.count(stem) == 1 else str(Path(name).with_suffix(""))
         whole = load(name)
         parts = whole.pieces()
         look = looks.get(name)
@@ -503,20 +515,20 @@ def _shown(names: list[str], looks: dict[str, colours_module.Look]) -> list[Show
                 look.label if look else "",
                 k + 1,
                 _anchor(parts),
+                mark,
             )
         )
     return found
 
 
-def _numbered(pixels: np.ndarray, marks: list[tuple[int, float, float]]) -> np.ndarray:
-    """Each file's number where it is, once the picture's been checked: the check reads none."""
+def _numbered(pixels: np.ndarray, marks: list[tuple[str, float, float]]) -> np.ndarray:
+    """Each file's mark where it is, once the picture's been checked: the check reads none."""
     picture = Image.fromarray(pixels.copy())
     draw = ImageDraw.Draw(picture)
     size = picture.width
-    for number, x, y in marks:
+    for text, x, y in marks:
         if not (0 <= x < size and 0 <= y < picture.height):
             continue
-        text = str(number)
         left, top, right, bottom = draw.textbbox((x, y), text, anchor="mm")
         draw.rectangle(
             (left - MARK_PAD, top - MARK_PAD, right + MARK_PAD, bottom + MARK_PAD),
@@ -533,8 +545,8 @@ def _marks(
     size: int,
     points: np.ndarray,
     close: Close | None = None,
-) -> list[tuple[int, float, float]]:
-    """Where each file's number lands in a view, by the same arithmetic that aims the camera."""
+) -> list[tuple[str, float, float]]:
+    """Where each file's mark lands in a view, by the same arithmetic that aims the camera."""
     right, top, _ = _axes(view)
     centre, scale = _aim(points, view, close)
     found = []
@@ -542,7 +554,7 @@ def _marks(
         across = float((one.anchor - centre) @ right)
         up = float((one.anchor - centre) @ top)
         per_mm = size / (2 * scale)
-        found.append((one.number, size / 2 + across * per_mm, size / 2 - up * per_mm))
+        found.append((one.mark, size / 2 + across * per_mm, size / 2 - up * per_mm))
     return found
 
 
@@ -571,17 +583,44 @@ def _seen(
     return found
 
 
+def wrapped(draw: Any, text: str, room: float) -> list[str]:
+    """The text in lines no wider than `room` px, broken between words, or within a word longer
+    than a line. Nothing is cut."""
+    lines: list[str] = []
+    line = ""
+    for word in text.split(" "):
+        tried = f"{line} {word}" if line else word
+        if draw.textlength(tried) <= room:
+            line = tried
+            continue
+        if line:
+            lines.append(line)
+        line = word
+        while draw.textlength(line) > room and len(line) > 1:
+            fits = [k for k in range(len(line), 0, -1) if draw.textlength(line[:k]) <= room]
+            cut = fits[0] if fits else 1
+            lines.append(line[:cut])
+            line = line[cut:]
+    return [*lines, line] if line else lines
+
+
 def _legend(shown: list[Shown], width: int) -> Image.Image:
-    """What each number and colour is: a strip under the sheet."""
+    """What each mark and colour is: a strip under the sheet, its entries in rows, each entry's
+    words wrapped within it."""
     across = max(1, width // LEGEND_ENTRY)
-    lines = int(np.ceil(len(shown) / across))
-    strip = Image.new("RGB", (width, LEGEND_LINE * lines + 8), "white")
+    measure = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    room = min(LEGEND_ENTRY, width - 8) - LEGEND_TEXT - LEGEND_PAD
+    entries = [wrapped(measure, one.said, room) for one in shown]
+    rows = [entries[i : i + across] for i in range(0, len(entries), across)]
+    heights = [LEGEND_LINE * max(len(e) for e in row) for row in rows]
+    strip = Image.new("RGB", (width, sum(heights) + 8), "white")
     draw = ImageDraw.Draw(strip)
-    for i, one in enumerate(shown):
+    for i, (one, lines) in enumerate(zip(shown, entries, strict=True)):
         x = 8 + (i % across) * LEGEND_ENTRY
-        y = 4 + (i // across) * LEGEND_LINE
+        y = 4 + sum(heights[: i // across])
         draw.rectangle((x, y + 2, x + 12, y + 14), fill=one.rgb, outline=(20, 20, 20))
-        draw.text((x + 18, y + 2), one.said[: LEGEND_ENTRY // 7], fill=(20, 20, 20))
+        for k, line in enumerate(lines):
+            draw.text((x + LEGEND_TEXT, y + 2 + k * LEGEND_LINE), line, fill=(20, 20, 20))
     return strip
 
 
@@ -616,7 +655,7 @@ def _cut_column(
     for line in drawn.notes:
         report.line(f"{name}{line}")
     report.numbers.setdefault("cuts", {})[f"{name}{cut.label}"] = drawn.numbers
-    marks = [(shown[k].number, x, y) for k, x, y in drawn.marks]
+    marks = [(shown[k].mark, x, y) for k, x, y in drawn.marks]
     return _numbered(drawn.pixels, marks), [f"{name}{p}" for p in drawn.problems]
 
 
@@ -708,6 +747,7 @@ def run_variants(args: Any, report: Report) -> None:
 def _file_numbers(one: Shown) -> dict[str, Any]:
     return {
         "number": one.number,
+        "mark": one.mark,
         "file": one.name,
         "label": one.label,
         "colour": one.colour,
