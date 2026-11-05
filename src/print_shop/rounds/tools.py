@@ -409,9 +409,20 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
             "Say why a failing bench check doesn't apply, so it's no longer named in your "
             "replies. Each check whose latest try failed is named until it passes; the person at "
             "the next stop reads your reason. A check a need runs can't be set aside: `done` "
-            "decides it. If the check fails again, it's named again.",
-            check="The check as your replies name it: its command and files, such as `capture "
-            "references/frame.step pane.step`.",
+            "decides it. If the check fails again, it's named again. Or, with `file`, say why no "
+            "need has to read a file of the part, which `done` otherwise asks for.",
+            {
+                "check": {
+                    "type": "string",
+                    "description": "The check as your replies name it: its command and files, "
+                    "such as `capture references/frame.step pane.step`.",
+                },
+                "file": {
+                    "type": "string",
+                    "description": "Instead of `check`: a file of the part that no need's check "
+                    "reads, such as `pane.step`.",
+                },
+            },
             why="Why it doesn't apply, for the person at the next stop.",
         ),
         _spec(
