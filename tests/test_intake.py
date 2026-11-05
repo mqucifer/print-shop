@@ -299,7 +299,10 @@ def test_a_breakdown_is_held_to_its_shape_not_its_words() -> None:
             "look": [],
         }
     )
-    assert "a join names `socket`, which isn't one of `parts`" in wrong
+    assert (
+        "a join names `socket`, which isn't one of `parts`: a join names each part exactly as "
+        "`parts` does (`ring`, `shade`)"
+    ) in wrong
     assert any(w.startswith("`ring` is in no join") for w in wrong), "a part held by nothing"
     assert "`look` says what the look rests on, a line each" in wrong
     found, wrong = breakdown.read(

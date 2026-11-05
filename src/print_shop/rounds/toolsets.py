@@ -309,10 +309,11 @@ def _limit_wrong(need: Need, measure: Measure, given: nudge.Options, shown: str)
             "limit. There's no default: the limit is the request's, so ask for it with "
             "`questions` if you weren't given one"
         ]
-    if need.source not in ("request", "answer", "note"):
+    if need.source not in ("request", "answer", "note", "pick"):  # `needs.QUOTED`
         return [
             f"{shown}: a `{measure.name}` limit is the request's, so its `source` is `request`, "
-            f"`answer` or `note`, with the words that give it in `quote`, not `{need.source}`"
+            f"`answer`, `note` or `pick`, with the words that give it in `quote`, not "
+            f"`{need.source}`"
         ]
     missing = [f for f in figures if not _figure_in(f, need.quote)]
     if missing:

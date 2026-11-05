@@ -25,6 +25,17 @@ SHAPE = (
 )
 
 
+#: What a join is, said when one is refused: on the runs, a join named one part, such as the frame
+#: alone, and was refused twice before the model saw why (mqucifer/print-shop#54).
+JOIN = (
+    "A join is what holds one part to another, or connects them: the leading holding a pane by "
+    'its lips is {"parts": ["frame", "pane_1"], "how": "pane_1 sits in its pocket in the frame, '
+    'held by the lips on both faces"}, and a bracket\'s is {"parts": ["plate", "arm"], "how": '
+    '"the arm is printed as one with the plate"}. What a part is on its own goes in its `what`, '
+    "and with one part there's no join"
+)
+
+
 def read(raw: Any) -> tuple[dict[str, Any], list[str]]:
     """The breakdown as it's kept, or what's wrong with it."""
     if isinstance(raw, str):
@@ -62,12 +73,18 @@ def read(raw: Any) -> tuple[dict[str, Any], list[str]]:
         between = entry.get("parts")
         how = str(entry.get("how") or "").strip()
         if not isinstance(between, list) or len(between) < 2:
-            wrong.append("a join names the two or more parts it holds together, in `parts`")
+            wrong.append(
+                f"a join names the two or more parts it holds together, in `parts`, and this one "
+                f"names {len(between) if isinstance(between, list) else 0}. {JOIN}"
+            )
             continue
         between = [str(b).strip() for b in between]
         for name in between:
             if name not in names:
-                wrong.append(f"a join names `{name}`, which isn't one of `parts`")
+                wrong.append(
+                    f"a join names `{name}`, which isn't one of `parts`: a join names each part "
+                    f"exactly as `parts` does ({', '.join(f'`{n}`' for n in sorted(names))})"
+                )
         if not how:
             wrong.append(f"the join of {', '.join(between)} says `how` they're held or connected")
         joins.append({"parts": between, "how": how})

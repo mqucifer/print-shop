@@ -21,8 +21,10 @@ from print_shop.rounds import reports, toolsets
 from print_shop.rounds.toolsets import Toolset
 
 #: `note` is a person's note relayed to the model, so a Sponsor's words aren't marked `derived`.
-SOURCES = ("request", "answer", "note", "reference", "derived", "chosen")
-QUOTED = ("request", "answer", "note")
+SOURCES = ("request", "answer", "note", "pick", "reference", "derived", "chosen")
+#: Sources quoted in a person's own words: a pick's reason is one (mqucifer/print-shop#54), as on
+#: `eval-unnamed-1` a need quoting the stand-in's pick was refused and cost a round of questions.
+QUOTED = ("request", "answer", "note", "pick")
 COMMANDS = (
     "info",
     "clearance",
@@ -119,12 +121,37 @@ def _bound(entry: dict[str, Any], key: str, wrong: list[str], shown: str) -> flo
     return float(value)
 
 
+def _unquoted(source: str, quote: str, theirs: str, relayed: str, picked: str) -> str:
+    """Why a quote isn't from its source, naming the source it is from, or nothing if it is."""
+    where = {
+        "note": (relayed, "which isn't in a note you were sent"),
+        "pick": (picked, "which isn't in a pick's reason you were sent"),
+    }
+    text, said = where.get(source, (theirs, "which isn't in the request or the answers"))
+    if quote in text:
+        return ""
+    others = (
+        ("note", relayed, "a note", "`note`"),
+        ("pick", picked, "a pick's reason", "`pick`"),
+        ("answer", theirs, "the request or an answer", "`request` or `answer`"),
+    )
+    for other, found, kind, named in others:
+        if other != source and not (other == "answer" and source == "request") and quote in found:
+            return f"{said}, but is in {kind}: its `source` is {named}"
+    return said
+
+
 def read(
-    raw: Any, said_by_sponsor: str, notes: str = "", toolset: Toolset | None = None
+    raw: Any,
+    said_by_sponsor: str,
+    notes: str = "",
+    toolset: Toolset | None = None,
+    picks: str = "",
 ) -> tuple[list[Need], list[str]]:
-    """The needs, or what's wrong with them. `said_by_sponsor` is the request and the answers, and
-    `notes` what was relayed: each is its own source, so a need says which it came from. With a
-    `toolset`, each bench need's check is in it and measures what the need says it's about."""
+    """The needs, or what's wrong with them. `said_by_sponsor` is the request and the answers,
+    `notes` what was relayed, and `picks` each pick's reason and fix-first: each is its own source,
+    so a need says which it came from. With a `toolset`, each bench need's check is in it and
+    measures what the need says it's about."""
     wrong: list[str] = []
     try:
         entries = json.loads(raw) if isinstance(raw, str) else raw
@@ -136,6 +163,7 @@ def read(
     seen: set[str] = set()
     theirs = normal(said_by_sponsor)
     relayed = normal(notes)
+    picked = normal(picks)
     for entry in entries:
         if not isinstance(entry, dict):
             wrong.append("each need is an object")
@@ -164,15 +192,10 @@ def read(
         if source in QUOTED:
             if not quote.strip():
                 wrong.append(f"{shown} comes from the {source}: give its `quote`, their own words")
-            elif source == "note" and normal(quote) not in relayed:
-                wrong.append(f'{shown} quotes "{quote}", which isn\'t in a note you were sent')
-            elif source != "note" and normal(quote) not in theirs:
-                hint = (
-                    ", but is in a note: its `source` is `note`" if normal(quote) in relayed else ""
-                )
-                wrong.append(
-                    f'{shown} quotes "{quote}", which isn\'t in the request or the answers{hint}'
-                )
+            else:
+                said = _unquoted(str(source), normal(quote), theirs, relayed, picked)
+                if said:
+                    wrong.append(f'{shown} quotes "{quote}", {said}')
         check = entry.get("check")
         if not isinstance(check, dict):
             wrong.append(f'{shown}: `check` is {{"by": "bench", ...}} or {{"by": "eye", ...}}')

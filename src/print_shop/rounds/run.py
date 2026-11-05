@@ -16,6 +16,7 @@ its own. A person approves it, or sends it back with a note, and the ledger reco
 from __future__ import annotations
 
 import base64
+import contextlib
 import difflib
 import fcntl
 import hashlib
@@ -1776,17 +1777,80 @@ class Run:
         text = args["questions"].strip()
         if not text:
             return Judged("questions", "failed", "`questions` is empty.", "empty")
+        pictures = [str(p) for p in args.get("pictures") or []]
+        shown: list[tuple[str, str]] = []
+        for path in pictures:
+            if Path(path).suffix.lower() not in (".png", ".jpg", ".jpeg"):
+                reply = f"`pictures` are PNG or JPEG files you made, and `{path}` isn't one."
+                return Judged("questions", "failed", reply, "not_a_picture")
+            seen_picture = self.tools.call("read", {"path": path})
+            if seen_picture.outcome != "ok":
+                return Judged("questions", "failed", seen_picture.reply, seen_picture.why)
+            shown += seen_picture.images
         self.state.questions += 1
         n = self.state.questions
         folder = self.folder / "questions"
         folder.mkdir(exist_ok=True)
-        (folder / f"{n}.md").write_text(text + "\n", encoding="utf-8")
+        kept, said = self._question_pictures(n, pictures)
+        lines = [text, ""]
+        if kept:
+            lines += ["## Pictures", "", *[f"- {path}" for path in kept], ""]
+        (folder / f"{n}.md").write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
         self.ledger.question(self.state.name, n, text, self.session.requests)
         self.state.stop = {"kind": "questions", "n": n}
         self.state.said.append(f"You asked the Sponsor:\n\n{text}")
         self.save()
         reply = "Your questions have gone to the Sponsor. Their answers come in your next message."
-        return Judged("questions", "ok", reply, ending=Ending("questions", {"n": n}))
+        if said:
+            reply += f" {said}"
+        images = shown or [(f"questions/{n}/{Path(p).name}", self._b64(p)) for p in kept]
+        return Judged(
+            "questions",
+            "ok",
+            reply,
+            images=images,
+            detail={"pictures": len(kept)},
+            ending=Ending("questions", {"n": n}),
+        )
+
+    def _b64(self, path: Path) -> str:
+        return base64.b64encode(path.read_bytes()).decode()
+
+    def _question_pictures(self, n: int, pictures: list[str]) -> tuple[list[Path], str]:
+        """What goes with a question (mqucifer/print-shop#54): on `eval-choice-1` a question about
+        a cell's size went with no picture, as the request gave only STEP files. The model's own
+        pictures go as they are. With none, the harness draws a sheet of the given geometry, one
+        row of every STEP or STL under `references/`, so the person sees what's asked about. It's
+        what they see, and the model is shown it too."""
+        folder = self.folder / "questions" / str(n)
+        if pictures:
+            folder.mkdir(parents=True, exist_ok=True)
+            kept = []
+            for path in pictures:
+                target = folder / Path(path).name
+                target.write_bytes(paths.read_bytes_inside(self.work, path))
+                kept.append(target)
+            return kept, "Your pictures went with them, as they are."
+        given = sorted(
+            str(found.relative_to(self.work))
+            for found in (self.work / "references").glob("*")
+            if found.is_file() and not found.is_symlink() and found.name.lower().endswith(GEOMETRY)
+        )
+        if not given:
+            return [], ""
+        out = f".pictures/questions-{n}"
+        command = ["render", "--variant", f"given={','.join(given)}"]
+        command += ["--views", *ASK_VIEWS, "--size", ASK_SIZE, "--renders-out", out]
+        done = self.box.bench(command)
+        record = recorded(done.output, self.work)
+        sheets = [str(f) for f in (record or {}).get("files") or [] if str(f).endswith(".png")]
+        if done.code != 0 or not sheets:
+            return [], "The harness couldn't draw the given files, so they went with no picture."
+        folder.mkdir(parents=True, exist_ok=True)
+        target = folder / "given-sheet.png"
+        target.write_bytes(paths.read_bytes_inside(self.work, sheets[-1]))
+        named = ", ".join(f"`{name}`" for name in given)
+        return [target], f"With them went the harness's sheet of the given files, above: {named}."
 
     def needs(self, args: dict[str, Any]) -> Judged:
         """The needs, settled or tried. One refused once they were first settled goes beside the
@@ -1820,6 +1884,7 @@ class Run:
             "\n".join([request, *self.state.said]),
             "\n".join(self.state.notes),
             self.toolset,
+            picks=self._picks_said(),
         )
         if not wrong and not trying:
             wrong = needs.numbers_wrong(found) + needs.verdicts_wrong(found)
@@ -1872,6 +1937,17 @@ class Run:
                 "both checks and your reason."
             )
         return Judged("needs", "ok", reply)
+
+    def _picks_said(self) -> str:
+        """Each pick's reason and fix-first, as written in its `pick.json`: what a need with
+        `source` `pick` quotes (mqucifer/print-shop#54)."""
+        said = []
+        for path in sorted((self.folder / "asks").glob("*/pick.json")):
+            with contextlib.suppress(ValueError, OSError):
+                found = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(found, dict):
+                    said += [str(found.get(k) or "") for k in ("reason", "fix_first")]
+        return "\n".join(one for one in said if one.strip())
 
     def _fixed_kept(self, found: list[Need]) -> list[str]:
         """Each fixed need settled before, kept as it was: its check, its words and its mark. Only
@@ -2229,8 +2305,12 @@ class Run:
             return Judged(tool, "failed", shape, "not_a_look")
         found: dict[str, dict[str, str]] = {}
         for name, look in given.items():
-            if name not in allowed:
-                reply = f"`looks` names `{name}`, which isn't one of the files here. {shape}"
+            if name not in allowed and not self._given(name):
+                named = ", ".join(f"`{f}`" for f in allowed) or "none"
+                reply = (
+                    f"`looks` names `{name}`, which isn't one of the files here ({named}), or a "
+                    f"given file under `references/`. {shape}"
+                )
                 return Judged(tool, "failed", reply, "not_a_look")
             if not isinstance(look, dict) or not set(look) <= {"colour", "label"}:
                 return Judged(tool, "failed", shape, "not_a_look")
@@ -2242,6 +2322,13 @@ class Run:
                 return Judged(tool, "failed", f"`{name}`: {exc}. {shape}", "not_a_look")
             found[name] = {"colour": colour, "label": label}
         return found
+
+    def _given(self, name: str) -> bool:
+        """A file the run was given, under `references/`: `looks` may name one (on
+        `eval-through-1` a plan's `looks` naming the given frame was refused, and on
+        `eval-light-3` a `done`'s naming the given panes, mqucifer/print-shop#54)."""
+        found = paths.inside(self.work, name)
+        return name.startswith("references/") and found is not None and found.is_file()
 
     def _groups(self, given: Any, part: list[str]) -> list[dict[str, Any]] | Judged:
         """The ways the part is printed, each with its own files. A file of `part` in no group
@@ -2588,7 +2675,8 @@ class Run:
         args = ["render", "--renders-out", "final-render", "--size", ASK_SIZE]
         for row in rows:
             args += ["--variant", f"{row['name']}={','.join(row['files'])}"]
-        args += _look_args(looks)
+        drawn = {name for row in rows for name in row["files"]}
+        args += _look_args({name: look for name, look in looks.items() if name in drawn})
         args += ["--views", *ASK_VIEWS]
         done = self.box.bench(args, where=judged)
         record = recorded(done.output, judged) or {}
@@ -2667,7 +2755,7 @@ class Run:
                 command += ["--variant", f"{one['name']}={','.join(one['files'])}"]
             for path in pieces:
                 command += ["--test-piece", path]
-            command += _look_args(looks)
+            command += _look_args({name: look for name, look in looks.items() if name in drawn})
             command += [f"--close={close}" for close in str(args.get("close") or "").split()]
             command += [f"--cut={cut}" for cut in str(args.get("cuts") or "").split()]
             views = str(args.get("views") or " ".join(ASK_VIEWS)).split()
@@ -2718,6 +2806,12 @@ class Run:
             lines += ["What the bench says it drew:", *[f"- {line}" for line in bench_said]]
         if pictures:
             lines.append(f"Your pictures go as they are: {', '.join(f'`{p}`' for p in pictures)}.")
+        undrawn = [name for name in looks if name not in drawn]
+        if undrawn:
+            lines.append(
+                f"`looks` names {', '.join(f'`{n}`' for n in undrawn)}, given but not on this "
+                "sheet, so it isn't drawn: name it in a variant's `files` to draw it."
+            )
         if stop == forms.PLAN:
             lines.append(
                 "With your plan go your latest breakdown and the needs as settled, with the "

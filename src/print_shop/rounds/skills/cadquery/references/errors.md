@@ -40,3 +40,33 @@ assert len(cq.Workplane("XY").box(1, 1, 1).val().Solids()) == 1
 - A sweep that comes out as a shell, not a solid: the profile wasn't closed, or it
   twisted. Close the wire, and sweep along a helix with `isFrenet=True`
   (`cadquery-threads-helices`).
+
+<!-- print-shop's additions, after the measured text (mqucifer/print-shop#54) -->
+
+## Calls the runs reached for
+
+Each was tried in a design run, and each is checked in CadQuery 2.8.0 as it's said here.
+
+| Tried | What happens | What works |
+|---|---|---|
+| `face.extrude(h)` | `'Face' object has no attribute 'extrude'` | `cq.Solid.extrudeLinear(face, cq.Vector(0, 0, h))`, or draw it on a Workplane and `.extrude(h)` |
+| `wp.wrapped` | `'Workplane' object has no attribute 'wrapped'` | `wp.val().wrapped`: the OCP shape is on the shape, not the Workplane |
+| `cq.Workplane("XY", solid)` | `Expected three floats, OCC gp_, or 3-tuple`: the second argument is the origin | `cq.Workplane().add(solid)` |
+| `cq.Workplane().newObject(solid)` | no error, and no solid: it holds the solid's shell, so `.solids()` is empty and a `union` leaves it out | `cq.Workplane().add(solid)`, or `newObject([solid])`, a list |
+| `wp.cut([a, b])` | `Cannot cut type '<class 'list'>'` | `wp.cut(cq.Compound.makeCompound([a, b]))`, or `solid.cut(a, b)` on the shape |
+| `wp.cut(a, b)` | no error, and only `a` is cut: `b` is taken for `clean` | as above. Check the volume after a cut |
+| `solid.boundingBox()`, `.volume()`, `.area()`, `.length()`, `.Vertexes()` | `has no attribute ...` | a shape's own methods start with a capital: `BoundingBox()`, `Volume()`, `Area()`, `Length()`, `Vertices()` |
+| `polyline(points, close=True)`, `Wire.makePolygon(points, isClosed=True)` | `unexpected keyword argument` | `polyline(points).close()`, and `Wire.makePolygon(points, close=True)` |
+| `wire.offset2D(-d)` on a wire of arcs and lines | `Null TopoDS_Shape object`, on some wires and not others | build the offset shape again from its numbers, `d` further in (`building-curves-from-a-layout`) |
+
+```python
+import cadquery as cq
+
+box = cq.Workplane("XY").box(10, 10, 2)
+a = cq.Solid.makeBox(2, 2, 4, cq.Vector(1, 1, -1))
+b = cq.Solid.makeBox(2, 2, 4, cq.Vector(-3, -3, -1))
+assert abs(box.cut(a, b).val().Volume() - 192) < 1e-6  # only a was cut
+assert abs(box.cut(cq.Compound.makeCompound([a, b])).val().Volume() - 184) < 1e-6
+assert cq.Workplane().newObject(box.val()).solids().vals() == []
+assert len(cq.Workplane().add(box.val()).solids().vals()) == 1
+```

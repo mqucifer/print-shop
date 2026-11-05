@@ -122,13 +122,14 @@ LOOKS = {
         "description": 'Each file\'s colour and a short label: {"pane_1.step": {"colour": "blue", '
         '"label": "cup"}, "frame.step": {"colour": "grey", "label": "frame"}}. A colour is a name '
         "such as blue, amber or clear, perhaps with light or dark, or #rrggbb. The sheet draws "
-        "each file in its colour, numbered, with a legend; a file with none takes a colour no "
-        "other file has. Optional.",
+        "each file in its colour, marked by its name, with a legend; a file with none takes a "
+        "colour no other file has. A given file under `references/` may have one too. Optional.",
     }
 }
 NEED_SHAPE = (
-    "Each need: `id`; `what` it must do; `source` (`request`, `answer` or `note` with `quote`, the "
-    'words as you were sent them; `reference`, `derived` or `chosen`); and `check`, either {"by": '
+    "Each need: `id`; `what` it must do; `source` (`request`, `answer`, `note` or `pick`, a pick's "
+    "reason, with `quote`, the words as you were sent them; `reference`, `derived` or `chosen`); "
+    'and `check`, either {"by": '
     '"bench", "measures": "fit", "command": '
     '"clearance lid.step cup.step --min-gap 0.2", "verdicts": [...] (optional: which verdicts '
     'pass, exit 0 by default), "number": "pairs.0.gap_mesh_mm", "at_least": 0.2, "at_most": 0.6 '
@@ -248,7 +249,17 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
             "questions",
             "At intake: put what you need to know to the Sponsor. The run stops here until their "
             "answers come back, in your next message. Ask as a designer would in conversation, "
-            "only what you can't find in what you've been given.",
+            "only what you can't find in what you've been given. Pictures you made go with them; "
+            "with none, the harness draws a sheet of the given STEP and STL files to go with them.",
+            {
+                "pictures": {
+                    "type": "array",
+                    "description": "Pictures you made that show what you're asking about, such "
+                    "as a 2D layout drawn with matplotlib: PNG files in your directory. They're "
+                    "shown to you first, and go as they are. Optional.",
+                    "items": {"type": "string"},
+                }
+            },
             questions="Your questions, as you'd say them.",
         ),
         _spec(
@@ -835,6 +846,7 @@ class WorkTools:
         if unknown:
             named = ", ".join(f"`{a}`" for a in unknown)
             said = f"`{shown}` wasn't run: it doesn't take {named}. It takes {takes}."
+            said += self._taken_by(shown, unknown)
             return Judged(shown, "malformed", said, "unknown")
         missing = [a for a in spec.get("required", []) if a not in args]
         if missing:
@@ -852,6 +864,24 @@ class WorkTools:
             said = ", ".join(f"`{k}` must be a {properties[k]['type']}" for k in wrong)
             return Judged(shown, "ill_typed", f"`{shown}` wasn't run: {said}.", "type")
         return None
+
+    def _taken_by(self, shown: str, unknown: list[str]) -> str:
+        """Which other tool on offer takes each argument this one doesn't: on the runs, `says`
+        went to `ask`, where it's `send_ask`'s (mqucifer/print-shop#54)."""
+        said = []
+        for arg in unknown:
+            others = [n for n, s in self.accepted.items() if n != shown and arg in s["properties"]]
+            if others:
+                tools = " and ".join(f"`{n}`" for n in others)
+                said.append(f"`{arg}` is {tools}'s{self._after(shown, others)}")
+        return f" {'; '.join(said)}." if said else ""
+
+    @staticmethod
+    def _after(shown: str, others: list[str]) -> str:
+        """A tool that comes after this one, said so: `send_ask` sends what `ask` drew."""
+        if shown == "ask" and others == ["send_ask"]:
+            return ", which sends the sheet once `ask` has drawn it"
+        return ""
 
     @staticmethod
     def _failed(name: str, why: str, reply: str) -> Judged:

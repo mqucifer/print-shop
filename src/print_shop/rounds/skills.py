@@ -2,10 +2,13 @@
 
 `skills/cadquery` and `skills/references` are mqucifer/model-performance's `cad_eval/skills` at
 98b3c5b, byte for byte, in the Agent Skills layout: the measured text, held to its source by a test
-on the Mac and by `SKILLS_SHA` everywhere. Each `SKILL.md` and `references/*.md` is a skill of its
-own, so a topic is read only when it's needed. The mechanism is crew's in small
-(`crew_org/session/skills.py`): the start names each in one line, and `skill` reads one.
-`skills/bench` is new, and says what `docs/bench.md` says, for the session.
+on the Mac and by `SKILLS_SHA` everywhere. Where the runs showed a gap (mqucifer/print-shop#54), a
+measured file gains print-shop's additions after `ADDED`, a line of its own, and the text above it
+is still the measured text, held as before (`measured`). A file of print-shop's own in those sets,
+such as `cadquery/references/layout-to-arcs.md`, keeps every rule. Each `SKILL.md` and
+`references/*.md` is a skill of its own, so a topic is read only when it's needed. The mechanism
+is crew's in small (`crew_org/session/skills.py`): the start names each in one line, and `skill`
+reads one. `skills/bench` is new, and says what `docs/bench.md` says, for the session.
 
 A run reads the skills of its toolset (`toolsets.py`): the core's three sets, and a kind's own,
 such as `skills/designing-stained-glass`. Each read is in the ledger's `skill_reads`, with the
@@ -59,6 +62,41 @@ def start_line(sets: tuple[str, ...] = SETS) -> str:
     """The one line the start adds, as crew's start names its skills."""
     named = "; ".join(f"`{name}`, {about}" for name, (about, _) in registry(sets).items())
     return f"Skills for this work: {named}. Read one with `skill` when you need it."
+
+
+#: The line after which a measured file holds print-shop's additions, and before which it's the
+#: measured text, byte for byte.
+ADDED = "<!-- print-shop's additions, after the measured text (mqucifer/print-shop#54) -->"
+#: The measured copies' files, as `cad_eval/skills` at 98b3c5b has them: any other file in those
+#: sets is print-shop's own.
+MEASURED_FILES = (
+    "cadquery/SKILL.md",
+    "cadquery/references/assemblies-fits.md",
+    "cadquery/references/errors.md",
+    "cadquery/references/selectors.md",
+    "cadquery/references/sketch-extrude.md",
+    "cadquery/references/threads-helices.md",
+    "references/SKILL.md",
+    "references/references/fasteners.md",
+    "references/references/fdm.md",
+    "references/references/fits.md",
+)
+
+
+def measured(path: Path) -> bytes:
+    """A measured file's measured text: all of it, or what's before print-shop's additions."""
+    data = path.read_bytes()
+    cut = data.find(b"\n\n" + ADDED.encode())
+    return data if cut < 0 else data[: cut + 1]
+
+
+def measured_sha() -> str:
+    """One hash over the measured text of each measured file, as `sha` hashes a set."""
+    digest = hashlib.sha256()
+    for name in MEASURED_FILES:
+        digest.update(name.encode())
+        digest.update(measured(SKILLS / name))
+    return digest.hexdigest()
 
 
 def sha(names: tuple[str, ...] = SETS) -> str:
