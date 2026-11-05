@@ -583,6 +583,100 @@ CREATE TABLE IF NOT EXISTS stale_descriptions (
     changed TEXT NOT NULL,
     PRIMARY KEY (run, seq)
 );
+CREATE TABLE IF NOT EXISTS refinements (
+    -- The refinement pass on an approved run (mqucifer/print-shop#51): which approval and which
+    -- decision it follows, the code and Orca it ran with, what it sliced with, and how it ended.
+    id INTEGER PRIMARY KEY,
+    run TEXT NOT NULL REFERENCES runs(run),
+    n INTEGER NOT NULL,
+    approval INTEGER NOT NULL,
+    decision INTEGER NOT NULL REFERENCES decisions(id),
+    begun_at TEXT NOT NULL,
+    harness_commit TEXT NOT NULL,
+    orca TEXT NOT NULL,
+    context TEXT NOT NULL,
+    folder TEXT NOT NULL,
+    ended TEXT,
+    ended_at TEXT,
+    UNIQUE (run, n)
+);
+CREATE TABLE IF NOT EXISTS refine_files (
+    -- Each file of the approved folder: what it holds, its part in the print, its colour, and how
+    -- it was meshed for Orca, against OCCT.
+    refinement INTEGER NOT NULL REFERENCES refinements(id),
+    folder TEXT NOT NULL,
+    file TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    role TEXT NOT NULL,
+    colour TEXT,
+    label TEXT,
+    meshed TEXT NOT NULL,
+    PRIMARY KEY (refinement, folder, file)
+);
+CREATE TABLE IF NOT EXISTS refine_slices (
+    -- Each plate Orca sliced: its files, filaments and pauses, the command, and what it said.
+    refinement INTEGER NOT NULL REFERENCES refinements(id),
+    plate TEXT NOT NULL,
+    files TEXT NOT NULL,
+    filaments TEXT NOT NULL,
+    pauses TEXT,
+    command TEXT NOT NULL,
+    exit INTEGER NOT NULL,
+    gcode TEXT,
+    gcode_sha TEXT,
+    layers INTEGER,
+    seconds INTEGER,
+    filament TEXT,
+    warnings TEXT,
+    PRIMARY KEY (refinement, plate)
+);
+CREATE TABLE IF NOT EXISTS refine_findings (
+    -- What the pass read, where (file, layer, z) and what it means for the print. `source` is
+    -- whose reading it is: `orca` (its warnings, labels, widths and figures), `bench` (a
+    -- command's), or `pass` (the pass's own, from Orca's lines against the part).
+    id INTEGER PRIMARY KEY,
+    refinement INTEGER NOT NULL REFERENCES refinements(id),
+    seq INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    source TEXT NOT NULL,
+    plate TEXT,
+    file TEXT,
+    layer_from INTEGER,
+    layer_to INTEGER,
+    z_from REAL,
+    z_to REAL,
+    read TEXT NOT NULL,
+    means TEXT NOT NULL,
+    needs_change INTEGER NOT NULL,
+    numbers TEXT,
+    UNIQUE (refinement, seq)
+);
+CREATE TABLE IF NOT EXISTS refine_proposals (
+    -- A change to the part a finding needs, proposed and never made: its words, its cost, and
+    -- whether it was checked (`params` on the design's script, the run's needs, `pause` and Orca
+    -- again) or is words with its measured reason.
+    id INTEGER PRIMARY KEY,
+    refinement INTEGER NOT NULL REFERENCES refinements(id),
+    finding INTEGER NOT NULL REFERENCES refine_findings(id),
+    change TEXT NOT NULL,
+    cost TEXT NOT NULL,
+    parameter TEXT,
+    was REAL,
+    becomes REAL,
+    checked TEXT NOT NULL,
+    check_said TEXT,
+    folder TEXT,
+    at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS proposal_decisions (
+    -- A person's yes or no to a proposal, signed as any decision is: `sponsor` or `stand-in: who`.
+    id INTEGER PRIMARY KEY,
+    proposal INTEGER NOT NULL REFERENCES refine_proposals(id),
+    decision TEXT NOT NULL,
+    by TEXT NOT NULL,
+    note TEXT,
+    at TEXT NOT NULL
+);
 CREATE VIEW IF NOT EXISTS phases AS
 SELECT calls.run, calls.phase, MIN(calls.n) AS first_call, MAX(calls.n) AS last_call,
        COUNT(*) AS calls, SUM(calls.seconds) AS seconds,

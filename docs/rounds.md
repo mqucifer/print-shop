@@ -18,6 +18,9 @@ scripts/rounds.py lessons [RUN] [--ledger FILE]
 scripts/rounds.py lessons accept|edit|reject|retire|promote ID --by WHO ...
 scripts/rounds.py lessons score RUN ID --score used|not_used|in_the_way --by WHO [--calls N,N] [--route R]
 scripts/rounds.py lessons load FILE --by WHO
+scripts/rounds.py refine NAME --nozzle MM --filament [COLOUR=]NAME...
+scripts/rounds.py refined NAME
+scripts/rounds.py proposal NAME ID --approve|--reject --by WHO [--note FILE]
 ```
 
 It needs the bench's image (`scripts/bench.py build`), and LiteLLM on :4000 with print-shop's key from `~/.config/print-shop/.env`. It uses `crew-code-think`, and probes nothing else. **A run's record says what reasoning effort its alias sends** (`runs.reasoning_effort`, and `reasoning_effort` in `summary.json`), read at `start` from LiteLLM's own `/model/info` for this key: the alias's `litellm_params.reasoning_effort`, or its `extra_body`'s, or in `extra_body.chat_template_kwargs`. It's no model call, and SGLang isn't reached. If LiteLLM won't say, the record says `unknown` and why (`reasoning_effort_from`). Nothing else is kept from the answer, which can name a server's address. The effort stays as it is (the Sponsor, 2026-11-03): it's recorded, not changed. **A run names its code,** so `start` and `resume` refuse a checkout with uncommitted changes. As in `cad_eval`, run from a checkout nothing edits until it ends: `git worktree add --detach ../run-<commit> <commit>`. One session runs under a root at a time (`.session.lock`). Runs live in `~/print-shop/design-runs/`, off this public repository, and `start` refuses a folder inside it.
@@ -268,6 +271,8 @@ The Sponsor, 2026-11-03: "id be concerned with adding things like light-path com
 | `said_weighed` | What the after-action review made of each thing a person said: the lesson it became, if any, and why |
 | `lesson_steps` | Each change to a lesson, who made it and why. An edit keeps the words it replaced |
 | `run_lessons` | Each lesson a run was given, how (`start`, or by hand in the request before this), and the words it was given in |
+| `refinements`, `refine_files`, `refine_slices`, `refine_findings` | Each refinement pass: the approval and decision it follows, the commit, Orca's version and the context. Each file by its hash, its part and colour, and how it was meshed against OCCT. Each plate Orca sliced, its command, filaments, pauses and G-code's hash. Each finding: its kind, whose (`orca`, `bench` or `pass`), where, what it read and means, and whether it needs the part to change |
+| `refine_proposals`, `proposal_decisions` | Each change proposed, its cost, the parameter and how it was checked, and each yes or no to it, and who |
 | `lesson_scores` | Whether a lesson held on a route in a run (`used`, `not_used`, `in_the_way`), with the calls that show it: on the model's route by the model at its review or a reviewer, on the others by the analysis (`route`, empty from before) |
 
 Looking a lesson up when a reading fails isn't here yet.
@@ -361,6 +366,37 @@ For the operator, at each review and each ask (mqucifer/print-shop#40). It's the
 
 **Not yet:** looking a lesson up when a reading fails (the next batch, by the keys above), runs with and without a lesson to measure its gain, promotion into skills by code, and the crew's lessons (M16).
 
+## The refinement pass
+
+After approval, the approved folder is sliced through Orca, and what Orca made of it becomes findings in the ledger (mqucifer/print-shop#51, M18's step between approval and the learn loop). It runs after approval only, never inside design rounds, and never touches the printer. No model is called.
+
+```
+scripts/rounds.py refine NAME --nozzle MM --filament [COLOUR=]NAME... [--machine M] [--process P]
+scripts/rounds.py refined NAME
+scripts/rounds.py proposal NAME ID --approve|--reject --by WHO [--note FILE]
+```
+
+The Sponsor, 2026-11-05: "It should use orca's cli to add pauses not raw gcode. Use what we can of orca at any point. Same with color setting by object." And: "The goal of it is feedback that we can learn from. Part of that feedback could be part changes that need approval first." Printability is a second pass on an approved file, never a reason to fail a design.
+
+**What Orca's CLI does** (2.4.2 on the Mac, `~/print-shop/proofs/m18-refine/cli-probe/`, each tested):
+- **A pause:** `--load-custom-gcodes` takes Orca's own `CustomGCode::Info` as JSON, a `PausePrint` at a `print_z`. Orca writes `;PAUSE_PRINT` and the machine profile's pause G-code (`M600` on the Centauri). It puts an item on the nearest layer, a tie going to the lower, and runs it before that layer prints. So "pause after layer 13" on 0.2 mm layers is `print_z` 2.8. One file applies to one plate.
+- **A filament and colour by object:** `--load-filaments` and `--load-filament-ids`, one id per file. Each filament needs `filament_colour`. The store's composed profiles have none, and with two filaments and none, Orca crashes (SIGSEGV), so the pass sets it from the file's colour.
+- **Placement:** arrange turns parts unless `--allow-rotations=0` (its CLI starts it on; `--allow-rotations 0` exits 254). `EXCLUDE_OBJECT_DEFINE` says where each object went.
+- **Warnings:** only in the log on macOS (`result.json` is written on Linux only), read with `--debug 3`.
+- **STEP:** refused (exit 250). So each STEP file is meshed in the bench's image at Orca's own GUI defaults, 0.003 mm and 0.5 rad, and the mesh's volume and box are held to OCCT's. The operator's call on the issue (option A); the meshing is one seam.
+
+**What it does,** for each folder of the approved result:
+1. **Plates.** The largest file is the frame, on a plate of its own with its pause. A file inside the frame's box, above its underside, is a pane, set in at the pause. The panes and any other files print on a plate of their colour, as the printer has one filament loaded at a time. Each plate has its own filaments, from the store, on the Sponsor's textured PEI plate.
+2. **The pause.** The bench's `pause` on the frame, at the process's own layers, with each pane as it sits (its mid-height and thickness). With no pane file, the inputs come from the run's own last `pause` call. Orca is given the layer it reads, and writes the pause itself.
+3. **What Orca says,** first: its warnings; where it wrote the pause, against the bench's layer; each pane's first layer over it after the pause, with Orca's labels (on our frames, `Bridge` and `Overhang wall`: Orca doesn't know a pane is there) and how far it's laid above the pane's top; anything printed inside a pane's outline above its floor before the pause; bridges and overhangs; gap fill and the narrowest line; time and filament for each plate.
+4. **The pass's own reading,** last: each layer's section of the part against every line Orca laid there, in the image. A stretch of the part with no line, at the part's edge, is `bare`: on the probe a 0.5 mm bar got no line on layer 1. Two wall lines laid over each other, more than 0.15 mm across, are `walls_overlap`: the same bar got one 0.42 mm wall down each side from layer 2, 0.34 mm over each other.
+5. **Findings** go in the ledger, each with what it read, where (file, plate, layer and z), what it means for the print, and whose reading it is. Where none needs the part to change, the print steps are the pass's own: written into `refinements/n/README.md`, and into the run's `review/README.md` above the model's words, which stay marked as the model's.
+6. **A proposal,** where a finding needs the part to change. Today that's a pane standing above the last layer before its pocket closes: raise the ceiling to the first layer line over the pane, at the cost of the top lip. Where the design's script has the ceiling's z or the pocket's depth as a top-level number, it's checked: `params --keep` re-runs the script with it in the bench's container, the run's bench needs are read on what it made, then `pause`, then Orca again. Otherwise it's words with the measured reason. Either way it waits: `proposal ... --approve|--reject`, signed as any decision. Nothing in the approved folder changes.
+
+**Checked against the record.** On copies of the approved runs from 2026-11-04 and 2026-11-05, the bench and Orca both pause after the layer the record holds: `eval-hanging-2` after 13 and `eval-rings-2` after 11, as `scores.md` has them, and `eval-light-3` after 14, as its own last `pause` read (call 47 in its ledger; its folder has no pane file, so that call gives the inputs). On `eval-hanging-2` Orca leaves layer 14 open, where `pause` closes it (the pocket's ceiling is on that layer's mid-height), so its first layer over the pane is 0.3 mm above it, not 0.1: said, with both readings. `eval-rims-2` and `eval-thick-2` were never approved, and the pass refuses them.
+
+**Not here yet:** supports and orientation (mqucifer/print-shop#9), the model proposing settings (mqucifer/print-shop#13), and the model at all: its place comes once there are findings to learn from. A proposal approved isn't applied by code: it goes to the design, as a new run or a send-back.
+
 ## A run's folder
 
 | Path | Holds |
@@ -380,6 +416,7 @@ For the operator, at each review and each ask (mqucifer/print-shop#40). It's the
 | `lessons.md` | The lessons it was given at the start, as given |
 | `after-action-fault-n.txt` | A fault of ours in the after-action review, its trace |
 | `final-sheet.png` | The latest `part` to pass, one row each, for the people who see the result. It decides nothing |
+| `refinements/n/` | Each refinement pass: `README.md` (print steps, findings, proposals), `plates/` (each plate's G-code and Orca's log), `meshing/`, `bench/`, `cover/`, `findings.json`, and `proposals/` with each check's files |
 | `summary.json` | A run's figures, from `scripts/rounds.py summary`, read from its events |
 
 ## Where each part came from
@@ -436,5 +473,7 @@ mqucifer/print-shop#19 then took what else it lacked: close-ups, sheets of the p
 `tests/test_descriptions.py` needs no Docker: each description kept with the part's files, a stale one named at `done` and held there until it's sent again or said to hold, a change after a confirmation, a STEP file written again the same, a helper outside the part, the heading at an ask and at approval, `restate`'s refusals, and who each answer and note is from, in a conversation from the record too.
 
 `tests/test_memory.py` needs no Docker: what a shrunk reply keeps, the latest replies staying whole, `record/CHECKS.md` and a new conversation given it, and each way a refused `edit` says how its lines differ, or that its file changed and which call changed it. `tests/test_loop.py` needs no Docker: routes proposed and confirmed, keys, layers by kind of part and skill, delivery and a score on each route, a corrected score, a lesson's text stopping once its fix holds, a ledger from before sorted once with every row kept, the review's index of the harness's record and people's words, the review near its limit, and the effort read from a fake of LiteLLM's documented `/model/info`.
+
+`tests/test_refine.py` needs no Docker: Orca's G-code and log read as Orca 2.4.2 writes them, the pause given to Orca, a colour by filament, the ceiling's arithmetic, the approved folder held to its hashes, and a pass with fakes of the bench and Orca: steps, a tie, a pane above the pause and its proposal, a plate refused, and a decision signed once. `tests/test_refine_bench.py` (`-m bench`) meshes a STEP against OCCT and reads made-up lines against a part, and `params --keep`. `tests/test_refine_orca.py` (`-m slicer`) runs the issue's four fixtures through the real Orca and image.
 
 `tests/test_rounds_cup_local.py` (`-m bench_local`) reads `cup-1` back where the Mac holds it, and skips elsewhere: its request, references, needs and each round's scripts, with every name read from the run's own folder, so nothing of it is in this repository. `needs` refuses the version that passed on FAIL, round 1 doesn't stop for approval as `thin` fails two panes, and round 2's `review/` holds the same files, by what they hold, under the same names as the folder made by hand. Its run is kept in `~/print-shop/proofs/m18-truth/`, with `figures.json`.
