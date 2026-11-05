@@ -18,6 +18,11 @@ The part's files are its geometry. Once `done` or a sheet names them, only those
 references count, so a helper the model made to check against doesn't make a description stale.
 Before that, every piece of geometry counts. A run from before this has no descriptions kept, and
 nothing of it goes stale.
+
+A description written before the part existed, with no geometry of the model's yet, as the
+breakdown and the needs usually are, is stamped against the part's first version, as the harness
+first sees it, and goes stale only when a file changes after that. Holding every run's first
+`done` for them would teach the model to say they hold by reflex.
 """
 
 from __future__ import annotations
@@ -35,6 +40,8 @@ PLAN = "plan"
 NEED = "need "
 #: How each was last kept: written by its own tool, sent again with new words, or said to hold.
 WRITTEN, SENT_AGAIN, HOLDS = "written", "sent again", "holds"
+#: A description written before the part existed, stamped against its first version.
+FIRST_VERSION = "first version"
 HEADING = "## Descriptions written before the part changed"
 SINCE_HEADING = "## Descriptions sent again or said to still hold since the last stop"
 #: A plan describes the part where it gives a figure: "the plan's figures".
@@ -91,6 +98,27 @@ def hashes(tracked: dict[str, list[Any]]) -> dict[str, str]:
     return {name: was[0] for name, was in tracked.items() if was[0] is not None}
 
 
+def made(files: dict[str, str]) -> dict[str, str]:
+    """The model's own geometry among them: what was given isn't the part existing."""
+    return {name: sha for name, sha in files.items() if not name.startswith("references/")}
+
+
+def stamp(
+    described: dict[str, dict[str, Any]], tracked: dict[str, list[Any]], at_call: int
+) -> list[str]:
+    """Each description written before the part existed, stamped against the part's first
+    version once there is one: the files as they are now. Its key, for each one stamped."""
+    now = hashes(tracked)
+    if not made(now):
+        return []
+    found = []
+    for key, one in described.items():
+        if one.get("stamped_at") is None and not made(one.get("files") or {}):
+            one["files"], one["stamped_at"] = now, at_call
+            found.append(key)
+    return found
+
+
 @dataclass
 class Stale:
     key: str
@@ -99,6 +127,8 @@ class Stale:
     held_at: int | None
     # Each file changed since: its name, `changed`, `new` or `gone`, and the call by which it was.
     changed: list[tuple[str, str, int | None]]
+    # The call by which the part's first version was seen, for one written before the part existed.
+    stamped_at: int | None = None
 
     def plain(self) -> dict[str, Any]:
         return {
@@ -107,6 +137,7 @@ class Stale:
             "written_at": self.written_at,
             "held_at": self.held_at,
             "changed": [list(one) for one in self.changed],
+            "stamped_at": self.stamped_at,
         }
 
     @classmethod
@@ -117,6 +148,7 @@ class Stale:
             int(kept["written_at"]),
             kept.get("held_at"),
             _changed(kept.get("changed") or []),
+            kept.get("stamped_at"),
         )
 
 
@@ -148,8 +180,8 @@ def stale(
             by = tracked.get(name)
             changed.append((name, how, by[1] if by else None))
         if changed:
-            held = one.get("held_at")
-            found.append(Stale(key, one["what"], int(one["written_at"]), held, changed))
+            held, stamped = one.get("held_at"), one.get("stamped_at")
+            found.append(Stale(key, one["what"], int(one["written_at"]), held, changed, stamped))
     return found
 
 
@@ -164,6 +196,10 @@ def changed_said(changed: list[tuple[str, str, int | None]]) -> str:
 
 def line(one: Stale) -> str:
     held = f", said to hold at call {one.held_at}" if one.held_at is not None else ""
+    if one.held_at is None and one.stamped_at is not None:
+        held = (
+            f", before the part existed, against its first version, seen by call {one.stamped_at}"
+        )
     return (
         f"- {one.what}, written at call {one.written_at}{held}: since then "
         f"{changed_said(one.changed)}"

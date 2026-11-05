@@ -297,7 +297,7 @@ def test_a_run_goes_from_intake_through_refusals_and_a_pick_to_its_needs_met(
 
     calls = [e for e in replies(run) if e["name"] == "done" and e["why"] != STALE]
     assert calls[0]["why"] == "no_needs"
-    assert any(e["why"] == STALE for e in replies(run)), "the part was made after the needs"
+    assert any(e["why"] == STALE for e in replies(run)), "the gap changed after the first part"
     first, second = calls[1], calls[2]
     assert first["outcome"] == "ok", "a refused `done` is a tool that did what it was asked"
     assert "Round 1: not met yet" in first["reply"]
@@ -1354,12 +1354,10 @@ def test_done_asks_for_the_fixs_shape_and_its_closing_words(tmp_path: Path) -> N
 def test_the_same_part_written_again_doesnt_make_a_description_stale(tmp_path: Path) -> None:
     """CadQuery's STEP header names the second it was written, so running the same script again
     changes the file's bytes and not what it holds (mqucifer/print-shop#53)."""
-    holds = {"of": ["breakdown", "volume"], "holds": "Two boxes, as built."}
     run, _ = begin(
         tmp_path,
         [BROKEN_DOWN, tool("needs", needs=[SIZE_NEED])],
         [write("make.py", script(gap=0.5), run=True)],
-        [tool("restate", descriptions=[holds])],
         [tool("blocked", reason="stop")],
     )
     assert run.drive().name == "blocked"
@@ -1371,6 +1369,7 @@ def test_the_same_part_written_again_doesnt_make_a_description_stale(tmp_path: P
     assert (run.work / "block.step").read_bytes() != before, "written again, a second later"
     assert [e["outcome"] for e in replies(run) if e["name"] == "done"] == ["ok"]
     assert run.state.geometry["block.step"][1] == 2, "seen as it is since the first run"
+    assert run.state.described["breakdown"]["stamped_at"] == 2, "its first version"
     assert not rows(run, "stale_descriptions")
 
 

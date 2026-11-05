@@ -1092,6 +1092,20 @@ class Run:
         run and bench call, so a change is named by the call that made it."""
         now = descriptions.geometry(self.work, self.state.geometry)
         self.state.geometry = descriptions.seen(self.state.geometry, now, self.session.requests)
+        at = self.session.requests
+        for key in descriptions.stamp(self.state.described, self.state.geometry, at):
+            one = self.state.described[key]
+            self.ledger.described(
+                self.state.name,
+                {
+                    "key": key,
+                    "what": one["what"],
+                    "how": descriptions.FIRST_VERSION,
+                    "at_call": at,
+                    "round": self.state.round,
+                    "files": json.dumps(one["files"], sort_keys=True),
+                },
+            )
         return self.state.geometry
 
     def _describe(self, key: str, what: str, text: str, how: str = descriptions.WRITTEN) -> None:
@@ -1162,9 +1176,11 @@ class Run:
                 continue
             if entry["holds"] and key not in everything:
                 # Nothing to say holds: kept as it was, and said, rather than refusing the rest.
+                one = kept[key]
+                since = one["held_at"] or one.get("stamped_at") or one["written_at"]
                 unchanged.append(
-                    f"{kept[key]['what']}: no part file has changed since call "
-                    f"{kept[key]['held_at'] or kept[key]['written_at']}, so it's kept as it was"
+                    f"{one['what']}: no part file has changed since call {since}, so it's kept "
+                    "as it was"
                 )
                 continue
             plan.append((key, entry))
@@ -1252,10 +1268,11 @@ class Run:
             if not one.get("shown_at"):
                 one["shown_at"] = where
         self.ledger.change(
-            "UPDATE descriptions SET shown_at=? WHERE run=? AND shown_at IS NULL AND how!=?",
+            "UPDATE descriptions SET shown_at=? WHERE run=? AND shown_at IS NULL AND how IN (?, ?)",
             where,
             self.state.name,
-            descriptions.WRITTEN,
+            descriptions.HOLDS,
+            descriptions.SENT_AGAIN,
         )
 
     def _wanted(self) -> list[nudge.Wanted]:

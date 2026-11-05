@@ -65,13 +65,17 @@ def step(body: str, second: str = "10:00:00") -> str:
 
 
 class Maker(Box):
-    """`run` and a clean run write the part as the test last set it; `overlap` finds none."""
+    """`run` and a clean run write the part as the test last set it; `overlap` finds none. Each
+    of the model's own `run`s first takes the next of `changes`, if any are left."""
 
     def __init__(self, work: Path) -> None:
         super().__init__(work)
         self.parts: dict[str, str] = {"bracket.step": step("#1=ARM(120);")}
+        self.changes: list[dict[str, str]] = []
 
     def python(self, script: str, where: Path | None = None, timeout: int | None = None) -> Ran:
+        if where is None and self.changes:
+            self.parts.update(self.changes.pop(0))
         for name, text in self.parts.items():
             (where or self.work).joinpath(name).write_text(text)
         return Ran(0, "made\n", 0.1)
@@ -140,11 +144,41 @@ def test_each_description_keeps_the_part_as_it_stood_when_it_was_written(tmp_pat
     ]
 
 
+def changing(run: Run, *changes: dict[str, str]) -> Run:
+    """The part as each of the model's `run`s after the first leaves it."""
+    run.box.changes = [{}, *changes]  # type: ignore[attr-defined]
+    return run
+
+
+LONGER = {"bracket.step": step("#1=ARM(130);")}
+
+
+def test_the_part_first_made_after_the_descriptions_doesnt_hold_done(tmp_path: Path) -> None:
+    """The breakdown and the needs are written before any part file: they're stamped against the
+    part's first version, so a run's first `done` isn't held by reflex."""
+    run = again(planned(tmp_path), [MAKE], [done()])
+    run.resume()
+    assert run.drive().name == "met"
+    assert [e["outcome"] for e in told(run) if e["name"] == "done"] == ["ok"]
+    kept = run.state.described
+    assert {k: kept[k]["stamped_at"] for k in kept} == {"breakdown": 5, "need arm": 5, "plan": 5}
+    assert kept["breakdown"]["written_at"] == 1
+    assert set(kept["breakdown"]["files"]) == {"bracket.step"}
+    rows = run.ledger.rows("SELECT key, at_call FROM descriptions WHERE how='first version'")
+    assert sorted((r["key"], r["at_call"]) for r in rows) == [
+        ("breakdown", 5),
+        ("need arm", 5),
+        ("plan", 5),
+    ]
+    assert not run.ledger.rows("SELECT * FROM stale_descriptions")
+
+
 def test_done_waits_for_each_stale_description_and_the_stop_shows_what_was_said(
     tmp_path: Path,
 ) -> None:
     run = again(
         planned(tmp_path),
+        [MAKE],
         [MAKE],
         [done()],
         [
@@ -152,25 +186,31 @@ def test_done_waits_for_each_stale_description_and_the_stop_shows_what_was_said(
                 "restate",
                 descriptions=[
                     {"of": ["breakdown", "plan"], "holds": "One body, as built."},
-                    {"of": "arm", "now": "the arm reaches 120 mm from the wall face"},
+                    {"of": "arm", "now": "the arm reaches 130 mm from the wall face"},
                 ],
             )
         ],
         [done()],
     )
+    changing(run, LONGER)
     run.resume()
     assert run.drive().name == "met"
     replies = told(run)
-    made, refused, restated, met = replies[-4:]
-    assert made["name"] == "run"
+    refused, restated, met = replies[-3:]
     assert refused["why"] == "descriptions_stale"
     assert refused["reply"].startswith("Nothing was checked: these describe the part as it was")
     assert (
-        "- breakdown 1, written at call 1: since then `bracket.step` is new by call 5"
-        in refused["reply"]
+        "- breakdown 1, written at call 1, before the part existed, against its first version, "
+        "seen by call 5: since then `bracket.step` changed by call 6" in refused["reply"]
     )
-    assert "- the need `arm`'s `what`, written at call 2: since then" in refused["reply"]
-    assert "- the plan, sent at ask 1, written at call 4: since then" in refused["reply"]
+    assert (
+        "- the need `arm`'s `what`, written at call 2, before the part existed"
+        in (refused["reply"])
+    )
+    assert (
+        "- the plan, sent at ask 1, written at call 4, before the part existed"
+        in (refused["reply"])
+    )
     assert len(refused["detail"]["stale"]) == 3
     assert run.ledger.rows("SELECT COUNT(*) AS n FROM readings")[0]["n"] == 1, "one done ran"
     assert restated["outcome"] == "ok" and "Still written" not in restated["reply"]
@@ -178,15 +218,15 @@ def test_done_waits_for_each_stale_description_and_the_stop_shows_what_was_said(
     stop = (run.folder / "approvals" / "1" / "stop.md").read_text()
     assert descriptions.SINCE_HEADING in stop
     assert (
-        "- breakdown 1, said to still hold at call 7, over `bracket.step` is new by call 5: "
+        "- breakdown 1, said to still hold at call 8, over `bracket.step` changed by call 6: "
         "One body, as built." in stop
     )
-    assert "- the need `arm`'s `what`, sent again at call 7, over" in stop
+    assert "- the need `arm`'s `what`, sent again at call 8, over" in stop
     assert "  - was: the arm reaches 120 mm from the wall\n" in stop
-    assert "  - now: the arm reaches 120 mm from the wall face" in stop
+    assert "  - now: the arm reaches 130 mm from the wall face" in stop
     # The need's description changed, and nothing else of it did.
     kept = json.loads((run.folder / "needs.json").read_text())
-    assert kept[0]["what"] == "the arm reaches 120 mm from the wall face"
+    assert kept[0]["what"] == "the arm reaches 130 mm from the wall face"
     assert kept[0]["command"] == "info bracket.step" and kept[0]["source"] == "derived"
     assert json.loads((run.work / "record" / "needs.json").read_text()) == kept
     stale = run.ledger.rows("SELECT key, found_at, changed FROM stale_descriptions ORDER BY seq")
@@ -195,8 +235,10 @@ def test_done_waits_for_each_stale_description_and_the_stop_shows_what_was_said(
         ("need arm", "done"),
         ("plan", "done"),
     ]
-    assert json.loads(stale[0]["changed"]) == [["bracket.step", "new", 5]]
-    shown = run.ledger.rows("SELECT key, how, why, shown_at FROM descriptions WHERE how!='written'")
+    assert json.loads(stale[0]["changed"]) == [["bracket.step", "changed", 6]]
+    shown = run.ledger.rows(
+        "SELECT key, how, shown_at FROM descriptions WHERE how IN ('holds', 'sent again')"
+    )
     assert {(r["key"], r["how"], r["shown_at"]) for r in shown} == {
         ("breakdown", "holds", "approval 1"),
         ("plan", "holds", "approval 1"),
@@ -205,26 +247,28 @@ def test_done_waits_for_each_stale_description_and_the_stop_shows_what_was_said(
 
 
 def test_a_change_after_a_confirmation_makes_it_stale_again(tmp_path: Path) -> None:
+    holds = {"of": ["breakdown", "plan", "arm"], "holds": "As is."}
     run = again(
         planned(tmp_path),
         [MAKE],
-        [tool("restate", descriptions=[{"of": ["breakdown", "plan", "arm"], "holds": "As is."}])],
+        [MAKE],
+        [tool("restate", descriptions=[holds])],
         [tool("write", path="note.txt", content="a script's change, no geometry\n")],
         [MAKE],
         [done()],
     )
-    run.box.parts["bracket.step"] = step("#1=ARM(120);")  # type: ignore[attr-defined]
+    changing(run, LONGER)
     run.resume()
     assert run.drive().name == "met", "a run that writes the same part changes nothing"
     run = again(run)
     run.state.stop = None
     run.state.ending = None
     run = again(run, [MAKE], [done()])
-    run.box.parts["bracket.step"] = step("#1=ARM(140);")  # type: ignore[attr-defined]
+    changing(run, {"bracket.step": step("#1=ARM(140);")}).box.changes.pop(0)  # type: ignore[attr-defined]
     run.drive()
     refused = told(run)[-2]
     assert refused["why"] == "descriptions_stale"
-    assert "said to hold at call 6: since then `bracket.step` changed by call" in refused["reply"]
+    assert "said to hold at call 7: since then `bracket.step` changed by call" in refused["reply"]
 
 
 def test_a_step_file_written_again_the_same_isnt_a_change(tmp_path: Path) -> None:
@@ -247,9 +291,11 @@ def test_an_ask_after_a_change_shows_each_stale_description_under_its_heading(
     run = again(
         planned(tmp_path),
         [MAKE],
+        [MAKE],
         [tool("ask", question="Does it look right?", pictures=["profile.png"])],
         SENT,
     )
+    changing(run, LONGER)
     run.resume()
     assert run.drive().name == "ask"
     drawn = told(run)[-2]
@@ -257,7 +303,8 @@ def test_an_ask_after_a_change_shows_each_stale_description_under_its_heading(
     question = (run.folder / "asks" / "2" / "question.md").read_text()
     assert descriptions.HEADING in question
     assert (
-        "- breakdown 1, written at call 1: since then `bracket.step` is new by call 5" in question
+        "- breakdown 1, written at call 1, before the part existed, against its first version, "
+        "seen by call 5: since then `bracket.step` changed by call 6" in question
     )
     assert "- the need `arm`'s `what`, written at call 2" in question
     found = run.ledger.rows("SELECT found_at FROM stale_descriptions")
@@ -265,16 +312,10 @@ def test_an_ask_after_a_change_shows_each_stale_description_under_its_heading(
 
 
 def test_a_helper_outside_the_part_doesnt_make_a_description_stale(tmp_path: Path) -> None:
-    run = again(
-        planned(tmp_path),
-        [MAKE],
-        [tool("restate", descriptions=[{"of": ["breakdown", "plan", "arm"], "holds": "As is."}])],
-        [MAKE],
-        [done()],
-    )
-    run.box.parts["pocket_cavity.step"] = step("#1=HELPER;")  # type: ignore[attr-defined]
+    run = again(planned(tmp_path), [MAKE], [MAKE], [done()])
+    changing(run, {"pocket_cavity.step": step("#1=HELPER;")})
     run.resume()
-    # The helper is new after the confirmation, and it isn't in `part`.
+    # The helper is new after the part's first version, and it isn't in `part`.
     assert run.drive().name == "met"
 
 
@@ -293,8 +334,9 @@ def test_restate_is_refused_with_what_is_wrong_and_nothing_is_kept(tmp_path: Pat
     run.drive()
     fresh, _, whole, unknown, both, several, empty = told(run)[-8:-1]
     assert fresh["outcome"] == "ok", "nothing to say holds isn't a refusal"
-    assert "- breakdown 1: no part file has changed since call 1, so it's kept as it was" in (
-        fresh["reply"]
+    assert (
+        "- breakdown 1: no part file has changed since call 1, so it's kept as it was"
+        in (fresh["reply"])
     )
     assert fresh["reply"].startswith("Nothing was kept.")
     assert "The breakdown is sent again with `breakdown`, whole." in whole["reply"]
