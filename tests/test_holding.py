@@ -156,24 +156,26 @@ def test_a_pass_at_the_first_settings_clears_probes_and_a_looser_pass_clears_not
 
 
 def test_a_check_set_aside_with_a_reason_goes_until_it_fails_again(tmp_path: Path) -> None:
+    # Not `capture`: on the model's files, stained glass's own checks can't be set aside.
+    wall = "wall pane.step references/frame.step --hole 1,2,3"
     run = started(
         tmp_path,
-        tool("bench", command=CAPTURE),
-        tool("set_aside", check="capture pane.step", why="Not that one."),
-        tool("set_aside", check=f"bench {CAPTURE} --min-lip 0.4", why="I rebuilt the frame."),
+        tool("bench", command=wall),
+        tool("set_aside", check="wall pane.step", why="Not that one."),
+        tool("set_aside", check=f"bench {wall} --min-wall 2", why="I rebuilt the frame."),
         tool("bench", command="info pane.step"),
-        tool("bench", command=CAPTURE),
+        tool("bench", command=wall),
         answers=("FAIL", "OK", "FAIL"),
     )
     assert run.drive().name == "blocked"
     told = replies(run)
     assert told[1]["why"] == "not_failing"
-    assert "`capture pane.step references/frame.step`" in told[1]["reply"]
+    assert "`wall pane.step references/frame.step`" in told[1]["reply"]
     assert told[2]["outcome"] == "ok"
     assert HELD not in told[3]["reply"]
     assert HELD in told[4]["reply"] and "call 5: FAIL" in told[4]["reply"]
     kept = [dict(r) for r in run.ledger.rows("SELECT * FROM set_asides")]
-    assert kept[0]["command"] == "capture" and kept[0]["why"] == "I rebuilt the frame."
+    assert kept[0]["command"] == "wall" and kept[0]["why"] == "I rebuilt the frame."
     assert json.loads(kept[0]["tries"]) == [1] and kept[0]["shown_at"] is None
 
 

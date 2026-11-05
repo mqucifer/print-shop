@@ -57,6 +57,7 @@ from print_shop.rounds import (
     unprintable,
 )
 from print_shop.rounds import request as forms
+from print_shop.rounds import standing as glass_checks
 from print_shop.rounds.box import Box, Gone, Ran
 from print_shop.rounds.judge import SPONSOR, STAND_IN
 from print_shop.rounds.ledger import DesignLedger, now
@@ -146,6 +147,9 @@ class State:
     # checks, and shown at the next stop (`holding.py`). One with `unread_file` is a part file the
     # model says no need has to read (mqucifer/print-shop#52).
     asides: list[dict[str, Any]] = field(default_factory=list)
+    # The latest frames and panes `done` or `ask` declared, for the kind's standing checks
+    # (`standing.py`).
+    glass: list[dict[str, Any]] | None = None
     # Each `needs` refused once they were settled, shown beside the next question.
     needs_refused: list[dict[str, Any]] = field(default_factory=list)
 
@@ -1167,6 +1171,23 @@ class Run:
             )
             found.append((tried.at_call, 1, tried))
         for row in self.ledger.rows(
+            "SELECT at_call, stop, command, passed, unsure, verdict, why FROM standing WHERE run=? "
+            "AND check_name IN (?, ?) ORDER BY id",
+            self.state.name,
+            glass_checks.LIGHT,
+            glass_checks.HOLD,
+        ):
+            # The kind's own, at `done` and each stop (`standing.py`): held as the model's are.
+            tried = holding.Tried(
+                int(row["at_call"]),
+                shlex.split(str(row["command"])),
+                None if row["unsure"] else bool(row["passed"]),
+                str(row["verdict"] or ""),
+                str(row["why"] or ""),
+                str(row["stop"]),
+            )
+            found.append((tried.at_call, 1, tried))
+        for row in self.ledger.rows(
             "SELECT r.need, r.passed, r.verdict, r.why, o.last_call, o.needs_version FROM readings "
             "AS r JOIN rounds AS o ON o.run = r.run AND o.round = r.round WHERE r.run=? AND "
             "r.by='bench' AND o.last_call IS NOT NULL ORDER BY o.round",
@@ -1247,6 +1268,24 @@ class Run:
                 f"need's check is wrong: {prompt.STUCK}"
             )
             return Judged("set_aside", "failed", reply, "a_needs_check")
+        own = ", ".join(f"`{c}`" for c in self.toolset.standing)
+        # A given file is the "before" state only where the piece doesn't print it: a frame given
+        # and printed as it is, named in `glass`, is the part.
+        printed = {
+            _plain_name(f) for one in glass_checks.load(self.state.glass) for f in one.files()
+        }
+        if check[0] in self.toolset.standing and not all(
+            _plain_name(f).startswith("references/") and _plain_name(f) not in printed
+            for f in check[1]
+        ):
+            reply = (
+                f"`{check[0]}` is one of {self.toolset.title}'s own checks, which every piece of "
+                f"this kind passes whatever the request's lines say: {own}. "
+                "The harness runs them on every pane at `done` and at each stop, so they can't be "
+                'set aside. On a given reference the piece doesn\'t print, as the "before" state, '
+                f"one can. If the check reads the part wrongly: {prompt.STUCK}"
+            )
+            return Judged("set_aside", "failed", reply, "standing")
         aside = {
             "at_call": self.session.requests,
             "round": self.state.round,
@@ -1802,6 +1841,9 @@ class Run:
         unread = self._unread(part)
         if unread:
             return Judged("done", "failed", _unread_refused(unread), "part_unread")
+        glass = self._glass_declared(args.get("glass"), part, "done")
+        if isinstance(glass, Judged):
+            return glass
         script = str(args["script"])
         n = self.state.round
         folder = self.folder / "rounds" / f"{n:03}"
@@ -1809,6 +1851,7 @@ class Run:
         wanted = self._needs()
         judgement = judge.check(self.box, self.work, script, wanted, self.state.picks, folder, part)
         standing: list[judge.Standing] = []
+        panes_read: list[judge.Standing] = []
         overlap: dict[str, Any] = {}
         clashes: list[str] = []
         if judgement.met:
@@ -1817,12 +1860,17 @@ class Run:
             standing = judge.printable(self.box, part, judged, folder / "standing")
             for one in standing:
                 self._stood(one, "done", judged)
+            # The kind's own: `light` and `capture` on every pane (`standing.py`).
+            panes_read = glass_checks.check(self.box, glass, judged, folder / "standing")
+            for one in panes_read:
+                self._stood(one, "done", judged)
             overlap = self._overlap(judged, part)
             clashes = _clashes(groups, part, overlap)
             (folder / "standing.json").write_text(
                 json.dumps(
                     {
                         "printable": [one.plain() for one in standing],
+                        "glass": [one.plain() for one in panes_read],
                         "overlap": overlap,
                         "clashes": clashes,
                     },
@@ -1830,7 +1878,12 @@ class Run:
                 ),
                 encoding="utf-8",
             )
-        met = judgement.met and not clashes and not any(one.failed for one in standing)
+        met = (
+            judgement.met
+            and not clashes
+            and not any(one.failed for one in standing)
+            and not any(one.failed for one in panes_read)
+        )
         files = paths.snapshot(self.work)
         diff = self._diff(folder)
         (folder / "diff.patch").write_text(diff, encoding="utf-8")
@@ -1853,6 +1906,8 @@ class Run:
             judgement.left,
         )
         reply = self._said_of(judgement, wanted, met, standing, clashes)
+        if panes_read:
+            reply += "\n" + "\n".join([glass_checks.HEADING, *glass_checks.said(panes_read)])
         held = self._holding()
         if held:
             # Whatever the needs read: a check that failed and hasn't passed since (`holding.py`).
@@ -1870,6 +1925,7 @@ class Run:
                 "groups": groups,
                 "looks": looks,
                 "standing": standing,
+                "glass": panes_read,
                 "overlap": overlap,
                 "held": held,
             }
@@ -2079,6 +2135,8 @@ class Run:
             mark = "can't tell" if one.unsure else "ok"
             lines.append(f"- `{one.file}`, {mark}: {one.why}")
         lines.append("")
+        if delivered.get("glass"):
+            lines += [f"## {glass_checks.HEADING}", "", *glass_checks.said(delivered["glass"]), ""]
         if delivered.get("held"):
             lines += [
                 "## Checks whose latest try failed, which no need settles",
@@ -2369,7 +2427,10 @@ class Run:
             image = paths.read_bytes_inside(self.work, sheet)
             bench_said = [line for line in done.output.splitlines() if _sheet_line(line)]
             images.append((f"{out}/sheet.png", base64.b64encode(image).decode()))
-        standing = self._standing_at_ask(drawn) if drawn else []
+        declared = self._glass_declared(args.get("glass"), drawn, "ask")
+        if isinstance(declared, Judged):
+            return declared
+        standing = self._standing_at_ask(drawn, declared) if drawn else []
         self.state.draft = {
             "question": question,
             "need": need,
@@ -2514,7 +2575,31 @@ class Run:
                 return "no_plan", "At the plan stop, `plan` says how you'll go about it."
         return None
 
-    def _standing_at_ask(self, files: list[str]) -> list[judge.Standing]:
+    def _glass_declared(
+        self, given: Any, part: list[str], tool: str
+    ) -> list[glass_checks.Glass] | Judged:
+        """The frames and panes the kind's standing checks read (`standing.py`): at `done` given,
+        with every file of `part`; at `ask`, the latest given."""
+        if not self.toolset.standing:
+            return []
+        if given is None:
+            if tool == "done":
+                reply = (
+                    f"Nothing was checked: `done` names the frames and panes in `glass`, as "
+                    f"{self.toolset.title}'s own checks read every pane. {glass_checks.SHAPE}"
+                )
+                return Judged("done", "failed", reply, "no_glass")
+            return glass_checks.load(self.state.glass)
+        found = glass_checks.read(given, part, self.work, whole=tool == "done")
+        if isinstance(found, str):
+            return Judged(tool, "failed", found, "not_glass")
+        self.state.glass = [one.plain() for one in found]
+        self.save()
+        return found
+
+    def _standing_at_ask(
+        self, files: list[str], glass: list[glass_checks.Glass] | None = None
+    ) -> list[judge.Standing]:
         """What an ask shows, read as it stands: each settled need's own check, and `thin` on each
         file. On `cup-1` a question said a pane was split in two where `capture` read one, and no
         need ran `capture` any more."""
@@ -2538,6 +2623,15 @@ class Run:
         try:
             paths.copy_plain(self.work, scratch, skip_made=True)
             found += judge.printable(self.box, files, scratch, scratch / ".kept")
+            # The kind's own, on each frame whose files are all on the sheet or given.
+            shown = set(files)
+            on_sheet = [
+                one
+                for one in glass or []
+                if all(f in shown or f.startswith("references/") for f in one.files())
+                and any(f in shown for f in one.files())
+            ]
+            found += glass_checks.check(self.box, on_sheet, scratch, scratch / ".kept")
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
         return found

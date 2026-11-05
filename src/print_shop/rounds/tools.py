@@ -151,6 +151,25 @@ def _measures_said(toolset: Toolset) -> str:
     )
 
 
+def _glass(toolset: Toolset) -> dict[str, Any]:
+    """`done`'s and `ask`'s `glass`, for a kind whose standing checks need it (`standing.py`)."""
+    if not toolset.standing:
+        return {}
+    return {
+        "glass": {
+            "type": "array",
+            "description": "Each frame and its panes, for the harness's own "
+            f"{' and '.join(f'`{c}`' for c in toolset.standing)}, which run on every pane "
+            'whatever the needs say: [{"frame": "frame.step", "panes": ["pane_1.step"], "with": '
+            '[], "pocket_z": 2.0, "clearance": 0.25, "pane_thickness": 1.6}]: a height inside the '
+            "pockets, the play round a pane and its thickness, in mm, and `with` any other part "
+            "of the frame. At `done`, every file of `part` is in it. At `ask`, optional: the "
+            "latest one is used.",
+            "items": {"type": "object"},
+        }
+    }
+
+
 def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
     commands = ", ".join(f"`{c}`" for c in toolset.commands)
     return [
@@ -329,6 +348,7 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
                     "items": {"type": "string"},
                 },
                 **LOOKS,
+                **_glass(toolset),
                 "cuts": {
                     "type": "string",
                     "description": "Cut-throughs added to each variant's row, by spaces: `z=3` "
@@ -379,6 +399,7 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
             "from, one folder for each of `groups`.",
             {
                 **LOOKS,
+                **_glass(toolset),
                 "groups": {
                     "type": "array",
                     "description": "The ways the part prints, each with its own files: "
@@ -707,6 +728,7 @@ class WorkTools:
         for key in (
             "needs",
             "variants",
+            "glass",
             "groups",
             "looks",
             "why_changed",
