@@ -1,5 +1,5 @@
-"""The numbers each bench command reports, so `needs` refuses a `number` its command never gives
-(mqucifer/print-shop#45).
+"""The numbers and verdicts each bench command gives, so `needs` refuses a `number` its command
+never reports (mqucifer/print-shop#45), or a verdict it never says (mqucifer/print-shop#52).
 
 On `eval-rings-1`, `needs` took `number: min_wall_mm` for `wall`, which reports `least_wall_mm`.
 Nothing said so until the harness's clean run at the end. A need's `number` is a path into the
@@ -10,6 +10,13 @@ Each command's keys are read from its JSON: `report.fact(name, ...)` and `report
 in the bench's code. `tests/test_reports.py` reads them from the code again, through each
 command's own functions, so a number added to the bench and not here fails a test. A `*` stands
 for a part of the name the code fills in, such as `pocket_section_mm2`.
+
+**Verdicts.** On `eval-through-1` a fit need on `clearance` asked for `verdict OK`. `clearance`
+says CLEAR, TOUCHING, TOO CLOSE or INTERFERE, and never OK, so the need could never pass: three
+`done`s and four refused `needs` before the model asked. Each command's verdicts below are read
+from its code the same way (`report.verdict(...)`, and a pair's `"verdict"` where the worst of
+them is the answer). DISAGREE and NO ANSWER aren't listed: any command can say them, and they
+never pass a need (`needs.UNSURE`).
 """
 
 from __future__ import annotations
@@ -103,6 +110,39 @@ REPORTS: dict[str, tuple[str, ...]] = {
 }
 
 
+VERDICTS: dict[str, tuple[str, ...]] = {
+    "info": ("OK", "FAIL"),
+    "clearance": ("CLEAR", "TOUCHING", "TOO CLOSE", "INTERFERE"),
+    "readback": ("OK", "FAIL", "NO CHANGE"),
+    "rays": ("OK", "FAIL"),
+    "panes": ("OK", "FAIL"),
+    "capture": ("OK", "FAIL"),
+    "thin": ("OK", "FAIL"),
+    "wall": ("OK", "FAIL"),
+    "light": ("OK", "FAIL"),
+    "thickness": ("OK", "FAIL"),
+    "pause": ("OK", "FAIL"),
+    "params": ("OK", "NO CHANGE", "PARTIAL"),
+    "render": ("OK", "FAIL"),
+}
+
+
+#: Options that limit one quantity from both ends, by command. An exact figure carried by one
+#: needs the other too (`figures.py`); one with no partner, such as `capture --min-visible`, is
+#: all a check can carry. `tests/test_reports.py` reads the pairs from the bench's parser.
+BOTH_ENDS: dict[str, tuple[tuple[str, str], ...]] = {"thickness": (("--min", "--max"),)}
+
+
+def other_end(command: str, option: str) -> str | None:
+    """The option that limits the other end of what `option` limits, if its command has one."""
+    for low, high in BOTH_ENDS.get(command, ()):
+        if option == low:
+            return high
+        if option == high:
+            return low
+    return None
+
+
 def reports(command: str, number: str) -> bool | None:
     """Whether `command` reports `number`'s first part: None for a command not listed here."""
     keys = REPORTS.get(command)
@@ -120,4 +160,16 @@ def wrong_number(command: str, number: str) -> str | None:
     return (
         f"`{command}` never reports `{number.split('.', 1)[0]}`: its numbers are {named}. A "
         "`number` is a path into them, such as `pairs.0.gap_mesh_mm`"
+    )
+
+
+def wrong_verdict(command: str, verdict: str) -> str | None:
+    """What's wrong with a need's verdict for its command, naming the verdicts it does give."""
+    given = VERDICTS.get(command)
+    if given is None or verdict in given:
+        return None
+    named = ", ".join(given)
+    return (
+        f"`{command}` never says {verdict}: its verdicts are {named}, so a need asking for "
+        f"{verdict} could never pass"
     )

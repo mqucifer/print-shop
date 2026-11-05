@@ -42,6 +42,7 @@ from print_shop.rounds import (
     after_action,
     breakdown,
     descriptions,
+    figures,
     holding,
     judge,
     lessons,
@@ -57,6 +58,7 @@ from print_shop.rounds import (
     unprintable,
 )
 from print_shop.rounds import request as forms
+from print_shop.rounds import standing as glass_checks
 from print_shop.rounds.box import Box, Gone, Ran
 from print_shop.rounds.judge import SPONSOR, STAND_IN
 from print_shop.rounds.ledger import DesignLedger, now
@@ -143,8 +145,12 @@ class State:
     # Who opened the fixed needs, with a note, so they may change at the next `needs`.
     fixed_open: dict[str, Any] | None = None
     # Each failing check the model said doesn't apply, and why: held out of the list of failing
-    # checks, and shown at the next stop (`holding.py`).
+    # checks, and shown at the next stop (`holding.py`). One with `unread_file` is a part file the
+    # model says no need has to read (mqucifer/print-shop#52).
     asides: list[dict[str, Any]] = field(default_factory=list)
+    # The latest frames and panes `done` or `ask` declared, for the kind's standing checks
+    # (`standing.py`).
+    glass: list[dict[str, Any]] | None = None
     # Each `needs` refused once they were settled, shown beside the next question.
     needs_refused: list[dict[str, Any]] = field(default_factory=list)
     # Who each of `notes` is from, in order: a run from before this has none, and its notes were
@@ -1396,6 +1402,23 @@ class Run:
             )
             found.append((tried.at_call, 1, tried))
         for row in self.ledger.rows(
+            "SELECT at_call, stop, command, passed, unsure, verdict, why FROM standing WHERE run=? "
+            "AND check_name IN (?, ?) ORDER BY id",
+            self.state.name,
+            glass_checks.LIGHT,
+            glass_checks.HOLD,
+        ):
+            # The kind's own, at `done` and each stop (`standing.py`): held as the model's are.
+            tried = holding.Tried(
+                int(row["at_call"]),
+                shlex.split(str(row["command"])),
+                None if row["unsure"] else bool(row["passed"]),
+                str(row["verdict"] or ""),
+                str(row["why"] or ""),
+                str(row["stop"]),
+            )
+            found.append((tried.at_call, 1, tried))
+        for row in self.ledger.rows(
             "SELECT r.need, r.passed, r.verdict, r.why, o.last_call, o.needs_version FROM readings "
             "AS r JOIN rounds AS o ON o.run = r.run AND o.round = r.round WHERE r.run=? AND "
             "r.by='bench' AND o.last_call IS NOT NULL ORDER BY o.round",
@@ -1448,6 +1471,8 @@ class Run:
         fails again, and shown to the person at the next stop. A check a settled need runs is
         `done`'s to decide, so it can't be set aside."""
         why = str(args.get("why") or "").strip()
+        if args.get("file") is not None:
+            return self._set_aside_file(str(args["file"]).strip(), why, args.get("check"))
         try:
             argv = shlex.split(str(args.get("check") or ""))
         except ValueError as exc:
@@ -1474,6 +1499,24 @@ class Run:
                 f"need's check is wrong: {prompt.STUCK}"
             )
             return Judged("set_aside", "failed", reply, "a_needs_check")
+        own = ", ".join(f"`{c}`" for c in self.toolset.standing)
+        # A given file is the "before" state only where the piece doesn't print it: a frame given
+        # and printed as it is, named in `glass`, is the part.
+        printed = {
+            _plain_name(f) for one in glass_checks.load(self.state.glass) for f in one.files()
+        }
+        if check[0] in self.toolset.standing and not all(
+            _plain_name(f).startswith("references/") and _plain_name(f) not in printed
+            for f in check[1]
+        ):
+            reply = (
+                f"`{check[0]}` is one of {self.toolset.title}'s own checks, which every piece of "
+                f"this kind passes whatever the request's lines say: {own}. "
+                "The harness runs them on every pane at `done` and at each stop, so they can't be "
+                'set aside. On a given reference the piece doesn\'t print, as the "before" state, '
+                f"one can. If the check reads the part wrongly: {prompt.STUCK}"
+            )
+            return Judged("set_aside", "failed", reply, "standing")
         aside = {
             "at_call": self.session.requests,
             "round": self.state.round,
@@ -1492,12 +1535,69 @@ class Run:
         )
         return Judged("set_aside", "ok", reply, detail={"set_aside": aside})
 
+    def _set_aside_file(self, name: str, why: str, check: Any) -> Judged:
+        """A part file the model says no need has to read, and why (mqucifer/print-shop#52): out
+        of `done`'s refusal, and shown at the next stop."""
+        if check:
+            reply = "`set_aside` takes a `check` or a `file`, not both."
+            return Judged("set_aside", "failed", reply, "both")
+        if not why:
+            reply = "`why` says why no need reads the file, for the person at the next stop."
+            return Judged("set_aside", "failed", reply, "empty")
+        plain = _plain_name(name)
+        if plain not in {_plain_name(f) for f in self.state.part or []}:
+            named = ", ".join(f"`{f}`" for f in self.state.part or []) or "none yet"
+            reply = (
+                f"`{name}` isn't a file of the part `done` last named ({named}): a `file` set "
+                "aside is a part file no need reads."
+            )
+            return Judged("set_aside", "failed", reply, "not_in_part")
+        if plain not in self._unread(self.state.part or []):
+            reply = f"A need already reads `{name}`, so there's nothing to set aside."
+            return Judged("set_aside", "failed", reply, "read")
+        aside = {
+            "at_call": self.session.requests,
+            "round": self.state.round,
+            "command": "",
+            "files": [plain],
+            "tries": [],
+            "why": why,
+            "unread_file": plain,
+            "shown_at": None,
+        }
+        self.state.asides.append(aside)
+        self.ledger.set_aside(self.state.name, len(self.state.asides), aside)
+        self.save()
+        reply = (
+            f"Set aside: `done` no longer asks for a need to read `{plain}`. The person at the "
+            "next stop reads your reason."
+        )
+        return Judged("set_aside", "ok", reply, detail={"set_aside": aside})
+
     def _asides_said(self) -> list[str]:
-        """The checks set aside since the last stop, for the person there."""
+        """The checks set aside since the last stop, and the part files no need reads, for the
+        person there."""
         shown = [a for a in self.state.asides if not a.get("shown_at")]
         if not shown:
             return []
-        lines = ["## Failing checks the model set aside", ""]
+        files = [a for a in shown if a.get("unread_file")]
+        shown = [a for a in shown if not a.get("unread_file")]
+        lines: list[str] = []
+        if files:
+            lines += [
+                "## Part files no need reads, set aside by the model",
+                "",
+                "`thin` reads every file of the part; no need's check reads these.",
+                "",
+            ]
+            lines += [
+                f"- `{a['unread_file']}`, set aside at call {a['at_call']}: {a['why']}"
+                for a in files
+            ]
+            lines.append("")
+        if not shown:
+            return lines
+        lines += ["## Failing checks the model set aside", ""]
         for aside in shown:
             on = " ".join(aside["files"])
             calls = ", ".join(str(c) for c in aside["tries"])
@@ -1506,6 +1606,84 @@ class Run:
                 f"{aside['at_call']}: {aside['why']}"
             )
         return [*lines, ""]
+
+    def _on_replaced(self, printed: list[str]) -> list[tuple[str, str, str, str]]:
+        """Each bench need checked on a given reference that the part replaces, by its name: on
+        `eval-through-1` the fit need ran on `references/frame.step` while the part was the
+        model's changed `frame.step`. Each is its need, the reference, the part's file and its
+        command. A check on the reference, as the "before" state, can still run: it isn't a
+        need."""
+        mine: dict[str, str] = {}
+        for name in printed:
+            plain = _plain_name(name)
+            if not plain.startswith("references/"):
+                mine.setdefault(Path(plain).name, plain)
+        found = []
+        for need in self._needs():
+            if need.by != "bench":
+                continue
+            for name in need.files():
+                plain = _plain_name(name)
+                if plain.startswith("references/") and Path(plain).name in mine:
+                    found.append((need.id, name, mine[Path(plain).name], need.command))
+        return found
+
+    def _unread(self, printed: list[str]) -> list[str]:
+        """Each file of the part no need's check reads, beyond `thin`'s, and not set aside: on
+        `eval-tip-2` the pane's fit need was `panes` on the frame, which builds its own pane and
+        never opens `pane.step` (mqucifer/print-shop#52). A run from before toolsets carries on
+        as it began."""
+        if self.toolset.legacy:
+            return []
+        # `thin` reads every file whatever the needs say, so a need that runs it reads nothing more,
+        # unless it asks for one body: on `eval-tip-2` `pane.step` was read by `thin` alone.
+        read = {
+            _plain_name(f)
+            for n in self._needs()
+            if n.by == "bench" and (n.argv()[:1] != ["thin"] or "--one-body" in n.argv())
+            for f in n.files()
+        }
+        aside = {str(a["unread_file"]) for a in self.state.asides if a.get("unread_file")}
+        found = []
+        for name in printed:
+            plain = _plain_name(name)
+            if plain not in read and plain not in aside and plain not in found:
+                found.append(plain)
+        return found
+
+    def _part_reading_said(self, draft: dict[str, Any]) -> list[str]:
+        """Beside a question: needs on a reference the part replaces, and part files no need
+        reads, as `done` would refuse them."""
+        lines: list[str] = []
+        replaced = draft.get("on_replaced") or []
+        if replaced:
+            lines += [
+                "## Needs checked on a reference the part replaces",
+                "",
+                "A need is checked on the part. Where the part has its own copy of a given file, "
+                "a check on the given one is the \"before\" state, not a need: `done` refuses "
+                "these until the needs change, which takes `--reopen-needs`.",
+                "",
+                *[
+                    f"- `{o['need']}`: `{o['file']}`, in `{o['command']}`, where the part has "
+                    f"`{o['part_file']}`"
+                    for o in replaced
+                ],
+                "",
+            ]
+        unread = draft.get("unread") or []
+        if unread:
+            lines += [
+                "## Files no need reads",
+                "",
+                "`done` asks for each file of the part to be read by a need's check, beyond "
+                "`thin`. These, on the sheet or in the part `done` last named, aren't: a need is "
+                "added through `--reopen-needs`, or the model sets the file aside with its reason.",
+                "",
+                *[f"- `{name}`" for name in unread],
+                "",
+            ]
+        return lines
 
     def _off_part(self, printed: list[str]) -> list[tuple[str, str, str]]:
         """Each bench need whose check names a file that's neither printed nor given: on
@@ -1644,9 +1822,10 @@ class Run:
             self.toolset,
         )
         if not wrong and not trying:
-            wrong = needs.numbers_wrong(found)
+            wrong = needs.numbers_wrong(found) + needs.verdicts_wrong(found)
         if not wrong and form is not None and not trying:
-            wrong = forms.held(found, form) + self._fixed_kept(found)
+            wrong = forms.held(found, form) + figures.wrong(found, form)
+            wrong += self._fixed_kept(found)
         if not wrong:
             wrong = self._usable(found)
         if wrong:
@@ -1895,6 +2074,15 @@ class Run:
         off = self._off_part(part)
         if off:
             return Judged("done", "failed", _off_part_refused(off), "need_off_part")
+        replaced = self._on_replaced(part)
+        if replaced:
+            return Judged("done", "failed", _on_replaced_refused(replaced), "need_on_replaced")
+        unread = self._unread(part)
+        if unread:
+            return Judged("done", "failed", _unread_refused(unread), "part_unread")
+        glass = self._glass_declared(args.get("glass"), part, "done")
+        if isinstance(glass, Judged):
+            return glass
         stale = self._stale(part)
         if stale:
             # A description of the part as it was: sent again or said to hold before anything is
@@ -1912,6 +2100,7 @@ class Run:
         wanted = self._needs()
         judgement = judge.check(self.box, self.work, script, wanted, self.state.picks, folder, part)
         standing: list[judge.Standing] = []
+        panes_read: list[judge.Standing] = []
         overlap: dict[str, Any] = {}
         clashes: list[str] = []
         if judgement.met:
@@ -1920,12 +2109,18 @@ class Run:
             standing = judge.printable(self.box, part, judged, folder / "standing")
             for one in standing:
                 self._stood(one, "done", judged)
+            # The kind's own: `light` and `capture` on every pane (`standing.py`).
+            ran = list(zip(wanted, judgement.readings, strict=True))
+            panes_read = glass_checks.check(self.box, glass, judged, folder / "standing", ran)
+            for one in panes_read:
+                self._stood(one, "done", judged)
             overlap = self._overlap(judged, part)
             clashes = _clashes(groups, part, overlap)
             (folder / "standing.json").write_text(
                 json.dumps(
                     {
                         "printable": [one.plain() for one in standing],
+                        "glass": [one.plain() for one in panes_read],
                         "overlap": overlap,
                         "clashes": clashes,
                     },
@@ -1933,7 +2128,12 @@ class Run:
                 ),
                 encoding="utf-8",
             )
-        met = judgement.met and not clashes and not any(one.failed for one in standing)
+        met = (
+            judgement.met
+            and not clashes
+            and not any(one.failed for one in standing)
+            and not any(one.failed for one in panes_read)
+        )
         files = paths.snapshot(self.work)
         diff = self._diff(folder)
         (folder / "diff.patch").write_text(diff, encoding="utf-8")
@@ -1956,6 +2156,8 @@ class Run:
             judgement.left,
         )
         reply = self._said_of(judgement, wanted, met, standing, clashes)
+        if panes_read:
+            reply += "\n" + "\n".join([glass_checks.HEADING, *glass_checks.said(panes_read)])
         held = self._holding()
         if held:
             # Whatever the needs read: a check that failed and hasn't passed since (`holding.py`).
@@ -1973,6 +2175,7 @@ class Run:
                 "groups": groups,
                 "looks": looks,
                 "standing": standing,
+                "glass": panes_read,
                 "overlap": overlap,
                 "held": held,
             }
@@ -2182,6 +2385,8 @@ class Run:
             mark = "can't tell" if one.unsure else "ok"
             lines.append(f"- `{one.file}`, {mark}: {one.why}")
         lines.append("")
+        if delivered.get("glass"):
+            lines += [f"## {glass_checks.HEADING}", "", *glass_checks.said(delivered["glass"]), ""]
         if delivered.get("held"):
             lines += [
                 "## Checks whose latest try failed, which no need settles",
@@ -2477,7 +2682,10 @@ class Run:
             image = paths.read_bytes_inside(self.work, sheet)
             bench_said = [line for line in done.output.splitlines() if _sheet_line(line)]
             images.append((f"{out}/sheet.png", base64.b64encode(image).decode()))
-        standing = self._standing_at_ask(drawn) if drawn else []
+        declared = self._glass_declared(args.get("glass"), drawn, "ask")
+        if isinstance(declared, Judged):
+            return declared
+        standing = self._standing_at_ask(drawn, declared) if drawn else []
         self.state.draft = {
             "question": question,
             "need": need,
@@ -2557,6 +2765,22 @@ class Run:
             {"need": need, "file": file, "command": command} for need, file, command in off
         ]
         self.state.draft["off_part_known"] = bool(printed)
+        replaced = self._on_replaced(printed)
+        unread = self._unread(printed)
+        if replaced or unread:
+            said = [
+                f"- `{need}` reads `{file}`, and the part has `{own}`"
+                for need, file, own, _ in replaced
+            ] + [f"- no need reads `{name}`" for name in unread]
+            lines.append(
+                "What `done` would refuse in the needs, which goes beside the question too:\n"
+                + "\n".join(said)
+            )
+        self.state.draft["on_replaced"] = [
+            {"need": need, "file": file, "part_file": own, "command": command}
+            for need, file, own, command in replaced
+        ]
+        self.state.draft["unread"] = unread
         stale = self._stale(printed)
         if stale:
             lines.append(
@@ -2613,13 +2837,38 @@ class Run:
                 return "no_plan", "At the plan stop, `plan` says how you'll go about it."
         return None
 
-    def _standing_at_ask(self, files: list[str]) -> list[judge.Standing]:
+    def _glass_declared(
+        self, given: Any, part: list[str], tool: str
+    ) -> list[glass_checks.Glass] | Judged:
+        """The frames and panes the kind's standing checks read (`standing.py`): at `done` given,
+        with every file of `part`; at `ask`, the latest given."""
+        if not self.toolset.standing:
+            return []
+        if given is None:
+            if tool == "done":
+                reply = (
+                    f"Nothing was checked: `done` names the frames and panes in `glass`, as "
+                    f"{self.toolset.title}'s own checks read every pane. {glass_checks.SHAPE}"
+                )
+                return Judged("done", "failed", reply, "no_glass")
+            return glass_checks.load(self.state.glass)
+        found = glass_checks.read(given, part, self.work, whole=tool == "done")
+        if isinstance(found, str):
+            return Judged(tool, "failed", found, "not_glass")
+        self.state.glass = [one.plain() for one in found]
+        self.save()
+        return found
+
+    def _standing_at_ask(
+        self, files: list[str], glass: list[glass_checks.Glass] | None = None
+    ) -> list[judge.Standing]:
         """What an ask shows, read as it stands: each settled need's own check, and `thin` on each
         file. On `cup-1` a question said a pane was split in two where `capture` read one, and no
         need ran `capture` any more."""
         found: list[judge.Standing] = []
         benched = [n for n in self._needs() if n.by == "bench"]
-        for need, reading in zip(benched, self._read_now(benched), strict=True):
+        ran = list(zip(benched, self._read_now(benched), strict=True))
+        for need, reading in ran:
             unsure = reading.verdict in UNSURE or not reading.verdict
             found.append(
                 judge.Standing(
@@ -2637,6 +2886,15 @@ class Run:
         try:
             paths.copy_plain(self.work, scratch, skip_made=True)
             found += judge.printable(self.box, files, scratch, scratch / ".kept")
+            # The kind's own, on each frame whose files are all on the sheet or given.
+            shown = set(files)
+            on_sheet = [
+                one
+                for one in glass or []
+                if all(f in shown or f.startswith("references/") for f in one.files())
+                and any(f in shown for f in one.files())
+            ]
+            found += glass_checks.check(self.box, on_sheet, scratch, scratch / ".kept", ran)
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
         return found
@@ -2809,6 +3067,7 @@ class Run:
                 *[f"- `{o['need']}`: `{o['file']}`, in `{o['command']}`" for o in off],
                 "",
             ]
+        lines += self._part_reading_said(draft)
         lines += self._needs_refused_said()
         lines += self._asides_said()
         lines += self._swaps_said()
@@ -2979,6 +3238,40 @@ def _off_part_refused(off: list[tuple[str, str, str]]) -> str:
         "If the file is printed, name it in `part`. Otherwise the need's check has to change, "
         "and the needs are settled: show what you have with `ask`, and the need goes beside your "
         "question, so a person can reopen them."
+    )
+    return "\n".join(lines)
+
+
+def _on_replaced_refused(found: list[tuple[str, str, str, str]]) -> str:
+    """`done`'s refusal of a need checked on a given file the part has its own copy of."""
+    lines = [
+        "Nothing was checked: a need is checked on the part, and these are checked on a given "
+        "reference the part replaces:"
+    ]
+    lines += [
+        f"- `{need}` reads `{file}`, in `{command}`, and the part has its own `{own}`."
+        for need, file, own, command in found
+    ]
+    lines.append(
+        'A check on the given file, as the "before" state, can still run on the bench: it just '
+        "isn't a need. The needs are settled, so show what you have with `ask`: the need goes "
+        "beside your question, so a person can reopen them."
+    )
+    return "\n".join(lines)
+
+
+def _unread_refused(unread: list[str]) -> str:
+    """`done`'s refusal of a part whose files aren't all read by a need's check."""
+    lines = [
+        "Nothing was checked: each file of the part is read by a need's check, beyond `thin`, "
+        "and no need's command reads these:"
+    ]
+    lines += [f"- `{name}`" for name in unread]
+    lines.append(
+        "A need that names another file, such as `panes` on the frame, builds its own and never "
+        "opens these. If a need should read one, the needs are settled: show it with `ask`, and "
+        "it goes beside your question, so a person can reopen them. If none has to, say why with "
+        "`set_aside`, giving `file` and `why`: the person at the next stop reads it."
     )
     return "\n".join(lines)
 

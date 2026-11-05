@@ -731,6 +731,9 @@ ADDED = (
     ("runs", "reasoning_effort_from", "TEXT"),
     # Who gave intake's answers (mqucifer/print-shop#53): empty from before it was asked.
     ("questions", "answered_by", "TEXT"),
+    # A part file the model set aside as no need reading it, with no command
+    # (mqucifer/print-shop#52).
+    ("set_asides", "unread_file", "TEXT"),
 )
 #: Each stop asked, at which call, and picked when and by whom: made once `picks.stop` is there.
 STOPS_VIEW = """CREATE VIEW IF NOT EXISTS stops AS
@@ -1181,6 +1184,7 @@ class DesignLedger:
             files=_json(aside["files"]),
             tries=_json(aside["tries"]),
             why=aside["why"],
+            unread_file=aside.get("unread_file"),
         )
 
     def swaps_shown(self, run: str, where: str) -> None:

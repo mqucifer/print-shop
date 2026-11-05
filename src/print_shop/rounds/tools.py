@@ -151,6 +151,25 @@ def _measures_said(toolset: Toolset) -> str:
     )
 
 
+def _glass(toolset: Toolset) -> dict[str, Any]:
+    """`done`'s and `ask`'s `glass`, for a kind whose standing checks need it (`standing.py`)."""
+    if not toolset.standing:
+        return {}
+    return {
+        "glass": {
+            "type": "array",
+            "description": "Each frame and its panes, for the harness's own "
+            f"{' and '.join(f'`{c}`' for c in toolset.standing)}, which run on every pane "
+            'whatever the needs say: [{"frame": "frame.step", "panes": ["pane_1.step"], "with": '
+            '[], "pocket_z": 2.0, "clearance": 0.25, "pane_thickness": 1.6}]: a height inside the '
+            "pockets, the play round a pane and its thickness, in mm, and `with` any other part "
+            "of the frame. At `done`, every file of `part` is in it. At `ask`, optional: the "
+            "latest one is used.",
+            "items": {"type": "object"},
+        }
+    }
+
+
 def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
     commands = ", ".join(f"`{c}`" for c in toolset.commands)
     return [
@@ -329,6 +348,7 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
                     "items": {"type": "string"},
                 },
                 **LOOKS,
+                **_glass(toolset),
                 "cuts": {
                     "type": "string",
                     "description": "Cut-throughs added to each variant's row, by spaces: `z=3` "
@@ -374,11 +394,14 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
             "fresh container, with every STEP and STL outside `references/` taken away first, and "
             "the harness runs each need's check itself. Needs that fail come back to you, and the "
             "next round starts. Every file in `part` is also read by `thin`, at the nozzle's "
-            "width, and files printed together mustn't take the same space. When all of that "
+            "width, and files printed together mustn't take the same space. Each file of `part` "
+            "is read by a need's check, or set aside with `set_aside` and your reason, and a need "
+            "isn't checked on a given file the part has its own copy of. When all of that "
             "passes, the run stops for approval, and the harness writes the folder to print "
             "from, one folder for each of `groups`.",
             {
                 **LOOKS,
+                **_glass(toolset),
                 "groups": {
                     "type": "array",
                     "description": "The ways the part prints, each with its own files: "
@@ -409,9 +432,20 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
             "Say why a failing bench check doesn't apply, so it's no longer named in your "
             "replies. Each check whose latest try failed is named until it passes; the person at "
             "the next stop reads your reason. A check a need runs can't be set aside: `done` "
-            "decides it. If the check fails again, it's named again.",
-            check="The check as your replies name it: its command and files, such as `capture "
-            "references/frame.step pane.step`.",
+            "decides it. If the check fails again, it's named again. Or, with `file`, say why no "
+            "need has to read a file of the part, which `done` otherwise asks for.",
+            {
+                "check": {
+                    "type": "string",
+                    "description": "The check as your replies name it: its command and files, "
+                    "such as `capture references/frame.step pane.step`.",
+                },
+                "file": {
+                    "type": "string",
+                    "description": "Instead of `check`: a file of the part that no need's check "
+                    "reads, such as `pane.step`.",
+                },
+            },
             why="Why it doesn't apply, for the person at the next stop.",
         ),
         _spec(
@@ -714,6 +748,7 @@ class WorkTools:
         for key in (
             "needs",
             "variants",
+            "glass",
             "groups",
             "looks",
             "why_changed",
