@@ -274,17 +274,18 @@ def test_a_render_whose_picture_goes_through_a_link_shows_nothing(tmp_path: Path
 
 
 def test_the_ported_skills_are_the_measured_text() -> None:
-    assert skills.sha(("cadquery", "references")) == MEASURED_SKILLS_SHA
+    """Above any additions of print-shop's (mqucifer/print-shop#54), each is the measured text."""
+    assert skills.measured_sha() == MEASURED_SKILLS_SHA
+    added = [n for n in skills.MEASURED_FILES if skills.ADDED in (skills.SKILLS / n).read_text()]
+    assert added == ["cadquery/references/errors.md", "cadquery/references/sketch-extrude.md"]
 
 
 def test_the_ported_skills_match_their_source_where_it_is_present() -> None:
     if not CAD_EVAL_SKILLS.is_dir():
         pytest.skip("mqucifer/model-performance isn't on this machine")
-    for name in ("cadquery", "references"):
-        ours = skills.SKILLS / name
-        for path in sorted(p for p in ours.rglob("*.md")):
-            theirs = CAD_EVAL_SKILLS / name / path.relative_to(ours)
-            assert path.read_bytes() == theirs.read_bytes(), path
+    for name in skills.MEASURED_FILES:
+        theirs = CAD_EVAL_SKILLS / name
+        assert skills.measured(skills.SKILLS / name) == theirs.read_bytes(), name
 
 
 def test_each_skill_has_a_name_a_line_and_a_body() -> None:

@@ -3,8 +3,10 @@ evaluations, written before its text (mqucifer/print-shop#37). No Docker, and no
 
 The rules: platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices. The
 `cadquery` and `references` sets are measured copies from mqucifer/model-performance, held to
-their source by a hash: where they break a rule it's listed here, as the PR lists it, and they
-aren't edited. print-shop's own, `bench` and `designing-stained-glass`, keep every rule.
+their source by a hash: where they break a rule it's listed here, as the PR lists it, and their
+measured text isn't edited, though two now carry print-shop's additions after it
+(mqucifer/print-shop#54). print-shop's own, `bench`, `designing-stained-glass` and any other file
+in those sets, keep every rule.
 """
 
 from __future__ import annotations
@@ -23,32 +25,27 @@ MEASURED = ("cadquery", "references")
 #: What the measured copies break, by file: their names aren't gerunds, and their descriptions
 #: say what they hold but not when to read them. Listed, not edited.
 MEASURED_BREAKS = {
-    path: ["isn't in gerund form", "doesn't say when to use it"]
-    for path in (
-        "cadquery/SKILL.md",
-        "cadquery/references/assemblies-fits.md",
-        "cadquery/references/errors.md",
-        "cadquery/references/selectors.md",
-        "cadquery/references/sketch-extrude.md",
-        "cadquery/references/threads-helices.md",
-        "references/SKILL.md",
-        "references/references/fasteners.md",
-        "references/references/fdm.md",
-        "references/references/fits.md",
-    )
+    path: ["isn't in gerund form", "doesn't say when to use it"] for path in skills.MEASURED_FILES
 }
+#: Every file of print-shop's own: its sets, and its files among the measured copies.
+OWN = [
+    *skills.files(OURS),
+    *(
+        p
+        for p in skills.files(MEASURED)
+        if str(p.relative_to(skills.SKILLS)) not in skills.MEASURED_FILES
+    ),
+]
 
 
-@pytest.mark.parametrize(
-    "path", skills.files(OURS), ids=lambda p: str(p.relative_to(skills.SKILLS))
-)
+@pytest.mark.parametrize("path", OWN, ids=lambda p: str(p.relative_to(skills.SKILLS)))
 def test_print_shops_own_skills_keep_every_rule(path: Path) -> None:
     assert skills.broken(path) == []
 
 
 def test_the_measured_copies_break_only_what_is_listed() -> None:
-    for path in skills.files(MEASURED):
-        shown = str(path.relative_to(skills.SKILLS))
+    for name in skills.MEASURED_FILES:
+        path, shown = skills.SKILLS / name, name
         said = skills.broken(path)
         listed = MEASURED_BREAKS[shown]
         assert len(said) == len(listed) and all(

@@ -46,7 +46,7 @@ Before any layout, write down how the reference and the request are built, not o
 
 ### 2. The 2D layout
 
-Lay the piece out flat first, with Shapely, and check it before any CAD.
+Lay the piece out flat first, as numbers, and check it with Shapely before any CAD. The numbers are the layout: each circle's centre and radius, each bar's angle and width, each straight cell's corners, the leading, the play and the rims, as constants at the top of the script. Shapely checks them in 2D. In 3D, step 5 builds the solids from the same numbers with CadQuery's own curves, never from Shapely's points: Shapely's circles are polygons.
 
 - Split the outline into cells that share their edges. Don't cut holes from a solid: that leaves separate bodies, and panes that merge.
 - Take every shape of a cell from that one cell, by offsets, so they always fit:
@@ -99,7 +99,46 @@ Each bench need gives `measures`, what it's about, and its command has to measur
 
 ### 5. The frame and the panes
 
-Extrude the 2D shapes last: the frame from `frame_2d` with each pocket and opening cut at its heights, and each pane from its `pane` polygon, as its own file. The panes are named by cell, `pane_1.step` and so on, and the frame is one file, or two if the request prints a cap apart.
+Build the solids last, from the layout's numbers: the frame with each pocket and opening cut at its heights, and each pane as its own file. The panes are named by cell, `pane_1.step` and so on, and the frame is one file, or two if the request prints a cap apart.
+
+**Build curves as curves.** A circle, an arc or a rounded corner is built with CadQuery's own: `circle`, `threePointArc` or `radiusArc` between two points, `offset2D(d, kind="arc")` to round corners, or a `Sketch`. Each shape that's an offset of a cell in 2D is the cell built again from its numbers, further in: the pocket `leading / 2` in, the pane `leading / 2 + play` in, the opening `leading / 2 + rim` in. A circle `inset` in is `circle(r - inset)`, a ring `circle(r1 - inset).circle(r0 + inset)`, and a bar between cells is cut `2 * inset` wide. One function of the inset makes them all, so they always fit:
+
+```python
+import math
+
+import cadquery as cq
+
+R_OUT, R_RING, R_DISC, BARS = 40.0, 36.0, 15.0, 6  # a disc, a ring of cells split by bars
+LEADING, PLAY, RIM = 1.0, 0.25, 1.2
+FLOOR, PANE, ROOM, HEIGHT = 1.5, 1.0, 0.2, 4.0  # step 3's heights
+
+
+def cells(inset, z0, z1):
+    """Every cell, `inset` in from its edges, from z0 to z1: true circles, cut by straight bars."""
+    at = cq.Workplane("XY").workplane(offset=z0)
+    ring = at.circle(R_RING - inset).circle(R_DISC + inset).extrude(z1 - z0)
+    for k in range(BARS):
+        bar = at.transformed(rotate=(0, 0, 360 * k / BARS)).center((R_DISC + R_RING) / 2, 0)
+        ring = ring.cut(bar.rect(R_RING - R_DISC + 2, 2 * inset).extrude(z1 - z0))
+    return ring.union(at.circle(R_DISC - inset).extrude(z1 - z0))
+
+
+frame = (
+    cq.Workplane("XY").circle(R_OUT).extrude(HEIGHT)
+    .cut(cells(LEADING / 2, FLOOR, FLOOR + PANE + ROOM))  # the pockets
+    .cut(cells(LEADING / 2 + RIM, 0, HEIGHT))  # the openings, through
+)
+panes = cells(LEADING / 2 + PLAY, FLOOR, FLOOR + PANE).solids().vals()
+assert len(frame.solids().vals()) == 1 and len(panes) == 1 + BARS
+assert {f.geomType() for f in frame.val().Faces()} <= {"PLANE", "CYLINDER"}  # no strips
+```
+
+- **Check it's the layout you checked:** each solid's volume over its height is its cell's area in Shapely, at `quad_segs=64`, to 0.1%.
+- **Straight sides are exact as polygons.** A cell whose sides are all straight can be extruded from its Shapely offset's points with `polyline(...).close()`.
+- **Where only a polygon will do,** such as a free curve with no centre or radius, give its curves a `quad_segs` and know the error: a circle of radius R is off by up to R·(1 − cos(45°/quad_segs)). At Shapely's default of 16, an 80 mm ring is 0.048 mm off, a fifth of 0.25 mm of play; at 64 it's 0.003 mm. Or draw it with `spline` through the points, which is a curve.
+- **Never extrude a circle or a round join from Shapely with `polyline`.** It's stored as flat strips, a face for each segment: such a ring was 130 faces and 491 kB where circles make 4 faces and 10 kB, and the slicer loses its arcs. `info` reports the flat faces under 1 mm across.
+
+`cadquery-sketch-extrude` has the same step for any part.
 
 ### 6. Each bench check
 

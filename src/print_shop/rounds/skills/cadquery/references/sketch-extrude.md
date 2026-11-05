@@ -97,3 +97,7 @@ assert moved.val().BoundingBox().xmin == 1.0
 ## Exporting
 - `cq.exporters.export(workplane_or_shape, "part.step")`: the file type follows the
   name ([Import and export](https://github.com/CadQuery/cadquery/blob/v2.8.0/doc/importexport.rst)).
+
+<!-- print-shop's additions, after the measured text (mqucifer/print-shop#54) -->
+## From a checked 2D layout
+A layout checked in Shapely is built from its numbers with true curves (`circle`, `threePointArc`, `offset2D(d, kind="arc")`, `spline`), never with `polyline` through Shapely's points, which stores a curve as flat strips: `building-curves-from-a-layout` shows the step.
