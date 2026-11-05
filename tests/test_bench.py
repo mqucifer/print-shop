@@ -1393,7 +1393,9 @@ def test_a_test_piece_is_drawn_grey_and_marked_and_the_part_isnt(bench: Any) -> 
     x_part = int(256 + (-20 - 15) * scale)
     x_piece = int(256 + (70 - 15) * scale)
     done = host.run(
-        ["read_picture.py", f"marked/plate-3mm-top.png:{x_part},256",
+        # The part's point is 60 px, about 16 mm, below the middle: off the box its name is
+        # marked in, which is wider than the number it once was (mqucifer/print-shop#54).
+        ["read_picture.py", f"marked/plate-3mm-top.png:{x_part},316",
          f"marked/plate-3mm-top.png:{x_piece},256"],
         bench.work,
         python=True,
