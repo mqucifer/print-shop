@@ -11,7 +11,7 @@ in the bench's code. `tests/test_reports.py` reads them from the code again, thr
 command's own functions, so a number added to the bench and not here fails a test. A `*` stands
 for a part of the name the code fills in, such as `pocket_section_mm2`.
 
-**Verdicts.** On `eval-unnamed-1` a fit need on `clearance` asked for `verdict OK`. `clearance`
+**Verdicts.** On `eval-through-1` a fit need on `clearance` asked for `verdict OK`. `clearance`
 says CLEAR, TOUCHING, TOO CLOSE or INTERFERE, and never OK, so the need could never pass: three
 `done`s and four refused `needs` before the model asked. Each command's verdicts below are read
 from its code the same way (`report.verdict(...)`, and a pair's `"verdict"` where the worst of

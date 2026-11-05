@@ -70,6 +70,9 @@ def test_done_names_each_part_file_no_need_reads_and_checks_nothing(tmp_path: Pa
     assert "`set_aside`, giving `file` and `why`" in refused["reply"]
     assert not (run.folder / "rounds" / "001" / "judged").exists(), "nothing was checked"
     assert run._unread(["pane.step"]) == ["pane.step"]
+    printable = Need("ok", "x", "chosen", "bench", command="thin pane.step", measures="printable")
+    settled(run, FROM_THE_FRAME, printable)
+    assert run._unread(["pane.step"]) == ["pane.step"], "`thin` reads every file anyway"
     settled(run, ON_THE_PANE)
     assert run._unread(["pane.step"]) == [], "a need that names it reads it"
 
@@ -323,3 +326,23 @@ def test_a_kind_with_no_standing_checks_takes_no_glass() -> None:
 
     assert "glass" in done(toolsets.STAINED_GLASS)
     assert "glass" not in done(toolsets.CORE)
+
+
+def test_a_need_that_runs_the_check_on_that_frame_is_its_reading_at_the_requests_figures(
+    tmp_path: Path,
+) -> None:
+    """A rim the request sizes by share can be under the bench's 0.4 mm: where a need runs
+    `capture` on the frame, its reading is the standing check's, and no second one runs."""
+    rims = (
+        "capture references/frame.step --pocket-z 2 --clearance 0.2 --pane-thickness 1.5 "
+        "--full-rim 1.1 --least-rim 0.5 --min-visible 55 --panes 1"
+    )
+    held = Need("held", "held on both faces", "chosen", "bench", command=rims, measures="pane-hold")
+    run = started(tmp_path, tool("done", part=["pane.step"], glass=GLASS, **DONE))
+    in_rounds(run, THICK, held)
+    assert run.drive().name == "met"
+    asked = [" ".join(a[2:]) for a in run.box.asked]
+    assert HOLD not in asked and asked.count(rims) == 1, "once, as the need"
+    assert LIGHT in asked
+    stop = (run.folder / "approvals" / "1" / "stop.md").read_text()
+    assert f"- `{rims}`, ok: as the need `held` reads it: OK" in stop

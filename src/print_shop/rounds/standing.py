@@ -15,10 +15,12 @@ panes and any other part of the frame (`with`), with the pocket's height, the pl
 and the pane's thickness. Every file of the part is in it, so no pane is left out. It's the
 model's word, shown at the stop beside the readings; a need carries the request's own figures.
 
-**Their limits.** Neither is the request's figure: that's a need's (`figures.py`). `capture` runs
-at the bench's own least lip, 0.4 mm after play, a nozzle's width, with `--panes` the panes
-declared; `light` has no limit, and fails a pane with nothing open straight through: the kind's
-rule is that light passes through every pane.
+**Their limits.** Where a settled need runs the same check on that frame (and, for `light`, every
+pane of it), the need's reading is the standing check's, at the request's own figures: a rim the
+request sizes by share can be under the bench's 0.4 mm, and would fail every such design. Where
+none does, `capture` runs at the bench's own least lip, 0.4 mm after play, a nozzle's width, with
+`--panes` the panes declared, and `light` with no limit, failing a pane with nothing open straight
+through: the kind's rule is that light passes through every pane.
 """
 
 from __future__ import annotations
@@ -30,7 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from print_shop.rounds import judge
-from print_shop.rounds.needs import UNSURE, Need
+from print_shop.rounds.needs import UNSURE, Need, Reading
 
 LIGHT = "light"
 HOLD = "pane-hold"
@@ -173,11 +175,52 @@ def read(given: Any, part: list[str], work: Path, whole: bool = True) -> list[Gl
     return found
 
 
-def check(box: Any, glass: list[Glass], where: Path, kept: Path) -> list[judge.Standing]:
-    """`light` and `capture` on each frame and its panes, each in a fresh container."""
+def _as_a_need(
+    name: str, one: Glass, ran: list[tuple[Need, Reading]]
+) -> tuple[Need, Reading] | None:
+    """A settled need that runs this check on this frame, and on every pane of it: its reading is
+    the standing check's, at the request's own figures. A rim sized by the request's share can be
+    under the bench's 0.4 mm, which would fail every such design."""
+    for need, reading in ran:
+        files = need.files()
+        words = need.argv()
+        if not words or words[0] != CHECKS[name] or not files or files[0] != one.frame:
+            continue
+        if name == LIGHT and not set(one.panes) <= set(files[1:]):
+            continue
+        return need, reading
+    return None
+
+
+def check(
+    box: Any,
+    glass: list[Glass],
+    where: Path,
+    kept: Path,
+    ran: list[tuple[Need, Reading]] | None = None,
+) -> list[judge.Standing]:
+    """`light` and `capture` on each frame and its panes, each in a fresh container, or as a
+    settled need already read it (`ran`)."""
     found = []
     for one in glass:
         for name, command in one.commands().items():
+            mine = _as_a_need(name, one, ran or [])
+            if mine is not None:
+                need, reading = mine
+                unsure = reading.verdict in UNSURE or not reading.verdict
+                found.append(
+                    judge.Standing(
+                        name,
+                        one.frame,
+                        need.command,
+                        reading.passed,
+                        unsure and not reading.passed,
+                        reading.verdict,
+                        f"as the need `{need.id}` reads it: {reading.why}",
+                        dict((reading.record or {}).get("numbers") or {}),
+                    )
+                )
+                continue
             need = Need(
                 f"{name}-{judge.NOT_IN_A_NAME.sub('_', one.frame)}"[:80],
                 "the kind's standing check",

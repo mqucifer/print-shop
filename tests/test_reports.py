@@ -200,7 +200,7 @@ def test_a_verdict_its_command_never_gives_is_refused_naming_those_it_does() -> 
     def need(command: str, *verdicts: str) -> Need:
         return Need("fit", "x", "chosen", "bench", command=command, verdicts=list(verdicts))
 
-    # `eval-unnamed-1`: `clearance` says CLEAR, never OK.
+    # `eval-through-1`: `clearance` says CLEAR, never OK.
     wrong = needs.verdicts_wrong([need("clearance pane.step frame.step", "OK")])
     assert len(wrong) == 1
     assert "the need 'fit': `clearance` never says OK" in wrong[0]

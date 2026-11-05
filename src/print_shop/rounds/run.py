@@ -1404,7 +1404,14 @@ class Run:
         as it began."""
         if self.toolset.legacy:
             return []
-        read = {_plain_name(f) for n in self._needs() if n.by == "bench" for f in n.files()}
+        # `thin` reads every file whatever the needs say, so a need that runs it reads nothing more:
+        # on `eval-tip-2` `pane.step` was read by `thin` alone.
+        read = {
+            _plain_name(f)
+            for n in self._needs()
+            if n.by == "bench" and n.argv()[:1] != ["thin"]
+            for f in n.files()
+        }
         aside = {str(a["unread_file"]) for a in self.state.asides if a.get("unread_file")}
         found = []
         for name in printed:
@@ -1861,7 +1868,8 @@ class Run:
             for one in standing:
                 self._stood(one, "done", judged)
             # The kind's own: `light` and `capture` on every pane (`standing.py`).
-            panes_read = glass_checks.check(self.box, glass, judged, folder / "standing")
+            ran = list(zip(wanted, judgement.readings, strict=True))
+            panes_read = glass_checks.check(self.box, glass, judged, folder / "standing", ran)
             for one in panes_read:
                 self._stood(one, "done", judged)
             overlap = self._overlap(judged, part)
@@ -2605,7 +2613,8 @@ class Run:
         need ran `capture` any more."""
         found: list[judge.Standing] = []
         benched = [n for n in self._needs() if n.by == "bench"]
-        for need, reading in zip(benched, self._read_now(benched), strict=True):
+        ran = list(zip(benched, self._read_now(benched), strict=True))
+        for need, reading in ran:
             unsure = reading.verdict in UNSURE or not reading.verdict
             found.append(
                 judge.Standing(
@@ -2631,7 +2640,7 @@ class Run:
                 if all(f in shown or f.startswith("references/") for f in one.files())
                 and any(f in shown for f in one.files())
             ]
-            found += glass_checks.check(self.box, on_sheet, scratch, scratch / ".kept")
+            found += glass_checks.check(self.box, on_sheet, scratch, scratch / ".kept", ran)
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
         return found

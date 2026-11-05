@@ -270,7 +270,7 @@ def numbers_wrong(found: list[Need]) -> list[str]:
 
 def verdicts_wrong(found: list[Need]) -> list[str]:
     """Each bench need asking for a verdict its command never gives (`reports.py`). On
-    `eval-unnamed-1` a fit need on `clearance` asked for OK, where `clearance` says CLEAR: three
+    `eval-through-1` a fit need on `clearance` asked for OK, where `clearance` says CLEAR: three
     `done`s failed on it before the model asked."""
     wrong = []
     for need in found:

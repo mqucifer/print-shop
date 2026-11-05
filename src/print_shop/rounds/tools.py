@@ -394,7 +394,9 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
             "fresh container, with every STEP and STL outside `references/` taken away first, and "
             "the harness runs each need's check itself. Needs that fail come back to you, and the "
             "next round starts. Every file in `part` is also read by `thin`, at the nozzle's "
-            "width, and files printed together mustn't take the same space. When all of that "
+            "width, and files printed together mustn't take the same space. Each file of `part` "
+            "is read by a need's check, or set aside with `set_aside` and your reason, and a need "
+            "isn't checked on a given file the part has its own copy of. When all of that "
             "passes, the run stops for approval, and the harness writes the folder to print "
             "from, one folder for each of `groups`.",
             {
