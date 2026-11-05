@@ -28,7 +28,7 @@ from print_shop.rounds.box import Box, Gone
 from print_shop.rounds.ledger import DesignLedger
 from print_shop.rounds.run import Refused, Run, only_session, summarise, what_next
 from print_shop.rounds.session import Ending, Limits
-from tests.rounds_fakes import Scripted, Spoken, raw, stream_of, tool
+from tests.rounds_fakes import Restating, Scripted, Spoken, raw, stream_of, tool
 
 pytestmark = pytest.mark.bench
 
@@ -116,6 +116,9 @@ EYE_NEED = {
 }
 
 
+#: `done` held for descriptions written before the part changed (mqucifer/print-shop#53): the
+#: model here says each still holds, and sends `done` again (`Restating`).
+STALE = "descriptions_stale"
 #: After `ask` draws its sheet, the model says what it shows, and only then does it go.
 SENT = [tool("send_ask", says="The block, in the colour the legend gives it.")]
 
@@ -123,7 +126,7 @@ SENT = [tool("send_ask", says="The block, in the colour the legend gives it.")]
 def begin(
     tmp_path: Path, *turns: Any, limits: Limits | None = None, **kw: Any
 ) -> tuple[Run, Scripted]:
-    model = Scripted(*turns, **kw)
+    model = Restating(*turns, **kw)
     run = Run.start(tmp_path, "proof", REQUEST, [], model, limits, sleep=lambda _: None)
     return run, model
 
@@ -138,7 +141,7 @@ def begin_stained_glass(tmp_path: Path, *turns: Any) -> tuple[Run, Scripted]:
 
 
 def again(run: Run, *turns: Any, limits: Limits | None = None) -> tuple[Run, Scripted]:
-    model = Scripted(*turns)
+    model = Restating(*turns)
     return Run.load(run.folder, model, limits, sleep=lambda _: None), model
 
 
@@ -274,7 +277,7 @@ def test_a_run_goes_from_intake_through_refusals_and_a_pick_to_its_needs_met(
         ],
         SENT,
     )
-    run.resume()
+    run.resume(note_from="sponsor")
     assert run.session.messages[-1]["content"].startswith("The Sponsor's answers:")
     ending = run.drive()
 
@@ -292,8 +295,9 @@ def test_a_run_goes_from_intake_through_refusals_and_a_pick_to_its_needs_met(
     assert named[3]["why"] == "needs_settled", "settled needs can't be loosened by the model"
     assert json.loads((run.folder / "needs.json").read_text())[0]["id"] == "gap"
 
-    calls = [e for e in replies(run) if e["name"] == "done"]
+    calls = [e for e in replies(run) if e["name"] == "done" and e["why"] != STALE]
     assert calls[0]["why"] == "no_needs"
+    assert any(e["why"] == STALE for e in replies(run)), "the part was made after the needs"
     first, second = calls[1], calls[2]
     assert first["outcome"] == "ok", "a refused `done` is a tool that did what it was asked"
     assert "Round 1: not met yet" in first["reply"]
@@ -1153,11 +1157,15 @@ def test_every_note_and_answer_relayed_is_a_row_saying_who_when_and_at_which_cal
         ],
         SENT,
     )
-    run.resume()
+    run.resume(note_from="stand-in: a builder in a test")
+    assert run.session.messages[-1]["content"].startswith(
+        "Answers from a stand-in for the Sponsor (a builder in a test):"
+    )
     assert run.drive().name == "ask"
     picked(run)
     run, _ = again(run, [tool("blocked", reason="stop")])
     run.resume("Try a rounder corner.", note_from="the operator")
+    assert run.session.messages[-1]["content"].startswith("A note from the operator:")
     assert run.drive().name == "blocked"
     run, _ = again(run, [tool("blocked", reason="stop again")])
     run.resume("And a little taller.", reopen_needs=True)
@@ -1166,7 +1174,7 @@ def test_every_note_and_answer_relayed_is_a_row_saying_who_when_and_at_which_cal
     found = sorted(rows(run, "interventions"), key=lambda r: r["seq"])
     said = [(r["kind"], r["from_who"], r["text"]) for r in found]
     assert said == [
-        ("answers", "relayed as the Sponsor's", "20 mm across."),
+        ("answers", "stand-in: a builder in a test", "20 mm across."),
         ("pick", "sponsor", "A: It sits better."),
         ("note", "the operator", "Try a rounder corner."),
         ("reopen_needs", "the people running this", said[3][2]),
@@ -1203,7 +1211,7 @@ def test_each_stop_resume_and_compaction_has_its_size_and_its_commit(
     (run.folder / "questions" / "1.answers.md").write_text("Fine.")
     monkeypatch.setattr("print_shop.rounds.run.repository_version", lambda: ("commit-two", False))
     run, _ = again(run, [tool("blocked", reason="stop")], limits=Limits())
-    run.resume()
+    run.resume(note_from="sponsor")
     assert run.drive().name == "blocked"
 
     found = sorted(rows(run, "timeline"), key=lambda r: r["seq"])
@@ -1298,7 +1306,7 @@ def test_a_need_from_a_relayed_note_says_so_and_is_held_to_its_words(tmp_path: P
         [BROKEN_DOWN, tool("needs", needs=[from_note])],
         [tool("blocked", reason="stop")],
     )
-    run.resume("It has to sit flat on a shelf, whatever else.")
+    run.resume("It has to sit flat on a shelf, whatever else.", note_from="sponsor")
     assert run.drive().name == "blocked"
     said = [e for e in replies(run) if e["name"] == "needs"]
     assert "isn't in the request or the answers, but is in a note" in said[0]["reply"]
@@ -1341,6 +1349,29 @@ def test_done_asks_for_the_fixs_shape_and_its_closing_words(tmp_path: Path) -> N
     row = rows(run, "rounds")[0]
     assert row["fix_shape_model_said"] == "a plain block"
     assert row["closing_model_said"] == "It's a plain block."
+
+
+def test_the_same_part_written_again_doesnt_make_a_description_stale(tmp_path: Path) -> None:
+    """CadQuery's STEP header names the second it was written, so running the same script again
+    changes the file's bytes and not what it holds (mqucifer/print-shop#53)."""
+    holds = {"of": ["breakdown", "volume"], "holds": "Two boxes, as built."}
+    run, _ = begin(
+        tmp_path,
+        [BROKEN_DOWN, tool("needs", needs=[SIZE_NEED])],
+        [write("make.py", script(gap=0.5), run=True)],
+        [tool("restate", descriptions=[holds])],
+        [tool("blocked", reason="stop")],
+    )
+    assert run.drive().name == "blocked"
+    before = (run.work / "block.step").read_bytes()
+    time.sleep(1.1)  # so the header's second differs
+    run, model = again(run, [tool("run", path="make.py")], [done()])
+    run.resume()
+    assert run.drive().name == "met"
+    assert (run.work / "block.step").read_bytes() != before, "written again, a second later"
+    assert [e["outcome"] for e in replies(run) if e["name"] == "done"] == ["ok"]
+    assert run.state.geometry["block.step"][1] == 2, "seen as it is since the first run"
+    assert not rows(run, "stale_descriptions")
 
 
 # Runaways are evidence, and nothing here cuts a call
@@ -1945,7 +1976,7 @@ def test_the_run_doesnt_stop_for_approval_with_a_file_under_the_nozzles_width(
         [done(part=["block.step", "tab.step"])],
     )
     assert run.drive().name == "met"
-    first, second = [e["reply"] for e in replies(run) if e["name"] == "done"]
+    first, second = [e["reply"] for e in replies(run) if e["name"] == "done" and e["why"] != STALE]
     assert "Round 1: not met yet. Every need passed" in first
     assert "- block.step, TOO THIN: FAIL: " in first and "narrower than the 0.4 mm nozzle" in first
     assert "the thinnest 0.200 mm" in first and "- tab.step, ok:" in first
@@ -1975,7 +2006,7 @@ def test_files_printed_together_cant_take_the_same_space(tmp_path: Path) -> None
         [done(part=TWO_WAYS_PART, groups=TWO_WAYS_GROUPS, looks=LOOKS)],
     )
     assert run.drive().name == "met"
-    first = [e["reply"] for e in replies(run) if e["name"] == "done"][0]
+    first = [e["reply"] for e in replies(run) if e["name"] == "done" and e["why"] != STALE][0]
     assert "`block.step` and `base.step` share 1200 mm³, 1200 by OCCT" in first
     assert "the group `part` prints them together" in first
     review = run.folder / "review"

@@ -104,6 +104,9 @@ class Desk:
     def set_aside(self, args: dict[str, Any]) -> Judged:
         return Judged("set_aside", "ok", "set aside")
 
+    def restate(self, args: dict[str, Any]) -> Judged:
+        return Judged("restate", "ok", "kept")
+
     def blocked(self, args: dict[str, Any]) -> Judged:
         return Judged("blocked", "ok", "", ending=Ending("blocked", {}))
 

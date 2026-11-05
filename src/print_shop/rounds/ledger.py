@@ -164,6 +164,8 @@ CREATE TABLE IF NOT EXISTS questions (
     at_call INTEGER NOT NULL,
     answers TEXT,
     answered_at TEXT,
+    -- Who gave the answers: `sponsor`, or `stand-in: <who>`. Empty from before it was asked.
+    answered_by TEXT,
     PRIMARY KEY (run, n)
 );
 CREATE TABLE IF NOT EXISTS calls (
@@ -548,6 +550,39 @@ CREATE TABLE IF NOT EXISTS set_asides (
     shown_at TEXT,
     PRIMARY KEY (run, seq)
 );
+CREATE TABLE IF NOT EXISTS descriptions (
+    -- Each description of the part the model wrote, sent again or said to still hold: the
+    -- breakdown, a need's `what`, or the plan's figures, with the part's files as they stood, by
+    -- what they hold (mqucifer/print-shop#53). `changed` is what had changed since the one
+    -- before, for one sent again or said to hold, and `shown_at` where a person read that.
+    run TEXT NOT NULL REFERENCES runs(run),
+    seq INTEGER NOT NULL,
+    key TEXT NOT NULL,
+    what TEXT NOT NULL,
+    how TEXT NOT NULL,
+    at_call INTEGER NOT NULL,
+    round INTEGER,
+    files TEXT NOT NULL,
+    text TEXT,
+    was TEXT,
+    why TEXT,
+    changed TEXT,
+    shown_at TEXT,
+    PRIMARY KEY (run, seq)
+);
+CREATE TABLE IF NOT EXISTS stale_descriptions (
+    -- Each description found stale, where: `done`, which refused, or the ask it went beside.
+    run TEXT NOT NULL REFERENCES runs(run),
+    seq INTEGER NOT NULL,
+    key TEXT NOT NULL,
+    what TEXT NOT NULL,
+    written_at INTEGER NOT NULL,
+    held_at INTEGER,
+    at_call INTEGER NOT NULL,
+    found_at TEXT NOT NULL,
+    changed TEXT NOT NULL,
+    PRIMARY KEY (run, seq)
+);
 CREATE VIEW IF NOT EXISTS phases AS
 SELECT calls.run, calls.phase, MIN(calls.n) AS first_call, MAX(calls.n) AS last_call,
        COUNT(*) AS calls, SUM(calls.seconds) AS seconds,
@@ -600,6 +635,8 @@ ADDED = (
     # The reasoning effort the run's alias sends, read through LiteLLM, or `unknown`, and how.
     ("runs", "reasoning_effort", "TEXT"),
     ("runs", "reasoning_effort_from", "TEXT"),
+    # Who gave intake's answers (mqucifer/print-shop#53): empty from before it was asked.
+    ("questions", "answered_by", "TEXT"),
 )
 #: Each stop asked, at which call, and picked when and by whom: made once `picks.stop` is there.
 STOPS_VIEW = """CREATE VIEW IF NOT EXISTS stops AS
@@ -1091,11 +1128,37 @@ class DesignLedger:
                 (run, n, text, now(), at_call),
             )
 
-    def answered(self, run: str, n: int, answers: str) -> None:
+    def answered(self, run: str, n: int, answers: str, by: str | None = None) -> None:
         with self._open() as db:
             db.execute(
-                "UPDATE questions SET answers=?, answered_at=? WHERE run=? AND n=?",
-                (answers, now(), run, n),
+                "UPDATE questions SET answers=?, answered_at=?, answered_by=? WHERE run=? AND n=?",
+                (answers, now(), by, run, n),
+            )
+
+    def described(self, run: str, row: dict[str, Any]) -> None:
+        """A description of the part kept, sent again or said to hold (`descriptions.py`)."""
+        with self._open() as db:
+            seq = db.execute("SELECT COUNT(*) FROM descriptions WHERE run=?", (run,)).fetchone()[0]
+        self.add("descriptions", run=run, seq=int(seq) + 1, **row)
+
+    def stale_found(self, run: str, at_call: int, found_at: str, stale: list[Any]) -> None:
+        """Each description found stale, at `done` or an ask."""
+        with self._open() as db:
+            counted = db.execute("SELECT COUNT(*) FROM stale_descriptions WHERE run=?", (run,))
+            seq = int(counted.fetchone()[0])
+        for one in stale:
+            seq += 1
+            self.add(
+                "stale_descriptions",
+                run=run,
+                seq=seq,
+                key=one.key,
+                what=one.what,
+                written_at=one.written_at,
+                held_at=one.held_at,
+                at_call=at_call,
+                found_at=found_at,
+                changed=_json([list(c) for c in one.changed]),
             )
 
     def request_read(self, run: str, form: Any) -> None:

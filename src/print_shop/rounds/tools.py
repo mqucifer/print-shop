@@ -415,6 +415,22 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
             why="Why it doesn't apply, for the person at the next stop.",
         ),
         _spec(
+            "restate",
+            "Send a description of the part again, or say why it still holds. Your breakdown, "
+            "each need's `what` and the plan's figures are kept with the part's files as they "
+            "stood; once a part file changes, each is named as written before the change, and "
+            "`done` waits until each is sent again or said to still hold. The person at the next "
+            "stop reads each.",
+            descriptions={
+                "type": "array",
+                "description": 'Each {"of": "breakdown", "holds": "why it still holds"}, {"of": '
+                '"N1", "now": "the need\'s `what` in new words"} or {"of": "plan", "now": "the '
+                'plan, again"}. `of` may name several, ["N1", "N2"], with one reason in `holds`. '
+                "The breakdown is sent again with `breakdown`.",
+                "items": {"type": "object"},
+            },
+        ),
+        _spec(
             "blocked",
             "End the run without the part, saying what's missing. A person reads it.",
             reason="What's missing.",
@@ -436,6 +452,7 @@ DESK = (
     "send_ask",
     "done",
     "set_aside",
+    "restate",
     "blocked",
     "after_action",
 )
@@ -451,6 +468,7 @@ class Desk(Protocol):
     def send_ask(self, args: dict[str, Any]) -> Judged: ...
     def done(self, args: dict[str, Any]) -> Judged: ...
     def set_aside(self, args: dict[str, Any]) -> Judged: ...
+    def restate(self, args: dict[str, Any]) -> Judged: ...
     def blocked(self, args: dict[str, Any]) -> Judged: ...
     def after_action(self, args: dict[str, Any]) -> Judged: ...
     def bench_said(
@@ -703,6 +721,7 @@ class WorkTools:
             "scores",
             "parts",
             "joins",
+            "descriptions",
             "look",
             "pictures",
         ):

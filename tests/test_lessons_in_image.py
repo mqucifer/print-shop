@@ -20,7 +20,7 @@ import pytest
 from print_shop.bench import host
 from print_shop.rounds import after_action, lessons
 from print_shop.rounds.run import Run
-from tests.rounds_fakes import Scripted, tool
+from tests.rounds_fakes import Restating, Scripted, tool
 from tests.test_rounds_in_image import BROKEN_DOWN, SIZE_NEED, done, script, write
 
 pytestmark = pytest.mark.bench
@@ -30,7 +30,7 @@ BY = "stand-in: a reviewer in a test"
 
 def met(root: Path, name: str, *more: Any) -> tuple[Run, Scripted]:
     """A run whose needs pass the harness's own checks: needs, a script, `done`, then `more`."""
-    model = Scripted(
+    model = Restating(
         [BROKEN_DOWN, tool("needs", needs=[SIZE_NEED])],
         [write("make.py", script(gap=0.5), run=True)],
         [done()],
@@ -62,7 +62,7 @@ def reviewed(run: Run, *turns: Any) -> Run:
         ]
         for turn in turns
     )
-    again = Run.load(run.folder, Scripted(*turns), sleep=lambda _: None)
+    again = Run.load(run.folder, Restating(*turns), sleep=lambda _: None)
     assert again.after_action_review().name == after_action.REVIEWED
     return again
 

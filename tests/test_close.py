@@ -52,7 +52,7 @@ def ended(root: Path, how: str) -> Run:
     found = run.drive()
     if how == "stopped":
         (run.folder / "questions" / "1.answers.md").write_text("Nothing else.")
-        run.resume()
+        run.resume(note_from="sponsor")
         (run.folder / "stop").touch()
         found = run.drive()
     assert found.name == how
@@ -401,7 +401,7 @@ def test_a_run_resumed_on_this_code_counts_the_failures_it_had_before(tmp_path: 
         [tool("bench", command="capture frame.step --min-lip 0.2")],
         [tool("blocked", reason="It can't hold.")],
     )
-    run.resume()
+    run.resume(note_from="sponsor")
     box: Any = Answers(run.work, 1)
     run.tools.box = box
     assert run.drive().name == "blocked"

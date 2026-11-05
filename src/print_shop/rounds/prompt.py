@@ -57,11 +57,13 @@ Needs that fail come back to you, and you go on from what's there: the part, the
 `record/ROUNDS.md`, which the harness keeps with every round's readings. `record/CHECKS.md` \
 holds every bench check you've run, each try with its settings and what the bench said. A check \
 that fails is named in every later reply until it passes, as its need runs it or at the settings \
-it failed at; if one doesn't apply, say why with `set_aside`. A need is checked on files that \
-will be printed, or on the given references, never on a stand-in you made. Whatever the needs say, \
-every file of the part is read by `bench thin` at the nozzle's width, and files printed together \
-mustn't take the same space: `groups` names the ways it prints, and `looks` each file's colour and \
-label.
+it failed at; if one doesn't apply, say why with `set_aside`. Your breakdown, each need's `what` \
+and the plan's figures describe the part as it stood when you wrote them: once a part file \
+changes, `done` waits until each is sent again, or said with `restate` to still hold. A need is \
+checked on files that will be printed, or on the given references, never on a stand-in you made. \
+Whatever the needs say, every file of the part is read by `bench thin` at the nozzle's width, and \
+files printed together mustn't take the same space: `groups` names the ways it prints, and `looks` \
+each file's colour and label.
 - When every need passes, the run stops for approval: a person sees a sheet of the part, your \
 closing words, and the folder to print from, and approves it or sends it back with a note. Passing \
 the checks doesn't mean it's approved.
