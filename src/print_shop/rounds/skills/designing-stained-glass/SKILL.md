@@ -166,4 +166,4 @@ When a check keeps failing and you can't see why, cut a section at its height (`
 
 ### 7. Asking and done
 
-`ask` draws a sheet: give each pane its colour and the frame grey in `looks`, and add a cut through a pane in its pocket (`cuts`: `x=X,y=Y0:Y1`). Say what each picture shows as drawn. `done` names the frame and every pane in `part`.
+`ask` draws a sheet: give each pane its colour and the frame grey in `looks`, and add a cut through a pane in its pocket (`cuts`: `x=X,y=Y0:Y1`). Say what each picture shows as drawn. `done` names the frame and every pane in `part`, and gives `glass`: each frame with its panes, `pocket_z` (a height inside the pockets, as for `capture`), `clearance` (the play), `pane_thickness`, and `with` any other part of the frame. Every file of `part` is in it. With it the harness runs `light` and `capture` on every pane itself, at `done` and at each `ask`, whatever the needs say, and neither can be set aside: every piece is held and lets the light through. At `ask`, `glass` is optional, and the latest one is used.
