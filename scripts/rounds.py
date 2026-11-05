@@ -14,6 +14,10 @@ scripts/rounds.py stop NAME                                         stop before 
 scripts/rounds.py summary NAME                                      its figures, in summary.json
 scripts/rounds.py read-back NAME [--ledger FILE]                    its records, through the ledger
 scripts/rounds.py after-action NAME                                 the review again, if it failed
+scripts/rounds.py refine NAME --nozzle MM --filament [COLOUR=]NAME...   after approval: the
+                                  approved folder sliced by Orca, its findings and proposals
+scripts/rounds.py refined NAME                                      the latest pass's findings
+scripts/rounds.py proposal NAME ID --approve|--reject --by WHO [--note FILE]
 
 scripts/rounds.py lessons [RUN] [--ledger FILE]                     what a run wrote, its evidence
 scripts/rounds.py lessons accept ID --by WHO [--routes R,R] [--becomes B]
@@ -58,6 +62,7 @@ from print_shop.rounds.run import (
     what_next,
 )
 from print_shop.rounds.send import ALIAS, Sender
+from print_shop.slicer.store import NoChoice
 
 
 def _interrupted(_signal: int, _frame: FrameType | None) -> None:
@@ -188,6 +193,56 @@ def _lessons(args: argparse.Namespace, ledger: DesignLedger) -> str:
     return f"lesson {lesson}: {found['status']}, by {found['status_by']}"
 
 
+def _refine(args: argparse.Namespace, folder: Path, ledger: DesignLedger) -> int:
+    """The refinement pass, its findings, and a decision on a proposal it made."""
+    from print_shop.refine import approved, proposals
+    from print_shop.refine.context import Context
+    from print_shop.refine.refinement import Pass
+    from print_shop.slicer.orca import version
+
+    if args.command == "proposal":
+        note = args.note.read_text(encoding="utf-8") if args.note else ""
+        decision = "approved" if args.approve else "rejected"
+        n = proposals.decide(ledger, args.id, decision, args.by, note)
+        print(
+            f"proposal {args.id} {decision} by {args.by} (decision {n}). Nothing in the approved "
+            "folder changes: an approved change goes to the design, as a new run or a send-back."
+        )
+        return 0
+    if args.command == "refined":
+        rows = ledger.rows(
+            "SELECT * FROM refinements WHERE run=? ORDER BY n DESC LIMIT 1", folder.name
+        )
+        if not rows:
+            raise Refused(f"{folder.name} hasn't been refined")
+        found = ledger.rows(
+            "SELECT seq, kind, source, file, layer_from, z_from, read, means, needs_change "
+            "FROM refine_findings WHERE refinement=? ORDER BY seq", rows[0]["id"]
+        )
+        made = ledger.rows(
+            "SELECT p.*, d.decision, d.by FROM refine_proposals AS p LEFT JOIN "
+            "proposal_decisions AS d ON d.proposal = p.id WHERE p.refinement=?", rows[0]["id"]
+        )
+        print(json.dumps({"refinement": dict(rows[0]), "findings": [dict(r) for r in found],
+                          "proposals": [dict(r) for r in made]}, indent=1))
+        return 0
+    commit, dirty = repository_version()
+    if dirty:
+        raise Refused(
+            f"this checkout at {commit[:12]} has uncommitted changes: a pass names its code"
+        )
+    run = approved.read(folder, ledger)
+    context = Context.parse(args.nozzle, args.filament, machine=args.machine, process=args.process)
+    done = Pass(run, ledger, context, orca=version(), commit=commit).run()
+    changes = [f for f in done.findings if f.needs_change]
+    print(f"refinement {done.n} of {run.run}: {len(done.findings)} findings, "
+          f"{len(changes)} needing the part to change, {len(done.proposals)} proposals.")
+    print(f"{done.folder / 'README.md'}")
+    for folder_name, steps in done.steps.items():
+        print(f"{folder_name}: " + ("print steps written" if steps else "no print steps"))
+    return 0
+
+
 def main() -> int:
     top = argparse.ArgumentParser(description=__doc__)
     top.add_argument(
@@ -215,6 +270,28 @@ def main() -> int:
     reading.add_argument("name")
     reading.add_argument("--ledger", type=Path, help="this ledger, not the one beside the runs")
     sub.add_parser("after-action").add_argument("name")
+    refining = sub.add_parser("refine", help="after approval: the folder sliced through Orca")
+    refining.add_argument("name")
+    refining.add_argument("--nozzle", type=float, required=True, help="the fitted nozzle, mm")
+    refining.add_argument(
+        "--filament", action="append", required=True,
+        help="a filament for every colour, by variety or tuning, or COLOUR=NAME for one",
+    )
+    refining.add_argument("--machine", help="a machine profile's exact name, to pick one")
+    refining.add_argument("--process", help="a process profile's exact name, to pick one")
+    refining.add_argument("--ledger", type=Path, help="this ledger, not the one beside the runs")
+    refined = sub.add_parser("refined", help="the latest refinement's findings and proposals")
+    refined.add_argument("name")
+    refined.add_argument("--ledger", type=Path, help="this ledger, not the one beside the runs")
+    proposed = sub.add_parser("proposal", help="a person's yes or no to a proposed part change")
+    proposed.add_argument("name")
+    proposed.add_argument("id", type=int)
+    verdict = proposed.add_mutually_exclusive_group(required=True)
+    verdict.add_argument("--approve", action="store_true")
+    verdict.add_argument("--reject", action="store_true")
+    proposed.add_argument("--by", required=True, help="who decided: sponsor, or stand-in: <who>")
+    proposed.add_argument("--note", type=Path)
+    proposed.add_argument("--ledger", type=Path, help="this ledger, not the one beside the runs")
     taught = sub.add_parser("lessons")
     taught.add_argument("words", nargs="*", help="RUN, or a step: " + ", ".join(LESSON_ACTIONS))
     taught.add_argument("--ledger", type=Path, help="this ledger, not the one beside the runs")
@@ -256,6 +333,8 @@ def main() -> int:
         if args.command == "lessons":
             print(_lessons(args, DesignLedger(args.ledger or root / "ledger.sqlite")))
             return 0
+        if args.command in ("refine", "refined", "proposal"):
+            return _refine(args, folder, DesignLedger(args.ledger or root / "ledger.sqlite"))
         with only_session(root):
             if args.command == "resume" and args.approve:
                 note = args.note.read_text(encoding="utf-8") if args.note else ""
@@ -297,7 +376,7 @@ def main() -> int:
                     run.resume(note, args.reopen_needs, args.note_from)
             ending = run.drive()
             print(what_next(run, ending))
-    except (Refused, lessons.Refused, FileNotFoundError, LookupError) as refused:
+    except (Refused, lessons.Refused, NoChoice, FileNotFoundError, LookupError) as refused:
         print(f"refused: {refused}", file=sys.stderr)
         return 3
     return 10 if ending.name in WAITING else 20

@@ -86,7 +86,8 @@ def write(
     owned = {f for g in groups for f in g["files"]}
     shared = [f for f in part if f not in owned]
     renamed = shared_names(shared, looks)
-    held: dict[str, Any] = {"groups": [], "shared": renamed}
+    # Each file's colour and label, by its name in the run, for the refinement pass after approval.
+    held: dict[str, Any] = {"groups": [], "shared": renamed, "looks": looks}
     letters = iter(string.ascii_uppercase)
     lines = [
         f"# {run}: the files to print (round {round_n})",

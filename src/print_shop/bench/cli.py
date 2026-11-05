@@ -193,6 +193,7 @@ def parser() -> Parser:
         "--set", dest="change", required=True, help="NAME=VALUE, a top-level number"
     )
     params.add_argument("--timeout", type=int, default=150, help="seconds for each of its 3 runs")
+    params.add_argument("--keep", help="a new folder to copy what the changed run wrote into")
     params.add_argument(
         "--max-left",
         type=int,
