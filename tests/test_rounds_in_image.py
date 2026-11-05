@@ -85,7 +85,7 @@ GAP_NEED: dict[str, Any] = {
         "at_most": 0.55,
     },
 }
-SIZE_NEED = {
+SIZE_NEED: dict[str, Any] = {
     "id": "volume",
     "what": "the block is the size chosen",
     "source": "chosen",
@@ -97,6 +97,19 @@ SIZE_NEED = {
         "at_most": 3000,
     },
 }
+
+
+def sized(name: str) -> dict[str, Any]:
+    """A need that reads `name`, as `done` asks every file of the part to be read by one
+    (mqucifer/print-shop#52), and passes on any part these tests make."""
+    return {
+        **SIZE_NEED,
+        "id": f"volume-{Path(name).stem}",
+        "what": f"{name} is the size chosen",
+        "check": {**SIZE_NEED["check"], "command": f"info {name}"},
+    }
+
+
 PARAM_NEED = {
     "id": "gap-drives",
     "what": "the gap's a parameter that moves the tab",
@@ -626,7 +639,7 @@ def test_done_with_no_part_is_told_and_costs_only_that_call(tmp_path: Path) -> N
 def test_a_part_a_clean_run_doesnt_leave_isnt_met(tmp_path: Path) -> None:
     run, _ = begin(
         tmp_path,
-        [BROKEN_DOWN, tool("needs", needs=[SIZE_NEED])],
+        [BROKEN_DOWN, tool("needs", needs=[SIZE_NEED, sized("stand.step")])],
         [write("make.py", script(gap=0.5), run=True)],
         [done(part=["block.step", "stand.step"])],
         [tool("blocked", reason="stop")],
@@ -835,7 +848,9 @@ def endings(run: Run) -> str:
     return str(ended[-1]["name"])
 
 
-EYE_ONLY = [BROKEN_DOWN, tool("needs", needs=[EYE_NEED])]
+#: The eye need, and one that reads `s.step`, the part `DONE_S` names: a clean run of `s.py`
+#: doesn't leave it, so the round isn't met.
+EYE_ONLY = [BROKEN_DOWN, tool("needs", needs=[EYE_NEED, sized("s.step")])]
 A_SCRIPT = [write("s.py", "print('hi')\n")]
 DONE_S = done("s.py", part=["s.step"])
 
@@ -1011,7 +1026,7 @@ def test_a_conversation_that_never_fits_ends_when_its_restarts_run_out(tmp_path:
 def test_a_pick_of_none_leaves_the_need_open_and_says_why(tmp_path: Path) -> None:
     run, _ = begin(
         tmp_path,
-        EYE_ONLY,
+        [BROKEN_DOWN, tool("needs", needs=[EYE_NEED, SIZE_NEED])],
         [write("make.py", script(gap=0.5), run=True)],
         [
             tool(
@@ -1041,7 +1056,7 @@ def test_a_pick_of_none_leaves_the_need_open_and_says_why(tmp_path: Path) -> Non
 def test_needs_reopen_only_when_a_person_says_so(tmp_path: Path) -> None:
     run, _ = begin(
         tmp_path,
-        EYE_ONLY,
+        [BROKEN_DOWN, tool("needs", needs=[EYE_NEED])],
         [tool("questions", questions="Can I change the needs?")],
         [BROKEN_DOWN, tool("needs", needs=[SIZE_NEED])],
         [tool("blocked", reason="the need's check is wrong")],
@@ -1458,6 +1473,7 @@ def test_streamed_arguments_are_kept_as_they_arrive_so_a_cut_off_call_can_be_rea
             ),
         ),
     ]
+
     def answer(request: httpx.Request) -> httpx.Response:
         # `start` reads the alias's effort from the model info first, which says nothing here.
         if request.url.path.endswith("/model/info"):
@@ -1632,7 +1648,7 @@ def test_a_check_holds_what_a_need_says_at_done(
     )
     run, _ = begin(
         tmp_path,
-        [BROKEN_DOWN, tool("needs", needs=[need])],
+        [BROKEN_DOWN, tool("needs", needs=[need, sized("parts.step")])],
         [write("make.py", made, run=True)],
         [done(part=["parts.step"])],
         [tool("blocked", reason="stop")],
@@ -1649,6 +1665,11 @@ FRAME_SCRIPT = (
     'pocket = cq.Workplane("XY").workplane(offset=1).rect(40, 40).extrude(2)\n'
     'window = cq.Workplane("XY").rect(36, 36).extrude(4)\n'
     'cq.exporters.export(plate.cut(pocket).cut(window), "frame.step")\n'
+)
+#: A pane in the frame's pocket, for stained glass's own checks to read.
+PANE_LINE = (
+    'pane = cq.Workplane("XY").workplane(offset=1).rect(39.8, 39.8).extrude(2)\n'
+    'cq.exporters.export(pane, "pane.step")\n'
 )
 
 
@@ -1676,11 +1697,26 @@ def test_a_frames_check_holds_what_a_need_says_at_done(
         "source": "chosen",
         "check": {"by": "bench", "measures": measures, "command": command},
     }
+    fit = {
+        "id": "fit",
+        "what": "the pane sits in its pocket",
+        "source": "chosen",
+        "check": {"by": "bench", "measures": "fit", "command": "clearance frame.step pane.step"},
+    }
+    glass = [
+        {
+            "frame": "frame.step",
+            "panes": ["pane.step"],
+            "pocket_z": 2,
+            "clearance": 0.1,
+            "pane_thickness": 2,
+        }
+    ]
     run, _ = begin_stained_glass(
         tmp_path,
-        [BROKEN_DOWN, tool("needs", needs=[need])],
-        [write("frame.py", FRAME_SCRIPT, run=True)],
-        [done("frame.py", part=["frame.step"])],
+        [BROKEN_DOWN, tool("needs", needs=[need, fit])],
+        [write("frame.py", FRAME_SCRIPT + PANE_LINE, run=True)],
+        [done("frame.py", part=["frame.step", "pane.step"], glass=glass)],
         [tool("blocked", reason="stop")],
     )
     assert run.drive().name == "blocked"
@@ -1692,9 +1728,13 @@ def test_a_frames_check_holds_what_a_need_says_at_done(
 
 
 def met_with_a_sheet(tmp_path: Path, **more: Any) -> Run:
+    # A need reads each file of the part, as `done` asks (mqucifer/print-shop#52).
+    rows_ = more.get("part", ["block.step"])
+    files = [f for r in rows_ for f in (r["files"] if isinstance(r, dict) else [r])]
+    read = [SIZE_NEED, *[sized(f) for f in files if f != "block.step"]]
     run, _ = begin(
         tmp_path,
-        [BROKEN_DOWN, tool("needs", needs=[SIZE_NEED])],
+        [BROKEN_DOWN, tool("needs", needs=read)],
         [write("make.py", script(gap=0.5), run=True)],
         [done(closing="I couldn't try the fit, so look at the shape.", **more)],
     )
@@ -1825,7 +1865,7 @@ def test_a_sheet_too_tall_to_send_stays_with_the_person(tmp_path: Path) -> None:
     copies = ["block.step", *[f"copy{i}.step" for i in range(4)]]
     run, _ = begin(
         tmp_path,
-        [BROKEN_DOWN, tool("needs", needs=[SIZE_NEED])],
+        [BROKEN_DOWN, tool("needs", needs=[SIZE_NEED, *[sized(f) for f in copies[1:]]])],
         [write("make.py", many, run=True)],
         # Five copies in one place: each prints on its own, or they'd take the same space.
         [done(part=copies, groups=[{"name": f"g{k}", "files": [f]} for k, f in enumerate(copies)])],
@@ -1938,7 +1978,7 @@ def test_the_run_doesnt_stop_for_approval_with_a_file_under_the_nozzles_width(
     """On `cup-1` two panes the Sponsor found too thin in Orca passed every need."""
     run, _ = begin(
         tmp_path,
-        [BROKEN_DOWN, tool("needs", needs=[SIZE_NEED])],
+        [BROKEN_DOWN, tool("needs", needs=[SIZE_NEED, sized("tab.step")])],
         [write("make.py", FIN_SCRIPT.format(fin=0.2), run=True)],
         [done(part=["block.step", "tab.step"])],
         [write("make.py", FIN_SCRIPT.format(fin=2.0), run=True)],
@@ -1969,7 +2009,7 @@ def test_files_printed_together_cant_take_the_same_space(tmp_path: Path) -> None
     """Both real runs handed over `frame` beside `frame_base` and `cap`, its two halves."""
     run, _ = begin(
         tmp_path,
-        [BROKEN_DOWN, tool("needs", needs=[SIZE_NEED])],
+        [BROKEN_DOWN, tool("needs", needs=[SIZE_NEED, *[sized(f) for f in TWO_WAYS_PART[1:]]])],
         [write("make.py", TWO_WAYS, run=True)],
         [done(part=TWO_WAYS_PART)],
         [done(part=TWO_WAYS_PART, groups=TWO_WAYS_GROUPS, looks=LOOKS)],

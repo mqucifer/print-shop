@@ -60,6 +60,9 @@ class Toolset:
     #: From before toolsets: every command, and needs read as they were.
     legacy: bool = False
     added: tuple[str, ...] = field(default=())
+    #: Bench commands the harness runs on every piece at `done` and each stop, beside `thin`,
+    #: which `set_aside` refuses on the model's files (`standing.py`, mqucifer/print-shop#52).
+    standing: tuple[str, ...] = field(default=())
 
     def measure(self, name: str) -> Measure | None:
         return next((m for m in self.measures if m.name == name), None)
@@ -201,6 +204,7 @@ STAINED_GLASS = Toolset(
     ),
     CORE_SKILLS + ("designing-stained-glass",),
     added=STAINED_GLASS_COMMANDS,
+    standing=("light", "capture"),
 )
 KINDS = {STAINED_GLASS.kind: STAINED_GLASS}
 #: A run from before toolsets: every command it had then, its skills, and needs read as they were.

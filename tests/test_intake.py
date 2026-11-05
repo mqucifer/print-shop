@@ -125,7 +125,7 @@ def covered(**changed: Any) -> list[dict[str, Any]]:
             covers=["N1"],
             fixed=True,
             figure="the arm's length from the wall face to its tip, as drawn",
-            check={"number": "bounds_mm.0.1", "at_least": 120, "at_most": 120.5},
+            check={"number": "bounds_mm.0.1", "at_least": 120, "at_most": 120},
         ),
         bench(
             "plate",
@@ -480,7 +480,15 @@ def test_a_fixed_need_changes_only_by_the_sponsor_with_a_note(tmp_path: Path) ->
         e for e in transcript.events_of(run.session.events) if e.get("relay") == "reopen_needs"
     ]
     assert "The fixed needs, `arm`, `plate`, stay as they are" in reopened[-1]["message"]
-    run = again(run, [tool("needs", needs=looser)])
+    # As the Sponsor changed its figure, the need quotes their note, and carries the note's.
+    noted = covered(
+        plate={
+            "check": measured({"by": "bench", "command": "thin bracket.step --min 3"}),
+            "source": "note",
+            "quote": "3 mm will do for the plate",
+        }
+    )
+    run = again(run, [tool("needs", needs=looser)], [tool("needs", needs=noted)])
     run.resume("3 mm will do for the plate.", reopen_needs=True, note_from="sponsor")
     run.drive()
     assert told(run)[-2]["outcome"] == "ok", "the Sponsor's note opened the fixed needs"
@@ -547,7 +555,10 @@ def test_the_plan_needs_no_part_file_and_holds_done_and_the_next_stop(tmp_path: 
     assert "the stop `plan`" in said and '"pick": "yes or none"' in said
 
 
-def test_a_figure_no_fixed_need_carries_is_said_to_the_person(tmp_path: Path) -> None:
+def test_a_fixed_need_whose_check_doesnt_carry_its_lines_figure_is_refused(
+    tmp_path: Path,
+) -> None:
+    """Said at the plan before mqucifer/print-shop#52, and settled: now refused."""
     run = begin(
         tmp_path,
         BRACKET,
@@ -558,13 +569,30 @@ def test_a_figure_no_fixed_need_carries_is_said_to_the_person(tmp_path: Path) ->
                 needs=covered(arm={"check": measured({"by": "bench", "command": "info x.step"})}),
             )
         ],
-        [PLAN_ASK],
-        SENT,
     )
+    run.drive()
+    refused = told(run)[-2]
+    assert refused["outcome"] == "failed" and refused["why"] == "misses"
+    assert (
+        "the need 'arm' covers `N1`, \"The arm is 120 mm long, from the wall to its tip.\", and "
+        "its 120 mm, an exact figure, so both ends, isn't carried at all. Their checks carry no "
+        "figure."
+    ) in refused["reply"]
+    assert run.state.needs_open, "nothing was settled"
+
+
+def test_a_bare_number_no_fixed_need_carries_is_said_to_the_person(tmp_path: Path) -> None:
+    """A count has no limit to carry it, so it's said at the plan, and never refused."""
+    ribbed = BRACKET.replace(
+        "The arm is 120 mm long, from the wall to its tip.",
+        "The arm is 120 mm long, from the wall to its tip, over 3 ribs.",
+    )
+    needed = [tool("needs", needs=covered())]
+    run = begin(tmp_path, ribbed, [BROKEN_DOWN], needed, [PLAN_ASK], SENT)
     picture(run)
     assert run.drive().name == "ask"
     question = (run.folder / "asks" / "1" / "question.md").read_text()
-    assert "- `N1`: 120 isn't in the check of a fixed need that covers it" in question
+    assert "- `N1`: 3 isn't in the check of a fixed need that covers it" in question
 
 
 def test_a_pick_passes_a_stop_none_leaves_it_open_and_the_record_says_who_and_when(

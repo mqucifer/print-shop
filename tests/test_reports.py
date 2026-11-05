@@ -141,3 +141,115 @@ def test_a_number_its_command_never_reports_is_refused_naming_those_it_does() ->
     # A name the code fills in.
     assert not needs.numbers_wrong([need("panes frame.step", "pocket_section_mm2")])
     assert not needs.numbers_wrong([need("thin pane.step", "")])
+
+
+def said(module: str, function: str) -> set[str]:
+    """Every verdict a command's entry gives, through each function it calls: `report.verdict`
+    with a word, or a row's `"verdict"` set to one where the worst row is the answer, as
+    `clearance`'s pairs are."""
+    modules: dict[str, Module] = {}
+    seen: set[tuple[str, str]] = set()
+    words: set[str] = set()
+    todo = [(module, function)]
+    passed_on = False
+    while todo:
+        where, name = todo.pop()
+        if (where, name) in seen:
+            continue
+        seen.add((where, name))
+        mod = modules.setdefault(where, Module(where))
+        if name not in mod.functions:
+            continue
+        for node in ast.walk(mod.functions[name]):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                if node.func.attr == "verdict" and node.args:
+                    if isinstance(node.args[0], ast.Constant):
+                        words.add(str(node.args[0].value))
+                    else:
+                        passed_on = True
+            elif (
+                isinstance(node, ast.Assign)
+                and isinstance(node.value, ast.Constant)
+                and any(
+                    isinstance(t, ast.Subscript)
+                    and isinstance(t.slice, ast.Constant)
+                    and t.slice.value == "verdict"
+                    for t in node.targets
+                )
+            ):
+                words.add(str(node.value.value))
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                called = node.func.id
+                if called in mod.functions:
+                    todo.append((where, called))
+                elif called in mod.imported and (BENCH / f"{mod.imported[called]}.py").is_file():
+                    todo.append((mod.imported[called], called))
+    # A verdict passed on from a variable has to come from the rows' words above.
+    assert not passed_on or words, f"{module}.{function} gives a verdict this test can't read"
+    return words
+
+
+def test_each_commands_verdicts_are_the_ones_its_code_gives() -> None:
+    found = entries()
+    assert set(found) == set(reports.VERDICTS)
+    for command, (module, function) in found.items():
+        assert set(reports.VERDICTS[command]) == said(module, function) - set(needs.UNSURE), command
+
+
+def test_a_verdict_its_command_never_gives_is_refused_naming_those_it_does() -> None:
+    def need(command: str, *verdicts: str) -> Need:
+        return Need("fit", "x", "chosen", "bench", command=command, verdicts=list(verdicts))
+
+    # `eval-through-1`: `clearance` says CLEAR, never OK.
+    wrong = needs.verdicts_wrong([need("clearance pane.step frame.step", "OK")])
+    assert len(wrong) == 1
+    assert "the need 'fit': `clearance` never says OK" in wrong[0]
+    assert "CLEAR, TOUCHING, TOO CLOSE, INTERFERE" in wrong[0]
+    assert not needs.verdicts_wrong([need("clearance pane.step frame.step", "CLEAR", "TOUCHING")])
+    assert not needs.verdicts_wrong([need("capture frame.step --pocket-z 2", "OK")])
+    # One of two wrong is still wrong; no verdicts is exit 0, as before.
+    assert needs.verdicts_wrong([need("panes frame.step", "OK", "CLEAR")])
+    assert not needs.verdicts_wrong([need("panes frame.step")])
+
+
+def test_the_options_that_limit_both_ends_are_the_parsers_pairs() -> None:
+    """`--min` with `--max`, or `--min-X` with `--max-X`, on one command, from the bench's
+    parser: an exact figure one of them carries needs the other (`figures.py`)."""
+    tree = ast.parse((BENCH / "cli.py").read_text(encoding="utf-8"))
+    parser = next(f for f in tree.body if isinstance(f, ast.FunctionDef) and f.name == "parser")
+    commands: dict[str, str] = {}
+    options: dict[str, set[str]] = {}
+    for node in ast.walk(parser):
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Call):
+            continue
+        call = node.value
+        if isinstance(call.func, ast.Attribute) and call.func.attr == "add_parser":
+            name = node.targets[0]
+            assert isinstance(name, ast.Name) and isinstance(call.args[0], ast.Constant)
+            commands[name.id] = str(call.args[0].value)
+    for node in ast.walk(parser):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "add_argument"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id in commands
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+        ):
+            options.setdefault(commands[node.func.value.id], set()).add(str(node.args[0].value))
+    pairs: dict[str, tuple[tuple[str, str], ...]] = {}
+    for command, given in options.items():
+        found = tuple(
+            sorted(
+                (low, "--max" + low[len("--min") :])
+                for low in given
+                if (low == "--min" or low.startswith("--min-"))
+                and "--max" + low[len("--min") :] in given
+            )
+        )
+        if found:
+            pairs[command] = found
+    assert pairs == reports.BOTH_ENDS
+    assert reports.other_end("thickness", "--max") == "--min"
+    assert reports.other_end("capture", "--min-visible") is None
