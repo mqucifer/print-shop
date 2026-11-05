@@ -5,6 +5,7 @@ The local model works in rounds on the bench, and every round is recorded (mquci
 ```
 scripts/rounds.py start NAME --request FILE [--reference FILE]...
 scripts/rounds.py resume NAME [--note FILE] [--from WHO] [--reopen-needs]
+scripts/rounds.py resume NAME --from sponsor|"stand-in: <who>" [--note FILE]   (at `questions`)
 scripts/rounds.py resume NAME --approve --by WHO [--note FILE]
 scripts/rounds.py resume NAME --send-back --by WHO --note FILE [--reopen-needs]
 scripts/rounds.py resume NAME --close --by WHO --note FILE
@@ -161,6 +162,8 @@ Each of these is in the ledger's `standing` table, by file and its hash, and a r
 
 **A pick is about the look.** A build fault found at an ask goes in `"fix_first"` in `pick.json`, apart from the pick: it reaches the model as its own message, is `picks.fix_first`, and is an intervention of its own kind. On `cup-1` the Sponsor was asked to answer `none` for one, which mixed two answers. The pick still holds only for the files it saw, so the fix means asking again.
 
+**What's relayed says who said it** (mqucifer/print-shop#53). On `eval-choice-1` a stand-in's answers reached the model as "The Sponsor's answers", though `--from` named the stand-in, and the model then wrote "the Sponsor confirmed" in set-aside reasons, and on `eval-rings-2` "The Sponsor caught this" in a lesson. So answers, notes and send-backs name the person, as `--from` or `--by` gives it, and the words "the Sponsor" appear only when it was the Sponsor: "The Sponsor's answers", "Answers from a stand-in for the Sponsor (who)", "A note from the operator". **Answers at `questions` say who gave them,** `--from sponsor` or `--from "stand-in: <who>"`, as a pick does, or `resume` is refused. A note's `--from` is free, and is "the people running this" when nobody says. A conversation started again from the record says each note's sender too (`state.notes_from`). The ledger's `interventions.from_who` and `questions.answered_by` hold who, and the after-action review's index reads them from there. Answers from before this read as `relayed as the Sponsor's`, as they did.
+
 **A pick says who made it,** so someone else's can't pass for the Sponsor's taste in later training data. `pick.json` is `{"pick": "A", "reason": "...", "by": "sponsor"}`, with `"pick": "none"` if nothing's right, and `"fix_first": "..."` if there's a fault to fix. Any other key is refused. Anyone else is `"by": "stand-in: a Claude builder"`, naming who. Anything else, or nothing, is refused. Text says "the Sponsor picked" only when they did: what the model's told, the reading, and `record/ROUNDS.md`. The ledger has it in `picks.picked_by`, and `summary.json` in `picked_by`. An empty `picked_by` says nothing of who it was.
 
 | Ending | When | Whose |
@@ -204,6 +207,19 @@ Across the 1,122 recorded calls of 12 runs, 15 ended with no tool call, 12 of th
 - **What's to be said again after a compaction** goes before the next call: `Session.after_compaction`, which mqucifer/print-shop#45 sets to the checks that still fail.
 - **An `edit` on a file that changed since the model had it whole says so,** and which call changed it: the harness keeps each file as the model last had it (its `write`, a whole `read`, or an `edit` of what it had), and after each `run`, `bench`, and run after a `write` or `edit`, which of those files changed. It's held in the process, so a resumed run starts knowing none.
 
+### A description says which part it describes (mqucifer/print-shop#53)
+
+The Sponsor, 2026-11-04: "The inventory being out of date though does seem like a bigger more broad area to get at." In 4 of the 9 stained-glass evals on 430fc1a (`eval-choice-1`, `eval-through-1`, `eval-tip-1`, `eval-tip-2`) the breakdown still described the part as it was before a change: on `eval-tip-2` the frame's pocket was reshaped, and the breakdown still gave the original right-triangle pocket. A stand-in caught it at a stop each time, the model fixed it in one round once it was named, and nothing in the harness noticed. On `eval-hanging-2` a need's `what` said 1.25 after the closing words were corrected to 1.0.
+
+- **Each description keeps the part's version it was written about** (`descriptions.py`): the breakdown, each need's `what`, and the plan, where its text gives a figure ("the plan's figures"). The version is each piece of geometry under `work/` (STEP, STL, BREP, outside what runs make) by what it holds, `paths.content_hash`, so a STEP file written again the same isn't a change. The harness looks after every `run` and `bench` call, so a change is named by the call by which it was seen (`state.geometry`), and a large file whose size and time haven't moved isn't read again.
+- **A description is stale once a part file changes after it:** changed, new or gone. The part's files are those `done` names, or a sheet and the last `done` at an ask, with the given references; before anything names the part, every piece of geometry counts. A helper outside the part changes nothing.
+- **A description written before the part existed,** with no geometry of the model's yet (the given references don't count), as the breakdown and the needs usually are, is stamped against the part's first version, as the harness first sees it, and goes stale only when a file changes after that. Holding every run's first `done` for them would teach the model to say they hold by reflex (the operator, 2026-11-05). The stamp is a row of `descriptions`, `first version`, and a stale one says "before the part existed, against its first version, seen by call N".
+- **The next stop shows each stale one under its own heading,** "Descriptions written before the part changed", in `question.md`: what it is, the call it was written at, and each file changed since, with its call. The ask's draft says they go beside the question.
+- **`done` refuses until each is sent again or said to still hold** (`descriptions_stale`), before anything runs. The breakdown is sent again with `breakdown`; a need's `what` or the plan with `restate` and its new words in `now`. Or `restate` says why one still holds, in `holds`, with one reason for several if it covers them. A need's new `what` changes its words in `needs.json` and `record/needs.json`, and nothing else of it: its check, quote and marks stay settled. `restate` refuses the breakdown in `now`, a name that isn't kept, and both or neither of `holds` and `now`, and keeps nothing then. A `holds` where nothing has changed since is said and not kept, without refusing the rest.
+- **Each one sent again or said to hold is shown at the next stop,** ask or approval, as a set-aside is, under "Descriptions sent again or said to still hold since the last stop", with what changed under it and the reason or the old and new words.
+- **The ledger:** `descriptions` has each one written, sent again or said to hold, with the files by hash and where it was shown; `stale_descriptions` each found stale, at `done` or the ask it went beside.
+- **A run from before this** has no descriptions kept, and nothing of it goes stale.
+
 Limits are in `session.Limits`, recorded on the run's row. The model isn't told them, so a run says what a lower one would have done.
 
 ## Toolsets
@@ -239,7 +255,7 @@ The Sponsor, 2026-11-03: "id be concerned with adding things like light-path com
 | `readings` | Each need's check at each round's end: the verdict, the number, its limit, and how it ran |
 | `bench_calls` | Each bench answer the model asked for between those: calls to the first clean bench pass come from these (ADR 0010's fourth signal) |
 | `picks` | The question, the variants, the sheet, and the pick with its reason and who made it (`picked_by`) |
-| `questions` | Intake's questions and answers |
+| `questions` | Intake's questions and answers, and who answered (`answered_by`) |
 | `changes` (a view) | Each need's reading before and after each round, with the diff |
 | `interventions` | Every note, answer, pick and send-back relayed to the model: when, at which call, who it's from, its text. The largest cause of change in a run |
 | `timeline` | Each start, stop, resume, compaction and restart, in order. A compaction has its size before and after, estimated and measured, and what it cut (`said`), and each process its harness commit, where `runs.harness_commit` holds only the first. Each call that ended without a tool call is an `asked` row, with what the next request offered |
@@ -257,6 +273,8 @@ The Sponsor, 2026-11-03: "id be concerned with adding things like light-path com
 | `breakdowns` | Each breakdown the model wrote, at which call |
 | `need_marks` | Each need's `covers`, `fixed`, `figure` and `no_bench`, by version: apart from `needs`, which older code inserts into by position |
 | `stops` (a view) | Each stop asked, from `picks.stop`: what it is, its ask and call, and the pick, when and by whom |
+| `descriptions` | Each description of the part, the breakdown, a need's `what` or the plan, written, sent again or said to still hold: the files it was written about, by hash, the reason or the words before, and where a person was shown it (mqucifer/print-shop#53) |
+| `stale_descriptions` | Each description found written before a part file changed, and where: `done`, which refused, or the ask it went beside |
 
 `picks.seen` holds each variant's files, its test pieces and its sheet, by hash, `picks.said_of_sheet_model_said` what the model said the sheet shows, in its own words, and `picks.fix_first` a fault sent back apart from the pick. `rounds` gains `part_rows`, `closing_model_said` and `judged_files`, what the clean run left by hash.
 
@@ -467,6 +485,8 @@ mqucifer/print-shop#19 then took what else it lacked: close-ups, sheets of the p
 `tests/test_close.py` needs no Docker: a close after each kind of ending, what the model's told and asked, the refusals, the lock on the command line, the nudge counted by command and file and from a resumed run's earlier calls, and a ledger from before made again with every row kept. `tests/test_lessons.py` needs no Docker: the after-action review on a run put at its stop, each refusal, the reviewer's steps, giving at the start, scoring and retiring, a file of steps, and the command line with no key. `tests/test_lessons_in_image.py`, under `bench`, goes the whole way in real containers: a run met by the harness's checks, approved, its review, the reviewer's step by the command line, and the next run starting with the lesson, using it and scoring it.
 
 `tests/test_holding.py` needs no Docker: a failed check named in every later reply until it passes at its settings or as its need checks it, a pass at the first settings clearing probes, `set_aside` and its refusals, the harness's readings counting, a check leaving the part, the list after a compaction, `done` refusing a need off the part, the question naming each, and a `none` at the plan reopening the needs. `tests/test_reports.py` reads each command's numbers from the bench's code.
+
+`tests/test_descriptions.py` needs no Docker: each description kept with the part's files, one written before the part existed stamped against its first version and not holding the first `done`, a stale one named at `done` and held there until it's sent again or said to hold, a change after a confirmation, a STEP file written again the same, a helper outside the part, the heading at an ask and at approval, `restate`'s refusals, and who each answer and note is from, in a conversation from the record too.
 
 `tests/test_memory.py` needs no Docker: what a shrunk reply keeps, the latest replies staying whole, `record/CHECKS.md` and a new conversation given it, and each way a refused `edit` says how its lines differ, or that its file changed and which call changed it. `tests/test_loop.py` needs no Docker: routes proposed and confirmed, keys, layers by kind of part and skill, delivery and a score on each route, a corrected score, a lesson's text stopping once its fix holds, a ledger from before sorted once with every row kept, the review's index of the harness's record and people's words, the review near its limit, and the effort read from a fake of LiteLLM's documented `/model/info`.
 

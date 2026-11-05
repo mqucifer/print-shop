@@ -41,6 +41,7 @@ from print_shop.bench import usage as usage_module
 from print_shop.rounds import (
     after_action,
     breakdown,
+    descriptions,
     figures,
     holding,
     judge,
@@ -152,6 +153,17 @@ class State:
     glass: list[dict[str, Any]] | None = None
     # Each `needs` refused once they were settled, shown beside the next question.
     needs_refused: list[dict[str, Any]] = field(default_factory=list)
+    # Who each of `notes` is from, in order: a run from before this has none, and its notes were
+    # all from the people running this.
+    notes_from: list[str] = field(default_factory=list)
+    # Each description of the part the model wrote, by key: what it is, the call it was written
+    # at, and the part's files then, by what they hold (`descriptions.py`). A run from before this
+    # has none kept, and nothing of it goes stale.
+    described: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Each piece of geometry as the harness last saw it, and the call by which it was so.
+    geometry: dict[str, list[Any]] = field(default_factory=dict)
+    # Each description sent again or said to still hold, shown at the next stop.
+    restated: list[dict[str, Any]] = field(default_factory=list)
 
 
 def repository_version() -> tuple[str, bool]:
@@ -182,6 +194,16 @@ def picked_by_words(by: str) -> str:
     if by == SPONSOR:
         return "The Sponsor"
     return f"A stand-in for the Sponsor ({by[len(STAND_IN) :].strip()})"
+
+
+def from_words(who: str) -> str:
+    """Who sent something, as the model's told it: "the Sponsor" only of the Sponsor, a stand-in
+    by name, and anyone else as `--from` gave them (mqucifer/print-shop#53)."""
+    if who == SPONSOR:
+        return "the Sponsor"
+    if who.startswith(STAND_IN) and who[len(STAND_IN) :].strip():
+        return f"a stand-in for the Sponsor ({who[len(STAND_IN) :].strip()})"
+    return who.strip() or NOTE_FROM
 
 
 def _decides(by: str) -> bool:
@@ -447,9 +469,7 @@ class Run:
                 "It takes `--approve` or `--send-back`, with `--by`"
             )
         if stop and stop["kind"] == "questions":
-            self._take_answers(
-                int(stop["n"]), note_from if note_from != NOTE_FROM else records.ANSWERS_FROM
-            )
+            self._take_answers(int(stop["n"]), note_from)
         elif stop and stop["kind"] == "ask":
             self._take_pick(int(stop["n"]), reopening=reopen_needs)
         self._go_on()
@@ -507,7 +527,8 @@ class Run:
 
     def _note(self, note: str, who: str) -> None:
         self.state.notes.append(note)
-        self._relay("note", who, note, f"A note from the people running this:\n\n{note}")
+        self.state.notes_from.append(who)
+        self._relay("note", who, note, f"A note from {from_words(who)}:\n\n{note}")
 
     def approve(self, by: str, note: str = "") -> Ending:
         """A person's yes. It ends the run: the refinement pass and the delivery come after this."""
@@ -732,6 +753,7 @@ class Run:
         self.ledger.decided(self.state.name, n, "sent_back", by, note.strip())
         self._go_on()
         self.state.notes.append(note.strip())
+        self.state.notes_from.append(by)
         message = (
             f"{picked_by_words(by)} looked at the final part and sent it back, with this note:\n\n"
             f"{note.strip()}"
@@ -743,13 +765,24 @@ class Run:
         self.save()
 
     def _take_answers(self, n: int, who: str) -> None:
+        """The answers to the model's questions, said as whoever gave them: on `eval-choice-1` a
+        stand-in's reached the model as the Sponsor's, and its set-aside reasons then said "the
+        Sponsor confirmed" (mqucifer/print-shop#53). So they say who, as a pick does."""
         path = self.folder / "questions" / f"{n}.answers.md"
         if not path.is_file() or not path.read_text(encoding="utf-8").strip():
             raise Refused(f"the answers aren't written yet: {path}")
+        if not _decides(who):
+            raise Refused(
+                f'the answers say who gave them: --from "{SPONSOR}" only if they did, or --from '
+                f'"{STAND_IN} <who>" for anyone standing in. Not {who!r}'
+            )
         answers = path.read_text(encoding="utf-8").strip()
-        said = f"The Sponsor's answers:\n\n{answers}"
+        if who == SPONSOR:
+            said = f"The Sponsor's answers:\n\n{answers}"
+        else:
+            said = f"Answers from {from_words(who)}:\n\n{answers}"
         self.state.said.append(said)
-        self.ledger.answered(self.state.name, n, answers)
+        self.ledger.answered(self.state.name, n, answers, who)
         self._relay("answers", who, answers, said)
 
     def _take_pick(self, n: int, reopening: bool = False) -> None:
@@ -903,7 +936,12 @@ class Run:
         state = f"This is round {self.state.round}." if self.state.round else "This is intake."
         state = f"{state} {self._stops_said()}".strip()
         needs_json = json.dumps([n.plain() for n in self._needs()], indent=1)
-        relayed = [f"A note from the people running this:\n\n{n}" for n in self.state.notes]
+        # A run from before this kept no sender, and those notes come first.
+        older = [NOTE_FROM] * (len(self.state.notes) - len(self.state.notes_from))
+        relayed = [
+            f"A note from {from_words(who)}:\n\n{note}"
+            for note, who in zip(self.state.notes, [*older, *self.state.notes_from], strict=True)
+        ]
         checks = nudge.record(self._bench_tries(), self._wanted(), last=AGAIN_TRIES)
         text = prompt.again(
             self._start_text(), [*self.state.said, *relayed], needs_json, state, checks
@@ -986,6 +1024,7 @@ class Run:
             paths.snapshot(self.work),
             ran.seconds,
         )
+        self._seen()
         earlier = self._bench_tries()
         wanted = self._wanted()
         paths.write_inside(self.work, "record/CHECKS.md", nudge.record(earlier, wanted))
@@ -1044,12 +1083,203 @@ class Run:
         _write_atomic(self.folder / "breakdown.md", text)
         paths.write_inside(self.work, "record/breakdown.md", text)
         self.ledger.broken_down(self.state.name, n, self.session.requests, found)
+        self._describe(descriptions.BREAKDOWN, f"breakdown {n}", text)
         self.save()
         reply = (
             f"Kept, as breakdown {n}: `record/breakdown.md` holds it, and the first stop shows it. "
             "Send it again if you find it's wrong."
         )
         return Judged("breakdown", "ok", reply, detail={"breakdown": n})
+
+    # The model's descriptions of the part, each held to the version it was written about
+
+    def _seen(self) -> dict[str, list[Any]]:
+        """Each piece of geometry as it is now, and the call by which it was so: kept after every
+        run and bench call, so a change is named by the call that made it."""
+        now = descriptions.geometry(self.work, self.state.geometry)
+        self.state.geometry = descriptions.seen(self.state.geometry, now, self.session.requests)
+        at = self.session.requests
+        for key in descriptions.stamp(self.state.described, self.state.geometry, at):
+            one = self.state.described[key]
+            self.ledger.described(
+                self.state.name,
+                {
+                    "key": key,
+                    "what": one["what"],
+                    "how": descriptions.FIRST_VERSION,
+                    "at_call": at,
+                    "round": self.state.round,
+                    "files": json.dumps(one["files"], sort_keys=True),
+                },
+            )
+        return self.state.geometry
+
+    def _describe(self, key: str, what: str, text: str, how: str = descriptions.WRITTEN) -> None:
+        """A description written, with the part's files as they stand (mqucifer/print-shop#53)."""
+        files = descriptions.hashes(self._seen())
+        self.state.described[key] = {
+            "what": what,
+            "written_at": self.session.requests,
+            "held_at": None,
+            "files": files,
+            "text": text,
+        }
+        self.ledger.described(
+            self.state.name,
+            {
+                "key": key,
+                "what": what,
+                "how": how,
+                "at_call": self.session.requests,
+                "round": self.state.round,
+                "files": json.dumps(files, sort_keys=True),
+                "text": text,
+            },
+        )
+
+    def _needs_described(self, found: list[Need]) -> None:
+        """Each need's `what`, as it was settled: a need dropped isn't a description any more."""
+        for key in [k for k in self.state.described if k.startswith(descriptions.NEED)]:
+            del self.state.described[key]
+        for need in found:
+            self._describe(descriptions.need_key(need.id), _need_what(need.id), need.what)
+
+    def _plan_described(self, plan: str, ask: int) -> None:
+        """The plan, where it gives a figure: "the plan's figures". One without any isn't kept."""
+        if descriptions.FIGURE.search(plan):
+            self._describe(descriptions.PLAN, f"the plan, sent at ask {ask}", plan)
+        else:
+            self.state.described.pop(descriptions.PLAN, None)
+
+    def _stale(self, part: list[str] | None) -> list[descriptions.Stale]:
+        """Each description written before a file of the part changed: the files named, with the
+        given references, or every piece of geometry where nothing names the part yet."""
+        return descriptions.stale(
+            self.state.described, self._seen(), descriptions.among(part)
+        )
+
+    def restate(self, args: dict[str, Any]) -> Judged:
+        """A description sent again with new words, or said to still hold with a reason: what
+        `done` asks of each stale one. It's shown to the person at the next stop."""
+        entries, wrong = descriptions.read(args.get("descriptions"))
+        kept = self.state.described
+        if not kept and not wrong:
+            wrong = [
+                "No description is kept yet: `breakdown`, `needs` and the plan's `ask` keep them."
+            ]
+        tracked = self._seen()
+        everything = {one.key: one for one in descriptions.stale(kept, tracked, None)}
+        named = ", ".join(_described_name(k) for k in kept)
+        plan: list[tuple[str, dict[str, Any]]] = []
+        unchanged: list[str] = []
+        for entry in entries:
+            key = _description_key(entry["of"])
+            if key not in kept:
+                wrong.append(f"`{entry['of']}` isn't a description kept. They are: {named}.")
+                continue
+            if key == descriptions.BREAKDOWN and entry["now"]:
+                wrong.append("The breakdown is sent again with `breakdown`, whole.")
+                continue
+            if entry["holds"] and key not in everything:
+                # Nothing to say holds: kept as it was, and said, rather than refusing the rest.
+                one = kept[key]
+                since = one["held_at"] or one.get("stamped_at") or one["written_at"]
+                unchanged.append(
+                    f"{one['what']}: no part file has changed since call {since}, so it's kept "
+                    "as it was"
+                )
+                continue
+            plan.append((key, entry))
+        if wrong:
+            said = "\n".join(f"- {w}" for w in dict.fromkeys(wrong))
+            return Judged("restate", "failed", f"Nothing was kept:\n{said}", "misses")
+        files = descriptions.hashes(tracked)
+        done: list[str] = []
+        for key, entry in plan:
+            one = kept[key]
+            stale = everything.get(key)
+            changed = [list(c) for c in stale.changed] if stale else []
+            row: dict[str, Any] = {
+                "key": key,
+                "what": one["what"],
+                "at_call": self.session.requests,
+                "round": self.state.round,
+                "changed": changed,
+                "shown_at": None,
+            }
+            if entry["holds"]:
+                one["held_at"], one["files"] = self.session.requests, files
+                row.update(how=descriptions.HOLDS, why=entry["holds"])
+                done.append(f"{one['what']}: said to still hold")
+            else:
+                was = str(one.get("text") or "")
+                if key == descriptions.PLAN:
+                    what = f"the plan, sent again at call {self.session.requests}"
+                else:
+                    self._need_what_now(key.removeprefix(descriptions.NEED), entry["now"])
+                    what = one["what"]
+                one.update(
+                    what=what,
+                    written_at=self.session.requests,
+                    held_at=None,
+                    files=files,
+                    text=entry["now"],
+                )
+                row.update(how=descriptions.SENT_AGAIN, was=was, now=entry["now"])
+                done.append(f"{what}: sent again")
+            self.state.restated.append(row)
+            self.ledger.described(
+                self.state.name,
+                {
+                    "key": key,
+                    "what": row["what"],
+                    "how": row["how"],
+                    "at_call": row["at_call"],
+                    "round": row["round"],
+                    "files": json.dumps(files, sort_keys=True),
+                    "text": row.get("now"),
+                    "was": row.get("was"),
+                    "why": row.get("why"),
+                    "changed": json.dumps(changed),
+                },
+            )
+        self.save()
+        left = self._stale(self.state.part)
+        reply = (
+            "Kept, and the person at the next stop reads each:\n"
+            + "\n".join(f"- {one}" for one in done)
+            if done
+            else "Nothing was kept."
+        )
+        if unchanged:
+            reply += "\n" + "\n".join(f"- {one}" for one in unchanged)
+        if left:
+            reply += "\n\nStill written before the part changed:\n" + "\n".join(
+                descriptions.lines(left)
+            )
+        return Judged("restate", "ok", reply, detail={"restated": [k for k, _ in plan]})
+
+    def _need_what_now(self, nid: str, what: str) -> None:
+        """A need's `what` in new words. Its check, its quote and its marks stay as settled: only
+        the model's description of it changes, and the needs' files say it as it is now."""
+        for entry in self.state.needs:
+            if entry["id"] == nid:
+                entry["what"] = what
+        text = json.dumps([n.plain() for n in self._needs()], indent=1) + "\n"
+        _write_atomic(self.folder / "needs.json", text)
+        paths.write_inside(self.work, "record/needs.json", text)
+
+    def _restated_shown(self, where: str) -> None:
+        for one in self.state.restated:
+            if not one.get("shown_at"):
+                one["shown_at"] = where
+        self.ledger.change(
+            "UPDATE descriptions SET shown_at=? WHERE run=? AND shown_at IS NULL AND how IN (?, ?)",
+            where,
+            self.state.name,
+            descriptions.HOLDS,
+            descriptions.SENT_AGAIN,
+        )
 
     def _wanted(self) -> list[nudge.Wanted]:
         """The settled needs that run a bench check."""
@@ -1107,7 +1337,8 @@ class Run:
 
     def standing_said(self) -> str:
         """What a `run` reply gains: each part file whose last `thin` failed, and each check whose
-        latest try failed (`holding.py`)."""
+        latest try failed (`holding.py`). The geometry a run made is seen here, by its call."""
+        self._seen()
         said = [unprintable.said(self._thin_failing()), holding.said(self._holding())]
         return "\n\n".join(one for one in said if one)
 
@@ -1627,6 +1858,7 @@ class Run:
         paths.write_inside(self.work, "record/needs.json", text)
         self.ledger.needs_accepted(self.state.name, version, found, self.session.requests)
         self.ledger.needs_marked(self.state.name, version, found)
+        self._needs_described(found)
         self.state.fixed_open = None
         if self.state.stage == "intake":
             self.state.stage = "rounds"
@@ -1851,6 +2083,16 @@ class Run:
         glass = self._glass_declared(args.get("glass"), part, "done")
         if isinstance(glass, Judged):
             return glass
+        stale = self._stale(part)
+        if stale:
+            # A description of the part as it was: sent again or said to hold before anything is
+            # checked (mqucifer/print-shop#53).
+            self.ledger.stale_found(self.state.name, self.session.requests, "done", stale)
+            self.save()
+            said = {"stale": [one.plain() for one in stale]}
+            return Judged(
+                "done", "failed", descriptions.refused(stale), "descriptions_stale", detail=said
+            )
         script = str(args["script"])
         n = self.state.round
         folder = self.folder / "rounds" / f"{n:03}"
@@ -2155,7 +2397,11 @@ class Run:
                 *holding.lines(delivered["held"]),
                 "",
             ]
-        lines += [*self._asides_said(), *self._swaps_said()]
+        lines += [
+            *self._asides_said(),
+            *self._swaps_said(),
+            *descriptions.since_said(self.state.restated),
+        ]
         groups = ", ".join(f"`{g['folder']}`" for g in made["groups"])
         lines += [
             "## The folder to print from",
@@ -2167,6 +2413,7 @@ class Run:
             self.ledger.swaps_shown(self.state.name, f"approval {n}")
             self.state.swaps = []
         self._asides_shown(f"approval {n}")
+        self._restated_shown(f"approval {n}")
         part_hashes = {name: judgement.left.get(name) for row in rows for name in row["files"]}
         self.ledger.approval_asked(
             self.state.name,
@@ -2534,6 +2781,13 @@ class Run:
             for need, file, own, command in replaced
         ]
         self.state.draft["unread"] = unread
+        stale = self._stale(printed)
+        if stale:
+            lines.append(
+                "Descriptions written before the part changed, which go beside the question too:\n"
+                + "\n".join(descriptions.lines(stale))
+            )
+        self.state.draft["stale"] = [one.plain() for one in stale]
         if self.state.needs_refused:
             lines.append(
                 f"Your {len(self.state.needs_refused)} refused `needs` call(s) since the last stop "
@@ -2817,6 +3071,9 @@ class Run:
         lines += self._needs_refused_said()
         lines += self._asides_said()
         lines += self._swaps_said()
+        stale = [descriptions.Stale.load(one) for one in draft.get("stale") or []]
+        lines += descriptions.at_stop(stale)
+        lines += descriptions.since_said(self.state.restated)
         lines += [
             "## Answering",
             "",
@@ -2845,6 +3102,11 @@ class Run:
             self.ledger.swaps_shown(self.state.name, f"ask {n}")
             self.state.swaps = []
         self._asides_shown(f"ask {n}")
+        self._restated_shown(f"ask {n}")
+        if stale:
+            self.ledger.stale_found(self.state.name, self.session.requests, f"ask {n}", stale)
+        if stop == forms.PLAN:
+            self._plan_described(draft.get("plan") or "", n)
         self.state.needs_refused = []
         self.state.draft = None
         self.state.stop = {"kind": "ask", "n": n}
@@ -2939,6 +3201,23 @@ class Run:
             eyes = ", ".join(n.id for n in self._needs() if n.by == "eye") or "none yet"
             return "no_such_need", f"`need` names an eye need. They are: {eyes}."
         return None
+
+
+def _need_what(nid: str) -> str:
+    return f"the need `{nid}`'s `what`"
+
+
+def _described_name(key: str) -> str:
+    """How `restate` names a description in `of`."""
+    return f"`{key.removeprefix(descriptions.NEED)}`"
+
+
+def _description_key(of: str) -> str:
+    """`breakdown`, `plan`, or a need by its id, as `restate` names it."""
+    of = of.strip().strip("`")
+    if of in (descriptions.BREAKDOWN, descriptions.PLAN):
+        return of
+    return descriptions.need_key(of.removeprefix(descriptions.NEED).strip())
 
 
 def _plain_name(name: str) -> str:
@@ -3069,7 +3348,8 @@ def what_next(run: Run, ending: Ending) -> str:
         folder = run.folder / "questions"
         return (
             f"waiting: questions in {folder / f'{n}.md'}. Write the answers to "
-            f"{folder / f'{n}.answers.md'}, then: scripts/rounds.py resume {name}"
+            f"{folder / f'{n}.answers.md'}, then: scripts/rounds.py resume {name} --from "
+            f'"{SPONSOR}", or --from "{STAND_IN} <who>" if someone stood in for them'
         )
     if ending.name == "ask":
         folder = run.folder / "asks" / str(ending.said["n"])

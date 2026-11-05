@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -80,3 +81,41 @@ def stream_of(*chunks: dict[str, Any]) -> bytes:
     """A streamed answer, as LiteLLM sends one."""
     lines = [f"data: {json.dumps(chunk)}\n\n" for chunk in chunks]
     return "".join([*lines, "data: [DONE]\n\n"]).encode()
+
+
+#: How `done` begins when it's held for descriptions written before the part changed.
+STALE_REFUSAL = "Nothing was checked: these describe the part as it was"
+STALE_LINE = re.compile(r"^- (breakdown \d+|the need `([^`]+)`'s `what`|the plan),", re.M)
+
+
+class Restating(Scripted):
+    """A scripted model that does what `done` asks when it's held for stale descriptions
+    (mqucifer/print-shop#53): it says each one named still holds, then sends the same `done`
+    again. For runs that aren't about descriptions, so their scripts stay as they were."""
+
+    def __call__(self, body: dict[str, Any]) -> dict[str, Any]:
+        messages = body.get("messages") or []
+        last = max((i for i, m in enumerate(messages) if m.get("role") == "assistant"), default=-1)
+        held = [
+            m
+            for m in messages[last + 1 :]
+            if m.get("role") == "tool" and STALE_REFUSAL in str(m.get("content"))
+        ]
+        if held and not self.failures:
+            named = []
+            for found in STALE_LINE.finditer(str(held[-1]["content"])):
+                if found.group(1).startswith("breakdown"):
+                    named.append("breakdown")
+                elif found.group(2):
+                    named.append(found.group(2))
+                else:
+                    named.append("plan")
+            sent = [
+                c["function"]
+                for c in messages[last].get("tool_calls") or []
+                if c["function"]["name"] == "done"
+            ]
+            again = {"name": "done", "raw": sent[-1]["arguments"]}
+            said = {"of": named, "holds": "Read against the part as it stands: it holds."}
+            self.turns[:0] = [[tool("restate", descriptions=[said])], [again]]
+        return super().__call__(body)

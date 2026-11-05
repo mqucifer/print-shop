@@ -256,7 +256,12 @@ def main() -> int:
     resume = sub.add_parser("resume")
     resume.add_argument("name")
     resume.add_argument("--note", type=Path)
-    resume.add_argument("--from", dest="note_from", default=NOTE_FROM, help="who the note is from")
+    resume.add_argument(
+        "--from",
+        dest="note_from",
+        default=NOTE_FROM,
+        help="who the note is from; at `questions`, who answered: sponsor, or stand-in: <who>",
+    )
     resume.add_argument("--reopen-needs", action="store_true")
     decision = resume.add_mutually_exclusive_group()
     decision.add_argument("--approve", action="store_true")
