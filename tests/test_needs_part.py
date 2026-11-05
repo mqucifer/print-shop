@@ -232,7 +232,7 @@ def test_done_runs_light_and_capture_on_every_pane_and_isnt_met_while_one_fails(
     )
     in_rounds(run, THICK)
     assert run.drive().name == "blocked"
-    asked = [" ".join(a[2:]) for a in run.box.asked]
+    asked = [" ".join(a[2:]) for a in run.box.asked]  # type: ignore[attr-defined]
     assert asked[2:4] == [LIGHT, HOLD], "after the needs and `thin`, each in its own container"
     done, aside, later = replies(run)[:3]
     assert done["detail"]["met"] is False
@@ -322,7 +322,8 @@ def test_a_kind_with_no_standing_checks_takes_no_glass() -> None:
 
     def done(toolset: toolsets.Toolset) -> dict[str, object]:
         spec = next(s for s in specs(toolset) if s["function"]["name"] == "done")
-        return spec["function"]["parameters"]["properties"]
+        found: dict[str, object] = spec["function"]["parameters"]["properties"]
+        return found
 
     assert "glass" in done(toolsets.STAINED_GLASS)
     assert "glass" not in done(toolsets.CORE)
@@ -341,7 +342,7 @@ def test_a_need_that_runs_the_check_on_that_frame_is_its_reading_at_the_requests
     run = started(tmp_path, tool("done", part=["pane.step"], glass=GLASS, **DONE))
     in_rounds(run, THICK, held)
     assert run.drive().name == "met"
-    asked = [" ".join(a[2:]) for a in run.box.asked]
+    asked = [" ".join(a[2:]) for a in run.box.asked]  # type: ignore[attr-defined]
     assert HOLD not in asked and asked.count(rims) == 1, "once, as the need"
     assert LIGHT in asked
     stop = (run.folder / "approvals" / "1" / "stop.md").read_text()
