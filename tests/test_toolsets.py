@@ -104,7 +104,7 @@ def test_a_limit_from_the_request_is_taken_as_an_option_or_a_number() -> None:
     assert read(thick) == []
     chosen = {**light, "source": "chosen"}
     chosen.pop("quote")
-    assert "its `source` is `request`, `answer` or `note`" in read(chosen)[0]
+    assert "its `source` is `request`, `answer`, `note` or `pick`" in read(chosen)[0]
 
 
 def test_render_measures_nothing_and_old_needs_read_as_they_were() -> None:
