@@ -129,3 +129,17 @@ def test_two_walls_laid_over_each_other_are_said_and_walls_side_by_side_arent(
     assert pair["overlap_mm"] == pytest.approx(0.34, abs=1e-3)
     assert pair["length_mm"] == pytest.approx(8, abs=0.1)
     assert found["beside"] == [] and found["infill"] == []
+
+
+def test_params_keeps_what_the_changed_run_made(work: Path) -> None:
+    (work / "cube.py").write_text(
+        "import trimesh\nSIZE = 2.0\n"
+        "trimesh.creation.box(extents=(SIZE, SIZE, 1)).export('cube.stl')\n"
+    )
+    ran = host.run(["params", "cube.py", "--set", "SIZE=3", "--keep", "kept"], work)
+    assert "verdict: OK" in ran.stdout, ran.stdout
+    kept: Any = trimesh.load(work / "kept" / "cube.stl")
+    assert [round(float(v), 6) for v in kept.extents] == [3.0, 3.0, 1.0]
+    assert not (work / "cube.stl").exists()
+    again = host.run(["params", "cube.py", "--set", "SIZE=4", "--keep", "kept"], work)
+    assert "has to be a new folder" in again.stdout
