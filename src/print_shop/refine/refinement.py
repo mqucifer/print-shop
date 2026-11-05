@@ -522,6 +522,9 @@ class Pass:
         dx, dy, dz = offset
         obj = self._object(plate.frame, sliced)
         pause_layer = min(placed) + 1 if placed else None
+        alike: dict[
+            tuple[int, float, tuple[str, ...]], list[tuple[File, dict[str, float], float, float]]
+        ] = {}
         for pane in plate.panes:
             row = self.meshed[self._key(pane)]
             (_, _, z0), (_, _, z1) = row["mesh_box_mm"]
@@ -570,6 +573,13 @@ class Pass:
                 continue
             layer, labels = first_over
             room = round(layer.bottom - top, 4)
+            # Panes alike are one finding: rings' 17 panes read the same.
+            key = (layer.n, room, tuple(sorted(labels)))
+            alike.setdefault(key, []).append((pane, labels, top, floor))
+        expected = min(placed) + 1 if placed else None
+        for (n, room, _), panes in alike.items():
+            layer = sliced.layers[n - 1]
+            labels = panes[0][1]
             said = ", ".join(f"{k} {v:g} mm" for k, v in labels.items())
             air = {k: v for k, v in labels.items() if k in fnd.OVER_AIR}
             means = []
@@ -577,28 +587,52 @@ class Pass:
                 means.append(f"the nozzle lays it {-room:g} mm into the pane: it would hit it")
             else:
                 means.append(f"it's laid {room:g} mm above the pane's top")
+            if expected is not None and n > expected:
+                ceiling = next(
+                    (
+                        r.get("pocket_ceiling_z")
+                        for r in plate.pause_rows
+                        if r.get("pocket_ceiling_z")
+                    ),
+                    None,
+                )
+                means.append(
+                    f"Orca closes the pocket {n - expected} layer(s) after the pause, where the "
+                    f"bench reads it closing at layer {expected}"
+                    + (
+                        f" (the ceiling, z {ceiling:g}, is on a layer's mid-height, which a slicer "
+                        "may read either way)"
+                        if ceiling is not None
+                        else ""
+                    )
+                    + ": the pane rattles in that room, and the layer over it bridges that high"
+                )
             if air:
                 means.append(
                     "Orca reads it as laid over air (" + ", ".join(air) + "), as it doesn't know "
                     "the pane is there: bridge speed, flow and fan, over the pane"
                 )
+            names = ", ".join(f"`{p.name}`" for p, *_ in panes)
             self.found.append(
                 Finding(
                     "over_pane",
                     "orca",
-                    f"Orca's first layer over `{pane.name}` after the pause is layer {layer.n} "
-                    f"(z {layer.bottom:g}-{layer.z:g}): {said}",
+                    f"Orca's first layer over {names} after the pause is layer {n} "
+                    f"(z {layer.bottom:g}-{layer.z:g})"
+                    + (f", over each: {said}" if len(panes) > 1 else f": {said}"),
                     "; ".join(means),
                     needs_change=room < -1e-3,
                     plate=plate.name,
-                    file=self._key(pane),
-                    layer_from=layer.n,
+                    file=", ".join(self._key(p) for p, *_ in panes),
+                    layer_from=n,
                     z_from=layer.z,
                     numbers={
                         "labels_mm": labels,
                         "room_mm": room,
-                        "pane_top_z": round(top, 4),
-                        "pane_floor_z": round(floor, 4),
+                        "panes": [self._key(p) for p, *_ in panes],
+                        "pane_top_z": round(panes[0][2], 4),
+                        "pane_floor_z": round(panes[0][3], 4),
+                        "bench_closes_at": expected,
                     },
                 )
             )
