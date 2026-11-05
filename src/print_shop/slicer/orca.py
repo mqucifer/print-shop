@@ -446,7 +446,8 @@ def slice_plate(
     """One plate through Orca's CLI, with a filament for each object and Orca's own pauses.
 
     As `slice_model`: a throwaway data directory, never the Sponsor's own Orca folders. Orca
-    arranges the plate itself, and `EXCLUDE_OBJECT_DEFINE` says where each object went. Its log
+    arranges the plate itself, without turning anything, and `EXCLUDE_OBJECT_DEFINE` says where
+    each object went. Its log
     (`--debug 3`) is kept, as the macOS CLI writes its warnings nowhere else. A plate that
     doesn't slice isn't raised: what Orca said is the finding.
     """
@@ -464,6 +465,10 @@ def slice_plate(
         "--load-settings", f"{machine};{process}",
         "--load-filaments", ";".join(str(f) for f in filaments),
         "--load-filament-ids", ",".join(str(o.filament) for o in objects),
+        # Orca's CLI arranges with rotation on unless told (`allow_rotations = true`, v2.4.2):
+        # on the probe it turned a 40 x 47.5 mm frame a quarter turn. Off, each object keeps
+        # the design's own turn, so its lines are read against the file as it is.
+        "--allow-rotations=0",
     ]
     if pauses:
         items = outdir / "pauses.json"
