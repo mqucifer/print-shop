@@ -160,8 +160,10 @@ def cover(request: dict[str, Any]) -> dict[str, Any]:
             if piece.distance(edge) > least + 0.05:
                 continue
             x0, y0, x1, y1 = piece.bounds
-            # A long strip's width: twice its area over its outline, and what shrinking took off.
-            width = 2 * piece.area / max(piece.length, 1e-9) + 2 * least
+            # Its width: the least rectangle round it, its short side, and what shrinking took off.
+            corners = np.asarray(shapely.minimum_rotated_rectangle(piece).exterior.coords)
+            sides = np.hypot(*np.diff(corners[:3], axis=0).T)
+            width = float(sides.min()) + 2 * least
             found.append(
                 {
                     "layer": layer["n"],
