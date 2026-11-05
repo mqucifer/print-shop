@@ -10,6 +10,9 @@ output moves on its own, what moved can't be put down to the parameter.
 
 A parameter is a number assigned once at the top level of the script (`BaseCircle = 20.0`).
 
+`--keep DIR` copies what the changed run wrote into a new folder, by the same names: the refinement
+pass (mqucifer/print-shop#51) checks a proposed change to a part on those files.
+
 A parameter that leaves pieces behind reads `PARTIAL`, not `OK`: a need saying it moves every piece
 passed with one piece moved of several. `--max-left` says how many may stay, for a parameter that's
 meant to drive only some of them.
@@ -106,8 +109,14 @@ def _hash(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def run_script(source: str, script: Path, timeout: int) -> dict[str, list[Part]]:
-    """One run, in a scratch copy of the script's folder: each file it wrote, as its pieces."""
+def run_script(
+    source: str, script: Path, timeout: int, keep: Path | None = None
+) -> dict[str, list[Part]]:
+    """One run, in a scratch copy of the script's folder: each file it wrote, as its pieces.
+
+    `keep` is a folder to copy each file it wrote into, by the same name, before the scratch
+    folder goes: the refinement pass checks a proposed change on what the changed run made.
+    """
     with tempfile.TemporaryDirectory(dir="/tmp") as scratch:
         here = Path(scratch)
         inputs: dict[str, str] = {}
@@ -146,6 +155,9 @@ def run_script(source: str, script: Path, timeout: int) -> dict[str, list[Part]]
                 parts[name] = part.pieces()
                 for piece in parts[name]:
                     piece.fine()  # read while the scratch folder is there
+                if keep is not None:
+                    (keep / name).parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(path, keep / name)
         return parts
 
 
@@ -292,8 +304,14 @@ def run(args: Any, report: Report) -> None:
     if not base:
         raise NoAnswer("the script wrote no STEP or STL file, so there's nothing to compare")
     control = _readings(run_script(source, script, args.timeout))
+    keep = None
+    if getattr(args, "keep", None):
+        keep = Path(args.keep)
+        if keep.resolve() == script.resolve().parent or keep.exists():
+            raise NoAnswer(f"--keep {args.keep} has to be a new folder")
+        keep.mkdir(parents=True)
     try:
-        after = _readings(run_script(changed, script, args.timeout))
+        after = _readings(run_script(changed, script, args.timeout, keep))
     except ScriptFailed as exc:
         report.second("the changed run wrote nothing to compare")
         report.verdict("NO ANSWER", f"at {name.strip()}={new:g} the script failed: {exc}")

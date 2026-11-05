@@ -15,7 +15,7 @@ import subprocess
 import tempfile
 from enum import StrEnum
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from pydantic import BaseModel
 
@@ -23,6 +23,13 @@ from print_shop.core.state import SliceResult
 from print_shop.slicer.store import ProfilesUsed
 
 __all__ = [
+    "PauseAt",
+    "PlateObject",
+    "PlateSlice",
+    "pause_items",
+    "slice_plate",
+    "version",
+    "with_colour",
     "BedType",
     "SliceResult",
     "Slicer",
@@ -348,3 +355,153 @@ def slice_model(
         )
 
     return parse_gcode_header(gcode_path)
+
+
+#: Orca's CLI exit codes the refinement pass has met, in Orca's words (`cli_errors` in
+#: `src/OrcaSlicer.cpp` at v2.4.2), or what the run showed.
+EXITS = {
+    -11: "Orca crashed (SIGSEGV)",
+    155: "G-code paths conflict: two objects take the same space",
+    195: "the filament doesn't fit the build plate",
+    239: "the process isn't compatible with the machine",
+    250: "Orca can't read the file's format",
+}
+
+
+class PauseAt(BaseModel):
+    """A pause Orca writes itself, from the machine profile's pause G-code.
+
+    `print_z` is the top of the first layer printed after it. Orca puts a custom G-code item on
+    the nearest layer (a tie goes to the lower) and runs it at the start of that layer, before
+    the layer prints (`ToolOrdering::assign_custom_gcodes`, v2.4.2; tested at 2.6, 2.7 and 2.8 mm
+    in `~/print-shop/proofs/m18-refine/cli-probe/`). So a pause after layer 13 of 0.2 mm layers
+    on a 0.2 mm first layer is `print_z` 2.8.
+    """
+
+    print_z: float
+    message: str = ""
+
+
+def pause_items(pauses: list[PauseAt]) -> dict[str, Any]:
+    """`--load-custom-gcodes`' file: Orca's `CustomGCode::Info`, as its `from_json` reads it."""
+    return {
+        "mode": "SingleExtruder",
+        "gcodes": [
+            {"type": "PausePrint", "print_z": p.print_z, "color": "", "extruder": 1,
+             "extra": p.message}
+            for p in sorted(pauses, key=lambda p: p.print_z)
+        ],
+    }
+
+
+class PlateObject(BaseModel):
+    """One file on a plate, and which of the plate's filaments it prints in (from 1)."""
+
+    stl: Path
+    filament: int = 1
+
+
+class PlateSlice(BaseModel):
+    """What Orca made of one plate: its G-code and log, or why there's none."""
+
+    command: list[str]
+    exit: int
+    gcode: Path | None
+    log: Path
+    stdout: str
+    stderr: str
+
+    @property
+    def why(self) -> str:
+        known = EXITS.get(self.exit, "")
+        said = (self.stderr.strip() or self.stdout.strip())[-400:]
+        return "; ".join(x for x in (f"exit {self.exit}", known, said) if x)
+
+
+def with_colour(filament: Path, colour: str, out: Path) -> Path:
+    """A whole filament profile with its colour set, as Orca reads it (`filament_colour`).
+
+    The store's composed profiles carry none. With two or more filaments and no colour, Orca
+    2.4.2 counts one filament, sizes its flush matrix by it, and crashes (SIGSEGV in
+    `calc_filament_change_info_by_toolorder`, cli-probe runs o4, o8). The colour is a setting
+    Orca reads, so it writes each object's colour itself.
+    """
+    data = json.loads(filament.read_text())
+    data["filament_colour"] = [colour]
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(data, indent=2))
+    return out
+
+
+def slice_plate(
+    objects: list[PlateObject],
+    machine: Path,
+    process: Path,
+    filaments: list[Path],
+    outdir: Path,
+    pauses: list[PauseAt] | None = None,
+    binary: Path | str | None = None,
+    timeout_s: float = 600.0,
+) -> PlateSlice:
+    """One plate through Orca's CLI, with a filament for each object and Orca's own pauses.
+
+    As `slice_model`: a throwaway data directory, never the Sponsor's own Orca folders. Orca
+    arranges the plate itself, and `EXCLUDE_OBJECT_DEFINE` says where each object went. Its log
+    (`--debug 3`) is kept, as the macOS CLI writes its warnings nowhere else. A plate that
+    doesn't slice isn't raised: what Orca said is the finding.
+    """
+    binary_path = Path(binary) if binary is not None else _DEFAULT_BINARY
+    if not binary_path.exists():
+        raise FileNotFoundError(f"OrcaSlicer binary not found: {binary_path}")
+    outdir.mkdir(parents=True, exist_ok=True)
+    for stale in outdir.glob("plate_*.gcode"):
+        stale.unlink()
+    log = outdir / "orca.log"
+    log.unlink(missing_ok=True)
+    scratch = tempfile.TemporaryDirectory(prefix="orca-data-")
+    cmd: list[str] = [
+        str(binary_path), "--datadir", scratch.name, "--debug", "3", "--logfile", str(log),
+        "--load-settings", f"{machine};{process}",
+        "--load-filaments", ";".join(str(f) for f in filaments),
+        "--load-filament-ids", ",".join(str(o.filament) for o in objects),
+    ]
+    if pauses:
+        items = outdir / "pauses.json"
+        items.write_text(json.dumps(pause_items(pauses), indent=1))
+        cmd += ["--load-custom-gcodes", str(items)]
+    cmd += ["--slice", "0", "--outputdir", str(outdir), *(str(o.stl) for o in objects)]
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        start_new_session=True, cwd=scratch.name,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout_s)
+    except subprocess.TimeoutExpired as exc:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        proc.wait()
+        raise RuntimeError(f"OrcaSlicer timeout after {timeout_s}s") from exc
+    finally:
+        scratch.cleanup()
+    gcode = outdir / "plate_1.gcode"
+    shown = [c if c != scratch.name else "<throwaway>" for c in cmd]
+    return PlateSlice(
+        command=shown,
+        exit=proc.returncode,
+        gcode=gcode if proc.returncode == 0 and gcode.exists() else None,
+        log=log,
+        stdout=stdout[-4000:],
+        stderr=stderr[-4000:],
+    )
+
+
+def version(binary: Path | str | None = None) -> str:
+    """Orca's version, from the first line of its `--help`, which it writes without slicing."""
+    binary_path = Path(binary) if binary is not None else _DEFAULT_BINARY
+    with tempfile.TemporaryDirectory(prefix="orca-data-") as scratch:
+        done = subprocess.run(
+            [str(binary_path), "--datadir", scratch, "--help"],
+            capture_output=True, text=True, timeout=60, check=False, cwd=scratch,
+        )
+    first = (done.stdout or done.stderr).strip().splitlines()[:1]
+    return first[0].rstrip(":") if first else "unknown"
