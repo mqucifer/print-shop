@@ -1404,12 +1404,12 @@ class Run:
         as it began."""
         if self.toolset.legacy:
             return []
-        # `thin` reads every file whatever the needs say, so a need that runs it reads nothing more:
-        # on `eval-tip-2` `pane.step` was read by `thin` alone.
+        # `thin` reads every file whatever the needs say, so a need that runs it reads nothing more,
+        # unless it asks for one body: on `eval-tip-2` `pane.step` was read by `thin` alone.
         read = {
             _plain_name(f)
             for n in self._needs()
-            if n.by == "bench" and n.argv()[:1] != ["thin"]
+            if n.by == "bench" and (n.argv()[:1] != ["thin"] or "--one-body" in n.argv())
             for f in n.files()
         }
         aside = {str(a["unread_file"]) for a in self.state.asides if a.get("unread_file")}

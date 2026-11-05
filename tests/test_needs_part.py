@@ -73,6 +73,9 @@ def test_done_names_each_part_file_no_need_reads_and_checks_nothing(tmp_path: Pa
     printable = Need("ok", "x", "chosen", "bench", command="thin pane.step", measures="printable")
     settled(run, FROM_THE_FRAME, printable)
     assert run._unread(["pane.step"]) == ["pane.step"], "`thin` reads every file anyway"
+    one_body = Need("one", "x", "chosen", "bench", command="thin pane.step --one-body")
+    settled(run, FROM_THE_FRAME, one_body)
+    assert run._unread(["pane.step"]) == [], "one body is a check beyond `thin`'s"
     settled(run, ON_THE_PANE)
     assert run._unread(["pane.step"]) == [], "a need that names it reads it"
 
