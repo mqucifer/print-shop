@@ -1895,7 +1895,12 @@ class Run:
         self.state.stop = {"kind": "questions", "n": n}
         self.state.said.append(f"You asked the Sponsor:\n\n{text}")
         self.save()
-        reply = "Your questions have gone to the Sponsor. Their answers come in your next message."
+        # Who answers isn't known until they do: a stand-in's answers say so, and the reply
+        # doesn't name the Sponsor before then (mqucifer/print-shop#59).
+        reply = (
+            "Your questions have gone out, to the Sponsor or someone standing in for them. The "
+            "answers come in your next message, saying who gave them."
+        )
         if said:
             reply += f" {said}"
         images = shown or [(f"questions/{n}/{Path(p).name}", self._b64(p)) for p in kept]
@@ -2951,9 +2956,10 @@ class Run:
         self.save()
         what = "The sheet above is drawn" if sheet else "What's above is ready"
         lines = [
-            f"{what}, and it hasn't gone to the Sponsor. Look at it, and send it with `send_ask`, "
+            f"{what}, and nothing has gone out yet. Look at it, and send it with `send_ask`, "
             "saying in `says` what it shows: each picture as drawn, not the design you meant. It "
-            "reaches them with the question, in your words."
+            "reaches whoever answers, the Sponsor or someone standing in for them, with the "
+            "question, in your words."
         ]
         if bench_said:
             lines += ["What the bench says it drew:", *[f"- {line}" for line in bench_said]]
@@ -3378,8 +3384,8 @@ class Run:
         self.state.stop = {"kind": "ask", "n": n}
         self.save()
         reply = (
-            "The sheet has gone to the Sponsor, with what you said of it. Their pick and reason "
-            "come in your next message."
+            "The sheet has gone out with what you said of it, to the Sponsor or someone standing "
+            "in for them. The pick and its reason come in your next message, saying who made it."
         )
         return Judged("send_ask", "ok", reply, ending=Ending("ask", {"n": n}))
 

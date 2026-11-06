@@ -2189,7 +2189,7 @@ def test_an_asks_sheet_goes_to_the_model_first_and_only_then_with_its_words(
     assert sent[1]["why"] == "changed", "a file changed after its sheet was drawn"
     drawn = [e for e in replies(run) if e["name"] == "ask"]
     assert all(e["outcome"] == "ok" for e in drawn)
-    assert "hasn't gone to the Sponsor" in drawn[0]["reply"]
+    assert "nothing has gone out yet" in drawn[0]["reply"]
     assert "drawn: block.step: block (blue)" in drawn[0]["reply"]
     # The harness's own reading of what the sheet shows: the gap fails, as `done` would say.
     assert (
