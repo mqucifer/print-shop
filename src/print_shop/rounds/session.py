@@ -421,7 +421,9 @@ class Session:
         - Every other `write` or `edit` call keeps its own keys, its text a note, and every other
           tool reply shrinks to what failed and why (`gist`): a bench answer's verdict and its
           reason, or a run's last error, never only its exit code (mqucifer/print-shop#39).
-        - What the Sponsor said is never touched: it's in user messages.
+        - What the Sponsor said is never touched: it's in user messages. So is the start, with
+          the required skills it gives whole (mqucifer/print-shop#61): on `suncatcher-3` a skill
+          read with `skill` was lost to the next of 31 compactions, and read again.
         """
         last = max((i for i, m in enumerate(self.messages) if m["role"] == "assistant"), default=-1)
         kept, copies = self._files(last)

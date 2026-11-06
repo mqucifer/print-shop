@@ -57,6 +57,10 @@ class Toolset:
     commands: tuple[str, ...]
     measures: tuple[Measure, ...] = ()
     skills: tuple[str, ...] = ()
+    #: The skills, by name, a run of this kind must have throughout: given whole in the start, where
+    #: no compaction reaches, and never left to a read (mqucifer/print-shop#61). The rest of its
+    #: sets' skills are named there and read with `skill`.
+    required: tuple[str, ...] = ()
     #: From before toolsets: every command, and needs read as they were.
     legacy: bool = False
     added: tuple[str, ...] = field(default=())
@@ -102,8 +106,12 @@ CORE_COMMANDS = (
     "pause",
     "params",
     "render",
+    "layout",
 )
 CORE_SKILLS = ("bench", "cadquery", "references")
+#: What every run builds with and checks with. On `suncatcher-3` neither was read in 325 calls,
+#: named among 15 skills in one line (mqucifer/print-shop#61).
+CORE_REQUIRED = ("cadquery", "using-the-bench")
 CORE_MEASURES = (
     Measure(
         "size",
@@ -161,7 +169,9 @@ CORE_MEASURES = (
         "params SCRIPT --set NAME=VALUE",
     ),
 )
-CORE = Toolset(None, "the core", CORE_COMMANDS, CORE_MEASURES, CORE_SKILLS)
+CORE = Toolset(
+    None, "the core", CORE_COMMANDS, CORE_MEASURES, CORE_SKILLS, required=CORE_REQUIRED
+)
 
 #: `capture` and `panes` read a pane in its pocket, held by lips: only stained glass has those.
 #: `light` and `thickness` read what a person sees through a pane. `pause` stays in the core: an
@@ -203,6 +213,7 @@ STAINED_GLASS = Toolset(
         ),
     ),
     CORE_SKILLS + ("designing-stained-glass",),
+    required=("designing-stained-glass", *CORE_REQUIRED),
     added=STAINED_GLASS_COMMANDS,
     standing=("light", "capture"),
 )
@@ -234,6 +245,9 @@ ENCLOSURE = Toolset(
         ),
     ),
     CORE_SKILLS + ("designing-enclosures",),
+    # Its own, the core's two, and the clearances and walls a printed case is sized by
+    # (mqucifer/print-shop#60, mqucifer/print-shop#61).
+    required=("designing-enclosures", *CORE_REQUIRED, "ref-fdm"),
     added=ENCLOSURE_COMMANDS,
 )
 KINDS = {STAINED_GLASS.kind: STAINED_GLASS, ENCLOSURE.kind: ENCLOSURE}

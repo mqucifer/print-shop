@@ -125,6 +125,16 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "pieces_not_moved",
     ),
     "render": ("close_ups", "cuts", "files", "sections", "seen_px", "test_pieces", "views"),
+    "layout": (
+        "least_width_mm",
+        "least_width_piece",
+        "overlaps",
+        "picture",
+        "pieces",
+        "pieces_count",
+        "step_mm",
+        "tips_count",
+    ),
 }
 
 
@@ -143,6 +153,7 @@ VERDICTS: dict[str, tuple[str, ...]] = {
     "pause": ("OK", "FAIL"),
     "params": ("OK", "NO CHANGE", "PARTIAL"),
     "render": ("OK", "FAIL"),
+    "layout": ("OK", "FAIL"),
 }
 
 

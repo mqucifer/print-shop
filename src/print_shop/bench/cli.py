@@ -230,6 +230,37 @@ def parser() -> Parser:
         help="how many pieces may stay where they are and still read OK: over that is PARTIAL",
     )
 
+    layout = sub.add_parser(
+        "layout",
+        help="a flat layout of named pieces, in 2D: each piece, its least width and where, what "
+        "an inset leaves of it, and a picture with each piece labelled",
+    )
+    layout.add_argument(
+        "file",
+        help='JSON: {"pieces": {NAME: OUTLINE}}, each outline GeoJSON, as '
+        "shapely.geometry.mapping writes it, or WKT, in mm",
+    )
+    layout.add_argument(
+        "--inset",
+        dest="insets",
+        action="append",
+        type=float,
+        default=[],
+        metavar="D",
+        help="what an inset of D mm leaves of each piece: its parts and its narrowest neck. "
+        "Give it more than once for several. A negative D is an outset",
+    )
+    layout.add_argument(
+        "--join",
+        choices=("mitre", "round"),
+        default="mitre",
+        help="the inset's corners: mitre, as a layout's pockets are cut, or round, the true "
+        "distance",
+    )
+    layout.add_argument(
+        "--min-width", type=float, help="the least width wanted, in mm: a piece under it is FAIL"
+    )
+    layout.add_argument("--layout-out", dest="out_layout", default="layout")
     render = sub.add_parser("render", help="pictures from the standard views")
     render.add_argument("files", nargs="*")
     render.add_argument(
@@ -335,6 +366,11 @@ def _dispatch(args: Any, report: Report) -> None:
     elif args.command == "params":
         from .params import run
 
+        run(args, report)
+    elif args.command == "layout":
+        from .layout import run
+
+        args.out = args.out_layout
         run(args, report)
     elif args.command == "render":
         from .render import VIEWS, run

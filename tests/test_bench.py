@@ -897,22 +897,34 @@ def test_info_reads_a_curve_stored_as_flat_strips_and_the_files_size(bench: Any)
 
 
 def test_the_skills_new_code_runs_in_the_image(bench: Any) -> None:
-    """Every Python block print-shop added to the skills, run as the model would run it."""
-    blocks = [
-        block
-        for name in (
-            "cadquery/references/layout-to-arcs.md",
-            "cadquery/references/errors.md",
-            "designing-stained-glass/SKILL.md",
-        )
-        for block in re.findall(
-            r"```python\n(.*?)```",
-            (skills.SKILLS / name).read_text().split(skills.ADDED)[-1],
-            re.DOTALL,
-        )
-        if "cadquery" in block
+    """Every Python block print-shop added to the skills that stands alone, run as the model
+    would run it: each that builds with CadQuery, and since mqucifer/print-shop#61 each after
+    `ADDED` that lays a figure out in Shapely. The stained-glass layout's own step-2 block uses
+    the reader's cells, so it doesn't stand alone, and isn't here."""
+
+    def found(name: str, after: bool) -> list[str]:
+        text = (skills.SKILLS / name).read_text()
+        part = text.split(skills.ADDED)[-1] if after else text
+        return re.findall(r"```python\n(.*?)```", part, re.DOTALL)
+
+    names = (
+        "cadquery/SKILL.md",
+        "cadquery/references/layout-to-arcs.md",
+        "cadquery/references/errors.md",
+        "designing-stained-glass/SKILL.md",
+    )
+    measured = ("cadquery/SKILL.md", "cadquery/references/errors.md")
+    blocks = [b for n in names for b in found(n, n in measured) if "import cadquery" in b]
+    blocks += [
+        b
+        for n in names
+        if skills.ADDED in (skills.SKILLS / n).read_text()
+        for b in found(n, True)
+        if "import shapely" in b and "import cadquery" not in b
     ]
-    assert len(blocks) == 4
+    # The U from pieces, curves from a layout, the errors' two, the stained-glass cells built as
+    # curves, and its figure from pieces.
+    assert len(blocks) == 6
     for k, block in enumerate(blocks):
         (bench.work / f"skill_block_{k}.py").write_text(block)
         ran = host.run([f"skill_block_{k}.py"], bench.work, python=True)
@@ -1721,11 +1733,29 @@ def test_each_panes_rim_is_sized_to_keep_its_visible_share(bench: Any) -> None:
     assert rims[19.5]["visible_pct"] == pytest.approx(81.46, abs=0.1)
     assert rims[5.5]["needs_mm"] == pytest.approx(0.8699, abs=0.001)
     assert rims[5.5]["visible_pct"] == pytest.approx(60.0, abs=0.1)
+    # How each was chosen, in three figures (mqucifer/print-shop#61): the full rim, the share it
+    # leaves, and the smaller rim that keeps the share wanted.
+    assert rims[19.5]["chosen"] == "full" and rims[5.5]["chosen"] == "smaller"
+    full = rims[19.5]["visible_at_full_pct"]
+    assert (
+        f"At the full rim, 1.2 mm before play, {full:.2f}% of it is visible, at least the 60% "
+        "wanted, so it keeps the full rim." in held.text
+    )
+    small = rims[5.5]
+    assert small["visible_at_full_pct"] < 60
+    assert (
+        f"At the full rim, 1.2 mm before play, {small['visible_at_full_pct']:.2f}% of it would be "
+        "visible, under the 60% wanted, so its rim is the widest that keeps 60%: "
+        f"{small['needs_mm']:g} mm, set as 0.869 mm, which leaves "
+        f"{small['visible_at_need_pct']:.2f}%." in held.text
+    )
     unheld = bench("capture", "rims/unheld.step", *share)
     assert unheld.verdict == "FAIL", unheld.text
     assert "set this pane's rim to 0.869 mm before play. It has 1.2 mm" in unheld.record["why"]
     assert "42.8% of it is visible, where 60% is wanted" in unheld.record["why"]
     assert "remove this pane. Even the smallest rim, 0.55 mm before play" in unheld.record["why"]
+    assert "so it's to be removed." in unheld.text and "both under the 60% wanted" in unheld.text
+    assert "under the 60% wanted, so its rim is the widest that keeps 60%" in unheld.record["why"]
     done = host.run(["capture", "rims/held.step", *share[:-2]], bench.work)
     assert done.returncode == 3 and "no default for any of them" in done.stdout + done.stderr
 
@@ -1833,3 +1863,81 @@ def test_edges_says_a_rounding_stored_as_strips(bench: Any) -> None:
     assert answer.numbers["faceted_edges"] == 68
     assert answer.numbers["rounded"] == []
     assert any("stored as flat strips" in n for n in answer.record["notes"])
+
+
+# A flat layout, read in 2D (mqucifer/print-shop#61)
+
+
+def _layout(work: Path, name: str, pieces: dict[str, Any]) -> str:
+    """A layout file as a model's script writes it: GeoJSON or WKT outlines, by name."""
+    (work / name).write_text(json.dumps({"pieces": pieces}))
+    return name
+
+
+def _circle(cx: float, cy: float, r: float, n: int = 256) -> list[list[float]]:
+    import math
+
+    ring = [[cx + r * math.cos(2 * math.pi * k / n), cy + r * math.sin(2 * math.pi * k / n)]
+            for k in range(n)]  # fmt: skip
+    return [*ring, ring[0]]
+
+
+def test_a_layout_says_each_piece_its_least_width_its_tips_and_what_an_inset_leaves(
+    bench: Any,
+) -> None:
+    """Planted pieces whose answers are arithmetic: two squares joined by a bar 1 mm wide, a ring
+    3 mm wide, an equilateral triangle, a piece in two parts, and an arm 2 mm wide with a round
+    end, which is no narrower than the arm."""
+    import math
+
+    # An arm 2 mm wide, 10 mm long, with a round end of radius 1.
+    end = [[90 + math.sin(math.pi * k / 64), 1 - math.cos(math.pi * k / 64)] for k in range(1, 64)]
+    pieces = {
+        "dumbbell": {"type": "Polygon", "coordinates": [[[0, 0], [10, 0], [10, 4.5], [16, 4.5],
+                     [16, 0], [26, 0], [26, 10], [16, 10], [16, 5.5], [10, 5.5], [10, 10], [0, 10],
+                     [0, 0]]]},  # fmt: skip
+        "ring": {"type": "Polygon", "coordinates": [_circle(40, 5, 8), _circle(40, 5, 5)[::-1]]},
+        "triangle": {"type": "Polygon",
+                     "coordinates": [[[60, 0], [70, 0], [65, 5 * math.sqrt(3)], [60, 0]]]},
+        "apart": "MULTIPOLYGON (((0 20, 5 20, 5 25, 0 25, 0 20)), ((8 20, 13 20, 13 25, 8 25, "
+        "8 20)))",
+        "arm": {"type": "Polygon",
+                "coordinates": [[[80, 0], [90, 0], *end, [90, 2], [80, 2], [80, 0]]]},
+    }
+    name = _layout(bench.work, "flat.json", pieces)
+    answer = bench("layout", name, "--inset", "0.6", "--min-width", "0.9")
+    rows = answer.numbers["pieces"]
+    assert answer.verdict == "FAIL", answer.text
+    assert answer.record["why"].count("sharp tip, 60°") == 3, "the triangle's tips, and no width"
+    assert "dumbbell" not in answer.record["why"] and "arm" not in answer.record["why"]
+    assert rows["dumbbell"]["least_width_mm"] == pytest.approx(1.0, abs=0.002)
+    at = rows["dumbbell"]["least_width_at"]
+    assert 10 <= at[0] <= 16 and at[1] == pytest.approx(5.0, abs=0.01), "across the bar"
+    inset = rows["dumbbell"]["insets"]["0.6"]
+    assert inset["parts_count"] == 2, "the bar is cut"
+    assert [c["width_mm"] for c in inset["cut_at"]] == [pytest.approx(1.0, abs=0.002)]
+    assert inset["cut_at"][0]["runs_mm"] == pytest.approx(6.0, abs=0.1), "one place, all the bar"
+    assert rows["ring"]["least_width_mm"] == pytest.approx(3.0, abs=0.002)
+    assert rows["ring"]["insets"]["0.6"]["least_width_mm"] == pytest.approx(1.8, abs=0.002)
+    assert rows["triangle"]["least_width_mm"] is None and len(rows["triangle"]["tips"]) == 3
+    assert rows["apart"]["parts_count"] == 2
+    assert "piece apart: NOT one piece: 2 parts" in answer.text
+    assert rows["arm"]["least_width_mm"] == pytest.approx(2.0, abs=0.002), "a round end isn't less"
+    for row in rows.values():
+        second = row["width_by_facing"]
+        assert (second is None) == (row["least_width_mm"] is None)
+        if second is not None:
+            # The nearest facing point reads from cos(20°) of the ray to the ray, and the same
+            # across parallel sides: an arm's round end is the one place here they differ.
+            first = row["least_width_mm"]
+            assert first * math.cos(math.radians(20)) - 0.1 <= second["width_mm"] <= first + 0.1
+    assert rows["dumbbell"]["width_by_facing"]["width_mm"] == pytest.approx(1.0, abs=0.002)
+    assert rows["ring"]["width_by_facing"]["width_mm"] == pytest.approx(3.0, abs=0.002)
+    assert answer.numbers["overlaps"] == []
+    picture = bench.work / answer.numbers["picture"]
+    with png_size(picture) as (width, height):
+        assert max(width, height) >= 1000
+    assert len(answer.record["second_check"]) == len(pieces)
+
+    told = bench("layout", _layout(bench.work, "bare.json", {}))
+    assert told.verdict == "NO ANSWER" and '{"pieces": {NAME: OUTLINE' in told.record["why"]

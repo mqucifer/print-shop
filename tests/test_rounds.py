@@ -280,7 +280,11 @@ def test_the_ported_skills_are_the_measured_text() -> None:
     """Above any additions of print-shop's (mqucifer/print-shop#54), each is the measured text."""
     assert skills.measured_sha() == MEASURED_SKILLS_SHA
     added = [n for n in skills.MEASURED_FILES if skills.ADDED in (skills.SKILLS / n).read_text()]
-    assert added == ["cadquery/references/errors.md", "cadquery/references/sketch-extrude.md"]
+    assert added == [
+        "cadquery/SKILL.md",
+        "cadquery/references/errors.md",
+        "cadquery/references/sketch-extrude.md",
+    ]
 
 
 def test_the_ported_skills_match_their_source_where_it_is_present() -> None:

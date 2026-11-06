@@ -116,6 +116,8 @@ class Recorder:
         self.calls_since_compaction = 0
         self.last_prompt = 0
         self.skills_read: set[str] = set()
+        # The required skills the start gave whole, which no compaction takes away.
+        self.skills_given: set[str] = set()
         self.refused: deque[list[str]] = deque(maxlen=REFUSED_KEPT)
         self.last_bench = ""
         self.refusals = 0
@@ -407,8 +409,11 @@ class Recorder:
             "stream": event.get("stream"),
         }
         lacked = {
+            "skills_given": sorted(self.skills_given),
             "skills_read": sorted(self.skills_read),
-            "skills_not_read": sorted(set(skills.registry(self.skills_offered)) - self.skills_read),
+            "skills_not_read": sorted(
+                set(skills.registry(self.skills_offered)) - self.skills_read - self.skills_given
+            ),
             "compactions_so_far": self.compactions,
             "calls_since_compaction": self.calls_since_compaction,
             "prompt_tokens": used.get("prompt_tokens"),
@@ -486,7 +491,27 @@ class Recorder:
             name=str(arguments.get("name")),
             file=detail.get("file") if isinstance(detail, dict) else None,
             found=int(event.get("outcome") == "ok"),
+            how="read",
         )
+
+    def _on_skills_given(self, event: dict[str, Any]) -> None:
+        """The required skills a conversation's start gives whole (mqucifer/print-shop#61): rows
+        of `skill_reads` as given, at the call they go with."""
+        at = int(event.get("at_call") or self.requests + 1)
+        for one in event.get("skills") or []:
+            self.skill_reads += 1
+            self.skills_given.add(str(one["name"]))
+            self.ledger.add(
+                "skill_reads",
+                run=self.run,
+                seq=self.skill_reads,
+                at_call=at,
+                round=self._round_of(at),
+                name=str(one["name"]),
+                file=one.get("file"),
+                found=1,
+                how="given",
+            )
 
     def _nudged(self, nudge: dict[str, Any]) -> None:
         """A check that kept failing, and the line its reply gained."""

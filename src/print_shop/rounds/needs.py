@@ -39,6 +39,7 @@ COMMANDS = (
     "render",
     "light",
     "thickness",
+    "layout",
     "edges",
 )
 #: Verdicts that are no answer: they never pass a need, whatever it says.

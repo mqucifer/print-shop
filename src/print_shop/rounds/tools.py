@@ -218,7 +218,8 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
             "bench",
             "Ask the bench about your files: any bench command, in a fresh container, with a "
             "second check by a different method behind each answer. The first line of the reply "
-            f"is the verdict. {commands} (`render`'s picture comes to you). `<command> --help` "
+            f"is the verdict. {commands} (`render`'s and `layout`'s pictures come to you). "
+            "`<command> --help` "
             "gives its arguments, and the skills say what each answers.",
             command="The command and its arguments, such as `clearance lid.step cup.step "
             "--min-gap 0.2` or `render part.step --views iso top`.",
@@ -242,7 +243,8 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
         ),
         _spec(
             "skill",
-            "Read a skill the start names: how to do one kind of thing, or a table of values.",
+            "Read a skill the start names: how to do one kind of thing, or a table of values. "
+            "The ones this work needs throughout are already in the start, whole.",
             name="The skill's name.",
         ),
         _spec(
@@ -1108,7 +1110,8 @@ class WorkTools:
         return ""
 
     def _bench(self, args: dict[str, Any]) -> Judged:
-        """Any bench command, its plain text going back. `render`'s picture reaches the model."""
+        """Any bench command, its plain text going back. `render`'s and `layout`'s pictures
+        reach the model."""
         try:
             argv = shlex.split(args["command"])
         except ValueError as exc:
@@ -1154,8 +1157,9 @@ class WorkTools:
         return self._failed("bench", "not_in_toolset", reply)
 
     def _rendered(self, record: dict[str, Any] | None) -> list[tuple[str, str]]:
-        """The picture a `render` wrote: its sheet, if it made one, or its one view."""
-        if not record or record.get("command") != "render":
+        """The picture a `render` wrote: its sheet, if it made one, or its one view. `layout`'s
+        one picture, its pieces labelled, comes the same way (mqucifer/print-shop#61)."""
+        if not record or record.get("command") not in ("render", "layout"):
             return []
         files = [str(f) for f in record.get("files") or [] if str(f).endswith(".png")]
         sheets = [f for f in files if f.endswith("-sheet.png")]
@@ -1173,6 +1177,15 @@ class WorkTools:
             named = ", ".join(f"`{n}`" for n in self.skills)
             return self._failed("skill", "unknown", f"No skill `{args['name']}`: {named}.")
         # Which file it read, for the record of how a run finds its skills (`skill_reads`).
+        if args["name"] in self.toolset.required:
+            # Given whole in the start, where no compaction reaches: a second copy here would be
+            # compacted to a note, and costs the room (mqucifer/print-shop#61).
+            said = (
+                f"`{args['name']}` is in your first message, whole, between "
+                f'`<skill name="{args["name"]}">` and `</skill>`. It stays there for the whole '
+                "run, through every compaction: read it there."
+            )
+            return Judged("skill", "ok", said, detail={"file": found[2], "given": True})
         return Judged("skill", "ok", found[1], detail={"file": found[2]})
 
     def _lookup(self, args: dict[str, Any]) -> Judged:

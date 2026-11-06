@@ -8,7 +8,9 @@ is still the measured text, held as before (`measured`). A file of print-shop's 
 such as `cadquery/references/layout-to-arcs.md`, keeps every rule. Each `SKILL.md` and
 `references/*.md` is a skill of its own, so a topic is read only when it's needed. The mechanism
 is crew's in small (`crew_org/session/skills.py`): the start names each in one line, and `skill`
-reads one. `skills/bench` is new, and says what `docs/bench.md` says, for the session.
+reads one. A kind's required skills are the exception (mqucifer/print-shop#61): the start gives
+each whole (`start_skills`), and they stay through every compaction. `skills/bench` is new, and
+says what `docs/bench.md` says, for the session.
 
 A run reads the skills of its toolset (`toolsets.py`): the core's three sets, and a kind's own,
 such as `skills/designing-stained-glass`. Each read is in the ledger's `skill_reads`, with the
@@ -59,9 +61,49 @@ def located(sets: tuple[str, ...] = SETS) -> dict[str, tuple[str, str, str]]:
 
 
 def start_line(sets: tuple[str, ...] = SETS) -> str:
-    """The one line the start adds, as crew's start names its skills."""
+    """The one line the start adds, as crew's start names its skills: a run from before
+    required skills (mqucifer/print-shop#61)."""
     named = "; ".join(f"`{name}`, {about}" for name, (about, _) in registry(sets).items())
     return f"Skills for this work: {named}. Read one with `skill` when you need it."
+
+
+#: How a required skill is set in the start, so its text reads as the skill's and nothing else's,
+#: and a reply can point to it.
+GIVEN = '<skill name="{name}">\n{body}\n</skill>'
+
+
+def start_skills(sets: tuple[str, ...], required: tuple[str, ...]) -> str:
+    """What the start says of a run's skills: each required one whole, in the order given, and
+    the rest named in one line, to read with `skill` (mqucifer/print-shop#61). On `suncatcher-3`
+    the start named all 15 in one sentence, and `cadquery` and `using-the-bench` were never read
+    in 325 calls. A user message is never compacted (`session.compact`), so what's here stays."""
+    found = registry(sets)
+    missing = [name for name in required if name not in found]
+    if missing:
+        raise KeyError(f"required skills not in the sets {sets}: {missing}")
+    if not required:
+        return start_line(sets)
+    names = ", ".join(f"`{name}`" for name in required)
+    whole = "\n\n".join(GIVEN.format(name=n, body=found[n][1].strip()) for n in required)
+    others = "; ".join(
+        f"`{name}`, {about.rstrip('.')}"
+        for name, (about, _) in found.items()
+        if name not in required
+    )
+    rest = (
+        f"\n\nThe other skills, to read with `skill` when you need one: {others}." if others else ""
+    )
+    return (
+        f"The skills this work needs throughout are here whole: {names}. They stay in this "
+        f"message for the whole run, through every compaction, so there's no need to read them "
+        f"with `skill`.\n\n{whole}{rest}"
+    )
+
+
+def given(sets: tuple[str, ...], required: tuple[str, ...]) -> list[tuple[str, str]]:
+    """Each required skill and its file under `skills/`, as the start gives them."""
+    found = located(sets)
+    return [(name, found[name][2]) for name in required]
 
 
 #: The line after which a measured file holds print-shop's additions, and before which it's the

@@ -69,3 +69,45 @@ back = cq.Workplane().add(solid.fuse(cq.Solid.makeBox(1, 1, 1)))
 - **Keep a shape valid.** After a boolean, `part.val().isValid()` should be `True`; a
   part that isn't valid won't be measured.
 - **Units are millimetres**, angles in degrees unless an argument says radians.
+
+<!-- print-shop's additions, after the measured text (mqucifer/print-shop#54) -->
+
+## Shapes from pieces (print-shop)
+
+Build every outline from simple shapes, joined, cut and offset: rectangles, circles, slots and
+polygons of a few straight sides, each placed by numbers at the top of the script. Never type
+an outline as a list of points worked out one by one: in one run, tracing a single U-shaped
+outline point by point took seven calls of long reasoning, where two rectangles make it
+(mqucifer/print-shop#61).
+
+```python
+import cadquery as cq
+
+W, H, LEG, GAP, T = 10.0, 14.0, 3.0, 4.0, 2.0  # a U: its width, height, bottom bar, gap, thickness
+
+body = cq.Workplane("XY").rect(W, H).extrude(T)  # one rectangle
+gap = cq.Workplane("XY").center(0, LEG / 2).rect(GAP, H - LEG).extrude(T)  # cut down from the top
+u = body.cut(gap).edges("|Z").fillet(0.5)  # every corner rounded, as curves
+assert len(u.solids().vals()) == 1
+assert abs(u.val().Volume() - (W * H - GAP * (H - LEG)) * T) < 0.01 * W * H * T
+```
+
+- **Joined:** `union`, or a `cq.Sketch` whose shapes add by default. **Cut:** `cut`, or a
+  Sketch shape with `mode="s"`. **Offset:** `offset2D(d, kind="arc")` grows an outline by `d`
+  with round corners, and a negative `d` shrinks it.
+- **A figure is pieces too.** A body is a circle or an ellipse, a leg is a bar, a wing is a
+  circle cut by another: place each by its centre and size, join them, and round the joins
+  with `fillet` or `offset2D`.
+- **In 2D, the same pieces:** `shapely.box`, `shapely.Point(x, y).buffer(r)`, `union`,
+  `difference` and `buffer(d)`, from the same numbers, to check the layout before building it
+  (`building-curves-from-a-layout`). `bench layout` reads such a layout: which piece is which,
+  each one's narrowest neck, and what an inset leaves (`using-the-bench`).
+
+## Look at what you built (print-shop)
+
+After each build of a part with pockets, holes or cavities, cut it through them with the bench
+before reasoning about what it holds: `render PART --cut z=Z` at a height inside the pockets, or
+`--cut x=X` upright across one. Whether a pocket is blind or runs through the part, and what
+stands in an opening, are on the cut. Worked out from the script instead, in one run six calls
+of long reasoning went on how its own pockets were built, to find that every one ran through
+(mqucifer/print-shop#61).

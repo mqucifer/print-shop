@@ -840,7 +840,7 @@ def _share_says(
     needs = "none: it's to be removed" if rim["remove"] else f"{rim['set_mm']:g} mm"
     report.line(
         f"pane {name}: {share:.1f}% visible, {args.min_visible:g}% wanted; its rim needs "
-        f"{needs} before play, and has {has} mm at the least"
+        f"{needs} before play, and has {has} mm at the least. {rim_chosen(rim)}"
     )
     report.second(
         f"pane {name}'s visible share by rays straight up through the frame: {by_rays:.1f}% of "
@@ -887,8 +887,31 @@ def _share_says(
             f"{label}: set this pane's rim to {rim['set_mm']:g} mm before play. It has "
             f"{has} mm at the least"
             + (f" ({where})" if where else "")
-            + f", and {share:.1f}% of it is visible, where {args.min_visible:g}% is wanted"
+            + f", and {share:.1f}% of it is visible, where {args.min_visible:g}% is wanted. "
+            + rim_chosen(rim)
         )
+
+
+def rim_chosen(rim: dict[str, Any]) -> str:
+    """How the rim a pane needs was chosen, in its three figures: the full rim, the share it
+    leaves visible, and the smaller rim that keeps the share wanted (mqucifer/print-shop#61).
+    On `suncatcher-3` the reply gave the rim to set and not how, and two calls of long reasoning
+    rebuilt the logic."""
+    full, wanted = rim["full_rim_mm"], rim["min_visible_pct"]
+    at_full = f"At the full rim, {full:g} mm before play, {rim['visible_at_full_pct']:.2f}% of it"
+    if rim["remove"]:
+        return (
+            f"{at_full} would be visible, and at the smallest rim, {rim['least_rim_mm']:g} mm, "
+            f"{rim['visible_at_least_pct']:.2f}%: both under the {wanted:g}% wanted, so it's to "
+            "be removed."
+        )
+    if rim["chosen"] == "full":
+        return f"{at_full} is visible, at least the {wanted:g}% wanted, so it keeps the full rim."
+    return (
+        f"{at_full} would be visible, under the {wanted:g}% wanted, so its rim is the widest that "
+        f"keeps {wanted:g}%: {rim['needs_mm']:g} mm, set as {rim['set_mm']:g} mm, which leaves "
+        f"{rim['visible_at_need_pct']:.2f}%."
+    )
 
 
 def inset_share(pane: Any, overlap: float) -> float:
@@ -915,10 +938,12 @@ def rim_needed(pane: Any, args: Any) -> dict[str, Any]:
     }
     if found["visible_at_full_pct"] >= share:
         need = full
+        found["chosen"] = "full"
     elif inset_share(pane, least - play) < share:
-        found.update(remove=True, needs_mm=None)
+        found.update(remove=True, needs_mm=None, chosen="remove")
         return found
     else:
+        found["chosen"] = "smaller"
         low, high = least - play, full - play
         for _ in range(HALVINGS):
             middle = (low + high) / 2

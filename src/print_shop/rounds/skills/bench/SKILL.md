@@ -34,10 +34,27 @@ The first line is the verdict. Then come the numbers, each with how it was read,
 | `render --variant A=a.step --variant B=b.step,c.step [--views ...] [--close ...]... [--cut ...]... [--look ...]... [--test-piece FILE]...` | a sheet with a labelled row for each variant, to compare them |
 | `wall FILE --hole X,Y,Z [--axis A] [--min-wall W]` | the least wall round one hole, along its whole length, and toward what: the part's outside or another opening. Any point inside the hole names it |
 | `params SCRIPT --set NAME=VALUE [--max-left N]` | which dimensions, volumes and pieces moved when one parameter changed |
+| `layout FILE.json [--inset D]... [--join mitre\|round] [--min-width W]` | a flat layout of named pieces, in 2D: whether each is one piece, and where each part is; its least width and where, into a sharp tip or across a neck; what an inset of D leaves of it, how many parts and the narrowest neck, and where it cuts the piece; any two that overlap; and a picture with each piece labelled, which comes to you |
 
 **`pause`'s numbers are the bench's own,** largest opening first, not your files'.
 
 A kind's toolset adds commands of its own, such as stained glass's `capture` and `light`, or an enclosure's `edges`, and its skill says what each answers.
+
+**A 2D question has a reading: `layout`.** Which piece an inset makes, which piece is which, how narrow a neck is, whether a frame in 2D is one piece: write the layout to a file and ask, rather than work it out by reasoning or by printing bounding boxes. The file is JSON, each piece's name and its outline as GeoJSON or WKT, in mm, which your script writes from the layout it built:
+
+```python
+import json
+
+from shapely.geometry import mapping
+
+pieces = {"frame": frame_2d, **{f"cell_{k}": c for k, c in enumerate(cells, start=1)}}
+with open("layout.json", "w") as fh:
+    json.dump({"pieces": {name: mapping(shape) for name, shape in pieces.items()}}, fh)
+```
+
+Then `bench layout layout.json --inset 0.5 --inset 1.7`, an inset for each offset the layout uses. A width is a line straight across the piece, square to its edges: a corner sharper than 75° is a tip, read down to nothing, and a blunter one isn't a width. Its picture marks each piece's narrowest neck in red and each inset's outline in black. It reads a layout, not the part: a need is checked on the part's own files.
+
+**Look at what you built.** After each build of a part with pockets, holes or cavities, cut it through them (`render PART --cut z=Z`, a height inside the pockets, or `x=X` upright across one) and read the cut before reasoning about what the part holds: whether a pocket is blind or runs through, and what stands in an opening, are on the cut, and slow to work out from the script.
 
 **When a bench reading and your design disagree, cut a section** (`render FILE --section Z`) at the height in question, and read its verdict before its picture: a section that fails its own check names the piece it couldn't draw.
 
