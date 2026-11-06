@@ -204,7 +204,10 @@ def eye_reading(
     it too, so a run can be proved with no Sponsor there, and its reading says who it was."""
     pick = picks.get(need.id)
     if pick is None:
-        why = f"this is for the Sponsor's eye ({need.look_for}): `ask`, naming it as `need`"
+        why = (
+            f"this is for the Sponsor's eye ({need.look_for}): `ask`, naming it in `need` with "
+            "every other eye need its sheet answers"
+        )
         return Reading(need.id, "eye", False, why)
     reason = pick.get("reason")
     if pick.get("by") == SPONSOR:
@@ -215,7 +218,8 @@ def eye_reading(
     if stale is not None:
         why = (
             f"{who} picked {pick['pick']} at ask {pick.get('ask')}, and that pick doesn't hold: "
-            f"{stale}. It's asked again: `ask`, naming it as `need`"
+            f"{stale}. It's asked again: `ask`, naming it in `need` with every other eye need its "
+            "sheet answers"
         )
         return Reading(need.id, "eye", False, why)
     return Reading(need.id, "eye", True, f"{who} picked {pick['pick']}: {reason}")
