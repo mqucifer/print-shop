@@ -281,8 +281,8 @@ CURVES = "curves"
 #: 3's arcs frame has 1 of 54, and its rings frame 0 of 134, each with true circles; all 50 STEP
 #: files of batch 3's approved folders pass, the most having 4 (`curves_batch3_approved.json`).
 #: One small round hole cut from a polygon is enough: at 16 segments a quarter, a 3 mm radius is
-#: 64 faces of 0.29 mm. A part with no curves has a few, at a corner or a sliver, and its reason is said with
-#: `set_aside`.
+#: 64 faces of 0.29 mm. A part with no curves has a few, at a corner or a sliver, and where it has
+#: more, its reason is said with `set_aside`.
 STRIPS_AT = 20
 #: What a curved part's file can be read by: an STL has no faces of its own.
 FACED = (".step", ".stp", ".brep")
