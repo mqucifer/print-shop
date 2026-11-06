@@ -267,7 +267,7 @@ def test_a_run_goes_from_intake_through_refusals_and_a_pick_to_its_needs_met(
             tool(
                 "ask",
                 question="Which proportions?",
-                need="nope",
+                need=["nope"],
                 variants=[{"name": "A", "files": ["block.step"]}],
             )
         ],
@@ -280,7 +280,7 @@ def test_a_run_goes_from_intake_through_refusals_and_a_pick_to_its_needs_met(
             tool(
                 "ask",
                 question="Which proportions?",
-                need="look",
+                need=["look"],
                 variants=[
                     {"name": "A", "files": ["block.step", "tab.step"], "about": "the even one"},
                     {"name": "B", "files": ["wide.step", "wide-tab.step"], "about": "the wide one"},
@@ -478,7 +478,7 @@ def asked_a_pick(tmp_path: Path, **ask: Any) -> Run:
             tool(
                 "ask",
                 question="Which proportions?",
-                need="look",
+                need=["look"],
                 views="iso",
                 variants=[{"name": "A", "files": ["block.step"], "about": "the even one"}],
                 **ask,
@@ -665,7 +665,7 @@ def test_a_picks_sheet_can_hold_a_close_up_and_marks_a_test_piece(tmp_path: Path
             tool(
                 "ask",
                 question="Which proportions?",
-                need="look",
+                need=["look"],
                 views="top",
                 close="-5,0,2.5,4",
                 test_pieces=["test-piece.step"],
@@ -1036,7 +1036,7 @@ def test_a_pick_of_none_leaves_the_need_open_and_says_why(tmp_path: Path) -> Non
             tool(
                 "ask",
                 question="Does this work?",
-                need="look",
+                need=["look"],
                 views="iso",
                 variants=[{"name": "A", "files": ["block.step"]}],
             )
@@ -1133,7 +1133,7 @@ def asked_with_needs(tmp_path: Path, *need_list: dict[str, Any], **ask: Any) -> 
             tool(
                 "ask",
                 question="Which proportions?",
-                need="look",
+                need=["look"],
                 views="iso",
                 variants=[{"name": "A", "files": ["block.step"], "about": "the even one"}],
                 **ask,
@@ -1165,7 +1165,7 @@ def test_every_note_and_answer_relayed_is_a_row_saying_who_when_and_at_which_cal
             tool(
                 "ask",
                 question="Which?",
-                need="look",
+                need=["look"],
                 views="iso",
                 variants=[{"name": "A", "files": ["block.step"]}],
             )
@@ -1585,7 +1585,7 @@ def test_a_pick_on_files_that_changed_doesnt_hold_and_the_need_is_asked_again(
     ask_again = tool(
         "ask",
         question="And this one?",
-        need="look",
+        need=["look"],
         views="iso",
         variants=[{"name": "A", "files": ["block.step"], "about": "narrower"}],
     )
@@ -1636,7 +1636,7 @@ def test_a_pick_of_none_takes_back_the_one_before_it(tmp_path: Path) -> None:
     ask_again = tool(
         "ask",
         question="Still?",
-        need="look",
+        need=["look"],
         views="iso",
         variants=[{"name": "A", "files": ["block.step"]}],
     )
@@ -2162,7 +2162,7 @@ def test_an_asks_sheet_goes_to_the_model_first_and_only_then_with_its_words(
             tool(
                 "ask",
                 question="Which proportions?",
-                need="look",
+                need=["look"],
                 views="top",
                 cuts="z=0",
                 looks={"block.step": {"colour": "blue", "label": "block"}},
@@ -2175,7 +2175,7 @@ def test_an_asks_sheet_goes_to_the_model_first_and_only_then_with_its_words(
             tool(
                 "ask",
                 question="Which proportions?",
-                need="look",
+                need=["look"],
                 views="top",
                 looks={"block.step": {"colour": "blue", "label": "block"}},
                 variants=[{"name": "A", "files": ["block.step", "tab.step"], "about": "even"}],

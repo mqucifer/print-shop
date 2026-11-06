@@ -3564,10 +3564,11 @@ class Run:
             if _shown(asked.get("seen") or {}, kept) != mine:
                 continue
             what = f"the stop `{stop}`" if same_stop else ", ".join(f"`{e}`" for e in eyes)
+            who = picked_by_words(str(picked.get("by")))
             said = (
                 f"Already picked; go on. Ask {n} showed {what} on the same files and pictures, "
-                f"unchanged since by their hash, and {picked_by_words(str(picked.get('by')))} "
-                f"picked {picked['pick']}: {picked.get('reason') or ''}"
+                f"unchanged since by their hash, and {who[0].lower()}{who[1:]} picked "
+                f"{picked['pick']}: {picked.get('reason') or ''}"
             )
             if picked.get("fix_first"):
                 said += f" Fix first: {picked['fix_first']}"
