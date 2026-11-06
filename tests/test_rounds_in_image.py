@@ -267,7 +267,7 @@ def test_a_run_goes_from_intake_through_refusals_and_a_pick_to_its_needs_met(
             tool(
                 "ask",
                 question="Which proportions?",
-                need="nope",
+                need=["nope"],
                 variants=[{"name": "A", "files": ["block.step"]}],
             )
         ],
@@ -280,7 +280,7 @@ def test_a_run_goes_from_intake_through_refusals_and_a_pick_to_its_needs_met(
             tool(
                 "ask",
                 question="Which proportions?",
-                need="look",
+                need=["look"],
                 variants=[
                     {"name": "A", "files": ["block.step", "tab.step"], "about": "the even one"},
                     {"name": "B", "files": ["wide.step", "wide-tab.step"], "about": "the wide one"},
@@ -478,7 +478,7 @@ def asked_a_pick(tmp_path: Path, **ask: Any) -> Run:
             tool(
                 "ask",
                 question="Which proportions?",
-                need="look",
+                need=["look"],
                 views="iso",
                 variants=[{"name": "A", "files": ["block.step"], "about": "the even one"}],
                 **ask,
@@ -665,7 +665,7 @@ def test_a_picks_sheet_can_hold_a_close_up_and_marks_a_test_piece(tmp_path: Path
             tool(
                 "ask",
                 question="Which proportions?",
-                need="look",
+                need=["look"],
                 views="top",
                 close="-5,0,2.5,4",
                 test_pieces=["test-piece.step"],
@@ -1036,7 +1036,7 @@ def test_a_pick_of_none_leaves_the_need_open_and_says_why(tmp_path: Path) -> Non
             tool(
                 "ask",
                 question="Does this work?",
-                need="look",
+                need=["look"],
                 views="iso",
                 variants=[{"name": "A", "files": ["block.step"]}],
             )
@@ -1133,7 +1133,7 @@ def asked_with_needs(tmp_path: Path, *need_list: dict[str, Any], **ask: Any) -> 
             tool(
                 "ask",
                 question="Which proportions?",
-                need="look",
+                need=["look"],
                 views="iso",
                 variants=[{"name": "A", "files": ["block.step"], "about": "the even one"}],
                 **ask,
@@ -1165,7 +1165,7 @@ def test_every_note_and_answer_relayed_is_a_row_saying_who_when_and_at_which_cal
             tool(
                 "ask",
                 question="Which?",
-                need="look",
+                need=["look"],
                 views="iso",
                 variants=[{"name": "A", "files": ["block.step"]}],
             )
@@ -1585,7 +1585,7 @@ def test_a_pick_on_files_that_changed_doesnt_hold_and_the_need_is_asked_again(
     ask_again = tool(
         "ask",
         question="And this one?",
-        need="look",
+        need=["look"],
         views="iso",
         variants=[{"name": "A", "files": ["block.step"], "about": "narrower"}],
     )
@@ -1633,12 +1633,16 @@ def test_a_pick_of_files_the_part_isnt_made_of_doesnt_hold(tmp_path: Path) -> No
 def test_a_pick_of_none_takes_back_the_one_before_it(tmp_path: Path) -> None:
     run = asked_with_needs(tmp_path, SIZE_NEED, EYE_NEED)
     picked(run)
+    # Something new beside it: the same sheet again is already picked (mqucifer/print-shop#59).
     ask_again = tool(
         "ask",
         question="Still?",
-        need="look",
+        need=["look"],
         views="iso",
-        variants=[{"name": "A", "files": ["block.step"]}],
+        variants=[
+            {"name": "A", "files": ["block.step"]},
+            {"name": "B", "files": ["block.step", "tab.step"]},
+        ],
     )
     run, _ = again(run, [ask_again], SENT)
     run.resume()
@@ -1713,8 +1717,9 @@ PANE_LINE = (
         ),
         (
             "pane-hold",
-            "capture frame.step --pocket-z 2 --clearance 0.1 --pane-thickness 2 --panes 5",
-            "1 pane(s) read, and 5 were asked for",
+            # A figure the need holds: a pane count follows the part (mqucifer/print-shop#59).
+            "capture frame.step --pocket-z 2 --clearance 0.1 --pane-thickness 2 --min-lip 3",
+            "is under 3.0 mm after 0.1 mm of play",
         ),
     ],
 )
@@ -2021,7 +2026,7 @@ def test_the_run_doesnt_stop_for_approval_with_a_file_under_the_nozzles_width(
     assert "the thinnest 0.200 mm" in first and "- tab.step, ok:" in first
     assert "Round 2: every need is met." in second
     assert run.state.stop == {"kind": "met", "n": 1}
-    stood = rows(run, "standing")
+    stood = [r for r in rows(run, "standing") if r["check_name"] == "printable"]
     assert {(r["round"], r["file"], r["passed"]) for r in stood} == {
         (1, "block.step", 0),
         (1, "tab.step", 1),
@@ -2162,7 +2167,7 @@ def test_an_asks_sheet_goes_to_the_model_first_and_only_then_with_its_words(
             tool(
                 "ask",
                 question="Which proportions?",
-                need="look",
+                need=["look"],
                 views="top",
                 cuts="z=0",
                 looks={"block.step": {"colour": "blue", "label": "block"}},
@@ -2175,7 +2180,7 @@ def test_an_asks_sheet_goes_to_the_model_first_and_only_then_with_its_words(
             tool(
                 "ask",
                 question="Which proportions?",
-                need="look",
+                need=["look"],
                 views="top",
                 looks={"block.step": {"colour": "blue", "label": "block"}},
                 variants=[{"name": "A", "files": ["block.step", "tab.step"], "about": "even"}],
@@ -2189,7 +2194,7 @@ def test_an_asks_sheet_goes_to_the_model_first_and_only_then_with_its_words(
     assert sent[1]["why"] == "changed", "a file changed after its sheet was drawn"
     drawn = [e for e in replies(run) if e["name"] == "ask"]
     assert all(e["outcome"] == "ok" for e in drawn)
-    assert "hasn't gone to the Sponsor" in drawn[0]["reply"]
+    assert "nothing has gone out yet" in drawn[0]["reply"]
     assert "drawn: block.step: block (blue)" in drawn[0]["reply"]
     # The harness's own reading of what the sheet shows: the gap fails, as `done` would say.
     assert (
@@ -2209,7 +2214,7 @@ def test_an_asks_sheet_goes_to_the_model_first_and_only_then_with_its_words(
     pick = rows(run, "picks")[0]
     assert pick["said_of_sheet_model_said"].startswith("The block in blue")
     at_ask = [r for r in rows(run, "standing") if r["stop"] == "ask"]
-    assert {r["check_name"] for r in at_ask} == {"need gap", "printable"}
+    assert {r["check_name"] for r in at_ask} == {"need gap", "printable", "curves"}
     assert all(r["ask"] == 1 for r in at_ask)
     asked = json.loads((folder / "asked.json").read_text())
     assert asked["says_model_said"].startswith("The block in blue")

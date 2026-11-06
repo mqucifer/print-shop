@@ -31,7 +31,7 @@ import pytest
 from print_shop.rounds import paths
 from print_shop.rounds.run import Run
 from print_shop.rounds.session import Limits
-from tests.rounds_fakes import Scripted, tool
+from tests.rounds_fakes import Restating, tool
 from tests.test_rounds_in_image import BROKEN_DOWN
 
 pytestmark = [pytest.mark.bench, pytest.mark.bench_local]
@@ -136,7 +136,7 @@ def test_cup_1_read_back_refuses_its_fail_need_and_its_thin_panes_and_delivers_t
                 tool(
                     "ask",
                     question="Does it read as the picture?",
-                    need=eye,
+                    need=[eye],
                     looks=looks(files),
                     cuts="z=3",
                     variants=[{"name": "A", "files": files, "about": "as the run left it"}],
@@ -156,11 +156,13 @@ def test_cup_1_read_back_refuses_its_fail_need_and_its_thin_panes_and_delivers_t
         (run.folder / "asks" / str(run.state.asks) / "pick.json").write_text(json.dumps(pick))
 
     def load(run: Run, *turns: Any) -> Run:
-        return Run.load(run.folder, Scripted(*turns), sleep=lambda _: None)
+        # Round 2's files change the part, so `done` holds the descriptions written before, as
+        # mqucifer/print-shop#53 has it, and the model answers each as a real run must.
+        return Run.load(run.folder, Restating(*turns), sleep=lambda _: None)
 
     # Intake, and round 1's script as the run had it.
     round_1, round_2 = files_of(1), files_of(2)
-    model = Scripted(
+    model = Restating(
         [BROKEN_DOWN, tool("needs", needs=failing_version)],
         [tool("needs", needs=settled)],
         *asked(round_1),

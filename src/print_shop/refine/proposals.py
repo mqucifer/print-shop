@@ -39,6 +39,9 @@ if TYPE_CHECKING:
 TRIED = 3
 #: Two heights the same, in mm.
 SAME = 1e-4
+#: How near the changed frame's ceiling is to the one proposed, in mm, as `pause` reads it: a
+#: tenth of a 0.2 mm layer.
+CEILING_WITHIN = 0.02
 
 
 def numbers_in(source: str) -> dict[str, float]:
@@ -215,6 +218,13 @@ def check(
         kept = work / "kept"
         if record.get("verdict") not in ("OK", "PARTIAL") or not (kept / frame.was).is_file():
             continue
+        # The change it names, and nothing else: on `eval-arcs-1` the pane's thickness was the
+        # pocket's depth, so the try thickened the pane and failed its need
+        # (mqucifer/print-shop#59).
+        others = moved_besides(judged, kept, frame.was)
+        if others:
+            attempt["moved_too"] = others
+            continue
         # What the changed run made, over the approved round's: the needs name its files.
         changed = folder / f"files-{name}"
         if changed.exists():
@@ -240,6 +250,11 @@ def check(
         )
         attempt["frame_sha256"] = content_hash(frame.was, (changed / frame.was).read_bytes())
         orca = attempt["orca"]
+        risen = ceiling_now(orca)
+        attempt["ceiling_now"] = risen
+        if risen is None or abs(risen - (change["ceiling"] + change["rise"])) > CEILING_WITHIN:
+            attempt["not_the_ceiling"] = True
+            continue
         needs_ok = all(r["passed"] is not False for r in readings)
         if orca.get("pause_ok") and needs_ok:
             attempt["held"] = True
@@ -258,6 +273,15 @@ def check(
                 ),
             }
     last = tried[-1]
+    if all(t.get("moved_too") or t.get("not_the_ceiling") for t in tried):
+        return {
+            "checked": "words",
+            "tried": tried,
+            "said": "Words only: no number at the top of the script moves the ceiling alone. "
+            + "; ".join(_not_alone(t) for t in tried)
+            + ".",
+            "numbers": numbers,
+        }
     return {
         "checked": "failed",
         "tried": tried,
@@ -273,6 +297,44 @@ def check(
         )
         + ". Its words stand, with the measured reason.",
     }
+
+
+def moved_besides(before: Path, kept: Path, frame: str) -> list[str]:
+    """Each file the changed run wrote, other than the frame, that differs from the approved
+    round's: a parameter that moves one moves more than the ceiling."""
+    found = []
+    for made in sorted(kept.rglob("*")):
+        name = str(made.relative_to(kept))
+        if not made.is_file() or name == frame:
+            continue
+        was = before / name
+        if not was.is_file():
+            continue
+        if content_hash(name, made.read_bytes()) != content_hash(name, was.read_bytes()):
+            found.append(name)
+    return found
+
+
+def ceiling_now(orca: dict[str, Any]) -> float | None:
+    """The pocket's ceiling the changed frame's `pause` reads, the highest of its openings."""
+    heights = [
+        float(row["pocket_ceiling_z"])
+        for f in orca.get("findings") or []
+        if f.get("kind") == "pause" and f.get("source") == "bench"
+        for row in (f.get("numbers") or {}).get("openings") or []
+        if row.get("pocket_ceiling_z") is not None
+    ]
+    return max(heights) if heights else None
+
+
+def _not_alone(t: dict[str, Any]) -> str:
+    if t.get("moved_too"):
+        moved = ", ".join(f"`{name}`" for name in t["moved_too"])
+        return f"{t['parameter']} → {t['becomes']:g} ({t['as']}) changed {moved} too"
+    return (
+        f"{t['parameter']} → {t['becomes']:g} ({t['as']}) left the ceiling at "
+        f"{t.get('ceiling_now')}"
+    )
 
 
 def decide(ledger: DesignLedger, proposal: int, decision: str, by: str, note: str) -> int:

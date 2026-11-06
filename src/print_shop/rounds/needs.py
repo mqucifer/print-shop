@@ -14,7 +14,7 @@ import json
 import math
 import re
 import shlex
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
 from print_shop.rounds import reports, toolsets
@@ -308,6 +308,104 @@ def verdicts_wrong(found: list[Need]) -> list[str]:
             if said:
                 wrong.append(f"the need {need.id!r}: {said}")
     return wrong
+
+
+def echoes_wrong(found: list[Need]) -> list[str]:
+    """Each bench need whose `number` reads back one of its command's own arguments, so it checks
+    nothing (`reports.INPUTS`): on `eval-fit-1` a fixed fit need on `panes` passed at 0.25 mm
+    because `panes` was told to build its pane at 0.25 mm (mqucifer/print-shop#59)."""
+    wrong = []
+    for need in found:
+        if need.by != "bench" or not need.number or not need.command:
+            continue
+        words = need.argv()
+        option = reports.echoed(words[0], need.number) if words else None
+        if option is None:
+            continue
+        given = next((w.split("=", 1)[1] for w in words if w.startswith(option + "=")), None)
+        if given is None and option in words and words.index(option) + 1 < len(words):
+            given = words[words.index(option) + 1]
+        at = f" {given}" if given else ""
+        wrong.append(
+            f"the need {need.id!r}: `{need.number}` is `{words[0]}`'s own `{option}{at}` read "
+            f"back: `{words[0]}` builds what it measures from it, so it reads{at or ' it'} "
+            "whatever the part is, and checks nothing. Check the part's own file: "
+            f"{reports.READS_THE_FILE.get(words[0], 'a command that reads it')}"
+        )
+    return wrong
+
+
+def _split(words: list[str]) -> tuple[list[str], list[tuple[str, str]]]:
+    """A command's positional words and its options, each option with its one value: every
+    option of the commands whose files follow the part takes one (`reports.ROLES`)."""
+    positional: list[str] = []
+    options: list[tuple[str, str]] = []
+    k = 0
+    while k < len(words):
+        word = words[k]
+        if word.startswith("--"):
+            if "=" in word:
+                name, value = word.split("=", 1)
+                options.append((name, value))
+            else:
+                options.append((word, words[k + 1] if k + 1 < len(words) else ""))
+                k += 1
+        else:
+            positional.append(word)
+        k += 1
+    return positional, options
+
+
+def on_part(need: Need, glass: list[Any]) -> tuple[Need, str]:
+    """The need as it reads the part now: its frame, its panes, the frame's other parts and how
+    many panes there are, as `glass` declares them, and every figure as settled
+    (mqucifer/print-shop#59). With what changed in words, or nothing. A need on a given reference
+    that `glass` doesn't name, the "before" state, stays as it is.
+
+    `glass` is the declaration `standing.Glass` holds: each with `frame`, `panes` and `others`."""
+    words = need.argv() if need.by == "bench" and need.command else []
+    roles = reports.ROLES.get(words[0]) if words else None
+    if not roles or not glass:
+        return need, ""
+    command = words[0]
+    positional, options = _split(words[1:])
+    names = reports.POSITIONAL[command]
+    given: dict[str, list[str]] = {name: [] for name in names}
+    for k, word in enumerate(positional):
+        given[names[min(k, len(names) - 1)]].append(word)
+    frames = {one.frame: one for one in glass}
+    one = None
+    if "frame" in given and given["frame"]:
+        named = given["frame"][0]
+        one = frames.get(named)
+        if one is None and len(glass) == 1 and not named.startswith("references/"):
+            # The frame renamed: the part has one frame, and the need's isn't a given file.
+            one = glass[0]
+        if one is None:
+            return need, ""
+        given["frame"] = [one.frame]
+    if "panes" in given:
+        panes = list(one.panes) if one is not None else [p for g in glass for p in g.panes]
+        if roles.get("panes") == reports.PANES and panes:
+            given["panes"] = panes
+    moved: list[tuple[str, str]] = []
+    for name, value in options:
+        role = roles.get(name)
+        if role == reports.COUNT and one is not None:
+            moved.append((name, str(len(one.panes))))
+        elif role == reports.WITH and one is not None:
+            continue  # put back from the declaration below
+        else:
+            moved.append((name, value))
+    if one is not None and roles.get("--with") == reports.WITH:
+        moved += [("--with", other) for other in one.others]
+    rebuilt = [command, *[w for name in names for w in given[name]]]
+    for name, value in moved:
+        rebuilt += [name, value]
+    text = shlex.join(rebuilt)
+    if shlex.split(text) == words or text == need.command:
+        return need, ""
+    return replace(need, command=text), f"settled as `{need.command}`; the part now has `{text}`"
 
 
 def load(entries: list[dict[str, Any]]) -> list[Need]:

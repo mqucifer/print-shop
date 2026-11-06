@@ -92,6 +92,11 @@ ASK_SIZE = "512"
 #: The most rows of a sheet at approval the model is shown. The person always has it, and a very
 #: tall picture could fail the call that carries it, which isn't worth a run.
 SHOWN_ROWS = 4
+#: Said where a settled need's files or count followed the part (mqucifer/print-shop#59).
+FOLLOWED = (
+    "Needs whose files or pane count follow the part, as `glass` declares it, every figure as "
+    "settled:"
+)
 #: A sheet's row name, from a file's name where nobody gave it one.
 NOT_IN_A_NAME = re.compile(r"[^A-Za-z0-9_-]+")
 
@@ -814,20 +819,22 @@ class Run:
             raise Refused(f"{path}: a pick needs its reason, which is what the ledger learns from")
         _who_decides(by, path)
         self.ledger.picked(self.state.name, n, pick, reason, by, fix_first)
-        need = asked.get("need")
-        if need:
+        # Every eye need the ask named: one stop answers them all (mqucifer/print-shop#59).
+        eyes = asked.get("needs") or ([asked["need"]] if asked.get("need") else [])
+        for need in eyes:
             # A "none" takes back any pick before it: the person has just said it isn't this.
             self.state.picks.pop(need, None)
-        if pick != "none" and need:
+        if pick != "none" and eyes:
             seen = asked.get("seen") or records.seen_by_kept_files(folder)
             files = (seen.get("variants") or {}).get(pick) or {}
-            self.state.picks[need] = {
-                "pick": pick,
-                "reason": reason,
-                "ask": n,
-                "by": by,
-                "files": files,
-            }
+            for need in eyes:
+                self.state.picks[need] = {
+                    "pick": pick,
+                    "reason": reason,
+                    "ask": n,
+                    "by": by,
+                    "files": files,
+                }
         who = picked_by_words(by)
         if pick == "none":
             said = f"{who} didn't pick any of them. Their reason: {reason}"
@@ -982,7 +989,24 @@ class Run:
         _write_atomic(self.folder / "state.json", json.dumps(asdict(self.state), indent=1))
 
     def _needs(self) -> list[Need]:
+        """The needs as settled."""
         return needs.load(self.state.needs)
+
+    def _needs_now(self, glass: list[glass_checks.Glass] | None = None) -> list[Need]:
+        """The needs as they read the part now: a settled need's frame, panes and count follow
+        the part as `glass` declares it, the latest unless given, and its figures stay as settled
+        (mqucifer/print-shop#59)."""
+        declared = glass if glass is not None else glass_checks.load(self.state.glass)
+        return [needs.on_part(n, declared)[0] for n in self._needs()]
+
+    def _followed_said(self, glass: list[glass_checks.Glass]) -> list[str]:
+        """Each need whose files or count followed the part, in words, for a reply or a stop."""
+        found = []
+        for need in self._needs():
+            _, said = needs.on_part(need, glass)
+            if said:
+                found.append(f"- `{need.id}`: {said}")
+        return found
 
     def _form(self) -> forms.Form | None:
         return forms.load(self.state.form)
@@ -1286,7 +1310,7 @@ class Run:
         """The settled needs that run a bench check."""
         return [
             nudge.Wanted(n.id, n.command, n.argv(), n.fixed, n.quote)
-            for n in self._needs()
+            for n in self._needs_now()
             if n.by == "bench" and n.command
         ]
 
@@ -1354,7 +1378,7 @@ class Run:
         command read against its limit, and the harness's readings of the needs at `done` and at
         an ask. `thin` at the harness's settings is `unprintable.py`'s."""
         found: list[tuple[int, int, holding.Tried]] = []
-        wanted = self._needs()
+        wanted = self._needs_now()
         for row in self.ledger.rows(
             "SELECT at_call, argv, exit, verdict, why, numbers FROM bench_calls WHERE run=? "
             "ORDER BY id",
@@ -1420,12 +1444,15 @@ class Run:
             )
             found.append((tried.at_call, 1, tried))
         for row in self.ledger.rows(
-            "SELECT r.need, r.passed, r.verdict, r.why, o.last_call, o.needs_version FROM readings "
+            "SELECT r.need, r.round, r.passed, r.verdict, r.why, o.last_call, o.needs_version FROM "
+            "readings "
             "AS r JOIN rounds AS o ON o.run = r.run AND o.round = r.round WHERE r.run=? AND "
             "r.by='bench' AND o.last_call IS NOT NULL ORDER BY o.round",
             self.state.name,
         ):
-            command = self._need_command(int(row["needs_version"]), str(row["need"]))
+            command = self._need_command(
+                int(row["needs_version"]), str(row["need"]), int(row["round"])
+            )
             if not command:
                 continue
             unsure = not row["passed"] and (not row["verdict"] or row["verdict"] in UNSURE)
@@ -1441,8 +1468,15 @@ class Run:
         found.sort(key=lambda r: (r[0], r[1]))
         return [r[2] for r in found]
 
-    def _need_command(self, version: int, need: str) -> str:
-        """A need's command as a version of the needs had it."""
+    def _need_command(self, version: int, need: str, round_n: int | None = None) -> str:
+        """A need's command as `done` ran it in that round, its files following the part
+        (mqucifer/print-shop#59), or as a version of the needs had it."""
+        ran = self.folder / "rounds" / f"{round_n or 0:03}" / "followed.json"
+        if round_n is not None and ran.is_file():
+            with contextlib.suppress(ValueError, OSError):
+                found = json.loads(ran.read_text(encoding="utf-8")).get(need)
+                if found:
+                    return str(found)
         kept = self.folder / "needs" / f"{version}.json"
         if not kept.is_file():
             return ""
@@ -1472,6 +1506,8 @@ class Run:
         fails again, and shown to the person at the next stop. A check a settled need runs is
         `done`'s to decide, so it can't be set aside."""
         why = str(args.get("why") or "").strip()
+        if args.get("curves") is not None:
+            return self._set_aside_curves(str(args["curves"]).strip(), why, args)
         if args.get("file") is not None:
             return self._set_aside_file(str(args["file"]).strip(), why, args.get("check"))
         try:
@@ -1536,6 +1572,50 @@ class Run:
         )
         return Judged("set_aside", "ok", reply, detail={"set_aside": aside})
 
+    def _set_aside_curves(self, name: str, why: str, args: dict[str, Any]) -> Judged:
+        """A part file whose small flat faces aren't curves stored as strips, by the model's
+        reason: `done` and the stops then pass it, and the next stop shows why
+        (mqucifer/print-shop#59)."""
+        if args.get("check") or args.get("file"):
+            reply = "`set_aside` takes one of `check`, `file` and `curves`."
+            return Judged("set_aside", "failed", reply, "both")
+        if not why:
+            reply = "`why` says why the file's small flat faces aren't curves, for the next stop."
+            return Judged("set_aside", "failed", reply, "empty")
+        plain = _plain_name(name)
+        latest = self.ledger.rows(
+            "SELECT passed, why FROM standing WHERE run=? AND check_name=? AND file=? "
+            "ORDER BY id DESC LIMIT 1",
+            self.state.name,
+            glass_checks.CURVES,
+            plain,
+        )
+        if not latest or latest[0]["passed"]:
+            reply = (
+                f"`{name}` hasn't failed the harness's reading of curves stored as strips, at "
+                "`done` or a stop, so there's nothing to set aside."
+            )
+            return Judged("set_aside", "failed", reply, "not_failing")
+        aside = {
+            "at_call": self.session.requests,
+            "round": self.state.round,
+            "command": "info",
+            "files": [plain],
+            "tries": [],
+            "why": why,
+            "strips_file": plain,
+            "shown_at": None,
+        }
+        self.state.asides = [a for a in self.state.asides if a.get("strips_file") != plain]
+        self.state.asides.append(aside)
+        self.ledger.set_aside(self.state.name, len(self.state.asides), aside)
+        self.save()
+        reply = (
+            f"Set aside: `done` and the stops pass `{plain}`'s small flat faces with your reason, "
+            "which the person at the next stop reads."
+        )
+        return Judged("set_aside", "ok", reply, detail={"set_aside": aside})
+
     def _set_aside_file(self, name: str, why: str, check: Any) -> Judged:
         """A part file the model says no need has to read, and why (mqucifer/print-shop#52): out
         of `done`'s refusal, and shown at the next stop."""
@@ -1582,8 +1662,23 @@ class Run:
         if not shown:
             return []
         files = [a for a in shown if a.get("unread_file")]
-        shown = [a for a in shown if not a.get("unread_file")]
+        strips = [a for a in shown if a.get("strips_file")]
+        shown = [a for a in shown if not a.get("unread_file") and not a.get("strips_file")]
         lines: list[str] = []
+        if strips:
+            lines += [
+                "## Small flat faces the model says aren't curves stored as strips",
+                "",
+                f"Each file has {glass_checks.STRIPS_AT} or more flat faces under 1 mm across, "
+                "which is how a curve built from a polygon is stored. The model says why these "
+                "aren't:",
+                "",
+                *[
+                    f"- `{a['strips_file']}`, set aside at call {a['at_call']}: {a['why']}"
+                    for a in strips
+                ],
+                "",
+            ]
         if files:
             lines += [
                 "## Part files no need reads, set aside by the model",
@@ -1620,7 +1715,7 @@ class Run:
             if not plain.startswith("references/"):
                 mine.setdefault(Path(plain).name, plain)
         found = []
-        for need in self._needs():
+        for need in self._needs_now():
             if need.by != "bench":
                 continue
             for name in need.files():
@@ -1640,7 +1735,7 @@ class Run:
         # unless it asks for one body: on `eval-tip-2` `pane.step` was read by `thin` alone.
         read = {
             _plain_name(f)
-            for n in self._needs()
+            for n in self._needs_now()
             if n.by == "bench" and (n.argv()[:1] != ["thin"] or "--one-body" in n.argv())
             for f in n.files()
         }
@@ -1692,7 +1787,7 @@ class Run:
         the frame had almost no lip at the tip. Each is its need, the file and its command."""
         kept = {_plain_name(name) for name in printed}
         found = []
-        for need in self._needs():
+        for need in self._needs_now():
             if need.by != "bench":
                 continue
             for name in need.files():
@@ -1800,7 +1895,12 @@ class Run:
         self.state.stop = {"kind": "questions", "n": n}
         self.state.said.append(f"You asked the Sponsor:\n\n{text}")
         self.save()
-        reply = "Your questions have gone to the Sponsor. Their answers come in your next message."
+        # Who answers isn't known until they do: a stand-in's answers say so, and the reply
+        # doesn't name the Sponsor before then (mqucifer/print-shop#59).
+        reply = (
+            "Your questions have gone out, to the Sponsor or someone standing in for them. The "
+            "answers come in your next message, saying who gave them."
+        )
         if said:
             reply += f" {said}"
         images = shown or [(f"questions/{n}/{Path(p).name}", self._b64(p)) for p in kept]
@@ -1888,8 +1988,10 @@ class Run:
         )
         if not wrong and not trying:
             wrong = needs.numbers_wrong(found) + needs.verdicts_wrong(found)
+            wrong += needs.echoes_wrong(found)
         if not wrong and form is not None and not trying:
             wrong = forms.held(found, form) + figures.wrong(found, form)
+            wrong += figures.echoed(found, form)
             wrong += self._fixed_kept(found)
         if not wrong:
             wrong = self._usable(found)
@@ -1899,7 +2001,10 @@ class Run:
         if trying:
             return self._try_needs(found)
         why_changed = args.get("why_changed") or {}
-        swaps, refused = self._swaps(self._needs(), found, why_changed)
+        declared = glass_checks.load(self.state.glass)
+        swaps, refused = self._swaps(
+            self._needs_now(declared), [needs.on_part(n, declared)[0] for n in found], why_changed
+        )
         if refused:
             said = "\n".join(f"- {w}" for w in refused)
             reply = (
@@ -1954,9 +2059,12 @@ class Run:
         the Sponsor changes one, with a note (`_reopen`)."""
         if self.state.fixed_open:
             return []
-        kept = {n.id: n for n in found}
+        # Its files and pane count follow the part, so a list of the part's own files in their
+        # roles is the same check (mqucifer/print-shop#59); its figures aren't.
+        declared = glass_checks.load(self.state.glass)
+        kept = {n.id: needs.on_part(n, declared)[0] for n in found}
         wrong = []
-        for old in self._needs():
+        for old in self._needs_now(declared):
             new = kept.get(old.id)
             if not old.fixed or (
                 new is not None
@@ -2147,6 +2255,9 @@ class Run:
         if not fix_shape or not closing:
             reply = "`fix_shape` and `closing` each take your own words, and one is empty."
             return Judged("done", "failed", reply, "empty")
+        # The frames and panes first: a settled need's files and counts follow them
+        # (mqucifer/print-shop#59), so what's off the part is read against the part as it is.
+        declared = self._glass_declared(args.get("glass"), part, "done")
         off = self._off_part(part)
         if off:
             return Judged("done", "failed", _off_part_refused(off), "need_off_part")
@@ -2156,9 +2267,9 @@ class Run:
         unread = self._unread(part)
         if unread:
             return Judged("done", "failed", _unread_refused(unread), "part_unread")
-        glass = self._glass_declared(args.get("glass"), part, "done")
-        if isinstance(glass, Judged):
-            return glass
+        if isinstance(declared, Judged):
+            return declared
+        glass = declared
         stale = self._stale(part)
         if stale:
             # A description of the part as it was: sent again or said to hold before anything is
@@ -2173,10 +2284,16 @@ class Run:
         n = self.state.round
         folder = self.folder / "rounds" / f"{n:03}"
         shutil.rmtree(folder / "judged", ignore_errors=True)
-        wanted = self._needs()
+        wanted = self._needs_now(glass)
+        followed = self._followed_said(glass)
+        (folder / "followed.json").write_text(
+            json.dumps({n.id: n.command for n in wanted if n.by == "bench"}, indent=1),
+            encoding="utf-8",
+        )
         judgement = judge.check(self.box, self.work, script, wanted, self.state.picks, folder, part)
         standing: list[judge.Standing] = []
         panes_read: list[judge.Standing] = []
+        strips: list[judge.Standing] = []
         overlap: dict[str, Any] = {}
         clashes: list[str] = []
         if judgement.met:
@@ -2190,6 +2307,10 @@ class Run:
             panes_read = glass_checks.check(self.box, glass, judged, folder / "standing", ran)
             for one in panes_read:
                 self._stood(one, "done", judged)
+            # Curves stored as flat strips, beside `thin` (mqucifer/print-shop#59).
+            strips = self._curves(part, judged, folder / "standing")
+            for one in strips:
+                self._stood(one, "done", judged)
             overlap = self._overlap(judged, part)
             clashes = _clashes(groups, part, overlap)
             (folder / "standing.json").write_text(
@@ -2197,6 +2318,7 @@ class Run:
                     {
                         "printable": [one.plain() for one in standing],
                         "glass": [one.plain() for one in panes_read],
+                        "curves": [one.plain() for one in strips],
                         "overlap": overlap,
                         "clashes": clashes,
                     },
@@ -2209,6 +2331,7 @@ class Run:
             and not clashes
             and not any(one.failed for one in standing)
             and not any(one.failed for one in panes_read)
+            and not any(one.failed for one in strips)
         )
         files = paths.snapshot(self.work)
         diff = self._diff(folder)
@@ -2232,8 +2355,12 @@ class Run:
             judgement.left,
         )
         reply = self._said_of(judgement, wanted, met, standing, clashes)
+        if followed:
+            reply += "\n" + "\n".join([FOLLOWED, *followed])
         if panes_read:
             reply += "\n" + "\n".join([glass_checks.HEADING, *glass_checks.said(panes_read)])
+        if any(not one.passed for one in strips):
+            reply += "\n" + "\n".join([glass_checks.CURVES_HEADING, *glass_checks.said(strips)])
         held = self._holding()
         if held:
             # Whatever the needs read: a check that failed and hasn't passed since (`holding.py`).
@@ -2252,6 +2379,7 @@ class Run:
                 "looks": looks,
                 "standing": standing,
                 "glass": panes_read,
+                "curves": strips,
                 "overlap": overlap,
                 "held": held,
             }
@@ -2259,6 +2387,17 @@ class Run:
                 rows, folder, judgement, wanted, closing, reply, detail, delivered
             )
         return self._next_round(reply, detail)
+
+    def _curves(self, files: list[str], where: Path, kept: Path) -> list[judge.Standing]:
+        """Each file's curves, if it has any, built as curves: `info`'s small flat faces as a
+        standing check, unless the model set the file aside with its reason
+        (mqucifer/print-shop#59). A run from before toolsets carries on as it began."""
+        if self.toolset.legacy:
+            return []
+        asides = {
+            str(a["strips_file"]): str(a["why"]) for a in self.state.asides if a.get("strips_file")
+        }
+        return glass_checks.curves(self.box, files, where, kept, asides)
 
     def _stood(self, one: judge.Standing, stop: str, where: Path, ask: int | None = None) -> None:
         sha = None
@@ -2474,6 +2613,13 @@ class Run:
         lines.append("")
         if delivered.get("glass"):
             lines += [f"## {glass_checks.HEADING}", "", *glass_checks.said(delivered["glass"]), ""]
+        if delivered.get("curves"):
+            lines += [
+                f"## {glass_checks.CURVES_HEADING}",
+                "",
+                *glass_checks.said(delivered["curves"]),
+                "",
+            ]
         if delivered.get("held"):
             lines += [
                 "## Checks whose latest try failed, which no need settles",
@@ -2700,13 +2846,17 @@ class Run:
         picture the model drew (mqucifer/print-shop#38)."""
         question = args["question"].strip()
         variants = args.get("variants") or []
-        need = args.get("need") or None
+        eyes = _eyes_named(args.get("need"))
+        need = eyes[0] if eyes else None
+        later = args.get("later") or {}
         stop = str(args.get("stop") or "").strip() or None
         plan = str(args.get("plan") or "").strip()
         pictures = [str(p) for p in args.get("pictures") or []]
-        bad = self._ask_problem(question, variants, need)
+        bad = self._ask_problem(question, variants, eyes)
         if bad is None:
             bad = self._stop_problem(stop, plan)
+        if bad is None:
+            bad = self._eyes_problem(eyes, later, variants)
         if bad is None and not (variants or pictures or plan):
             bad = (
                 "nothing_shown",
@@ -2739,6 +2889,13 @@ class Run:
             if seen_picture.outcome != "ok":
                 return Judged("ask", "failed", seen_picture.reply, seen_picture.why)
             shown += seen_picture.images
+        seen_now = {
+            "variants": {v["name"]: self._held(v["files"]) for v in named},
+            "pictures": self._held(pictures),
+        }
+        repeated = self._already_picked(stop, eyes, seen_now, plan)
+        if repeated is not None:
+            return Judged("ask", "failed", repeated, "already_picked")
         drawn = list(dict.fromkeys(str(f) for v in named for f in v["files"]))
         looks = self._looks(args.get("looks"), drawn, "ask")
         if isinstance(looks, Judged):
@@ -2777,6 +2934,8 @@ class Run:
         self.state.draft = {
             "question": question,
             "need": need,
+            "needs": eyes,
+            "later": {k: str(v) for k, v in later.items()} if eyes else {},
             "stop": stop,
             "plan": plan,
             "variants": named,
@@ -2798,9 +2957,10 @@ class Run:
         self.save()
         what = "The sheet above is drawn" if sheet else "What's above is ready"
         lines = [
-            f"{what}, and it hasn't gone to the Sponsor. Look at it, and send it with `send_ask`, "
+            f"{what}, and nothing has gone out yet. Look at it, and send it with `send_ask`, "
             "saying in `says` what it shows: each picture as drawn, not the design you meant. It "
-            "reaches them with the question, in your words."
+            "reaches whoever answers, the Sponsor or someone standing in for them, with the "
+            "question, in your words."
         ]
         if bench_said:
             lines += ["What the bench says it drew:", *[f"- {line}" for line in bench_said]]
@@ -2875,6 +3035,10 @@ class Run:
             for need, file, own, command in replaced
         ]
         self.state.draft["unread"] = unread
+        followed = self._followed_said(declared or glass_checks.load(self.state.glass))
+        if followed:
+            lines.append(FOLLOWED + "\n" + "\n".join(followed))
+        self.state.draft["followed"] = followed
         stale = self._stale(printed)
         if stale:
             lines.append(
@@ -2960,7 +3124,7 @@ class Run:
         file. On `cup-1` a question said a pane was split in two where `capture` read one, and no
         need ran `capture` any more."""
         found: list[judge.Standing] = []
-        benched = [n for n in self._needs() if n.by == "bench"]
+        benched = [n for n in self._needs_now(glass) if n.by == "bench"]
         ran = list(zip(benched, self._read_now(benched), strict=True))
         for need, reading in ran:
             unsure = reading.verdict in UNSURE or not reading.verdict
@@ -2989,6 +3153,7 @@ class Run:
                 and any(f in shown for f in one.files())
             ]
             found += glass_checks.check(self.box, on_sheet, scratch, scratch / ".kept", ran)
+            found += self._curves(files, scratch, scratch / ".kept")
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
         return found
@@ -3052,6 +3217,8 @@ class Run:
         asked = {
             "question": draft["question"],
             "need": draft["need"],
+            "needs": draft.get("needs") or ([draft["need"]] if draft["need"] else []),
+            "later": draft.get("later") or {},
             "stop": stop,
             "plan": draft.get("plan") or "",
             "pictures": pictures,
@@ -3077,6 +3244,7 @@ class Run:
                 "",
             ]
         lines += [draft["question"], ""]
+        lines += self._eyes_said(draft)
         if about:
             lines += [about, ""]
         if sheet is not None:
@@ -3162,6 +3330,17 @@ class Run:
                 "",
             ]
         lines += self._part_reading_said(draft)
+        if draft.get("followed"):
+            lines += [
+                "## Needs that follow the part",
+                "",
+                "A settled need's frame, panes and pane count are the part's, as the model's "
+                "latest `glass` names them. Its figures stay as settled: changing one takes "
+                "`--reopen-needs` with the Sponsor's note.",
+                "",
+                *draft["followed"],
+                "",
+            ]
         lines += self._needs_refused_said()
         lines += self._asides_said()
         lines += self._swaps_said()
@@ -3180,7 +3359,7 @@ class Run:
             self.state.name,
             n,
             self.state.round,
-            draft["need"],
+            ", ".join(draft.get("needs") or []) or draft["need"],
             draft["question"],
             named,
             str(sheet) if sheet is not None else "",
@@ -3206,8 +3385,8 @@ class Run:
         self.state.stop = {"kind": "ask", "n": n}
         self.save()
         reply = (
-            "The sheet has gone to the Sponsor, with what you said of it. Their pick and reason "
-            "come in your next message."
+            "The sheet has gone out with what you said of it, to the Sponsor or someone standing "
+            "in for them. The pick and its reason come in your next message, saying who made it."
         )
         return Judged("send_ask", "ok", reply, ending=Ending("ask", {"n": n}))
 
@@ -3274,9 +3453,7 @@ class Run:
             for name in files
         }
 
-    def _ask_problem(
-        self, question: str, variants: Any, need: str | None
-    ) -> tuple[str, str] | None:
+    def _ask_problem(self, question: str, variants: Any, eyes: list[str]) -> tuple[str, str] | None:
         if not question:
             return "empty", "`question` says what they're judging."
         if not isinstance(variants, list):
@@ -3291,10 +3468,139 @@ class Run:
             if variant["name"] in seen:
                 return "not_a_variant", f"Two variants are named {variant['name']}."
             seen.add(variant["name"])
-        if need is not None and need not in [n.id for n in self._needs() if n.by == "eye"]:
-            eyes = ", ".join(n.id for n in self._needs() if n.by == "eye") or "none yet"
-            return "no_such_need", f"`need` names an eye need. They are: {eyes}."
+        known = [n.id for n in self._needs() if n.by == "eye"]
+        for need in eyes:
+            if need not in known:
+                named = ", ".join(known) or "none yet"
+                return "no_such_need", f"`need` names eye needs. They are: {named}."
         return None
+
+    def _eyes_open(self) -> list[Need]:
+        """Each eye need with no pick that holds for the files as they stand."""
+        now = paths.geometry_hashes(self.work)
+        return [
+            n
+            for n in self._needs()
+            if n.by == "eye"
+            and (
+                n.id not in self.state.picks
+                or judge.not_what_it_saw(self.state.picks[n.id], now, None) is not None
+            )
+        ]
+
+    def _eyes_problem(self, eyes: list[str], later: Any, variants: Any) -> tuple[str, str] | None:
+        """Eye needs judged on one sheet are asked together, so one stop answers them: on
+        `suncatcher-3` two were confirmed one stop each on the same layout, and the third set
+        went in one only after the stand-in asked (mqucifer/print-shop#59). And an eye need is
+        asked on the part's own files, which is all its pick can pass."""
+        if not eyes:
+            return None
+        if not variants:
+            return "eye_on_picture", (
+                "An eye need passes on a pick of the part's own files, which `done` holds it to, "
+                "so `need` goes with `variants`: a picture you drew isn't the part, and a pick on "
+                "it can't pass the need. Show the files as variants, with your pictures beside "
+                "them if they help."
+            )
+        if not isinstance(later, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in later.items()
+        ):
+            return "eyes_apart", EYES_LATER
+        left = [
+            n.id for n in self._eyes_open() if n.id not in eyes and not later.get(n.id, "").strip()
+        ]
+        if left:
+            named = ", ".join(f"`{one}`" for one in left)
+            return "eyes_apart", (
+                f"Eye needs judged on one sheet go in one ask, so one stop answers them all: "
+                f"{named} {'is' if len(left) == 1 else 'are'} open too. Name each this sheet "
+                f"answers in `need`, or {EYES_LATER}"
+            )
+        return None
+
+    def _eyes_said(self, draft: dict[str, Any]) -> list[str]:
+        """What the eye needs asked are, for the person: one pick answers every one."""
+        eyes = draft.get("needs") or ([draft["need"]] if draft.get("need") else [])
+        if not eyes:
+            return []
+        found = {n.id: n for n in self._needs()}
+        lines = ["One pick answers each of these, judged by eye on the sheet:", ""]
+        lines += [f"- **{e}**: {found[e].look_for if e in found else ''}" for e in eyes]
+        later = draft.get("later") or {}
+        if later:
+            lines += ["", "Asked at a later stop, as the model says:", ""]
+            lines += [f"- **{k}**: {v}" for k, v in later.items()]
+        return [*lines, ""]
+
+    def _already_picked(
+        self, stop: str | None, eyes: list[str], seen: dict[str, Any], plan: str
+    ) -> str | None:
+        """A stop, or eye needs, asked again on what a pick already answered, unchanged since by
+        hash: on `suncatcher-3` the layout stop was raised again with the picked picture, byte
+        for byte, only to say the fix was understood (mqucifer/print-shop#59)."""
+        if not stop and not eyes:
+            return None
+        mine = _shown(seen, plan if stop == forms.PLAN else "")
+        if mine == _shown({}, ""):
+            return None
+        asks = sorted(
+            (int(p.name) for p in (self.folder / "asks").glob("*") if p.name.isdigit()),
+            reverse=True,
+        )
+        for n in asks:
+            folder = self.folder / "asks" / str(n)
+            try:
+                asked = json.loads((folder / "asked.json").read_text(encoding="utf-8"))
+                picked = json.loads((folder / "pick.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if picked.get("pick") in (None, "none"):
+                continue
+            theirs = asked.get("needs") or ([asked["need"]] if asked.get("need") else [])
+            same_stop = bool(stop) and asked.get("stop") == stop and stop in self.state.stops
+            same_eyes = bool(eyes) and set(eyes) <= set(theirs)
+            if not (same_stop or same_eyes):
+                continue
+            kept = asked.get("plan") or "" if asked.get("stop") == forms.PLAN else ""
+            if _shown(asked.get("seen") or {}, kept) != mine:
+                continue
+            what = f"the stop `{stop}`" if same_stop else ", ".join(f"`{e}`" for e in eyes)
+            who = picked_by_words(str(picked.get("by")))
+            said = (
+                f"Already picked; go on. Ask {n} showed {what} on the same files and pictures, "
+                f"unchanged since by their hash, and {who[0].lower()}{who[1:]} picked "
+                f"{picked['pick']}: {picked.get('reason') or ''}"
+            )
+            if picked.get("fix_first"):
+                said += f" Fix first: {picked['fix_first']}"
+            return (
+                said + "\nAsking again tells them nothing new. Go on with the work, and show it "
+                "at the next stop once it's changed."
+            )
+        return None
+
+
+EYES_LATER = (
+    "say in `later` why it needs another sheet, by its id: "
+    '{"hang-hole": "a close-up of the hole, once it\'s cut"}. The person reads it.'
+)
+
+
+def _eyes_named(given: Any) -> list[str]:
+    """The eye needs an ask names: one, or a list."""
+    if isinstance(given, str):
+        given = [given]
+    if not isinstance(given, list):
+        return []
+    return list(dict.fromkeys(str(one).strip() for one in given if str(one).strip()))
+
+
+def _shown(seen: dict[str, Any], plan: str) -> tuple[Any, ...]:
+    """What an ask showed, by hash: each variant's files, whatever its name, each picture, and
+    the plan's text at the plan stop."""
+    variants = sorted(tuple(sorted(v.values())) for v in (seen.get("variants") or {}).values())
+    pictures = sorted((seen.get("pictures") or {}).values())
+    return (tuple(variants), tuple(pictures), plan)
 
 
 def _need_what(nid: str) -> str:
