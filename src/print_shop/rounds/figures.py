@@ -155,6 +155,11 @@ def carried(need: Need) -> list[Carried]:
             if not math.isfinite(number):
                 continue
             how = f"`{name} {value}`"
+            if name in reports.INPUTS.get(command, {}):
+                # What the command builds from, not a limit it reads the part at: `panes` cuts its
+                # own pane at `--clearance`, so its fit is that figure whatever the part's pane is
+                # (mqucifer/print-shop#59).
+                continue
             if name == "--min" or name.startswith("--min-"):
                 found.append(Carried(number, LOW, how, command, reports.other_end(command, name)))
             elif name == "--max" or name.startswith("--max-"):
@@ -222,7 +227,8 @@ def _said(line: Line, figure: Figure, mine: list[Need], by: list[Carried], missi
         else f"{figure.text}, {SHOWN[figure.end]}"
     )
     has = "; ".join(sorted({c.how for c in by})) or "no figure"
-    return (
+    built = _built_from(figure, mine)
+    return built + (
         f'{whose} `{line.id}`, "{line.text}", and its {what}, isn\'t carried {missing}. '
         f"Their checks carry {has}. A non-negotiable is checked at the request's own figure, at "
         "both ends where the line gives a range or an exact figure: as the check's own limit, "
@@ -230,3 +236,27 @@ def _said(line: Line, figure: Figure, mine: list[Need], by: list[Carried], missi
         "another measure, such as an area for a rim, doesn't carry it. If the line can't be "
         "read that way, ask with `questions`"
     )
+
+
+def _built_from(figure: Figure, mine: list[Need]) -> str:
+    """Where the figure is a command's own input, which it builds what it measures from: said
+    first, with the command that reads the part's file instead (mqucifer/print-shop#59)."""
+    for need in mine:
+        words = need.argv()
+        command = words[0] if words else ""
+        for name, values in nudge.options(words).items():
+            if name not in reports.INPUTS.get(command, {}):
+                continue
+            for value in values:
+                try:
+                    if _same(float(value), figure.value):
+                        return (
+                            f"`{name} {value}` is what `{command}` builds from, not a limit it "
+                            f"reads the part at: `{command}` makes its own and measures that, so "
+                            f"the need {need.id!r} reads {figure.text} whatever the part is. "
+                            "Check the part's own file: "
+                            f"{reports.READS_THE_FILE.get(command, 'a command that reads it')}. "
+                        )
+                except ValueError:
+                    continue
+    return ""
