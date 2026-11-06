@@ -1633,12 +1633,16 @@ def test_a_pick_of_files_the_part_isnt_made_of_doesnt_hold(tmp_path: Path) -> No
 def test_a_pick_of_none_takes_back_the_one_before_it(tmp_path: Path) -> None:
     run = asked_with_needs(tmp_path, SIZE_NEED, EYE_NEED)
     picked(run)
+    # Something new beside it: the same sheet again is already picked (mqucifer/print-shop#59).
     ask_again = tool(
         "ask",
         question="Still?",
         need=["look"],
         views="iso",
-        variants=[{"name": "A", "files": ["block.step"]}],
+        variants=[
+            {"name": "A", "files": ["block.step"]},
+            {"name": "B", "files": ["block.step", "tab.step"]},
+        ],
     )
     run, _ = again(run, [ask_again], SENT)
     run.resume()
@@ -1713,8 +1717,9 @@ PANE_LINE = (
         ),
         (
             "pane-hold",
-            "capture frame.step --pocket-z 2 --clearance 0.1 --pane-thickness 2 --panes 5",
-            "1 pane(s) read, and 5 were asked for",
+            # A figure the need holds: a pane count follows the part (mqucifer/print-shop#59).
+            "capture frame.step --pocket-z 2 --clearance 0.1 --pane-thickness 2 --min-lip 3",
+            "is under 3.0 mm after 0.1 mm of play",
         ),
     ],
 )
@@ -2021,7 +2026,7 @@ def test_the_run_doesnt_stop_for_approval_with_a_file_under_the_nozzles_width(
     assert "the thinnest 0.200 mm" in first and "- tab.step, ok:" in first
     assert "Round 2: every need is met." in second
     assert run.state.stop == {"kind": "met", "n": 1}
-    stood = rows(run, "standing")
+    stood = [r for r in rows(run, "standing") if r["check_name"] == "printable"]
     assert {(r["round"], r["file"], r["passed"]) for r in stood} == {
         (1, "block.step", 0),
         (1, "tab.step", 1),
@@ -2209,7 +2214,7 @@ def test_an_asks_sheet_goes_to_the_model_first_and_only_then_with_its_words(
     pick = rows(run, "picks")[0]
     assert pick["said_of_sheet_model_said"].startswith("The block in blue")
     at_ask = [r for r in rows(run, "standing") if r["stop"] == "ask"]
-    assert {r["check_name"] for r in at_ask} == {"need gap", "printable"}
+    assert {r["check_name"] for r in at_ask} == {"need gap", "printable", "curves"}
     assert all(r["ask"] == 1 for r in at_ask)
     asked = json.loads((folder / "asked.json").read_text())
     assert asked["says_model_said"].startswith("The block in blue")
