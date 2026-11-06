@@ -299,7 +299,7 @@ def test_each_skill_has_a_name_a_line_and_a_body() -> None:
         assert f"`{name}`" in skills.start_line(skills.ALL)
 
 
-@pytest.mark.parametrize("toolset", [toolsets.CORE, toolsets.STAINED_GLASS])
+@pytest.mark.parametrize("toolset", [toolsets.CORE, toolsets.STAINED_GLASS, toolsets.ENCLOSURE])
 def test_a_toolsets_skills_name_every_command_it_has_and_no_other(
     toolset: toolsets.Toolset,
 ) -> None:
@@ -309,7 +309,7 @@ def test_a_toolsets_skills_name_every_command_it_has_and_no_other(
     for command in toolset.commands:
         assert f"`{command} " in bodies, command
     core = skills.registry(toolsets.CORE.skills)["using-the-bench"][1]
-    for command in toolsets.STAINED_GLASS_COMMANDS:
+    for command in toolsets.STAINED_GLASS_COMMANDS + toolsets.ENCLOSURE_COMMANDS:
         assert f"`{command} " not in core, command
 
 

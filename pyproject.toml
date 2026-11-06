@@ -68,6 +68,6 @@ warn_unreachable = true
 # The bench's geometry code runs in its image (src/print_shop/bench/image), and these libraries
 # are there, not in this environment.
 [[tool.mypy.overrides]]
-module = ["cadquery.*", "cadquery", "OCP.*", "manifold3d.*", "manifold3d", "shapely.*", "shapely", "vtk.*", "vtk", "PIL.*"]
+module = ["cadquery.*", "cadquery", "OCP.*", "manifold3d.*", "manifold3d", "shapely.*", "shapely", "vtk.*", "vtk", "PIL.*", "scipy.*", "scipy"]
 ignore_missing_imports = true
 follow_imports = "skip"

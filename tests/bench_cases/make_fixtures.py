@@ -516,6 +516,44 @@ def glass() -> None:
     save(box(0, 10, 0, 10, 0, 1).union(box(0, 10, 9.5, 10, 1, 1.5)), "glass/pane_ridge")
 
 
+def enclosure() -> None:
+    """Edges and lids whose answers are known by arithmetic (mqucifer/print-shop#60).
+    - `round2`: a 40 x 30 x 20 block, every edge rounded 2 mm; `mixed`, its upright edges 3 mm,
+      its top 1.5 mm and its bottom left sharp, so 8 sharp edges: 4 straight, 4 round a corner.
+    - `strips`: a slab whose upright edges are rounded 3 mm as 16 flat strips each.
+    - `tray`: 40 x 30 x 15, its upright edges rounded 3 mm and its bottom 2 mm, its top rim
+      sharp, walls and floor 2 mm, and a 4 mm post 6 mm tall in the middle. Open, a finger
+      meets 16 sharp edges: the rim's 8 outside, its 4 inside and the post's top 4.
+    - `tray-lid`: a 3 mm lid of the same outline, flush on the rim, its top rounded 2 mm.
+      Closed, nothing sharp is in reach: the rim and the lid's underside meet flush.
+    - `lid-lip-P-up`: a lid with a lip 3 mm deep inside the walls, P mm of play all round,
+      lifted 0.5 mm off its seat, so the least gap to the tray is the play, or 0.5.
+    Shelling a block whose every edge is rounded fails quietly in CadQuery 2.8, so the tray
+    is cut, not shelled.
+    """
+    Path("enclosure").mkdir(exist_ok=True)
+    Path("references").mkdir(exist_ok=True)
+    save(cq.Workplane().box(40, 30, 20).edges().fillet(2), "enclosure/round2")
+    mixed = cq.Workplane().box(40, 30, 20).edges("|Z").fillet(3).faces(">Z").edges().fillet(1.5)
+    save(mixed, "enclosure/mixed")
+    corners = []
+    for cx, cy, a0 in ((17, 12, 0), (-17, 12, 90), (-17, -12, 180), (17, -12, 270)):
+        for i in range(17):
+            a = np.radians(a0 + 90 * i / 16)
+            corners.append((cx + 3 * float(np.cos(a)), cy + 3 * float(np.sin(a))))
+    save(cq.Workplane().polyline(corners).close().extrude(5), "enclosure/strips")
+    tray = box(-20, 20, -15, 15, 0, 15).edges("|Z").fillet(3).faces("<Z").edges().fillet(2)
+    tray = tray.cut(box(-18, 18, -13, 13, 2, 15)).union(box(-2, 2, -2, 2, 2, 8))
+    save(tray, "enclosure/tray")
+    plate = box(-20, 20, -15, 15, 15, 18).edges("|Z").fillet(3).faces(">Z").edges().fillet(2)
+    save(plate, "enclosure/tray-lid")
+    save(plate, "references/tray-lid")
+    for play, name in ((0.2, "0p2"), (0.6, "0p6")):
+        lip = box(-18 + play, 18 - play, -13 + play, 13 - play, 12, 15)
+        save(plate.union(lip).translate((0, 0, 0.5)), f"enclosure/lid-lip-{name}-up")
+    save(plate.union(box(-17.8, 17.8, -12.8, 12.8, 12, 15)), "enclosure/lid-lip-0p2")
+
+
 if __name__ == "__main__":
     near_touching()
     boxes()
@@ -533,4 +571,5 @@ if __name__ == "__main__":
     designs()
     sheets()
     glass()
+    enclosure()
     print("made")

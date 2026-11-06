@@ -20,7 +20,7 @@ import pytest
 from print_shop.rounds import request, skills, toolsets
 
 EVALS = Path(__file__).parent / "skill_evals" / "designing-stained-glass"
-OURS = ("bench", "designing-stained-glass")
+OURS = ("bench", "designing-stained-glass", "designing-enclosures")
 MEASURED = ("cadquery", "references")
 #: What the measured copies break, by file: their names aren't gerunds, and their descriptions
 #: say what they hold but not when to read them. Listed, not edited.
