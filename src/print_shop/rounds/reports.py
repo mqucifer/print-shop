@@ -92,6 +92,20 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "least_wall_to",
         "least_wall_toward",
     ),
+    "edges": (
+        "edges",
+        "faceted_edges",
+        "grid_mm",
+        "least_radius_at",
+        "least_radius_mm",
+        "least_rounded_at",
+        "least_rounded_mm",
+        "min_radius_mm",
+        "not_read",
+        "reach_mm",
+        "rounded",
+        "sharp_edges",
+    ),
     "light": (
         "least_open_file",
         "least_open_pct",
@@ -116,13 +130,14 @@ REPORTS: dict[str, tuple[str, ...]] = {
 
 VERDICTS: dict[str, tuple[str, ...]] = {
     "info": ("OK", "FAIL"),
-    "clearance": ("CLEAR", "TOUCHING", "TOO CLOSE", "INTERFERE"),
+    "clearance": ("CLEAR", "TOUCHING", "TOO CLOSE", "TOO LOOSE", "INTERFERE"),
     "readback": ("OK", "FAIL", "NO CHANGE"),
     "rays": ("OK", "FAIL"),
     "panes": ("OK", "FAIL"),
     "capture": ("OK", "FAIL"),
     "thin": ("OK", "FAIL"),
     "wall": ("OK", "FAIL"),
+    "edges": ("OK", "FAIL"),
     "light": ("OK", "FAIL"),
     "thickness": ("OK", "FAIL"),
     "pause": ("OK", "FAIL"),
@@ -134,7 +149,10 @@ VERDICTS: dict[str, tuple[str, ...]] = {
 #: Options that limit one quantity from both ends, by command. An exact figure carried by one
 #: needs the other too (`figures.py`); one with no partner, such as `capture --min-visible`, is
 #: all a check can carry. `tests/test_reports.py` reads the pairs from the bench's parser.
-BOTH_ENDS: dict[str, tuple[tuple[str, str], ...]] = {"thickness": (("--min", "--max"),)}
+BOTH_ENDS: dict[str, tuple[tuple[str, str], ...]] = {
+    "clearance": (("--min-gap", "--max-gap"),),
+    "thickness": (("--min", "--max"),),
+}
 
 
 def other_end(command: str, option: str) -> str | None:

@@ -207,3 +207,64 @@ def test_a_run_from_before_toolsets_keeps_every_command(tmp_path: Path) -> None:
     assert again.tools._not_in_toolset("capture") is None
     bench = next(s for s in again.tools.specs if s["function"]["name"] == "bench")
     assert "`capture`" in bench["function"]["description"]
+
+
+# The enclosure (mqucifer/print-shop#60)
+
+ENCLOSURE = toolsets.ENCLOSURE
+CASE_REQUEST = """A case for a board, its lid not loose, with its edges softened to 2 mm.
+
+## Requirements
+
+- Edges, corners and lid softened to at least 2 mm.
+
+## Kind
+
+enclosure
+"""
+
+
+def test_an_edge_need_takes_its_radius_from_the_request() -> None:
+    def read_case(entry: dict[str, Any]) -> list[str]:
+        return needs.read([entry], CASE_REQUEST, "", ENCLOSURE)[1]
+
+    quote = "Edges, corners and lid softened to at least 2 mm"
+    assert read_case(need("edges base.step lid.step --min-radius 2", "edges", quote=quote)) == []
+    assert "its limit 1 isn't in its quote" in read_case(
+        need("edges base.step lid.step --min-radius 1", "edges", quote=quote)
+    )[0]
+    assert "gives its limit, `--min-radius`" in read_case(
+        need("edges base.step lid.step", "edges", quote=quote)
+    )[0]
+    assert "`edges` doesn't measure that: `clearance` does" in read_case(
+        need("edges base.step --min-radius 2", "fit", quote=quote)
+    )[0]
+    # In a run without the kind, the command and the measure say where they are.
+    said = needs.read([need("edges base.step --min-radius 2", "edges", quote=quote)],
+                      CASE_REQUEST, "", CORE)[1]  # fmt: skip
+    assert "`edges` is in the enclosure toolset, and this run's is the core" in said[0]
+
+
+def test_an_enclosure_run_loads_its_toolset_and_skill(tmp_path: Path) -> None:
+    """The request's `## Kind` loads `edges` and `designing-enclosures`; a core run refuses
+    `edges`, naming the toolset it's in."""
+    run, model = started(
+        tmp_path,
+        [tool("skill", name="designing-enclosures")],
+        [tool("skill", name="softening-edges")],
+        request=CASE_REQUEST,
+    )
+    assert run.drive().name == "blocked"
+    assert run.toolset is ENCLOSURE and run.state.kind == "enclosure"
+    start = model.bodies[0]["messages"][1]["content"]
+    assert "This run's toolset is enclosure" in start and "`designing-enclosures`" in start
+    told = [e for e in replies(run) if e["name"] == "skill"]
+    assert told[0]["outcome"] == "ok" and "# Designing enclosures" in told[0]["reply"]
+    assert told[1]["outcome"] == "ok" and "# Softening edges" in told[1]["reply"]
+    bench = next(s for s in run.tools.specs if s["function"]["name"] == "bench")
+    assert "`edges`" in bench["function"]["description"]
+    core, _ = started(tmp_path / "core", [tool("bench", command="edges base.step")])
+    assert core.drive().name == "blocked"
+    refused = replies(core)[0]
+    assert refused["why"] == "not_in_toolset"
+    assert "`edges` is in the enclosure toolset" in refused["reply"]

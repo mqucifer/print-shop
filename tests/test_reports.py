@@ -204,7 +204,7 @@ def test_a_verdict_its_command_never_gives_is_refused_naming_those_it_does() -> 
     wrong = needs.verdicts_wrong([need("clearance pane.step frame.step", "OK")])
     assert len(wrong) == 1
     assert "the need 'fit': `clearance` never says OK" in wrong[0]
-    assert "CLEAR, TOUCHING, TOO CLOSE, INTERFERE" in wrong[0]
+    assert "CLEAR, TOUCHING, TOO CLOSE, TOO LOOSE, INTERFERE" in wrong[0]
     assert not needs.verdicts_wrong([need("clearance pane.step frame.step", "CLEAR", "TOUCHING")])
     assert not needs.verdicts_wrong([need("capture frame.step --pocket-z 2", "OK")])
     # One of two wrong is still wrong; no verdicts is exit 0, as before.

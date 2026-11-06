@@ -113,3 +113,13 @@ def test_a_line_only_an_eye_need_covers_isnt_held_to_it() -> None:
     line = form("A border 6 mm wide that reads as lead.")
     eye = Need("n1", "x", "request", "eye", covers=["N1"], fixed=True, look_for="it reads as lead")
     assert not figures.wrong([eye], line)
+
+
+def test_a_lids_play_is_carried_at_both_ends_now_clearance_has_them() -> None:
+    """`clearance --max-gap` (mqucifer/print-shop#60): a play of 0.1 to 0.3 mm carried by
+    `--min-gap` alone leaves a lid too loose to stay on passing."""
+    line = form("The lid's lip has 0.1 to 0.3 mm of play all round.")
+    wrong = figures.wrong([fixed("clearance base.step lid-lifted.step --min-gap 0.1")], line)
+    assert len(wrong) == 1 and "isn't carried as an upper limit" in wrong[0]
+    both = fixed("clearance base.step lid-lifted.step --min-gap 0.1 --max-gap 0.3")
+    assert not figures.wrong([both], line)

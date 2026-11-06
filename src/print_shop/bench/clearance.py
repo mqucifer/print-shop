@@ -6,6 +6,14 @@ with each other. So a STEP pair is measured three ways (OCCT common, OCCT cut, M
 the mesh), and a pair where they differ gets no single answer. An STL has no exact surface,
 so its second method is a stack of plane sections clipped by Shapely, and points on one
 surface measured to the other.
+
+**A gap range** (mqucifer/print-shop#60). `--min-gap` alone let a lid too loose to stay on pass.
+`--max-gap G` fails a pair whose least gap is over G, `TOO LOOSE`, so parts meant to mate are held
+from both ends. A gap drawn at G passes: the mesh's chords on both faces can read it up to
+`2 * FINE` wider, as `wall --min-wall` holds a wall drawn at its limit. A pair that touches or
+overlaps has a least gap of 0, which is never too loose: a lid resting on its seat touches it, and
+the play round its lip is read with the lid lifted off its seat (the `designing-enclosures`
+skill), which the reply says.
 """
 
 from __future__ import annotations
@@ -27,7 +35,7 @@ TOUCHING = 1e-4
 SECTIONS = 96
 SAMPLES = 6000
 #: Worst first: the pairs' verdict is the worst of them.
-ORDER = ["DISAGREE", "INTERFERE", "TOO CLOSE", "TOUCHING", "CLEAR"]
+ORDER = ["DISAGREE", "INTERFERE", "TOO CLOSE", "TOO LOOSE", "TOUCHING", "CLEAR"]
 
 
 def _apart(a: Part, b: Part, margin: float = 1e-3) -> bool:
@@ -78,7 +86,9 @@ def _sampled_gap(a: Part, b: Part) -> tuple[float, float]:
     return float(np.min(distance)), float(np.sqrt(a.fine().area / SAMPLES))
 
 
-def measure_pair(a: Part, b: Part, min_gap: float | None) -> dict[str, Any]:
+def measure_pair(
+    a: Part, b: Part, min_gap: float | None, max_gap: float | None = None
+) -> dict[str, Any]:
     """Every figure for a pair, whether the methods agree, and the pair's verdict."""
     fine, coarse = a.manifold(True) ^ b.manifold(True), a.manifold(False) ^ b.manifold(False)
     overlap, overlap_coarse = float(fine.volume()), float(coarse.volume())
@@ -133,6 +143,8 @@ def measure_pair(a: Part, b: Part, min_gap: float | None) -> dict[str, Any]:
         pair["verdict"] = "INTERFERE"
     elif min_gap is not None and gap < min_gap:
         pair["verdict"] = "TOO CLOSE"
+    elif max_gap is not None and gap > max_gap + 2 * FINE[0]:
+        pair["verdict"] = "TOO LOOSE"
     elif gap <= TOUCHING:
         pair["verdict"] = "TOUCHING"
     else:
@@ -149,7 +161,8 @@ def run(args: Any, report: Report) -> None:
     if len(items) < 2:
         raise NoAnswer(f"needs two parts or a file of several solids: found {len(items)}")
     pairs = [(items[i], items[j]) for i in range(len(items)) for j in range(i + 1, len(items))]
-    results = [measure_pair(a, b, args.min_gap) for a, b in pairs]
+    max_gap = args.max_gap
+    results = [measure_pair(a, b, args.min_gap, max_gap) for a, b in pairs]
     report.numbers["pairs"] = results
     brep = all(a.is_brep and b.is_brep for a, b in pairs)
     for r in results:
@@ -170,10 +183,28 @@ def run(args: Any, report: Report) -> None:
                 f"mm³, {SAMPLES} sampled points say gap {r['gap_sampled_mm']:.4f} mm"
             )
         report.notes += r["differs"]
+    if max_gap is not None:
+        report.line(
+            f"gap range: {_range(args.min_gap, max_gap)}, a gap drawn at {max_gap:g} mm "
+            f"passing within the mesh's chords ({2 * FINE[0]:g} mm)"
+        )
+        seated = [r for r in results if r["verdict"] in ("TOUCHING", "INTERFERE")]
+        if seated:
+            report.note(
+                f"{len(seated)} pair(s) touch or overlap, so their least gap is 0 and --max-gap "
+                "can't read them: a part resting on its seat touches it. To read the play round "
+                "a lid's lip or a part in its recess, lift it off its seat along the way it "
+                f"closes by more than {max_gap:g} mm, in a file of its own, and run this on that: "
+                "the least gap is then the play"
+            )
     worst = min((r["verdict"] for r in results), key=ORDER.index)
     counts = {w: sum(r["verdict"] == w for r in results) for w in ORDER}
     said = ", ".join(f"{n} {w.lower()}" for w, n in counts.items() if n)
     report.verdict(worst, f"{len(results)} pair(s): {said}")
+
+
+def _range(low: float | None, high: float) -> str:
+    return f"{low:g} to {high:g} mm" if low is not None else f"at most {high:g} mm"
 
 
 def _shown(value: float | None, digits: int = 3) -> str:

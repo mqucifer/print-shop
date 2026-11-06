@@ -25,7 +25,7 @@ SKILLS = Path(__file__).parent / "skills"
 #: The core's sets, as every run had before toolsets.
 SETS = ("bench", "cadquery", "references")
 #: Every set there is, a kind's among them.
-ALL = (*SETS, "designing-stained-glass")
+ALL = (*SETS, "designing-stained-glass", "designing-enclosures")
 
 
 def files(sets: tuple[str, ...] = SETS) -> list[Path]:
