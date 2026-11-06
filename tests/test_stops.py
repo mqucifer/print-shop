@@ -179,6 +179,20 @@ def test_a_build_input_carries_no_figure_and_says_what_reads_the_file() -> None:
     assert "clearance PANE.step FRAME.step" in said
 
 
+def test_an_unfixed_need_whose_lines_figure_is_its_build_input_is_refused_too() -> None:
+    """On `eval-through-2` the fit need was `panes ... --clearance 0.25`, for "0.25 mm of play"."""
+    form = request.read("A frame.\n\n## Requirements\n- The pane fits, with 0.25 mm of play.\n")
+    plain = Need(
+        "fit", "fits", "request", "bench", command="panes f.step --pocket-z 2 --clearance 0.25"
+    )
+    plain.covers = ["R1"]
+    (said,) = figures.echoed([plain], form)
+    assert said.startswith("the need 'fit' covers `R1`")
+    assert "`--clearance 0.25` is what `panes` builds from" in said
+    other = Need(**{**plain.__dict__, "command": "panes f.step --pocket-z 2 --clearance 0.3"})
+    assert figures.echoed([other], form) == [], "a play other than the line's isn't its figure"
+
+
 # Wanted 2: one stop for the eye needs on one picture, and nothing asked twice
 
 

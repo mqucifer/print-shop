@@ -1991,6 +1991,7 @@ class Run:
             wrong += needs.echoes_wrong(found)
         if not wrong and form is not None and not trying:
             wrong = forms.held(found, form) + figures.wrong(found, form)
+            wrong += figures.echoed(found, form)
             wrong += self._fixed_kept(found)
         if not wrong:
             wrong = self._usable(found)

@@ -260,3 +260,31 @@ def _built_from(figure: Figure, mine: list[Need]) -> str:
                 except ValueError:
                     continue
     return ""
+
+
+def echoed(found: list[Need], form: Form) -> list[str]:
+    """Each bench need, fixed or not, whose line's figure is one of its command's own build inputs
+    (`reports.INPUTS`), so its check reads that figure back whatever the part is: on
+    `eval-through-2` a fit need was `panes ... --clearance 0.25` for "0.25 mm of play", and
+    `panes` builds its own pane at that play (mqucifer/print-shop#59). A fixed need on a
+    non-negotiable is said by `wrong`, where the input carries none of its figure."""
+    said: list[str] = []
+    lines = {line.id: line for line in form.lines()}
+    fixed_lines = {line.id for line in form.non_negotiables}
+    for need in found:
+        if need.by != "bench" or not need.command:
+            continue
+        for line_id in need.covers:
+            line = lines.get(line_id)
+            if line is None or (need.fixed and line_id in fixed_lines):
+                continue
+            for figure in read(line.text):
+                built = _built_from(figure, [need])
+                if built:
+                    said.append(
+                        f'the need {need.id!r} covers `{line.id}`, "{line.text}": '
+                        + built[0].lower()
+                        + built[1:].rstrip()
+                    )
+                    break
+    return said
