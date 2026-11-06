@@ -897,22 +897,34 @@ def test_info_reads_a_curve_stored_as_flat_strips_and_the_files_size(bench: Any)
 
 
 def test_the_skills_new_code_runs_in_the_image(bench: Any) -> None:
-    """Every Python block print-shop added to the skills, run as the model would run it."""
-    blocks = [
-        block
-        for name in (
-            "cadquery/references/layout-to-arcs.md",
-            "cadquery/references/errors.md",
-            "designing-stained-glass/SKILL.md",
-        )
-        for block in re.findall(
-            r"```python\n(.*?)```",
-            (skills.SKILLS / name).read_text().split(skills.ADDED)[-1],
-            re.DOTALL,
-        )
-        if "cadquery" in block
+    """Every Python block print-shop added to the skills that stands alone, run as the model
+    would run it: each that builds with CadQuery, and since mqucifer/print-shop#61 each after
+    `ADDED` that lays a figure out in Shapely. The stained-glass layout's own step-2 block uses
+    the reader's cells, so it doesn't stand alone, and isn't here."""
+
+    def found(name: str, after: bool) -> list[str]:
+        text = (skills.SKILLS / name).read_text()
+        part = text.split(skills.ADDED)[-1] if after else text
+        return re.findall(r"```python\n(.*?)```", part, re.DOTALL)
+
+    names = (
+        "cadquery/SKILL.md",
+        "cadquery/references/layout-to-arcs.md",
+        "cadquery/references/errors.md",
+        "designing-stained-glass/SKILL.md",
+    )
+    measured = ("cadquery/SKILL.md", "cadquery/references/errors.md")
+    blocks = [b for n in names for b in found(n, n in measured) if "import cadquery" in b]
+    blocks += [
+        b
+        for n in names
+        if skills.ADDED in (skills.SKILLS / n).read_text()
+        for b in found(n, True)
+        if "import shapely" in b and "import cadquery" not in b
     ]
-    assert len(blocks) == 4
+    # The U from pieces, curves from a layout, the errors' two, the stained-glass cells built as
+    # curves, and its figure from pieces.
+    assert len(blocks) == 6
     for k, block in enumerate(blocks):
         (bench.work / f"skill_block_{k}.py").write_text(block)
         ran = host.run([f"skill_block_{k}.py"], bench.work, python=True)

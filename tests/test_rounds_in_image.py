@@ -217,7 +217,9 @@ def test_a_run_goes_from_intake_through_refusals_and_a_pick_to_its_needs_met(
     looked = [e for e in replies(run) if e["name"] == "lookup"]
     assert "cq.Shape.fuse" in looked[0]["reply"], "an inherited name is found"
     assert found["docs"]["outcome"] == "ok" and "fillet" in found["docs"]["reply"].lower()
-    assert "# The bench" in found["skill"]["reply"]
+    # `using-the-bench` is the core's, whole in the start, and the reply says where
+    # (mqucifer/print-shop#61).
+    assert '`<skill name="using-the-bench">`' in found["skill"]["reply"]
     read = [e for e in replies(run) if e["name"] == "read"]
     assert [e["outcome"] for e in read] == ["ok", "ok", "failed"]
     assert read[2]["why"] == "not_a_picture"
@@ -1107,7 +1109,8 @@ def test_references_are_copied_and_named_at_the_start(tmp_path: Path) -> None:
     first = model.bodies[0]["messages"][1]["content"]
     assert "`references/drawing.txt` (9 bytes)" in first
     assert REQUEST in first
-    assert "`using-the-bench`," in first and "`cadquery`," in first
+    # The core's required skills, whole (mqucifer/print-shop#61).
+    assert '<skill name="using-the-bench">' in first and '<skill name="cadquery">' in first
     assert "This run's toolset is the core" in first
     assert (run.work / "references" / "drawing.txt").read_text() == "a drawing"
 
@@ -1417,7 +1420,10 @@ def test_a_call_whose_reasoning_repeats_gets_a_row_and_goes_on_uncut(tmp_path: P
     assert doing["tool_calls"][0]["path"] == "c.txt"
     lacked = json.loads(flagged[1]["lacked"])
     assert lacked["skills_read"] == ["using-the-bench"]
-    assert "cadquery" in lacked["skills_not_read"]
+    # Given whole in the start, so neither is unread (mqucifer/print-shop#61).
+    assert lacked["skills_given"] == ["cadquery", "using-the-bench"]
+    assert "cadquery" not in lacked["skills_not_read"]
+    assert "cadquery-errors" in lacked["skills_not_read"]
     assert lacked["last_tool_calls_refused"] == [["run", "no_file"]]
     assert flagged[1]["review_note"] is None, "that's for a reviewer"
 
