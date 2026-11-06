@@ -40,6 +40,7 @@ from print_shop.refine import findings as fnd
 from print_shop.refine.approved import Approved, File, Group, pause_inputs
 from print_shop.refine.context import Context, layers_of
 from print_shop.refine.findings import Finding
+from print_shop.rounds import lessons as lessons_module
 from print_shop.rounds.box import Box
 from print_shop.rounds.ledger import DesignLedger, now
 from print_shop.rounds.paths import content_hash
@@ -80,6 +81,21 @@ class Outcome:
     steps: dict[str, list[str]]
 
 
+#: Who writes a refinement finding's lesson, as `lessons.writer` names it.
+REFINED_BY = "the refinement pass"
+
+
+def _part_kind(folder: Path) -> str | None:
+    """The request's kind, from the run's `state.json`, if it has one."""
+    try:
+        state = json.loads((folder / "state.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    form = state.get("form") or {}
+    kind = form.get("kind") if isinstance(form, dict) else None
+    return str(kind) if kind else None
+
+
 def _bench_answer(output: str) -> dict[str, Any]:
     if MARK not in output:
         raise RuntimeError(f"the bench's refine helper gave no answer: {output[-600:]}")
@@ -116,6 +132,10 @@ class Pass:
         #: Off while a proposal is checked: its slices aren't the approved folder's.
         self.recording = True
         self.id = 0
+        #: The candidate lessons its findings made (mqucifer/print-shop#59).
+        self.lessons: list[int] = []
+        #: The request's kind, as `start` gives a kind's lessons by it.
+        self.part_kind = _part_kind(approved.folder)
 
     # The pass
 
@@ -146,6 +166,7 @@ class Pass:
                 for plate in plates:
                     self.slice(plate)
             ids = self.record_findings()
+            self.lessons = self.to_lessons(ids)
             made = proposals.propose(self, ids)
             for group in self.approved.groups:
                 steps[group.folder] = self.print_steps(group)
@@ -777,6 +798,37 @@ class Pass:
             json.dumps([f.plain() for f in self.found], indent=1, default=str), encoding="utf-8"
         )
         return ids
+
+    def to_lessons(self, ids: list[int]) -> list[int]:
+        """A candidate lesson for each finding the bench failed or that needs the part to change,
+        for the design rounds, where the part is drawn (mqucifer/print-shop#59). On `eval-rings-3`
+        `pause` failed on 0.5 mm of air over the pane, which the Sponsor calls an unacceptable
+        overhang, and the pass needed no change and proposed nothing, so it reached no one. Each
+        is a candidate like any lesson: a reviewer lets it through, or not."""
+        made = []
+        for finding, finding_id in zip(self.found, ids, strict=True):
+            verdict = str(finding.numbers.get("verdict") or "")
+            failed = finding.source == "bench" and verdict == "FAIL"
+            if not (finding.needs_change or failed):
+                continue
+            argv = finding.numbers.get("argv") or []
+            command = str(argv[0]) if argv else finding.kind
+            text = f"{finding.read} ({finding.where()}). For the print: {finding.means}."
+            made.append(
+                lessons_module.write(
+                    self.ledger,
+                    self.approved.run,
+                    written_by=REFINED_BY,
+                    fix_shape=f"a refinement pass's finding, after approval ({finding.kind})",
+                    kind="verify",
+                    text=text,
+                    held={"findings": [finding_id], "refinement": self.n},
+                    routes=["model"],
+                    keys=[{"command": command, "verdict": verdict}],
+                    part_kind=self.part_kind,
+                )
+            )
+        return made
 
     def print_steps(self, group: Group) -> list[str]:
         """The pass's own print steps, from Orca's slices, when no finding needs a change."""

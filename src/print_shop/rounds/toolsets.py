@@ -217,7 +217,40 @@ STAINED_GLASS = Toolset(
     added=STAINED_GLASS_COMMANDS,
     standing=("light", "capture"),
 )
-KINDS = {STAINED_GLASS.kind: STAINED_GLASS}
+#: A case round bought parts: a box and its lid, fitted to boards, a fan or a plug, with softened
+#: edges (mqucifer/print-shop#60). The core holds most of what it needs: references drawn by
+#: whoever writes the request, `clearance` round them, its `--max-gap` for a lid that mustn't be
+#: loose (a `fit` need), and `rays`, `thin`, `wall`, `info` and `render --cut`. It adds `edges`,
+#: each outside edge sharp or rounded, and its skill.
+#:
+#: **No standing checks.** A standing check runs with no need behind it, so it needs a limit of
+#: the bench's own and the files it reads. An edge's radius is the request's, with no default,
+#: and which files close the case is the model's to say, so `edges` is a need's check, settled
+#: with the request's radius, and `thin` reads every file as for any kind.
+ENCLOSURE_COMMANDS = ("edges",)
+ENCLOSURE = Toolset(
+    "enclosure",
+    "enclosure",
+    CORE_COMMANDS + ENCLOSURE_COMMANDS,
+    CORE_MEASURES
+    + (
+        Measure(
+            "edges",
+            "each outside edge a finger meets rounded, to at least the request's radius: a sharp "
+            "edge is radius 0",
+            ("edges",),
+            "edges FILE... --min-radius R",
+            limits=("--min-radius",),
+            limited=True,
+        ),
+    ),
+    CORE_SKILLS + ("designing-enclosures",),
+    # Its own, the core's two, and the clearances and walls a printed case is sized by
+    # (mqucifer/print-shop#60, mqucifer/print-shop#61).
+    required=("designing-enclosures", *CORE_REQUIRED, "ref-fdm"),
+    added=ENCLOSURE_COMMANDS,
+)
+KINDS = {STAINED_GLASS.kind: STAINED_GLASS, ENCLOSURE.kind: ENCLOSURE}
 #: A run from before toolsets: every command it had then, its skills, and needs read as they were.
 EVERY = Toolset(
     None,

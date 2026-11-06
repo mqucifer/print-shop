@@ -16,7 +16,7 @@ The first line is the verdict. Then come the numbers, each with how it was read,
 | Exit | Verdicts | It means |
 |---|---|---|
 | 0 | `OK`, `CLEAR`, `TOUCHING` | both methods agree, and nothing's wrong |
-| 1 | `FAIL`, `INTERFERE`, `TOO CLOSE`, `NO CHANGE`, `PARTIAL` | both methods agree that something's wrong |
+| 1 | `FAIL`, `INTERFERE`, `TOO CLOSE`, `TOO LOOSE`, `NO CHANGE`, `PARTIAL` | both methods agree that something's wrong |
 | 2 | `DISAGREE`, `NO ANSWER` | there's no answer to rely on: read the numbers, and don't pick one |
 | 3 | | the command itself was wrong |
 
@@ -25,7 +25,7 @@ The first line is the verdict. Then come the numbers, each with how it was read,
 | Command | Answers |
 |---|---|
 | `info FILE` | size, volume, bodies, flat heights |
-| `clearance FILE... [--min-gap G]` | overlap and gap, every pair, across files or a file's solids |
+| `clearance FILE... [--min-gap G] [--max-gap G2]` | overlap and gap, every pair, across files or a file's solids. `--max-gap` fails a pair whose least gap is over it, `TOO LOOSE`, for parts meant to mate. A part resting on another touches it, gap 0, which is never too loose |
 | `readback BEFORE AFTER [--cutter C] [--expect-delta V] [--min-share S]` | volume before and after, and how much of a cutter was in the body |
 | `rays FILE --centre X,Y,Z [--axis A] [--d D] [--depth H]` | a cut feature measured from its axis: rays that hit nothing, the distance across, the wall beyond, the floor |
 | `thin FILE [--nozzle N] [--layer L] [--min-body V] [--one-body]` | features under the nozzle's width, floors under a layer, and tiny pieces. `--one-body` fails on more than one connected body |
@@ -38,7 +38,7 @@ The first line is the verdict. Then come the numbers, each with how it was read,
 
 **`pause`'s numbers are the bench's own,** largest opening first, not your files'.
 
-A kind's toolset adds commands of its own, such as stained glass's `capture` and `light`, and its skill says what each answers.
+A kind's toolset adds commands of its own, such as stained glass's `capture` and `light`, or an enclosure's `edges`, and its skill says what each answers.
 
 **A 2D question has a reading: `layout`.** Which piece an inset makes, which piece is which, how narrow a neck is, whether a frame in 2D is one piece: write the layout to a file and ask, rather than work it out by reasoning or by printing bounding boxes. The file is JSON, each piece's name and its outline as GeoJSON or WKT, in mm, which your script writes from the layout it built:
 

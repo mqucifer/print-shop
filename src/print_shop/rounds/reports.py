@@ -92,6 +92,20 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "least_wall_to",
         "least_wall_toward",
     ),
+    "edges": (
+        "edges",
+        "faceted_edges",
+        "grid_mm",
+        "least_radius_at",
+        "least_radius_mm",
+        "least_rounded_at",
+        "least_rounded_mm",
+        "min_radius_mm",
+        "not_read",
+        "reach_mm",
+        "rounded",
+        "sharp_edges",
+    ),
     "light": (
         "least_open_file",
         "least_open_pct",
@@ -126,13 +140,14 @@ REPORTS: dict[str, tuple[str, ...]] = {
 
 VERDICTS: dict[str, tuple[str, ...]] = {
     "info": ("OK", "FAIL"),
-    "clearance": ("CLEAR", "TOUCHING", "TOO CLOSE", "INTERFERE"),
+    "clearance": ("CLEAR", "TOUCHING", "TOO CLOSE", "TOO LOOSE", "INTERFERE"),
     "readback": ("OK", "FAIL", "NO CHANGE"),
     "rays": ("OK", "FAIL"),
     "panes": ("OK", "FAIL"),
     "capture": ("OK", "FAIL"),
     "thin": ("OK", "FAIL"),
     "wall": ("OK", "FAIL"),
+    "edges": ("OK", "FAIL"),
     "light": ("OK", "FAIL"),
     "thickness": ("OK", "FAIL"),
     "pause": ("OK", "FAIL"),
@@ -145,7 +160,62 @@ VERDICTS: dict[str, tuple[str, ...]] = {
 #: Options that limit one quantity from both ends, by command. An exact figure carried by one
 #: needs the other too (`figures.py`); one with no partner, such as `capture --min-visible`, is
 #: all a check can carry. `tests/test_reports.py` reads the pairs from the bench's parser.
-BOTH_ENDS: dict[str, tuple[tuple[str, str], ...]] = {"thickness": (("--min", "--max"),)}
+BOTH_ENDS: dict[str, tuple[tuple[str, str], ...]] = {
+    "clearance": (("--min-gap", "--max-gap"),),
+    "thickness": (("--min", "--max"),),
+}
+
+
+#: What each of a command's arguments is in the part, by its name in the bench's parser: the
+#: frame, its panes, the frame's other parts (`--with`), or how many panes there are
+#: (mqucifer/print-shop#59).
+#: A settled need's files and counts in these roles follow the part, as `done` or `ask` declares
+#: it in `glass`; its figures don't. On `suncatcher-3` the rim needs were settled at `--panes 14`
+#: over `pane_1.step` to `pane_14.step`, the part grew to 27 panes with new names, and four needs
+#: failed on the count and the names alone. `tests/test_reports.py` reads each from the parser.
+FRAME, PANES, WITH, COUNT = "frame", "panes", "with", "count"
+ROLES: dict[str, dict[str, str]] = {
+    "light": {"frame": FRAME, "panes": PANES, "--with": WITH},
+    "capture": {"frame": FRAME, "--panes": COUNT},
+    "thickness": {"panes": PANES},
+    "panes": {"frame": FRAME},
+    "pause": {"frame": FRAME},
+}
+#: Each command's positional arguments, in order, by the parser's names: the last of them takes
+#: every word left (`nargs="+"`) where it's `panes`.
+POSITIONAL: dict[str, tuple[str, ...]] = {
+    "light": ("frame", "panes"),
+    "capture": ("frame",),
+    "thickness": ("panes",),
+    "panes": ("frame",),
+    "pause": ("frame",),
+}
+
+#: Options a command builds what it measures from, and the numbers that read them back
+#: (mqucifer/print-shop#59). `panes` cuts its own pane from each opening, `--clearance` in from
+#: its edge, so its gaps are that clearance whatever the part's pane is: on `eval-fit-1` the fixed
+#: fit need passed at 0.25 mm because 0.25 was what `panes` was told to build. Such an option
+#: carries no figure, and such a number checks nothing. `tests/test_reports.py` reads the build
+#: from the bench's code.
+INPUTS: dict[str, dict[str, tuple[str, ...]]] = {
+    "panes": {"--clearance": ("gap_2d_mm", "gap_3d_mm")},
+}
+#: The command that reads the part's own file instead, as a need would run it.
+READS_THE_FILE: dict[str, str] = {
+    "panes": (
+        "`clearance PANE.step FRAME.step`, the part's own pane against its frame, with `number` "
+        "`pairs.0.gap_occt_mm` and the figure as `at_least` and `at_most`"
+    ),
+}
+
+
+def echoed(command: str, number: str) -> str | None:
+    """The option a need's `number` reads back, if its command builds what it measures from it."""
+    last = number.split(".")[-1]
+    for option, numbers in INPUTS.get(command, {}).items():
+        if last in numbers:
+            return option
+    return None
 
 
 def other_end(command: str, option: str) -> str | None:

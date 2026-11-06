@@ -204,7 +204,7 @@ def test_a_verdict_its_command_never_gives_is_refused_naming_those_it_does() -> 
     wrong = needs.verdicts_wrong([need("clearance pane.step frame.step", "OK")])
     assert len(wrong) == 1
     assert "the need 'fit': `clearance` never says OK" in wrong[0]
-    assert "CLEAR, TOUCHING, TOO CLOSE, INTERFERE" in wrong[0]
+    assert "CLEAR, TOUCHING, TOO CLOSE, TOO LOOSE, INTERFERE" in wrong[0]
     assert not needs.verdicts_wrong([need("clearance pane.step frame.step", "CLEAR", "TOUCHING")])
     assert not needs.verdicts_wrong([need("capture frame.step --pocket-z 2", "OK")])
     # One of two wrong is still wrong; no verdicts is exit 0, as before.
@@ -253,3 +253,66 @@ def test_the_options_that_limit_both_ends_are_the_parsers_pairs() -> None:
     assert pairs == reports.BOTH_ENDS
     assert reports.other_end("thickness", "--max") == "--min"
     assert reports.other_end("capture", "--min-visible") is None
+
+
+def _arguments() -> dict[str, list[tuple[str, bool]]]:
+    """Each command's arguments in order, by the parser's names, and whether each takes a value."""
+    tree = ast.parse((BENCH / "cli.py").read_text(encoding="utf-8"))
+    parser = next(f for f in tree.body if isinstance(f, ast.FunctionDef) and f.name == "parser")
+    commands: dict[str, str] = {}
+    for node in ast.walk(parser):
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+            call = node.value
+            if isinstance(call.func, ast.Attribute) and call.func.attr == "add_parser":
+                name = node.targets[0]
+                assert isinstance(name, ast.Name) and isinstance(call.args[0], ast.Constant)
+                commands[name.id] = str(call.args[0].value)
+    found: dict[str, list[tuple[str, bool]]] = {}
+    for node in ast.walk(parser):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "add_argument"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id in commands
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+        ):
+            flag = any(
+                k.arg == "action"
+                and isinstance(k.value, ast.Constant)
+                and str(k.value.value).startswith("store_")
+                for k in node.keywords
+            )
+            found.setdefault(commands[node.func.value.id], []).append(
+                (str(node.args[0].value), not flag)
+            )
+    for command in found.values():
+        command.sort(key=lambda a: a[0].startswith("-"))  # positionals first, in order
+    return found
+
+
+def test_each_role_a_need_follows_the_part_by_is_the_parsers_own_argument() -> None:
+    """A settled need's frame, panes and count follow the part (mqucifer/print-shop#59): each is
+    read by the parser's name, and every option of those commands takes one value, as
+    `needs.on_part` reads them."""
+    arguments = _arguments()
+    for command, roles in reports.ROLES.items():
+        names = [name for name, _ in arguments[command]]
+        assert set(roles) <= set(names), command
+        positional = tuple(name for name in names if not name.startswith("-"))
+        assert positional == reports.POSITIONAL[command], command
+        assert all(takes for name, takes in arguments[command] if name.startswith("-")), command
+
+
+def test_an_input_a_command_builds_from_is_the_one_its_code_builds_with() -> None:
+    """`panes` cuts its pane `--clearance` in from each opening, and its gaps read that back."""
+    code = (BENCH / "fabrication.py").read_text(encoding="utf-8")
+    assert "opening.buffer(-args.clearance" in code
+    for command, inputs in reports.INPUTS.items():
+        names = [name for name, _ in _arguments()[command]]
+        for option, numbers in inputs.items():
+            assert option in names
+            for number in numbers:
+                assert f"{number}=" in code, number
+        assert command in reports.READS_THE_FILE

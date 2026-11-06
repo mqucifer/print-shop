@@ -370,8 +370,18 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
                     "Optional.",
                 },
                 "need": {
-                    "type": "string",
-                    "description": "The eye need this answers, if it answers one. Optional.",
+                    "type": "array",
+                    "description": "The eye needs this sheet answers, by id, every one it does: "
+                    "one pick answers them all, so one stop. Each open eye need goes here or in "
+                    "`later`. They go with `variants`, the part's own files, which is all a pick "
+                    "can pass them on. Optional.",
+                    "items": {"type": "string"},
+                },
+                "later": {
+                    "type": "object",
+                    "description": "With `need`: each open eye need this sheet can't answer, by "
+                    'its id, with why: {"hang-hole": "a close-up of the hole, once it\'s cut"}. '
+                    "The person reads it. Optional.",
                 },
                 "views": {
                     "type": "string",
@@ -446,7 +456,8 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
             "replies. Each check whose latest try failed is named until it passes; the person at "
             "the next stop reads your reason. A check a need runs can't be set aside: `done` "
             "decides it. If the check fails again, it's named again. Or, with `file`, say why no "
-            "need has to read a file of the part, which `done` otherwise asks for.",
+            "need has to read a file of the part, which `done` otherwise asks for; or, with "
+            "`curves`, why a file's small flat faces aren't curves stored as strips.",
             {
                 "check": {
                     "type": "string",
@@ -457,6 +468,12 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
                     "type": "string",
                     "description": "Instead of `check`: a file of the part that no need's check "
                     "reads, such as `pane.step`.",
+                },
+                "curves": {
+                    "type": "string",
+                    "description": "Instead of either: a file of the part the harness read as "
+                    "curves stored as flat strips, by its many flat faces under 1 mm, that has no "
+                    "curves, such as `grid.step`. Say in `why` what its small faces are.",
                 },
             },
             why="Why it doesn't apply, for the person at the next stop.",

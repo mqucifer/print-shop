@@ -30,6 +30,19 @@ stained-glass
 """
 
 
+#: A request in the set form whose `## Kind` loads the enclosure toolset (mqucifer/print-shop#60).
+ENCLOSURE_REQUEST = """A case round a small board.
+
+## Requirements
+
+- Every outside edge rounded to at least 1 mm.
+
+## Kind
+
+enclosure
+"""
+
+
 def body(name: str) -> str:
     return skills.registry(skills.ALL)[name][1].strip()
 
@@ -40,6 +53,12 @@ def test_each_toolset_names_its_required_skills_and_each_is_one_of_its_own() -> 
         "designing-stained-glass",
         "cadquery",
         "using-the-bench",
+    )
+    assert toolsets.ENCLOSURE.required == (
+        "designing-enclosures",
+        "cadquery",
+        "using-the-bench",
+        "ref-fdm",
     )
     assert toolsets.EVERY.required == ()
     for toolset in (toolsets.CORE, *toolsets.KINDS.values()):
@@ -66,6 +85,7 @@ def test_the_start_gives_each_required_skill_whole_and_names_the_rest() -> None:
     [
         ("A block.", ["cadquery", "using-the-bench"]),
         (GLASS_REQUEST, ["designing-stained-glass", "cadquery", "using-the-bench"]),
+        (ENCLOSURE_REQUEST, ["designing-enclosures", "cadquery", "using-the-bench", "ref-fdm"]),
     ],
 )
 def test_a_run_starts_with_its_kinds_required_skills_and_the_ledger_has_them_as_given(

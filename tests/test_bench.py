@@ -1775,6 +1775,96 @@ def test_the_rim_a_reply_names_passes_when_its_set(bench: Any) -> None:
     assert answer.record["why"].count("set this pane's rim") == 1
 
 
+# The enclosure (mqucifer/print-shop#60)
+
+
+def test_clearance_holds_a_lid_from_both_ends(bench: Any) -> None:
+    """A lid's lip with 0.2 mm of play, lifted 0.5 mm off its seat, is in a range of 0.1 to
+    0.3 mm; one with 0.6 mm of play reads its lift, 0.5, and is too loose. Seated, it touches,
+    and the reply says how to read its play."""
+    held = bench("clearance", "enclosure/tray.step", "enclosure/lid-lip-0p2-up.step",
+                 "--min-gap", "0.1", "--max-gap", "0.3")  # fmt: skip
+    assert held.verdict == "CLEAR", held.text
+    assert only_pair(held)["gap_mesh_mm"] == pytest.approx(0.2, abs=0.005)
+    loose = bench("clearance", "enclosure/tray.step", "enclosure/lid-lip-0p6-up.step",
+                  "--min-gap", "0.1", "--max-gap", "0.3")  # fmt: skip
+    assert loose.verdict == "TOO LOOSE" and loose.code == 1, loose.text
+    assert only_pair(loose)["gap_mesh_mm"] == pytest.approx(0.5, abs=0.005)
+    seated = bench("clearance", "enclosure/tray.step", "enclosure/lid-lip-0p2.step",
+                   "--max-gap", "0.3")  # fmt: skip
+    assert seated.verdict == "TOUCHING"
+    assert any("lift it off its seat" in n for n in seated.record["notes"])
+
+
+def test_a_gap_drawn_at_the_most_passes_and_a_range_the_wrong_way_round_is_refused(
+    bench: Any,
+) -> None:
+    assert bench("clearance", "cube.step", "cube-gap-0p1.step", "--max-gap", "0.1").verdict == (
+        "CLEAR"
+    )
+    assert bench("clearance", "cube.step", "cube-gap-0p1.step", "--max-gap", "0.09").verdict == (
+        "TOO LOOSE"
+    )
+    done = host.run(
+        ["clearance", "cube.step", "cube-gap-0p1.step", "--min-gap", "0.2", "--max-gap", "0.1"],
+        bench.work,
+    )
+    assert done.returncode == 3 and "is over --max-gap" in done.stdout + done.stderr
+
+
+def test_edges_reads_each_rounding_and_holds_a_radius(bench: Any) -> None:
+    """Every edge rounded 2 mm: 2 passes, a rounding drawn at it, and 2.1 fails."""
+    at = bench("edges", "enclosure/round2.step", "--min-radius", "2")
+    assert at.verdict == "OK", at.text
+    assert at.numbers["least_rounded_mm"] == pytest.approx(2.0, abs=0.001)
+    assert at.numbers["least_radius_mm"] == pytest.approx(2.0, abs=0.001)
+    assert at.numbers["edges"]["sharp_outside"] == 0
+    assert any("a circle through the section" in s for s in at.record["second_check"])
+    over = bench("edges", "enclosure/round2.step", "--min-radius", "2.1")
+    assert over.verdict == "FAIL" and "under 2.1 mm" in over.record["why"]
+
+
+def test_edges_names_each_sharp_edge_and_where(bench: Any) -> None:
+    """Upright edges 3 mm, the top 1.5 and the bottom sharp: 8 sharp edges at z = -10."""
+    answer = bench("edges", "enclosure/mixed.step", "--min-radius", "1.5")
+    assert answer.verdict == "FAIL", answer.text
+    sharp = answer.numbers["sharp_edges"]
+    assert len(sharp) == 8
+    assert {e["at"][2] for e in sharp} == {-10.0}
+    assert {e["turn_deg"] for e in sharp} == {90.0}
+    assert answer.numbers["least_radius_mm"] == 0.0
+    assert answer.numbers["least_rounded_mm"] == pytest.approx(1.5, abs=0.001)
+    assert "8 sharp outside edge(s)" in answer.record["why"]
+    assert any("8 turn as the exact surface does" in s for s in answer.record["second_check"])
+
+
+def test_edges_reads_an_open_tray_and_not_the_inside_of_a_closed_one(bench: Any) -> None:
+    """Open, a finger meets the rim's 8 outside edges, its 4 inside and the post's top 4, and
+    the 12 inside corners aren't read. Closed by its lid, nothing sharp is in reach: the seat is
+    flush. A reference closes it the same, and isn't read."""
+    tray = bench("edges", "enclosure/tray.step", "--min-radius", "2")
+    assert tray.verdict == "FAIL"
+    assert tray.numbers["edges"]["sharp_outside"] == 16
+    assert tray.numbers["edges"]["inside_corners"] == 12
+    closed = bench("edges", "enclosure/tray.step", "enclosure/tray-lid.step", "--min-radius", "2")
+    assert closed.verdict == "OK", closed.text
+    assert closed.numbers["edges"]["sharp_outside"] == 0
+    given = bench("edges", "enclosure/tray.step", "references/tray-lid.step", "--min-radius", "2")
+    assert given.verdict == "OK", given.text
+    assert given.numbers["not_read"] == [{"file": "references/tray-lid.step", "why": "a reference"}]
+    assert {r["file"] for r in given.numbers["rounded"]} == {"enclosure/tray.step"}
+    assert bench("edges", "references/tray-lid.step").verdict == "NO ANSWER"
+
+
+def test_edges_says_a_rounding_stored_as_strips(bench: Any) -> None:
+    """Each rounded corner as 16 flat strips: 17 sharp edges a corner, each turning under 6°."""
+    answer = bench("edges", "enclosure/strips.step")
+    assert answer.verdict == "OK", answer.text
+    assert answer.numbers["faceted_edges"] == 68
+    assert answer.numbers["rounded"] == []
+    assert any("stored as flat strips" in n for n in answer.record["notes"])
+
+
 # A flat layout, read in 2D (mqucifer/print-shop#61)
 
 

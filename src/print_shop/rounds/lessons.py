@@ -241,6 +241,20 @@ def evidence_lines(ledger: DesignLedger, run: str, held: dict[str, Any]) -> list
         ):
             mark = "would pass" if t["passed"] else "wouldn't pass"
             lines.append(f"  tried `{t['need']}`: {mark}, {t['why'][:160]}")
+    for finding in held.get("findings") or []:
+        # A refinement pass's finding, by its row (mqucifer/print-shop#59).
+        rows = ledger.rows(
+            "SELECT f.kind, f.source, f.read, f.means, r.n FROM refine_findings AS f JOIN "
+            "refinements AS r ON r.id = f.refinement WHERE f.id=?",
+            finding,
+        )
+        if not rows:
+            lines.append(f"refinement finding {finding}: not in the ledger")
+            continue
+        row = rows[0]
+        lines.append(
+            f"refinement {row['n']}, {row['kind']} by {row['source']}: {str(row['read'])[:200]}"
+        )
     for reading in held.get("readings") or []:
         found = ledger.rows(
             "SELECT passed, why FROM readings WHERE run=? AND round=? AND need=?",

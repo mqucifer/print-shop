@@ -266,3 +266,83 @@ def said(found: list[judge.Standing]) -> list[str]:
         mark = "ok" if one.passed else "can't tell" if one.unsure else "FAIL"
         lines.append(f"- `{one.command}`, {mark}: {one.why}")
     return lines
+
+
+# Curves stored as flat strips (mqucifer/print-shop#59)
+
+#: The check's name in the ledger's `standing` table.
+CURVES = "curves"
+#: A file with this many flat faces under 1 mm across (`info`'s `small_flat_faces`) has curves,
+#: stored as flat strips, and fails. A part's curves are read from its faces, not from its words:
+#: built as curves they're curved faces, which `info` doesn't count, and built from a polygon
+#: they're a run of thin flat faces, one for each segment. Measured with `info` in the bench's
+#: image on copies (`~/print-shop/proofs/m18-stops/curves.json`): `suncatcher-3`'s frame has
+#: 1,413 of 6,069 flat faces under 1 mm, and none curved, and two of its panes 33 and 153; batch
+#: 3's arcs frame has 1 of 54, and its rings frame 0 of 134, each with true circles; all 50 STEP
+#: files of batch 3's approved folders pass, the most having 4 (`curves_batch3_approved.json`).
+#: One small round hole cut from a polygon is enough: at 16 segments a quarter, a 3 mm radius is
+#: 64 faces of 0.29 mm. A part with no curves has a few, at a corner or a sliver, and where it has
+#: more, its reason is said with `set_aside`.
+STRIPS_AT = 20
+#: What a curved part's file can be read by: an STL has no faces of its own.
+FACED = (".step", ".stp", ".brep")
+CURVES_HEADING = "Curves stored as flat strips, by `info`'s flat faces under 1 mm, on every file:"
+
+
+def curves(
+    box: Any, files: list[str], where: Path, kept: Path, asides: dict[str, str]
+) -> list[judge.Standing]:
+    """`info` on each file, each in a fresh container, failing one with `STRIPS_AT` or more flat
+    faces under 1 mm across, unless the model set it aside with its reason (`asides`, by file).
+    On `suncatcher-3` `info` said so at five calls, naming the skill the model had read, and the
+    frame stayed 23 MB of strips: a reading it can pass over was passed over every time."""
+    found = []
+    for name in files:
+        command = f"info {shlex.quote(name)}"
+        if not name.lower().endswith(FACED):
+            found.append(
+                judge.Standing(
+                    CURVES, name, command, True, False, "", "an STL has no faces of its own"
+                )
+            )
+            continue
+        need = Need(
+            f"curves-{judge.NOT_IN_A_NAME.sub('_', name)}"[:80],
+            "curves built as curves",
+            "derived",
+            "bench",
+            command=command,
+        )
+        reading = judge.read_need(box, need, where, kept)
+        numbers = dict((reading.record or {}).get("numbers") or {})
+        small, flat = numbers.get("small_flat_faces"), numbers.get("flat_faces")
+        if isinstance(small, bool) or not isinstance(small, int):
+            why = f"no count of small flat faces came back: {reading.why}"
+            found.append(
+                judge.Standing(CURVES, name, command, False, True, reading.verdict, why, numbers)
+            )
+            continue
+        of = f" of {flat}" if isinstance(flat, int) else ""
+        said = f"{small}{of} flat faces under 1 mm across"
+        if small < STRIPS_AT:
+            found.append(
+                judge.Standing(CURVES, name, command, True, False, reading.verdict, said, numbers)
+            )
+            continue
+        if name in asides:
+            why = f"{said}, set aside by the model: {asides[name]}"
+            found.append(
+                judge.Standing(CURVES, name, command, True, False, reading.verdict, why, numbers)
+            )
+            continue
+        why = (
+            f"{said}: its curves are stored as flat strips, a face for each segment of a polygon, "
+            f"at {STRIPS_AT} or more. Build each curve as a curve, with CadQuery's circles and "
+            "arcs (the skill `building-curves-from-a-layout`), not `polyline` through a polygon's "
+            "points. If the file has no curves, say so with `set_aside`, giving `curves` and "
+            "`why`: the next stop shows your reason"
+        )
+        found.append(
+            judge.Standing(CURVES, name, command, False, False, reading.verdict, why, numbers)
+        )
+    return found

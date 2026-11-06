@@ -56,6 +56,11 @@ def parser() -> Parser:
     clearance = sub.add_parser("clearance", help="overlap and gap between parts, every pair")
     clearance.add_argument("files", nargs="+", help="parts, or one file of several solids")
     clearance.add_argument("--min-gap", type=float, help="a gap under this in mm is TOO CLOSE")
+    clearance.add_argument(
+        "--max-gap",
+        type=float,
+        help="a least gap over this in mm is TOO LOOSE, for parts meant to mate, such as a lid",
+    )
 
     readback = sub.add_parser("readback", help="volume before and after an operation")
     readback.add_argument("before")
@@ -146,6 +151,30 @@ def parser() -> Parser:
     wall.add_argument("--min-wall", type=float, help="the least wall wanted, in mm: under is FAIL")
     wall.add_argument("--layer", type=float, default=0.2, help="sections a layer apart")
     wall.add_argument("--n", type=int, default=360, help="rays at each height")
+
+    edges = sub.add_parser(
+        "edges", help="each outside edge of a part: sharp or rounded, and the least radius"
+    )
+    edges.add_argument(
+        "files",
+        nargs="+",
+        help="the part's files, as assembled: each blocks a finger from the others' insides. "
+        "A file under references/ blocks it and isn't read",
+    )
+    edges.add_argument(
+        "--with",
+        dest="with_files",
+        action="append",
+        default=[],
+        metavar="FILE",
+        help="another file in place, such as a bought fan: it blocks a finger, and isn't read",
+    )
+    edges.add_argument(
+        "--min-radius",
+        type=float,
+        help="the least radius of every outside edge, in mm, from the request: a sharp edge or a "
+        "tighter rounding is FAIL",
+    )
 
     light = sub.add_parser(
         "light", help="the share of each pane open straight through the frame, as light passes"
@@ -318,6 +347,10 @@ def _dispatch(args: Any, report: Report) -> None:
         from .wall import run as run_wall
 
         run_wall(args, report)
+    elif args.command == "edges":
+        from .edges import run as run_edges
+
+        run_edges(args, report)
     elif args.command == "light":
         from .glass import run_light
 
@@ -378,11 +411,20 @@ def rims_given(args: Any, top: Parser) -> None:
         args.min_lip = MIN_LIP
 
 
+def gaps_given(args: Any, top: Parser) -> None:
+    """`clearance`'s gap range: a least gap no larger than its most."""
+    if args.command != "clearance" or args.min_gap is None or args.max_gap is None:
+        return
+    if args.min_gap > args.max_gap:
+        top.error(f"clearance: --min-gap {args.min_gap:g} is over --max-gap {args.max_gap:g}")
+
+
 def main(argv: list[str] | None = None) -> int:
     given = sys.argv[1:] if argv is None else argv
     top = parser()
     args = top.parse_args(given)
     rims_given(args, top)
+    gaps_given(args, top)
     out = Path(args.out)
     report = Report(args.command, given)
     try:
