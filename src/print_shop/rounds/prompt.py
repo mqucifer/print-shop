@@ -84,9 +84,10 @@ scipy, trimesh, Manifold (`manifold3d`), Shapely, rtree, VTK and Pillow. CadQuer
 each with its own methods: the Workplane chain (`cq.Workplane`, whose methods return a new \
 Workplane) and the shapes it holds (`cq.Solid`, `cq.Face`, `cq.Wire` and the rest; `.val()` takes \
 one from a Workplane). Check a name before you use it: `lookup` finds names in the installed \
-library, and `docs` searches CadQuery's own 2.8.0 documentation. The skills are for reading when \
-you need them; where they say `inspect` or `measure`, those are `bench info` and `bench clearance` \
-here."""
+library, and `docs` searches CadQuery's own 2.8.0 documentation. A skill your first message \
+gives whole is one this work needs throughout, and it stays there; the others are for reading \
+with `skill` when you need them. Where they say `inspect` or \
+`measure`, those are `bench info` and `bench clearance` here."""
 )
 
 

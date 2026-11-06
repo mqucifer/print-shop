@@ -167,3 +167,64 @@ When a check keeps failing and you can't see why, cut a section at its height (`
 ### 7. Asking and done
 
 `ask` draws a sheet: give each pane its colour and the frame grey in `looks`, and add a cut through a pane in its pocket (`cuts`: `x=X,y=Y0:Y1`). Say what each picture shows as drawn. `done` names the frame and every pane in `part`, and gives `glass`: each frame with its panes, `pocket_z` (a height inside the pockets, as for `capture`), `clearance` (the play), `pane_thickness`, and `with` any other part of the frame. Every file of `part` is in it. With it the harness runs `light` and `capture` on every pane itself, at `done` and at each `ask`, whatever the needs say, and neither can be set aside: every piece is held and lets the light through. At `ask`, `glass` is optional, and the latest one is used.
+
+<!-- print-shop's additions, after the measured text (mqucifer/print-shop#54) -->
+
+## Print-shop's additions to the steps (mqucifer/print-shop#61)
+
+### Step 2: every cell from pieces
+
+Make each cell, and any figure in the layout, from simple shapes, joined, cut and offset, each
+placed by numbers at the top of the script: circles, rectangles, bars and polygons of a few
+straight sides. Never trace an outline point by point. A figure is pieces: a body a circle, a
+head a smaller one, each leg a bar, joined with `union` and rounded with `buffer`. In one run,
+one U-shaped outline traced point by point took seven calls of long reasoning.
+
+```python
+import shapely
+
+BODY_R, HEAD_R, LEG_W, LEG_L = 9.0, 5.0, 2.4, 10.0  # a figure, from the layout's numbers
+body = shapely.Point(0, 0).buffer(BODY_R, quad_segs=64)
+head = shapely.Point(BODY_R + HEAD_R - 2, 6).buffer(HEAD_R, quad_segs=64)
+legs = [shapely.box(x - LEG_W / 2, -BODY_R - LEG_L, x + LEG_W / 2, -BODY_R + 2) for x in (-3, 3)]
+figure = shapely.unary_union([body, head, *legs]).buffer(0.8).buffer(-0.8)  # joins rounded
+assert figure.geom_type == "Polygon"
+```
+
+In 3D the same pieces are CadQuery's `circle`, `rect` and `union` (`cadquery`, in your first
+message), built from the same numbers.
+
+### Step 2: read the layout with `layout`
+
+Which cell is which, whether the leading is one piece, the narrowest neck of each cell, and what
+each offset leaves of it are read by the bench, not worked out: in one run, twelve calls of long
+reasoning went on which piece or neck an inset makes. Write the cells and the leading to a file,
+then read it with an inset for each offset you'll cut:
+
+```python
+import json
+
+from shapely.geometry import mapping
+
+pieces = {"leading": frame_2d, **{f"cell_{k}": c for k, c in enumerate(cells, start=1)}}
+with open("layout.json", "w") as fh:
+    json.dump({"pieces": {name: mapping(shape) for name, shape in pieces.items()}}, fh)
+```
+
+`bench layout layout.json --inset 0.5 --inset 1.7`, with `leading / 2` for the pocket and
+`leading / 2 + rim` for the opening, says of each piece whether it's one piece, its least width,
+what each inset leaves (how many parts, the narrowest neck, and where it cuts the cell), and draws
+each piece labelled. An opening that an inset cuts in two, or that a cell loses whole, is changed
+in the layout before any CAD. `--min-width 0.8` fails any piece narrower than two nozzle widths,
+at a tip or a neck, and says where: cut the tip off or widen the neck, as above.
+
+### Step 5: what to read, and a look at what you built
+
+Read for step 5: `cadquery`, in your first message, and `building-curves-from-a-layout`, with
+`skill`, before building any curve.
+
+After each build of the frame, cut it through its pockets before reasoning about what it holds:
+`render frame.step --cut z=Z` at a height inside the pockets, and a cut upright across one pane in
+its pocket, `--cut x=X,y=Y0:Y1`. Whether a pocket is blind or runs through, and what stands in an
+opening, are on the cut. In one run, six calls of long reasoning went on how its own frame's
+pockets were built, which one cut shows.

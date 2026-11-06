@@ -525,7 +525,9 @@ CREATE TABLE IF NOT EXISTS need_measures (
 );
 CREATE TABLE IF NOT EXISTS skill_reads (
     -- Each skill a run read, at which call, and the file it is: how a run finds its skills
-    -- (mqucifer/print-shop#37). `found` 0 is a name no skill of its toolset has.
+    -- (mqucifer/print-shop#37). `found` 0 is a name no skill of its toolset has. `how` is `read`
+    -- by `skill`, or `given` whole in a conversation's start, as its kind requires
+    -- (mqucifer/print-shop#61); empty from before, when every one was read.
     run TEXT NOT NULL,
     seq INTEGER NOT NULL,
     at_call INTEGER NOT NULL,
@@ -533,6 +535,7 @@ CREATE TABLE IF NOT EXISTS skill_reads (
     name TEXT NOT NULL,
     file TEXT,
     found INTEGER NOT NULL,
+    how TEXT,
     PRIMARY KEY (run, seq)
 );
 CREATE TABLE IF NOT EXISTS set_asides (
@@ -734,6 +737,8 @@ ADDED = (
     # A part file the model set aside as no need reading it, with no command
     # (mqucifer/print-shop#52).
     ("set_asides", "unread_file", "TEXT"),
+    # Whether a skill was read with `skill` or given whole in the start (mqucifer/print-shop#61).
+    ("skill_reads", "how", "TEXT"),
 )
 #: Each stop asked, at which call, and picked when and by whom: made once `picks.stop` is there.
 STOPS_VIEW = """CREATE VIEW IF NOT EXISTS stops AS

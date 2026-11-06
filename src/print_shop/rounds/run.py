@@ -408,6 +408,7 @@ class Run:
             {"role": "system", "content": prompt.SYSTEM},
             {"role": "user", "content": run._start_text()},
         )
+        run._skills_given()
         return run
 
     def _give_lessons(self) -> None:
@@ -951,6 +952,7 @@ class Run:
             {"role": "system", "content": prompt.SYSTEM},
             {"role": "user", "content": text},
         )
+        self._skills_given()
         for said in after or []:
             self.session.say(said)
 
@@ -970,8 +972,22 @@ class Run:
             line = skills.start_line()
         else:
             asked = form.kind if form is not None else None
-            line = f"{toolset.said(asked)} {skills.start_line(toolset.skills)}"
+            line = f"{toolset.said(asked)} {skills.start_skills(toolset.skills, toolset.required)}"
         return prompt.start(request, given, line, given_lessons, lines)
+
+    def _skills_given(self) -> None:
+        """The required skills a conversation's start gives whole, for the ledger's `skill_reads`
+        as given, not read (mqucifer/print-shop#61): at the run's start, and again at each new
+        conversation from the record, which gives them again."""
+        toolset = self.toolset
+        if toolset.legacy or not toolset.required:
+            return
+        given = skills.given(toolset.skills, toolset.required)
+        self.session._record(
+            "skills_given",
+            at_call=self.session.requests + 1,
+            skills=[{"name": name, "file": file} for name, file in given],
+        )
 
     @property
     def toolset(self) -> toolsets.Toolset:

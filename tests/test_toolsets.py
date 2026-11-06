@@ -163,11 +163,21 @@ def test_a_run_with_no_kind_has_the_core_only_and_says_so(tmp_path: Path) -> Non
     assert told[0]["outcome"] == "failed" and told[0]["why"] == "not_in_toolset"
     assert "`capture` is in the stained glass toolset" in told[0]["reply"]
     assert told[1]["why"] == "unknown"
-    kept = run.ledger.rows("SELECT seq, at_call, name, file, found FROM skill_reads ORDER BY seq")
+    # `using-the-bench` is the core's, given whole in the start (mqucifer/print-shop#61).
+    assert told[2]["outcome"] == "ok" and "is in your first message, whole" in told[2]["reply"]
+    kept = run.ledger.rows(
+        "SELECT seq, at_call, name, file, found, how FROM skill_reads ORDER BY seq"
+    )
     assert [dict(r) for r in kept] == [
-        {"seq": 1, "at_call": 2, "name": "designing-stained-glass", "file": None, "found": 0},
-        {"seq": 2, "at_call": 3, "name": "using-the-bench", "file": "bench/SKILL.md", "found": 1},
-    ]
+        {"seq": 1, "at_call": 1, "name": "cadquery", "file": "cadquery/SKILL.md", "found": 1,
+         "how": "given"},
+        {"seq": 2, "at_call": 1, "name": "using-the-bench", "file": "bench/SKILL.md", "found": 1,
+         "how": "given"},
+        {"seq": 3, "at_call": 2, "name": "designing-stained-glass", "file": None, "found": 0,
+         "how": "read"},
+        {"seq": 4, "at_call": 3, "name": "using-the-bench", "file": "bench/SKILL.md", "found": 1,
+         "how": "read"},
+    ]  # fmt: skip
     toolset = json.loads(run.ledger.rows("SELECT toolset FROM runs")[0]["toolset"])
     assert toolset["kind"] is None and "capture" not in toolset["commands"]
 
@@ -188,12 +198,18 @@ def test_a_stained_glass_run_reads_its_skill_and_its_needs_measure_what_they_nam
     assert run.toolset is toolsets.STAINED_GLASS and run.state.kind == "stained-glass"
     start = model.bodies[0]["messages"][1]["content"]
     assert "This run's toolset is stained glass" in start and "`designing-stained-glass`" in start
+    assert '<skill name="designing-stained-glass">\n# Designing stained glass' in start
     told = [e for e in replies(run) if e["name"] in ("skill", "needs")]
-    assert told[0]["outcome"] == "ok" and "# Designing stained glass" in told[0]["reply"]
+    assert told[0]["outcome"] == "ok" and "is in your first message, whole" in told[0]["reply"]
     assert told[1]["why"] == "misses", told[1]["reply"]
     assert "`wall` does, as `wall FILE --hole X,Y,Z --min-wall W`" in told[1]["reply"]
-    kept = run.ledger.rows("SELECT file FROM skill_reads")
-    assert kept[0]["file"] == "designing-stained-glass/SKILL.md"
+    kept = run.ledger.rows("SELECT file, how FROM skill_reads ORDER BY seq")
+    assert [(r["file"], r["how"]) for r in kept] == [
+        ("designing-stained-glass/SKILL.md", "given"),
+        ("cadquery/SKILL.md", "given"),
+        ("bench/SKILL.md", "given"),
+        ("designing-stained-glass/SKILL.md", "read"),
+    ]
 
 
 def test_a_run_from_before_toolsets_keeps_every_command(tmp_path: Path) -> None:
