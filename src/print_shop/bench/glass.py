@@ -28,6 +28,7 @@ import numpy as np
 import shapely
 import shapely.ops
 
+from .limits import over, said, under
 from .report import Report
 from .shapes import FINE, NoAnswer, Part, flat_heights, load, slice_at
 
@@ -158,7 +159,8 @@ def run_light(args: Any, report: Report) -> None:
             "centre": [round((x0 + x1) / 2, 2), round((y0 + y1) / 2, 2)],
             "footprint_mm2": round(float(foot.area), 3),
             "open_mm2": round(float(open_region.area), 3),
-            "open_pct": round(pct, 2),
+            # The figure `--min-open` judges, as it is: a need reads the same (`limits`).
+            "open_pct": pct,
             "open_pct_rays": round(pct_rays, 2),
             "rays": rays,
             "band_pct": round(band, 2),
@@ -189,11 +191,13 @@ def run_light(args: Any, report: Report) -> None:
     _narrowest_band(opened, built, low, high, report, differs)
     problems = []
     if args.min_open is not None:
-        under = [r for r in rows if r["open_pct"] < args.min_open]
-        if under:
-            named = ", ".join(f"{r['file']} {r['open_pct']:.1f}%" for r in under)
+        short = [r for r in rows if under(r["open_pct"], args.min_open)]
+        if short:
+            named = ", ".join(
+                f"{r['file']} {said(r['open_pct'], args.min_open, 1)}%" for r in short
+            )
             problems.append(
-                f"{len(under)} pane(s) under the {args.min_open:g}% open asked for: {named}"
+                f"{len(short)} pane(s) under the {args.min_open:g}% open asked for: {named}"
             )
     if differs:
         report.verdict("DISAGREE", "; ".join(differs))
@@ -285,9 +289,10 @@ def run_thickness(args: Any, report: Report) -> None:
             raise NoAnswer(f"no ray through {name} met any material")
         row = {
             "file": name,
-            "thickest_mm": round(height, 4),
+            # The figures `--max` and `--min` judge, as they are.
+            "thickest_mm": height,
             "thickest_rays_mm": round(max(found), 4),
-            "thinnest_rays_mm": round(min(found), 4),
+            "thinnest_rays_mm": min(found),
             "z_from": round(low, 4),
             "z_to": round(high, 4),
             "rays": len(points),
@@ -320,15 +325,17 @@ def run_thickness(args: Any, report: Report) -> None:
     )
     problems = []
     if args.max is not None:
-        over = [r for r in rows if r["thickest_mm"] > args.max + hair]
-        if over:
-            named = ", ".join(f"{r['file']} {r['thickest_mm']:.3f} mm" for r in over)
-            problems.append(f"{len(over)} pane(s) thicker than the {args.max:g} mm asked: {named}")
+        thick = [r for r in rows if over(r["thickest_mm"], args.max + hair)]
+        if thick:
+            named = ", ".join(f"{r['file']} {said(r['thickest_mm'], args.max)} mm" for r in thick)
+            problems.append(f"{len(thick)} pane(s) thicker than the {args.max:g} mm asked: {named}")
     if args.min is not None:
-        under = [r for r in rows if r["thinnest_rays_mm"] < args.min - hair]
-        if under:
-            named = ", ".join(f"{r['file']} {r['thinnest_rays_mm']:.3f} mm" for r in under)
-            problems.append(f"{len(under)} pane(s) thinner than the {args.min:g} mm asked: {named}")
+        thin = [r for r in rows if under(r["thinnest_rays_mm"], args.min - hair)]
+        if thin:
+            named = ", ".join(
+                f"{r['file']} {said(r['thinnest_rays_mm'], args.min)} mm" for r in thin
+            )
+            problems.append(f"{len(thin)} pane(s) thinner than the {args.min:g} mm asked: {named}")
     if differs:
         report.verdict("DISAGREE", "; ".join(differs))
     elif problems:
@@ -339,7 +346,12 @@ def run_thickness(args: Any, report: Report) -> None:
             f"at least {args.min:g} mm" if args.min is not None else "",
         ]
         asked = " and ".join(x for x in limits if x)
-        said = f", {asked} as asked" if asked else ", a reading with no limit given"
+        held = f", {asked} as asked" if asked else ", a reading with no limit given"
+        chords = (args.max is not None and over(thickest["thickest_mm"], args.max)) or (
+            args.min is not None and under(thinnest["thinnest_rays_mm"], args.min)
+        )
+        if chords:
+            held += f", within the mesh's {hair:g} mm of chords"
         report.verdict(
-            "OK", f"the thickest pane is {thickest['file']}, {thickest['thickest_mm']:.3f} mm{said}"
+            "OK", f"the thickest pane is {thickest['file']}, {thickest['thickest_mm']:.3f} mm{held}"
         )

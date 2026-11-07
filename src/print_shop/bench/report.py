@@ -71,7 +71,7 @@ class Report:
 
     def fact(self, name: str, value: Any, unit: str = "", how: str = "") -> None:
         """A line of the report and a number in its saved form."""
-        shown = f"{value:.4f}" if isinstance(value, float) else str(value)
+        shown = f"{value:.4f}" if isinstance(value, float) else str(_shown(value))
         line = f"{name}: {shown}" + (f" {unit}" if unit else "") + (f" ({how})" if how else "")
         self.facts.append(line)
         self.numbers[name] = value
@@ -156,3 +156,15 @@ def _plain(value: Any) -> Any:
 
 def slug(text: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "-", text).strip("-")
+
+
+def _shown(value: Any) -> Any:
+    """A figure as a line says it: floats to 4 places, in a dict or a list too. The saved numbers
+    keep each figure as it is (`limits`)."""
+    if isinstance(value, float):
+        return round(value, 4)
+    if isinstance(value, dict):
+        return {k: _shown(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_shown(v) for v in value]
+    return value

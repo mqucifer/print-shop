@@ -111,6 +111,29 @@ def parser() -> Parser:
     clearance.add_argument(
         "--along", choices=("x", "y", "z"), default="z", help="the axis --lift moves it along"
     )
+    clearance.add_argument(
+        "--box",
+        dest="boxes",
+        action="append",
+        default=[],
+        type=_named_box,
+        metavar="NAME=X0,Y0,Z0,X1,Y1,Z1",
+        help="a place: each pair's least gap between their surfaces inside this box, as "
+        "pairs.N.places.NAME.gap_mm. Put it round the faces whose play it is, such as a pane's "
+        "edge and its pocket's wall, and clear of the faces with another play. With a place "
+        "named, --min-gap and --max-gap hold each place's gap",
+    )
+    clearance.add_argument(
+        "--facing",
+        dest="facings",
+        action="append",
+        default=[],
+        type=_named_facing,
+        metavar="NAME=DIR",
+        help="a place on a STEP pair: the least gap between faces that face DIR, one of +x -x +y "
+        "-y +z -z, within 60° all over, and the other part's faces facing back. DIR and its "
+        "opposite read alike, as a gap has a face on each side",
+    )
 
     readback = sub.add_parser("readback", help="volume before and after an operation")
     readback.add_argument("before")
@@ -501,13 +524,24 @@ def gaps_given(args: Any, top: Parser) -> None:
 
 
 def selections_given(args: Any, top: Parser) -> None:
-    """`edges`' selections, each by a name of its own."""
-    if args.command != "edges":
+    """`edges`' selections and `clearance`'s places, each by a name of its own, and each box with
+    room inside it."""
+    if args.command not in ("edges", "clearance"):
         return
     names = [n for n, _ in args.boxes] + [n for n, _ in args.facings]
     twice = sorted({n for n in names if names.count(n) > 1})
     if twice:
-        top.error(f"edges: each --box and --facing has a name of its own: {', '.join(twice)}")
+        top.error(
+            f"{args.command}: each --box and --facing has a name of its own: {', '.join(twice)}"
+        )
+    flat = [
+        n for n, (low, high) in args.boxes if any(b <= a for a, b in zip(low, high, strict=True))
+    ]
+    if flat and args.command == "clearance":
+        top.error(
+            f"clearance: the box {flat[0]} has no room inside it: give two corners apart on x, y "
+            "and z"
+        )
 
 
 def main(argv: list[str] | None = None) -> int:

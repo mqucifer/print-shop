@@ -17,6 +17,7 @@ import shlex
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
+from print_shop.bench import limits
 from print_shop.rounds import reports, toolsets
 from print_shop.rounds.toolsets import Toolset
 
@@ -496,10 +497,15 @@ def _judge_number(need: Need, reading: Reading, record: dict[str, Any]) -> Readi
         return reading
     value = float(raw)
     reading.value = value
-    if need.at_least is not None and value < need.at_least:
-        reading.why = f"`{need.number}` is {value:g}, under {need.at_least:g}"
-    elif need.at_most is not None and value > need.at_most:
-        reading.why = f"`{need.number}` is {value:g}, over {need.at_most:g}"
+    # The bench's rule (`bench/limits.py`): a figure at its limit, to arithmetic's noise, passes.
+    if need.at_least is not None and limits.under(value, need.at_least):
+        reading.why = (
+            f"`{need.number}` is {limits.said(value, need.at_least, None)}, under {need.at_least:g}"
+        )
+    elif need.at_most is not None and limits.over(value, need.at_most):
+        reading.why = (
+            f"`{need.number}` is {limits.said(value, need.at_most, None)}, over {need.at_most:g}"
+        )
     else:
         reading.passed = True
         reading.why = f"{reading.verdict}, `{need.number}` is {value:g}"
