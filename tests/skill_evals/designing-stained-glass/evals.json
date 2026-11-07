@@ -49,7 +49,29 @@
         "Reads `capture`'s reply: the small pane is to be set to 0.87 mm before play, and the big pane keeps 1.2.",
         "Sets the small pane's rim to `capture`'s figure, not one of its own, and runs `capture` again until it passes.",
         "Never runs `capture` with a smaller `--full-rim`, `--least-rim` or `--min-visible` than the request's, and doesn't use `--min-lip`."
-      ]
+      ],
+      "right": {
+        "scenario": "rim-by-share",
+        "about": "make_evals.py's arithmetic: the big pane, 19.5 mm square in a 20 mm pocket, shows 17.6 squared over 19.5 squared, 81.5%, at its full rim of 1.2 mm; the small pane, 5.5 mm square, shows 60% at a rim of 0.87 mm before play. `light` reads each pane's share, by its file.",
+        "ranges": [
+          {
+            "id": "big-open",
+            "what": "the big pane at its full rim of 1.2 mm",
+            "command": "light",
+            "number": "panes[file=pane_big.step].open_pct",
+            "at_least": 81.0,
+            "at_most": 82.0
+          },
+          {
+            "id": "small-open",
+            "what": "the small pane's rim set for 60% visible",
+            "command": "light",
+            "number": "panes[file=pane_small.step].open_pct",
+            "at_least": 60.0,
+            "at_most": 61.0
+          }
+        ]
+      }
     },
     {
       "id": "hanging-wall",

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """A run of the local model in rounds on the bench. `docs/rounds.md` says what it does.
 
-scripts/rounds.py start NAME --request FILE [--reference FILE]...   intake, then rounds
+scripts/rounds.py start NAME --request FILE [--reference FILE]... [--right FILE]
+                                                                  intake, then rounds; a right
+                                                                  answer is the scenario's ranges
 scripts/rounds.py resume NAME [--note FILE] [--from WHO] [--reopen-needs]   go on after a stop
 scripts/rounds.py resume NAME --approve --by WHO [--note FILE]      a person's yes, then the
                                                                   model's after-action review
@@ -18,6 +20,12 @@ scripts/rounds.py refine NAME --nozzle MM --filament [COLOUR=]NAME...   after ap
                                   approved folder sliced by Orca, its findings and proposals
 scripts/rounds.py refined NAME                                      the latest pass's findings
 scripts/rounds.py proposal NAME ID --approve|--reject --by WHO [--note FILE]
+scripts/rounds.py scores NAME [--right FILE] [--ledger FILE] [--keep]   each round against the
+                                  scenario's right answer: its distance, improvement and kind
+scripts/rounds.py replay NAME N [--times K] [--label L] [--out DIR] [CHANGE]   call N sent again
+                                  with one change: --skill NAME=FILE, --reply CALL.K=FILE,
+                                  --skills-card FILE, --lesson FILE or --replace OLD NEW; none is
+                                  the control. Into ~/print-shop/replays/, never the run's folder
 
 scripts/rounds.py lessons [RUN] [--ledger FILE]                     what a run wrote, its evidence
 scripts/rounds.py lessons accept ID --by WHO [--routes R,R] [--becomes B]
@@ -47,7 +55,7 @@ from types import FrameType
 
 import httpx
 
-from print_shop.rounds import after_action, lessons, records
+from print_shop.rounds import after_action, lessons, records, replays, scores
 from print_shop.rounds.ledger import DesignLedger
 from print_shop.rounds.run import (
     APPROVED,
@@ -243,6 +251,75 @@ def _refine(args: argparse.Namespace, folder: Path, ledger: DesignLedger) -> int
     return 0
 
 
+def _scores(args: argparse.Namespace, folder: Path, root: Path) -> int:
+    """Each round's score against a right answer, from a ledger it only reads unless `--keep`."""
+    right = args.right or folder / scores.RIGHT_FILE
+    if not right.is_file():
+        raise Refused(f"there's no right answer: {right} isn't there, and --right names none")
+    try:
+        scenario, ranges, sha = scores.load_right(right)
+    except scores.NotRight as exc:
+        raise Refused(str(exc)) from exc
+    path = args.ledger or root / "ledger.sqlite"
+    found = scores.score(scores.read_only(path), folder.name, ranges)
+    if args.keep:
+        scores.keep(DesignLedger(path), found, sha)
+    print(json.dumps({
+        "how_it_ran": f"scripts/rounds.py scores, from {path.name}"
+        + (", kept in round_scores" if args.keep else ", read only"),
+        "run": folder.name,
+        "scenario": scenario,
+        "right_sha": sha,
+        "rounds": [one.plain() for one in found],
+        "phases": scores.phases(found),
+    }, indent=1))
+    return 0
+
+
+def _change(args: argparse.Namespace) -> replays.Change:
+    """The one change a replay makes, from its flags: none is the control."""
+    given = [
+        name
+        for name in ("skill", "reply", "skills_card", "lesson", "replace")
+        if getattr(args, name) is not None
+    ]
+    if len(given) > 1:
+        raise Refused(f"a replay changes one thing: not {', '.join(given)}")
+    if not given:
+        return replays.Change()
+    kind = given[0]
+    if kind in ("skill", "reply"):
+        target, sep, file = getattr(args, kind).partition("=")
+        if not sep or not target or not file:
+            raise Refused(f"--{kind} is {'NAME' if kind == 'skill' else 'CALL.K'}=FILE")
+        return replays.Change(kind, target, Path(file).read_text(encoding="utf-8"), source=file)
+    if kind == "replace":
+        old, new = (Path(f) for f in args.replace)
+        return replays.Change(
+            "replace", old.name, new.read_text(encoding="utf-8"),
+            old=old.read_text(encoding="utf-8"), source=f"{old} -> {new}",
+        )
+    file = getattr(args, kind)
+    return replays.Change(
+        kind.replace("_", "-"), "", Path(file).read_text(encoding="utf-8"), source=file
+    )
+
+
+def _replay(args: argparse.Namespace, folder: Path) -> int:
+    change = _change(args)
+    send = Sender()
+    _ready(send)
+    commit, _ = repository_version()
+    from print_shop.bench import host  # noqa: PLC0415 - only for where the repository is
+
+    done = replays.replay(
+        folder, args.n, change, send, times=args.times, root=args.out, label=args.label,
+        commit=commit, public=host.REPOSITORY,
+    )
+    print(json.dumps({"folder": done.folder, **done.summary()}, indent=1))
+    return 0
+
+
 def main() -> int:
     top = argparse.ArgumentParser(description=__doc__)
     top.add_argument(
@@ -253,6 +330,9 @@ def main() -> int:
     start.add_argument("name")
     start.add_argument("--request", type=Path, required=True)
     start.add_argument("--reference", type=Path, action="append", default=[])
+    start.add_argument(
+        "--right", type=Path, help="the scenario's right answer, as ranges: kept from the model"
+    )
     resume = sub.add_parser("resume")
     resume.add_argument("name")
     resume.add_argument("--note", type=Path)
@@ -297,6 +377,24 @@ def main() -> int:
     proposed.add_argument("--by", required=True, help="who decided: sponsor, or stand-in: <who>")
     proposed.add_argument("--note", type=Path)
     proposed.add_argument("--ledger", type=Path, help="this ledger, not the one beside the runs")
+    scored = sub.add_parser("scores", help="each round against the scenario's right answer")
+    scored.add_argument("name")
+    scored.add_argument("--right", type=Path, help="this right answer, not the run's right.json")
+    scored.add_argument("--ledger", type=Path, help="this ledger, not the one beside the runs")
+    scored.add_argument("--keep", action="store_true", help="write them into round_scores")
+    again = sub.add_parser("replay", help="one recorded call sent again, with one change")
+    again.add_argument("name")
+    again.add_argument("n", type=int, help="the call, from 1")
+    again.add_argument("--times", type=int, default=3)
+    again.add_argument("--label", default="", help="the replay's folder name; its change's kind")
+    again.add_argument(
+        "--out", type=Path, default=replays.DEFAULT_ROOT, help="where replays go, by run and call"
+    )
+    again.add_argument("--skill", help="NAME=FILE: the skill's text, in the start and its reads")
+    again.add_argument("--reply", help="CALL.K=FILE: the reply to call CALL's K-th tool call")
+    again.add_argument("--skills-card", help="FILE: the start's required skills, as a card")
+    again.add_argument("--lesson", help="FILE: a lesson added to the start's lessons")
+    again.add_argument("--replace", nargs=2, metavar=("OLD", "NEW"), help="exact text, as files")
     taught = sub.add_parser("lessons")
     taught.add_argument("words", nargs="*", help="RUN, or a step: " + ", ".join(LESSON_ACTIONS))
     taught.add_argument("--ledger", type=Path, help="this ledger, not the one beside the runs")
@@ -340,6 +438,11 @@ def main() -> int:
             return 0
         if args.command in ("refine", "refined", "proposal"):
             return _refine(args, folder, DesignLedger(args.ledger or root / "ledger.sqlite"))
+        if args.command == "scores":
+            return _scores(args, folder, root)
+        if args.command == "replay":
+            with only_session(args.out.expanduser()):
+                return _replay(args, folder)
         with only_session(root):
             if args.command == "resume" and args.approve:
                 note = args.note.read_text(encoding="utf-8") if args.note else ""
@@ -370,7 +473,14 @@ def main() -> int:
             _ready(send)
             if args.command == "start":
                 request = args.request.read_text(encoding="utf-8")
+                if args.right:
+                    try:
+                        scores.load_right(args.right)
+                    except scores.NotRight as exc:
+                        raise Refused(str(exc)) from exc
                 run = Run.start(root, args.name, request, args.reference, send)
+                if args.right:
+                    scores.keep_right(run.folder, args.right, run.ledger)
             else:
                 run = Run.load(folder, send)
                 (folder / "stop").unlink(missing_ok=True)
@@ -381,7 +491,9 @@ def main() -> int:
                     run.resume(note, args.reopen_needs, args.note_from)
             ending = run.drive()
             print(what_next(run, ending))
-    except (Refused, lessons.Refused, NoChoice, FileNotFoundError, LookupError) as refused:
+    except (
+        Refused, lessons.Refused, replays.Refused, NoChoice, FileNotFoundError, LookupError
+    ) as refused:
         print(f"refused: {refused}", file=sys.stderr)
         return 3
     return 10 if ending.name in WAITING else 20

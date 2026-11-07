@@ -53,6 +53,7 @@ from print_shop.rounds import (
     prompt,
     records,
     review,
+    scores,
     skills,
     toolsets,
     transcript,
@@ -2370,6 +2371,8 @@ class Run:
             closing,
             judgement.left,
         )
+        # Against the scenario's right answer, if it was started with one: mqucifer/print-shop#67.
+        scores.after_round(self.ledger, self.folder)
         reply = self._said_of(judgement, wanted, met, standing, clashes)
         if followed:
             reply += "\n" + "\n".join([FOLLOWED, *followed])

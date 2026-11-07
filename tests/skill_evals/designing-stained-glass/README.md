@@ -36,3 +36,15 @@ Each expected behaviour is read from the run's record, not from what the model s
 - what it said: `events.jsonl`, by call.
 
 Score each behaviour held or not, with the call that shows it, and compare with the scenario's `baseline`: the three runs had every bench command and no stained-glass skill, so `gaps.md` is the baseline on this model. A scenario run once is one reading, so run each at least twice before changing the skill.
+
+## A score for each round
+
+A scenario with a `right` answer (`rim-by-share` has one) is scored round by round against it (mqucifer/print-shop#67, `docs/rounds.md`). Write it to a file and start the run with it, so each round is scored as it ends:
+
+```
+python3 -c "import json; e={x['id']: x for x in json.load(open('<checkout>/tests/skill_evals/designing-stained-glass/evals.json'))['evals']}['rim-by-share']; json.dump(e['right'], open('rims.right.json','w'))"
+<checkout>/scripts/rounds.py start eval-rims-1 --request rims.md --right rims.right.json \
+  --reference rims/frame.step --reference rims/pane_big.step --reference rims/pane_small.step
+```
+
+`right.json` stays beside the run's records, outside `work/`, so the model never reads it. A run started without one is scored after with `scripts/rounds.py scores NAME --right FILE`, which only reads the ledger.

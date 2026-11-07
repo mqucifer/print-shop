@@ -21,6 +21,9 @@ scripts/rounds.py lessons load FILE --by WHO
 scripts/rounds.py refine NAME --nozzle MM --filament [COLOUR=]NAME...
 scripts/rounds.py refined NAME
 scripts/rounds.py proposal NAME ID --approve|--reject --by WHO [--note FILE]
+scripts/rounds.py start NAME --request FILE [--reference FILE]... --right FILE
+scripts/rounds.py scores NAME [--right FILE] [--ledger FILE] [--keep]
+scripts/rounds.py replay NAME N [--times K] [--label L] [--out DIR] [--skill NAME=FILE | --reply CALL.K=FILE | --skills-card FILE | --lesson FILE | --replace OLD NEW]
 ```
 
 It needs the bench's image (`scripts/bench.py build`), and LiteLLM on :4000 with print-shop's key from `~/.config/print-shop/.env`. It uses `crew-code-think`, and probes nothing else. **A run's record says what reasoning effort its alias sends** (`runs.reasoning_effort`, and `reasoning_effort` in `summary.json`), read at `start` from LiteLLM's own `/model/info` for this key: the alias's `litellm_params.reasoning_effort`, or its `extra_body`'s, or in `extra_body.chat_template_kwargs`. It's no model call, and SGLang isn't reached. If LiteLLM won't say, the record says `unknown` and why (`reasoning_effort_from`). Nothing else is kept from the answer, which can name a server's address. The effort stays as it is (the Sponsor, 2026-11-03): it's recorded, not changed. **A run names its code,** so `start` and `resume` refuse a checkout with uncommitted changes. As in `cad_eval`, run from a checkout nothing edits until it ends: `git worktree add --detach ../run-<commit> <commit>`. One session runs under a root at a time (`.session.lock`). Runs live in `~/print-shop/design-runs/`, off this public repository, and `start` refuses a folder inside it.
@@ -290,7 +293,10 @@ The Sponsor, 2026-11-03: "id be concerned with adding things like light-path com
 | `interventions` | Every note, answer, pick and send-back relayed to the model: when, at which call, who it's from, its text. The largest cause of change in a run |
 | `timeline` | Each start, stop, resume, compaction and restart, in order. A compaction has its size before and after, estimated and measured, and what it cut (`said`), and each process its harness commit, where `runs.harness_commit` holds only the first. Each call that ended without a tool call is an `asked` row, with what the next request offered |
 | `calls` | Each call's seconds, tokens, finish and share of repeated reasoning, with its round, its phase (how many times a person had sent something) and its process |
-| `phases`, `round_costs` (views) | Calls, seconds and tokens, split by what a person sent or by round |
+| `phases`, `round_costs` (views) | Calls, seconds and tokens, split by what a person sent or by round. `phases` also splits first rounds from refinement rounds: each phase's `rounds`, its `kind` (that of its first round to end) and that round's `improvement` |
+| `right_ranges` | A scenario's right answer, as ranges of what the bench reads, by the file's hash: the operator's, never shown to the model (below) |
+| `round_scores` | Each ended round against a right answer: its distance at its end, its improvement over the ranges read at both ends, its kind, and each range's value before and after, with the bench answer that gave it |
+| `round_kinds` (a view) | Each ended round's kind: `first`, `again` (no person between it and the round before) or `refinement` (after a note, a send-back, a pick or an answer) |
 | `runaways` | A call that hit the limit, was cut, or whose reasoning repeats, for review. See below |
 | `tries` | Each reading from a `try` |
 | `approvals`, `decisions` | Each stop for approval, with its sheet's hash, the part's hashes, the closing words and the delivered folder's groups and files (`review`), and each yes, send-back or close, and who. A close of a run that never stopped for approval has no `approval` |
@@ -335,6 +341,43 @@ The Sponsor: "When we get these run-away calls or repeating itself constantly it
 - **It can't keep what never arrives.** On one real run the arguments of a call cut off at the limit never arrived, and the likely cause is the server holding them back until they're complete, which hasn't been probed. If so, `tokens_unaccounted` on the row, and `tool_args_chars` of 0, are what show it.
 - **A row in `runaways`** is a call with a `finish` of `length` or `runaway`, or whose reasoning repeats earlier text past `Limits.review_repeat_share` (0.5, recorded on the run). Repetition counts sentences of 25 characters or more that match an earlier one word for word, by characters, over calls with at least 2,000 characters of such sentences. Paraphrase isn't counted, so it's a floor.
 - **`doing`** is what it was calling, with any path, and how its text and reasoning ended. **`lacked`** is the evidence code can give: the skills read and not read, the compactions so far, the last bench answer, the last refusals and the needs failing. What it really lacked is a reviewer's call, which `review_note` is for.
+
+### Measuring a change without a whole run (mqucifer/print-shop#67)
+
+An eval takes one to four hours, so "did this skill text help?" would cost a run. mrCAD (arXiv 2504.20294) scores every round as improvement toward a right answer, and replays one recorded round with the history fixed; it found models made the part worse on refinement rounds. Two tools do that here, from the records alone.
+
+**A score for each round** (`scores.py`). A scenario's right answer is a JSON file of ranges, kept apart from its request, which is what the model reads:
+
+```json
+{"scenario": "peg-through-a-plate",
+ "ranges": [
+  {"id": "gap", "what": "the least gap round the peg", "command": "clearance",
+   "names": ["peg.step"], "number": "pairs.0.gap_mesh_mm", "at_least": 0.3, "at_most": 0.8},
+  {"id": "across", "what": "the opening's least width across", "command": "rays",
+   "number": "levels.0.across_mm.min", "at_least": 8.0, "scale": 1.0}]}
+```
+
+- **Each range names what the bench reads:** a command, the files its command line must name (by file name, so `references/peg.step` counts for `peg.step`, and a copy such as `peg-lifted.step` doesn't), a number in its answer, and the range. A list's item can be picked by a key, `panes[file=pane_small.step].open_pct`, since a list's order follows the command line the model wrote. One end is enough. A range of no width, or with one end, gives its `scale`, in its own units; otherwise it's the width. An opening sized by its gap all round is two ranges, as here: `clearance` reads the least gap, and `rays` the width across.
+- **`start --right FILE`** checks it, keeps it as `right.json` beside the run's records (outside `work/`), and in `right_ranges`. Each round is then scored as it ends, into `round_scores`. The scenario that shows the form in this repository is `rim-by-share`'s `right` in `tests/skill_evals/designing-stained-glass/evals.json`; the operator's other scenarios keep theirs beside their requests.
+- **Each range's value is the bench's, read from the ledger:** at a round's end, a need's reading (`readings`), then the harness's own checks at `done` (`standing`), then the model's last bench call in the round (`bench_calls`). Before it, the round before's end; and before the first round, the last bench call before it began. Each value says which answer gave it. Where two answers read a range differently at one moment, the further counts. A range nothing read is `null`, and counts in no sum. Nothing is run, and nothing is taken from what the model said.
+- **The figures:** each range's distance outside it, over its scale. A round's `distance` is their sum over every range read at its end (`read` of `of`). Its `improvement` is (before − after) ÷ before over the ranges read at both ends (`compared`): 1 is right now, 0 no change, below 0 worse. With nothing wrong before there's none, and `said` says so ("right before and after"). Its `kind` is `first`, `again` or `refinement`, from the phase of each round's last call, so a refinement round's improvement is what a note, a send-back or a pick led to.
+- **`scores NAME`** prints every round's score and the phases, from a ledger it opens read-only, so it can score a run whose records are kept read-only. `--right` names a file other than the run's own, and `--keep` writes the rows into `round_scores`, each under the right answer's hash, so a corrected file's scores sit beside the first.
+- **Batch 4's nine evals,** from copies of their ledgers (`~/print-shop/proofs/m18-replay/baseline/`): each of the eight with ranges ended its last round at distance 0. eval-lid-1's one round went from a seated lid, 0.0 mm (the model's call 11), to 0.25 mm of play, an improvement of 1.0; eval-count-1's from two openings to three, 1.0; eval-sleeve-1's four rounds read right throughout, while its needs failed on number paths `info` doesn't print, so its failures were the needs', not the part's. eval-fan-1 is judged by eye and has no ranges. Most runs have one round, as a round is a `done`.
+
+**A replay of one call with one thing changed** (`replays.py`). `replay NAME N` rebuilds call `N`'s exact request with `transcript.rebuild`, makes one change, and sends it `--times` times (3 by default), since the model varies. It sends nothing to the Sponsor, runs no tool the answer asks for, and writes nothing in the run's folder: each replay is a folder of its own, `~/print-shop/replays/<run>/call-NNN/<label>/`, refused inside the run's folder or this repository. The changes:
+
+| Flag | What changes |
+|---|---|
+| none | Nothing: the control, for how far the model varies on its own |
+| `--skill NAME=FILE` | A skill's text, wherever the request holds it: given whole in the start, between `<skill name="NAME">` and `</skill>`, and each `skill` reply that read it |
+| `--reply CALL.K=FILE` | The reply to the K-th tool call (from 1) the model made at call `CALL`, such as a bench answer reworded |
+| `--skills-card FILE` | The start's required skills, from "The skills this work needs throughout" to the last `</skill>`, as a short card of their rules or whatever the file says |
+| `--lesson FILE` | A lesson added under the start's lessons heading, which is added if the start had none |
+| `--replace OLD NEW` | One exact text, everywhere the request holds it, for anything else: both are files |
+
+A change that finds nothing to change is refused, so a replay never runs as a control by mistake. Each try records the reasoning's length (characters, and tokens where the proxy says), the call it ends in (`build`: `write`, `edit` or `run`; `bench`; `ask`: `ask`, `send_ask` or `questions`; `other`, with the tools named; or `none`), its seconds and finish, and whether it's long: past 20,000 characters of reasoning (`LONG_CHARS`, the line the runaways were read at), or cut, or at its limit. The recorded call's own figures come first, from its `call` event. `replay.json` has every figure, `README.md` a table, `request.json` what was sent, and `n.json` each answer. A failed try keeps only its kind and status, as an error's words can name the proxy, and the rest go on. It runs on the proxy as any call does, from a committed checkout, and refuses otherwise.
+
+**The first replays are the operator's,** after the merges, recorded on mqucifer/print-shop#67: eval-fan-1's calls 3, 5 and 6 with a worked clip, eval-rims-4's call 6 and eval-edges-1's calls 39–40 with reworded replies, before and after mqucifer/print-shop#65's wording, and three or four long calls with the required skills whole against a short card. Here the mechanism is proved with the scripted model (`tests/test_replays.py`).
 
 ## Lessons
 
@@ -465,6 +508,7 @@ The Sponsor, 2026-11-05: "It should use orca's cli to add pauses not raw gcode. 
 | `final-sheet.png` | The latest `part` to pass, one row each, for the people who see the result. It decides nothing |
 | `refinements/n/` | Each refinement pass: `README.md` (print steps, findings, proposals), `plates/` (each plate's G-code and Orca's log), `meshing/`, `bench/`, `cover/`, `findings.json`, and `proposals/` with each check's files |
 | `summary.json` | A run's figures, from `scripts/rounds.py summary`, read from its events |
+| `right.json` | The scenario's right answer, from `start --right`, outside `work/`, so the model never reads it |
 
 ## Where each part came from
 
@@ -514,6 +558,8 @@ mqucifer/print-shop#19 then took what else it lacked: close-ups, sheets of the p
 `tests/test_intake.py` needs no Docker: the request's form, a bracket's and a lamp's, and one in the old form, the breakdown before the needs, every line covered or the lines left over named, a fixed need's check at other settings from the first try and its change only by the Sponsor, and the stops, the plan first with no part file, `done` and the next stop held, `none` leaving one open, and the record. The in-image tests' requests say `no plan`, as their runs aren't about stops, and each settles its needs after a breakdown.
 
 `tests/test_close.py` needs no Docker: a close after each kind of ending, what the model's told and asked, the refusals, the lock on the command line, the nudge counted by command and file and from a resumed run's earlier calls, and a ledger from before made again with every row kept. `tests/test_lessons.py` needs no Docker: the after-action review on a run put at its stop, each refusal, the reviewer's steps, giving at the start, scoring and retiring, a file of steps, and the command line with no key. `tests/test_lessons_in_image.py`, under `bench`, goes the whole way in real containers: a run met by the harness's checks, approved, its review, the reviewer's step by the command line, and the next run starting with the lesson, using it and scoring it.
+
+`tests/test_scores.py` and `tests/test_replays.py` need no Docker and make no model call: the right answer's form, each round's distance, improvement and kind with where each value came from, the further of two answers, the model's bench call where no need read a range, the phases view and an older ledger's made again, a ledger read without a write, `right.json` outside `work/` and scored at each round, the command line; and a replay of a real session's call as recorded and with each change, what each try records, the run's folder left as it was, and a failed try holding only its status.
 
 `tests/test_holding.py` needs no Docker: a failed check named in every later reply until it passes at its settings or as its need checks it, a pass at the first settings clearing probes, `set_aside` and its refusals, the harness's readings counting, a check leaving the part, the list after a compaction, `done` refusing a need off the part, the question naming each, and a `none` at the plan reopening the needs. `tests/test_reports.py` reads each command's numbers from the bench's code. `tests/test_friction.py` needs no Docker: an argument named with the tool that takes it, a join's refusal, `questions` with the model's pictures and with the harness's sheet of the given files, `looks` on a given file, and a need quoting a pick's reason.
 
