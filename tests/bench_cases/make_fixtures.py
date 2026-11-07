@@ -491,11 +491,18 @@ def glass() -> None:
     #   w leaves (5.5 - 2w)² = 60% of 30.25 mm², w = 0.6199, so 0.8699 mm before play.
     # - One 1.5 mm square keeps 36% even at 0.55 mm: it's to be removed.
     # `rims/held` has the first two at 1.2 and 0.87 mm; `rims/unheld` has the 5.5 mm pane at
-    # 1.2 mm, and the 1.5 mm one at 0.55.
+    # 1.2 mm, and the 1.5 mm one at 0.55; `rims/both-at-1` has the first two at 1.0 mm, so the
+    # big pane's rim is to widen by 0.2 and the small one's to narrow by 0.131
+    # (mqucifer/print-shop#65).
     Path("rims").mkdir(exist_ok=True)
-    for name, small_rim, tiny in (("held", 0.87, False), ("unheld", 1.2, True)):
+    for name, big_rim, small_rim, tiny in (
+        ("held", 1.2, 0.87, False),
+        ("unheld", 1.2, 1.2, True),
+        ("both-at-1", 1.0, 1.0, False),
+    ):
         rims = box(0, 40, 0, 24, 0, 4)
-        rims = rims.cut(box(2, 22, 2, 22, 1.5, 2.5)).cut(box(3.2, 20.8, 3.2, 20.8, 0, 4))
+        rims = rims.cut(box(2, 22, 2, 22, 1.5, 2.5))
+        rims = rims.cut(box(2 + big_rim, 22 - big_rim, 2 + big_rim, 22 - big_rim, 0, 4))
         rims = rims.cut(box(26, 32, 9, 15, 1.5, 2.5))
         rims = rims.cut(box(26 + small_rim, 32 - small_rim, 9 + small_rim, 15 - small_rim, 0, 4))
         if tiny:
@@ -528,6 +535,10 @@ def enclosure() -> None:
       Closed, nothing sharp is in reach: the rim and the lid's underside meet flush.
     - `lid-lip-P-up`: a lid with a lip 3 mm deep inside the walls, P mm of play all round,
       lifted 0.5 mm off its seat, so the least gap to the tray is the play, or 0.5.
+    - `lid-lip-P`: the same lids seated, as printed: `clearance --lift 0.5` reads them as the
+      lifted copies (mqucifer/print-shop#65).
+    - `curved-pocket` and `curved-pane`: a pane 20 x 14 with corners rounded 3 mm in a pocket
+      0.25 mm wider all round, its corners 3.25, so the gap is 0.25 on a curve as well as flat.
     Shelling a block whose every edge is rounded fails quietly in CadQuery 2.8, so the tray
     is cut, not shelled.
     """
@@ -552,6 +563,14 @@ def enclosure() -> None:
         lip = box(-18 + play, 18 - play, -13 + play, 13 - play, 12, 15)
         save(plate.union(lip).translate((0, 0, 0.5)), f"enclosure/lid-lip-{name}-up")
     save(plate.union(box(-17.8, 17.8, -12.8, 12.8, 12, 15)), "enclosure/lid-lip-0p2")
+    save(plate.union(box(-17.4, 17.4, -12.4, 12.4, 12, 15)), "enclosure/lid-lip-0p6")
+
+    def rounded(w: float, h: float, r: float, z0: float, z1: float) -> Any:
+        return box(-w / 2, w / 2, -h / 2, h / 2, z0, z1).edges("|Z").fillet(r)
+
+    save(rounded(20, 14, 3, 1, 2), "enclosure/curved-pane")
+    save(box(-15, 15, -12, 12, 0, 3).cut(rounded(20.5, 14.5, 3.25, 0.5, 2.5)),
+         "enclosure/curved-pocket")  # fmt: skip
 
 
 if __name__ == "__main__":

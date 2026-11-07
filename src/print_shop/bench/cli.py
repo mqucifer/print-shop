@@ -7,6 +7,7 @@ wrong, 2 there's no answer to rely on, 3 the command itself was wrong.
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 from typing import Any, NoReturn
@@ -45,6 +46,44 @@ def _point(text: str) -> list[float]:
     return values
 
 
+#: A name for a selection of edges, as a need's number path holds it: no dots.
+NAME = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def _named(text: str) -> tuple[str, str]:
+    name, sep, value = text.partition("=")
+    if not sep or not NAME.fullmatch(name):
+        raise argparse.ArgumentTypeError(
+            "NAME=..., the name in letters, digits, - and _, as a need's number names it"
+        )
+    return name, value
+
+
+def _named_box(text: str) -> tuple[str, tuple[list[float], list[float]]]:
+    """`corners=-30,-20,2,30,20,18`: a name, and the box's low and high corners."""
+    name, value = _named(text)
+    try:
+        values = [float(v) for v in value.split(",")]
+    except ValueError:
+        values = []
+    if len(values) != 6:
+        raise argparse.ArgumentTypeError("NAME=X0,Y0,Z0,X1,Y1,Z1: six numbers, two corners")
+    low = [min(a, b) for a, b in zip(values[:3], values[3:], strict=True)]
+    high = [max(a, b) for a, b in zip(values[:3], values[3:], strict=True)]
+    return name, (low, high)
+
+
+#: The ways `edges --facing` takes, as `bench/edges.py` reads them.
+FACINGS = ("+x", "-x", "+y", "-y", "+z", "-z")
+
+
+def _named_facing(text: str) -> tuple[str, str]:
+    name, way = _named(text)
+    if way not in FACINGS:
+        raise argparse.ArgumentTypeError(f"NAME=DIR, DIR one of {' '.join(FACINGS)}")
+    return name, way
+
+
 def parser() -> Parser:
     top = Parser(prog="bench", description=__doc__)
     top.add_argument("--out", default="bench-out", help="where reports are saved")
@@ -60,6 +99,17 @@ def parser() -> Parser:
         "--max-gap",
         type=float,
         help="a least gap over this in mm is TOO LOOSE, for parts meant to mate, such as a lid",
+    )
+    clearance.add_argument(
+        "--lift",
+        type=float,
+        metavar="D",
+        help="move the last file named D mm along --along before measuring, signed, its file left "
+        "where it is: a seated lid lifted off its seat by more than the play, so the least gap is "
+        "its lip's play, read on the printed lid",
+    )
+    clearance.add_argument(
+        "--along", choices=("x", "y", "z"), default="z", help="the axis --lift moves it along"
     )
 
     readback = sub.add_parser("readback", help="volume before and after an operation")
@@ -174,6 +224,26 @@ def parser() -> Parser:
         type=float,
         help="the least radius of every outside edge, in mm, from the request: a sharp edge or a "
         "tighter rounding is FAIL",
+    )
+    edges.add_argument(
+        "--box",
+        dest="boxes",
+        action="append",
+        default=[],
+        type=_named_box,
+        metavar="NAME=X0,Y0,Z0,X1,Y1,Z1",
+        help="the edges with any point read in this box, their least radius as selected.NAME. "
+        "Each edge is also in a group, upright, top, bottom or side, as groups.NAME",
+    )
+    edges.add_argument(
+        "--facing",
+        dest="facings",
+        action="append",
+        default=[],
+        type=_named_facing,
+        metavar="NAME=DIR",
+        help="the edges facing within 60° of DIR, one of +x -x +y -y +z -z: those round the face "
+        "that faces it, their least radius as selected.NAME",
     )
 
     light = sub.add_parser(
@@ -412,11 +482,32 @@ def rims_given(args: Any, top: Parser) -> None:
 
 
 def gaps_given(args: Any, top: Parser) -> None:
-    """`clearance`'s gap range: a least gap no larger than its most."""
-    if args.command != "clearance" or args.min_gap is None or args.max_gap is None:
+    """`clearance`'s gap range, a least gap no larger than its most, and a lift past both: a lift
+    short of a limit would read as the gap (mqucifer/print-shop#65)."""
+    if args.command != "clearance":
         return
-    if args.min_gap > args.max_gap:
+    if args.min_gap is not None and args.max_gap is not None and args.min_gap > args.max_gap:
         top.error(f"clearance: --min-gap {args.min_gap:g} is over --max-gap {args.max_gap:g}")
+    if args.lift is None:
+        return
+    if len(args.files) < 2:
+        top.error("clearance: --lift moves the last file named, so it takes two files or more")
+    limits = [g for g in (args.min_gap, args.max_gap) if g is not None]
+    if args.lift == 0 or any(abs(args.lift) <= g for g in limits):
+        top.error(
+            f"clearance: --lift {args.lift:g} is a gap it would read: lift by more than "
+            f"{max(limits, default=0):g} mm, so the least gap is the play and not the lift"
+        )
+
+
+def selections_given(args: Any, top: Parser) -> None:
+    """`edges`' selections, each by a name of its own."""
+    if args.command != "edges":
+        return
+    names = [n for n, _ in args.boxes] + [n for n, _ in args.facings]
+    twice = sorted({n for n in names if names.count(n) > 1})
+    if twice:
+        top.error(f"edges: each --box and --facing has a name of its own: {', '.join(twice)}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -425,6 +516,7 @@ def main(argv: list[str] | None = None) -> int:
     args = top.parse_args(given)
     rims_given(args, top)
     gaps_given(args, top)
+    selections_given(args, top)
     out = Path(args.out)
     report = Report(args.command, given)
     try:

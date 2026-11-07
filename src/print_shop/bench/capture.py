@@ -840,7 +840,8 @@ def _share_says(
     needs = "none: it's to be removed" if rim["remove"] else f"{rim['set_mm']:g} mm"
     report.line(
         f"pane {name}: {share:.1f}% visible, {args.min_visible:g}% wanted; its rim needs "
-        f"{needs} before play, and has {has} mm at the least. {rim_chosen(rim)}"
+        f"{needs} before play, and has {has} mm at the least. {rim_change(rim, has)} "
+        f"{rim_chosen(rim)}"
     )
     report.second(
         f"pane {name}'s visible share by rays straight up through the frame: {by_rays:.1f}% of "
@@ -888,8 +889,44 @@ def _share_says(
             f"{has} mm at the least"
             + (f" ({where})" if where else "")
             + f", and {share:.1f}% of it is visible, where {args.min_visible:g}% is wanted. "
+            + rim_change(rim, has)
+            + " "
             + rim_chosen(rim)
         )
+
+
+def rim_change(rim: dict[str, Any], has: float | None) -> str:
+    """Which way the rim moves to meet its need, by how much, and what it then leaves visible
+    (mqucifer/print-shop#65). On `eval-rims-4` the longest call, 31 minutes, went on working out
+    which way a wider rim moves the visible share from "needs 1.2 mm, has 1.0 mm at the least"."""
+    if rim["remove"]:
+        return "No rim keeps the share wanted: the pane goes, with its cell."
+    if has is None:
+        return "Its lip isn't read, so how far its rim is off isn't said."
+    wanted, set_mm = rim["min_visible_pct"], rim["set_mm"]
+    by = round(abs(set_mm - has), 3)
+    if rim["chosen"] == "full":
+        after = rim["visible_at_full_pct"]
+        keeps = f"Any rim of {set_mm:g} mm or more passes while {wanted:g}% stays visible."
+    else:
+        after = rim["visible_at_need_pct"]
+        keeps = (
+            f"Wider than {set_mm:g} mm leaves under {wanted:g}% visible, and narrower is under the "
+            "rim it needs, so it's that rim and no other."
+        )
+    if by <= RIM_TOL or (rim["chosen"] == "full" and has >= set_mm - RIM_TOL):
+        return f"Its rim is the rim it needs: leave it. {keeps}"
+    if set_mm > has:
+        move = (
+            f"Widen its rim by {by:g} mm, from {has:g} to {set_mm:g} mm before play: the opening's "
+            f"edge moves {by:g} mm in, over the pane, which covers more of it"
+        )
+    else:
+        move = (
+            f"Narrow its rim by {by:g} mm, from {has:g} to {set_mm:g} mm before play: the "
+            f"opening's edge moves {by:g} mm out, off the pane, which shows more of it"
+        )
+    return f"{move}, and leaves {after:.2f}% of it visible. {keeps}"
 
 
 def rim_chosen(rim: dict[str, Any]) -> str:

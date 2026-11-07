@@ -56,15 +56,17 @@ Each bench need gives `measures`, what it's about, and its command has to measur
 | The request asks | `measures` | Its check |
 |---|---|---|
 | the case clears a board, a fan or a plug by G | `fit` | `clearance base.step references/board.step --min-gap G` |
-| the lid's play is from G1 to G2, so it isn't loose | `fit` | `clearance base.step lid-lifted.step --min-gap G1 --max-gap G2` |
+| the lid's play is from G1 to G2, so it isn't loose | `fit` | `clearance base.step lid.step --lift D --min-gap G1 --max-gap G2` |
 | edges, corners and lid softened to R | `edges` | `edges base.step lid.step references/board.step --min-radius R` |
+| one group of edges at its own radius, such as the upright corners at R2 | `edges` | `edges base.step lid.step`, `number` `groups.upright.least_radius_mm`, `at_least` R2 |
 | a round opening of diameter D, such as the fan's | `hole` | `rays lid.step --centre X,Y,Z --d D` |
 | the wall round a screw's boss | `wall` | `wall base.step --hole X,Y,Z --min-wall W` |
 | each part printable | `printable` | `thin base.step` |
 | how firmly the fan or the lid is held | an eye need | none measures it: say what to look for |
 
 - **One pair to a `clearance` need,** the part and what it must clear. `clearance` reads every pair of the files named, and a part resting on another touches it, gap 0: a board on its standoffs, or the lid on its seat, reads `TOO CLOSE` under any `--min-gap`.
-- **A lid's play is read with the lid lifted.** Seated, the lid touches its seat, so its least gap is 0 whatever the lip's play. Write a copy lifted off its seat along the way it closes by more than the largest play allowed, `lid-lifted.step`, from the same script. Its least gap to the base is then the lip's play: a lip too loose is `TOO LOOSE`, too tight `TOO CLOSE`.
+- **A lid's play is read with `--lift`.** Seated, the lid touches its seat, so its least gap is 0 whatever the lip's play. `--lift D` moves the last file named D mm along the way it closes (`--along`, z unless said) before measuring, and leaves its file where it is: D more than G2 and less than the lip's depth, so the lip stays in the walls. The least gap is then the lip's play, read on `lid.step`, the printed lid: a lip too loose is `TOO LOOSE`, too tight `TOO CLOSE`. Make no lifted copy: `done` refuses a need on a file that isn't printed.
+- **A need on some edges names their group or their place, never a row of a list.** `rounded.19.radius_mm` is the 20th rounding sorted by radius, and a rebuild moves it. Each edge read is in a group, `upright`, `top`, `bottom` or `side`, in the file's axes, and `groups.upright.least_radius_mm` is the upright corners' least radius. Edges in a box or facing a way are `--box NAME=X0,Y0,Z0,X1,Y1,Z1` and `--facing NAME=DIR`, read as `selected.NAME.least_radius_mm`.
 - **A plug's body is drawn in place,** pushed fully into its port, as a reference. The opening clears the body, not the port: `clearance base.step references/plug.step --min-gap G`.
 - **`edges` names every part of the closed case, and the references inside,** in place: each blocks a finger from the others' insides, so the inside of the closed case isn't read. A reference is never read.
 - An `edges` need's limit is the request's radius, in its quote. "Softened" with no figure is a question to ask.
@@ -77,7 +79,7 @@ Build each part from simple solids, joined, cut and then rounded: boxes and cyli
 
 - **Cut the inside, don't shell a rounded block.** In CadQuery 2.8, `shell` on a block whose every edge is rounded fails quietly, leaving a solid whose surface isn't closed (found building this repository's fixtures, `tests/bench_cases/make_fixtures.py`). Cut the inside away with a box, or with a rounded box `wall` smaller, so the wall stays even.
 - **Round the edges last, outside first:** `references/edges-and-printing.md` (the skill `softening-edges`) has the order and the calls. Every rounding is a `fillet`, an arc or a rounded `Sketch`, never strips from points: `edges` reads strips as sharp edges.
-- **Each part is its own file:** `base.step`, `lid.step`, and `lid-lifted.step` for the lid's check.
+- **Each part is its own file:** `base.step` and `lid.step`, each where it sits in the closed case.
 - **Render a cut after each build** of a part with a cavity, before reasoning about what it holds: `render base.step lid.step references/board.step --cut x=X` through the boards, and `--cut z=Z` through the lip. Read the cut's verdict, then its picture.
 
 `references/openings.md` (the skill `cutting-openings`) has the plug's opening, the LED's window and the vents; `references/mounting.md` (the skill `mounting-boards`) the bosses, standoffs and screws.
@@ -94,7 +96,7 @@ Run each check at the need's own command. Then:
 Run them in this order, as each depends on the one before:
 
 1. `clearance` of each part against each reference it holds: the boards, the fan, the plug's body.
-2. `clearance` of the base and the lifted lid, with the request's play.
+2. `clearance` of the base and the lid, with `--lift` and the request's play.
 3. `thin` on every part, one file at a time.
 4. `rays` on each round opening, and `wall` on each boss.
 5. `edges` on the closed case, with the references inside, at the request's radius. Rounding is last because a change to a wall or an opening changes its edges.
@@ -103,4 +105,4 @@ A change for one check can break another, as a thicker wall changes the inside. 
 
 ### 7. Asking and done
 
-`ask` draws a sheet: give each part its colour, the references grey, and add a cut through the boards and one through the lid's lip (`cuts`). Say what each picture shows as drawn. Say each part's print orientation and where its bed edges are (`softening-edges`). `done` names every printed part in `part`: the base, the lid, and any other printed part, not the lifted copy.
+`ask` draws a sheet: give each part its colour, the references grey, and add a cut through the boards and one through the lid's lip (`cuts`). Say what each picture shows as drawn. Say each part's print orientation and where its bed edges are (`softening-edges`). `done` names every printed part in `part`: the base, the lid, and any other printed part.

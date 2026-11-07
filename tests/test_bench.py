@@ -1758,6 +1758,19 @@ def test_each_panes_rim_is_sized_to_keep_its_visible_share(bench: Any) -> None:
     assert "under the 60% wanted, so its rim is the widest that keeps 60%" in unheld.record["why"]
     done = host.run(["capture", "rims/held.step", *share[:-2]], bench.work)
     assert done.returncode == 3 and "no default for any of them" in done.stdout + done.stderr
+    # Which way each rim moves, and what that leaves visible (mqucifer/print-shop#65): both
+    # panes' rims at 1.0 mm, as on `eval-rims-4`.
+    both = bench("capture", "rims/both-at-1.step", *share)
+    assert (
+        "Widen its rim by 0.2 mm, from 1 to 1.2 mm before play: the opening's edge moves 0.2 mm "
+        "in, over the pane, which covers more of it, and leaves 81.46% of it visible" in both.text
+    )
+    assert (
+        "Narrow its rim by 0.131 mm, from 1 to 0.869 mm before play: the opening's edge moves "
+        "0.131 mm out, off the pane, which shows more of it, and leaves 60.00% of it visible"
+        in both.text
+    )
+    assert "Its rim is the rim it needs: leave it." in held.text
 
 
 def test_the_rim_a_reply_names_passes_when_its_set(bench: Any) -> None:
@@ -1793,7 +1806,43 @@ def test_clearance_holds_a_lid_from_both_ends(bench: Any) -> None:
     seated = bench("clearance", "enclosure/tray.step", "enclosure/lid-lip-0p2.step",
                    "--max-gap", "0.3")  # fmt: skip
     assert seated.verdict == "TOUCHING"
-    assert any("lift it off its seat" in n for n in seated.record["notes"])
+    assert any("run this again with --lift D" in n for n in seated.record["notes"])
+
+
+def test_clearance_lifts_a_seated_lid_itself_so_the_need_is_on_the_printed_file(
+    bench: Any,
+) -> None:
+    """mqucifer/print-shop#65: the printed lids, seated, read as the lifted copies do with
+    `--lift 0.5`, and the reply says the lid was moved and its file wasn't. A lift that's the gap
+    itself is said, and one no more than a limit is refused."""
+    lift = ("--lift", "0.5", "--min-gap", "0.1", "--max-gap", "0.3")
+    held = bench("clearance", "enclosure/tray.step", "enclosure/lid-lip-0p2.step", *lift)
+    assert held.verdict == "CLEAR", held.text
+    assert only_pair(held)["gap_mm"] == pytest.approx(0.2, abs=1e-4)
+    assert held.numbers["lift"] == {"file": "lid-lip-0p2.step", "along": "z", "mm": 0.5}
+    assert "lifted: lid-lip-0p2.step, moved 0.5 mm up along z before measuring" in held.text
+    loose = bench("clearance", "enclosure/tray.step", "enclosure/lid-lip-0p6.step", *lift)
+    assert loose.verdict == "TOO LOOSE", loose.text
+    assert any("the least gap is the lift, 0.5 mm" in n for n in loose.record["notes"])
+    short = host.run(
+        ["clearance", "enclosure/tray.step", "enclosure/lid-lip-0p2.step", "--lift", "0.3",
+         "--max-gap", "0.3"], bench.work)  # fmt: skip
+    assert short.returncode == 3 and "lift by more than 0.3 mm" in short.stdout + short.stderr
+
+
+def test_a_gap_drawn_on_a_curve_is_held_at_both_ends_by_the_exact_distance(bench: Any) -> None:
+    """mqucifer/print-shop#65: on `eval-fit-2` a pane 0.25 mm from its pocket all round, round
+    its corners too, was TOO CLOSE under `--min-gap 0.25`: the mesh's chords cut into the
+    pocket's concave corners and read it short. On a STEP pair the verdict reads OCCT's exact
+    distance, at both ends, so 0.25 passes and 0.2501 doesn't."""
+    pair = ("clearance", "enclosure/curved-pocket.step", "enclosure/curved-pane.step")
+    exact = bench(*pair, "--min-gap", "0.25", "--max-gap", "0.25")
+    assert exact.verdict == "CLEAR", exact.text
+    found = only_pair(exact)
+    assert found["gap_mm"] == 0.25 and found["gap_by"] == "occt"
+    assert found["gap_mesh_mm"] <= 0.25
+    assert bench(*pair, "--min-gap", "0.2501").verdict == "TOO CLOSE"
+    assert bench(*pair, "--max-gap", "0.2499").verdict == "TOO LOOSE"
 
 
 def test_a_gap_drawn_at_the_most_passes_and_a_range_the_wrong_way_round_is_refused(
@@ -1854,6 +1903,45 @@ def test_edges_reads_an_open_tray_and_not_the_inside_of_a_closed_one(bench: Any)
     assert given.numbers["not_read"] == [{"file": "references/tray-lid.step", "why": "a reference"}]
     assert {r["file"] for r in given.numbers["rounded"]} == {"enclosure/tray.step"}
     assert bench("edges", "references/tray-lid.step").verdict == "NO ANSWER"
+
+
+def test_edges_reads_the_least_of_each_group_and_of_a_place(bench: Any) -> None:
+    """mqucifer/print-shop#65: a need names the upright corners' radius by its group, not by an
+    index into a list a rebuild can reorder. `mixed` has its upright edges 3 mm, its top 1.5 and
+    its bottom sharp. A box round one corner reads its upright rounding and the sharp foot
+    beside it; facing -y reads the edges round the front face."""
+    answer = bench("edges", "enclosure/mixed.step", "--box", "corner=15,10,-12,25,20,12",
+                   "--facing", "front=-y")  # fmt: skip
+    groups = answer.numbers["groups"]
+    assert groups["upright"]["least_radius_mm"] == pytest.approx(3.0, abs=0.001)
+    assert (groups["upright"]["sharp"], groups["upright"]["rounded"]) == (0, 4)
+    assert groups["top"]["least_radius_mm"] == pytest.approx(1.5, abs=0.001)
+    assert (groups["bottom"]["least_radius_mm"], groups["bottom"]["sharp"]) == (0.0, 8)
+    assert groups["side"]["least_radius_mm"] is None
+    corner, front = answer.numbers["selected"]["corner"], answer.numbers["selected"]["front"]
+    assert corner["least_radius_mm"] == 0.0 and corner["rounded"] >= 1
+    x, y, _ = corner["least_at"]
+    assert 15 <= x <= 25 and 10 <= y <= 20, "where it's said is in the box"
+    assert front["least_radius_mm"] == 0.0 and front["least_at"][1] == pytest.approx(-15.0)
+    assert {r["group"] for r in answer.numbers["rounded"]} == {"upright", "top"}
+    assert "groups.NAME.least_radius_mm" in answer.text and "as selected.corner" in answer.text
+    twice = host.run(["edges", "enclosure/mixed.step", "--box", "a=0,0,0,1,1,1", "--facing",
+                      "a=+z"], bench.work)  # fmt: skip
+    assert twice.returncode == 3 and "a name of its own" in twice.stdout + twice.stderr
+
+
+def test_rays_from_a_point_in_air_say_what_across_measures(bench: Any) -> None:
+    """mqucifer/print-shop#65: on `eval-edges-1` rays from a rounded corner's centre, which lay
+    in the box's hollow, were read as the corner's radius. The tray's corner centre is 1 mm from
+    two inside walls: the nearest wall reads 1, and the least across 2√2, the hollow's width."""
+    answer = bench("rays", "enclosure/tray.step", "--centre", "17,12,11")
+    level = answer.numbers["levels"][0]
+    assert level["start_in_material"] == 0.0
+    assert level["nearest_wall_mm"] == pytest.approx(1.0, abs=0.01)
+    assert level["across_mm"]["min"] == pytest.approx(2 * 2**0.5, abs=0.01)
+    told = " ".join(answer.record["notes"])
+    assert "the centre is in air, so `across` is the open space's width" in told
+    assert "It isn't an outside corner's radius" in told and "`edges`" in told
 
 
 def test_edges_says_a_rounding_stored_as_strips(bench: Any) -> None:

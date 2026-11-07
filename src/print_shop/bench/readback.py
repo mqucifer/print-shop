@@ -362,6 +362,8 @@ def run_rays(args: Any, report: Report) -> None:
         walls = second - first
         if np.isfinite(walls).any():
             level["wall_beyond_min_mm"] = round(float(np.nanmin(walls)), 4)
+        if np.isfinite(first).any():
+            level["nearest_wall_mm"] = round(float(np.nanmin(first)), 4)
         section = slice_at(built, float(z))
         point = shapely.Point(at[0], at[1])
         hole = _void_at(section, point)
@@ -418,6 +420,9 @@ def run_rays(args: Any, report: Report) -> None:
         else:
             report.second(f"section at {z:.3f}: no closed hole around the centre")
     report.numbers["levels"] = levels_found
+    in_air = [lv for lv in levels_found if lv["start_in_material"] <= 0.5 and "across_mm" in lv]
+    if in_air:
+        report.note(in_air_said(in_air[0]))
     if args.depth:
         _floor(built, centre, args, length, report, problems)
     if differs:
@@ -428,6 +433,23 @@ def run_rays(args: Any, report: Report) -> None:
         report.verdict("OK", f"rays met the feature's wall all round at {len(levels)} height(s)")
 
 
+def in_air_said(level: dict[str, Any]) -> str:
+    """What `across` measures from a point in air (mqucifer/print-shop#65). On `eval-edges-1` it
+    was read from a rounded corner's centre, which lay in the box's hollow, as the corner's
+    radius, over three long calls: it was the hollow's width."""
+    span = level["across_mm"]
+    return (
+        f"the centre is in air, so `across` is the open space's width through it: from the wall "
+        f"one ray meets to the wall the opposite ray meets, {span['min']} to {span['max']} mm "
+        f"here, and `nearest_wall_mm`, {level.get('nearest_wall_mm')} mm, how far the nearest "
+        "wall is. Centred on a hole's or a bore's axis that's its diameter and radius, and "
+        "anywhere else it's the width of whatever space the point is in. It isn't an outside "
+        "corner's radius: a rounded outside corner's centre is inside the part, in its material "
+        "or its hollow, and rays from there meet the walls round it, not the rounding. `edges` "
+        "reads an outside corner's radius"
+    )
+
+
 def _level_line(level: dict[str, Any]) -> str:
     text = f"at {level['at']}: {level['missed']} of {level['rays']} rays missed"
     if "across_mm" in level:
@@ -435,6 +457,8 @@ def _level_line(level: dict[str, Any]) -> str:
         text += f", across {span['min']} / {span['mean']} / {span['max']} mm (min / mean / max)"
     if "wall_beyond_min_mm" in level:
         text += f", wall beyond at least {level['wall_beyond_min_mm']} mm"
+    if "nearest_wall_mm" in level and level["start_in_material"] <= 0.5:
+        text += f", nearest wall {level['nearest_wall_mm']} mm"
     return text
 
 
