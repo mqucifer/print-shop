@@ -12,7 +12,12 @@ asks for, and writes nothing in the run's folder: each replay is a folder of its
   `<skill name="NAME">` and `</skill>`), and each `skill` reply that read it.
 - `reply CALL.K`: the reply to the K-th tool call (from 1) the model made at call CALL.
 - `skills-card`: the start's required skills, from "The skills this work needs throughout" to
-  the last `</skill>`, as a short card of their rules, or whatever the file says.
+  the last `</skill>`, as a short card of their rules, or whatever the file says. It tests the
+  card as it would ship, with each skill's full text on demand: a `skill` read of a required
+  skill in the history, which said the skill was in the start, has its full text as the start
+  had it, and a try that reads one is answered with it and goes on to its next call, until it
+  ends in anything else. A turn that reads one and calls anything more ends there, as no other
+  tool is run.
 - `lesson`: a lesson added to the start's lessons, under their heading, which is added if the
   start had none.
 - `replace`: one exact text, everywhere the request holds it, for anything else.
@@ -22,7 +27,8 @@ A change that finds nothing to change is refused, so a replay never runs as a co
 **Each try records** the reasoning's length (characters, and tokens where the proxy says), the
 call it ends in (`build`: `write`, `edit` or `run`; `bench`; `ask`: `ask`, `send_ask` or
 `questions`; `other`, naming the tools; or `none`, with no tool call), its seconds, its finish,
-and whether it's long. A long call reasoned past `LONG_CHARS`, the line the runaways were read at
+whether it's long, and which required skills it read with `skill`. A long call reasoned past
+`LONG_CHARS`, the line the runaways were read at
 (`docs/bench.md`, `suncatcher-3`'s 35), or was cut or ended at its limit. The recorded call's own
 figures come first, from its `call` event, to compare with.
 """
@@ -43,6 +49,7 @@ from typing import Any
 
 from print_shop.rounds import transcript
 from print_shop.rounds.lessons import ABOUT, HEADING
+from print_shop.rounds.session import _sendable
 
 DEFAULT_ROOT = Path("~/print-shop/replays")
 #: Reasoning past this many characters is a long call: where the runaways were read from.
@@ -53,6 +60,10 @@ BENCH = ("bench",)
 ASK = ("ask", "send_ask", "questions")
 #: Where the start's required skills begin (`skills.start_skills`).
 SKILLS_SAID = "The skills this work needs throughout are here whole:"
+#: A required skill as the start gives it whole (`skills.GIVEN`).
+GIVEN = re.compile(r'<skill name="([^"]+)">\n(.*?)\n</skill>', re.DOTALL)
+#: What a `skill` read of a required skill answered: that it's in the start (`tools._skill`).
+POINTS_TO_START = "in your first message"
 #: Where a start with no lessons has its skills, for a lesson to go before.
 SKILL_LINES = (SKILLS_SAID, "Skills for this work:")
 
@@ -148,7 +159,7 @@ def _skill(messages: list[dict[str, Any]], change: Change) -> int:
             continue
         content = message.get("content")
         # A required skill's reply only points to the start, which is changed above.
-        if named == name and isinstance(content, str) and "in your first message" not in content:
+        if named == name and isinstance(content, str) and POINTS_TO_START not in content:
             message["content"] = body
             changed += 1
     return changed
@@ -174,7 +185,26 @@ def _reply(messages: list[dict[str, Any]], change: Change, events: Path) -> int:
     return changed
 
 
+def required_given(messages: list[dict[str, Any]]) -> dict[str, str]:
+    """Each required skill's text, as the start gives it whole, by its name."""
+    text = _first_user(messages)["content"]
+    at = text.find(SKILLS_SAID)
+    return {} if at < 0 else dict(GIVEN.findall(text[at:]))
+
+
+def _skill_named(call: dict[str, Any]) -> str | None:
+    function = call.get("function") or {}
+    if function.get("name") != "skill":
+        return None
+    try:
+        named = json.loads(function.get("arguments") or "{}").get("name")
+    except (ValueError, AttributeError):
+        return None
+    return named if isinstance(named, str) else None
+
+
 def _skills_card(messages: list[dict[str, Any]], change: Change) -> int:
+    given = required_given(messages)
     start = _first_user(messages)
     text = start["content"]
     at = text.find(SKILLS_SAID)
@@ -182,6 +212,17 @@ def _skills_card(messages: list[dict[str, Any]], change: Change) -> int:
     if at < 0 or end < at:
         raise Refused("the start gives no required skills whole: there's nothing to make a card of")
     start["content"] = text[:at] + change.text.strip() + text[end + len("</skill>") :]
+    # Each earlier read of a required skill had only a pointer to the start: with the card it
+    # gives the skill's text, as the run would if the card shipped.
+    calls = _tool_calls(messages)
+    for message in messages:
+        if message.get("role") != "tool":
+            continue
+        call = calls.get(str(message.get("tool_call_id")))
+        named = _skill_named(call) if call is not None else None
+        content = message.get("content")
+        if named in given and isinstance(content, str) and POINTS_TO_START in content:
+            message["content"] = given[named]
     return 1
 
 
@@ -266,10 +307,15 @@ def ends_in(message: dict[str, Any]) -> str:
 
 
 def figures(
-    message: dict[str, Any], finish: Any, usage: dict[str, Any], seconds: Any
+    message: dict[str, Any],
+    finish: Any,
+    usage: dict[str, Any],
+    seconds: Any,
+    required: Any = (),
 ) -> dict[str, Any]:
     reasoning = str(message.get("reasoning_content") or "")
     tools = [c["function"].get("name") for c in message.get("tool_calls") or []]
+    read = [n for c in message.get("tool_calls") or [] if (n := _skill_named(c)) in required]
     return {
         "reasoning_chars": len(reasoning),
         "reasoning_tokens": usage.get("reasoning_tokens"),
@@ -280,6 +326,7 @@ def figures(
         "finish": finish,
         "seconds": seconds,
         "long": len(reasoning) > LONG_CHARS or finish in ("length", "runaway"),
+        "read_required": read,
     }
 
 
@@ -287,7 +334,10 @@ def recorded(events: Path, n: int) -> dict[str, Any]:
     """The recorded call's own figures, from its `call` event."""
     made = _call_event(events, n)
     message = made.get("message") or {}
-    found = figures(message, made.get("finish"), made.get("usage") or {}, made.get("seconds"))
+    required = required_given(transcript.rebuild(events, n)["messages"])
+    found = figures(
+        message, made.get("finish"), made.get("usage") or {}, made.get("seconds"), required
+    )
     found["reasoning_chars"] = made.get("reasoning_chars", found["reasoning_chars"])
     long = int(found["reasoning_chars"] or 0) > LONG_CHARS
     found["long"] = long or made.get("finish") in ("length", "runaway")
@@ -318,6 +368,7 @@ class Replay:
             "tries": len(self.tries),
             "answered": len(done),
             "long": sum(1 for t in done if t["long"]),
+            "read_required": sum(1 for t in done if t["read_required"]),
             "ends_in": dict(sorted(Counter(t["ends_in"] for t in done).items())),
             "reasoning_chars": {
                 "least": min(chars) if chars else None,
@@ -394,52 +445,100 @@ def replay(
         folder=str(folder),
         recorded=recorded(events, n),
     )
-    keep = getattr(send, "keep_stream", None)
+    required = required_given(body["messages"])
+    on_demand = required if change.kind == "skills-card" else {}
     for k in range(1, times + 1):
+        done.tries.append(_one_try(folder, k, made, send, required, on_demand))
+        _write(folder, done)
+    return done
+
+
+def _one_try(
+    folder: Path,
+    k: int,
+    made: dict[str, Any],
+    send: Callable[[dict[str, Any]], dict[str, Any]],
+    required: dict[str, str],
+    on_demand: dict[str, str],
+) -> dict[str, Any]:
+    """One try: the call, and where the card's skills are given on demand, each call after a read
+    of one, answered with its text, until a call ends in anything else."""
+    keep = getattr(send, "keep_stream", None)
+    request = made
+    calls: list[dict[str, Any]] = []
+    answers: list[dict[str, Any]] = []
+    read: list[str] = []
+    while True:
+        part = f"{k}" if not calls else f"{k}-{len(calls) + 1}"
         if callable(keep):
-            keep(folder / "streams" / f"{k}.jsonl")
+            keep(folder / "streams" / f"{part}.jsonl")
         began = time.monotonic()
         try:
-            answer = send(made)
+            answer = send(request)
         except Exception as exc:  # noqa: BLE001 - a failed try is recorded, and the rest go on
             # The kind of failure only, and a status: an error's words can name the proxy.
             status = getattr(getattr(exc, "response", None), "status_code", None)
-            one = {"try": k, "error": type(exc).__name__, "status": status}
-        else:
-            choice = (answer.get("choices") or [{}])[0]
-            message = choice.get("message") or {}
-            seconds = round(time.monotonic() - began, 3)
-            one = {
-                "try": k,
-                **figures(message, choice.get("finish_reason"), answer.get("usage") or {}, seconds),
-            }
-            (folder / f"{k}.json").write_text(
-                json.dumps({**one, "message": message, "stream": answer.get("stream")}, indent=1),
-                encoding="utf-8",
-            )
-        done.tries.append(one)
-        _write(folder, done)
-    return done
+            failed = {"try": k, "error": type(exc).__name__, "status": status}
+            return {**failed, "calls": calls} if calls else failed
+        choice = (answer.get("choices") or [{}])[0]
+        message = choice.get("message") or {}
+        seconds = round(time.monotonic() - began, 3)
+        usage = answer.get("usage") or {}
+        one = figures(message, choice.get("finish_reason"), usage, seconds, required)
+        calls.append(one)
+        answers.append({"message": message, "stream": answer.get("stream")})
+        asked = message.get("tool_calls") or []
+        names = [_skill_named(c) for c in asked]
+        fresh = [n for n in names if n in on_demand and n not in read]
+        read += [n for n in one["read_required"] if n not in read]
+        # It goes on only where every call of the turn reads a required skill not read yet.
+        if not asked or len(fresh) != len(asked):
+            break
+        kept: dict[str, Any] = {"role": "assistant", "content": message.get("content") or ""}
+        if message.get("reasoning_content"):
+            kept["reasoning_content"] = message["reasoning_content"]
+        kept["tool_calls"] = _sendable(asked)
+        replies = [
+            {"role": "tool", "tool_call_id": c.get("id"), "content": on_demand[str(n)]}
+            for c, n in zip(asked, names, strict=True)
+        ]
+        request = {**request, "messages": [*request["messages"], kept, *replies]}
+    last = calls[-1]
+    found = {
+        "try": k,
+        **last,
+        "read_required": read,
+        "long": any(c["long"] for c in calls),
+        "reasoning_chars_total": sum(int(c["reasoning_chars"]) for c in calls),
+    }
+    if len(calls) > 1:
+        found["calls"] = calls
+    (folder / f"{k}.json").write_text(
+        json.dumps({**found, "answers": answers}, indent=1), encoding="utf-8"
+    )
+    return found
 
 
 def _write(folder: Path, done: Replay) -> None:
     (folder / "replay.json").write_text(json.dumps(done.plain(), indent=1) + "\n", encoding="utf-8")
     rows = [
-        "| try | reasoning chars | tokens | ends in | tools | long | seconds | finish |",
-        "|---|---|---|---|---|---|---|---|",
+        "| try | reasoning chars | tokens | ends in | tools | long | seconds | finish | read |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     r = done.recorded
     rows.append(
         f"| recorded | {r['reasoning_chars']} | {r['reasoning_tokens']} | {r['ends_in']} | "
-        f"{', '.join(r['tools'])} | {r['long']} | {r['seconds']} | {r['finish']} |"
+        f"{', '.join(r['tools'])} | {r['long']} | {r['seconds']} | {r['finish']} | "
+        f"{', '.join(r['read_required'])} |"
     )
     for t in done.tries:
         if "error" in t:
-            rows.append(f"| {t['try']} | failed: {t['error']} {t['status'] or ''} | | | | | | |")
+            rows.append(f"| {t['try']} | failed: {t['error']} {t['status'] or ''} | | | | | | | |")
             continue
         rows.append(
             f"| {t['try']} | {t['reasoning_chars']} | {t['reasoning_tokens']} | {t['ends_in']} | "
-            f"{', '.join(t['tools'])} | {t['long']} | {t['seconds']} | {t['finish']} |"
+            f"{', '.join(t['tools'])} | {t['long']} | {t['seconds']} | {t['finish']} | "
+            f"{', '.join(t['read_required'])} |"
         )
     change = done.change
     head = (

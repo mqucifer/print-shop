@@ -34,6 +34,8 @@ class Desk:
     def call(self, name: Any, raw_args: Any) -> Judged:
         if name == "stop":
             return Judged("stop", "ok", "stopped", ending=Ending("blocked", {"reason": "x"}))
+        if name == "skill" and "fitting-pegs" in str(raw_args):
+            return Judged("skill", "ok", POINTER)
         if name == "skill":
             return Judged("skill", "ok", "An arm bends along its layers.")
         if name == "bench":
@@ -41,12 +43,16 @@ class Desk:
         return Judged(str(name), "ok", f"{name} did it")
 
 
-def a_run(tmp_path: Path) -> Path:
+#: What a `skill` read of a required skill answered at the run's commit: a pointer to the start.
+POINTER = "`fitting-pegs` is in your first message, whole: read it there."
+
+
+def a_run(tmp_path: Path, first: str = "bending-arms") -> Path:
     """A run's folder with three calls in its events: a skill read, a bench call, then a stop."""
     folder = tmp_path / "runs" / "peg-1"
     folder.mkdir(parents=True)
     model = Scripted(
-        [tool("skill", name="bending-arms")],
+        [tool("skill", name=first)],
         [tool("bench", argv=["clearance", "plate.step", "peg.step"])],
         [tool("stop")],
     )
@@ -204,3 +210,60 @@ def test_a_failed_try_says_only_its_kind_and_status_and_the_rest_go_on(tmp_path:
     assert done.tries[0] == {"try": 1, "error": "HTTPStatusError", "status": 500}
     assert done.tries[1]["ends_in"] == "build"
     assert "proxy.invalid" not in (Path(done.folder) / "replay.json").read_text()
+
+
+CARD = "A card of the rules: 0.3 mm round a peg."
+WHOLE = "Leave 0.3 mm round a peg."
+
+
+def test_under_a_card_an_earlier_read_of_a_required_skill_has_its_text(tmp_path: Path) -> None:
+    folder = a_run(tmp_path, first="fitting-pegs")
+    model = Scripted([tool("write", path="a.py", content="x")])
+    replays.replay(folder, 3, replays.Change("skills-card", "", CARD), model, times=1,
+                   root=tmp_path / "out")
+    replies = [m["content"] for m in model.bodies[0]["messages"] if m["role"] == "tool"]
+    assert replies[0] == WHOLE, "the pointer to the start is now the skill's text"
+    control = Scripted([tool("write", path="a.py", content="x")])
+    replays.replay(folder, 3, replays.Change(), control, times=1, root=tmp_path / "out")
+    assert [m["content"] for m in control.bodies[0]["messages"] if m["role"] == "tool"][0] == (
+        POINTER
+    ), "the control is the request as recorded"
+
+
+def test_under_a_card_a_read_of_a_required_skill_is_answered_and_the_try_goes_on(
+    tmp_path: Path,
+) -> None:
+    folder = a_run(tmp_path)
+    model = Scripted(
+        Spoken([tool("skill", name="fitting-pegs")], reasoning="r" * 100),
+        Spoken([tool("write", path="a.py", content="x")], reasoning="s" * 30),
+        [tool("skill", name="fitting-pegs"), tool("bench", argv=["info", "a.step"])],
+    )
+    done = replays.replay(folder, 3, replays.Change("skills-card", "", CARD), model, times=2,
+                          root=tmp_path / "out")
+    first, second = done.tries
+    assert first["read_required"] == ["fitting-pegs"]
+    assert (first["ends_in"], first["reasoning_chars"], first["reasoning_chars_total"]) == (
+        "build", 30, 130
+    )
+    assert [c["ends_in"] for c in first["calls"]] == ["other", "build"]
+    sent = model.bodies[1]["messages"]
+    assert sent[-2]["role"] == "assistant" and sent[-2]["reasoning_content"] == "r" * 100
+    assert sent[-1] == {"role": "tool", "tool_call_id": "call-1-0", "content": WHOLE}
+    # A turn that reads one and calls anything more ends there: no other tool is run.
+    assert len(model.bodies) == 3
+    assert (second["read_required"], second["ends_in"], "calls" in second) == (
+        ["fitting-pegs"], "other", False
+    )
+    assert done.summary()["read_required"] == 2
+
+
+def test_without_a_card_a_read_of_a_required_skill_is_recorded_and_the_try_ends(
+    tmp_path: Path,
+) -> None:
+    folder = a_run(tmp_path)
+    model = Scripted([tool("skill", name="fitting-pegs")], [tool("skill", name="bending-arms")])
+    done = replays.replay(folder, 3, replays.Change(), model, times=2, root=tmp_path / "out")
+    assert [t["read_required"] for t in done.tries] == [["fitting-pegs"], []]
+    assert len(model.bodies) == 2
+    assert done.recorded["read_required"] == []
