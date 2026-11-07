@@ -1,6 +1,6 @@
-"""A kind's standing checks: for stained glass, `light` and `capture` on every pane at `done` and at
-each stop, whatever the needs say, as `thin` reads every file (mqucifer/print-shop#52; the Sponsor,
-2026-11-04).
+"""A kind's standing checks: for stained glass, `light`, `capture` and `pause` on every frame at
+`done` and at each stop, whatever the needs say, as `thin` reads every file (mqucifer/print-shop#52;
+the Sponsor, 2026-11-04).
 
 On `eval-unnamed-1` the model set `capture` aside because "the request doesn't ask" about holding,
 and planned a solid floor under the pane, so no light passed: the stand-in caught it by reading
@@ -14,6 +14,15 @@ frame and which the panes. So a stained-glass `done` declares them, in `glass`: 
 panes and any other part of the frame (`with`), with the pocket's height, the play round a pane
 and the pane's thickness. Every file of the part is in it, so no pane is left out. It's the
 model's word, shown at the stop beside the readings; a need carries the request's own figures.
+
+**`pause` too** (mqucifer/print-shop#66). `eval-rims-4`'s and `eval-fit-2`'s closing words each put
+the pause at the pocket's floor: neither run ran `pause`, and both are wrong, as the nozzle would
+meet the pane. `eval-thick-2`
+found the same in batch 3. So `pause` reads each frame at its declared pocket height and pane
+thickness, at the bench's own layers (0.2 mm, as the run doesn't know the printer's process; the
+refinement pass reads it again at the process's), and fails where the pane stands above the last
+layer before its pocket closes. Where nothing closes over the pockets, it passes: a pane can go in
+afterwards.
 
 **Their limits.** Where a settled need runs the same check on that frame (and, for `light`, every
 pane of it), the need's reading is the standing check's, at the request's own figures: a rim the
@@ -36,10 +45,12 @@ from print_shop.rounds.needs import UNSURE, Need, Reading
 
 LIGHT = "light"
 HOLD = "pane-hold"
+INSERT = "insert"
 #: The checks the harness runs for a kind, by the bench command each is.
-CHECKS = {LIGHT: "light", HOLD: "capture"}
+CHECKS = {LIGHT: "light", HOLD: "capture", INSERT: "pause"}
 SHAPE = (
-    "`glass` names each frame and its panes, for the harness's own `light` and `capture`: "
+    "`glass` names each frame and its panes, for the harness's own `light`, `capture` and "
+    "`pause`: "
     '[{"frame": "frame.step", "panes": ["pane_1.step", "pane_2.step"], "with": [], '
     '"pocket_z": 2.0, "clearance": 0.25, "pane_thickness": 1.6}]. `pocket_z` is a height '
     "inside the pockets, `clearance` the play round a pane and `pane_thickness` the pane's, each "
@@ -47,7 +58,7 @@ SHAPE = (
     "`part` is a frame, a pane or `with`; a given file may be one too, as "
     "`references/frame.step`."
 )
-HEADING = "Every pane, by `light` and `capture`, whatever the needs say:"
+HEADING = "Every pane, by `light`, `capture` and `pause`, whatever the needs say:"
 KEYS = {"frame", "panes", "with", "pocket_z", "clearance", "pane_thickness"}
 
 
@@ -85,6 +96,10 @@ class Glass:
                 f"capture {q(self.frame)} --pocket-z {self.pocket_z:g} --clearance "
                 f"{self.clearance:g} --pane-thickness {self.pane_thickness:g} --panes "
                 f"{len(self.panes)}"
+            ),
+            INSERT: (
+                f"pause {q(self.frame)} --pocket-z {self.pocket_z:g} --pane-thickness "
+                f"{self.pane_thickness:g}"
             ),
         }
 
@@ -170,7 +185,7 @@ def read(given: Any, part: list[str], work: Path, whole: bool = True) -> list[Gl
         said = ", ".join(f"`{name}`" for name in left)
         return (
             f"`glass` leaves out {said}: every file of `part` is a frame, a pane or `with`, so "
-            f"`light` and `capture` read every pane. {SHAPE}"
+            f"`light`, `capture` and `pause` read every pane. {SHAPE}"
         )
     return found
 
@@ -199,8 +214,8 @@ def check(
     kept: Path,
     ran: list[tuple[Need, Reading]] | None = None,
 ) -> list[judge.Standing]:
-    """`light` and `capture` on each frame and its panes, each in a fresh container, or as a
-    settled need already read it (`ran`)."""
+    """`light`, `capture` and `pause` on each frame and its panes, each in a fresh container, or as
+    a settled need already read it (`ran`)."""
     found = []
     for one in glass:
         for name, command in one.commands().items():

@@ -166,13 +166,38 @@ def carried(need: Need) -> list[Carried]:
                 found.append(Carried(number, HIGH, how, command, reports.other_end(command, name)))
             else:
                 found.append(Carried(number, BOTH, how, command, None))
-    if need.number:
+    # A number that reads a build input back carries nothing either (`reports.INPUTS`).
+    if need.number and reports.echoed(command, need.number) is None:
         if need.at_least is not None:
             how = f"`{need.number}` at least {need.at_least:g}"
             found.append(Carried(need.at_least, LOW, how, command, "at_most"))
         if need.at_most is not None:
             how = f"`{need.number}` at most {need.at_most:g}"
             found.append(Carried(need.at_most, HIGH, how, command, "at_least"))
+    return found
+
+
+def as_setting(need: Need, figures: list[Figure]) -> list[Carried]:
+    """A build input of the need's, carried as the setting its line's other figures are read at,
+    where the need reads one of them off the part (mqucifer/print-shop#66): `capture --full-rim R
+    --clearance P` for a rim of R sized before a play of P reads the rim at that play, as the
+    line asks. Where the input is all the need carries of its line, as on `eval-fit-2`'s play
+    need on `capture --clearance`, it's nothing."""
+    own = carried(need)
+    if not any(_same(c.value, f.value) for c in own for f in figures):
+        return []
+    words = need.argv()
+    command = words[0] if words else ""
+    found = []
+    for name, values in nudge.options(words).items():
+        if name not in reports.INPUTS.get(command, {}):
+            continue
+        for value in values:
+            try:
+                number = float(value)
+            except ValueError:
+                continue
+            found.append(Carried(number, BOTH, f"`{name} {value}`", command, None))
     return found
 
 
@@ -207,10 +232,11 @@ def wrong(found: list[Need], form: Form) -> list[str]:
         mine = [n for n in found if n.fixed and n.by == "bench" and line.id in n.covers]
         if not mine:
             continue
-        by = [c for need in mine for c in carried(need)]
         # A figure the Sponsor changed by a note is the note's: its need quotes it (`request.py`).
         noted = [n.quote for n in mine if n.source == "note"]
-        for figure in read(" ".join(noted) if noted else line.text):
+        said_figures = read(" ".join(noted) if noted else line.text)
+        by = [c for need in mine for c in [*carried(need), *as_setting(need, said_figures)]]
+        for figure in said_figures:
             missing = _missing(figure, by)
             if missing is None:
                 continue
@@ -266,8 +292,11 @@ def echoed(found: list[Need], form: Form) -> list[str]:
     """Each bench need, fixed or not, whose line's figure is one of its command's own build inputs
     (`reports.INPUTS`), so its check reads that figure back whatever the part is: on
     `eval-through-2` a fit need was `panes ... --clearance 0.25` for "0.25 mm of play", and
-    `panes` builds its own pane at that play (mqucifer/print-shop#59). A fixed need on a
-    non-negotiable is said by `wrong`, where the input carries none of its figure."""
+    `panes` builds its own pane at that play (mqucifer/print-shop#59). It's the same with no
+    `number`, exit-only (mqucifer/print-shop#66): `eval-fit-2`'s `capture ... --clearance 0.25`.
+    Where another need on the line reads the figure off the part, the input is only the setting
+    that check is read at, and stands. A fixed need on a non-negotiable is said by `wrong`, where
+    the input carries none of its figure."""
     said: list[str] = []
     lines = {line.id: line for line in form.lines()}
     fixed_lines = {line.id for line in form.non_negotiables}
@@ -278,7 +307,14 @@ def echoed(found: list[Need], form: Form) -> list[str]:
             line = lines.get(line_id)
             if line is None or (need.fixed and line_id in fixed_lines):
                 continue
-            for figure in read(line.text):
+            # What every need on the line reads off the part: a figure one of them carries isn't
+            # read back by nothing, nor is the setting this need reads the line's others at.
+            figures_here = read(line.text)
+            by = [c for other in found if line_id in other.covers for c in carried(other)]
+            by += as_setting(need, figures_here)
+            for figure in figures_here:
+                if any(_same(c.value, figure.value) for c in by):
+                    continue
                 built = _built_from(figure, [need])
                 if built:
                     said.append(

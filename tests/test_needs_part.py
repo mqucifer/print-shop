@@ -197,6 +197,7 @@ def test_the_question_names_a_need_on_a_reference_the_part_replaces(tmp_path: Pa
 
 LIGHT = "light references/frame.step pane.step"
 HOLD = "capture references/frame.step --pocket-z 2 --clearance 0.2 --pane-thickness 1.5 --panes 1"
+PAUSE = "pause references/frame.step --pocket-z 2 --pane-thickness 1.5"
 
 
 def test_a_stained_glass_done_names_its_frames_and_panes(tmp_path: Path) -> None:
@@ -236,20 +237,21 @@ def test_done_runs_light_and_capture_on_every_pane_and_isnt_met_while_one_fails(
     in_rounds(run, THICK)
     assert run.drive().name == "blocked"
     asked = [" ".join(a[2:]) for a in run.box.asked]  # type: ignore[attr-defined]
-    assert asked[2:4] == [LIGHT, HOLD], "after the needs and `thin`, each in its own container"
+    assert asked[2:5] == [LIGHT, HOLD, PAUSE], "after the needs and `thin`, each in its own"
     done, aside, later = replies(run)[:3]
     assert done["detail"]["met"] is False
     assert "Every need passed, and the harness's own checks" in done["reply"]
-    assert "Every pane, by `light` and `capture`, whatever the needs say:" in done["reply"]
+    assert "Every pane, by `light`, `capture` and `pause`, whatever the needs say:" in done["reply"]
     assert f"- `{LIGHT}`, ok: OK: ok on" in done["reply"]
     assert f"- `{HOLD}`, FAIL: FAIL: fail on" in done["reply"]
     rows = run.ledger.rows(
         "SELECT check_name, stop, passed FROM standing WHERE run=? AND check_name != 'curves'",
         "r",
     )
-    assert [(r["check_name"], r["stop"], r["passed"]) for r in rows][-2:] == [
+    assert [(r["check_name"], r["stop"], r["passed"]) for r in rows][-3:] == [
         ("light", "done", 1),
         ("pane-hold", "done", 0),
+        ("insert", "done", 1),
     ]
     # It can't be set aside, on the model's files, and it's held until it passes.
     assert aside["why"] == "standing"
@@ -259,6 +261,51 @@ def test_done_runs_light_and_capture_on_every_pane_and_isnt_met_while_one_fails(
         in (aside["reply"])
     )
     assert f"`{HOLD}`, call 1, by the harness at `done`: FAIL" in later["reply"]
+
+
+def test_done_runs_pause_too_and_a_closing_pause_it_never_ran_cant_pass(tmp_path: Path) -> None:
+    """mqucifer/print-shop#66: on `eval-rims-4` and `eval-fit-2` the closing words gave a pause
+    neither run ran, and both were wrong: the nozzle would meet the pane."""
+    run = started(
+        tmp_path,
+        tool("done", part=["pane.step"], glass=GLASS, **DONE),
+        tool("set_aside", check="pause references/frame.step", why="The closing words say it."),
+        answers=(
+            "OK",  # the need
+            "OK",  # `thin` on the pane
+            ("OK", {"least_open_pct": 61.5, "least_open_file": "pane.step"}),
+            "OK",  # `capture`
+            "FAIL",  # `pause`
+        ),
+    )
+    in_rounds(run, THICK)
+    run.drive()
+    done, aside = replies(run)[:2]
+    assert done["detail"]["met"] is False
+    assert f"- `{PAUSE}`, FAIL: FAIL: fail on" in done["reply"]
+    assert aside["why"] == "standing", "it can't be set aside on the model's files"
+    assert "`light`, `capture`, `pause`" in aside["reply"]
+
+
+def test_done_takes_the_side_each_file_lies_on_for_the_refinement_pass(tmp_path: Path) -> None:
+    """mqucifer/print-shop#66: on `eval-lid-1` and `eval-plug-1` the side to print on was only in
+    the closing words, and the pass printed each part as stored."""
+    run = started(
+        tmp_path,
+        tool("done", part=["pane.step"], glass=GLASS, on_bed={"pane.step": "+q"}, **DONE),
+        tool("done", part=["pane.step"], glass=GLASS, on_bed={"lid.step": "+z"}, **DONE),
+        tool("done", part=["pane.step"], glass=GLASS, on_bed={"pane.step": "z"}, **DONE),
+    )
+    in_rounds(run, THICK)
+    assert run.drive().name == "met"
+    wrong_side, not_part, met = replies(run)[:3]
+    assert wrong_side["why"] == "not_on_bed" and "`+q` isn't a side" in wrong_side["reply"]
+    assert not_part["why"] == "not_on_bed" and "isn't a file of `part`" in not_part["reply"]
+    assert met["outcome"] == "ok"
+    (row,) = run.ledger.rows("SELECT review FROM approvals WHERE run=?", "r")
+    assert json.loads(row["review"])["on_bed"] == {"pane.step": "+z"}
+    readme = (run.folder / "approvals" / "1" / "review" / "README.md").read_text()
+    assert "it prints with its +z side on the bed (the model's word)" in readme
 
 
 def test_light_fails_a_pane_with_nothing_open_whatever_its_verdict(tmp_path: Path) -> None:
@@ -284,7 +331,7 @@ def test_at_the_stop_for_approval_each_reading_is_shown(tmp_path: Path) -> None:
     in_rounds(run, THICK)
     assert run.drive().name == "met"
     stop = (run.folder / "approvals" / "1" / "stop.md").read_text()
-    assert "## Every pane, by `light` and `capture`, whatever the needs say:" in stop
+    assert "## Every pane, by `light`, `capture` and `pause`, whatever the needs say:" in stop
     assert f"- `{HOLD}`, ok: OK" in stop
     assert run.state.glass == [{**GLASS[0], "with": []}]
 

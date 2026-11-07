@@ -280,14 +280,20 @@ def _bench_check(need: Need, check: dict[str, Any], wrong: list[str], shown: str
 
 def numbers_wrong(found: list[Need]) -> list[str]:
     """Each bench need whose `number` its command never reports (`reports.py`). On `eval-rings-1`
-    `wall` was settled with `min_wall_mm`, where it reports `least_wall_mm`. A `try` isn't held to
-    this: its reading says which numbers the answer has."""
+    `wall` was settled with `min_wall_mm`, where it reports `least_wall_mm`. And each whose path
+    walks where the answer never goes (`reports.SHAPES`, mqucifer/print-shop#66): on
+    `eval-sleeve-1` `bounds_mm.1.z` was settled before the file existed, and `bounds_mm.1` is a
+    list of three. Neither needs a file to run on. A `try` is told the same beside its readings."""
     wrong = []
     for need in found:
         if need.by != "bench" or not need.number:
             continue
         words = need.argv()
-        said = reports.wrong_number(words[0], need.number) if words else None
+        said = None
+        if words:
+            said = reports.wrong_number(words[0], need.number) or reports.wrong_path(
+                words[0], need.number
+            )
         if said:
             wrong.append(f"the need {need.id!r}: {said}")
     return wrong

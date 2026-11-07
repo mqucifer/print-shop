@@ -35,10 +35,12 @@ from typing import Any
 
 import numpy as np
 
-from print_shop.bench.refine import ANGULAR, LINEAR, MARK
+from print_shop.bench.refine import ANGULAR, GAP, LINEAR, MARK, WALL
 from print_shop.refine import findings as fnd
+from print_shop.refine import kinds
+from print_shop.refine import walls as walls_module
 from print_shop.refine.approved import Approved, File, Group, pause_inputs
-from print_shop.refine.context import Context, layers_of
+from print_shop.refine.context import Context, layers_of, wall_lines
 from print_shop.refine.findings import Finding
 from print_shop.rounds import lessons as lessons_module
 from print_shop.rounds.box import Box
@@ -54,6 +56,8 @@ MESH_SHARE = 1e-3
 MESH_BOX = 0.01
 #: A plate's G-code is read for each object's lines only up to this many layers' worth.
 READ_LIMIT = 2000
+#: The least a part laid on a side has on the bed, in mm², or it stands on an edge or a point.
+BED_LEAST_MM2 = 1.0
 
 Slicer = Callable[..., PlateSlice]
 
@@ -69,6 +73,8 @@ class Plate:
     pauses: list[PauseAt] = field(default_factory=list)
     #: The bench's pause readings that set `pauses`.
     pause_rows: list[dict[str, Any]] = field(default_factory=list)
+    #: Panes the run was given, set in at the pause as they sit, and never printed.
+    context: list[File] = field(default_factory=list)
 
 
 @dataclass
@@ -127,7 +133,12 @@ class Pass:
         self.out = approved.folder / "refinements" / str(self.n)
         self.box = box or Box(self.out)
         self.found: list[Finding] = []
+        #: What Orca is given of each file: as stored, or laid on the side `done` named.
         self.meshed: dict[str, dict[str, Any]] = {}
+        #: Each file as stored, as it sits in the part: where a pane sits in its pocket.
+        self.stored: dict[str, dict[str, Any]] = {}
+        #: Given files read as context only, by key: never printed (`kinds.py`).
+        self.given: dict[str, File] = {}
         self.sliced: dict[str, tuple[Plate, gcode.Sliced]] = {}
         #: Off while a proposal is checked: its slices aren't the approved folder's.
         self.recording = True
@@ -136,6 +147,8 @@ class Pass:
         self.lessons: list[int] = []
         #: The request's kind, as `start` gives a kind's lessons by it.
         self.part_kind = _part_kind(approved.folder)
+        #: What the pass reads the part as, by its kind (mqucifer/print-shop#66).
+        self.plan = kinds.plan_of(approved.kind or self.part_kind)
 
     # The pass
 
@@ -182,39 +195,42 @@ class Pass:
 
     # Meshing, roles and plates
 
-    def mesh(self, files: list[File]) -> None:
-        """Each file as an STL, by the bench's image at Orca's own STEP defaults (the seam)."""
-        work = self.out / "meshing"
+    def mesh(self, files: list[File], on_bed: dict[str, str] | None = None) -> dict[str, Any]:
+        """Each file as an STL, by the bench's image at Orca's own STEP defaults (the seam): as
+        stored, or each laid on the side `on_bed` gives it, by key. As stored, it's what the part
+        is and what Orca is given until a file is laid."""
+        work = self.out / ("meshing-laid" if on_bed else "meshing")
         work.mkdir(parents=True, exist_ok=True)
         names = []
         for f in files:
             target = work / f"{f.folder}__{f.name}"
             shutil.copyfile(f.path, target)
             names.append(target.name)
-        ran = self.box.helper(
-            "refine",
-            [
-                json.dumps(
-                    {
-                        "request": "mesh",
-                        "files": names,
-                        "out": "meshed",
-                        "linear": LINEAR,
-                        "angular": ANGULAR,
-                    }
-                )
-            ],
-            timeout=600,
-            where=work,
-        )
+        request: dict[str, Any] = {
+            "request": "mesh",
+            "files": names,
+            "out": "meshed",
+            "linear": LINEAR,
+            "angular": ANGULAR,
+        }
+        if on_bed:
+            request["on_bed"] = {
+                name: on_bed[self._key(f)] for f, name in zip(files, names, strict=True)
+            }
+        ran = self.box.helper("refine", [json.dumps(request)], timeout=600, where=work)
         answer = _bench_answer(ran.output)
+        rows: dict[str, Any] = {}
         for f, name in zip(files, names, strict=True):
             row = answer["files"][name]
             if "unread" in row:
                 raise RuntimeError(f"{f.folder}/{f.name} couldn't be meshed: {row['unread']}")
             row["stl_path"] = str(work / row["stl"])
-            self.meshed[self._key(f)] = row
-            self._mesh_finding(f, row)
+            rows[self._key(f)] = row
+            if not on_bed:
+                self.meshed[self._key(f)] = row
+                self.stored[self._key(f)] = row
+                self._mesh_finding(f, row)
+        return rows
 
     @staticmethod
     def _key(f: File) -> str:
@@ -246,12 +262,51 @@ class Pass:
             )
 
     def plates(self, group: Group) -> list[Plate]:
+        """The group's plates, by its kind (`kinds.py`): for stained glass, the frame on a plate
+        of its own with the pause, its panes and frame from `glass` where the run declared it;
+        for an enclosure, or any kind with no pause, each file on a plate of its colour."""
         self.mesh(group.files)
-        rows = {self._key(f): self.meshed[self._key(f)] for f in group.files}
+        frame: File | None = None
+        panes: list[File] = []
+        context: list[File] = []
+        if self.plan.pause:
+            if self.plan.by_glass:
+                frame, panes, context = self._glass_roles(group)
+            if frame is None:
+                frame, panes = self._roles_by_place(group)
+        others = [f for f in group.files if f is not frame and f not in panes]
+        # A frame a pause is read on prints as stored: its pockets are where the panes sit.
+        self._lay(group, pinned=[frame] if frame is not None else [])
+        plates: list[Plate] = []
+        if frame is not None:
+            plates.append(
+                Plate(
+                    f"{group.folder}-frame",
+                    group.folder,
+                    [frame],
+                    [frame.colour],
+                    frame,
+                    panes,
+                    context=context,
+                )
+            )
+        by_colour: dict[str, list[File]] = {}
+        for f in panes + others:
+            by_colour.setdefault(f.colour, []).append(f)
+        for colour, files in by_colour.items():
+            name = f"{group.folder}-{colour or 'no-colour'}".replace(" ", "-")
+            plates.append(Plate(name, group.folder, files, [colour]))
+        if frame is not None:
+            self._pause(plates[0], group)
+        return plates
+
+    def _roles_by_place(self, group: Group) -> tuple[File, list[File]]:
+        """A run from before `glass`: the largest file is the frame, and a file inside its box,
+        above its underside, is a pane."""
+        rows = {self._key(f): self.stored[self._key(f)] for f in group.files}
         frame = max(group.files, key=lambda f: rows[self._key(f)]["mesh_volume_mm3"])
         (fx0, fy0, fz0), (fx1, fy1, fz1) = rows[self._key(frame)]["mesh_box_mm"]
         panes: list[File] = []
-        others: list[File] = []
         for f in group.files:
             if f is frame:
                 continue
@@ -264,18 +319,170 @@ class Pass:
                 and z0 > fz0 + 0.01
                 and z1 <= fz1 + 0.01
             )
-            (panes if within else others).append(f)
-        plates = [
-            Plate(f"{group.folder}-frame", group.folder, [frame], [frame.colour], frame, panes)
-        ]
-        by_colour: dict[str, list[File]] = {}
-        for f in panes + others:
-            by_colour.setdefault(f.colour, []).append(f)
-        for colour, files in by_colour.items():
-            name = f"{group.folder}-{colour or 'no-colour'}".replace(" ", "-")
-            plates.append(Plate(name, group.folder, files, [colour]))
-        self._pause(plates[0], group)
-        return plates
+            if within:
+                panes.append(f)
+        return frame, panes
+
+    def _glass_roles(self, group: Group) -> tuple[File | None, list[File], list[File]]:
+        """The frame, its panes and its given panes, as the run's last `glass` declares them: on
+        `eval-fit-2` the given pane wasn't in the approved folder, so no pause was set. A given
+        pane is context: read as it sits, for the pause and Orca's lines over it, and never
+        printed. With no frame of `glass` in this group, None."""
+
+        def ours(name: str) -> File | None:
+            return next(
+                (f for f in group.files if f.was == name or f.was == Path(name).name), None
+            ) or next((f for f in group.files if f.name == Path(name).name), None)
+
+        for entry in self.approved.glass:
+            frame = ours(str(entry.get("frame") or ""))
+            if frame is None:
+                continue
+            panes: list[File] = []
+            context: list[File] = []
+            for name in entry.get("panes") or []:
+                mine = ours(str(name))
+                if mine is not None and mine is not frame:
+                    panes.append(mine)
+                    continue
+                given = self._given(group, str(name))
+                if given is not None:
+                    context.append(given)
+            if context:
+                self.mesh(context)
+            return frame, panes, context
+        return None, [], []
+
+    def _given(self, group: Group, name: str) -> File | None:
+        """A file the run was given, by its name in the run, as context only: from the run's
+        `work/references/`, read as OCCT reads any STEP file, in the bench's image."""
+        if not name.startswith("references/"):
+            return None
+        path = self.approved.folder / "work" / name
+        if not path.is_file():
+            return None
+        one = File(
+            group.folder,
+            Path(name).name,
+            name,
+            path,
+            content_hash(name, path.read_bytes()),
+            "",
+            "given, context only",
+        )
+        self.given[self._key(one)] = one
+        return one
+
+    # Laying each file on the side the run named
+
+    def _lay(self, group: Group, pinned: list[File]) -> None:
+        """Each file on the side `done` named for the bed (mqucifer/print-shop#66), or what keeps
+        it as stored, said. On `eval-lid-1` the lid printed lip down, as stored, with 6.2 m of
+        bridge, where a lid prints with its outside on the bed; on `eval-plug-1` a 2 mm plate
+        stood on its edge, 99 layers, where the run meant it flat. Choosing a better side is
+        mqucifer/print-shop#9: this only honours the one stated."""
+        turning: list[File] = []
+        for f in group.files:
+            side = f.on_bed or ""
+            stored = self.stored[self._key(f)]
+            if not side:
+                continue
+            if f in pinned and side != "-z":
+                self.found.append(
+                    Finding(
+                        "on_bed",
+                        "pass",
+                        f"`done` named `{side}` for the bed, and the panes are set into "
+                        f"`{f.name}` at a pause as they sit in it",
+                        "turned, its pockets wouldn't be where the panes go, and the pause is "
+                        f"read on it as stored: it prints as stored, its -z side down, "
+                        f"{stored.get('bed_contact_mm2', 0):g} mm² on the bed",
+                        plate=f"{group.folder}-frame",
+                        file=self._key(f),
+                        numbers={"named": side, "laid": "-z", "why": "a frame paused on"},
+                    )
+                )
+            elif side == "-z":
+                self._laid(f, side, stored)
+            else:
+                turning.append(f)
+        if turning:
+            rows = self.mesh(turning, on_bed={self._key(f): str(f.on_bed) for f in turning})
+            for f in turning:
+                row = rows[self._key(f)]
+                stored = self.stored[self._key(f)]
+                contact = float(row.get("bed_contact_mm2") or 0.0)
+                if contact < BED_LEAST_MM2:
+                    self.found.append(
+                        Finding(
+                            "on_bed",
+                            "pass",
+                            f"laid with its {f.on_bed} side down, as `done` named it, `{f.name}` "
+                            f"touches the bed over {contact:g} mm²",
+                            "that side isn't flat: it would stand on an edge or a point. It "
+                            f"prints as stored, its -z side down, "
+                            f"{stored.get('bed_contact_mm2', 0):g} mm² on the bed",
+                            file=self._key(f),
+                            numbers={
+                                "named": f.on_bed,
+                                "laid": "-z",
+                                "why": "not flat",
+                                "bed_contact_mm2": contact,
+                            },
+                        )
+                    )
+                    continue
+                self.meshed[self._key(f)] = row
+                self._laid(f, str(f.on_bed), row, stored)
+        unnamed = [f for f in group.files if not f.on_bed]
+        if unnamed:
+            names = ", ".join(f"`{f.name}`" for f in unnamed)
+            self.found.append(
+                Finding(
+                    "on_bed",
+                    "pass",
+                    f"`done` named no side for the bed for {names}",
+                    "each prints as stored, its -z side down: the pass can't tell whether "
+                    "that's the side meant. `done`'s `on_bed` says",
+                    file=", ".join(self._key(f) for f in unnamed),
+                    numbers={
+                        "named": None,
+                        "laid": "-z",
+                        "files": [self._key(f) for f in unnamed],
+                    },
+                )
+            )
+
+    def _laid(
+        self,
+        f: File,
+        side: str,
+        row: dict[str, Any],
+        stored: dict[str, Any] | None = None,
+    ) -> None:
+        (x0, y0, z0), (x1, y1, z1) = row["mesh_box_mm"]
+        was = ""
+        if stored is not None:
+            (a0, b0, c0), (a1, b1, c1) = stored["mesh_box_mm"]
+            contact = stored.get("bed_contact_mm2", 0)
+            was = f"; as stored it was {c1 - c0:g} mm tall, {contact:g} mm²"
+        self.found.append(
+            Finding(
+                "on_bed",
+                "pass",
+                f"`{f.name}` is laid with its {side} side on the bed, as `done` named it: "
+                f"{z1 - z0:g} mm tall, {row.get('bed_contact_mm2', 0):g} mm² on the bed{was}",
+                "it prints on the side the run said",
+                file=self._key(f),
+                numbers={
+                    "named": side,
+                    "laid": side,
+                    "bed_contact_mm2": row.get("bed_contact_mm2"),
+                    "height_mm": round(z1 - z0, 4),
+                    "footprint_mm": [round(x1 - x0, 4), round(y1 - y0, 4)],
+                },
+            )
+        )
 
     # The pause
 
@@ -288,12 +495,37 @@ class Pass:
         first, height = layers_of(process)
         asked: list[tuple[float, float, str]] = []
         seen: set[tuple[float, float]] = set()
-        for pane in plate.panes:
-            (_, _, z0), (_, _, z1) = self.meshed[self._key(pane)]["mesh_box_mm"]
+        for pane in [*plate.panes, *plate.context]:
+            (_, _, z0), (_, _, z1) = self.stored[self._key(pane)]["mesh_box_mm"]
             key = (round((z0 + z1) / 2, 4), round(z1 - z0, 4))
             if key not in seen:
                 seen.add(key)
-                asked.append((*key, f"`{pane.name}` as it sits"))
+                whence = (
+                    f"`{pane.was}`, given, as it sits: context only, never printed"
+                    if pane in plate.context
+                    else f"`{pane.name}` as it sits"
+                )
+                asked.append((*key, whence))
+        if not asked:
+            # The run's own word for its frame, where no pane file is to hand.
+            declared = next(
+                (
+                    g
+                    for g in self.approved.glass
+                    if Path(str(g.get("frame") or "")).name in (plate.frame.name, plate.frame.was)
+                ),
+                None,
+            )
+            if declared and declared.get("pocket_z") is not None and declared.get(
+                "pane_thickness"
+            ):
+                asked.append(
+                    (
+                        float(declared["pocket_z"]),
+                        float(declared["pane_thickness"]),
+                        "the frame's `glass` as the run declared it, as no pane file is to hand",
+                    )
+                )
         if not asked:
             calls = [c for c in self.approved.pause_calls if pause_inputs(c)]
             if calls:
@@ -313,7 +545,8 @@ class Pass:
                 Finding(
                     "pause",
                     "pass",
-                    "no pane sits in the frame, and the run never ran `pause`",
+                    "no pane sits in the frame or is given, `glass` declares none, and the run "
+                    "never ran `pause`",
                     "nothing says where a pane goes, so no pause is set: if one is set in at a "
                     "pause, the pass can't say when",
                     plate=plate.name,
@@ -372,6 +605,9 @@ class Pass:
                         if hits
                         else "the layer to pause after, by the part's own heights"
                         if verdict == "OK"
+                        else "the bench fails this pause: the print steps give Orca's pause at "
+                        "its layer, with the bench's reason beside it"
+                        if verdict == "FAIL" and closing
                         else "no pause the bench can stand behind: the print steps don't give one"
                     ),
                     needs_change=hits,
@@ -472,8 +708,9 @@ class Pass:
         self.found += fnd.narrow_lines(sliced, plate.name, ", ".join(files), self.context.nozzle_mm)
         if plate.frame is not None:
             self._read_pause(plate, sliced)
+        lines = wall_lines(composed["process"], self.context.nozzle_mm)
         for f in plate.files:
-            self._cover(plate, f, sliced, where)
+            self._cover(plate, f, sliced, where, lines, composed)
         row.update(
             gcode=str(kept),
             gcode_sha=hashlib.sha256(kept.read_bytes()).hexdigest(),
@@ -538,7 +775,7 @@ class Pass:
                 )
             )
         offset = self._offset(plate.frame, sliced)
-        if offset is None or not plate.panes:
+        if offset is None or not (plate.panes or plate.context):
             return
         dx, dy, dz = offset
         obj = self._object(plate.frame, sliced)
@@ -546,8 +783,8 @@ class Pass:
         alike: dict[
             tuple[int, float, tuple[str, ...]], list[tuple[File, dict[str, float], float, float]]
         ] = {}
-        for pane in plate.panes:
-            row = self.meshed[self._key(pane)]
+        for pane in [*plate.panes, *plate.context]:
+            row = self.stored[self._key(pane)]
             (_, _, z0), (_, _, z1) = row["mesh_box_mm"]
             floor, top = z0 + dz, z1 + dz
             rings = fnd.shifted(row["outline"], dx, dy)
@@ -658,7 +895,15 @@ class Pass:
                 )
             )
 
-    def _cover(self, plate: Plate, f: File, sliced: gcode.Sliced, where: Path) -> None:
+    def _cover(
+        self,
+        plate: Plate,
+        f: File,
+        sliced: gcode.Sliced,
+        where: Path,
+        wall_profile: dict[str, Any] | None = None,
+        composed: dict[str, Any] | None = None,
+    ) -> None:
         """The pass's own reading: where the part has no line, and walls laid over each other."""
         offset = self._offset(f, sliced)
         if offset is None:
@@ -667,7 +912,14 @@ class Pass:
         layers = []
         for layer in sliced.layers[:READ_LIMIT]:
             lines = [
-                [ln.x0, ln.y0, ln.x1, ln.y1, ln.width, 1 if ln.kind in fnd.WALLS else 0]
+                [
+                    ln.x0,
+                    ln.y0,
+                    ln.x1,
+                    ln.y1,
+                    ln.width,
+                    WALL if ln.kind in fnd.WALLS else GAP if ln.kind == fnd.GAP_FILL else 0,
+                ]
                 for ln in layer.lines
                 if ln.obj == obj and ln.width > 0
             ]
@@ -697,6 +949,38 @@ class Pass:
         (work / "cover.json").write_text(json.dumps(answer, indent=1), encoding="utf-8")
         self.found += fnd.bare(answer, plate.name, self._key(f))
         self.found += fnd.overlapping(answer, plate.name, self._key(f))
+        if wall_profile is not None and composed is not None:
+            edges = self._edges(composed, wall_profile, plate)
+            self.found += fnd.gap_in_wall(answer, plate.name, self._key(f), wall_profile, edges)
+
+    def _edges(
+        self, composed: dict[str, Any], lines: dict[str, Any], plate: Plate
+    ) -> Callable[[float], walls_module.Edges]:
+        """Each edge of the gap-fill band round a wall, by Orca's own slices of a test wall at
+        this plate's profile (`walls.py`)."""
+        work = self.out / "walls" / plate.name
+        taken = walls_module.walls_take(
+            lines["outer"], lines["inner"], lines["loops"], lines["layer"]
+        )
+
+        def lays(width: float) -> str:
+            folder = work / f"{width:.2f}"
+            folder.mkdir(parents=True, exist_ok=True)
+            stl = walls_module.tube(width, folder / f"wall-{width:.2f}.stl")
+            done = self.slicer(
+                [PlateObject(stl=stl, filament=1)],
+                composed["machine"],
+                composed["process"],
+                composed["filaments"][:1],
+                folder,
+            )
+            if done.gcode is None:
+                return f"refused: {done.why}"
+            said = walls_module.what_orca_lays(gcode.read(done.gcode))
+            done.gcode.unlink(missing_ok=True)
+            return said
+
+        return lambda wall: walls_module.edges(lays, wall, taken)
 
     def check_frame(
         self, path: Path, frame: File, folder: Path, reading: dict[str, Any]
@@ -777,9 +1061,13 @@ class Pass:
         for group in self.approved.groups:
             for one in group.files:
                 row = self.meshed.get(self._key(one), {})
-                role = "frame" if any(p.frame is one for p, _ in self.sliced.values()) else "file"
-                if role == "file" and any(one in p.panes for p, _ in self.sliced.values()):
-                    role = "pane"
+                role = (
+                    "frame"
+                    if any(p.frame is one for p, _ in self.sliced.values())
+                    else "pane"
+                    if any(one in p.panes for p, _ in self.sliced.values())
+                    else self.plan.part_role
+                )
                 self.ledger.add(
                     "refine_files",
                     refinement=self.id,
@@ -794,6 +1082,23 @@ class Pass:
                         sort_keys=True,
                     ),
                 )
+        for key, one in self.given.items():
+            # A given file read as context only: never printed (`kinds.py`).
+            row = self.stored.get(key, {})
+            self.ledger.add(
+                "refine_files",
+                refinement=self.id,
+                folder=one.folder,
+                file=one.was,
+                sha256=one.sha256,
+                role="context",
+                colour="",
+                label=one.label,
+                meshed=json.dumps(
+                    {k: v for k, v in row.items() if k not in ("outline", "stl_path")},
+                    sort_keys=True,
+                ),
+            )
         (self.out / "findings.json").write_text(
             json.dumps([f.plain() for f in self.found], indent=1, default=str), encoding="utf-8"
         )
@@ -847,7 +1152,7 @@ class Pass:
         for plate, sliced in sorted(plates, key=lambda x: x[0].frame is not None):
             minutes = round((sliced.time_s or 0) / 60)
             grams = sum(sliced.per_filament("filament used [g]"))
-            names = ", ".join(f"`{f.name}`" for f in plate.files)
+            names = ", ".join(f"`{f.name}`{self._side_said(f)}" for f in plate.files)
             colour = plate.colours[0] or "no colour given"
             gfile = f"refinements/{self.n}/plates/{plate.name}/{plate.name}.gcode"
             if plate.frame is None:
@@ -860,11 +1165,14 @@ class Pass:
                 f"Print `{gfile}`: {names} in {colour}, about {minutes} min and {grams:g} g by "
                 "Orca's estimate."
             )
-            if sliced.pauses and plate.panes:
+            if sliced.pauses and (plate.panes or plate.context):
                 p = sliced.pauses[0]
                 over = [f for f in self.found if f.kind == "over_pane" and f.plate == plate.name]
                 rooms = [float(f.numbers["room_mm"]) for f in over if "room_mm" in f.numbers]
-                panes = ", ".join(f"`{f.name}` ({f.colour or 'no colour'})" for f in plate.panes)
+                panes = ", ".join(
+                    [f"`{f.name}` ({f.colour or 'no colour'})" for f in plate.panes]
+                    + [f"the given `{f.was}`" for f in plate.context]
+                )
                 line += (
                     f" Orca pauses after layer {p['before_layer'] - 1} (z {p['after_z']:g}), "
                     f"before layer {p['before_layer']}: set {panes} in their pockets, each on its "
@@ -875,6 +1183,16 @@ class Pass:
                         f" The first layer over them is laid {min(rooms):g} mm above the panes' "
                         "tops, by Orca's lines."
                     )
+                failed = [
+                    f
+                    for f in self.found
+                    if f.kind == "pause"
+                    and f.source == "bench"
+                    and f.plate == plate.name
+                    and f.numbers.get("verdict") == "FAIL"
+                ]
+                for f in failed[:1]:
+                    line += f" The bench's `pause` fails it: {f.read.split(': FAIL: ', 1)[-1]}."
             elif sliced.pauses:
                 p = sliced.pauses[0]
                 line += (
@@ -883,6 +1201,11 @@ class Pass:
                 )
             steps.append(line)
         return steps
+
+    def _side_said(self, f: File) -> str:
+        """The side a file prints on, where it isn't as stored."""
+        side = str(self.meshed.get(self._key(f), {}).get("on_bed") or "-z")
+        return "" if side == "-z" else f" with its {side} side on the bed"
 
     def write_readme(self, steps: dict[str, list[str]], made: list[dict[str, Any]]) -> None:
         lines = [

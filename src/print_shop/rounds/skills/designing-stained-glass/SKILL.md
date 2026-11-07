@@ -228,3 +228,12 @@ After each build of the frame, cut it through its pockets before reasoning about
 its pocket, `--cut x=X,y=Y0:Y1`. Whether a pocket is blind or runs through, and what stands in an
 opening, are on the cut. In one run, six calls of long reasoning went on how its own frame's
 pockets were built, which one cut shows.
+
+### Step 7: the pause is `pause`'s reading (mqucifer/print-shop#66)
+
+With `glass`, the harness runs `pause` on each frame too, beside `light` and `capture`, at its
+`pocket_z` and `pane_thickness`, and it can't be set aside: it fails where the pane stands above
+the last layer before its pocket closes, as the nozzle would meet it. Give the pause in your
+closing words as `pause` reads it, the layer and its z, never as the pocket's floor: in two runs
+the closing words put the pause at the pocket's floor, neither ran `pause`, and both were wrong. Where it fails, raise the pocket's ceiling to the first
+layer line over the pane, or set the pane lower.

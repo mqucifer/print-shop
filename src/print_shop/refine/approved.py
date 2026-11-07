@@ -3,7 +3,9 @@
 It runs after approval only. The approval is the run's last `approved` decision, and the folder is
 that stop's (`approvals/<n>/review/`), each file held to the hash the ledger recorded at the stop.
 Each file's colour and label are the ones `done` gave: the stop's `review` record has them from
-now on, and for a run from before, they're read from the `done` call that made the stop.
+now on, and for a run from before, they're read from the `done` call that made the stop. So is the
+side each file lies on (`on_bed`, mqucifer/print-shop#66), and the run's kind and `glass`, which
+say what's printed and what's only context.
 """
 
 from __future__ import annotations
@@ -33,6 +35,8 @@ class File:
     sha256: str
     colour: str = ""
     label: str = ""
+    #: The side `done` named for the bed, `-z` to `+y`, or "" where it named none.
+    on_bed: str = ""
 
 
 @dataclass
@@ -58,6 +62,10 @@ class Approved:
     needs: list[Need]
     #: The run's own `pause` calls, in order: each one's arguments, verdict and call.
     pause_calls: list[dict[str, Any]] = field(default_factory=list)
+    #: The request's kind, as `start` read it, or None for a run from before kinds.
+    kind: str | None = None
+    #: Each frame, its panes and the frame's other parts, as the run's last `glass` declared them.
+    glass: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def judged(self) -> Path:
@@ -65,14 +73,14 @@ class Approved:
         return self.folder / "rounds" / f"{self.round:03}" / "judged"
 
 
-def _looks_from_events(folder: Path, approval: int) -> dict[str, dict[str, str]]:
+def _looks_from_events(folder: Path, approval: int, key: str = "looks") -> dict[str, Any]:
     """The `looks` of the `done` call that made stop `approval`, for a run from before they were
-    in the stop's record."""
-    looks: dict[str, dict[str, str]] = {}
+    in the stop's record, or another of its arguments by `key`."""
+    looks: dict[str, Any] = {}
     events = folder / "events.jsonl"
     if not events.is_file():
         return looks
-    last: dict[str, dict[str, str]] = {}
+    last: dict[str, Any] = {}
     for line in events.read_text(encoding="utf-8").splitlines():
         try:
             event = json.loads(line)
@@ -83,8 +91,8 @@ def _looks_from_events(folder: Path, approval: int) -> dict[str, dict[str, str]]
                 args = json.loads(event.get("arguments") or "{}")
             except ValueError:
                 continue
-            if isinstance(args.get("looks"), dict):
-                last = args["looks"]
+            if isinstance(args.get(key), dict):
+                last = args[key]
         elif event.get("kind") == "ended" and event.get("name") == "met":
             if (event.get("said") or {}).get("approval") == approval:
                 looks = last
@@ -134,6 +142,7 @@ def read(folder: Path, ledger: DesignLedger) -> Approved:
         raise Refused(f"approval {approval} of {name} has no folder to print from in the ledger")
     review = json.loads(stop[0]["review"])
     looks: dict[str, dict[str, str]] = review.get("looks") or _looks_from_events(folder, approval)
+    on_bed: dict[str, str] = review.get("on_bed") or _looks_from_events(folder, approval, "on_bed")
     shared: dict[str, str] = review.get("shared") or {}
     renamed_from = {v: k for k, v in shared.items()}
     base = folder / "approvals" / str(approval) / "review"
@@ -163,6 +172,7 @@ def read(folder: Path, ledger: DesignLedger) -> Approved:
                     sha,
                     str(look.get("colour") or ""),
                     str(look.get("label") or ""),
+                    str(on_bed.get(was) or ""),
                 )
             )
         groups.append(
@@ -205,6 +215,8 @@ def read(folder: Path, ledger: DesignLedger) -> Approved:
         groups=groups,
         needs=wanted,
         pause_calls=calls,
+        kind=(state.get("form") or {}).get("kind") or state.get("kind") or None,
+        glass=list(state.get("glass") or []),
     )
 
 

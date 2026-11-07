@@ -137,3 +137,36 @@ def layers_of(process: Path) -> tuple[float, float]:
         return float(value)
 
     return first("initial_layer_print_height", 0.2), first("layer_height", 0.2)
+
+
+def wall_lines(process: Path, nozzle_mm: float) -> dict[str, Any] | None:
+    """The process profile's wall lines: the outer and inner line widths in mm, the walls a side
+    and the layer height, and where the widths came from (mqucifer/print-shop#66). A width Orca
+    gives as a share of the nozzle (`110%`) is read so; 0 is Orca's "auto", read as `line_width`.
+    With neither, None: the pass doesn't guess Orca's own."""
+    data = json.loads(process.read_text())
+
+    def one(key: str) -> object:
+        value = data.get(key)
+        return value[0] if isinstance(value, list) and value else value
+
+    def mm(value: object) -> float:
+        text = str(value or "0").strip()
+        if text.endswith("%"):
+            return nozzle_mm * float(text[:-1]) / 100
+        return float(text)
+
+    plain = mm(one("line_width"))
+    found: dict[str, Any] = {
+        "loops": int(float(str(one("wall_loops") or 2))),
+        "layer": float(str(one("layer_height") or 0.2)),
+    }
+    for side, key in (("outer", "outer_wall_line_width"), ("inner", "inner_wall_line_width")):
+        width = mm(one(key))
+        if width <= 0:
+            width, key = plain, "line_width"
+        if width <= 0:
+            return None
+        found[side] = width
+        found[f"{side}_from"] = f"the profile's `{key}`"
+    return found

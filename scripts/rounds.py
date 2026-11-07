@@ -486,9 +486,13 @@ def main() -> int:
                 (folder / "stop").unlink(missing_ok=True)
                 note = args.note.read_text(encoding="utf-8") if args.note else ""
                 if args.send_back:
-                    run.send_back(args.by, note, args.reopen_needs)
+                    told = run.send_back(args.by, note, args.reopen_needs)
                 else:
-                    run.resume(note, args.reopen_needs, args.note_from)
+                    told = run.resume(note, args.reopen_needs, args.note_from)
+                # Said before the model goes on, so a reopening that left the fixed needs
+                # locked can be stopped and done again (mqucifer/print-shop#66).
+                for line in told:
+                    print(line, flush=True)
             ending = run.drive()
             print(what_next(run, ending))
     except (

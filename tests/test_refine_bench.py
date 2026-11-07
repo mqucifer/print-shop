@@ -79,6 +79,31 @@ def test_a_step_file_is_meshed_at_orcas_own_defaults_and_held_to_occt(work: Path
     assert block["meshed"] == "an STL, copied as it is" and block["triangles"] == 12
 
 
+def test_a_file_is_laid_on_the_side_the_run_named_and_says_what_touches_the_bed(
+    work: Path,
+) -> None:
+    """mqucifer/print-shop#66: on `eval-plug-1` a 2 mm plate stored upright printed on its edge.
+    Turned in OCCT before meshing, so the mesh is still held to OCCT's own box and volume."""
+    (work / "make.py").write_text(
+        'import cadquery as cq\ncq.exporters.export(cq.Workplane("XY").box(30, 2, 20, '
+        'centered=False), "upright.step")\n'
+    )
+    made = host.run(["make.py"], work, python=True)
+    assert made.returncode == 0, made.stdout + made.stderr
+    request = {"request": "mesh", "files": ["upright.step"], "out": "m"}
+    stored = _ask(work, request)["files"]["upright.step"]
+    laid = _ask(work, {**request, "out": "laid", "on_bed": {"upright.step": "-y"}})["files"][
+        "upright.step"
+    ]
+    assert stored["on_bed"] == "-z" and stored["bed_contact_mm2"] == pytest.approx(60)
+    assert laid["on_bed"] == "-y" and laid["bed_contact_mm2"] == pytest.approx(600)
+    (x0, y0, z0), (x1, y1, z1) = laid["mesh_box_mm"]
+    assert (x1 - x0, y1 - y0, z1 - z0) == pytest.approx((30, 20, 2), abs=1e-3)
+    flat = [v for corner in laid["mesh_box_mm"] for v in corner]
+    assert [v for corner in laid["occt_box_mm"] for v in corner] == pytest.approx(flat, abs=0.01)
+    assert laid["occt_volume_mm3"] == pytest.approx(1200, rel=1e-6)
+
+
 def _layer(lines: list[list[float]]) -> dict[str, Any]:
     return {"n": 1, "z": 0.2, "height": 0.2, "lines": lines}
 
@@ -109,6 +134,22 @@ def test_a_stretch_with_no_line_at_the_edge_is_bare_and_infills_gaps_inside_aren
         work, {"request": "cover", "stl": "square.stl", "offset": [0, 0, 0], "lines": "square.json"}
     )
     assert inside["bare"] == []
+
+
+def test_gap_fill_in_a_wall_reads_the_walls_width(work: Path) -> None:
+    """mqucifer/print-shop#66: a gap line down the middle of a 2 mm wall is twice its way to the
+    section's edge from the wall's width."""
+    # A box 20 x 20 with a 16 x 16 hole: 2 mm walls, two walls a side and a gap line in each.
+    _box(0, 0, 0, 20, 20, 0.2).difference(_box(2, 2, -1, 18, 18, 1)).export(work / "ring.stl")
+    lines = [[1.0, 2.0, 1.0, 18.0, 0.13, 2], [19.0, 2.0, 19.0, 18.0, 0.13, 2]]
+    lines += [[0.21, 0.21, 0.21, 19.79, 0.42, 1], [0.66, 0.66, 0.66, 19.34, 0.45, 1]]
+    (work / "ring.json").write_text(json.dumps({"layers": [_layer(lines)]}))
+    answer = _ask(
+        work, {"request": "cover", "stl": "ring.stl", "offset": [0, 0, 0], "lines": "ring.json"}
+    )
+    (row,) = answer["gap_walls"]
+    assert row["wall_mm"] == pytest.approx(2.0, abs=0.01)
+    assert row["length_mm"] == pytest.approx(32.0, abs=0.01)
 
 
 def test_two_walls_laid_over_each_other_are_said_and_walls_side_by_side_arent(

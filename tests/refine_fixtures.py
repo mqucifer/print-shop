@@ -61,8 +61,12 @@ def make_run(
     panes: int = 1,
     bar: float = 0.0,
     pane_colours: tuple[str, ...] = COLOURS,
+    given_pane: bool = False,
+    glass: bool = False,
 ) -> tuple[Path, DesignLedger]:
-    """An approved run under `root`, and the ledger beside it."""
+    """An approved run under `root`, and the ledger beside it. With `given_pane`, the pane was
+    given (`work/references/`) and isn't in the approved folder; with `glass`, the run is of the
+    stained-glass kind and declared its frame and panes, as `done` does."""
     folder = root / name
     judged = folder / "rounds" / "001" / "judged"
     judged.mkdir(parents=True)
@@ -74,14 +78,56 @@ def make_run(
     looks: dict[str, dict[str, str]] = {"frame.stl": {"colour": "grey", "label": "frame"}}
     for k in range(panes):
         looks[f"pane_{k + 1}.stl"] = {"colour": pane_colours[k], "label": "pane"}
-    group = folder / "approvals" / "1" / "review" / "A-with-pause"
+    state: dict[str, Any] = {}
+    if given_pane:
+        given = folder / "work" / "references"
+        given.mkdir(parents=True)
+        for f in files[1:]:
+            shutil.move(str(judged / f), given / f)
+            looks.pop(f)
+        files = files[:1]
+    if glass:
+        pane_names = [f"references/pane_{k + 1}.stl" if given_pane else f"pane_{k + 1}.stl"
+                      for k in range(panes)]
+        state = {
+            "form": {"kind": "stained-glass"},
+            "glass": [
+                {
+                    "frame": "frame.stl",
+                    "panes": pane_names,
+                    "with": [],
+                    "pocket_z": 1.5 + pane / 2,
+                    "clearance": 0.25,
+                    "pane_thickness": pane,
+                }
+            ],
+        }
+    return approve(root, name, folder, judged, files, looks, "make_frame.py", state)
+
+
+def approve(
+    root: Path,
+    name: str,
+    folder: Path,
+    judged: Path,
+    files: list[str],
+    looks: dict[str, dict[str, str]],
+    script: str,
+    state_more: dict[str, Any] | None = None,
+    done_more: dict[str, Any] | None = None,
+    group_name: str = "with pause",
+) -> tuple[Path, DesignLedger]:
+    """The records of a run approved at its first stop, with `files` from `judged/`."""
+    folder_name = "A-" + group_name.replace(" ", "-")
+    group = folder / "approvals" / "1" / "review" / folder_name
     group.mkdir(parents=True)
     held: dict[str, str] = {}
     for f in files:
         shutil.copyfile(judged / f, group / f)
         held[f] = content_hash(f, (judged / f).read_bytes())
     (group.parent / "README.md").write_text(
-        "# made up\n\n## A-with-pause\n\nPrint it, pause, drop the panes in. (the model's words)\n",
+        f"# made up\n\n## {folder_name}\n\nPrint it, pause, drop the panes in. (the model's "
+        "words)\n",
         encoding="utf-8",
     )
     shutil.copytree(group.parent, folder / "review")
@@ -101,19 +147,21 @@ def make_run(
         "stage": "rounds",
         "round": 1,
         "ending": {"name": "approved", "said": {"approval": 1}},
+        **(state_more or {}),
     }
     (folder / "state.json").write_text(json.dumps(state), encoding="utf-8")
     done_args = {
-        "script": "make_frame.py",
+        "script": script,
         "part": [{"name": "frame", "files": files}],
         "looks": looks,
+        **(done_more or {}),
     }
     events = [
         {"kind": "tool", "name": "done", "outcome": "ok", "arguments": json.dumps(done_args)},
         {
             "kind": "ended",
             "name": "met",
-            "said": {"round": 1, "script": "make_frame.py", "approval": 1},
+            "said": {"round": 1, "script": script, "approval": 1},
         },
         {"kind": "ended", "name": "approved", "said": {"approval": 1}},
     ]
@@ -134,7 +182,7 @@ def make_run(
     )
     review: dict[str, Any] = {
         "folder": str(folder / "review"),
-        "groups": [{"folder": "A-with-pause", "name": "with pause", "files": held}],
+        "groups": [{"folder": folder_name, "name": group_name, "files": held}],
         "shared": {},
     }
     ledger.add(
@@ -161,3 +209,48 @@ def make_run(
     )
     ledger.decided(name, 1, "approved", "stand-in: a test", "")
     return folder, ledger
+
+
+#: An enclosure's parts, as a script would store them (mqucifer/print-shop#66): a lid stored lip
+#: down, its 40 x 30 plate at z 4 to 6 over a 2 mm lip ring 4 mm tall; a plate 30 x 2 x 20
+#: stored standing on its 2 mm edge; and a cone, which has no flat top to lie on.
+PARTS_SCRIPT = """\
+import trimesh
+
+
+def box(x0, y0, z0, x1, y1, z1):
+    made = trimesh.creation.box(extents=(x1 - x0, y1 - y0, z1 - z0))
+    made.apply_translation(((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2))
+    return made
+
+
+lid = box(0, 0, 4, 40, 30, 6).union(box(2, 2, 0, 38, 28, 4).difference(box(4, 4, -1, 36, 26, 5)))
+lid.export("lid.stl")
+box(0, 0, 0, 30, 2, 20).export("plate.stl")
+cone = trimesh.creation.cone(radius=8, height=10, sections=48)
+cone.export("cone.stl")
+"""
+
+
+def make_enclosure_run(
+    root: Path, name: str, on_bed: dict[str, str], files: tuple[str, ...] = ("lid.stl",)
+) -> tuple[Path, DesignLedger]:
+    """An approved enclosure run, its `done` naming the side each file lies on."""
+    folder = root / name
+    judged = folder / "rounds" / "001" / "judged"
+    judged.mkdir(parents=True)
+    (judged / "make_parts.py").write_text(PARTS_SCRIPT, encoding="utf-8")
+    subprocess.run([sys.executable, "-I", "make_parts.py"], cwd=judged, check=True)
+    looks = {f: {"colour": "blue", "label": Path(f).stem} for f in files}
+    return approve(
+        root,
+        name,
+        folder,
+        judged,
+        list(files),
+        looks,
+        "make_parts.py",
+        {"form": {"kind": "enclosure"}},
+        {"on_bed": on_bed} if on_bed else {},
+        group_name="case",
+    )

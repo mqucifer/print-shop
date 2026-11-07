@@ -19,7 +19,7 @@ from typing import Any
 import pytest
 
 from print_shop.bench import host
-from print_shop.rounds import skills
+from print_shop.rounds import reports, skills
 
 pytestmark = pytest.mark.bench
 CASES = Path(__file__).parent / "bench_cases"
@@ -157,6 +157,9 @@ def test_generated_code_runs_there_too_and_reaches_nothing(bench: Any) -> None:
         ("wall", "hang.step", "--hole", "50,121.5,2"),
         ("render", "block.step", "--views", "iso"),
         ("params", "design.py", "--set", "Thickness=4"),
+        ("edges", "block.step"),
+        ("thickness", "cube.step"),
+        ("light", "frame.step", "cube.step"),
     ],
 )
 def test_every_command_says_its_verdict_second_check_and_file(
@@ -168,6 +171,8 @@ def test_every_command_says_its_verdict_second_check_and_file(
     assert "second check: " in answer.text
     assert "saved: " in answer.text
     assert answer.verdict in ("OK", "CLEAR", "TOUCHING"), answer.text
+    # Each number has the shape `needs` walks a path through (mqucifer/print-shop#66).
+    assert not reports.unlike(args[0], answer.numbers), reports.unlike(args[0], answer.numbers)
 
 
 def test_a_file_that_isnt_there_is_no_answer(bench: Any) -> None:
