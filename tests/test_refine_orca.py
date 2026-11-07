@@ -104,3 +104,36 @@ def test_a_narrow_bar_is_gap_filled_and_a_narrower_one_is_bare_and_laid_twice(
     numbers = twice["numbers"]
     assert twice["layer_from"] == 2
     assert isinstance(numbers, dict) and numbers["overlap_mm"] == pytest.approx(0.34, abs=0.02)
+
+
+def test_a_test_walls_edges_at_the_sponsors_profile_are_the_sweeps(tmp_path: Path) -> None:
+    """mqucifer/print-shop#66: swept from 1.50 to 2.60 mm through Orca at the Rapid PETG 240°
+    profile (mqucifer/print-shop#65), a wall prints clean to 1.66 mm and takes infill from 2.28.
+    The pass finds both by bisection from a 2.00 mm wall, at the store's own composed profile."""
+    from print_shop.refine import walls
+    from print_shop.refine.context import wall_lines
+    from print_shop.slicer.orca import PlateObject, slice_plate
+
+    rapid = "Elegoo RAPID PETG 240Degree,MaxFanSpeed=50,AuxPartCoolingFan=80"
+    context = Context.parse(0.4, [rapid])
+    composed = context.composed([""], tmp_path / "profiles")
+    lines = wall_lines(composed["process"], 0.4)
+    assert lines is not None
+
+    def lays(width: float) -> str:
+        folder = tmp_path / f"{width:.2f}"
+        folder.mkdir()
+        stl = walls.tube(width, folder / "wall.stl")
+        done = slice_plate(
+            [PlateObject(stl=stl, filament=1)],
+            composed["machine"],
+            composed["process"],
+            composed["filaments"],
+            folder,
+        )
+        assert done.gcode is not None, done.why
+        return walls.what_orca_lays(gcode.read(done.gcode))
+
+    taken = walls.walls_take(lines["outer"], lines["inner"], lines["loops"], lines["layer"])
+    band = walls.edges(lays, 2.0, taken)
+    assert (band.clean_to_mm, band.infill_from_mm) == (1.66, 2.28), band.read

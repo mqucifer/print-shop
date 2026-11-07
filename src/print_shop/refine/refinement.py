@@ -38,8 +38,9 @@ import numpy as np
 from print_shop.bench.refine import ANGULAR, GAP, LINEAR, MARK, WALL
 from print_shop.refine import findings as fnd
 from print_shop.refine import kinds
+from print_shop.refine import walls as walls_module
 from print_shop.refine.approved import Approved, File, Group, pause_inputs
-from print_shop.refine.context import Context, layers_of, line_width_of
+from print_shop.refine.context import Context, layers_of, wall_lines
 from print_shop.refine.findings import Finding
 from print_shop.rounds import lessons as lessons_module
 from print_shop.rounds.box import Box
@@ -707,9 +708,9 @@ class Pass:
         self.found += fnd.narrow_lines(sliced, plate.name, ", ".join(files), self.context.nozzle_mm)
         if plate.frame is not None:
             self._read_pause(plate, sliced)
-        line = line_width_of(composed["process"], self.context.nozzle_mm)
+        lines = wall_lines(composed["process"], self.context.nozzle_mm)
         for f in plate.files:
-            self._cover(plate, f, sliced, where, line)
+            self._cover(plate, f, sliced, where, lines, composed)
         row.update(
             gcode=str(kept),
             gcode_sha=hashlib.sha256(kept.read_bytes()).hexdigest(),
@@ -900,7 +901,8 @@ class Pass:
         f: File,
         sliced: gcode.Sliced,
         where: Path,
-        line: tuple[float, int, str] | None = None,
+        wall_profile: dict[str, Any] | None = None,
+        composed: dict[str, Any] | None = None,
     ) -> None:
         """The pass's own reading: where the part has no line, and walls laid over each other."""
         offset = self._offset(f, sliced)
@@ -947,8 +949,38 @@ class Pass:
         (work / "cover.json").write_text(json.dumps(answer, indent=1), encoding="utf-8")
         self.found += fnd.bare(answer, plate.name, self._key(f))
         self.found += fnd.overlapping(answer, plate.name, self._key(f))
-        if line is not None:
-            self.found += fnd.gap_in_wall(answer, plate.name, self._key(f), *line)
+        if wall_profile is not None and composed is not None:
+            edges = self._edges(composed, wall_profile, plate)
+            self.found += fnd.gap_in_wall(answer, plate.name, self._key(f), wall_profile, edges)
+
+    def _edges(
+        self, composed: dict[str, Any], lines: dict[str, Any], plate: Plate
+    ) -> Callable[[float], walls_module.Edges]:
+        """Each edge of the gap-fill band round a wall, by Orca's own slices of a test wall at
+        this plate's profile (`walls.py`)."""
+        work = self.out / "walls" / plate.name
+        taken = walls_module.walls_take(
+            lines["outer"], lines["inner"], lines["loops"], lines["layer"]
+        )
+
+        def lays(width: float) -> str:
+            folder = work / f"{width:.2f}"
+            folder.mkdir(parents=True, exist_ok=True)
+            stl = walls_module.tube(width, folder / f"wall-{width:.2f}.stl")
+            done = self.slicer(
+                [PlateObject(stl=stl, filament=1)],
+                composed["machine"],
+                composed["process"],
+                composed["filaments"][:1],
+                folder,
+            )
+            if done.gcode is None:
+                return f"refused: {done.why}"
+            said = walls_module.what_orca_lays(gcode.read(done.gcode))
+            done.gcode.unlink(missing_ok=True)
+            return said
+
+        return lambda wall: walls_module.edges(lays, wall, taken)
 
     def check_frame(
         self, path: Path, frame: File, folder: Path, reading: dict[str, Any]

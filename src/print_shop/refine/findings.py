@@ -9,6 +9,7 @@ line, wall lines laid over each other, and lines over a pane. Each says whose it
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -294,14 +295,21 @@ def _grouped(
 
 
 def gap_in_wall(
-    answer: dict[str, Any], plate: str, file: str, line: float, loops: int, whence: str
+    answer: dict[str, Any],
+    plate: str,
+    file: str,
+    lines: dict[str, Any],
+    edges: Callable[[float], Any] | None = None,
 ) -> list[Finding]:
-    """Gap fill inside a wall over many layers, named by its cause (mqucifer/print-shop#66): the
-    wall's width against a whole number of the profile's line. On `eval-edges-1` 2 mm walls left
-    14.3 m of gap fill, down to 0.096 mm, inside every wall from layer 10 to 100. A gap line is
-    inside a wall where the part there is no wider than the walls the profile lays a side, both
-    sides, and a line between: wider, it's infill's, not a wall's."""
-    widest = (2 * loops + 1) * line
+    """Gap fill inside a wall over many layers, named by its cause (mqucifer/print-shop#66): what
+    the profile's walls a side take of the wall, by their line widths and spacings, and the widths
+    either side that print with no gap fill and with infill, by Orca's own slices of a test wall
+    at the profile (`walls.py`). On `eval-edges-1` 2 mm walls left 14.3 m of gap fill, down to
+    0.096 mm, inside every wall from layer 10 to 100. A gap line is inside a wall where the part
+    there is no wider than its walls a side, both sides, and a line between: wider, it's
+    infill's."""
+    outer, inner, loops = float(lines["outer"]), float(lines["inner"]), int(lines["loops"])
+    widest = 2 * (outer + (loops - 1) * inner) + inner
     rows = [r for r in answer.get("gap_walls") or [] if float(r["wall_mm"]) <= widest]
     runs: list[list[dict[str, Any]]] = []
     for row in rows:
@@ -318,13 +326,43 @@ def gap_in_wall(
     for run in runs:
         if len(run) < MANY_LAYERS:
             continue
-        walls = sorted(float(r["wall_mm"]) for r in run)
-        wall = walls[len(walls) // 2]
+        widths = sorted(float(r["wall_mm"]) for r in run)
+        wall = widths[len(widths) // 2]
         length = sum(float(r["length_mm"]) for r in run)
-        lines = wall / line
-        low, high = math.floor(lines), math.ceil(lines)
-        if high == low:
-            high += 1
+        taken = 2 * (
+            outer - float(lines["layer"]) * (1 - math.pi / 4)
+            + (loops - 1) * (inner - float(lines["layer"]) * (1 - math.pi / 4))
+        )
+        band = edges(wall) if edges is not None else None
+        said = (
+            f"{wall:.2f} mm wall: its {loops} walls a side, {outer:g} mm outer and {inner:g} mm "
+            f"inner lines ({lines['outer_from']}, {lines['inner_from']}), take {taken:.2f} mm "
+            f"of it as Orca spaces them, and leave {wall - taken:.2f} mm between, too narrow "
+            "for infill, which Orca gap-fills"
+        )
+        if band is not None and band.clean_to_mm is not None and band.infill_from_mm is not None:
+            said += (
+                f". By Orca's own slices of a test wall at this profile, a wall prints with no "
+                f"gap fill up to {band.clean_to_mm:.2f} mm, and takes infill from "
+                f"{band.infill_from_mm:.2f} mm: size it to one of those"
+            )
+        elif band is not None:
+            said += ". Orca's slices of a test wall didn't find both edges of the band in reach"
+        numbers: dict[str, Any] = {
+            "wall_mm": wall,
+            "outer_mm": outer,
+            "inner_mm": inner,
+            "wall_loops": loops,
+            "layer_mm": float(lines["layer"]),
+            "walls_take_mm": round(taken, 3),
+            "length_mm": round(length, 2),
+        }
+        if band is not None:
+            numbers.update(
+                clean_to_mm=band.clean_to_mm,
+                infill_from_mm=band.infill_from_mm,
+                test_walls={f"{k:.2f}": v for k, v in band.read.items()},
+            )
         found.append(
             Finding(
                 "gap_in_wall",
@@ -332,24 +370,14 @@ def gap_in_wall(
                 f"Orca's gap fill on layers {run[0]['layer']}-{run[-1]['layer']} lies inside a "
                 f"wall {wall:.2f} mm wide, by the part's section at each gap line: "
                 f"{length:.0f} mm of it",
-                f"{wall:.2f} mm wall = {lines:.1f} lines of {line:g} mm ({whence}): a wall that "
-                "isn't a whole number of lines leaves a sliver between its walls, which Orca "
-                f"fills with thin gap lines. {low} lines are {low * line:.2f} mm and {high} are "
-                f"{high * line:.2f} mm",
+                said,
                 plate=plate,
                 file=file,
                 layer_from=int(run[0]["layer"]),
                 layer_to=int(run[-1]["layer"]),
                 z_from=float(run[0]["z"]),
                 z_to=float(run[-1]["z"]),
-                numbers={
-                    "wall_mm": wall,
-                    "line_mm": line,
-                    "lines": round(lines, 2),
-                    "wall_loops": loops,
-                    "length_mm": round(length, 2),
-                    "whole_mm": [round(low * line, 3), round(high * line, 3)],
-                },
+                numbers=numbers,
             )
         )
     return found

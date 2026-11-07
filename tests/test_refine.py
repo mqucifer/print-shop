@@ -14,8 +14,8 @@ from typing import Any, cast
 import numpy as np
 import pytest
 
-from print_shop.refine import approved, proposals
-from print_shop.refine.context import Context, hex_of, line_width_of
+from print_shop.refine import approved, proposals, walls
+from print_shop.refine.context import Context, hex_of, wall_lines
 from print_shop.refine.findings import gap_in_wall, inside, runs_of
 from print_shop.refine.refinement import Pass
 from print_shop.rounds.box import Box
@@ -499,36 +499,81 @@ def test_a_pause_the_bench_fails_is_given_with_its_reason_beside_it(tmp_path: Pa
     )
 
 
-def test_gap_fill_inside_a_wall_over_many_layers_names_the_walls_width_in_lines() -> None:
+#: Orca 2.4.2's band at the Sponsor's Rapid PETG 240° profile, as mqucifer/print-shop#65 swept it
+#: from 1.50 to 2.60 mm: clean to 1.66, gap fill from 1.68 to 2.26, infill from 2.28.
+def _swept(width: float) -> str:
+    return walls.CLEAN if width <= 1.66 else walls.GAP if width <= 2.26 else walls.INFILL
+
+
+PROFILE = {
+    "outer": 0.42,
+    "inner": 0.45,
+    "loops": 2,
+    "layer": 0.2,
+    "outer_from": "the profile's `outer_wall_line_width`",
+    "inner_from": "the profile's `inner_wall_line_width`",
+}
+
+
+def test_a_gap_filled_walls_edges_are_bisected_from_the_wall_the_part_has() -> None:
+    """Whole lines aren't the rule: 4 lines (1.80) and 5 (2.25) both gap-fill."""
+    asked: list[float] = []
+
+    def lays(width: float) -> str:
+        asked.append(width)
+        return _swept(width)
+
+    band = walls.edges(lays, 2.0, walls.walls_take(0.42, 0.45, 2, 0.2))
+    assert (band.clean_to_mm, band.infill_from_mm) == (1.66, 2.28)
+    assert len(asked) <= 16, "a bisection, not a sweep"
+    # The walls' spacings are the sweep's own gap line: a 2.00 mm wall's is 0.432.
+    assert band.walls_take_mm == pytest.approx(2.0 - 0.432, abs=1e-3)
+
+
+def test_gap_fill_inside_a_wall_over_many_layers_names_its_cause_and_both_edges() -> None:
     """mqucifer/print-shop#66: on `eval-edges-1` 2 mm walls left 14.3 m of gap fill inside every
-    wall, layers 10 to 100: a 2 mm wall isn't a whole number of the profile's lines."""
+    wall, layers 10 to 100."""
     rows = [{"layer": n, "z": 0.2 * n, "length_mm": 150.0, "wall_mm": 2.0} for n in range(10, 101)]
     rows += [{"layer": n, "z": 0.2 * n, "length_mm": 9.0, "wall_mm": 2.0} for n in (2, 3, 4)]
     rows += [{"layer": n, "z": 0.2 * n, "length_mm": 9.0, "wall_mm": 6.0} for n in range(110, 130)]
+    taken = walls.walls_take(0.42, 0.45, 2, 0.2)
     (found,) = gap_in_wall(
         {"gap_walls": sorted(rows, key=lambda r: r["layer"])},
         "A-box",
         "A/box.step",
-        0.45,
-        2,
-        "the profile's `inner_wall_line_width`",
+        PROFILE,
+        lambda wall: walls.edges(_swept, wall, taken),
     )
     assert found.kind == "gap_in_wall" and (found.layer_from, found.layer_to) == (10, 100)
     assert found.means.startswith(
-        "2.00 mm wall = 4.4 lines of 0.45 mm (the profile's `inner_wall_line_width`)"
+        "2.00 mm wall: its 2 walls a side, 0.42 mm outer and 0.45 mm inner lines"
     )
-    assert "4 lines are 1.80 mm and 5 are 2.25 mm" in found.means
+    assert "take 1.57 mm of it as Orca spaces them, and leave 0.43 mm between" in found.means
+    assert (
+        "a wall prints with no gap fill up to 1.66 mm, and takes infill from 2.28 mm"
+    ) in found.means
     assert found.numbers["length_mm"] == pytest.approx(13650)
+    assert (found.numbers["clean_to_mm"], found.numbers["infill_from_mm"]) == (1.66, 2.28)
 
 
-def test_the_line_a_wall_is_counted_in_is_the_profiles(tmp_path: Path) -> None:
+def test_the_wall_lines_are_the_profiles(tmp_path: Path) -> None:
     profile = tmp_path / "process.json"
-    profile.write_text(json.dumps({"inner_wall_line_width": "0.45", "wall_loops": "3"}))
-    assert line_width_of(profile, 0.4) == (0.45, 3, "the profile's `inner_wall_line_width`")
-    profile.write_text(json.dumps({"inner_wall_line_width": "110%"}))
-    share = line_width_of(profile, 0.4)
-    assert share is not None and share[0] == pytest.approx(0.44) and share[1] == 2
-    profile.write_text(json.dumps({"inner_wall_line_width": "0", "line_width": "0.42"}))
-    assert line_width_of(profile, 0.4) == (0.42, 2, "the profile's `line_width`")
+    profile.write_text(
+        json.dumps(
+            {
+                "outer_wall_line_width": "0.42",
+                "inner_wall_line_width": "110%",
+                "wall_loops": "3",
+                "layer_height": "0.16",
+            }
+        )
+    )
+    found = wall_lines(profile, 0.4)
+    assert found is not None
+    assert (found["outer"], found["loops"], found["layer"]) == (0.42, 3, 0.16)
+    assert found["inner"] == pytest.approx(0.44)
+    profile.write_text(json.dumps({"outer_wall_line_width": "0", "line_width": "0.42"}))
+    found = wall_lines(profile, 0.4)
+    assert found is not None and found["outer_from"] == "the profile's `line_width`"
     profile.write_text(json.dumps({}))
-    assert line_width_of(profile, 0.4) is None
+    assert wall_lines(profile, 0.4) is None
