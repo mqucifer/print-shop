@@ -36,7 +36,7 @@ assert {f.geomType() for f in base.val().Faces()} <= {"PLANE", "CYLINDER", "TORU
 
 ## Print orientation
 
-Say each part's orientation at `ask` and `done`. Changing a part for its orientation or supports is a later pass, not the design (mqucifer/print-shop#9).
+Say each part's orientation at `ask` and `done`, where `done`'s `on_bed` gives each file its side. Where the request says which way a part prints, that's a bed need on its file, not a stop: `done` holds `on_bed` to it (`bench`, "How a need names a check"). Changing a part for its orientation or supports is a later pass, not the design (mqucifer/print-shop#9).
 
 | Part | Lies | Why |
 |---|---|---|

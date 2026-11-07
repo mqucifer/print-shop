@@ -283,7 +283,7 @@ def _same_check(a: Need, b: Need) -> bool:
         b.at_least,
         b.at_most,
         b.look_for,
-    )
+    ) and (a.file, a.side) == (b.file, b.side)
 
 
 def _closed(name: str) -> str:
@@ -2127,7 +2127,7 @@ class Run:
                 and new.figure == old.figure
             ):
                 continue
-            check = old.command or f"the Sponsor's eye: {old.look_for}"
+            check = needs.check_said(old)
             wrong.append(
                 f"`{old.id}` is fixed, a non-negotiable of the request, and changes only by the "
                 f"Sponsor, through `resume --reopen-needs` with their note. Send it as it was: "
@@ -2175,6 +2175,8 @@ class Run:
                 what = "drops it"
             elif instead.by == "eye":
                 what = "gives it to the Sponsor's eye"
+            elif instead.by == needs.BED:
+                what = f"checks it by `on_bed`, as `{needs.check_said(instead)}`"
             else:
                 what = f"changes its check to `{instead.command}` ({instead.limit()}), which passes"
             if not reason:
@@ -2207,7 +2209,7 @@ class Run:
             lines.append(f"- **{swap['need']}** (needs version {swap['version']}):")
             lines.append(f"  - was `{old.get('command')}`, which read: {swap['old_reading']}")
             if new:
-                check = new.get("command") or f"the Sponsor's eye: {new.get('look_for')}"
+                check = needs.check_said(Need(**new))
                 then = f", which read: {swap['new_reading']}" if swap.get("new_reading") else ""
                 lines.append(f"  - is now `{check}`{then}")
             else:
@@ -2227,6 +2229,12 @@ class Run:
         for need in found:
             if need.by == "eye":
                 lines.append(f"- {need.id}: for the Sponsor's eye, so there's nothing to read.")
+                continue
+            if need.by == needs.BED:
+                lines.append(
+                    f"- {need.id}: checked at `done`, against `on_bed`: it has to give "
+                    f'{{"{need.file}": "{need.side}"}}.'
+                )
                 continue
             reading = next(read)
             mark = "would pass" if reading.passed else "WOULDN'T PASS"
@@ -2313,6 +2321,12 @@ class Run:
         on_bed = _on_bed(args.get("on_bed"), part)
         if isinstance(on_bed, str):
             return Judged("done", "failed", on_bed, "not_on_bed")
+        # A need on the side a file prints on, against `on_bed`, before anything runs
+        # (mqucifer/print-shop#73): it's the side the run gives, not its word elsewhere.
+        beds = [needs.bed_reading(n, on_bed, part) for n in self._needs() if n.by == needs.BED]
+        bed_unmet = [one for one in beds if not one.passed]
+        if bed_unmet:
+            return Judged("done", "failed", _bed_unmet_refused(bed_unmet), "bed_need_unmet")
         fix_shape, closing = str(args["fix_shape"]).strip(), str(args["closing"]).strip()
         if not fix_shape or not closing:
             reply = "`fix_shape` and `closing` each take your own words, and one is empty."
@@ -2352,7 +2366,9 @@ class Run:
             json.dumps({n.id: n.command for n in wanted if n.by == "bench"}, indent=1),
             encoding="utf-8",
         )
-        judgement = judge.check(self.box, self.work, script, wanted, self.state.picks, folder, part)
+        judgement = judge.check(
+            self.box, self.work, script, wanted, self.state.picks, folder, part, on_bed
+        )
         standing: list[judge.Standing] = []
         panes_read: list[judge.Standing] = []
         strips: list[judge.Standing] = []
@@ -2666,7 +2682,7 @@ class Run:
             "",
         ]
         for need, reading in zip(wanted, judgement.readings, strict=True):
-            limit = f" Limit: {need.limit()}." if need.by == "bench" else ""
+            limit = f" Limit: {need.limit()}." if need.by != "eye" else ""
             lines.append(f"- **{need.id}** ({need.what}): {reading.why}.{limit}")
         lines += [
             "",
@@ -2816,7 +2832,7 @@ class Run:
                 last = value if value is not None else before.get("verdict") or before["why"][:60]
                 was = f" (last round: {last})"
             mark = "met" if reading.passed else "NOT MET"
-            limit = f" Limit: {need.limit()}." if need.by == "bench" else ""
+            limit = f" Limit: {need.limit()}." if need.by != "eye" else ""
             lines.append(f"- {need.id}, {mark}: {reading.why}.{limit}{was}")
             if not reading.passed and reading.text:
                 lines.append(reading.text[:FAILURE_CHARS].rstrip())
@@ -3485,6 +3501,8 @@ class Run:
         for need in self._needs():
             if need.by == "bench":
                 check = f"`{need.command}`, {need.limit()}"
+            elif need.by == needs.BED:
+                check = f"at `done`: {need.limit()}"
             else:
                 check = f"by eye: {need.look_for}"
                 if need.no_bench:
@@ -3860,7 +3878,21 @@ def only_session(root: Path) -> Iterator[None]:
 
 
 #: The sides a file can lie on, as `done`'s `on_bed` names them (mqucifer/print-shop#66).
-SIDES = ("-z", "+z", "-x", "+x", "-y", "+y")
+SIDES = needs.SIDES
+
+
+def _bed_unmet_refused(unmet: list[Reading]) -> str:
+    """`done`'s refusal of an `on_bed` that doesn't give a bed need its side
+    (mqucifer/print-shop#73)."""
+    lines = [
+        "Nothing was checked: a need says which side of a file lies on the bed, and `on_bed` "
+        "doesn't give it:"
+    ]
+    lines += [f"- `{one.need}`: {one.why}." for one in unmet]
+    lines.append(
+        "Send `done` again with `on_bed` giving each file its side, as your script stores it."
+    )
+    return "\n".join(lines)
 
 
 def _on_bed(given: Any, part: list[str]) -> dict[str, str] | str:
