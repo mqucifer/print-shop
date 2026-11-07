@@ -1848,7 +1848,8 @@ def test_a_gap_drawn_on_a_curve_is_held_at_both_ends_by_the_exact_distance(bench
     exact = bench(*pair, "--min-gap", "0.25", "--max-gap", "0.25")
     assert exact.verdict == "CLEAR", exact.text
     found = only_pair(exact)
-    assert found["gap_mm"] == 0.25 and found["gap_by"] == "occt"
+    # The figure the limits judged, as it is (mqucifer/print-shop#72): 0.24999999999999853.
+    assert found["gap_mm"] == pytest.approx(0.25, abs=1e-6) and found["gap_by"] == "occt"
     assert found["gap_mesh_mm"] <= 0.25
     assert bench(*pair, "--min-gap", "0.2501").verdict == "TOO CLOSE"
     assert bench(*pair, "--max-gap", "0.2499").verdict == "TOO LOOSE"
