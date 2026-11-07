@@ -15,9 +15,9 @@ panes and any other part of the frame (`with`), with the pocket's height, the pl
 and the pane's thickness. Every file of the part is in it, so no pane is left out. It's the
 model's word, shown at the stop beside the readings; a need carries the request's own figures.
 
-**`pause` too** (mqucifer/print-shop#66). `eval-rims-4`'s closing words said "pause at the pocket
-floor (z=1.5)", and `eval-fit-2`'s "print to just below the pocket's floor, drop the pane in":
-neither run ran `pause`, and both are wrong, as the nozzle would meet the pane. `eval-thick-2`
+**`pause` too** (mqucifer/print-shop#66). `eval-rims-4`'s and `eval-fit-2`'s closing words each put
+the pause at the pocket's floor: neither run ran `pause`, and both are wrong, as the nozzle would
+meet the pane. `eval-thick-2`
 found the same in batch 3. So `pause` reads each frame at its declared pocket height and pane
 thickness, at the bench's own layers (0.2 mm, as the run doesn't know the printer's process; the
 refinement pass reads it again at the process's), and fails where the pane stands above the last

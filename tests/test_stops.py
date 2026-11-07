@@ -194,30 +194,30 @@ def test_an_unfixed_need_whose_lines_figure_is_its_build_input_is_refused_too() 
 
 
 FIT2 = (
-    "A frame.\n\n## Requirements\n- The pane sits in its pocket with 0.25 mm of play.\n\n"
-    "## Non-negotiables\n- The pane fits its pocket with 0.25 mm of play all round.\n"
+    "A frame.\n\n## Requirements\n- A pane drops into its pocket with 0.3 mm of play.\n\n"
+    "## Non-negotiables\n- Each pane has 0.3 mm of play in its pocket on every side.\n"
 )
 
 
 def test_an_exit_only_need_whose_figure_is_its_commands_own_input_is_refused() -> None:
-    """mqucifer/print-shop#66: on `eval-fit-2` the fixed play need was exit-only, `capture ...
-    --clearance 0.25`, its figure "the --clearance in capture": `capture` builds its own pane from
-    the pocket, so the given pane was never read."""
+    """mqucifer/print-shop#66: on `eval-fit-2` the fixed play need was exit-only, on `capture
+    --clearance`, its figure carried by that option alone: `capture` builds its own pane from the
+    pocket, so the given pane was never read."""
     form = request.read(FIT2)
     play = Need(
         "play",
-        "0.25 mm of play",
+        "0.3 mm of play",
         "request",
         "bench",
-        quote="The pane fits its pocket with 0.25 mm of play all round.",
-        command="capture frame.step --pocket-z 2.1 --clearance 0.25 --pane-thickness 1.2",
+        quote="Each pane has 0.3 mm of play in its pocket on every side.",
+        command="capture frame.step --pocket-z 2.1 --clearance 0.3 --pane-thickness 1.2",
         covers=["R1", "N1"],
         fixed=True,
-        figure="it is the --clearance in capture",
+        figure="the play is capture's --clearance",
         measures="pane-hold",
     )
     (fixed,) = figures.wrong([play], form)
-    assert fixed.startswith("`--clearance 0.25` is what `capture` builds from")
+    assert fixed.startswith("`--clearance 0.3` is what `capture` builds from")
     assert "clearance PANE.step FRAME.step" in fixed
     (unfixed,) = figures.echoed([play], form)
     assert unfixed.startswith("the need 'play' covers `R1`")
@@ -225,20 +225,43 @@ def test_an_exit_only_need_whose_figure_is_its_commands_own_input_is_refused() -
     # read at, and stands.
     pane = Need(
         "fit",
-        "0.25 mm of play",
+        "0.3 mm of play",
         "request",
         "bench",
         quote=play.quote,
         command="clearance references/pane_1.step frame.step",
         number="pairs.0.gap_occt_mm",
-        at_least=0.25,
-        at_most=0.25,
+        at_least=0.3,
+        at_most=0.3,
         covers=["R1", "N1"],
         fixed=True,
         measures="fit",
     )
     assert figures.wrong([play, pane], form) == []
     assert figures.echoed([play, pane], form) == []
+
+
+def test_an_input_that_is_the_setting_its_lines_other_figures_are_read_at_stands() -> None:
+    """A rim sized before a play is read at that play: `capture --full-rim R --clearance P` is
+    the line's own check. Replayed on every needs version the evals settled, refusing these would
+    have refused 14 rim and lip needs that read the part rightly."""
+    line = "A 1.4 mm rim holds each pane on both faces, measured before 0.3 mm of play."
+    rims = Need(
+        "rims",
+        "held",
+        "request",
+        "bench",
+        quote=line,
+        command="capture frame.step --pocket-z 2 --clearance 0.3 --pane-thickness 1 "
+        "--full-rim 1.4",
+        covers=["R1"],
+        measures="pane-hold",
+    )
+    form = request.read(f"A frame.\n\n## Requirements\n- {line}\n")
+    assert figures.echoed([rims], form) == []
+    fixed = request.read(f"A frame.\n\n## Non-negotiables\n- {line}\n")
+    held = Need(**{**rims.__dict__, "covers": ["N1"], "fixed": True})
+    assert figures.wrong([held], fixed) == []
 
 
 # Wanted 2: one stop for the eye needs on one picture, and nothing asked twice

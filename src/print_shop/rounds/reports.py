@@ -395,8 +395,8 @@ POSITIONAL: dict[str, tuple[str, ...]] = {
 #: from the bench's code.
 #: `capture` does the same with no number to read it back (mqucifer/print-shop#66): it cuts its own
 #: pane `--clearance` in from the pocket and reads the lips past that play. On `eval-fit-2` the
-#: fixed play need was `capture frame.step ... --clearance 0.25`, exit-only, its figure "the
-#: --clearance in capture": 0.25 came back by construction and the given pane was never read.
+#: fixed play need was exit-only, on `capture --clearance`, its figure carried by that option
+#: alone: the play came back by construction and the given pane was never read.
 INPUTS: dict[str, dict[str, tuple[str, ...]]] = {
     "panes": {"--clearance": ("gap_2d_mm", "gap_3d_mm")},
     "capture": {"--clearance": ()},

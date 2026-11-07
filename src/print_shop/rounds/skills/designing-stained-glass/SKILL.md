@@ -235,6 +235,5 @@ With `glass`, the harness runs `pause` on each frame too, beside `light` and `ca
 `pocket_z` and `pane_thickness`, and it can't be set aside: it fails where the pane stands above
 the last layer before its pocket closes, as the nozzle would meet it. Give the pause in your
 closing words as `pause` reads it, the layer and its z, never as the pocket's floor: in two runs
-the closing words said "pause at the pocket floor" and "print to just below the pocket's floor",
-neither ran `pause`, and both were wrong. Where it fails, raise the pocket's ceiling to the first
+the closing words put the pause at the pocket's floor, neither ran `pause`, and both were wrong. Where it fails, raise the pocket's ceiling to the first
 layer line over the pane, or set the pane lower.

@@ -540,10 +540,10 @@ def test_a_reopening_with_no_note_says_the_fixed_needs_stay_and_a_fix_first_open
 
 
 def test_a_question_with_options_takes_them_as_picks(tmp_path: Path) -> None:
-    """mqucifer/print-shop#66: on `eval-change-2` ask 4 asked "A or B?" in one picture, and the
-    pick "A" was refused, as a picture's picks were yes or none."""
-    which = "Which outline: A (41 mm wide) or B (44 mm wide)?"
-    options = [{"name": "A", "about": "41 mm wide"}, {"name": "B", "about": "44 mm wide"}]
+    """mqucifer/print-shop#66: on `eval-change-2` ask 4 offered A or B in one picture, and the
+    pick of A was refused, as a picture's picks were yes or none."""
+    which = "Which arm: A (the short one) or B (the long one)?"
+    options = [{"name": "A", "about": "a 90 mm arm"}, {"name": "B", "about": "a 120 mm arm"}]
     run = to_the_plan(
         tmp_path,
         [tool("ask", question=which, pictures=["options.png"])],
@@ -561,7 +561,7 @@ def test_a_question_with_options_takes_them_as_picks(tmp_path: Path) -> None:
     assert one["why"] == "not_an_option"
     assert named["outcome"] == "ok"
     question = (run.folder / "asks" / "1" / "question.md").read_text()
-    assert "- **A**: 41 mm wide" in question and "- **B**: 44 mm wide" in question
+    assert "- **A**: a 90 mm arm" in question and "- **B**: a 120 mm arm" in question
     assert 'the pick is one of them, "A", "B", or "none"' in question
     said = what_next(run, Ending("ask", {"n": run.state.asks}))
     assert '"pick": "A or B or none"' in said

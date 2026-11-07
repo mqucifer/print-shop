@@ -377,9 +377,9 @@ class Pass:
     def _lay(self, group: Group, pinned: list[File]) -> None:
         """Each file on the side `done` named for the bed (mqucifer/print-shop#66), or what keeps
         it as stored, said. On `eval-lid-1` the lid printed lip down, as stored, with 6.2 m of
-        bridge, where the run said outside face down; on `eval-plug-1` a 2 mm plate stood on its
-        edge, 99 layers, where it said flat. Choosing a better side is mqucifer/print-shop#9:
-        this only honours the one stated."""
+        bridge, where a lid prints with its outside on the bed; on `eval-plug-1` a 2 mm plate
+        stood on its edge, 99 layers, where the run meant it flat. Choosing a better side is
+        mqucifer/print-shop#9: this only honours the one stated."""
         turning: list[File] = []
         for f in group.files:
             side = f.on_bed or ""
@@ -604,6 +604,9 @@ class Pass:
                         if hits
                         else "the layer to pause after, by the part's own heights"
                         if verdict == "OK"
+                        else "the bench fails this pause: the print steps give Orca's pause at "
+                        "its layer, with the bench's reason beside it"
+                        if verdict == "FAIL" and closing
                         else "no pause the bench can stand behind: the print steps don't give one"
                     ),
                     needs_change=hits,
@@ -1131,6 +1134,16 @@ class Pass:
                         f" The first layer over them is laid {min(rooms):g} mm above the panes' "
                         "tops, by Orca's lines."
                     )
+                failed = [
+                    f
+                    for f in self.found
+                    if f.kind == "pause"
+                    and f.source == "bench"
+                    and f.plate == plate.name
+                    and f.numbers.get("verdict") == "FAIL"
+                ]
+                for f in failed[:1]:
+                    line += f" The bench's `pause` fails it: {f.read.split(': FAIL: ', 1)[-1]}."
             elif sliced.pauses:
                 p = sliced.pauses[0]
                 line += (

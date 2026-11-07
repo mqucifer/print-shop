@@ -328,12 +328,12 @@ def test_a_path_the_answer_never_has_is_refused_when_settled_with_no_file() -> N
     def need(command: str, number: str) -> Need:
         return Need("size", "x", "chosen", "bench", command=command, number=number, at_least=1)
 
-    wrong = needs.numbers_wrong([need("info sleeve.step", "bounds_mm.1.z")])
+    wrong = needs.numbers_wrong([need("info box.step", "bounds_mm.1.z")])
     assert len(wrong) == 1
     assert "the need 'size': `bounds_mm.1.z` isn't in `info`'s answer" in wrong[0]
     assert "its z is `bounds_mm.1.2`" in wrong[0]
     for right in ("bounds_mm.1.2", "size_mm.0", "solids", "flat_heights.3.up"):
-        assert not needs.numbers_wrong([need("info sleeve.step", right)]), right
+        assert not needs.numbers_wrong([need("info box.step", right)]), right
     # A list or a row is no one number, and says how to name one.
     said = reports.wrong_path("info", "size_mm")
     assert said and "`size_mm.2` z" in said

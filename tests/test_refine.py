@@ -369,7 +369,7 @@ def _enclosure(root: Path, on_bed: dict[str, str], *files: str) -> tuple[Pass, F
 
 def test_a_lid_stored_lip_down_prints_outside_face_down_as_done_says(tmp_path: Path) -> None:
     """On `eval-lid-1` the pass printed the lid as stored, lip down, with 6.2 m of bridge at the
-    plate's underside, where the closing words said outside face down."""
+    plate's underside, where a lid prints with its outside on the bed."""
     p, orca = _enclosure(tmp_path, {"lid.stl": "+z"})
     assert p.approved.groups[0].files[0].on_bed == "+z"
     done = p.run()
@@ -410,7 +410,7 @@ def test_an_enclosure_is_read_as_its_kind_with_no_frame_panes_or_pause(tmp_path:
 def test_a_plate_stored_on_its_edge_prints_flat_and_a_side_with_no_flat_is_said(
     tmp_path: Path,
 ) -> None:
-    """On `eval-plug-1` a 2 mm plate stood on its edge, 99 layers, where the run said flat."""
+    """On `eval-plug-1` a 2 mm plate stood on its edge, 99 layers, where the run meant it flat."""
     p, orca = _enclosure(tmp_path, {"plate.stl": "-y", "cone.stl": "+z"}, "plate.stl", "cone.stl")
     done = p.run()
     found = {str(f.file).split("/")[-1]: f for f in done.findings if f.kind == "on_bed"}
@@ -484,3 +484,18 @@ def test_a_frame_paused_on_prints_as_stored_whatever_side_is_named(tmp_path: Pat
     (said,) = [f for f in done.findings if f.kind == "on_bed" and "frame" in str(f.file)]
     assert said.numbers["why"] == "a frame paused on"
     assert "it prints as stored, its -z side down" in said.means
+
+
+def test_a_pause_the_bench_fails_is_given_with_its_reason_beside_it(tmp_path: Path) -> None:
+    """Read on `eval-fit-2`'s given pane, `pause` failed on 0.5 mm of air over it: the steps give
+    Orca's pause, and say so, where they'd said nothing."""
+    record = pause_record(13, 0.5, 3.0, verdict="FAIL")
+    record["why"] = "opening 1: 0.500 mm above the pane at the pause, over 0.4 mm"
+    done = _pass(tmp_path, record, FakeOrca(closes_at=14)).run()
+    pause = next(f for f in done.findings if f.kind == "pause")
+    assert pause.means.startswith("the bench fails this pause")
+    (steps,) = done.steps.values()
+    assert steps[-1].endswith(
+        "The bench's `pause` fails it: opening 1: 0.500 mm above the pane at the pause, over "
+        "0.4 mm."
+    )

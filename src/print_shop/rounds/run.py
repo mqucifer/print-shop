@@ -3557,7 +3557,7 @@ class Run:
         self, question: str, options: Any, variants: Any
     ) -> tuple[str, str] | None:
         """A question with options takes them as picks (mqucifer/print-shop#66). On `eval-change-2`
-        ask 4 asked "A or B?" in one picture, and its pick "A" was refused: a picture's picks were
+        ask 4 offered A or B in one picture, and its pick of A was refused: a picture's picks were
         yes or none. Options of the part's own files are `variants`; options drawn in a picture
         are named in `options`, and each is a pick."""
         shape = 'Each option is {"name": "A", "about": "what sets it apart"}.'

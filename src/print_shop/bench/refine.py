@@ -11,7 +11,7 @@ Two requests, each one JSON argument, each answered by one line, `MARK` then JSO
   file's outline at its mid-height comes too, for reading where Orca's lines fall. A file is laid
   first on the face the run named for the bed (`on_bed`, mqucifer/print-shop#66), turned as a
   whole, and the mesh says how much of it then touches the bed: on `eval-lid-1` the lid printed
-  lip down, as stored, where the run said outside face down.
+  lip down, as stored, where a lid prints with its outside on the bed.
 - **`cover`**: where a part's section has no line of Orca's at all. On the probe a 0.5 and a 0.7 mm
   bar across a window got no line and no warning. For each layer, the section at its mid-height
   less every line laid there, each as wide as Orca says: what's left, shrunk by `least`, and
