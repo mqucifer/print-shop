@@ -363,3 +363,43 @@ def test_an_answer_unlike_its_shapes_is_said() -> None:
     assert reports.unlike("info", {"bounds_mm": [0, 0, 0, 1, 2, 3]})
     assert reports.unlike("info", {"flat_heights": [{"z": 1, "area": 2}]})
     assert reports.unlike("info", {"valid": 1})
+
+
+def test_the_bench_s_new_numbers_settle_and_a_wrong_path_to_them_is_refused() -> None:
+    """mqucifer/print-shop#65's numbers, walked as any other (mqucifer/print-shop#66): the verdict's
+    gap, a lifted file, and edges by group and by place."""
+    from print_shop.rounds import toolsets
+
+    def settled(command: str, number: str) -> list[str]:
+        entry = {
+            "id": "n",
+            "what": "x",
+            "source": "chosen",
+            "check": {"by": "bench", "command": command, "number": number, "at_least": 0},
+        }
+        found, wrong = needs.read([entry], "", toolset=toolsets.EVERY)
+        return wrong or needs.numbers_wrong(found)
+
+    lifted = "clearance base.step lid.step --lift 2"
+    edges = "edges box.step --box corner=0,0,0,5,5,40 --facing front=-y"
+    for command, number in (
+        (lifted, "pairs.0.gap_mm"),
+        (lifted, "lift.mm"),
+        ("edges box.step", "groups.upright.least_radius_mm"),
+        ("edges box.step", "groups.side.least_at.2"),
+        (edges, "selected.corner.least_radius_mm"),
+        (edges, "selected.front.least_radius_mm"),
+    ):
+        assert settled(command, number) == [], (command, number)
+    for command, number, says in (
+        (lifted, "pairs.gap_mm", "`pairs` is a list of rows"),
+        (lifted, "lift.z", "`lift` is a row of `file`, `along`, `mm`"),
+        (lifted, "lift", "name one of its numbers: `lift.mm`"),
+        ("edges box.step", "groups.vertical.least_radius_mm", "`upright`, `top`, `bottom`, `side`"),
+        ("edges box.step", "groups.top", "`groups.top.least_radius_mm`"),
+        ("edges box.step", "groups.upright.least_at.z", "its z is `groups.upright.least_at.2`"),
+        (edges, "selected.corner.radius_mm", "`selected.corner` is a row of `sharp`"),
+        (edges, "selected.back.least_radius_mm", "it names `corner`, `front`. Name `back`"),
+    ):
+        (said,) = settled(command, number)
+        assert says in said, (number, said)
