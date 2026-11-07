@@ -158,6 +158,10 @@ def test_generated_code_runs_there_too_and_reaches_nothing(bench: Any) -> None:
         ("render", "block.step", "--views", "iso"),
         ("params", "design.py", "--set", "Thickness=4"),
         ("edges", "block.step"),
+        # mqucifer/print-shop#65's: a lifted file and edges by group and by place, held to the
+        # shapes `needs` walks a path through (mqucifer/print-shop#66).
+        ("clearance", "cube.step", "cube-gap-0p1.step", "--lift", "1"),
+        ("edges", "block.step", "--box", "corner=-1,-1,-1,5,5,50", "--facing", "front=-y"),
         ("thickness", "cube.step"),
         ("light", "frame.step", "cube.step"),
     ],

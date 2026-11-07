@@ -66,4 +66,4 @@ COPY --from=docs /build/docs.json /opt/cad-eval/docs.json
 # where (mqucifer/print-shop#46); 0.6's `info` reads small flat faces and the file's size,
 # `capture` names panes whose files have another play, and a sheet marks each file by its name
 # and wraps its legend (mqucifer/print-shop#54). Its code is mounted, not copied in.
-LABEL org.opencontainers.image.version="0.7"
+LABEL org.opencontainers.image.version="0.8"

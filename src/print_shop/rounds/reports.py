@@ -188,6 +188,20 @@ XYZ = Vector(3, NUMBER, ("x", "y", "z"))
 XY = Vector(2, NUMBER, ("x", "y"))
 CORNERS = Vector(2, XYZ, ("the low corner", "the high corner"))
 SPREAD = Row({"min": NUMBER, "mean": NUMBER, "max": NUMBER}, closed=True)
+#: `edges`' least of a group or a selection (mqucifer/print-shop#65): its counts and its least
+#: radius, 0 at a sharp edge, where it is and in which file, or None where nothing is read.
+LEAST = Row(
+    {
+        "sharp": NUMBER,
+        "rounded": NUMBER,
+        "least_radius_mm": NUMBER,
+        "least_at": XYZ,
+        "file": TEXT,
+    },
+    closed=True,
+)
+#: The groups `edges` reads every edge into, by the file's axes, as `bench/edges.py` names them.
+EDGE_GROUPS = ("upright", "top", "bottom", "side")
 
 SHAPES: dict[str, dict[str, Any]] = {
     "info": {
@@ -206,11 +220,16 @@ SHAPES: dict[str, dict[str, Any]] = {
         "watertight": FLAG,
     },
     "clearance": {
+        # The file `--lift` moved, along which axis and how far (mqucifer/print-shop#65).
+        "lift": Row({"file": TEXT, "along": TEXT, "mm": NUMBER}, closed=True),
         "pairs": Rows(
             Row(
                 {
                     "a": TEXT,
                     "b": TEXT,
+                    # The verdict's gap: OCCT's on a STEP pair, else the mesh's.
+                    "gap_mm": NUMBER,
+                    "gap_by": TEXT,
                     "gap_mesh_mm": NUMBER,
                     "gap_occt_mm": NUMBER,
                     "overlap_band_mm3": NUMBER,
@@ -328,9 +347,12 @@ SHAPES: dict[str, dict[str, Any]] = {
     },
     "edges": {
         "grid_mm": NUMBER,
+        "groups": Row({name: LEAST for name in EDGE_GROUPS}, closed=True),
         "least_radius_at": XYZ,
         "least_radius_mm": NUMBER,
         "reach_mm": NUMBER,
+        # By the names the need's own `--box NAME=...` and `--facing NAME=...` give.
+        "selected": Keyed(LEAST),
     },
     "render": {"seen_px": Keyed(Keyed(NUMBER)), "views": Keyed(Row())},
 }
@@ -450,6 +472,31 @@ def wrong_number(command: str, number: str) -> str | None:
     )
 
 
+def selected_unnamed(words: list[str], number: str) -> str | None:
+    """An `edges` need's `selected.NAME` that its own command never names: a selection is read
+    only for the `--box NAME=...` and `--facing NAME=...` it's given (mqucifer/print-shop#65)."""
+    if not words or words[0] != "edges" or not number.startswith("selected."):
+        return None
+    name = number.split(".")[1] if number.count(".") else ""
+    given: list[str] = []
+    for k, word in enumerate(words):
+        value = None
+        if word in ("--box", "--facing") and k + 1 < len(words):
+            value = words[k + 1]
+        elif word.startswith(("--box=", "--facing=")):
+            value = word.split("=", 1)[1]
+        if value is not None:
+            given.append(value.split("=", 1)[0])
+    if name in given:
+        return None
+    named = ", ".join(f"`{g}`" for g in given) or "none"
+    return (
+        f"`{number}` isn't in `edges`' answer: a selection is read only for the command's own "
+        f"`--box NAME=X0,Y0,Z0,X1,Y1,Z1` or `--facing NAME=DIR`, and it names {named}. Name "
+        f"`{name}` in one, or read a group, such as `groups.upright.least_radius_mm`"
+    )
+
+
 def wrong_verdict(command: str, verdict: str) -> str | None:
     """What's wrong with a need's verdict for its command, naming the verdicts it does give."""
     given = VERDICTS.get(command)
@@ -491,8 +538,11 @@ def _under(shape: Any, path: str) -> str:
     if isinstance(shape, Rows):
         return f"name a row by its number and then its number, such as `{path}.0`..."
     if isinstance(shape, Row) and shape.fields:
-        numbers = [k for k, v in shape.fields.items() if v not in (TEXT, FLAG)]
-        return "name one of its numbers: " + ", ".join(f"`{path}.{k}`" for k in numbers)
+        numbers = [k for k, v in shape.fields.items() if v == NUMBER]
+        if numbers:
+            return "name one of its numbers: " + ", ".join(f"`{path}.{k}`" for k in numbers)
+        under = ", ".join(f"`{path}.{k}`" for k in shape.fields)
+        return f"each of {under} holds numbers: name one of them, and then its number"
     return f"name one of its numbers, `{path}.<name>`"
 
 

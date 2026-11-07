@@ -291,8 +291,10 @@ def numbers_wrong(found: list[Need]) -> list[str]:
         words = need.argv()
         said = None
         if words:
-            said = reports.wrong_number(words[0], need.number) or reports.wrong_path(
-                words[0], need.number
+            said = (
+                reports.wrong_number(words[0], need.number)
+                or reports.wrong_path(words[0], need.number)
+                or reports.selected_unnamed(words, need.number)
             )
         if said:
             wrong.append(f"the need {need.id!r}: {said}")
