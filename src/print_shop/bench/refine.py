@@ -16,7 +16,10 @@ Two requests, each one JSON argument, each answered by one line, `MARK` then JSO
   bar across a window got no line and no warning. For each layer, the section at its mid-height
   less every line laid there, each as wide as Orca says: what's left, shrunk by `least`, and
   within `least` of the section's edge, is a stretch of the part Orca didn't print. Sparse infill
-  leaves gaps inside, which its walls keep away from the edge, so those aren't counted.
+  leaves gaps inside, which its walls keep away from the edge, so those aren't counted. And how
+  wide the part is where Orca gap-fills, twice the way from each gap line's middle to the
+  section's edge: gap fill in the middle of a wall is a wall that isn't a whole number of lines
+  (mqucifer/print-shop#66; on `eval-edges-1` 14.3 m of it inside 2 mm walls).
 
 Nothing here edits G-code: the lines are read on the host, from Orca's own file.
 """
@@ -30,6 +33,8 @@ from pathlib import Path
 from typing import Any
 
 MARK = "ROUNDS_REFINE "
+#: A line's kind in `cover`'s request: 1 a wall, 2 gap fill, 0 anything else.
+WALL, GAP = 1, 2
 #: How far two wall lines must overlap across to be laid over each other, in mm.
 DEEP_MM = 0.15
 #: Either side of a layer's mid-height, in mm.
@@ -180,6 +185,7 @@ def cover(request: dict[str, Any]) -> dict[str, Any]:
     with open(request["lines"], encoding="utf-8") as fh:
         layers = json.load(fh)["layers"]
     found = []
+    gaps = []
     for layer in layers:
         mid = float(layer["z"]) - float(layer["height"]) / 2
         # Just under and just over the mid-height: on a level face there, a slicer may read either
@@ -189,6 +195,24 @@ def cover(request: dict[str, Any]) -> dict[str, Any]:
         if section.is_empty:
             continue
         lines = np.asarray(layer["lines"], dtype=float).reshape(-1, 6)
+        gap = lines[lines[:, 5] == GAP]
+        if len(gap):
+            middles = shapely.points((gap[:, 0:2] + gap[:, 2:4]) / 2)
+            inside = shapely.contains(section, middles)
+            if inside.any():
+                lengths = np.hypot(*(gap[:, 2:4] - gap[:, 0:2]).T)[inside]
+                across = 2 * shapely.distance(section.boundary, middles[inside])
+                order = np.argsort(across)
+                weights = np.cumsum(lengths[order])
+                median = float(across[order][np.searchsorted(weights, weights[-1] / 2)])
+                gaps.append(
+                    {
+                        "layer": layer["n"],
+                        "z": layer["z"],
+                        "length_mm": round(float(lengths.sum()), 3),
+                        "wall_mm": round(median, 3),
+                    }
+                )
         if len(lines):
             strokes = shapely.linestrings(np.stack([lines[:, 0:2], lines[:, 2:4]], axis=1))
             laid = shapely.union_all(shapely.buffer(strokes, lines[:, 4] / 2, cap_style="flat"))
@@ -216,7 +240,7 @@ def cover(request: dict[str, Any]) -> dict[str, Any]:
                     "width_mm": round(float(width), 3),
                 }
             )
-    return {"bare": found, "overlaps": overlaps(layers), "layers": len(layers)}
+    return {"bare": found, "overlaps": overlaps(layers), "layers": len(layers), "gap_walls": gaps}
 
 
 def overlaps(layers: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -234,7 +258,7 @@ def overlaps(layers: list[dict[str, Any]]) -> list[dict[str, Any]]:
     found = []
     for layer in layers:
         lines = np.asarray(layer["lines"], dtype=float).reshape(-1, 6)
-        walls = lines[lines[:, 5] == 1]
+        walls = lines[lines[:, 5] == WALL]
         if len(walls) < 2:
             continue
         strokes = shapely.linestrings(np.stack([walls[:, 0:2], walls[:, 2:4]], axis=1))

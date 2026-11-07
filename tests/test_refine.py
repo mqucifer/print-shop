@@ -15,8 +15,8 @@ import numpy as np
 import pytest
 
 from print_shop.refine import approved, proposals
-from print_shop.refine.context import Context, hex_of
-from print_shop.refine.findings import inside, runs_of
+from print_shop.refine.context import Context, hex_of, line_width_of
+from print_shop.refine.findings import gap_in_wall, inside, runs_of
 from print_shop.refine.refinement import Pass
 from print_shop.rounds.box import Box
 from print_shop.rounds.run import Refused
@@ -475,9 +475,7 @@ def test_with_no_pane_file_to_hand_the_pause_is_read_at_glasss_own_figures(
 
 def test_a_frame_paused_on_prints_as_stored_whatever_side_is_named(tmp_path: Path) -> None:
     folder, ledger = make_run(tmp_path, "fx", glass=True)
-    review = json.loads(
-        ledger.rows("SELECT review FROM approvals WHERE run='fx'")[0]["review"]
-    )
+    review = json.loads(ledger.rows("SELECT review FROM approvals WHERE run='fx'")[0]["review"])
     review["on_bed"] = {"frame.stl": "+z"}
     ledger.change("UPDATE approvals SET review=? WHERE run='fx'", json.dumps(review))
     done = _passing(folder, ledger, pause_record(13, 0.1, 2.6), FakeOrca()).run()
@@ -499,3 +497,38 @@ def test_a_pause_the_bench_fails_is_given_with_its_reason_beside_it(tmp_path: Pa
         "The bench's `pause` fails it: opening 1: 0.500 mm above the pane at the pause, over "
         "0.4 mm."
     )
+
+
+def test_gap_fill_inside_a_wall_over_many_layers_names_the_walls_width_in_lines() -> None:
+    """mqucifer/print-shop#66: on `eval-edges-1` 2 mm walls left 14.3 m of gap fill inside every
+    wall, layers 10 to 100: a 2 mm wall isn't a whole number of the profile's lines."""
+    rows = [{"layer": n, "z": 0.2 * n, "length_mm": 150.0, "wall_mm": 2.0} for n in range(10, 101)]
+    rows += [{"layer": n, "z": 0.2 * n, "length_mm": 9.0, "wall_mm": 2.0} for n in (2, 3, 4)]
+    rows += [{"layer": n, "z": 0.2 * n, "length_mm": 9.0, "wall_mm": 6.0} for n in range(110, 130)]
+    (found,) = gap_in_wall(
+        {"gap_walls": sorted(rows, key=lambda r: r["layer"])},
+        "A-box",
+        "A/box.step",
+        0.45,
+        2,
+        "the profile's `inner_wall_line_width`",
+    )
+    assert found.kind == "gap_in_wall" and (found.layer_from, found.layer_to) == (10, 100)
+    assert found.means.startswith(
+        "2.00 mm wall = 4.4 lines of 0.45 mm (the profile's `inner_wall_line_width`)"
+    )
+    assert "4 lines are 1.80 mm and 5 are 2.25 mm" in found.means
+    assert found.numbers["length_mm"] == pytest.approx(13650)
+
+
+def test_the_line_a_wall_is_counted_in_is_the_profiles(tmp_path: Path) -> None:
+    profile = tmp_path / "process.json"
+    profile.write_text(json.dumps({"inner_wall_line_width": "0.45", "wall_loops": "3"}))
+    assert line_width_of(profile, 0.4) == (0.45, 3, "the profile's `inner_wall_line_width`")
+    profile.write_text(json.dumps({"inner_wall_line_width": "110%"}))
+    share = line_width_of(profile, 0.4)
+    assert share is not None and share[0] == pytest.approx(0.44) and share[1] == 2
+    profile.write_text(json.dumps({"inner_wall_line_width": "0", "line_width": "0.42"}))
+    assert line_width_of(profile, 0.4) == (0.42, 2, "the profile's `line_width`")
+    profile.write_text(json.dumps({}))
+    assert line_width_of(profile, 0.4) is None

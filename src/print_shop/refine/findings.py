@@ -8,6 +8,7 @@ line, wall lines laid over each other, and lines over a pane. Each says whose it
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -18,6 +19,11 @@ from print_shop.slicer.gcode import Layer, Line, Sliced
 #: Orca's labels for a line laid over air, as it reads the part.
 OVER_AIR = ("Bridge", "Internal Bridge", "Overhang wall")
 WALLS = ("Outer wall", "Inner wall", "Overhang wall")
+GAP_FILL = "Gap infill"
+#: Gap fill inside a wall over at least this many layers in a row is named by its cause.
+MANY_LAYERS = 5
+#: Layers whose walls at the gap fill differ by more than this, in mm, are read apart.
+WALL_BAND = 0.1
 
 
 @dataclass
@@ -284,4 +290,66 @@ def _grouped(
                     numbers={figure: value, "box": span[0]["box"], "layers": len(span)},
                 )
             )
+    return found
+
+
+def gap_in_wall(
+    answer: dict[str, Any], plate: str, file: str, line: float, loops: int, whence: str
+) -> list[Finding]:
+    """Gap fill inside a wall over many layers, named by its cause (mqucifer/print-shop#66): the
+    wall's width against a whole number of the profile's line. On `eval-edges-1` 2 mm walls left
+    14.3 m of gap fill, down to 0.096 mm, inside every wall from layer 10 to 100. A gap line is
+    inside a wall where the part there is no wider than the walls the profile lays a side, both
+    sides, and a line between: wider, it's infill's, not a wall's."""
+    widest = (2 * loops + 1) * line
+    rows = [r for r in answer.get("gap_walls") or [] if float(r["wall_mm"]) <= widest]
+    runs: list[list[dict[str, Any]]] = []
+    for row in rows:
+        last = runs[-1] if runs else None
+        if (
+            last is not None
+            and int(row["layer"]) == int(last[-1]["layer"]) + 1
+            and abs(float(row["wall_mm"]) - float(last[0]["wall_mm"])) <= WALL_BAND
+        ):
+            last.append(row)
+        else:
+            runs.append([row])
+    found = []
+    for run in runs:
+        if len(run) < MANY_LAYERS:
+            continue
+        walls = sorted(float(r["wall_mm"]) for r in run)
+        wall = walls[len(walls) // 2]
+        length = sum(float(r["length_mm"]) for r in run)
+        lines = wall / line
+        low, high = math.floor(lines), math.ceil(lines)
+        if high == low:
+            high += 1
+        found.append(
+            Finding(
+                "gap_in_wall",
+                "pass",
+                f"Orca's gap fill on layers {run[0]['layer']}-{run[-1]['layer']} lies inside a "
+                f"wall {wall:.2f} mm wide, by the part's section at each gap line: "
+                f"{length:.0f} mm of it",
+                f"{wall:.2f} mm wall = {lines:.1f} lines of {line:g} mm ({whence}): a wall that "
+                "isn't a whole number of lines leaves a sliver between its walls, which Orca "
+                f"fills with thin gap lines. {low} lines are {low * line:.2f} mm and {high} are "
+                f"{high * line:.2f} mm",
+                plate=plate,
+                file=file,
+                layer_from=int(run[0]["layer"]),
+                layer_to=int(run[-1]["layer"]),
+                z_from=float(run[0]["z"]),
+                z_to=float(run[-1]["z"]),
+                numbers={
+                    "wall_mm": wall,
+                    "line_mm": line,
+                    "lines": round(lines, 2),
+                    "wall_loops": loops,
+                    "length_mm": round(length, 2),
+                    "whole_mm": [round(low * line, 3), round(high * line, 3)],
+                },
+            )
+        )
     return found

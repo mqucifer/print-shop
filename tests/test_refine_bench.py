@@ -136,6 +136,22 @@ def test_a_stretch_with_no_line_at_the_edge_is_bare_and_infills_gaps_inside_aren
     assert inside["bare"] == []
 
 
+def test_gap_fill_in_a_wall_reads_the_walls_width(work: Path) -> None:
+    """mqucifer/print-shop#66: a gap line down the middle of a 2 mm wall is twice its way to the
+    section's edge from the wall's width."""
+    # A box 20 x 20 with a 16 x 16 hole: 2 mm walls, two walls a side and a gap line in each.
+    _box(0, 0, 0, 20, 20, 0.2).difference(_box(2, 2, -1, 18, 18, 1)).export(work / "ring.stl")
+    lines = [[1.0, 2.0, 1.0, 18.0, 0.13, 2], [19.0, 2.0, 19.0, 18.0, 0.13, 2]]
+    lines += [[0.21, 0.21, 0.21, 19.79, 0.42, 1], [0.66, 0.66, 0.66, 19.34, 0.45, 1]]
+    (work / "ring.json").write_text(json.dumps({"layers": [_layer(lines)]}))
+    answer = _ask(
+        work, {"request": "cover", "stl": "ring.stl", "offset": [0, 0, 0], "lines": "ring.json"}
+    )
+    (row,) = answer["gap_walls"]
+    assert row["wall_mm"] == pytest.approx(2.0, abs=0.01)
+    assert row["length_mm"] == pytest.approx(32.0, abs=0.01)
+
+
 def test_two_walls_laid_over_each_other_are_said_and_walls_side_by_side_arent(
     work: Path,
 ) -> None:

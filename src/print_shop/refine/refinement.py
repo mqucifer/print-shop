@@ -35,11 +35,11 @@ from typing import Any
 
 import numpy as np
 
-from print_shop.bench.refine import ANGULAR, LINEAR, MARK
+from print_shop.bench.refine import ANGULAR, GAP, LINEAR, MARK, WALL
 from print_shop.refine import findings as fnd
 from print_shop.refine import kinds
 from print_shop.refine.approved import Approved, File, Group, pause_inputs
-from print_shop.refine.context import Context, layers_of
+from print_shop.refine.context import Context, layers_of, line_width_of
 from print_shop.refine.findings import Finding
 from print_shop.rounds import lessons as lessons_module
 from print_shop.rounds.box import Box
@@ -707,8 +707,9 @@ class Pass:
         self.found += fnd.narrow_lines(sliced, plate.name, ", ".join(files), self.context.nozzle_mm)
         if plate.frame is not None:
             self._read_pause(plate, sliced)
+        line = line_width_of(composed["process"], self.context.nozzle_mm)
         for f in plate.files:
-            self._cover(plate, f, sliced, where)
+            self._cover(plate, f, sliced, where, line)
         row.update(
             gcode=str(kept),
             gcode_sha=hashlib.sha256(kept.read_bytes()).hexdigest(),
@@ -893,7 +894,14 @@ class Pass:
                 )
             )
 
-    def _cover(self, plate: Plate, f: File, sliced: gcode.Sliced, where: Path) -> None:
+    def _cover(
+        self,
+        plate: Plate,
+        f: File,
+        sliced: gcode.Sliced,
+        where: Path,
+        line: tuple[float, int, str] | None = None,
+    ) -> None:
         """The pass's own reading: where the part has no line, and walls laid over each other."""
         offset = self._offset(f, sliced)
         if offset is None:
@@ -902,7 +910,14 @@ class Pass:
         layers = []
         for layer in sliced.layers[:READ_LIMIT]:
             lines = [
-                [ln.x0, ln.y0, ln.x1, ln.y1, ln.width, 1 if ln.kind in fnd.WALLS else 0]
+                [
+                    ln.x0,
+                    ln.y0,
+                    ln.x1,
+                    ln.y1,
+                    ln.width,
+                    WALL if ln.kind in fnd.WALLS else GAP if ln.kind == fnd.GAP_FILL else 0,
+                ]
                 for ln in layer.lines
                 if ln.obj == obj and ln.width > 0
             ]
@@ -932,6 +947,8 @@ class Pass:
         (work / "cover.json").write_text(json.dumps(answer, indent=1), encoding="utf-8")
         self.found += fnd.bare(answer, plate.name, self._key(f))
         self.found += fnd.overlapping(answer, plate.name, self._key(f))
+        if line is not None:
+            self.found += fnd.gap_in_wall(answer, plate.name, self._key(f), *line)
 
     def check_frame(
         self, path: Path, frame: File, folder: Path, reading: dict[str, Any]
