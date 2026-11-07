@@ -343,6 +343,14 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
                     "Optional where there are `pictures` or a `plan`.",
                     "items": {"type": "object"},
                 },
+                "options": {
+                    "type": "array",
+                    "description": 'Choices drawn in your `pictures`, each a pick: {"name": "A", '
+                    '"about": "what sets it apart"}. A question that offers A or B names them '
+                    "here, or shows each as `variants` of its files; with neither, the only "
+                    'picks are "yes" and "none". Optional.',
+                    "items": {"type": "object"},
+                },
                 "stop": {
                     "type": "string",
                     "description": "The request's stop this shows, by its id: `plan`, `S1`. "

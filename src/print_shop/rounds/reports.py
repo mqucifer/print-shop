@@ -21,7 +21,9 @@ never pass a need (`needs.UNSURE`).
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
+from typing import Any
 
 REPORTS: dict[str, tuple[str, ...]] = {
     "info": (
@@ -138,6 +140,200 @@ REPORTS: dict[str, tuple[str, ...]] = {
 }
 
 
+#: What's under each number's name, where it's the same whatever the part (mqucifer/print-shop#66).
+#: On `eval-sleeve-1` two needs were settled on `info`'s `bounds_mm.1.z` and `bounds_mm.1.x`, before
+#: the file existed: `bounds_mm` is a list of two corners, each a list of three, so neither path is
+#: there, and the run ended `blocked` with the part right. A path is walked through these when its
+#: need is settled, with no file to run on. What isn't here, such as a row's field a part may or may
+#: not have, is let through as before. `tests/test_bench.py` holds every command's answer on its
+#: fixtures to these, so a shape changed in the bench and not here fails a test.
+NUMBER, TEXT, FLAG, ANY = "number", "text", "true or false", "any"
+
+
+@dataclass(frozen=True)
+class Vector:
+    """A list of `length`, each `of`: a point or a size is three numbers, x, y and z."""
+
+    length: int
+    of: Any = NUMBER
+    #: What each place is, such as x, y and z.
+    names: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class Rows:
+    """A list as long as the part makes it, each row `of`."""
+
+    of: Any
+
+
+@dataclass(frozen=True)
+class Row:
+    """A row's fields. A closed row has only these; an open one may have others the part makes."""
+
+    fields: dict[str, Any] = field(default_factory=dict)
+    closed: bool = False
+
+
+@dataclass(frozen=True)
+class Keyed:
+    """A table by names the part gives, such as a file's or a view's, each `of`."""
+
+    of: Any
+
+
+XYZ = Vector(3, NUMBER, ("x", "y", "z"))
+XY = Vector(2, NUMBER, ("x", "y"))
+CORNERS = Vector(2, XYZ, ("the low corner", "the high corner"))
+SPREAD = Row({"min": NUMBER, "mean": NUMBER, "max": NUMBER}, closed=True)
+
+SHAPES: dict[str, dict[str, Any]] = {
+    "info": {
+        "bodies_mesh": NUMBER,
+        "bounds_mm": CORNERS,
+        "faces": NUMBER,
+        "file_kb": NUMBER,
+        "flat_faces": NUMBER,
+        "flat_heights": Rows(Row({"z": NUMBER, "up": NUMBER, "down": NUMBER}, closed=True)),
+        "size_mm": XYZ,
+        "small_flat_faces": NUMBER,
+        "solids": NUMBER,
+        "triangles": NUMBER,
+        "valid": FLAG,
+        "volume_mesh_mm3": NUMBER,
+        "watertight": FLAG,
+    },
+    "clearance": {
+        "pairs": Rows(
+            Row(
+                {
+                    "a": TEXT,
+                    "b": TEXT,
+                    "gap_mesh_mm": NUMBER,
+                    "gap_occt_mm": NUMBER,
+                    "overlap_band_mm3": NUMBER,
+                    "overlap_mesh_mm3": NUMBER,
+                    "overlap_occt_common_mm3": NUMBER,
+                    "overlap_occt_cut_mm3": NUMBER,
+                    "verdict": TEXT,
+                }
+            )
+        ),
+    },
+    "readback": {
+        "after_mm3": NUMBER,
+        "before_mm3": NUMBER,
+        "bodies_before_after": Vector(2, NUMBER, ("before", "after")),
+        "bounds_after_mm": CORNERS,
+        "change_mm3": NUMBER,
+        "change_pct": NUMBER,
+    },
+    "rays": {
+        "axes": TEXT,
+        "levels": Rows(
+            Row(
+                {
+                    "across_mm": SPREAD,
+                    "at": NUMBER,
+                    "closed_loop_around_centre": FLAG,
+                    "missed": NUMBER,
+                    "rays": NUMBER,
+                    "ray_vs_section_worst_mm": NUMBER,
+                    "section_area_mm2": NUMBER,
+                    "section_fit_d_mm": NUMBER,
+                    "section_fit_offset_mm": NUMBER,
+                    "start_in_material": NUMBER,
+                    "wall_beyond_min_mm": NUMBER,
+                }
+            )
+        ),
+    },
+    "panes": {
+        "*_section_mm2": NUMBER,
+        "openings": NUMBER,
+        "panes": Rows(
+            Row(
+                {
+                    "centre": XY,
+                    "gap_2d_mm": NUMBER,
+                    "gap_3d_mm": NUMBER,
+                    "opening_mm2": NUMBER,
+                    "pane": TEXT,
+                    "pane_mm2": NUMBER,
+                    "pocket_ceiling_z": NUMBER,
+                    "pocket_floor_z": NUMBER,
+                }
+            )
+        ),
+    },
+    "capture": {
+        "*_section_mm2": NUMBER,
+        "least_lip_mm": NUMBER,
+        "openings": NUMBER,
+        "panes": Rows(Row({"centre": XY, "pane": TEXT, "size_mm": XY})),
+        "panes_read": NUMBER,
+    },
+    "thin": {
+        "bodies": NUMBER,
+        "body_volumes_mm3": Rows(NUMBER),
+        "narrower_than_nozzle_mm3": NUMBER,
+        "sharp_points": NUMBER,
+        "thin_rays_not_at_a_point": NUMBER,
+        "thin_spots": NUMBER,
+        "thin_wall_area_mm2": NUMBER,
+        "thinnest_flat_mm": NUMBER,
+        "thinnest_wall_mm": NUMBER,
+    },
+    "pause": {
+        "layers": NUMBER,
+        "least_room_over_pane_mm": NUMBER,
+        "openings": Rows(
+            Row(
+                {
+                    "opening": TEXT,
+                    "pane_top_z": NUMBER,
+                    "pause_after_layer": NUMBER,
+                    "pause_top_z": NUMBER,
+                    "pocket_ceiling_z": NUMBER,
+                    "pocket_floor_z": NUMBER,
+                    "room_over_pane_mm": NUMBER,
+                }
+            )
+        ),
+        "openings_closing": NUMBER,
+    },
+    "wall": {
+        "hole_fit_centre": XYZ,
+        "hole_fit_d_mm": NUMBER,
+        "hole_mm2": NUMBER,
+        "least_wall_from": XYZ,
+        "least_wall_mm": NUMBER,
+        "least_wall_rays_mm": NUMBER,
+        "least_wall_to": XYZ,
+        "least_wall_toward": TEXT,
+    },
+    "thickness": {
+        "files": Rows(Row({"file": TEXT, "thickest_mm": NUMBER})),
+        "thickest_file": TEXT,
+        "thickest_mm": NUMBER,
+        "thinnest_file": TEXT,
+        "thinnest_mm": NUMBER,
+    },
+    "light": {
+        "least_open_file": TEXT,
+        "least_open_pct": NUMBER,
+        "panes": Rows(Row({"file": TEXT, "open_mm2": NUMBER, "open_pct": NUMBER})),
+    },
+    "edges": {
+        "grid_mm": NUMBER,
+        "least_radius_at": XYZ,
+        "least_radius_mm": NUMBER,
+        "reach_mm": NUMBER,
+    },
+    "render": {"seen_px": Keyed(Keyed(NUMBER)), "views": Keyed(Row())},
+}
+
+
 VERDICTS: dict[str, tuple[str, ...]] = {
     "info": ("OK", "FAIL"),
     "clearance": ("CLEAR", "TOUCHING", "TOO CLOSE", "TOO LOOSE", "INTERFERE"),
@@ -197,16 +393,20 @@ POSITIONAL: dict[str, tuple[str, ...]] = {
 #: fit need passed at 0.25 mm because 0.25 was what `panes` was told to build. Such an option
 #: carries no figure, and such a number checks nothing. `tests/test_reports.py` reads the build
 #: from the bench's code.
+#: `capture` does the same with no number to read it back (mqucifer/print-shop#66): it cuts its own
+#: pane `--clearance` in from the pocket and reads the lips past that play. On `eval-fit-2` the
+#: fixed play need was `capture frame.step ... --clearance 0.25`, exit-only, its figure "the
+#: --clearance in capture": 0.25 came back by construction and the given pane was never read.
 INPUTS: dict[str, dict[str, tuple[str, ...]]] = {
     "panes": {"--clearance": ("gap_2d_mm", "gap_3d_mm")},
+    "capture": {"--clearance": ()},
 }
 #: The command that reads the part's own file instead, as a need would run it.
-READS_THE_FILE: dict[str, str] = {
-    "panes": (
-        "`clearance PANE.step FRAME.step`, the part's own pane against its frame, with `number` "
-        "`pairs.0.gap_occt_mm` and the figure as `at_least` and `at_most`"
-    ),
-}
+_PANE_ON_FRAME = (
+    "`clearance PANE.step FRAME.step`, the part's own pane against its frame, with `number` "
+    "`pairs.0.gap_occt_mm` and the figure as `at_least` and `at_most`"
+)
+READS_THE_FILE: dict[str, str] = {"panes": _PANE_ON_FRAME, "capture": _PANE_ON_FRAME}
 
 
 def echoed(command: str, number: str) -> str | None:
@@ -258,3 +458,150 @@ def wrong_verdict(command: str, verdict: str) -> str | None:
         f"`{command}` never says {verdict}: its verdicts are {named}, so a need asking for "
         f"{verdict} could never pass"
     )
+
+
+def _named(path: str) -> str:
+    return f"`{path}`"
+
+
+def _what(shape: Any) -> str:
+    """A shape in words, as a refusal says it."""
+    if isinstance(shape, Vector):
+        names = f" ({', '.join(shape.names)})" if shape.names else ""
+        return f"a list of {shape.length}{names}"
+    if isinstance(shape, Rows):
+        return "a list of rows, as many as the part makes"
+    if isinstance(shape, Row):
+        return "a row of " + (", ".join(f"`{k}`" for k in shape.fields) or "fields")
+    if isinstance(shape, Keyed):
+        return "a table by name"
+    return "a number" if shape == NUMBER else str(shape)
+
+
+def _under(shape: Any, path: str) -> str:
+    """How to name a number under a list or a row, as a refusal suggests it."""
+    if isinstance(shape, Vector):
+        first = f"{path}.0"
+        if shape.names:
+            ends = ", ".join(f"`{path}.{k}` {n}" for k, n in enumerate(shape.names))
+            return f"name one place by its number: {ends}"
+        return f"name one place by its number, `{first}` to `{path}.{shape.length - 1}`"
+    if isinstance(shape, Rows):
+        return f"name a row by its number and then its number, such as `{path}.0`..."
+    if isinstance(shape, Row) and shape.fields:
+        numbers = [k for k, v in shape.fields.items() if v not in (TEXT, FLAG)]
+        return "name one of its numbers: " + ", ".join(f"`{path}.{k}`" for k in numbers)
+    return f"name one of its numbers, `{path}.<name>`"
+
+
+def wrong_path(command: str, number: str) -> str | None:
+    """What's wrong with the way a `number` walks into its command's answer, by the shapes the
+    answer always has (`SHAPES`), or None where it's right or the shape depends on the part."""
+    table = SHAPES.get(command)
+    if not table or not number:
+        return None
+    parts = number.split(".")
+    shape = next((v for k, v in table.items() if fnmatchcase(parts[0], k)), None)
+    if shape is None:
+        return None
+    walked = parts[0]
+    for part in parts[1:]:
+        if shape == ANY:
+            return None
+        if isinstance(shape, Vector | Rows):
+            if not part.isdigit():
+                hint = ""
+                if isinstance(shape, Vector) and part in shape.names:
+                    place = f"{walked}.{shape.names.index(part)}"
+                    hint = f": its {part} is {_named(place)}"
+                return (
+                    f"{_named(number)} isn't in `{command}`'s answer: {_named(walked)} is "
+                    f"{_what(shape)}, each named by its place, counted from 0{hint}"
+                )
+            if isinstance(shape, Vector) and int(part) >= shape.length:
+                return (
+                    f"{_named(number)} isn't in `{command}`'s answer: {_named(walked)} is "
+                    f"{_what(shape)}, so its places are 0 to {shape.length - 1}"
+                )
+            shape = shape.of
+        elif isinstance(shape, Row):
+            if part not in shape.fields:
+                if shape.closed:
+                    return (
+                        f"{_named(number)} isn't in `{command}`'s answer: {_named(walked)} is "
+                        f"{_what(shape)}"
+                    )
+                return None
+            shape = shape.fields[part]
+        elif isinstance(shape, Keyed):
+            shape = shape.of
+        else:
+            return (
+                f"{_named(number)} isn't in `{command}`'s answer: {_named(walked)} is "
+                f"{_what(shape)}, with nothing under it"
+            )
+        walked += "." + part
+    if shape in (NUMBER, ANY):
+        return None
+    if isinstance(shape, str):
+        return (
+            f"{_named(number)} is {shape} in `{command}`'s answer, not a number, so no limit "
+            "holds it"
+        )
+    return (
+        f"{_named(number)} is {_what(shape)} in `{command}`'s answer, not one number: "
+        f"{_under(shape, number)}"
+    )
+
+
+def unlike(command: str, numbers: dict[str, Any]) -> list[str]:
+    """Where an answer's numbers don't have the shape `SHAPES` says: a test reads the bench's
+    answers through this, so the shapes are the bench's own."""
+    table = SHAPES.get(command) or {}
+    wrong: list[str] = []
+
+    def walk(value: Any, shape: Any, path: str) -> None:
+        if shape == ANY:
+            return
+        if shape == NUMBER:
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int | float)
+            ):
+                wrong.append(f"{path} is {value!r}, not a number")
+        elif shape == TEXT:
+            if value is not None and not isinstance(value, str):
+                wrong.append(f"{path} is {value!r}, not text")
+        elif shape == FLAG:
+            if not isinstance(value, bool):
+                wrong.append(f"{path} is {value!r}, not true or false")
+        elif isinstance(shape, Vector | Rows):
+            if value is None:
+                return
+            if not isinstance(value, list):
+                wrong.append(f"{path} is {value!r}, not a list")
+                return
+            if isinstance(shape, Vector) and len(value) != shape.length:
+                wrong.append(f"{path} has {len(value)}, not {shape.length}")
+            for k, one in enumerate(value):
+                walk(one, shape.of, f"{path}.{k}")
+        elif isinstance(shape, Row):
+            if not isinstance(value, dict):
+                wrong.append(f"{path} is {value!r}, not a row")
+                return
+            if shape.closed and set(value) != set(shape.fields):
+                wrong.append(f"{path} has {sorted(value)}, not {sorted(shape.fields)}")
+            for name, one in shape.fields.items():
+                if name in value:
+                    walk(value[name], one, f"{path}.{name}")
+        elif isinstance(shape, Keyed):
+            if not isinstance(value, dict):
+                wrong.append(f"{path} is {value!r}, not a table")
+                return
+            for name, one in value.items():
+                walk(one, shape.of, f"{path}.{name}")
+
+    for key, value in numbers.items():
+        shape = next((v for k, v in table.items() if fnmatchcase(key, k)), None)
+        if shape is not None:
+            walk(value, shape, key)
+    return wrong

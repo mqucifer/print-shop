@@ -193,6 +193,54 @@ def test_an_unfixed_need_whose_lines_figure_is_its_build_input_is_refused_too() 
     assert figures.echoed([other], form) == [], "a play other than the line's isn't its figure"
 
 
+FIT2 = (
+    "A frame.\n\n## Requirements\n- The pane sits in its pocket with 0.25 mm of play.\n\n"
+    "## Non-negotiables\n- The pane fits its pocket with 0.25 mm of play all round.\n"
+)
+
+
+def test_an_exit_only_need_whose_figure_is_its_commands_own_input_is_refused() -> None:
+    """mqucifer/print-shop#66: on `eval-fit-2` the fixed play need was exit-only, `capture ...
+    --clearance 0.25`, its figure "the --clearance in capture": `capture` builds its own pane from
+    the pocket, so the given pane was never read."""
+    form = request.read(FIT2)
+    play = Need(
+        "play",
+        "0.25 mm of play",
+        "request",
+        "bench",
+        quote="The pane fits its pocket with 0.25 mm of play all round.",
+        command="capture frame.step --pocket-z 2.1 --clearance 0.25 --pane-thickness 1.2",
+        covers=["R1", "N1"],
+        fixed=True,
+        figure="it is the --clearance in capture",
+        measures="pane-hold",
+    )
+    (fixed,) = figures.wrong([play], form)
+    assert fixed.startswith("`--clearance 0.25` is what `capture` builds from")
+    assert "clearance PANE.step FRAME.step" in fixed
+    (unfixed,) = figures.echoed([play], form)
+    assert unfixed.startswith("the need 'play' covers `R1`")
+    # Read off the given pane by another need, the same input is only the setting the lips are
+    # read at, and stands.
+    pane = Need(
+        "fit",
+        "0.25 mm of play",
+        "request",
+        "bench",
+        quote=play.quote,
+        command="clearance references/pane_1.step frame.step",
+        number="pairs.0.gap_occt_mm",
+        at_least=0.25,
+        at_most=0.25,
+        covers=["R1", "N1"],
+        fixed=True,
+        measures="fit",
+    )
+    assert figures.wrong([play, pane], form) == []
+    assert figures.echoed([play, pane], form) == []
+
+
 # Wanted 2: one stop for the eye needs on one picture, and nothing asked twice
 
 
@@ -350,7 +398,7 @@ def test_done_isnt_met_on_strips_and_a_set_aside_is_shown_at_the_next_stop(
         tool("set_aside", curves="pane.step", why=""),
         tool("set_aside", curves="pane.step", why="Its small faces are the tab's chamfers."),
         tool("done", part=["pane.step"], glass=glass, **DONE),
-        answers=("OK", "OK", "OK", "OK", strips, "OK", "OK", "OK", "OK", strips),
+        answers=("OK", "OK", "OK", "OK", "OK", strips, "OK", "OK", "OK", "OK", "OK", strips),
     )
     in_rounds(run, THICK)
     assert run.drive().name == "met"

@@ -266,8 +266,11 @@ def echoed(found: list[Need], form: Form) -> list[str]:
     """Each bench need, fixed or not, whose line's figure is one of its command's own build inputs
     (`reports.INPUTS`), so its check reads that figure back whatever the part is: on
     `eval-through-2` a fit need was `panes ... --clearance 0.25` for "0.25 mm of play", and
-    `panes` builds its own pane at that play (mqucifer/print-shop#59). A fixed need on a
-    non-negotiable is said by `wrong`, where the input carries none of its figure."""
+    `panes` builds its own pane at that play (mqucifer/print-shop#59). It's the same with no
+    `number`, exit-only (mqucifer/print-shop#66): `eval-fit-2`'s `capture ... --clearance 0.25`.
+    Where another need on the line reads the figure off the part, the input is only the setting
+    that check is read at, and stands. A fixed need on a non-negotiable is said by `wrong`, where
+    the input carries none of its figure."""
     said: list[str] = []
     lines = {line.id: line for line in form.lines()}
     fixed_lines = {line.id for line in form.non_negotiables}
@@ -278,7 +281,12 @@ def echoed(found: list[Need], form: Form) -> list[str]:
             line = lines.get(line_id)
             if line is None or (need.fixed and line_id in fixed_lines):
                 continue
+            # What every need on the line reads off the part: a figure one of them carries isn't
+            # read back by nothing.
+            by = [c for other in found if line_id in other.covers for c in carried(other)]
             for figure in read(line.text):
+                if any(_same(c.value, figure.value) for c in by):
+                    continue
                 built = _built_from(figure, [need])
                 if built:
                     said.append(

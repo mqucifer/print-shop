@@ -306,13 +306,60 @@ def test_each_role_a_need_follows_the_part_by_is_the_parsers_own_argument() -> N
 
 
 def test_an_input_a_command_builds_from_is_the_one_its_code_builds_with() -> None:
-    """`panes` cuts its pane `--clearance` in from each opening, and its gaps read that back."""
-    code = (BENCH / "fabrication.py").read_text(encoding="utf-8")
-    assert "opening.buffer(-args.clearance" in code
+    """`panes` cuts its pane `--clearance` in from each opening, and its gaps read that back.
+    `capture` cuts its own the same way, and reads the lips past it (mqucifer/print-shop#66)."""
+    module = {"panes": "fabrication", "capture": "capture"}
     for command, inputs in reports.INPUTS.items():
+        code = (BENCH / f"{module[command]}.py").read_text(encoding="utf-8")
+        assert "opening.buffer(-args.clearance" in code, command
         names = [name for name, _ in _arguments()[command]]
         for option, numbers in inputs.items():
             assert option in names
             for number in numbers:
                 assert f"{number}=" in code, number
         assert command in reports.READS_THE_FILE
+
+
+def test_a_path_the_answer_never_has_is_refused_when_settled_with_no_file() -> None:
+    """On `eval-sleeve-1` `bounds_mm.1.z` was settled before the file existed: `bounds_mm` is two
+    corners of three, so the path isn't there, and the run ended `blocked` (mqucifer/print-shop#66).
+    """
+
+    def need(command: str, number: str) -> Need:
+        return Need("size", "x", "chosen", "bench", command=command, number=number, at_least=1)
+
+    wrong = needs.numbers_wrong([need("info sleeve.step", "bounds_mm.1.z")])
+    assert len(wrong) == 1
+    assert "the need 'size': `bounds_mm.1.z` isn't in `info`'s answer" in wrong[0]
+    assert "its z is `bounds_mm.1.2`" in wrong[0]
+    for right in ("bounds_mm.1.2", "size_mm.0", "solids", "flat_heights.3.up"):
+        assert not needs.numbers_wrong([need("info sleeve.step", right)]), right
+    # A list or a row is no one number, and says how to name one.
+    said = reports.wrong_path("info", "size_mm")
+    assert said and "`size_mm.2` z" in said
+    said = reports.wrong_path("rays", "levels.0.across_mm")
+    assert said and "`levels.0.across_mm.min`" in said
+    # Past a number, past a list's end, a row's field it never has, and text or a flag.
+    assert reports.wrong_path("info", "solids.0")
+    assert reports.wrong_path("info", "bounds_mm.2.0")
+    assert reports.wrong_path("info", "flat_heights.0.area")
+    assert reports.wrong_path("clearance", "pairs.gap_mesh_mm")
+    assert reports.wrong_path("info", "valid")
+    assert reports.wrong_path("thickness", "thinnest_file")
+    # What depends on the part is let through: an open row's field, and a command not shaped.
+    assert reports.wrong_path("clearance", "pairs.0.gap_occt_mm") is None
+    assert reports.wrong_path("capture", "panes.2.lip_mm") is None
+    assert reports.wrong_path("edges", "rounded.19.radius_mm") is None
+    assert reports.wrong_path("layout", "pieces.0.width_mm") is None
+
+
+def test_each_shape_is_of_a_number_its_command_reports() -> None:
+    for command, table in reports.SHAPES.items():
+        assert set(table) <= set(reports.REPORTS[command]), command
+
+
+def test_an_answer_unlike_its_shapes_is_said() -> None:
+    assert not reports.unlike("info", {"bounds_mm": [[0, 0, 0], [1, 2, 3]], "size_mm": [1, 2, 3]})
+    assert reports.unlike("info", {"bounds_mm": [0, 0, 0, 1, 2, 3]})
+    assert reports.unlike("info", {"flat_heights": [{"z": 1, "area": 2}]})
+    assert reports.unlike("info", {"valid": 1})

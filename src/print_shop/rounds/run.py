@@ -84,6 +84,10 @@ NOTE_FROM = "the people running this"
 AGAIN_TRIES = 6
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 VARIANT = re.compile(r"[A-Za-z0-9_-]{1,24}")
+#: A question that offers lettered options: "A (...) or B (...)?", "A, B or C?". On
+#: `eval-change-2` ask 4 drew A and B in one picture, and the pick "A" was refused, as a picture's
+#: picks are yes or none (mqucifer/print-shop#66).
+LETTERED = re.compile(r"\b([A-H])\b[^?]*?\bor\s+\(?([A-H])\b")
 #: A failing need's bench text shown in the reply.
 FAILURE_CHARS = 4000
 #: The default views on an `ask`'s sheet and on the sheet at approval, and each picture's side.
@@ -460,8 +464,11 @@ class Run:
 
     def resume(
         self, note: str = "", reopen_needs: bool = False, note_from: str = NOTE_FROM
-    ) -> None:
-        """Take in what a person wrote, ready to go on. Refused until it's there."""
+    ) -> list[str]:
+        """Take in what a person wrote, ready to go on. Refused until it's there. What comes back
+        is said to whoever resumed, in their terminal: on `eval-lid-1` and `eval-fit-2` a reopening
+        with no note left the fixed needs locked, only the model was told, and each lost a round
+        (mqucifer/print-shop#66)."""
         ending = (self.state.ending or {}).get("name")
         if ending == MET:
             raise Refused("this run ended at `met`, from before approval was a stop")
@@ -475,38 +482,64 @@ class Run:
                 f"this run is waiting for approval: {self.folder / 'approvals' / str(stop['n'])}. "
                 "It takes `--approve` or `--send-back`, with `--by`"
             )
+        picked: dict[str, str] | None = None
         if stop and stop["kind"] == "questions":
             self._take_answers(int(stop["n"]), note_from)
         elif stop and stop["kind"] == "ask":
-            self._take_pick(int(stop["n"]), reopening=reopen_needs)
+            picked = self._take_pick(int(stop["n"]), reopening=reopen_needs)
         self._go_on()
+        told: list[str] = []
         if reopen_needs:
-            self._reopen(note_from, bool(note.strip()))
+            # A note from someone who decides opens the fixed needs, and so does a pick's
+            # fix-first, which only someone who decides writes (mqucifer/print-shop#66).
+            if note.strip() and _decides(note_from):
+                told.append(self._reopen(note_from, True))
+            elif picked and picked.get("fix_first"):
+                told.append(self._reopen(picked["by"], True, "the pick's fix-first"))
+            else:
+                told.append(self._reopen(note_from, bool(note.strip())))
         if note.strip():
             self._note(note.strip(), note_from)
         self.save()
+        return [t for t in told if t]
 
-    def _reopen(self, who: str, noted: bool) -> None:
+    def _reopen(self, who: str, noted: bool, whence: str = "the note") -> str:
         """The needs may be settled again. A fixed need, a non-negotiable's, changes only by the
-        Sponsor, or someone standing in who says who, with a note: anyone else's reopening leaves
-        the fixed needs as they are (mqucifer/print-shop#37)."""
+        Sponsor, or someone standing in who says who, with a note or a pick's fix-first: anyone
+        else's reopening leaves the fixed needs as they are (mqucifer/print-shop#37). What comes
+        back is said to whoever reopened them, as the model is told."""
         self.state.needs_open = True
         fixed = [n.id for n in self._needs() if n.fixed]
         said = (
             "The needs may be settled again: send `needs` with the whole list if they should "
             "change."
         )
+        named = ", ".join(f"`{f}`" for f in fixed)
+        told = "The needs are open again" + (
+            ", with no fixed need among them." if not fixed else ""
+        )
         if noted and _decides(who):
             self.state.fixed_open = {"by": who}
             if fixed:
-                said += " The fixed needs may change too, as the note says."
+                said += f" The fixed needs may change too, as {whence} says."
+                told += f", the fixed needs {named} too, by {whence} from {who}."
         elif fixed:
-            named = ", ".join(f"`{f}`" for f in fixed)
             said += (
                 f" The fixed needs, {named}, stay as they are: a non-negotiable's need changes "
                 "only by the Sponsor, with a note."
             )
+            why = (
+                f"the note is from {who}, who doesn't decide"
+                if noted
+                else "no `--note` came with it, and no pick's fix-first"
+            )
+            told += (
+                f", but the fixed needs {named} stay locked: {why}. A fixed need opens only with "
+                'a note from someone who decides, `--from sponsor` or `--from "stand-in: <who>"`, '
+                "or a pick's `fix_first`. The model is told they stay."
+            )
         self._relay("reopen_needs", who, said)
+        return told
 
     def _go_on(self) -> None:
         """A new process's part of the run, under the code it's running on."""
@@ -742,7 +775,7 @@ class Run:
             return Judged(after_action.NAME, "failed", reply, "not_decided")
         return after_action.take(self.ledger, self.state.name, args, self.session.requests)
 
-    def send_back(self, by: str, note: str, reopen_needs: bool = False) -> None:
+    def send_back(self, by: str, note: str, reopen_needs: bool = False) -> list[str]:
         """A person's no, with what's wrong, at the stop or by hand after approving it. It goes on
         as a new round. A pick on files that then change is asked again, as ever. With
         `reopen_needs`, the needs may be settled again: on `cup-1` a send-back couldn't add the
@@ -766,10 +799,10 @@ class Run:
             f"{note.strip()}"
         )
         self._relay("send_back", by, note.strip(), message)
-        if reopen_needs:
-            self._reopen(by, True)
+        told = [self._reopen(by, True)] if reopen_needs else []
         self._start_round()
         self.save()
+        return told
 
     def _take_answers(self, n: int, who: str) -> None:
         """The answers to the model's questions, said as whoever gave them: on `eval-choice-1` a
@@ -792,7 +825,7 @@ class Run:
         self.ledger.answered(self.state.name, n, answers, who)
         self._relay("answers", who, answers, said)
 
-    def _take_pick(self, n: int, reopening: bool = False) -> None:
+    def _take_pick(self, n: int, reopening: bool = False) -> dict[str, str]:
         folder = self.folder / "asks" / str(n)
         path = folder / "pick.json"
         if not path.is_file():
@@ -813,7 +846,7 @@ class Run:
         unknown = set(found) - {"pick", "reason", "by", "fix_first"}
         if unknown:
             raise Refused(f"{path}: a pick holds pick, reason, by and fix_first: not {unknown}")
-        names = [v["name"] for v in asked["variants"]] or ["yes"]
+        names = [v["name"] for v in asked["variants"] or asked.get("options") or []] or ["yes"]
         if pick not in [*names, "none"]:
             raise Refused(f"{path}: the pick is one of {', '.join(names)}, or none: not {pick!r}")
         if not reason:
@@ -839,7 +872,7 @@ class Run:
         who = picked_by_words(by)
         if pick == "none":
             said = f"{who} didn't pick any of them. Their reason: {reason}"
-        elif not asked["variants"]:
+        elif not asked["variants"] and not asked.get("options"):
             said = f"{who} said yes to it. Their reason: {reason}"
         else:
             said = f"{who} picked {pick}. Their reason: {reason}"
@@ -855,6 +888,7 @@ class Run:
             )
             self.state.said.append(first)
             self._relay("fix_first", by, fix_first, first)
+        return {"pick": pick, "by": by, "fix_first": fix_first or ""}
 
     def _stop_picked(
         self, stop: str | None, ask: int, pick: str, by: str, reopening: bool = False
@@ -1444,10 +1478,11 @@ class Run:
             found.append((tried.at_call, 1, tried))
         for row in self.ledger.rows(
             "SELECT at_call, stop, command, passed, unsure, verdict, why FROM standing WHERE run=? "
-            "AND check_name IN (?, ?) ORDER BY id",
+            "AND check_name IN (?, ?, ?) ORDER BY id",
             self.state.name,
             glass_checks.LIGHT,
             glass_checks.HOLD,
+            glass_checks.INSERT,
         ):
             # The kind's own, at `done` and each stop (`standing.py`): held as the model's are.
             tried = holding.Tried(
@@ -2184,6 +2219,8 @@ class Run:
         guessed a number's name, since a check that's wrong once settled would stop the run for a
         person. It runs on a copy, with no clean run first, so it says only that a check works."""
         lines = ["Nothing is settled. Each check, against your files as they stand:"]
+        # A path the answer never has is wrong with or without a file (mqucifer/print-shop#66).
+        paths_wrong = needs.numbers_wrong(found)
         readings: list[dict[str, Any]] = []
         read = iter(self._read_now([n for n in found if n.by == "bench"]))
         for need in found:
@@ -2205,7 +2242,12 @@ class Run:
                     "numbers": (reading.record or {}).get("numbers"),
                 }
             )
+        if paths_wrong:
+            lines.append("Settling these would be refused, file or no file:")
+            lines += [f"- {w}" for w in paths_wrong]
         detail = {"tried": True, "readings": readings}
+        if paths_wrong:
+            detail["paths_wrong"] = paths_wrong
         return Judged("needs", "ok", "\n".join(lines), detail=detail)
 
     def _usable(self, found: list[Need]) -> list[str]:
@@ -2318,7 +2360,7 @@ class Run:
             standing = judge.printable(self.box, part, judged, folder / "standing")
             for one in standing:
                 self._stood(one, "done", judged)
-            # The kind's own: `light` and `capture` on every pane (`standing.py`).
+            # The kind's own: `light`, `capture` and `pause` on every pane (`standing.py`).
             ran = list(zip(wanted, judgement.readings, strict=True))
             panes_read = glass_checks.check(self.box, glass, judged, folder / "standing", ran)
             for one in panes_read:
@@ -2868,7 +2910,10 @@ class Run:
         stop = str(args.get("stop") or "").strip() or None
         plan = str(args.get("plan") or "").strip()
         pictures = [str(p) for p in args.get("pictures") or []]
+        options = args.get("options") or []
         bad = self._ask_problem(question, variants, eyes)
+        if bad is None:
+            bad = self._options_problem(question, options, variants)
         if bad is None:
             bad = self._stop_problem(stop, plan)
         if bad is None:
@@ -2955,6 +3000,9 @@ class Run:
             "stop": stop,
             "plan": plan,
             "variants": named,
+            "options": [
+                {"name": str(o["name"]), "about": str(o.get("about") or "")} for o in options
+            ],
             "test_pieces": pieces,
             "pictures": pictures,
             "looks": looks,
@@ -3239,6 +3287,7 @@ class Run:
             "plan": draft.get("plan") or "",
             "pictures": pictures,
             "variants": named,
+            "options": draft.get("options") or [],
             "test_pieces": draft["test_pieces"],
             "looks": draft["looks"],
             "round": self.state.round,
@@ -3247,7 +3296,8 @@ class Run:
             "standing": draft["standing"],
         }
         (folder / "asked.json").write_text(json.dumps(asked, indent=1), encoding="utf-8")
-        about = "\n".join(f"- **{v['name']}**: {v['about']}" for v in named)
+        options = draft.get("options") or []
+        about = "\n".join(f"- **{v['name']}**: {v['about']}" for v in [*named, *options])
         form = self._form()
         shown_stop = form.stop(stop) if form is not None and stop else None
         lines = []
@@ -3269,7 +3319,14 @@ class Run:
             lines += ["Pictures the model made:", ""]
             lines += [f"- {folder / 'pictures' / Path(p).name}" for p in pictures]
             lines.append("")
-        if not named:
+        if options:
+            picks = ", ".join(f'"{o["name"]}"' for o in options)
+            lines += [
+                f"The options are drawn in the pictures, and the pick is one of them, {picks}, "
+                'or "none", with the reason, if none is right.',
+                "",
+            ]
+        elif not named:
             lines += [
                 'With nothing to choose between, the pick is "yes" to go on from this, or '
                 '"none", with the reason, if it isn\'t right.',
@@ -3489,6 +3546,44 @@ class Run:
             if need not in known:
                 named = ", ".join(known) or "none yet"
                 return "no_such_need", f"`need` names eye needs. They are: {named}."
+        return None
+
+    def _options_problem(
+        self, question: str, options: Any, variants: Any
+    ) -> tuple[str, str] | None:
+        """A question with options takes them as picks (mqucifer/print-shop#66). On `eval-change-2`
+        ask 4 asked "A or B?" in one picture, and its pick "A" was refused: a picture's picks were
+        yes or none. Options of the part's own files are `variants`; options drawn in a picture
+        are named in `options`, and each is a pick."""
+        shape = 'Each option is {"name": "A", "about": "what sets it apart"}.'
+        if not isinstance(options, list):
+            return "not_an_option", shape
+        if options and variants:
+            return "not_an_option", (
+                "`options` are for choices drawn in your pictures; with `variants`, each variant "
+                "is already a pick. Name each choice once, as a variant."
+            )
+        seen: set[str] = set()
+        for option in options:
+            if not isinstance(option, dict) or "name" not in option:
+                return "not_an_option", shape
+            name = str(option["name"])
+            if not VARIANT.fullmatch(name) or name in ("none", "yes"):
+                return "not_an_option", f"`{name}` won't do as a short name. {shape}"
+            if name in seen:
+                return "not_an_option", f"Two options are named {name}."
+            seen.add(name)
+        if options and len(options) < 2:
+            return "not_an_option", "One option is no choice: ask yes or none, with no `options`."
+        offered = LETTERED.search(question)
+        if offered and not options and not variants:
+            a, b = offered.groups()
+            return "options_unnamed", (
+                f"Your question offers {a} or {b}, and with neither `variants` nor `options` the "
+                f'only picks are "yes" and "none", so a pick of {a} would be refused. Name each '
+                f'in `options`, as {{"name": "{a}", "about": "..."}}, drawn in your pictures, or '
+                "make each one's files and show them as `variants`."
+            )
         return None
 
     def _eyes_open(self) -> list[Need]:
@@ -3770,7 +3865,13 @@ def what_next(run: Run, ending: Ending) -> str:
     if ending.name == "ask":
         folder = run.folder / "asks" / str(ending.said["n"])
         asked = json.loads((folder / "asked.json").read_text(encoding="utf-8"))
-        choice = "<a variant or none>" if asked.get("variants") else "yes or none"
+        choice = (
+            "<a variant or none>"
+            if asked.get("variants")
+            else " or ".join([o["name"] for o in asked["options"]] + ["none"])
+            if asked.get("options")
+            else "yes or none"
+        )
         stop = f"the stop `{asked['stop']}`: " if asked.get("stop") else ""
         return (
             f"waiting at {stop}{folder / 'question.md'}. Write {folder / 'pick.json'}, "

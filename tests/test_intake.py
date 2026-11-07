@@ -470,7 +470,10 @@ def test_a_fixed_need_changes_only_by_the_sponsor_with_a_note(tmp_path: Path) ->
         plate={"check": measured({"by": "bench", "command": "thin bracket.step --min 3"})}
     )
     run = again(run, [tool("needs", needs=looser)])
-    run.resume("Look at the plate again.", reopen_needs=True)
+    (said,) = run.resume("Look at the plate again.", reopen_needs=True)
+    # Said to whoever resumed too, not only to the model (mqucifer/print-shop#66).
+    assert "the fixed needs `arm`, `plate` stay locked" in said
+    assert "the note is from the people running this, who doesn't decide" in said
     run.drive()
     refused = told(run)[-2]
     assert refused["outcome"] == "failed"
@@ -492,11 +495,85 @@ def test_a_fixed_need_changes_only_by_the_sponsor_with_a_note(tmp_path: Path) ->
         }
     )
     run = again(run, [tool("needs", needs=looser)], [tool("needs", needs=noted)])
-    run.resume("3 mm will do for the plate.", reopen_needs=True, note_from="sponsor")
+    (said,) = run.resume("3 mm will do for the plate.", reopen_needs=True, note_from="sponsor")
+    assert "the fixed needs `arm`, `plate` too, by the note from sponsor" in said
     run.drive()
     assert told(run)[-2]["outcome"] == "ok", "the Sponsor's note opened the fixed needs"
     assert run.state.fixed_open is None, "for that one settling only"
     assert "--min 3" in run.state.needs[4]["command"]
+
+
+def test_a_reopening_with_no_note_says_the_fixed_needs_stay_and_a_fix_first_opens_them(
+    tmp_path: Path,
+) -> None:
+    """mqucifer/print-shop#66: on `eval-lid-1` and `eval-fit-2` `resume --reopen-needs` with no
+    `--note` kept the fixed needs locked, the operator's terminal said nothing, and each lost a
+    round. A pick's `fix_first` is from someone who decides, so it counts as the note."""
+    run = to_the_plan(tmp_path, [PLAN_ASK], SENT)
+    assert run.drive().name == "ask"
+    pick(run, 1, "yes")
+    run = again(run)
+    (said,) = run.resume(reopen_needs=True)
+    assert said.startswith("The needs are open again, but the fixed needs `arm`, `plate` stay")
+    assert "no `--note` came with it, and no pick's fix-first" in said
+    assert run.state.fixed_open is None
+    # A pick with a fix-first, by a stand-in who says who, opens them.
+    run = to_the_plan(tmp_path / "again", [PLAN_ASK], SENT)
+    assert run.drive().name == "ask"
+    found = {
+        "pick": "yes",
+        "reason": "The plan holds.",
+        "by": "stand-in: the operator",
+        "fix_first": "Read the plate's thickness after the countersinks, as N2 says.",
+    }
+    (run.folder / "asks" / "1" / "pick.json").write_text(json.dumps(found))
+    run = again(run)
+    (said,) = run.resume(reopen_needs=True)
+    assert "the fixed needs `arm`, `plate` too, by the pick's fix-first" in said
+    assert run.state.fixed_open == {"by": "stand-in: the operator"}
+    reopened = [
+        e for e in transcript.events_of(run.session.events) if e.get("relay") == "reopen_needs"
+    ]
+    assert (
+        "The fixed needs may change too, as the pick's fix-first says." in reopened[-1]["message"]
+    )
+
+
+def test_a_question_with_options_takes_them_as_picks(tmp_path: Path) -> None:
+    """mqucifer/print-shop#66: on `eval-change-2` ask 4 asked "A or B?" in one picture, and the
+    pick "A" was refused, as a picture's picks were yes or none."""
+    which = "Which outline: A (41 mm wide) or B (44 mm wide)?"
+    options = [{"name": "A", "about": "41 mm wide"}, {"name": "B", "about": "44 mm wide"}]
+    run = to_the_plan(
+        tmp_path,
+        [tool("ask", question=which, pictures=["options.png"])],
+        [tool("ask", question=which, pictures=["options.png"], options=options[:1])],
+        [tool("ask", question=which, pictures=["options.png"], options=options)],
+        [tool("send_ask", says="Two outlines side by side: A on the left, B on the right.")],
+    )
+    picture(run, "options.png")
+    assert run.drive().name == "ask"
+    unnamed, one, named = told(run)[2:5]
+    assert unnamed["why"] == "options_unnamed"
+    assert (
+        'the only picks are "yes" and "none", so a pick of A would be refused' in unnamed["reply"]
+    )
+    assert one["why"] == "not_an_option"
+    assert named["outcome"] == "ok"
+    question = (run.folder / "asks" / "1" / "question.md").read_text()
+    assert "- **A**: 41 mm wide" in question and "- **B**: 44 mm wide" in question
+    assert 'the pick is one of them, "A", "B", or "none"' in question
+    said = what_next(run, Ending("ask", {"n": run.state.asks}))
+    assert '"pick": "A or B or none"' in said
+    pick(run, 1, "A", by="stand-in: the operator")
+    run = again(run)
+    run.resume()
+    picked = [e for e in transcript.events_of(run.session.events) if e.get("relay") == "pick"]
+    assert "picked A" in picked[-1]["message"]
+    # Neither yes nor a name it never offered.
+    pick(run, 1, "yes")
+    with pytest.raises(Refused, match="the pick is one of A, B, or none"):
+        again(run)._take_pick(1)
 
 
 # The stops, the plan first

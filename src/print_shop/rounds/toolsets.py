@@ -215,7 +215,7 @@ STAINED_GLASS = Toolset(
     CORE_SKILLS + ("designing-stained-glass",),
     required=("designing-stained-glass", *CORE_REQUIRED),
     added=STAINED_GLASS_COMMANDS,
-    standing=("light", "capture"),
+    standing=("light", "capture", "pause"),
 )
 #: A case round bought parts: a box and its lid, fitted to boards, a fan or a plug, with softened
 #: edges (mqucifer/print-shop#60). The core holds most of what it needs: references drawn by
