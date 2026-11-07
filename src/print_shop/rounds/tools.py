@@ -132,7 +132,7 @@ NEED_SHAPE = (
     'and `check`, either {"by": '
     '"bench", "measures": "fit", "command": '
     '"clearance lid.step cup.step --min-gap 0.2", "verdicts": [...] (optional: which verdicts '
-    'pass, exit 0 by default), "number": "pairs.0.gap_mesh_mm", "at_least": 0.2, "at_most": 0.6 '
+    'pass, exit 0 by default), "number": "pairs.0.gap_mm", "at_least": 0.2, "at_most": 0.6 '
     '(optional: a number in that answer, and its limit)} or {"by": "eye", "look_for": "what the '
     'Sponsor judges", "no_bench": "why no bench command measures it", where it covers a line}. '
     'Where the request has lines: `covers`, the ids of the lines it covers (["R1"]); `fixed`: '

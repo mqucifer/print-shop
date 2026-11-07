@@ -30,6 +30,16 @@ radius may read short of it by `RADIUS_SHARE` of R, or `RADIUS_FLOOR`, which is 
 arithmetic on a spline's curvature. A rounding stored as flat strips reads as sharp edges, each
 turning a few degrees: the reply says so, as a curve built as a curve is one rounded face.
 
+**By group and by place** (mqucifer/print-shop#65). On `eval-edges-1` a need on the four upright
+corners read `rounded.19.radius_mm`, the 20th rounding in a list sorted by radius, which a rebuild
+can move, and three long calls went on picking corners out of the list. So each edge and rounding
+read is also in a group, in the file's axes: `upright` where it runs within `UPRIGHT_DEG` of z,
+and otherwise `top` or `bottom` where it faces more than `LEVEL_DEG` above or below level, and
+`side` for the rest, a level edge facing sideways. Each group's least radius is a number a need
+can name, `groups.upright.least_radius_mm`. `--box NAME=X0,Y0,Z0,X1,Y1,Z1` and `--facing NAME=DIR`
+read the same of what lies in a box or faces a way, as `selected.NAME`. Each group's and
+selection's least is among those the second method checks.
+
 **Second checks.** At each sharp edge read, the fine mesh cut by a plane square to the edge, and
 the angle its outline turns through at the edge, within the chords on both faces. At each
 rounded face's least radius, the mesh cut along the direction it bends most, and a circle
@@ -103,6 +113,24 @@ RADIUS_BAND = 0.02
 RADIUS_BAND_SHARE = 0.03
 #: How many places a reply names before it says how many more.
 NAMED = 8
+#: An edge in the `upright` group runs within this of z, in degrees.
+UPRIGHT_DEG = 30.0
+#: An edge in the `top` or `bottom` group faces more than this above or below level, in degrees.
+LEVEL_DEG = 20.0
+#: An edge `--facing` a way faces within this of it, in degrees: so a box's edges round its front
+#: face, each 45° from it, are read, and those round its back, 135° away, aren't.
+FACING_DEG = 60.0
+#: The groups, in the order a reply says them.
+GROUPS = ("upright", "top", "bottom", "side")
+#: The directions `--facing` takes.
+DIRECTIONS = {
+    "+x": (1.0, 0.0, 0.0),
+    "-x": (-1.0, 0.0, 0.0),
+    "+y": (0.0, 1.0, 0.0),
+    "-y": (0.0, -1.0, 0.0),
+    "+z": (0.0, 0.0, 1.0),
+    "-z": (0.0, 0.0, -1.0),
+}
 
 
 def _xyz(p: Any) -> np.ndarray:
@@ -174,6 +202,7 @@ class Sharp:
     kinds: tuple[str, str]
     faces: tuple[int, int]
     length: float
+    outward: np.ndarray = field(default_factory=lambda: np.zeros(3))
 
     def worst(self) -> int:
         return int(np.argmax(self.turns))
@@ -187,7 +216,14 @@ class Sharp:
             "length_mm": round(self.length, 2),
             "turn_deg": round(max(self.turns), 1),
             "faces": list(self.kinds),
+            "group": self.group(),
         }
+
+    def group(self) -> str:
+        return group(self.tangent, self.outward)
+
+    def where(self) -> list[np.ndarray]:
+        return self.points
 
 
 @dataclass
@@ -203,6 +239,8 @@ class Rounded:
     bends: np.ndarray
     spots: int = 0
     second: dict[str, Any] = field(default_factory=dict)
+    outward: np.ndarray = field(default_factory=lambda: np.zeros(3))
+    points: list[np.ndarray] = field(default_factory=list)
 
     def plain(self) -> dict[str, Any]:
         return {
@@ -211,7 +249,41 @@ class Rounded:
             "radius_mm": round(self.radius, 3),
             "face": self.kind,
             "spots_in_reach": self.spots,
+            "group": self.group(),
         }
+
+    def axis(self) -> np.ndarray:
+        """The way it runs at its least radius: square to its normal and to where it bends."""
+        return np.cross(self.normal, self.bends)
+
+    def group(self) -> str:
+        # A rounding that faces up or down is a top's or a bottom's, whichever way its least
+        # radius runs: a ball's corner bends alike both ways, so it has no way of its own.
+        if abs(float(self.outward[2])) >= math.sin(math.radians(LEVEL_DEG)):
+            return group(np.zeros(3), self.outward)
+        return group(self.axis(), self.outward)
+
+    def where(self) -> list[np.ndarray]:
+        return self.points
+
+
+def _unit(v: np.ndarray) -> np.ndarray:
+    size = float(np.linalg.norm(v))
+    return v / size if size > 1e-12 else np.zeros(3)
+
+
+def group(runs: np.ndarray, outward: np.ndarray) -> str:
+    """An edge's group, in the file's axes: `upright` if it runs within `UPRIGHT_DEG` of z, else
+    `top` or `bottom` if it faces more than `LEVEL_DEG` above or below level, else `side`."""
+    runs, outward = _unit(np.asarray(runs, float)), _unit(np.asarray(outward, float))
+    if abs(float(runs[2])) >= math.cos(math.radians(UPRIGHT_DEG)):
+        return "upright"
+    level = math.sin(math.radians(LEVEL_DEG))
+    if outward[2] > level:
+        return "top"
+    if outward[2] < -level:
+        return "bottom"
+    return "side"
 
 
 class Reach:
@@ -405,6 +477,7 @@ class Solid:
                 self.counts["not_met"] += 1
                 continue
             mid = touched[len(touched) // 2]
+            outward = _unit(sum((normals[i][0] + normals[i][1] for i in touched), np.zeros(3)))
             self.sharp.append(
                 Sharp(
                     self.name,
@@ -414,6 +487,7 @@ class Solid:
                     (a.kind, b.kind),
                     (indices[0], indices[1]),
                     length,
+                    outward,
                 )
             )
         for index in sorted(smooth_faces):
@@ -448,8 +522,20 @@ class Solid:
         # The least radius; between equal ones, the spot nearest the face's middle, where the
         # section's window stays on the face.
         best = min(met, key=lambda f: (round(f[0], 6), f[1]))
+        outward = _unit(sum((f[3] for f in met), np.zeros(3)))
         self.rounded.append(
-            Rounded(self.name, index, face.kind, best[0], best[2], best[3], best[4], len(met))
+            Rounded(
+                self.name,
+                index,
+                face.kind,
+                best[0],
+                best[2],
+                best[3],
+                best[4],
+                len(met),
+                outward=outward,
+                points=[f[2] for f in met],
+            )
         )
 
 
@@ -556,6 +642,15 @@ def _spread(items: list[Any], most: int) -> list[Any]:
     return [items[int(i * step)] for i in range(most)]
 
 
+def _with(items: list[Any], more: list[Any]) -> list[Any]:
+    """The items, and each of `more` not among them already: each group's least is checked."""
+    found = list(items)
+    for m in more:
+        if all(m is not i for i in found):
+            found.append(m)
+    return found
+
+
 def _is_reference(path: str) -> bool:
     return PurePosixPath(path).parts[:1] == ("references",)
 
@@ -650,9 +745,106 @@ def run(args: Any, report: Report) -> None:
             "`fillet`, or an arc, and it reads as one rounded face"
         )
 
-    differs = _second(report, solids, sharp, rounded, reach, parts)
+    read: list[Sharp | Rounded] = [*sharp, *rounded]
+    groups = {
+        name: _least([(e, _point(e)) for e in read if e.group() == name]) for name in GROUPS
+    }
+    chosen = {
+        name: _least([(e, at) for e in read if (at := pick(e)) is not None])
+        for name, pick in selectors(args).items()
+    }
+    must = [g["item"] for g in (*groups.values(), *chosen.values()) if g["item"] is not None]
+    differs = _second(report, solids, sharp, rounded, reach, parts, must)
     report.notes += differs
+    report.numbers["groups"] = {name: _plain_least(g) for name, g in groups.items()}
+    report.line(
+        f"by group, in the file's axes: upright runs within {UPRIGHT_DEG:g}° of z; top and bottom "
+        f"face more than {LEVEL_DEG:g}° above or below level; side is the rest, a level edge "
+        "facing sideways. A need names one's least as groups.NAME.least_radius_mm"
+    )
+    for name, g in groups.items():
+        report.line(f"  {_said(name, g)}")
+    if chosen:
+        report.numbers["selected"] = {name: _plain_least(g) for name, g in chosen.items()}
+        words = selectors(args, said=True)
+        for name, g in chosen.items():
+            report.line(f"selected, {words[name]}: {_said(name, g)}, as selected.{name}")
     _judge(report, args.min_radius, sharp, rounded, differs)
+
+
+def _least(found: list[tuple[Sharp | Rounded, np.ndarray]]) -> dict[str, Any]:
+    """A group's or a selection's counts and its least radius, with a point of it in the group or
+    selection: 0 at a sharp edge, the sharpest first, else its tightest rounding. None if nothing
+    in it is read. A rounding's radius is its own least, wherever on it that is."""
+    sharp = [(e, at) for e, at in found if isinstance(e, Sharp)]
+    rounded = [(e, at) for e, at in found if isinstance(e, Rounded)]
+    least: tuple[Any, Any] = (None, None)
+    if sharp:
+        least = max(sharp, key=lambda f: max(f[0].turns))
+    elif rounded:
+        least = min(rounded, key=lambda f: f[0].radius)
+    return {"sharp": len(sharp), "rounded": len(rounded), "item": least[0], "at": least[1]}
+
+
+def _point(item: Sharp | Rounded) -> np.ndarray:
+    return item.points[item.worst()] if isinstance(item, Sharp) else item.at
+
+
+def _plain_least(g: dict[str, Any]) -> dict[str, Any]:
+    item = g["item"]
+    found: dict[str, Any] = {"sharp": g["sharp"], "rounded": g["rounded"]}
+    if item is None:
+        return {**found, "least_radius_mm": None, "least_at": None, "file": None}
+    radius = 0.0 if isinstance(item, Sharp) else round(item.radius, 3)
+    return {**found, "least_radius_mm": radius, "least_at": _at(g["at"]), "file": item.file}
+
+
+def _said(name: str, g: dict[str, Any]) -> str:
+    item = g["item"]
+    if item is None:
+        return f"{name}: none read"
+    counts = f"{g['sharp']} sharp, {g['rounded']} rounded"
+    if isinstance(item, Sharp):
+        least = f"least radius 0, sharp {max(item.turns):.0f}° at {_shown(g['at'])}"
+    else:
+        least = f"least radius {item.radius:.3f} mm at {_shown(g['at'])}"
+    return f"{name}: {counts}, {least} on {item.file}"
+
+
+def selectors(args: Any, said: bool = False) -> dict[str, Any]:
+    """Each `--box` and `--facing` by its name: a test of an edge or a rounding, or with `said`,
+    what it is in words. An edge is in a box where any point of it read is; it faces a way where
+    its outward direction is within `FACING_DEG` of it. Each test gives a point of it, or None."""
+    found: dict[str, Any] = {}
+    for name, (low, high) in getattr(args, "boxes", None) or []:
+        words = f"in the box from {_shown(low)} to {_shown(high)}"
+        found[name] = words if said else _in_box(np.asarray(low), np.asarray(high))
+    for name, way in getattr(args, "facings", None) or []:
+        words = f"facing within {FACING_DEG:g}° of {way}"
+        found[name] = words if said else _facing(np.asarray(DIRECTIONS[way]))
+    return found
+
+
+def _in_box(low: np.ndarray, high: np.ndarray) -> Any:
+    """A test giving the point of an edge read in the box nearest its least, or None."""
+
+    def test(item: Sharp | Rounded) -> np.ndarray | None:
+        inside = [p for p in item.where() if np.all(p >= low) and np.all(p <= high)]
+        if not inside:
+            return None
+        least = _point(item)
+        return min(inside, key=lambda p: float(np.linalg.norm(p - least)))
+
+    return test
+
+
+def _facing(toward: np.ndarray) -> Any:
+    least = math.cos(math.radians(FACING_DEG))
+
+    def test(item: Sharp | Rounded) -> np.ndarray | None:
+        return _point(item) if float(_unit(item.outward) @ toward) >= least else None
+
+    return test
 
 
 def _second(
@@ -662,12 +854,14 @@ def _second(
     rounded: list[Rounded],
     reach: Reach,
     parts: list[Part],
+    must: list[Sharp | Rounded] | None = None,
 ) -> list[str]:
     """Sections of the mesh at the sharp edges and the least radii, and the ball's centres held
     clear by the mesh's exact distance."""
     differs: list[str] = []
     owner = {s.name: s for s in solids}
-    checked_sharp = _spread(sharp, SECOND_MOST)
+    must = must or []
+    checked_sharp = _with(_spread(sharp, SECOND_MOST), [m for m in must if isinstance(m, Sharp)])
     unread = 0
     agreed = 0
     for s in checked_sharp:
@@ -690,7 +884,9 @@ def _second(
             f"turn as the exact surface does, within {ANGLE_BAND_DEG:g}° and the chords"
             + (f"; {unread} couldn't be read there" if unread else "")
         )
-    checked_round = _spread(rounded, SECOND_MOST)
+    checked_round = _with(
+        _spread(rounded, SECOND_MOST), [m for m in must if isinstance(m, Rounded)]
+    )
     unread = agreed = 0
     for r in checked_round:
         solid = owner[r.file]

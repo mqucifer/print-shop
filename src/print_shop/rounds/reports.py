@@ -39,7 +39,7 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "volume_mesh_mm3",
         "watertight",
     ),
-    "clearance": ("pairs",),
+    "clearance": ("lift", "pairs"),
     "readback": (
         "after_mm3",
         "before_mm3",
@@ -96,6 +96,7 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "edges",
         "faceted_edges",
         "grid_mm",
+        "groups",
         "least_radius_at",
         "least_radius_mm",
         "least_rounded_at",
@@ -104,6 +105,7 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "not_read",
         "reach_mm",
         "rounded",
+        "selected",
         "sharp_edges",
     ),
     "light": (

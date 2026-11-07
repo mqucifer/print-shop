@@ -42,7 +42,7 @@ Say each part's orientation at `ask` and `done`. Changing a part for its orienta
 |---|---|---|
 | base | on its floor, opening up | its walls and bosses stand with no overhang |
 | lid | its outside face down, lip up | its outside face prints flat on the bed |
-| a clip | with its arm level | it bends along the layers, never across ([E1]) |
+| a clip | with its arm level, where the part lets it lie level; hanging from a part printed flat, upright (`sizing-walls-and-lids`) | level, it bends along the layers ([E1]) |
 
 - **An overhang prints clean up to 45°** from upright, and to 60° on some settings ([E3] [E2]). A fillet's top half is such an overhang; a hole through an upright wall is bridged at its top.
 - **A rounded edge on the bed** starts as a very steep overhang, and a chamfer prints cleaner there ([E2]); a 45° chamfer or a radius on every bed edge is the usual practice ([E3]). When the request asks every edge rounded, round the bed edges too, and say at the ask which edges lie on the bed and that their lowest layers may droop: the Sponsor decides.
