@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from print_shop.rounds.box import Box
-from print_shop.rounds.needs import GEOMETRY, UNSURE, Need, Reading, judge
+from print_shop.rounds.needs import BED, GEOMETRY, UNSURE, Need, Reading, bed_reading, judge
 from print_shop.rounds.paths import copy_plain, geometry_hashes, inside, walk_plain
 from print_shop.rounds.tools import SAVED, recorded
 
@@ -233,9 +233,11 @@ def check(
     picks: dict[str, dict[str, Any]],
     round_dir: Path,
     part: list[str] | None = None,
+    on_bed: dict[str, str] | None = None,
 ) -> Judgement:
     """`done`, as the harness runs it. A script that fails leaves every bench need unread, and a
-    part a clean run didn't leave isn't met, whatever the needs read."""
+    part a clean run didn't leave isn't met, whatever the needs read. A bed need is read against
+    `done`'s `on_bed` (mqucifer/print-shop#73)."""
     judged = round_dir / "judged"
     judgement = run_clean(box, work, script, judged)
     judgement.part_missing = [
@@ -247,6 +249,8 @@ def check(
     for need in needs:
         if need.by == "eye":
             judgement.readings.append(eye_reading(need, picks, judgement.left, part))
+        elif need.by == BED:
+            judgement.readings.append(bed_reading(need, on_bed or {}, part))
         elif judgement.code != 0:
             why = f"the script didn't finish from a clean start: exit {judgement.code}"
             judgement.readings.append(Reading(need.id, "bench", False, why))

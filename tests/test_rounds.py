@@ -342,7 +342,7 @@ def test_a_need_is_held_to_its_shape() -> None:
         ([{**bench_need(), "what": ""}], "`what`"),
         ([{**bench_need(), "source": "vibes"}], "`source`"),
         ([{**bench_need(), "check": "no"}], "`check`"),
-        ([{**bench_need(), "check": {"by": "magic"}}], "bench or eye"),
+        ([{**bench_need(), "check": {"by": "magic"}}], "bench, eye or bed"),
         ([{**bench_need(), "check": {"by": "eye"}}], "`look_for`"),
         ([{**bench_need(), "check": {"by": "bench", "command": "fly a"}}], "bench command"),
         ([bench_need(verdicts=["NO ANSWER"])], "no answer"),

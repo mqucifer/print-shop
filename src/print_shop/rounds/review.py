@@ -22,7 +22,7 @@ from typing import Any
 
 from print_shop.rounds import paths
 from print_shop.rounds.judge import Standing
-from print_shop.rounds.needs import Need, Reading
+from print_shop.rounds.needs import BED, Need, Reading
 
 NOT_IN_A_NAME = re.compile(r"[^a-z0-9]+")
 TRAILING_NUMBER = re.compile(r"^(.*?)(\d+)$")
@@ -128,7 +128,14 @@ def write(
             look = looks.get(name)
             said = f": {look['label']}, {look['colour']}" if look else ""
             side = (on_bed or {}).get(name)
-            if side and side != "-z":
+            held_by = [n.id for n in wanted if n.by == BED and n.file == name]
+            if side and held_by:
+                # A bed need held it at `done` (mqucifer/print-shop#73): not the model's word.
+                needs_said = ", ".join(f"`{n}`" for n in held_by)
+                said += (
+                    f"; it prints with its {side} side on the bed, as the need {needs_said} says"
+                )
+            elif side and side != "-z":
                 said += f"; it prints with its {side} side on the bed (the model's word)"
             lines.append(f"- `{Path(name).name}`{said}")
         if shared:
@@ -174,6 +181,8 @@ def write(
             against = ", ".join(f"`{f}`" for f in need.files()) or "(no file named)"
             named |= set(need.files())
             limit = need.limit()
+        elif need.by == BED:
+            against, limit = "`done`'s `on_bed`", need.limit()
         else:
             against, limit = "the sheet", "a pick, by the Sponsor's eye"
         why = reading.why.replace("\n", " ").replace("|", "/")

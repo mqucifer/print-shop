@@ -50,8 +50,28 @@ UNSURE = ("DISAGREE", "NO ANSWER")
 WRONG = ("FAIL",)
 GOOD = ("OK", "CLEAR", "TOUCHING")
 GEOMETRY = (".step", ".stp", ".stl", ".brep")
+#: The kind of need whose check is the side a file lies on, as `done`'s `on_bed` gives it.
+BED = "bed"
 #: A need's keys that tie it to the request's lines (`request.py`).
 MARKS = ("covers", "fixed", "figure")
+#: The sides a file can lie on, as `done`'s `on_bed` names them (mqucifer/print-shop#66), and a
+#: bed need's `side` (mqucifer/print-shop#73).
+SIDES = ("-z", "+z", "-x", "+x", "-y", "+y")
+#: Words in an eye need's `look_for` that ask the eye which side of a part lies on the bed. On
+#: `eval-edges-2` a stop was raised only to confirm the box prints on its floor, which `on_bed`
+#: already held: the side is a bed need's (mqucifer/print-shop#73). Read in `look_for` alone, what
+#: the eye is asked to judge, so an eye need on a clip's hold, whose `what` says how it prints,
+#: isn't refused for it.
+PRINT_SIDE = re.compile(
+    r"\b(?:print(?:ing)? orientation|orientation (?:on|for|to) (?:the )?(?:bed|print(?:ing)?)"
+    r"|print(?:ing)? side|bed (?:side|face)|(?:on|to|against|toward|towards|facing) the "
+    r"(?:print )?bed|which (?:way|side) (?:it|they|the \w+) prints?"
+    r"|print(?:s|ed|ing)? (?:on|with) (?:its|their|the|a|an) [\w -]{0,30}?(?:side|face|floor"
+    r"|base|bottom|top|back|edge|end|outside|inside|lip|rim)s?\b(?: (?:down|up))?"
+    r"|print(?:s|ed|ing)? (?:upright|flat|standing|lying|on (?:its|their) (?:end|side)s?)"
+    r"|upside[ -]down|(?:face|side|floor|base|bottom|top|lip|rim|outside|inside|opening|open "
+    r"top)[ -]down)\b"
+)
 
 
 def normal(text: str) -> str:
@@ -86,6 +106,10 @@ class Need:
     figure: str = ""
     # What a bench need is about, from its toolset's short list (`toolsets.py`).
     measures: str = ""
+    # A bed need's: which file, and which side of it as the script stores it, lies on the bed.
+    # `done` checks it against its `on_bed` (mqucifer/print-shop#73).
+    file: str = ""
+    side: str = ""
 
     def argv(self) -> list[str]:
         return shlex.split(self.command)
@@ -103,6 +127,8 @@ class Need:
 
     def limit(self) -> str:
         """The limit as a reading's line says it."""
+        if self.by == BED:
+            return f"`on_bed` gives `{self.file}` its {self.side} side"
         wanted = f"verdict {' or '.join(self.verdicts)}" if self.verdicts else "exit 0"
         if self.number:
             low = f" at least {self.at_least}" if self.at_least is not None else ""
@@ -201,7 +227,10 @@ def read(
                     wrong.append(f'{shown} quotes "{quote}", {said}')
         check = entry.get("check")
         if not isinstance(check, dict):
-            wrong.append(f'{shown}: `check` is {{"by": "bench", ...}} or {{"by": "eye", ...}}')
+            wrong.append(
+                f'{shown}: `check` is {{"by": "bench", ...}}, {{"by": "eye", ...}} or '
+                '{"by": "bed", ...}'
+            )
             continue
         need = Need(need_id, what, str(source), str(check.get("by")), quote)
         _marks(need, entry, wrong, shown)
@@ -210,13 +239,17 @@ def read(
             need.no_bench = str(check.get("no_bench") or "").strip()
             if not need.look_for:
                 wrong.append(f"{shown}: `look_for` says what the Sponsor's eye is judging")
+            elif PRINT_SIDE.search(normal(need.look_for)):
+                wrong.append(eye_on_side(shown, need.look_for))
+        elif check.get("by") == BED:
+            _bed_check(need, check, wrong, shown)
         elif check.get("by") == "bench":
             before = len(wrong)
             _bench_check(need, check, wrong, shown)
             if toolset is not None and len(wrong) == before:
                 wrong += toolsets.wrong_with(need, toolset)
         else:
-            wrong.append(f"{shown}: `check.by` is bench or eye")
+            wrong.append(f"{shown}: `check.by` is bench, eye or bed")
         found.append(need)
     return ([], wrong) if wrong else (found, [])
 
@@ -245,6 +278,89 @@ def _marks(need: Need, entry: dict[str, Any], wrong: list[str], shown: str) -> N
         wrong.append(f"{shown}: `figure` says in words how its line's figure is read")
         figure = ""
     need.figure = figure.strip()
+
+
+def eye_on_side(shown: str, look_for: str) -> str:
+    """The refusal of an eye need that asks which side lies on the bed, said so the model knows
+    what to send next in one reading (mqucifer/print-shop#73)."""
+    said = PRINT_SIDE.search(normal(look_for))
+    words = f' ("{said.group(0)}")' if said else ""
+    return (
+        f"{shown} asks the eye which side it prints on{words}. That isn't an eye need: `done` "
+        f"checks the side against its `on_bed`, so send it as a bed need, {BED_SHAPE}, with the "
+        "side as your script stores the file, and the same `source`, `quote` and `covers`. If "
+        "this eye need judges more than the side, such as how a feature looks as printed or "
+        "whether it holds, keep it for that, with `look_for` naming only what the eye judges, "
+        "and send the bed need beside it"
+    )
+
+
+#: A bed need's check, as a refusal shows it.
+BED_SHAPE = '"check": {"by": "bed", "file": "lid.step", "side": "+z"}'
+
+
+def _bed_check(need: Need, check: dict[str, Any], wrong: list[str], shown: str) -> None:
+    """A bed need's file and side: one file the run prints, and one of `SIDES`, as `on_bed`
+    takes them (mqucifer/print-shop#73)."""
+    need.file = str(check.get("file") or "").strip().removeprefix("/work/").removeprefix("./")
+    side = str(check.get("side") or "").strip().lower()
+    if side in ("z", "x", "y"):
+        side = "+" + side
+    need.side = side
+    shape = f"a bed need's check is {BED_SHAPE}"
+    if not need.file or not need.file.lower().endswith(GEOMETRY):
+        wrong.append(
+            f"{shown}: `file` names the one file that lies on the bed, as `part` names it: {shape}"
+        )
+    elif need.file.startswith("references/"):
+        wrong.append(
+            f"{shown}: `{need.file}` is a given reference, which isn't printed: `file` names a "
+            "file of the part, as `part` names it"
+        )
+    if side not in SIDES:
+        wrong.append(
+            f"{shown}: `side` is the side of `file` that lies on the bed, as your script stores "
+            f"it, one of {', '.join(SIDES)}: `-z` is as stored, its underside down, and `+z` "
+            f"turns it over. Not {side or 'nothing'}"
+        )
+
+
+def bed_reading(need: Need, on_bed: dict[str, str], part: list[str] | None = None) -> Reading:
+    """A bed need against `done`'s `on_bed`: the side the run gives the file, not its word
+    elsewhere (mqucifer/print-shop#73). A file `on_bed` doesn't name prints as stored, and the
+    need's side has to be named even where it's `-z`, so what's handed over says it."""
+    given = (on_bed or {}).get(need.file)
+    reading = Reading(need.id, BED, False, "")
+    if part is not None and need.file not in part:
+        named = ", ".join(f"`{f}`" for f in part) or "nothing"
+        reading.why = (
+            f"the need says `{need.file}` prints with its {need.side} side on the bed, and "
+            f"`part` doesn't name `{need.file}` ({named}): name it in `part`, and in `on_bed` as "
+            f'{{"{need.file}": "{need.side}"}}'
+        )
+    elif given is None:
+        reading.why = (
+            f"`on_bed` names no side for `{need.file}`, and the need says it prints with its "
+            f'{need.side} side on the bed: give `on_bed` {{"{need.file}": "{need.side}"}}'
+        )
+    elif given != need.side:
+        reading.why = (
+            f"`on_bed` gives `{need.file}` its {given} side, and the need says {need.side}. If "
+            f"its {need.side} side is the one down, give `on_bed` "
+            f'{{"{need.file}": "{need.side}"}}. If it now prints another way, the needs are '
+            "settled: show it with `ask`, and a person can reopen them"
+        )
+    else:
+        reading.passed = True
+        reading.why = f"`on_bed` gives `{need.file}` its {given} side, as the need says"
+    return reading
+
+
+def check_said(need: Need) -> str:
+    """A need's check in a few words, of any kind."""
+    if need.by == BED:
+        return json.dumps({"by": BED, "file": need.file, "side": need.side})
+    return need.command or f"the Sponsor's eye: {need.look_for}"
 
 
 def _bench_check(need: Need, check: dict[str, Any], wrong: list[str], shown: str) -> None:
