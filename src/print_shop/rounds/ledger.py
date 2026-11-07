@@ -14,7 +14,8 @@ what it said to the person at the end. They decide nothing.
 Lessons are here (`lessons`, `run_lessons`, `lesson_scores`, `lesson_steps`, and `after_actions`
 for the model's review that writes them): `lessons.py` says how they're checked and given. Looking a
 lesson up when a reading fails isn't here yet. `changes` gives each need's reading before and after
-each round.
+each round, and `round_scores` each round against a scenario's right answer (`scores.py`), which
+`phases` splits into first rounds and refinement rounds.
 
 `records.py` writes `calls`, `interventions`, `timeline`, `runaways`, `tries` and `nudges` from a
 run's events, so a run's own records can be read back through them. Older code can still be running
@@ -680,14 +681,53 @@ CREATE TABLE IF NOT EXISTS proposal_decisions (
     note TEXT,
     at TEXT NOT NULL
 );
-CREATE VIEW IF NOT EXISTS phases AS
-SELECT calls.run, calls.phase, MIN(calls.n) AS first_call, MAX(calls.n) AS last_call,
-       COUNT(*) AS calls, SUM(calls.seconds) AS seconds,
-       SUM(calls.completion_tokens) AS completion_tokens,
-       SUM(calls.reasoning_tokens) AS reasoning_tokens,
-       (SELECT GROUP_CONCAT(i.kind || ' from ' || i.from_who, '; ') FROM interventions AS i
-         WHERE i.run = calls.run AND i.phase = calls.phase) AS begun_by
-FROM calls GROUP BY calls.run, calls.phase;
+CREATE TABLE IF NOT EXISTS right_ranges (
+    -- A scenario's right answer, as ranges of what the bench reads (mqucifer/print-shop#67): the
+    -- operator's, never shown to the model. A corrected file is rows of its own, by its hash.
+    run TEXT NOT NULL REFERENCES runs(run),
+    right_sha TEXT NOT NULL,
+    scenario TEXT NOT NULL,
+    id TEXT NOT NULL,
+    what TEXT NOT NULL,
+    command TEXT NOT NULL,
+    names TEXT NOT NULL,
+    number TEXT NOT NULL,
+    at_least REAL,
+    at_most REAL,
+    scale REAL NOT NULL,
+    PRIMARY KEY (run, right_sha, id)
+);
+CREATE TABLE IF NOT EXISTS round_scores (
+    -- Each ended round against a right answer (`scores.py`): its distance at its end, and its
+    -- improvement, (before - after) / before over the ranges read at both ends.
+    run TEXT NOT NULL REFERENCES runs(run),
+    round INTEGER NOT NULL,
+    right_sha TEXT NOT NULL,
+    -- `first`, `again` (no person between it and the round before) or `refinement`.
+    kind TEXT,
+    phase INTEGER,
+    distance REAL,
+    ranges_read INTEGER NOT NULL,
+    ranges_of INTEGER NOT NULL,
+    compared INTEGER NOT NULL,
+    distance_before REAL,
+    distance_after REAL,
+    improvement REAL,
+    said TEXT NOT NULL,
+    -- Each range's value before and after, and which bench answer gave it.
+    ranges TEXT NOT NULL,
+    PRIMARY KEY (run, round, right_sha)
+);
+CREATE VIEW IF NOT EXISTS round_kinds AS
+SELECT r.run, r.round, c.phase,
+       CASE WHEN p.round IS NULL THEN 'first'
+            WHEN pc.phase IS NULL THEN NULL
+            WHEN c.phase > pc.phase THEN 'refinement'
+            ELSE 'again' END AS kind
+FROM rounds AS r
+JOIN calls AS c ON c.run = r.run AND c.n = r.last_call
+LEFT JOIN rounds AS p ON p.run = r.run AND p.round = r.round - 1
+LEFT JOIN calls AS pc ON pc.run = p.run AND pc.n = p.last_call;
 CREATE VIEW IF NOT EXISTS round_costs AS
 SELECT run, round, MIN(n) AS first_call, MAX(n) AS last_call, COUNT(*) AS calls,
        SUM(seconds) AS seconds, SUM(completion_tokens) AS completion_tokens,
@@ -740,6 +780,26 @@ ADDED = (
     # Whether a skill was read with `skill` or given whole in the start (mqucifer/print-shop#61).
     ("skill_reads", "how", "TEXT"),
 )
+#: Calls, seconds and tokens by what a person had sent, and first rounds apart from refinement
+#: rounds (mqucifer/print-shop#67): each phase's rounds, its kind (that of the first round to end
+#: in it: `first` or `refinement`), and that round's improvement by its latest score. Made again
+#: on a ledger whose view hasn't `kind`: a view holds no rows, and older code selects by name.
+PHASES_VIEW = """CREATE VIEW IF NOT EXISTS phases AS
+SELECT calls.run, calls.phase, MIN(calls.n) AS first_call, MAX(calls.n) AS last_call,
+       COUNT(*) AS calls, SUM(calls.seconds) AS seconds,
+       SUM(calls.completion_tokens) AS completion_tokens,
+       SUM(calls.reasoning_tokens) AS reasoning_tokens,
+       (SELECT GROUP_CONCAT(i.kind || ' from ' || i.from_who, '; ') FROM interventions AS i
+         WHERE i.run = calls.run AND i.phase = calls.phase) AS begun_by,
+       (SELECT COUNT(*) FROM round_kinds AS k
+         WHERE k.run = calls.run AND k.phase = calls.phase) AS rounds,
+       (SELECT k.kind FROM round_kinds AS k WHERE k.run = calls.run AND k.phase = calls.phase
+         ORDER BY k.round LIMIT 1) AS kind,
+       (SELECT s.improvement FROM round_scores AS s
+         WHERE s.run = calls.run AND s.round = (SELECT MIN(k.round) FROM round_kinds AS k
+           WHERE k.run = calls.run AND k.phase = calls.phase)
+         ORDER BY s.rowid DESC LIMIT 1) AS improvement
+FROM calls GROUP BY calls.run, calls.phase"""
 #: Each stop asked, at which call, and picked when and by whom: made once `picks.stop` is there.
 STOPS_VIEW = """CREATE VIEW IF NOT EXISTS stops AS
 SELECT picks.run, picks.stop, request_lines.text AS what, picks.ask, picks.round, picks.at_call,
@@ -832,6 +892,12 @@ class DesignLedger:
                 if column not in held:
                     db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
             db.execute(STOPS_VIEW)
+            # Read from its text, as a view over a table from before a column can't be compiled.
+            made = db.execute("SELECT sql FROM sqlite_master WHERE type='view' AND name='phases'")
+            held = made.fetchone()
+            if held is not None and " AS kind" not in held["sql"]:
+                db.execute("DROP VIEW phases")
+            db.execute(PHASES_VIEW)
         self._made_again()
         from print_shop.rounds import lessons  # noqa: PLC0415 - lessons reads the ledger
 
