@@ -229,6 +229,32 @@ its pocket, `--cut x=X,y=Y0:Y1`. Whether a pocket is blind or runs through, and 
 opening, are on the cut. In one run, six calls of long reasoning went on how its own frame's
 pockets were built, which one cut shows.
 
+### Step 4: the play round a pane's edge, read at its edge (mqucifer/print-shop#72)
+
+The play the request gives is round the pane's outline, at its edge. Its faces may have another
+play, yours to choose so the pause works. `clearance FRAME PANE` reads the pair's least gap,
+the tightest face, so where the faces' play is smaller it reads that, and the edge's need fails.
+In one run the edge play was 0.25 and the faces 0.15: `clearance` read 0.15, a section through
+the pocket was refused at `done`, and five rounds went on it. Read the edge's play with a box
+round the pane's edge, between its two faces, on the frame and the pane as they are:
+
+| The request asks | `measures` | Its check |
+|---|---|---|
+| play P round each pane's edge | `fit` | `clearance FRAME PANE --box edge=X0,Y0,Z0,X1,Y1,Z1 --min-gap P --max-gap P`, `number` `pairs.0.places.edge.gap_mm`, `at_least` P, `at_most` P |
+
+- **The box:** across one edge of the pane, from inside its outline to past the pocket's wall,
+  and in z from just above the pane's underside to just below its top, so neither face's play
+  is in it: for a pane from z=0 to 1.2 with its +x edge at x=10, `edge=9.6,-3,0.1,10.6,3,1.1`.
+  A box round a rounded corner reads the same play there.
+- **The faces' play** is a box above the pane's top face, under the lip, clear of its edge:
+  `face=X0,Y0,Z0,X1,Y1,Z1` from below the pane's top to above the pocket's ceiling.
+- **Where the play is the same on the edge and the faces,** the pair's own `pairs.0.gap_mm` is it,
+  and no box is needed.
+- `capture --clearance P` builds its own pane at P and reads it back, so it never checks the play:
+  the play's need is `clearance` on the given pane or the pane's file.
+- A figure at its limit passes, to a millionth of a millimetre: 0.25 passes at 0.25, and the
+  reply says a figure past its limit with enough places to show it, such as 0.4001 over 0.4.
+
 ### Step 7: the pause is `pause`'s reading (mqucifer/print-shop#66)
 
 With `glass`, the harness runs `pause` on each frame too, beside `light` and `capture`, at its

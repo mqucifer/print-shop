@@ -60,6 +60,7 @@ from shapely.geometry import shape as from_geojson
 from shapely.geometry.polygon import orient
 
 from . import colours
+from .limits import said, under
 from .report import Report
 from .shapes import NoAnswer
 
@@ -332,7 +333,8 @@ def narrowest(area: Any, step: float) -> dict[str, Any]:
         necks = [r for r in rows if not edges.at_tip(r["at"], r["width"])]
         said[method] = (
             {
-                "width_mm": round(necks[0]["width"], 4),
+                # The figure `--min-width` judges, as it is: a need reads the same (`limits`).
+                "width_mm": float(necks[0]["width"]),
                 "at": _part(necks[0]["at"]),
                 "from": _part(necks[0]["from"]),
                 "to": _part(necks[0]["to"]),
@@ -487,17 +489,18 @@ def run(args: Any, report: Report) -> None:
         report.verdict("DISAGREE", "; ".join(differs))
         return
     if args.min_width is not None:
-        under = [
-            f"{n} is {r['least_width_mm']:.3f} mm across at {_xy(r['least_width_at'])}"
+        narrow = [
+            f"{n} is {said(r['least_width_mm'], args.min_width)} mm across at "
+            f"{_xy(r['least_width_at'])}"
             for n, r in rows.items()
-            if r["least_width_mm"] is not None and r["least_width_mm"] < args.min_width
+            if r["least_width_mm"] is not None and under(r["least_width_mm"], args.min_width)
         ] + [
             f"{n} has a sharp tip, {t['angle_deg']:g}°, at {_xy(t['at'])}, which narrows to nothing"
             for n, r in rows.items()
             for t in r["tips"]
         ]
-        if under:
-            report.verdict("FAIL", "; ".join(under) + f": under {args.min_width:g} mm")
+        if narrow:
+            report.verdict("FAIL", "; ".join(narrow) + f": under {args.min_width:g} mm")
             return
     report.verdict("OK", f"{len(pieces)} piece(s) read, by rays and by nearest facing points")
 

@@ -2266,3 +2266,55 @@ def test_a_send_back_can_reopen_the_needs(tmp_path: Path) -> None:
     assert reply_of(run, "needs")["outcome"] == "ok"
     kinds = [r["kind"] for r in rows(run, "interventions")]
     assert kinds[-2:] == ["send_back", "reopen_needs"]
+
+
+# A gap read by place (mqucifer/print-shop#72)
+
+#: A pane rounded 3 mm, 1.2 mm thick, in a frame's pocket 0.25 mm wider round its edge and 0.15 mm
+#: over each face, as `bench_cases/make_fixtures.py`'s `places/` pair.
+POCKET_SCRIPT = (
+    "import cadquery as cq\n"
+    "def rounded(w, h, r, z0, z1):\n"
+    '    return cq.Workplane("XY").rect(w, h).extrude(z1 - z0).edges("|Z").fillet(r)'
+    ".translate((0, 0, z0))\n"
+    "pane = rounded(20, 14, 3, 0, 1.2)\n"
+    'frame = cq.Workplane("XY").box(28, 22, 3.5, centered=(True, True, False))'
+    ".translate((0, 0, -1.15))\n"
+    "frame = frame.cut(rounded(20.5, 14.5, 3.25, -0.15, 1.35)).cut(rounded(18, 12, 2, -2, 3))\n"
+    'cq.exporters.export(frame, "frame.step")\n'
+    'cq.exporters.export(pane, "pane.step")\n'
+)
+
+
+@pytest.mark.parametrize(("least", "met"), [(0.25, True), (0.2501, False)])
+def test_a_need_on_a_place_is_held_at_done(tmp_path: Path, least: float, met: bool) -> None:
+    """On `eval-fit-3` the edge play's need couldn't reach `done`: `clearance` read the face play,
+    a section was refused, and a size wasn't the play. A need on the edge's place, on the printed
+    frame and the given pane, passes at 0.25 and fails past it."""
+    need = {
+        "id": "edge-play",
+        "what": "0.25 mm of play round the pane's edge",
+        "source": "chosen",
+        "check": {
+            "by": "bench",
+            "measures": "fit",
+            "command": "clearance frame.step pane.step --box edge=9.6,-3,0.1,10.6,3,1.1",
+            "verdicts": ["CLEAR"],
+            "number": "pairs.0.places.edge.gap_mm",
+            "at_least": least,
+            "at_most": 0.25,
+        },
+    }
+    run, _ = begin(
+        tmp_path,
+        [BROKEN_DOWN, tool("needs", needs=[need, sized("frame.step"), sized("pane.step")])],
+        [write("make.py", POCKET_SCRIPT, run=True)],
+        [done(part=["frame.step", "pane.step"])],
+        [tool("blocked", reason="stop")],
+    )
+    assert run.drive().name == ("met" if met else "blocked")
+    reading = next(r for r in rows(run, "readings") if r["need"] == "edge-play")
+    assert reading["passed"] == int(met)
+    if not met:
+        told = reply_of(run, "done")["reply"]
+        assert "`pairs.0.places.edge.gap_mm` is 0.25, under 0.2501" in told

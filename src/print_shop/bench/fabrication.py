@@ -17,6 +17,7 @@ import numpy as np
 import shapely
 import trimesh
 
+from .limits import ARITHMETIC, over, said, under
 from .report import Report
 from .shapes import (
     FINE,
@@ -53,6 +54,9 @@ MIN_RAYS = 5
 TIP_SHARE = 0.05
 #: The share of an opening the lip may cover and it still be a plain hole.
 PLAIN = 1e-3
+#: How far inside the surface a ray through a wall or a floor starts, in mm: added back to what
+#: it reads, so a wall exactly the nozzle's width reads that width.
+INTO = 1e-5
 #: A layer's mid-height within this of a level face is on it, in mm.
 TIE = 1e-4
 #: A pane with more points than this is written as a mesh only.
@@ -336,7 +340,7 @@ def _pane(
     opened = pane.buffer(-half, join_style="mitre").buffer(half, join_style="mitre")
     lost = 100 * (1 - float(opened.area) / float(pane.area))
     row["lost_to_nozzle_pct"] = round(lost, 2)
-    if pane.area < args.min_area or lost > 40:
+    if under(float(pane.area), args.min_area) or lost > 40:
         problems.append(
             f"pane {name} is too small to print: {pane.area:.2f} mm², with {lost:.0f}% narrower "
             f"than the {args.nozzle} mm nozzle"
@@ -505,12 +509,13 @@ def run_thin(args: Any, report: Report) -> None:
     for z in heights:
         section = slice_at(built, float(z))
         tips_by_layer.append(_tips(section, nozzle))
-        opened = _opened(section, nozzle)
+        # Opened by the nozzle less arithmetic's noise: a wall exactly the nozzle's width stays.
+        opened = _opened(section, nozzle - ARITHMETIC)
         lost = section.difference(opened)
         pieces = list(getattr(lost, "geoms", [lost]))
         lost_mm3 += float(lost.area) * step
         for poly in section.geoms:
-            if _opened(poly, nozzle).is_empty and poly.area >= 1e-4:
+            if _opened(poly, nozzle - ARITHMETIC).is_empty and poly.area >= 1e-4:
                 c = poly.representative_point()
                 too_small_rows.append(
                     {
@@ -558,8 +563,10 @@ def run_thin(args: Any, report: Report) -> None:
     wall, flat, starts = _through(mesh, built, args.samples, length)
     # Each ray stands for its share of the surface.
     per_ray = float(mesh.area) / args.samples
-    wall_thin = float((wall < nozzle).sum()) * per_ray
-    flat_thin = flat[flat < layer]
+    # The shared rule (`limits`), for every ray at once: a wall or floor at its limit isn't thin.
+    narrow = wall < nozzle - ARITHMETIC
+    wall_thin = float(narrow.sum()) * per_ray
+    flat_thin = flat[flat < layer - ARITHMETIC]
     # A thin reading beside a sharp point is that point: a real one, and not a wall.
     tip_rows = sum(len(t.geoms) for t in tips_by_layer)
     tips_per_layer = max((len(t.geoms) for t in tips_by_layer), default=0)
@@ -567,7 +574,7 @@ def run_thin(args: Any, report: Report) -> None:
         "sharp_points", tips_per_layer, how=f"sharper than the {nozzle} mm nozzle's round end"
     )
     alone = []
-    for point in starts[wall < nozzle]:
+    for point in starts[narrow]:
         index = min(count - 1, max(0, int((point[2] - low) / step)))
         near = tips_by_layer[index]
         if near.is_empty or near.distance(shapely.Point(point[0], point[1])) > 2 * nozzle:
@@ -616,8 +623,8 @@ def run_thin(args: Any, report: Report) -> None:
     problems = []
     if thin_rows:
         problems.append(
-            f"{len(thin_rows)} spot(s) narrower than the {nozzle} mm nozzle, the thinnest "
-            f"{min(widths):.3f} mm"
+            f"{len(thin_rows)} spot(s) narrower than the {nozzle:g} mm nozzle, the thinnest "
+            f"{said(min(widths), nozzle)} mm"
             if widths
             else f"{len(thin_rows)} spot(s) narrower than the nozzle"
         )
@@ -661,10 +668,10 @@ def _through(
         # Only a level face is a floor: a shallow slope, like a thread's flank, runs out to an
         # edge, and any ray straight through it near there reads thin.
         if abs(normal[2]) > 0.9999:
-            start = point - normal * 1e-5
+            start = point - normal * INTO
             met = hits(built, start, -normal, length)
             if met:
-                flats.append(met[0])
+                flats.append(met[0] + INTO)
             continue
         # Nor is a shallow slope a wall. Near the top of a cylinder lying on its side, a level ray
         # crosses a tiny chord, in a strip less than a layer tall that no layer ever prints.
@@ -672,9 +679,9 @@ def _through(
             continue
         level = np.array([normal[0], normal[1], 0.0])
         level /= np.linalg.norm(level)
-        met = hits(built, point - level * 1e-5, -level, length)
+        met = hits(built, point - level * INTO, -level, length)
         if met:
-            walls.append(met[0])
+            walls.append(met[0] + INTO)
             starts.append(point)
     return np.array(walls), np.array(flats), np.array(starts).reshape(-1, 3)
 
@@ -686,9 +693,13 @@ def _bodies(part: Part, built: Any, args: Any, report: Report) -> dict[str, list
     report.fact("bodies", len(bodies), how="mesh")
     report.fact("body_volumes_mm3", volumes[:20])
     problems, differs = [], []
-    small = [v for v in volumes if v < args.min_body]
+    exact = sorted(float(b.volume()) for b in bodies)
+    small = [v for v in exact if under(v, args.min_body)]
     if small:
-        problems.append(f"{len(small)} body(ies) under {args.min_body} mm³, the least {small[0]}")
+        problems.append(
+            f"{len(small)} body(ies) under {args.min_body:g} mm³, the least "
+            f"{said(small[0], args.min_body)}"
+        )
     if args.one_body and len(bodies) > 1:
         problems.append(f"{len(bodies)} separate bodies, and one was asked for")
     if part.is_brep:
@@ -776,7 +787,7 @@ def run_pause(args: Any, report: Report) -> None:
         report.verdict(
             "OK",
             f"pause after layer {first_row['pause_after_layer']}, at z={first_row['pause_top_z']}: "
-            f"the pane sits {first_row['room_over_pane_mm']} mm under the next layer",
+            f"the pane sits {first_row['room_over_pane_mm']:.3f} mm under the next layer",
         )
 
 
@@ -842,7 +853,9 @@ def _pause_one(
     floor = heights.floor if heights.floor is not None else float(mesh.bounds[0][2])
     pane_top = floor + args.pane_thickness
     row["pane_top_z"] = round(pane_top, 4)
-    row["room_over_pane_mm"] = round(top - pane_top, 4)
+    # The figure the limits judge, as it is: a need reads the same (`limits`).
+    room = top - pane_top
+    row["room_over_pane_mm"] = room
     # The nozzle's tip lays the next layer one layer above the pause.
     row["nozzle_over_pane_mm"] = round(top + args.layer - pane_top, 4)
     row["pocket_height_mm"] = (
@@ -855,15 +868,18 @@ def _pause_one(
             f"opening {name}: the pane's top is at {pane_top:.3f}, above the pause at {top:.3f}: "
             "the nozzle would hit it"
         )
-    elif top - pane_top > args.max_gap:
+    elif over(room, args.max_gap):
         problems.append(
-            f"opening {name}: {top - pane_top:.3f} mm above the pane at the pause, over "
-            f"{args.max_gap} mm: the next layer bridges too far above it"
+            f"opening {name}: {said(room, args.max_gap)} mm above the pane at the pause, over "
+            f"{args.max_gap:g} mm: the next layer bridges too far above it. Raise the pocket's "
+            f"floor by at least {said(room - args.max_gap, 0)} mm, its ceiling kept, to bring "
+            "the pane up under it"
         )
-    elif args.min_room is not None and row["room_over_pane_mm"] < args.min_room:
+    elif args.min_room is not None and under(room, args.min_room):
         problems.append(
-            f"opening {name}: {row['room_over_pane_mm']} mm above the pane at the pause, under the "
-            f"{args.min_room} mm asked for"
+            f"opening {name}: {said(room, args.min_room)} mm above the pane at the pause, under "
+            f"the {args.min_room:g} mm asked for. Lower the pocket's floor by at least "
+            f"{said(args.min_room - room, 0)} mm, its ceiling kept"
         )
     return row
 
@@ -873,5 +889,5 @@ def _pause_line(row: dict[str, Any]) -> str:
         f"opening {row['opening']}: floor z={row['pocket_floor_z']}, ceiling "
         f"z={row['pocket_ceiling_z']}, pause after layer {row['pause_after_layer']} "
         f"(top z={row.get('pause_top_z')}), pane top z={row.get('pane_top_z')}, room over it "
-        f"{row.get('room_over_pane_mm')} mm"
+        + (f"{row['room_over_pane_mm']:.3f} mm" if "room_over_pane_mm" in row else "None mm")
     )

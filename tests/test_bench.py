@@ -1848,7 +1848,8 @@ def test_a_gap_drawn_on_a_curve_is_held_at_both_ends_by_the_exact_distance(bench
     exact = bench(*pair, "--min-gap", "0.25", "--max-gap", "0.25")
     assert exact.verdict == "CLEAR", exact.text
     found = only_pair(exact)
-    assert found["gap_mm"] == 0.25 and found["gap_by"] == "occt"
+    # The figure the limits judged, as it is (mqucifer/print-shop#72): 0.24999999999999853.
+    assert found["gap_mm"] == pytest.approx(0.25, abs=1e-6) and found["gap_by"] == "occt"
     assert found["gap_mesh_mm"] <= 0.25
     assert bench(*pair, "--min-gap", "0.2501").verdict == "TOO CLOSE"
     assert bench(*pair, "--max-gap", "0.2499").verdict == "TOO LOOSE"
@@ -2038,3 +2039,178 @@ def test_a_layout_says_each_piece_its_least_width_its_tips_and_what_an_inset_lea
 
     told = bench("layout", _layout(bench.work, "bare.json", {}))
     assert told.verdict == "NO ANSWER" and '{"pieces": {NAME: OUTLINE' in told.record["why"]
+
+
+# A mated pair's gaps by place, and a figure exactly at its limit (mqucifer/print-shop#72)
+
+#: A box round the pane's +x edge, between its faces: its edge and the pocket's wall, and neither
+#: face's play. One round the lip over that edge, above the pane's top face: its face play.
+#: One round a rounded corner, between the faces.
+EDGE = "edge=9.6,-3,0.1,10.6,3,1.1"
+FACE = "face=9.2,-3,1.0,9.8,3,1.5"
+CORNER = "corner=8.5,5.5,0.1,10,7,1.1"
+
+
+def test_a_pairs_gaps_are_read_by_place_round_the_edge_and_round_a_face(bench: Any) -> None:
+    """On `eval-fit-3` a pane sat in its pocket with 0.25 mm of play round its edge and 0.15 mm on
+    its faces, and `clearance` read only 0.15, the least. On a pair of our own like it, a box round
+    the edge reads 0.25, one round a face 0.15, and a rounded corner 0.25, OCCT and the mesh
+    agreeing; facing +z reads the face play and +x the edge's. With places named, the range holds
+    each place, and the pair's own least gap is read and not held."""
+    answer = bench("clearance", "places/pocket.step", "places/pane.step", "--box", EDGE,
+                   "--box", FACE, "--box", CORNER, "--facing", "top=+z", "--facing", "side=+x",
+                   "--min-gap", "0.25", "--max-gap", "0.25")  # fmt: skip
+    pair = only_pair(answer)
+    assert pair["gap_mm"] == pytest.approx(0.15, abs=1e-6) and pair["verdict"] == "CLEAR"
+    at = pair["places"]
+    for name, gap in (("edge", 0.25), ("face", 0.15), ("corner", 0.25), ("top", 0.15),
+                      ("side", 0.25)):  # fmt: skip
+        assert at[name]["gap_mm"] == pytest.approx(gap, abs=1e-6), (name, answer.text)
+        assert at[name]["gap_by"] == "occt"
+        assert at[name]["gap_second_mm"] == pytest.approx(gap, abs=2 * 0.002 + 1e-4), name
+    assert [at[n]["verdict"] for n in ("edge", "face", "corner")] == ["CLEAR", "TOO CLOSE", "CLEAR"]
+    assert answer.verdict == "TOO CLOSE" and answer.code == 1, "a place's verdict counts"
+    assert "as pairs.N.places.edge.gap_mm" in answer.text
+    assert "the range is the play at those places" in answer.text
+    assert answer.numbers["places"]["edge"] == {"box": [[9.6, -3.0, 0.1], [10.6, 3.0, 1.1]]}
+    assert answer.numbers["places"]["top"] == {"facing": "+z"}
+    assert not reports.unlike("clearance", answer.numbers), reports.unlike(
+        "clearance", answer.numbers
+    )
+    edge = bench("clearance", "places/pocket.step", "places/pane.step", "--box", EDGE,
+                 "--min-gap", "0.25", "--max-gap", "0.25")  # fmt: skip
+    assert edge.verdict == "CLEAR" and edge.code == 0, edge.text
+    close = bench("clearance", "places/pocket.step", "places/pane.step", "--box", EDGE,
+                  "--min-gap", "0.2501")  # fmt: skip
+    assert close.verdict == "TOO CLOSE", close.text
+
+
+def test_a_place_on_an_stl_pair_reads_the_mesh_and_samples_it(bench: Any) -> None:
+    answer = bench("clearance", "places/pocket.stl", "places/pane.stl", "--box", EDGE,
+                   "--box", CORNER)  # fmt: skip
+    at = only_pair(answer)["places"]
+    assert at["edge"]["gap_by"] == "mesh"
+    assert at["edge"]["gap_mm"] == pytest.approx(0.25, abs=1e-4)
+    assert at["corner"]["gap_mm"] == pytest.approx(0.25, abs=2 * 0.002 + 1e-4)
+    assert "points sampled on the mesh clipped by the box" in answer.text
+    facing = bench("clearance", "places/pocket.stl", "places/pane.stl", "--facing", "up=+z")
+    assert facing.verdict == "NO ANSWER" and "with --box" in facing.text
+
+
+def test_a_box_round_a_clip_arm_reads_its_side_play_with_the_plate_seated(bench: Any) -> None:
+    """On `eval-fan-1` the clip arms' side play couldn't be read apart from the seated plate's
+    contact, and lifted, the barb overlapped. A box round an arm, clear of the seat, reads the
+    side play with the plate seated; one at the seat reads its contact, 0."""
+    answer = bench("clearance", "places/base.step", "places/plate.step",
+                   "--box", "arm=9.8,-3,2.5,12,3,5", "--box", "seat=-5,-5,1.5,5,5,2.5")  # fmt: skip
+    pair = only_pair(answer)
+    assert pair["verdict"] == "TOUCHING"
+    assert pair["places"]["arm"]["gap_mm"] == pytest.approx(0.3, abs=1e-6), answer.text
+    assert pair["places"]["arm"]["verdict"] == "CLEAR"
+    assert pair["places"]["seat"]["gap_mm"] == pytest.approx(0.0, abs=1e-6)
+    assert pair["places"]["seat"]["verdict"] == "TOUCHING"
+    assert answer.verdict == "TOUCHING" and answer.code == 0
+
+
+def test_a_box_that_catches_no_surface_of_one_of_the_pair_says_which_and_gives_no_figure(
+    bench: Any,
+) -> None:
+    inside = "inside=-15,-5,0.5,-14,-4,1.5"
+    answer = bench("clearance", "places/base.step", "places/plate.step",
+                   "--box", "arm=9.8,-3,2.5,12,3,5", "--box", inside)  # fmt: skip
+    found = only_pair(answer)["places"]["inside"]
+    assert found["gap_mm"] is None and found["verdict"] == "NOT CAUGHT"
+    assert "base.step fills the box with material and plate.step lies all outside" in found["why"]
+    assert answer.verdict == "NO ANSWER" and answer.code == 2, "no pair has a figure there"
+    assert "second check: arm:" in answer.text, "the other places are still read and checked"
+    twice = host.run(["clearance", "places/base.step", "places/plate.step", "--box",
+                      "a=0,0,0,1,1,1", "--facing", "a=+z"], bench.work)  # fmt: skip
+    assert twice.returncode == 3 and "a name of its own: a" in twice.stdout + twice.stderr
+    flat = host.run(["clearance", "places/base.step", "places/plate.step", "--box",
+                     "a=0,0,0,1,1,0"], bench.work)  # fmt: skip
+    assert flat.returncode == 3 and "has no room inside it" in flat.stdout + flat.stderr
+
+
+def test_pause_passes_a_room_exactly_at_its_limit_and_fails_past_it(bench: Any) -> None:
+    """On `eval-fit-3` `pause` said "0.400 mm above the pane at the pause, over 0.4 mm": the room
+    was 0.40000000000000036 by the floats that add up the layers. A 1.6 mm pane under the frame's
+    ceiling at z=3 has that room exactly."""
+    args = ("pause", "frame.step", "--pocket-z", "2", "--pane-thickness")
+    at = bench(*args, "1.6", "--max-gap", "0.4", "--min-room", "0.4")
+    assert at.verdict == "OK", at.text
+    assert at.numbers["least_room_over_pane_mm"] == pytest.approx(0.4, abs=1e-6)
+    over = bench(*args, "1.5999", "--max-gap", "0.4")
+    assert over.verdict == "FAIL", over.text
+    assert "0.4001 mm above the pane at the pause, over 0.4 mm" in over.text
+    assert "Raise the pocket's floor by at least 0.0001 mm" in over.text
+    under = bench(*args, "1.6001", "--min-room", "0.4")
+    assert under.verdict == "FAIL", under.text
+    assert "0.3999 mm above the pane at the pause, under the 0.4 mm asked for" in under.text
+
+
+def test_thin_passes_a_wall_exactly_the_nozzles_width_and_a_body_exactly_the_least(
+    bench: Any,
+) -> None:
+    """A wall 0.4 mm wide at a 0.4 mm nozzle read DISAGREE: its rays started 1e-5 mm inside it
+    and didn't add that back. Its body is 824 mm³."""
+    at = bench("thin", "wall-0p4.step", "--nozzle", "0.4", "--min-body", "824")
+    assert at.verdict == "OK", at.text
+    narrow = bench("thin", "wall-0p4.step", "--nozzle", "0.4001")
+    assert narrow.verdict == "FAIL" and "the thinnest 0.4000 mm" in narrow.text, narrow.text
+    small = bench("thin", "wall-0p4.step", "--min-body", "824.001")
+    assert small.verdict == "FAIL" and "under 824.001 mm³" in small.text, small.text
+
+
+def test_light_passes_a_share_exactly_at_its_limit_and_fails_past_it(bench: Any) -> None:
+    files = ("light", "glass/frame.step", "glass/pane_a.step")
+    share = bench(*files).numbers["least_open_pct"]
+    assert bench(*files, "--min-open", repr(share)).verdict == "OK"
+    past = bench(*files, "--min-open", repr(share + 1e-4))
+    assert past.verdict == "FAIL", past.text
+
+
+def test_thickness_wall_and_capture_pass_at_their_limit_with_their_readings_error(
+    bench: Any,
+) -> None:
+    """Each reads on the mesh, and holds a figure at its limit within its stated error: 2 chords
+    of 0.002 mm for `thickness` and `wall`, and for `capture` none past arithmetic's noise, as a
+    straight lip reads exactly (mqucifer/print-shop#72's answer: those errors stay as they are)."""
+    assert bench("thickness", "cube.step", "--max", "9.996", "--min", "10.004").verdict == "OK"
+    assert bench("thickness", "cube.step", "--max", "9.9959").verdict == "FAIL"
+    assert bench("thickness", "cube.step", "--min", "10.0041").verdict == "FAIL"
+    hole = ("wall", "hang.step", "--hole", "50,121.5,2", "--min-wall")
+    held = bench(*hole, "2.004")
+    assert held.verdict == "OK" and "within the mesh's 0.004 mm" in held.text, held.text
+    assert bench(*hole, "2.0041").verdict == "FAIL"
+    assert capture(bench, "held.step", "--min-lip", "1.8").verdict == "OK"
+    assert capture(bench, "held.step", "--min-lip", "1.8001").verdict == "FAIL"
+
+
+def test_edges_passes_a_rounding_at_its_limit_with_its_readings_error(bench: Any) -> None:
+    """A rounding drawn at R may read short of it by 0.5% of R: a block rounded 2 mm passes at
+    2 / 0.995 mm and fails past it."""
+    block = ("edges", "enclosure/round2.step", "--min-radius")
+    radius = bench(*block, "2").numbers["least_rounded_mm"]
+    held = bench(*block, repr(radius / 0.995))
+    assert held.verdict == "OK" and "within 0.01005 mm" in held.text, held.text
+    assert bench(*block, repr(radius / 0.995 + 1e-4)).verdict == "FAIL"
+
+
+def test_layout_readback_and_rays_pass_at_their_limit_and_fail_past_it(bench: Any) -> None:
+    name = _layout(bench.work, "bar.json", {"bar": "POLYGON ((0 0, 10 0, 10 1, 0 1, 0 0))"})
+    width = bench("layout", name).numbers["least_width_mm"]
+    assert bench("layout", name, "--min-width", repr(width)).verdict == "OK"
+    assert bench("layout", name, "--min-width", repr(width + 1e-4)).verdict == "FAIL"
+    cut = ("readback", "block.step", "block-seat.step")
+    change = bench(*cut).numbers["change_mm3"]
+    expect = ("--expect-delta", repr(change + 0.5))
+    assert bench(*cut, *expect, "--tol", "0.5").verdict == "OK"
+    assert bench(*cut, *expect, "--tol", "0.4999").verdict == "FAIL"
+    seat = ("rays", "block-seat.step", "--centre", "30,20,16", "--d", "22")
+    level = bench(*seat).numbers["levels"][0]["across_mm"]
+    tol = max(22 - level["min"], level["max"] - 22)
+    assert bench(*seat, "--tol", repr(tol)).verdict == "OK"
+    # Past it the rays' span is out while the section's circle fit, the second method, may still
+    # be in: FAIL or DISAGREE, and never OK.
+    past = bench(*seat, "--tol", repr(tol - 1e-4))
+    assert past.verdict in ("FAIL", "DISAGREE"), past.text

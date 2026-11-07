@@ -1,6 +1,6 @@
 ---
 name: checking-enclosures
-description: Explains what the enclosure checks answer, the edges command by group and by place and clearance's gap range and lift, and how to read each reply and its numbers. Use when running edges or clearance with --max-gap or --lift, reading their answers, or naming one of their numbers in a need.
+description: Explains what the enclosure checks answer, the edges command by group and by place and clearance's gap range, lift and places, and how to read each reply and its numbers. Use when running edges or clearance with --max-gap, --lift or --box, reading their answers, or naming one of their numbers in a need.
 ---
 
 # The enclosure checks
@@ -10,7 +10,7 @@ description: Explains what the enclosure checks answer, the edges command by gro
 | Command | Answers |
 |---|---|
 | `edges FILE... [--with FILE]... [--min-radius R] [--box NAME=X0,Y0,Z0,X1,Y1,Z1]... [--facing NAME=DIR]...` | each outside edge of the parts named: sharp or rounded, how far a sharp one turns, and the least radius of the rounded ones, with where, overall, by group and by place. `--min-radius` fails a sharp edge or a tighter rounding |
-| `clearance FILE... [--min-gap G] [--max-gap G2] [--lift D [--along AXIS]]` | overlap and gap, every pair. `--max-gap` fails a pair whose least gap is over it, `TOO LOOSE`. `--lift` moves the last file named off its seat before measuring |
+| `clearance FILE... [--min-gap G] [--max-gap G2] [--lift D [--along AXIS]] [--box NAME=X0,Y0,Z0,X1,Y1,Z1]... [--facing NAME=DIR]...` | overlap and gap, every pair. `--max-gap` fails a pair whose least gap is over it, `TOO LOOSE`. `--lift` moves the last file named off its seat before measuring. `--box` and `--facing` read each pair's least gap at a place |
 
 ## Reading `edges`
 
@@ -33,6 +33,16 @@ description: Explains what the enclosure checks answer, the edges command by gro
 - **`--lift D` reads a lid's play on the printed lid.** It moves the last file named D mm along `--along` (z unless said, signed) before measuring, and its file stays where it is. D is more than G2 and G1, or it's refused: a lift short of the play would read as the gap. Where the least gap still reads D, the faces that seat are what's nearest: the reply says so, and the play is at least D.
 - **Its numbers:** under `pairs`, each pair's `gap_mm`, `gap_by` (`occt` or `mesh`), `gap_mesh_mm` and `verdict`; `lift`, the file moved, the axis and the mm.
 
+## Reading `clearance` by place
+
+- **A pair's least gap is its tightest face.** Where two parts touch at a seat, or have a smaller play on another face, that's what `gap_mm` reads, and a play elsewhere isn't in it.
+- **`--box NAME=X0,Y0,Z0,X1,Y1,Z1`** reads each pair's least gap between their surfaces inside the box, on the files where they lie: never a section or a copy. Put it round both faces of the one gap, and clear of every face with another gap or a contact. For a clip arm beside a seated fan: the box holds the arm's inner face and the fan's side, and starts above the ledge the fan rests on.
+- **`--facing NAME=DIR`,** DIR one of `+x -x +y -y +z -z`, reads the least gap between faces facing DIR, within 60° all over, and the other part's faces facing back. DIR and its opposite read alike. STEP files only; on an STL use `--box`.
+- **With a place named, `--min-gap` and `--max-gap` hold each place's gap,** not the pair's least, which is still read and said. The verdict is the worst of the pairs' and the places'.
+- **A box that holds no surface of one of the pair** says which part lies outside it and which fills it, and gives no figure: move it. A box round a contact reads 0, `TOUCHING`.
+- **Its numbers:** `pairs.N.places.NAME`, with `gap_mm`, `gap_by`, `gap_second_mm` (the second method's figure), `from` and `to` (the points it's between) and `verdict`.
+- **A figure at its limit passes,** to a millionth of a millimetre, here and in a need's `at_least` and `at_most`.
+
 ## Numbers a need can name
 
 | Command | Number | Its limit |
@@ -40,6 +50,7 @@ description: Explains what the enclosure checks answer, the edges command by gro
 | `edges` | `least_radius_mm` | `at_least`: the request's radius |
 | `edges` | `groups.upright.least_radius_mm`, `groups.top.…`, `groups.bottom.…`, or `selected.NAME.least_radius_mm` | `at_least`: the request's radius for those edges |
 | `clearance` | `pairs.0.gap_mm` | `at_least` and `at_most`: the request's play |
+| `clearance --box NAME=...` | `pairs.0.places.NAME.gap_mm` | `at_least` and `at_most`: the request's play at that place |
 
 Never name a row of `rounded` or `sharp_edges` by its index: the list is sorted by radius, and a rebuild reorders it.
 

@@ -25,7 +25,7 @@ The first line is the verdict. Then come the numbers, each with how it was read,
 | Command | Answers |
 |---|---|
 | `info FILE` | size, volume, bodies, flat heights |
-| `clearance FILE... [--min-gap G] [--max-gap G2] [--lift D [--along A]]` | overlap and gap, every pair, across files or a file's solids. `--max-gap` fails a pair whose least gap is over it, `TOO LOOSE`, for parts meant to mate. Both limits hold `gap_mm`, OCCT's exact distance on STEP files, so a gap drawn at a limit passes. A part resting on another touches it, gap 0, which is never too loose: `--lift D` moves the last file named D mm along A (z unless said) before measuring, its file left where it is, so a seated lid's play is read on the printed lid |
+| `clearance FILE... [--min-gap G] [--max-gap G2] [--lift D [--along A]] [--box NAME=X0,Y0,Z0,X1,Y1,Z1]... [--facing NAME=DIR]...` | overlap and gap, every pair, across files or a file's solids. `--max-gap` fails a pair whose least gap is over it, `TOO LOOSE`, for parts meant to mate. Both limits hold `gap_mm`, OCCT's exact distance on STEP files, so a gap drawn at a limit passes. A part resting on another touches it, gap 0, which is never too loose: `--lift D` moves the last file named D mm along A (z unless said) before measuring, its file left where it is, so a seated lid's play is read on the printed lid. A pair with two plays, such as a pane's edge and its faces, reads only the smaller: `--box NAME=...` round the faces one play is on reads that play alone, as `pairs.0.places.NAME.gap_mm`, and with a place named the limits hold each place's gap |
 | `readback BEFORE AFTER [--cutter C] [--expect-delta V] [--min-share S]` | volume before and after, and how much of a cutter was in the body |
 | `rays FILE --centre X,Y,Z [--axis A] [--d D] [--depth H]` | a cut feature measured from its axis: rays that hit nothing, the distance across, the wall beyond, the floor. From a point in air, `across` is the open space's width through it, wall to opposite wall: a hole's diameter on its axis, never an outside corner's radius |
 | `thin FILE [--nozzle N] [--layer L] [--min-body V] [--one-body]` | features under the nozzle's width, floors under a layer, and tiny pieces. `--one-body` fails on more than one connected body |
@@ -81,7 +81,7 @@ A bench need names a command as you'd give it, and what must hold. The harness r
 | `measures` | It's about | Its check |
 |---|---|---|
 | `size` | the part's outer size, volume, bodies or flat heights, as a whole | `info FILE` |
-| `fit` | the gap or overlap between parts | `clearance A B --min-gap G` |
+| `fit` | the gap or overlap between parts | `clearance A B --min-gap G`, or at one place `clearance A B --box NAME=X0,Y0,Z0,X1,Y1,Z1 --min-gap G` |
 | `cut` | a cut or a join changed the body by what it should | `readback BEFORE AFTER --expect-delta V` |
 | `hole` | a cut feature's size, depth or floor, from its axis | `rays FILE --centre X,Y,Z --d D` |
 | `wall` | the wall round one hole, such as the hole a piece hangs from | `wall FILE --hole X,Y,Z --min-wall W` |

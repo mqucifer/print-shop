@@ -41,7 +41,7 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "volume_mesh_mm3",
         "watertight",
     ),
-    "clearance": ("lift", "pairs"),
+    "clearance": ("lift", "pairs", "places"),
     "readback": (
         "after_mm3",
         "before_mm3",
@@ -202,6 +202,21 @@ LEAST = Row(
 )
 #: The groups `edges` reads every edge into, by the file's axes, as `bench/edges.py` names them.
 EDGE_GROUPS = ("upright", "top", "bottom", "side")
+#: `clearance`'s gap at one place, for one pair (mqucifer/print-shop#72): the least gap and by which
+#: method, the second method's figure, the points it's between, the place's verdict, and why it has
+#: no figure where it catches no surface of one of the pair (None then).
+PLACE = Row(
+    {
+        "gap_mm": NUMBER,
+        "gap_by": TEXT,
+        "gap_second_mm": NUMBER,
+        "from": XYZ,
+        "to": XYZ,
+        "verdict": TEXT,
+        "why": TEXT,
+    },
+    closed=True,
+)
 
 SHAPES: dict[str, dict[str, Any]] = {
     "info": {
@@ -236,10 +251,14 @@ SHAPES: dict[str, dict[str, Any]] = {
                     "overlap_mesh_mm3": NUMBER,
                     "overlap_occt_common_mm3": NUMBER,
                     "overlap_occt_cut_mm3": NUMBER,
+                    # By the names the need's own `--box NAME=...` and `--facing NAME=...` give.
+                    "places": Keyed(PLACE),
                     "verdict": TEXT,
                 }
             )
         ),
+        # What each place named is: a box's two corners, or the way its faces face.
+        "places": Keyed(Row({"box": CORNERS, "facing": TEXT})),
     },
     "readback": {
         "after_mm3": NUMBER,
@@ -428,7 +447,9 @@ INPUTS: dict[str, dict[str, tuple[str, ...]]] = {
 #: The command that reads the part's own file instead, as a need would run it.
 _PANE_ON_FRAME = (
     "`clearance PANE.step FRAME.step`, the part's own pane against its frame, with `number` "
-    "`pairs.0.gap_occt_mm` and the figure as `at_least` and `at_most`"
+    "`pairs.0.gap_mm` and the figure as `at_least` and `at_most`. Where the pane's faces have "
+    "another play, read its edge alone with `--box edge=X0,Y0,Z0,X1,Y1,Z1` round the edge between "
+    "its faces, and `number` `pairs.0.places.edge.gap_mm` (mqucifer/print-shop#72)"
 )
 READS_THE_FILE: dict[str, str] = {"panes": _PANE_ON_FRAME, "capture": _PANE_ON_FRAME}
 
@@ -474,8 +495,14 @@ def wrong_number(command: str, number: str) -> str | None:
 
 def selected_unnamed(words: list[str], number: str) -> str | None:
     """An `edges` need's `selected.NAME` that its own command never names: a selection is read
-    only for the `--box NAME=...` and `--facing NAME=...` it's given (mqucifer/print-shop#65)."""
-    if not words or words[0] != "edges" or not number.startswith("selected."):
+    only for the `--box NAME=...` and `--facing NAME=...` it's given (mqucifer/print-shop#65). And a
+    `clearance` need's `pairs.N.places.NAME` the same way (mqucifer/print-shop#72)."""
+    if not words:
+        return None
+    parts = number.split(".")
+    if words[0] == "clearance" and len(parts) >= 3 and parts[0] == "pairs" and parts[2] == "places":
+        return _place_unnamed(words, number, parts[3] if len(parts) > 3 else "")
+    if words[0] != "edges" or not number.startswith("selected."):
         return None
     name = number.split(".")[1] if number.count(".") else ""
     given: list[str] = []
@@ -494,6 +521,33 @@ def selected_unnamed(words: list[str], number: str) -> str | None:
         f"`{number}` isn't in `edges`' answer: a selection is read only for the command's own "
         f"`--box NAME=X0,Y0,Z0,X1,Y1,Z1` or `--facing NAME=DIR`, and it names {named}. Name "
         f"`{name}` in one, or read a group, such as `groups.upright.least_radius_mm`"
+    )
+
+
+def _given_places(words: list[str]) -> list[str]:
+    """The names a command's own `--box NAME=...` and `--facing NAME=...` give."""
+    given: list[str] = []
+    for k, word in enumerate(words):
+        value = None
+        if word in ("--box", "--facing") and k + 1 < len(words):
+            value = words[k + 1]
+        elif word.startswith(("--box=", "--facing=")):
+            value = word.split("=", 1)[1]
+        if value is not None:
+            given.append(value.split("=", 1)[0])
+    return given
+
+
+def _place_unnamed(words: list[str], number: str, name: str) -> str | None:
+    given = _given_places(words)
+    if name and name in given:
+        return None
+    named = ", ".join(f"`{g}`" for g in given) or "none"
+    return (
+        f"`{number}` isn't in `clearance`'s answer: a place is read only for the command's own "
+        f"`--box NAME=X0,Y0,Z0,X1,Y1,Z1` or `--facing NAME=DIR`, and it names {named}. Add "
+        f"`--box {name or 'NAME'}=...` round the faces whose gap the need holds, and name "
+        f"`pairs.0.places.{name or 'NAME'}.gap_mm`"
     )
 
 

@@ -403,3 +403,30 @@ def test_the_bench_s_new_numbers_settle_and_a_wrong_path_to_them_is_refused() ->
     ):
         (said,) = settled(command, number)
         assert says in said, (number, said)
+
+
+def test_a_place_s_gap_settles_and_one_its_command_doesnt_name_is_refused() -> None:
+    """`clearance`'s places (mqucifer/print-shop#72) are walked as `edges`' selections are."""
+    from print_shop.rounds import toolsets
+
+    def settled(command: str, number: str) -> list[str]:
+        entry = {
+            "id": "n",
+            "what": "x",
+            "source": "chosen",
+            "check": {"by": "bench", "command": command, "number": number, "at_least": 0},
+        }
+        found, wrong = needs.read([entry], "", toolset=toolsets.EVERY)
+        return wrong or needs.numbers_wrong(found)
+
+    placed = "clearance frame.step pane.step --box edge=9,-3,0,11,3,1 --facing top=+z"
+    for number in ("pairs.0.places.edge.gap_mm", "pairs.0.places.top.from.2", "pairs.0.gap_mm"):
+        assert settled(placed, number) == [], number
+    for command, number, says in (
+        (placed, "pairs.0.places.corner.gap_mm", "it names `edge`, `top`. Add `--box corner=...`"),
+        ("clearance frame.step pane.step", "pairs.0.places.edge.gap_mm", "it names none"),
+        (placed, "pairs.0.places.edge", "name one of its numbers: `pairs.0.places.edge.gap_mm`"),
+        (placed, "pairs.0.places.edge.gap", "is a row of `gap_mm`"),
+    ):
+        (said,) = settled(command, number)
+        assert says in said, (number, said)

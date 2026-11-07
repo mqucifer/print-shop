@@ -74,6 +74,7 @@ from OCP.TopoDS import TopoDS
 from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
 from scipy import ndimage
 
+from . import limits
 from .readback import _circle
 from .report import Report
 from .shapes import FINE, NoAnswer, Part, load, slice_at
@@ -693,7 +694,7 @@ def run(args: Any, report: Report) -> None:
     report.numbers["faceted_edges"] = len(faceted)
     report.numbers["rounded"] = [r.plain() for r in rounded]
     least_rounded = rounded[0] if rounded else None
-    report.numbers["least_rounded_mm"] = round(least_rounded.radius, 3) if least_rounded else None
+    report.numbers["least_rounded_mm"] = least_rounded.radius if least_rounded else None
     report.numbers["least_rounded_at"] = _at(least_rounded.at) if least_rounded else None
     if sharp:
         worst = max(sharp, key=lambda s: max(s.turns))
@@ -795,7 +796,8 @@ def _plain_least(g: dict[str, Any]) -> dict[str, Any]:
     found: dict[str, Any] = {"sharp": g["sharp"], "rounded": g["rounded"]}
     if item is None:
         return {**found, "least_radius_mm": None, "least_at": None, "file": None}
-    radius = 0.0 if isinstance(item, Sharp) else round(item.radius, 3)
+    # The figure a need limits, as it is (`limits`).
+    radius = 0.0 if isinstance(item, Sharp) else item.radius
     return {**found, "least_radius_mm": radius, "least_at": _at(g["at"]), "file": item.file}
 
 
@@ -956,13 +958,21 @@ def _judge(
         return
     short = max(RADIUS_FLOOR, RADIUS_SHARE * least)
     report.numbers["min_radius_mm"] = least
-    tight = [r for r in rounded if r.radius < least - short]
+    # `short` is the reading's own error on a spline's curvature, held through the shared rule.
+    tight = [r for r in rounded if limits.under(r.radius, least - short)]
     if not sharp and not tight:
-        report.verdict("OK", f"every outside edge read is rounded to at least {least:g} mm: {said}")
+        within = any(limits.under(r.radius, least) for r in rounded)
+        held = (
+            f"to the {least:g} mm asked for, within {short:.4g} mm, the exact surface's reading "
+            "of a spline's curvature"
+            if within
+            else f"to at least {least:g} mm"
+        )
+        report.verdict("OK", f"every outside edge read is rounded {held}: {said}")
         return
     places = [
         f"sharp {max(s.turns):.0f}° at {_shown(s.points[s.worst()])} on {s.file}" for s in sharp
-    ] + [f"{r.radius:.3f} mm at {_shown(r.at)} on {r.file}" for r in tight]
+    ] + [f"{limits.said(r.radius, least)} mm at {_shown(r.at)} on {r.file}" for r in tight]
     more = f", and {len(places) - 3} more" if len(places) > 3 else ""
     report.verdict(
         "FAIL",

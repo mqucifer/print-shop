@@ -573,6 +573,44 @@ def enclosure() -> None:
          "enclosure/curved-pocket")  # fmt: skip
 
 
+def places() -> None:
+    """Gaps of a mated pair read one place at a time (mqucifer/print-shop#72), on parts of our own.
+
+    - `places/pane` and `places/pocket`: a pane 20 x 14, its corners rounded 3 mm, 1.2 mm thick,
+      in a frame's pocket 0.25 mm wider round its edge (corners 3.25) and 0.15 mm over each face,
+      with a lip 1 mm over its edge on both faces. Each also as an STL.
+    - `places/base` and `places/plate`: a plate 20 x 20 x 3 seated on a base, between two upright
+      arms 0.3 mm off its sides, each with a barb over the plate's top 0.3 mm above it.
+    """
+    Path("places").mkdir(exist_ok=True)
+
+    def rounded(w: float, h: float, r: float, z0: float, z1: float) -> Any:
+        return box(-w / 2, w / 2, -h / 2, h / 2, z0, z1).edges("|Z").fillet(r)
+
+    pane = rounded(20, 14, 3, 0, 1.2)
+    frame = (
+        box(-14, 14, -11, 11, -1.15, 2.35)
+        .cut(rounded(20.5, 14.5, 3.25, -0.15, 1.35))
+        .cut(rounded(18, 12, 2, -2, 3))
+    )
+    for shape, name in ((pane, "places/pane"), (frame, "places/pocket")):
+        save(shape, name)
+        shape.val().exportStl(f"{name}.stl", tolerance=0.002, angularTolerance=0.05)
+    base = box(-20, 20, -10, 10, 0, 2)
+    for side in (1, -1):
+        x0, x1 = sorted((side * 10.3, side * 11.8))
+        b0, b1 = sorted((side * 9.5, side * 10.3))
+        base = base.union(box(x0, x1, -3, 3, 0, 8)).union(box(b0, b1, -3, 3, 5.3, 6.5))
+    save(base, "places/base")
+    save(box(-10, 10, -10, 10, 2, 5), "places/plate")
+
+
+def at_limits() -> None:
+    """A figure exactly at its limit (mqucifer/print-shop#72): a wall 0.4 mm wide, a nozzle's."""
+    base = box(0, 20, 0, 20, 0, 2)
+    save(base.union(box(5, 15, 9.8, 10.2, 2, 8)), "wall-0p4")
+
+
 if __name__ == "__main__":
     near_touching()
     boxes()
@@ -591,4 +629,6 @@ if __name__ == "__main__":
     sheets()
     glass()
     enclosure()
+    places()
+    at_limits()
     print("made")

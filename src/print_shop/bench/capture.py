@@ -42,6 +42,7 @@ from .fabrication import (
     pocket_heights,
 )
 from .glass import grid, shadow, span, visible, visible_by_rays
+from .limits import ARITHMETIC, over, under
 from .report import Report
 from .shapes import NoAnswer, Part, flat_heights, hits, load, slice_at
 
@@ -567,7 +568,8 @@ def rim_reading(
     """
     rings = rings or [(0, len(lips), step)]
     none = lips <= SHARED
-    thin = ~none & (lips - play < min_lip)
+    # The shared rule (`limits`), for every point at once: a lip at its limit holds.
+    thin = ~none & (lips - play < min_lip - ARITHMETIC)
     ends = np.zeros(len(lips), dtype=bool)
     spacing = np.zeros(len(lips))
     for start, count, ring_step in rings:
@@ -870,15 +872,15 @@ def _share_says(
         return
     faces = [row[k] for k in ("up", "down")]
     short = [f for f in faces if f["thin_mm"]]
-    covered = share < args.min_visible - SHARE_TOL
-    if not short and covered and has is not None and has <= rim["needs_mm"] + RIM_TOL:
+    covered = under(share, args.min_visible - SHARE_TOL)
+    if not short and covered and has is not None and not over(has, rim["needs_mm"] + RIM_TOL):
         problems.append(
             f"{label}: its rim is the {rim['set_mm']:g} mm before play it needs, and only "
             f"{share:.1f}% of it is visible, where {args.min_visible:g}% is wanted: the frame "
             "covers it elsewhere, as a floor under it or a bar across it would"
         )
         return
-    if short or share < args.min_visible - SHARE_TOL:
+    if short or covered:
         where = "; ".join(
             f"{way} short of it for {f['thin_mm']} mm of its edge, near {f['thin_at']}"
             for way, f in zip(("above", "below"), faces, strict=True)
@@ -914,7 +916,7 @@ def rim_change(rim: dict[str, Any], has: float | None) -> str:
             f"Wider than {set_mm:g} mm leaves under {wanted:g}% visible, and narrower is under the "
             "rim it needs, so it's that rim and no other."
         )
-    if by <= RIM_TOL or (rim["chosen"] == "full" and has >= set_mm - RIM_TOL):
+    if not over(by, RIM_TOL) or (rim["chosen"] == "full" and not under(has, set_mm - RIM_TOL)):
         return f"Its rim is the rim it needs: leave it. {keeps}"
     if set_mm > has:
         move = (
@@ -973,10 +975,10 @@ def rim_needed(pane: Any, args: Any) -> dict[str, Any]:
         "visible_at_full_pct": round(inset_share(pane, full - play), 2),
         "visible_at_least_pct": round(inset_share(pane, least - play), 2),
     }
-    if found["visible_at_full_pct"] >= share:
+    if not under(inset_share(pane, full - play), share):
         need = full
         found["chosen"] = "full"
-    elif inset_share(pane, least - play) < share:
+    elif under(inset_share(pane, least - play), share):
         found.update(remove=True, needs_mm=None, chosen="remove")
         return found
     else:

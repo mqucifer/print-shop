@@ -14,6 +14,7 @@ from typing import Any
 import numpy as np
 import shapely
 
+from .limits import over, under
 from .report import Report
 from .shapes import (
     VOLUME_FLOOR,
@@ -211,7 +212,7 @@ def run_readback(args: Any, report: Report) -> None:
     report.fact("before_mm3", was["mesh_mm3"], how="mesh")
     report.fact("after_mm3", now["mesh_mm3"], how="mesh")
     resolved = max(was["resolved_mm3"], now["resolved_mm3"])
-    report.fact("change_mm3", round(delta, 4), how=f"mesh, ± {resolved:.4f}")
+    report.fact("change_mm3", delta, how=f"mesh, ± {resolved:.4f}")
     if was["mesh_mm3"]:
         report.fact("change_pct", round(100 * delta / was["mesh_mm3"], 3))
     report.fact("bodies_before_after", [was["bodies_mesh"], now["bodies_mesh"]])
@@ -228,12 +229,12 @@ def run_readback(args: Any, report: Report) -> None:
         return
     if args.cutter:
         share = _cutter(before, load(args.cutter), delta, band, report, problems)
-        if args.min_share is not None and share < args.min_share:
+        if args.min_share is not None and under(share, args.min_share):
             problems.append(f"only {share:.1%} of the cutter is in the body")
     if args.expect_delta is not None:
         tol = args.tol if args.tol is not None else max(resolved, 0.001 * abs(args.expect_delta))
         report.fact("expected_change_mm3", args.expect_delta, how=f"± {tol:.4f}")
-        if abs(delta - args.expect_delta) > tol:
+        if over(abs(delta - args.expect_delta), tol):
             problems.append(f"the change is {delta:.3f} mm³, and {args.expect_delta} was expected")
     elif abs(now["exact_mm3"] - was["exact_mm3"]) <= VOLUME_FLOOR:
         report.verdict("NO CHANGE", f"the volume moved {delta:.4f} mm³: the operation did nothing")
@@ -354,10 +355,11 @@ def run_rays(args: Any, report: Report) -> None:
         half = args.n // 2
         across = first[:half] + first[half : half * 2]
         if np.isfinite(across).any():
+            # The figures `--d` and `--tol` judge, as they are: a need reads the same (`limits`).
             level["across_mm"] = {
-                "min": round(float(np.nanmin(across)), 4),
+                "min": float(np.nanmin(across)),
                 "mean": round(float(np.nanmean(across)), 4),
-                "max": round(float(np.nanmax(across)), 4),
+                "max": float(np.nanmax(across)),
             }
         walls = second - first
         if np.isfinite(walls).any():
@@ -401,7 +403,7 @@ def run_rays(args: Any, report: Report) -> None:
         rays_right = None
         if args.d and "across_mm" in level and not missed and not in_material:
             span = level["across_mm"]
-            rays_right = span["min"] >= args.d - tol and span["max"] <= args.d + tol
+            rays_right = not (under(span["min"], args.d - tol) or over(span["max"], args.d + tol))
             if not rays_right:
                 problems.append(
                     f"at {z:.3f} it measures {span['min']:.3f} to {span['max']:.3f} mm across, "
@@ -410,7 +412,7 @@ def run_rays(args: Any, report: Report) -> None:
         if args.d and "section_fit_d_mm" in level and not missed:
             fit = level["section_fit_d_mm"]
             report.second(f"section at {z:.3f}: a circle fit gives d {fit}")
-            if rays_right is not None and rays_right != (abs(fit - args.d) <= tol):
+            if rays_right is not None and rays_right != (not over(abs(fit - args.d), tol)):
                 differs.append(f"at {z:.3f} the rays and the section fit ({fit} mm) differ")
         elif hole is not None:
             report.second(
@@ -438,9 +440,10 @@ def in_air_said(level: dict[str, Any]) -> str:
     was read from a rounded corner's centre, which lay in the box's hollow, as the corner's
     radius, over three long calls: it was the hollow's width."""
     span = level["across_mm"]
+    low, high = span["min"], span["max"]
     return (
         f"the centre is in air, so `across` is the open space's width through it: from the wall "
-        f"one ray meets to the wall the opposite ray meets, {span['min']} to {span['max']} mm "
+        f"one ray meets to the wall the opposite ray meets, {low:.4f} to {high:.4f} mm "
         f"here, and `nearest_wall_mm`, {level.get('nearest_wall_mm')} mm, how far the nearest "
         "wall is. Centred on a hole's or a bore's axis that's its diameter and radius, and "
         "anywhere else it's the width of whatever space the point is in. It isn't an outside "
@@ -454,7 +457,10 @@ def _level_line(level: dict[str, Any]) -> str:
     text = f"at {level['at']}: {level['missed']} of {level['rays']} rays missed"
     if "across_mm" in level:
         span = level["across_mm"]
-        text += f", across {span['min']} / {span['mean']} / {span['max']} mm (min / mean / max)"
+        text += (
+            f", across {span['min']:.4f} / {span['mean']} / {span['max']:.4f} mm "
+            "(min / mean / max)"
+        )
     if "wall_beyond_min_mm" in level:
         text += f", wall beyond at least {level['wall_beyond_min_mm']} mm"
     if "nearest_wall_mm" in level and level["start_in_material"] <= 0.5:
@@ -485,9 +491,9 @@ def _floor(
         return
     report.fact(
         "floor_mm",
-        {"min": round(float(np.nanmin(depths)), 4), "max": round(float(np.nanmax(depths)), 4)},
+        {"min": float(np.nanmin(depths)), "max": round(float(np.nanmax(depths)), 4)},
     )
-    if abs(float(np.nanmin(depths)) - abs(args.depth)) > args.tol:
+    if over(abs(float(np.nanmin(depths)) - abs(args.depth)), args.tol):
         problems.append(
             f"the floor is {np.nanmin(depths):.3f} mm in, and {abs(args.depth)} was asked"
         )

@@ -20,6 +20,7 @@ import numpy as np
 import shapely
 import shapely.ops
 
+from . import limits
 from .readback import _circle, _frame, _turned
 from .report import Report
 from .shapes import FINE, NoAnswer, flat_heights, load, slice_at, to_manifold
@@ -27,6 +28,9 @@ from .shapes import FINE, NoAnswer, flat_heights, load, slice_at, to_manifold
 #: How far the two methods may differ, in mm, before it's a disagreement: the mesh's chords on
 #: both walls, and the spacing of rays round a small hole.
 BAND = 0.03
+#: How far a wall drawn at `--min-wall` may read under it: the fine mesh's chords on both of its
+#: edges, the sections' own error. It stays as it is: it's never widened to pass a part.
+CHORDS = 2 * FINE[0]
 #: A height this close to a level face is moved off it, in mm, so a section reads one side.
 LEVEL = 1e-3
 #: A wall whose normal is steeper than this (the z of its unit normal) isn't read by a level ray.
@@ -169,7 +173,7 @@ def run(args: Any, report: Report) -> None:
     report.numbers["hole_fit_centre"] = unturned((float(centre[0]), float(centre[1])), least_h)
     report.fact(
         "least_wall_mm",
-        round(least["wall"], 4),
+        least["wall"],
         how=f"sections across the hole, toward {least['toward']}",
     )
     report.numbers["least_wall_from"] = unturned(least["from"], least_h)
@@ -208,19 +212,26 @@ def run(args: Any, report: Report) -> None:
             f"rays square to the hole's wall read {rays['wall']:.4f}: where it's least, the wall "
             "isn't square to the hole, as between two corners"
         )
-    # A wall drawn at the limit reads a hair under it on the mesh's chords.
-    if args.min_wall is not None and least["wall"] < args.min_wall - 2 * FINE[0]:
+    # A wall drawn at the limit reads a hair under it on the mesh's chords: `CHORDS`, the
+    # reading's own error, held through the shared rule (`limits`).
+    if args.min_wall is not None and limits.under(least["wall"], args.min_wall - CHORDS):
         problems.append(
-            f"the least wall round the hole is {least['wall']:.3f} mm, toward {least['toward']}, "
-            f"under the {args.min_wall} mm asked for"
+            f"the least wall round the hole is {limits.said(least['wall'], args.min_wall)} mm, "
+            f"toward {least['toward']}, under the {args.min_wall:g} mm asked for, past the mesh's "
+            f"{CHORDS:g} mm of chords"
         )
     if differs:
         report.verdict("DISAGREE", "; ".join(differs))
     elif problems:
         report.verdict("FAIL", "; ".join(problems))
     else:
+        held = ""
+        if args.min_wall is not None:
+            held = f", at least the {args.min_wall:g} mm asked for"
+            if limits.under(least["wall"], args.min_wall):
+                held = f", the {args.min_wall:g} mm asked for, within the mesh's {CHORDS:g} mm"
         report.verdict(
             "OK",
             f"the least wall round the hole is {least['wall']:.3f} mm, toward {least['toward']}"
-            + (f", at least the {args.min_wall} mm asked for" if args.min_wall is not None else ""),
+            + held,
         )
