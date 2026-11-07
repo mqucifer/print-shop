@@ -14,9 +14,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import trimesh
 
-from print_shop.bench.refine import MARK
+from print_shop.bench.refine import MARK, ON_BED, bed_contact
 from print_shop.rounds.box import Ran
 from print_shop.slicer.orca import PauseAt, PlateObject, PlateSlice
 
@@ -41,8 +42,17 @@ class FakeBox:
             return Ran(0, MARK + json.dumps({"bare": [], "overlaps": [], "layers": 0}), 0.1)
         files = {}
         (where / request["out"]).mkdir(exist_ok=True)
+        laid = request.get("on_bed") or {}
         for name in request["files"]:
             mesh: Any = trimesh.load(where / name, force="mesh")
+            # Turned as the image turns it, onto the side named (mqucifer/print-shop#66).
+            axis, degrees = ON_BED[laid.get(name, "-z")]
+            if degrees:
+                mesh.apply_transform(
+                    trimesh.transformations.rotation_matrix(  # type: ignore[no-untyped-call]
+                        np.radians(degrees), axis
+                    )
+                )
             target = Path(request["out"]) / (Path(name).stem + ".stl")
             mesh.export(where / target)
             low, high = mesh.bounds
@@ -63,6 +73,8 @@ class FakeBox:
                 "mesh_volume_mm3": float(mesh.volume),
                 "mesh_box_mm": [[float(v) for v in low], [float(v) for v in high]],
                 "outline_z": float((low[2] + high[2]) / 2),
+                "on_bed": laid.get(name, "-z"),
+                "bed_contact_mm2": bed_contact(mesh),
                 "outline": [{"outer": outline, "holes": [], "area": 1.0}],
             }
         return Ran(0, MARK + json.dumps({"files": files}), 0.1)

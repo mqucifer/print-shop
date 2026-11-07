@@ -8,7 +8,10 @@ Two requests, each one JSON argument, each answered by one line, `MARK` then JSO
   (`AppConfig.cpp`, v2.4.2), absolute, as `shapes._tessellated` meshes. For each file: the
   tolerance, the triangles, whether the mesh is closed, and its volume and box beside OCCT's, so
   what Orca is given is held to the file. An STL is copied through and read the same way. Each
-  file's outline at its mid-height comes too, for reading where Orca's lines fall.
+  file's outline at its mid-height comes too, for reading where Orca's lines fall. A file is laid
+  first on the face the run named for the bed (`on_bed`, mqucifer/print-shop#66), turned as a
+  whole, and the mesh says how much of it then touches the bed: on `eval-lid-1` the lid printed
+  lip down, as stored, where the run said outside face down.
 - **`cover`**: where a part's section has no line of Orca's at all. On the probe a 0.5 and a 0.7 mm
   bar across a window got no line and no warning. For each layer, the section at its mid-height
   less every line laid there, each as wide as Orca says: what's left, shrunk by `least`, and
@@ -34,6 +37,18 @@ TIE = 1e-3
 #: Orca's GUI defaults for meshing a STEP file, in mm and radians.
 LINEAR = 0.003
 ANGULAR = 0.5
+#: Which way of the file, as stored, lies on the bed, and the turn that lays it there: about an
+#: axis through the origin, in degrees. `-z` is as stored.
+ON_BED: dict[str, tuple[tuple[float, float, float], float]] = {
+    "-z": ((1.0, 0.0, 0.0), 0.0),
+    "+z": ((1.0, 0.0, 0.0), 180.0),
+    "+x": ((0.0, 1.0, 0.0), 90.0),
+    "-x": ((0.0, 1.0, 0.0), -90.0),
+    "+y": ((1.0, 0.0, 0.0), -90.0),
+    "-y": ((1.0, 0.0, 0.0), 90.0),
+}
+#: How near the lowest point a face facing down counts as on the bed, in mm.
+ON_BED_MM = 0.01
 
 
 def _box(low: Any, high: Any) -> list[list[float]]:
@@ -75,14 +90,20 @@ def mesh(request: dict[str, Any]) -> dict[str, Any]:
     angular = float(request.get("angular", ANGULAR))
     out = Path(request["out"])
     out.mkdir(parents=True, exist_ok=True)
+    laid: dict[str, str] = request.get("on_bed") or {}
     files: dict[str, Any] = {}
     for name in request["files"]:
         row: dict[str, Any] = {"linear_mm": linear, "angular_rad": angular}
+        face = laid.get(name, "-z")
+        axis, degrees = ON_BED[face]
+        row["on_bed"] = face
         try:
             part = load(name)
             target = out / (Path(name).stem + ".stl")
             if part.is_brep:
                 shape = part.shape
+                if degrees:
+                    shape = shape.rotate((0, 0, 0), axis, degrees)
                 BRepTools.Clean_s(shape.wrapped)
                 BRepMesh_IncrementalMesh(shape.wrapped, linear, False, angular, True)
                 vertices, triangles = shape.tessellate(1e9)
@@ -104,9 +125,20 @@ def mesh(request: dict[str, Any]) -> dict[str, Any]:
                 built.export(str(target))
             else:
                 built = part.fine()
-                shutil.copyfile(name, target)
-                row["meshed"] = "an STL, copied as it is"
+                if degrees:
+                    built = built.copy()
+                    built.apply_transform(
+                        trimesh.transformations.rotation_matrix(  # type: ignore[no-untyped-call]
+                            np.radians(degrees), axis
+                        )
+                    )
+                    built.export(str(target))
+                    row["meshed"] = f"an STL, turned to lie on its {face} side"
+                else:
+                    shutil.copyfile(name, target)
+                    row["meshed"] = "an STL, copied as it is"
             low, high = np.asarray(built.bounds)
+            row["bed_contact_mm2"] = bed_contact(built)
             row["stl"] = str(target)
             row["triangles"] = int(len(built.faces))
             row["closed"] = bool(built.is_watertight)
@@ -119,6 +151,17 @@ def mesh(request: dict[str, Any]) -> dict[str, Any]:
             row["unread"] = str(exc)[:400]
         files[name] = row
     return {"files": files}
+
+
+def bed_contact(built: Any) -> float:
+    """How much of a mesh, as it lies, touches the bed: the faces facing down at its lowest."""
+    import numpy as np
+
+    normals = np.asarray(built.face_normals)
+    centres = np.asarray(built.triangles_center)
+    low = float(np.asarray(built.bounds)[0][2])
+    down = (normals[:, 2] < -0.9999) & (centres[:, 2] <= low + ON_BED_MM)
+    return round(float(np.asarray(built.area_faces)[down].sum()), 3)
 
 
 def cover(request: dict[str, Any]) -> dict[str, Any]:

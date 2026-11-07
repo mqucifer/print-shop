@@ -7,6 +7,7 @@ Orca are fakes (`refine_fakes.py`). `test_refine_orca.py` runs the real ones on 
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from typing import Any, cast
 
@@ -22,13 +23,17 @@ from print_shop.rounds.run import Refused
 from print_shop.slicer import gcode
 from print_shop.slicer.orca import PauseAt, pause_items, with_colour
 from tests.refine_fakes import FakeBox, FakeOrca, pause_record
-from tests.refine_fixtures import make_run
+from tests.refine_fixtures import make_enclosure_run, make_run
 
 CONTEXT = ["Elegoo PETG Translucent", "grey=Elegoo PLA"]
 
 
 def _pass(root: Path, record: dict[str, Any], orca: FakeOrca | None = None, **kw: Any) -> Pass:
     folder, ledger = make_run(root, "fx", **kw)
+    return _passing(folder, ledger, record, orca)
+
+
+def _passing(folder: Path, ledger: Any, record: dict[str, Any], orca: FakeOrca | None) -> Pass:
     run = approved.read(folder, ledger)
     return Pass(
         run,
@@ -351,3 +356,131 @@ def test_a_proposal_waits_for_a_signed_decision_once(tmp_path: Path) -> None:
     assert approved.read(p.approved.folder, p.ledger).groups[0].files[0].sha256 == (
         p.approved.groups[0].files[0].sha256
     )
+
+
+# Laid as the run says, and read as its kind (mqucifer/print-shop#66)
+
+
+def _enclosure(root: Path, on_bed: dict[str, str], *files: str) -> tuple[Pass, FakeOrca]:
+    orca = FakeOrca()
+    folder, ledger = make_enclosure_run(root, "case", on_bed, files or ("lid.stl",))
+    return _passing(folder, ledger, {}, orca), orca
+
+
+def test_a_lid_stored_lip_down_prints_outside_face_down_as_done_says(tmp_path: Path) -> None:
+    """On `eval-lid-1` the pass printed the lid as stored, lip down, with 6.2 m of bridge at the
+    plate's underside, where the closing words said outside face down."""
+    p, orca = _enclosure(tmp_path, {"lid.stl": "+z"})
+    assert p.approved.groups[0].files[0].on_bed == "+z"
+    done = p.run()
+    (plate,) = orca.plates
+    (laid,) = [f for f in done.findings if f.kind == "on_bed"]
+    assert laid.read.startswith("`lid.stl` is laid with its +z side on the bed, as `done` named")
+    assert laid.numbers["bed_contact_mm2"] == pytest.approx(1200, abs=0.5), "the plate's top"
+    assert laid.numbers["height_mm"] == pytest.approx(6)
+    # What Orca was given is the lid turned over: its plate on the bed, its lip up.
+    import trimesh
+
+    given: Any = trimesh.load(plate["objects"][0].stl, force="mesh")
+    low, high = given.bounds
+    assert high[2] - low[2] == pytest.approx(6)
+    down = given.face_normals[:, 2] < -0.9999
+    at_bed = given.triangles_center[:, 2] < low[2] + 0.01
+    assert given.area_faces[down & at_bed].sum() == pytest.approx(1200, abs=0.5)
+
+
+def test_an_enclosure_is_read_as_its_kind_with_no_frame_panes_or_pause(tmp_path: Path) -> None:
+    """On `eval-lid-1` every row spoke of a frame and panes: "no pane sits in the frame, and the
+    run never ran `pause`"."""
+    p, orca = _enclosure(tmp_path, {"lid.stl": "+z"})
+    done = p.run()
+    assert not [f for f in done.findings if f.kind in ("pause", "pause_placed", "over_pane")]
+    assert not any("frame" in (f.plate or "") for f in done.findings)
+    assert [o.stl.name for o in orca.plates[0]["objects"]] == ["A-case__lid.stl"]
+    assert orca.plates[0]["pauses"] is None
+    (row,) = p.ledger.rows("SELECT file, role FROM refine_files")
+    assert tuple(row) == ("lid.stl", "part")
+    (steps,) = done.steps.values()
+    assert steps == [
+        "Print `refinements/1/plates/A-case-blue/A-case-blue.gcode`: `lid.stl` with its +z side "
+        "on the bed in blue, about 12 min and 3.3 g by Orca's estimate."
+    ]
+
+
+def test_a_plate_stored_on_its_edge_prints_flat_and_a_side_with_no_flat_is_said(
+    tmp_path: Path,
+) -> None:
+    """On `eval-plug-1` a 2 mm plate stood on its edge, 99 layers, where the run said flat."""
+    p, orca = _enclosure(tmp_path, {"plate.stl": "-y", "cone.stl": "+z"}, "plate.stl", "cone.stl")
+    done = p.run()
+    found = {str(f.file).split("/")[-1]: f for f in done.findings if f.kind == "on_bed"}
+    assert found["plate.stl"].numbers["height_mm"] == pytest.approx(2)
+    assert found["plate.stl"].numbers["bed_contact_mm2"] == pytest.approx(600, abs=0.5)
+    cone = found["cone.stl"]
+    assert cone.numbers["why"] == "not flat" and cone.numbers["laid"] == "-z"
+    assert "touches the bed over 0 mm²" in cone.read
+    assert "It prints as stored, its -z side down" in cone.means
+    import trimesh
+
+    tall = {
+        o.stl.name: float(trimesh.load(o.stl, force="mesh").extents[2])
+        for o in orca.plates[0]["objects"]
+    }
+    assert tall == {"A-case__plate.stl": pytest.approx(2), "A-case__cone.stl": pytest.approx(10)}
+
+
+def test_a_file_with_no_side_named_prints_as_stored_and_says_so(tmp_path: Path) -> None:
+    p, _ = _enclosure(tmp_path, {})
+    done = p.run()
+    (said,) = [f for f in done.findings if f.kind == "on_bed"]
+    assert said.read == "`done` named no side for the bed for `lid.stl`"
+    assert said.numbers["laid"] == "-z"
+
+
+def test_a_given_pane_is_context_for_the_pause_and_never_printed(tmp_path: Path) -> None:
+    """On `eval-fit-2` the given pane wasn't in the approved folder, so the pass set no pause."""
+    orca = FakeOrca(closes_at=14)
+    p = _pass(tmp_path, pause_record(13, 0.1, 2.6), orca, given_pane=True, glass=True)
+    done = p.run()
+    asked = next(c for c in p.box.calls if c[2:3] == ["pause"])  # type: ignore[attr-defined]
+    assert asked[asked.index("--pocket-z") + 1] == "2"
+    assert asked[asked.index("--pane-thickness") + 1] == "1"
+    pause = next(f for f in done.findings if f.kind == "pause")
+    assert "`references/pane_1.stl`, given, as it sits: context only, never printed" in pause.read
+    (frame_plate,) = orca.plates
+    assert [o.stl.name for o in frame_plate["objects"]] == ["A-with-pause__frame.stl"]
+    assert [x.print_z for x in frame_plate["pauses"]] == [2.8]
+    over = next(f for f in done.findings if f.kind == "over_pane")
+    assert "`pane_1.stl`" in over.read
+    rows = p.ledger.rows("SELECT file, role FROM refine_files ORDER BY role")
+    assert [tuple(r) for r in rows] == [
+        ("references/pane_1.stl", "context"),
+        ("frame.stl", "frame"),
+    ]
+    (steps,) = done.steps.values()
+    assert "set the given `references/pane_1.stl` in their pockets" in steps[0]
+
+
+def test_with_no_pane_file_to_hand_the_pause_is_read_at_glasss_own_figures(
+    tmp_path: Path,
+) -> None:
+    folder, ledger = make_run(tmp_path, "fx", given_pane=True, glass=True)
+    shutil.rmtree(folder / "work")
+    p = _passing(folder, ledger, pause_record(13, 0.1, 2.6), FakeOrca())
+    done = p.run()
+    pause = next(f for f in done.findings if f.kind == "pause")
+    assert "the frame's `glass` as the run declared it" in pause.read
+    assert "the pocket at z 2 and a 1 mm pane" in pause.read
+
+
+def test_a_frame_paused_on_prints_as_stored_whatever_side_is_named(tmp_path: Path) -> None:
+    folder, ledger = make_run(tmp_path, "fx", glass=True)
+    review = json.loads(
+        ledger.rows("SELECT review FROM approvals WHERE run='fx'")[0]["review"]
+    )
+    review["on_bed"] = {"frame.stl": "+z"}
+    ledger.change("UPDATE approvals SET review=? WHERE run='fx'", json.dumps(review))
+    done = _passing(folder, ledger, pause_record(13, 0.1, 2.6), FakeOrca()).run()
+    (said,) = [f for f in done.findings if f.kind == "on_bed" and "frame" in str(f.file)]
+    assert said.numbers["why"] == "a frame paused on"
+    assert "it prints as stored, its -z side down" in said.means

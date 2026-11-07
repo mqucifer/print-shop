@@ -287,6 +287,27 @@ def test_done_runs_pause_too_and_a_closing_pause_it_never_ran_cant_pass(tmp_path
     assert "`light`, `capture`, `pause`" in aside["reply"]
 
 
+def test_done_takes_the_side_each_file_lies_on_for_the_refinement_pass(tmp_path: Path) -> None:
+    """mqucifer/print-shop#66: on `eval-lid-1` and `eval-plug-1` the side to print on was only in
+    the closing words, and the pass printed each part as stored."""
+    run = started(
+        tmp_path,
+        tool("done", part=["pane.step"], glass=GLASS, on_bed={"pane.step": "+q"}, **DONE),
+        tool("done", part=["pane.step"], glass=GLASS, on_bed={"lid.step": "+z"}, **DONE),
+        tool("done", part=["pane.step"], glass=GLASS, on_bed={"pane.step": "z"}, **DONE),
+    )
+    in_rounds(run, THICK)
+    assert run.drive().name == "met"
+    wrong_side, not_part, met = replies(run)[:3]
+    assert wrong_side["why"] == "not_on_bed" and "`+q` isn't a side" in wrong_side["reply"]
+    assert not_part["why"] == "not_on_bed" and "isn't a file of `part`" in not_part["reply"]
+    assert met["outcome"] == "ok"
+    (row,) = run.ledger.rows("SELECT review FROM approvals WHERE run=?", "r")
+    assert json.loads(row["review"])["on_bed"] == {"pane.step": "+z"}
+    readme = (run.folder / "approvals" / "1" / "review" / "README.md").read_text()
+    assert "it prints with its +z side on the bed (the model's word)" in readme
+
+
 def test_light_fails_a_pane_with_nothing_open_whatever_its_verdict(tmp_path: Path) -> None:
     """With no limit given, `light` is a reading and says OK: the kind's rule is that light
     passes through every pane."""

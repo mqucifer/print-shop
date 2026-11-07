@@ -433,6 +433,15 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
             {
                 **LOOKS,
                 **_glass(toolset),
+                "on_bed": {
+                    "type": "object",
+                    "description": "Which side of each file, as your script stores it, lies on "
+                    'the bed when it prints: {"lid.step": "+z"}, each one of -z, +z, -x, +x, -y '
+                    "or +y. `-z` is as stored, its underside down; `+z` turns it over, so a lid "
+                    "stored lip down prints outside face down. The refinement pass after approval "
+                    "lays each file so, or says why it can't. A file not named prints as stored. "
+                    "Optional.",
+                },
                 "groups": {
                     "type": "array",
                     "description": "The ways the part prints, each with its own files: "

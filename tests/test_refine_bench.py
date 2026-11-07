@@ -79,6 +79,31 @@ def test_a_step_file_is_meshed_at_orcas_own_defaults_and_held_to_occt(work: Path
     assert block["meshed"] == "an STL, copied as it is" and block["triangles"] == 12
 
 
+def test_a_file_is_laid_on_the_side_the_run_named_and_says_what_touches_the_bed(
+    work: Path,
+) -> None:
+    """mqucifer/print-shop#66: on `eval-plug-1` a 2 mm plate stored upright printed on its edge.
+    Turned in OCCT before meshing, so the mesh is still held to OCCT's own box and volume."""
+    (work / "make.py").write_text(
+        'import cadquery as cq\ncq.exporters.export(cq.Workplane("XY").box(30, 2, 20, '
+        'centered=False), "upright.step")\n'
+    )
+    made = host.run(["make.py"], work, python=True)
+    assert made.returncode == 0, made.stdout + made.stderr
+    request = {"request": "mesh", "files": ["upright.step"], "out": "m"}
+    stored = _ask(work, request)["files"]["upright.step"]
+    laid = _ask(work, {**request, "out": "laid", "on_bed": {"upright.step": "-y"}})["files"][
+        "upright.step"
+    ]
+    assert stored["on_bed"] == "-z" and stored["bed_contact_mm2"] == pytest.approx(60)
+    assert laid["on_bed"] == "-y" and laid["bed_contact_mm2"] == pytest.approx(600)
+    (x0, y0, z0), (x1, y1, z1) = laid["mesh_box_mm"]
+    assert (x1 - x0, y1 - y0, z1 - z0) == pytest.approx((30, 20, 2), abs=1e-3)
+    flat = [v for corner in laid["mesh_box_mm"] for v in corner]
+    assert [v for corner in laid["occt_box_mm"] for v in corner] == pytest.approx(flat, abs=0.01)
+    assert laid["occt_volume_mm3"] == pytest.approx(1200, rel=1e-6)
+
+
 def _layer(lines: list[list[float]]) -> dict[str, Any]:
     return {"n": 1, "z": 0.2, "height": 0.2, "lines": lines}
 

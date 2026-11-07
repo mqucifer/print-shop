@@ -73,6 +73,7 @@ def write(
     groups: list[dict[str, Any]],
     looks: dict[str, dict[str, str]],
     wanted: list[Need],
+    on_bed: dict[str, str] | None = None,
     readings: list[Reading],
     standing: list[Standing],
     overlap: dict[str, Any],
@@ -88,6 +89,9 @@ def write(
     renamed = shared_names(shared, looks)
     # Each file's colour and label, by its name in the run, for the refinement pass after approval.
     held: dict[str, Any] = {"groups": [], "shared": renamed, "looks": looks}
+    # The side each file lies on, by its name in the run, for the pass (mqucifer/print-shop#66).
+    if on_bed:
+        held["on_bed"] = on_bed
     letters = iter(string.ascii_uppercase)
     lines = [
         f"# {run}: the files to print (round {round_n})",
@@ -123,6 +127,9 @@ def write(
         for name in group["files"]:
             look = looks.get(name)
             said = f": {look['label']}, {look['colour']}" if look else ""
+            side = (on_bed or {}).get(name)
+            if side and side != "-z":
+                said += f"; it prints with its {side} side on the bed (the model's word)"
             lines.append(f"- `{Path(name).name}`{said}")
         if shared:
             lines.append(f"- and the {len(shared)} files below")

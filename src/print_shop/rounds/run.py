@@ -2309,6 +2309,9 @@ class Run:
         groups = self._groups(args.get("groups"), part)
         if isinstance(groups, Judged):
             return groups
+        on_bed = _on_bed(args.get("on_bed"), part)
+        if isinstance(on_bed, str):
+            return Judged("done", "failed", on_bed, "not_on_bed")
         fix_shape, closing = str(args["fix_shape"]).strip(), str(args["closing"]).strip()
         if not fix_shape or not closing:
             reply = "`fix_shape` and `closing` each take your own words, and one is empty."
@@ -2435,6 +2438,7 @@ class Run:
             delivered = {
                 "groups": groups,
                 "looks": looks,
+                "on_bed": on_bed,
                 "standing": standing,
                 "glass": panes_read,
                 "curves": strips,
@@ -2630,6 +2634,7 @@ class Run:
             part=part,
             groups=delivered["groups"],
             looks=looks,
+            on_bed=delivered.get("on_bed") or {},
             wanted=wanted,
             readings=judgement.readings,
             standing=delivered["standing"],
@@ -3849,6 +3854,36 @@ def only_session(root: Path) -> Iterator[None]:
         except OSError as exc:
             raise Refused(f"another session is running under {root}") from exc
         yield
+
+
+#: The sides a file can lie on, as `done`'s `on_bed` names them (mqucifer/print-shop#66).
+SIDES = ("-z", "+z", "-x", "+x", "-y", "+y")
+
+
+def _on_bed(given: Any, part: list[str]) -> dict[str, str] | str:
+    """Which side of each file lies on the bed, as `done` gives it, or what's wrong with it. On
+    `eval-lid-1` and `eval-plug-1` the refinement pass printed each part as stored, where the
+    closing words said otherwise: the side is data now, for the pass to lay the part by."""
+    shape = (
+        '`on_bed` gives each file the side of it that lies on the bed: {"lid.step": "+z"}, '
+        f"each one of {', '.join(SIDES)}, as your script stores it."
+    )
+    if not given:
+        return {}
+    if not isinstance(given, dict):
+        return shape
+    found: dict[str, str] = {}
+    for name, side in given.items():
+        if name not in part:
+            named = ", ".join(f"`{f}`" for f in part)
+            return f"`on_bed` names `{name}`, which isn't a file of `part` ({named}). {shape}"
+        side = str(side).strip().lower()
+        if side in ("z", "x", "y"):
+            side = "+" + side
+        if side not in SIDES:
+            return f"`{name}`: `{side}` isn't a side. {shape}"
+        found[name] = side
+    return found
 
 
 def what_next(run: Run, ending: Ending) -> str:
