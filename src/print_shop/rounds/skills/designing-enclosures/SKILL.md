@@ -63,6 +63,7 @@ Each bench need gives `measures`, what it's about, and its command has to measur
 | the wall round a screw's boss | `wall` | `wall base.step --hole X,Y,Z --min-wall W` |
 | each part printable | `printable` | `thin base.step` |
 | how firmly the fan or the lid is held | an eye need | none measures it: say what to look for |
+| which way a part prints, such as the base on its floor | a bed need | `{"by": "bed", "file": "base.step", "side": "-z"}`, with `done`'s `on_bed` giving it the same side |
 
 - **One pair to a `clearance` need,** the part and what it must clear. `clearance` reads every pair of the files named, and a part resting on another touches it, gap 0: a board on its standoffs, or the lid on its seat, reads `TOO CLOSE` under any `--min-gap`.
 - **A lid's play is read with `--lift`.** Seated, the lid touches its seat, so its least gap is 0 whatever the lip's play. `--lift D` moves the last file named D mm along the way it closes (`--along`, z unless said) before measuring, and leaves its file where it is: D more than G2 and less than the lip's depth, so the lip stays in the walls. The least gap is then the lip's play, read on `lid.step`, the printed lid: a lip too loose is `TOO LOOSE`, too tight `TOO CLOSE`. Make no lifted copy: `done` refuses a need on a file that isn't printed.

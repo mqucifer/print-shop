@@ -36,7 +36,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from print_shop.rounds.needs import Need, Reading
+from print_shop.rounds.needs import BED, Need, Reading
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -522,6 +522,17 @@ CREATE TABLE IF NOT EXISTS need_measures (
     version INTEGER NOT NULL,
     need TEXT NOT NULL,
     measures TEXT NOT NULL,
+    PRIMARY KEY (run, version, need)
+);
+CREATE TABLE IF NOT EXISTS need_beds (
+    -- Each bed need of a version: the file, and its side as the script stores it, that lies on
+    -- the bed, which `done` checks against its `on_bed` (mqucifer/print-shop#73). A table of its
+    -- own, keyed as `need_marks`, for the same reason as `need_measures`.
+    run TEXT NOT NULL REFERENCES runs(run),
+    version INTEGER NOT NULL,
+    need TEXT NOT NULL,
+    file TEXT NOT NULL,
+    side TEXT NOT NULL,
     PRIMARY KEY (run, version, need)
 );
 CREATE TABLE IF NOT EXISTS skill_reads (
@@ -1368,6 +1379,12 @@ class DesignLedger:
                         "INSERT OR REPLACE INTO need_measures (run, version, need, measures) "
                         "VALUES (?,?,?,?)",
                         (run, version, n.id, n.measures),
+                    )
+                if n.by == BED:
+                    db.execute(
+                        "INSERT OR REPLACE INTO need_beds (run, version, need, file, side) "
+                        "VALUES (?,?,?,?,?)",
+                        (run, version, n.id, n.file, n.side),
                     )
 
     def stop_asked(self, run: str, ask: int, stop: str) -> None:

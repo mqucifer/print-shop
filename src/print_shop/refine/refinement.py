@@ -45,6 +45,7 @@ from print_shop.refine.findings import Finding
 from print_shop.rounds import lessons as lessons_module
 from print_shop.rounds.box import Box
 from print_shop.rounds.ledger import DesignLedger, now
+from print_shop.rounds.needs import BED
 from print_shop.rounds.paths import content_hash
 from print_shop.rounds.tools import recorded
 from print_shop.slicer import gcode
@@ -277,6 +278,7 @@ class Pass:
         others = [f for f in group.files if f is not frame and f not in panes]
         # A frame a pause is read on prints as stored: its pockets are where the panes sit.
         self._lay(group, pinned=[frame] if frame is not None else [])
+        self._bed_needs(group)
         plates: list[Plate] = []
         if frame is not None:
             plates.append(
@@ -452,6 +454,45 @@ class Pass:
                     },
                 )
             )
+
+    def _bed_needs(self, group: Group) -> None:
+        """Each bed need on a file of this folder, read on the file as the pass laid it: the
+        side Orca is given, not the side `done` named (mqucifer/print-shop#73). `done` held the
+        need to `on_bed`, so they differ only where the pass couldn't lay it so: a side that
+        isn't flat, or a frame a pause is read on. The file's `on_bed` finding says which."""
+        for need in self.approved.needs:
+            if need.by != BED:
+                continue
+            for f in group.files:
+                if f.was != need.file:
+                    continue
+                key = self._key(f)
+                laid = str(self.meshed.get(key, {}).get("on_bed") or "-z")
+                finding = next(
+                    (one for one in self.found if one.kind == "on_bed" and one.file == key), None
+                )
+                if finding is None:
+                    finding = Finding(
+                        "on_bed",
+                        "pass",
+                        f"`{f.name}` is laid as stored, its -z side on the bed",
+                        "`done` named no side for it",
+                        file=key,
+                        numbers={"named": None, "laid": laid},
+                    )
+                    self.found.append(finding)
+                finding.numbers = {**finding.numbers, "need": need.id, "need_side": need.side}
+                if laid == need.side:
+                    finding.means += (
+                        f"; the need `{need.id}`, its {need.side} side on the bed, holds on the "
+                        "laid part"
+                    )
+                else:
+                    finding.needs_change = True
+                    finding.means += (
+                        f"; the need `{need.id}` says its {need.side} side lies on the bed, and "
+                        f"the part is laid {laid} side down, so it doesn't hold on the laid part"
+                    )
 
     def _laid(
         self,

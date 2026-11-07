@@ -129,12 +129,15 @@ LOOKS = {
 NEED_SHAPE = (
     "Each need: `id`; `what` it must do; `source` (`request`, `answer`, `note` or `pick`, a pick's "
     "reason, with `quote`, the words as you were sent them; `reference`, `derived` or `chosen`); "
-    'and `check`, either {"by": '
+    'and `check`, one of {"by": '
     '"bench", "measures": "fit", "command": '
     '"clearance lid.step cup.step --min-gap 0.2", "verdicts": [...] (optional: which verdicts '
     'pass, exit 0 by default), "number": "pairs.0.gap_mm", "at_least": 0.2, "at_most": 0.6 '
-    '(optional: a number in that answer, and its limit)} or {"by": "eye", "look_for": "what the '
-    'Sponsor judges", "no_bench": "why no bench command measures it", where it covers a line}. '
+    '(optional: a number in that answer, and its limit)}; {"by": "eye", "look_for": "what the '
+    'Sponsor judges", "no_bench": "why no bench command measures it", where it covers a line}; '
+    'or {"by": "bed", "file": "lid.step", "side": "+z"}, for which side of a file lies on the bed '
+    "when it prints, as your script stores it: `done` checks it against its `on_bed`, so a line "
+    "saying only which way a part prints is a bed need, never an eye need. "
     'Where the request has lines: `covers`, the ids of the lines it covers (["R1"]); `fixed`: '
     "true for a non-negotiable's need, quoting its line; and `figure`, for a fixed need whose "
     "line holds a figure: how it's read, and where something changes it (such as before or after "
@@ -441,7 +444,7 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
                     "stored lip down prints with its outside on the bed. The refinement pass after "
                     "approval "
                     "lays each file so, or says why it can't. A file not named prints as stored. "
-                    "Optional.",
+                    "A bed need's file is named here, at its need's side. Optional.",
                 },
                 "groups": {
                     "type": "array",
