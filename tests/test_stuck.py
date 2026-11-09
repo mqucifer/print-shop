@@ -184,7 +184,7 @@ def test_a_note_reopening_three_needs_lists_them_and_needs_waits_for_each_mark(
     assert '- `look`: "the lid reads plain", checked by the Sponsor\'s eye' in listed
     assert "in `against_note` mark each of these kept or changed" in listed
     # A compaction's note leads with it too.
-    assert run.failing_said().startswith(stuck.REOPENED)
+    assert run.compaction_note().startswith(stuck.REOPENED + "\n\n")
 
     earlier = len(told(run))
     assert run.drive().name == "blocked"
@@ -201,7 +201,7 @@ def test_a_note_reopening_three_needs_lists_them_and_needs_waits_for_each_mark(
     assert taken["outcome"] == "ok" and taken["reply"].startswith("The needs are settled")
     assert run.state.reopened is None
     assert not after["reply"].startswith(stuck.REOPENED), "`needs` was taken"
-    assert run.failing_said() == ""
+    assert not run.compaction_note().startswith(stuck.REOPENED)
     refused = [r["why"] for r in run.ledger.rows("SELECT why FROM refusals ORDER BY seq")]
     assert refused.count("not_marked") == 3
 

@@ -202,10 +202,28 @@ class Recorder:
             )
         self.cut = {}
 
+    def _on_reasoning_trimmed(self, event: dict[str, Any]) -> None:
+        """The reasoning-trim switch's one step, for an eval's arm that turns it on: how many
+        turns lost their reasoning, and the estimate either side (mqucifer/print-shop#78)."""
+        said = {k: event.get(k) for k in ("turns", "kept", "reasoning_before", "reasoning_after")}
+        self._row(
+            "reasoning_trimmed",
+            at=event.get("t"),
+            at_call=event.get("before_call", self.requests + 1),
+            said=_json(said),
+            estimated_before=event.get("estimated"),
+            estimated_after=event.get("estimated_after"),
+        )
+
     def _on_rewrite(self, event: dict[str, Any]) -> None:
         """A change to an earlier message: what compaction cuts, counted until its event. A cut-off
-        call's reasoning, withheld as it came, isn't compaction's."""
-        if event.get("why") == "cut_off":
+        call's reasoning, withheld as it came, isn't compaction's, and nor is the reasoning-trim
+        switch's (`reasoning_trimmed` counts it). A newest turn's, withheld because it wouldn't fit
+        once compacted, is this compaction's, counted on its own (mqucifer/print-shop#78)."""
+        if event.get("why") in ("cut_off", "trimmed"):
+            return
+        if event.get("why") == "oversize":
+            self.cut["newest_reasoning_withheld"] = 1
             return
         message = event.get("message") or {}
         content = str(message.get("content") or "")

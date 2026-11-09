@@ -107,6 +107,9 @@ class Desk:
     def restate(self, args: dict[str, Any]) -> Judged:
         return Judged("restate", "ok", "kept")
 
+    def fact(self, args: dict[str, Any]) -> Judged:
+        return Judged("fact", "ok", "kept")
+
     def blocked(self, args: dict[str, Any]) -> Judged:
         return Judged("blocked", "ok", "", ending=Ending("blocked", {}))
 

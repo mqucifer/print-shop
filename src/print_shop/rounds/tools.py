@@ -531,6 +531,40 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
             },
         ),
         _spec(
+            "fact",
+            "Keep one fact you've established, by name: a figure or a finding you measured, read "
+            "or were told, with where it came from, such as a part's size from `bench info`, or "
+            "the answer to a person's question. `record/FACTS.md` holds them, and each goes whole "
+            "into every compaction's note and every new conversation, so it's never worked out "
+            "again. Setting a name again replaces it, and an empty `text` removes it. A bought "
+            "part's fact is named for its file, such as `references/fan.step`, and gives its "
+            "`box`, `way_in` and `held_by`: one fact for each bought part.",
+            {
+                "box": {
+                    "type": "string",
+                    "description": "A bought part's: its bounds from `bench info`, such as `x "
+                    "0-30, y 0-30, z 0-10`.",
+                },
+                "way_in": {
+                    "type": "string",
+                    "description": "A bought part's: the way it goes in, one of +x, -x, +y, -y, "
+                    "+z, -z.",
+                },
+                "held_by": {
+                    "type": "string",
+                    "description": "A bought part's: what holds it, as `bench clearance <part> "
+                    "<bought part> --slide <the way out>` answers, or what will until something "
+                    "does.",
+                },
+            },
+            name="A short name for it, such as `fan-airflow`, or a bought part's file.",
+            text="The fact, with its figures, in a line or two. Empty to remove it.",
+            **{
+                "from": "Where it came from: the call and what it was, such as `call 40, bench "
+                "info references/fan.step` or `the stand-in's note`."
+            },
+        ),
+        _spec(
             "blocked",
             "End the run without the part, saying what's missing. A person reads it.",
             reason="What's missing.",
@@ -553,6 +587,7 @@ DESK = (
     "done",
     "set_aside",
     "restate",
+    "fact",
     "blocked",
     "after_action",
 )
@@ -569,6 +604,7 @@ class Desk(Protocol):
     def done(self, args: dict[str, Any]) -> Judged: ...
     def set_aside(self, args: dict[str, Any]) -> Judged: ...
     def restate(self, args: dict[str, Any]) -> Judged: ...
+    def fact(self, args: dict[str, Any]) -> Judged: ...
     def blocked(self, args: dict[str, Any]) -> Judged: ...
     def after_action(self, args: dict[str, Any]) -> Judged: ...
     def bench_said(

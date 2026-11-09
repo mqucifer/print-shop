@@ -2,8 +2,9 @@
 """A run of the local model in rounds on the bench. `docs/rounds.md` says what it does.
 
 scripts/rounds.py start NAME --request FILE [--reference FILE]... [--right FILE]
-                                                                  intake, then rounds; a right
-                                                                  answer is the scenario's ranges
+                  [--trim-reasoning]                              intake, then rounds; a right
+                                                                  answer is the scenario's ranges;
+                                                                  the trim is an eval arm's, off
 scripts/rounds.py resume NAME [--note FILE] [--from WHO] [--reopen-needs]   go on after a stop
 scripts/rounds.py resume NAME --approve --by WHO [--note FILE]      a person's yes, then the
                                                                   model's after-action review
@@ -70,6 +71,7 @@ from print_shop.rounds.run import (
     what_next,
 )
 from print_shop.rounds.send import ALIAS, Sender
+from print_shop.rounds.session import TRIM_AT, TRIM_KEEP, Limits
 from print_shop.slicer.store import NoChoice
 
 
@@ -333,6 +335,12 @@ def main() -> int:
     start.add_argument(
         "--right", type=Path, help="the scenario's right answer, as ranges: kept from the model"
     )
+    start.add_argument(
+        "--trim-reasoning",
+        action="store_true",
+        help=f"an eval's arm: past reasoning over {TRIM_AT:,} tokens keeps only the last "
+        f"{TRIM_KEEP} turns', in one step, for the whole run. Off unless given",
+    )
     resume = sub.add_parser("resume")
     resume.add_argument("name")
     resume.add_argument("--note", type=Path)
@@ -478,7 +486,8 @@ def main() -> int:
                         scores.load_right(args.right)
                     except scores.NotRight as exc:
                         raise Refused(str(exc)) from exc
-                run = Run.start(root, args.name, request, args.reference, send)
+                limits = Limits(trim_reasoning_at=TRIM_AT) if args.trim_reasoning else None
+                run = Run.start(root, args.name, request, args.reference, send, limits)
                 if args.right:
                     scores.keep_right(run.folder, args.right, run.ledger)
             else:

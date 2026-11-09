@@ -8,6 +8,8 @@ reach a run in its first message, from the ledger, and only once a reviewer has 
 
 from __future__ import annotations
 
+from print_shop.rounds import facts
+
 #: What a run that's stuck is told: in the prompt where `blocked` is offered, in the refusals that
 #: point to it, and in the reply of a bench check that keeps failing (`nudge.py`). The Sponsor,
 #: 2026-11-03: "show what you have and ask what you need", and "failed and complete is a valid end".
@@ -104,21 +106,47 @@ def start(
         files = "They gave you nothing besides this."
     kept = f"{lessons.strip()}\n\n" if lessons.strip() else ""
     lines = f"{form.strip()}\n\n" if form.strip() else ""
-    return f"The Sponsor's request:\n\n{request.strip()}\n\n{files}\n\n{lines}{kept}{skills_line}"
+    return (
+        f"The Sponsor's request:\n\n{request.strip()}\n\n{files}\n\n{lines}{kept}"
+        f"{facts.START}\n\n{skills_line}"
+    )
+
+
+#: The restart's last words, and what it adds where it gives each check's tries or the facts.
+AGAIN = (
+    "An earlier conversation about this ran out of room, and this one goes on from what's there. "
+    "Your files are as you left them: list and read what you need, starting with "
+    "`record/ROUNDS.md`."
+)
+AGAIN_TRIES = (
+    " Each check's latest tries are above, so there's no need to read `record/CHECKS.md`: it "
+    "holds the same, and older tries only."
+)
+AGAIN_FACTS = " Your facts are above whole, so there's no need to read `record/FACTS.md`."
 
 
 def again(
-    start_text: str, said: list[str], needs_json: str, state: str, checks: str = ""
+    start_text: str,
+    said: list[str],
+    needs_json: str,
+    state: str,
+    checks: str = "",
+    kept_facts: str = "",
 ) -> str:
     """A new conversation from the record, when the last one wouldn't fit any more: nothing's
     lost but its reasoning, as the part, the script and the record are all on the disk. Each
     check's latest tries come with it (`nudge.record`), so it can compare them without reading
-    back what it tried (mqucifer/print-shop#39)."""
+    back what it tried (mqucifer/print-shop#39), and the facts the model kept, whole.
+
+    It gives the tries or points at `record/CHECKS.md`, never both (mqucifer/print-shop#78): one
+    run read 10.9k tokens of `CHECKS.md` and `ROUNDS.md` again, after a restart message of 31.7k
+    that already held each check's latest tries."""
     answers = "\n\n".join(said)
     tried = f"{checks.strip()}\n\n" if checks.strip() else ""
+    known = f"{kept_facts.strip()}\n\n" if kept_facts.strip() else ""
+    closing = AGAIN + (AGAIN_TRIES if tried else " `record/CHECKS.md` holds every check's tries.")
+    closing += AGAIN_FACTS if known else ""
     return (
-        f"{start_text}\n\n{answers}\n\nThe needs, as settled:\n{needs_json}\n\n{state}\n\n"
-        f"{tried}An earlier conversation about this ran out of room, and this one goes on from "
-        "what's there. Your files are as you left them: list and read what you need, starting "
-        "with `record/ROUNDS.md` and `record/CHECKS.md`."
+        f"{start_text}\n\n{answers}\n\nThe needs, as settled:\n{needs_json}\n\n{known}"
+        f"{state}\n\n{tried}{closing}"
     )
