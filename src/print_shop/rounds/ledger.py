@@ -211,7 +211,8 @@ CREATE TABLE IF NOT EXISTS timeline (
     run TEXT NOT NULL REFERENCES runs(run),
     seq INTEGER NOT NULL,
     -- start, resume, stop, compaction, restart, after_action, or asked: a call that ended
-    -- without a tool call, asked what's missing.
+    -- without a tool call, asked what's missing. reasoning_trimmed: the reasoning-trim
+    -- switch's one step, on an eval's arm that turns it on.
     kind TEXT NOT NULL,
     name TEXT,
     at TEXT,

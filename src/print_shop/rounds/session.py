@@ -92,6 +92,34 @@ SHOWN_BEFORE = (
     "any of them again.)"
 )
 NOT_CARRIED_OUT = "Not carried out: an earlier call in this turn stopped the turn."
+#: The calls whose latest arguments are what stands: each earlier one is replaced by it, and
+#: compaction makes it a note (mqucifer/print-shop#78).
+REPLACED_BY_LATEST = ("needs", "ask", "breakdown")
+#: Where each of those keeps what stands.
+LATEST_KEPT = {
+    "needs": "`record/needs.json` holds the needs as settled",
+    "ask": "the latest `ask` stays whole",
+    "breakdown": "`record/breakdown.md` holds the latest",
+}
+#: An argument this short stays as it is in a replaced call, such as an ask's `stop`.
+SHORT_ARGUMENT = 80
+#: A one-off script's share of the main one's changes, under which it isn't a main script: the
+#: context study's rule for the main script (`findings.md`, "Limits").
+MAIN_SHARE = 0.35
+#: What an earlier compaction's note becomes: only the latest stays.
+EARLIER_NOTE = "(compacted: an earlier compaction's note. The latest one, further on, says it now.)"
+#: The old note's opening, for a run from before notes were kept by their place.
+OLD_NOTE = "Compacted. Still failing, from `record/CHECKS.md`:"
+#: Said in the note when the newest turn's reasoning didn't fit and isn't sent back.
+WITHHELD = (
+    "Your last turn's reasoning, about {tokens:,} tokens, didn't fit in the conversation even "
+    "compacted, so it isn't sent back: its tool calls and their replies are. If it worked out a "
+    "figure or a plan you still need, keep it with `fact` or say it again in your next reasoning."
+)
+#: The reasoning-trim switch's settings, for an arm of the operator's evals: off unless a run
+#: sets them (mqucifer/print-shop#78, the context study's option (e)).
+TRIM_AT = 40_000
+TRIM_KEEP = 3
 RETRY_STATUS = (408, 409, 425, 429, 500, 502, 503, 504)
 
 
@@ -124,6 +152,10 @@ class Limits:
     # A call whose reasoning repeats earlier text past this share gets a row for review. It decides
     # nothing, and nothing cuts a call for it.
     review_repeat_share: float = 0.5
+    # Past reasoning, in tokens, over which every turn but the last `trim_keep` loses its
+    # reasoning, in one step: 0 is off, as it is unless an eval's arm turns it on.
+    trim_reasoning_at: int = 0
+    trim_keep: int = TRIM_KEEP
     # The after-action review's calls, after the approval: it ends on `after_action`, and this is
     # only so a review that never calls it ends by name.
     after_action_calls: int = 30
@@ -199,14 +231,18 @@ class Session:
     replies: dict[int, dict[str, Any]] = field(default_factory=dict)
     # Told each event as it's kept, for the ledger.
     heard: Callable[[dict[str, Any]], None] | None = None
-    # Asked right after a compaction for what to say before the next call: the run's failing
-    # checks (mqucifer/print-shop#45). Empty text says nothing.
+    # Asked right after a compaction for what to say before the next call: the run's facts, open
+    # needs, what a person last asked and its failing checks (mqucifer/print-shop#45, #78). Empty
+    # text says nothing.
     after_compaction: Callable[[], str] | None = None
+    # Where this conversation's compaction notes are, so only the latest stays whole.
+    notes_at: list[int] = field(default_factory=list)
 
     def begin(self, *start: dict[str, Any]) -> None:
         """A new conversation. An earlier one in the same run stays in the records."""
         self.messages = list(start)
         self.replies = {}
+        self.notes_at = []
         self.logged = 0
         self.last_prompt = 0
         self.last_chars = 0
@@ -236,6 +272,7 @@ class Session:
                     self.logged_params = event["params"]
                 if event["from"] == 0:
                     self.replies = {}
+                    self.notes_at = []
             elif kind == "call":
                 self.calls += 1
                 self.model_s += float(event.get("seconds") or 0)
@@ -252,6 +289,8 @@ class Session:
                 self.replies[int(event["index"])] = event["info"]
             elif kind == "compacted":
                 self.compactions += 1
+            elif kind == "compaction_note":
+                self.notes_at.append(int(event["index"]))
             elif kind == "picture":
                 self.views += 1
             elif kind == "quiet_reply":
@@ -303,14 +342,62 @@ class Session:
             if ending is not None:
                 return self._ended(ending)
 
-    def _withhold_reasoning(self, index: int) -> None:
+    def _withhold_reasoning(self, index: int, why: str = "cut_off") -> None:
         """A call cut off at `max_tokens` goes back without its reasoning, its text and calls as
         they came. On `suncatcher-2` each such call's 65k tokens were resent whole, as the newest
         turn's, and calls 258-262 compacted once a call. The `call` event keeps all of it, and
-        the change is a rewrite, kept after a snapshot so the records can replay it."""
+        the change is a rewrite, kept after a snapshot so the records can replay it. A newest
+        turn too big to fit once compacted goes back the same way (`oversize`)."""
         self.snapshot()
         self.messages[index] = {**self.messages[index], "reasoning_content": ""}
-        self._record("rewrite", index=index, message=self.messages[index], why="cut_off")
+        self._record("rewrite", index=index, message=self.messages[index], why=why)
+
+    def _withhold_newest(self) -> int:
+        """The newest turn's reasoning, withheld when the conversation won't fit even compacted,
+        and its tokens, about: 0 when it had none (mqucifer/print-shop#78). Two of the three
+        `context_full` endings in the context study came from one long newest turn, which
+        compaction keeps whole: pi5's call 147 reasoned for 30k tokens, and 149k came down only
+        to 141k. A restart lost all its reasoning instead, and the run's plan with it."""
+        last = max((i for i, m in enumerate(self.messages) if m["role"] == "assistant"), default=-1)
+        if last < 0 or not self.messages[last].get("reasoning_content"):
+            return 0
+        tokens = int(len(str(self.messages[last]["reasoning_content"])) / CHARS_PER_TOKEN)
+        self._withhold_reasoning(last, "oversize")
+        return tokens
+
+    def _trim_reasoning(self) -> None:
+        """The reasoning-trim switch, off unless `trim_reasoning_at` is set: once past turns'
+        reasoning passes it, every turn but the last `trim_keep` loses its reasoning, all in one
+        step, so the prefix cache misses once and not on every call (the context study's option
+        (e)). It's for an arm of the operator's evals, and nothing turns it on by default."""
+        at = self.limits.trim_reasoning_at
+        if not at:
+            return
+        turns = [i for i, m in enumerate(self.messages) if m["role"] == "assistant"]
+        thought = sum(len(str(self.messages[i].get("reasoning_content") or "")) for i in turns)
+        if thought / CHARS_PER_TOKEN <= at:
+            return
+        keep = max(self.limits.trim_keep, 0)
+        cut = [i for i in turns[: len(turns) - keep] if self.messages[i].get("reasoning_content")]
+        if not cut:
+            return
+        before = self.estimate()
+        self.snapshot()
+        for i in cut:
+            self.messages[i] = {**self.messages[i], "reasoning_content": ""}
+            self._record("rewrite", index=i, message=self.messages[i], why="trimmed")
+        left = sum(len(str(self.messages[i].get("reasoning_content") or "")) for i in turns)
+        self._record(
+            "reasoning_trimmed",
+            before_call=self.requests + 1,
+            turns=len(cut),
+            kept=keep,
+            reasoning_before=int(thought / CHARS_PER_TOKEN),
+            reasoning_after=int(left / CHARS_PER_TOKEN),
+            estimated=before,
+            estimated_after=self.estimate(),
+            limit=at,
+        )
 
     def _asking(self) -> tuple[str, ...]:
         """The asking tools this session offers: none in the after-action review."""
@@ -424,9 +511,23 @@ class Session:
         - What the Sponsor said is never touched: it's in user messages. So is the start, with
           the required skills it gives whole (mqucifer/print-shop#61): on `suncatcher-3` a skill
           read with `skill` was lost to the next of 31 compactions, and read again.
+
+        **What a later call replaced goes** (mqucifer/print-shop#78). On pi5 at call 138, 29% of
+        what compaction kept was replaced content: a `needs` list sent 7 times stayed 7 times,
+        26.8k tokens with 22.1k replaced, beside 11 one-off scripts and 18 restated lists. The
+        context study's estimate is that this takes that floor from 109k tokens to about 70k.
+        - Only the latest `needs`, `ask` and `breakdown` call keeps its arguments whole. Each
+          earlier one keeps its short arguments, and the rest becomes a note.
+        - A one-off script, written once, run once and left since, becomes a note with its run's
+          gist. The main scripts stay: any `done` names, and any changed at least 35% as often as
+          the most changed one.
+        - Only the latest compaction's note stays: each earlier one becomes a note.
         """
         last = max((i for i, m in enumerate(self.messages) if m["role"] == "assistant"), default=-1)
         kept, copies = self._files(last)
+        one_offs = self._one_offs(last, kept)
+        kept -= {("call", i, k) for i, k in one_offs}
+        replaced = self._replaced(last)
         latest: dict[str, int] = {}
         for i, info in self.replies.items():
             for name in ("run", "bench", "done"):
@@ -448,12 +549,16 @@ class Session:
                         noted = all(NOTE_LINE.fullmatch(str(args[t])) for t in texts if t in args)
                         if not noted:
                             size = len(str(function.get("arguments")))
-                            note = COMPACTED.format(what=f"{size} characters")
+                            note = one_offs.get((i, k)) or COMPACTED.format(
+                                what=f"{size} characters"
+                            )
                             short = {**args, **{t: note for t in texts if t in args}}
                             called = {
                                 **called,
                                 "function": {**function, "arguments": json.dumps(short)},
                             }
+                    elif (i, k) in replaced:
+                        called = _noted_call(called, replaced[(i, k)])
                     calls.append(called)
                 if calls:
                     changed["tool_calls"] = calls
@@ -472,7 +577,95 @@ class Session:
                     body += COPY.format(path=path) + _numbered(text)
                 if body != content:
                     self.rewrite(i, body)
+        for i in self.notes_at:
+            if i < len(self.messages) and self.messages[i].get("content") != EARLIER_NOTE:
+                self.rewrite(i, EARLIER_NOTE)
+        for i, m in enumerate(self.messages):
+            # A run from before notes were kept by their place: its notes, by how they open.
+            if m["role"] == "user" and str(m.get("content") or "").startswith(OLD_NOTE):
+                self.rewrite(i, EARLIER_NOTE)
         self.compactions += 1
+
+    def _replaced(self, last: int) -> dict[tuple[int, int], str]:
+        """Each `needs`, `ask` and `breakdown` call a later one of its name replaced, by (message,
+        call), and what it says in place of its arguments."""
+        found: dict[str, list[tuple[int, int]]] = {}
+        for i, m in enumerate(self.messages[:last]):
+            if m["role"] != "assistant":
+                continue
+            for k, called in enumerate(m.get("tool_calls") or []):
+                name = (called.get("function") or {}).get("name")
+                if name in REPLACED_BY_LATEST:
+                    found.setdefault(name, []).append((i, k))
+        for m in self.messages[last:]:
+            for called in m.get("tool_calls") or []:
+                name = (called.get("function") or {}).get("name")
+                if name in REPLACED_BY_LATEST:
+                    # The newest turn's is the latest, and every earlier one is replaced.
+                    found.setdefault(name, []).append((-1, -1))
+        replaced: dict[tuple[int, int], str] = {}
+        for name, at in found.items():
+            for i, k in at[:-1]:
+                replaced[(i, k)] = f"a later `{name}` replaced this: {LATEST_KEPT[name]}"
+        return replaced
+
+    def _one_offs(self, last: int, kept: set[tuple[str, int, int]]) -> dict[tuple[int, int], str]:
+        """Each one-off script's `write`, by (message, call), and the note it becomes: a `.py`
+        file written once, never edited, run once and left since, that isn't a main script.
+        A main script is one a `done` names, or one changed at least 35% as often as the most
+        changed one, so while no script has been changed three times, none is a one-off. One
+        whose run is the latest `run` reply, or whose text stays whole as a `read`, isn't
+        either."""
+        writes: dict[str, list[tuple[int, int]]] = {}
+        changes: Counter[str] = Counter()
+        runs: dict[str, list[int]] = {}
+        main: set[str] = set()
+        for i, m in enumerate(self.messages):
+            for k, called in enumerate(m.get("tool_calls") or []):
+                function = called.get("function") or {}
+                name = function.get("name")
+                args = _arguments(function.get("arguments"))
+                path = str(args.get("path"))
+                if name == "done" and isinstance(args.get("script"), str):
+                    main.add(args["script"])
+                if name not in ("write", "edit", "run"):
+                    continue
+                reply = self._reply_index(i, k)
+                ran = (self.replies.get(reply) or {}).get("ran")
+                if name in ("write", "edit"):
+                    changes[path] += 1
+                    if name == "write":
+                        writes.setdefault(path, []).append((i, k))
+                    script = args.get("run_script")
+                    if ran and isinstance(script, str):
+                        runs.setdefault(script, []).append(reply)
+                        continue
+                if ran:
+                    runs.setdefault(path, []).append(reply)
+        most = max(changes.values(), default=0)
+        main |= {p for p, n in changes.items() if n >= MAIN_SHARE * most}
+        latest_run = max(
+            (i for i, info in self.replies.items() if info["name"] == "run" or info["ran"]),
+            default=-1,
+        )
+        found: dict[tuple[int, int], str] = {}
+        for path, at in writes.items():
+            ran_at = runs.get(path, [])
+            if (
+                not path.endswith(".py")
+                or path in main
+                or len(at) != 1
+                or changes[path] != 1
+                or len(ran_at) != 1
+                or ran_at[0] >= last
+                or ran_at[0] == latest_run
+                or ("call", *at[0]) not in kept
+            ):
+                continue
+            said = gist(str(self.messages[ran_at[0]].get("content") or ""))
+            what = f"`{path}`, a one-off script, run once and left since; it said: {said}"
+            found[at[0]] = COMPACTED.format(what=f"{what}. `read` gives it whole")
+        return found
 
     def _files(self, last: int) -> tuple[set[tuple[str, int, int]], dict[int, tuple[str, str]]]:
         """Each file's latest full text, what stays whole of it as (kind, message, call), and the
@@ -547,19 +740,31 @@ class Session:
         return i + 1 + k
 
     def _call(self) -> tuple[dict[str, Any], Ending | None]:
+        self._trim_reasoning()
         if self.last_prompt and self.estimate() >= self.limits.compact_at:
             before = self.estimate()
             self.compact()
+            compacted = self.estimate()
+            withheld = 0
+            if compacted >= self.limits.compact_at:
+                withheld = self._withhold_newest()
             self._record(
                 "compacted",
                 estimated=before,
                 estimated_after=self.estimate(),
                 prompt_before=self.last_prompt,
                 before_call=self.requests + 1,
+                **({"withheld_reasoning": withheld, "compacted_to": compacted} if withheld else {}),
             )
             restated = self.after_compaction() if self.after_compaction is not None else ""
+            if withheld:
+                restated = "\n\n".join(
+                    one for one in (restated, WITHHELD.format(tokens=withheld)) if one
+                )
             if restated:
                 self.say(restated)
+                self.notes_at.append(len(self.messages) - 1)
+                self._record("compaction_note", index=len(self.messages) - 1)
             if self.estimate() >= self.limits.compact_at:
                 full = {"estimated": self.estimate(), "limit": self.limits.compact_at}
                 return {}, Ending("context_full", full)
@@ -759,6 +964,24 @@ class Session:
         self.snapshot()
         self._record("ended", name=ending.name, said=ending.said)
         return ending
+
+
+def _noted_call(called: dict[str, Any], why: str) -> dict[str, Any]:
+    """A replaced call with its short arguments as they came and each long one a note."""
+    function = called.get("function") or {}
+    args = _arguments(function.get("arguments"))
+    short: dict[str, Any] = {}
+    for key, value in args.items():
+        said = json.dumps(value)
+        if len(said) <= SHORT_ARGUMENT or (
+            isinstance(value, str) and NOTE_LINE.fullmatch(value)
+        ):
+            short[key] = value
+        else:
+            short[key] = COMPACTED.format(what=f"{len(said)} characters; {why}")
+    if short == args:
+        return called
+    return {**called, "function": {**function, "arguments": json.dumps(short)}}
 
 
 def _cut(line: str) -> str:
