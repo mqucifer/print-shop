@@ -27,11 +27,12 @@ class Parser(argparse.ArgumentParser):
 
 def _coordinates_joined(given: list[str]) -> list[str]:
     """`--close -5,0,2,4`, as `--close=-5,0,2,4`. To argparse a word starting with `-` that isn't
-    a plain number is an option, so a point left of the origin would be a usage error."""
+    a plain number is an option, so a point left of the origin would be a usage error. `--slide
+    -z`, the way out as it's said, likewise (mqucifer/print-shop#76)."""
     joined: list[str] = []
     words = iter(given)
     for word in words:
-        if word in ("--close", "--centre", "--hole"):
+        if word in ("--close", "--centre", "--hole", "--slide"):
             value = next(words, None)
             joined.append(word if value is None else f"{word}={value}")
         else:
@@ -594,22 +595,10 @@ def selections_given(args: Any, top: Parser) -> None:
         )
 
 
-def _way_joined(argv: list[str]) -> list[str]:
-    """`--slide -z` as `--slide=-z`: argparse reads a word starting with `-` as an option, and the
-    way out is written as it's said."""
-    joined: list[str] = []
-    for word in argv:
-        if joined and joined[-1] == "--slide" and word in ("-x", "-y", "-z", "+x", "+y", "+z"):
-            joined[-1] = f"--slide={word}"
-        else:
-            joined.append(word)
-    return joined
-
-
 def main(argv: list[str] | None = None) -> int:
     given = sys.argv[1:] if argv is None else argv
     top = parser()
-    args = top.parse_args(_way_joined(given))
+    args = top.parse_args(given)
     rims_given(args, top)
     gaps_given(args, top)
     selections_given(args, top)
