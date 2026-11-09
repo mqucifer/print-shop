@@ -65,5 +65,8 @@ COPY --from=docs /build/docs.json /opt/cad-eval/docs.json
 # (mqucifer/print-shop#37); 0.5's `capture` says what the frame lacks over or under a pane, and
 # where (mqucifer/print-shop#46); 0.6's `info` reads small flat faces and the file's size,
 # `capture` names panes whose files have another play, and a sheet marks each file by its name
-# and wraps its legend (mqucifer/print-shop#54). Its code is mounted, not copied in.
-LABEL org.opencontainers.image.version="0.10"
+# and wraps its legend (mqucifer/print-shop#54). 0.10 has `clearance --slide`
+# (mqucifer/print-shop#76). 0.11's replies say where: `clearance`'s bodies and overlaps, `light`'s,
+# `thin`'s and `capture`'s, and `faces` and `slice` (mqucifer/print-shop#77). Its code is mounted,
+# not copied in.
+LABEL org.opencontainers.image.version="0.11"

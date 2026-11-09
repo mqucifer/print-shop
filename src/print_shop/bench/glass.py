@@ -171,9 +171,15 @@ def run_light(args: Any, report: Report) -> None:
             f"{row['footprint_mm2']} mm²), at {row['centre'][0]},{row['centre'][1]}"
         )
         if abs(pct - pct_rays) > band:
+            # Both figures, which method gave each, and where (mqucifer/print-shop#77): on
+            # `suncatcher-3` a DISAGREE that named neither was read as the frame being wrong.
             differs.append(
-                f"{name} is {pct:.1f}% open by the sections and {pct_rays:.1f}% by rays, "
-                f"more than the {band:.1f} points a grid of {rays} can be off by"
+                f"{name}, its footprint from ({x0:.2f}, {y0:.2f}) to ({x1:.2f}, {y1:.2f}): "
+                f"{pct:.1f}% open by the first method, its footprint less the frame's shadow cut "
+                f"at every layer, and {pct_rays:.1f}% by the second, {rays} rays straight up "
+                f"through the frame, {abs(pct - pct_rays):.1f} points apart where a grid of "
+                f"{rays} can be off by {band:.1f}. Neither is the answer: render a cut "
+                f"(`render --cut z=...`) through the frame over this pane to see what covers it"
             )
         opened += [(name, piece) for piece in _pieces(open_region)]
     report.numbers["panes"] = rows
@@ -257,8 +263,13 @@ def _narrowest_band(
     )
     if abs(across - gap) > 2 * gap / max(1, steps - 1) + 2 * FINE[0]:
         differs.append(
-            f"the narrowest band is {gap:.3f} mm between open pieces, and rays across it find "
-            f"{across:.3f} mm of frame"
+            f"the narrowest band of frame, between the open pieces of {opened[i][0]} and "
+            f"{opened[j][0]}, from ({near.x:.3f}, {near.y:.3f}) to ({far.x:.3f}, {far.y:.3f}): "
+            f"{gap:.3f} mm wide by the first method, the least distance between the open pieces "
+            f"as the sections read them, and {across:.3f} mm of frame by the second, rays straight "
+            f"up every {gap / (steps - 1):.3f} mm along that line. The two read the frame there "
+            "differently, so neither is the answer: render a close-up there "
+            f"(`render --close {near.x:.2f},{near.y:.2f},Z,R`) and a cut through it"
         )
 
 

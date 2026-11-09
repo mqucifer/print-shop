@@ -41,7 +41,7 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "volume_mesh_mm3",
         "watertight",
     ),
-    "clearance": ("lift", "pairs", "places", "slide"),
+    "clearance": ("bodies", "lift", "pairs", "places", "slide"),
     "readback": (
         "after_mm3",
         "before_mm3",
@@ -72,6 +72,7 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "narrower_than_nozzle_mm3",
         "sharp_points",
         "thin_at",
+        "thin_places",
         "thin_rays_at",
         "thin_rays_not_at_a_point",
         "thin_spots",
@@ -129,6 +130,8 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "pieces_not_moved",
     ),
     "render": ("close_ups", "cuts", "files", "sections", "seen_px", "test_pieces", "views"),
+    "faces": ("bosses", "flat_faces", "holes", "partial_cylinders"),
+    "slice": ("cuts",),
     "layout": (
         "least_width_mm",
         "least_width_piece",
@@ -430,6 +433,9 @@ VERDICTS: dict[str, tuple[str, ...]] = {
     "params": ("OK", "NO CHANGE", "PARTIAL"),
     "render": ("OK", "FAIL"),
     "layout": ("OK", "FAIL"),
+    # Readings, with no limit: what's there, or DISAGREE where the two methods differ.
+    "faces": ("OK",),
+    "slice": ("OK",),
 }
 
 

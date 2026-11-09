@@ -8,6 +8,7 @@ is a case here that the command must catch, named after the row. Everything's ma
 from __future__ import annotations
 
 import json
+import math
 import re
 import shutil
 from collections.abc import Iterator
@@ -164,6 +165,8 @@ def test_generated_code_runs_there_too_and_reaches_nothing(bench: Any) -> None:
         ("edges", "block.step", "--box", "corner=-1,-1,-1,5,5,50", "--facing", "front=-y"),
         ("thickness", "cube.step"),
         ("light", "frame.step", "cube.step"),
+        ("faces", "block.step"),
+        ("slice", "block.step", "--at", "z=1"),
     ],
 )
 def test_every_command_says_its_verdict_second_check_and_file(
@@ -797,6 +800,12 @@ def test_a_pane_whose_height_misses_the_pocket_is_told_so(bench: Any) -> None:
     answer = capture(bench, "held.step", "--pane-floor-z", "2.5")
     assert answer.verdict == "FAIL", answer.text
     assert "misses --pocket-z" in answer.text
+    # Where its underside came from, so it isn't taken for the bench moving the pane
+    # (mqucifer/print-shop#77, `eval-unnamed-2`).
+    assert "its underside is z=2.5, where --pane-floor-z puts it" in answer.text
+    read = capture(bench, "held.step")
+    assert "is read with its underside at z=" in read.text and "the pocket's floor" in read.text
+    assert "its rim above, faces facing down at z=" in read.text, read.text
 
 
 def test_a_pane_count_a_need_asks_for_is_held(bench: Any) -> None:
@@ -1096,6 +1105,14 @@ def test_a_wall_thinner_than_the_nozzle_is_caught_two_ways(bench: Any) -> None:
     assert answer.numbers["thinnest_wall_mm"] == pytest.approx(0.3, abs=0.01)
     # 10 × 6 mm, both sides, give or take a sample.
     assert answer.numbers["thin_wall_area_mm2"] == pytest.approx(120, rel=0.25)
+    # Where it is (mqucifer/print-shop#77): one place, the wall's own box, its width by rays.
+    (place,) = answer.numbers["thin_places"]
+    assert place["width_mm"] == pytest.approx(0.3, abs=0.01)
+    assert place["box"][0][:2] == pytest.approx([5, 9.85], abs=0.01)
+    assert place["box"][1][:2] == pytest.approx([15, 10.15], abs=0.01)
+    assert place["box"][0][2] == pytest.approx(2, abs=0.2) and place["box"][1][2] == 8
+    assert "1: 0.300 mm across, from (5, 9.85, " in answer.text
+    assert "1 place(s), " in answer.record["why"]
 
 
 def test_a_thin_wall_the_sections_cant_see_is_a_disagreement(bench: Any) -> None:
@@ -2070,7 +2087,7 @@ def test_a_pairs_gaps_are_read_by_place_round_the_edge_and_round_a_face(bench: A
         assert at[name]["gap_second_mm"] == pytest.approx(gap, abs=2 * 0.002 + 1e-4), name
     assert [at[n]["verdict"] for n in ("edge", "face", "corner")] == ["CLEAR", "TOO CLOSE", "CLEAR"]
     assert answer.verdict == "TOO CLOSE" and answer.code == 1, "a place's verdict counts"
-    assert "as pairs.N.places.edge.gap_mm" in answer.text
+    assert "as pairs.0.places.edge.gap_mm" in answer.text
     assert "the range is the play at those places" in answer.text
     assert answer.numbers["places"]["edge"] == {"box": [[9.6, -3.0, 0.1], [10.6, 3.0, 1.1]]}
     assert answer.numbers["places"]["top"] == {"facing": "+z"}
@@ -2308,3 +2325,118 @@ def test_a_slide_takes_two_files_and_no_gap_range(bench: Any) -> None:
     ):
         done = host.run(["clearance", *args], bench.work)
         assert done.returncode == 3 and says in done.stdout + done.stderr, (args, done.stderr)
+
+
+# Replies that say where (mqucifer/print-shop#77)
+
+
+def test_a_file_of_several_bodies_is_said_first_and_an_overlap_where_it_lies(bench: Any) -> None:
+    """On `pi5-case-1` a lid's clip legs were floating, 5 bodies, and five replies each listed its
+    15 pairs, about 21k characters, without saying so, and gave an overlap's volume and nothing of
+    where it was. Here a lid of 5 bodies over a fan, one leg's toe 1 mm³ into it, in a box of two
+    named: the reply leads with the bodies, places the overlap in its box, says the one pair whole
+    and the other 14 in one counted line, and is under 2,000 characters."""
+    answer = bench("clearance", "where/lid5.step", "where/fan.step",
+                   "--box", "left=13,-3,0,19,3,3", "--box", "right=-19,-3,0,-13,3,3")  # fmt: skip
+    assert answer.verdict == "INTERFERE", answer.text
+    assert answer.record["why"].startswith("lid5.step: 5 bodies; 15 pair(s): 1 interfere")
+    (bodies,) = answer.numbers["bodies"]
+    assert bodies["file"] == "lid5.step" and bodies["bodies"] == 5
+    assert "lid5.step: 5 bodies, solids not joined" in answer.text
+    assert "second check: lid5.step: 5 solids by OCCT; its mesh splits into 5" in answer.text
+    bad = [r for r in answer.numbers["pairs"] if r["verdict"] not in ("CLEAR", "TOUCHING")]
+    assert len(bad) == 1 and bad[0]["b"] == "fan.step"
+    (piece,) = bad[0]["overlap_at"]
+    assert piece["mm3"] == pytest.approx(1.0, abs=0.01)
+    assert piece["box"][0] == pytest.approx([14.5, -1, 1], abs=1e-3)
+    assert piece["box"][1] == pytest.approx([15, 1, 2], abs=1e-3)
+    assert "1.000 mm³ from (14.5, -1, 1) to (15, 1, 2), inside the box left" in answer.text
+    assert bad[0]["overlap_occt_box"] == [[14.5, -1.0, 1.0], [15.0, 1.0, 2.0]]
+    assert "14 other pair(s) with nothing to report (10 clear, 4 touching" in answer.text
+    assert answer.text.count("pairs.") < 8, "the quiet pairs aren't listed one by one"
+    assert len(answer.text) < 2000, len(answer.text)
+    alone = bench("clearance", "where/lid5.step", "where/fan.step",
+                  "--box", "right=-19,-3,0,-13,3,3")  # fmt: skip
+    assert "outside every named box" in alone.text
+
+
+def test_two_methods_that_both_find_an_overlap_read_interfere_with_both_volumes(
+    bench: Any,
+) -> None:
+    """On `pi5-case-1` OCCT read 4.000 mm³ and the mesh 3.274, and about 1.5 h went on a DISAGREE
+    that was only a volume. On the hinge turned 3e-5°, OCCT reads about 4 mm³ more than the
+    mesh: an overlap by both, so INTERFERE with both volumes. Where OCCT reads none, as it does
+    turned -3e-4° at y 0.6, it's still DISAGREE."""
+    answer = bench("clearance", "hinge-a.step", "hinge-b-y03-p3e5.step")
+    pair = only_pair(answer)
+    assert answer.verdict == "INTERFERE" and pair["volumes_differ"], answer.text
+    assert pair["overlap_occt_common_mm3"] - pair["overlap_mesh_mm3"] > pair["overlap_band_mm3"]
+    assert "Both methods find an overlap; volumes 1933." in answer.text
+    assert "so the verdict is INTERFERE, not DISAGREE" in answer.text
+    none = bench("clearance", "hinge-a.step", "hinge-b-y06-m3e4.step")
+    assert none.verdict == "DISAGREE", none.text
+    assert "one method finds an overlap and another none: the mesh 19" in none.text
+
+
+def test_faces_reads_a_fan_blocks_six_faces_and_four_holes(bench: Any) -> None:
+    """The run's own scripts read a bought part's faces and a fan's holes. A fan block 30 x 30 x
+    7.5 with four 3.4 mm holes through, 24 mm apart: six planes, and four holes at their centres."""
+    answer = bench("faces", "where/fan.step")
+    assert answer.verdict == "OK", answer.text
+    flats = {f["facing"]: f for f in answer.numbers["flat_faces"]}
+    assert sorted(flats) == ["+x", "+y", "+z", "-x", "-y", "-z"]
+    hole = math.pi * 1.7**2
+    assert flats["+z"]["at_mm"] == pytest.approx(7.5) and flats["-z"]["at_mm"] == pytest.approx(0)
+    assert flats["+z"]["area_mm2"] == pytest.approx(900 - 4 * hole, abs=1e-3)
+    assert flats["+x"]["area_mm2"] == pytest.approx(225, abs=1e-6)
+    assert flats["+x"]["size_mm"] == [0, 30, 7.5]
+    holes = answer.numbers["holes"]
+    assert sorted(tuple(h["centre"]) for h in holes) == [
+        (-12, -12, 3.75), (-12, 12, 3.75), (12, -12, 3.75), (12, 12, 3.75)
+    ]  # fmt: skip
+    for h in holes:
+        assert (h["axis"], h["radius_mm"], h["depth_mm"]) == ("z", 1.7, 7.5)
+        assert h["open_ends"] == 2
+        assert h["second"]["radius_mm"] == pytest.approx(1.7, abs=0.004)
+        assert h["second"]["depth_mm"] == pytest.approx(7.5, abs=0.004)
+    assert answer.numbers["bosses"] == []
+    assert "facing +z at z=7.5: " in answer.text
+    assert "hole at (12, 12, 3.75), axis z, radius 1.7 mm (Ø3.4), 7.5 mm deep" in answer.text
+    assert not reports.unlike("faces", answer.numbers)
+    stl = bench("faces", "cube.stl")
+    assert stl.verdict == "NO ANSWER" and "slice" in stl.text
+
+
+def test_slice_through_a_fan_block_gives_one_piece_and_its_holes(bench: Any) -> None:
+    """The run's 9 cross-section scripts, as one command: at mid-height the fan block is one
+    piece, a 30 mm square with its four round holes; upright through two holes, three pieces."""
+    answer = bench("slice", "where/fan.step", "--at", "z=3.75", "--at", "y=-12")
+    assert answer.verdict == "OK", answer.text
+    level, upright = answer.numbers["cuts"]
+    (piece,) = level["pieces"]
+    assert piece["outline"] == "a rectangle" and piece["rectangle_mm"] == [30, 30]
+    assert piece["box"] == [[-15, -15, 3.75], [15, 15, 3.75]]
+    assert len(piece["holes"]) == 4
+    for h in piece["holes"]:
+        assert h["circle_d_mm"] == pytest.approx(3.4, abs=0.004)
+        assert [abs(v) for v in h["centre"][:2]] == pytest.approx([12, 12], abs=1e-3)
+    assert level["second"]["pieces"] == 1 and level["second"]["holes"] == 4
+    assert piece["area_mm2"] == pytest.approx(900 - 4 * math.pi * 1.7**2, abs=0.01)
+    assert [p["size_mm"] for p in upright["pieces"]] == [[20.6, 7.5], [1.3, 7.5], [1.3, 7.5]]
+    assert "hole at (12, 12, 3.75): a circle Ø3.4" in answer.text
+    assert "sizes are along x then z" in answer.text
+    missed = bench("slice", "where/fan.step", "--at", "z=9")
+    assert missed.verdict == "NO ANSWER" and "runs from z=0 to z=7.5" in missed.text
+
+
+def test_light_that_disagrees_names_both_figures_their_methods_and_where(bench: Any) -> None:
+    """On `suncatcher-3` a `light` DISAGREE named neither figure's method, and was read as the
+    frame being wrong. A plate 0.1 mm thick tilted 5° over a pane: sections a layer apart cut it
+    into strips, rays meet it everywhere."""
+    answer = bench("light", "where/light-slats.step", "where/light-pane.step")
+    assert answer.verdict == "DISAGREE", answer.text
+    why = answer.record["why"]
+    assert "its footprint from (0.00, 0.00) to (10.00, 10.00)" in why
+    assert "% open by the first method, its footprint less the frame's shadow" in why
+    assert "0.0% by the second, " in why and "rays straight up through the frame" in why
+    assert "Neither is the answer: render a cut" in why

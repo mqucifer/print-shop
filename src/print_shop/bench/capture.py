@@ -1024,6 +1024,65 @@ def _clash_says(
     )
 
 
+#: How many heights of the rim's faces, each way, a reply names.
+RIM_FACES_SAID = 3
+
+
+def _level_faces(mesh: trimesh.Trimesh, opening: Any, up: bool) -> list[tuple[float, float]]:
+    """The level faces inside an opening facing one way: (height, area), lowest first."""
+    normals = np.asarray(mesh.face_normals)
+    centres = np.asarray(mesh.triangles_center)
+    level = (normals[:, 2] > 0.9999) if up else (normals[:, 2] < -0.9999)
+    inside = level & shapely.contains_xy(opening.buffer(1e-3), centres[:, 0], centres[:, 1])
+    found: dict[float, float] = {}
+    for z, area in zip(
+        np.round(centres[inside, 2], 4), np.asarray(mesh.area_faces)[inside], strict=True
+    ):
+        found[float(z)] = found.get(float(z), 0.0) + float(area)
+    return sorted(found.items())
+
+
+def read_against(
+    mesh: trimesh.Trimesh, opening: Any, args: Any, heights: Any, floor: float, top: float
+) -> dict[str, Any]:
+    """What a pane is read against, and why (mqucifer/print-shop#77): where its underside came
+    from, and the frame's level faces over and under its opening that its lips are. On
+    `eval-unnamed-2` `capture` said a pane "runs from z=0.000 to z=1.000, which misses --pocket-z",
+    nothing said where 0 came from, and the model guessed the bench moved the pane."""
+    if args.pane_floor_z is not None:
+        why = "where --pane-floor-z puts it"
+    elif heights.floor is not None:
+        why = "the pocket's floor, the face facing up in its opening nearest under --pocket-z"
+    else:
+        why = "the part's bottom, as no face faces up in its opening under --pocket-z"
+    above = [(z, a) for z, a in _level_faces(mesh, opening, False) if z > args.pocket_z]
+    below = [(z, a) for z, a in _level_faces(mesh, opening, True) if z < args.pocket_z][::-1]
+    return {
+        "floor_z": round(floor, 4),
+        "floor_from": f"z={floor:g}, {why}",
+        "top_z": round(top, 4),
+        "faces_above": [{"z": z, "mm2": round(a, 3)} for z, a in above],
+        "faces_below": [{"z": z, "mm2": round(a, 3)} for z, a in below],
+    }
+
+
+def against_says(against: dict[str, Any], args: Any) -> str:
+    """The line that says it: the pocket, the pane's two faces, and the faces that are its rim."""
+
+    def faces(rows: list[dict[str, Any]], way: str) -> str:
+        if not rows:
+            return f"no face facing {way}"
+        said = ", ".join(f"z={r['z']:g} ({r['mm2']:g} mm²)" for r in rows[:RIM_FACES_SAID])
+        more = f" and {len(rows) - RIM_FACES_SAID} more" if len(rows) > RIM_FACES_SAID else ""
+        return f"faces facing {way} at {said}{more}"
+
+    return (
+        f"its underside at {against['floor_from']}, its top at z={against['top_z']:g}; its rim "
+        f"above, {faces(against['faces_above'], 'down')}, and below, "
+        f"{faces(against['faces_below'], 'up')}"
+    )
+
+
 def _pane_line(name: str, row: dict[str, Any]) -> str:
     def said(face: dict[str, Any]) -> str:
         if face["window_mm2"] == 0:
@@ -1316,6 +1375,12 @@ def run(args: Any, report: Report) -> None:
         "pane numbers are the bench's own, largest opening first, and not a file's: each is said "
         "with where it is, and the file whose outline it is, if one beside the frame matches"
     )
+    report.line(
+        f"each pane is read in its opening at --pocket-z {args.pocket_z:g}, {args.clearance:g} mm "
+        "of play in from the pocket's wall. Its rim is the frame's level faces over and under its "
+        "opening, said for each pane, and what covers each face is every section of the frame "
+        "beyond it, seen straight along z"
+    )
     for k, opening, pane in readable:
         name = str(k + 1)
         area = float(pane.area)
@@ -1327,6 +1392,7 @@ def run(args: Any, report: Report) -> None:
         floor = args.pane_floor_z if args.pane_floor_z is not None else heights.floor
         floor = low if floor is None else float(floor)
         top = floor + args.pane_thickness
+        against = read_against(mesh, opening, args, heights, floor, top)
         row: dict[str, Any] = {
             "pane": name,
             "at": where(pane)["inside_at"],
@@ -1335,13 +1401,16 @@ def run(args: Any, report: Report) -> None:
             "pane_mm2": round(area, 3),
             "pane_floor_z": round(floor, 4),
             "pane_top_z": round(top, 4),
+            "read_against": against,
         }
         label = _label(name, row)
+        report.line(f"{label} is read with {against_says(against, args)}")
         # The pane where it sits, against the frame: one too tall for its pocket is in the lip.
         if not floor < args.pocket_z < top:
             problems.append(
                 f"{label} runs from z={floor:.3f} to z={top:.3f}, which misses "
-                f"--pocket-z {args.pocket_z}"
+                f"--pocket-z {args.pocket_z}: its underside is {against['floor_from']}. Give "
+                "--pane-floor-z where the pane's underside sits"
             )
         solid = _prism(pane, floor + INSET, top - INSET)
         clash = built ^ solid
