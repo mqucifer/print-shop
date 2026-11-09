@@ -1072,7 +1072,13 @@ def test_needs_reopen_only_when_a_person_says_so(tmp_path: Path) -> None:
     assert calls["questions"]["why"] == "needs_settled"
     assert calls["needs"]["why"] == "needs_settled"
 
-    run, _ = again(run, [tool("needs", needs=[SIZE_NEED])], [tool("blocked", reason="fine")])
+    # Each settled need marked against the note that reopened them (mqucifer/print-shop#79).
+    marked = {"look": {"is": "changed", "why": "The note lets the size stand for it."}}
+    run, _ = again(
+        run,
+        [tool("needs", needs=[SIZE_NEED], against_note=marked)],
+        [tool("blocked", reason="fine")],
+    )
     run.resume("It's fine to change them.", reopen_needs=True)
     assert run.drive().name == "blocked"
     assert reply_of(run, "needs")["outcome"] == "ok"
@@ -1197,12 +1203,15 @@ def test_every_note_and_answer_relayed_is_a_row_saying_who_when_and_at_which_cal
         ("note", "the operator", "Try a rounder corner."),
         ("reopen_needs", "the people running this", said[3][2]),
         ("note", "the people running this", "And a little taller."),
+        # Each settled need, beside the note (mqucifer/print-shop#79).
+        ("settled_beside", "the people running this", said[5][2]),
     ]
+    assert "Each settled need, beside it:" in said[5][2]
     assert all(r["at"] for r in found)
     # The answer reached call 2, and what arrived together is one phase. `ask` and `send_ask`
     # are two calls.
-    assert [r["at_call"] for r in found] == [2, 6, 6, 7, 7]
-    assert [r["phase"] for r in found] == [1, 2, 2, 3, 3]
+    assert [r["at_call"] for r in found] == [2, 6, 6, 7, 7, 7]
+    assert [r["phase"] for r in found] == [1, 2, 2, 3, 3, 3]
     assert found[1]["round"] == 1
     # Each went to the model as the row says.
     bodies = "\n".join(
@@ -2258,14 +2267,21 @@ def test_a_send_back_can_reopen_the_needs(tmp_path: Path) -> None:
     run = met_with_a_sheet(tmp_path)
     run, _ = again(
         run,
-        [BROKEN_DOWN, tool("needs", needs=[SIZE_NEED, {**SIZE_NEED, "id": "printable"}])],
+        [
+            BROKEN_DOWN,
+            tool(
+                "needs",
+                needs=[SIZE_NEED, {**SIZE_NEED, "id": "printable"}],
+                against_note={"volume": {"is": "kept", "why": "The note adds a check."}},
+            ),
+        ],
         [tool("blocked", reason="stop")],
     )
     run.send_back("sponsor", "Add the check you were missing.", reopen_needs=True)
     assert run.drive().name == "blocked"
     assert reply_of(run, "needs")["outcome"] == "ok"
     kinds = [r["kind"] for r in rows(run, "interventions")]
-    assert kinds[-2:] == ["send_back", "reopen_needs"]
+    assert kinds[-3:] == ["send_back", "reopen_needs", "settled_beside"]
 
 
 # A gap read by place (mqucifer/print-shop#72)
@@ -2318,3 +2334,60 @@ def test_a_need_on_a_place_is_held_at_done(tmp_path: Path, least: float, met: bo
     if not met:
         told = reply_of(run, "done")["reply"]
         assert "`pairs.0.places.edge.gap_mm` is 0.25, under 0.2501" in told
+
+
+# What holds a bought part (mqucifer/print-shop#76)
+
+#: A fan block 30 x 30 x 7.5 pushed up under a plate, as `bench_cases/make_fixtures.py`'s `hold/`
+#: parts: with hooks 0.2 mm under its bottom face reaching 1 mm in, or the plate alone.
+HOLD_SCRIPT = (
+    "import sys\n"
+    "import cadquery as cq\n"
+    "def box(x0, x1, y0, y1, z0, z1):\n"
+    '    return cq.Workplane("XY").box(x1 - x0, y1 - y0, z1 - z0)'
+    ".translate(((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2))\n"
+    "lid = box(-20, 20, -20, 20, 7.5, 9.5)\n"
+    "if sys.argv[1] == 'hooks':\n"
+    "    for turn in (0, 90, 180, 270):\n"
+    "        arm = box(15.3, 17.3, -3, 3, -1.2, 7.5).union(box(14, 15.3, -3, 3, -1.2, -0.2))\n"
+    "        lid = lid.union(arm.rotate((0, 0, 0), (0, 0, 1), turn))\n"
+    'cq.exporters.export(lid, "lid.step")\n'
+    'cq.exporters.export(box(-15, 15, -15, 15, 0, 7.5), "fan.step")\n'
+)
+
+
+def roomy(name: str) -> dict[str, Any]:
+    """`sized`, for parts bigger than its 3000 mm³: the fan block alone is 6750."""
+    need = sized(name)
+    return {**need, "check": {**need["check"], "at_most": 10_000}}
+
+
+@pytest.mark.parametrize(("lid", "met"), [("hooks", True), ("plain", False)])
+def test_a_need_on_what_holds_a_part_is_held_at_done(tmp_path: Path, lid: str, met: bool) -> None:
+    """A need can check a hold: `HELD`, and the first contact within 1 mm, on the printed lid and
+    the fan slid down, its way out. Hooks under the fan pass; a plain plate is `NOT HELD`."""
+    need = {
+        "id": "fan-held",
+        "what": "the fan can't fall out of the lid",
+        "source": "chosen",
+        "check": {
+            "by": "bench",
+            "measures": "fit",
+            "command": "clearance lid.step fan.step --slide -z",
+            "verdicts": ["HELD"],
+            "number": "slide.first_mm",
+            "at_most": 1,
+        },
+    }
+    run, _ = begin(
+        tmp_path,
+        [BROKEN_DOWN, tool("needs", needs=[need, *map(roomy, ("lid.step", "fan.step"))])],
+        [write("make.py", HOLD_SCRIPT.replace("sys.argv[1]", repr(lid)), run=True)],
+        [done(part=["lid.step", "fan.step"])],
+        [tool("blocked", reason="stop")],
+    )
+    assert run.drive().name == ("met" if met else "blocked")
+    reading = next(r for r in rows(run, "readings") if r["need"] == "fan-held")
+    assert reading["passed"] == int(met)
+    if not met:
+        assert "NOT HELD" in reply_of(run, "done")["reply"]

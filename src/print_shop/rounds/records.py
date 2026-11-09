@@ -123,6 +123,10 @@ class Recorder:
         self.refusals = 0
         # What's been rewritten since the last request: a compaction's cut, before its event.
         self.cut: dict[str, Any] = {}
+        # Each call's reasoning tokens, and why each call marked a runaway was, by the call: what
+        # the next reply leads with depends on it (`stuck.py`, mqucifer/print-shop#79).
+        self.reasoning_at: dict[int, int] = {}
+        self.runaway_at: dict[int, str] = {}
 
     def feed(self, event: dict[str, Any]) -> None:
         kind = event.get("kind")
@@ -388,6 +392,10 @@ class Recorder:
                 self.compacted_at,
             )
             self.compacted_at = None
+        tokens = used.get("reasoning_tokens")
+        if tokens is None:
+            tokens = int(len(reasoning) / CHARS_PER_TOKEN)
+        self.reasoning_at[n] = int(tokens)
         self._runaway(event, called, share, counted, round_n)
         self.last_prompt = int(used.get("prompt_tokens") or 0)
         self.calls_since_compaction += 1
@@ -410,6 +418,7 @@ class Recorder:
             why.append("repeats")
         if not why:
             return
+        self.runaway_at[int(event["n"])] = ",".join(why)
         used = event.get("usage") or {}
         message = event.get("message") or {}
         completion = int(used.get("completion_tokens") or 0)

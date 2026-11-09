@@ -15,8 +15,8 @@ The first line is the verdict. Then come the numbers, each with how it was read,
 
 | Exit | Verdicts | It means |
 |---|---|---|
-| 0 | `OK`, `CLEAR`, `TOUCHING` | both methods agree, and nothing's wrong |
-| 1 | `FAIL`, `INTERFERE`, `TOO CLOSE`, `TOO LOOSE`, `NO CHANGE`, `PARTIAL` | both methods agree that something's wrong |
+| 0 | `OK`, `CLEAR`, `TOUCHING`, `HELD` | both methods agree, and nothing's wrong |
+| 1 | `FAIL`, `INTERFERE`, `TOO CLOSE`, `TOO LOOSE`, `NO CHANGE`, `PARTIAL`, `NOT HELD` | both methods agree that something's wrong |
 | 2 | `DISAGREE`, `NO ANSWER` | there's no answer to rely on: read the numbers, and don't pick one |
 | 3 | | the command itself was wrong |
 

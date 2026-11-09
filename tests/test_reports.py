@@ -430,3 +430,31 @@ def test_a_place_s_gap_settles_and_one_its_command_doesnt_name_is_refused() -> N
     ):
         (said,) = settled(command, number)
         assert says in said, (number, said)
+
+
+def test_a_hold_is_a_verdict_and_a_figure_a_need_can_name() -> None:
+    """`clearance --slide` (mqucifer/print-shop#76): `HELD` is a verdict a need names, and the
+    first contact's distance a number it holds; a path the answer never has is refused."""
+    from print_shop.rounds import toolsets
+
+    slid = "clearance lid.step references/fan.step --slide -z"
+    held = Need("hold", "x", "chosen", "bench", command=slid, verdicts=["HELD"])
+    assert not needs.verdicts_wrong([held])
+    wrong = needs.verdicts_wrong([Need("hold", "x", "chosen", "bench", command=slid,
+                                       verdicts=["HOLDS"])])  # fmt: skip
+    assert "HELD, NOT HELD" in wrong[0]
+
+    def settled(number: str) -> list[str]:
+        entry = {
+            "id": "n",
+            "what": "x",
+            "source": "chosen",
+            "check": {"by": "bench", "command": slid, "number": number, "at_most": 1},
+        }
+        found, wrong = needs.read([entry], "", toolset=toolsets.EVERY)
+        return wrong or needs.numbers_wrong(found)
+
+    for number in ("slide.first_mm", "slide.path.0.reach_mm", "slide.contacts.0.box.0.2"):
+        assert settled(number) == [], number
+    (said,) = settled("slide.first")
+    assert "`slide` is a row of `file`" in said, said

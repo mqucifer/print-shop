@@ -470,7 +470,8 @@ def test_a_fixed_need_changes_only_by_the_sponsor_with_a_note(tmp_path: Path) ->
         plate={"check": measured({"by": "bench", "command": "thin bracket.step --min 3"})}
     )
     run = again(run, [tool("needs", needs=looser)])
-    (said,) = run.resume("Look at the plate again.", reopen_needs=True)
+    said, beside = run.resume("Look at the plate again.", reopen_needs=True)
+    assert beside.startswith("The model is shown its 5 settled needs beside the note")
     # Said to whoever resumed too, not only to the model (mqucifer/print-shop#66).
     assert "the fixed needs `arm`, `plate` stay locked" in said
     assert "the note is from the people running this, who doesn't decide" in said
@@ -494,8 +495,15 @@ def test_a_fixed_need_changes_only_by_the_sponsor_with_a_note(tmp_path: Path) ->
             "quote": "3 mm will do for the plate",
         }
     )
-    run = again(run, [tool("needs", needs=looser)], [tool("needs", needs=noted)])
-    (said,) = run.resume("3 mm will do for the plate.", reopen_needs=True, note_from="sponsor")
+    # Each settled need marked against the note (mqucifer/print-shop#79).
+    marks = {n["id"]: {"is": "kept", "why": "The note is about the plate."} for n in noted}
+    marks["plate"] = {"is": "changed", "why": "The Sponsor's note says 3 mm will do."}
+    run = again(
+        run,
+        [tool("needs", needs=looser, against_note=marks)],
+        [tool("needs", needs=noted, against_note=marks)],
+    )
+    said, _ = run.resume("3 mm will do for the plate.", reopen_needs=True, note_from="sponsor")
     assert "the fixed needs `arm`, `plate` too, by the note from sponsor" in said
     run.drive()
     assert told(run)[-2]["outcome"] == "ok", "the Sponsor's note opened the fixed needs"
@@ -528,8 +536,9 @@ def test_a_reopening_with_no_note_says_the_fixed_needs_stay_and_a_fix_first_open
     }
     (run.folder / "asks" / "1" / "pick.json").write_text(json.dumps(found))
     run = again(run)
-    (said,) = run.resume(reopen_needs=True)
+    said, beside = run.resume(reopen_needs=True)
     assert "the fixed needs `arm`, `plate` too, by the pick's fix-first" in said
+    assert "beside the note" in beside
     assert run.state.fixed_open == {"by": "stand-in: the operator"}
     reopened = [
         e for e in transcript.events_of(run.session.events) if e.get("relay") == "reopen_needs"

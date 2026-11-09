@@ -605,6 +605,50 @@ def places() -> None:
     save(box(-10, 10, -10, 10, 2, 5), "places/plate")
 
 
+def mirrored(side: int, a: float, b: float) -> tuple[float, float]:
+    """a to b along x, on the side named: +1 as given, -1 mirrored, low end first."""
+    return min(side * a, side * b), max(side * a, side * b)
+
+
+def holds() -> None:
+    """What holds a bought part, slid along its way out (mqucifer/print-shop#76), on parts of our
+    own: a fan block 30 x 30 x 7.5 under a plate, pushed up into it, so its way out is down.
+
+    - `hold/fan`: the block, x and y from -15 to 15, z from 0 to 7.5.
+    - `hold/plain`: a plate 40 x 40 x 2 on the block's top, z 7.5 to 9.5, and nothing else.
+    - `hold/hooks`: the plate, with an arm down each side 0.3 mm off the block, 6 mm wide, and a
+      hook from each reaching 1 mm in under the block's bottom face, its top 0.2 mm below it.
+    - `hold/toes`: the plate, with each arm stopping 0.5 mm down and a toe 1 mm into the block
+      at its top face: an overlap of 4 x 1 x 6 x 0.5 = 12 mm³, with nothing under the block.
+    - `hold/snap-base` and `hold/snap-lid`: a lid held by snaps, its way off up. The base is
+      40 x 30 x 15, walls and floor 2 mm, with a ledge 1 mm deep and 8 mm wide inside each end
+      wall, z 12 to 13. The lid, 2 mm thick on the rim, has an arm 0.5 mm thick down each end,
+      0.2 mm in from its ledge, and a hook reaching 0.8 mm out under it, its top 0.2 mm below the
+      ledge. The ledges are inside the lid's footprint, 2 mm in from its edge, so they reach 3 mm
+      in from its outline, though each hook catches 0.8 mm.
+    """
+    Path("hold").mkdir(exist_ok=True)
+    save(box(-15, 15, -15, 15, 0, 7.5), "hold/fan")
+    plate = box(-20, 20, -20, 20, 7.5, 9.5)
+    save(plate, "hold/plain")
+    hooks, toes = plate, plate
+    for turn in (0, 90, 180, 270):
+        arm = box(15.3, 17.3, -3, 3, -1.2, 7.5).union(box(14, 15.3, -3, 3, -1.2, -0.2))
+        toe = box(15.3, 17.3, -3, 3, 7, 7.5).union(box(14, 15.3, -3, 3, 7, 7.5))
+        hooks = hooks.union(arm.rotate((0, 0, 0), (0, 0, 1), turn))
+        toes = toes.union(toe.rotate((0, 0, 0), (0, 0, 1), turn))
+    save(hooks, "hold/hooks")
+    save(toes, "hold/toes")
+    base = box(-20, 20, -15, 15, 0, 15).cut(box(-18, 18, -13, 13, 2, 15))
+    lid = box(-20, 20, -15, 15, 15, 17)
+    for side in (1, -1):
+        base = base.union(box(*mirrored(side, 17, 18), -4, 4, 12, 13))
+        lid = lid.union(box(*mirrored(side, 16.3, 16.8), -3.5, 3.5, 10.5, 15))
+        lid = lid.union(box(*mirrored(side, 16.8, 17.8), -3.5, 3.5, 10.5, 11.8))
+    save(base, "hold/snap-base")
+    save(lid, "hold/snap-lid")
+
+
 def at_limits() -> None:
     """A figure exactly at its limit (mqucifer/print-shop#72): a wall 0.4 mm wide, a nozzle's."""
     base = box(0, 20, 0, 20, 0, 2)
@@ -657,5 +701,6 @@ if __name__ == "__main__":
     glass()
     enclosure()
     places()
+    holds()
     at_limits()
     print("made")

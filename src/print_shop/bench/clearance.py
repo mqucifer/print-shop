@@ -63,6 +63,7 @@ from .shapes import (
     load,
     slice_at,
 )
+from .slide import summary, what_holds
 
 #: Closer than this is touching, in mm.
 TOUCHING = 1e-4
@@ -73,6 +74,10 @@ SAMPLES = 6000
 AXES = {"x": (1.0, 0.0, 0.0), "y": (0.0, 1.0, 0.0), "z": (0.0, 0.0, 1.0)}
 #: Worst first: the pairs' verdict is the worst of them.
 ORDER = ["DISAGREE", "INTERFERE", "TOO CLOSE", "TOO LOOSE", "TOUCHING", "CLEAR"]
+#: With `--slide`, worst first: the hold, then an overlap of parts that don't move. A pair's own
+#: touch or gap is a reading beside it (mqucifer/print-shop#76).
+SLIDE_ORDER = ["DISAGREE", "NOT HELD", "INTERFERE", "HELD", "TOO CLOSE", "TOO LOOSE", "TOUCHING",
+               "CLEAR"]  # fmt: skip
 #: A place that catches no surface of one of a pair: it gives no figure, and judges nothing.
 NOT_CAUGHT = "NOT CAUGHT"
 #: A face is `--facing` a way where its outward normal stays within this of it, in degrees,
@@ -558,6 +563,9 @@ def run(args: Any, report: Report) -> None:
     pairs = [(items[i], items[j]) for i in range(len(items)) for j in range(i + 1, len(items))]
     max_gap = args.max_gap
     named = places(args)
+    # With --slide a box names where a contact lies, and reads no gap (mqucifer/print-shop#76).
+    way_out: str | None = getattr(args, "slide", None)
+    boxes, named = (named, []) if way_out else ([], named)
     if any(place.way for place in named) and not all(one.is_brep for one in items):
         raise NoAnswer(
             "--facing reads the faces of a STEP file, and an STL has none of its own: read an "
@@ -576,6 +584,10 @@ def run(args: Any, report: Report) -> None:
     report.numbers["pairs"] = results
     if named:
         report.numbers["places"] = {p.name: p.plain() for p in named}
+    slid = None
+    if way_out:
+        others = [piece for part in parts[:-1] for piece in part.pieces()]
+        slid = what_holds(report, parts[-1], others, way_out, args.hold, boxes)
     brep = all(a.is_brep and b.is_brep for a, b in pairs)
     # Many pairs with nothing to report are one counted line: on `pi5-case-1` a lid of 5 bodies
     # gave 15 pairs, about 21k characters a reply (mqucifer/print-shop#77). Every pair whose
@@ -629,6 +641,12 @@ def run(args: Any, report: Report) -> None:
     if read_at:
         at = {w: sum(p["verdict"] == w for p in read_at) for w in [*ORDER, NOT_CAUGHT]}
         tally += "; at the places: " + ", ".join(f"{n} {w.lower()}" for w, n in at.items() if n)
+    if slid is not None:
+        # The slide's verdict is the answer's, unless a reading has no answer to rely on, or two
+        # parts that don't move overlap: the hold's figures stand beside the pairs'.
+        worst = min([*verdicts, slid["verdict"]], key=SLIDE_ORDER.index)
+        report.verdict(worst, f"{summary(slid)}; {lead}{len(results)} pair(s): {tally}")
+        return
     report.verdict(worst, f"{lead}{len(results)} pair(s): {tally}")
 
 
