@@ -56,6 +56,7 @@ from print_shop.rounds import (
     review,
     scores,
     skills,
+    stuck,
     toolsets,
     transcript,
     unprintable,
@@ -197,6 +198,12 @@ class State:
     last_said: dict[str, Any] | None = None
     # The reasoning-trim switch, as an eval's arm set it at the start: None is off.
     trim_reasoning: dict[str, int] | None = None
+    # A note's reopening of the settled needs, until `needs` is taken: who, from what, the needs
+    # it set beside the note, and whether they've been shown (mqucifer/print-shop#79).
+    reopened: dict[str, Any] | None = None
+    # Each overlap with a given part a person accepted at an ask: the need, its command, the ask
+    # and who (mqucifer/print-shop#79).
+    overlaps: list[dict[str, Any]] = field(default_factory=list)
 
 
 def repository_version() -> tuple[str, bool]:
@@ -358,6 +365,10 @@ class Run:
         # facts, the open needs and what a person last asked (mqucifer/print-shop#78).
         self.session.after_compaction = self.compaction_note
         self.tools.at_call = lambda: self.session.requests
+        # A reply leads with what a stuck model needs said first (`stuck.py`), and the call whose
+        # replies have had the line after a call that circled.
+        self.session.lead = self.lead
+        self._circled_at = 0
 
     # Starting and going on
 
@@ -534,6 +545,7 @@ class Run:
                 told.append(self._reopen(note_from, bool(note.strip())))
         if note.strip():
             self._note(note.strip(), note_from)
+        told.append(self._set_beside())
         self.save()
         return [t for t in told if t]
 
@@ -573,7 +585,42 @@ class Run:
                 "or a pick's `fix_first`. The model is told they stay."
             )
         self._relay("reopen_needs", who, said)
+        if noted and self.state.needs_version:
+            self.state.reopened = {
+                "by": who,
+                "whence": whence,
+                "at_call": self.session.requests + 1,
+                "version": self.state.needs_version,
+                "needs": [n.id for n in self._needs()],
+                "fixed_locked": not self.state.fixed_open,
+                "shown": False,
+            }
         return told
+
+    def _set_beside(self) -> str:
+        """After a note that reopened the needs, each settled need set beside it, and `needs`
+        held until each is marked kept or changed (mqucifer/print-shop#79). On `pi5-case-1` the
+        model's own settled need said the opposite of a stand-in's note, nothing set the two side
+        by side, and it sided with its need. Said after the note, so it reads against it. What
+        comes back is said to whoever reopened them."""
+        reopened = self.state.reopened
+        if not reopened or reopened.get("shown"):
+            return ""
+        ids = set(reopened["needs"])
+        settled = [n for n in self._needs() if n.id in ids]
+        text = stuck.beside(
+            settled,
+            self.state.last_readings,
+            str(reopened["whence"]),
+            bool(reopened.get("fixed_locked")),
+            self.state.overlaps,
+        )
+        self._relay("settled_beside", str(reopened["by"]), text)
+        reopened["shown"] = True
+        return (
+            f"The model is shown its {len(settled)} settled needs beside the note, and `needs` is "
+            "refused until each is marked kept or changed against it."
+        )
 
     def _go_on(self) -> None:
         """A new process's part of the run, under the code it's running on."""
@@ -848,9 +895,10 @@ class Run:
         )
         self._relay("send_back", by, note.strip(), message)
         told = [self._reopen(by, True)] if reopen_needs else []
+        told.append(self._set_beside())
         self._start_round()
         self.save()
-        return told
+        return [t for t in told if t]
 
     def _take_answers(self, n: int, who: str) -> None:
         """The answers to the model's questions, said as whoever gave them: on `eval-choice-1` a
@@ -925,6 +973,7 @@ class Run:
         else:
             said = f"{who} picked {pick}. Their reason: {reason}"
         said += self._stop_picked(asked.get("stop"), n, pick, by, reopening)
+        said += self._overlap_picked(asked.get("overlap"), n, pick, by, reason)
         self.state.said.append(f'On your question "{asked["question"]}": {said}')
         self._relay("pick", by, f"{pick}: {reason}", said)
         if fix_first:
@@ -937,6 +986,35 @@ class Run:
             self.state.said.append(first)
             self._relay("fix_first", by, fix_first, first)
         return {"pick": pick, "by": by, "fix_first": fix_first or ""}
+
+    def _overlap_picked(
+        self, overlap: dict[str, Any] | None, ask: int, pick: str, by: str, reason: str
+    ) -> str:
+        """The overlap with a given part an ask showed, accepted by any pick but `none`
+        (mqucifer/print-shop#79): its need may then expect it."""
+        if not overlap:
+            return ""
+        accepted = pick != "none"
+        if accepted:
+            self.state.overlaps.append(
+                {
+                    "need": overlap["need"],
+                    "command": overlap["command"],
+                    "ask": ask,
+                    "by": by,
+                    "reason": reason,
+                    "why": overlap.get("why") or "",
+                }
+            )
+        self.session._record(
+            "overlap_picked",
+            ask=ask,
+            need=overlap["need"],
+            command=overlap["command"],
+            accepted=accepted,
+            by=by,
+        )
+        return stuck.overlap_picked(overlap, picked_by_words(by), accepted)
 
     def _stop_picked(
         self, stop: str | None, ask: int, pick: str, by: str, reopening: bool = False
@@ -1163,6 +1241,14 @@ class Run:
             return None
         lines: list[str] = []
         detail: dict[str, Any] = {}
+        n = self.session.requests
+        repeated = stuck.rerun(
+            [one for one in earlier if one.at_call < n], argv, self.state.geometry
+        )
+        if repeated is not None:
+            # A check whose last try failed, on files unchanged since: one sign a long call went
+            # round in circles (mqucifer/print-shop#79), which `lead` weighs.
+            detail["rerun"] = {"failed_at": repeated.at_call, "command": " ".join(argv)}
         off = nudge.off_need(argv, wanted)
         lead = nudge.not_the_requirement(off)
         if off:
@@ -1192,7 +1278,7 @@ class Run:
                 "after": nudge.AFTER,
                 "calls": [one.at_call for one in tries],
             }
-        if not lines and not lead:
+        if not lines and not lead and not detail:
             return None
         return {"said": "\n\n".join(lines), "detail": detail, "lead": lead}
 
@@ -1479,6 +1565,48 @@ class Run:
         compaction's note."""
         return holding.after_compaction(self._holding(), self._thin_failing())
 
+    def lead(self, name: Any, judged: Judged) -> Judged:
+        """What a tool reply leads with when the model is stuck (mqucifer/print-shop#79): each
+        `bench` and `run` reply, while a note's reopening of the needs waits for `needs`; and the
+        first reply after a call that went round in circles, which the recorder marked as a
+        runaway, or which reasoned `stuck.CIRCLING_TOKENS` or more and re-ran a check whose last
+        try failed, on files unchanged since. The call is never cut: only what comes next
+        changes. Session calls it through `lead`."""
+        lines: list[str] = []
+        said: dict[str, Any] = {}
+        reply = str(judged.reply or "")
+        ran = name == "run" or (name in ("write", "edit") and "\n\nRan " in reply)
+        if self.state.reopened and (name == "bench" or ran):
+            lines.append(stuck.REOPENED)
+            said["reopened"] = True
+        n = self.session.requests
+        circled = self._circled(n, judged) if self._circled_at != n else None
+        if circled is not None:
+            lines.append(stuck.CIRCLED)
+            said["circled"] = circled
+            self._circled_at = n
+        if not lines:
+            return judged
+        return replace(
+            judged,
+            reply="\n".join(lines) + "\n\n" + reply,
+            detail={**judged.detail, "stuck": said},
+        )
+
+    def _circled(self, n: int, judged: Judged) -> dict[str, Any] | None:
+        """Why call `n` counts as one that went round in circles, or None."""
+        recorder = self.recorder
+        if recorder is None:
+            return None
+        marked = recorder.runaway_at.get(n)
+        if marked:
+            return {"call": n, "why": "runaway", "marked": marked}
+        again = judged.detail.get("rerun")
+        tokens = recorder.reasoning_at.get(n, 0)
+        if again and tokens >= stuck.CIRCLING_TOKENS:
+            return {"call": n, "why": "rerun", "reasoning_tokens": tokens, **again}
+        return None
+
     def compaction_note(self) -> str:
         """The message after every compaction, even when nothing fails (mqucifer/print-shop#78):
         on the pi5 design run two compactions left no note at all, because nothing was failing.
@@ -1486,6 +1614,8 @@ class Run:
         person last asked. Session calls it through `after_compaction`, and keeps only the
         latest whole."""
         parts = [
+            # Led by the needs a note reopened, until `needs` is taken (mqucifer/print-shop#79).
+            stuck.REOPENED if self.state.reopened else "",
             self.failing_said() or NOTHING_FAILING,
             facts.block(self._facts(), facts.NONE_YET),
             self._open_needs_said(),
@@ -2198,6 +2328,17 @@ class Run:
             wrong = forms.held(found, form) + figures.wrong(found, form)
             wrong += figures.echoed(found, form)
             wrong += self._fixed_kept(found)
+        if found and not trying:
+            # A note's reopening answered need by need, and no overlap with a given part taken
+            # as right without a person's yes (mqucifer/print-shop#79): said with any other miss,
+            # so one refusal names all of it.
+            marks = self._against_note(args.get("against_note"), found)
+            bought = stuck.overlaps(found, self.state.overlaps)
+            if wrong:
+                wrong += marks + bought
+            elif marks or bought:
+                reply, why = stuck.refused(marks, bought)
+                return Judged("needs", "failed", reply, why)
         if not wrong:
             wrong = self._usable(found)
         if wrong:
@@ -2235,6 +2376,7 @@ class Run:
         self.ledger.needs_marked(self.state.name, version, found)
         self._needs_described(found)
         self.state.fixed_open = None
+        self.state.reopened = None
         if self.state.stage == "intake":
             self.state.stage = "rounds"
             self._start_round()
@@ -2287,6 +2429,24 @@ class Run:
                 f"`{check}`" + (f" ({old.limit()})" if old.by == "bench" else "")
             )
         return wrong
+
+    def _against_note(self, marks: Any, found: list[Need]) -> list[str]:
+        """Each settled need a note reopened that `against_note` leaves unmarked, or marks against
+        what this list sends (mqucifer/print-shop#79). Kept is its check and words as they were,
+        each need's files following the part as `glass` declares it."""
+        reopened = self.state.reopened
+        if not reopened:
+            return []
+        ids = set(reopened["needs"])
+        declared = glass_checks.load(self.state.glass)
+
+        def same(old: Need, new: Need) -> bool:
+            was, now = needs.on_part(old, declared)[0], needs.on_part(new, declared)[0]
+            return _same_check(was, now) and " ".join(old.what.split()) == " ".join(
+                new.what.split()
+            )
+
+        return stuck.unmarked(marks, [n for n in self._needs() if n.id in ids], found, same)
 
     def _read_now(self, found: list[Need]) -> list[Reading]:
         """Each bench need's check against the files as they stand, on a copy, with no clean run
@@ -3103,6 +3263,9 @@ class Run:
             )
         if bad is not None:
             return Judged("ask", "failed", bad[1], bad[0])
+        overlap = self._overlap_asked(args.get("overlap"))
+        if isinstance(overlap, Judged):
+            return overlap
         named: list[dict[str, Any]] = []
         for variant in variants:
             files = variant["files"] if isinstance(variant["files"], list) else [variant["files"]]
@@ -3195,6 +3358,8 @@ class Run:
             "standing": [one.plain() for one in standing],
             "at_call": self.session.requests,
         }
+        if overlap is not None:
+            self.state.draft["overlap"] = overlap
         self.save()
         what = "The sheet above is drawn" if sheet else "What's above is ready"
         lines = [
@@ -3217,6 +3382,12 @@ class Run:
             lines.append(
                 "With your plan go your latest breakdown and the needs as settled, with the "
                 "request's lines each covers."
+            )
+        if overlap is not None:
+            lines.append(
+                stuck.overlap_said(
+                    overlap["need"], overlap["command"], overlap["verdict"], overlap["why"]
+                )
             )
         failing = [one for one in standing if not one.passed]
         if failing:
@@ -3306,6 +3477,48 @@ class Run:
             images=images + shown,
             detail={"drafted": n, "standing_failing": len(failing), "stop": stop},
         )
+
+    def _overlap_asked(self, given: Any) -> dict[str, Any] | Judged | None:
+        """An overlap with a given part an ask shows, for a person to accept or not: the need
+        that expects it and its command, read by the harness on the files as they stand
+        (mqucifer/print-shop#79). Only an overlap there is goes."""
+        if given in (None, "", {}):
+            return None
+        shape = '`overlap` is {"need": "<the need\'s id>", "command": "<its check>"}'
+        if not isinstance(given, dict):
+            return Judged("ask", "failed", f"{shape}.", "overlap_shape")
+        nid = str(given.get("need") or "").strip()
+        command = str(given.get("command") or "").strip().removeprefix("bench ").strip()
+        if not nid or not command:
+            return Judged("ask", "failed", f"{shape}: it needs both.", "overlap_shape")
+        need = Need(nid, "the overlap asked about", "derived", "bench", command=command)
+        need.verdicts = [stuck.OVERLAP]
+        try:
+            given_parts = stuck.bought(need)
+        except ValueError:
+            given_parts = []
+        if not given_parts:
+            reply = (
+                f"`{command}` names no file under `references/`, so it's no overlap with a part "
+                "you were given, and needs nobody's yes: leave `overlap` out."
+            )
+            return Judged("ask", "failed", reply, "overlap_not_given")
+        reading = self._read_now([need])[0]
+        why = str((reading.record or {}).get("why") or reading.why)
+        if reading.verdict != stuck.OVERLAP:
+            reply = (
+                f"`{command}` reads {reading.verdict or 'no verdict'} on your files as they "
+                f"stand: {why}. There's no overlap to show, so nothing to accept: leave "
+                "`overlap` out, or ask once the files overlap as you mean them to."
+            )
+            return Judged("ask", "failed", reply, "no_overlap")
+        return {
+            "need": nid,
+            "command": command,
+            "verdict": reading.verdict,
+            "why": why,
+            "text": reading.text[: stuck.OVERLAP_CHARS],
+        }
 
     def _stop_problem(self, stop: str | None, plan: str) -> tuple[str, str] | None:
         """A stop is shown in its turn: the next stop's ask waits for the one before it to have a
@@ -3471,6 +3684,7 @@ class Run:
             "seen": seen,
             "says_model_said": says,
             "standing": draft["standing"],
+            "overlap": draft.get("overlap"),
         }
         (folder / "asked.json").write_text(json.dumps(asked, indent=1), encoding="utf-8")
         options = draft.get("options") or []
@@ -3591,6 +3805,8 @@ class Run:
                 *draft["followed"],
                 "",
             ]
+        if draft.get("overlap"):
+            lines += stuck.overlap_at_stop(draft["overlap"])
         lines += self._needs_refused_said()
         lines += self._asides_said()
         lines += self._swaps_said()

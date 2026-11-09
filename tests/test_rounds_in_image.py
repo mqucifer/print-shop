@@ -1072,7 +1072,13 @@ def test_needs_reopen_only_when_a_person_says_so(tmp_path: Path) -> None:
     assert calls["questions"]["why"] == "needs_settled"
     assert calls["needs"]["why"] == "needs_settled"
 
-    run, _ = again(run, [tool("needs", needs=[SIZE_NEED])], [tool("blocked", reason="fine")])
+    # Each settled need marked against the note that reopened them (mqucifer/print-shop#79).
+    marked = {"look": {"is": "changed", "why": "The note lets the size stand for it."}}
+    run, _ = again(
+        run,
+        [tool("needs", needs=[SIZE_NEED], against_note=marked)],
+        [tool("blocked", reason="fine")],
+    )
     run.resume("It's fine to change them.", reopen_needs=True)
     assert run.drive().name == "blocked"
     assert reply_of(run, "needs")["outcome"] == "ok"
@@ -1197,12 +1203,15 @@ def test_every_note_and_answer_relayed_is_a_row_saying_who_when_and_at_which_cal
         ("note", "the operator", "Try a rounder corner."),
         ("reopen_needs", "the people running this", said[3][2]),
         ("note", "the people running this", "And a little taller."),
+        # Each settled need, beside the note (mqucifer/print-shop#79).
+        ("settled_beside", "the people running this", said[5][2]),
     ]
+    assert "Each settled need, beside it:" in said[5][2]
     assert all(r["at"] for r in found)
     # The answer reached call 2, and what arrived together is one phase. `ask` and `send_ask`
     # are two calls.
-    assert [r["at_call"] for r in found] == [2, 6, 6, 7, 7]
-    assert [r["phase"] for r in found] == [1, 2, 2, 3, 3]
+    assert [r["at_call"] for r in found] == [2, 6, 6, 7, 7, 7]
+    assert [r["phase"] for r in found] == [1, 2, 2, 3, 3, 3]
     assert found[1]["round"] == 1
     # Each went to the model as the row says.
     bodies = "\n".join(
@@ -2258,14 +2267,21 @@ def test_a_send_back_can_reopen_the_needs(tmp_path: Path) -> None:
     run = met_with_a_sheet(tmp_path)
     run, _ = again(
         run,
-        [BROKEN_DOWN, tool("needs", needs=[SIZE_NEED, {**SIZE_NEED, "id": "printable"}])],
+        [
+            BROKEN_DOWN,
+            tool(
+                "needs",
+                needs=[SIZE_NEED, {**SIZE_NEED, "id": "printable"}],
+                against_note={"volume": {"is": "kept", "why": "The note adds a check."}},
+            ),
+        ],
         [tool("blocked", reason="stop")],
     )
     run.send_back("sponsor", "Add the check you were missing.", reopen_needs=True)
     assert run.drive().name == "blocked"
     assert reply_of(run, "needs")["outcome"] == "ok"
     kinds = [r["kind"] for r in rows(run, "interventions")]
-    assert kinds[-2:] == ["send_back", "reopen_needs"]
+    assert kinds[-3:] == ["send_back", "reopen_needs", "settled_beside"]
 
 
 # A gap read by place (mqucifer/print-shop#72)

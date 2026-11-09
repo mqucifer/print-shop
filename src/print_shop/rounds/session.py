@@ -237,6 +237,9 @@ class Session:
     after_compaction: Callable[[], str] | None = None
     # Where this conversation's compaction notes are, so only the latest stays whole.
     notes_at: list[int] = field(default_factory=list)
+    # Given each tool reply before it's kept, for what it leads with when the model is stuck: the
+    # run's (mqucifer/print-shop#79). It never refuses or cuts anything.
+    lead: Callable[[Any, Judged], Judged] | None = None
 
     def begin(self, *start: dict[str, Any]) -> None:
         """A new conversation. An earlier one in the same run stays in the records."""
@@ -864,6 +867,8 @@ class Session:
                 continue
             args = _arguments(function.get("arguments"))
             judged = self._refused(name, args) or self.tools.call(name, function.get("arguments"))
+            if self.lead is not None:
+                judged = self.lead(name, judged)
             self.outcomes[judged.outcome] += 1
             if isinstance(name, str):
                 self.by_tool[name] += 1
