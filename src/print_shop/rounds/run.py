@@ -43,6 +43,7 @@ from print_shop.rounds import (
     after_action,
     breakdown,
     descriptions,
+    facts,
     figures,
     holding,
     judge,
@@ -84,6 +85,18 @@ NOTE_FROM = "the people running this"
 #: are in `record/CHECKS.md`.
 AGAIN_TRIES = 6
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+#: A compaction's note when no check's latest try fails: it opens as the failing list does.
+NOTHING_FAILING = "Compacted. No check's latest try fails."
+#: What a person said that the compaction note names, as the model's told it.
+SAID_KINDS = {
+    "note": "note",
+    "send_back": "send-back note",
+    "answers": "answers",
+    "pick": "pick",
+    "fix_first": "fix-first",
+}
+#: How much of a person's message the compaction note quotes, where it asks nothing.
+SAID_CHARS = 300
 VARIANT = re.compile(r"[A-Za-z0-9_-]{1,24}")
 #: A question that offers lettered options: "A (...) or B (...)?", "A, B or C?". On
 #: `eval-change-2` ask 4 drew A and B in one picture, and the pick "A" was refused, as a picture's
@@ -175,6 +188,15 @@ class State:
     geometry: dict[str, list[Any]] = field(default_factory=dict)
     # Each description sent again or said to still hold, shown at the next stop.
     restated: list[dict[str, Any]] = field(default_factory=list)
+    # What the model established with `fact`, by name, in the order first set
+    # (mqucifer/print-shop#78): `record/FACTS.md` holds them, and every new conversation, every
+    # compaction's note and every resume gives them whole.
+    facts: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # The last thing a person said to the model: its kind, who, the text and the call it came
+    # before. Every compaction's note says what it asked.
+    last_said: dict[str, Any] | None = None
+    # The reasoning-trim switch, as an eval's arm set it at the start: None is off.
+    trim_reasoning: dict[str, int] | None = None
 
 
 def repository_version() -> tuple[str, bool]:
@@ -332,8 +354,9 @@ class Run:
         )
         if sleep is not None:
             self.session.sleep = sleep
-        # After a compaction, each check whose latest try fails is said again (`holding.py`).
-        self.session.after_compaction = self.failing_said
+        # After a compaction, a note: each check whose latest try fails (`holding.py`), the
+        # facts, the open needs and what a person last asked (mqucifer/print-shop#78).
+        self.session.after_compaction = self.compaction_note
         self.tools.at_call = lambda: self.session.requests
 
     # Starting and going on
@@ -386,6 +409,11 @@ class Run:
             kind=toolsets.key(form.kind) if form.kind else None,
             toolsets=True,
         )
+        if run.limits.trim_reasoning_at:
+            run.state.trim_reasoning = {
+                "at": run.limits.trim_reasoning_at,
+                "keep": run.limits.trim_keep,
+            }
         run.tools.use(run.toolset)
         read = getattr(send, "effort", None)
         effort, effort_from = (
@@ -457,6 +485,11 @@ class Run:
             raise Refused(f"{folder} isn't a run")
         run = cls(folder, send, limits, alias, sleep)
         run.state = State(**json.loads((folder / "state.json").read_text(encoding="utf-8")))
+        if run.state.trim_reasoning:
+            # An eval's arm turned it on at the start, so every process of the run has it.
+            trim = run.state.trim_reasoning
+            run.limits = replace(run.limits, trim_reasoning_at=trim["at"], trim_keep=trim["keep"])
+            run.session.limits = run.limits
         run.tools.use(run.toolset)
         run.session.restore()
         # What the ledger hasn't got yet: an older run's, or what a killed process didn't reach.
@@ -550,11 +583,23 @@ class Run:
         self.state.ending = None
         self.session._record("resumed", commit=self.state.harness[-1])
         self.ledger.run_resumed(self.state.name)
+        kept = self._facts()
+        if kept:
+            # Every resume gives the facts whole: on the pi5 design run, a resume added nothing,
+            # and the call before it was replayed as it was (mqucifer/print-shop#78).
+            self.session.say(facts.block(kept))
 
     def _relay(self, kind: str, who: str, text: str, message: str | None = None) -> None:
         """Something a person sent, to the model and into the ledger: it's the largest cause of
         change in a run. `text` is theirs, and `message` how it's put to the model."""
         said = message if message is not None else text
+        if kind in SAID_KINDS:
+            self.state.last_said = {
+                "kind": kind,
+                "from": who,
+                "text": text,
+                "at_call": self.session.requests + 1,
+            }
         self.session._record(
             "relayed",
             relay=kind,
@@ -569,7 +614,8 @@ class Run:
     def _note(self, note: str, who: str) -> None:
         self.state.notes.append(note)
         self.state.notes_from.append(who)
-        self._relay("note", who, note, f"A note from {from_words(who)}:\n\n{note}")
+        message = _answer_with_facts(f"A note from {from_words(who)}:\n\n{note}", note)
+        self._relay("note", who, note, message)
 
     def approve(self, by: str, note: str = "") -> Ending:
         """A person's yes. It ends the run: the refinement pass and the delivery come after this."""
@@ -795,9 +841,10 @@ class Run:
         self._go_on()
         self.state.notes.append(note.strip())
         self.state.notes_from.append(by)
-        message = (
+        message = _answer_with_facts(
             f"{picked_by_words(by)} looked at the final part and sent it back, with this note:\n\n"
-            f"{note.strip()}"
+            f"{note.strip()}",
+            note.strip(),
         )
         self._relay("send_back", by, note.strip(), message)
         told = [self._reopen(by, True)] if reopen_needs else []
@@ -986,9 +1033,17 @@ class Run:
             f"A note from {from_words(who)}:\n\n{note}"
             for note, who in zip(self.state.notes, [*older, *self.state.notes_from], strict=True)
         ]
-        checks = nudge.record(self._bench_tries(), self._wanted(), last=AGAIN_TRIES)
+        tries = self._bench_tries()
+        # With no try yet, there's nothing to give, and the message says where they'll be.
+        given = any(one.exit != nudge.USAGE for one in tries)
+        checks = nudge.record(tries, self._wanted(), last=AGAIN_TRIES) if given else ""
         text = prompt.again(
-            self._start_text(), [*self.state.said, *relayed], needs_json, state, checks
+            self._start_text(),
+            [*self.state.said, *relayed],
+            needs_json,
+            state,
+            checks,
+            facts.block(self._facts()),
         )
         self.session.begin(
             {"role": "system", "content": prompt.SYSTEM},
@@ -1419,10 +1474,108 @@ class Run:
         return "\n\n".join(one for one in said if one)
 
     def failing_said(self) -> str:
-        """The message after a compaction: each check whose latest try fails, one or two lines
-        each, from the tries `record/CHECKS.md` keeps (mqucifer/print-shop#45). Empty when none
-        does. Session calls it through `after_compaction`."""
+        """Each check whose latest try fails, one or two lines each, from the tries
+        `record/CHECKS.md` keeps (mqucifer/print-shop#45). Empty when none does. It opens every
+        compaction's note."""
         return holding.after_compaction(self._holding(), self._thin_failing())
+
+    def compaction_note(self) -> str:
+        """The message after every compaction, even when nothing fails (mqucifer/print-shop#78):
+        on the pi5 design run two compactions left no note at all, because nothing was failing.
+        It says each failing check, the facts whole, the needs not yet met, the stops and what a
+        person last asked. Session calls it through `after_compaction`, and keeps only the
+        latest whole."""
+        parts = [
+            self.failing_said() or NOTHING_FAILING,
+            facts.block(self._facts(), facts.NONE_YET),
+            self._open_needs_said(),
+            self._stops_said(),
+            self._last_said(),
+        ]
+        return "\n\n".join(part for part in parts if part)
+
+    def _open_needs_said(self) -> str:
+        """The needs the last `done` didn't find met, and those no `done` has read yet."""
+        settled = self._needs()
+        if not settled:
+            return "No needs are settled yet: `needs` settles them, after `breakdown`."
+        unread = [f"`{n.id}`" for n in settled if n.id not in self.state.last_readings]
+        unmet = [
+            (n.id, self.state.last_readings[n.id])
+            for n in settled
+            if n.id in self.state.last_readings and not self.state.last_readings[n.id]["passed"]
+        ]
+        if not unread and not unmet:
+            return f"Every need of the {len(settled)} settled was met at the last `done`."
+        lines = [f"Needs not yet met, of the {len(settled)} settled (`record/needs.json`):"]
+        for nid, reading in unmet:
+            why = str(reading.get("why") or reading.get("verdict") or "")
+            why = why[: holding.AFTER_WHY_CHARS]
+            lines.append(f"- `{nid}`, NOT MET at the last `done`: {why}")
+        if unread:
+            lines.append(f"- not read at a `done` yet: {', '.join(unread)}")
+        return "\n".join(lines)
+
+    def _last_said(self) -> str:
+        """What a person last said, as the compaction's note gives it: what it asked, or the
+        start of it where it asked nothing. It's in the conversation above, whole."""
+        last = self.state.last_said
+        if not last:
+            return ""
+        what = SAID_KINDS.get(str(last.get("kind")), "message")
+        who = from_words(str(last.get("from") or ""))
+        head = f"The last {what}, from {who} before call {last.get('at_call')},"
+        found = facts.asks(str(last.get("text") or ""))
+        if found:
+            return (
+                f"{head} asked you {facts.asked_said(found)}. Where no fact answers it yet, "
+                "answer it with `fact`."
+            )
+        text = " ".join(str(last.get("text") or "").split())
+        quoted = text if len(text) <= SAID_CHARS else f"{text[:SAID_CHARS]}…"
+        return f'{head} said: "{quoted}" It\'s above in full.'
+
+    # Facts the model established (mqucifer/print-shop#78)
+
+    def _facts(self) -> list[facts.Fact]:
+        return facts.load(self.state.facts)
+
+    def fact(self, args: dict[str, Any]) -> Judged:
+        """One named fact, set, replaced or removed, and `record/FACTS.md` written again."""
+        given = sorted(
+            f"references/{p.name}"
+            for p in (self.work / "references").iterdir()
+            if p.is_file() and not p.is_symlink()
+        )
+        wrong = facts.problem(args, set(given))
+        if wrong:
+            return Judged("fact", "failed", f"Not kept: {wrong}", "fact")
+        name = str(args["name"]).strip()
+        text = str(args["text"]).strip()
+        shape = {k: str(args.get(k) or "").strip() for k in ("box", "way_in", "held_by")}
+        before = self.state.facts.get(name)
+        if not text and not any(shape.values()):
+            if before is None:
+                named = ", ".join(f"`{k}`" for k in self.state.facts) or "none yet"
+                reply = (
+                    f"Not kept: an empty `text` removes a fact, and there's no `{name}`. The "
+                    f"facts are {named}."
+                )
+                return Judged("fact", "failed", reply, "fact")
+            del self.state.facts[name]
+            reply = f"The fact `{name}` is gone, from `{facts.RECORD}` and every later message."
+        else:
+            one = facts.Fact(name, text, str(args["from"]).strip(), self.session.requests, **shape)
+            self.state.facts[name] = asdict(one)
+            again = f", replacing the one kept at call {before['at_call']}" if before else ""
+            reply = (
+                f"Kept, as the fact `{name}`{again}. `{facts.RECORD}` holds it, and it goes "
+                "whole into every compaction's note and every new conversation. Set "
+                f"`{name}` again to change it, or with an empty `text` to remove it."
+            )
+        paths.write_inside(self.work, facts.RECORD, facts.record(self._facts()))
+        self.save()
+        return Judged("fact", "ok", reply, detail={"fact": name, "facts": len(self.state.facts)})
 
     def _held_tries(self) -> list[holding.Tried]:
         """Every reading of a check, oldest first: the model's bench calls, each need's own
@@ -3738,6 +3891,14 @@ def _shown(seen: dict[str, Any], plan: str) -> tuple[Any, ...]:
     variants = sorted(tuple(sorted(v.values())) for v in (seen.get("variants") or {}).values())
     pictures = sorted((seen.get("pictures") or {}).values())
     return (tuple(variants), tuple(pictures), plan)
+
+
+def _answer_with_facts(message: str, note: str) -> str:
+    """A person's note as the model's told it, and beneath it, where it asks something, that
+    each ask is answered with `fact` (mqucifer/print-shop#78): on the pi5 design run a note asked
+    how a bought part is fitted, and no answer was ever written down."""
+    line = facts.answer_line(note)
+    return f"{message}\n\n{line}" if line else message
 
 
 def _need_what(nid: str) -> str:

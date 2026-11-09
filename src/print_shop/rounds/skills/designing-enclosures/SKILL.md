@@ -41,6 +41,8 @@ If the request has `## Stops`, each stop goes where it names. Show it with `ask`
 
 Run `info` on every file under `references/` and write down each one's bounds: the boards' outlines and heights, where each port, LED and hole is, the fan's frame and the plug's body. These are the only source of positions. Write down what the request fixes: which ports are used, which LEDs must show, how the lid closes, the edge radius, and each clearance. If the request names something to fit and gives no figure or no reference for it, ask with `questions`.
 
+Keep each bought part as one `fact`, named for its file, such as `references/fan.step`: its `box` from `info`, the `way_in` it goes in, and what it's `held_by`, the bench's answer once something holds it, and what will until then. Facts go whole into every new conversation and every compaction's note, so a part's size or the way it goes in is never measured or worked out again.
+
 ### 2. The parts and how the lid closes
 
 Decide the parts before any geometry, and write them down: which part each reference mounts to, where the lid splits from the base, and how it closes. `references/walls-and-lids.md` (the skill `sizing-walls-and-lids`) has the three ways a lid closes, and what each needs. Where the request leaves the way open, take it to the plan stop.
