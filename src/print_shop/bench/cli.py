@@ -7,6 +7,7 @@ wrong, 2 there's no answer to rely on, 3 the command itself was wrong.
 from __future__ import annotations
 
 import argparse
+import math
 import re
 import sys
 from pathlib import Path
@@ -71,6 +72,18 @@ def _named_box(text: str) -> tuple[str, tuple[list[float], list[float]]]:
     low = [min(a, b) for a, b in zip(values[:3], values[3:], strict=True)]
     high = [max(a, b) for a, b in zip(values[:3], values[3:], strict=True)]
     return name, (low, high)
+
+
+def _plane(text: str) -> tuple[str, float]:
+    """`z=3.75`: the axis a plane is square to, and where along it."""
+    axis, sep, value = text.partition("=")
+    try:
+        at = float(value)
+    except ValueError:
+        at = math.nan
+    if not sep or axis not in ("x", "y", "z") or not math.isfinite(at):
+        raise argparse.ArgumentTypeError("AXIS=AT, AXIS one of x y z: z=3 is level at 3 mm")
+    return axis, at
 
 
 #: The ways `edges --facing` takes, as `bench/edges.py` reads them.
@@ -354,6 +367,26 @@ def parser() -> Parser:
         "--min-width", type=float, help="the least width wanted, in mm: a piece under it is FAIL"
     )
     layout.add_argument("--layout-out", dest="out_layout", default="layout")
+    faces = sub.add_parser(
+        "faces",
+        help="a STEP part's flat faces, the way each faces, where and how large, and its round "
+        "holes and bosses: centre, axis, radius and depth",
+    )
+    faces.add_argument("file")
+    cut = sub.add_parser(
+        "slice",
+        help="a part cut by a plane: each separate piece's outline, box, area and holes",
+    )
+    cut.add_argument("file")
+    cut.add_argument(
+        "--at",
+        action="append",
+        required=True,
+        type=_plane,
+        metavar="AXIS=AT",
+        help="the plane: z=3 is level at 3 mm, x=50 and y=40 upright. Give it more than once for "
+        "several",
+    )
     render = sub.add_parser("render", help="pictures from the standard views")
     render.add_argument("files", nargs="*")
     render.add_argument(
@@ -465,6 +498,14 @@ def _dispatch(args: Any, report: Report) -> None:
 
         args.out = args.out_layout
         run(args, report)
+    elif args.command == "faces":
+        from .faces import run as run_faces
+
+        run_faces(args, report)
+    elif args.command == "slice":
+        from .section import run as run_slice
+
+        run_slice(args, report)
     elif args.command == "render":
         from .render import VIEWS, run
 

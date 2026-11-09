@@ -35,6 +35,8 @@ The first line is the verdict. Then come the numbers, each with how it was read,
 | `wall FILE --hole X,Y,Z [--axis A] [--min-wall W]` | the least wall round one hole, along its whole length, and toward what: the part's outside or another opening. Any point inside the hole names it |
 | `params SCRIPT --set NAME=VALUE [--max-left N]` | which dimensions, volumes and pieces moved when one parameter changed |
 | `layout FILE.json [--inset D]... [--join mitre\|round] [--min-width W]` | a flat layout of named pieces, in 2D: whether each is one piece, and where each part is; its least width and where, into a sharp tip or across a neck; what an inset of D leaves of it, how many parts and the narrowest neck, and where it cuts the piece; any two that overlap; and a picture with each piece labelled, which comes to you |
+| `faces FILE` | a STEP part's flat faces, by plane: the way each faces, where (`z=7.5`), its area and its box; and its round holes and bosses: centre, axis, radius, depth, and whether a hole is open at each end. A reading, for measuring a part, a bought one too, instead of a script of your own |
+| `slice FILE --at z=H [--at x=H]...` | the part cut by a plane, level (`z=`) or upright (`x=`, `y=`): each separate piece's area, box and outline, and each hole in it, with its centre and, where it's round, its diameter. A reading, for a cross-section instead of a script of your own |
 
 **`pause`'s numbers are the bench's own,** largest opening first, not your files'.
 

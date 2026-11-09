@@ -611,7 +611,34 @@ def at_limits() -> None:
     save(base.union(box(5, 15, 9.8, 10.2, 2, 8)), "wall-0p4")
 
 
+def where() -> None:
+    """Replies that say where (mqucifer/print-shop#77). A fan block 30 x 30 x 7.5 with four
+    3.4 mm holes 24 mm apart, through. A lid over it in 5 bodies: a plate 2 mm above the fan and
+    4 legs touching its underside, not joined to it, 1 mm off the fan's sides. The +x leg has a
+    toe reaching 0.5 mm into the fan: 0.5 x 2 x 1 = 1 mm³, from (14.5, -1, 1) to (15, 1, 2)."""
+    Path("where").mkdir(exist_ok=True)
+    fan = box(-15, 15, -15, 15, 0, 7.5)
+    for x in (-12, 12):
+        for y in (-12, 12):
+            fan = fan.cut(cq.Workplane("XY").center(x, y).circle(1.7).extrude(7.5))
+    save(fan, "where/fan")
+    legs = [
+        box(16, 18, -1, 1, 1, 9.5).union(box(14.5, 16, -1, 1, 1, 2)),
+        box(-18, -16, -1, 1, 1, 9.5),
+        box(-1, 1, 16, 18, 1, 9.5),
+        box(-1, 1, -18, -16, 1, 9.5),
+    ]
+    parts = [box(-20, 20, -20, 20, 9.5, 11.5).val(), *(leg.val() for leg in legs)]
+    save(cq.Workplane(obj=cq.Compound.makeCompound(parts)), "where/lid5")
+    # A plate 0.1 mm thick tilted 5° over a pane: sections a layer apart cut it into strips with
+    # gaps between, and rays straight up meet it everywhere, so `light`'s two methods differ.
+    plate = box(-1, 11, -1, 11, 0, 0.1).val().rotate((5, 5, 0), (5, 6, 0), 5)
+    save(cq.Workplane(obj=plate.translate((0, 0, 2))), "where/light-slats")
+    save(box(0, 10, 0, 10, 0, 1), "where/light-pane")
+
+
 if __name__ == "__main__":
+    where()
     near_touching()
     boxes()
     pin_in_hole()

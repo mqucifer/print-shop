@@ -486,6 +486,103 @@ def _across(built: Any, x: float, y: float, z: float, length: float) -> float:
     return float(best)
 
 
+#: How many thin places a reply names, thinnest first; every one is in the record.
+PLACES_SAID = 10
+#: The most thin places read by rays across, past the 50 thin spots already read.
+PLACES_READ = 200
+
+
+def _thin_places(
+    rows: list[dict[str, Any]],
+    width_of: dict[int, float],
+    built: Any,
+    length: float,
+    step: float,
+    heights: tuple[float, float],
+) -> list[dict[str, Any]]:
+    """The thin spots of each layer joined into places: a spot in one layer and one in the next
+    whose boxes meet are one place (mqucifer/print-shop#77). On `suncatcher-2` `thin` said 40 spots
+    and the thinnest, the model never opened the record's positions, and it took a note about a
+    wedge for where they were. Each place gives its box, how many layers it runs through, and
+    the least width across it by rays, thinnest first."""
+    by_layer: dict[float, list[int]] = {}
+    for i, r in enumerate(rows):
+        by_layer.setdefault(r["z"], []).append(i)
+    parent = list(range(len(rows)))
+
+    def root(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    layers = sorted(by_layer)
+    for below, above in zip(layers, layers[1:], strict=False):
+        if above - below > 1.01 * step:
+            continue
+        for i in by_layer[below]:
+            a = rows[i]["box"]
+            for j in by_layer[above]:
+                b = rows[j]["box"]
+                if a[0] <= b[2] and b[0] <= a[2] and a[1] <= b[3] and b[1] <= a[3]:
+                    parent[root(i)] = root(j)
+    groups: dict[int, list[dict[str, Any]]] = {}
+    for i, r in enumerate(rows):
+        groups.setdefault(root(i), []).append(r)
+    places: list[dict[str, Any]] = []
+    read = 0
+    for group in groups.values():
+        widths = [width_of[id(r)] for r in group if id(r) in width_of]
+        if not widths and read < PLACES_READ:
+            r = group[0]
+            widths = [_across(built, r["x"], r["y"], r["z"], length)]
+            read += 1
+        width = min((w for w in widths if np.isfinite(w)), default=None)
+        zs = [r["z"] for r in group]
+        lo = [min(r["box"][0] for r in group), min(r["box"][1] for r in group)]
+        hi = [max(r["box"][2] for r in group), max(r["box"][3] for r in group)]
+        places.append(
+            {
+                "width_mm": round(width, 4) if width is not None else None,
+                "box": [
+                    [*lo, round(max(heights[0], min(zs) - step / 2), 3)],
+                    [*hi, round(min(heights[1], max(zs) + step / 2), 3)],
+                ],
+                "layers": len(set(zs)),
+                "mm2": round(sum(r["mm2"] for r in group), 3),
+            }
+        )
+    return sorted(places, key=lambda p: (p["width_mm"] is None, p["width_mm"] or 0.0))
+
+
+def _thin_places_said(report: Report, places: list[dict[str, Any]], nozzle: float) -> None:
+    def point(p: list[float]) -> str:
+        return "(" + ", ".join(f"{v + 0.0:g}" for v in p) + ")"
+
+    rest = (
+        f", the first {PLACES_SAID} of {len(places)}; the rest are in the record as thin_places"
+        if len(places) > PLACES_SAID
+        else ""
+    )
+    report.line(
+        f"thin places, thinnest first{rest}: where each is, and its least width across by rays"
+    )
+    for k, p in enumerate(places[:PLACES_SAID], 1):
+        width = (
+            f"{p['width_mm']:.3f} mm across"
+            if p["width_mm"] is not None
+            else "rays across found no wall on both sides"
+        )
+        report.line(
+            f"  {k}: {width}, from {point(p['box'][0])} to {point(p['box'][1])}, "
+            f"{p['layers']} layer(s)"
+        )
+    if any(p["width_mm"] is not None and p["width_mm"] >= nozzle for p in places[:PLACES_SAID]):
+        report.line(
+            f"  a place {nozzle:g} mm across or wider is one the sections call thin and rays don't"
+        )
+
+
 def run_thin(args: Any, report: Report) -> None:
     part = load(args.file)
     report.notes += part.notes
@@ -534,6 +631,7 @@ def run_thin(args: Any, report: Report) -> None:
                         "x": round(c.x, 3),
                         "y": round(c.y, 3),
                         "mm2": round(float(piece.area), 3),
+                        "box": [round(float(v), 3) for v in piece.bounds],
                     }
                 )
     report.fact("layers_read", f"{count} at {step:.3f} mm" + sampled)
@@ -552,9 +650,14 @@ def run_thin(args: Any, report: Report) -> None:
             f"{len(cusps)} small spot(s) the sections read as thin measure wider across by rays: "
             f"a cusp where a curve meets a flat, at {cusps[:2]}"
         )
+    width_of = {id(r): w for r, w in zip(thin_rows, measured, strict=False)}
     thin_rows = [r for r in thin_rows if r not in cusps]
     report.fact("thin_spots", len(thin_rows), how=f"over {least} mm² in a layer")
     report.numbers["thin_at"] = thin_rows[:50]
+    places = _thin_places(thin_rows, width_of, built, length, step, (low, high))
+    report.numbers["thin_places"] = places
+    if places:
+        _thin_places_said(report, places, nozzle)
     widths = [w for w in measured if np.isfinite(w) and w < nozzle + 2 * FINE[0]]
     unconfirmed = len(wide) - len(cusps)
     if widths:
@@ -622,11 +725,12 @@ def run_thin(args: Any, report: Report) -> None:
     bodies = _bodies(part, built, args, report)
     problems = []
     if thin_rows:
+        where = f"{len(places)} place(s), {len(thin_rows)} spot(s) in their layers,"
         problems.append(
-            f"{len(thin_rows)} spot(s) narrower than the {nozzle:g} mm nozzle, the thinnest "
+            f"{where} narrower than the {nozzle:g} mm nozzle, the thinnest "
             f"{said(min(widths), nozzle)} mm"
             if widths
-            else f"{len(thin_rows)} spot(s) narrower than the nozzle"
+            else f"{where} narrower than the nozzle"
         )
     if too_small_rows:
         problems.append(f"{len(too_small_rows)} section piece(s) vanish at the nozzle's width")

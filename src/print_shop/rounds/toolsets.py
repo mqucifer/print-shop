@@ -107,6 +107,8 @@ CORE_COMMANDS = (
     "params",
     "render",
     "layout",
+    "faces",
+    "slice",
 )
 CORE_SKILLS = ("bench", "cadquery", "references")
 #: What every run builds with and checks with. On `suncatcher-3` neither was read in 325 calls,

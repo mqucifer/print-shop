@@ -98,11 +98,24 @@ def _apart(a: Part, b: Part, margin: float = 1e-3) -> bool:
 
 
 def _occt(a: Part, b: Part) -> dict[str, Any]:
-    """OCCT's overlap twice over and its distance. A boolean that raises is reported as such."""
+    """OCCT's overlap twice over and its distance, and the box round `common`'s solid where it
+    has one. A boolean that raises is reported as such."""
     found: dict[str, Any] = {}
     apart = _apart(a, b)
+
+    def common() -> float:
+        shared = a.shape.intersect(b.shape)
+        volume = float(shared.Volume())
+        if volume > VOLUME_FLOOR:
+            box = shared.BoundingBox()
+            found["common_box"] = [
+                _at((box.xmin, box.ymin, box.zmin)),
+                _at((box.xmax, box.ymax, box.zmax)),
+            ]
+        return volume
+
     measures: dict[str, Callable[[], float]] = {
-        "common": lambda: float(a.shape.intersect(b.shape).Volume()),
+        "common": common,
         "cut": lambda: float(a.shape.Volume() - a.shape.cut(b.shape).Volume()),
     }
     for name, measure in measures.items():
@@ -156,6 +169,11 @@ def measure_pair(
         "overlap_band_mm3": round(band, 4),
     }
     differs: list[str] = []
+    # Each method's overlap, by its name: they agree there is one, or that there's none, or they
+    # don't, and only the last is a disagreement (mqucifer/print-shop#77).
+    volumes: dict[str, float] = {"the mesh": overlap}
+    #: How far each may be from the mesh's and still agree on the figure.
+    tolerance: dict[str, float] = {}
     if a.is_brep and b.is_brep:
         occt = _occt(a, b)
         pair.update(
@@ -163,11 +181,13 @@ def measure_pair(
             overlap_occt_cut_mm3=occt["cut"],
             gap_occt_mm=occt["distance"],
         )
+        if "common_box" in occt:
+            pair["overlap_occt_box"] = occt["common_box"]
         for name in ("common", "cut"):
             if occt[name] is None:
                 differs.append(f"OCCT {name} failed: {occt[f'{name}_error']}")
-            elif abs(occt[name] - overlap) > band:
-                differs.append(f"OCCT {name} says {occt[name]:.3f} mm³, the mesh {overlap:.3f}")
+            else:
+                volumes[f"OCCT {name}"] = occt[name]
         search = (occt["distance"] or 0.0) + 1.0
         gap = float(a.manifold().min_gap(b.manifold(), search))
         if occt["distance"] is None:
@@ -179,8 +199,8 @@ def measure_pair(
         # A stack's error is its steps' outlines: a share of the overlap, and a little at least.
         stack_band = max(0.02, 0.05 * overlap)
         pair["overlap_sections_mm3"] = round(stacked, 4)
-        if abs(stacked - overlap) > stack_band:
-            differs.append(f"sections say {stacked:.3f} mm³, the mesh {overlap:.3f}")
+        volumes[f"{SECTIONS} sections"] = stacked
+        tolerance[f"{SECTIONS} sections"] = stack_band
         sampled, spacing = _sampled_gap(a, b)
         low, high = a.bounds(), b.bounds()
         far = float(np.linalg.norm(np.maximum(low[0] - high[1], high[0] - low[1]))) + 1.0
@@ -196,9 +216,18 @@ def measure_pair(
     # The figure the limits judge, as it is: a need on it reads the same (`limits`).
     pair["gap_mm"] = read
     pair["gap_by"] = "occt" if exact is not None else "mesh"
+    overlapping = _overlap_agreed(volumes, tolerance, band, differs)
+    pair["overlap_by"] = {name: round(v, 4) for name, v in volumes.items()}
+    if overlapping or overlap > band:
+        # Where it is: each separate piece of it, largest first, by the mesh's own intersection.
+        pair["overlap_at"] = _pieces_of(fine)
+    if overlapping:
+        pair["volumes_differ"] = bool(
+            max(volumes.values()) - min(volumes.values()) > max([band, *tolerance.values()])
+        )
     if differs:
         pair["verdict"] = "DISAGREE"
-    elif overlap > band:
+    elif overlapping:
         pair["verdict"] = "INTERFERE"
     elif min_gap is not None and under(read, min_gap):
         pair["verdict"] = "TOO CLOSE"
@@ -210,6 +239,42 @@ def measure_pair(
         pair["verdict"] = "CLEAR"
     pair["differs"] = differs
     return pair
+
+
+def _overlap_agreed(
+    volumes: dict[str, float], tolerance: dict[str, float], band: float, differs: list[str]
+) -> bool:
+    """Whether the pair overlaps, by every method. Where all find an overlap it's one, whatever
+    the volumes: on `pi5-case-1` OCCT read 4.000 mm³ and the mesh 3.274, the verdict was DISAGREE,
+    and about 1.5 h went on that difference (mqucifer/print-shop#77). Where one finds an overlap
+    and another none, further apart than its tolerance, that's a disagreement, said in `differs`.
+    Within it, the mesh's figure decides, as it always has."""
+    finds = {n: v > max(band, tolerance.get(n, band)) for n, v in volumes.items()}
+    if all(finds.values()) or not any(finds.values()):
+        return all(finds.values())
+    mesh = volumes["the mesh"]
+    apart = [n for n, v in volumes.items() if abs(v - mesh) > tolerance.get(n, band)]
+    if not apart:
+        return finds["the mesh"]
+    yes = [f"{n} {_mm3(volumes[n])} mm³" for n in volumes if finds[n]]
+    no = [f"{n} {_mm3(volumes[n])}" for n in volumes if not finds[n]]
+    differs.append(
+        f"one method finds an overlap and another none: {', '.join(yes)}, against "
+        f"{', '.join(no)}, so neither is the answer. Render a cut through the pair there"
+    )
+    return False
+
+
+def _pieces_of(shared: Any) -> list[dict[str, Any]]:
+    """Each separate piece of an overlap, largest first: its volume and the box it fills."""
+    rows = []
+    for piece in shared.decompose():
+        volume = float(piece.volume())
+        if volume <= VOLUME_FLOOR:
+            continue
+        x0, y0, z0, x1, y1, z1 = piece.bounding_box()
+        rows.append({"mm3": round(volume, 4), "box": [_at((x0, y0, z0)), _at((x1, y1, z1))]})
+    return sorted(rows, key=lambda r: -r["mm3"])
 
 
 @dataclass
@@ -485,7 +550,9 @@ def run(args: Any, report: Report) -> None:
         )
     for part in parts:
         report.notes += part.notes
-    items = [piece for part in parts for piece in part.pieces()]
+    split = [(part, part.pieces()) for part in parts]
+    items = [piece for _, pieces in split for piece in pieces]
+    lead = _bodies_said(report, split)
     if len(items) < 2:
         raise NoAnswer(f"needs two parts or a file of several solids: found {len(items)}")
     pairs = [(items[i], items[j]) for i in range(len(items)) for j in range(i + 1, len(items))]
@@ -510,30 +577,19 @@ def run(args: Any, report: Report) -> None:
     if named:
         report.numbers["places"] = {p.name: p.plain() for p in named}
     brep = all(a.is_brep and b.is_brep for a, b in pairs)
-    for r in results:
-        by = "OCCT's exact distance" if r["gap_by"] == "occt" else "the mesh, the STL's own surface"
-        line = (
-            f"{r['a']} | {r['b']}: {r['verdict']}, overlap {r['overlap_mesh_mm3']:.3f} mm³ "
-            f"± {r['overlap_band_mm3']:.3f}, gap {r['gap_mm']:.4f} mm by {by}"
-        )
-        if r["gap_by"] == "occt":
-            line += f" (the mesh at {FINE[0]} mm reads {r['gap_mesh_mm']:.4f})"
-        report.line(line)
-        if brep:
-            common, cut = r["overlap_occt_common_mm3"], r["overlap_occt_cut_mm3"]
-            report.second(
-                f"{r['a']} | {r['b']}: OCCT common {_shown(common)} mm³, cut {_shown(cut)} mm³; "
-                f"the mesh's gap {r['gap_mesh_mm']:.4f} mm against OCCT's "
-                f"{_shown(r['gap_occt_mm'], 4)}, within the chords on both ({2 * FINE[0]:g} mm)"
-            )
-        else:
-            report.second(
-                f"{r['a']} | {r['b']}: {SECTIONS} sections say {r['overlap_sections_mm3']:.3f} "
-                f"mm³, {SAMPLES} sampled points say gap {r['gap_sampled_mm']:.4f} mm"
-            )
-        report.notes += r["differs"]
+    # Many pairs with nothing to report are one counted line: on `pi5-case-1` a lid of 5 bodies
+    # gave 15 pairs, about 21k characters a reply (mqucifer/print-shop#77). Every pair whose
+    # verdict, or any of whose places', isn't good is said whole.
+    folded = len(results) > SAID_WHOLE
+    for i, r in enumerate(results):
+        if folded and _quiet(r):
+            continue
+        _pair_said(report, i, r, named, brep)
         for name, place in r.get("places", {}).items():
-            _place_said(report, r, name, place, args)
+            if not (folded and place["verdict"] == NOT_CAUGHT):
+                _place_said(report, i, r, name, place, args)
+    if folded:
+        _quiet_said(report, results, named, brep)
     if args.min_gap is not None or max_gap is not None:
         exact = "OCCT's exact distance" if brep else "the mesh's distance"
         held = "each place's least gap" if named else "each pair's least gap"
@@ -573,22 +629,208 @@ def run(args: Any, report: Report) -> None:
     if read_at:
         at = {w: sum(p["verdict"] == w for p in read_at) for w in [*ORDER, NOT_CAUGHT]}
         tally += "; at the places: " + ", ".join(f"{n} {w.lower()}" for w, n in at.items() if n)
-    report.verdict(worst, f"{len(results)} pair(s): {tally}")
+    report.verdict(worst, f"{lead}{len(results)} pair(s): {tally}")
+
+
+#: Up to this many pairs, every pair is said whole; past it, those with nothing to report are one
+#: counted line (mqucifer/print-shop#77).
+SAID_WHOLE = 3
+#: A pair's verdicts with nothing to report, and a place's.
+QUIET = ("CLEAR", "TOUCHING")
+QUIET_AT = (*QUIET, NOT_CAUGHT)
+#: How many bodies of a file, and pieces of an overlap, a reply names; the rest are in the record.
+BODIES_SAID = 8
+PIECES_SAID = 6
+
+
+def _quiet(pair: dict[str, Any]) -> bool:
+    """Nothing to report: a good verdict, no disagreement, and every place good or not caught."""
+    places = pair.get("places", {}).values()
+    return (
+        pair["verdict"] in QUIET
+        and not pair["differs"]
+        and all(p["verdict"] in QUIET_AT for p in places)
+    )
+
+
+def _bodies_said(report: Report, split: list[tuple[Part, list[Part]]]) -> str:
+    """Each file of more than one body, said first, with where each body is: on `pi5-case-1` a
+    lid's clip legs were floating, 5 bodies, and five replies listed its 15 pairs without saying
+    so (mqucifer/print-shop#77). The second reading is the file's own mesh, split where nothing
+    joins it. Returns the verdict's lead, as "lid.step: 5 bodies; "."""
+    rows: list[dict[str, Any]] = []
+    for part, pieces in split:
+        if len(pieces) < 2:
+            continue
+        each: list[dict[str, Any]] = []
+        for piece in pieces:
+            low, high = piece.extent()
+            volume = round(float(piece.manifold().volume()), 4)
+            each.append({"part": piece.name, "mm3": volume, "box": [_at(low), _at(high)]})
+        rows.append({"file": part.name, "bodies": len(pieces), "each": each})
+        kind = "solids" if part.is_brep else "closed bodies in its mesh"
+        named = "; ".join(
+            f"#{e['part'].rsplit('#', 1)[-1]} {e['mm3']:g} mm³ from {_point(e['box'][0])} to "
+            f"{_point(e['box'][1])}"
+            for e in each[:BODIES_SAID]
+        )
+        more = f"; and {len(each) - BODIES_SAID} more, in the record" * (len(each) > BODIES_SAID)
+        report.line(
+            f"{part.name}: {len(pieces)} bodies, {kind} not joined, each its own part: "
+            f"{named}{more}. If it's meant to be one piece, join each body to the one it belongs to"
+        )
+        if part.is_brep:
+            meshed = len(part.fine().split(only_watertight=False))
+            report.second(
+                f"{part.name}: {len(pieces)} solids by OCCT; its mesh splits into {meshed} "
+                "separate bodies"
+            )
+            if meshed < len(pieces):
+                report.note(
+                    f"{part.name}'s mesh joins some of its {len(pieces)} solids where they touch: "
+                    "touching isn't joined, and each is still its own body"
+                )
+    if rows:
+        report.numbers["bodies"] = rows
+    return "".join(f"{r['file']}: {r['bodies']} bodies; " for r in rows)
+
+
+def _within(low: list[float], high: list[float], named: list[Place]) -> str:
+    """Which named box a box lies in: all inside one, partly in some, or outside every one."""
+    boxes = [(p.name, p.low, p.high) for p in named if p.low is not None and p.high is not None]
+    if not boxes:
+        return ""
+    lo, hi = np.asarray(low), np.asarray(high)
+    inside = [n for n, a, b in boxes if np.all(lo >= a - 1e-3) and np.all(hi <= b + 1e-3)]
+    if inside:
+        return f", inside the box {inside[0]}"
+    partly = [n for n, a, b in boxes if np.all(lo < b) and np.all(hi > a)]
+    if partly:
+        return f", partly in the box {' and '.join(partly)}"
+    return ", outside every named box"
+
+
+def _mm3(value: float) -> str:
+    """A volume to 3 places, never "-0.000": a boolean's arithmetic noise round nothing."""
+    return f"{round(value, 3) + 0.0:.3f}"
+
+
+def _volumes(pair: dict[str, Any]) -> str:
+    by = pair["overlap_by"]
+    shown = [f"{_mm3(v)} ({n})" for n, v in by.items()]
+    return ", ".join(shown[:-1]) + f" and {shown[-1]} mm³"
+
+
+def _pair_said(
+    report: Report, index: int, r: dict[str, Any], named: list[Place], brep: bool
+) -> None:
+    """One pair whole: its verdict, its figures, where any overlap is, and its second check."""
+    by = "OCCT's exact distance" if r["gap_by"] == "occt" else "the mesh, the STL's own surface"
+    line = (
+        f"pairs.{index}, {r['a']} | {r['b']}: {r['verdict']}, overlap "
+        f"{r['overlap_mesh_mm3']:.3f} mm³ ± {r['overlap_band_mm3']:.3f}, gap {r['gap_mm']:.4f} "
+        f"mm by {by}"
+    )
+    if r["gap_by"] == "occt" and not r.get("overlap_at"):
+        line += f" (the mesh at {FINE[0]} mm reads {r['gap_mesh_mm']:.4f})"
+    if r.get("volumes_differ"):
+        line += (
+            f". Both methods find an overlap; volumes {_volumes(r)}: they differ only on its "
+            "size, so the verdict is INTERFERE, not DISAGREE"
+        )
+    report.line(line)
+    pieces = r.get("overlap_at") or []
+    if pieces:
+        report.line(
+            f"  the overlap is {len(pieces)} piece(s), by the mesh: "
+            + "; ".join(
+                f"{p['mm3']:.3f} mm³ from {_point(p['box'][0])} to {_point(p['box'][1])}"
+                + _within(p["box"][0], p["box"][1], named)
+                for p in pieces[:PIECES_SAID]
+            )
+            + (f"; and {len(pieces) - PIECES_SAID} more" if len(pieces) > PIECES_SAID else "")
+        )
+    if brep:
+        common, cut = r["overlap_occt_common_mm3"], r["overlap_occt_cut_mm3"]
+        text = (
+            f"{r['a']} | {r['b']}: OCCT common {_shown(common)} mm³, cut {_shown(cut)} mm³; "
+            f"the mesh's gap {r['gap_mesh_mm']:.4f} mm against OCCT's "
+            f"{_shown(r['gap_occt_mm'], 4)}, within the chords on both ({2 * FINE[0]:g} mm)"
+        )
+        if r.get("overlap_occt_box"):
+            low, high = r["overlap_occt_box"]
+            text += f"; OCCT's common from {_point(low)} to {_point(high)}"
+        report.second(text)
+    else:
+        report.second(
+            f"{r['a']} | {r['b']}: {SECTIONS} sections say {r['overlap_sections_mm3']:.3f} "
+            f"mm³, {SAMPLES} sampled points say gap {r['gap_sampled_mm']:.4f} mm"
+        )
+    report.notes += r["differs"]
+
+
+def _quiet_said(
+    report: Report, results: list[dict[str, Any]], named: list[Place], brep: bool
+) -> None:
+    """The pairs with nothing to report, as one counted line and one second check."""
+    quiet = [(i, r) for i, r in enumerate(results) if _quiet(r)]
+    if not quiet:
+        return
+    tally = ", ".join(
+        f"{n} {w.lower()}" for w in QUIET if (n := sum(r["verdict"] == w for _, r in quiet))
+    )
+    i, least = min(quiet, key=lambda q: q[1]["gap_mm"])
+    line = (
+        f"{len(quiet)} other pair(s) with nothing to report ({tally}, no overlap; least gap "
+        f"{least['gap_mm']:.4f} mm, pairs.{i}, {least['a']} | {least['b']})"
+    )
+    # A place that catches no surface of one of a pair says nothing of it, whichever pair it is.
+    shown = {i for i, r in enumerate(results) if not _quiet(r)}
+    for place in named:
+        read = [r["places"][place.name]["verdict"] for k, r in enumerate(results)]
+        quiet_read = [v for k, v in enumerate(read) if k not in shown or v == NOT_CAUGHT]
+        missed = read.count(NOT_CAUGHT)
+        got = [f"{n} {w.lower()}" for w in QUIET if (n := quiet_read.count(w))]
+        line += f"; at {place.name} " + ", ".join(
+            [*got, *[f"{missed} not caught"] * bool(missed)]
+        )
+    report.line(line + ". Each pair is whole in the record")
+    report.second(
+        f"the {len(quiet)} other pair(s): "
+        + (
+            "no overlap by OCCT common, by its cut or by the mesh, and the mesh's gaps within "
+            f"the chords ({2 * FINE[0]:g} mm) of OCCT's"
+            if brep
+            else f"no overlap by {SECTIONS} sections or by the mesh, and sampled points agree "
+            "with the mesh's gaps"
+        )
+    )
 
 
 def _place_said(
-    report: Report, pair: dict[str, Any], name: str, place: dict[str, Any], args: Any
+    report: Report,
+    index: int,
+    pair: dict[str, Any],
+    name: str,
+    place: dict[str, Any],
+    args: Any,
 ) -> None:
     """One place's line, for one pair: its gap, where, and by which method, or why it has none."""
-    head = f"  at {name}, {pair['a']} | {pair['b']}:"
+    head = f"  at {name}, pairs.{index}, {pair['a']} | {pair['b']}:"
     if place["gap_mm"] is None:
         report.line(f"{head} {place['verdict']}, no figure: {place['why']}")
         return
     limit = next((g for g in (args.min_gap, args.max_gap) if g is not None), place["gap_mm"])
     by = "OCCT's exact distance" if place["gap_by"] == "occt" else "the mesh"
+    # An overlap's gap is 0 at any point of it: where it is, is the pair's overlap line.
+    ends = (
+        f", from {_point(place['from'])} to {_point(place['to'])}"
+        if place["verdict"] != "INTERFERE"
+        else ""
+    )
     line = (
-        f"{head} {place['verdict']}, gap {said(place['gap_mm'], limit, 4)} mm by {by}, from "
-        f"{_point(place['from'])} to {_point(place['to'])}, as pairs.N.places.{name}.gap_mm"
+        f"{head} {place['verdict']}, gap {said(place['gap_mm'], limit, 4)} mm by {by}{ends}, "
+        f"as pairs.{index}.places.{name}.gap_mm"
     )
     if place["why"]:
         line += f": {place['why']}"
@@ -596,22 +838,37 @@ def _place_said(
 
 
 def _places_checked(report: Report, results: list[dict[str, Any]], named: list[Place]) -> None:
-    """What each place is, its second check, and a place no pair has surfaces in."""
+    """What each place is, its second check, and a place no pair has surfaces in. Past
+    `SAID_WHOLE` pairs, the second check names the pairs said whole, and counts the rest."""
     empty: str | None = None
+    folded = len(results) > SAID_WHOLE
     for place in named:
-        report.line(f"place {place.name}: {place.words()}")
+        # A box is as the command gave it; past `SAID_WHOLE` pairs only a way's words are said.
+        if not (folded and place.way is None):
+            report.line(f"place {place.name}: {place.words()}")
         read = [r["places"][place.name] for r in results]
         seconds = [p for p in read if p["gap_second_mm"] is not None]
+        shown = [
+            p
+            for r, p in zip(results, read, strict=True)
+            if p["gap_second_mm"] is not None and not (folded and _quiet(r))
+        ]
         if seconds:
             way = "points sampled on those faces" if place.way else "the mesh clipped by the box"
             if not place.way and not all(p["gap_by"] == "occt" for p in seconds):
                 way = "points sampled on the mesh clipped by the box"
-            report.second(
-                f"{place.name}: {way} read "
-                + ", ".join(f"{p['gap_second_mm']:.4f}" for p in seconds)
-                + " mm, against "
-                + ", ".join(f"{p['gap_mm']:.4f}" for p in seconds)
-            )
+            rest = len(seconds) - len(shown)
+            agree = f"{rest} other pair(s) agree within the chords"
+            if not shown:
+                report.second(f"{place.name}: {way} agrees within the chords ({rest} pair(s))")
+            else:
+                report.second(
+                    f"{place.name}: {way} read "
+                    + ", ".join(f"{p['gap_second_mm']:.4f}" for p in shown)
+                    + " mm, against "
+                    + ", ".join(f"{p['gap_mm']:.4f}" for p in shown)
+                    + (f"; {agree}" if rest else "")
+                )
         if all(p["verdict"] == NOT_CAUGHT for p in read) and empty is None:
             empty = (
                 f"the place {place.name}, {place.words()}, holds no pair's surfaces on both sides "
