@@ -41,7 +41,7 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "volume_mesh_mm3",
         "watertight",
     ),
-    "clearance": ("lift", "pairs", "places"),
+    "clearance": ("lift", "pairs", "places", "slide"),
     "readback": (
         "after_mm3",
         "before_mm3",
@@ -218,6 +218,39 @@ PLACE = Row(
     closed=True,
 )
 
+#: `clearance --slide`'s answer (mqucifer/print-shop#76). `first_mm` is None where it meets nothing.
+SLIDE = Row(
+    {
+        "file": TEXT,
+        "way": TEXT,
+        "step_mm": NUMBER,
+        "hold_mm": NUMBER,
+        "clear_mm": NUMBER,
+        "first_mm": NUMBER,
+        "first_rays_mm": NUMBER,
+        "meets": Rows(TEXT),
+        "contacts": Rows(Row({"part": TEXT, "box": CORNERS, "in": Rows(TEXT)}, closed=True)),
+        "overlaps": Rows(Row({"part": TEXT, "overlap_mm3": NUMBER, "box": CORNERS}, closed=True)),
+        "path": Rows(
+            Row(
+                {
+                    "part": TEXT,
+                    "met_mm": NUMBER,
+                    "met_rays_mm": NUMBER,
+                    "box": CORNERS,
+                    "reach_mm": NUMBER,
+                    "reach_rays_mm": NUMBER,
+                    # Each piece of it on the path, such as each hook a fan passes.
+                    "pieces": Rows(Row({"box": CORNERS, "reach_mm": NUMBER}, closed=True)),
+                },
+                closed=True,
+            )
+        ),
+        "verdict": TEXT,
+    },
+    closed=True,
+)
+
 SHAPES: dict[str, dict[str, Any]] = {
     "info": {
         "bodies_mesh": NUMBER,
@@ -259,6 +292,10 @@ SHAPES: dict[str, dict[str, Any]] = {
         ),
         # What each place named is: a box's two corners, or the way its faces face.
         "places": Keyed(Row({"box": CORNERS, "facing": TEXT})),
+        # What holds the last file named, slid along its way out (mqucifer/print-shop#76): the
+        # first distance it meets another, by the step and halving and by the rays, which parts
+        # and where, an overlap where it lies, and every part on its path.
+        "slide": SLIDE,
     },
     "readback": {
         "after_mm3": NUMBER,
@@ -379,7 +416,7 @@ SHAPES: dict[str, dict[str, Any]] = {
 
 VERDICTS: dict[str, tuple[str, ...]] = {
     "info": ("OK", "FAIL"),
-    "clearance": ("CLEAR", "TOUCHING", "TOO CLOSE", "TOO LOOSE", "INTERFERE"),
+    "clearance": ("CLEAR", "TOUCHING", "TOO CLOSE", "TOO LOOSE", "INTERFERE", "HELD", "NOT HELD"),
     "readback": ("OK", "FAIL", "NO CHANGE"),
     "rays": ("OK", "FAIL"),
     "panes": ("OK", "FAIL"),

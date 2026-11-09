@@ -112,6 +112,21 @@ def parser() -> Parser:
         "--along", choices=("x", "y", "z"), default="z", help="the axis --lift moves it along"
     )
     clearance.add_argument(
+        "--slide",
+        choices=("+x", "-x", "+y", "-y", "+z", "-z"),
+        metavar="DIR",
+        help="slide the last file named along DIR, one of +x -x +y -y +z -z, its way out, until "
+        "it's clear of every other part: an overlap where it lies, then the first part it meets "
+        "and where, HELD within --hold, and everything on its path, which is what has to bend or "
+        "be fitted afterwards on its way in (mqucifer/print-shop#76)",
+    )
+    clearance.add_argument(
+        "--hold",
+        type=float,
+        metavar="D",
+        help="with --slide, the part is HELD if it meets another within D mm (1 unless given)",
+    )
+    clearance.add_argument(
         "--box",
         dest="boxes",
         action="append",
@@ -511,6 +526,7 @@ def gaps_given(args: Any, top: Parser) -> None:
         return
     if args.min_gap is not None and args.max_gap is not None and args.min_gap > args.max_gap:
         top.error(f"clearance: --min-gap {args.min_gap:g} is over --max-gap {args.max_gap:g}")
+    slides(args, top)
     if args.lift is None:
         return
     if len(args.files) < 2:
@@ -521,6 +537,40 @@ def gaps_given(args: Any, top: Parser) -> None:
             f"clearance: --lift {args.lift:g} is a gap it would read: lift by more than "
             f"{max(limits, default=0):g} mm, so the least gap is the play and not the lift"
         )
+
+
+#: How far a part may move before what it meets holds it, in mm, unless `--hold` says.
+HOLD = 1.0
+
+
+def slides(args: Any, top: Parser) -> None:
+    """`clearance --slide`: two files or more, as it moves the last, and no gap range or lift, as
+    it reads what holds a part, not its play (mqucifer/print-shop#76)."""
+    if args.slide is None:
+        if args.hold is not None:
+            top.error("clearance: --hold is how far a --slide may go before it's held: add --slide")
+        return
+    if len(args.files) < 2:
+        top.error(
+            "clearance: --slide moves the last file named past the others, so it takes two files "
+            "or more: the part, then the bought part it holds"
+        )
+    given = [o for o, v in (("--min-gap", args.min_gap), ("--max-gap", args.max_gap),
+                            ("--lift", args.lift)) if v is not None]  # fmt: skip
+    if given:
+        top.error(
+            f"clearance: --slide reads what holds a part, and {' and '.join(given)} its play: "
+            "run each in a call of its own"
+        )
+    if args.facings:
+        top.error(
+            "clearance: with --slide, a place names where a contact lies: give it as --box "
+            "NAME=X0,Y0,Z0,X1,Y1,Z1, and read a gap facing a way in a call of its own"
+        )
+    if args.hold is None:
+        args.hold = HOLD
+    elif args.hold < 0:
+        top.error(f"clearance: --hold {args.hold:g} is a distance, 0 or more")
 
 
 def selections_given(args: Any, top: Parser) -> None:
@@ -544,10 +594,22 @@ def selections_given(args: Any, top: Parser) -> None:
         )
 
 
+def _way_joined(argv: list[str]) -> list[str]:
+    """`--slide -z` as `--slide=-z`: argparse reads a word starting with `-` as an option, and the
+    way out is written as it's said."""
+    joined: list[str] = []
+    for word in argv:
+        if joined and joined[-1] == "--slide" and word in ("-x", "-y", "-z", "+x", "+y", "+z"):
+            joined[-1] = f"--slide={word}"
+        else:
+            joined.append(word)
+    return joined
+
+
 def main(argv: list[str] | None = None) -> int:
     given = sys.argv[1:] if argv is None else argv
     top = parser()
-    args = top.parse_args(given)
+    args = top.parse_args(_way_joined(given))
     rims_given(args, top)
     gaps_given(args, top)
     selections_given(args, top)

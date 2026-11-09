@@ -45,6 +45,8 @@ Run `info` on every file under `references/` and write down each one's bounds: t
 
 Decide the parts before any geometry, and write them down: which part each reference mounts to, where the lid splits from the base, and how it closes. `references/walls-and-lids.md` (the skill `sizing-walls-and-lids`) has the three ways a lid closes, and what each needs. Where the request leaves the way open, take it to the plan stop.
 
+For each bought part, name the way it goes in, then run `clearance <part> <bought part> --slide <the way out>`. `HELD` names what holds it. Everything on its path is what has to bend, or be fitted afterwards.
+
 ### 3. Dimensions
 
 Name each dimension once at the top of the script, and derive every other from the references' bounds and those: the wall, the floor, the clearance round the boards, the lip's play, the edge radius. The inside is the references' outline plus the clearance; the outside is the inside plus the wall. Print each part's bounds after each run.

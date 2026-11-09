@@ -605,6 +605,31 @@ def places() -> None:
     save(box(-10, 10, -10, 10, 2, 5), "places/plate")
 
 
+def holds() -> None:
+    """What holds a bought part, slid along its way out (mqucifer/print-shop#76), on parts of our
+    own: a fan block 30 x 30 x 7.5 under a plate, pushed up into it, so its way out is down.
+
+    - `hold/fan`: the block, x and y from -15 to 15, z from 0 to 7.5.
+    - `hold/plain`: a plate 40 x 40 x 2 on the block's top, z 7.5 to 9.5, and nothing else.
+    - `hold/hooks`: the plate, with an arm down each side 0.3 mm off the block, 6 mm wide, and a
+      hook from each reaching 1 mm in under the block's bottom face, its top 0.2 mm below it.
+    - `hold/toes`: the plate, with each arm stopping 0.5 mm down and a toe 1 mm into the block
+      at its top face: an overlap of 4 x 1 x 6 x 0.5 = 12 mm³, with nothing under the block.
+    """
+    Path("hold").mkdir(exist_ok=True)
+    save(box(-15, 15, -15, 15, 0, 7.5), "hold/fan")
+    plate = box(-20, 20, -20, 20, 7.5, 9.5)
+    save(plate, "hold/plain")
+    hooks, toes = plate, plate
+    for turn in (0, 90, 180, 270):
+        arm = box(15.3, 17.3, -3, 3, -1.2, 7.5).union(box(14, 15.3, -3, 3, -1.2, -0.2))
+        toe = box(15.3, 17.3, -3, 3, 7, 7.5).union(box(14, 15.3, -3, 3, 7, 7.5))
+        hooks = hooks.union(arm.rotate((0, 0, 0), (0, 0, 1), turn))
+        toes = toes.union(toe.rotate((0, 0, 0), (0, 0, 1), turn))
+    save(hooks, "hold/hooks")
+    save(toes, "hold/toes")
+
+
 def at_limits() -> None:
     """A figure exactly at its limit (mqucifer/print-shop#72): a wall 0.4 mm wide, a nozzle's."""
     base = box(0, 20, 0, 20, 0, 2)
@@ -630,5 +655,6 @@ if __name__ == "__main__":
     glass()
     enclosure()
     places()
+    holds()
     at_limits()
     print("made")
