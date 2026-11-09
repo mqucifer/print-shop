@@ -322,6 +322,13 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
                     'passes, why, by its id: {"panes-held": "..."}. A person reads it at the next '
                     "stop, beside both checks. Optional.",
                 },
+                "against_note": {
+                    "type": "object",
+                    "description": "When a note reopened the needs: each settled need it "
+                    'reopened, by its id, marked kept or changed against the note: {"lid-fit": '
+                    '{"is": "kept", "why": "the note doesn\'t touch the fit"}}. A need dropped is '
+                    "changed. Until each is marked, `needs` is refused.",
+                },
             },
             needs={
                 "type": "array",
@@ -410,6 +417,14 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
                     "description": "Files to show with each variant that aren't the part. They're "
                     "drawn see-through in grey, and marked. Optional.",
                     "items": {"type": "string"},
+                },
+                "overlap": {
+                    "type": "object",
+                    "description": "An overlap with a given part you mean, for a person to "
+                    'accept: {"need": "clips", "command": "clearance references/fan.step '
+                    'lid.step"}, the need that expects INTERFERE and its check. The harness reads '
+                    "it and puts it beside the question, and only a pick other than none lets "
+                    "that need stand. Optional.",
                 },
             },
             question="What you're asking them to judge.",
@@ -803,6 +818,8 @@ class WorkTools:
             "groups",
             "looks",
             "why_changed",
+            "against_note",
+            "overlap",
             "lessons",
             "scores",
             "parts",
