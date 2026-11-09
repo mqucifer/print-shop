@@ -14,9 +14,9 @@ from pathlib import Path
 from typing import Any
 
 #: The measured answer stands: both methods agree and no check failed.
-GOOD = {"OK", "CLEAR", "TOUCHING"}
+GOOD = {"OK", "CLEAR", "TOUCHING", "HELD"}
 #: Both methods agree, and what they agree on is a problem.
-BAD = {"FAIL", "INTERFERE", "TOO CLOSE", "TOO LOOSE", "NO CHANGE", "PARTIAL"}
+BAD = {"FAIL", "INTERFERE", "TOO CLOSE", "TOO LOOSE", "NO CHANGE", "PARTIAL", "NOT HELD"}
 #: There's no answer to rely on: the methods differ, or one couldn't run.
 UNSURE = {"DISAGREE", "NO ANSWER"}
 EXIT = {**dict.fromkeys(GOOD, 0), **dict.fromkeys(BAD, 1), **dict.fromkeys(UNSURE, 2)}

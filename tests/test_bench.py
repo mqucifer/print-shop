@@ -2214,3 +2214,97 @@ def test_layout_readback_and_rays_pass_at_their_limit_and_fail_past_it(bench: An
     # be in: FAIL or DISAGREE, and never OK.
     past = bench(*seat, "--tol", repr(tol - 1e-4))
     assert past.verdict in ("FAIL", "DISAGREE"), past.text
+
+
+# What holds a bought part (mqucifer/print-shop#76)
+
+HOOKS = ("clearance", "hold/hooks.step", "hold/fan.step", "--slide", "-z")
+#: The same words every reply with a path gives, as the issue has them.
+BACKWARDS = (
+    "Read backwards, that is everything fan.step has to pass on its way in, so it is what has to "
+    "bend, or be fitted afterwards"
+)
+
+
+def test_a_fan_on_hooks_slid_out_is_held_by_the_hooks_and_they_are_its_path(bench: Any) -> None:
+    """A fan block 30 x 30 x 7.5 under a plate, four hooks 0.2 mm under its bottom face reaching
+    1 mm in: slid down, its way out, it meets the hooks after 0.2 mm, at all four, and they're
+    everything on its path, each reaching 1 mm in. The rays read the same."""
+    answer = bench(*HOOKS, "--box", "east=13.5,-4,-1.5,15.5,4,0")
+    assert answer.verdict == "HELD" and answer.code == 0, answer.text
+    slide = answer.numbers["slide"]
+    assert slide["first_mm"] == pytest.approx(0.2, abs=2 * 0.002 + 1e-4), answer.text
+    assert slide["first_rays_mm"] == pytest.approx(0.2, abs=1e-4)
+    assert slide["meets"] == ["hooks.step"] and slide["hold_mm"] == 1.0
+    assert len(slide["contacts"]) == 4
+    assert [c["in"] for c in slide["contacts"] if c["box"][0][0] > 13] == [["east"]]
+    (path,) = slide["path"]
+    assert path["part"] == "hooks.step" and len(path["pieces"]) == 4
+    assert path["reach_mm"] == pytest.approx(1.0, abs=0.01)
+    assert path["reach_rays_mm"] == pytest.approx(1.0, abs=0.01)
+    assert path["box"] == [[-15.0, -15.0, -1.2], [15.0, 15.0, -0.2]]
+    assert "fan.step first meets hooks.step after 0.2000 mm, as slide.first_mm" in answer.text
+    assert BACKWARDS in answer.text and "in steps of 0.1 mm" in answer.text
+    assert not reports.unlike("clearance", answer.numbers), reports.unlike(
+        "clearance", answer.numbers
+    )
+    # A first contact at --hold holds, as any figure at its limit passes; past it, it doesn't.
+    first = repr(slide["first_mm"])
+    assert bench(*HOOKS, "--hold", first).verdict == "HELD"
+    loose = bench(*HOOKS, "--hold", "0.1")
+    assert loose.verdict == "NOT HELD" and loose.code == 1, loose.text
+    assert "more than 0.1. Bring what holds it within 0.1 mm" in loose.text
+
+
+def test_a_lid_held_by_snaps_says_its_reach_is_from_its_outline_not_a_bend(bench: Any) -> None:
+    """A lid whose hooks catch 0.8 mm under ledges 2 mm inside its footprint: slid off, the ledges
+    hold it after 0.2 mm, and each reaches 3 mm in from the lid's edge. The reply says that figure
+    is from the outline, and not how far anything bends (mqucifer/print-shop#82's review)."""
+    answer = bench("clearance", "hold/snap-base.step", "hold/snap-lid.step", "--slide", "+z")
+    assert answer.verdict == "HELD" and answer.code == 0, answer.text
+    slide = answer.numbers["slide"]
+    assert slide["first_mm"] == pytest.approx(0.2, abs=2 * 0.002 + 1e-4)
+    (path,) = slide["path"]
+    assert path["part"] == "snap-base.step" and len(path["pieces"]) == 2
+    assert path["reach_mm"] == pytest.approx(3.0, abs=0.01), answer.text
+    assert path["pieces"][1]["box"] == [[17.0, -3.5, 12.0], [17.8, 3.5, 13.0]]
+    said = "reaching 3.000 mm in from the edge of snap-lid.step's outline seen along z"
+    assert said in answer.text
+    assert "It isn't how far anything bends" in answer.text
+
+
+def test_toes_inside_the_frame_overlap_where_they_lie_and_hold_nothing(bench: Any) -> None:
+    """The design run's fault, on parts of our own: toes 1 mm into the fan's frame at its top
+    face, 12 mm³, taken for a catch. The overlap is said first, and the fan slides out."""
+    answer = bench("clearance", "hold/toes.step", "hold/fan.step", "--slide", "-z")
+    assert answer.verdict == "NOT HELD" and answer.code == 1, answer.text
+    lines = answer.text.splitlines()
+    assert lines[1].startswith("OVERLAP WHERE IT LIES: fan.step | toes.step: 12.000 mm³"), lines
+    assert "An overlap is never a hold" in lines[1]
+    assert "an overlap is never a hold; sliding -z, it leaves without meeting anything" in lines[0]
+    slide = answer.numbers["slide"]
+    assert slide["overlaps"][0]["overlap_mm3"] == pytest.approx(12.0, abs=1e-3)
+    assert slide["overlaps"][0]["box"] == [[-15.0, -15.0, 7.0], [15.0, 15.0, 7.5]]
+    assert slide["first_mm"] is None and slide["path"] == []
+
+
+def test_a_plain_plate_and_a_lid_on_its_tray_are_not_held(bench: Any) -> None:
+    """Nothing under the fan, and a lid whose lip only fits its walls: both slide out. The bench
+    doesn't model friction, and says so."""
+    plain = bench("clearance", "hold/plain.step", "hold/fan.step", "--slide", "-z")
+    assert plain.verdict == "NOT HELD", plain.text
+    assert "fan.step leaves without meeting anything" in plain.text
+    lid = bench("clearance", "enclosure/tray.step", "enclosure/lid-lip-0p2.step", "--slide", "+z")
+    assert lid.verdict == "NOT HELD" and lid.numbers["slide"]["first_mm"] is None, lid.text
+    assert "The bench doesn't model friction" in lid.text
+
+
+def test_a_slide_takes_two_files_and_no_gap_range(bench: Any) -> None:
+    for args, says in (
+        (("hold/fan.step", "--slide", "-z"), "takes two files or more"),
+        ((*HOOKS[1:], "--min-gap", "0.1"), "and --min-gap its play"),
+        (("hold/hooks.step", "hold/fan.step", "--hold", "1"), "add --slide"),
+        ((*HOOKS[1:], "--facing", "top=+z"), "give it as --box"),
+    ):
+        done = host.run(["clearance", *args], bench.work)
+        assert done.returncode == 3 and says in done.stdout + done.stderr, (args, done.stderr)

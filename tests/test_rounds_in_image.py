@@ -2318,3 +2318,60 @@ def test_a_need_on_a_place_is_held_at_done(tmp_path: Path, least: float, met: bo
     if not met:
         told = reply_of(run, "done")["reply"]
         assert "`pairs.0.places.edge.gap_mm` is 0.25, under 0.2501" in told
+
+
+# What holds a bought part (mqucifer/print-shop#76)
+
+#: A fan block 30 x 30 x 7.5 pushed up under a plate, as `bench_cases/make_fixtures.py`'s `hold/`
+#: parts: with hooks 0.2 mm under its bottom face reaching 1 mm in, or the plate alone.
+HOLD_SCRIPT = (
+    "import sys\n"
+    "import cadquery as cq\n"
+    "def box(x0, x1, y0, y1, z0, z1):\n"
+    '    return cq.Workplane("XY").box(x1 - x0, y1 - y0, z1 - z0)'
+    ".translate(((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2))\n"
+    "lid = box(-20, 20, -20, 20, 7.5, 9.5)\n"
+    "if sys.argv[1] == 'hooks':\n"
+    "    for turn in (0, 90, 180, 270):\n"
+    "        arm = box(15.3, 17.3, -3, 3, -1.2, 7.5).union(box(14, 15.3, -3, 3, -1.2, -0.2))\n"
+    "        lid = lid.union(arm.rotate((0, 0, 0), (0, 0, 1), turn))\n"
+    'cq.exporters.export(lid, "lid.step")\n'
+    'cq.exporters.export(box(-15, 15, -15, 15, 0, 7.5), "fan.step")\n'
+)
+
+
+def roomy(name: str) -> dict[str, Any]:
+    """`sized`, for parts bigger than its 3000 mm³: the fan block alone is 6750."""
+    need = sized(name)
+    return {**need, "check": {**need["check"], "at_most": 10_000}}
+
+
+@pytest.mark.parametrize(("lid", "met"), [("hooks", True), ("plain", False)])
+def test_a_need_on_what_holds_a_part_is_held_at_done(tmp_path: Path, lid: str, met: bool) -> None:
+    """A need can check a hold: `HELD`, and the first contact within 1 mm, on the printed lid and
+    the fan slid down, its way out. Hooks under the fan pass; a plain plate is `NOT HELD`."""
+    need = {
+        "id": "fan-held",
+        "what": "the fan can't fall out of the lid",
+        "source": "chosen",
+        "check": {
+            "by": "bench",
+            "measures": "fit",
+            "command": "clearance lid.step fan.step --slide -z",
+            "verdicts": ["HELD"],
+            "number": "slide.first_mm",
+            "at_most": 1,
+        },
+    }
+    run, _ = begin(
+        tmp_path,
+        [BROKEN_DOWN, tool("needs", needs=[need, *map(roomy, ("lid.step", "fan.step"))])],
+        [write("make.py", HOLD_SCRIPT.replace("sys.argv[1]", repr(lid)), run=True)],
+        [done(part=["lid.step", "fan.step"])],
+        [tool("blocked", reason="stop")],
+    )
+    assert run.drive().name == ("met" if met else "blocked")
+    reading = next(r for r in rows(run, "readings") if r["need"] == "fan-held")
+    assert reading["passed"] == int(met)
+    if not met:
+        assert "NOT HELD" in reply_of(run, "done")["reply"]
