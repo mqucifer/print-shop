@@ -11,9 +11,10 @@ where it lies until it's clear of every other part, and says three things, in th
 - **The hold.** The first distance at which the part meets another, which part it meets, and the
   box of that first contact. That's `HELD` within `--hold` (1 mm unless said), and `NOT HELD` if
   the part leaves without meeting anything, or meets something only further than that.
-- **The path.** Every part the slide meets before it's clear: its box, and how far into the
-  moving part's path it reaches. Read backwards, that's everything the part has to pass on its
-  way in, so it's what has to bend, or be fitted afterwards.
+- **The path.** Every part the slide meets before it's clear: its box, and how far in it
+  reaches from the edge of the moving part's outline, seen along the slide: not how far anything
+  bends, as the bench doesn't know which way an arm bends. Read backwards, that's everything the
+  part has to pass on its way in, so it's what has to bend, or be fitted afterwards.
 
 To meet is for the overlap to grow past what it is where the part lies, so a part touching its
 seat, or sliding along a wall, meets nothing. The step is `STEP`, a third of a 0.3 mm catch, so
@@ -434,7 +435,7 @@ def what_holds(
         spacing = math.sqrt(max(moving.fine().area, other.fine().area) / SAMPLES)
         if reach_rays > reach + 2 * EDGE_STEP or reach_rays < reach - spacing - 2 * EDGE_STEP:
             differs.append(
-                f"{other.name}: it reaches {reach:.3f} mm into the path by the sections, "
+                f"{other.name}: it reaches {reach:.3f} mm in from the outline by the sections, "
                 f"{reach_rays:.3f} by the rays' points, {spacing:.2f} mm apart"
             )
         lows = [p[0] for p in pieces]
@@ -540,16 +541,21 @@ def _said(
             box = f", in the box {_box_said(*p['box'])}" if p["box"] else ""
             report.line(
                 f"  {p['part']}: met after {p['met_mm']:.4f} mm{box}, reaching "
-                f"{p['reach_mm']:.3f} mm into {name}'s path"
+                f"{p['reach_mm']:.3f} mm in from the edge of {name}'s outline seen along {way[1]}"
                 + (f", in {len(p['pieces'])} pieces:" if len(p["pieces"]) > 1 else "")
             )
             if len(p["pieces"]) > 1:
                 for piece in p["pieces"][:SHOWN]:
                     report.line(
-                        f"    {_box_said(*piece['box'])}, reaching {piece['reach_mm']:.3f} mm"
+                        f"    {_box_said(*piece['box'])}, reaching {piece['reach_mm']:.3f} mm in"
                     )
                 if len(p["pieces"]) > SHOWN:
                     report.line(f"    and {len(p['pieces']) - SHOWN} more, in slide.path")
+        report.line(
+            f"  Each reach_mm is how far in that part reaches from the edge of {name}'s outline, "
+            f"seen along {way[1]}. It isn't how far anything bends: the bench doesn't know which "
+            "way an arm bends. Read where the catch is from its box"
+        )
     else:
         report.line(f"path: nothing is in {name}'s way {way}, so nothing has to bend to fit it")
     if found["verdict"] == "NOT HELD":
@@ -569,7 +575,7 @@ def _said(
             "it, counted only where they enter: "
             + "; ".join(
                 f"{p['part']} met after {p['met_rays_mm']:.4f} mm, reaching "
-                f"{p['reach_rays_mm']:.3f} mm"
+                f"{p['reach_rays_mm']:.3f} mm in"
                 for p in found["path"]
             )
             + ", against "

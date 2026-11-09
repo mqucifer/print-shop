@@ -2256,6 +2256,23 @@ def test_a_fan_on_hooks_slid_out_is_held_by_the_hooks_and_they_are_its_path(benc
     assert "more than 0.1. Bring what holds it within 0.1 mm" in loose.text
 
 
+def test_a_lid_held_by_snaps_says_its_reach_is_from_its_outline_not_a_bend(bench: Any) -> None:
+    """A lid whose hooks catch 0.8 mm under ledges 2 mm inside its footprint: slid off, the ledges
+    hold it after 0.2 mm, and each reaches 3 mm in from the lid's edge. The reply says that figure
+    is from the outline, and not how far anything bends (mqucifer/print-shop#82's review)."""
+    answer = bench("clearance", "hold/snap-base.step", "hold/snap-lid.step", "--slide", "+z")
+    assert answer.verdict == "HELD" and answer.code == 0, answer.text
+    slide = answer.numbers["slide"]
+    assert slide["first_mm"] == pytest.approx(0.2, abs=2 * 0.002 + 1e-4)
+    (path,) = slide["path"]
+    assert path["part"] == "snap-base.step" and len(path["pieces"]) == 2
+    assert path["reach_mm"] == pytest.approx(3.0, abs=0.01), answer.text
+    assert path["pieces"][1]["box"] == [[17.0, -3.5, 12.0], [17.8, 3.5, 13.0]]
+    said = "reaching 3.000 mm in from the edge of snap-lid.step's outline seen along z"
+    assert said in answer.text
+    assert "It isn't how far anything bends" in answer.text
+
+
 def test_toes_inside_the_frame_overlap_where_they_lie_and_hold_nothing(bench: Any) -> None:
     """The design run's fault, on parts of our own: toes 1 mm into the fan's frame at its top
     face, 12 mm³, taken for a catch. The overlap is said first, and the fan slides out."""
