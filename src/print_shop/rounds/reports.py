@@ -36,6 +36,8 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "size_mm",
         "small_flat_faces",
         "solids",
+        "strip_faces",
+        "strip_runs",
         "triangles",
         "valid",
         "volume_mesh_mm3",
@@ -265,6 +267,9 @@ SHAPES: dict[str, dict[str, Any]] = {
         "size_mm": XYZ,
         "small_flat_faces": NUMBER,
         "solids": NUMBER,
+        # Flat faces in runs of strips, and each run's length (mqucifer/print-shop#85).
+        "strip_faces": NUMBER,
+        "strip_runs": Rows(NUMBER),
         "triangles": NUMBER,
         "valid": FLAG,
         "volume_mesh_mm3": NUMBER,

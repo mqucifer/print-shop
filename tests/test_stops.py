@@ -379,32 +379,69 @@ def test_the_replies_dont_say_the_sponsor_before_anyone_has_answered(tmp_path: P
 def test_a_file_with_curves_stored_as_strips_fails_unless_set_aside_with_its_reason(
     tmp_path: Path,
 ) -> None:
-    for name in ("frame.step", "arcs.step", "mine.step", "pane.stl"):
+    for name in ("frame.step", "arcs.step", "mine.step", "pane.stl", "lid.step", "old.step"):
         (tmp_path / name).write_text("x")
     box = Answers(
         tmp_path,
-        ("OK", {"small_flat_faces": 1413, "flat_faces": 6069}),
-        ("OK", {"small_flat_faces": 1, "flat_faces": 54}),
-        ("DISAGREE", {"small_flat_faces": 40, "flat_faces": 60}),
+        (
+            "OK",
+            {
+                "small_flat_faces": 1413,
+                "flat_faces": 6069,
+                "strip_faces": 1392,
+                "strip_runs": [256, 256, 176],
+            },
+        ),
+        ("OK", {"small_flat_faces": 1, "flat_faces": 54, "strip_faces": 0, "strip_runs": []}),
+        (
+            "DISAGREE",
+            {"small_flat_faces": 40, "flat_faces": 60, "strip_faces": 40, "strip_runs": [40]},
+        ),
+        # mqucifer/print-shop#85: a lid of boxes, a circle and fillets, its small faces the
+        # narrow sides of clip beams, in no run of strips, as `strips/beams` reads.
+        ("OK", {"small_flat_faces": 24, "flat_faces": 58, "strip_faces": 0, "strip_runs": []}),
+        # An `info` from before the runs were read: no count of strips.
+        ("OK", {"small_flat_faces": 24, "flat_faces": 58}),
     )
-    files = ["frame.step", "arcs.step", "mine.step", "pane.stl"]
+    files = ["frame.step", "arcs.step", "mine.step", "pane.stl", "lid.step", "old.step"]
     found = glass_checks.curves(box, files, tmp_path, tmp_path / ".kept", {"mine.step": "Text."})
     assert [(one.passed, one.unsure) for one in found] == [
         (False, False),
         (True, False),
         (True, False),
         (True, False),
+        (True, False),
+        (False, True),
     ]
-    assert "1413 of 6069 flat faces under 1 mm across" in found[0].why
+    said = "3 runs of strips (the longest 256 faces), 1392 of 6069 flat faces under 1 mm across"
+    assert said in found[0].why, found[0].why
     assert "`building-curves-from-a-layout`" in found[0].why
     assert found[2].why.endswith("set aside by the model: Text.")
-    assert len(box.asked) == 3, "an STL has no faces to read"
+    narrow = "24 of 58 flat faces under 1 mm across: narrow flat faces only, no strips"
+    assert found[4].why == narrow
+    assert found[5].why.startswith("no count of strips came back")
+    assert len(box.asked) == 5, "an STL has no faces to read"
+
+
+def test_strips_are_counted_from_info_s_runs_through_one_function() -> None:
+    """`strips_counted` is the one place the standing check counts strips
+    (mqucifer/print-shop#85)."""
+    assert glass_checks.strips_counted({"strip_faces": 48, "strip_runs": [48]}) == (
+        48,
+        "1 run of strips (the longest 48 faces), 48 flat faces under 1 mm across in them",
+    )
+    assert glass_checks.strips_counted({"strip_faces": 0, "strip_runs": []}) == (0, "no strips")
+    assert glass_checks.strips_counted({"small_flat_faces": 36}) is None
+    assert glass_checks.strips_counted({"strip_faces": True, "strip_runs": []}) is None
 
 
 def test_done_isnt_met_on_strips_and_a_set_aside_is_shown_at_the_next_stop(
     tmp_path: Path,
 ) -> None:
-    strips = ("OK", {"small_flat_faces": 40, "flat_faces": 60})
+    strips = (
+        "OK",
+        {"small_flat_faces": 40, "flat_faces": 60, "strip_faces": 40, "strip_runs": [24, 16]},
+    )
     glass = [
         {
             "frame": FRAME,

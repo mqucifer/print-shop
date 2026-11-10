@@ -28,13 +28,23 @@ on each other part back along it, each ray counting only where it enters the oth
 nearest is where the slide first meets it. It reads every contact of a vertex on a face exactly
 and one of two edges within `EDGE_STEP`. The reach is read again from the points the rays found on
 the path. The bench doesn't model friction: a lid held only by its lip's fit slides out.
+
+**Where the parts touch already** (mqucifer/print-shop#84), as a fan's sides on its pocket's walls,
+the gap can't close a contact: it's 0 all the way. Their overlap has no volume, but its faces give
+the band its chords, and on eval-pocket-2's lid four feet 0.1 mm under the fan were read 0.053 mm
+late, as it took that long for their overlap to pass the band. So there the contact is
+read back along the overlap's growth to where it began, which head on is exact. And where the
+methods read a contact's distance differently but agree on the verdict and on where it is, the
+verdict stands, with both distances: `DISAGREE` is kept for a real difference.
 """
 
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from typing import Any
 
+import manifold3d as m3
 import numpy as np
 import shapely
 import trimesh
@@ -78,6 +88,9 @@ PAST = 0.01
 SAMPLES = 6000
 #: The most contacts said one by one; the rest are counted.
 SHOWN = 8
+#: A first contact's place, seen along the slide, is opened by this, in mm: a face sliding along
+#: another leaves a sliver no wider, which isn't a contact.
+OPEN = 1e-4
 
 
 def _turned(manifold: Any, axis: str) -> Any:
@@ -125,13 +138,17 @@ def _corners(low: Any, high: Any) -> list[list[float]]:
 
 def _meet(a: Any, b: Any, d: np.ndarray, rest: float, band: float, length: float) -> float | None:
     """The least distance a, slid along d, meets b: where their overlap first grows past what it
-    is where a lies. Stepped by `STEP` or the gap, halved to `HALVED`, then closed by the gap."""
+    is where a lies. Stepped by `STEP` or the gap, halved to `HALVED`, then closed: by the gap
+    where the parts are apart, or where they touch, back to where the overlap began to grow."""
 
     def moved(t: float) -> Any:
         return a.translate(tuple(map(float, d * t)))
 
+    def volume(t: float) -> float:
+        return float((moved(t) ^ b).volume())
+
     def grows(t: float) -> bool:
-        return float((moved(t) ^ b).volume()) > rest + band
+        return volume(t) > rest + band
 
     clear, t = 0.0, 0.0
     while t <= length + STEP:
@@ -142,11 +159,28 @@ def _meet(a: Any, b: Any, d: np.ndarray, rest: float, band: float, length: float
                 low, high = (low, mid) if grows(mid) else (mid, high)
             # Head on, the gap left is the rest of the way; at a slant it's less, never more.
             gap = float(moved(low).min_gap(b, high - low)) if rest <= band else 0.0
-            return low + min(gap, high - low)
+            if gap > 0:
+                return low + min(gap, high - low)
+            return _began(volume, rest, high)
         clear = t
         gap = float(moved(t).min_gap(b, length + 1.0)) if rest <= band else 0.0
         t += max(STEP, gap)
     return None
+
+
+def _began(volume: Callable[[float], float], rest: float, high: float) -> float:
+    """Where an overlap that has grown past its band by `high` began to grow, for parts that
+    touch already, so the gap can't close it (mqucifer/print-shop#84). A part on its seat, its
+    sides on a pocket's walls, has an overlap of no volume whose faces give the band its chords:
+    in `hold/feet`, 0.64 mm³, which four feet 16 mm² across take 0.04 mm to pass. So the
+    overlap's growth, read over `PROBE` past `high`, is followed back to where it was `rest`.
+    Head on it grows evenly, and that's exact; where the contact widens as it goes in, it grows
+    faster past `high`, and that's short of `high` but never before the contact."""
+    grown = float(volume(high)) - rest
+    rate = (float(volume(high + PROBE)) - rest - grown) / PROBE
+    if rate <= 0:
+        return high
+    return max(0.0, high - grown / rate)
 
 
 def _path(
@@ -313,9 +347,10 @@ def _by_rays(
     d: np.ndarray,
     axis: str,
     overlapping: bool,
-) -> tuple[float | None, np.ndarray, int]:
+) -> tuple[float | None, np.ndarray, np.ndarray, int]:
     """The second method: rays from a's points along d into b, and from b's back along it into a.
-    (The nearest, b's points on a's path, how many rays ran.) Where a lies in b, the points of
+    (The nearest, b's points on a's path, the points on b where the nearest met it, how many rays
+    ran.) Where a lies in b, the points of
     each inside the other are left out, or they'd read the overlap as a contact."""
     a_points = _near(_points(a_mesh), b, axis)
     b_points = _near(_points(b_mesh), a, axis)
@@ -326,15 +361,132 @@ def _by_rays(
     # b's points whose ray back along the slide enters a: a passes through them.
     path = np.vstack([on_b, b_points[np.unique(ray)]])
     found = np.concatenate([forward, back])
-    first = float(found.min()) if len(found) else None
-    return first, path, len(a_points) + len(b_points)
+    if not len(found):
+        return None, path, np.empty((0, 3)), len(a_points) + len(b_points)
+    first = float(found.min())
+    # Where on b the rays first met it: each point within the chords of the nearest.
+    at = np.vstack([on_b, b_points[ray]])
+    firsts = at[found <= first + 2 * FINE[0] + HALVED]
+    return first, path, firsts, len(a_points) + len(b_points)
 
 
-def _contacts(a: Any, b: Any, d: np.ndarray, first: float) -> list[tuple[np.ndarray, np.ndarray]]:
+def _held(found: dict[str, Any], first: float | None, hold: float) -> bool:
+    """Whether a first contact holds: within `--hold`, unless the part overlaps another where it
+    lies, which is never a hold."""
+    return not found["overlaps"] and first is not None and not over(first, hold)
+
+
+def _figures_differ(
+    found: dict[str, Any], met: list[dict[str, Any]], hold: float, figures: list[str]
+) -> list[str]:
+    """Where the two methods both meet each part but read the distance differently: what they
+    disagree on, if anything (mqucifer/print-shop#84). They agree where each method's own first
+    contact gives the same verdict, the rays first meet the same parts, and each point where they
+    first met is in a box the step and halving read at its first contact, and each box has one.
+    Then the figures are given and the verdict stands; otherwise it's `DISAGREE`."""
+    rays_first = min(m["met_rays_mm"] for m in met)
+    by_step, by_rays = _held(found, found["first_mm"], hold), _held(found, rays_first, hold)
+    if by_step != by_rays:
+        step_word, rays_word = ("HELD", "NOT HELD") if by_step else ("NOT HELD", "HELD")
+        return [
+            f"the step and halving read {step_word} at {found['first_mm']:.4f} mm, the rays "
+            f"{rays_word} at {rays_first:.4f}, against --hold {hold:g} mm: "
+            + "; ".join(figures)
+        ]
+    band_mm = 2 * FINE[0] + HALVED
+    by_rays_parts = sorted(m["part"] for m in met if m["met_rays_mm"] <= rays_first + band_mm)
+    if by_rays_parts != sorted(found["meets"]):
+        return [
+            f"the step and halving meet {', '.join(found['meets'])} first, the rays "
+            f"{', '.join(by_rays_parts)}: " + "; ".join(figures)
+        ]
+    tol = 2 * FINE[0] + 1e-6
+    boxes = [
+        (c["part"], np.asarray(c["box"][0]), np.asarray(c["box"][1])) for c in found["contacts"]
+    ]
+    seen = [False] * len(boxes)
+    for m in met:
+        if m["part"] not in by_rays_parts:
+            continue
+        for point in m["_firsts"]:
+            inside = [
+                k
+                for k, (part, low, high) in enumerate(boxes)
+                if part == m["part"] and np.all(point >= low - tol) and np.all(point <= high + tol)
+            ]
+            if not inside:
+                return [
+                    f"the rays first meet {m['part']} at {_point(point)}, outside every box the "
+                    "step and halving read at its first contact (slide.contacts): "
+                    + "; ".join(figures)
+                ]
+            for k in inside:
+                seen[k] = True
+    if not all(seen):
+        k = seen.index(False)
+        return [
+            f"the step and halving first meet {boxes[k][0]} in "
+            f"{_box_said(boxes[k][1], boxes[k][2])}, where the rays find no first contact: "
+            + "; ".join(figures)
+        ]
+    found["first_rays_mm"] = round(rays_first, 4)
+    return []
+
+
+def _agreed(found: dict[str, Any]) -> str:
+    """The words for two methods that read a contact's distance differently and agree on the rest:
+    "both methods find the first contact at the feet; 0.1000 and 0.1533 mm"."""
+    named = sorted({n for c in found["contacts"] for n in c["in"]})
+    count = len(found["contacts"])
+    where = (
+        ", ".join(named)
+        if named and all(c["in"] for c in found["contacts"])
+        else f"the same {count} place{'s' if count != 1 else ''} on {', '.join(found['meets'])}"
+    )
+    return (
+        f"both methods find the first contact at {where}; {found['first_rays_mm']:.4f} mm by the "
+        f"rays and {found['first_mm']:.4f} by the step and halving, and both read "
+        f"{found['verdict']} against --hold {found['hold_mm']:g} mm, so the verdict stands: "
+        "their distances differ, not their answer"
+    )
+
+
+def _contacts(
+    a: Any, b: Any, d: np.ndarray, axis: str, first: float
+) -> list[tuple[np.ndarray, np.ndarray]]:
     """Each place a first meets b: with a moved `PROBE` past its first contact, the box of each
-    piece of their overlap. Flat on flat it's a slab that thin; round a curve, wider."""
+    piece of their overlap. Flat on flat it's a slab that thin; round a curve, wider.
+
+    A place is read from what the overlap covers seen along the slide, opened by `OPEN`, and the
+    overlap inside it: where a's sides lie on b's walls, as a fan's in its pocket, their overlap
+    is a sliver no thicker than arithmetic, with no area seen along the slide. On one machine it
+    has no volume and on another a little, and joined to a foot's contact it made that box run up
+    the wall (mqucifer/print-shop#84, on CI's x86)."""
     overlap = a.translate(tuple(map(float, d * (first + PROBE)))) ^ b
-    found = [_bounds(p) for p in overlap.decompose() if float(p.volume()) > 0]
+    if float(overlap.volume()) <= 0:
+        return []
+    rows = np.asarray(ACROSS[axis], dtype=float)
+    back = np.hstack([rows.T, np.zeros((3, 1))])
+    corner_low, corner_high = _bounds(overlap)
+    low_w, high_w = sorted((float(rows[2] @ corner_low), float(rows[2] @ corner_high)))
+    seen = _shadow(overlap, axis).buffer(-OPEN)
+    across = [k for k in range(3) if k != int(np.argmax(np.abs(d)))]
+    found = []
+    for place in getattr(seen, "geoms", [seen]):
+        if place.geom_type != "Polygon" or place.area <= 0:
+            continue
+        upright = shapely.geometry.polygon.orient(place, 1.0)
+        rings = [np.asarray(upright.exterior.coords)[:-1]]
+        rings += [np.asarray(r.coords)[:-1] for r in upright.interiors]
+        prism = m3.CrossSection(rings).extrude(high_w - low_w + 2.0)
+        prism = prism.translate((0.0, 0.0, low_w - 1.0)).transform(back)
+        for piece in (overlap ^ prism).decompose():
+            if float(piece.volume()) <= 0:
+                continue
+            low, high = _bounds(piece)
+            low[across] -= OPEN
+            high[across] += OPEN
+            found.append((low, high))
     return sorted(found, key=lambda c: tuple(c[0]))
 
 
@@ -363,7 +515,10 @@ def what_holds(
 ) -> dict[str, Any]:
     """Slide the moving part along `way` until it's clear of the others, and say what holds it:
     where it lies, its first contact and the hold, then everything on its path. The slide's own
-    verdict, `HELD` or `NOT HELD`, or `DISAGREE` where the two methods differ."""
+    verdict, `HELD` or `NOT HELD`, or `DISAGREE` where the two methods differ: one meets a part
+    and the other doesn't, they read a different reach, or they read the first contact's
+    distance differently and also differ on the verdict or on where it is. Two distances that
+    differ with the same verdict, at the same places, keep the verdict, and both are given."""
     d = np.asarray(WAYS[way], dtype=float)
     axis = way[1]
     a_fine, a_coarse = moving.manifold(True), moving.manifold(False)
@@ -384,6 +539,7 @@ def what_holds(
         "why": "",
     }
     differs: list[str] = []
+    figures: list[str] = []
     met: list[dict[str, Any]] = []
     rays_run = 0
     for other in others:
@@ -398,7 +554,7 @@ def what_holds(
                 {"part": other.name, "overlap_mm3": round(rest, 4), "box": _corners(low, high)}
             )
         first = _meet(a_fine, b_fine, d, rest, band, length)
-        rays, on_path, count = _by_rays(
+        rays, on_path, firsts, count = _by_rays(
             moving.fine(), other.fine(), a_fine, b_fine, d, axis, rest > band
         )
         rays_run += count
@@ -427,7 +583,8 @@ def what_holds(
         reach_rays = _reach_of_points(on_path, axis, shadow)
         band_mm = 2 * FINE[0] + HALVED
         if rays < first - band_mm or rays > first + EDGE_STEP + band_mm:
-            differs.append(
+            # Both found it: whether they differ on the hold, or where, is judged on them all.
+            figures.append(
                 f"{other.name}: the rays meet it after {rays:.4f} mm, the step and halving "
                 f"after {first:.4f}"
             )
@@ -453,6 +610,7 @@ def what_holds(
                     for low, high, r in pieces
                 ],
                 "_b": b_fine,
+                "_firsts": firsts,
             }
         )
     met.sort(key=lambda m: m["met_mm"])
@@ -463,7 +621,7 @@ def what_holds(
         found["first_rays_mm"] = min(m["met_rays_mm"] for m in tied)
         found["meets"] = [m["part"] for m in tied]
         for m in tied:
-            for low, high in _contacts(a_fine, m["_b"], d, m["met_mm"]):
+            for low, high in _contacts(a_fine, m["_b"], d, axis, m["met_mm"]):
                 found["contacts"].append(
                     {
                         "part": m["part"],
@@ -472,16 +630,20 @@ def what_holds(
                     }
                 )
     found["path"] = [{k: v for k, v in m.items() if not k.startswith("_")} for m in met]
+    if figures:
+        # A figure on its own is a disagreement only where the answer or the place differs.
+        differs += _figures_differ(found, met, hold, figures) if not differs else figures
     if differs:
         found["verdict"] = "DISAGREE"
         found["why"] = "; ".join(differs)
-    elif found["overlaps"]:
-        found["verdict"] = "NOT HELD"
-    elif found["first_mm"] is not None and not over(found["first_mm"], hold):
+    elif _held(found, found["first_mm"], hold):
         found["verdict"] = "HELD"
     else:
         found["verdict"] = "NOT HELD"
-    _said(report, found, boxes, rays_run, differs)
+    if figures and not differs:
+        found["why"] = _agreed(found)
+        figures.insert(0, found["why"])
+    _said(report, found, boxes, rays_run, differs or figures)
     report.numbers["slide"] = {k: v for k, v in found.items() if k != "why"}
     return found
 
@@ -604,7 +766,8 @@ def summary(found: dict[str, Any]) -> str:
         return lead + f"sliding {way}, it leaves without meeting anything"
     meets = ", ".join(found["meets"])
     within = "within" if found["verdict"] == "HELD" or not over(first, found["hold_mm"]) else "past"
+    agreed = f"; {found['why']}" if found["why"] else ""
     return lead + (
         f"sliding {way}, it first meets {meets} after {first:.4f} mm, {within} --hold "
-        f"{found['hold_mm']:g} mm"
+        f"{found['hold_mm']:g} mm{agreed}"
     )

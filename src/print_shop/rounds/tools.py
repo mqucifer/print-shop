@@ -512,8 +512,9 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
                 "curves": {
                     "type": "string",
                     "description": "Instead of either: a file of the part the harness read as "
-                    "curves stored as flat strips, by its many flat faces under 1 mm, that has no "
-                    "curves, such as `grid.step`. Say in `why` what its small faces are.",
+                    "curves stored as flat strips, by its runs of narrow flat faces each turning "
+                    "a few degrees to the next, that has no curves, such as `grid.step`. Say in "
+                    "`why` what those faces are.",
                 },
             },
             why="Why it doesn't apply, for the person at the next stop.",

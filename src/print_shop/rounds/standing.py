@@ -287,30 +287,56 @@ def said(found: list[judge.Standing]) -> list[str]:
 
 #: The check's name in the ledger's `standing` table.
 CURVES = "curves"
-#: A file with this many flat faces under 1 mm across (`info`'s `small_flat_faces`) has curves,
-#: stored as flat strips, and fails. A part's curves are read from its faces, not from its words:
-#: built as curves they're curved faces, which `info` doesn't count, and built from a polygon
-#: they're a run of thin flat faces, one for each segment. Measured with `info` in the bench's
-#: image on copies (`~/print-shop/proofs/m18-stops/curves.json`): `suncatcher-3`'s frame has
-#: 1,413 of 6,069 flat faces under 1 mm, and none curved, and two of its panes 33 and 153; batch
-#: 3's arcs frame has 1 of 54, and its rings frame 0 of 134, each with true circles; all 50 STEP
-#: files of batch 3's approved folders pass, the most having 4 (`curves_batch3_approved.json`).
-#: One small round hole cut from a polygon is enough: at 16 segments a quarter, a 3 mm radius is
-#: 64 faces of 0.29 mm. A part with no curves has a few, at a corner or a sliver, and where it has
-#: more, its reason is said with `set_aside`.
+#: A file with this many flat faces in runs of strips (`info`'s `strip_faces`) has curves stored
+#: as flat strips, and fails. A part's curves are read from its faces, not from its words: built
+#: as curves they're curved faces, which `info` doesn't count, and built from a polygon they're a
+#: run of thin flat faces, one for each segment, each turning a few degrees to the next. Measured
+#: with `info` in the bench's image on copies (`~/print-shop/proofs/m18-stops/curves.json`):
+#: `suncatcher-3`'s frame has 1,413 of 6,069 flat faces under 1 mm, and none curved, and two of its
+#: panes 33 and 153; batch 3's arcs frame has 1 of 54, and its rings frame 0 of 134, each with true
+#: circles; all 50 STEP files of batch 3's approved folders pass, the most having 4
+#: (`curves_batch3_approved.json`). One small round hole cut from a polygon is enough: at 16
+#: segments a quarter, a 3 mm radius is 64 faces of 0.29 mm. Until mqucifer/print-shop#85 every
+#: small flat face counted, and a lid of boxes, a circle and fillets failed on its clip beams'
+#: narrow sides; narrow faces that aren't in a run don't count now. The same copies read again
+#: so (`~/print-shop/proofs/m18-bench8/curves.json`): the frame and both panes still fail, and
+#: the 50 files still pass. Where a part still has strips it doesn't mean, its reason is said
+#: with `set_aside`.
 STRIPS_AT = 20
 #: What a curved part's file can be read by: an STL has no faces of its own.
 FACED = (".step", ".stp", ".brep")
-CURVES_HEADING = "Curves stored as flat strips, by `info`'s flat faces under 1 mm, on every file:"
+CURVES_HEADING = "Curves stored as flat strips, by `info`'s runs of strips, on every file:"
+
+
+def strips_counted(numbers: dict[str, Any]) -> tuple[int, str] | None:
+    """How `curves` counts a file's strips, from `info`'s numbers: its flat faces in runs of strips
+    (`strip_faces`, mqucifer/print-shop#85), and the words for it, or None where they didn't come
+    back. A narrow flat face not in a run, a beam's side or a fillet's seam, isn't counted."""
+    small, flat = numbers.get("small_flat_faces"), numbers.get("flat_faces")
+    count, lengths = numbers.get("strip_faces"), numbers.get("strip_runs")
+    if isinstance(count, bool) or not isinstance(count, int) or not isinstance(lengths, list):
+        return None
+    of = f" of {flat}" if isinstance(flat, int) and not isinstance(flat, bool) else ""
+    if not lengths:
+        if isinstance(small, int) and not isinstance(small, bool) and small:
+            return 0, f"{small}{of} flat faces under 1 mm across: narrow flat faces only, no strips"
+        return 0, "no strips"
+    runs = "1 run" if len(lengths) == 1 else f"{len(lengths)} runs"
+    longest = max(lengths)
+    return count, (
+        f"{runs} of strips (the longest {longest} faces), {count}{of} flat faces under 1 mm "
+        "across in them"
+    )
 
 
 def curves(
     box: Any, files: list[str], where: Path, kept: Path, asides: dict[str, str]
 ) -> list[judge.Standing]:
     """`info` on each file, each in a fresh container, failing one with `STRIPS_AT` or more flat
-    faces under 1 mm across, unless the model set it aside with its reason (`asides`, by file).
-    On `suncatcher-3` `info` said so at five calls, naming the skill the model had read, and the
-    frame stayed 23 MB of strips: a reading it can pass over was passed over every time."""
+    faces in runs of strips (`strips_counted`), unless the model set it aside with its reason
+    (`asides`, by file). On `suncatcher-3` `info` said so at five calls, naming the skill the
+    model had read, and the frame stayed 23 MB of strips: a reading it can pass over was passed
+    over every time."""
     found = []
     for name in files:
         command = f"info {shlex.quote(name)}"
@@ -330,16 +356,15 @@ def curves(
         )
         reading = judge.read_need(box, need, where, kept)
         numbers = dict((reading.record or {}).get("numbers") or {})
-        small, flat = numbers.get("small_flat_faces"), numbers.get("flat_faces")
-        if isinstance(small, bool) or not isinstance(small, int):
-            why = f"no count of small flat faces came back: {reading.why}"
+        counted = strips_counted(numbers)
+        if counted is None:
+            why = f"no count of strips came back: {reading.why}"
             found.append(
                 judge.Standing(CURVES, name, command, False, True, reading.verdict, why, numbers)
             )
             continue
-        of = f" of {flat}" if isinstance(flat, int) else ""
-        said = f"{small}{of} flat faces under 1 mm across"
-        if small < STRIPS_AT:
+        count, said = counted
+        if count < STRIPS_AT:
             found.append(
                 judge.Standing(CURVES, name, command, True, False, reading.verdict, said, numbers)
             )
@@ -352,10 +377,10 @@ def curves(
             continue
         why = (
             f"{said}: its curves are stored as flat strips, a face for each segment of a polygon, "
-            f"at {STRIPS_AT} or more. Build each curve as a curve, with CadQuery's circles and "
-            "arcs (the skill `building-curves-from-a-layout`), not `polyline` through a polygon's "
-            "points. If the file has no curves, say so with `set_aside`, giving `curves` and "
-            "`why`: the next stop shows your reason"
+            f"at {STRIPS_AT} faces in runs or more. Build each curve as a curve, with CadQuery's "
+            "circles and arcs (the skill `building-curves-from-a-layout`), not `polyline` through "
+            "a polygon's points. If the file has no curves, say so with `set_aside`, giving "
+            "`curves` and `why`: the next stop shows your reason"
         )
         found.append(
             judge.Standing(CURVES, name, command, False, False, reading.verdict, why, numbers)
