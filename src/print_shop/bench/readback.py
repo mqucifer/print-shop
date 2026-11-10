@@ -14,6 +14,7 @@ from typing import Any
 import numpy as np
 import shapely
 
+from . import strips
 from .limits import over, under
 from .report import Report
 from .shapes import (
@@ -35,13 +36,6 @@ SECTIONS = 128
 STACK_SHARE = 0.005
 #: With no change stated, losing or gaining this share of the volume needs saying first.
 LARGE_CHANGE = 0.5
-#: A flat face narrower than this, across its plane, is read as small (mqucifer/print-shop#54):
-#: 121 of 226 approved STEP files stored every curve as such strips, at 96 to 200 a quarter circle.
-SMALL_FACE_MM = 1.0
-#: Points read along each edge of a flat face, for the second reading of its width.
-EDGE_POINTS = 9
-
-
 def volumes(part: Part) -> dict[str, Any]:
     """The volume by two methods, and whether they agree. Raises when the mesh isn't closed."""
     coarse, fine = part.meshes()
@@ -96,71 +90,69 @@ def _bounds(part: Part) -> list[list[float]]:
     return found
 
 
-def _obb_width(face: Any) -> float:
-    """A flat face's width across its plane, by OCCT's oriented box: its middle extent, since a flat
-    face's smallest is its thickness, nothing."""
-    from OCP.Bnd import Bnd_OBB
-    from OCP.BRepBndLib import BRepBndLib
-
-    box = Bnd_OBB()
-    BRepBndLib.AddOBB_s(face.wrapped, box, True, True, False)
-    return float(sorted([2 * box.XHSize(), 2 * box.YHSize(), 2 * box.ZHSize()])[1])
-
-
-def _drawn_width(face: Any) -> float:
-    """The same width by points along the face's edges, laid in its plane, and the narrower side
-    of the least rectangle round them."""
-    normal = np.array(face.normalAt().toTuple())
-    across = np.cross(normal, [1.0, 0.0, 0.0])
-    if np.linalg.norm(across) < 1e-6:
-        across = np.cross(normal, [0.0, 1.0, 0.0])
-    across /= np.linalg.norm(across)
-    up = np.cross(normal, across)
-    points = np.array(
-        [
-            p.toTuple()
-            for edge in face.Edges()
-            for p in edge.positions(np.linspace(0.0, 1.0, EDGE_POINTS).tolist())
-        ]
-    )
-    flat = shapely.MultiPoint(np.column_stack([points @ across, points @ up]))
-    rectangle = flat.minimum_rotated_rectangle
-    if rectangle.geom_type != "Polygon":
-        return 0.0
-    a, b, c = np.asarray(rectangle.exterior.coords)[:3]
-    return float(min(np.linalg.norm(b - a), np.linalg.norm(c - b)))
-
-
 def small_faces(part: Part, path: str, report: Report) -> None:
-    """How many flat faces are under 1 mm across, and how big the file is: a reading, not a
-    failure (mqucifer/print-shop#54). A curve built from a polygon is stored as a strip for each
-    segment: an 80 mm ring at 96 segments a quarter is 770 flat faces and 3 MB, where two circles
-    make 4 faces and 10 kB. A slicer can't fit arcs to it, and the file drags."""
+    """How many flat faces are under 1 mm across, how many of them lie in runs of strips, and how
+    big the file is: a reading, not a failure (mqucifer/print-shop#54, mqucifer/print-shop#85). A
+    curve built from a polygon is stored as a strip for each segment: an 80 mm ring at 96 segments
+    a quarter is 770 flat faces and 3 MB, where two circles make 4 faces and 10 kB. A slicer can't
+    fit arcs to it, and the file drags. A beam's narrow side is a small flat face too, but not a
+    strip: strips come in runs, each turning a few degrees to the next (`strips`)."""
     report.fact("file_kb", round(os.path.getsize(path) / 1024, 1), how="on the disk")
     if not part.is_brep:
         report.note("an STL has no faces of its own, only triangles, so no flat faces are read")
         return
     flat = [f for f in part.shape.Faces() if f.geomType() == "PLANE"]
-    widths = [_obb_width(f) for f in flat]
-    small = sum(1 for w in widths if w < SMALL_FACE_MM)
+    widths, found = strips.by_topology(part.shape, flat)
+    small = sum(1 for w in widths if w < strips.SMALL_FACE_MM)
+    lengths = [len(r) for r in found]
     report.fact("flat_faces", len(flat), how="OCCT's planes")
     report.fact(
         "small_flat_faces",
         small,
-        how=f"flat faces under {SMALL_FACE_MM:g} mm across their plane, by OCCT's oriented box",
+        how=f"flat faces under {strips.SMALL_FACE_MM:g} mm across their plane, by OCCT's "
+        "oriented box",
     )
-    drawn = sum(1 for f in flat if _drawn_width(f) < SMALL_FACE_MM)
-    report.second(f"flat faces under {SMALL_FACE_MM:g} mm by points along their edges: {drawn}")
-    if drawn != small:
+    counted = strips.narrow_in(found, widths)
+    report.fact(
+        "strip_faces",
+        counted,
+        how=f"small flat faces in runs of strips: {strips.RUN_LEAST} flat faces or more, each a "
+        f"neighbour of the next by OCCT's edges, turning under {strips.TURN_DEG:g}° to it",
+    )
+    report.fact("strip_runs", lengths, how="each run's flat faces, longest first")
+    drawn_widths, drawn = strips.by_points(flat)
+    drawn_small = sum(1 for w in drawn_widths if w < strips.SMALL_FACE_MM)
+    drawn_lengths = [len(r) for r in drawn]
+    drawn_counted = strips.narrow_in(drawn, drawn_widths)
+    report.second(
+        f"flat faces under {strips.SMALL_FACE_MM:g} mm by points along their edges: "
+        f"{drawn_small}; by the same points, {strips.said(drawn_lengths)}"
+        + (f" {drawn_lengths[:8]}, {drawn_counted} small faces in them" if drawn_lengths else "")
+    )
+    if drawn_small != small:
         report.note(
-            f"the two readings of small flat faces differ, {small} by the box and {drawn} by "
-            "the points: a face near 1 mm across reads either side"
+            f"the two readings of small flat faces differ, {small} by the box and {drawn_small} "
+            "by the points: a face near 1 mm across reads either side"
         )
-    if small:
+    if drawn_lengths != lengths or drawn_counted != counted:
         report.note(
-            f"{small} flat face(s) under {SMALL_FACE_MM:g} mm across: if the part has curves, "
-            "they're stored as flat strips. Build a curve with CadQuery's circles and arcs "
-            "(the skill `building-curves-from-a-layout`), not `polyline` through a polygon's points"
+            f"the two readings of strips differ: {strips.said(lengths)} {lengths[:8]}, "
+            f"{counted} small faces in them, by OCCT's edges, and {strips.said(drawn_lengths)} "
+            f"{drawn_lengths[:8]}, {drawn_counted} small, by points along them"
+        )
+    if lengths:
+        report.note(
+            f"{strips.said(lengths)}, {counted} of {small} flat face(s) under "
+            f"{strips.SMALL_FACE_MM:g} mm across: a curve stored as flat strips, a face for each "
+            "segment of a polygon. Build a curve with CadQuery's circles and arcs (the skill "
+            "`building-curves-from-a-layout`), not `polyline` through a polygon's points"
+        )
+    elif small:
+        report.note(
+            f"{small} flat face(s) under {strips.SMALL_FACE_MM:g} mm across, narrow flat faces "
+            "only, no strips: none is in a run of neighbours each turning a few degrees to the "
+            "next, as a polygon's strips are. A beam's or a slot's narrow side, or a seam where "
+            "fillets meet, reads so"
         )
 
 

@@ -907,11 +907,53 @@ def test_info_reads_a_curve_stored_as_flat_strips_and_the_files_size(bench: Any)
     curved = bench("info", "ring-curved.step")
     assert faceted.verdict == curved.verdict == "OK", faceted.text + curved.text
     assert faceted.numbers["flat_faces"] == 770 and faceted.numbers["small_flat_faces"] == 768
+    assert faceted.numbers["strip_runs"] == [384, 384] and faceted.numbers["strip_faces"] == 768
     assert "flat faces under 1 mm by points along their edges: 768" in faceted.text
-    assert "768 flat face(s) under 1 mm across" in faceted.text
+    assert "2 runs of strips (the longest 384 faces), 768 of 768 flat face(s)" in faceted.text
     assert curved.numbers["flat_faces"] == 2 and curved.numbers["small_flat_faces"] == 0
+    assert curved.numbers["strip_runs"] == [] and curved.numbers["strip_faces"] == 0
     assert faceted.numbers["file_kb"] > 100 * curved.numbers["file_kb"]
     assert "flat strips" not in curved.text
+
+
+def test_info_tells_a_polygon_s_strips_from_narrow_flat_faces(bench: Any) -> None:
+    """mqucifer/print-shop#85. A circle drawn as 48 points through `polyline` is one run of 48
+    strips, each 0.654 mm wide and turning 7.5° to the next. A lid of boxes, one circle and
+    fillets, with four 0.6 mm clip beams in slots and feet, has narrow flat faces and no strips,
+    by both readings."""
+    circle = bench("info", "strips/circle48.step")
+    assert circle.verdict == "OK", circle.text
+    assert circle.numbers["strip_runs"] == [48] and circle.numbers["strip_faces"] == 48
+    assert "1 run of strips (the longest 48 faces)" in circle.text
+    assert "by the same points, 1 run of strips (the longest 48 faces) [48]" in circle.text
+    beams = bench("info", "strips/beams.step")
+    assert beams.verdict == "OK", beams.text
+    assert beams.numbers["small_flat_faces"] >= 16, "the beams' and feet's narrow sides"
+    assert beams.numbers["strip_runs"] == [] and beams.numbers["strip_faces"] == 0
+    assert "narrow flat faces only, no strips" in beams.text
+    assert "by the same points, no strips" in beams.text
+    assert "the two readings of strips differ" not in beams.text + circle.text
+    assert "a curve stored as flat strips" not in beams.text
+
+
+def test_the_standing_check_blocks_rings_and_a_polygon_and_passes_the_beams(bench: Any) -> None:
+    """The check `done` runs on every part file (mqucifer/print-shop#59), counting runs of strips
+    now (mqucifer/print-shop#85): rings drawn as polylines, and a circle of 48 points, still fail;
+    the lid with clip beams, whose narrow faces failed it before, passes."""
+    from print_shop.rounds import standing
+    from print_shop.rounds.box import Box
+
+    files = ["ring-faceted.step", "strips/circle48.step", "strips/beams.step", "ring-curved.step"]
+    found = standing.curves(Box(bench.work), files, bench.work, bench.work / ".kept", {})
+    assert [(one.passed, one.unsure) for one in found] == [
+        (False, False),
+        (False, False),
+        (True, False),
+        (True, False),
+    ], [one.why for one in found]
+    assert found[0].why.startswith("2 runs of strips (the longest 384 faces), 768 of 770")
+    assert found[1].why.startswith("1 run of strips (the longest 48 faces), 48 of 50")
+    assert found[2].why.endswith("narrow flat faces only, no strips"), found[2].why
 
 
 def test_the_skills_new_code_runs_in_the_image(bench: Any) -> None:
@@ -2314,6 +2356,53 @@ def test_a_plain_plate_and_a_lid_on_its_tray_are_not_held(bench: Any) -> None:
     lid = bench("clearance", "enclosure/tray.step", "enclosure/lid-lip-0p2.step", "--slide", "+z")
     assert lid.verdict == "NOT HELD" and lid.numbers["slide"]["first_mm"] is None, lid.text
     assert "The bench doesn't model friction" in lid.text
+
+
+def test_a_fan_on_feet_in_its_pocket_is_held_at_0p1_by_both_methods(bench: Any) -> None:
+    """mqucifer/print-shop#84, on parts of our own: a fan block with round holes, its sides on its
+    pocket's walls, and four feet 0.1 mm under its bottom face. The sides give the step's band
+    its chords, and the step and halving read 0.14, so it was `DISAGREE`. Now both read 0.1."""
+    answer = bench("clearance", "hold/feet.step", "hold/holed-fan.step", "--slide", "-z")
+    assert answer.verdict == "HELD" and answer.code == 0, answer.text
+    slide = answer.numbers["slide"]
+    assert slide["first_mm"] == pytest.approx(0.1, abs=2 * 0.002 + 1e-4), answer.text
+    assert slide["first_rays_mm"] == pytest.approx(0.1, abs=1e-4)
+    assert slide["meets"] == ["feet.step"] and len(slide["contacts"]) == 4
+    assert "DISAGREE" not in answer.text and not answer.record["notes"], answer.text
+    assert "holed-fan.step first meets feet.step after 0.1000 mm" in answer.text
+
+
+def test_two_methods_that_differ_on_a_distance_alone_keep_their_verdict(bench: Any) -> None:
+    """mqucifer/print-shop#84. Planted on the hooks by making one method read otherwise, in the
+    process only (`bench_cases/planted_slide.py`). The step and halving 0.05 mm late, both within
+    --hold, at the same four hooks: `HELD`, with both figures and where. Past --hold for one and
+    not the other, rays that meet nothing, or rays that first meet the hooks somewhere no contact
+    of the step's is: still `DISAGREE`."""
+    done = host.run(["planted_slide.py"], bench.work, python=True)
+    assert done.returncode == 0, done.stdout + done.stderr
+    found = json.loads(done.stdout.strip().splitlines()[-1])
+    agreed = found["agreed"]
+    assert agreed["verdict"] == "HELD" and agreed["code"] == 0, agreed["text"]
+    assert agreed["first_mm"] == pytest.approx(0.25, abs=0.005)
+    assert agreed["first_rays_mm"] == pytest.approx(0.2, abs=1e-4)
+    said = (
+        "both methods find the first contact at east, north, south, west; 0.2000 mm by the rays "
+        "and 0.2500 by the step and halving, and both read HELD against --hold 1 mm, so the "
+        "verdict stands: their distances differ, not their answer"
+    )
+    assert said in agreed["text"].splitlines()[0], agreed["text"]
+    assert "at the same 4 places on hooks.step; 0.2000 mm" in found["agreed_unnamed"]["text"]
+    differ = found["verdicts_differ"]
+    assert differ["verdict"] == "DISAGREE" and differ["code"] == 2, differ["text"]
+    assert "the step and halving read NOT HELD at 0.2500 mm, the rays HELD at 0.2000" in (
+        differ["text"]
+    )
+    blind = found["rays_meet_nothing"]
+    assert blind["verdict"] == "DISAGREE", blind["text"]
+    assert "the step and halving say it's met after 0.2000 mm, the rays never" in blind["text"]
+    elsewhere = found["rays_elsewhere"]
+    assert elsewhere["verdict"] == "DISAGREE", elsewhere["text"]
+    assert "the rays first meet hooks.step at (0, 0, 7.5), outside every box" in elsewhere["text"]
 
 
 def test_a_slide_takes_two_files_and_no_gap_range(bench: Any) -> None:

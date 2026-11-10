@@ -647,6 +647,59 @@ def holds() -> None:
         lid = lid.union(box(*mirrored(side, 16.8, 17.8), -3.5, 3.5, 10.5, 11.8))
     save(base, "hold/snap-base")
     save(lid, "hold/snap-lid")
+    pocket_feet()
+
+
+def pocket_feet() -> None:
+    """A fan held in a pocket by feet 0.1 mm under it (mqucifer/print-shop#84), on parts of our own.
+
+    - `hold/holed-fan`: the fan block, with four 3.4 mm holes 24 mm apart, through: its holes'
+      curved faces give its mesh chords.
+    - `hold/feet`: a plate 40 x 40 x 2 on the block's top, and walls 2 mm thick round it, their
+      inside faces on the block's sides, down to z -1.1. A foot inside each wall, 8 mm wide,
+      reaching 0.5 mm in under the block, z -1.1 to -0.1: its top 0.1 mm under the block's
+      bottom face. Slid down, the block meets the four feet after 0.1 mm, 16 mm² of them.
+
+    The block's sides on the walls are an overlap of no volume whose faces give the slide's band
+    its chords, 0.002 mm on the holes' 320 mm²: the feet take 0.04 mm to pass that, so the step
+    and halving read 0.14 where the rays read 0.1, and it was `DISAGREE`.
+    """
+    fan = box(-15, 15, -15, 15, 0, 7.5)
+    for x in (-12, 12):
+        for y in (-12, 12):
+            fan = fan.cut(cq.Workplane("XY").center(x, y).circle(1.7).extrude(7.5))
+    save(fan, "hold/holed-fan")
+    feet = box(-20, 20, -20, 20, 7.5, 9.5)
+    for turn in (0, 90, 180, 270):
+        wall = box(15, 17, -17, 17, -1.1, 7.5).union(box(14.5, 15, -4, 4, -1.1, -0.1))
+        feet = feet.union(wall.rotate((0, 0, 0), (0, 0, 1), turn))
+    save(feet, "hold/feet")
+
+
+def strips() -> None:
+    """Strips told from narrow flat faces (mqucifer/print-shop#85), on parts of our own.
+
+    - `strips/circle48`: a circle radius 5 drawn as a polygon of 48 points through `polyline`,
+      extruded 3 mm: 48 strips, each 2 x 5 x sin(pi / 48) = 0.654 mm wide, turning 7.5° to the
+      next, in one run of 48.
+    - `strips/beams`: a lid 40 x 40 x 3, its upright edges rounded 3 mm and its top 1 mm, with
+      one round opening radius 12 and four clip beams. Each beam is 0.6 mm thick and 8 mm wide in
+      a slot 1.6 mm wide, joined at the slot's ends, hanging 6 mm under the lid with a foot
+      reaching 0.9 mm in, its edges along the beam rounded 0.2 mm. It has narrow flat faces, the
+      beams' and feet's sides and ends, and no polygon: no strips.
+    """
+    Path("strips").mkdir(exist_ok=True)
+    angles = np.linspace(0, 2 * np.pi, 48, endpoint=False)
+    circle = [(5 * float(np.cos(a)), 5 * float(np.sin(a))) for a in angles]
+    save(cq.Workplane("XY").polyline(circle).close().extrude(3), "strips/circle48")
+    lid = box(-20, 20, -20, 20, 0, 3).edges("|Z").fillet(3).faces(">Z").edges().fillet(1)
+    lid = lid.cut(cq.Workplane("XY").circle(12).extrude(3))
+    for turn in (0, 90, 180, 270):
+        slot = box(15, 16.6, -4, 4, 0, 3).rotate((0, 0, 0), (0, 0, 1), turn)
+        beam = box(15.5, 16.1, -4, 4, -6, 3).union(box(14.6, 15.5, -4, 4, -6, -5.4))
+        beam = beam.edges("|Y").fillet(0.2).rotate((0, 0, 0), (0, 0, 1), turn)
+        lid = lid.cut(slot).union(beam)
+    save(lid, "strips/beams")
 
 
 def at_limits() -> None:
@@ -702,5 +755,6 @@ if __name__ == "__main__":
     enclosure()
     places()
     holds()
+    strips()
     at_limits()
     print("made")

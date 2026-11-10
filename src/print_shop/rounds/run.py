@@ -2004,9 +2004,9 @@ class Run:
             lines += [
                 "## Small flat faces the model says aren't curves stored as strips",
                 "",
-                f"Each file has {glass_checks.STRIPS_AT} or more flat faces under 1 mm across, "
-                "which is how a curve built from a polygon is stored. The model says why these "
-                "aren't:",
+                f"Each file has {glass_checks.STRIPS_AT} or more flat faces under 1 mm across in "
+                "runs, each turning a few degrees to the next, which is how a curve built from a "
+                "polygon is stored. The model says why these aren't:",
                 "",
                 *[
                     f"- `{a['strips_file']}`, set aside at call {a['at_call']}: {a['why']}"
