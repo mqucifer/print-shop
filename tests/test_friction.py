@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from print_shop.rounds import breakdown, needs, tools, transcript
+from print_shop.rounds import breakdown, needs, tools, toolsets, transcript
 from print_shop.rounds.box import Ran
 from print_shop.rounds.run import Run
 from tests.rounds_fakes import Scripted, tool
@@ -222,4 +222,7 @@ def test_a_run_holds_a_picks_quote_to_what_was_picked(tmp_path: Path) -> None:
 
 
 def test_the_needs_tool_names_the_pick_as_a_source() -> None:
-    assert "`note` or `pick`, a pick's reason" in tools.NEED_SHAPE
+    # Its sources are in the needs' schema since mqucifer/print-shop#93, beside the enum.
+    source = tools.need_item(toolsets.CORE)["properties"]["source"]
+    assert "`note` or `pick`, a pick's reason" in source["description"]
+    assert "pick" in source["enum"]

@@ -178,11 +178,17 @@ def read(
     notes: str = "",
     toolset: Toolset | None = None,
     picks: str = "",
+    keep: bool = False,
 ) -> tuple[list[Need], list[str]]:
     """The needs, or what's wrong with them. `said_by_sponsor` is the request and the answers,
     `notes` what was relayed, and `picks` each pick's reason and fix-first: each is its own source,
     so a need says which it came from. With a `toolset`, each bench need's check is in it and
-    measures what the need says it's about."""
+    measures what the need says it's about.
+
+    With `keep`, each need whose `check` is an object comes back with what's wrong, so a `try`
+    can read the checks that can still be run (`readable`) beside the mistakes: 38 of the 106
+    `needs` refused for a mistake were tries, refused before any check was read
+    (mqucifer/print-shop#93)."""
     wrong: list[str] = []
     try:
         entries = json.loads(raw) if isinstance(raw, str) else raw
@@ -253,7 +259,24 @@ def read(
         else:
             wrong.append(f"{shown}: `check.by` is bench, eye or bed")
         found.append(need)
+    if keep:
+        return found, wrong
     return ([], wrong) if wrong else (found, [])
+
+
+def readable(need: Need, toolset: Toolset | None = None) -> bool:
+    """Whether a bench need's command can be run at all, whatever else is wrong with the need: it
+    parses, and names a bench command, of this run's toolset where there's one. A `try` reads
+    each check that can, and only these (mqucifer/print-shop#93)."""
+    if need.by != "bench":
+        return False
+    try:
+        words = need.argv()
+    except ValueError:
+        return False
+    if not words or words[0] not in COMMANDS:
+        return False
+    return toolset is None or toolset.legacy or words[0] in toolset.commands
 
 
 def _marks(need: Need, entry: dict[str, Any], wrong: list[str], shown: str) -> None:

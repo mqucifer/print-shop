@@ -156,6 +156,26 @@ def test_an_exact_text_is_replaced_everywhere_and_a_change_that_finds_nothing_is
         sent(tmp_path / "3", replays.Change("skill", "no-such-skill", "y"))
 
 
+def test_a_tools_spec_is_given_in_its_place_and_the_messages_stay_as_recorded(
+    tmp_path: Path,
+) -> None:
+    """mqucifer/print-shop#93 replays a call with the `needs` tool's new schema."""
+    spec = json.loads(json.dumps(tools.specs()[0]))
+    spec["function"]["description"] = "Write a file, said another way."
+    done, model = sent(tmp_path, replays.Change("tool", "write", json.dumps(spec)))
+    recorded = transcript.rebuild(tmp_path / "runs" / "peg-1" / "events.jsonl", 3)
+    assert model.bodies[0]["tools"] == [spec]
+    assert model.bodies[0]["messages"] == recorded["messages"]
+    assert done.places_changed == 1
+    with pytest.raises(replays.Refused, match="finds nothing to change"):
+        other = {"type": "function", "function": {"name": "needs"}}
+        sent(tmp_path / "2", replays.Change("tool", "needs", json.dumps(other)))
+    with pytest.raises(replays.Refused, match="isn't one of the tool `write`"):
+        sent(tmp_path / "3", replays.Change("tool", "write", json.dumps({"function": {}})))
+    with pytest.raises(replays.Refused, match="a tool's spec is JSON"):
+        sent(tmp_path / "4", replays.Change("tool", "write", "not json"))
+
+
 def test_each_try_records_its_reasoning_the_call_it_ends_in_and_whether_its_long(
     tmp_path: Path,
 ) -> None:
