@@ -44,6 +44,7 @@ import math
 from collections.abc import Callable
 from typing import Any
 
+import manifold3d as m3
 import numpy as np
 import shapely
 import trimesh
@@ -87,6 +88,9 @@ PAST = 0.01
 SAMPLES = 6000
 #: The most contacts said one by one; the rest are counted.
 SHOWN = 8
+#: A first contact's place, seen along the slide, is opened by this, in mm: a face sliding along
+#: another leaves a sliver no wider, which isn't a contact.
+OPEN = 1e-4
 
 
 def _turned(manifold: Any, axis: str) -> Any:
@@ -447,11 +451,42 @@ def _agreed(found: dict[str, Any]) -> str:
     )
 
 
-def _contacts(a: Any, b: Any, d: np.ndarray, first: float) -> list[tuple[np.ndarray, np.ndarray]]:
+def _contacts(
+    a: Any, b: Any, d: np.ndarray, axis: str, first: float
+) -> list[tuple[np.ndarray, np.ndarray]]:
     """Each place a first meets b: with a moved `PROBE` past its first contact, the box of each
-    piece of their overlap. Flat on flat it's a slab that thin; round a curve, wider."""
+    piece of their overlap. Flat on flat it's a slab that thin; round a curve, wider.
+
+    A place is read from what the overlap covers seen along the slide, opened by `OPEN`, and the
+    overlap inside it: where a's sides lie on b's walls, as a fan's in its pocket, their overlap
+    is a sliver no thicker than arithmetic, with no area seen along the slide. On one machine it
+    has no volume and on another a little, and joined to a foot's contact it made that box run up
+    the wall (mqucifer/print-shop#84, on CI's x86)."""
     overlap = a.translate(tuple(map(float, d * (first + PROBE)))) ^ b
-    found = [_bounds(p) for p in overlap.decompose() if float(p.volume()) > 0]
+    if float(overlap.volume()) <= 0:
+        return []
+    rows = np.asarray(ACROSS[axis], dtype=float)
+    back = np.hstack([rows.T, np.zeros((3, 1))])
+    corner_low, corner_high = _bounds(overlap)
+    low_w, high_w = sorted((float(rows[2] @ corner_low), float(rows[2] @ corner_high)))
+    seen = _shadow(overlap, axis).buffer(-OPEN)
+    across = [k for k in range(3) if k != int(np.argmax(np.abs(d)))]
+    found = []
+    for place in getattr(seen, "geoms", [seen]):
+        if place.geom_type != "Polygon" or place.area <= 0:
+            continue
+        upright = shapely.geometry.polygon.orient(place, 1.0)
+        rings = [np.asarray(upright.exterior.coords)[:-1]]
+        rings += [np.asarray(r.coords)[:-1] for r in upright.interiors]
+        prism = m3.CrossSection(rings).extrude(high_w - low_w + 2.0)
+        prism = prism.translate((0.0, 0.0, low_w - 1.0)).transform(back)
+        for piece in (overlap ^ prism).decompose():
+            if float(piece.volume()) <= 0:
+                continue
+            low, high = _bounds(piece)
+            low[across] -= OPEN
+            high[across] += OPEN
+            found.append((low, high))
     return sorted(found, key=lambda c: tuple(c[0]))
 
 
@@ -586,7 +621,7 @@ def what_holds(
         found["first_rays_mm"] = min(m["met_rays_mm"] for m in tied)
         found["meets"] = [m["part"] for m in tied]
         for m in tied:
-            for low, high in _contacts(a_fine, m["_b"], d, m["met_mm"]):
+            for low, high in _contacts(a_fine, m["_b"], d, axis, m["met_mm"]):
                 found["contacts"].append(
                     {
                         "part": m["part"],

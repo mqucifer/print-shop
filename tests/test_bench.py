@@ -2403,6 +2403,14 @@ def test_two_methods_that_differ_on_a_distance_alone_keep_their_verdict(bench: A
     elsewhere = found["rays_elsewhere"]
     assert elsewhere["verdict"] == "DISAGREE", elsewhere["text"]
     assert "the rays first meet hooks.step at (0, 0, 7.5), outside every box" in elsewhere["text"]
+    # CI's x86 read `hold/feet`'s walls on the block's sides as a sliver joined to each foot, and
+    # its first contacts ran up the walls: walls 1e-6 mm into the block plant it on any machine.
+    assert found["sliver_contacts"] == [
+        [[-15.0, -4.0, -0.12], [-14.5, 4.0, -0.1]],
+        [[-4.0, -15.0, -0.12], [4.0, -14.5, -0.1]],
+        [[-4.0, 14.5, -0.12], [4.0, 15.0, -0.1]],
+        [[14.5, -4.0, -0.12], [15.0, 4.0, -0.1]],
+    ]
 
 
 def test_a_slide_takes_two_files_and_no_gap_range(bench: Any) -> None:
