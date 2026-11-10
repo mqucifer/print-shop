@@ -50,7 +50,7 @@ Whichever way, the lid sits on its **seat**, the wall's top, and its **lip** fit
 
 ## A fan held in the lid
 
-A fan held without screws sits in a recess the fan's frame plus the play on each face, against a ledge that stops it, held by clips that hook over its frame: two or more on opposite sides. The clips follow the rules above. Centre the fan on the point the request names, such as over a processor, from the references, never by eye. How firmly it's held is an eye need.
+A fan held without screws sits in a recess the fan's frame plus the play on each face, against a ledge that stops it, held by clips that hook over its frame: two or more on opposite sides. The clips follow the rules above. Centre the fan on the point the request names, such as over a processor, from the references, never by eye. Whether it's held is read on the bench, never by eye: `clearance <part> references/fan.step --slide <its way out>`, with `HELD`.
 
 ## Sources
 

@@ -43,9 +43,10 @@ Sponsor changes it. You may try things out while you work this out.
 
 **Stops.** The request's stops, the plan first unless it says otherwise, are each shown with \
 `ask` and its `stop`, in order. The plan shows how you'll go about it, with your breakdown, the \
-needs, and any picture you drew, such as a 2D layout: it needs no part file. Until a stop's ask \
-has a pick, `done` and the next stop's ask wait. Writing, running, the bench and any other `ask` \
-stay open throughout.
+needs, and any picture you drew, such as a 2D layout: it needs no part file, except where a part \
+of yours holds a bought part: then a rough first try and its reading go with it. Until a stop's \
+ask has a pick, `done` and the next stop's ask wait. Writing, running, the bench and any other \
+`ask` stay open throughout.
 
 **Then, rounds.** Write a script with `write`, change it with `edit`, read a file back with \
 `read`, and run it with `run` (or `run: true` on `write` or `edit`). Units are millimetres, and \
@@ -106,9 +107,14 @@ def start(
         files = "They gave you nothing besides this."
     kept = f"{lessons.strip()}\n\n" if lessons.strip() else ""
     lines = f"{form.strip()}\n\n" if form.strip() else ""
+    # Where something was given, what a held part needs before its plan (mqucifer/print-shop#87).
+    # Imported here: `holds` reads needs, whose toolsets read this module.
+    from print_shop.rounds import holds
+
+    held = f"{holds.START}\n\n" if given else ""
     return (
         f"The Sponsor's request:\n\n{request.strip()}\n\n{files}\n\n{lines}{kept}"
-        f"{facts.START}\n\n{skills_line}"
+        f"{facts.START}\n\n{held}{skills_line}"
     )
 
 

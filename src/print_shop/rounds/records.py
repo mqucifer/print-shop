@@ -250,6 +250,10 @@ class Recorder:
         said = {
             k: event.get(k) for k in ("reasoning_tokens", "seconds", "finish", "after", "only")
         }
+        if event.get("allowed"):
+            # What the lock left room to build and read (mqucifer/print-shop#86): only where it
+            # did, so an older run's rows read back the same.
+            said["allowed"] = event["allowed"]
         self._row(
             "asked",
             name="ask_only" if event.get("only") else "what_is_missing",

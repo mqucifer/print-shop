@@ -47,7 +47,9 @@ Keep each bought part as one `fact`, named for its file, such as `references/fan
 
 Decide the parts before any geometry, and write them down: which part each reference mounts to, where the lid splits from the base, and how it closes. `references/walls-and-lids.md` (the skill `sizing-walls-and-lids`) has the three ways a lid closes, and what each needs. Where the request leaves the way open, take it to the plan stop.
 
-For each bought part, name the way it goes in, then run `clearance <part> <bought part> --slide <the way out>`. `HELD` names what holds it. Everything on its path is what has to bend, or be fitted afterwards.
+For each bought part, name the way it goes in, then run `clearance <part> <bought part> --slide <the way out>`. `HELD` names what holds it. Everything on its path is what has to bend, or be fitted afterwards. Where a part holds a bought part, build a rough first try and read it this way before the plan stop, not after: the plan waits for that reading, whatever it says.
+
+A given part fixed in place and never fitted, such as a box your lid sits on, is a `fact` with its `box` and `fixed: true` in place of `way_in` and `held_by`.
 
 ### 3. Dimensions
 
@@ -67,7 +69,8 @@ Each bench need gives `measures`, what it's about, and its command has to measur
 | a round opening of diameter D, such as the fan's | `hole` | `rays lid.step --centre X,Y,Z --d D` |
 | the wall round a screw's boss | `wall` | `wall base.step --hole X,Y,Z --min-wall W` |
 | each part printable | `printable` | `thin base.step` |
-| how firmly the fan or the lid is held | an eye need | none measures it: say what to look for |
+| a bought part, such as the fan, is held | `fit` | `clearance lid.step references/fan.step --slide <its way out>`, verdict `HELD` |
+| how firmly a lid stays on by its fit alone | an eye need | the bench doesn't model friction: say what to look for |
 | which way a part prints, such as the base on its floor | a bed need | `{"by": "bed", "file": "base.step", "side": "-z"}`, with `done`'s `on_bed` giving it the same side |
 
 - **One pair to a `clearance` need,** the part and what it must clear. `clearance` reads every pair of the files named, and a part resting on another touches it, gap 0: a board on its standoffs, or the lid on its seat, reads `TOO CLOSE` under any `--min-gap`.

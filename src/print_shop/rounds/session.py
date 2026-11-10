@@ -75,12 +75,36 @@ ASK_WHAT = (
 CUT_OFF = " It reached the answer's limit, so that reasoning isn't sent back."
 ONLY_ASKING = (
     " It's happened again, {calls} after the last time, so until you've asked or ended, only "
-    "`ask`, `send_ask` and `blocked` work."
+    "`ask`, `send_ask` and `blocked` work, besides this: you may build one change and read one "
+    "check, then ask or end. That's one `write` or `edit` (`run: true` runs it, or one `run`), "
+    "and one `bench` command."
 )
 STILL_ONLY = " Only `ask`, `send_ask` and `blocked` work until you've asked or ended."
 NOT_NOW = (
     "Not carried out: only `ask`, `send_ask` and `blocked` work until you've asked what's "
     "missing or ended."
+)
+#: What the ask-only lock leaves room for, once each, while it holds: on `eval-fan-3` the lock
+#: stopped a model that had twice decided to build a lip and read the slide, and four calls with
+#: no tool followed, 73 minutes (mqucifer/print-shop#86).
+ALLOWANCE = {"write": "build", "edit": "build", "run": "run", "bench": "check"}
+#: Said of what the lock still allows, after `STILL_ONLY`, while any is left.
+STILL_ALLOWED = " Besides them, you may still {left}, once, then ask or end."
+LEFT = {
+    "build": "build one change with `write` or `edit`",
+    "run": "`run` it",
+    "check": "read one check with `bench`",
+}
+#: A call the lock's allowance has already had.
+SPENT = (
+    "Not carried out: under the lock you've had your one {what}. Now `ask` what's missing, "
+    "showing what you have, then `send_ask`; or end with `blocked`, saying what's missing."
+)
+SPENT_WHAT = {"build": "build", "run": "run", "check": "bench check"}
+#: After an allowed call that was carried out, what's left.
+AFTER_ALLOWED = (
+    "\n\n(Under the lock: {left}. Then `ask` what's missing, and `send_ask`; or end with "
+    "`blocked`.)"
 )
 NOTE_AS_TEXT = (
     "Not {done}: `{key}` holds a compaction note, `{note}`, not a file's text. Earlier calls "
@@ -226,6 +250,8 @@ class Session:
     # The last call that ended without a tool call, and while it holds, the only tools offered.
     quiet_at: int = 0
     only: tuple[str, ...] = ()
+    # What the lock's allowance has had since it was set: `build`, `run`, `check`.
+    spent: set[str] = field(default_factory=set)
     last_seconds: float = 0.0
     # Each tool reply's facts, by its message's index, for compaction.
     replies: dict[int, dict[str, Any]] = field(default_factory=dict)
@@ -290,6 +316,8 @@ class Session:
                 if isinstance(event.get("name"), str):
                     self.by_tool[event["name"]] += 1
                 self.replies[int(event["index"])] = event["info"]
+                if self.only and event["outcome"] == "ok" and event.get("name") in ALLOWANCE:
+                    self.spent.add(ALLOWANCE[event["name"]])
             elif kind == "compacted":
                 self.compactions += 1
             elif kind == "compaction_note":
@@ -298,10 +326,14 @@ class Session:
                 self.views += 1
             elif kind == "quiet_reply":
                 self.quiet_at = int(event["n"])
-                self.only = tuple(event.get("only") or ())
+                only = tuple(event.get("only") or ())
+                if only and not self.only:
+                    self.spent = set()
+                self.only = only
             elif kind == "ended":
                 # Each stop ends what a quiet call asked for: the model asked, or ended.
                 self.only = ()
+                self.spent = set()
 
     def go(self) -> Ending:
         """Calls until something stops it."""
@@ -410,13 +442,43 @@ class Session:
     def _offered(self) -> list[dict[str, Any]]:
         if not self.only:
             return self.tools.specs
-        return [s for s in self.tools.specs if s["function"]["name"] in self.only]
+        return [s for s in self.tools.specs if self._open(s["function"]["name"])]
+
+    def _open(self, name: Any) -> bool:
+        """Whether a tool works now: any, or under the lock the asking ones and what's left of its
+        allowance."""
+        if not self.only or name in self.only:
+            return True
+        kind = ALLOWANCE.get(name) if isinstance(name, str) else None
+        return kind is not None and kind not in self.spent
+
+    def _allowed(self) -> list[str]:
+        """The tools the lock's allowance still opens, of those this session offers."""
+        if not self.only:
+            return []
+        offered = [s["function"]["name"] for s in self.tools.specs]
+        return [n for n in offered if n in ALLOWANCE and ALLOWANCE[n] not in self.spent]
+
+    def _left(self) -> list[str]:
+        """What the lock's allowance has left, of the tools this session offers."""
+        offered = {s["function"]["name"] for s in self.tools.specs}
+        kinds = dict.fromkeys(k for n, k in ALLOWANCE.items() if n in offered)
+        return [LEFT[k] for k in kinds if k not in self.spent]
+
+    def _left_said(self) -> str:
+        left = self._left()
+        if not left:
+            return "nothing more to build, run or read"
+        return "you may still " + (
+            left[0] if len(left) == 1 else ", ".join(left[:-1]) + f" and {left[-1]}"
+        )
 
     def _quiet_reply(self, answer: dict[str, Any], message: dict[str, Any], finish: Any) -> str:
         """What a call that ended without a tool call is told: what's missing is asked for, not
         action (mqucifer/print-shop#47). On the records, 12 of the 15 such calls followed 16k
         tokens or more of reasoning, and 10 sat in the two loops. A second one soon after gets a
-        request whose only tools are the asking ones. Nothing cuts a call or limits thinking."""
+        request whose only tools are the asking ones, and once each a build, a run and a check
+        (mqucifer/print-shop#86). Nothing cuts a call or limits thinking."""
         asking = self._asking()
         if not {"ask", "blocked"} <= set(asking):
             return QUIET
@@ -430,12 +492,17 @@ class Session:
         reasoning = f"{tokens:,} tokens ({took})"
         again = bool(self.quiet_at) and n - self.quiet_at <= self.limits.ask_within
         reply = ASK_WHAT.format(reasoning=reasoning, cut=CUT_OFF if finish == "length" else "")
-        if again:
+        if again and not self.only:
             self.only = asking
+            self.spent = set()
             gap = n - self.quiet_at
             reply += ONLY_ASKING.format(calls=f"{gap} call{'' if gap == 1 else 's'}")
         elif self.only:
             reply += STILL_ONLY
+            left = self._left()
+            if left:
+                said = left[0] if len(left) == 1 else ", ".join(left[:-1]) + f" and {left[-1]}"
+                reply += STILL_ALLOWED.format(left=said)
         self._record(
             "quiet_reply",
             n=n,
@@ -444,6 +511,7 @@ class Session:
             finish=finish,
             after=n - self.quiet_at if self.quiet_at else None,
             only=list(self.only) or None,
+            allowed=self._allowed() or None,
             reply=reply,
         )
         self.quiet_at = n
@@ -867,6 +935,11 @@ class Session:
                 continue
             args = _arguments(function.get("arguments"))
             judged = self._refused(name, args) or self.tools.call(name, function.get("arguments"))
+            if self.only and judged.outcome == "ok" and name in ALLOWANCE:
+                self.spent.add(ALLOWANCE[name])
+                judged.reply = (judged.reply or "ok") + AFTER_ALLOWED.format(
+                    left=self._left_said()
+                )
             if self.lead is not None:
                 judged = self.lead(name, judged)
             self.outcomes[judged.outcome] += 1
@@ -907,10 +980,15 @@ class Session:
 
     def _refused(self, name: Any, args: dict[str, Any]) -> Judged | None:
         """What the session refuses before a tool sees it: any tool but the asking ones while only
-        they're offered, and a `write` or `edit` whose text holds a compaction's note. On
+        they're offered, beyond the lock's one build, run and check (mqucifer/print-shop#86), and a
+        `write` or `edit` whose text holds a compaction's note. On
         `eval-tip-1` at call 109 the model wrote a file whose whole text was a note, as earlier
         `write` calls looked after compaction (mqucifer/print-shop#47)."""
-        if self.only and name not in self.only:
+        if not self._open(name):
+            kind = ALLOWANCE.get(name) if isinstance(name, str) else None
+            if kind is not None:
+                spent = SPENT.format(what=SPENT_WHAT[kind])
+                return Judged(str(name), "failed", spent, "ask_only_spent")
             return Judged(str(name), "failed", NOT_NOW, "ask_only")
         if name not in ("write", "edit"):
             return None
@@ -966,6 +1044,7 @@ class Session:
 
     def _ended(self, ending: Ending) -> Ending:
         self.only = ()
+        self.spent = set()
         self.snapshot()
         self._record("ended", name=ending.name, said=ending.said)
         return ending

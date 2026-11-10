@@ -92,7 +92,7 @@ A bench need names a command as you'd give it, and what must hold. The harness r
 | `insert` | the layer to pause after to drop an insert in, and the room over it | `pause FILE --pocket-z Z --pane-thickness T --min-room R` |
 | `parameter` | a top-level number moves every piece it should | `params SCRIPT --set NAME=VALUE` |
 
-A check should hold what the need says. "A 0.2 mm margin" asks `pause --min-room 0.2`, "one connected solid" asks `thin --one-body`, "2 mm of wall round the hanging hole" asks `wall --hole X,Y,Z --min-wall 2` at that hole (not `info`, whose size is the whole part's, nor `thin`, whose thinnest figures are too), and "moves every piece" asks `params` with no `--max-left`. `render` draws and measures nothing: what only an eye can judge is an eye need.
+A check should hold what the need says. "A 0.2 mm margin" asks `pause --min-room 0.2`, "one connected solid" asks `thin --one-body`, "2 mm of wall round the hanging hole" asks `wall --hole X,Y,Z --min-wall 2` at that hole (not `info`, whose size is the whole part's, nor `thin`, whose thinnest figures are too), and "moves every piece" asks `params` with no `--max-left`. `render` draws and measures nothing: what only an eye can judge is an eye need. Whether a bought part is held is never one: `clearance <part> <bought part> --slide <its way out>` reads it, with `HELD`, and `needs` refuses an eye need on it, giving the command.
 
 **Which way a part prints is a bed need, never an eye need.** It names the file and the side of it, as your script stores it, that lies on the bed: `-z` as stored, `+z` turned over.
 
@@ -102,7 +102,7 @@ A check should hold what the need says. "A 0.2 mm margin" asks `pause --min-room
  "check": {"by": "bed", "file": "tray.step", "side": "-z"}}
 ```
 
-`done` checks it against its `on_bed`, before anything runs, so give that file the same side there, `-z` too. `needs` refuses an eye need whose `look_for` asks which side lies on the bed, and says what to send. An eye need on how a feature looks as printed, or whether it holds, stays an eye need: its `look_for` names only what the eye judges, and the side goes in a bed need beside it. A bed need checks the side the run states; choosing the side for strength or supports isn't a need (mqucifer/print-shop#9).
+`done` checks it against its `on_bed`, before anything runs, so give that file the same side there, `-z` too. `needs` refuses an eye need whose `look_for` asks which side lies on the bed, and says what to send. An eye need on how a feature looks as printed stays an eye need: its `look_for` names only what the eye judges, and the side goes in a bed need beside it. A bed need checks the side the run states; choosing the side for strength or supports isn't a need (mqucifer/print-shop#9).
 
 By default a need passes on exit 0. `verdicts` names which verdicts pass instead, such as `["INTERFERE"]` for a press fit. `number` names a number in the answer's saved JSON (`bench-out/*.json`, under `numbers`), with dots for anything nested (`pairs.0.gap_mm`), and `at_least` or `at_most` its limit. `DISAGREE` and `NO ANSWER` never pass, and a need can't ask for `FAIL`. To see a number's name, run the command yourself first: names differ between commands. Once settled, needs don't change, so send them with `try: true` first: each check is read against your files as they stand, and nothing is settled.
 

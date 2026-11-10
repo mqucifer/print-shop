@@ -46,6 +46,7 @@ from print_shop.rounds import (
     facts,
     figures,
     holding,
+    holds,
     judge,
     lessons,
     needs,
@@ -1672,17 +1673,16 @@ class Run:
 
     def fact(self, args: dict[str, Any]) -> Judged:
         """One named fact, set, replaced or removed, and `record/FACTS.md` written again."""
-        given = sorted(
-            f"references/{p.name}"
-            for p in (self.work / "references").iterdir()
-            if p.is_file() and not p.is_symlink()
-        )
-        wrong = facts.problem(args, set(given))
+        wrong = facts.problem(args, self._references())
         if wrong:
             return Judged("fact", "failed", f"Not kept: {wrong}", "fact")
         name = str(args["name"]).strip()
         text = str(args["text"]).strip()
-        shape = {k: str(args.get(k) or "").strip() for k in ("box", "way_in", "held_by")}
+        shape: dict[str, Any] = {
+            k: str(args.get(k) or "").strip() for k in ("box", "way_in", "held_by")
+        }
+        if facts.fixed_of(args.get("fixed")):
+            shape["fixed"] = True
         before = self.state.facts.get(name)
         if not text and not any(shape.values()):
             if before is None:
@@ -1706,6 +1706,45 @@ class Run:
         paths.write_inside(self.work, facts.RECORD, facts.record(self._facts()))
         self.save()
         return Judged("fact", "ok", reply, detail={"fact": name, "facts": len(self.state.facts)})
+
+    def _references(self) -> set[str]:
+        """The given files, as `references/<name>`."""
+        return {
+            f"references/{p.name}"
+            for p in (self.work / "references").iterdir()
+            if p.is_file() and not p.is_symlink()
+        }
+
+    # What holds a bought part (mqucifer/print-shop#86, mqucifer/print-shop#87)
+
+    def _breakdown_latest(self) -> dict[str, Any] | None:
+        if not self.state.breakdowns:
+            return None
+        path = self.folder / "breakdowns" / f"{self.state.breakdowns}.json"
+        try:
+            found = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return found if isinstance(found, dict) else None
+
+    def _holds(self) -> list[holds.Held]:
+        """Each bought part a part of the model's holds, by its fact or the latest breakdown."""
+        return holds.held(self._facts(), self._breakdown_latest(), self._references())
+
+    def _first_tries(self) -> tuple[list[holds.Read], list[holds.Missing]]:
+        """Each held part's reading on a part file as it stands, and each held part without one."""
+        found = self._holds()
+        if not found:
+            return [], []
+        rows = [
+            dict(row)
+            for row in self.ledger.rows(
+                "SELECT at_call, argv, exit, verdict, why FROM bench_calls WHERE run=? "
+                "ORDER BY id",
+                self.state.name,
+            )
+        ]
+        return holds.first_tries(found, rows, self._seen())
 
     def _held_tries(self) -> list[holding.Tried]:
         """Every reading of a check, oldest first: the model's bench calls, each need's own
@@ -2334,11 +2373,18 @@ class Run:
             # so one refusal names all of it.
             marks = self._against_note(args.get("against_note"), found)
             bought = stuck.overlaps(found, self.state.overlaps)
+            # A hold is read on the slide, never by eye (mqucifer/print-shop#86).
+            lines = {line.id: line.text for line in form.lines()} if form is not None else {}
+            on_hold = holds.eye_on_hold(found, self._holds(), lines)
             if wrong:
-                wrong += marks + bought
+                wrong += marks + bought + on_hold
             elif marks or bought:
-                reply, why = stuck.refused(marks, bought)
+                reply, why = stuck.refused(marks, bought + on_hold)
                 return Judged("needs", "failed", reply, why)
+            elif on_hold:
+                said = "\n".join(f"- {w}" for w in on_hold)
+                reply = f"The needs weren't taken:\n{said}"
+                return Judged("needs", "failed", reply, "eye_on_hold")
         if not wrong:
             wrong = self._usable(found)
         if wrong:
@@ -3238,7 +3284,8 @@ class Run:
         model described the design it meant to make, not what a bench picture showed. It works at
         any point, with the files as they stand. A stop of the request is shown here, in order,
         and the plan, the first, needs no part file: its text, the breakdown, the needs, and any
-        picture the model drew (mqucifer/print-shop#38)."""
+        picture the model drew (mqucifer/print-shop#38). Where a part holds a bought part, it
+        waits for a first try and its slide reading, which go with it (mqucifer/print-shop#87)."""
         question = args["question"].strip()
         variants = args.get("variants") or []
         eyes = _eyes_named(args.get("need"))
@@ -3360,6 +3407,8 @@ class Run:
         }
         if overlap is not None:
             self.state.draft["overlap"] = overlap
+        first_tries = self._first_tries()[0] if stop == forms.PLAN else []
+        self.state.draft["holds"] = holds.plain(first_tries)
         self.save()
         what = "The sheet above is drawn" if sheet else "What's above is ready"
         lines = [
@@ -3382,6 +3431,11 @@ class Run:
             lines.append(
                 "With your plan go your latest breakdown and the needs as settled, with the "
                 "request's lines each covers."
+            )
+        if first_tries:
+            lines.append(
+                "With it goes each held part's reading, whatever its verdict:\n"
+                + "\n".join(holds.said(first_tries))
             )
         if overlap is not None:
             lines.append(
@@ -3547,6 +3601,10 @@ class Run:
                 )
             if not plan:
                 return "no_plan", "At the plan stop, `plan` says how you'll go about it."
+            # A held part is built and read before its plan (mqucifer/print-shop#87).
+            _, missing = self._first_tries()
+            if missing:
+                return "hold_unread", holds.plan_waits(missing)
         return None
 
     def _glass_declared(
@@ -3685,6 +3743,7 @@ class Run:
             "says_model_said": says,
             "standing": draft["standing"],
             "overlap": draft.get("overlap"),
+            "holds": draft.get("holds") or [],
         }
         (folder / "asked.json").write_text(json.dumps(asked, indent=1), encoding="utf-8")
         options = draft.get("options") or []
@@ -3734,6 +3793,7 @@ class Run:
             ]
         if stop == forms.PLAN:
             lines += self._plan_said(draft.get("plan") or "")
+            lines += holds.at_stop(draft.get("holds") or [])
         failing = [one for one in draft["standing"] if not one["passed"]]
         if failing:
             lines += [

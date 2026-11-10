@@ -65,6 +65,11 @@ def offered(body: dict[str, Any]) -> list[str]:
     return [s["function"]["name"] for s in body["tools"]]
 
 
+#: What the lock offers before its allowance is spent: the asking tools, and once each a build, a
+#: run and a check (mqucifer/print-shop#86), in the order the specs give them.
+LOCKED = ["write", "edit", "run", "bench", "ask", "send_ask", "blocked"]
+
+
 def events(s: Session, kind: str) -> list[dict[str, Any]]:
     return [e for e in transcript.events_of(s.events) if e["kind"] == kind]
 
@@ -118,21 +123,104 @@ def test_a_second_one_soon_after_is_offered_only_ask_and_blocked_until_it_asks(
     assert s.go().name == "ask"
     every = offered(model.bodies[0])
     assert offered(model.bodies[2]) == every
-    for n in (3, 4, 5):
-        assert offered(model.bodies[n]) == ["ask", "send_ask", "blocked"], n
+    assert offered(model.bodies[3]) == LOCKED
+    for n in (4, 5):
+        assert offered(model.bodies[n]) == ["write", "edit", "bench", "ask", "send_ask", "blocked"]
     assert "It's happened again, 2 calls after the last time" in str(
         model.bodies[3]["messages"][-1]["content"]
     )
-    refused = model.bodies[4]["messages"][-1]
-    assert refused == {"role": "tool", "tool_call_id": "call-4-0", "content": NOT_NOW}
-    assert [name for name, _ in desk.called] == ["run", "ask", "send_ask"], "the run isn't run"
+    ran = str(model.bodies[4]["messages"][-1]["content"])
+    assert ran.startswith("run did it\n\n(Under the lock: you may still build one change")
+    assert [name for name, _ in desk.called] == ["run", "run", "ask", "send_ask"]
     (_, forced) = events(s, "quiet_reply")
     assert forced["only"] == ["ask", "send_ask", "blocked"]
+    assert forced["allowed"] == ["write", "edit", "run", "bench"]
     assert forced["after"] == 2
-    tried = events(s, "tool")[1]
-    assert (tried["name"], tried["outcome"], tried["why"]) == ("run", "failed", "ask_only")
     assert s.only == (), "a stop ends it"
     rebuilds(s, model)
+
+
+def test_the_lock_leaves_room_for_one_build_and_one_check_then_only_asking(
+    tmp_path: Path,
+) -> None:
+    """On `eval-fan-3` the lock stopped a model that had twice decided to build a lip and read the
+    slide, and four calls with no tool followed (mqucifer/print-shop#86). Made up here: an edit,
+    a check, then a second edit, a `read` and a second check, all refused."""
+    model = Scripted(
+        THINKING,
+        [tool("run", path="a.py")],
+        THINKING,
+        [tool("edit", path="a.py", old="1", new="2", run=True)],
+        [tool("bench", command="clearance lid.step references/fan.step --slide -z")],
+        [tool("edit", path="a.py", old="2", new="3", run=True)],
+        [tool("read", path="a.py")],
+        [tool("bench", command="info lid.step")],
+        THINKING,
+        [tool("ask", question="The slide reads NOT HELD at the lip. Which way?", plan="x")],
+        [tool("send_ask", says="the plan")],
+    )
+    desk = Desk()
+    s = session(tmp_path, model, desk)
+    assert s.go().name == "ask"
+    locked = str(model.bodies[3]["messages"][-1]["content"])
+    assert "you may build one change and read one check, then ask or end" in locked
+    assert "one `write` or `edit` (`run: true` runs it, or one `run`), and one `bench`" in locked
+    assert offered(model.bodies[3]) == LOCKED
+    built, read_, again, other, twice = (
+        str(model.bodies[n]["messages"][-1]["content"]) for n in (4, 5, 6, 7, 8)
+    )
+    assert built == (
+        "edit did it\n\n(Under the lock: you may still `run` it and read one check with "
+        "`bench`. Then `ask` what's missing, and `send_ask`; or end with `blocked`.)"
+    )
+    assert offered(model.bodies[4]) == ["run", "bench", "ask", "send_ask", "blocked"]
+    assert read_.endswith(
+        "(Under the lock: you may still `run` it. Then `ask` what's missing, and `send_ask`; or "
+        "end with `blocked`.)"
+    )
+    assert offered(model.bodies[5]) == ["run", "ask", "send_ask", "blocked"]
+    assert again == (
+        "Not carried out: under the lock you've had your one build. Now `ask` what's missing, "
+        "showing what you have, then `send_ask`; or end with `blocked`, saying what's missing."
+    )
+    assert other == NOT_NOW
+    assert twice.startswith("Not carried out: under the lock you've had your one bench check.")
+    still = str(model.bodies[9]["messages"][-1]["content"])
+    assert still.endswith(
+        "Only `ask`, `send_ask` and `blocked` work until you've asked or ended. Besides them, you "
+        "may still `run` it, once, then ask or end."
+    )
+    assert [name for name, _ in desk.called] == ["run", "edit", "bench", "ask", "send_ask"]
+    whys = [(e["name"], e["why"]) for e in events(s, "tool") if e["outcome"] == "failed"]
+    assert whys == [("edit", "ask_only_spent"), ("read", "ask_only"), ("bench", "ask_only_spent")]
+    assert (s.only, s.spent) == ((), set()), "a stop ends the lock and its allowance"
+    rebuilds(s, model)
+
+    back = Session(
+        tools=Desk(), send=Scripted(), alias="crew-code-think", events=s.events, sleep=print
+    )
+    back.restore()
+    assert (back.only, back.spent) == ((), set())
+
+
+def test_a_session_back_from_its_events_keeps_what_the_locks_allowance_has_had(
+    tmp_path: Path,
+) -> None:
+    model = Killed(
+        THINKING, THINKING, [tool("edit", path="a.py", old="1", new="2")], THINKING
+    )
+    model.stop_at = 4
+    s = session(tmp_path, model)
+    with pytest.raises(KeyboardInterrupt):
+        s.go()
+    again = Scripted([tool("blocked", reason="x")])
+    back = Session(
+        tools=Desk(), send=again, alias="crew-code-think", events=s.events, sleep=lambda _: None
+    )
+    back.restore()
+    assert back.spent == {"build"}
+    assert back.go().name == "blocked"
+    assert offered(again.bodies[0]) == ["run", "bench", "ask", "send_ask", "blocked"]
 
 
 def test_a_quiet_call_long_after_the_last_is_only_asked(tmp_path: Path) -> None:
@@ -163,10 +251,13 @@ def test_the_quiet_ending_stays_as_it_is(tmp_path: Path) -> None:
 
 
 class Killed(Scripted):
-    """The process is killed during the third call: no ending is recorded."""
+    """The process is killed during the third call, or the one `stop_at` names: no ending is
+    recorded."""
+
+    stop_at = 2
 
     def __call__(self, body: dict[str, Any]) -> dict[str, Any]:
-        if len(self.bodies) == 2:
+        if len(self.bodies) == self.stop_at:
             raise KeyboardInterrupt
         return super().__call__(body)
 
@@ -184,7 +275,7 @@ def test_a_session_back_from_its_events_still_offers_only_the_asking_tools(
     back.restore()
     assert (back.quiet_at, back.only) == (2, ("ask", "send_ask", "blocked"))
     assert back.go().name == "blocked"
-    assert offered(again.bodies[0]) == ["ask", "send_ask", "blocked"]
+    assert offered(again.bodies[0]) == LOCKED
 
 
 # A call cut off at the token limit
@@ -426,14 +517,15 @@ def test_the_index_shows_each_quiet_call_and_what_the_next_request_offered(
     model = Scripted(THINKING, THINKING, [tool("blocked", reason="Which side the lip goes.")])
     run = Run.start(tmp_path, "r", "A block.", [], model, sleep=lambda _: None)
     assert run.drive().name == "blocked"
-    assert offered(model.bodies[2]) == ["ask", "send_ask", "blocked"]
+    assert offered(model.bodies[2]) == LOCKED
     shown = "\n".join(after_action.index(run.ledger, "r"))
     assert (
         "1: no tool\n"
         "   no tool call, after 21,340 tokens of reasoning in 0 s: asked what's missing\n"
         "2: no tool\n"
         "   no tool call, after 21,340 tokens of reasoning in 0 s: asked what's missing; the next "
-        "request offered only `ask`, `send_ask`, `blocked`, as it was 1 call after the last\n"
+        "request offered only `ask`, `send_ask`, `blocked`, as it was 1 call after the last, and "
+        "once each, to build and read, `write`, `edit`, `run`, `bench`\n"
         "3: blocked"
     ) in shown
     rows = run.ledger.rows("SELECT name, at_call, said FROM timeline WHERE kind='asked'")
