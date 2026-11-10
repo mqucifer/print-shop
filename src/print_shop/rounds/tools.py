@@ -135,8 +135,8 @@ NEED_SHAPE = (
     'pass, exit 0 by default), "number": "pairs.0.gap_mm", "at_least": 0.2, "at_most": 0.6 '
     '(optional: a number in that answer, and its limit)}; {"by": "eye", "look_for": "what the '
     'Sponsor judges", "no_bench": "why no bench command measures it", where it covers a line: '
-    "never a bought part's hold, which `clearance <part> <bought part> --slide <its way out>` "
-    "reads, with `HELD`}; "
+    "never a hold, a bought part's or one of your parts' on another, which `clearance <holder> "
+    "<held part> --slide <its way out>` reads, with `HELD`}; "
     'or {"by": "bed", "file": "lid.step", "side": "+z"}, for which side of a file lies on the bed '
     "when it prints, as your script stores it: `done` checks it against its `on_bed`, so a line "
     "saying only which way a part prints is a bed need, never an eye need. "
@@ -372,8 +372,9 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
                     "type": "string",
                     "description": "At the `plan` stop: how you'll go about it, in your words. "
                     "It goes to them with your breakdown and the needs. Where a part of yours "
-                    "holds a bought part, the plan waits for a rough first try built and its "
-                    "`clearance --slide` reading, which goes with it whatever it says.",
+                    "holds a bought part or another of yours, the plan waits for a rough first "
+                    "try built and its `clearance --slide` reading, which goes with it whatever "
+                    "it says.",
                 },
                 "pictures": {
                     "type": "array",
@@ -545,7 +546,8 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
             "part's fact is named for its file, such as `references/fan.step`, and gives its "
             "`box`, `way_in` and `held_by`: one fact for each bought part. A given part fixed in "
             "place and never fitted, such as a box your lid sits on, gives `box` and `fixed: "
-            "true` instead.",
+            "true` instead. One fitted loose, that nothing is meant to hold, gives `loose: true` "
+            "in place of `held_by`.",
             {
                 "box": {
                     "type": "string",
@@ -567,6 +569,11 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
                     "type": "boolean",
                     "description": "A given part's that's fixed in place and never fitted: true, "
                     "in place of `way_in` and `held_by`. Nothing of yours holds it.",
+                },
+                "loose": {
+                    "type": "boolean",
+                    "description": "A bought part's that's fitted loose and that nothing is meant "
+                    "to hold: true, in place of `held_by`.",
                 },
             },
             name="A short name for it, such as `fan-airflow`, or a bought part's file.",

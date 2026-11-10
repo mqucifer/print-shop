@@ -1572,11 +1572,20 @@ class Run:
         first reply after a call that went round in circles, which the recorder marked as a
         runaway, or which reasoned `stuck.CIRCLING_TOKENS` or more and re-ran a check whose last
         try failed, on files unchanged since. The call is never cut: only what comes next
-        changes. Session calls it through `lead`."""
+        changes. At intake, once a held part's slide reads `HELD`, each `bench` and `run` reply
+        leads with what comes next, until `needs` is settled (mqucifer/print-shop#92). Session
+        calls it through `lead`."""
         lines: list[str] = []
         said: dict[str, Any] = {}
+        more: dict[str, Any] = {}
         reply = str(judged.reply or "")
         ran = name == "run" or (name in ("write", "edit") and "\n\nRan " in reply)
+        if self.state.stage == "intake" and self.state.needs_open and (name == "bench" or ran):
+            # A hold read `HELD` at intake says what comes next (mqucifer/print-shop#92).
+            read = [one for one in self._first_tries()[0] if one.verdict == holds.VERDICT]
+            if read:
+                lines.append(holds.read_at_intake(read))
+                more["hold_read"] = [one.bought for one in read]
         if self.state.reopened and (name == "bench" or ran):
             lines.append(stuck.REOPENED)
             said["reopened"] = True
@@ -1588,10 +1597,12 @@ class Run:
             self._circled_at = n
         if not lines:
             return judged
+        if said:
+            more["stuck"] = said
         return replace(
             judged,
             reply="\n".join(lines) + "\n\n" + reply,
-            detail={**judged.detail, "stuck": said},
+            detail={**judged.detail, **more},
         )
 
     def _circled(self, n: int, judged: Judged) -> dict[str, Any] | None:
@@ -1683,6 +1694,8 @@ class Run:
         }
         if facts.fixed_of(args.get("fixed")):
             shape["fixed"] = True
+        if facts.loose_of(args.get("loose")):
+            shape["loose"] = True
         before = self.state.facts.get(name)
         if not text and not any(shape.values()):
             if before is None:
@@ -1727,9 +1740,26 @@ class Run:
             return None
         return found if isinstance(found, dict) else None
 
-    def _holds(self) -> list[holds.Held]:
-        """Each bought part a part of the model's holds, by its fact or the latest breakdown."""
-        return holds.held(self._facts(), self._breakdown_latest(), self._references())
+    def _lines(self) -> dict[str, str]:
+        """The request's lines by id, or none for a request without its form."""
+        form = self._form()
+        return {line.id: line.text for line in form.lines()} if form is not None else {}
+
+    def _mine(self) -> list[str]:
+        """The model's own geometry as the harness last saw it, not the given files."""
+        return sorted(
+            name
+            for name, seen in self.state.geometry.items()
+            if seen and seen[0] is not None and not name.startswith(holds.REFERENCES)
+        )
+
+    def _holds(self, found: list[Need] | None = None) -> list[holds.Held]:
+        """Each part a part of the model's holds: a bought part by its fact or the latest
+        breakdown, and a part of the model's by a join of the latest breakdown that the needs'
+        words or the join's `how` say holds it (mqucifer/print-shop#90). `found` are the needs
+        being sent; the settled needs otherwise."""
+        said = holds.words(self._needs() if found is None else found, self._lines())
+        return holds.held(self._facts(), self._breakdown_latest(), self._references(), said)
 
     def _first_tries(self) -> tuple[list[holds.Read], list[holds.Missing]]:
         """Each held part's reading on a part file as it stands, and each held part without one."""
@@ -2373,9 +2403,15 @@ class Run:
             # so one refusal names all of it.
             marks = self._against_note(args.get("against_note"), found)
             bought = stuck.overlaps(found, self.state.overlaps)
-            # A hold is read on the slide, never by eye (mqucifer/print-shop#86).
-            lines = {line.id: line.text for line in form.lines()} if form is not None else {}
-            on_hold = holds.eye_on_hold(found, self._holds(), lines)
+            # A hold is read on the slide, never by eye (mqucifer/print-shop#86), between two of
+            # the model's own parts too (mqucifer/print-shop#90).
+            on_hold = holds.eye_on_hold(
+                found,
+                self._holds(found),
+                self._lines(),
+                self._mine(),
+                sorted(self._references()),
+            )
             if wrong:
                 wrong += marks + bought + on_hold
             elif marks or bought:

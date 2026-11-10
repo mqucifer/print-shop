@@ -1,10 +1,12 @@
 """A hold is read on the slide, never by eye, and a part that holds a bought part shows a first
-build and its reading at the plan stop (mqucifer/print-shop#86, mqucifer/print-shop#87). A given
-part fixed in place is a fact without a way in.
+build and its reading at the plan stop (mqucifer/print-shop#86, mqucifer/print-shop#87), as does a
+part of the model's held by another (mqucifer/print-shop#90). A given part fixed in place is a fact
+without a way in, and one fitted loose a fact held by nothing (mqucifer/print-shop#91). At intake,
+a hold read `HELD` says what comes next (mqucifer/print-shop#92).
 
 No Docker and no model: a scripted model drives each run, and a box answers each bench command
-with the next verdict and runs nothing. The parts are made up for the test, a lid holding a fan
-and a lid on a box, each given as a reference; nothing here is from a run.
+with the next verdict and runs nothing. The parts are made up for the test, a lid holding a fan, a
+lid on a box, a lid on a base both printed, and a sleeve over a block; nothing here is from a run.
 """
 
 from __future__ import annotations
@@ -75,10 +77,13 @@ def started(
     root: Path, request: str, given: str, *turns: Any, verdicts: tuple[str, ...] = ()
 ) -> Run:
     model = Scripted(*turns, [tool("blocked", reason="Out of turns.")])
-    part = root / "given" / given
-    part.parent.mkdir(parents=True, exist_ok=True)
-    part.write_text(f"a {given}, made up")
-    run = Run.start(root / "runs", "r", request, [part], model, sleep=lambda _: None)
+    parts = []
+    if given:
+        part = root / "given" / given
+        part.parent.mkdir(parents=True, exist_ok=True)
+        part.write_text(f"a {given}, made up")
+        parts.append(part)
+    run = Run.start(root / "runs", "r", request, parts, model, sleep=lambda _: None)
     box: Any = Answers(run.work, *verdicts)
     run.box = box
     run.tools.box = box
@@ -265,7 +270,9 @@ def test_a_plan_on_a_part_holding_a_fan_waits_for_a_first_try_and_its_reading(
         "- `references/fan.step`: its fact says it goes in along +z: held by the lid's clips, "
         "once they're built. Missing: a part file of yours, and its reading. Build a rough "
         "first try with `write` and `run`, then read it with `bench clearance <your part> "
-        "references/fan.step --slide -z`.\n"
+        "references/fan.step --slide -z`. If nothing is meant to hold it, as with a loose fit, "
+        "say so with its `fact`, `loose: true` in place of `held_by`, and the plan goes as it "
+        "is.\n"
         "The first try doesn't have to hold: its reading goes beside the plan, whatever the "
         "verdict, and the plan says what you'd change. Then `ask` the plan again."
     )
@@ -427,3 +434,329 @@ def test_a_fixed_box_given_a_way_in_is_told_how_to_say_its_fixed(tmp_path: Path)
     ) in holds.plan_waits([gap])
     fan = holds.Held("references/fan.step", "-z", "fact", "nothing yet; the lid's clips will")
     assert "fixed" not in holds.plan_waits([holds.Missing(fan, [], [])])
+
+
+# 5. A hold between two of the model's own parts (mqucifer/print-shop#90)
+
+LID_REQUEST = """\
+A lid and a base, both printed.
+
+## Requirements
+- The lid snaps onto the base and stays on until pulled off.
+- The lid sits flush with the base.
+"""
+LID_BREAKDOWN = tool(
+    "breakdown",
+    parts=[
+        {"name": "base", "what": "an open box"},
+        {"name": "lid", "what": "a plate with two tabs"},
+    ],
+    joins=[{"parts": ["base", "lid"], "how": "two tabs on the lid catch under the base's rim"}],
+    look=["flush"],
+    **{"from": "the request"},
+)
+LID_SLIDE = "clearance base.step lid.step --slide +z"
+STAYS_QUOTE = "The lid snaps onto the base and stays on until pulled off."
+STAYS_BY_EYE = {
+    "id": "stays",
+    "what": "the lid stays on the base until pulled off",
+    "source": "request",
+    "quote": STAYS_QUOTE,
+    "covers": ["R1"],
+    "check": {
+        "by": "eye",
+        "look_for": "the tabs bend and the lid stays on",
+        "no_bench": "no bench command measures it",
+    },
+}
+STAYS_BY_SLIDE = {
+    **STAYS_BY_EYE,
+    "check": {"by": "bench", "measures": "fit", "command": LID_SLIDE, "verdicts": ["HELD"]},
+}
+FLUSH = {
+    "id": "flush",
+    "what": "the lid sits flush with the base",
+    "source": "request",
+    "quote": "The lid sits flush with the base.",
+    "covers": ["R2"],
+    "check": {"by": "eye", "look_for": "no step at the seam", "no_bench": "a look"},
+}
+FIRM = {
+    "id": "firm",
+    "what": "the pull that takes the lid off feels firm",
+    "source": "chosen",
+    "check": {"by": "eye", "look_for": "a firm pull, not a light tug, lifts the lid"},
+}
+GAP = {
+    "id": "gap",
+    "what": "the lid's walls clear the base's",
+    "source": "chosen",
+    "check": {
+        "by": "bench",
+        "measures": "fit",
+        "command": "clearance base.step lid.step --min-gap 0.1",
+        "verdicts": ["CLEAR"],
+    },
+}
+WAY_OFF = "<its way off: the way lid moves to come off base, one of +x -x +y -y +z -z>"
+
+
+def test_an_eye_need_saying_a_lid_stays_on_its_base_is_refused_naming_the_slide(
+    tmp_path: Path,
+) -> None:
+    run = started(
+        tmp_path,
+        LID_REQUEST,
+        "",
+        [LID_BREAKDOWN],
+        [tool("needs", needs=[STAYS_BY_EYE, FLUSH, FIRM, GAP])],
+        [tool("needs", needs=[STAYS_BY_SLIDE, FLUSH, FIRM, GAP])],
+    )
+    assert run.drive().name == "blocked"
+    _, refused, taken = told(run)[:3]
+    assert (refused["outcome"], refused["why"]) == ("failed", "eye_on_hold")
+    assert refused["reply"] == (
+        "The needs weren't taken:\n"
+        "- the need 'stays' asks the eye whether lid is held by base (\"stays on\"), and your "
+        "breakdown joins them. A hold is read on the bench, never by eye: "
+        f"`clearance base.step lid.step --slide {WAY_OFF}` slides lid off along its way off and "
+        "says `HELD` with what it meets first, or `NOT HELD` and how far it moves. Send this need "
+        'as a bench need, "check": {"by": "bench", "measures": "fit", "command": '
+        f'"clearance base.step lid.step --slide {WAY_OFF}", "verdicts": ["HELD"]}}, with the '
+        "same `source`, `quote` and `covers`, and its way off named. The held part goes last, as "
+        "it's the one slid: swap the two if it's the other way round. If the eye is to judge "
+        "something else of it too, such as how it looks or how firm a pull feels, keep an eye "
+        "need for that alone, its `what` and `look_for` naming only that"
+    ), "the flush look and the firm pull are the eye's: only the hold is refused"
+    assert taken["outcome"] == "ok", taken["reply"]
+    (kept,) = [n for n in run._needs() if n.id == "stays"]
+    assert (kept.by, kept.command, kept.verdicts) == ("bench", LID_SLIDE, ["HELD"])
+
+
+def test_which_of_two_printed_parts_is_held_comes_from_the_words() -> None:
+    def joined(how: str) -> dict[str, Any]:
+        return {"joins": [{"parts": ["base", "lid"], "how": how}]}
+
+    lid_on_base = [holds.Held("lid", "", holds.PRINTED, "base")]
+    assert holds.held([], joined("the lid snaps onto the base"), set()) == lid_on_base
+    assert holds.held([], joined("the base holds the lid by its rim"), set()) == lid_on_base
+    assert holds.held([], joined("tabs snap over a rim"), set()) == [], "naming neither"
+    assert holds.held([], joined("the lid stays on"), set()) == lid_on_base, "naming one"
+    assert holds.held([], joined("the base holds a shelf"), set()) == [], (
+        "naming one as the holder, of something else"
+    )
+    assert holds.held([], joined("one body"), set()) == [], "a join that says no hold"
+    said = ["the lid stays on the base"]
+    assert holds.held([], joined("tabs under a rim"), set(), said) == lid_on_base
+    fan = ["the fan is held under the lid"]
+    assert holds.held([], joined("tabs under a rim"), {"references/fan.step"}, fan) == [], (
+        "the words are about the fan, not the lid on its base"
+    )
+    bought = {"joins": [{"parts": ["lid", "fan"], "how": "held"}]}
+    assert holds.held([], bought, {"references/fan.step"}) == [
+        holds.Held("references/fan.step", "", "breakdown", "lid")
+    ], "a join with a bought part is the bought part's"
+
+
+def test_a_slide_of_two_printed_parts_reads_either_way_round() -> None:
+    lid = holds.Held("lid", "", holds.PRINTED, "base")
+    geometry = {"base.step": ["a", 3], "lid.step": ["b", 4]}
+
+    def row(command: str) -> dict[str, Any]:
+        return {"at_call": 5, "argv": command.split(), "exit": 0, "verdict": "HELD", "why": ""}
+
+    for command in (LID_SLIDE, "clearance lid.step base.step --slide -z"):
+        found, missing = holds.first_tries([lid], [row(command)], geometry)
+        assert (len(found), missing) == (1, []), command
+    found, missing = holds.first_tries([lid], [row("clearance lid.step --slide +z")], geometry)
+    assert (found, len(missing)) == ([], 1)
+
+
+def test_a_plan_with_the_lid_held_by_the_base_waits_for_its_slide(tmp_path: Path) -> None:
+    run = started(
+        tmp_path,
+        LID_REQUEST,
+        "",
+        [LID_BREAKDOWN],
+        [tool("needs", needs=[STAYS_BY_SLIDE, FLUSH, FIRM])],
+        [PLAN],
+        [tool("write", path="base.step", content="a first base, made up")],
+        [tool("write", path="lid.step", content="a first lid, made up")],
+        [PLAN],
+        [tool("bench", command=LID_SLIDE)],
+        [PLAN],
+        [tool("send_ask", says="The plan, the breakdown and the needs, as text.")],
+        verdicts=("HELD",),
+    )
+    assert run.drive().name == "ask"
+    _, _, nothing, _, _, unread, read, drawn, sent = told(run)
+    assert (nothing["outcome"], nothing["why"]) == ("failed", "hold_unread")
+    assert (
+        "- lid: your breakdown joins it to base, and a need or the join says it's held. Missing: "
+        "a part file for each of base and lid, and its reading. Build a rough first try with "
+        "`write` and `run`, then read it with `bench clearance <base's file> <lid's file> "
+        f"--slide {WAY_OFF}`. The held part goes last, as it's the one slid: swap the two if "
+        "it's the other way round, and name its way off."
+    ) in nothing["reply"]
+    assert "loose" not in nothing["reply"], "a part of the model's has no fact to say so"
+    assert unread["why"] == "hold_unread"
+    assert f"Missing: its reading: `bench clearance base.step lid.step --slide {WAY_OFF}`" in (
+        unread["reply"]
+    )
+    assert read["outcome"] == "ok"
+    assert drawn["outcome"] == "ok", drawn["reply"]
+    assert f"- `lid`: `{LID_SLIDE}`, call 7: HELD" in drawn["reply"]
+    assert sent["outcome"] == "ok"
+    question = (run.folder / "asks" / "1" / "question.md").read_text()
+    assert holds.AT_STOP in question
+
+
+# 6. A bought part fitted loose is held by nothing (mqucifer/print-shop#91)
+
+SLEEVE_REQUEST = """\
+A sleeve over the block given.
+
+## Requirements
+- The sleeve slides over the block with play all round.
+"""
+SLEEVE_BREAKDOWN = tool(
+    "breakdown",
+    parts=[{"name": "sleeve", "what": "a tube"}, {"name": "block", "what": "the given block"}],
+    joins=[{"parts": ["sleeve", "block"], "how": "the sleeve slides over the block"}],
+    look=["a plain tube"],
+    **{"from": "the request and references/block.step"},
+)
+BLOCK = {
+    "name": "references/block.step",
+    "text": "A block.",
+    "from": "call 2, bench info references/block.step",
+    "box": "x 0-20, y 0-20, z 0-40",
+    "way_in": "+z",
+}
+PLAY = {
+    "id": "play",
+    "what": "the sleeve slides over the block with play",
+    "source": "request",
+    "quote": "The sleeve slides over the block with play all round.",
+    "covers": ["R1"],
+    "check": {
+        "by": "bench",
+        "measures": "fit",
+        "command": "clearance sleeve.step references/block.step --min-gap 0.2",
+        "verdicts": ["CLEAR"],
+    },
+}
+SLEEVE_PLAN = tool("ask", question="This way?", stop="plan", plan="A tube, 0.2 mm of play.")
+
+
+def test_a_block_fitted_loose_lets_the_plan_go_with_no_slide(tmp_path: Path) -> None:
+    run = started(
+        tmp_path,
+        SLEEVE_REQUEST,
+        "block.step",
+        [SLEEVE_BREAKDOWN],
+        [tool("fact", **BLOCK, loose=True)],
+        [tool("needs", needs=[PLAY])],
+        [SLEEVE_PLAN],
+        [tool("send_ask", says="The plan as text.")],
+    )
+    assert run.drive().name == "ask", [e["reply"] for e in told(run)]
+    assert [e["outcome"] for e in told(run)] == ["ok"] * 5
+    (one,) = facts.load(run.state.facts)
+    assert one.line() == (
+        "- `references/block.step`: box x 0-20, y 0-20, z 0-40; goes in along +z; a loose fit, "
+        "held by nothing. A block. (from call 2, bench info references/block.step, kept at call 2)"
+    )
+    question = (run.folder / "asks" / "1" / "question.md").read_text()
+    assert holds.AT_STOP not in question
+
+
+def test_a_block_held_by_the_sleeve_still_waits_and_names_the_loose_way_out(
+    tmp_path: Path,
+) -> None:
+    run = started(
+        tmp_path,
+        SLEEVE_REQUEST,
+        "block.step",
+        [SLEEVE_BREAKDOWN],
+        [tool("fact", **BLOCK, held_by="the sleeve")],
+        [tool("needs", needs=[PLAY])],
+        [SLEEVE_PLAN],
+    )
+    assert run.drive().name == "blocked"
+    waits = told(run)[3]
+    assert waits["why"] == "hold_unread"
+    assert (
+        "If nothing is meant to hold it, as with a loose fit, say so with its `fact`, `loose: "
+        "true` in place of `held_by`, and the plan goes as it is."
+    ) in waits["reply"]
+
+
+def test_a_loose_fact_gives_no_held_by_and_isnt_fixed_too(tmp_path: Path) -> None:
+    run = started(tmp_path, SLEEVE_REQUEST, "block.step")
+    both = run.fact({**BLOCK, "loose": True, "held_by": "the sleeve"})
+    assert both.reply == (
+        "Not kept: `loose` says nothing holds it, and `held_by` says what does. Drop `held_by` "
+        "for a loose fit, or drop `loose` if a part of yours holds it."
+    )
+    fixed = run.fact({**BLOCK, "way_in": "", "loose": True, "fixed": True})
+    assert "give one of them" in fixed.reply
+    wayless = run.fact({**BLOCK, "way_in": "", "loose": True})
+    assert "`way_in` missing" in wayless.reply
+    odd = run.fact({**BLOCK, "loose": "a bit"})
+    assert odd.reply.startswith("Not kept: `loose` is true")
+    unsaid = run.fact({**BLOCK})
+    assert "give `loose: true` in place of `held_by`" in unsaid.reply
+    assert run.fact({**BLOCK, "loose": True}).outcome == "ok"
+    assert holds.held(facts.load(run.state.facts), None, run._references()) == []
+    joined = {"joins": [{"parts": ["sleeve", "block"], "how": "over it"}]}
+    assert holds.held(facts.load(run.state.facts), joined, run._references()) == [], (
+        "nor does the breakdown's join make it held"
+    )
+
+
+# 7. A hold read HELD at intake says what comes next (mqucifer/print-shop#92)
+
+
+def test_a_hold_read_held_at_intake_leads_each_reply_until_the_needs(tmp_path: Path) -> None:
+    run = started(
+        tmp_path,
+        FAN_REQUEST,
+        "fan.step",
+        [FAN_FACT],
+        [tool("write", path="lid.step", content="a first lid, made up")],
+        [tool("bench", command=SLIDE)],
+        [tool("write", path="a.py", content="print('round the edges')")],
+        [tool("run", path="a.py")],
+        [FAN_BREAKDOWN],
+        [tool("needs", needs=[BY_SLIDE, FLAT, LOOKS])],
+        [tool("bench", command=SLIDE)],
+        verdicts=("HELD", "HELD"),
+    )
+    assert run.drive().name == "blocked"
+    _, _, read, wrote, ran, _, settled, after = told(run)[:8]
+    line = (
+        "The hold is read: `references/fan.step` reads `HELD`. Next come `breakdown`, `needs` "
+        "and the plan stop: the plan needs only those and this first try with its reading. "
+        "Finishing, such as edges and fillets, is round work after the plan is approved."
+    )
+    assert read["reply"].startswith(line + "\n\n")
+    assert not wrote["reply"].startswith(line), "a write that runs nothing isn't led"
+    assert ran["reply"].startswith(line + "\n\n"), "a later run at intake leads with it"
+    assert settled["outcome"] == "ok"
+    assert line not in after["reply"], "once the needs are settled it's gone"
+
+
+def test_a_hold_read_not_held_at_intake_says_nothing_more(tmp_path: Path) -> None:
+    run = started(
+        tmp_path,
+        FAN_REQUEST,
+        "fan.step",
+        [FAN_FACT],
+        [tool("write", path="lid.step", content="a first lid, made up")],
+        [tool("bench", command=SLIDE)],
+        verdicts=("NOT HELD",),
+    )
+    assert run.drive().name == "blocked"
+    read = told(run)[2]
+    assert "The hold is read" not in read["reply"]
