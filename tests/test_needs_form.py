@@ -100,7 +100,8 @@ def test_the_needs_items_are_a_schema_of_each_field(name: str) -> None:
 def test_the_needs_description_is_no_longer_than_it_was(name: str) -> None:
     described = needs_spec(TOOLSETS[name])["description"]
     assert len(described) <= DESCRIBED_BEFORE[name]
-    assert "never a bought part's hold" in described and "never an eye need" in described
+    assert "never a hold, a bought part's or one of your parts' on another" in described
+    assert "never an eye need" in described
 
 
 def test_needs_with_every_field_right_fit_the_schema_they_are_shown() -> None:

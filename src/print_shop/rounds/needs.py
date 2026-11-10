@@ -63,7 +63,7 @@ SIDES = ("-z", "+z", "-x", "+x", "-y", "+y")
 #: `eval-edges-2` a stop was raised only to confirm the box prints on its floor, which `on_bed`
 #: already held: the side is a bed need's (mqucifer/print-shop#73). Read in `look_for` alone, what
 #: the eye is asked to judge, so an eye need on a feature's look, whose `what` says how it
-#: prints, isn't refused for it. A bought part's hold is `holds.py`'s: never an eye need.
+#: prints, isn't refused for it. A hold is `holds.py`'s: never an eye need.
 PRINT_SIDE = re.compile(
     r"\b(?:print(?:ing)? orientation|orientation (?:on|for|to) (?:the )?(?:bed|print(?:ing)?)"
     r"|print(?:ing)? side|bed (?:side|face)|(?:on|to|against|toward|towards|facing) the "
@@ -316,8 +316,8 @@ def eye_on_side(shown: str, look_for: str) -> str:
         "side as your script stores the file, and the same `source`, `quote` and `covers`. If "
         "this eye need judges more than the side, such as how a feature looks as printed, keep "
         "it for that, with `look_for` naming only what the eye judges, and send the bed need "
-        "beside it. Whether a bought part is held is the bench's, never the eye's: `clearance "
-        "<part> <bought part> --slide <its way out>`, with `HELD`"
+        "beside it. Whether a part is held is the bench's, never the eye's: `clearance "
+        "<holder> <held part> --slide <its way out>`, with `HELD`"
     )
 
 

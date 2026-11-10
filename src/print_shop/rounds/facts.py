@@ -19,6 +19,10 @@ and each goes whole into the restart message, every compaction's note and every 
   base box a lid sits on, already printed, had two facts refused until it was given a way in. Its
   fact gives its box and `fixed: true` in place of `way_in` and `held_by`: it's in place, never
   fitted, and nothing of the model's holds it. A fitted bought part's shape is unchanged.
+- **A bought part fitted loose is held by nothing** (mqucifer/print-shop#91). On `eval-sleeve-3`
+  and `eval-plug-3` the parts fitted loose by design, each fact named a part of the model's in
+  `held_by`, as the fact asked, and the plan waited for a slide that could only say `NOT HELD`.
+  Its fact gives `loose: true` in place of `held_by`, with its `box` and `way_in`.
 - **A person's question is answered with a fact.** A note that asks something says so beneath
   it, naming what it asks, and the latest one's asks are in every compaction's note.
 """
@@ -84,6 +88,8 @@ class Fact:
     held_by: str = ""
     # A given part already in place and never fitted, in place of `way_in` and `held_by`.
     fixed: bool = False
+    # A bought part fitted loose, that nothing holds by design, in place of `held_by`.
+    loose: bool = False
 
     def plain(self) -> dict[str, Any]:
         return {k: v for k, v in asdict(self).items() if v not in ("", None, False)}
@@ -93,6 +99,9 @@ class Fact:
         said = f"- `{self.name}`: "
         if self.fixed:
             said += f"box {self.box}; fixed in place, never fitted."
+            said += f" {self.text}" if self.text else ""
+        elif self.loose:
+            said += f"box {self.box}; goes in along {self.way_in}; a loose fit, held by nothing."
             said += f" {self.text}" if self.text else ""
         elif self.box or self.way_in or self.held_by:
             said += f"box {self.box}; goes in along {self.way_in}; held by {self.held_by}."
@@ -131,8 +140,15 @@ FIXED = (
 )
 
 
-def fixed_of(value: Any) -> bool | None:
-    """`fixed` as sent: true, or a word that says so; false or absent; None where it's neither."""
+#: What a loose part's fact is, as a refusal says it.
+LOOSE = (
+    "If it's a loose fit that nothing is meant to hold, give `loose: true` in place of `held_by`, "
+    "with its `box` and `way_in`."
+)
+
+
+def _flag(value: Any, yes: tuple[str, ...]) -> bool | None:
+    """A flag as sent: true, or a word that says so; false or absent; None where it's neither."""
     if value is None or value is False:
         return False
     if value is True:
@@ -141,9 +157,19 @@ def fixed_of(value: Any) -> bool | None:
         word = value.strip().lower()
         if word in ("", "false", "no"):
             return False
-        if word in ("true", "yes", "fixed", "in place", "fixed in place"):
+        if word in ("true", "yes", *yes):
             return True
     return None
+
+
+def fixed_of(value: Any) -> bool | None:
+    """`fixed` as sent: true, or a word that says so; false or absent; None where it's neither."""
+    return _flag(value, ("fixed", "in place", "fixed in place"))
+
+
+def loose_of(value: Any) -> bool | None:
+    """`loose` as sent: true, or a word that says so; false or absent; None where it's neither."""
+    return _flag(value, ("loose", "loose fit", "a loose fit"))
 
 
 def problem(args: dict[str, Any], references: set[str]) -> str:
@@ -172,6 +198,15 @@ def problem(args: dict[str, Any], references: set[str]) -> str:
         return f"`fixed` is true, for a given part fixed in place, or left out: not {said!r}."
     if fixed:
         shape.append("fixed")
+    loose = loose_of(args.get("loose"))
+    if loose is None:
+        said = args.get("loose")
+        return (
+            "`loose` is true, for a bought part fitted loose that nothing holds, or left out: "
+            f"not {said!r}."
+        )
+    if loose:
+        shape.append("loose")
     if not bought(name.strip()):
         if shape:
             named = ", ".join(f"`{k}`" for k in shape)
@@ -186,6 +221,11 @@ def problem(args: dict[str, Any], references: set[str]) -> str:
         return f"There's no `{name.strip()}`: the given files are {given}."
     if not text.strip() and not shape:
         return ""
+    if fixed and loose:
+        return (
+            "`fixed` says it's in place and never fitted, and `loose` that it's fitted loose: "
+            "give one of them."
+        )
     if fixed:
         fitted = [f"`{k}`" for k in ("way_in", "held_by") if k in shape]
         if fitted:
@@ -197,14 +237,20 @@ def problem(args: dict[str, Any], references: set[str]) -> str:
         if "box" not in shape:
             return "A fixed part's fact gives its `box`, its bounds from `bench info`, and `fixed`."
         return ""
-    missing = [k for k in ("box", "way_in", "held_by") if k not in shape]
+    if loose and "held_by" in shape:
+        return (
+            "`loose` says nothing holds it, and `held_by` says what does. Drop `held_by` for a "
+            "loose fit, or drop `loose` if a part of yours holds it."
+        )
+    wanted = ("box", "way_in") if loose else ("box", "way_in", "held_by")
+    missing = [k for k in wanted if k not in shape]
     if missing:
         named = ", ".join(f"`{k}`" for k in missing)
         return (
             f"A bought part's fact gives its box, the way it goes in and what holds it: {named} "
             "missing. `box` is its bounds from `bench info`; `way_in` one of "
             f"{', '.join(WAYS)}; `held_by` the bench's `clearance --slide` answer, or what will "
-            f"hold it until something does. {FIXED}"
+            f"hold it until something does. {FIXED} {LOOSE}"
         )
     if str(args.get("way_in")).strip() not in WAYS:
         return f"`way_in` is one of {', '.join(WAYS)}: not {args.get('way_in')!r}. {FIXED}"
