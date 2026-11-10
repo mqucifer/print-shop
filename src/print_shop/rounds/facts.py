@@ -15,6 +15,10 @@ and each goes whole into the restart message, every compaction's note and every 
   part's box, the way it goes in, and what holds it: the bench's `clearance --slide` answer
   (mqucifer/print-shop#76), or what will, until something does. A name holds one fact, so each
   bought part has one.
+- **A given part fixed in place has no way in** (mqucifer/print-shop#86). On `eval-lid-3` the
+  base box a lid sits on, already printed, had two facts refused until it was given a way in. Its
+  fact gives its box and `fixed: true` in place of `way_in` and `held_by`: it's in place, never
+  fitted, and nothing of the model's holds it. A fitted bought part's shape is unchanged.
 - **A person's question is answered with a fact.** A note that asks something says so beneath
   it, naming what it asks, and the latest one's asks are in every compaction's note.
 """
@@ -78,14 +82,19 @@ class Fact:
     box: str = ""
     way_in: str = ""
     held_by: str = ""
+    # A given part already in place and never fitted, in place of `way_in` and `held_by`.
+    fixed: bool = False
 
     def plain(self) -> dict[str, Any]:
-        return {k: v for k, v in asdict(self).items() if v not in ("", None)}
+        return {k: v for k, v in asdict(self).items() if v not in ("", None, False)}
 
     def line(self) -> str:
         """One fact as every message gives it."""
         said = f"- `{self.name}`: "
-        if self.box or self.way_in or self.held_by:
+        if self.fixed:
+            said += f"box {self.box}; fixed in place, never fitted."
+            said += f" {self.text}" if self.text else ""
+        elif self.box or self.way_in or self.held_by:
             said += f"box {self.box}; goes in along {self.way_in}; held by {self.held_by}."
             said += f" {self.text}" if self.text else ""
         else:
@@ -115,6 +124,28 @@ def record(found: list[Fact]) -> str:
     return "\n".join(lines) + "\n"
 
 
+#: What a fixed part's fact is, as a refusal says it.
+FIXED = (
+    "If it's fixed in place and never fitted, such as a box already printed that your part sits "
+    "on, give `fixed: true` in place of `way_in` and `held_by`, with its `box`."
+)
+
+
+def fixed_of(value: Any) -> bool | None:
+    """`fixed` as sent: true, or a word that says so; false or absent; None where it's neither."""
+    if value is None or value is False:
+        return False
+    if value is True:
+        return True
+    if isinstance(value, str):
+        word = value.strip().lower()
+        if word in ("", "false", "no"):
+            return False
+        if word in ("true", "yes", "fixed", "in place", "fixed in place"):
+            return True
+    return None
+
+
 def problem(args: dict[str, Any], references: set[str]) -> str:
     """What's wrong with a `fact` call, in words, or nothing. `references` are the given files'
     paths, `references/<name>`."""
@@ -135,6 +166,12 @@ def problem(args: dict[str, Any], references: set[str]) -> str:
     if len(source) > SOURCE_CHARS:
         return f"`from` is {len(source)} characters: at most {SOURCE_CHARS}."
     shape = [k for k in ("box", "way_in", "held_by") if str(args.get(k) or "").strip()]
+    fixed = fixed_of(args.get("fixed"))
+    if fixed is None:
+        said = args.get("fixed")
+        return f"`fixed` is true, for a given part fixed in place, or left out: not {said!r}."
+    if fixed:
+        shape.append("fixed")
     if not bought(name.strip()):
         if shape:
             named = ", ".join(f"`{k}`" for k in shape)
@@ -149,6 +186,17 @@ def problem(args: dict[str, Any], references: set[str]) -> str:
         return f"There's no `{name.strip()}`: the given files are {given}."
     if not text.strip() and not shape:
         return ""
+    if fixed:
+        fitted = [f"`{k}`" for k in ("way_in", "held_by") if k in shape]
+        if fitted:
+            return (
+                f"`fixed` says it's in place and never fitted, and {' and '.join(fitted)} say "
+                "how it's fitted. Drop them for a part fixed in place, or drop `fixed` if a part "
+                "of yours holds it."
+            )
+        if "box" not in shape:
+            return "A fixed part's fact gives its `box`, its bounds from `bench info`, and `fixed`."
+        return ""
     missing = [k for k in ("box", "way_in", "held_by") if k not in shape]
     if missing:
         named = ", ".join(f"`{k}`" for k in missing)
@@ -156,10 +204,10 @@ def problem(args: dict[str, Any], references: set[str]) -> str:
             f"A bought part's fact gives its box, the way it goes in and what holds it: {named} "
             "missing. `box` is its bounds from `bench info`; `way_in` one of "
             f"{', '.join(WAYS)}; `held_by` the bench's `clearance --slide` answer, or what will "
-            "hold it until something does."
+            f"hold it until something does. {FIXED}"
         )
     if str(args.get("way_in")).strip() not in WAYS:
-        return f"`way_in` is one of {', '.join(WAYS)}: not {args.get('way_in')!r}."
+        return f"`way_in` is one of {', '.join(WAYS)}: not {args.get('way_in')!r}. {FIXED}"
     return ""
 
 

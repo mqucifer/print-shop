@@ -136,6 +136,9 @@ def _asked(said: str | None) -> str:
         gap = was.get("after")
         calls = f"{gap} call{'' if gap == 1 else 's'}"
         line += f"; the next request offered only {named}, as it was {calls} after the last"
+        if was.get("allowed"):
+            once = ", ".join(f"`{name}`" for name in was["allowed"])
+            line += f", and once each, to build and read, {once}"
     return line
 
 

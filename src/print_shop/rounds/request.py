@@ -225,7 +225,8 @@ def held(found: list[Need], form: Form) -> list[str]:
             wrong.append(
                 f"{name} covers a line of the request by the Sponsor's eye: a line is covered by "
                 "an eye check only where no bench command measures it. Say why none does in "
-                "`check.no_bench`, or check it on the bench"
+                "`check.no_bench`, or check it on the bench. A bought part's hold is always "
+                "the bench's: `clearance <part> <bought part> --slide <its way out>`, with `HELD`"
             )
     for line in form.requirements:
         if not any(line.id in need.covers for need in found):
