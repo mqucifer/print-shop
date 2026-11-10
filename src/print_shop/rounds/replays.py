@@ -21,6 +21,9 @@ asks for, and writes nothing in the run's folder: each replay is a folder of its
 - `lesson`: a lesson added to the start's lessons, under their heading, which is added if the
   start had none.
 - `replace`: one exact text, everywhere the request holds it, for anything else.
+- `tool NAME`: a tool's spec, its description and its schema, as the request offers it, from a
+  JSON file: such as `needs` as this checkout gives it (mqucifer/print-shop#93). The rest of the
+  request is as recorded.
 
 A change that finds nothing to change is refused, so a replay never runs as a control by mistake.
 
@@ -54,7 +57,7 @@ from print_shop.rounds.session import _sendable
 DEFAULT_ROOT = Path("~/print-shop/replays")
 #: Reasoning past this many characters is a long call: where the runaways were read from.
 LONG_CHARS = 20_000
-KINDS = ("none", "skill", "reply", "skills-card", "lesson", "replace")
+KINDS = ("none", "skill", "reply", "skills-card", "lesson", "replace", "tool")
 BUILD = ("write", "edit", "run")
 BENCH = ("bench",)
 ASK = ("ask", "send_ask", "questions")
@@ -262,6 +265,22 @@ def _replace(messages: list[dict[str, Any]], change: Change) -> int:
     return changed
 
 
+def _tool(made: dict[str, Any], change: Change) -> int:
+    """The tool named, as the request offers it, given the file's spec in its place."""
+    try:
+        spec = json.loads(change.text)
+    except ValueError as exc:
+        raise Refused(f"a tool's spec is JSON: {exc}") from exc
+    if not isinstance(spec, dict) or (spec.get("function") or {}).get("name") != change.target:
+        raise Refused(f"the spec isn't one of the tool `{change.target}`, by its function's name")
+    changed = 0
+    for k, one in enumerate(made.get("tools") or []):
+        if isinstance(one, dict) and (one.get("function") or {}).get("name") == change.target:
+            made["tools"][k] = spec
+            changed += 1
+    return changed
+
+
 def changed(body: dict[str, Any], change: Change, events: Path) -> tuple[dict[str, Any], int]:
     """The request with the change made, and how many places it changed. Nothing changed is
     refused, but for the control."""
@@ -279,6 +298,8 @@ def changed(body: dict[str, Any], change: Change, events: Path) -> tuple[dict[st
         n = _skills_card(messages, change)
     elif change.kind == "lesson":
         n = _lesson(messages, change)
+    elif change.kind == "tool":
+        n = _tool(made, change)
     else:
         n = _replace(messages, change)
     if n == 0:

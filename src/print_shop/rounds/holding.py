@@ -6,7 +6,11 @@ On `eval-tip-1` `capture` failed on the frame at call 32 and again at call 87. N
 stop without naming it. `unprintable.py` holds a failing `thin`, and `nudge.py` a check that keeps
 failing; this holds any check, once.
 
-**What's held.** A check is its command and the files it names (`nudge.check_of`). Each try that
+**What's held.** A check is its command and the files it names (`nudge.check_of`), and a slide is
+a check of its own, by its way: `clearance A B --slide -z` is apart from `clearance A B` at any gap
+settings, and from `--slide +y` on the same files (mqucifer/print-shop#94). On `eval-sleeve-3` a
+slide's `NOT HELD`, the answer meant, was held under a gap need on the same files, and couldn't be
+set aside. A slide no need runs is held as any check no need runs is. Each try that
 failed (exit 1, or a need's own command that didn't pass its need) stays named in every later
 `bench` and `run` reply, `done`'s, what `ask` sends, and the message after a compaction:
 - **Where a settled need runs the check,** only a pass as that need checks it clears it: its

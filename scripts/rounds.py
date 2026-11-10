@@ -25,8 +25,9 @@ scripts/rounds.py scores NAME [--right FILE] [--ledger FILE] [--keep]   each rou
                                   scenario's right answer: its distance, improvement and kind
 scripts/rounds.py replay NAME N [--times K] [--label L] [--out DIR] [CHANGE]   call N sent again
                                   with one change: --skill NAME=FILE, --reply CALL.K=FILE,
-                                  --skills-card FILE, --lesson FILE or --replace OLD NEW; none is
-                                  the control. Into ~/print-shop/replays/, never the run's folder
+                                  --skills-card FILE, --lesson FILE, --replace OLD NEW or
+                                  --tool NAME=FILE; none is the control. Into
+                                  ~/print-shop/replays/, never the run's folder
 
 scripts/rounds.py lessons [RUN] [--ledger FILE]                     what a run wrote, its evidence
 scripts/rounds.py lessons accept ID --by WHO [--routes R,R] [--becomes B]
@@ -282,7 +283,7 @@ def _change(args: argparse.Namespace) -> replays.Change:
     """The one change a replay makes, from its flags: none is the control."""
     given = [
         name
-        for name in ("skill", "reply", "skills_card", "lesson", "replace")
+        for name in ("skill", "reply", "skills_card", "lesson", "replace", "tool")
         if getattr(args, name) is not None
     ]
     if len(given) > 1:
@@ -290,10 +291,10 @@ def _change(args: argparse.Namespace) -> replays.Change:
     if not given:
         return replays.Change()
     kind = given[0]
-    if kind in ("skill", "reply"):
+    if kind in ("skill", "reply", "tool"):
         target, sep, file = getattr(args, kind).partition("=")
         if not sep or not target or not file:
-            raise Refused(f"--{kind} is {'NAME' if kind == 'skill' else 'CALL.K'}=FILE")
+            raise Refused(f"--{kind} is {'CALL.K' if kind == 'reply' else 'NAME'}=FILE")
         return replays.Change(kind, target, Path(file).read_text(encoding="utf-8"), source=file)
     if kind == "replace":
         old, new = (Path(f) for f in args.replace)
@@ -403,6 +404,7 @@ def main() -> int:
     again.add_argument("--skills-card", help="FILE: the start's required skills, as a card")
     again.add_argument("--lesson", help="FILE: a lesson added to the start's lessons")
     again.add_argument("--replace", nargs=2, metavar=("OLD", "NEW"), help="exact text, as files")
+    again.add_argument("--tool", help="NAME=FILE: the tool's spec, as JSON, in the request's")
     taught = sub.add_parser("lessons")
     taught.add_argument("words", nargs="*", help="RUN, or a step: " + ", ".join(LESSON_ACTIONS))
     taught.add_argument("--ledger", type=Path, help="this ledger, not the one beside the runs")

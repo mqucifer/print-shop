@@ -1946,12 +1946,13 @@ class Run:
         printed = {
             _plain_name(f) for one in glass_checks.load(self.state.glass) for f in one.files()
         }
-        if check[0] in self.toolset.standing and not all(
+        command = nudge.command_of(check)
+        if command in self.toolset.standing and not all(
             _plain_name(f).startswith("references/") and _plain_name(f) not in printed
             for f in check[1]
         ):
             reply = (
-                f"`{check[0]}` is one of {self.toolset.title}'s own checks, which every piece of "
+                f"`{command}` is one of {self.toolset.title}'s own checks, which every piece of "
                 f"this kind passes whatever the request's lines say: {own}. "
                 "The harness runs them on every pane at `done` and at each stop, so they can't be "
                 'set aside. On a given reference the piece doesn\'t print, as the "before" state, '
@@ -2389,7 +2390,13 @@ class Run:
             "\n".join(self.state.notes),
             self.toolset,
             picks=self._picks_said(),
+            keep=trying,
         )
+        if trying:
+            # A try reads each check that can be run, beside any mistake: 38 of the 106 `needs`
+            # refused for a mistake were tries, refused before a check was read
+            # (mqucifer/print-shop#93).
+            return self._try_needs(found, wrong)
         if not wrong and not trying:
             wrong = needs.numbers_wrong(found) + needs.verdicts_wrong(found)
             wrong += needs.echoes_wrong(found)
@@ -2426,8 +2433,6 @@ class Run:
         if wrong:
             said = "\n".join(f"- {w}" for w in wrong)
             return Judged("needs", "failed", f"The needs weren't taken:\n{said}", "misses")
-        if trying:
-            return self._try_needs(found)
         why_changed = args.get("why_changed") or {}
         declared = glass_checks.load(self.state.glass)
         swaps, refused = self._swaps(
@@ -2612,24 +2617,45 @@ class Run:
             lines.append(f"  - the model's reason: {swap['reason']}")
         return [*lines, ""]
 
-    def _try_needs(self, found: list[Need]) -> Judged:
+    def _try_needs(self, found: list[Need], wrong: list[str] | None = None) -> Judged:
         """Each bench check against the files as they stand, settling nothing. The first real run
         guessed a number's name, since a check that's wrong once settled would stop the run for a
-        person. It runs on a copy, with no clean run first, so it says only that a check works."""
-        lines = ["Nothing is settled. Each check, against your files as they stand:"]
+        person. It runs on a copy, with no clean run first, so it says only that a check works.
+
+        Where the needs have mistakes (`wrong`), it's still refused as settling them would be,
+        naming each, and each check that can be run is read beside them, so a try is never spent
+        on nothing (mqucifer/print-shop#93). Only a check whose command can't be run is left out:
+        one that doesn't parse, names no bench command of this run's, or the bench's own parser
+        can't read."""
+        wrong = list(wrong or [])
+        runnable = [n for n in found if needs.readable(n, self.toolset)]
+        unusable = self._unusable(runnable)
+        wrong += [said for _, said in unusable]
+        if any(need is None for need, _ in unusable):
+            runnable = []
+        ran = [n for n in runnable if all(n is not need for need, _ in unusable)]
         # A path the answer never has is wrong with or without a file (mqucifer/print-shop#66).
-        paths_wrong = needs.numbers_wrong(found)
+        paths_wrong = needs.numbers_wrong(ran)
         readings: list[dict[str, Any]] = []
-        read = iter(self._read_now([n for n in found if n.by == "bench"]))
+        # Read under names of the harness's own: a need's id is a file's name in the scratch copy,
+        # and a mistaken one is no name to trust.
+        read = iter(self._read_now([replace(n, id=f"try-{k}") for k, n in enumerate(ran)]))
+        lines: list[str] = []
         for need in found:
             if need.by == "eye":
                 lines.append(f"- {need.id}: for the Sponsor's eye, so there's nothing to read.")
                 continue
             if need.by == needs.BED:
-                lines.append(
-                    f"- {need.id}: checked at `done`, against `on_bed`: it has to give "
-                    f'{{"{need.file}": "{need.side}"}}.'
-                )
+                if need.file and need.side in needs.SIDES:
+                    lines.append(
+                        f"- {need.id}: checked at `done`, against `on_bed`: it has to give "
+                        f'{{"{need.file}": "{need.side}"}}.'
+                    )
+                else:
+                    lines.append(f"- {need.id}: checked at `done`, against `on_bed`.")
+                continue
+            if not any(need is one for one in ran):
+                lines.append(f"- {need.id}: not run, as its check can't be run as it stands.")
                 continue
             reading = next(read)
             mark = "would pass" if reading.passed else "WOULDN'T PASS"
@@ -2646,16 +2672,34 @@ class Run:
                     "numbers": (reading.record or {}).get("numbers"),
                 }
             )
+        detail: dict[str, Any] = {"tried": True, "readings": readings}
+        if wrong:
+            mistakes = "\n".join(f"- {w}" for w in wrong)
+            head = [
+                f"Nothing is settled, and the needs as sent wouldn't be taken:\n{mistakes}",
+                "Each check that can be run, against your files as they stand:"
+                if ran
+                else "No check can be run as it stands, so none was read:",
+            ]
+            detail["wrong"] = wrong
+        else:
+            head = ["Nothing is settled. Each check, against your files as they stand:"]
+        lines = head + lines
         if paths_wrong:
             lines.append("Settling these would be refused, file or no file:")
             lines += [f"- {w}" for w in paths_wrong]
-        detail = {"tried": True, "readings": readings}
-        if paths_wrong:
             detail["paths_wrong"] = paths_wrong
+        if wrong:
+            return Judged("needs", "failed", "\n".join(lines), "misses", detail=detail)
         return Judged("needs", "ok", "\n".join(lines), detail=detail)
 
     def _usable(self, found: list[Need]) -> list[str]:
         """Whether each bench need's command can be read at all, by the bench's own parser."""
+        return [said for _, said in self._unusable(found)]
+
+    def _unusable(self, found: list[Need]) -> list[tuple[Need | None, str]]:
+        """Each bench need whose command the bench's own parser can't read, and why; with no need,
+        where the parser itself couldn't be asked."""
         benched = [n for n in found if n.by == "bench"]
         if not benched:
             return []
@@ -2665,11 +2709,11 @@ class Run:
             if line.startswith(usage_module.MARK):
                 said = json.loads(line[len(usage_module.MARK) :])
                 return [
-                    f"the need {n.id!r}: the bench can't read `{n.command}`: {w}"
+                    (n, f"the need {n.id!r}: the bench can't read `{n.command}`: {w}")
                     for n, w in zip(benched, said, strict=True)
                     if w
                 ]
-        return [f"the commands couldn't be read: exit {done.code}: {done.output[-400:]}"]
+        return [(None, f"the commands couldn't be read: exit {done.code}: {done.output[-400:]}")]
 
     def _start_round(self) -> None:
         self.state.round += 1

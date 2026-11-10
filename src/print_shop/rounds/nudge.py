@@ -2,7 +2,9 @@
 need, or end with `blocked`, as a failed, complete run is a valid end (the Sponsor, 2026-11-03).
 
 A check is its command and the files it names, not its other arguments: on `suncatcher-2` the model
-passed `capture` a lower `--min-lip` on each try, and each try was the same check failing. Exit 3 is
+passed `capture` a lower `--min-lip` on each try, and each try was the same check failing. A slide
+and its way are the one exception: `clearance --slide -z` reads a hold, not a gap, so it's a check
+of its own (mqucifer/print-shop#94). Exit 3 is
 the command itself being wrong, so it's neither. Any other exit but 0 doesn't pass: 1, both methods
 agree something's wrong, 2, there's no answer to rely on, or the container's own.
 
@@ -38,6 +40,8 @@ SUFFIX = re.compile(r"\.[A-Za-z][A-Za-z0-9]*$")
 #: The bench's options that take no value, and those that take every word up to the next option.
 FLAGS = frozenset({"--one-body"})
 MANY = frozenset({"--views", "--section"})
+#: The option that makes a check a slide, whose way is part of the check (mqucifer/print-shop#94).
+SLIDE = "--slide"
 #: How much of what the bench said each try's line keeps.
 WHY_CHARS = 140
 
@@ -73,7 +77,12 @@ def _words(argv: list[str]) -> list[str]:
 
 
 def check_of(argv: list[str]) -> Check:
-    """A bench command's check: its command and the files it names, whatever else it's given."""
+    """A bench command's check: its command and the files it names, whatever else it's given,
+    but for a slide and its way. A slide reads whether a part is held, not a gap, so
+    `clearance A B --slide -z` is a check of its own, as `clearance --slide -z` on A and B: apart
+    from `clearance A B` at any gap settings, and from `--slide +y`. On `eval-sleeve-3` a slide's
+    `NOT HELD`, the answer meant, was filed under a gap need on the same files, held until it
+    passed, and couldn't be set aside (mqucifer/print-shop#94)."""
     words = _words(argv)
     if not words:
         return "", ()
@@ -82,7 +91,14 @@ def check_of(argv: list[str]) -> Check:
         for w in words[1:]
         if not w.startswith("-") and "=" not in w and SUFFIX.search(PurePosixPath(w).name)
     }
-    return words[0], tuple(sorted(files))
+    way = options(words).get(SLIDE)
+    command = f"{words[0]} {SLIDE} {way[-1]}" if way else words[0]
+    return command, tuple(sorted(files))
+
+
+def command_of(check: Check) -> str:
+    """A check's bench command alone, without a slide's way."""
+    return check[0].split(" ", 1)[0]
 
 
 def options(argv: list[str]) -> Options:

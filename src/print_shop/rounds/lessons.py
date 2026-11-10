@@ -348,7 +348,7 @@ def keys_from(ledger: DesignLedger, run: str, held: dict[str, Any]) -> list[dict
             n,
             nudge.USAGE,
         ):
-            command = nudge.check_of(json.loads(b["argv"]))[0]
+            command = nudge.command_of(nudge.check_of(json.loads(b["argv"])))
             if command:
                 found.append({"command": command, "verdict": str(b["verdict"] or "")})
     for reading in held.get("readings") or []:
@@ -363,7 +363,7 @@ def keys_from(ledger: DesignLedger, run: str, held: dict[str, Any]) -> list[dict
         )
         for r in rows:
             if r["command"]:
-                command = nudge.check_of(str(r["command"]).split())[0]
+                command = nudge.command_of(nudge.check_of(str(r["command"]).split()))
                 found.append({"command": command, "verdict": str(r["verdict"] or "")})
     return [dict(k) for k in dict.fromkeys(tuple(sorted(k.items())) for k in found)]
 

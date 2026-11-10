@@ -36,7 +36,7 @@ from print_shop.bench import picture as picture_module
 from print_shop.bench import search as search_module
 from print_shop.rounds import paths, skills, toolsets
 from print_shop.rounds.box import Box, Ran
-from print_shop.rounds.needs import COMMANDS
+from print_shop.rounds.needs import COMMANDS, QUOTED, SIDES, SOURCES
 from print_shop.rounds.paths import Outside, a_path, inside, read_bytes_inside, read_inside
 from print_shop.rounds.session import Judged, WorkFull
 from print_shop.rounds.toolsets import Toolset
@@ -126,35 +126,114 @@ LOOKS = {
         "colour no other file has. A given file under `references/` may have one too. Optional.",
     }
 }
+#: What only words can say of a need, beside its fields in the schema (mqucifer/print-shop#93).
 NEED_SHAPE = (
-    "Each need: `id`; `what` it must do; `source` (`request`, `answer`, `note` or `pick`, a pick's "
-    "reason, with `quote`, the words as you were sent them; `reference`, `derived` or `chosen`); "
-    'and `check`, one of {"by": '
-    '"bench", "measures": "fit", "command": '
-    '"clearance lid.step cup.step --min-gap 0.2", "verdicts": [...] (optional: which verdicts '
-    'pass, exit 0 by default), "number": "pairs.0.gap_mm", "at_least": 0.2, "at_most": 0.6 '
-    '(optional: a number in that answer, and its limit)}; {"by": "eye", "look_for": "what the '
-    'Sponsor judges", "no_bench": "why no bench command measures it", where it covers a line: '
-    "never a hold, a bought part's or one of your parts' on another, which `clearance <holder> "
-    "<held part> --slide <its way out>` reads, with `HELD`}; "
-    'or {"by": "bed", "file": "lid.step", "side": "+z"}, for which side of a file lies on the bed '
-    "when it prints, as your script stores it: `done` checks it against its `on_bed`, so a line "
-    "saying only which way a part prints is a bed need, never an eye need. "
-    'Where the request has lines: `covers`, the ids of the lines it covers (["R1"]); `fixed`: '
-    "true for a non-negotiable's need, quoting its line; and `figure`, for a fixed need whose "
-    "line holds a figure: how it's read, and where something changes it (such as before or after "
-    "play), which."
+    "Each need's fields are in the schema. A need from the request, an answer, a note or a "
+    'pick gives `quote`: {"id": "lid-gap", "what": "the lid lifts off", "source": "request", '
+    '"quote": "a 0.2 mm gap round the lid", "check": {"by": "bench", "measures": "fit", '
+    '"command": "clearance lid.step cup.step --min-gap 0.2"}}. An eye need is for what no bench '
+    "command measures: never a hold, a bought part's or one of your parts' on another, which "
+    "`clearance <holder> <held part> --slide <its way out>` reads, with `HELD`. A line saying "
+    "only which way a part prints is a bed need, never an eye need: `done` checks its side "
+    "against `on_bed`."
 )
 
 
-def _measures_said(toolset: Toolset) -> str:
+def _measures(toolset: Toolset) -> dict[str, Any]:
+    """A bench need's `measures`, with the toolset's short list where it has one."""
+    said = "A bench need's: what it's about. Its command has to measure that."
     if toolset.legacy:
-        return ""
+        return {"type": "string", "description": said}
     named = "; ".join(f"`{m.name}`, {m.about} (`{m.usage}`)" for m in toolset.measures)
-    return (
-        " A bench need's `measures` says what it's about, and its command has to measure that: "
-        f"{named}."
-    )
+    return {
+        "type": "string",
+        "enum": [m.name for m in toolset.measures],
+        "description": f"{said} {named}.",
+    }
+
+
+def need_item(toolset: Toolset) -> dict[str, Any]:
+    """One need, as the `needs` tool's schema shows it (mqucifer/print-shop#93). `needs` refused
+    for a mistake was the largest refusal class, and of its lines 158 were a `quote` left out and
+    39 a field the need doesn't have, mostly `measures` beside `check`: the fields were only in
+    words, `quote` in brackets. The rules stay in `needs.read`; this is what the model sees first.
+    `check` keeps to one level of fields, as some models stumble on a schema nested deeper."""
+    text: dict[str, Any] = {"type": "string"}
+    return {
+        "type": "object",
+        "properties": {
+            "id": {**text, "description": "A short name: letters, digits, `.`, `_` or `-`."},
+            "what": {**text, "description": "What the part must do."},
+            "source": {
+                **text,
+                "enum": list(SOURCES),
+                "description": "Where it came from: `request`, `answer`, `note` or `pick`, a "
+                "pick's reason, each with its `quote`; or `reference`, `derived` or `chosen`.",
+            },
+            "quote": {
+                **text,
+                "description": f"Required where `source` is {_either(QUOTED)}: their words, "
+                "word for word as you were sent them, holding the need's figure where it has a "
+                "limit.",
+            },
+            "check": {
+                "type": "object",
+                "description": "How it's checked. `bench`: `measures` and `command`, with "
+                "`verdicts` or `number` and its limit if you like. `eye`: `look_for`, and "
+                "`no_bench` where it covers a line. `bed`: `file` and `side`.",
+                "properties": {
+                    "by": {**text, "enum": ["bench", "eye", "bed"]},
+                    "measures": _measures(toolset),
+                    "command": {**text, "description": "A bench command and its arguments."},
+                    "verdicts": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "The verdicts that pass. Optional: exit 0 by default.",
+                    },
+                    "number": {
+                        **text,
+                        "description": "A number in the answer, by its path, such as "
+                        "`pairs.0.gap_mm`. Optional, with its limit.",
+                    },
+                    "at_least": {"type": "number"},
+                    "at_most": {"type": "number"},
+                    "look_for": {**text, "description": "What the Sponsor's eye judges."},
+                    "no_bench": {**text, "description": "Why no bench command measures it."},
+                    "file": {
+                        **text,
+                        "description": "The file that lies on the bed, as `part` names it.",
+                    },
+                    "side": {
+                        **text,
+                        "enum": list(SIDES),
+                        "description": "Its side down, as your script stores it.",
+                    },
+                },
+                "required": ["by"],
+            },
+            "covers": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": 'Where the request has lines: the ids it covers, ["R1"].',
+            },
+            "fixed": {
+                "type": "boolean",
+                "description": "true for a non-negotiable's need, quoting its line.",
+            },
+            "figure": {
+                **text,
+                "description": "A fixed need's, where its line holds a figure: how it's read, "
+                "and where something changes it (such as before or after play), which.",
+            },
+        },
+        "required": ["id", "what", "source", "check"],
+        "additionalProperties": False,
+    }
+
+
+def _either(names: tuple[str, ...]) -> str:
+    shown = [f"`{n}`" for n in names]
+    return f"{', '.join(shown[:-1])} or {shown[-1]}"
 
 
 def _glass(toolset: Toolset) -> dict[str, Any]:
@@ -308,14 +387,14 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
             "naming the lines left over. The harness runs each check itself at `done`. A check "
             "can't pass on FAIL. Settled again after they're reopened, a need whose check fails "
             "on your files as they stand can't be dropped, or changed to one that passes, without "
-            "a reason, and a fixed need changes only by the Sponsor. "
-            f"{NEED_SHAPE}{_measures_said(toolset)}",
+            "a reason, and a fixed need changes only by the Sponsor. " + NEED_SHAPE,
             {
                 "try": {
                     "type": "boolean",
                     "description": "true to read each bench check against your files as they "
                     "stand, and settle nothing: whether its command, number and limit work. "
-                    "Optional.",
+                    "Where a need has a mistake, it says so, and still reads each check that can "
+                    "run. Optional.",
                 },
                 "why_changed": {
                     "type": "object",
@@ -335,7 +414,7 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
             needs={
                 "type": "array",
                 "description": "The needs.",
-                "items": {"type": "object"},
+                "items": need_item(toolset),
             },
         ),
         _spec(

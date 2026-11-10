@@ -13,7 +13,7 @@ from typing import Any
 
 from print_shop.bench import picture as picture_module
 from print_shop.bench import usage as usage_module
-from print_shop.rounds import holding, needs, transcript
+from print_shop.rounds import holding, needs, nudge, transcript
 from print_shop.rounds.box import Ran
 from print_shop.rounds.holding import Aside, Tried
 from print_shop.rounds.needs import Need
@@ -62,7 +62,7 @@ class Answers:
             answer = self.answers.pop(0) if self.answers else "OK"
             verdict, numbers = answer if isinstance(answer, tuple) else (answer, {})
             record["numbers"] = numbers
-        code = {"OK": 0, "FAIL": 1}.get(verdict, 2)
+        code = {"OK": 0, "HELD": 0, "FAIL": 1, "NOT HELD": 1}.get(verdict, 2)
         why = f"{verdict.lower()} on {' '.join(args)}"
         record.update(verdict=verdict, why=why)
         out_dir = here / "bench-out"
@@ -408,3 +408,110 @@ def test_after_a_compaction_a_failing_thin_is_in_the_same_short_list() -> None:
     assert said.startswith(holding.AFTER_COMPACTION)
     assert "- `thin pane.step`, call 4: FAIL: a spot 0.2 mm wide" in said
     assert holding.after_compaction([], []) == ""
+
+
+# A slide is its own check (mqucifer/print-shop#94)
+
+FIT = "clearance pane.step references/frame.step"
+SLIDE = f"{FIT} --slide -z"
+
+
+def gap_need() -> Need:
+    return Need(
+        "gap",
+        "the pane sits loose in the frame",
+        "chosen",
+        "bench",
+        command=f"{FIT} --min-gap 0.4 --max-gap 0.8",
+        measures="fit",
+    )
+
+
+def test_a_slide_and_its_way_are_part_of_a_checks_key() -> None:
+    gap = nudge.check_of(f"{FIT} --min-gap 0.4 --max-gap 0.8".split())
+    down = nudge.check_of(SLIDE.split())
+    assert gap == ("clearance", ("pane.step", "references/frame.step"))
+    assert down == ("clearance --slide -z", ("pane.step", "references/frame.step"))
+    assert nudge.check_of(["bench", *FIT.split(), "--slide=-z", "--hold", "2"]) == down
+    assert nudge.check_of([*FIT.split(), "--slide", "+y"]) != down
+    assert nudge.check_of(FIT.split()) == gap, "a gap at any settings is one check"
+    assert nudge.command_of(down) == "clearance"
+
+
+def test_slides_two_ways_on_the_same_files_are_two_checks() -> None:
+    present = {"references/frame.step", "pane.step"}
+    tries = [
+        Tried(1, SLIDE.split(), False, "NOT HELD"),
+        Tried(2, [*FIT.split(), "--slide", "+y"], False, "NOT HELD"),
+        Tried(3, SLIDE.split(), True, "HELD"),
+    ]
+    found = holding.failing(tries, [], present, None, None)
+    assert [(h.check[0], [t.at_call for t in h.tries]) for h in found] == [
+        ("clearance --slide +y", [2])
+    ], "a pass on -z says nothing of +y"
+
+
+def test_a_slide_no_need_runs_is_apart_from_a_gap_need_on_its_files_and_can_be_set_aside(
+    tmp_path: Path,
+) -> None:
+    """On `eval-sleeve-3` the block slid out of a loose sleeve, `NOT HELD` as meant, and the
+    harness held it under the gap need and refused `set_aside`."""
+    run = started(
+        tmp_path,
+        tool("bench", command=SLIDE),
+        tool("set_aside", check=SLIDE, why="Nothing holds the pane: it lifts out, as asked."),
+        tool("bench", command="info pane.step"),
+        answers=("NOT HELD",),
+    )
+    settled(run, gap_need())
+    assert run.drive().name == "blocked"
+    told = replies(run)
+    assert HELD in told[0]["reply"] and f"- `{SLIDE}`, call 1: NOT HELD" in told[0]["reply"]
+    assert "`gap` runs it" not in told[0]["reply"], "the slide isn't the gap need's check"
+    assert "This is `gap`'s check" not in told[0]["reply"]
+    assert told[0]["detail"]["held"] == [
+        {
+            "command": "clearance --slide -z",
+            "files": ["pane.step", "references/frame.step"],
+            "needs": [],
+            "tries": [
+                {
+                    "at_call": 1,
+                    "argv": SLIDE.split(),
+                    "verdict": "NOT HELD",
+                    "why": f"not held on {SLIDE}",
+                    "by": "bench",
+                }
+            ],
+        }
+    ]
+    assert told[1]["outcome"] == "ok", told[1]["reply"]
+    assert HELD not in told[2]["reply"]
+    kept = [dict(r) for r in run.ledger.rows("SELECT * FROM set_asides")]
+    assert kept[0]["command"] == "clearance --slide -z"
+
+
+def test_a_settled_slide_needs_own_failing_reading_cant_be_set_aside(tmp_path: Path) -> None:
+    held = Need(
+        "held",
+        "the pane is held in the frame",
+        "chosen",
+        "bench",
+        command=SLIDE,
+        verdicts=["HELD"],
+        measures="fit",
+    )
+    run = started(
+        tmp_path,
+        tool("bench", command=SLIDE),
+        tool("set_aside", check=SLIDE, why="It's fine."),
+        tool("bench", command=f"{FIT} --slide +y"),
+        tool("set_aside", check=f"{FIT} --slide +y", why="It goes in from above."),
+        answers=("NOT HELD", "NOT HELD"),
+    )
+    settled(run, held, gap_need())
+    assert run.drive().name == "blocked"
+    told = replies(run)
+    assert f"`held` runs it as `{SLIDE}`, which `done` checks." in told[0]["reply"]
+    assert told[1]["why"] == "a_needs_check" and "`held`" in told[1]["reply"]
+    assert told[3]["outcome"] == "ok", "the other way is a check no need runs"
