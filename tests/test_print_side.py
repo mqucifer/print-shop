@@ -121,8 +121,8 @@ def test_an_eye_need_that_only_names_the_print_side_is_refused_saying_which_kind
         "stores the file, and the same `source`, `quote` and `covers`. If this eye need judges "
         "more than the side, such as how a feature looks as printed, keep it for that, with "
         "`look_for` naming only what the eye judges, and send the bed need beside it. Whether a "
-        "bought part is held is the bench's, never the eye's: `clearance <part> <bought part> "
-        "--slide <its way out>`, with `HELD`"
+        "part is held is the bench's, never the eye's: `clearance <holder> <held part> --slide "
+        "<its way out>`, with `HELD`"
     ]
 
 

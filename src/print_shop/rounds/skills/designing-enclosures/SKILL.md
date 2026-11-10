@@ -47,9 +47,9 @@ Keep each bought part as one `fact`, named for its file, such as `references/fan
 
 Decide the parts before any geometry, and write them down: which part each reference mounts to, where the lid splits from the base, and how it closes. `references/walls-and-lids.md` (the skill `sizing-walls-and-lids`) has the three ways a lid closes, and what each needs. Where the request leaves the way open, take it to the plan stop.
 
-For each bought part, name the way it goes in, then run `clearance <part> <bought part> --slide <the way out>`. `HELD` names what holds it. Everything on its path is what has to bend, or be fitted afterwards. Where a part holds a bought part, build a rough first try and read it this way before the plan stop, not after: the plan waits for that reading, whatever it says.
+For each bought part, name the way it goes in, then run `clearance <part> <bought part> --slide <the way out>`. `HELD` names what holds it. Everything on its path is what has to bend, or be fitted afterwards. Where a part holds a bought part, build a rough first try and read it this way before the plan stop, not after: the plan waits for that reading, whatever it says. Where one of your parts holds another, such as a lid snapped onto a base, read it the same way, the held part last: `clearance base.step lid.step --slide <the way the lid comes off>`.
 
-A given part fixed in place and never fitted, such as a box your lid sits on, is a `fact` with its `box` and `fixed: true` in place of `way_in` and `held_by`.
+A given part fixed in place and never fitted, such as a box your lid sits on, is a `fact` with its `box` and `fixed: true` in place of `way_in` and `held_by`. A bought part fitted loose, that nothing is meant to hold, gives `loose: true` in place of `held_by`.
 
 ### 3. Dimensions
 
