@@ -36,14 +36,14 @@ def late(*args: Any) -> Any:
 
 def blind(*args: Any) -> Any:
     """Rays that meet nothing."""
-    _, path, _, count = by_rays(*args)
-    return None, path, np.empty((0, 3)), count
+    _, path, _, count, _ = by_rays(*args)
+    return None, path, np.empty((0, 3)), count, (np.empty(0), np.empty((0, 3)))
 
 
 def elsewhere(*args: Any) -> Any:
     """Rays that first meet the hooks somewhere none of the step's contacts is."""
-    first, path, _, count = by_rays(*args)
-    return first, path, np.array([[0.0, 0.0, 7.5]]), count
+    first, path, _, count, hits = by_rays(*args)
+    return first, path, np.array([[0.0, 0.0, 7.5]]), count, hits
 
 
 def sliver() -> list[list[list[float]]]:

@@ -687,6 +687,9 @@ def blocked_way_in() -> None:
     - `hold/bump-walled`: the same, with a wall of the same part across the block's way in: from
       the -x wall 3.75 mm in, the block's whole depth in y, z -3 to -2. Sliding down, the block
       meets the bump after 0.2 mm, then the wall, 3.75 mm into its path against the bump's 0.5.
+    - `hold/bump-roomy`: the walls down to z -9.5, and the same wall at z -9 to -8: met after
+      8 mm, past the block's 7.5 mm length from the bump at 0.2, so there's room to set the block
+      in before it, and it isn't in the way (the operator's review of mqucifer/print-shop#100).
     """
     bump = box(-20, 20, -20, 20, 7.5, 9.5)
     for turn in (0, 90, 180, 270):
@@ -694,6 +697,12 @@ def blocked_way_in() -> None:
     bump = bump.union(box(14.5, 15, -4, 4, -1.2, -0.2))
     save(bump, "hold/bump")
     save(bump.union(box(-15, -11.25, -15, 15, -3, -2)), "hold/bump-walled")
+    # The wall past the block's own 7.5 mm length from the bump: room to set it in before it.
+    roomy = box(-20, 20, -20, 20, 7.5, 9.5)
+    for turn in (0, 90, 180, 270):
+        roomy = roomy.union(box(15, 17, -17, 17, -9.5, 7.5).rotate((0, 0, 0), (0, 0, 1), turn))
+    roomy = roomy.union(box(14.5, 15, -4, 4, -1.2, -0.2))
+    save(roomy.union(box(-15, -11.25, -15, 15, -9, -8)), "hold/bump-roomy")
 
 
 def strips() -> None:

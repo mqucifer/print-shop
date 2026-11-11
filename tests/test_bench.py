@@ -2442,6 +2442,36 @@ def test_a_held_fan_whose_way_in_is_blocked_says_so(bench: Any) -> None:
     assert open_.numbers["slide"]["blocked"] == [] and "blocked" not in open_.text, open_.text
     assert open_.numbers["slide"]["catch_mm"] == pytest.approx(0.5, abs=0.01)
     assert not open_.record["notes"], open_.text
+    # Met within the block's 7.5 mm length past the bump: no room to set it in before the wall.
+    assert slide["length_mm"] == pytest.approx(7.5, abs=1e-3)
+    assert blocked["met_mm"] == pytest.approx(2.0, abs=2 * 0.002 + 1e-4), walled.text
+    assert blocked["met_rays_mm"] == pytest.approx(2.0, abs=1e-3)
+    assert slide["room"] == []
+
+
+def test_a_wall_past_the_held_parts_length_leaves_room_to_set_it_in(bench: Any) -> None:
+    """The operator's review of mqucifer/print-shop#100: a fan 30 mm long held by a bump in an
+    upside-down lid met the lid's far wall after 44.9 mm, and was read as blocked, though it goes
+    in set down between the two. Here the same wall 8 mm down, past the block's 7.5 mm length from
+    the bump at 0.2: `HELD`, nothing blocking, and the wall said to leave room."""
+    roomy = bench("clearance", "hold/bump-roomy.step", "hold/fan.step", "--slide", "-z")
+    assert roomy.verdict == "HELD" and roomy.code == 0, roomy.text
+    slide = roomy.numbers["slide"]
+    assert slide["blocked"] == [] and "way in is blocked" not in roomy.text, roomy.text
+    (room,) = slide["room"]
+    assert room["box"] == [[-15.0, -15.0, -9.0], [-11.25, 15.0, -8.0]]
+    assert room["met_mm"] == pytest.approx(8.0, abs=2 * 0.002 + 1e-4), roomy.text
+    assert room["met_rays_mm"] == pytest.approx(8.0, abs=1e-3)
+    assert room["reach_mm"] == pytest.approx(3.75, abs=0.01)
+    assert (
+        "room: bump-roomy.step's piece at (-15, -15, -9) to (-11.25, 15, -8) is met after 8.00 mm, "
+        "past fan.step's 7.50 mm length along z from the catch at 0.20 mm: there's room to set "
+        "fan.step in before it, so it isn't in the way"
+    ) in roomy.text, roomy.text
+    assert "DISAGREE" not in roomy.text and not roomy.record["notes"], roomy.text
+    assert not reports.unlike("clearance", roomy.numbers), reports.unlike(
+        "clearance", roomy.numbers
+    )
 
 
 def test_a_slide_takes_two_files_and_no_gap_range(bench: Any) -> None:

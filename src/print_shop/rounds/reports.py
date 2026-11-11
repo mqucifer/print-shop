@@ -223,6 +223,20 @@ PLACE = Row(
     closed=True,
 )
 
+#: A piece of a slide's path (mqucifer/print-shop#100).
+PATH_PIECE = Row(
+    {
+        "box": CORNERS,
+        "reach_mm": NUMBER,
+        "reach_rays_mm": NUMBER,
+        "met_mm": NUMBER,
+        "met_rays_mm": NUMBER,
+    },
+    closed=True,
+)
+#: A piece of a slide's path that reaches further in than the catch (mqucifer/print-shop#100).
+PAST_THE_CATCH = Row({"part": TEXT, **PATH_PIECE.fields}, closed=True)
+
 #: `clearance --slide`'s answer (mqucifer/print-shop#76). `first_mm` is None where it meets nothing.
 SLIDE = Row(
     {
@@ -245,27 +259,22 @@ SLIDE = Row(
                     "box": CORNERS,
                     "reach_mm": NUMBER,
                     "reach_rays_mm": NUMBER,
-                    # Each piece of it on the path, such as each hook a fan passes, and its reach
-                    # read again from the rays' points in its box (mqucifer/print-shop#100).
-                    "pieces": Rows(
-                        Row(
-                            {"box": CORNERS, "reach_mm": NUMBER, "reach_rays_mm": NUMBER},
-                            closed=True,
-                        )
-                    ),
+                    # Each piece of it on the path, such as each hook a fan passes, its reach read
+                    # again from the rays' points in its box, and how far the part slides before
+                    # it meets it, by both methods (mqucifer/print-shop#100).
+                    "pieces": Rows(PATH_PIECE),
                 },
                 closed=True,
             )
         ),
-        # How far the first contacts' pieces reach into the path, and each piece that isn't one
-        # of them and reaches further: the way in, blocked (mqucifer/print-shop#100).
+        # The moving part's length along the slide, how far the first contacts' pieces reach
+        # into the path, each piece that isn't one of them and reaches further, met before the
+        # part has gone its length past the catch: the way in, blocked; and each met after it,
+        # with room to set the part in before it (mqucifer/print-shop#100).
+        "length_mm": NUMBER,
         "catch_mm": NUMBER,
-        "blocked": Rows(
-            Row(
-                {"part": TEXT, "box": CORNERS, "reach_mm": NUMBER, "reach_rays_mm": NUMBER},
-                closed=True,
-            )
-        ),
+        "blocked": Rows(PAST_THE_CATCH),
+        "room": Rows(PAST_THE_CATCH),
         "verdict": TEXT,
     },
     closed=True,

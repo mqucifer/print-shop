@@ -98,6 +98,10 @@ OPEN = 1e-4
 #: this, in mm (mqucifer/print-shop#100): the rays' reading of a reach may be over the section's by
 #: `2 * EDGE_STEP`, and a piece no further in than that is the catch's own depth.
 PAST_CATCH = 2 * EDGE_STEP
+#: A piece met this close to where the moving part has gone its own length past the catch is met
+#: there, in mm: the step and halving read a contact to the chords and `HALVED`, so the part fits
+#: the room before it exactly, and has room to be set in (mqucifer/print-shop#100).
+ROOM_TOL = 2 * FINE[0] + HALVED
 
 
 def _turned(manifold: Any, axis: str) -> Any:
@@ -355,10 +359,11 @@ def _by_rays(
     d: np.ndarray,
     axis: str,
     overlapping: bool,
-) -> tuple[float | None, np.ndarray, np.ndarray, int]:
+) -> tuple[float | None, np.ndarray, np.ndarray, int, tuple[np.ndarray, np.ndarray]]:
     """The second method: rays from a's points along d into b, and from b's back along it into a.
     (The nearest, b's points on a's path, the points on b where the nearest met it, how many rays
-    ran.) Where a lies in b, the points of
+    ran, and every ray's distance with the point on b it met there, so each piece of the path is
+    read on its own.) Where a lies in b, the points of
     each inside the other are left out, or they'd read the overlap as a contact."""
     a_points = _near(_points(a_mesh), b, axis)
     b_points = _near(_points(b_mesh), a, axis)
@@ -369,13 +374,39 @@ def _by_rays(
     # b's points whose ray back along the slide enters a: a passes through them.
     path = np.vstack([on_b, b_points[np.unique(ray)]])
     found = np.concatenate([forward, back])
+    at = np.vstack([on_b, b_points[ray]]).reshape(-1, 3)
     if not len(found):
-        return None, path, np.empty((0, 3)), len(a_points) + len(b_points)
+        return None, path, np.empty((0, 3)), len(a_points) + len(b_points), (found, at)
     first = float(found.min())
     # Where on b the rays first met it: each point within the chords of the nearest.
-    at = np.vstack([on_b, b_points[ray]])
     firsts = at[found <= first + 2 * FINE[0] + HALVED]
-    return first, path, firsts, len(a_points) + len(b_points)
+    return first, path, firsts, len(a_points) + len(b_points), (found, at)
+
+
+def _piece_met(
+    a: Any, b: Any, d: np.ndarray, low: Any, high: Any, moving: Part, other: Part, length: float
+) -> float | None:
+    """How far a slides before it meets one piece of the path, by the step and halving: b's
+    material in the piece's box, opened by the coarse mesh's chords (mqucifer/print-shop#100)."""
+    tol = 2 * COARSE[0]
+    corner = np.asarray(low, dtype=float) - tol
+    size = np.asarray(high, dtype=float) + tol - corner
+    piece = b ^ m3.Manifold.cube(tuple(map(float, size))).translate(tuple(map(float, corner)))
+    if float(piece.volume()) <= 0:
+        return None
+    overlap = a ^ piece
+    return _meet(a, piece, d, float(overlap.volume()), _band(overlap, moving, other), length)
+
+
+def _rays_met(hits: tuple[np.ndarray, np.ndarray], low: Any, high: Any) -> float | None:
+    """The rays' reading of when a piece is met: the least distance of a ray that met it there."""
+    far, at = hits
+    if not len(far):
+        return None
+    tol = 2 * COARSE[0]
+    inside = np.all(at >= np.asarray(low) - tol, axis=1)
+    inside &= np.all(at <= np.asarray(high) + tol, axis=1)
+    return float(far[inside].min()) if np.any(inside) else None
 
 
 def _held(found: dict[str, Any], first: float | None, hold: float) -> bool:
@@ -532,7 +563,7 @@ def _in_box(points: np.ndarray, low: Any, high: Any) -> np.ndarray:
 
 def _blocked(
     found: dict[str, Any], met: list[dict[str, Any]]
-) -> tuple[float | None, list[dict[str, Any]], list[str]]:
+) -> tuple[float | None, list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     """Whether the way in is blocked (mqucifer/print-shop#100): each piece on the path that isn't
     one of the first contacts and reaches further into the path than every one of them, by more
     than `PAST_CATCH`. (The catch's reach, those pieces, and where the two methods read a piece
@@ -543,9 +574,17 @@ def _blocked(
     nothing read it. A piece is a first contact where its box meets a first contact's box. Each
     such piece and each blocking one is read again from the rays' points in its box, and held to
     its section's reach as the path's reach is: within the points' spacing below, and
-    `2 * EDGE_STEP` above. Where the part overlaps where it lies there's no hold to block."""
+    `2 * EDGE_STEP` above. Where the part overlaps where it lies there's no hold to block.
+
+    **Only where there's no room to set the part in before it** (mqucifer/print-shop#100, the
+    operator's review). A fan 30 mm long held by a bump in an upside-down lid met the lid's far
+    wall after 44.9 mm: it goes in set down between the two, then slid past the bump, and the wall
+    is never in its way. So a piece blocks only where the slide meets it before the part has gone
+    its own length along the slide past the catch, within `ROOM_TOL`; one met later has room, and
+    is said so (the fourth of what this gives). Each such piece's distance is read by both
+    methods, and held to each other as the first contact's are."""
     if found["overlaps"] or not found["contacts"]:
-        return None, [], []
+        return None, [], [], []
     tol = 2 * COARSE[0] + OPEN
     catches: list[tuple[dict[str, Any], dict[str, Any]]] = []
     others: list[tuple[dict[str, Any], dict[str, Any]]] = []
@@ -558,28 +597,43 @@ def _blocked(
             )
             (catches if first else others).append((m, piece))
     if not catches:
-        return None, [], []
+        return None, [], [], []
     catch = max(piece["reach_mm"] for _, piece in catches)
-    blocking = [(m, p) for m, p in others if p["reach_mm"] > catch + PAST_CATCH]
+    past = [(m, p) for m, p in others if p["reach_mm"] > catch + PAST_CATCH]
+    room_from = float(found["first_mm"]) + float(found["length_mm"]) - ROOM_TOL
+    blocking = [(m, p) for m, p in past if p["met_mm"] is None or p["met_mm"] < room_from]
+    roomy = [(m, p) for m, p in past if p["met_mm"] is not None and p["met_mm"] >= room_from]
     unlike = []
-    for m, piece in [*catches, *blocking]:
+    band_mm = 2 * FINE[0] + HALVED
+    read = [(m, p, True) for m, p in catches] + [(m, p, False) for m, p in past]
+    for m, piece, caught in read:
         reach, rays = piece["reach_mm"], piece["reach_rays_mm"]
+        where = f"{m['part']}'s piece in {_box_said(*piece['box'])}"
         if rays > reach + 2 * EDGE_STEP or rays < reach - m["_spacing"] - 2 * EDGE_STEP:
             unlike.append(
-                f"{m['part']}'s piece in {_box_said(*piece['box'])}: it reaches {reach:.3f} mm "
-                f"into the path by the sections, {rays:.3f} by the rays' points, "
-                f"{m['_spacing']:.2f} mm apart"
+                f"{where}: it reaches {reach:.3f} mm into the path by the sections, {rays:.3f} by "
+                f"the rays' points, {m['_spacing']:.2f} mm apart"
             )
-    blocked = [
-        {
-            "part": m["part"],
-            "box": piece["box"],
-            "reach_mm": piece["reach_mm"],
-            "reach_rays_mm": piece["reach_rays_mm"],
-        }
-        for m, piece in blocking
-    ]
-    return round(catch, 4), blocked, unlike
+        if caught:
+            # The first contact's distance is the hold's, read by both methods already.
+            continue
+        at, at_rays = piece["met_mm"], piece["met_rays_mm"]
+        if at is None or at_rays is None or not (
+            at - band_mm <= at_rays <= at + EDGE_STEP + band_mm
+        ):
+            said = "never" if at is None else f"after {at:.4f} mm"
+            by_rays = "never" if at_rays is None else f"after {at_rays:.4f}"
+            unlike.append(
+                f"{where}: the step and halving meet it {said}, the rays {by_rays}, within the "
+                f"chords and {EDGE_STEP:g} mm along an edge"
+            )
+
+    def row(m: dict[str, Any], piece: dict[str, Any]) -> dict[str, Any]:
+        keys = ("box", "reach_mm", "reach_rays_mm", "met_mm", "met_rays_mm")
+        return {"part": m["part"], **{k: piece[k] for k in keys}}
+
+    found["room"] = [row(m, p) for m, p in roomy]
+    return round(catch, 4), [row(m, p) for m, p in blocking], found["room"], unlike
 
 
 def _blocked_said(found: dict[str, Any]) -> str:
@@ -592,10 +646,29 @@ def _blocked_said(found: dict[str, Any]) -> str:
     more = len(found["blocked"]) - SHOWN
     if more > 0:
         pieces += f"; and {more} more, in slide.blocked"
+    along = found["way"][1]
     return (
         f"but the way in is blocked: {pieces}; {found['file']} can't be fitted this way unless "
-        "it bends or is fitted afterwards"
+        f"it bends or is fitted afterwards, as the slide meets "
+        f"{'it' if len(found['blocked']) == 1 else 'each'} within {found['file']}'s "
+        f"{found['length_mm']:.2f} mm length along {along} past the catch, so there's no room to "
+        "set it in before"
     )
+
+
+def _room_said(found: dict[str, Any], piece: dict[str, Any]) -> str:
+    """A piece past the catch that the part has room to be set in before."""
+    name, along = found["file"], found["way"][1]
+    return (
+        f"{piece['part']}'s piece at {_box_said(*piece['box'])} is met after "
+        f"{piece['met_mm']:.2f} mm, past {name}'s {found['length_mm']:.2f} mm length along {along} "
+        f"from the catch at {found['first_mm']:.2f} mm: there's room to set {name} in before it, "
+        "so it isn't in the way"
+    )
+
+
+def _rounded(value: float | None) -> float | None:
+    return None if value is None else round(float(value), 4)
 
 
 def _point(p: Any) -> str:
@@ -619,6 +692,10 @@ def what_holds(
     axis = way[1]
     a_fine, a_coarse = moving.manifold(True), moving.manifold(False)
     shadow = _shadow(a_coarse, axis)
+    a_low, a_high = _bounds(a_fine)
+    # The moving part's own length along the slide: how far it goes past the catch before all of
+    # it is past (mqucifer/print-shop#100).
+    k = int(np.argmax(np.abs(d)))
     found: dict[str, Any] = {
         "file": moving.name,
         "way": way,
@@ -631,11 +708,14 @@ def what_holds(
         "contacts": [],
         "overlaps": [],
         "path": [],
+        "length_mm": None,
         "catch_mm": None,
         "blocked": [],
+        "room": [],
         "verdict": "NOT HELD",
         "why": "",
     }
+    found["length_mm"] = round(float(a_high[k] - a_low[k]), 4)
     differs: list[str] = []
     figures: list[str] = []
     met: list[dict[str, Any]] = []
@@ -652,7 +732,7 @@ def what_holds(
                 {"part": other.name, "overlap_mm3": round(rest, 4), "box": _corners(low, high)}
             )
         first = _meet(a_fine, b_fine, d, rest, band, length)
-        rays, on_path, firsts, count = _by_rays(
+        rays, on_path, firsts, count, hits = _by_rays(
             moving.fine(), other.fine(), a_fine, b_fine, d, axis, rest > band
         )
         rays_run += count
@@ -710,6 +790,10 @@ def what_holds(
                         "reach_rays_mm": round(
                             _reach_of_points(_in_box(on_path, low, high), axis, shadow), 4
                         ),
+                        "met_mm": _rounded(
+                            _piece_met(a_fine, b_fine, d, low, high, moving, other, length)
+                        ),
+                        "met_rays_mm": _rounded(_rays_met(hits, low, high)),
                     }
                     for low, high, r in pieces
                 ],
@@ -735,7 +819,7 @@ def what_holds(
                     }
                 )
     found["path"] = [{k: v for k, v in m.items() if not k.startswith("_")} for m in met]
-    found["catch_mm"], found["blocked"], unlike = _blocked(found, met)
+    found["catch_mm"], found["blocked"], found["room"], unlike = _blocked(found, met)
     if figures:
         # A figure on its own is a disagreement only where the answer or the place differs.
         differs += _figures_differ(found, met, hold, figures) if not differs else figures
@@ -794,6 +878,8 @@ def _said(
             "slide.blocked: a need on HELD isn't met while one is there, unless it names "
             "slide.blocked for a piece the request says is fitted afterwards"
         )
+    for piece in found["room"][:SHOWN]:
+        report.line(f"room: {_room_said(found, piece)}")
     shown = found["contacts"][:SHOWN]
     for c in shown:
         where = (
