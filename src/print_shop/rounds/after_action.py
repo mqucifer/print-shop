@@ -130,7 +130,13 @@ def _asked(said: str | None) -> str:
     cut = ""
     if was.get("finish") == "length":
         cut = ", cut off at the limit, its reasoning not sent back"
-    line = f"   no tool call, after {after}{took}{cut}: asked what's missing"
+    told = "asked what's missing"
+    if was.get("kept"):
+        if was.get("script"):
+            told = f"told to write the script it drafted, kept in `{was['kept']}`"
+        else:
+            told += f", its last design kept in `{was['kept']}`"
+    line = f"   no tool call, after {after}{took}{cut}: {told}"
     if was.get("only"):
         named = ", ".join(f"`{name}`" for name in was["only"])
         gap = was.get("after")

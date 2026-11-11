@@ -674,6 +674,35 @@ def pocket_feet() -> None:
         wall = box(15, 17, -17, 17, -1.1, 7.5).union(box(14.5, 15, -4, 4, -1.1, -0.1))
         feet = feet.union(wall.rotate((0, 0, 0), (0, 0, 1), turn))
     save(feet, "hold/feet")
+    blocked_way_in()
+
+
+def blocked_way_in() -> None:
+    """A fan held in a pocket whose way in is blocked (mqucifer/print-shop#100), on parts of our
+    own. The fan is `hold/fan`, the block 30 x 30 x 7.5, z 0 to 7.5, and its way out is down.
+
+    - `hold/bump`: a plate 40 x 40 x 2 on the block's top, and walls 2 mm thick round it, their
+      inside faces on the block's sides, down to z -3.5. One bump on the +x wall, 8 mm wide,
+      reaching 0.5 mm in under the block, z -1.2 to -0.2: its top 0.2 mm under the block's bottom.
+    - `hold/bump-walled`: the same, with a wall of the same part across the block's way in: from
+      the -x wall 3.75 mm in, the block's whole depth in y, z -3 to -2. Sliding down, the block
+      meets the bump after 0.2 mm, then the wall, 3.75 mm into its path against the bump's 0.5.
+    - `hold/bump-roomy`: the walls down to z -9.5, and the same wall at z -9 to -8: met after
+      8 mm, past the block's 7.5 mm length from the bump at 0.2, so there's room to set the block
+      in before it, and it isn't in the way (the operator's review of mqucifer/print-shop#100).
+    """
+    bump = box(-20, 20, -20, 20, 7.5, 9.5)
+    for turn in (0, 90, 180, 270):
+        bump = bump.union(box(15, 17, -17, 17, -3.5, 7.5).rotate((0, 0, 0), (0, 0, 1), turn))
+    bump = bump.union(box(14.5, 15, -4, 4, -1.2, -0.2))
+    save(bump, "hold/bump")
+    save(bump.union(box(-15, -11.25, -15, 15, -3, -2)), "hold/bump-walled")
+    # The wall past the block's own 7.5 mm length from the bump: room to set it in before it.
+    roomy = box(-20, 20, -20, 20, 7.5, 9.5)
+    for turn in (0, 90, 180, 270):
+        roomy = roomy.union(box(15, 17, -17, 17, -9.5, 7.5).rotate((0, 0, 0), (0, 0, 1), turn))
+    roomy = roomy.union(box(14.5, 15, -4, 4, -1.2, -0.2))
+    save(roomy.union(box(-15, -11.25, -15, 15, -9, -8)), "hold/bump-roomy")
 
 
 def strips() -> None:
@@ -734,8 +763,38 @@ def where() -> None:
     save(box(0, 10, 0, 10, 0, 1), "where/light-pane")
 
 
+def sections() -> None:
+    """A section's pieces and least widths (mqucifer/print-shop#101), on parts of our own.
+
+    - `slice/open-box`: 50 x 35 x 20 outside, its floor and walls 2 mm: at mid-height its walls
+      are one ring, 2 mm thick.
+    - `slice/tabs-free`: a wall 50 x 35 x 20, 2 mm thick on a 2 mm floor, with a tab inside each
+      side, 8 mm wide and 1.2 mm thick, standing from the floor to the top with a hook at its top
+      reaching 1 mm in, z 18 to 20. Each is cut free of the wall, 0.5 mm off its inside face, so at
+      a level between root and hook the section is 5 pieces: the wall's ring and four tabs.
+    - `slice/tabs-fused`: the same tabs against the wall's inside face, fused to it for their whole
+      height: one piece.
+    """
+    Path("slice").mkdir(exist_ok=True)
+    ring = box(-25, 25, -17.5, 17.5, 0, 20).cut(box(-23, 23, -15.5, 15.5, 2, 20))
+    save(ring, "slice/open-box")
+    for name, gap in (("tabs-free", 0.5), ("tabs-fused", 0.0)):
+        part = ring
+        for side in (1, -1):
+            # Each tab's face toward the wall, `gap` off the wall's inside face, and its hook.
+            x_out, y_out = 23 - gap, 15.5 - gap
+            part = part.union(box(*mirrored(side, x_out - 1.2, x_out), -4, 4, 2, 20))
+            part = part.union(box(*mirrored(side, x_out - 2.2, x_out - 1.2), -4, 4, 18, 20))
+            y0, y1 = mirrored(side, y_out - 1.2, y_out)
+            part = part.union(box(-4, 4, y0, y1, 2, 20))
+            y0, y1 = mirrored(side, y_out - 2.2, y_out - 1.2)
+            part = part.union(box(-4, 4, y0, y1, 18, 20))
+        save(part, f"slice/{name}")
+
+
 if __name__ == "__main__":
     where()
+    sections()
     near_touching()
     boxes()
     pin_in_hole()

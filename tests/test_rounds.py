@@ -392,6 +392,46 @@ def test_a_need_passes_only_on_the_benchs_own_answer() -> None:
     assert not needs.judge(need, 0, "", None).passed
 
 
+#: A slide that read `HELD` on a bump, with a wall across the way in (mqucifer/print-shop#100).
+BLOCKED_SLIDE = {
+    "slide": {
+        "catch_mm": 0.4999,
+        "blocked": [
+            {
+                "part": "lid.step",
+                "box": [[-15.0, -15.0, -3.0], [-11.25, 15.0, -2.0]],
+                "reach_mm": 3.7499,
+                "reach_rays_mm": 3.75,
+            }
+        ],
+    }
+}
+
+
+def test_a_need_on_held_isnt_met_while_the_way_in_is_blocked() -> None:
+    held = Need("a", "x", "chosen", "bench", command="clearance lid.step fan.step --slide -z",
+                verdicts=["HELD"])  # fmt: skip
+    blocked = judged(held, 0, "HELD", BLOCKED_SLIDE)
+    assert not blocked.passed
+    assert blocked.why.startswith(
+        "HELD, but the way in is blocked: lid.step's piece at (-15, -15, -3) to (-11.25, 15, -2) "
+        "reaches 3.75 mm into the path, past the catch's 0.50."
+    ), blocked.why
+    assert judged(held, 0, "HELD", {"slide": {"blocked": []}}).passed
+    accepting = Need("a", "x", "chosen", "bench", command=held.command, verdicts=["HELD"],
+                     number="slide.blocked.0.reach_mm", at_most=4.0)  # fmt: skip
+    assert judged(accepting, 0, "HELD", BLOCKED_SLIDE).passed
+
+
+def test_a_need_naming_slide_blocked_says_the_piece_is_fitted_afterwards() -> None:
+    check = {"command": "clearance lid.step fan.step --slide -z", "verdicts": ["HELD"],
+             "number": "slide.blocked.0.reach_mm", "at_most": 4}  # fmt: skip
+    wrong = needs.read([bench_need(**check)], "")[1]
+    assert len(wrong) == 1 and "only for a piece the request says is fitted afterwards" in wrong[0]
+    said = {**bench_need(**check), "what": "held by the bump; the cross wall goes in afterwards"}
+    assert not needs.read([said], "")[1]
+
+
 def test_a_press_fit_may_ask_for_a_verdict_that_would_otherwise_fail() -> None:
     need = Need("a", "x", "chosen", "bench", command="clearance a.step", verdicts=["INTERFERE"])
     assert judged(need, 1, "INTERFERE").passed

@@ -223,6 +223,20 @@ PLACE = Row(
     closed=True,
 )
 
+#: A piece of a slide's path (mqucifer/print-shop#100).
+PATH_PIECE = Row(
+    {
+        "box": CORNERS,
+        "reach_mm": NUMBER,
+        "reach_rays_mm": NUMBER,
+        "met_mm": NUMBER,
+        "met_rays_mm": NUMBER,
+    },
+    closed=True,
+)
+#: A piece of a slide's path that reaches further in than the catch (mqucifer/print-shop#100).
+PAST_THE_CATCH = Row({"part": TEXT, **PATH_PIECE.fields}, closed=True)
+
 #: `clearance --slide`'s answer (mqucifer/print-shop#76). `first_mm` is None where it meets nothing.
 SLIDE = Row(
     {
@@ -245,15 +259,67 @@ SLIDE = Row(
                     "box": CORNERS,
                     "reach_mm": NUMBER,
                     "reach_rays_mm": NUMBER,
-                    # Each piece of it on the path, such as each hook a fan passes.
-                    "pieces": Rows(Row({"box": CORNERS, "reach_mm": NUMBER}, closed=True)),
+                    # Each piece of it on the path, such as each hook a fan passes, its reach read
+                    # again from the rays' points in its box, and how far the part slides before
+                    # it meets it, by both methods (mqucifer/print-shop#100).
+                    "pieces": Rows(PATH_PIECE),
                 },
                 closed=True,
             )
         ),
+        # The moving part's length along the slide, how far the first contacts' pieces reach
+        # into the path, each piece that isn't one of them and reaches further, met before the
+        # part has gone its length past the catch: the way in, blocked; and each met after it,
+        # with room to set the part in before it (mqucifer/print-shop#100).
+        "length_mm": NUMBER,
+        "catch_mm": NUMBER,
+        "blocked": Rows(PAST_THE_CATCH),
+        "room": Rows(PAST_THE_CATCH),
         "verdict": TEXT,
     },
     closed=True,
+)
+
+#: A section's two sizes: along x then y on a level cut, y then z or x then z upright.
+ACROSS = Vector(2, NUMBER, ("the plane's first axis", "its second"))
+#: `slice`'s place: the section inside a `--box NAME=...`, at one level (mqucifer/print-shop#101).
+SLICE_PLACE = Row(
+    {
+        "box": CORNERS,
+        "pieces": NUMBER,
+        "whole_pieces": NUMBER,
+        "least_width_mm": NUMBER,
+        "least_width_rays_mm": NUMBER,
+        "size_mm": ACROSS,
+    },
+    closed=True,
+)
+#: `slice`'s answer at each `--at` (mqucifer/print-shop#77): each piece, largest first, with its
+#: least width (mqucifer/print-shop#101), and how many pieces and holes there are.
+SLICE = Rows(
+    Row(
+        {
+            "at": TEXT,
+            "pieces": Rows(
+                Row(
+                    {
+                        "area_mm2": NUMBER,
+                        "box": CORNERS,
+                        "size_mm": ACROSS,
+                        "least_width_mm": NUMBER,
+                        "least_width_rays_mm": NUMBER,
+                        "outline": TEXT,
+                        "holes": Rows(Row({"centre": XYZ, "size_mm": ACROSS, "area_mm2": NUMBER})),
+                    }
+                )
+            ),
+            "pieces_count": NUMBER,
+            "area_mm2": NUMBER,
+            "holes": NUMBER,
+            # By the names the command's own `--box NAME=...` give.
+            "places": Keyed(SLICE_PLACE),
+        }
+    )
 )
 
 SHAPES: dict[str, dict[str, Any]] = {
@@ -419,6 +485,7 @@ SHAPES: dict[str, dict[str, Any]] = {
         "selected": Keyed(LEAST),
     },
     "render": {"seen_px": Keyed(Keyed(NUMBER)), "views": Keyed(Row())},
+    "slice": {"cuts": SLICE},
 }
 
 
@@ -550,6 +617,8 @@ def selected_unnamed(words: list[str], number: str) -> str | None:
     parts = number.split(".")
     if words[0] == "clearance" and len(parts) >= 3 and parts[0] == "pairs" and parts[2] == "places":
         return _place_unnamed(words, number, parts[3] if len(parts) > 3 else "")
+    if words[0] == "slice" and len(parts) >= 3 and parts[0] == "cuts" and parts[2] == "places":
+        return _slice_place_unnamed(words, number, parts[3] if len(parts) > 3 else "")
     if words[0] != "edges" or not number.startswith("selected."):
         return None
     name = number.split(".")[1] if number.count(".") else ""
@@ -596,6 +665,19 @@ def _place_unnamed(words: list[str], number: str, name: str) -> str | None:
         f"`--box NAME=X0,Y0,Z0,X1,Y1,Z1` or `--facing NAME=DIR`, and it names {named}. Add "
         f"`--box {name or 'NAME'}=...` round the faces whose gap the need holds, and name "
         f"`pairs.0.places.{name or 'NAME'}.gap_mm`"
+    )
+
+
+def _slice_place_unnamed(words: list[str], number: str, name: str) -> str | None:
+    given = _given_places(words)
+    if name and name in given:
+        return None
+    named = ", ".join(f"`{g}`" for g in given) or "none"
+    return (
+        f"`{number}` isn't in `slice`'s answer: a place is read only for the command's own "
+        f"`--box NAME=X0,Y0,Z0,X1,Y1,Z1`, and it names {named}. Add `--box {name or 'NAME'}=...` "
+        f"round the wall or tab the need reads, and name `cuts.0.places.{name or 'NAME'}.pieces` "
+        "or its `least_width_mm`"
     )
 
 

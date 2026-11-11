@@ -419,6 +419,11 @@ def _bench_check(need: Need, check: dict[str, Any], wrong: list[str], shown: str
         wrong.append(f"{shown}: `number` needs its limit: `at_least`, `at_most` or both")
     if not need.number and (need.at_least is not None or need.at_most is not None):
         wrong.append(f"{shown}: a limit needs the `number` it holds")
+    if names_blocked(need) and not AFTERWARDS.search(normal(f"{need.what} {need.quote}")):
+        wrong.append(
+            f"{shown}: `{need.number}` accepts a way in that's blocked, which is only for a piece "
+            "the request says is fitted afterwards: its `what` says so, or name another number"
+        )
 
 
 def numbers_wrong(found: list[Need]) -> list[str]:
@@ -619,11 +624,63 @@ def judge(need: Need, code: int, text: str, record: dict[str, Any] | None) -> Re
     elif code != 0 or verdict not in GOOD:
         reading.why = f"{verdict}: {str((record or {}).get('why') or '')[:300]}"
         return reading
+    blocked = way_in_blocked(need, verdict, record or {})
+    if blocked:
+        reading.why = blocked
+        return reading
     if need.number:
         return _judge_number(need, reading, record or {})
     reading.passed = True
     reading.why = verdict
     return reading
+
+
+#: Words that say a piece is fitted after the held part, as a need accepting a blocked way in
+#: must (mqucifer/print-shop#100).
+AFTERWARDS = re.compile(r"\bafter(?:wards?)?\b|\blater\b")
+
+
+def names_blocked(need: Need) -> bool:
+    """Whether a need names `slide.blocked`: it accepts a way in that's blocked, for a piece the
+    request says is fitted afterwards (mqucifer/print-shop#100)."""
+    return need.number.split(".")[:2] == ["slide", "blocked"]
+
+
+def _box_said(box: Any) -> str:
+    """A box's two corners as the bench says them: "(-15, -15, -3) to (-11.25, 15, -2)"."""
+    try:
+        low, high = box
+        return " to ".join("(" + ", ".join(f"{float(v):.4g}" for v in c) + ")" for c in (low, high))
+    except (TypeError, ValueError):
+        return str(box)
+
+
+def way_in_blocked(need: Need, verdict: str, record: dict[str, Any]) -> str:
+    """Why a `HELD` doesn't meet the need: the slide found the way in blocked, and the need doesn't
+    name `slide.blocked` (mqucifer/print-shop#100). In a design run a fan read `HELD` on a bump,
+    and its need passed, while a wall of the same part, added after the need was written, lay
+    across its whole way in, 3.75 mm into the path against the bump's 0.5. Empty where it's met."""
+    if verdict != "HELD" or names_blocked(need):
+        return ""
+    slide = (record.get("numbers") or {}).get("slide") or {}
+    pieces = slide.get("blocked") or []
+    if not pieces:
+        return ""
+    catch = slide.get("catch_mm")
+    against = f", past the catch's {catch:.2f}" if isinstance(catch, int | float) else ""
+    said = "; ".join(
+        f"{p.get('part')}'s piece at {_box_said(p.get('box'))} reaches "
+        f"{float(p.get('reach_mm') or 0):.2f} mm into the path{against}"
+        for p in pieces[:3]
+    )
+    more = f"; and {len(pieces) - 3} more" if len(pieces) > 3 else ""
+    return (
+        f"HELD, but the way in is blocked: {said}{more}. The held part can't be fitted this way "
+        "unless it bends or that piece is fitted afterwards, so the need isn't met. Move or open "
+        "what blocks it; or, where the request says that piece is fitted afterwards, name "
+        "`slide.blocked` in the need, such as `slide.blocked.0.reach_mm` with `at_most`, and say "
+        "so in its `what`"
+    )
 
 
 def _judge_number(need: Need, reading: Reading, record: dict[str, Any]) -> Reading:

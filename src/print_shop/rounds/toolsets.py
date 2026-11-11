@@ -170,6 +170,15 @@ CORE_MEASURES = (
         ("params",),
         "params SCRIPT --set NAME=VALUE",
     ),
+    # A section's readings (mqucifer/print-shop#101): on `eval-edges-5` a 2 mm wall need on
+    # `slice` was refused as `size`, `info`'s, and the wall was held by nothing but the script.
+    Measure(
+        "section",
+        "the part cut at a level: how many pieces and holes there are, or a piece's least width "
+        "or size across, such as a straight wall's thickness or a tab standing free of its wall",
+        ("slice",),
+        "slice FILE --at z=H [--box NAME=X0,Y0,Z0,X1,Y1,Z1]",
+    ),
 )
 CORE = Toolset(
     None, "the core", CORE_COMMANDS, CORE_MEASURES, CORE_SKILLS, required=CORE_REQUIRED
@@ -325,9 +334,15 @@ def wrong_with(need: Need, toolset: Toolset) -> list[str]:
             f"measures are: {_listing(toolset)}"
         ]
     if command not in measure.commands:
+        own = [m.name for m in toolset.measures if command in m.commands]
+        theirs = (
+            f". `{command}` measures {', '.join(f'`{m}`' for m in own)}, if that's what it's about"
+            if own
+            else ""
+        )
         return [
             f"{shown} is about `{measure.name}`, {measure.about}, and `{command}` doesn't measure "
-            f"that: `{measure.commands[0]}` does, as `{measure.usage}`"
+            f"that: `{measure.commands[0]}` does, as `{measure.usage}`{theirs}"
         ]
     given = nudge.options(words)
     if measure.flag and measure.flag not in given:

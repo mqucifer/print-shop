@@ -403,6 +403,17 @@ def parser() -> Parser:
         help="the plane: z=3 is level at 3 mm, x=50 and y=40 upright. Give it more than once for "
         "several",
     )
+    cut.add_argument(
+        "--box",
+        dest="boxes",
+        action="append",
+        default=[],
+        type=_named_box,
+        metavar="NAME=X0,Y0,Z0,X1,Y1,Z1",
+        help="the section inside this box, at each plane through it: its pieces, their least "
+        "width and size, and the plane's pieces wholly inside it, as cuts.N.places.NAME. So a "
+        "need reads one wall or one tab whatever order the pieces come in",
+    )
     render = sub.add_parser("render", help="pictures from the standard views")
     render.add_argument("files", nargs="*")
     render.add_argument(
@@ -618,9 +629,9 @@ def slides(args: Any, top: Parser) -> None:
 def selections_given(args: Any, top: Parser) -> None:
     """`edges`' selections and `clearance`'s places, each by a name of its own, and each box with
     room inside it."""
-    if args.command not in ("edges", "clearance"):
+    if args.command not in ("edges", "clearance", "slice"):
         return
-    names = [n for n, _ in args.boxes] + [n for n, _ in args.facings]
+    names = [n for n, _ in args.boxes] + [n for n, _ in getattr(args, "facings", [])]
     twice = sorted({n for n in names if names.count(n) > 1})
     if twice:
         top.error(
