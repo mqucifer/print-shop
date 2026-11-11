@@ -674,6 +674,26 @@ def pocket_feet() -> None:
         wall = box(15, 17, -17, 17, -1.1, 7.5).union(box(14.5, 15, -4, 4, -1.1, -0.1))
         feet = feet.union(wall.rotate((0, 0, 0), (0, 0, 1), turn))
     save(feet, "hold/feet")
+    blocked_way_in()
+
+
+def blocked_way_in() -> None:
+    """A fan held in a pocket whose way in is blocked (mqucifer/print-shop#100), on parts of our
+    own. The fan is `hold/fan`, the block 30 x 30 x 7.5, z 0 to 7.5, and its way out is down.
+
+    - `hold/bump`: a plate 40 x 40 x 2 on the block's top, and walls 2 mm thick round it, their
+      inside faces on the block's sides, down to z -3.5. One bump on the +x wall, 8 mm wide,
+      reaching 0.5 mm in under the block, z -1.2 to -0.2: its top 0.2 mm under the block's bottom.
+    - `hold/bump-walled`: the same, with a wall of the same part across the block's way in: from
+      the -x wall 3.75 mm in, the block's whole depth in y, z -3 to -2. Sliding down, the block
+      meets the bump after 0.2 mm, then the wall, 3.75 mm into its path against the bump's 0.5.
+    """
+    bump = box(-20, 20, -20, 20, 7.5, 9.5)
+    for turn in (0, 90, 180, 270):
+        bump = bump.union(box(15, 17, -17, 17, -3.5, 7.5).rotate((0, 0, 0), (0, 0, 1), turn))
+    bump = bump.union(box(14.5, 15, -4, 4, -1.2, -0.2))
+    save(bump, "hold/bump")
+    save(bump.union(box(-15, -11.25, -15, 15, -3, -2)), "hold/bump-walled")
 
 
 def strips() -> None:

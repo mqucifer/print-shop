@@ -2413,6 +2413,37 @@ def test_two_methods_that_differ_on_a_distance_alone_keep_their_verdict(bench: A
     ]
 
 
+def test_a_held_fan_whose_way_in_is_blocked_says_so(bench: Any) -> None:
+    """mqucifer/print-shop#100, on parts of our own: a fan block in a pocket with a bump 0.2 mm
+    under it reaching 0.5 mm in, and a wall of the same part across its way in, 3.75 mm into the
+    path. Sliding out it's `HELD` at the bump, and the wall is named as blocking the way in, by
+    both methods. Without the wall it's `HELD` with nothing blocking."""
+    walled = bench("clearance", "hold/bump-walled.step", "hold/fan.step", "--slide", "-z")
+    assert walled.verdict == "HELD" and walled.code == 0, walled.text
+    slide = walled.numbers["slide"]
+    assert slide["first_mm"] == pytest.approx(0.2, abs=2 * 0.002 + 1e-4), walled.text
+    assert slide["catch_mm"] == pytest.approx(0.5, abs=0.01)
+    (blocked,) = slide["blocked"]
+    assert blocked["part"] == "bump-walled.step"
+    assert blocked["box"] == [[-15.0, -15.0, -3.0], [-11.25, 15.0, -2.0]]
+    assert blocked["reach_mm"] == pytest.approx(3.75, abs=0.01)
+    assert blocked["reach_rays_mm"] == pytest.approx(3.75, abs=0.05)
+    first = walled.text.splitlines()[0]
+    assert (
+        "but the way in is blocked: bump-walled.step's piece at (-15, -15, -3) to (-11.25, 15, -2) "
+        "reaches 3.75 mm into the path, past the catch's 0.50; fan.step can't be fitted this way "
+        "unless it bends or is fitted afterwards"
+    ) in first, first
+    assert "BLOCKED WAY IN: fan.step meets the catch first" in walled.text
+    assert "DISAGREE" not in walled.text and not walled.record["notes"], walled.text
+    assert not reports.unlike("clearance", walled.numbers)
+    open_ = bench("clearance", "hold/bump.step", "hold/fan.step", "--slide", "-z")
+    assert open_.verdict == "HELD" and open_.code == 0, open_.text
+    assert open_.numbers["slide"]["blocked"] == [] and "blocked" not in open_.text, open_.text
+    assert open_.numbers["slide"]["catch_mm"] == pytest.approx(0.5, abs=0.01)
+    assert not open_.record["notes"], open_.text
+
+
 def test_a_slide_takes_two_files_and_no_gap_range(bench: Any) -> None:
     for args, says in (
         (("hold/fan.step", "--slide", "-z"), "takes two files or more"),

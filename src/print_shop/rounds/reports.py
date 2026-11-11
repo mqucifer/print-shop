@@ -245,9 +245,24 @@ SLIDE = Row(
                     "box": CORNERS,
                     "reach_mm": NUMBER,
                     "reach_rays_mm": NUMBER,
-                    # Each piece of it on the path, such as each hook a fan passes.
-                    "pieces": Rows(Row({"box": CORNERS, "reach_mm": NUMBER}, closed=True)),
+                    # Each piece of it on the path, such as each hook a fan passes, and its reach
+                    # read again from the rays' points in its box (mqucifer/print-shop#100).
+                    "pieces": Rows(
+                        Row(
+                            {"box": CORNERS, "reach_mm": NUMBER, "reach_rays_mm": NUMBER},
+                            closed=True,
+                        )
+                    ),
                 },
+                closed=True,
+            )
+        ),
+        # How far the first contacts' pieces reach into the path, and each piece that isn't one
+        # of them and reaches further: the way in, blocked (mqucifer/print-shop#100).
+        "catch_mm": NUMBER,
+        "blocked": Rows(
+            Row(
+                {"part": TEXT, "box": CORNERS, "reach_mm": NUMBER, "reach_rays_mm": NUMBER},
                 closed=True,
             )
         ),

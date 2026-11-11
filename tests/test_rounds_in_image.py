@@ -2391,3 +2391,65 @@ def test_a_need_on_what_holds_a_part_is_held_at_done(tmp_path: Path, lid: str, m
     assert reading["passed"] == int(met)
     if not met:
         assert "NOT HELD" in reply_of(run, "done")["reply"]
+
+
+#: The fan block in a pocket, its sides on the walls, with a bump 0.2 mm under it reaching 0.5 mm
+#: in, and, in `walled`, a wall of the same part across its way in, 3.75 mm into the path: as
+#: `bench_cases/make_fixtures.py`'s `hold/bump` and `hold/bump-walled` (mqucifer/print-shop#100).
+POCKET_HOLD_SCRIPT = (
+    "import sys\n"
+    "import cadquery as cq\n"
+    "def box(x0, x1, y0, y1, z0, z1):\n"
+    '    return cq.Workplane("XY").box(x1 - x0, y1 - y0, z1 - z0)'
+    ".translate(((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2))\n"
+    "lid = box(-20, 20, -20, 20, 7.5, 9.5)\n"
+    "for turn in (0, 90, 180, 270):\n"
+    "    lid = lid.union(box(15, 17, -17, 17, -3.5, 7.5).rotate((0, 0, 0), (0, 0, 1), turn))\n"
+    "lid = lid.union(box(14.5, 15, -4, 4, -1.2, -0.2))\n"
+    "if sys.argv[1] == 'walled':\n"
+    "    lid = lid.union(box(-15, -11.25, -15, 15, -3, -2))\n"
+    'cq.exporters.export(lid, "lid.step")\n'
+    'cq.exporters.export(box(-15, 15, -15, 15, 0, 7.5), "fan.step")\n'
+)
+
+
+@pytest.mark.parametrize(
+    ("lid", "accepts", "met"),
+    [("open", False, True), ("walled", False, False), ("walled", True, True)],
+)
+def test_a_need_on_held_isnt_met_while_the_way_in_is_blocked(
+    tmp_path: Path, lid: str, accepts: bool, met: bool
+) -> None:
+    """mqucifer/print-shop#100: a fan held by a bump in its pocket reads `HELD` either way, and a
+    need on `HELD` fails at `done` while a wall lies across its way in, naming the wall. Without
+    the wall it's met. A need that names `slide.blocked`, saying the wall is fitted afterwards,
+    accepts it."""
+    check: dict[str, Any] = {
+        "by": "bench",
+        "measures": "fit",
+        "command": "clearance lid.step fan.step --slide -z",
+        "verdicts": ["HELD"],
+        "number": "slide.first_mm",
+        "at_most": 1,
+    }
+    what = "the fan can't fall out of the lid"
+    if accepts:
+        check = {**check, "number": "slide.blocked.0.reach_mm", "at_most": 4}
+        what = "the fan is held by the bump; the cross wall is fitted afterwards"
+    need = {"id": "fan-held", "what": what, "source": "chosen", "check": check}
+    run, _ = begin(
+        tmp_path,
+        [BROKEN_DOWN, tool("needs", needs=[need, *map(roomy, ("lid.step", "fan.step"))])],
+        [write("make.py", POCKET_HOLD_SCRIPT.replace("sys.argv[1]", repr(lid)), run=True)],
+        [done(part=["lid.step", "fan.step"])],
+        [tool("blocked", reason="stop")],
+    )
+    assert run.drive().name == ("met" if met else "blocked")
+    reading = next(r for r in rows(run, "readings") if r["need"] == "fan-held")
+    assert reading["passed"] == int(met), reading["why"]
+    if not met:
+        told = reply_of(run, "done")["reply"]
+        assert (
+            "HELD, but the way in is blocked: lid.step's piece at (-15, -15, -3) to "
+            "(-11.25, 15, -2) reaches 3.75 mm into the path, past the catch's 0.50"
+        ) in told, told

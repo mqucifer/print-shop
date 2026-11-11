@@ -4,7 +4,7 @@ In a design run the model put a fan's clip toes inside the fan's frame, as an ov
 the fan was pushed against, and took the overlap for its catch: nothing sat in the fan's way out,
 so nothing held it. It had reasoned for hours over its own picture of which way the fan goes in.
 So the bench does the picturing: `clearance --slide DIR` moves the last file named along DIR, from
-where it lies until it's clear of every other part, and says three things, in this order.
+where it lies until it's clear of every other part, and says, in this order:
 
 - **Where it lies.** An overlap there is said first, with its volume and box. An overlap is never
   a hold: the part can't be put there, so the slide is `NOT HELD` while one stands.
@@ -15,6 +15,9 @@ where it lies until it's clear of every other part, and says three things, in th
   reaches from the edge of the moving part's outline, seen along the slide: not how far anything
   bends, as the bench doesn't know which way an arm bends. Read backwards, that's everything the
   part has to pass on its way in, so it's what has to bend, or be fitted afterwards.
+- **The way in, blocked** (mqucifer/print-shop#100). A piece on the path that isn't one of the
+  first contacts and reaches further in than every one of them is named, as `slide.blocked`: the
+  part can't be fitted that way unless it bends or that piece is fitted afterwards.
 
 To meet is for the overlap to grow past what it is where the part lies, so a part touching its
 seat, or sliding along a wall, meets nothing. The step is `STEP`, a third of a 0.3 mm catch, so
@@ -51,7 +54,7 @@ import trimesh
 
 from .limits import over
 from .report import Report
-from .shapes import FINE, VOLUME_FLOOR, VOLUME_SHARE, Part, polygons
+from .shapes import COARSE, FINE, VOLUME_FLOOR, VOLUME_SHARE, Part, polygons
 
 #: How far each step of the slide goes, in mm: a third of a 0.3 mm catch, so none is stepped over.
 STEP = 0.1
@@ -91,6 +94,10 @@ SHOWN = 8
 #: A first contact's place, seen along the slide, is opened by this, in mm: a face sliding along
 #: another leaves a sliver no wider, which isn't a contact.
 OPEN = 1e-4
+#: A piece on the path blocks the way in where it reaches further in than the catch by more than
+#: this, in mm (mqucifer/print-shop#100): the rays' reading of a reach may be over the section's by
+#: `2 * EDGE_STEP`, and a piece no further in than that is the catch's own depth.
+PAST_CATCH = 2 * EDGE_STEP
 
 
 def _turned(manifold: Any, axis: str) -> Any:
@@ -196,15 +203,16 @@ def _path(
     """b's material in a's path, from where a first meets it until a is past it, on the coarse
     mesh: each piece of it, such as each hook a fan passes, as its box and what it covers seen
     along the slide. A piece at one step and one at the next whose boxes meet are one piece.
-    Overlaps with no volume, where a face slides along another, aren't in it."""
+    Overlaps with no volume, where a face slides along another, aren't in it, and each step's
+    pieces are read by place (`_by_place`), so a part's sides on its pocket's walls don't join a
+    bump on one wall to a wall across the way in on another (mqucifer/print-shop#100)."""
     seen: list[tuple[np.ndarray, np.ndarray, Any]] = []
     t = start + PROBE
     while t <= length + STEP:
         overlap = a.translate(tuple(map(float, d * t))) ^ b
         if float(overlap.volume()) > rest + band:
-            for piece in overlap.decompose():
-                if float(piece.volume()) > VOLUME_FLOOR:
-                    seen.append((*_bounds(piece), _shadow(piece, axis)))
+            for piece, low, high in _by_place(overlap, d, axis, VOLUME_FLOOR):
+                seen.append((low, high, _shadow(piece, axis)))
         t += STEP
     group = list(range(len(seen)))
 
@@ -465,6 +473,16 @@ def _contacts(
     overlap = a.translate(tuple(map(float, d * (first + PROBE)))) ^ b
     if float(overlap.volume()) <= 0:
         return []
+    found = [(low, high) for _, low, high in _by_place(overlap, d, axis, 0.0)]
+    return sorted(found, key=lambda c: tuple(c[0]))
+
+
+def _by_place(overlap: Any, d: np.ndarray, axis: str, floor: float) -> list[tuple[Any, Any, Any]]:
+    """An overlap's pieces, each read from a place it covers seen along the slide, opened by
+    `OPEN`, and the overlap inside that place: (the piece, its box's two corners, opened again
+    across the slide). A sliver where a part's sides lie on another's walls has no area seen
+    along the slide, so it joins no pieces (mqucifer/print-shop#84, #100). Pieces of no more than
+    `floor` mm³ are left out."""
     rows = np.asarray(ACROSS[axis], dtype=float)
     back = np.hstack([rows.T, np.zeros((3, 1))])
     corner_low, corner_high = _bounds(overlap)
@@ -481,13 +499,13 @@ def _contacts(
         prism = m3.CrossSection(rings).extrude(high_w - low_w + 2.0)
         prism = prism.translate((0.0, 0.0, low_w - 1.0)).transform(back)
         for piece in (overlap ^ prism).decompose():
-            if float(piece.volume()) <= 0:
+            if float(piece.volume()) <= floor:
                 continue
             low, high = _bounds(piece)
             low[across] -= OPEN
             high[across] += OPEN
-            found.append((low, high))
-    return sorted(found, key=lambda c: tuple(c[0]))
+            found.append((piece, low, high))
+    return found
 
 
 def _in_boxes(low: np.ndarray, high: np.ndarray, boxes: list[Any]) -> list[str]:
@@ -500,6 +518,84 @@ def _in_boxes(low: np.ndarray, high: np.ndarray, boxes: list[Any]) -> list[str]:
         and np.all(low >= p.low - tol)
         and np.all(high <= p.high + tol)
     ]
+
+
+def _in_box(points: np.ndarray, low: Any, high: Any) -> np.ndarray:
+    """The points in a piece's box, within the coarse mesh's chords: the rays' points on it."""
+    if not len(points):
+        return points
+    tol = 2 * COARSE[0]
+    inside = np.all(points >= np.asarray(low) - tol, axis=1)
+    inside &= np.all(points <= np.asarray(high) + tol, axis=1)
+    return np.asarray(points[inside])
+
+
+def _blocked(
+    found: dict[str, Any], met: list[dict[str, Any]]
+) -> tuple[float | None, list[dict[str, Any]], list[str]]:
+    """Whether the way in is blocked (mqucifer/print-shop#100): each piece on the path that isn't
+    one of the first contacts and reaches further into the path than every one of them, by more
+    than `PAST_CATCH`. (The catch's reach, those pieces, and where the two methods read a piece
+    it turns on differently.)
+
+    In a design run a bought fan read `HELD` on a bump 0.5 mm in, and its need passed, but a wall
+    of the same part lay across its whole way in, 3.75 mm into the path. The path listed it and
+    nothing read it. A piece is a first contact where its box meets a first contact's box. Each
+    such piece and each blocking one is read again from the rays' points in its box, and held to
+    its section's reach as the path's reach is: within the points' spacing below, and
+    `2 * EDGE_STEP` above. Where the part overlaps where it lies there's no hold to block."""
+    if found["overlaps"] or not found["contacts"]:
+        return None, [], []
+    tol = 2 * COARSE[0] + OPEN
+    catches: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    others: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for m in met:
+        boxes = [np.asarray(c["box"]) for c in found["contacts"] if c["part"] == m["part"]]
+        for piece in m["pieces"]:
+            low, high = np.asarray(piece["box"][0]), np.asarray(piece["box"][1])
+            first = any(
+                np.all(low <= box[1] + tol) and np.all(high >= box[0] - tol) for box in boxes
+            )
+            (catches if first else others).append((m, piece))
+    if not catches:
+        return None, [], []
+    catch = max(piece["reach_mm"] for _, piece in catches)
+    blocking = [(m, p) for m, p in others if p["reach_mm"] > catch + PAST_CATCH]
+    unlike = []
+    for m, piece in [*catches, *blocking]:
+        reach, rays = piece["reach_mm"], piece["reach_rays_mm"]
+        if rays > reach + 2 * EDGE_STEP or rays < reach - m["_spacing"] - 2 * EDGE_STEP:
+            unlike.append(
+                f"{m['part']}'s piece in {_box_said(*piece['box'])}: it reaches {reach:.3f} mm "
+                f"into the path by the sections, {rays:.3f} by the rays' points, "
+                f"{m['_spacing']:.2f} mm apart"
+            )
+    blocked = [
+        {
+            "part": m["part"],
+            "box": piece["box"],
+            "reach_mm": piece["reach_mm"],
+            "reach_rays_mm": piece["reach_rays_mm"],
+        }
+        for m, piece in blocking
+    ]
+    return round(catch, 4), blocked, unlike
+
+
+def _blocked_said(found: dict[str, Any]) -> str:
+    """The way in, blocked, in words: each piece past the catch, and what it means."""
+    pieces = "; ".join(
+        f"{b['part']}'s piece at {_box_said(*b['box'])} reaches {b['reach_mm']:.2f} mm into the "
+        f"path, past the catch's {found['catch_mm']:.2f}"
+        for b in found["blocked"][:SHOWN]
+    )
+    more = len(found["blocked"]) - SHOWN
+    if more > 0:
+        pieces += f"; and {more} more, in slide.blocked"
+    return (
+        f"but the way in is blocked: {pieces}; {found['file']} can't be fitted this way unless "
+        "it bends or is fitted afterwards"
+    )
 
 
 def _point(p: Any) -> str:
@@ -535,6 +631,8 @@ def what_holds(
         "contacts": [],
         "overlaps": [],
         "path": [],
+        "catch_mm": None,
+        "blocked": [],
         "verdict": "NOT HELD",
         "why": "",
     }
@@ -606,11 +704,18 @@ def what_holds(
                 "reach_mm": round(reach, 4),
                 "reach_rays_mm": round(reach_rays, 4),
                 "pieces": [
-                    {"box": _corners(low, high), "reach_mm": round(r, 4)}
+                    {
+                        "box": _corners(low, high),
+                        "reach_mm": round(r, 4),
+                        "reach_rays_mm": round(
+                            _reach_of_points(_in_box(on_path, low, high), axis, shadow), 4
+                        ),
+                    }
                     for low, high, r in pieces
                 ],
                 "_b": b_fine,
                 "_firsts": firsts,
+                "_spacing": spacing,
             }
         )
     met.sort(key=lambda m: m["met_mm"])
@@ -630,9 +735,11 @@ def what_holds(
                     }
                 )
     found["path"] = [{k: v for k, v in m.items() if not k.startswith("_")} for m in met]
+    found["catch_mm"], found["blocked"], unlike = _blocked(found, met)
     if figures:
         # A figure on its own is a disagreement only where the answer or the place differs.
         differs += _figures_differ(found, met, hold, figures) if not differs else figures
+    differs += unlike
     if differs:
         found["verdict"] = "DISAGREE"
         found["why"] = "; ".join(differs)
@@ -681,6 +788,12 @@ def _said(
                 f"Bring what holds it within {hold:g} mm of where {name} lies"
             )
     report.line(hold_line)
+    if found["blocked"]:
+        report.line(
+            f"BLOCKED WAY IN: {name} meets the catch first, {_blocked_said(found)}. Each is in "
+            "slide.blocked: a need on HELD isn't met while one is there, unless it names "
+            "slide.blocked for a piece the request says is fitted afterwards"
+        )
     shown = found["contacts"][:SHOWN]
     for c in shown:
         where = (
@@ -767,7 +880,8 @@ def summary(found: dict[str, Any]) -> str:
     meets = ", ".join(found["meets"])
     within = "within" if found["verdict"] == "HELD" or not over(first, found["hold_mm"]) else "past"
     agreed = f"; {found['why']}" if found["why"] else ""
+    blocked = f", {_blocked_said(found)}" if found.get("blocked") else ""
     return lead + (
         f"sliding {way}, it first meets {meets} after {first:.4f} mm, {within} --hold "
-        f"{found['hold_mm']:g} mm{agreed}"
+        f"{found['hold_mm']:g} mm{blocked}{agreed}"
     )
