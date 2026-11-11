@@ -31,6 +31,7 @@ from typing import Any, Protocol
 
 import httpx
 
+from print_shop.rounds import cut_reasoning
 from print_shop.rounds.box import Gone
 from print_shop.rounds.transcript import conversation, events_of
 
@@ -73,6 +74,19 @@ ASK_WHAT = (
     "can't be done without it, end with `blocked`, saying what's missing."
 )
 CUT_OFF = " It reached the answer's limit, so that reasoning isn't sent back."
+#: Said after `CUT_OFF` of a cut call whose reasoning held no script (mqucifer/print-shop#99).
+DESIGN_KEPT = " The design it last stated is kept in `{path}`: `read` it."
+#: The reply to a call cut at the answer's limit while it wrote a script in its reasoning: it
+#: isn't stuck, so it isn't asked what's missing (mqucifer/print-shop#99). `eval-pocket-4` and
+#: `eval-fan-5` each settled a design, then wrote the script in the reasoning and were cut off in
+#: it; asked what was missing, each started again cold and closed with no part.
+SCRIPT_KEPT = (
+    "You reasoned for {reasoning} and ended without calling a tool: it reached the answer's "
+    "limit while you were writing a script in your reasoning, so that reasoning isn't sent back. "
+    "Its last script{unfinished} and the design you stated before it are kept in `{path}`. "
+    "`read` it, write the script with `write`, run it, and read the part on the bench. The "
+    "script goes in a `write` call, not in your reasoning."
+)
 ONLY_ASKING = (
     " It's happened again, {calls} after the last time, so until you've asked or ended, only "
     "`ask`, `send_ask` and `blocked` work, besides this: you may build one change and read one "
@@ -266,6 +280,9 @@ class Session:
     # Given each tool reply before it's kept, for what it leads with when the model is stuck: the
     # run's (mqucifer/print-shop#79). It never refuses or cuts anything.
     lead: Callable[[Any, Judged], Judged] | None = None
+    # The run's working directory, where a cut call's settled reasoning is kept for the model to
+    # `read` (mqucifer/print-shop#99): `work` beside the events where it's not named.
+    work: Path | None = None
 
     def begin(self, *start: dict[str, Any]) -> None:
         """A new conversation. An earlier one in the same run stays in the records."""
@@ -478,7 +495,9 @@ class Session:
         action (mqucifer/print-shop#47). On the records, 12 of the 15 such calls followed 16k
         tokens or more of reasoning, and 10 sat in the two loops. A second one soon after gets a
         request whose only tools are the asking ones, and once each a build, a run and a check
-        (mqucifer/print-shop#86). Nothing cuts a call or limits thinking."""
+        (mqucifer/print-shop#86). A call cut at the answer's limit has what its reasoning
+        settled kept in `record/`, and one cut while writing a script is told to write it, not
+        asked what's missing (mqucifer/print-shop#99). Nothing cuts a call or limits thinking."""
         asking = self._asking()
         if not {"ask", "blocked"} <= set(asking):
             return QUIET
@@ -491,8 +510,23 @@ class Session:
         took = f"{minutes:.0f} minutes" if minutes >= 2 else f"{self.last_seconds:.0f} seconds"
         reasoning = f"{tokens:,} tokens ({took})"
         again = bool(self.quiet_at) and n - self.quiet_at <= self.limits.ask_within
-        reply = ASK_WHAT.format(reasoning=reasoning, cut=CUT_OFF if finish == "length" else "")
-        if again and not self.only:
+        thought = str(message.get("reasoning_content") or "")
+        kept_at: str | None = None
+        script = False
+        cut = CUT_OFF if finish == "length" else ""
+        if finish == "length" and thought.strip():
+            # What the cut reasoning settled is kept, never run (mqucifer/print-shop#99).
+            kept_at, kept = cut_reasoning.write(self.work_dir(), n, thought)
+            script = kept.script is not None
+            cut += DESIGN_KEPT.format(path=kept_at)
+        if script:
+            unfinished = ", unfinished where it was cut," if kept.unfinished else ""
+            reply = SCRIPT_KEPT.format(reasoning=reasoning, unfinished=unfinished, path=kept_at)
+        else:
+            reply = ASK_WHAT.format(reasoning=reasoning, cut=cut)
+        # A call cut while writing a script wasn't stuck, so it never sets the lock: that's for a
+        # quiet call that holds no script. A lock an earlier one set still holds.
+        if again and not self.only and not script:
             self.only = asking
             self.spent = set()
             gap = n - self.quiet_at
@@ -513,9 +547,14 @@ class Session:
             only=list(self.only) or None,
             allowed=self._allowed() or None,
             reply=reply,
+            **({"script": script, "kept": kept_at} if kept_at else {}),
         )
         self.quiet_at = n
         return reply
+
+    def work_dir(self) -> Path:
+        """The run's working directory: the one the run names, or `work` beside the events."""
+        return self.work if self.work is not None else self.events.parent / "work"
 
     def rewrite(self, index: int, content: Any) -> None:
         """Change an earlier message's content, and keep the change in the records."""

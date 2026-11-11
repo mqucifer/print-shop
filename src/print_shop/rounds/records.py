@@ -246,7 +246,8 @@ class Recorder:
 
     def _on_quiet_reply(self, event: dict[str, Any]) -> None:
         """A call that ended without a tool call, asked what's missing, and whether the next
-        request offered only the asking tools (mqucifer/print-shop#47)."""
+        request offered only the asking tools (mqucifer/print-shop#47). One cut while writing a
+        script is told to write it instead, `write_the_script` (mqucifer/print-shop#99)."""
         said = {
             k: event.get(k) for k in ("reasoning_tokens", "seconds", "finish", "after", "only")
         }
@@ -254,9 +255,19 @@ class Recorder:
             # What the lock left room to build and read (mqucifer/print-shop#86): only where it
             # did, so an older run's rows read back the same.
             said["allowed"] = event["allowed"]
+        if event.get("kept"):
+            # A cut call's settled reasoning, kept in `record/`, and whether it held a script it
+            # was told to write (mqucifer/print-shop#99).
+            said["script"] = bool(event.get("script"))
+            said["kept"] = event["kept"]
+        name = "what_is_missing"
+        if event.get("only"):
+            name = "ask_only"
+        elif event.get("script"):
+            name = "write_the_script"
         self._row(
             "asked",
-            name="ask_only" if event.get("only") else "what_is_missing",
+            name=name,
             at=event.get("t"),
             at_call=int(event["n"]),
             said=_json(said),

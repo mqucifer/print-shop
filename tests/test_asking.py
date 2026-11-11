@@ -315,6 +315,131 @@ def test_a_cut_off_call_with_tool_calls_keeps_them_and_loses_its_reasoning(
     rebuilds(s, model)
 
 
+# A cut call keeps what its reasoning settled (mqucifer/print-shop#99)
+
+
+#: Made up, in the shape `eval-pocket-4` and `eval-fan-5` were cut in: a design settled, then the
+#: script written in the reasoning and cut off in the middle of it.
+DRAFTING = (
+    "The fan reads 40 x 40 x 10 on the bench. Let me think about the pocket again. "
+    * 40
+    + "\n\nOK, I'm confident now. Here's my final design spec:\n\n"
+    "- pocket 40.4 x 40.4, 10.2 deep\n- bump 0.5 over the fan's edge\n\n"
+    "Now the script:\n\n"
+    "```python\nimport cadquery as cq\n\nlid = cq.Workplane('XY').box(50, 50, 3)\n"
+    "pocket = lid.faces('>Z').workplane().rect(40.4, 40.4).cutBlind(-2)\nbump = ("
+)
+#: Round and round on a reading: no script anywhere.
+CIRCLING = (
+    "The plan: a lid with a lip, 1.2 mm, all round.\n\n"
+    + "The slide says NOT HELD, but is that right? Let me read it again. " * 60
+)
+
+
+def cut(reasoning: str) -> Spoken:
+    return Spoken("", reasoning=reasoning, finish="length")
+
+
+def test_a_call_cut_while_writing_a_script_is_told_to_write_it(tmp_path: Path) -> None:
+    model = Scripted(cut(DRAFTING), [tool("blocked", reason="x")])
+    s = session(tmp_path, model)
+    assert s.go().name == "blocked"
+    said = str(model.bodies[1]["messages"][-1]["content"])
+    assert "while you were writing a script in your reasoning" in said
+    assert "`record/cut-reasoning-1.md`" in said
+    assert "write the script with `write`, run it, and read the part on the bench" in said
+    assert "something is missing" not in said, "it isn't asked what's missing"
+    assert "unfinished where it was cut" in said
+    kept = (tmp_path / "work" / "record" / "cut-reasoning-1.md").read_text()
+    assert "pocket = lid.faces('>Z').workplane().rect(40.4, 40.4).cutBlind(-2)\nbump = (" in kept
+    assert "import cadquery as cq" in kept
+    assert "Here's my final design spec:" in kept and "- bump 0.5 over the fan's edge" in kept
+    assert "Let me think about the pocket again" not in kept, "only the design, not the rest"
+    (event,) = events(s, "quiet_reply")
+    assert (event["script"], event["kept"], event["only"]) == (
+        True,
+        "record/cut-reasoning-1.md",
+        None,
+    )
+    assert cut_off_reasoning(model) == "", "the reasoning still isn't sent back"
+    rebuilds(s, model)
+
+
+def cut_off_reasoning(model: Scripted) -> str:
+    return str(
+        next(m for m in model.bodies[1]["messages"] if m["role"] == "assistant")[
+            "reasoning_content"
+        ]
+    )
+
+
+def test_a_cut_call_with_no_script_is_asked_as_before_and_its_design_is_kept(
+    tmp_path: Path,
+) -> None:
+    model = Scripted(cut(CIRCLING), [tool("blocked", reason="x")])
+    s = session(tmp_path, model)
+    s.go()
+    said = str(model.bodies[1]["messages"][-1]["content"])
+    assert said.startswith("You reasoned for ")
+    assert CUT_OFF in said and "something is missing" in said
+    assert "The design it last stated is kept in `record/cut-reasoning-1.md`" in said
+    kept = (tmp_path / "work" / "record" / "cut-reasoning-1.md").read_text()
+    assert "The plan: a lid with a lip, 1.2 mm, all round." in kept
+    assert "```python" not in kept
+    (event,) = events(s, "quiet_reply")
+    assert (event["script"], event["kept"]) == (False, "record/cut-reasoning-1.md")
+
+
+def test_a_second_cut_while_writing_a_script_doesnt_narrow_the_tools(tmp_path: Path) -> None:
+    """On `eval-fan-4` the second quiet reply came after 73 minutes, narrowed the tools to the
+    asking ones, and the run ended with no part (mqucifer/print-shop#99)."""
+    model = Scripted(
+        cut(CIRCLING),
+        [tool("run", path="a.py")],
+        cut(DRAFTING),
+        [tool("write", path="lid.py", content="x = 1\n")],
+        [tool("run", path="lid.py")],
+        [tool("blocked", reason="x")],
+    )
+    s = session(tmp_path, model)
+    assert s.go().name == "blocked"
+    every = offered(model.bodies[0])
+    assert all(offered(b) == every for b in model.bodies), "every tool, every call"
+    second = str(model.bodies[3]["messages"][-1]["content"])
+    assert "It's happened again" not in second
+    assert "`record/cut-reasoning-3.md`" in second
+    assert [e["only"] for e in events(s, "quiet_reply")] == [None, None]
+    assert (tmp_path / "work" / "record" / "cut-reasoning-3.md").is_file()
+
+
+def test_a_second_quiet_call_with_no_script_still_narrows_the_tools(tmp_path: Path) -> None:
+    model = Scripted(cut(DRAFTING), [tool("run", path="a.py")], cut(CIRCLING), *ASKED)
+    s = session(tmp_path, model)
+    assert s.go().name == "ask"
+    assert offered(model.bodies[3]) == LOCKED
+
+
+ASKED = (
+    [tool("ask", question="Which way should the lip go?", plan="x")],
+    [tool("send_ask", says="the plan")],
+)
+
+
+def test_the_kept_design_is_the_paragraph_or_list_before_the_script() -> None:
+    from print_shop.rounds.cut_reasoning import settled
+
+    kept = settled(DRAFTING)
+    assert kept.script is not None and kept.script.startswith("import cadquery as cq\n")
+    assert kept.unfinished
+    assert kept.design.startswith("OK, I'm confident now. Here's my final design spec:")
+    assert kept.design.endswith("Now the script:")
+    closed = settled("Plan settled.\n\n```python\nx = 1\n```\n\nThat's it, I think.")
+    assert (closed.script, closed.unfinished, closed.design) == ("x = 1\n", False, "Plan settled.")
+    assert settled("Thinking.\n\nStill thinking.").design == "Still thinking."
+    opened_only = settled("A design.\n\n```python\n")
+    assert (opened_only.script, opened_only.design) == (None, "A design.")
+
+
 def test_a_finished_call_keeps_its_reasoning(tmp_path: Path) -> None:
     model = Scripted(Spoken([tool("x")], reasoning="done thinking"), [tool("blocked", reason="")])
     session(tmp_path, model).go()
@@ -534,3 +659,22 @@ def test_the_index_shows_each_quiet_call_and_what_the_next_request_offered(
     assert Limits().recorded() == json.loads(
         run.ledger.rows("SELECT limits FROM runs WHERE run='r'")[0]["limits"]
     )
+
+
+def test_the_index_shows_a_cut_call_told_to_write_its_script(tmp_path: Path) -> None:
+    from print_shop.rounds import after_action
+    from print_shop.rounds.run import Run
+
+    model = Scripted(cut(DRAFTING), [tool("blocked", reason="Which side the lip goes.")])
+    run = Run.start(tmp_path, "r", "A block.", [], model, sleep=lambda _: None)
+    assert run.drive().name == "blocked"
+    assert (run.work / "record" / "cut-reasoning-1.md").is_file()
+    shown = "\n".join(after_action.index(run.ledger, "r"))
+    assert (
+        "cut off at the limit, its reasoning not sent back: told to write the script it drafted, "
+        "kept in `record/cut-reasoning-1.md`"
+    ) in shown
+    rows = run.ledger.rows("SELECT name, said FROM timeline WHERE kind='asked'")
+    assert [r["name"] for r in rows] == ["write_the_script"]
+    said = json.loads(rows[0]["said"])
+    assert (said["script"], said["kept"]) == (True, "record/cut-reasoning-1.md")

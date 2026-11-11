@@ -359,6 +359,7 @@ class Run:
             events=folder / "events.jsonl",
             limits=self.limits,
             stop_file=folder / "stop",
+            work=self.work,
         )
         if sleep is not None:
             self.session.sleep = sleep
