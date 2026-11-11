@@ -754,8 +754,38 @@ def where() -> None:
     save(box(0, 10, 0, 10, 0, 1), "where/light-pane")
 
 
+def sections() -> None:
+    """A section's pieces and least widths (mqucifer/print-shop#101), on parts of our own.
+
+    - `slice/open-box`: 50 x 35 x 20 outside, its floor and walls 2 mm: at mid-height its walls
+      are one ring, 2 mm thick.
+    - `slice/tabs-free`: a wall 50 x 35 x 20, 2 mm thick on a 2 mm floor, with a tab inside each
+      side, 8 mm wide and 1.2 mm thick, standing from the floor to the top with a hook at its top
+      reaching 1 mm in, z 18 to 20. Each is cut free of the wall, 0.5 mm off its inside face, so at
+      a level between root and hook the section is 5 pieces: the wall's ring and four tabs.
+    - `slice/tabs-fused`: the same tabs against the wall's inside face, fused to it for their whole
+      height: one piece.
+    """
+    Path("slice").mkdir(exist_ok=True)
+    ring = box(-25, 25, -17.5, 17.5, 0, 20).cut(box(-23, 23, -15.5, 15.5, 2, 20))
+    save(ring, "slice/open-box")
+    for name, gap in (("tabs-free", 0.5), ("tabs-fused", 0.0)):
+        part = ring
+        for side in (1, -1):
+            # Each tab's face toward the wall, `gap` off the wall's inside face, and its hook.
+            x_out, y_out = 23 - gap, 15.5 - gap
+            part = part.union(box(*mirrored(side, x_out - 1.2, x_out), -4, 4, 2, 20))
+            part = part.union(box(*mirrored(side, x_out - 2.2, x_out - 1.2), -4, 4, 18, 20))
+            y0, y1 = mirrored(side, y_out - 1.2, y_out)
+            part = part.union(box(-4, 4, y0, y1, 2, 20))
+            y0, y1 = mirrored(side, y_out - 2.2, y_out - 1.2)
+            part = part.union(box(-4, 4, y0, y1, 18, 20))
+        save(part, f"slice/{name}")
+
+
 if __name__ == "__main__":
     where()
+    sections()
     near_touching()
     boxes()
     pin_in_hole()

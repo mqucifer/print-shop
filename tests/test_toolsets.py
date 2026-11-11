@@ -54,6 +54,25 @@ def test_a_hanging_wall_settled_on_a_stand_in_is_refused_naming_the_command_that
     assert read(need("wall frame.step --hole 20,43.5,2 --min-wall 2", "wall")) == []
 
 
+def test_a_section_need_is_taken_on_slice_and_a_size_need_on_it_still_goes_to_info() -> None:
+    """mqucifer/print-shop#101: on `eval-edges-5` a 2 mm wall need on `slice` was refused as
+    `size`. A `section` need on `slice` is taken; a part's outer size is still `info`'s, and the
+    refusal now says what `slice` does measure."""
+    wall = need("slice box.step --at z=10", "section", number="cuts.0.pieces.0.least_width_mm",
+                at_least=2)  # fmt: skip
+    assert read(wall, toolsets.CORE) == []
+    tabs = need("slice box.step --at z=10 --box east=20,-5,5,22.8,5,15", "section",
+                number="cuts.0.places.east.whole_pieces", at_least=1)  # fmt: skip
+    assert read(tabs, toolsets.CORE) == []
+    (said,) = read(need("slice box.step --at z=10", "size"), toolsets.CORE)
+    assert "`info` does, as `info FILE`. `slice` measures `section`" in said, said
+    found, _ = needs.read([wall], REQUEST, "", toolsets.CORE)
+    unnamed = {**wall, "check": {**wall["check"], "number": "cuts.0.places.west.pieces"}}
+    (wrong,) = needs.numbers_wrong(needs.read([unnamed], REQUEST, "", toolsets.CORE)[0])
+    assert "a place is read only for the command's own `--box NAME=" in wrong, wrong
+    assert not needs.numbers_wrong(found)
+
+
 def test_a_bench_need_says_what_it_measures_from_its_toolsets_list() -> None:
     said = read(need("wall frame.step --hole 1,2,3", None))
     assert "`check.measures` says what this need is about, one of: `size`" in said[0]

@@ -2453,3 +2453,77 @@ def test_a_need_on_held_isnt_met_while_the_way_in_is_blocked(
             "HELD, but the way in is blocked: lid.step's piece at (-15, -15, -3) to "
             "(-11.25, 15, -2) reaches 3.75 mm into the path, past the catch's 0.50"
         ) in told, told
+
+
+# A section's pieces and least widths (mqucifer/print-shop#101)
+
+#: A wall 50 x 35 x 20, 2 mm thick on a 2 mm floor, and in `free` and `fused` a tab inside each
+#: side, 8 x 1.2, with a hook at its top: 0.5 mm off the wall, or against it. As
+#: `bench_cases/make_fixtures.py`'s `slice/` parts.
+SECTION_SCRIPT = (
+    "import sys\n"
+    "import cadquery as cq\n"
+    "def box(x0, x1, y0, y1, z0, z1):\n"
+    '    return cq.Workplane("XY").box(x1 - x0, y1 - y0, z1 - z0)'
+    ".translate(((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2))\n"
+    "def mirrored(side, a, b):\n"
+    "    return min(side * a, side * b), max(side * a, side * b)\n"
+    "part = box(-25, 25, -17.5, 17.5, 0, 20).cut(box(-23, 23, -15.5, 15.5, 2, 20))\n"
+    "tabs = sys.argv[1]\n"
+    "if tabs != 'none':\n"
+    "    gap = 0.5 if tabs == 'free' else 0.0\n"
+    "    for side in (1, -1):\n"
+    "        x, y = 23 - gap, 15.5 - gap\n"
+    "        part = part.union(box(*mirrored(side, x - 1.2, x), -4, 4, 2, 20))\n"
+    "        part = part.union(box(*mirrored(side, x - 2.2, x - 1.2), -4, 4, 18, 20))\n"
+    "        part = part.union(box(-4, 4, *mirrored(side, y - 1.2, y), 2, 20))\n"
+    "        part = part.union(box(-4, 4, *mirrored(side, y - 2.2, y - 1.2), 18, 20))\n"
+    'cq.exporters.export(part, "box.step")\n'
+)
+
+
+def section_need(**check: Any) -> dict[str, Any]:
+    return {
+        "id": "section",
+        "what": "read in a section at z 10",
+        "source": "chosen",
+        "check": {"by": "bench", "measures": "section", "command": "slice box.step --at z=10",
+                  **check},
+    }  # fmt: skip
+
+
+def test_a_wall_thickness_need_on_slice_is_taken_and_met(tmp_path: Path) -> None:
+    """mqucifer/print-shop#101: on `eval-edges-5` a 2 mm wall need on `slice` was refused, as
+    `slice` doesn't measure `size`. Now it's a `section` need on the ring's least width."""
+    need = section_need(number="cuts.0.pieces.0.least_width_mm", at_least=2, at_most=2.05)
+    run, _ = begin(
+        tmp_path,
+        [BROKEN_DOWN, tool("needs", needs=[need])],
+        [write("make.py", SECTION_SCRIPT.replace("sys.argv[1]", "'none'"), run=True)],
+        [done(part=["box.step"])],
+        [tool("blocked", reason="stop")],
+    )
+    assert run.drive().name == "met"
+    reading = next(r for r in rows(run, "readings") if r["need"] == "section")
+    assert reading["passed"] == 1 and reading["value"] == pytest.approx(2.0, abs=1e-3)
+
+
+@pytest.mark.parametrize(("tabs", "met"), [("free", True), ("fused", False)])
+def test_a_tabs_free_need_counts_the_pieces_at_a_level(
+    tmp_path: Path, tabs: str, met: bool
+) -> None:
+    """mqucifer/print-shop#101: a design run's tabs were fused to the wall for their whole height,
+    and the model wrote that they stood free as a fact. A need on the pieces at a level between
+    the tabs' root and hook, at least 5, passes on tabs cut free and fails on fused ones."""
+    need = section_need(number="cuts.0.pieces_count", at_least=5)
+    run, _ = begin(
+        tmp_path,
+        [BROKEN_DOWN, tool("needs", needs=[need])],
+        [write("make.py", SECTION_SCRIPT.replace("sys.argv[1]", repr(tabs)), run=True)],
+        [done(part=["box.step"])],
+        [tool("blocked", reason="stop")],
+    )
+    assert run.drive().name == ("met" if met else "blocked")
+    reading = next(r for r in rows(run, "readings") if r["need"] == "section")
+    assert reading["passed"] == int(met), reading["why"]
+    assert reading["value"] == (5 if met else 1)

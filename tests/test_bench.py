@@ -2557,6 +2557,41 @@ def test_slice_through_a_fan_block_gives_one_piece_and_its_holes(bench: Any) -> 
     assert missed.verdict == "NO ANSWER" and "runs from z=0 to z=7.5" in missed.text
 
 
+def test_slice_reads_each_pieces_least_width_and_tabs_standing_free(bench: Any) -> None:
+    """mqucifer/print-shop#101, on parts of our own. An open box's 2 mm walls at mid-height are a
+    ring 2.000 mm across by both methods. A wall with four tabs cut free of it reads 5 pieces
+    between the tabs' root and hook, each tab 1.2 mm across; the same tabs fused to the wall read
+    1 piece. A box round one tab names it whatever the pieces' order."""
+    box = bench("slice", "slice/open-box.step", "--at", "z=10")
+    assert box.verdict == "OK", box.text
+    (cut,) = box.numbers["cuts"]
+    (ring,) = cut["pieces"]
+    assert cut["pieces_count"] == 1 and cut["holes"] == 1
+    assert ring["least_width_mm"] == pytest.approx(2.0, abs=1e-3), box.text
+    assert ring["least_width_rays_mm"] == pytest.approx(2.0, abs=1e-3)
+    assert "least width 2.0000 mm" in box.text
+    assert not reports.unlike("slice", box.numbers), reports.unlike("slice", box.numbers)
+    east = "east=20,-5,5,22.8,5,15"
+    free = bench("slice", "slice/tabs-free.step", "--at", "z=10", "--box", east)
+    assert free.verdict == "OK", free.text
+    (cut,) = free.numbers["cuts"]
+    assert cut["pieces_count"] == 5, free.text
+    widths = sorted(p["least_width_mm"] for p in cut["pieces"])
+    assert widths == pytest.approx([1.2, 1.2, 1.2, 1.2, 2.0], abs=1e-3), free.text
+    tab = cut["places"]["east"]
+    assert (tab["pieces"], tab["whole_pieces"]) == (1, 1), free.text
+    assert tab["least_width_mm"] == pytest.approx(1.2, abs=1e-3)
+    assert tab["size_mm"] == pytest.approx([1.2, 8.0], abs=1e-3)
+    assert "east: 1 piece(s) of the section in its box, least width 1.2000 mm" in free.text
+    assert not reports.unlike("slice", free.numbers), reports.unlike("slice", free.numbers)
+    fused = bench("slice", "slice/tabs-fused.step", "--at", "z=10", "--box", east)
+    assert fused.verdict == "OK", fused.text
+    (cut,) = fused.numbers["cuts"]
+    assert cut["pieces_count"] == 1, fused.text
+    assert cut["pieces"][0]["least_width_mm"] == pytest.approx(2.0, abs=1e-3)
+    assert cut["places"]["east"]["whole_pieces"] == 0
+
+
 def test_light_that_disagrees_names_both_figures_their_methods_and_where(bench: Any) -> None:
     """On `suncatcher-3` a `light` DISAGREE named neither figure's method, and was read as the
     frame being wrong. A plate 0.1 mm thick tilted 5° over a pane: sections a layer apart cut it
