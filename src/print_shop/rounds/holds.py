@@ -17,6 +17,16 @@ A fact with `fixed` is a part already in place and never fitted, such as a box a
 one with `loose` a part fitted loose by design (mqucifer/print-shop#91): no part holds either. A
 held part's way out is the opposite of its fact's way in, or unknown without one.
 
+**How a breakdown's name is matched to a given file** (mqucifer/print-shop#97). The batch 9 gate
+named given parts in words, "plug body" for `references/plug_body.step`, "box (reference)" for
+`references/base.step` and "pane (given)" for `references/pane_1.step`, and each was taken for a
+printed part, so the plan waited for a file that couldn't exist. A stem's underscores and hyphens
+read as spaces, and a trailing digit (`_1`) may be left off where that names one file alone. Where
+one given file is left unmatched by every name in the breakdown, a name still unmatched that says
+it's given, "(reference)", "(given)" or "(bought)" in brackets or at its end, is that file. A name
+still unmatched is a printed part. A `fixed` or `loose` fact ends the wait wherever the breakdown
+names its part, on either branch.
+
 **Which of the model's own parts are held** (mqucifer/print-shop#90). On a design run a lid's snap
 onto a base was settled by eye, and the slide, run once, read the lid overlapping the base where it
 lay. A part is held where the latest breakdown joins it to one other part of the model's, neither
@@ -26,7 +36,13 @@ stays on the base" holds the lid, and "the base holds the lid" too. Words naming
 that one, "the lid stays on", and name no bought part, so a bracket that "holds a shelf" holds
 nothing of its own. The slide reads either way round, so a reading of the two in either order
 counts, and every refusal says the held part goes last, to swap them if it's the other way. No
-fact gives a printed part's way off, so each refusal says how to name it.
+fact gives a printed part's way off, so each refusal says how to name it. A refusal naming a part
+with no file names the given files, to name it by one if it's given, not to build it.
+
+**A negated hold word isn't a hold** (mqucifer/print-shop#97). "read NOT HELD ... a passage, not a
+grip" said nothing was held, and read as a hold. A hold word with "not", "no", "nothing", "never"
+or a "-n't" up to two words before it, in the same clause, says no hold; words that say a part
+comes off, such as "falls out", still say a hold when negated: "never falls out".
 
 **Two rules, each said with what to do next:**
 - `needs` refuses an eye need on a held part's hold: its words, or a request line it covers, name
@@ -66,10 +82,21 @@ HOLD = re.compile(
     r"|captive|in place|stays? (?:in|on|put|seated|shut)|snaps? (?:on|onto|in|into|over|shut)"
     r"|snapped (?:on|in|shut)|falls? out|comes? (?:out|loose)|loose)\b"
 )
-#: A verb after the first part named that makes it the holder: "the base holds the lid".
-HOLDER_VERB = re.compile(
-    r"\b(?:holds|grips|retains|secures|keeps|captures|clamps|locks|traps)\b"
+#: Hold words that say a part comes off: negated, they still say it's held, "never falls out".
+COMES_OFF = re.compile(r"falls? out|comes? (?:out|loose)|loose")
+#: Words that say a hold word after them isn't one: "not a grip", "NOT HELD", "nothing holds it".
+NEGATION = re.compile(r"not|no|nothing|never|\w+n['’]t")
+#: How many words before a hold word a negation reaches, in the same clause.
+NEGATED_WITHIN = 3
+#: Where a clause ends, for a negation: punctuation, a dash between words, or a joining word.
+CLAUSE = re.compile(r"[,;:.!?()]|\s[-–—]+\s|\b(?:and|but|or|so|while|yet)\b")
+#: A breakdown's name that says it's a given part: "box (reference)", "pane (given)", "fan bought".
+GIVEN_SAID = re.compile(
+    r"\(\s*(?:the\s+|a\s+)?(?:references?|given|bought)\b[^()]*\)"
+    r"|\b(?:references?|given|bought)\s*$"
 )
+#: A verb after the first part named that makes it the holder: "the base holds the lid".
+HOLDER_VERB = re.compile(r"\b(?:holds|grips|retains|secures|keeps|captures|clamps|locks|traps)\b")
 #: Words of a part's name that don't name it.
 NOT_A_NAME = frozenset(
     {"the", "and", "its", "part", "parts", "printed", "piece", "with", "for", "your", "one"}
@@ -148,22 +175,84 @@ def _stem(bought: str) -> str:
     return PurePosixPath(bought).stem.lower()
 
 
-def _names(name: str, bought: str) -> bool:
-    """Whether a breakdown's part name is the bought part: its path, its file name, or its stem as
-    a word of the name, such as "fan" or "the fan (bought)" for `references/fan.step`."""
+def _spaced(text: str) -> str:
+    """Words in lower case, one space apart: underscores and hyphens read as spaces."""
+    return " ".join(re.findall(r"[a-z0-9]+", text.lower()))
+
+
+def _stems(bought: str, bare: bool) -> list[str]:
+    """A file's stem as words, "plug body" of `plug_body.step`, and where `bare`, without a
+    trailing digit, "pane" of `pane_1.step`, if what's left is a word of three letters or more."""
+    words = re.findall(r"[a-z0-9]+", _stem(bought))
+    forms = [" ".join(words)] if words else []
+    if bare and len(words) > 1 and words[-1].isdigit() and len(" ".join(words[:-1])) >= 3:
+        forms.append(" ".join(words[:-1]))
+    return forms
+
+
+def _names(name: str, bought: str, bare: bool = True) -> bool:
+    """Whether a breakdown's part name is the file: its path, its file name, or its stem as words
+    of the name, such as "fan" or "the fan (bought)" for `references/fan.step` and "plug body" for
+    `references/plug_body.step`; where `bare`, "pane" for `references/pane_1.step` too."""
     said = _plain(name).lower()
     path = PurePosixPath(bought)
     if said in (bought.lower(), path.name.lower()):
         return True
-    return re.search(rf"\b{re.escape(_stem(bought))}\b", said) is not None
+    spaced = _spaced(said)
+    return any(re.search(rf"\b{re.escape(f)}\b", spaced) for f in _stems(bought, bare))
+
+
+def given_names(breakdown: dict[str, Any] | None, references: set[str]) -> dict[str, set[str]]:
+    """Each part name the breakdown gives, in its parts or its joins, with the given files it
+    names (mqucifer/print-shop#97): by `_names`, a bare stem only where it names one file alone;
+    then, where one given file is left unmatched by every name, each name still unmatched that
+    says it's given, "box (reference)", is that file. A name not here is a part of the model's."""
+    names: list[str] = []
+    for part in (breakdown or {}).get("parts") or []:
+        if isinstance(part, dict) and part.get("name"):
+            names.append(str(part["name"]))
+    for join in (breakdown or {}).get("joins") or []:
+        if isinstance(join, dict):
+            names += [str(p) for p in join.get("parts") or []]
+    found: dict[str, set[str]] = {}
+    for name in dict.fromkeys(names):
+        hits = {r for r in references if _names(name, r, bare=False)}
+        if not hits:
+            bare = [r for r in references if _names(name, r)]
+            hits = set(bare) if len(bare) == 1 else set()
+        if hits:
+            found[name] = hits
+    named = set().union(*found.values()) if found else set()
+    left = sorted(set(references) - named)
+    if len(left) == 1:
+        for name in dict.fromkeys(names):
+            if name not in found and GIVEN_SAID.search(_plain(name).lower()):
+                found[name] = {left[0]}
+    return found
+
+
+def hold_word(text: str) -> re.Match[str] | None:
+    """The first hold word in words already `normal`, or None: one with a negation up to two words
+    before it in its clause isn't one, "not a grip", unless it says a part comes off, "never falls
+    out", which is a hold either way (mqucifer/print-shop#97)."""
+    for word in HOLD.finditer(text):
+        clause = CLAUSE.split(text[: word.start()])[-1]
+        before = re.findall(r"[\w'’]+", clause)[-NEGATED_WITHIN:]
+        negated = any(NEGATION.fullmatch(w) for w in before)
+        if not negated or COMES_OFF.fullmatch(word.group(0)):
+            return word
+    return None
 
 
 def mentions(text: str, bought: str) -> bool:
-    """Whether words name the bought part, by its path or its stem as a word."""
+    """Whether words name the bought part, by its path or its stem as words."""
     said = normal(text)
     if bought.lower() in said or PurePosixPath(bought).name.lower() in said:
         return True
-    return re.search(rf"\b{re.escape(_stem(bought))}s?\b", said) is not None
+    if normal(bought) in said or normal(PurePosixPath(bought).name) in said:
+        return True
+    spaced = _spaced(said)
+    return any(re.search(rf"\b{re.escape(f)}s?\b", spaced) for f in _stems(bought, bare=False))
 
 
 def _name_words(name: str, other: str) -> list[str]:
@@ -207,7 +296,7 @@ def _says(text: str, a: str, b: str, references: Sequence[str]) -> tuple[str, st
     bought part: "what the plate holds" holds nothing of the join's, and "the fan is held by the
     lid" isn't the lid held by its base."""
     said = normal(text)
-    if not said or not HOLD.search(said):
+    if not said or hold_word(said) is None:
         return None
     which = _which(said, a, b)
     named = [p for p, q in ((a, b), (b, a)) if _at(said, p, q) >= 0]
@@ -218,14 +307,11 @@ def _says(text: str, a: str, b: str, references: Sequence[str]) -> tuple[str, st
     return which
 
 
-def _pair(join: dict[str, Any], references: set[str]) -> tuple[str, str] | None:
-    """A join's two parts where both are the model's, in its order, or None."""
+def _pair(join: dict[str, Any], given: dict[str, set[str]]) -> tuple[str, str] | None:
+    """A join's two parts where both are the model's, in its order, or None. `given` is each name
+    the breakdown gives a given file, as `given_names` reads it."""
     between = [str(p) for p in join.get("parts") or []]
-    mine = [
-        p
-        for p in between
-        if not _plain(p).startswith(REFERENCES) and not any(_names(p, r) for r in references)
-    ]
+    mine = [p for p in between if not _plain(p).startswith(REFERENCES) and not given.get(p)]
     if len(between) != 2 or len(mine) != 2 or _plain(mine[0]) == _plain(mine[1]):
         return None
     return mine[0], mine[1]
@@ -259,25 +345,28 @@ def held(
 ) -> list[Held]:
     """Each part a part of the model's holds: a bought part by its fact, or by the latest
     breakdown where no fact says it's fixed or loose; and a part of the model's joined to another
-    in the latest breakdown, where `said`, the needs' words, or the join's `how` say it's held."""
+    in the latest breakdown, where `said`, the needs' words, or the join's `how` say it's held. A
+    `fixed` or `loose` fact ends the wait wherever the breakdown names its part, on either branch
+    (mqucifer/print-shop#97)."""
     found: dict[str, Held] = {}
     not_held = {one.name for one in kept if one.fixed or one.loose}
     for one in kept:
         if facts_module.bought(one.name) and one.name not in not_held and one.way_in:
             found[one.name] = Held(one.name, opposite(one.way_in), "fact", one.held_by)
     joins = [j for j in (breakdown or {}).get("joins") or [] if isinstance(j, dict)]
+    given = given_names(breakdown, references)
     for join in joins:
         between = [str(p) for p in join.get("parts") or []]
         for bought in sorted(references):
             if bought in found or bought in not_held:
                 continue
-            others = [p for p in between if not _names(p, bought)]
+            others = [p for p in between if bought not in given.get(p, set())]
             if others and len(others) < len(between):
                 found[bought] = Held(bought, "", "breakdown", ", ".join(others))
     printed: list[Held] = []
     for join in joins:
-        pair = _pair(join, references)
-        if pair is None:
+        pair = _pair(join, given)
+        if pair is None or any(_names(p, f) for p in pair for f in not_held):
             continue
         how = str(join.get("how") or "")
         part = _printed(pair, [*said, how], sorted(references))
@@ -344,9 +433,7 @@ def _why_held(one: Held) -> str:
 
 
 #: Said of a printed part's slide, which the words may have the wrong way round.
-SWAP = (
-    "The held part goes last, as it's the one slid: swap the two if it's the other way round"
-)
+SWAP = "The held part goes last, as it's the one slid: swap the two if it's the other way round"
 
 
 def _eye_on_printed(
@@ -357,19 +444,40 @@ def _eye_on_printed(
         which = _says(text, one.part, one.holder, references)
         if which is None:
             continue
-        word = HOLD.search(normal(text))
+        word = hold_word(normal(text))
         this = Held(which[0], "", PRINTED, which[1])
+        given = _given_said(_unfiled(this, mine), references)
         return (
             f"the need {need.id!r} asks the eye whether {this.part} is held by {this.holder} "
             f'("{word.group(0) if word else ""}"), and your breakdown joins them. A hold is read '
             f"on the bench, never by eye: `{command(this, mine)}` slides {this.part} off along "
             f"its way off and says `{VERDICT}` with what it meets first, or `NOT HELD` and how far "
             f'it moves. Send this need as a bench need, "check": {_bench_shape(this, mine)}, with '
-            f"the same `source`, `quote` and `covers`, and its way off named. {SWAP}. If the eye "
-            "is to judge something else of it too, such as how it looks or how firm a pull feels, "
-            "keep an eye need for that alone, its `what` and `look_for` naming only that"
+            f"the same `source`, `quote` and `covers`, and its way off named. {SWAP}. "
+            + (f"{given}. " if given else "")
+            + "If the eye is to judge something else of it too, such as how it looks or how firm "
+            "a pull feels, keep an eye need for that alone, its `what` and `look_for` naming only "
+            "that"
         )
     return ""
+
+
+def _unfiled(one: Held, mine: Sequence[str]) -> list[str]:
+    """The two parts of a printed part's hold that no file of the model's is named for."""
+    return [name for name in (one.holder, one.part) if not any(_names(name, f) for f in mine)]
+
+
+def _given_said(names: Sequence[str], references: Sequence[str]) -> str:
+    """Where a refusal names a part with no file and something was given: to name it by a given
+    file if it's given, not to build it (mqucifer/print-shop#97), or nothing."""
+    if not names or not references:
+        return ""
+    files = ", ".join(f"`{r}`" for r in sorted(references))
+    which = files if len(references) == 1 else f"one of {files}"
+    return (
+        f"If {' or '.join(names)} is a given part, not one you print, name it in `breakdown` by "
+        f"its file, {which}, and don't build it"
+    )
 
 
 def eye_on_hold(
@@ -399,9 +507,9 @@ def eye_on_hold(
                 continue
             said = next(
                 (
-                    HOLD.search(normal(t))
+                    hold_word(normal(t))
                     for t in texts
-                    if t and HOLD.search(normal(t)) and mentions(t, one.part)
+                    if t and hold_word(normal(t)) and mentions(t, one.part)
                 ),
                 None,
             )
@@ -415,8 +523,7 @@ def eye_on_hold(
                 f'this need as a bench need, "check": {_bench_shape(one, mine)}, with the same '
                 "`source`, `quote` and `covers`"
                 + (
-                    "; the way out is the opposite of the way it goes in, which its `fact` "
-                    "keeps"
+                    "; the way out is the opposite of the way it goes in, which its `fact` keeps"
                     if not one.way_out
                     else ""
                 )
@@ -536,8 +643,9 @@ LOOSE_SAID = (
 )
 
 
-def plan_waits(missing: list[Missing]) -> str:
-    """The plan stop's refusal: for each held part, what's missing, and what to do next."""
+def plan_waits(missing: list[Missing], references: Sequence[str] = ()) -> str:
+    """The plan stop's refusal: for each held part, what's missing, and what to do next.
+    `references` are the given files."""
     lines = [
         "The plan waits for a first try at each part you hold and the bench's reading of it "
         "(mqucifer/print-shop#87): the bench reads a hold in seconds, but only on a part."
@@ -545,7 +653,7 @@ def plan_waits(missing: list[Missing]) -> str:
     for gap in missing:
         one = gap.one
         if one.printed:
-            lines.append(_printed_waits(gap))
+            lines.append(_printed_waits(gap, references))
             continue
         said = f"- `{one.part}`: {_why_held(one)}."
         if not gap.mine:
@@ -580,16 +688,21 @@ def plan_waits(missing: list[Missing]) -> str:
     return "\n".join(lines)
 
 
-def _printed_waits(gap: Missing) -> str:
-    """The plan's refusal for a part of the model's held by another (mqucifer/print-shop#90)."""
+def _printed_waits(gap: Missing, references: Sequence[str] = ()) -> str:
+    """The plan's refusal for a part of the model's held by another (mqucifer/print-shop#90). A
+    part with no file may be a given part named in words: it's told how to name it
+    (mqucifer/print-shop#97)."""
     one = gap.one
     said = f"- {one.part}: {_why_held(one)}."
-    if not all(any(_names(name, f) for f in gap.mine) for name in (one.holder, one.part)):
+    unfiled = _unfiled(one, gap.mine)
+    if unfiled:
         said += (
             f" Missing: a part file for each of {one.holder} and {one.part}, and its reading. "
             "Build a rough first try with `write` and `run`, then read it with "
             f"`bench {command(one, gap.mine)}`."
         )
+        given = _given_said(unfiled, references)
+        said += f" {given}." if given else ""
     elif gap.stale:
         said += (
             f" Its reading is on a part file that has changed since: {', '.join(gap.stale)}. "

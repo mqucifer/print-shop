@@ -3684,7 +3684,7 @@ class Run:
             # A held part is built and read before its plan (mqucifer/print-shop#87).
             _, missing = self._first_tries()
             if missing:
-                return "hold_unread", holds.plan_waits(missing)
+                return "hold_unread", holds.plan_waits(missing, sorted(self._references()))
         return None
 
     def _glass_declared(

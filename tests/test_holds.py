@@ -2,11 +2,14 @@
 build and its reading at the plan stop (mqucifer/print-shop#86, mqucifer/print-shop#87), as does a
 part of the model's held by another (mqucifer/print-shop#90). A given part fixed in place is a fact
 without a way in, and one fitted loose a fact held by nothing (mqucifer/print-shop#91). At intake,
-a hold read `HELD` says what comes next (mqucifer/print-shop#92).
+a hold read `HELD` says what comes next (mqucifer/print-shop#92). A given part named in words is
+its file, a negated hold word isn't a hold, and a fixed or loose fact ends the wait on every branch
+(mqucifer/print-shop#97).
 
 No Docker and no model: a scripted model drives each run, and a box answers each bench command
 with the next verdict and runs nothing. The parts are made up for the test, a lid holding a fan, a
-lid on a box, a lid on a base both printed, and a sleeve over a block; nothing here is from a run.
+lid on a box, a lid on a base both printed, a sleeve over a block, a plug through a wall and a pane
+in a frame; nothing here is from a run.
 """
 
 from __future__ import annotations
@@ -600,8 +603,9 @@ def test_a_plan_with_the_lid_held_by_the_base_waits_for_its_slide(tmp_path: Path
     ) in nothing["reply"]
     assert "loose" not in nothing["reply"], "a part of the model's has no fact to say so"
     assert unread["why"] == "hold_unread"
-    assert f"Missing: its reading: `bench clearance base.step lid.step --slide {WAY_OFF}`" in (
-        unread["reply"]
+    assert (
+        f"Missing: its reading: `bench clearance base.step lid.step --slide {WAY_OFF}`"
+        in (unread["reply"])
     )
     assert read["outcome"] == "ok"
     assert drawn["outcome"] == "ok", drawn["reply"]
@@ -760,3 +764,250 @@ def test_a_hold_read_not_held_at_intake_says_nothing_more(tmp_path: Path) -> Non
     assert run.drive().name == "blocked"
     read = told(run)[2]
     assert "The hold is read" not in read["reply"]
+
+
+# 8. Given parts named in words, negated hold words, and facts on every branch
+# (mqucifer/print-shop#97)
+
+PLUG_REQUEST = """\
+A wall plate around the plug body given.
+
+## Requirements
+- The plug body passes through the wall plate.
+"""
+PLUG_BREAKDOWN = tool(
+    "breakdown",
+    parts=[
+        {"name": "wall", "what": "a plate with a hole"},
+        {"name": "plug body", "what": "the given plug, unchanged"},
+    ],
+    joins=[{"parts": ["wall", "plug body"], "how": "the plug body passes through the wall"}],
+    look=["a plain plate"],
+    **{"from": "the request and references/plug_body.step"},
+)
+PLUG_SLIDE = "clearance wall.step references/plug_body.step --slide +z"
+THROUGH = {
+    "id": "through",
+    "what": "the plug body passes through the wall",
+    "source": "request",
+    "quote": "The plug body passes through the wall plate.",
+    "covers": ["R1"],
+    "check": {
+        "by": "bench",
+        "measures": "fit",
+        "command": "clearance wall.step references/plug_body.step --min-gap 0.2",
+        "verdicts": ["CLEAR"],
+    },
+}
+
+
+def test_a_plug_body_named_in_words_is_its_file_and_its_slide_reading_counts(
+    tmp_path: Path,
+) -> None:
+    run = started(
+        tmp_path,
+        PLUG_REQUEST,
+        "plug_body.step",
+        [PLUG_BREAKDOWN],
+        [tool("needs", needs=[THROUGH])],
+        [tool("write", path="wall.step", content="a first wall, made up")],
+        [tool("bench", command=PLUG_SLIDE)],
+        [PLAN],
+        [tool("send_ask", says="The plan as text.")],
+        verdicts=("NOT HELD",),
+    )
+    assert run.drive().name == "ask", [e["reply"] for e in told(run)]
+    assert [e["outcome"] for e in told(run)] == ["ok"] * 6
+    (one,) = run._holds()
+    assert one == holds.Held("references/plug_body.step", "", "breakdown", "wall"), (
+        "the plug body is the given file, not a printed part of the model's"
+    )
+    question = (run.folder / "asks" / "1" / "question.md").read_text()
+    assert f"- `references/plug_body.step`: `{PLUG_SLIDE}`, call 4: NOT HELD" in question
+
+
+ON_THE_BOX = {
+    "id": "sits",
+    "what": "the lid sits on the box's top edge",
+    "source": "request",
+    "quote": "The lid sits on the box's top edge",
+    "covers": ["R1"],
+    "check": {"by": "eye", "look_for": "it sits flush", "no_bench": "a look"},
+}
+
+
+def test_a_box_named_as_the_reference_and_fixed_lets_the_lid_plan_go(tmp_path: Path) -> None:
+    breakdown = tool(
+        "breakdown",
+        parts=[
+            {"name": "lid", "what": "a plate with tabs"},
+            {"name": "box (reference)", "what": "the given box, already printed"},
+        ],
+        joins=[{"parts": ["lid", "box (reference)"], "how": "the lid snaps onto the box"}],
+        look=["flush with the box"],
+        **{"from": "the request and references/base.step"},
+    )
+    fixed = tool(
+        "fact",
+        name="references/base.step",
+        text="An open box, already printed.",
+        box="x 0-60, y 0-40, z 0-25",
+        fixed=True,
+        **{"from": "call 2, bench info references/base.step"},
+    )
+    run = started(
+        tmp_path,
+        BOX_REQUEST,
+        "base.step",
+        [breakdown],
+        [fixed],
+        [tool("needs", needs=[ON_THE_BOX])],
+        [tool("ask", question="This way?", stop="plan", plan="Two tabs, 0.2 mm of play.")],
+        [tool("send_ask", says="The plan as text.")],
+    )
+    assert run.drive().name == "ask", [e["reply"] for e in told(run)]
+    assert [e["outcome"] for e in told(run)] == ["ok"] * 5
+    assert run._holds() == [], "the fixed fact ends the wait, and the box isn't printed"
+
+
+def test_a_given_name_goes_to_the_one_given_file_left_unmatched() -> None:
+    def names(*parts: str) -> dict[str, Any]:
+        return {"parts": [{"name": p} for p in parts], "joins": [{"parts": list(parts)}]}
+
+    base = {"references/base.step"}
+    assert holds.given_names(names("lid", "box (reference)"), base) == {"box (reference)": base}
+    assert holds.given_names(names("lid", "the box, given"), base) == {"the box, given": base}
+    assert holds.given_names(names("lid", "box"), base) == {}, "a name that doesn't say given"
+    two = {"references/base.step", "references/fan.step"}
+    assert holds.given_names(names("lid", "box (reference)"), two) == {}, "two left: neither"
+    assert holds.given_names(names("lid", "fan", "box (bought)"), two) == {
+        "fan": {"references/fan.step"},
+        "box (bought)": base,
+    }, "the fan is named, so the base is the one left"
+    pane = {"references/pane_1.step"}
+    assert holds.given_names(names("frame", "pane (given)"), pane) == {"pane (given)": pane}
+    assert holds.given_names(names("frame", "pane"), pane) == {"pane": pane}, "_1 left off"
+    panes = {"references/pane_1.step", "references/pane_2.step"}
+    assert holds.given_names(names("frame", "pane"), panes) == {}, "a bare stem naming two"
+    assert holds.given_names(names("frame", "pane 2"), panes) == {
+        "pane 2": {"references/pane_2.step"}
+    }
+    assert holds.given_names(names("wall", "plug-body"), {"references/plug_body.step"}) == {
+        "plug-body": {"references/plug_body.step"}
+    }
+
+
+def test_a_pane_named_as_given_is_its_file_and_its_slide_reading_counts(tmp_path: Path) -> None:
+    breakdown = tool(
+        "breakdown",
+        parts=[
+            {"name": "frame", "what": "a frame with a lip"},
+            {"name": "pane (given)", "what": "the given pane"},
+        ],
+        joins=[{"parts": ["frame", "pane (given)"], "how": "the frame's lip holds the pane"}],
+        look=["a thin frame"],
+        **{"from": "the request and references/pane_1.step"},
+    )
+    slide = "clearance frame.step references/pane_1.step --slide +z"
+    sits = {
+        "id": "sits",
+        "what": "the pane sits in the frame",
+        "source": "request",
+        "quote": "The pane sits in the frame.",
+        "covers": ["R1"],
+        "check": {"by": "eye", "look_for": "an even border", "no_bench": "a look"},
+    }
+    run = started(
+        tmp_path,
+        "A frame for the pane given.\n\n## Requirements\n- The pane sits in the frame.\n",
+        "pane_1.step",
+        [breakdown],
+        [tool("needs", needs=[sits])],
+        [PLAN],
+        [tool("write", path="frame.step", content="a first frame, made up")],
+        [tool("bench", command=slide)],
+        [PLAN],
+        [tool("send_ask", says="The plan as text.")],
+        verdicts=("HELD",),
+    )
+    assert run.drive().name == "ask", [e["reply"] for e in told(run)]
+    _, _, waits, _, read, drawn, sent = told(run)
+    assert waits["why"] == "hold_unread"
+    assert "- `references/pane_1.step`: your breakdown joins it to frame." in waits["reply"]
+    assert "a part file for each of" not in waits["reply"], "the pane is given, not printed"
+    assert read["outcome"] == "ok"
+    assert drawn["outcome"] == "ok", drawn["reply"]
+    assert f"- `references/pane_1.step`: `{slide}`, call 5: HELD" in drawn["reply"]
+    assert sent["outcome"] == "ok"
+
+
+def test_a_negated_hold_word_isnt_a_hold() -> None:
+    def joined(how: str) -> dict[str, Any]:
+        return {"joins": [{"parts": ["base", "lid"], "how": how}]}
+
+    lid_on_base = [holds.Held("lid", "", holds.PRINTED, "base")]
+    assert (
+        holds.held([], joined("the lid passes through the base, not a grip, no retention"), set())
+        == []
+    )
+    assert (
+        holds.held(
+            [], joined("read NOT HELD: the lid is a passage, not a grip - no retention"), set()
+        )
+        == []
+    )
+    assert holds.held([], joined("nothing holds the lid on the base"), set()) == []
+    assert holds.held([], joined("the lid isn't held on the base"), set()) == []
+    assert holds.held([], joined("the lid never falls out of the base"), set()) == lid_on_base, (
+        "a part that never comes off is held"
+    )
+    assert (
+        holds.held([], joined("no gap, and the lid snaps onto the base"), set()) == lid_on_base
+    ), "a negation in another clause says nothing of the hold"
+    fan = facts.Fact("references/fan.step", "", "c", 1, "x", "+z", "the lid")
+    held = holds.held([fan], None, {"references/fan.step"})
+    passes = Need(
+        "p", "the fan passes the lid, not a grip", "chosen", "eye", look_for="no retention"
+    )
+    assert holds.eye_on_hold([passes], held, {}) == []
+    stays = Need("s", "the fan stays in place", "chosen", "eye", look_for="it never falls out")
+    assert holds.eye_on_hold([stays], held, {}) != []
+
+
+def test_a_loose_fact_ends_the_wait_wherever_the_breakdown_names_its_part() -> None:
+    plug = facts.Fact("references/plug_body.step", "", "c", 1, "x", "+z", loose=True)
+    given = {"references/plug_body.step"}
+    joined = {"joins": [{"parts": ["wall", "plug body"], "how": "the wall holds the plug body"}]}
+    assert holds.held([plug], joined, given) == []
+    panes = {"references/pane_1.step", "references/pane_2.step"}
+    fixed = [facts.Fact(p, "", "c", 1, "x", fixed=True) for p in sorted(panes)]
+    framed = {"joins": [{"parts": ["frame", "pane"], "how": "the frame holds the pane"}]}
+    assert holds.held([], framed, panes) == [holds.Held("pane", "", holds.PRINTED, "frame")], (
+        "a bare stem naming two files is a printed part"
+    )
+    assert holds.held(fixed, framed, panes) == [], "and a fixed fact on what it names ends it"
+
+
+def test_a_printed_part_with_no_file_is_told_to_name_a_given_file(tmp_path: Path) -> None:
+    breakdown = tool(
+        "breakdown",
+        parts=[{"name": "wall", "what": "a plate"}, {"name": "plug", "what": "the plug"}],
+        joins=[{"parts": ["wall", "plug"], "how": "the wall holds the plug"}],
+        look=["a plain plate"],
+        **{"from": "the request"},
+    )
+    run = started(
+        tmp_path,
+        PLUG_REQUEST,
+        "plug_body.step",
+        [breakdown],
+        [tool("needs", needs=[THROUGH])],
+        [PLAN],
+    )
+    assert run.drive().name == "blocked"
+    waits = told(run)[2]
+    assert waits["why"] == "hold_unread"
+    assert (
+        "If wall or plug is a given part, not one you print, name it in `breakdown` by its file, "
+        "`references/plug_body.step`, and don't build it."
+    ) in waits["reply"]
