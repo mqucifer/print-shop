@@ -29,6 +29,7 @@ from pydantic import BaseModel, ValidationError
 
 __all__ = [
     "Answer",
+    "AnswersRefused",
     "Asker",
     "Estimate",
     "Intake",
@@ -227,33 +228,98 @@ def cli_asker(
     return ask
 
 
-def replay_asker(path: Path) -> Asker:
-    """Answers recorded as JSON, `{"answers": [{"choice": 2}, {"other": "..."}]}`.
+class AnswersRefused(ValueError):
+    """A recorded answers file that doesn't answer the questions asked."""
 
-    Numbered from 1, as typed. A question beyond the recording takes the
-    recommended option, and says so in the answer.
+
+def replay_asker(path: Path) -> Asker:
+    """Answers recorded as JSON, each naming the question it answers.
+
+    ``{"answers": [{"question": "purpose", "choice": 2},
+    {"question": "<a question's text>", "choice": "<an option's label>"},
+    {"question": "overhang", "other": "..."}]}``
+
+    A question is named by its text, or by its feature id ("purpose",
+    "overhang") when no other question asked has that feature. A choice is an
+    option's number, from 1 as typed, or its label. The file must answer
+    every question asked and nothing else: a file written for other questions
+    is refused, saying which, never replayed by position (mqucifer/print-shop#107:
+    one written for one set of questions answered another wrongly, silently).
 
     Raises:
-        ValueError: If the file isn't a list of answers.
+        ValueError: If the file isn't a list of answers, each naming its question.
+            The asker itself raises `AnswersRefused` when they don't match.
     """
     try:
         rows = json.loads(path.read_text())["answers"]
-        recorded = [
-            Answer(choice=r["choice"] - 1) if "choice" in r else Answer(other=str(r["other"]))
-            for r in rows
-        ]
+        recorded = [_Recorded.model_validate(r) for r in rows]
     except (OSError, KeyError, TypeError, json.JSONDecodeError, ValidationError) as exc:
-        raise ValueError(f"{path} is not a list of answers: {exc}") from exc
+        raise ValueError(
+            f"{path} is not a list of answers, each naming its question "
+            f'({{"answers": [{{"question": "purpose", "choice": 2}}]}}): {exc}'
+        ) from exc
 
     def ask(questions: Sequence[Question]) -> tuple[Answer, ...]:
-        answers = []
-        for n, q in enumerate(questions):
-            given = recorded[n] if n < len(recorded) else None
-            if given is not None and (given.choice is None or given.choice < len(q.options)):
-                answers.append(given)
-            else:
-                answers.append(Answer(choice=q.recommended,
-                                      other="(not in the recording: the recommended option)"))
-        return tuple(answers)
+        answers: list[Answer | None] = [None] * len(questions)
+        problems = []
+        for r in recorded:
+            matched = r.matches(questions)
+            if len(matched) != 1:
+                problems.append(f"'{r.question}' names {'no' if not matched else 'more than one'} "
+                                "question asked")
+                continue
+            n = matched[0]
+            if answers[n] is not None:
+                problems.append(f"question {n + 1} is answered twice")
+                continue
+            given = r.answer(questions[n])
+            if isinstance(given, str):
+                problems.append(f"question {n + 1}: {given}")
+                continue
+            answers[n] = given
+        problems += [f"question {n + 1} has no answer in the file"
+                     for n, a in enumerate(answers) if a is None and questions]
+        if problems:
+            raise AnswersRefused(
+                f"{path} doesn't answer these questions, so none of it is used: "
+                + "; ".join(problems) + ".\nThe questions asked, each with its feature:\n"
+                + "\n".join(f"{n}. [{q.feature}] {q.text}\n"
+                             + "\n".join(f"   {i}) {o.label}" for i, o in enumerate(q.options, 1))
+                             for n, q in enumerate(questions, 1))
+            )
+        return tuple(a for a in answers if a is not None)
 
     return ask
+
+
+class _Recorded(BaseModel):
+    """One recorded answer: the question it answers, and an option or the Sponsor's words."""
+
+    model_config = {"frozen": True, "extra": "forbid"}
+
+    question: str
+    choice: int | str | None = None
+    other: str = ""
+
+    def matches(self, questions: Sequence[Question]) -> list[int]:
+        said = _plain(self.question)
+        by_text = [n for n, q in enumerate(questions) if _plain(q.text) == said]
+        if by_text:
+            return by_text
+        return [n for n, q in enumerate(questions) if q.feature == self.question.strip()]
+
+    def answer(self, question: Question) -> Answer | str:
+        if self.choice is None:
+            return Answer(other=self.other) if self.other.strip() else "neither a choice nor words"
+        if isinstance(self.choice, int):
+            if 1 <= self.choice <= len(question.options):
+                return Answer(choice=self.choice - 1)
+            return f"choice {self.choice} isn't one of its {len(question.options)} options"
+        labels = [_plain(o.label) for o in question.options]
+        if _plain(self.choice) in labels:
+            return Answer(choice=labels.index(_plain(self.choice)))
+        return f"'{self.choice}' isn't one of its options"
+
+
+def _plain(text: str) -> str:
+    return " ".join(text.split()).casefold()

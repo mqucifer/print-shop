@@ -9,6 +9,7 @@ the intake, the proposal and the corrections (part 4).
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -254,8 +255,7 @@ def test_a_correction_slices_again_and_the_ledger_keeps_it(
     assert daemon.wait_for_finish(job_id, timeout_s=30).printed
     row = ledger.get(job_id)
     assert row is not None and row.intake is not None
-    # What's seen, asked last by print-shop, is the recommended option: the recording has
-    # no answer for it (print-shop#105).
+    # What's seen, asked last by print-shop (print-shop#105), answered in the recording.
     assert row.intake.summary() == (
         "What is the cube for? a gift; Which faces of this part will be seen once it's in "
         "use? the walls and the top as it prints"
@@ -306,3 +306,33 @@ def test_stop_at_the_review_never_reaches_the_gate(
     assert (result.approved, result.printed) == (False, False)
     assert "stopped at the settings review" in (result.error or "")
     assert ledger.get(job_id) is None
+
+
+def test_answers_written_for_other_questions_end_the_job_before_the_gate(
+    tmp_path: Path,
+) -> None:
+    """mqucifer/print-shop#107: a file for other questions is refused, and says so at once.
+
+    It once answered whatever was asked, by position. `wait_for_gate` returns as
+    the job ends, rather than leaving `print_job.py` waiting out the hour.
+    """
+    (tmp_path / "work").mkdir()
+    answers = tmp_path / "answers.json"
+    answers.write_text(json.dumps({"answers": [{"question": "overhang", "choice": 1}]}))
+    sponsor = Sponsor("ok")
+    ledger = Ledger(tmp_path / "ledger.sqlite")
+    daemon = Daemon(cfg=CFG, profiles=CI_PROFILES, workdir=tmp_path / "work",
+                    printer=FramePrinter(), slicer=RecordedSlicer(),
+                    bridge=lambda cfg: MemoryBridge(), ledger=ledger,
+                    proposer=Proposer(ask=_model, ask_questions=_questions),
+                    asker=replay_asker(answers), reviewer=sponsor)
+    with daemon:
+        job_id = daemon.submit(write_stl("cube", tmp_path))
+        started = time.monotonic()
+        daemon.wait_for_gate(job_id, timeout_s=60)
+        assert time.monotonic() - started < 30 and daemon.pending_gate() is None
+        result = daemon.wait_for_finish(job_id, timeout_s=5)
+    assert (result.approved, result.printed) == (False, False)
+    assert "doesn't answer these questions, so none of it is used" in (result.error or "")
+    assert "1. [purpose] What is the cube for?" in (result.error or "")
+    assert not sponsor.shown and ledger.get(job_id) is None

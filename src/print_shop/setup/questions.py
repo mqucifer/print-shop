@@ -204,8 +204,8 @@ def propose_questions(facts: PartFacts, ask: Ask) -> Asked:
         questions = [PURPOSE, *questions[: MAX_QUESTIONS - 1]]
         note = "; ".join(x for x in (note, "purpose asked by print-shop: the model didn't") if x)
     if not any(q.feature == SEEN.feature for q in questions):
-        # Last, so recorded answers keep their places (they replay by position); in place of
-        # the model's last question when four are already asked (print-shop#105).
+        # Last, after what the part's shape raised; in place of the model's last question
+        # when four are already asked (print-shop#105).
         said = "what's seen asked by print-shop"
         if len(questions) >= MAX_QUESTIONS:
             said += f", in place of '{questions[MAX_QUESTIONS - 1].text}'"

@@ -328,12 +328,21 @@ class Daemon:
         return job_id
 
     def wait_for_gate(self, job_id: str, timeout_s: float) -> None:
-        """Block until the job reaches a gate (or times out).
+        """Block until the job reaches a gate, or ends before one (or times out).
+
+        A job that ended without a gate, refused or stopped before it, returns
+        at once, with `pending_gate()` None and its error in `wait_for_finish`,
+        rather than leaving the caller waiting out the timeout.
 
         Raises TimeoutError if the gate is not reached within timeout_s.
         """
-        if not self._at_gate.wait(timeout=timeout_s):
-            raise TimeoutError(f"timed out waiting for gate on job {job_id}")
+        deadline = time.monotonic() + timeout_s
+        while not self._at_gate.wait(timeout=min(0.2, max(0.0, deadline - time.monotonic()))):
+            with self._job_lock:
+                if self._active_job_id != job_id:
+                    return
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"timed out waiting for gate on job {job_id}")
 
     def wait_for_finish(self, job_id: str, timeout_s: float) -> JobResult:
         """Block until the job finishes (or times out).

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import secrets
 import time
 from collections.abc import Callable, Iterable
 from pathlib import Path
@@ -415,6 +417,13 @@ class MqttBridge:
         client_id = f"3dprint-{cfg.node_id}"
         if client_suffix:
             client_id += f"-{client_suffix}"
+        # Unique to this connection (mqucifer/print-shop#107). With a fixed id, a
+        # new run took over a stopped run's session that was still open: the broker
+        # published the old session's will, "offline", and the two clients' own
+        # reconnects took the id back and forth, each takeover another "offline",
+        # until Home Assistant showed the agent unavailable at the gate.
+        client_id += f"-{os.getpid()}-{secrets.token_hex(3)}"
+        self.client_id = client_id
 
         self._client = mqtt.Client(
             callback_api_version=CallbackAPIVersion.VERSION2,
@@ -431,6 +440,11 @@ class MqttBridge:
                 payload="offline",
                 retain=True,
             )
+        self._owns_availability = owns_availability
+        #: What this owner last said it was. Said again on every reconnect, and
+        #: over any "offline" that arrives while it's online: another session's
+        #: will, or its own from a dropped connection (mqucifer/print-shop#107).
+        self._online = False
         self._connected = False
         self._subscriptions: list[tuple[str, MessageHandler]] = []
         self._client.on_message = self._on_message
@@ -449,6 +463,8 @@ class MqttBridge:
             raise ConnectionError(
                 f"Could not connect to MQTT broker at {self._cfg.host}:{self._cfg.port}"
             )
+        if self._owns_availability:
+            self.subscribe(availability_topic(self._cfg), self._on_availability)
         return self
 
     def __exit__(self, *exc: object) -> None:
@@ -466,9 +482,17 @@ class MqttBridge:
         properties: Properties | None,
     ) -> None:
         if reason_code == 0:
+            reconnected = self._connected or bool(self._subscriptions)
             self._connected = True
-            # Availability is published explicitly by the owner, never here.
-            # See `owns_availability`.
+            # A clean session forgets its subscriptions: a reconnect makes them again.
+            if reconnected:
+                for topic, _ in self._subscriptions:
+                    client.subscribe(topic, qos=1)
+            # Availability is the owner's to publish, and only once it has said it's
+            # online: a reconnect says it again, since the broker may have published
+            # this connection's will while it was down. See `owns_availability`.
+            if self._owns_availability and self._online:
+                self._publish_online()
         else:
             raise ConnectionError(f"MQTT connect failed: {reason_code}")
 
@@ -532,12 +556,29 @@ class MqttBridge:
         return predicate()
 
     def publish_availability(self, online: bool) -> None:
+        self._online = online
         payload = "online" if online else "offline"
         self._client.publish(
             availability_topic(self._cfg),
             payload=payload,
             retain=True,
+            qos=1,
         )
+
+    def _publish_online(self) -> None:
+        self._client.publish(availability_topic(self._cfg), payload="online", retain=True, qos=1)
+
+    def _on_availability(self, topic: str, payload: bytes, retain: bool) -> None:
+        """An "offline" while this owner is online is stale: say "online" over it.
+
+        A stopped run's will can reach the broker after this run said it was
+        online (its session timed out late), and is retained over it. Nothing
+        else is the owner's to correct.
+        """
+        if payload == b"offline" and self._online:
+            logger.warning("availability read offline while this run is online "
+                           "(another session's will); saying online again")
+            self._publish_online()
 
     def announce(self) -> None:
         """Publish every discovery payload, retained."""

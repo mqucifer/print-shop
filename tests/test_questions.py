@@ -23,6 +23,7 @@ from print_shop.setup.bounds import check
 from print_shop.setup.features import Feature, measure
 from print_shop.setup.intake import (
     Answer,
+    AnswersRefused,
     Estimate,
     Intake,
     Question,
@@ -180,7 +181,7 @@ def test_which_faces_are_seen_is_asked_last_with_options_that_set_nothing(
 ) -> None:
     """mqucifer/print-shop#105: which face is seen comes from the intake, not the slice.
 
-    Last, so a recording's answers keep their places; one without it takes the recommended.
+    Last, after what the part's shape raised. A recorded answers file names it as "seen".
     """
     asked = Proposer(ask_questions=replay(RECORDED / "snap.json")).questions(
         features("snap", tmp_path), STORE_PROFILES
@@ -273,14 +274,68 @@ def test_an_answer_is_a_number_or_other_words(tmp_path: Path) -> None:
     assert isinstance(parse("9", q), str) and isinstance(parse("o", q), str)
 
 
-def test_a_recording_beyond_its_answers_takes_the_recommended(tmp_path: Path) -> None:
+def _answers(tmp_path: Path, *rows: dict[str, Any]) -> Path:
     path = tmp_path / "answers.json"
-    path.write_text(json.dumps({"answers": [{"choice": 1}]}))
+    path.write_text(json.dumps({"answers": list(rows)}))
+    return path
+
+
+def test_recorded_answers_are_matched_to_their_questions_not_their_places(
+    tmp_path: Path,
+) -> None:
+    """mqucifer/print-shop#107: answers once replayed by position, whatever was asked."""
     qs = questions("snap", tmp_path)
-    answers = replay_asker(path)(qs)
-    assert answers[0] == Answer(choice=0)
-    for q, a in zip(qs[1:], answers[1:], strict=True):
-        assert a.choice == q.recommended and "not in the recording" in a.other
+    assert [q.feature for q in qs] == ["purpose", "overhang", "seen"]
+    path = _answers(
+        tmp_path,
+        {"question": "seen", "choice": 2},
+        {"question": "overhang", "choice": qs[1].options[2].label.upper()},
+        {"question": f"  {qs[0].text}  ", "choice": 2},
+    )
+    assert replay_asker(path)(qs) == (Answer(choice=1), Answer(choice=2), Answer(choice=1))
+
+
+@pytest.mark.parametrize(
+    ("rows", "says"),
+    [
+        # Written for a part asked about its bridge, not its overhang.
+        ([{"question": "purpose", "choice": 1}, {"question": "bridge", "choice": 1}],
+         "'bridge' names no question asked"),
+        ([{"question": "purpose", "choice": 1}], "question 2 has no answer in the file"),
+        ([{"question": "purpose", "choice": 1}, {"question": "overhang", "choice": 9}],
+         "question 2: choice 9 isn't one of its"),
+        ([{"question": "purpose", "choice": "a door hinge"}, {"question": "overhang", "choice": 1}],
+         "question 1: 'a door hinge' isn't one of its options"),
+        ([{"question": "purpose", "choice": 1}, {"question": "purpose", "choice": 2},
+          {"question": "overhang", "choice": 1}], "question 1 is answered twice"),
+    ],
+)
+def test_a_file_that_doesnt_answer_the_questions_asked_is_refused(
+    rows: list[dict[str, Any]], says: str, tmp_path: Path
+) -> None:
+    qs = questions("snap", tmp_path)
+    with pytest.raises(AnswersRefused) as refused:
+        replay_asker(_answers(tmp_path, *rows))(qs)
+    message = str(refused.value)
+    assert says in message and "none of it is used" in message
+    assert f"1. [purpose] {qs[0].text}" in message and f"2. [overhang] {qs[1].text}" in message
+
+
+def test_a_feature_two_questions_share_must_be_named_by_its_text(tmp_path: Path) -> None:
+    q = questions("snap", tmp_path)[1]
+    twice = (q, q.model_copy(update={"text": "And the hook's lip?"}))
+    path = _answers(tmp_path, {"question": "overhang", "choice": 1},
+                    {"question": "And the hook's lip?", "choice": 2})
+    with pytest.raises(AnswersRefused, match="'overhang' names more than one question"):
+        replay_asker(path)(twice)
+    path = _answers(tmp_path, {"question": q.text, "choice": 1},
+                    {"question": "And the hook's lip?", "choice": 2})
+    assert replay_asker(path)(twice) == (Answer(choice=0), Answer(choice=1))
+
+
+def test_a_file_of_answers_by_position_is_refused_before_the_job(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="each naming its question"):
+        replay_asker(_answers(tmp_path, {"choice": 1}, {"choice": 2}))
 
 
 # --------------------------------------------------------------------------
