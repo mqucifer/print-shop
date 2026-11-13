@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -191,11 +192,18 @@ def _step(
     was: str | None = None, job_id: str | None = None,
 ) -> None:
     with ledger.writing() as db:
-        db.execute(
-            "INSERT INTO print_lesson_steps (lesson, status, by, why, was, job_id, at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (lesson, status, by, why, was, job_id, _now()),
-        )
+        _step_in(db, lesson, status, by, why, was, job_id)
+
+
+def _step_in(
+    db: sqlite3.Connection, lesson: int, status: str, by: str, why: str | None = None,
+    was: str | None = None, job_id: str | None = None,
+) -> None:
+    db.execute(
+        "INSERT INTO print_lesson_steps (lesson, status, by, why, was, job_id, at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (lesson, status, by, why, was, job_id, _now()),
+    )
 
 
 def _status(ledger: Ledger, lesson: int, status: str, by: str) -> None:
@@ -261,25 +269,26 @@ def draw(ledger: Ledger, row: Row) -> list[int]:
             lesson = int(same[0]["id"])
             keyed = json.loads(same[0]["traits"])
             fits = set(keyed) <= set(part["traits"]) and bool(keyed)
-            _evidence(ledger, lesson, row.job_id, CORRECTION, key, detail)
-            _step(ledger, lesson, one(ledger, lesson)["status"], HARNESS,
-                  f"the same correction again on {row.stl_name}"
-                  + ("" if fits else ", whose part isn't every trait it's keyed to"),
-                  job_id=row.job_id)
+            said = f"the same correction again on {row.stl_name}" + (
+                "" if fits else ", whose part isn't every trait it's keyed to"
+            )
+            with ledger.writing() as db:
+                _evidence(db, lesson, row.job_id, CORRECTION, key, detail)
+                _step_in(db, lesson, one_in(db, lesson), HARNESS, said, job_id=row.job_id)
             continue
         made.append(_new(
             ledger, row.job_id, CORRECTION, HARNESS, c.reason or "the Sponsor's correction",
-            part["traits"], key, c.value,
+            part["traits"], (CORRECTION, key, detail), key, c.value,
         ))
-        _evidence(ledger, made[-1], row.job_id, CORRECTION, key, detail)
     said = (row.note or "").strip()
     if row.result is not None and (row.result == "failed" or said) and not _drawn(
         ledger, row.job_id, OUTCOME, ""
     ):
         text = said or f"it failed: {row.symptom}"
-        made.append(_new(ledger, row.job_id, OUTCOME, HARNESS, text, part["traits"]))
         detail = {**part, "result": str(row.result), "symptom": str(row.symptom), "note": said}
-        _evidence(ledger, made[-1], row.job_id, OUTCOME, "", detail)
+        made.append(_new(
+            ledger, row.job_id, OUTCOME, HARNESS, text, part["traits"], (OUTCOME, "", detail)
+        ))
     return made
 
 
@@ -291,20 +300,29 @@ def _drawn(ledger: Ledger, job_id: str, kind: str, key: str) -> bool:
 
 
 def _evidence(
-    ledger: Ledger, lesson: int, job_id: str, kind: str, key: str, detail: dict[str, Any]
+    db: sqlite3.Connection, lesson: int, job_id: str, kind: str, key: str,
+    detail: dict[str, Any],
 ) -> None:
-    with ledger.writing() as db:
-        db.execute(
-            "INSERT OR IGNORE INTO print_lesson_evidence (lesson, job_id, kind, key, detail, at)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (lesson, job_id, kind, key, _json(detail), _now()),
-        )
+    db.execute(
+        "INSERT OR IGNORE INTO print_lesson_evidence (lesson, job_id, kind, key, detail, at)"
+        " VALUES (?, ?, ?, ?, ?, ?)",
+        (lesson, job_id, kind, key, _json(detail), _now()),
+    )
+
+
+def one_in(db: sqlite3.Connection, lesson: int) -> str:
+    """A lesson's status, read inside a transaction."""
+    return str(db.execute("SELECT status FROM print_lessons WHERE id=?", (lesson,)).fetchone()[0])
 
 
 def _new(
     ledger: Ledger, job_id: str, drawn_from: str, by: str, text: str, keyed: list[str],
+    evidence: tuple[str, str, dict[str, Any]] | None = None,
     setting: str | None = None, value: str | None = None,
 ) -> int:
+    """A candidate, with its evidence and its step, in one transaction: a lesson is never left
+    without the print it was drawn from, so a draw again never makes it twice."""
+    sets = f"{setting}={value}" if setting else "no setting"
     with ledger.writing() as db:
         cursor = db.execute(
             "INSERT INTO print_lessons (job_id, drawn_from, written_by, written_at, text,"
@@ -314,8 +332,10 @@ def _new(
              CANDIDATE, by, _now()),
         )
         lesson = int(cursor.lastrowid or 0)
-    sets = f"{setting}={value}" if setting else "no setting"
-    _step(ledger, lesson, CANDIDATE, by, f"from {drawn_from}: {sets}", job_id=job_id)
+        if evidence is not None:
+            kind, key, detail = evidence
+            _evidence(db, lesson, job_id, kind, key, detail)
+        _step_in(db, lesson, CANDIDATE, by, f"from {drawn_from}: {sets}", job_id=job_id)
     return lesson
 
 
@@ -330,7 +350,7 @@ def write(
     if not text.strip():
         raise Refused("a lesson needs its text")
     key, value = _setting(setting)
-    return _new(ledger, job_id, BY_HAND, by, text, _check_traits(keyed), key, value)
+    return _new(ledger, job_id, BY_HAND, by, text, _check_traits(keyed), None, key, value)
 
 
 def _setting(given: str | None) -> tuple[str | None, str | None]:
@@ -624,13 +644,17 @@ def _evidence_lines(ledger: Ledger, lesson: int) -> list[str]:
             said = f"{d['result']}, {d['symptom']}: {d['note']}"
         lines.append(f"    - job {e['job_id']}, {part}, {said} [print: {outcome}]")
     for g in ledger.query(
-        "SELECT j.*, p.stl_name FROM job_lessons j JOIN prints p ON p.job_id = j.job_id"
+        "SELECT j.*, p.stl_name, p.result, p.symptom FROM job_lessons j"
+        " JOIN prints p ON p.job_id = j.job_id"
         " WHERE j.lesson=? ORDER BY j.given_at",
         lesson,
     ):
         s = latest_scores(ledger, lesson).get(g["job_id"])
         scored = f"{s['score']} ({s['why']})" if s else "not scored"
-        lines.append(f"    - given to {g['stl_name']}, job {g['job_id']}: {scored}")
+        outcome = f"{g['result']}, {g['symptom']}" if g["result"] else "no outcome yet"
+        lines.append(
+            f"    - given to {g['stl_name']}, job {g['job_id']}: {scored} [print: {outcome}]"
+        )
     return lines
 
 

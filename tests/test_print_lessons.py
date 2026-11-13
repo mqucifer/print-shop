@@ -128,6 +128,24 @@ def test_the_same_correction_again_is_more_evidence_not_a_second_lesson(ledger: 
     assert len(ledger.query("SELECT * FROM print_lesson_evidence")) == 2, "drawn once"
 
 
+def test_a_draw_that_fails_leaves_no_lesson_without_its_evidence(
+    ledger: Ledger, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A lesson and the print it's drawn from are one write, so a draw again never doubles it."""
+
+    def broken(*args: Any) -> None:
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(lessons, "_evidence", broken)
+    ledger.record_start_requested(_record("job-1", RAIL, _brim()))
+    assert ledger.get("job-1") is not None, "the print is on record whatever its lessons do"
+    assert "draw them again by hand" in caplog.text
+    assert ledger.query("SELECT * FROM print_lessons") == []
+    monkeypatch.undo()
+    lessons.after_print(ledger, "job-1")
+    assert len(ledger.query("SELECT * FROM print_lessons")) == 1
+
+
 def test_an_outcome_with_something_to_say_is_a_candidate(ledger: Ledger) -> None:
     ledger.record_start_requested(_record("job-1", RAIL))
     ledger.record_started("job-1")
