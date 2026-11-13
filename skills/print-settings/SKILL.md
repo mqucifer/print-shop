@@ -29,9 +29,9 @@ Each is distilled from OrcaSlicer's wiki, which stays the source. Every setting 
 | `walls-shells` | `references/walls-shells.md` | `wall_loops`, `top_shell_layers`, `bottom_shell_layers` | always |
 | `infill` | `references/infill.md` | `sparse_infill_density`, `sparse_infill_pattern` | always |
 | `supports` | `references/supports.md` | `enable_support`, `support_type`, `support_threshold_angle` | it has an overhang or a bridge |
-| `adhesion` | `references/adhesion.md` | `brim_type` | under 200 mm² on the plate, or more than 2.5x as tall as its narrowest width |
+| `adhesion` | `references/adhesion.md` | `brim_type`, `textured_plate_temp`, `textured_plate_temp_initial_layer`, `cool_plate_temp`, `cool_plate_temp_initial_layer`, `during_print_exhaust_fan_speed` | under 200 mm² on the plate, or more than 2.5x as tall as its narrowest width |
 | `layer-height` | `references/layer-height.md` | `layer_height` | an intake option set it |
-| `speed-cooling` | `references/speed-cooling.md` | `outer_wall_speed`, `inner_wall_speed`, `sparse_infill_speed`, `fan_max_speed`, `fan_min_speed` | it has an overhang or a bridge |
+| `speed-cooling` | `references/speed-cooling.md` | `outer_wall_speed`, `inner_wall_speed`, `sparse_infill_speed`, `fan_max_speed`, `fan_min_speed`, `additional_cooling_fan_speed` | it has an overhang or a bridge |
 | `temperature` | `references/temperature.md` | `nozzle_temperature` | an intake option set it |
 
 Any group is also read when one of the intake's options set one of its settings.
