@@ -58,9 +58,13 @@ GROUPS: tuple[Group, ...] = (
           lambda f: f["bed_contact"] < 200 or f["slenderness"] > 2.5),
     Group("layer-height", ("layer_height",), lambda f: False),
     Group("speed-cooling", ("outer_wall_speed", "inner_wall_speed", "sparse_infill_speed",
-                            "fan_max_speed", "fan_min_speed", "additional_cooling_fan_speed"),
+                            "fan_max_speed", "fan_min_speed", "additional_cooling_fan_speed",
+                            "slow_down_for_layer_cooling", "slow_down_layer_time",
+                            "slow_down_min_speed"),
           lambda f: f["overhang"] > 0 or f["bridge"] > 0),
     Group("temperature", ("nozzle_temperature",), lambda f: False),
+    # Which faces are seen decides both (mqucifer/print-shop#105), and every part has walls.
+    Group("surface", ("ironing_type", "seam_position"), _always),
 )
 
 

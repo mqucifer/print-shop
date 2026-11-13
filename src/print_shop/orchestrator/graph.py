@@ -23,6 +23,7 @@ can be asserted against the real graph rather than a synthetic list.
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -52,6 +53,7 @@ from print_shop.setup.features import measure
 from print_shop.setup.intake import Asker, Estimate, Intake
 from print_shop.setup.proposal import Change, Proposal, Source, apply
 from print_shop.setup.questions import estimate
+from print_shop.setup.reading import SliceReading, flags, read_slice, seen
 from print_shop.setup.review import Reviewer, ReviewRequest
 from print_shop.slicer.naming import job_id_from_filename, name_gcode
 from print_shop.slicer.orca import (
@@ -63,6 +65,8 @@ from print_shop.slicer.orca import (
 )
 
 __all__ = ["build_graph", "graph_edges", "new_job"]
+
+logger = logging.getLogger(__name__)
 
 
 def new_job(stl_path: str | Path, *, entry: EntryPath) -> PrintJobState:
@@ -231,6 +235,7 @@ def build_graph(
                 reviewer,
                 AppliedOrientation(rotation_deg=rotation_deg, rationale=rationale),
                 outdir / "proposed",
+                intake,
             )
             proposed.update(reviewed)
         else:
@@ -238,6 +243,11 @@ def build_graph(
                 scoring_profiles(profiles, outdir) if overhang_area > 0 else profiles
             )
             result = slicer(stl_to_slice, active_profiles, outdir)
+            reading = _read(result)
+            proposed["slice_reading"] = reading
+            proposed["slice_flags"] = (
+                flags(reading, None, *_presets(active_profiles)) if reading else ()
+            )
         # Orca always writes `plate_1.gcode`. The printer's storage is one flat
         # namespace and `start_print` takes a bare name, so the file is renamed
         # to carry the job id before anything can upload it.
@@ -483,6 +493,8 @@ def _print_record(
         intake=state.get("intake"),
         proposal=state.get("proposal"),
         corrections=tuple(state.get("corrections", ())),
+        reading=state.get("slice_reading"),
+        flags=tuple(state.get("slice_flags", ())),
     )
 
 
@@ -518,8 +530,13 @@ def _propose_and_review(
     reviewer: Reviewer | None,
     orientation: AppliedOrientation,
     workdir: Path,
+    intake: Intake | None = None,
 ) -> tuple[SliceResult, dict[str, Any]]:
     """Slice with the proposal; with a reviewer, again after each correction until approved.
+
+    Each slice is read layer by layer, and flagged for this part from which faces the intake
+    says are seen (mqucifer/print-shop#105). A change a flag proposes is only applied when the
+    Sponsor takes it at the review.
 
     Raises:
         RuntimeError: If the Sponsor stops at the review. Nothing was sent to
@@ -529,11 +546,13 @@ def _propose_and_review(
         str(json.loads(p.read_text()).get("name", p.stem)) if p else "-"
         for p in (profiles.machine, profiles.process, profiles.filament)
     )
-    process = json.loads(profiles.process.read_text())
-    filament = json.loads(profiles.filament.read_text()) if profiles.filament else {}
+    process, filament = _presets(profiles)
+    faces = seen(intake)
     corrections: list[Change] = []
     while True:
         result: SliceResult = slice_with(apply(profiles, proposal, workdir))
+        reading = _read(result)
+        found = flags(reading, faces, process, filament) if reading is not None else ()
         if reviewer is None:
             break
         review = reviewer(
@@ -545,6 +564,8 @@ def _propose_and_review(
                 profiles=profiles,
                 process=process,
                 filament=filament,
+                reading=reading,
+                flags=found,
             )
         )
         if review.stop:
@@ -552,8 +573,25 @@ def _propose_and_review(
         if review.approved:
             break
         corrections += review.corrections
-        proposal = proposal.corrected(list(review.corrections))
-    return result, {"proposal": proposal, "corrections": tuple(corrections)}
+        proposal = proposal.corrected([*review.corrections, *review.taken])
+    return result, {"proposal": proposal, "corrections": tuple(corrections),
+                    "slice_reading": reading, "slice_flags": found}
+
+
+def _presets(profiles: SlicerProfiles) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The process and filament presets' own values."""
+    process = json.loads(profiles.process.read_text())
+    filament = json.loads(profiles.filament.read_text()) if profiles.filament else {}
+    return process, filament
+
+
+def _read(result: SliceResult) -> SliceReading | None:
+    """The slice, read layer by layer, or None (logged) if its G-code can't be read."""
+    try:
+        return read_slice(result.gcode_path)
+    except (OSError, ValueError) as exc:
+        logger.warning("the slice %s couldn't be read: %s", result.gcode_path, exc)
+        return None
 
 
 def build_volume_mm(machine_profile: Path) -> tuple[float, float, float]:

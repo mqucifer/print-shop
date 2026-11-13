@@ -9,6 +9,9 @@ index (SKILL.md), and proposes what those leave undecided:
   features can't show what the part is for. When none of the model's covers
   purpose, print-shop asks it first, with `PURPOSE` (the Sponsor's choice on
   mqucifer/print-shop#10), and keeps the model's first three;
+- which of its faces will be seen, asked by print-shop with `SEEN`, last: the
+  slice's reading judges ironing and the seam by it (mqucifer/print-shop#105). Which face
+  is seen comes from the person, never from which face is on top;
 - 2 to 4 options each. An option carries the settings it implies, each
   inside its bound (`bounds.check`): an option out of bounds is dropped, and
   a question left with fewer than 2 options is dropped. Exactly one option is
@@ -36,7 +39,9 @@ from print_shop.setup.model import SHORT, TEXT, Ask, setting_item
 from print_shop.setup.proposal import PartFacts
 from print_shop.setup.skill import SKILL_DIR
 
-__all__ = ["MAX_QUESTIONS", "Asked", "estimate", "propose_questions", "schema"]
+__all__ = [
+    "MAX_QUESTIONS", "SEEN", "SEEN_FACES", "Asked", "estimate", "propose_questions", "schema",
+]
 
 MAX_QUESTIONS = 4
 #: Slices for the options' estimates, at most, per print: a slice of a small
@@ -53,7 +58,8 @@ _SYSTEM = (
     "never restates a setting or a number (the settings are shown beside it), and exactly "
     "one is recommended, with why, pointing at the part. Never ask what the features "
     "already answer, and never ask open-ended questions. A simple part may need none. Don't "
-    "state times or filament: those come from the slicer.\n\n"
+    "state times or filament: those come from the slicer. Don't ask which faces will be "
+    "seen: print-shop asks that itself.\n\n"
 )
 
 
@@ -81,6 +87,38 @@ PURPOSE = Question(
                impact="kept quick and cheap: your presets, unless a feature needs a change"),
     ),
 )
+
+
+#: Which faces are seen, by option label: (walls, the top as it prints, the face on the plate).
+SEEN_FACES: dict[str, tuple[bool, bool, bool]] = {
+    "the walls and the top as it prints": (True, True, False),
+    "the walls; the top as it prints is hidden": (True, False, False),
+    "the top as it prints; the walls are hidden": (False, True, False),
+    "only the face on the plate": (False, False, True),
+}
+
+#: Which faces will be seen, asked last by print-shop whenever the model's questions don't (the
+#: Sponsor, 2026-11-13, on mqucifer/print-shop#105: which face is seen comes from the intake,
+#: not from which face is on top). Its options set nothing: the slice's reading uses the answer
+#: to judge ironing and the seam, and proposes at the review.
+SEEN = Question(
+    feature="seen",
+    text="Which faces of this part will be seen once it's in use?",
+    options=(
+        Option(label="the walls and the top as it prints", settings={}, recommended=True,
+               why="when it can't be said, judging every face as seen costs a little time, "
+                   "while a hidden flaw on a face that shows costs the print",
+               impact="the review keeps ironing for the top and points out a seam on the walls"),
+        Option(label="the walls; the top as it prints is hidden", settings={},
+               impact="the review points out ironing on the hidden top, and a seam on the walls"),
+        Option(label="the top as it prints; the walls are hidden", settings={},
+               impact="the review keeps ironing for the top and lets the seam be"),
+        Option(label="only the face on the plate", settings={},
+               impact="the review points out any ironing, which smooths only faces that "
+                      "end up hidden"),
+    ),
+)
+assert set(SEEN_FACES) == {o.label for o in SEEN.options}
 
 
 class Asked:
@@ -132,10 +170,13 @@ def propose_questions(facts: PartFacts, ask: Ask) -> Asked:
                     schema([f.id for f in facts.features]))
         raw = list(reply["questions"])
     except CutOff as exc:
-        return Asked((PURPOSE,), f"only purpose asked: the model was cut off ({exc})",
+        return Asked((PURPOSE, SEEN),
+                     f"only purpose and what's seen asked: the model was cut off ({exc})",
                      exc.info.model_dump())
     except (RuntimeError, OSError, KeyError, TypeError) as exc:
-        return Asked((PURPOSE,), f"only purpose asked: the model was unavailable ({exc})"[:600])
+        return Asked((PURPOSE, SEEN),
+                     f"only purpose and what's seen asked: the model was unavailable "
+                     f"({exc})"[:600])
 
     questions = []
     dropped = []
@@ -162,6 +203,14 @@ def propose_questions(facts: PartFacts, ask: Ask) -> Asked:
         # The Sponsor's choice on mqucifer/print-shop#10: purpose is always asked.
         questions = [PURPOSE, *questions[: MAX_QUESTIONS - 1]]
         note = "; ".join(x for x in (note, "purpose asked by print-shop: the model didn't") if x)
+    if not any(q.feature == SEEN.feature for q in questions):
+        # Last, so recorded answers keep their places (they replay by position); in place of
+        # the model's last question when four are already asked (print-shop#105).
+        said = "what's seen asked by print-shop"
+        if len(questions) >= MAX_QUESTIONS:
+            said += f", in place of '{questions[MAX_QUESTIONS - 1].text}'"
+        questions = [*questions[: MAX_QUESTIONS - 1], SEEN]
+        note = "; ".join(x for x in (note, said) if x)
     return Asked(tuple(questions), note, dict(reply.get("_call") or {}))
 
 

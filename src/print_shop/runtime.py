@@ -155,6 +155,7 @@ def describe(row: Row) -> str:
         f" {row.slicer_settings.get('print_settings_id', '?')} / {row.filament}",
         *_store_lines(row),
         *_setup_lines(row),
+        *_reading_lines(row),
         *([f"material       {row.material.line()}"] if row.material else []),
         f"plate          {row.slicer_settings.get('curr_bed_type', '?')},"
         f" bed {row.slicer_settings.get('first_layer_bed_temperature', '?')} C",
@@ -187,6 +188,17 @@ def _store_lines(row: Row) -> list[str]:
         lines.append(f"  {ref.file}  (sha256 {ref.sha256[:12]}…)")
         if ref.standard_file:
             lines.append(f"    over {ref.standard_file}  (sha256 {ref.standard_sha256[:12]}…)")
+    return lines
+
+
+def _reading_lines(row: Row) -> list[str]:
+    """The slice as it was read, and what it flagged (mqucifer/print-shop#105)."""
+    if row.reading is None:
+        return []
+    shown = row.reading.lines()
+    lines = [f"slice read     {shown[0]}" if shown else "slice read     -"]
+    lines += [f"               {line}" for line in shown[1:]]
+    lines += [f"  flagged      {f.id}: {f.reading}" for f in row.flags or ()]
     return lines
 
 

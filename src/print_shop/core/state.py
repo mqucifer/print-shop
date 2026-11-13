@@ -24,6 +24,7 @@ from pydantic import BaseModel
 from print_shop.core.contracts import Gate, GateDecision, Outcome
 from print_shop.setup.intake import Intake
 from print_shop.setup.proposal import Change, Proposal
+from print_shop.setup.reading import Flag, SliceReading
 from print_shop.slicer.store import ProfilesUsed
 
 __all__ = [
@@ -207,6 +208,10 @@ class PrintJobState(TypedDict):
     intake: NotRequired[Intake]
     proposal: NotRequired[Proposal]
     corrections: NotRequired[tuple[Change, ...]]
+    #: The slice that goes to the printer, read layer by layer, and what it says matters for
+    #: this part (mqucifer/print-shop#105).
+    slice_reading: NotRequired[SliceReading | None]
+    slice_flags: NotRequired[tuple[Flag, ...]]
 
     # Gates. `pending_gate` set means the graph is parked awaiting a human.
     pending_gate: NotRequired[Gate]

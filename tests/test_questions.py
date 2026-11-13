@@ -33,7 +33,7 @@ from print_shop.setup.intake import (
 )
 from print_shop.setup.model import Ask, llm_ask, setup_llm
 from print_shop.setup.proposal import Change, PartFacts, Proposal, Source, answered, apply
-from print_shop.setup.questions import MAX_SLICES, PURPOSE, estimate
+from print_shop.setup.questions import MAX_SLICES, PURPOSE, SEEN, SEEN_FACES, estimate
 from print_shop.slicer.orca import BedType, slice_model, with_bed_type
 from tests.fakes import DATA, STORE_PROFILES
 from tests.fixtures import write_stl
@@ -83,7 +83,7 @@ def test_the_questions_are_few_limited_and_each_has_one_recommendation(
     part: str, tmp_path: Path
 ) -> None:
     qs = questions(part, tmp_path)
-    ids = {f.id for f in features(part, tmp_path)} | {"purpose"}
+    ids = {f.id for f in features(part, tmp_path)} | {"purpose", "seen"}
     assert len(qs) <= 4
     for q in qs:
         assert q.feature in ids, q
@@ -135,8 +135,8 @@ def test_an_option_out_of_bounds_is_dropped_and_so_is_a_question_left_with_one(
     asked = Proposer(ask_questions=_reply(hot, walls)).questions(
         features("bracket", tmp_path), STORE_PROFILES
     )
-    assert [q.text for q in asked.questions if q is not PURPOSE] == ["How strong?"]
-    strong = next(q for q in asked.questions if q is not PURPOSE)
+    assert [q.text for q in asked.questions if q not in (PURPOSE, SEEN)] == ["How strong?"]
+    strong = next(q for q in asked.questions if q not in (PURPOSE, SEEN))
     assert [o.label for o in strong.options] == ["light", "strong"]
     assert "'molten' in 'How hot?': nozzle_temperature=300: outside 190-240" in asked.note
     assert "'How hot?': fewer than 2 options in bounds" in asked.note
@@ -156,7 +156,7 @@ def test_purpose_is_always_asked_when_the_model_doesnt(tmp_path: Path) -> None:
     asked = Proposer(ask_questions=replay(RECORDED / "bracket.json")).questions(
         features("bracket", tmp_path), STORE_PROFILES
     )
-    assert [q.feature for q in asked.questions] == ["purpose"]
+    assert [q.feature for q in asked.questions] == ["purpose", "seen"]
     assert asked.questions[0] is PURPOSE
     assert "purpose asked by print-shop: the model didn't" in asked.note
     purpose = asked.questions[0]
@@ -170,16 +170,37 @@ def test_the_purpose_question_counts_toward_four(tmp_path: Path) -> None:
     asked = Proposer(ask_questions=_reply(*[walls] * 4)).questions(
         features("bracket", tmp_path), STORE_PROFILES
     )
-    assert [q.feature for q in asked.questions] == ["purpose", "section", "section", "section"]
+    # What's seen is asked last, in place of the model's last question (print-shop#105).
+    assert [q.feature for q in asked.questions] == ["purpose", "section", "section", "seen"]
+    assert "what's seen asked by print-shop, in place of 'How strong?'" in asked.note
 
 
-def test_without_a_model_only_purpose_is_asked(tmp_path: Path) -> None:
+def test_which_faces_are_seen_is_asked_last_with_options_that_set_nothing(
+    tmp_path: Path,
+) -> None:
+    """mqucifer/print-shop#105: which face is seen comes from the intake, not the slice.
+
+    Last, so a recording's answers keep their places; one without it takes the recommended.
+    """
+    asked = Proposer(ask_questions=replay(RECORDED / "snap.json")).questions(
+        features("snap", tmp_path), STORE_PROFILES
+    )
+    assert [q.feature for q in asked.questions] == ["purpose", "overhang", "seen"]
+    assert asked.questions[-1] is SEEN
+    assert all(o.settings == {} for o in SEEN.options), "the reading proposes, at the review"
+    assert {o.label for o in SEEN.options} == set(SEEN_FACES)
+    assert SEEN.options[SEEN.recommended].why
+    answered_ = intake("snap", tmp_path)
+    assert answered_.answers[-1].choice == SEEN.recommended
+
+
+def test_without_a_model_only_purpose_and_whats_seen_are_asked(tmp_path: Path) -> None:
     def down(system: str, user: str, schema: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError("LiteLLM is down")
 
     asked = Proposer(ask_questions=down).questions(features("vase", tmp_path), STORE_PROFILES)
-    assert asked.questions == (PURPOSE,)
-    assert asked.note.startswith("only purpose asked: the model was unavailable")
+    assert asked.questions == (PURPOSE, SEEN)
+    assert asked.note.startswith("only purpose and what's seen asked: the model was unavailable")
 
 
 @pytest.mark.parametrize("part", PARTS)
@@ -191,9 +212,10 @@ def test_an_options_shown_settings_are_exactly_what_it_applies(part: str, tmp_pa
     asked = intake(part, tmp_path)
     facts = PartFacts(intake=asked, features=features(part, tmp_path), **_presets())
     applied = {c.key: c.value for c in answered(facts)}
+    shown: dict[str, str] = {}
     for _, option in asked.chosen():
-        shown = {k: v for k, v in option.settings.items() if v != facts.preset(k)}
-        assert applied == shown
+        shown |= {k: v for k, v in option.settings.items() if v != facts.preset(k)}
+    assert applied == shown
 
 
 def test_the_settings_line_reads_as_a_printer_person_would() -> None:
