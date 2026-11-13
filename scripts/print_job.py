@@ -20,7 +20,9 @@ several tunings of one are listed to choose from. `--machine` and
 oriented: each with numbered options, what each would cost (Orca's estimate)
 and one recommended. Answer by number, or `o` and your own words. A part
 whose shape leaves nothing open gets none. `--answers file.json` replays
-recorded answers. The settings are then proposed and shown here for review:
+recorded answers, each naming its question by its text or its feature; a
+file that doesn't answer exactly the questions asked is refused, and the job
+ends saying which. The settings are then proposed and shown here for review:
 `ok`, or correct a setting by name and it slices again. Home Assistant's
 approval gate comes after that, unchanged.
 
@@ -163,12 +165,13 @@ def main(argv: list[str] | None = None) -> int:
             job_id = run.daemon.submit(args.stl)
             print(f"Job {job_id}: orienting, then a few questions about the part, here.")
             run.daemon.wait_for_gate(job_id, timeout_s=APPROVAL_WAIT_S)
-            gate = run.daemon.pending_gate() or {}
-            print("At the approval gate. Approve or Reject on the dashboard.")
-            print(f"  time        {int(gate.get('print_time_s') or 0) // 60} min")
-            print(f"  plastic     {gate.get('filament_cm3')} cm3")
-            print(f"  turned      {gate.get('orientation_deg')}")
-            print(f"  because     {gate.get('orientation_rationale')}")
+            gate = run.daemon.pending_gate()
+            if gate is not None:
+                print("At the approval gate. Approve or Reject on the dashboard.")
+                print(f"  time        {int(gate.get('print_time_s') or 0) // 60} min")
+                print(f"  plastic     {gate.get('filament_cm3')} cm3")
+                print(f"  turned      {gate.get('orientation_deg')}")
+                print(f"  because     {gate.get('orientation_rationale')}")
             result = run.daemon.wait_for_finish(job_id, timeout_s=APPROVAL_WAIT_S + FINISH_WAIT_S)
             if result.error:
                 print(f"The job ended without printing: {result.error}")

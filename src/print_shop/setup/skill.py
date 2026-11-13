@@ -47,6 +47,17 @@ def _always(f: dict[str, float]) -> bool:
     return True
 
 
+#: A footprint this long, and this many times as long as it is wide, lifts at its
+#: ends whatever its contact area: a 150 x 25 mm part did, with no brim, on the
+#: first real prints (mqucifer/print-shop#107).
+LONG_MM = 100.0
+NARROW_ASPECT = 3.0
+
+
+def _long_and_narrow(f: dict[str, float]) -> bool:
+    return f["length"] >= LONG_MM and f["footprint_aspect"] >= NARROW_ASPECT
+
+
 GROUPS: tuple[Group, ...] = (
     Group("walls-shells", ("wall_loops", "top_shell_layers", "bottom_shell_layers"), _always),
     Group("infill", ("sparse_infill_density", "sparse_infill_pattern"), _always),
@@ -55,7 +66,7 @@ GROUPS: tuple[Group, ...] = (
     Group("adhesion", ("brim_type", "textured_plate_temp", "textured_plate_temp_initial_layer",
                        "cool_plate_temp", "cool_plate_temp_initial_layer",
                        "during_print_exhaust_fan_speed"),
-          lambda f: f["bed_contact"] < 200 or f["slenderness"] > 2.5),
+          lambda f: f["bed_contact"] < 200 or f["slenderness"] > 2.5 or _long_and_narrow(f)),
     Group("layer-height", ("layer_height",), lambda f: False),
     Group("speed-cooling", ("outer_wall_speed", "inner_wall_speed", "sparse_infill_speed",
                             "fan_max_speed", "fan_min_speed", "additional_cooling_fan_speed"),
@@ -91,7 +102,8 @@ def groups_for(intake: Intake, features: tuple[Feature, ...]) -> tuple[Group, ..
     a question about the surface makes the layer height worth reading.
     """
     # What an unmeasured part reads as: nothing overhangs, nothing is small.
-    values = {"overhang": 0.0, "bridge": 0.0, "bed_contact": float("inf"), "slenderness": 0.0}
+    values = {"overhang": 0.0, "bridge": 0.0, "bed_contact": float("inf"), "slenderness": 0.0,
+              "length": 0.0, "footprint_aspect": 0.0}
     values |= {f.id: f.value for f in features}
     offered = {k for q in intake.questions for o in q.options for k in o.settings}
     return tuple(g for g in GROUPS if g.needed(values) or offered & set(g.settings))

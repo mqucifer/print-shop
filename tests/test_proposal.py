@@ -245,7 +245,9 @@ def test_the_model_may_decide_an_overhang_needs_no_support(tmp_path: Path) -> No
 def test_the_prompt_carries_the_features_and_the_loaded_groups_bounds(tmp_path: Path) -> None:
     facts = _facts("snap", tmp_path)
     text = prompt(facts, load(groups_for(facts.intake, facts.features)))
-    assert "overhang: 10 mm2" in text
+    # The hook is 1.2 x 8 mm; its 0.4 mm beside the beam is held by the beam below it
+    # (mqucifer/print-shop#107), so 0.8 x 8 mm overhangs.
+    assert "overhang: 6 mm2" in text
     assert "support_type: preset normal(auto); allowed tree(auto)" in text
     assert "a clip: the hook snaps into a 1.2 mm ledge" in text, "the Sponsor's own words"
     assert "-> Tree support (enable_support=1, support_type=tree(auto))" in text
