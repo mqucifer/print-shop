@@ -8,7 +8,9 @@ the print was given.
 
 from __future__ import annotations
 
+import dataclasses
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -16,7 +18,14 @@ from print_shop.expert.client import LLMConfig
 from print_shop.setup.features import Feature
 from print_shop.setup.intake import Intake
 from print_shop.setup.model import Ask, llm_ask, propose_by_model
-from print_shop.setup.proposal import PartFacts, Proposal, answered, guard
+from print_shop.setup.proposal import (
+    GivenLesson,
+    PartFacts,
+    Proposal,
+    answered,
+    from_lessons,
+    guard,
+)
 from print_shop.setup.questions import Asked, propose_questions
 from print_shop.setup.skill import groups_for, load
 from print_shop.slicer.store import STORE_DIR
@@ -24,7 +33,10 @@ from print_shop.slicer.store import STORE_DIR
 if TYPE_CHECKING:  # the slicer imports the job state, which imports this
     from print_shop.slicer.orca import SlicerProfiles
 
-__all__ = ["Proposer"]
+__all__ = ["Lessons", "Proposer"]
+
+#: The reviewed lessons for a part with these features (`lessons.for_part`, over the ledger).
+Lessons = Callable[[tuple[Feature, ...]], tuple[GivenLesson, ...]]
 
 
 @dataclass(frozen=True)
@@ -34,6 +46,8 @@ class Proposer:
     llm: LLMConfig | None = None
     ask: Ask | None = None  # a test's recorded reply in place of the real call
     ask_questions: Ask | None = None  # the same, for the intake's questions
+    #: Where kept lessons come from (mqucifer/print-shop#106). None gives none.
+    lessons: Lessons | None = None
 
     def questions(self, features: tuple[Feature, ...], profiles: SlicerProfiles) -> Asked:
         """The intake's questions for this part, before any are answered."""
@@ -48,6 +62,9 @@ class Proposer:
         self, intake: Intake, features: tuple[Feature, ...], profiles: SlicerProfiles
     ) -> Proposal:
         facts = self._facts(intake, features, profiles)
+        given = self.lessons(features) if self.lessons is not None else ()
+        learned, learned_kept, marked = from_lessons(facts, given)
+        facts = dataclasses.replace(facts, lessons=marked)
         skill = load(groups_for(intake, features))
         if self.ask is not None:
             reasoned = propose_by_model(facts, skill, self.ask, "recorded")
@@ -55,10 +72,12 @@ class Proposer:
             reasoned = propose_by_model(facts, skill, llm_ask(self.llm), self.llm.model)
         else:
             reasoned = Proposal(model="")
-        # The Sponsor's answers first: the model may not change what they chose.
-        reasoned = reasoned.model_copy(
-            update={"changes": tuple(answered(facts)) + reasoned.changes}
-        )
+        # The Sponsor's answers first, then the lessons: the model may not change what they set.
+        reasoned = reasoned.model_copy(update={
+            "changes": tuple(answered(facts)) + tuple(learned) + reasoned.changes,
+            "kept": tuple(learned_kept) + reasoned.kept,
+            "lessons": marked,
+        })
         return guard(facts, reasoned)
 
     def _facts(

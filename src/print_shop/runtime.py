@@ -24,7 +24,7 @@ from print_shop.printer.centauri import (
     PrinterClient,
     PrinterConfig,
 )
-from print_shop.setup import Proposer
+from print_shop.setup import Proposer, lessons
 from print_shop.setup.intake import Asker
 from print_shop.setup.model import setup_llm
 from print_shop.setup.review import Reviewer
@@ -132,7 +132,11 @@ def build_run(
         workdir=work,
         printer=printer,
         llm=llm,
-        proposer=Proposer(llm=setup_llm(llm, env)),
+        # The reviewed lessons from earlier prints, for a part with their traits
+        # (mqucifer/print-shop#106).
+        proposer=Proposer(
+            llm=setup_llm(llm, env), lessons=lambda features: lessons.for_part(ledger, features)
+        ),
         asker=asker,
         reviewer=reviewer,
         ledger=ledger,
@@ -202,4 +206,7 @@ def _setup_lines(row: Row) -> list[str]:
         lines.append(f"  {c.key}: {c.preset or '-'} -> {c.value} ({c.source.value}) {c.reason}")
     if row.corrections:
         lines.append(f"corrected      {', '.join(f'{c.key}={c.value}' for c in row.corrections)}")
+    for g in row.proposal.lessons if row.proposal else ():
+        said = f"set {g.key}={g.value}" if g.applied else (g.why or "read")
+        lines.append(f"lesson         {g.id}, from {g.stl_name}: {said}")
     return lines
