@@ -41,6 +41,9 @@ class Setting:
         return "" if low <= number <= high else f"outside {low:g}-{high:g}"
 
 
+BED_MAX_C = 110  # the Centauri Carbon's heated bed limit, from Elegoo's specifications
+
+
 def _num(presets: dict[str, dict[str, Any]], tier: str, key: str) -> float:
     value = presets[tier].get(key, "")
     if isinstance(value, list):
@@ -76,6 +79,11 @@ SETTINGS: dict[str, Setting] = {
                            _num(p, "filament", "nozzle_temperature_range_high"))),
         Setting("fan_max_speed", True, lambda p: (0, 100)),
         Setting("fan_min_speed", True, lambda p: (0, _num(p, "filament", "fan_max_speed"))),
+        Setting("additional_cooling_fan_speed", True, lambda p: (0, 100)),
+        Setting("during_print_exhaust_fan_speed", True, lambda p: (0, 100)),
+        *(Setting(key, True, lambda p: (0, BED_MAX_C))
+          for key in ("textured_plate_temp", "textured_plate_temp_initial_layer",
+                      "cool_plate_temp", "cool_plate_temp_initial_layer")),
     )
 }
 

@@ -41,3 +41,11 @@ Distilled from OrcaSlicer's wiki, read 2026-10-25. The wiki is the source: each 
 - **Trade-off:** The wiki does not state a cost for this value directly.
 - **Change it when:** the part has small layer times, or overhangs and bridges whose dedicated fan speed must not fall below a floor.
 - **Bound:** 0 % up to the filament preset's `fan_max_speed`. Enforced in code (`src/print_shop/setup/bounds.py`): a value outside it is refused, never clamped.
+
+## Auxiliary fan (`additional_cooling_fan_speed`)
+[OrcaSlicer wiki: Material cooling](https://github.com/OrcaSlicer/OrcaSlicer/wiki/material_cooling). The values and the case for changing it are the Sponsor's practice, 2026-11-13, not the wiki's.
+
+- **Effect:** The Centauri Carbon's side (auxiliary) part-cooling fan, in percent, once the first layers are down. It blows across the whole part, not only the nozzle's spot.
+- **Trade-off:** It sharpens overhangs and bridges, but on PETG it cools a long part unevenly and lifts its ends. The Sponsor's Rapid PETG tunings run it at 70, 80 or 100 %.
+- **Change it when:** a PETG part warped or lifted (turn it down), or an overhang or bridge sagged (turn it up).
+- **Bound:** 0 to 100 %. Enforced in code (`src/print_shop/setup/bounds.py`): a value outside it is refused, never clamped.
