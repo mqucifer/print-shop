@@ -9,6 +9,7 @@ Everything here is a fixture: no Sponsor part, measurement or ledger row.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
 import sqlite3
@@ -254,8 +255,7 @@ def test_an_intake_answer_comes_before_a_lesson() -> None:
 
 def test_a_lesson_that_keeps_the_preset_is_a_decision_the_guard_leaves() -> None:
     """The Sponsor typed enable_support=0 on every overhung part: as a lesson, it holds."""
-    facts = _facts()
-    facts = PartFacts(**{**facts.__dict__, "features": _features(overhang=394.0)})
+    facts = dataclasses.replace(_facts(), features=_features(overhang=394.0))
     _, kept, _ = from_lessons(facts, (_given(1, "enable_support", "0", "overhangs"),))
     from print_shop.setup.proposal import Proposal  # noqa: PLC0415
 
