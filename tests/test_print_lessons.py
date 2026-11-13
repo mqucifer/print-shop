@@ -42,15 +42,17 @@ CONFIG = parse_config_block(DATA / "recorded" / "cube.gcode")
 
 
 def _features(**values: float) -> tuple[Feature, ...]:
-    base = {"height": 20.0, "footprint": 20.0, "aspect": 1.0, "bed_contact": 400.0,
+    base = {"height": 20.0, "footprint": 20.0, "length": 20.0, "footprint_aspect": 1.0,
+            "bed_contact": 400.0,
             "slenderness": 1.0, "overhang": 0.0, "steepest_overhang": 0.0, "bridge": 0.0,
             "flat_top": 400.0, "section": 6.0, "volume": 8000.0}
     return tuple(Feature(id=k, value=v, unit="", says=k) for k, v in (base | values).items())
 
 
 #: A long thin bar's features, and another long thin part's: the traits they share.
-RAIL = _features(footprint=150.0, aspect=7.5, height=20.0, bed_contact=3000.0)
-STRIP = _features(footprint=120.0, aspect=6.0, height=10.0, bed_contact=1500.0, section=1.6)
+RAIL = _features(footprint=150.0, length=150.0, footprint_aspect=7.5, bed_contact=3000.0)
+STRIP = _features(footprint=120.0, length=120.0, footprint_aspect=6.0, height=10.0,
+                  bed_contact=1500.0, section=1.6)
 CUBE = _features()
 
 
@@ -82,19 +84,19 @@ def ledger(tmp_path: Path) -> Iterator[Ledger]:
 
 
 def test_traits_come_from_the_features_by_their_thresholds() -> None:
-    assert traits(RAIL) == ("long_and_thin",)
-    assert traits(STRIP) == ("long_and_thin", "thin_walls")
+    assert traits(RAIL) == ("long_and_narrow",)
+    assert traits(STRIP) == ("long_and_narrow", "thin_walls")
     assert traits(CUBE) == ()
     assert traits(()) == (), "a part from before its features were kept has no traits, not 0s"
 
 
-def test_a_measured_long_bar_is_long_and_thin(tmp_path: Path) -> None:
+def test_a_measured_long_bar_is_long_and_narrow(tmp_path: Path) -> None:
     bar = trimesh.creation.box(extents=(150, 20, 20))
     bar.apply_translation((75, 10, 10))
     bar.export(tmp_path / "bar.stl")
     features = measure(tmp_path / "bar.stl", 3000.0)
-    assert next(f.value for f in features if f.id == "aspect") == 7.5
-    assert "long_and_thin" in traits(features)
+    assert next(f.value for f in features if f.id == "footprint_aspect") == 7.5
+    assert "long_and_narrow" in traits(features)
 
 
 # Candidates, drawn from a print's row
@@ -107,7 +109,7 @@ def test_a_correction_is_a_candidate_keyed_to_the_parts_traits(ledger: Ledger) -
     assert (found["setting"], found["value"], found["status"]) == (
         "brim_type", "outer_only", "candidate"
     )
-    assert json.loads(found["traits"]) == ["long_and_thin"]
+    assert json.loads(found["traits"]) == ["long_and_narrow"]
     assert found["text"] == "the ends of a long part lifted"
     [evidence] = ledger.query("SELECT * FROM print_lesson_evidence")
     assert evidence["job_id"] == "job-1"
@@ -169,11 +171,11 @@ def test_a_lesson_keyed_to_no_trait_is_keyed_before_its_accepted(ledger: Ledger)
         lessons.accept(ledger, 1, REVIEWER)
     with pytest.raises(Refused, match="a trait is one of"):
         lessons.edit(ledger, 1, REVIEWER, keyed=["long"])
-    lessons.edit(ledger, 1, REVIEWER, keyed=["long_and_thin"], text="brim long parts",
+    lessons.edit(ledger, 1, REVIEWER, keyed=["long_and_narrow"], text="brim long parts",
                  why="the cube's correction was about the rail beside it")
     found = lessons.one(ledger, 1)
     assert (found["status"], found["traits"], found["text"]) == (
-        "edited", ["long_and_thin"], "brim long parts"
+        "edited", ["long_and_narrow"], "brim long parts"
     )
     [step] = ledger.query("SELECT was FROM print_lesson_steps WHERE status='edited'")
     assert json.loads(step["was"])["text"] == "the ends of a long part lifted", "kept"
@@ -187,7 +189,7 @@ def test_only_a_kept_lesson_for_the_parts_traits_is_given(ledger: Ledger) -> Non
     assert (given.id, given.key, given.value, given.reviewed_by) == (
         1, "brim_type", "outer_only", "operator"
     )
-    lessons.edit(ledger, 1, REVIEWER, keyed=["long_and_thin"])
+    lessons.edit(ledger, 1, REVIEWER, keyed=["long_and_narrow"])
     assert [g.id for g in lessons.for_part(ledger, RAIL)] == [1]
     lessons.promote(ledger, 1, REVIEWER, "skill", "mqucifer/print-shop#999")
     assert lessons.for_part(ledger, RAIL) == (), "in the skill, it's read there"
@@ -205,14 +207,14 @@ def _facts(intake: Intake | None = None, **process: str) -> PartFacts:
 
 def _given(id: int, key: str, value: str, *keyed: str) -> GivenLesson:
     return GivenLesson(id=id, text=f"lesson {id}", key=key, value=value, job_id="job-0",
-                       stl_name="rail.stl", traits=keyed or ("long_and_thin",),
+                       stl_name="rail.stl", traits=keyed or ("long_and_narrow",),
                        reviewed_by="operator")
 
 
 def test_a_lesson_sets_its_setting_and_the_closer_one_wins() -> None:
     changes, kept, marked = from_lessons(_facts(), (
         _given(1, "brim_type", "outer_only"),
-        _given(2, "brim_type", "outer_and_inner", "long_and_thin", "thin_walls"),
+        _given(2, "brim_type", "outer_and_inner", "long_and_narrow", "thin_walls"),
     ))
     assert [(c.value, c.source, c.lesson) for c in changes] == [
         ("outer_and_inner", Source.LESSON, 2)
@@ -337,7 +339,7 @@ def test_a_correction_on_one_print_reaches_a_later_similar_parts_proposal(
     first = _print(daemon, _bar("rail", 150, 20, folder))
     row = ledger.get(first)
     assert row is not None and row.features is not None
-    assert "long_and_thin" in traits(row.features)
+    assert "long_and_narrow" in traits(row.features)
     [candidate] = ledger.query("SELECT * FROM print_lessons")
     assert candidate["status"] == "candidate"
 
@@ -353,7 +355,7 @@ def test_a_correction_on_one_print_reaches_a_later_similar_parts_proposal(
     assert (brim.value, brim.source, brim.lesson) == ("outer_only", Source.LESSON, 1)
     shown = render(sponsor.shown[-1])
     assert re.search(r"brim_type +no_brim -> outer_only", shown)
-    assert "[lesson 1: long_and_thin]" in shown, "the review says which lesson set it"
+    assert "[lesson 1: long_and_narrow]" in shown, "the review says which lesson set it"
     assert "Lesson 1, from rail.stl" in shown
 
     # The ledger records it was given, and the review scored it: it stood.
@@ -373,7 +375,7 @@ def test_a_correction_on_one_print_reaches_a_later_similar_parts_proposal(
     assert promoting["id"] == 1 and len(parts) == 2
     assert "## To promote" in lessons.listing(ledger)
 
-    # A cube isn't long and thin: it's given nothing.
+    # A cube isn't long and narrow: it's given nothing.
     sponsor.answers = ["ok"]
     _print(daemon, write_stl("cube", folder))
     assert sponsor.shown[-1].proposal.lessons == ()
@@ -422,6 +424,6 @@ def test_the_reviewers_tool_works_on_a_copy(
     assert "lesson 1 is accepted" in capsys.readouterr().out
     assert tool.main(["job-1", "--ledger", str(path)]) == 0
     out = capsys.readouterr().out
-    assert "brim_type=outer_only, for a part that's long_and_thin" in out
+    assert "brim_type=outer_only, for a part that's long_and_narrow" in out
     assert tool.main(["traits", "--ledger", str(path)]) == 0
-    assert "long_and_thin" in capsys.readouterr().out
+    assert "long_and_narrow" in capsys.readouterr().out

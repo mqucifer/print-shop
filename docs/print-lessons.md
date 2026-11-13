@@ -10,7 +10,7 @@ A lesson is keyed to the part's **traits** (`src/print_shop/setup/traits.py`). E
 
 | Trait | Read from | When |
 |---|---|---|
-| `long_and_thin` | `aspect` | its longest side on the plate is 3 or more times its shortest |
+| `long_and_narrow` | `length`, `footprint_aspect` | its footprint is 100 mm or longer and 3 or more times as long as it's wide |
 | `tall_and_narrow` | `slenderness` | more than 2.5 times as tall as its narrowest width |
 | `flat_and_wide` | `slenderness` | less than a quarter as tall as its narrowest width |
 | `small_bed_contact` | `bed_contact` | under 200 mm2 touches the plate |
@@ -19,7 +19,7 @@ A lesson is keyed to the part's **traits** (`src/print_shop/setup/traits.py`). E
 | `bridges` | `bridge` | flat downward faces off the plate |
 | `thin_walls` | `section` | a typical section under 2 mm |
 
-`aspect` is a new feature, the longest side on the plate over the shortest. The adhesion group's thresholds in the skill are the same numbers. **A lesson reaches a later part that has every trait it's keyed to.** Not the material (the Sponsor, 2026-11-13): the filament is in a lesson's evidence, for the reviewer and the model to weigh.
+`long_and_narrow` is the skill's own test for the adhesion group (`skill.LONG_MM`, `skill.NARROW_ASPECT`, from mqucifer/print-shop#107), and the other thresholds are the adhesion group's numbers, so a trait and the skill read a part alike. **A lesson reaches a later part that has every trait it's keyed to.** Not the material (the Sponsor, 2026-11-13): the filament is in a lesson's evidence, for the reviewer and the model to weigh.
 
 The ledger now keeps each print's features (`prints.features`), so a print's traits can be read back. A print from before has none, and nothing is guessed: its lessons are listed as NOT KEYED until a reviewer keys them.
 
@@ -48,7 +48,7 @@ uv run python scripts/print_lessons.py score JOB ID --score used|not_used|in_the
 uv run python scripts/print_lessons.py write JOB --by WHO --text FILE --traits T,T [--setting K=V]
 ```
 
-`--ledger FILE` works on a copy. **A lesson keyed to no trait would reach every part, so it isn't accepted until it's keyed to some** (`edit --traits`). Widen the keys to what the lesson is about: a plate temperature learned on a long thin part is `long_and_thin`, not every trait that part happened to have.
+`--ledger FILE` works on a copy. **A lesson keyed to no trait would reach every part, so it isn't accepted until it's keyed to some** (`edit --traits`). Widen the keys to what the lesson is about: a plate temperature learned on a long thin part is `long_and_narrow`, not every trait that part happened to have.
 
 ## Giving it to a later part
 
