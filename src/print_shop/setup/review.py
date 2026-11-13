@@ -56,6 +56,12 @@ class Reviewer(Protocol):
     def __call__(self, request: ReviewRequest) -> Review: ...
 
 
+#: Who each change is from, as the review names it. Every `Source` has one, so a
+#: change from an intake answer shows like any other (it raised KeyError, 2026-11-13).
+_BY = {Source.ANSWER: "your answer", Source.MODEL: "model", Source.GUARD: "guard",
+       Source.SPONSOR: "you"}
+
+
 def render(request: ReviewRequest) -> str:
     """The review as the command prints it."""
     machine, process, filament = request.presets
@@ -77,7 +83,7 @@ def render(request: ReviewRequest) -> str:
         head = "standard -> your tuning -> this print" if tuned else "your preset -> this print"
         lines.append(f"  {'setting'.ljust(width)}  {head}")
         for c in changes:
-            by = {Source.MODEL: "model", Source.GUARD: "guard", Source.SPONSOR: "you"}[c.source]
+            by = _BY[c.source]
             cites = ", ".join(x for x in (c.feature, c.knowledge) if x)
             was = f"{c.standard} -> {c.preset or '-'}" if c.standard else (c.preset or "-")
             lines.append(f"  {c.key.ljust(width)}  {was} -> {c.value}")

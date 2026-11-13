@@ -23,7 +23,7 @@ from print_shop.runtime import describe
 from print_shop.setup import Proposer
 from print_shop.setup.intake import replay_asker
 from print_shop.setup.proposal import Change, Proposal, Source
-from print_shop.setup.review import Review, ReviewRequest, parse_answer, render
+from print_shop.setup.review import _BY, Review, ReviewRequest, parse_answer, render
 from tests.fakes import (
     CI_PROFILES,
     DATA,
@@ -68,6 +68,17 @@ def test_the_review_shows_each_change_against_the_preset_and_the_reasoning() -> 
     assert "kept enable_support at 0: nothing overhangs" in text
     assert "Orca's estimate: 10 min 54 s, 2.9 cm3, 3.6 g, 100 layers" in text
     assert "flat face down" in text
+
+
+def test_every_source_has_a_name_in_the_review() -> None:
+    assert set(_BY) == set(Source)
+
+
+def test_a_change_from_an_intake_answer_is_shown_as_yours() -> None:
+    answer = Proposal(changes=(Change(key="wall_loops", preset="2", value="3", source=Source.ANSWER,
+                                      reason="holds shape under light use"),),
+                      model="crew-code-think")
+    assert "holds shape under light use [your answer]" in render(_request(answer))
 
 
 def test_a_cut_off_is_shown_as_one() -> None:
