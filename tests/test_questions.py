@@ -34,7 +34,7 @@ from print_shop.setup.intake import (
 )
 from print_shop.setup.model import Ask, llm_ask, setup_llm
 from print_shop.setup.proposal import Change, PartFacts, Proposal, Source, answered, apply
-from print_shop.setup.questions import MAX_SLICES, PURPOSE, estimate
+from print_shop.setup.questions import MAX_SLICES, PURPOSE, estimate, schema
 from print_shop.slicer.orca import BedType, slice_model, with_bed_type
 from tests.fakes import DATA, STORE_PROFILES
 from tests.fixtures import write_stl
@@ -150,6 +150,57 @@ def test_exactly_one_option_is_recommended_whatever_the_model_marks(tmp_path: Pa
         features("vase", tmp_path), STORE_PROFILES
     )
     assert [o.recommended for o in asked.questions[0].options] == [True, False]
+
+
+# --------------------------------------------------------------------------
+# The recommendation's reason is its option's (mqucifer/print-shop#107)
+# --------------------------------------------------------------------------
+
+
+def _offered(label: str, **settings: str) -> dict[str, Any]:
+    """An option as the server now asks for it: no flag and no reason of its own."""
+    return {"label": label, "settings": [{"key": k, "value": v} for k, v in settings.items()],
+            "impact": f"{label} impact"}
+
+
+def test_the_recommendation_comes_after_the_options_reason_first() -> None:
+    """A flag on each option let the model mark the first before weighing them."""
+    question = schema(["section"])["schema"]["properties"]["questions"]["items"]
+    option = question["properties"]["options"]["items"]
+    assert "recommended" not in option["properties"] and "why" not in option["properties"]
+    assert list(question["properties"]) == ["feature", "text", "options", "recommend"]
+    recommend = question["properties"]["recommend"]
+    assert list(recommend["properties"]) == recommend["required"] == ["why", "option"]
+
+
+def test_the_recommended_option_is_the_one_its_reason_names(tmp_path: Path) -> None:
+    """The ledger's case: a reason about a panel whose face shows, on "carries load"."""
+    q = {"feature": "purpose", "text": "What's it for?", "options": [
+        _offered("Carries load", wall_loops="4"), _offered("Decorative or for display"),
+        _offered("Must fit another part")],
+         "recommend": {"why": "the large flat top reads as a panel whose face shows",
+                       "option": "  decorative OR for display "}}
+    asked = Proposer(ask_questions=_reply(q)).questions(features("vase", tmp_path),
+                                                        STORE_PROFILES)
+    options = asked.questions[0].options
+    assert [o.recommended for o in options] == [False, True, False]
+    assert options[1].why == "the large flat top reads as a panel whose face shows"
+    assert options[0].why == options[2].why == "", "no option carries another's reason"
+
+
+def test_a_recommendation_naming_no_option_offered_says_so(tmp_path: Path) -> None:
+    """Named wrongly, or dropped out of bounds: its reason isn't given to another option."""
+    q = {"feature": "section", "text": "How strong?", "options": [
+        _offered("light", wall_loops="2"), _offered("strong", wall_loops="4"),
+        _offered("silly", wall_loops="40")],
+         "recommend": {"why": "the silly one, for a silly part", "option": "silly"}}
+    asked = Proposer(ask_questions=_reply(q)).questions(features("bracket", tmp_path),
+                                                        STORE_PROFILES)
+    strong = next(x for x in asked.questions if x.feature == "section")
+    assert [o.label for o in strong.options] == ["light", "strong"]
+    assert [o.recommended for o in strong.options] == [True, False]
+    assert strong.options[0].why == ("the first option: the model recommended 'silly', "
+                                     "which isn't one offered")
 
 
 def test_purpose_is_always_asked_when_the_model_doesnt(tmp_path: Path) -> None:
