@@ -12,10 +12,7 @@ index (SKILL.md), and proposes what those leave undecided:
 - 2 to 4 options each. An option carries the settings it implies, each
   inside its bound (`bounds.check`): an option out of bounds is dropped, and
   a question left with fewer than 2 options is dropped. Exactly one option is
-  recommended, with why. The recommendation is the question's, written after
-  its options, the reason first and then the option it names
-  (mqucifer/print-shop#107: a flag on each option let the model mark the first
-  before weighing them, and its reason then fitted another option);
+  recommended, with why;
 - each option's impact on strength, surface and risk in one line, in the
   model's words, which never restate its values: the settings line shown
   beside it is written from the settings it applies (`settings_line`). Its
@@ -53,9 +50,8 @@ _SYSTEM = (
     "the feature that makes it matter, or to the part's purpose when its shape can't show "
     "what it's for (ask that first). Each question has 2 to 4 concrete options; each option "
     "lists the settings it implies, one line on its impact (strength, surface, risk) that "
-    "never restates a setting or a number (the settings are shown beside it). After the "
-    "options, recommend one: first say why, pointing at the part, then name the option that "
-    "reason is for, by its label. Never ask what the features "
+    "never restates a setting or a number (the settings are shown beside it), and exactly "
+    "one is recommended, with why, pointing at the part. Never ask what the features "
     "already answer, and never ask open-ended questions. A simple part may need none. Don't "
     "state times or filament: those come from the slicer.\n\n"
 )
@@ -101,28 +97,22 @@ def schema(feature_ids: list[str]) -> dict[str, Any]:
     """The reply's shape, enforced by the server."""
     option = {
         "type": "object", "additionalProperties": False,
-        "required": ["label", "settings", "impact"],
+        "required": ["label", "settings", "impact", "recommended", "why"],
         "properties": {
             "label": SHORT,
             "settings": {"type": "array", "maxItems": 6, "items": setting_item(sorted(SETTINGS))},
             "impact": TEXT,
+            "recommended": {"type": "boolean"},
+            "why": TEXT,
         },
-    }
-    # After the options, and the reason before the option it's for: the model weighs
-    # them all, says why, then names the one that reason fits.
-    recommend = {
-        "type": "object", "additionalProperties": False,
-        "required": ["why", "option"],
-        "properties": {"why": TEXT, "option": SHORT},
     }
     question = {
         "type": "object", "additionalProperties": False,
-        "required": ["feature", "text", "options", "recommend"],
+        "required": ["feature", "text", "options"],
         "properties": {
             "feature": {"type": "string", "enum": [*feature_ids, "purpose"]},
             "text": TEXT,
             "options": {"type": "array", "minItems": 2, "maxItems": 4, "items": option},
-            "recommend": recommend,
         },
     }
     return {
@@ -165,11 +155,8 @@ def propose_questions(facts: PartFacts, ask: Ask) -> Asked:
         if len(options) < 2:
             dropped.append(f"'{q.get('text')}': fewer than 2 options in bounds")
             continue
-        recommend = q.get("recommend")
-        chosen = (_recommended(options, recommend) if isinstance(recommend, dict)
-                  else _one_recommended(options))
         questions.append(Question(feature=str(q["feature"]), text=str(q["text"]),
-                                  options=tuple(chosen)))
+                                  options=tuple(_one_recommended(options))))
     note = "; ".join(f"dropped {d}" for d in dropped)
     if not any(q.feature == "purpose" for q in questions):
         # The Sponsor's choice on mqucifer/print-shop#10: purpose is always asked.
@@ -196,30 +183,8 @@ def estimate(
     return tuple(out)
 
 
-def _recommended(options: list[Option], recommend: dict[str, Any]) -> list[Option]:
-    """The option the recommendation names, by its label, with its reason; only it.
-
-    A recommendation naming no option offered (or one dropped out of bounds)
-    recommends the first, saying so, rather than giving the first another's reason.
-    """
-    named = " ".join(str(recommend.get("option", "")).split()).casefold()
-    labels = [" ".join(o.label.split()).casefold() for o in options]
-    if named in labels:
-        at, why = labels.index(named), str(recommend.get("why", "")).strip()
-    else:
-        at, why = 0, ""
-    why = why or (f"the first option: the model recommended '{recommend.get('option')}', "
-                  "which isn't one offered")
-    return [o.model_copy(update={"recommended": i == at, "why": why if i == at else ""})
-            for i, o in enumerate(options)]
-
-
 def _one_recommended(options: list[Option]) -> list[Option]:
-    """Exactly one recommended: the first marked, else the first option.
-
-    Replies recorded before mqucifer/print-shop#107 marked it on each option;
-    the server now asks for the question's `recommend` (`_recommended`).
-    """
+    """Exactly one recommended: the first marked, else the first option."""
     first = next((i for i, o in enumerate(options) if o.recommended), 0)
     return [
         o.model_copy(update={
