@@ -501,6 +501,7 @@ class Daemon:
                 "orientation_deg": gate_payload.get("orientation_deg"),
                 "print_time_s": gate_payload.get("print_time_s"),
                 "filament_cm3": gate_payload.get("filament_cm3"),
+                "pause": gate_payload.get("pause") or "",
             }
         )
 

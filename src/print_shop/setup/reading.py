@@ -25,6 +25,7 @@ from print_shop.setup.proposal import Change, Source
 from print_shop.slicer import gcode
 
 __all__ = [
+    "PauseReading",
     "FeatureReading",
     "Flag",
     "LayerTime",
@@ -93,6 +94,23 @@ class SeamReading(BaseModel):
         return self.seams > 0 and self.stacked >= SEAM_LINE
 
 
+class PauseReading(BaseModel):
+    """A pause Orca wrote into the slice: the layer it comes before, that layer's top, and how
+    far into the print it stops (mqucifer/print-shop#119)."""
+
+    model_config = {"frozen": True}
+
+    before_layer: int
+    z: float
+    after_s: float
+
+    def line(self) -> str:
+        return (
+            f"pauses for a filament swap before layer {self.before_layer} (z {self.z:g} mm), "
+            f"about {_s(self.after_s)} in"
+        )
+
+
 class SliceReading(BaseModel):
     """One slice, read layer by layer."""
 
@@ -107,6 +125,8 @@ class SliceReading(BaseModel):
     settings: dict[str, str] = {}
     #: Orca's own estimate for the whole print, beside the layers' sum.
     orca_time_s: int | None = None
+    #: Each pause Orca wrote, a colour change asked for at the review.
+    pauses: tuple[PauseReading, ...] = ()
 
     @property
     def time_s(self) -> float:
@@ -138,6 +158,7 @@ class SliceReading(BaseModel):
                 f"{f.kind}: {_s(f.time_s)}, {f.area_mm2:.0f} mm2 on {f.layers} "
                 f"layer{'s' if f.layers != 1 else ''}, z {f.from_z:g} to {f.to_z:g} mm"
             )
+        out += [p.line() for p in self.pauses]
         if self.seam.seams:
             where = (f", most at x {self.seam.at[0]:g} y {self.seam.at[1]:g} "
                      f"({self.seam.at_layers} layers)" if self.seam.at else "")
@@ -192,7 +213,15 @@ def read_slice(path: Path) -> SliceReading:
         LayerTime(n=layer.n, z=layer.z, time_s=round(layer.times.get(IRONING, 0.0), 2))
         for layer in sliced.layers if layer.areas.get(IRONING, 0) > 0
     )
+    pauses = tuple(
+        PauseReading(
+            before_layer=int(p["before_layer"]), z=float(p["z"]),
+            after_s=round(sum(t.time_s for t in layers if t.n < int(p["before_layer"])), 1),
+        )
+        for p in sliced.pauses
+    )
     return SliceReading(
+        pauses=pauses,
         layers=layers,
         features=tuple(features),
         seam=_seam(sliced.layers),

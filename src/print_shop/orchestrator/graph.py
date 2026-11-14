@@ -314,6 +314,9 @@ def build_graph(
                 "max_z_mm": slice_result.max_z_mm,
                 "orientation_deg": list(applied_orientation.rotation_deg),
                 "orientation_rationale": applied_orientation.rationale,
+                # A colour change the review asked for, where the slice put it, so the person
+                # is at the printer for the swap (mqucifer/print-shop#119).
+                "pause": _pauses_said(state.get("slice_reading")),
             }
         )
         approved = (
@@ -465,6 +468,12 @@ def build_graph(
     graph.add_edge("print", END)
 
     return graph.compile(checkpointer=checkpointer)
+
+
+def _pauses_said(reading: Any) -> str:
+    """Where the slice pauses for a filament swap, in a sentence, or ""."""
+    pauses = getattr(reading, "pauses", ()) or ()
+    return "; ".join(f"this print {p.line()}" for p in pauses)
 
 
 def _print_record(

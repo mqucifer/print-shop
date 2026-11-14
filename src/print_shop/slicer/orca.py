@@ -70,6 +70,20 @@ def parse_duration(text: str) -> int:
     return total
 
 
+class PauseAt(BaseModel):
+    """A pause Orca writes itself, from the machine profile's pause G-code.
+
+    `print_z` is the top of the first layer printed after it. Orca puts a custom G-code item on
+    the nearest layer (a tie goes to the lower) and runs it at the start of that layer, before
+    the layer prints (`ToolOrdering::assign_custom_gcodes`, v2.4.2; tested at 2.6, 2.7 and 2.8 mm
+    in `~/print-shop/proofs/m18-refine/cli-probe/`). So a pause after layer 13 of 0.2 mm layers
+    on a 0.2 mm first layer is `print_z` 2.8.
+    """
+
+    print_z: float
+    message: str = ""
+
+
 class SlicerProfiles(BaseModel):
     """Paths to OrcaSlicer profile files, each whole: Orca resolves nothing.
 
@@ -82,6 +96,9 @@ class SlicerProfiles(BaseModel):
     process: Path
     filament: Path | None = None
     used: ProfilesUsed | None = None
+    #: Pauses Orca writes itself, from the machine's pause G-code (`M600` on the Centauri
+    #: Carbon): a colour change asked for at the review (mqucifer/print-shop#119).
+    pauses: tuple[PauseAt, ...] = ()
 
 
 class BedType(StrEnum):
@@ -311,6 +328,12 @@ def slice_model(
     if profiles.filament is not None:
         cmd += ["--load-filaments", str(profiles.filament)]
 
+    if profiles.pauses:
+        # Orca's own pause, as `slice_plate` writes it (mqucifer/print-shop#119).
+        items = out / "pauses.json"
+        items.write_text(json.dumps(pause_items(list(profiles.pauses)), indent=1))
+        cmd += ["--load-custom-gcodes", str(items)]
+
     cmd += ["--slice", "0", "--outputdir", str(out), str(stl)]
 
     # Run in its own process group so a timeout can kill the whole tree,
@@ -366,20 +389,6 @@ EXITS = {
     239: "the process isn't compatible with the machine",
     250: "Orca can't read the file's format",
 }
-
-
-class PauseAt(BaseModel):
-    """A pause Orca writes itself, from the machine profile's pause G-code.
-
-    `print_z` is the top of the first layer printed after it. Orca puts a custom G-code item on
-    the nearest layer (a tie goes to the lower) and runs it at the start of that layer, before
-    the layer prints (`ToolOrdering::assign_custom_gcodes`, v2.4.2; tested at 2.6, 2.7 and 2.8 mm
-    in `~/print-shop/proofs/m18-refine/cli-probe/`). So a pause after layer 13 of 0.2 mm layers
-    on a 0.2 mm first layer is `print_z` 2.8.
-    """
-
-    print_z: float
-    message: str = ""
 
 
 def pause_items(pauses: list[PauseAt]) -> dict[str, Any]:

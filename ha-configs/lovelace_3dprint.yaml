@@ -69,6 +69,9 @@ views:
 
                 **Turned:** {{ states('sensor.3d_print_agent_orientation') }}
 
+                {% set swap = state_attr('sensor.3d_print_agent_status', 'pause') %}
+                {%- if swap %}**Filament swap:** {{ swap }}. Be at the printer for it.{% endif %}
+
             - type: horizontal-stack
               cards:
                 - type: button
@@ -126,6 +129,9 @@ views:
 
                 **The printer says:** {{ state_attr('sensor.3d_print_agent_outcome_part',
                 'printer_end') }}
+
+                {% set swap = state_attr('sensor.3d_print_agent_outcome_part', 'swap') %}
+                {%- if swap %}**It {{ swap }}.** Say in the note how the swap went.{% endif %}
 
                 {% set e = state_attr('sensor.3d_print_agent_outcome_part', 'error') %}
                 {%- if e %}**Not recorded:** {{ e }}{% endif %}
