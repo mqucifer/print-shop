@@ -47,6 +47,7 @@ if TYPE_CHECKING:  # the slicer imports the job state, which imports this
     from print_shop.slicer.orca import SlicerProfiles
 
 __all__ = [
+    "ORIENTATION",
     "PAUSE",
     "PAUSE_NAMES",
     "Change",
@@ -60,6 +61,7 @@ __all__ = [
     "from_lessons",
     "guard",
     "pause_z",
+    "pose_value",
 ]
 
 
@@ -348,6 +350,17 @@ def _notes(f: PartFacts) -> list[str]:
 #: Centauri Carbon), so `apply` makes it one. Each name here is the same thing; `none` removes it.
 PAUSE = "pause_at"
 PAUSE_NAMES = (PAUSE, "colour_change", "color_change")
+
+
+#: The pose sent back at the review (mqucifer/print-shop#128): a correction, recorded and drawn
+#: as a lesson like any, that turns the part rather than setting anything in a preset. Its value
+#: is the rotation chosen (`pose_value`); `apply` never sees it.
+ORIENTATION = "orientation"
+
+
+def pose_value(rotation_deg: tuple[float, float, float]) -> str:
+    """A rotation as a correction's value: "0,90,0"."""
+    return ",".join(f"{a:g}" for a in rotation_deg)
 
 
 def pause_z(process: dict[str, Any], z: float) -> float:

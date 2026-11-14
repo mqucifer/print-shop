@@ -24,7 +24,7 @@ from pydantic import BaseModel
 from print_shop.core.contracts import Gate, GateDecision, Outcome
 from print_shop.setup.features import Feature
 from print_shop.setup.intake import Intake
-from print_shop.setup.proposal import Change, Proposal
+from print_shop.setup.proposal import Change, GivenLesson, Proposal
 from print_shop.setup.reading import Flag, SliceReading
 from print_shop.slicer.store import ProfilesUsed
 
@@ -209,6 +209,12 @@ class PrintJobState(TypedDict):
 
     # Judgment. Each is a full Outcome — proposal, verdict history, accepted.
     orientation: NotRequired[Outcome[Orientation]]
+    #: The poses the orientation step weighed, the part's traits in the file's own pose, and the
+    #: kept lessons it was given for them: for the review to send the pose back to one, and for
+    #: the lesson drawn from that (mqucifer/print-shop#128).
+    orientation_candidates: NotRequired[tuple[Orientation, ...]]
+    laid_traits: NotRequired[tuple[str, ...]]
+    orientation_lessons: NotRequired[tuple[GivenLesson, ...]]
 
     #: What the slicer actually did, which is not always what was decided.
     #: Every key a node returns must be declared here — LangGraph silently

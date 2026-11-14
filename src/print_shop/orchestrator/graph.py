@@ -56,12 +56,22 @@ from print_shop.ledger import Ledger, PrintRecord
 from print_shop.orchestrator.fitness import scoring_profiles
 from print_shop.printer.centauri import PreflightFailed, PrinterClient, preflight
 from print_shop.setup import Proposer
+from print_shop.setup import lessons as print_lessons
 from print_shop.setup.features import measure
 from print_shop.setup.intake import Asker, Estimate, Intake
-from print_shop.setup.proposal import Change, Proposal, Source, apply
+from print_shop.setup.proposal import (
+    ORIENTATION,
+    Change,
+    GivenLesson,
+    Proposal,
+    Source,
+    apply,
+    pose_value,
+)
 from print_shop.setup.questions import estimate
 from print_shop.setup.reading import SliceReading, flags, read_slice, seen
 from print_shop.setup.review import Reviewer, ReviewRequest
+from print_shop.setup.traits import traits
 from print_shop.slicer.naming import job_id_from_filename, name_gcode
 from print_shop.slicer.orca import (
     Slicer,
@@ -172,13 +182,18 @@ def build_graph(
                 "fitted nozzle and filament (scripts/print_job.py --nozzle --filament)"
             )
 
+        # The part's traits in the file's own pose, before any turn: what an orientation lesson
+        # is keyed to, and looked up by (mqucifer/print-shop#128).
+        laid = measure(state["stl_path"], state["mesh"].bed_contact_area_mm2)
+        found = tuple(candidates(state["stl_path"]))
+        poses = {"orientation_candidates": found, "laid_traits": traits(laid)}
         request = OrientationRequest(
-            candidates=tuple(candidates(state["stl_path"])),
-            build_volume_mm=build_volume,
-            part_description="",
+            candidates=found, build_volume_mm=build_volume, part_description="",
         )
         if state.get("as_laid"):
-            return {"orientation": _as_laid(request)}
+            return {"orientation": _as_laid(request), **poses}
+        given = print_lessons.for_orienting(ledger, laid) if ledger is not None else ()
+        request = request.model_copy(update={"lessons": tuple(g.line() for g in given)})
 
         def proposer(req: OrientationRequest) -> Any:
             if llm is None:
@@ -189,7 +204,7 @@ def build_graph(
                 return propose_geometric(req)
 
         outcome = propose_validate(proposer, validate_orientation, request)
-        return {"orientation": outcome}
+        return {"orientation": outcome, "orientation_lessons": given, **poses}
 
     def slice_node(state: PrintJobState) -> dict[str, Any]:
         """Slice the model in the chosen orientation, writing into outdir_root/job_id.
@@ -228,30 +243,60 @@ def build_graph(
         assert profiles is not None, "orient refuses a graph without profiles"
         proposed: dict[str, Any] = {}
         if proposer is not None and asker is not None:
-            contact = (
-                outcome.proposal.value.bed_contact_area_mm2
-                if outcome is not None and outcome.accepted
-                else state["mesh"].bed_contact_area_mm2
-            )
-            features = measure(stl_to_slice, contact)
+            poses = state.get("orientation_candidates", ())
+            features = measure(stl_to_slice, applied.bed_contact_area_mm2 or 0.0)
+            first = stl_to_slice
             intake = _ask(
                 proposer.questions(features, profiles),
                 asker,
                 lambda settings, n: _estimate(
-                    slicer, stl_to_slice, profiles, settings, outdir / "options" / str(n)
+                    slicer, first, profiles, settings, outdir / "options" / str(n)
                 ),
             )
             proposed["intake"] = intake
+            earlier: list[Change] = []
+            while True:
+                features = measure(stl_to_slice, applied.bed_contact_area_mm2 or 0.0)
+                proposal = _with_orienting(
+                    proposer(intake, features, profiles), state.get("orientation_lessons", ())
+                )
+                carried = [c for c in earlier if c.key != ORIENTATION]
+                if carried:
+                    # Corrections made before the part was turned stand after it.
+                    proposal = proposal.corrected(carried)
+                try:
+                    result, reviewed = _propose_and_review(
+                        proposal, profiles,
+                        lambda p, stl=stl_to_slice: slicer(stl, p, outdir),
+                        reviewer, applied, outdir / "proposed", intake,
+                        poses=poses, laid_traits=state.get("laid_traits", ()),
+                        cost=_coster(slicer, stl_to_slice, profiles, proposal, outdir / "offers"),
+                        earlier=earlier,
+                    )
+                except _Turned as turned:
+                    # Sent back at the review: turned to the person's pose, and sliced again.
+                    earlier = turned.corrections
+                    chosen = next(c for c in poses if pose_value(c.rotation_deg) == turned.to.value)
+                    rotation_deg = chosen.rotation_deg
+                    applied = AppliedOrientation(
+                        rotation_deg=rotation_deg,
+                        rationale=f"sent back at the review, by you: {turned.to.reason}",
+                        height_mm=chosen.height_mm,
+                        bed_contact_area_mm2=chosen.bed_contact_area_mm2,
+                    )
+                    proposed["orientation"] = Outcome(
+                        proposal=Chosen(value=chosen, source="sponsor",
+                                        rationale=applied.rationale),
+                        accepted=True, attempts=0,
+                    )
+                    stl_to_slice = (
+                        state["stl_path"] if rotation_deg == (0.0, 0.0, 0.0)
+                        else write_rotated(state["stl_path"], rotation_deg,
+                                           outdir / f"rotated-{pose_value(rotation_deg)}.stl")
+                    )
+                    continue
+                break
             proposed["features"] = features
-            result, reviewed = _propose_and_review(
-                proposer(intake, features, profiles),
-                profiles,
-                lambda p: slicer(stl_to_slice, p, outdir),
-                reviewer,
-                applied,
-                outdir / "proposed",
-                intake,
-            )
             proposed.update(reviewed)
         else:
             active_profiles = (
@@ -574,6 +619,44 @@ def _estimate(
                     filament_cm3=result.filament_cm3)
 
 
+class _Turned(Exception):  # noqa: N818 - a signal, not an error
+    """The pose was sent back at the review: turn the part to it, and propose and slice again."""
+
+    def __init__(self, to: Change, corrections: list[Change]) -> None:
+        super().__init__(f"turned to {to.value}")
+        self.to = to
+        self.corrections = corrections
+
+
+def _with_orienting(proposal: Proposal, given: tuple[GivenLesson, ...]) -> Proposal:
+    """The proposal with the lessons the orientation step was given listed beside its own, so
+    the review says which it was given and the ledger keeps them (mqucifer/print-shop#128)."""
+    if not given:
+        return proposal
+    marked = tuple(g.model_copy(update={"applied": False,
+                                        "why": "given to the orientation step with its poses"})
+                   for g in given)
+    return proposal.model_copy(update={"lessons": proposal.lessons + marked})
+
+
+def _coster(
+    slicer: Slicer, stl: str | Path, profiles: SlicerProfiles, proposal: Proposal, outdir: Path,
+) -> Any:
+    """Orca's estimate with some changes over the proposal: the price of a way by settings."""
+    counter = iter(range(1, 1000))
+
+    def cost(changes: tuple[Change, ...]) -> Estimate | None:
+        out = outdir / str(next(counter))
+        try:
+            result = slicer(stl, apply(profiles, proposal.corrected(list(changes)), out), out)
+        except (RuntimeError, OSError, ValueError):
+            return None
+        return Estimate(print_time_s=result.print_time_s, filament_g=result.filament_g,
+                        filament_cm3=result.filament_cm3)
+
+    return cost
+
+
 def _propose_and_review(
     proposal: Any,
     profiles: SlicerProfiles,
@@ -582,16 +665,24 @@ def _propose_and_review(
     orientation: AppliedOrientation,
     workdir: Path,
     intake: Intake | None = None,
+    *,
+    poses: tuple[Orientation, ...] = (),
+    laid_traits: tuple[str, ...] = (),
+    cost: Any = None,
+    earlier: list[Change] | None = None,
 ) -> tuple[SliceResult, dict[str, Any]]:
     """Slice with the proposal; with a reviewer, again after each correction until approved.
 
     Each slice is read layer by layer, and flagged for this part from which faces the intake
     says are seen (mqucifer/print-shop#105). A change a flag proposes is only applied when the
-    Sponsor takes it at the review.
+    Sponsor takes it at the review. `earlier` are the corrections made before the part was
+    turned, kept with the job's.
 
     Raises:
         RuntimeError: If the Sponsor stops at the review. Nothing was sent to
             the printer, and the approval gate was never reached.
+        _Turned: If the pose is sent back (mqucifer/print-shop#128), with every correction so
+            far: the caller turns the part and calls again.
     """
     presets = tuple(
         str(json.loads(p.read_text()).get("name", p.stem)) if p else "-"
@@ -599,7 +690,7 @@ def _propose_and_review(
     )
     process, filament = _presets(profiles)
     faces = seen(intake)
-    corrections: list[Change] = []
+    corrections: list[Change] = list(earlier or ())
     while True:
         result: SliceResult = slice_with(apply(profiles, proposal, workdir))
         reading = _read(result)
@@ -617,12 +708,18 @@ def _propose_and_review(
                 filament=filament,
                 reading=reading,
                 flags=found,
+                candidates=poses,
+                laid_traits=laid_traits,
+                cost=cost,
             )
         )
         if review.stop:
             raise RuntimeError("stopped at the settings review; nothing was sent to the printer")
         if review.approved:
             break
+        turned = next((c for c in review.corrections if c.key == ORIENTATION), None)
+        if turned is not None:
+            raise _Turned(turned, [*corrections, *review.corrections])
         corrections += review.corrections
         proposal = proposal.corrected([*review.corrections, *review.taken])
     return result, {"proposal": proposal, "corrections": tuple(corrections),

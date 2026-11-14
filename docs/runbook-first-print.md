@@ -97,6 +97,13 @@ A print uses your tuning where there is one, and the standard where you haven't 
 
    An answer at the questions is a decision, even one that keeps your preset's value. "Bridge it — no support" over a preset with supports off sets nothing, and the review says `kept enable_support at 0: you chose 'Bridge it — no support' … [your answer: overhang]`; the guard that switches tree supports on for an overhang only does so when nothing decided otherwise (mqucifer/print-shop#124). An option that says no support always carries `enable_support=0`. Your corrections go in the ledger: they are what print-shop learns from. Each one is a candidate lesson, keyed to the part's shape; once a reviewer keeps it, a later part with the same shape gets that setting by itself, and the review says which lesson set it (`docs/print-lessons.md`).
 
+   **To send the orientation back,** type `orientation` (mqucifer/print-shop#128). It's a short conversation:
+   - the step says why it turned the part, in its own words;
+   - you pick the pose it should print in, from the others it weighed, each with its overhang, its area on the plate and its height;
+   - it asks why the turn was wrong. Where its reason was a risk that settings answer, such as warping, it lists those settings, each with Orca's time for it: a brim, a warmer plate, the chamber's exhaust off, the side fan off. Answer in your own words, or take one by its number. A reason is required.
+
+   The part is then turned, proposed for and sliced again, keeping your answers to the questions and any corrections you'd already made. `orientation=1 because it's laid for printing` does it in one line, and `back` returns to the review. Your reason is recorded as the correction, and drawn as a lesson like any other (`docs/print-lessons.md`). Once a reviewer keeps it, the orientation step is given it, with its poses, for a later part with the same traits, and the review lists it.
+
    **How a correction grows the skill.** The proposal reasons from the print-settings skill (`skills/print-settings/`): SKILL.md and a reference per setting group, distilled from Orca's wiki. A correction that would apply to other parts too, such as "never above 0.16 mm layers for a visible curve", becomes an edit there by PR:
    - a "Change it when" line in the group's reference (`references/layer-height.md` for that example);
    - or a line in SKILL.md's "The Sponsor's practice".

@@ -42,6 +42,14 @@ When the ledger records a print (`Ledger.record_start_requested`) and again when
 - **An outcome with something to say is a candidate:** a failure, or a success with a note. It sets nothing, and the model reads it.
 - Each print's evidence is drawn once, however often it's read. A failure here never stops a print: it's logged, and `draw` does it again.
 
+### A pose sent back is a lesson for the orientation step
+
+**A pose sent back at the review is a correction too** (mqucifer/print-shop#128): `orientation`, from the pose the step chose to the one the person chose, with their reason.
+- **Its evidence** names the job, both poses and both readings: the overhang, the area on the plate and the height of each.
+- **It's keyed to the part's traits in the file's own pose,** before any turn, because that's the pose the orientation step reads when it looks lessons up. A lid laid flat is `flat_and_wide, large_bed_contact` whichever way the step turned it.
+- **Once kept, it's given to the orientation step** with its poses (`lessons.for_orienting`), never to the settings proposal: it turns nothing by itself, and the model reads it. The review lists it with the others, "given to the orientation step with its poses", and the ledger has its `job_lessons` row.
+- **It's scored at the review:** `used` if the pose wasn't sent back again, and `in_the_way` if it was.
+
 ## The reviewer's steps
 
 Nothing reaches a proposal until a reviewer lets it through. As with CAD lessons, the operator reviews, signing `--by "reviewer: <who>"`, and the Sponsor decides anything that's theirs (`sponsor`, or `stand-in: <who>`). Every step is a row of `print_lesson_steps`, with who and why, and an edit keeps the words it replaced.

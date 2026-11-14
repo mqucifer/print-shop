@@ -41,6 +41,9 @@ class OrientationRequest(BaseModel):
     candidates: tuple[Orientation, ...]
     build_volume_mm: tuple[float, float, float]
     part_description: str = ""
+    #: Kept lessons from earlier prints for a part with this one's traits, each as the review
+    #: words it (mqucifer/print-shop#128): what a person sent back, and why.
+    lessons: tuple[str, ...] = ()
 
 
 def _best(candidates: tuple[Orientation, ...]) -> Orientation:
@@ -132,6 +135,12 @@ def propose_orientation(
         + (f"Part: {request.part_description}\n" if request.part_description else "")
         + "Candidates:\n"
         + "\n".join(lines)
+        + (
+            "\nLessons from earlier prints, kept by a reviewer, for a part like this one. "
+            "Each is a person sending a pose back at the review, and why:\n"
+            + "\n".join(f"- {line}" for line in request.lessons)
+            if request.lessons else ""
+        )
         + "\nReturn the rotation_deg of your choice, a rationale, and a confidence in [0, 1]."
     )
     schema: dict[str, Any] = {
