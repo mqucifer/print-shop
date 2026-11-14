@@ -35,8 +35,9 @@ if TYPE_CHECKING:  # the slicer imports the job state, which imports this
 
 __all__ = ["Lessons", "Proposer"]
 
-#: The reviewed lessons for a part with these features (`lessons.for_part`, over the ledger).
-Lessons = Callable[[tuple[Feature, ...]], tuple[GivenLesson, ...]]
+#: The reviewed lessons for a part with these features in this filament type (`lessons.for_part`,
+#: over the ledger). A lesson for a setting the filament decides is withheld for another filament.
+Lessons = Callable[[tuple[Feature, ...], str], tuple[GivenLesson, ...]]
 
 
 @dataclass(frozen=True)
@@ -62,7 +63,7 @@ class Proposer:
         self, intake: Intake, features: tuple[Feature, ...], profiles: SlicerProfiles
     ) -> Proposal:
         facts = self._facts(intake, features, profiles)
-        given = self.lessons(features) if self.lessons is not None else ()
+        given = self.lessons(features, facts.filament_type) if self.lessons is not None else ()
         learned, learned_kept, marked = from_lessons(facts, given)
         facts = dataclasses.replace(facts, lessons=marked)
         skill = load(groups_for(intake, features))

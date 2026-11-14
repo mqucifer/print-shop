@@ -5,7 +5,7 @@
     uv run python scripts/print_lessons.py traits                       what a lesson is keyed to
     uv run python scripts/print_lessons.py accept ID --by WHO
     uv run python scripts/print_lessons.py edit ID --by WHO [--text FILE] [--setting K=V|none]
-                                           [--traits T,T] [--why W]
+                                           [--traits T,T] [--material TYPE|any] [--why W]
     uv run python scripts/print_lessons.py reject ID --by WHO --why W
     uv run python scripts/print_lessons.py retire ID --by WHO --why W
     uv run python scripts/print_lessons.py promote ID --as skill --where owner/repo#n --by WHO
@@ -80,7 +80,7 @@ def run(args: argparse.Namespace, ledger: Ledger) -> str:
     elif step == "edit":
         lessons.edit(
             ledger, lesson, args.by, text=_text(args.text), setting=args.setting,
-            keyed=_listed(args.traits), why=args.why,
+            keyed=_listed(args.traits), material=args.material, why=args.why,
         )
     elif step == "reject":
         lessons.reject(ledger, lesson, args.by, args.why)
@@ -102,6 +102,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--text", type=Path, help="FILE: the lesson's words")
     parser.add_argument("--setting", help="key=value it sets, or none for one only read")
     parser.add_argument("--traits", help="T,T: what it's keyed to (`traits` lists them)")
+    parser.add_argument(
+        "--material", help="the filament type a temperature or fan lesson holds for, or any"
+    )
     parser.add_argument("--as", dest="became", help="what it became: skill")
     parser.add_argument("--where", help="where it is now: owner/repo#n")
     parser.add_argument("--score", choices=list(lessons.SCORES))

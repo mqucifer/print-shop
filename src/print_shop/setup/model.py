@@ -224,13 +224,14 @@ def prompt(facts: PartFacts, skill: Skill) -> str:
 
 def _lessons(facts: PartFacts) -> list[str]:
     """The reviewed lessons this part was given, if any (mqucifer/print-shop#106)."""
-    if not facts.lessons:
+    given = [g for g in facts.lessons if not g.withheld]  # one for another filament isn't given
+    if not given:
         return []
     return [
         "Lessons from earlier prints, each kept by a reviewer, for parts with traits this one "
         "has (what a lesson set is already set; don't change it):",
         *(f"- {g.line()}" + ("" if g.applied or not g.key else f" (not set: {g.why})")
-          for g in facts.lessons),
+          for g in given),
         "",
     ]
 

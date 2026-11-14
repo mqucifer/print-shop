@@ -57,6 +57,7 @@ from print_shop.rounds.lessons import (
     signed,
 )
 from print_shop.rounds.lessons import writer as _writer
+from print_shop.setup.bounds import MATERIAL
 from print_shop.setup.features import Feature
 from print_shop.setup.proposal import GivenLesson, Source
 from print_shop.setup.traits import TRAITS, traits
@@ -65,6 +66,7 @@ if TYPE_CHECKING:  # the ledger opens these tables, so it imports this
     from print_shop.ledger import Ledger, Row
 
 __all__ = [
+    "ANY",
     "REVIEWER",
     "SCHEMA",
     "SCORES",
@@ -83,9 +85,12 @@ __all__ = [
     "settle",
     "to_promote",
     "to_retire",
+    "upgrade",
     "write",
 ]
 
+#: A lesson for a setting the filament decides, widened by a reviewer to every filament.
+ANY = "any"
 #: Used on this many prints that didn't fail, without the Sponsor correcting it: a skill line.
 USED_TO_PROMOTE = 2
 #: What a print lesson becomes when it's delivered: a line in the print-settings skill.
@@ -115,6 +120,10 @@ CREATE TABLE IF NOT EXISTS print_lessons (
     value TEXT,
     -- JSON [trait]: what it's keyed to (`traits.TRAITS`). A later part has every one.
     traits TEXT NOT NULL,
+    -- For a setting the filament decides (`bounds.MATERIAL`): the filament type it holds for, as
+    -- the print it was learned on was sliced (`filament_type`), or 'any' once a reviewer widens
+    -- it. NULL is no such setting, or not known, and then it isn't given (mqucifer/print-shop#117).
+    material TEXT,
     -- candidate; accepted, edited or rejected; given; held or broken; promoted or retired.
     status TEXT NOT NULL,
     status_by TEXT,
@@ -261,6 +270,38 @@ def _part(row: Row) -> dict[str, Any]:
     return part
 
 
+def material_of(settings: dict[str, Any]) -> str | None:
+    """A print's filament type, as it was sliced (`filament_type`), or None if it doesn't say."""
+    found = str(settings.get("filament_type") or "").strip().upper()
+    return found or None
+
+
+def upgrade(db: sqlite3.Connection) -> list[int]:
+    """A ledger from before mqucifer/print-shop#117: `print_lessons.material` added if missing,
+    and each lesson for a setting the filament decides given its print's filament type, read
+    from that print's own record, with a step saying so. Nothing is guessed: a print that doesn't
+    say leaves it unknown, and it isn't given. The lessons given a material, by id."""
+    held = {r[1] for r in db.execute("PRAGMA table_info(print_lessons)")}
+    if "material" not in held:
+        db.execute("ALTER TABLE print_lessons ADD COLUMN material TEXT")
+    filled = []
+    for lesson, setting, settings in db.execute(
+        "SELECT l.id, l.setting, p.slicer_settings FROM print_lessons l JOIN prints p"
+        " ON p.job_id = l.job_id WHERE l.material IS NULL AND l.setting IS NOT NULL ORDER BY l.id"
+    ).fetchall():
+        if setting not in MATERIAL:
+            continue
+        found = material_of(json.loads(settings or "{}"))
+        if found is None:
+            continue
+        db.execute("UPDATE print_lessons SET material=? WHERE id=?", (found, lesson))
+        _step_in(db, lesson, str(db.execute(
+            "SELECT status FROM print_lessons WHERE id=?", (lesson,)).fetchone()[0]),
+            HARNESS, f"its material, {found}, read from the print it was learned on")
+        filled.append(int(lesson))
+    return filled
+
+
 def draw(ledger: Ledger, row: Row) -> list[int]:
     """Candidates from a print's corrections and outcome, and the new ones' ids. A correction
     a live lesson already makes is more evidence for it. Each is drawn once."""
@@ -278,11 +319,16 @@ def draw(ledger: Ledger, row: Row) -> list[int]:
         detail = {**part, "key": key, "preset": c.preset, "value": c.value, "reason": c.reason}
         if kind == READING:
             detail["reading"] = c.reading
-        same = ledger.query(
-            "SELECT id, traits FROM print_lessons WHERE setting=? AND value=? AND status NOT IN"
-            " (?, ?) ORDER BY id",
-            key, c.value, REJECTED, RETIRED,
-        )
+        made_of = material_of(row.slicer_settings) if key in MATERIAL else None
+        same = [
+            found for found in ledger.query(
+                "SELECT id, traits, material FROM print_lessons WHERE setting=? AND value=? AND"
+                " status NOT IN (?, ?) ORDER BY id",
+                key, c.value, REJECTED, RETIRED,
+            )
+            # A filament's setting is the same lesson only for the same filament.
+            if key not in MATERIAL or found["material"] in (made_of, ANY)
+        ]
         if same:
             lesson = int(same[0]["id"])
             keyed = json.loads(same[0]["traits"])
@@ -297,7 +343,7 @@ def draw(ledger: Ledger, row: Row) -> list[int]:
         text = c.reason or ("the Sponsor's correction" if kind == CORRECTION else c.reading)
         made.append(_new(
             ledger, row.job_id, kind, HARNESS, text, part["traits"], (kind, key, detail), key,
-            c.value,
+            c.value, made_of,
         ))
     said = (row.note or "").strip()
     if row.result is not None and (row.result == "failed" or said) and not _drawn(
@@ -337,18 +383,20 @@ def one_in(db: sqlite3.Connection, lesson: int) -> str:
 def _new(
     ledger: Ledger, job_id: str, drawn_from: str, by: str, text: str, keyed: list[str],
     evidence: tuple[str, str, dict[str, Any]] | None = None,
-    setting: str | None = None, value: str | None = None,
+    setting: str | None = None, value: str | None = None, material: str | None = None,
 ) -> int:
     """A candidate, with its evidence and its step, in one transaction: a lesson is never left
     without the print it was drawn from, so a draw again never makes it twice."""
     sets = f"{setting}={value}" if setting else "no setting"
+    if material:
+        sets += f", in {material}"
     with ledger.writing() as db:
         cursor = db.execute(
             "INSERT INTO print_lessons (job_id, drawn_from, written_by, written_at, text,"
-            " setting, value, traits, status, status_by, status_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " setting, value, traits, material, status, status_by, status_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (job_id, drawn_from, by, _now(), text.strip(), setting, value, _json(keyed),
-             CANDIDATE, by, _now()),
+             material, CANDIDATE, by, _now()),
         )
         lesson = int(cursor.lastrowid or 0)
         if evidence is not None:
@@ -364,12 +412,14 @@ def write(
 ) -> int:
     """A lesson a reviewer writes by hand, from a print it's about: a candidate, like any."""
     by = signed(by)
-    if ledger.get(job_id) is None:
+    printed = ledger.get(job_id)
+    if printed is None:
         raise Refused(f"job {job_id} isn't in the ledger")
     if not text.strip():
         raise Refused("a lesson needs its text")
     key, value = _setting(setting)
-    return _new(ledger, job_id, BY_HAND, by, text, _check_traits(keyed), None, key, value)
+    made_of = material_of(printed.slicer_settings) if key in MATERIAL else None
+    return _new(ledger, job_id, BY_HAND, by, text, _check_traits(keyed), None, key, value, made_of)
 
 
 def _setting(given: str | None) -> tuple[str | None, str | None]:
@@ -403,22 +453,39 @@ def accept(ledger: Ledger, lesson: int, by: str) -> None:
 
 def edit(
     ledger: Ledger, lesson: int, by: str, *, text: str | None = None,
-    setting: str | None = None, keyed: Iterable[str] | None = None, why: str = "",
+    setting: str | None = None, keyed: Iterable[str] | None = None,
+    material: str | None = None, why: str = "",
 ) -> None:
-    """The reviewer's own words, setting or traits, kept beside the ones they replace. A
-    candidate edited is let through as edited, once it's keyed to a trait. `setting` "none"
-    makes it a lesson only read."""
+    """The reviewer's own words, setting, traits or material, kept beside the ones they replace.
+    A candidate edited is let through as edited, once it's keyed to a trait. `setting` "none"
+    makes it a lesson only read. `material` "any" widens a filament's setting to every
+    filament; a type names the one it holds for."""
     by = signed(by)
     found = one(ledger, lesson)
     if found["status"] in (REJECTED, RETIRED):
         raise Refused(f"lesson {lesson} is {found['status']}")
-    if text is None and setting is None and keyed is None:
-        raise Refused("an edit changes the text, the setting or the traits")
+    if text is None and setting is None and keyed is None and material is None:
+        raise Refused("an edit changes the text, the setting, the traits or the material")
     key, value = (
         _setting(setting) if setting is not None else (found["setting"], found["value"])
     )
     chosen = _check_traits(keyed) if keyed is not None else found["traits"]
-    was = {k: found[k] for k in ("text", "setting", "value", "traits")}
+    made_of = found["material"]
+    if material is not None:
+        if key not in MATERIAL:
+            raise Refused(
+                f"{key or 'a lesson only read'} goes by the part's shape alone: a material "
+                f"applies to the filament's temperatures and fans ({', '.join(sorted(MATERIAL))})"
+            )
+        made_of = ANY if material.strip().lower() == ANY else material.strip().upper()
+        if not made_of:
+            raise Refused('a material is a filament type, such as PETG, or "any"')
+    elif key not in MATERIAL:
+        made_of = None
+    elif made_of is None:
+        printed = ledger.get(found["job_id"])
+        made_of = material_of(printed.slicer_settings) if printed else None
+    was = {k: found[k] for k in ("text", "setting", "value", "traits", "material")}
     lets_through = found["status"] in (CANDIDATE, ACCEPTED, EDITED)
     if lets_through and not chosen:
         raise Refused(
@@ -426,8 +493,8 @@ def edit(
         )
     with ledger.writing() as db:
         db.execute(
-            "UPDATE print_lessons SET text=?, setting=?, value=?, traits=? WHERE id=?",
-            ((text or found["text"]).strip(), key, value, _json(chosen), lesson),
+            "UPDATE print_lessons SET text=?, setting=?, value=?, traits=?, material=? WHERE id=?",
+            ((text or found["text"]).strip(), key, value, _json(chosen), made_of, lesson),
         )
     if lets_through:
         _status(ledger, lesson, EDITED, by)
@@ -488,10 +555,15 @@ def reviewed_by(ledger: Ledger, lesson: int) -> str:
     return _writer(found[0]["by"]) if found else "a reviewer"
 
 
-def for_part(ledger: Ledger, features: tuple[Feature, ...]) -> tuple[GivenLesson, ...]:
+def for_part(
+    ledger: Ledger, features: tuple[Feature, ...], filament_type: str = ""
+) -> tuple[GivenLesson, ...]:
     """Each kept lesson keyed to traits this part has every one of, oldest first. One in the
-    skill is read there, not given."""
+    skill is read there, not given. One for a setting the filament decides holds only for its
+    own filament type (mqucifer/print-shop#117): for another, or when either isn't known, it's
+    listed as withheld, with why, and sets nothing."""
     has = set(traits(features))
+    this = filament_type.strip().upper()
     given = []
     for row in ledger.query(
         "SELECT l.*, p.stl_name FROM print_lessons l JOIN prints p ON p.job_id = l.job_id"
@@ -502,10 +574,20 @@ def for_part(ledger: Ledger, features: tuple[Feature, ...]) -> tuple[GivenLesson
         keyed = json.loads(row["traits"])
         if not keyed or not set(keyed) <= has:
             continue
+        made_of = row["material"] or ""
+        withheld = ""
+        if row["setting"] in MATERIAL and made_of != ANY:
+            if not made_of:
+                withheld = "its filament isn't known: the print it was learned on doesn't say"
+            elif made_of != this:
+                withheld = (
+                    f"learned on {made_of}; this print is {this or 'of a filament not known'}"
+                )
         given.append(GivenLesson(
             id=row["id"], text=row["text"], key=row["setting"] or "", value=row["value"] or "",
             job_id=row["job_id"], stl_name=row["stl_name"], traits=tuple(keyed),
             reviewed_by=reviewed_by(ledger, int(row["id"])),
+            material=made_of if row["setting"] in MATERIAL else "", withheld=withheld,
         ))
     return tuple(given)
 
@@ -514,6 +596,8 @@ def _given(ledger: Ledger, row: Row) -> None:
     """A row of `job_lessons` for each lesson the print's proposal was given, and each given the
     first time is `given`."""
     for g in row.proposal.lessons if row.proposal else ():
+        if g.withheld:
+            continue  # its shape matched, its filament didn't: never given
         if ledger.query("SELECT 1 FROM job_lessons WHERE job_id=? AND lesson=?", row.job_id, g.id):
             continue
         with ledger.writing() as db:
@@ -534,7 +618,7 @@ def _scored_at_review(ledger: Ledger, row: Row) -> None:
     corrected = {c.key: c for c in row.corrections or ()}
     stood = {c.key: c for c in row.proposal.changes} if row.proposal else {}
     for g in row.proposal.lessons if row.proposal else ():
-        if not g.key or ledger.query(
+        if not g.key or g.withheld or ledger.query(
             "SELECT 1 FROM print_lesson_scores WHERE job_id=? AND lesson=? AND by=?",
             row.job_id, g.id, AT_REVIEW,
         ):
@@ -644,6 +728,12 @@ def to_retire(ledger: Ledger) -> list[tuple[dict[str, Any], str]]:
 def _line(row: dict[str, Any]) -> str:
     keyed = json.loads(row["traits"]) if isinstance(row["traits"], str) else row["traits"]
     sets = f"{row['setting']}={row['value']}" if row["setting"] else "read only"
+    if row["setting"] in MATERIAL:
+        made_of = row.get("material")
+        sets += (
+            " in any filament" if made_of == ANY else f" in {made_of}" if made_of
+            else " in a filament NOT KNOWN (not given until a reviewer names it)"
+        )
     where = f" -> {row['became']}: {row['became_where']}" if row["became"] else ""
     return (
         f"- {row['id']}. [{row['status']}{where}] {sets}, for a part that's "

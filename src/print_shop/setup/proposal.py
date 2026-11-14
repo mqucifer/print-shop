@@ -104,13 +104,20 @@ class GivenLesson(BaseModel):
     reviewed_by: str
     applied: bool = False
     why: str = ""  # why it set nothing, when it didn't
+    #: The filament type it holds for, for a setting that depends on it (`bounds.MATERIAL`), or
+    #: "any" if a reviewer widened it; "" for a lesson that goes by shape alone.
+    material: str = ""
+    #: Why it wasn't given though the part's shape matched: the filament isn't its own
+    #: (mqucifer/print-shop#117). The review lists it; nothing else reads it.
+    withheld: str = ""
 
     def line(self) -> str:
         """The lesson as the model and the review read it."""
         sets = f"{self.key}={self.value}: " if self.key else ""
+        made = f", in {self.material}" if self.material and self.material != "any" else ""
         return (
             f"Lesson {self.id}, from {self.stl_name}, for a part that's "
-            f"{', '.join(self.traits)}, kept by {self.reviewed_by}: {sets}{self.text}"
+            f"{', '.join(self.traits)}{made}, kept by {self.reviewed_by}: {sets}{self.text}"
         )
 
 
@@ -220,7 +227,7 @@ def from_lessons(
     """
     answered_keys = {k for _, o in facts.intake.chosen() for k in o.settings}
     order = sorted(
-        (g for g in given if g.key), key=lambda g: (-len(g.traits), -g.id)
+        (g for g in given if g.key and not g.withheld), key=lambda g: (-len(g.traits), -g.id)
     )
     setting: dict[str, GivenLesson] = {}
     for g in order:
@@ -229,6 +236,9 @@ def from_lessons(
     kept: list[Change] = []
     marked = []
     for g in given:
+        if g.withheld:
+            marked.append(g.model_copy(update={"applied": False, "why": g.withheld}))
+            continue
         if not g.key:
             marked.append(g.model_copy(update={"why": "read by the model; it sets nothing"}))
             continue

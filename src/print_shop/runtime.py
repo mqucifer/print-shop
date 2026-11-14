@@ -135,7 +135,8 @@ def build_run(
         # The reviewed lessons from earlier prints, for a part with their traits
         # (mqucifer/print-shop#106).
         proposer=Proposer(
-            llm=setup_llm(llm, env), lessons=lambda features: lessons.for_part(ledger, features)
+            llm=setup_llm(llm, env),
+            lessons=lambda features, filament: lessons.for_part(ledger, features, filament),
         ),
         asker=asker,
         reviewer=reviewer,

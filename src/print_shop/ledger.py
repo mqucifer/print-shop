@@ -50,6 +50,7 @@ from print_shop.inventory import Material
 from print_shop.setup.features import Feature
 from print_shop.setup.intake import Intake
 from print_shop.setup.lessons import SCHEMA as LESSONS_SCHEMA
+from print_shop.setup.lessons import upgrade as upgrade_lessons
 from print_shop.setup.proposal import Change, Proposal
 from print_shop.setup.reading import Flag, SliceReading
 from print_shop.slicer.store import ProfilesUsed
@@ -353,6 +354,14 @@ class Ledger:
         # without moving the ledger's schema version.
         self._conn.executescript(INVENTORY_SCHEMA)
         self._conn.executescript(LESSONS_SCHEMA)
+        # A lesson's material, added and read from its print once (mqucifer/print-shop#117).
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            upgrade_lessons(self._conn)
+        except BaseException:
+            self._conn.execute("ROLLBACK")
+            raise
+        self._conn.execute("COMMIT")
         self._conn.executescript(READINGS_SCHEMA)
 
     def close(self) -> None:
