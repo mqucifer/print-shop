@@ -246,3 +246,45 @@ def test_a_version_1_ledger_gains_the_new_columns_and_keeps_its_rows(
         again.record_start_requested(record("job-2").model_copy(update={"profiles": _used()}))
         assert again.get("job-2").profiles == _used()  # type: ignore[union-attr]
     assert sqlite3.connect(path).execute("PRAGMA user_version").fetchone()[0] == 3
+
+
+def test_a_print_keeps_its_slice_reading_and_flags(tmp_path: Path) -> None:
+    """mqucifer/print-shop#105: the reading goes with the job, so a lesson can be keyed to it."""
+    from print_shop.setup.reading import flags, read_slice
+
+    reading = read_slice(DATA / "recorded" / "cube.gcode")
+    found = flags(reading, None, {}, {})
+    with Ledger(tmp_path / "l.sqlite") as ledger:
+        ledger.record_start_requested(
+            record().model_copy(update={"reading": reading, "flags": found}))
+        ledger.record_start_requested(record("job-2"))  # read nothing: none kept, none guessed
+        row, bare = ledger.get("job-1"), ledger.get("job-2")
+        kept = ledger._conn.execute(
+            "SELECT shortest_layer_s, ironing_s, seam_stacked FROM slice_readings").fetchall()
+    assert row is not None and row.reading == reading and row.flags == found
+    assert bare is not None and (bare.reading, bare.flags) == (None, None)
+    shortest = reading.shortest()
+    assert shortest is not None
+    assert [tuple(k) for k in kept] == [(shortest.time_s, 0.0, reading.seam.stacked)]
+
+
+def test_a_ledger_from_before_the_readings_gains_their_table_and_keeps_its_rows(
+    tmp_path: Path,
+) -> None:
+    """The table is created if missing, and the schema version stays 3."""
+    path = tmp_path / "l.sqlite"
+    with Ledger(path) as ledger:
+        ledger.record_start_requested(record())
+    db = sqlite3.connect(path)
+    db.execute("DROP TABLE slice_readings")
+    db.commit()
+    db.close()
+
+    with Ledger(path) as again:
+        row = again.get("job-1")
+        assert row is not None and (row.reading, row.flags) == (None, None)
+        assert len(again.rows()) == 1
+    tables = {r[0] for r in sqlite3.connect(path).execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert "slice_readings" in tables
+    assert sqlite3.connect(path).execute("PRAGMA user_version").fetchone()[0] == 3

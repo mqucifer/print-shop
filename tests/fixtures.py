@@ -175,6 +175,20 @@ def _snap() -> trimesh.Trimesh:
     return snap
 
 
+def _channel() -> trimesh.Trimesh:
+    """An open-top channel: 60x8 mm, 12 mm tall, 1.2 mm walls on a 2 mm floor.
+
+    Long and thin, so its layers are quick; its floor is a top inside the part, under the
+    rim's (mqucifer/print-shop#105). A shape of our own, not anyone's design.
+    """
+    outer = trimesh.creation.box(extents=(60, 8, 12))
+    outer.apply_translation((30, 4, 6))
+    inner = trimesh.creation.box(extents=(57.6, 5.6, 12))
+    inner.apply_translation((30, 4, 8))
+    channel: trimesh.Trimesh = trimesh.boolean.difference([outer, inner])
+    return channel
+
+
 # --------------------------------------------------------------------------
 # Slopes drawn in 0.1 mm steps (mqucifer/print-shop#107). Some CAD exports a
 # slope or a round as a stack of 0.1 mm layers: flat undersides and vertical
@@ -255,6 +269,7 @@ _BUILDERS = {
     "vase": _vase,
     "bracket": _bracket,
     "snap": _snap,
+    "channel": _channel,
     "stepped_ledge_45": lambda: _stepped_ledge(45.0),
     "stepped_ledge_50": lambda: _stepped_ledge(50.0),
     "stepped_round": _stepped_round,

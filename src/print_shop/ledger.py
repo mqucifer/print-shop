@@ -51,6 +51,7 @@ from print_shop.setup.features import Feature
 from print_shop.setup.intake import Intake
 from print_shop.setup.lessons import SCHEMA as LESSONS_SCHEMA
 from print_shop.setup.proposal import Change, Proposal
+from print_shop.setup.reading import Flag, SliceReading
 from print_shop.slicer.store import ProfilesUsed
 
 __all__ = [
@@ -172,6 +173,10 @@ class PrintRecord(BaseModel):
     #: The part's measured features as it printed, which its lessons are keyed to
     #: (mqucifer/print-shop#106).
     features: tuple[Feature, ...] = ()
+    #: The slice that goes to the printer, read layer by layer, and what it flagged for this
+    #: part (mqucifer/print-shop#105), so a lesson can be keyed to it.
+    reading: SliceReading | None = None
+    flags: tuple[Flag, ...] = ()
 
 
 class Row(BaseModel):
@@ -201,6 +206,10 @@ class Row(BaseModel):
     features: tuple[Feature, ...] | None = None
     #: The printer, nozzle and spool from the inventory (mqucifer/print-shop#11).
     material: Material | None = None
+    #: The slice as read, and its flags (mqucifer/print-shop#105). None: from before, or
+    #: its G-code couldn't be read.
+    reading: SliceReading | None = None
+    flags: tuple[Flag, ...] | None = None
     start_requested_at: str
     started_at: str | None
     start_error: str | None
@@ -258,6 +267,21 @@ CREATE TABLE IF NOT EXISTS prints (
 """
 
 SCHEMA_VERSION = 3
+
+#: The slice's reading for each print (mqucifer/print-shop#105), in its own table, created if
+#: missing, without moving the schema version: a print from before has no row here, and reads
+#: back with no reading. The figures a lesson is most often keyed to are columns of their own.
+READINGS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS slice_readings (
+    job_id            TEXT PRIMARY KEY REFERENCES prints(job_id),
+    reading           TEXT NOT NULL,          -- JSON SliceReading: layers, features, seam
+    flags             TEXT NOT NULL,          -- JSON [Flag]: what it said matters, and proposed
+    shortest_layer_s  REAL,                   -- the shortest layer's time
+    ironing_s         REAL,                   -- the time spent ironing, 0 for none
+    seam_stacked      REAL,                   -- the share of seams on the one below
+    read_at           TEXT NOT NULL
+);
+"""
 
 #: What each version adds to the one before, applied in order to an older file.
 #: 2: the profiles a print used, by store file, hash and commit (print-shop#6).
@@ -329,6 +353,7 @@ class Ledger:
         # without moving the ledger's schema version.
         self._conn.executescript(INVENTORY_SCHEMA)
         self._conn.executescript(LESSONS_SCHEMA)
+        self._conn.executescript(READINGS_SCHEMA)
 
     def close(self) -> None:
         with self._lock:
@@ -407,6 +432,19 @@ class Ledger:
                     " VALUES (?, ?, ?, ?, ?)",
                     (record.job_id, material.printer_id, material.nozzle_mm,
                      material.spool_id, material.model_dump_json()),
+                )
+            if record.reading is not None:
+                reading = record.reading
+                shortest = reading.shortest()
+                ironing = reading.feature("Ironing")
+                db.execute(
+                    "INSERT INTO slice_readings (job_id, reading, flags, shortest_layer_s,"
+                    " ironing_s, seam_stacked, read_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (record.job_id, reading.model_dump_json(),
+                     json.dumps([f.model_dump(mode="json") for f in record.flags]),
+                     shortest.time_s if shortest else None,
+                     ironing.time_s if ironing else 0.0,
+                     reading.seam.stacked, _now()),
                 )
         self._learn(record.job_id)
 
@@ -510,8 +548,9 @@ class Ledger:
 
 #: A print, and what it used from the inventory if it did.
 _SELECT = (
-    "SELECT p.*, m.spool AS material FROM prints p "
-    "LEFT JOIN print_material m ON m.job_id = p.job_id"
+    "SELECT p.*, m.spool AS material, r.reading AS reading, r.flags AS flags FROM prints p "
+    "LEFT JOIN print_material m ON m.job_id = p.job_id "
+    "LEFT JOIN slice_readings r ON r.job_id = p.job_id"
 )
 
 
@@ -533,5 +572,9 @@ def _row(row: sqlite3.Row) -> Row:
         data["corrections"] = tuple(Change.model_validate(c) for c in found)
     if data.get("features") is not None:
         data["features"] = tuple(Feature.model_validate(f) for f in json.loads(data["features"]))
+    if data["reading"] is not None:
+        data["reading"] = SliceReading.model_validate_json(data["reading"])
+    if data["flags"] is not None:
+        data["flags"] = tuple(Flag.model_validate(f) for f in json.loads(data["flags"]))
     del data["slicer_config"]
     return Row.model_validate(data)

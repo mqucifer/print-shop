@@ -24,6 +24,7 @@ from print_shop.runtime import describe
 from print_shop.setup import Proposer
 from print_shop.setup.intake import replay_asker
 from print_shop.setup.proposal import Change, Proposal, Source
+from print_shop.setup.reading import Seen, flags, read_slice
 from print_shop.setup.review import _BY, Review, ReviewRequest, parse_answer, render
 from tests.fakes import (
     CI_PROFILES,
@@ -114,6 +115,60 @@ def test_a_correction_is_kept_against_the_presets_own_value() -> None:
     ]
 
 
+def test_a_value_may_have_spaces_as_orcas_own_do() -> None:
+    request = _request()
+    request = ReviewRequest(**{**request.__dict__,
+                               "process": {**request.process, "ironing_type": "top"}})
+    review = parse_answer("ironing_type=no ironing because the top is hidden", request)
+    assert isinstance(review, Review)
+    assert [(c.key, c.value, c.reason) for c in review.corrections] == [
+        ("ironing_type", "no ironing", "the top is hidden")]
+    dashed = parse_answer("wall_loops=4 - it gets handled", _request())
+    assert isinstance(dashed, Review)
+    assert [(c.value, c.reason) for c in dashed.corrections] == [("4", "it gets handled")]
+
+
+# --------------------------------------------------------------------------
+# The slice's reading at the review (mqucifer/print-shop#105)
+# --------------------------------------------------------------------------
+
+
+def _read_request() -> ReviewRequest:
+    reading = read_slice(DATA / "recorded" / "cube.gcode")
+    seen_all = Seen(walls=True, top=True, bottom=False, said="the walls and the top")
+    found = flags(reading, seen_all, {"seam_position": "aligned"}, {})
+    request = _request()
+    return ReviewRequest(**{**request.__dict__, "reading": reading, "flags": found,
+                            "process": {**request.process, "seam_position": "aligned"}})
+
+
+def test_the_review_shows_the_slice_layer_by_layer_and_what_it_proposes() -> None:
+    text = render(_read_request())
+    assert "What the slice shows, layer by layer:\n  layers: 100, " in text
+    assert "  Sparse infill: " in text
+    assert "seam (aligned): " in text and "a line up the wall" in text
+    assert "Proposed from the slice (not applied unless you take it):" in text
+    assert "  1) seam_position  aligned -> back" in text
+    assert "read: " in text
+    assert "take what the slice proposes (take, or take 1)" in text
+
+
+def test_a_reading_proposes_and_only_take_applies_it() -> None:
+    request = _read_request()
+    assert parse_answer("ok", request) == Review(approved=True), "never applied by itself"
+    taken = parse_answer("take", request)
+    assert isinstance(taken, Review) and taken.corrections == ()
+    assert [(c.key, c.value, c.source) for c in taken.taken] == [
+        ("seam_position", "back", Source.READING)]
+    assert taken.taken[0].reading, "the reading it rests on goes with it"
+    both = parse_answer("take 1; wall_loops=3 because it's handled", request)
+    assert isinstance(both, Review) and len(both.taken) == 1 and len(both.corrections) == 1
+    yours = parse_answer("take; seam_position=random because it's round", request)
+    assert isinstance(yours, Review) and yours.taken == (), "your correction wins"
+    assert parse_answer("take 3", request) == "take a number from 1 to 1"
+    assert parse_answer("take", _request()) == "the slice proposes nothing to take"
+
+
 @pytest.mark.parametrize(("answer", "why"), [
     ("walls=3", "'walls' isn't a setting in the process preset"),
     ("wall_loops 3", "'wall_loops 3' isn't setting=value"),
@@ -200,7 +255,11 @@ def test_a_correction_slices_again_and_the_ledger_keeps_it(
     assert daemon.wait_for_finish(job_id, timeout_s=30).printed
     row = ledger.get(job_id)
     assert row is not None and row.intake is not None
-    assert row.intake.summary() == "What is the cube for? a gift"
+    # What's seen, asked last by print-shop (print-shop#105), answered in the recording.
+    assert row.intake.summary() == (
+        "What is the cube for? a gift; Which faces of this part will be seen once it's in "
+        "use? the walls and the top as it prints"
+    )
     option = row.intake.questions[0].options[1]
     assert option.estimate is not None, "Orca's estimate, from the recorded slice"
     assert row.proposal is not None
@@ -209,6 +268,32 @@ def test_a_correction_slices_again_and_the_ledger_keeps_it(
         ("wall_loops", "2", "4")
     ]
     assert "corrected      wall_loops=4" in describe(row)
+
+
+def test_the_reading_is_shown_taken_sliced_again_and_kept_with_the_job(
+    setup: tuple[Daemon, Sponsor, RecordedSlicer, Ledger, Path],
+) -> None:
+    """mqucifer/print-shop#105, through the daemon. The cube's walls are seen (the recommended
+    answer to what's seen) and its seam is a line up a corner, so moving it is proposed."""
+    daemon, sponsor, slicer, ledger, stl = setup
+    sponsor.answers = ["take", "ok"]
+    job_id = daemon.submit(stl)
+    daemon.wait_for_gate(job_id, timeout_s=30)
+
+    first, second = sponsor.shown
+    assert first.reading is not None and len(first.reading.layers) == 100
+    assert [f.change.key for f in first.proposed if f.change] == ["seam_position"]
+    assert first.proposal.get("seam_position") is None, "proposed, not applied"
+    taken = second.proposal.get("seam_position")
+    assert taken is not None and (taken.value, taken.source) == ("back", Source.READING)
+
+    daemon.press("approve")  # type: ignore[attr-defined]
+    assert daemon.wait_for_finish(job_id, timeout_s=30).printed
+    row = ledger.get(job_id)
+    assert row is not None and row.reading is not None and row.flags is not None
+    assert row.corrections == (), "taking a reading's change isn't a correction"
+    assert row.proposal is not None and row.proposal.get("seam_position") == taken
+    assert "slice read     layers: 100, " in describe(row)
 
 
 def test_stop_at_the_review_never_reaches_the_gate(

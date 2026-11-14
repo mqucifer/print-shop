@@ -67,11 +67,12 @@ def test_a_part_loads_the_groups_its_features_and_options_touch(tmp_path: Path) 
         loaded[part] = [g.id for g in groups_for(intake(part, tmp_path), features)]
     # The vase's purpose options set only walls, shells and infill; the bracket
     # was asked nothing; the snap fit's hook brings supports and cooling, and
-    # its footprint adhesion.
+    # its footprint adhesion. Every part reads the surface group: every part has walls,
+    # and which faces are seen decides its seam and ironing (mqucifer/print-shop#105).
     assert loaded == {
-        "vase": ["walls-shells", "infill"],
-        "bracket": ["walls-shells", "infill"],
-        "snap": ["walls-shells", "infill", "supports", "adhesion", "speed-cooling"],
+        "vase": ["walls-shells", "infill", "surface"],
+        "bracket": ["walls-shells", "infill", "surface"],
+        "snap": ["walls-shells", "infill", "supports", "adhesion", "speed-cooling", "surface"],
     }
 
 

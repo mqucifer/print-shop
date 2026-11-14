@@ -16,6 +16,14 @@ cli-probe/`:
   `EXCLUDE_OBJECT_DEFINE` gives its outline on the plate;
 - the macOS CLI writes no `result.json` (Orca's code writes it on Linux only): warnings are in
   the log, `--debug 3`, as "plate N: found [NON_CRITICAL] slicing warnings: ...".
+
+**How long each layer takes** is read from the moves (mqucifer/print-shop#105): Orca writes only
+the whole print's time, and its progress (`M73`) in whole percents. Each move runs at its `F`,
+under the acceleration Orca set for it (`SET_VELOCITY_LIMIT ACCEL=`, `M204 S`), slowing at
+corners as Klipper does (`SQUARE_CORNER_V`): the Centauri Carbon runs Klipper. A dwell (`G4`)
+counts; a heater wait doesn't, since it can't be known from the file. The end G-code, after the
+last line laid, is no layer's. The tests hold the layers to Orca's own progress, on slices Orca
+wrote.
 """
 
 from __future__ import annotations
@@ -39,8 +47,19 @@ __all__ = [
 _WORD = re.compile(r"([XYZEIJF])(-?\d*\.?\d+)")
 _DEFINE = re.compile(r"EXCLUDE_OBJECT_DEFINE NAME=(\S+).*?POLYGON=(\[\[.*\]\])")
 _NAME = re.compile(r"EXCLUDE_OBJECT_(START|END) NAME=(\S+)")
+_ACCEL = re.compile(r"\bACCEL=(\d*\.?\d+)")
+_M204 = re.compile(r"\b[SP](\d*\.?\d+)")
+_DWELL = re.compile(r"\b([PS])(\d*\.?\d+)")
 #: An arc is drawn as chords no longer than this, in mm, when its lines are kept.
 CHORD = 0.5
+#: Klipper's default `square_corner_velocity`, mm/s: how fast a 90 degree corner is taken.
+SQUARE_CORNER_V = 5.0
+#: The acceleration before the G-code sets one, mm/s2. Only the start G-code runs at it.
+START_ACCEL = 1000.0
+#: What a move that lays nothing is counted as, in a layer's times.
+TRAVEL = "travel"
+#: Orca's label for the outermost wall, where each loop's seam is.
+OUTER_WALL = "Outer wall"
 
 
 @dataclass(frozen=True)
@@ -74,10 +93,21 @@ class Layer:
     #: Each object's extruded length on this layer.
     objects: dict[str, float] = field(default_factory=dict)
     lines: list[Line] = field(default_factory=list)
+    #: Each feature's time, in s, by Orca's label; moves that lay nothing are `TRAVEL`.
+    times: dict[str, float] = field(default_factory=dict)
+    #: Each feature's area laid, in mm2: its lines' length times their width.
+    areas: dict[str, float] = field(default_factory=dict)
+    #: Where each outer wall loop starts on this layer, (x, y): its seam.
+    seams: list[tuple[float, float]] = field(default_factory=list)
 
     @property
     def bottom(self) -> float:
         return round(self.z - self.height, 4)
+
+    @property
+    def time_s(self) -> float:
+        """How long the layer takes, from its first move after `;LAYER_CHANGE` to the next."""
+        return round(sum(self.times.values()), 3)
 
 
 @dataclass
@@ -152,6 +182,86 @@ def _arc(
     return [*points, (x1, y1)]
 
 
+class _Moves:
+    """Every move's length, speed and acceleration, to time them as the printer runs them.
+
+    A move's speed at its ends is held by the corner it makes with its neighbours (Klipper's
+    junction deviation) and by what it can reach accelerating from the one before and braking
+    for the one after. A move that only extrudes or retracts stops the head.
+    """
+
+    def __init__(self) -> None:
+        self.length: list[float] = []
+        self.speed: list[float] = []
+        self.accel: list[float] = []
+        self.unit: list[tuple[float, float, float]] = []
+        self.where: list[tuple[int, str]] = []  # the layer (from 0, -1 before the first), kind
+        self.fixed: list[tuple[int, str, float]] = []  # dwells and moves of the filament only
+        #: The moves the head starts from rest: after a dwell or a move of the filament alone.
+        self.rests: set[int] = set()
+        #: How many moves and still times there were when the last line was laid: the rest
+        #: is the end G-code.
+        self.laid = (0, 0)
+
+    def move(self, dx: float, dy: float, dz: float, speed: float, accel: float,
+             layer: int, kind: str) -> None:
+        length = math.sqrt(dx * dx + dy * dy + dz * dz)
+        if length <= 0 or speed <= 0:
+            return
+        self.length.append(length)
+        self.speed.append(speed)
+        self.accel.append(max(accel, 1.0))
+        self.unit.append((dx / length, dy / length, dz / length))
+        self.where.append((layer, kind))
+
+    def still(self, layer: int, kind: str, seconds: float) -> None:
+        """Time with the head still: a dwell, or the filament moving alone."""
+        if seconds > 0:
+            self.fixed.append((layer, kind, seconds))
+        self.rests.add(len(self.length))
+
+    def times(self) -> list[float]:
+        """Each move's time, in s."""
+        n = len(self.length)
+        rests = self.rests
+        v2 = [v * v for v in self.speed]
+        # The fastest each move may start at: its corner with the one before.
+        start = [0.0] * (n + 1)
+        for i in range(1, n):
+            if i in rests:
+                continue
+            ax, ay, az = self.unit[i - 1]
+            bx, by, bz = self.unit[i]
+            cos_theta = -(ax * bx + ay * by + az * bz)
+            if cos_theta > 0.999999:
+                continue  # a reversal: stop
+            limit = min(v2[i], v2[i - 1])
+            if cos_theta < -0.999999:
+                start[i] = limit  # straight on
+                continue
+            sin_half = math.sqrt(0.5 * (1.0 - cos_theta))
+            r = sin_half / (1.0 - sin_half)
+            corner = r * SQUARE_CORNER_V * SQUARE_CORNER_V * (math.sqrt(2.0) - 1.0)
+            start[i] = min(limit, corner)
+        # Braking for what comes next, then accelerating from what came before.
+        for i in range(n - 1, -1, -1):
+            start[i] = min(start[i], start[i + 1] + 2 * self.accel[i] * self.length[i])
+        for i in range(n):
+            start[i + 1] = min(start[i + 1], start[i] + 2 * self.accel[i] * self.length[i])
+        found = []
+        for i in range(n):
+            a, length, v = self.accel[i], self.length[i], self.speed[i]
+            s0, s1 = math.sqrt(start[i]), math.sqrt(start[i + 1])
+            up = (v2[i] - start[i]) / (2 * a)
+            down = (v2[i] - start[i + 1]) / (2 * a)
+            if up + down <= length:
+                found.append((v - s0) / a + (v - s1) / a + (length - up - down) / v)
+            else:
+                peak = math.sqrt((2 * a * length + start[i] + start[i + 1]) / 2)
+                found.append((peak - s0) / a + (peak - s1) / a)
+        return found
+
+
 def read(gcode: Path, keep_lines: bool = False) -> Sliced:
     """A G-code as Orca wrote it: layers, labels, widths, pauses, filament changes, the footer.
 
@@ -166,18 +276,25 @@ def read(gcode: Path, keep_lines: bool = False) -> Sliced:
     kind = ""
     width = 0.0
     obj = ""
-    x = y = 0.0
+    x = y = z = 0.0
+    feed = 0.0  # mm/s
+    accel = START_ACCEL
+    in_run = False  # laying a line that follows on from the last
+    relative = False  # G91: X, Y and Z are relative
+    moves = _Moves()
     pause_next = False
     in_config = False
     absolute_e = False
     last_e = 0.0
     lengths: defaultdict[str, float] = defaultdict(float)
     objects: defaultdict[str, float] = defaultdict(float)
+    areas: defaultdict[str, float] = defaultdict(float)
 
     def close() -> None:
         if layer is not None:
             layer.lengths = {k: round(v, 3) for k, v in lengths.items()}
             layer.objects = {k: round(v, 3) for k, v in objects.items()}
+            layer.areas = {k: round(v, 3) for k, v in areas.items()}
 
     with gcode.open(encoding="utf-8", errors="replace") as fh:
         for raw in fh:
@@ -187,6 +304,8 @@ def read(gcode: Path, keep_lines: bool = False) -> Sliced:
                     close()
                     lengths = defaultdict(float)
                     objects = defaultdict(float)
+                    areas = defaultdict(float)
+                    in_run = False
                     layer = Layer(len(layers) + 1, 0.0, 0.0)
                     layers.append(layer)
                 elif text.startswith(";Z:") and layer is not None:
@@ -197,6 +316,7 @@ def read(gcode: Path, keep_lines: bool = False) -> Sliced:
                     layer.height = float(text[8:])
                 elif text.startswith(";TYPE:"):
                     kind = text[6:].strip()
+                    in_run = False
                 elif text.startswith(";WIDTH:"):
                     width = float(text[7:])
                 elif text.startswith(";PAUSE_PRINT"):
@@ -236,6 +356,23 @@ def read(gcode: Path, keep_lines: bool = False) -> Sliced:
                 absolute_e = False
             elif re.fullmatch(r"T\d+", word) and layer is not None:
                 changes.append({"layer": layer.n, "z": layer.z, "to": int(word[1:]) + 1})
+            elif word in ("G90",) or word.startswith("G90 "):
+                relative = False
+            elif word in ("G91",) or word.startswith("G91 "):
+                relative = True
+            elif word.startswith("SET_VELOCITY_LIMIT"):
+                set_to = _ACCEL.search(word)
+                if set_to:
+                    accel = float(set_to.group(1))
+            elif word.startswith("M204"):
+                set_to = _M204.search(word)
+                if set_to:
+                    accel = float(set_to.group(1))
+            elif re.match(r"G4\b", word):
+                dwell = _DWELL.search(word)
+                if dwell:
+                    seconds = float(dwell.group(2)) / (1000 if dwell.group(1) == "P" else 1)
+                    moves.still(len(layers) - 1, TRAVEL, seconds)
             if not word.startswith(("G0", "G1", "G2", "G3")):
                 if word.startswith("G92"):
                     values = dict(_WORD.findall(word))
@@ -244,35 +381,73 @@ def read(gcode: Path, keep_lines: bool = False) -> Sliced:
                 continue
             command = word.split()[0]
             values = {k: float(v) for k, v in _WORD.findall(word)}
-            nx, ny = values.get("X", x), values.get("Y", y)
+            if "F" in values:
+                feed = values["F"] / 60
+            if relative:
+                nx, ny, nz = x + values.get("X", 0.0), y + values.get("Y", 0.0), z + values.get(
+                    "Z", 0.0)
+            else:
+                nx, ny, nz = values.get("X", x), values.get("Y", y), values.get("Z", z)
             e = values.get("E")
             extruded = 0.0
             if e is not None:
                 extruded = e - last_e if absolute_e else e
                 if absolute_e:
                     last_e = e
-            if extruded > 0 and layer is not None and (nx != x or ny != y):
-                points: list[tuple[float, float]]
-                if command in ("G2", "G3") and ("I" in values or "J" in values):
-                    points = _arc(
-                        x, y, nx, ny, values.get("I", 0.0), values.get("J", 0.0), command == "G2"
-                    )
-                else:
-                    points = [(nx, ny)]
-                px, py = x, y
-                for qx, qy in points:
+            here = len(layers) - 1
+            arc = command in ("G2", "G3") and ("I" in values or "J" in values)
+            if nx == x and ny == y and nz == z and not arc:
+                if extruded:
+                    # The filament alone moves, the head still: a retraction or its undoing.
+                    moves.still(here, TRAVEL, abs(extruded) / feed if feed else 0.0)
+                continue
+            laying = extruded > 0 and (nx != x or ny != y)
+            what = kind if laying else TRAVEL
+            points: list[tuple[float, float]]
+            if arc:
+                points = _arc(
+                    x, y, nx, ny, values.get("I", 0.0), values.get("J", 0.0), command == "G2"
+                )
+            else:
+                points = [(nx, ny)]
+            if laying and kind == OUTER_WALL and not in_run and layer is not None:
+                layer.seams.append((round(x, 3), round(y, 3)))
+            in_run = laying
+            px, py, pz = x, y, z
+            for k, (qx, qy) in enumerate(points, 1):
+                qz = z + (nz - z) * k / len(points)
+                moves.move(qx - px, qy - py, qz - pz, feed, accel, here, what)
+                if laying and layer is not None:
                     piece = Line(px, py, qx, qy, width, kind, obj)
                     lengths[kind] += piece.length
+                    areas[kind] += piece.length * width
                     if obj:
                         objects[obj] += piece.length
                     if width > 0 and (kind not in layer.narrowest or width < layer.narrowest[kind]):
                         layer.narrowest[kind] = width
                     if keep_lines:
                         layer.lines.append(piece)
-                    px, py = qx, qy
-            x, y = nx, ny
+                px, py, pz = qx, qy, qz
+            if laying:
+                moves.laid = (len(moves.length), len(moves.fixed))
+            x, y, z = nx, ny, nz
     close()
+    _time(layers, moves)
     return Sliced(layers, pauses, changes, outlines, footer)
+
+
+def _time(layers: list[Layer], moves: _Moves) -> None:
+    """Each layer's time by feature, from its moves."""
+    spent: list[defaultdict[str, float]] = [defaultdict(float) for _ in layers]
+    moved, still = moves.laid
+    for (n, what), seconds in zip(moves.where[:moved], moves.times()[:moved], strict=True):
+        if n >= 0:
+            spent[n][what] += seconds
+    for n, what, seconds in moves.fixed[:still]:
+        if n >= 0:
+            spent[n][what] += seconds
+    for layer, times in zip(layers, spent, strict=True):
+        layer.times = {k: round(v, 3) for k, v in times.items()}
 
 
 _WARNED = re.compile(r"plate (\d+): found (NON_CRITICAL )?slicing warnings: (.*)")

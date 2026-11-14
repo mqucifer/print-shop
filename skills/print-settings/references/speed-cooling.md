@@ -49,3 +49,27 @@ Distilled from OrcaSlicer's wiki, read 2026-10-25. The wiki is the source: each 
 - **Trade-off:** It sharpens overhangs and bridges, but on PETG it cools a long part unevenly and lifts its ends. The Sponsor's Rapid PETG tunings run it at 70, 80 or 100 %.
 - **Change it when:** a PETG part warped or lifted (turn it down), or an overhang or bridge sagged (turn it up).
 - **Bound:** 0 to 100 %. Enforced in code (`src/print_shop/setup/bounds.py`): a value outside it is refused, never clamped.
+
+## Slow down for layer cooling (`slow_down_for_layer_cooling`)
+[OrcaSlicer wiki: Material cooling, slow printing down for better layer cooling](https://github.com/OrcaSlicer/OrcaSlicer/wiki/material_cooling#slow-printing-down-for-better-layer-cooling). Read 2026-11-13.
+
+- **Effect:** Slows a layer down so it takes at least the layer time below, giving it longer to cool before the next is laid on it. The wiki says it can improve small details. Orca estimates each layer's time as length over speed, ignoring acceleration, and caps the fastest extrusions until the layer meets the time, never below the min print speed. It applies to every layer, the first included, and the slowed speeds are written into the G-code.
+- **Trade-off:** The wiki names no cost for the option itself. A slowed layer takes longer, and once the floor is reached the layer finishes early anyway. The wiki suggests printing several copies at once, so each layer takes longer.
+- **Change it when:** the slice's layers take less than the filament's layer time and the part's walls or details must hold their shape. The review reads each layer's time from the slice and proposes it on when they're short (mqucifer/print-shop#105): on the first real prints, PETG walls laid at about 8 s a layer with this off came out blobby.
+- **Bound:** `0` (off) or `1` (on). Enforced in code (`src/print_shop/setup/bounds.py`): a value outside it is refused, never clamped.
+
+## Layer time for cooling (`slow_down_layer_time`)
+[OrcaSlicer wiki: Material cooling, max fan speed threshold](https://github.com/OrcaSlicer/OrcaSlicer/wiki/material_cooling#max-fan-speed-threshold). Read 2026-11-13.
+
+- **Effect:** The time, in seconds, the slow-down above holds each layer to: the "Layer time" threshold in the max fan speed threshold. The wiki gives no section of its own for it.
+- **Trade-off:** The wiki states none and gives no default. A longer time cools each layer more, at the cost of print time on every short layer.
+- **Change it when:** the wiki doesn't say. The filament presets carry the maker's figure (12 s for Elegoo's PETG, 4 s for its PLA), and the review uses it as the line a short layer is judged by.
+- **Bound:** 1 to 60 s: past a minute a layer has cooled, and the setting only costs time. print-shop's bound, not the wiki's. Enforced in code (`src/print_shop/setup/bounds.py`): a value outside it is refused, never clamped.
+
+## Min print speed (`slow_down_min_speed`)
+[OrcaSlicer wiki: Material cooling, min print speed](https://github.com/OrcaSlicer/OrcaSlicer/wiki/material_cooling#min-print-speed). Read 2026-11-13.
+
+- **Effect:** The slowest the slow-down goes to make a layer take its layer time. At `0` there's no floor, and every extrusion on the layer is slowed by the same factor instead.
+- **Trade-off:** The wiki states none. A lower floor lets a short layer take its full time; a layer that reaches the floor finishes early.
+- **Change it when:** slow-down is on and the slice's layers still take less than the layer time, because the floor stopped them. The review proposes a lower floor then.
+- **Bound:** 1 mm/s up to the process preset's outer wall speed: a floor above it would speed the wall up. Enforced in code (`src/print_shop/setup/bounds.py`): a value outside it is refused, never clamped.

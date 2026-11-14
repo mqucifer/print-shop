@@ -64,6 +64,8 @@ class Source(StrEnum):
     GUARD = "guard"  # a rule that holds whatever the model says
     SPONSOR = "sponsor"
     LESSON = "lesson"  # a reviewed lesson from an earlier print (mqucifer/print-shop#106)
+    #: Read from the slice at the review, and taken there by the Sponsor (mqucifer/print-shop#105).
+    READING = "reading"
 
 
 class Change(BaseModel):
@@ -79,9 +81,11 @@ class Change(BaseModel):
     value: str
     reason: str
     source: Source
-    feature: str = ""  # the feature id behind it, or "purpose"
+    feature: str = ""  # the feature id behind it, "purpose", or the reading's ("layer_time")
     knowledge: str = ""  # the skill's reference group it cites
     lesson: int | None = None  # the lesson that set it, for a change from one
+    #: What the slice showed that the change rests on, with its figures (a `Source.READING`).
+    reading: str = ""
 
 
 class GivenLesson(BaseModel):
