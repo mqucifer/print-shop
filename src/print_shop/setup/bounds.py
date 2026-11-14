@@ -81,6 +81,17 @@ SETTINGS: dict[str, Setting] = {
         Setting("fan_min_speed", True, lambda p: (0, _num(p, "filament", "fan_max_speed"))),
         Setting("additional_cooling_fan_speed", True, lambda p: (0, 100)),
         Setting("during_print_exhaust_fan_speed", True, lambda p: (0, 100)),
+        # Cooling a layer by time (mqucifer/print-shop#105): the floor never above the outer
+        # wall's own speed, where slowing down would speed it up; a minute is long enough for
+        # any layer to cool, past which the setting only costs time.
+        Setting("slow_down_for_layer_cooling", True, choices=("0", "1")),
+        Setting("slow_down_layer_time", True, lambda p: (1, 60)),
+        Setting("slow_down_min_speed", True,
+                lambda p: (1, _num(p, "process", "outer_wall_speed"))),
+        # Orca's own choices, as its config writes them.
+        Setting("ironing_type", False, choices=("no ironing", "top", "topmost", "solid")),
+        Setting("seam_position", False,
+                choices=("aligned", "aligned_back", "back", "nearest", "random")),
         *(Setting(key, True, lambda p: (0, BED_MAX_C))
           for key in ("textured_plate_temp", "textured_plate_temp_initial_layer",
                       "cool_plate_temp", "cool_plate_temp_initial_layer")),

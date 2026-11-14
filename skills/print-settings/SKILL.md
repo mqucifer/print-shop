@@ -31,10 +31,13 @@ Each is distilled from OrcaSlicer's wiki, which stays the source. Every setting 
 | `supports` | `references/supports.md` | `enable_support`, `support_type`, `support_threshold_angle` | it has an overhang or a bridge |
 | `adhesion` | `references/adhesion.md` | `brim_type`, `textured_plate_temp`, `textured_plate_temp_initial_layer`, `cool_plate_temp`, `cool_plate_temp_initial_layer`, `during_print_exhaust_fan_speed` | under 200 mm² on the plate, more than 2.5x as tall as its narrowest width, or at least 100 mm long and 3x as long as it is wide |
 | `layer-height` | `references/layer-height.md` | `layer_height` | an intake option set it |
-| `speed-cooling` | `references/speed-cooling.md` | `outer_wall_speed`, `inner_wall_speed`, `sparse_infill_speed`, `fan_max_speed`, `fan_min_speed`, `additional_cooling_fan_speed` | it has an overhang or a bridge |
+| `speed-cooling` | `references/speed-cooling.md` | `outer_wall_speed`, `inner_wall_speed`, `sparse_infill_speed`, `fan_max_speed`, `fan_min_speed`, `additional_cooling_fan_speed`, `slow_down_for_layer_cooling`, `slow_down_layer_time`, `slow_down_min_speed` | it has an overhang or a bridge |
 | `temperature` | `references/temperature.md` | `nozzle_temperature` | an intake option set it |
+| `surface` | `references/surface.md` | `ironing_type`, `seam_position` | always |
 
 Any group is also read when one of the intake's options set one of its settings.
+
+**The slice is read at the review** (mqucifer/print-shop#105): each layer's time, each feature's time and area, and where the seams fall. The review proposes a change from what it reads, such as slow-down on for short layers, with the reading it rests on, and the Sponsor takes it or not. print-shop asks which faces will be seen; don't ask it yourself.
 
 ## What holds whatever this skill says
 Code, not this skill, holds these guards (`src/print_shop/setup/bounds.py` and `proposal.py`):

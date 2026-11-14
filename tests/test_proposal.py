@@ -26,7 +26,7 @@ from print_shop.setup.features import Feature, measure
 from print_shop.setup.intake import Answer, Intake, Option, Question
 from print_shop.setup.model import Ask, llm_ask, prompt, setup_llm
 from print_shop.setup.proposal import PartFacts, Proposal, Source, apply
-from print_shop.setup.questions import PURPOSE
+from print_shop.setup.questions import PURPOSE, SEEN
 from print_shop.setup.skill import groups_for, load
 from print_shop.slicer.orca import (
     BedType,
@@ -145,7 +145,7 @@ def test_the_proposals_differ_for_reasons_traced_to_the_parts(tmp_path: Path) ->
     assert keys["vase"] == {}
 
     bracket = keys["bracket"]
-    assert intake("bracket", tmp_path).questions == (PURPOSE,)
+    assert intake("bracket", tmp_path).questions == (PURPOSE, SEEN)
     assert bracket["wall_loops"].value == "4" and bracket["sparse_infill_density"].value == "40%"
     # Each reason names the load. (Its feature tag needn't: crew-code-think
     # tags these "flat_top" while the reasons are about the flange's bending,
