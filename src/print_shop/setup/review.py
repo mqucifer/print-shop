@@ -27,7 +27,7 @@ from typing import Any, Protocol
 
 from print_shop.core.state import AppliedOrientation, SliceResult
 from print_shop.setup.bounds import SETTINGS
-from print_shop.setup.proposal import Change, Proposal, Source
+from print_shop.setup.proposal import PAUSE, PAUSE_NAMES, Change, Proposal, Source
 from print_shop.setup.reading import Flag, SliceReading
 from print_shop.slicer.orca import SlicerProfiles
 
@@ -150,7 +150,8 @@ def render(request: ReviewRequest) -> str:
     lines += [
         "",
         f"Type ok to go on to the approval gate,{take} or correct a setting by name, "
-        "e.g. wall_loops=3 because it's decorative (several separated by ';'), or stop.",
+        "e.g. wall_loops=3 because it's decorative (several separated by ';'), "
+        "pause_at=12.4 because white to black for a colour change at a height, or stop.",
     ]
     return "\n".join(lines)
 
@@ -203,6 +204,12 @@ def parse_answer(answer: str, request: ReviewRequest) -> Review | str:
         if match is None:
             return f"'{part}' isn't setting=value"
         key, value, reason = match.group(1), match.group(2), (match.group(3) or "").strip()
+        if key in PAUSE_NAMES:
+            change = _pause(value, reason, request)
+            if isinstance(change, str):
+                return change
+            corrections.append(change)
+            continue
         setting = SETTINGS.get(key)
         tier = "filament" if setting is not None and setting.filament else "process"
         data = request.filament if tier == "filament" else request.process
@@ -220,6 +227,24 @@ def parse_answer(answer: str, request: ReviewRequest) -> Review | str:
     keys = {c.key for c in corrections}
     return Review(corrections=tuple(corrections),
                   taken=tuple(c for c in taken if c.key not in keys))
+
+
+def _pause(value: str, reason: str, request: ReviewRequest) -> Change | str:
+    """A colour change at a height inside the part (mqucifer/print-shop#119), or why not.
+    `none` takes one away."""
+    shown = request.proposal.get(PAUSE)
+    if value.lower() == "none":
+        return Change(key=PAUSE, preset="", value="none", reason=reason or "no colour change",
+                      source=Source.SPONSOR)
+    try:
+        z = float(value.removesuffix("mm"))
+    except ValueError:
+        return f"'{value}' isn't a height: give one in mm, e.g. pause_at=12.4, or none"
+    top = request.slice.max_z_mm
+    if not 0 < z < top:
+        return f"a colour change is inside the part: above 0 and below its top, {top:g} mm"
+    return Change(key=PAUSE, preset=shown.value if shown else "", value=f"{z:g}",
+                  reason=reason or "a colour change", source=Source.SPONSOR)
 
 
 def _take(numbers: str, request: ReviewRequest) -> list[Change] | str:

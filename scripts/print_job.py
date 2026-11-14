@@ -172,6 +172,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  plastic     {gate.get('filament_cm3')} cm3")
                 print(f"  turned      {gate.get('orientation_deg')}")
                 print(f"  because     {gate.get('orientation_rationale')}")
+                if gate.get("pause"):
+                    print(f"  SWAP        {gate['pause']}: be at the printer for it")
             result = run.daemon.wait_for_finish(job_id, timeout_s=APPROVAL_WAIT_S + FINISH_WAIT_S)
             if result.error:
                 print(f"The job ended without printing: {result.error}")

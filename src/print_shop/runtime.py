@@ -218,6 +218,8 @@ def _setup_lines(row: Row) -> list[str]:
         lines.append(f"  {c.key}: {c.preset or '-'} -> {c.value} ({c.source.value}) {c.reason}")
     if row.corrections:
         lines.append(f"corrected      {', '.join(f'{c.key}={c.value}' for c in row.corrections)}")
+    for pause in row.reading.pauses if row.reading else ():
+        lines.append(f"swap           {pause.line()}")
     for g in row.proposal.lessons if row.proposal else ():
         said = f"set {g.key}={g.value}" if g.applied else (g.why or "read")
         lines.append(f"lesson         {g.id}, from {g.stl_name}: {said}")

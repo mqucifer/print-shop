@@ -46,6 +46,8 @@ if TYPE_CHECKING:  # the slicer imports the job state, which imports this
     from print_shop.slicer.orca import SlicerProfiles
 
 __all__ = [
+    "PAUSE",
+    "PAUSE_NAMES",
     "Change",
     "GivenLesson",
     "PartFacts",
@@ -55,6 +57,7 @@ __all__ = [
     "apply",
     "from_lessons",
     "guard",
+    "pause_z",
 ]
 
 
@@ -315,14 +318,45 @@ def _notes(f: PartFacts) -> list[str]:
     return notes
 
 
+#: A colour change at a height, asked for at the review (mqucifer/print-shop#119). It's no
+#: preset's setting but Orca's own pause, from the machine's pause G-code (`M600` on the
+#: Centauri Carbon), so `apply` makes it one. Each name here is the same thing; `none` removes it.
+PAUSE = "pause_at"
+PAUSE_NAMES = (PAUSE, "colour_change", "color_change")
+
+
+def pause_z(process: dict[str, Any], z: float) -> float:
+    """The top of the first layer at or above `z`, from the process's own layer heights.
+
+    Orca puts a pause on the layer whose top is nearest the height it's given, a tie going to
+    the lower, and runs it before that layer prints (`PauseAt`). Given a layer's own top, it
+    lands on that layer: the first that reaches `z`, so everything from `z` up is the new colour.
+    """
+    first = float(_first(process.get("initial_layer_print_height", "0.2")) or 0.2)
+    height = float(_first(process.get("layer_height", "0.2")) or 0.2)
+    if z <= first:
+        return round(first, 3)
+    steps = -(-round((z - first) / height, 6) // 1)  # up to the next whole layer
+    return round(first + steps * height, 3)
+
+
 def apply(profiles: SlicerProfiles, proposal: Proposal, workdir: Path) -> SlicerProfiles:
     """`profiles` with the changes written into whole copies of the process and filament.
 
-    A filament setting is a per-extruder list in Orca's JSON; the CC1 has one.
+    A filament setting is a per-extruder list in Orca's JSON; the CC1 has one. A colour change
+    (`PAUSE`) is Orca's own pause, at the first layer at or above its height.
     """
+    from print_shop.slicer.orca import PauseAt  # noqa: PLC0415 - the slicer imports this
+
     process = json.loads(profiles.process.read_text())
     filament = json.loads(profiles.filament.read_text()) if profiles.filament else {}
+    pauses: list[PauseAt] = []
     for change in proposal.changes:
+        if change.key == PAUSE:
+            if change.value != "none":
+                pauses.append(PauseAt(print_z=pause_z(process, float(change.value)),
+                                      message=change.reason))
+            continue
         setting = SETTINGS.get(change.key)
         if setting is not None and setting.filament:
             filament[change.key] = [change.value]
@@ -331,7 +365,7 @@ def apply(profiles: SlicerProfiles, proposal: Proposal, workdir: Path) -> Slicer
     workdir.mkdir(parents=True, exist_ok=True)
     out_process = workdir / "process_proposed.json"
     out_process.write_text(json.dumps(process, indent=2))
-    update: dict[str, Path] = {"process": out_process}
+    update: dict[str, Any] = {"process": out_process, "pauses": tuple(pauses)}
     if profiles.filament is not None:
         out_filament = workdir / "filament_proposed.json"
         out_filament.write_text(json.dumps(filament, indent=2))

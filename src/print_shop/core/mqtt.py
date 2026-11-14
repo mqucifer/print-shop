@@ -208,6 +208,8 @@ def discovery_payloads(cfg: MqttConfig) -> Iterable[tuple[str, dict[str, object]
                 "device_class": None,
                 "state_topic": state_topic(cfg),
                 "value_template": "{{ value_json.status }}",
+                # The rest of the state, as attributes: the gate's card reads `pause` there.
+                "json_attributes_topic": state_topic(cfg),
                 "availability_topic": avail,
                 "device": device,
             },

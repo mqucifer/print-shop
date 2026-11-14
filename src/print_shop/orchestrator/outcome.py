@@ -231,6 +231,11 @@ class OutcomeDesk:
                 "started_at": row.started_at,
                 "ended_at": row.ended_at,
                 "printer_end": end_name(row.printer_end_status),
+                # A colour change it paused for (mqucifer/print-shop#119): how the swap went
+                # goes in the note.
+                "swap": "; ".join(
+                    p.line() for p in (row.reading.pauses if row.reading else ())
+                ),
                 "result": self._draft.get("result", UNSET),
                 "symptom": self._draft.get("symptom", UNSET),
                 "note": self._draft.get("note", ""),
