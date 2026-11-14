@@ -33,8 +33,15 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
-from print_shop.core.contracts import Gate, GateDecision, approved_at, propose_validate
-from print_shop.core.state import AppliedOrientation, EntryPath, PrintJobState, PrintStatus
+from print_shop.core.contracts import Gate, GateDecision, Outcome, approved_at, propose_validate
+from print_shop.core.contracts import Proposal as Chosen
+from print_shop.core.state import (
+    AppliedOrientation,
+    EntryPath,
+    Orientation,
+    PrintJobState,
+    PrintStatus,
+)
 from print_shop.expert.client import LLMConfig
 from print_shop.expert.orientation import (
     NO_MODEL_CONFIGURED,
@@ -170,6 +177,8 @@ def build_graph(
             build_volume_mm=build_volume,
             part_description="",
         )
+        if state.get("as_laid"):
+            return {"orientation": _as_laid(request)}
 
         def proposer(req: OrientationRequest) -> Any:
             if llm is None:
@@ -201,10 +210,15 @@ def build_graph(
             rotation_deg = chosen.rotation_deg
             overhang_area = chosen.overhang_area_mm2
             rationale = outcome.proposal.rationale
+            pose = {"height_mm": chosen.height_mm,
+                    "bed_contact_area_mm2": chosen.bed_contact_area_mm2}
         else:
             rotation_deg = (0.0, 0.0, 0.0)
             overhang_area = state["mesh"].overhang_area_mm2
             rationale = "sliced in the authored orientation: no orientation was accepted"
+            pose = {"height_mm": state["mesh"].bbox_mm[2],
+                    "bed_contact_area_mm2": state["mesh"].bed_contact_area_mm2}
+        applied = AppliedOrientation(rotation_deg=rotation_deg, rationale=rationale, **pose)
 
         if rotation_deg == (0.0, 0.0, 0.0):
             stl_to_slice: str | Path = state["stl_path"]
@@ -234,7 +248,7 @@ def build_graph(
                 profiles,
                 lambda p: slicer(stl_to_slice, p, outdir),
                 reviewer,
-                AppliedOrientation(rotation_deg=rotation_deg, rationale=rationale),
+                applied,
                 outdir / "proposed",
                 intake,
             )
@@ -258,9 +272,7 @@ def build_graph(
         return {
             "gcode_path": str(result.gcode_path),
             "slice": result,
-            "applied_orientation": AppliedOrientation(
-                rotation_deg=rotation_deg, rationale=rationale
-            ),
+            "applied_orientation": applied,
             "profiles_used": profiles.used,
             **proposed,
         }
@@ -506,6 +518,34 @@ def _print_record(
         features=tuple(state.get("features", ())),
         reading=state.get("slice_reading"),
         flags=tuple(state.get("slice_flags", ())),
+    )
+
+
+#: Where an orientation kept as the person laid it came from, as the ledger keeps it.
+AS_LAID = "as_laid"
+
+
+def _as_laid(request: OrientationRequest) -> Outcome[Orientation]:
+    """The file's own pose, kept because the person laid it for printing (mqucifer/print-shop#128).
+
+    No model is asked: the person decided. The pose must still fit the plate.
+
+    Raises:
+        RuntimeError: If, laid as it is, the part doesn't fit the build volume.
+    """
+    laid = next(c for c in request.candidates if c.rotation_deg == (0.0, 0.0, 0.0))
+    if not laid.fits_in(request.build_volume_mm):
+        raise RuntimeError(
+            f"laid as it is, the part ({laid.bbox_mm} mm) doesn't fit the build volume "
+            f"{request.build_volume_mm} mm; print it without --as-laid"
+        )
+    return Outcome(
+        proposal=Chosen(
+            value=laid, source=AS_LAID,
+            rationale="kept as laid, by you (--as-laid): no orientation model was asked",
+        ),
+        accepted=True,
+        attempts=0,
     )
 
 

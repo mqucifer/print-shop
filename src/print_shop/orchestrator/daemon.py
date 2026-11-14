@@ -354,8 +354,11 @@ class Daemon:
 
     # -- public API ---------------------------------------------------------
 
-    def submit(self, stl_path: Path | str) -> str:
+    def submit(self, stl_path: Path | str, *, as_laid: bool = False) -> str:
         """Submit a new job. Returns the job_id.
+
+        `as_laid` keeps the file's own pose, laid for printing by the person: no
+        orientation is chosen for it (mqucifer/print-shop#128).
 
         Raises JobRejected if a job is already active.
         """
@@ -373,7 +376,7 @@ class Daemon:
 
         self._worker = threading.Thread(
             target=self._run_job,
-            args=(job_id, str(stl_path)),
+            args=(job_id, str(stl_path), as_laid),
             daemon=True,
         )
         self._worker_alive = True
@@ -545,7 +548,7 @@ class Daemon:
             # scoping exists to close.
             inbox.put(cmd)
 
-    def _run_job(self, job_id: str, stl_path: str) -> None:
+    def _run_job(self, job_id: str, stl_path: str, as_laid: bool = False) -> None:
         """Run the graph for one job. Runs on a background thread."""
         thread_config = {"configurable": {"thread_id": job_id}}
         initial_state: dict[str, Any] = {
@@ -554,6 +557,7 @@ class Daemon:
             "entry": "stl_upload",
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "stl_path": stl_path,
+            "as_laid": as_laid,
         }
 
         try:

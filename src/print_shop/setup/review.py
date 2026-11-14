@@ -152,6 +152,9 @@ def render(request: ReviewRequest) -> str:
         f"{s.filament_cm3} cm3" + (f", {s.filament_g} g" if s.filament_g else "")
         + f", {s.layer_count} layers",
         f"Orientation: {request.orientation.rotation_deg}, {request.orientation.rationale}",
+        # The pose the features, and the lessons keyed to them, were read in
+        # (mqucifer/print-shop#128).
+        f"  the part's features were read in this pose: {request.orientation.pose()}",
     ]
     lines += _read(request)
     take = " or take what the slice proposes (take, or take 1)," if request.proposed else ""

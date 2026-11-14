@@ -168,6 +168,17 @@ class AppliedOrientation(BaseModel):
 
     rotation_deg: tuple[float, float, float] = (0.0, 0.0, 0.0)
     rationale: str = ""
+    #: The pose as measured, which the part's features and the lessons keyed to them are read
+    #: in (mqucifer/print-shop#128): its height, and its area on the plate. None: not measured.
+    height_mm: float | None = None
+    bed_contact_area_mm2: float | None = None
+
+    def pose(self) -> str:
+        """The pose as the review names it."""
+        if self.height_mm is None or self.bed_contact_area_mm2 is None:
+            return f"rotation {self.rotation_deg}"
+        return (f"rotation {self.rotation_deg}, {self.height_mm:g} mm tall, "
+                f"{self.bed_contact_area_mm2:g} mm2 on the plate")
 
 
 # --------------------------------------------------------------------------
@@ -183,6 +194,9 @@ class PrintJobState(TypedDict):
     trace_id: str
     entry: EntryPath
     created_at: str  # ISO-8601
+    #: Keep the file's own pose: the person laid it for printing (`--as-laid`,
+    #: mqucifer/print-shop#128), so no orientation is chosen for it.
+    as_laid: NotRequired[bool]
 
     # Artifacts. Local paths; the pipeline is one process (see CONTRACTS.md §1).
     stl_path: NotRequired[str]
