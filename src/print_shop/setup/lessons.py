@@ -58,7 +58,7 @@ from print_shop.rounds.lessons import (
 )
 from print_shop.rounds.lessons import writer as _writer
 from print_shop.setup.features import Feature
-from print_shop.setup.proposal import GivenLesson
+from print_shop.setup.proposal import GivenLesson, Source
 from print_shop.setup.traits import TRAITS, traits
 
 if TYPE_CHECKING:  # the ledger opens these tables, so it imports this
@@ -90,9 +90,11 @@ __all__ = [
 USED_TO_PROMOTE = 2
 #: What a print lesson becomes when it's delivered: a line in the print-settings skill.
 BECOMES = ("skill",)
-#: How a lesson was drawn from a print: a correction, an outcome, or a reviewer by hand.
+#: How a lesson was drawn from a print: a correction, an outcome, a change the Sponsor took from
+#: the slice's reading (mqucifer/print-shop#105), or a reviewer by hand.
 CORRECTION = "correction"
 OUTCOME = "outcome"
+READING = "reading"
 BY_HAND = "by hand"
 #: Where a delivery is: `owner/repo#n`, or a path.
 _WHERE = re.compile(r"^([\w.-]+/[\w.-]+#\d+|[\w./-]+)$")
@@ -104,7 +106,7 @@ CREATE TABLE IF NOT EXISTS print_lessons (
     id INTEGER PRIMARY KEY,
     -- The print it was first learned on; `print_lesson_evidence` has every print that shows it.
     job_id TEXT NOT NULL REFERENCES prints(job_id),
-    drawn_from TEXT NOT NULL,                 -- correction, outcome or by hand
+    drawn_from TEXT NOT NULL,                 -- correction, outcome, reading or by hand
     written_by TEXT NOT NULL,
     written_at TEXT NOT NULL,
     text TEXT NOT NULL,
@@ -238,28 +240,44 @@ def after_print(ledger: Ledger, job_id: str) -> None:
 
 
 def _part(row: Row) -> dict[str, Any]:
-    """What a print says of its part, for a lesson's evidence."""
+    """What a print says of its part, for a lesson's evidence: its shape, and what its slice
+    showed and flagged (mqucifer/print-shop#105), where it was read."""
     features = row.features or ()
-    return {
+    part: dict[str, Any] = {
         "stl_name": row.stl_name,
         "filament": row.filament,
         "traits": list(traits(features)),
         "features": {f.id: f.value for f in features},
+        "flags": [{"id": f.id, "reading": f.reading} for f in row.flags or ()],
     }
+    if row.reading is not None:
+        shortest = row.reading.shortest()
+        ironing = row.reading.feature("Ironing")
+        part["slice"] = {
+            "shortest_layer_s": shortest.time_s if shortest else None,
+            "ironing_s": ironing.time_s if ironing else 0.0,
+            "seam_stacked": row.reading.seam.stacked,
+        }
+    return part
 
 
 def draw(ledger: Ledger, row: Row) -> list[int]:
     """Candidates from a print's corrections and outcome, and the new ones' ids. A correction
     a live lesson already makes is more evidence for it. Each is drawn once."""
     made: list[int] = []
-    last: dict[str, Any] = {}
+    last: dict[str, tuple[str, Any]] = {}
     for c in row.corrections or ():
-        last[c.key] = c  # corrected twice at one review: the one that stood
+        last[c.key] = (CORRECTION, c)  # corrected twice at one review: the one that stood
+    for c in row.proposal.changes if row.proposal else ():
+        if c.source is Source.READING and c.key not in last:
+            last[c.key] = (READING, c)  # taken from the slice's reading, its own kind
     part = _part(row)
-    for key, c in last.items():
-        if _drawn(ledger, row.job_id, CORRECTION, key):
+    for key, (kind, c) in last.items():
+        if _drawn(ledger, row.job_id, kind, key):
             continue
         detail = {**part, "key": key, "preset": c.preset, "value": c.value, "reason": c.reason}
+        if kind == READING:
+            detail["reading"] = c.reading
         same = ledger.query(
             "SELECT id, traits FROM print_lessons WHERE setting=? AND value=? AND status NOT IN"
             " (?, ?) ORDER BY id",
@@ -269,16 +287,17 @@ def draw(ledger: Ledger, row: Row) -> list[int]:
             lesson = int(same[0]["id"])
             keyed = json.loads(same[0]["traits"])
             fits = set(keyed) <= set(part["traits"]) and bool(keyed)
-            said = f"the same correction again on {row.stl_name}" + (
+            said = f"the same {kind} again on {row.stl_name}" + (
                 "" if fits else ", whose part isn't every trait it's keyed to"
             )
             with ledger.writing() as db:
-                _evidence(db, lesson, row.job_id, CORRECTION, key, detail)
+                _evidence(db, lesson, row.job_id, kind, key, detail)
                 _step_in(db, lesson, one_in(db, lesson), HARNESS, said, job_id=row.job_id)
             continue
+        text = c.reason or ("the Sponsor's correction" if kind == CORRECTION else c.reading)
         made.append(_new(
-            ledger, row.job_id, CORRECTION, HARNESS, c.reason or "the Sponsor's correction",
-            part["traits"], (CORRECTION, key, detail), key, c.value,
+            ledger, row.job_id, kind, HARNESS, text, part["traits"], (kind, key, detail), key,
+            c.value,
         ))
     said = (row.note or "").strip()
     if row.result is not None and (row.result == "failed" or said) and not _drawn(
@@ -513,6 +532,7 @@ def _scored_at_review(ledger: Ledger, row: Row) -> None:
     """Each setting a lesson set here, by what the Sponsor did with it at the review: stood is
     `used`, corrected `in_the_way`. One that set nothing is `not_used`. Once for each print."""
     corrected = {c.key: c for c in row.corrections or ()}
+    stood = {c.key: c for c in row.proposal.changes} if row.proposal else {}
     for g in row.proposal.lessons if row.proposal else ():
         if not g.key or ledger.query(
             "SELECT 1 FROM print_lesson_scores WHERE job_id=? AND lesson=? AND by=?",
@@ -524,6 +544,9 @@ def _scored_at_review(ledger: Ledger, row: Row) -> None:
         elif g.key in corrected:
             c = corrected[g.key]
             scored, why = "in_the_way", f"corrected at the review to {c.value}: {c.reason}"
+        elif g.key in stood and stood[g.key].source is Source.READING:
+            c = stood[g.key]
+            scored, why = "in_the_way", f"the slice's reading was taken instead: {c.value}"
         else:
             scored, why = "used", f"{g.key}={g.value} stood at the review"
         _score(ledger, row.job_id, g.id, scored, AT_REVIEW, why)
@@ -637,12 +660,18 @@ def _evidence_lines(ledger: Ledger, lesson: int) -> list[str]:
     ):
         d = json.loads(e["detail"])
         part = f"{e['stl_name']} ({', '.join(d.get('traits') or []) or 'no traits kept'})"
+        flagged = ", ".join(f["id"] for f in d.get("flags") or [])
         outcome = f"{e['result']}, {e['symptom']}" if e["result"] else "no outcome yet"
         if e["kind"] == CORRECTION:
             said = f"corrected {d['key']} {d['preset']} -> {d['value']}: {d['reason']}"
+        elif e["kind"] == READING:
+            said = f"took {d['key']} {d['preset']} -> {d['value']} from the slice: {d['reading']}"
         else:
             said = f"{d['result']}, {d['symptom']}: {d['note']}"
-        lines.append(f"    - job {e['job_id']}, {part}, {said} [print: {outcome}]")
+        lines.append(
+            f"    - job {e['job_id']}, {part}, {said} [print: {outcome}"
+            + (f"; the slice flagged {flagged}" if flagged else "") + "]"
+        )
     for g in ledger.query(
         "SELECT j.*, p.stl_name, p.result, p.symptom FROM job_lessons j"
         " JOIN prints p ON p.job_id = j.job_id"

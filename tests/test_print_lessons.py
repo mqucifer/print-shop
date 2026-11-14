@@ -29,7 +29,22 @@ from print_shop.setup import Proposer, lessons
 from print_shop.setup.features import Feature, measure
 from print_shop.setup.intake import Answer as IntakeAnswer
 from print_shop.setup.intake import Intake, Option, Question, replay_asker
-from print_shop.setup.proposal import Change, GivenLesson, PartFacts, Source, from_lessons, guard
+from print_shop.setup.proposal import (
+    Change,
+    GivenLesson,
+    PartFacts,
+    Proposal,
+    Source,
+    from_lessons,
+    guard,
+)
+from print_shop.setup.reading import (
+    FeatureReading,
+    Flag,
+    LayerTime,
+    SeamReading,
+    SliceReading,
+)
 from print_shop.setup.review import render
 from print_shop.setup.traits import traits
 from print_shop.slicer.orca import parse_config_block
@@ -58,14 +73,14 @@ CUBE = _features()
 
 
 def _record(job_id: str, features: tuple[Feature, ...], *corrections: Change,
-            stl: str = "rail.stl") -> PrintRecord:
+            stl: str = "rail.stl", **more: Any) -> PrintRecord:
     return PrintRecord(
         job_id=job_id, stl_name=stl, stl_sha256="ab" * 32, rotation_deg=(0.0, 0.0, 0.0),
         orientation_source="geometric", orientation_rationale="flat face down",
         orientation_accepted=True, gcode_name=f"{job_id}.gcode", print_time_s=600,
         filament_cm3=3.0, layer_count=100, slicer_config=CONFIG,
         printer_machine="Centauri Carbon", printer_firmware="V1.1.46",
-        corrections=corrections, features=features,
+        corrections=corrections, features=features, **more,
     )
 
 
@@ -167,6 +182,55 @@ def test_a_quiet_success_teaches_nothing(ledger: Ledger) -> None:
     assert ledger.query("SELECT * FROM print_lessons") == []
 
 
+def _ironing_off() -> Change:
+    return Change(key="ironing_type", preset="top", value="no ironing", source=Source.READING,
+                  reason="the ironed top faces down, where it's not seen",
+                  reading="ironing 412 s on the top, which you said isn't seen")
+
+
+def test_a_reading_taken_at_the_review_is_its_own_kind_of_candidate(ledger: Ledger) -> None:
+    """mqucifer/print-shop#105: a change taken from the slice isn't a correction."""
+    flag = Flag(id="ironing_hidden", reading="ironing 412 s on the top, which you said isn't seen")
+    ledger.record_start_requested(_record(
+        "job-1", RAIL, proposal=Proposal(changes=(_ironing_off(),)), flags=(flag,),
+        reading=SliceReading(
+            layers=(LayerTime(n=1, z=0.2, time_s=9.0),),
+            features=(FeatureReading(kind="Ironing", time_s=412.0, area_mm2=1800.0, layers=1,
+                                     from_z=20.0, to_z=20.0),),
+            seam=SeamReading(seams=100, stacked=0.4),
+        ),
+    ))
+    [found] = ledger.query("SELECT * FROM print_lessons")
+    assert (found["drawn_from"], found["setting"], found["value"]) == (
+        "reading", "ironing_type", "no ironing"
+    )
+    [evidence] = ledger.query("SELECT * FROM print_lesson_evidence")
+    detail = json.loads(evidence["detail"])
+    assert evidence["kind"] == "reading"
+    assert detail["reading"].startswith("ironing 412 s")
+    assert detail["flags"] == [{"id": "ironing_hidden", "reading": flag.reading}]
+    assert detail["slice"] == {"shortest_layer_s": 9.0, "ironing_s": 412.0, "seam_stacked": 0.4}
+    assert "took ironing_type top -> no ironing from the slice" in lessons.listing(ledger)
+    assert "the slice flagged ironing_hidden" in lessons.listing(ledger)
+
+
+def test_a_lesson_whose_setting_a_taken_reading_replaced_got_in_the_way(ledger: Ledger) -> None:
+    ledger.record_start_requested(_record("job-0", RAIL, Change(
+        key="ironing_type", preset="no ironing", value="top", reason="a smooth top",
+        source=Source.SPONSOR)))
+    lessons.accept(ledger, 1, REVIEWER)
+    [given] = lessons.for_part(ledger, RAIL)
+    ledger.record_start_requested(_record(
+        "job-1", RAIL,
+        proposal=Proposal(changes=(_ironing_off(),),
+                          lessons=(given.model_copy(update={"applied": True}),)),
+    ))
+    [scored] = ledger.query("SELECT * FROM print_lesson_scores")
+    assert (scored["score"], scored["why"]) == (
+        "in_the_way", "the slice's reading was taken instead: no ironing"
+    )
+
+
 # The reviewer's steps
 # --------------------------------------------------------------------------
 
@@ -257,8 +321,6 @@ def test_a_lesson_that_keeps_the_preset_is_a_decision_the_guard_leaves() -> None
     """The Sponsor typed enable_support=0 on every overhung part: as a lesson, it holds."""
     facts = dataclasses.replace(_facts(), features=_features(overhang=394.0))
     _, kept, _ = from_lessons(facts, (_given(1, "enable_support", "0", "overhangs"),))
-    from print_shop.setup.proposal import Proposal  # noqa: PLC0415
-
     guarded = guard(facts, Proposal(kept=tuple(kept)))
     assert guarded.get("enable_support") is None, "the guard didn't turn supports on"
     assert [(c.key, c.lesson) for c in guarded.kept] == [("enable_support", 1)]
