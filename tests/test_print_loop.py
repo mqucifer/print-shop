@@ -367,3 +367,70 @@ def test_asking_about_a_small_change_asks_nobody(shop: Any) -> None:
     assert _results(row.proposal)[0] == (
         "ask", "not a big change, so nobody was asked: propose it, and the person reviews it "
         "with the rest")
+
+
+def test_a_call_cut_off_at_its_limit_is_a_turn_not_an_ending(shop: Any) -> None:
+    """The Sponsor's lid, 2026-11-14: the settings call was cut off at 16,000 tokens after 499 s,
+    and none of it was used. In the loop the cut-off is said, recorded and counted."""
+    from print_shop.expert.client import CallInfo, CutOff  # noqa: PLC0415
+
+    script = Model(
+        [("propose", {"rotation": [0, 0, 0], "settings": WARPING[:1], "reasoning": "brim"})])
+    first = True
+
+    def chat(messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any]:
+        nonlocal first
+        if first:
+            first = False
+            raise CutOff("cut off at max_tokens=16000 after 16000 tokens (3895 reasoning) and "
+                         "499.0 s", CallInfo(model="fake", finish_reason="length",
+                                             prompt_tokens=9000, completion_tokens=16000,
+                                             reasoning_tokens=3895, max_tokens=16000,
+                                             seconds=499.0))
+        assert "Your last answer was cut off at its output limit" in messages[-1]["content"]
+        return script(messages, tools)
+
+    ledger, run = shop
+    job_id, row = run("lid", chat, Person())
+    assert [(c.tool, c.seconds) for c in row.proposal.loop][0] == ("(model)", 499.0)
+    assert row.proposal.loop[0].result.startswith("cut off: cut off at max_tokens=16000")
+    assert row.proposal.loop_ending.startswith("proposed, after 2 calls")
+    assert row.proposal.get("brim_type") is not None, "its proposal is used"
+
+
+def test_each_tools_free_text_is_capped() -> None:
+    from print_shop.setup.loop import TOOLS  # noqa: PLC0415
+
+    def strings(node: Any) -> Iterator[dict[str, Any]]:
+        if isinstance(node, dict):
+            if node.get("type") == "string":
+                yield node
+            for value in node.values():
+                yield from strings(value)
+        elif isinstance(node, list):
+            for value in node:
+                yield from strings(value)
+
+    for tool in TOOLS:
+        params = tool["function"]["parameters"]
+        assert all("maxLength" in s for s in strings(params)), tool["function"]["name"]
+
+
+def test_past_prints_sets_aside_words_that_arent_traits(shop: Any, tmp_path: Path) -> None:
+    """The one real call, 2026-11-14: crew-code-think asked `past_prints` for "flat", "wide",
+    "lid", "PLA" and "large bed contact". Now the schema names the traits, and a word that isn't
+    one is said and set aside, leaving the part's own."""
+    from print_shop.setup.loop import TOOLS  # noqa: PLC0415
+    from print_shop.setup.traits import TRAITS  # noqa: PLC0415
+
+    [tool] = [t for t in TOOLS if t["function"]["name"] == "past_prints"]
+    assert tool["function"]["parameters"]["properties"]["traits"]["items"]["enum"] == list(TRAITS)
+    ledger, run = shop
+    model = Model(
+        [("past_prints", {"traits": ["flat", "lid", "PLA"]})],
+        [("propose", {"rotation": [0, 0, 0], "settings": [], "reasoning": "flat"})],
+    )
+    job_id, row = run("lid", model, Person())
+    said = row.proposal.loop[0].result
+    assert said.startswith("Not traits, so set aside: flat, lid, PLA. The traits are: ")
+    assert "Kept lessons for this part (flat_and_wide, large_bed_contact):" in said

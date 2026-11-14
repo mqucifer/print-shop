@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from print_shop.core.state import AppliedOrientation, Orientation, SliceResult
-from print_shop.setup.bounds import SETTINGS
+from print_shop.setup.bounds import MATERIAL, SETTINGS
 from print_shop.setup.concerns import concern_in, ways
 from print_shop.setup.intake import Estimate
 from print_shop.setup.proposal import (
@@ -276,13 +276,9 @@ def parse_answer(answer: str, request: ReviewRequest) -> Review | str:
                 return change
             corrections.append(change)
             continue
-        setting = SETTINGS.get(key)
-        tier = "filament" if setting is not None and setting.filament else "process"
-        data = request.filament if tier == "filament" else request.process
-        if key not in data:
-            return f"'{key}' isn't a setting in the {tier} preset"
-        preset = data[key]
-        preset = str(preset[0] if isinstance(preset, list) and preset else preset)
+        preset = _preset_of(request, key)
+        if preset is None:
+            return f"'{key}' isn't a setting in the filament or the process preset"
         known = request.proposal.get(key) or next(
             (c for c in request.proposal.kept if c.key == key), None
         )
@@ -438,10 +434,23 @@ def _priced(request: ReviewRequest, settings: dict[str, str]) -> str:
     return f": {found.line()}, {more:+d} min"
 
 
-def _setting_change(request: ReviewRequest, key: str, value: str, reason: str) -> Change:
+def _preset_of(request: ReviewRequest, key: str) -> str | None:
+    """A setting's value in the presets, or None if neither has it. A key the filament decides
+    (`bounds.MATERIAL`, or a bounded filament setting) is looked up there first, then in the
+    process: a correction of a filament setting outside the bounded ones, such as
+    `overhang_fan_speed`, was refused as "not in the process preset" (mqucifer/print-shop#129)."""
     setting = SETTINGS.get(key)
-    data = request.filament if setting is not None and setting.filament else request.process
-    preset = data.get(key, "")
-    preset = str(preset[0] if isinstance(preset, list) and preset else preset)
+    filament_first = key in MATERIAL or (setting is not None and setting.filament)
+    tiers = ((request.filament, request.process) if filament_first
+             else (request.process, request.filament))
+    for data in tiers:
+        if key in data:
+            found = data[key]
+            return str(found[0] if isinstance(found, list) and found else found)
+    return None
+
+
+def _setting_change(request: ReviewRequest, key: str, value: str, reason: str) -> Change:
+    preset = _preset_of(request, key) or ""
     return Change(key=key, preset=preset, value=value, reason=reason or "a way by settings",
                   source=Source.SPONSOR)

@@ -28,6 +28,11 @@ its result and its time, is kept in the proposal (`Proposal.loop`), so the ledge
 
 The loop has a limit on calls and on time (`PrintLoop`), recorded with how it ended. Past
 either, or if the model can't be reached, the job falls back to the single calls and says so.
+**A call cut off at its output limit is a turn, not an ending:** the single settings call was
+cut off at 16,000 tokens after 499 s on the Sponsor's lid, and none of its proposals were used
+(mqucifer/print-shop#129). In the loop the cut-off is recorded, the model is told to answer with
+one short tool call, and it counts against the loop's limits. Each tool's arguments are capped,
+so an answer is a few hundred tokens, not thousands.
 """
 
 from __future__ import annotations
@@ -41,7 +46,7 @@ from typing import TYPE_CHECKING, Any
 
 from print_shop.core.contracts import Proposal as Chosen
 from print_shop.core.state import Orientation
-from print_shop.expert.client import LLMConfig, chat_with_tools
+from print_shop.expert.client import CutOff, LLMConfig, chat_with_tools
 from print_shop.expert.orientation import OrientationRequest, symptom_map, validate_orientation
 from print_shop.ingest.orientation import write_rotated
 from print_shop.setup.bounds import SETTINGS, check
@@ -59,7 +64,7 @@ from print_shop.setup.proposal import (
 )
 from print_shop.setup.reading import read_slice
 from print_shop.setup.skill import Skill
-from print_shop.setup.traits import traits
+from print_shop.setup.traits import TRAITS, traits
 
 if TYPE_CHECKING:  # the slicer imports the job state, which imports the setup
     from print_shop.ledger import Ledger
@@ -132,11 +137,13 @@ def _fn(name: str, description: str, properties: dict[str, Any],
 
 _ROTATION = {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3,
              "description": "one of the candidate poses' rotation, in degrees"}
-_SETTINGS = {"type": "array", "items": {
+#: Every free text is capped, so an answer stays short (the module docstring).
+_WORD = {"type": "string", "maxLength": 120}
+_TEXT = {"type": "string", "maxLength": 400}
+_SETTINGS = {"type": "array", "maxItems": 12, "items": {
     "type": "object", "additionalProperties": False, "required": ["key", "value"],
-    "properties": {"key": {"type": "string"}, "value": {"type": "string"},
-                   "feature": {"type": "string"}, "knowledge": {"type": "string"},
-                   "reason": {"type": "string"}},
+    "properties": {"key": _WORD, "value": _WORD, "feature": _WORD, "knowledge": _WORD,
+                   "reason": _TEXT},
 }}
 
 #: The tools, as the model is given them.
@@ -146,17 +153,18 @@ TOOLS: list[dict[str, Any]] = [
         {"rotation": _ROTATION, "settings": _SETTINGS}, ["rotation"]),
     _fn("orca_setting", "What a setting does, its Orca key and its bound here; or, with no key, "
         "which setting answers which symptom.",
-        {"key": {"type": "string"}}, []),
+        {"key": _WORD}, []),
     _fn("past_prints", "Earlier prints of parts with these traits (this part's, by default), "
         "their outcomes, and the kept lessons for this part.",
-        {"traits": {"type": "array", "items": {"type": "string"}}}, []),
+        {"traits": {"type": "array", "maxItems": 8,
+                    "items": {"type": "string", "enum": list(TRAITS), "maxLength": 40}}}, []),
     _fn("ask", "Ask the person before a big change. Say what you'd change and why.",
-        {"question": {"type": "string"}, "reason": {"type": "string"},
-         "rotation": _ROTATION, "settings": _SETTINGS}, ["question", "reason"]),
+        {"question": _TEXT, "reason": _TEXT, "rotation": _ROTATION, "settings": _SETTINGS},
+        ["question", "reason"]),
     _fn("propose", "The pose and the settings to print with. Ends the loop.",
         {"rotation": _ROTATION, "settings": _SETTINGS,
-         "reasoning": {"type": "string"},
-         "design_notes": {"type": "array", "items": {"type": "string"}}},
+         "reasoning": {"type": "string", "maxLength": 1200},
+         "design_notes": {"type": "array", "maxItems": 4, "items": _TEXT}},
         ["rotation", "settings", "reasoning"]),
 ]
 
@@ -309,6 +317,15 @@ def run(loop: PrintLoop, part: Part) -> LoopResult:
             return ended(f"past its limit of {loop.max_seconds:g} s")
         try:
             message = loop.chat(messages, TOOLS)
+        except CutOff as exc:
+            # A turn, not an ending: said to the model, recorded, and counted.
+            model_calls += 1
+            state.calls.append(LoopCall(tool="(model)", arguments={}, result=f"cut off: {exc}",
+                                        seconds=exc.info.seconds))
+            messages.append({"role": "user", "content": (
+                f"Your last answer was cut off at its output limit ({exc}). Answer with one "
+                "tool call, and keep your reasoning short.")})
+            continue
         except Exception as exc:  # noqa: BLE001 - the model failing is an ending, said
             return ended(f"the model couldn't be reached: {type(exc).__name__}: {exc}"[:300])
         model_calls += 1
@@ -431,8 +448,13 @@ def _orca_setting(part: Part, key: str | None) -> str:
 
 
 def _past_prints(part: Part, state: _State, wanted: list[str] | None) -> str:
-    has = set(wanted or traits(part.facts.features))
-    lines = [f"Kept lessons for this part ({', '.join(sorted(has)) or 'no traits'}):"]
+    # The real model, asked once at the boundary, gave words ("flat", "lid", "PLA") where traits
+    # go: a word that isn't one is said and set aside, and none leaves the part's own.
+    unknown = [w for w in wanted or () if w not in TRAITS]
+    has = {w for w in wanted or () if w in TRAITS} or set(traits(part.facts.features))
+    lines = [f"Not traits, so set aside: {', '.join(unknown)}. The traits are: "
+             f"{', '.join(TRAITS)}."] if unknown else []
+    lines.append(f"Kept lessons for this part ({', '.join(sorted(has)) or 'no traits'}):")
     given = [g for g in part.lessons if not g.withheld]
     for g in given:
         state.looked_up.append(g.id)
