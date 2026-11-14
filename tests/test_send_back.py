@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import shutil
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -35,12 +36,13 @@ from print_shop.orchestrator.daemon import Daemon
 from print_shop.setup import Proposer
 from print_shop.setup import lessons as print_lessons
 from print_shop.setup.intake import Estimate, replay_asker
-from print_shop.setup.proposal import ORIENTATION, Change, Source
+from print_shop.setup.proposal import ORIENTATION, Change, GivenLesson, Source
 from print_shop.setup.review import ReviewRequest, cli_reviewer, render, send_back
 from print_shop.slicer.orca import SlicerProfiles, parse_gcode_header
 from tests.fakes import CI_PROFILES, DATA, FramePrinter, MemoryBridge, RecordedSlicer
 from tests.fixtures import write_stl
 from tests.test_job_e2e import CFG
+from tests.test_ledger import record
 from tests.test_review import ANSWERS, _model, _questions, _request
 
 #: Why the model stood the lid on its edge, near enough its words of 2026-11-14.
@@ -145,6 +147,71 @@ def test_its_concern_can_be_met_by_settings_each_priced_by_orca() -> None:
         "warping is met by settings, not by turning the part: a brim round the outside"
     )
     assert (brim.key, brim.value, brim.source) == ("brim_type", "outer_only", Source.SPONSOR)
+
+
+def _kept(id: int, key: str, value: str, withheld: str = "") -> GivenLesson:
+    return GivenLesson(id=id, text="learned on a PETG tray", key=key, value=value, job_id="job-0",
+                       stl_name="tray.stl", traits=("flat_and_wide", "large_bed_contact"),
+                       reviewed_by="reviewer: test", material="PETG", withheld=withheld)
+
+
+def _offers(person: Person) -> list[str]:
+    start = next(i for i, s in enumerate(person.shown) if s.startswith("Why is"))
+    return [s for s in person.shown[start + 1:] if s.startswith("  ")]
+
+
+def test_a_way_offers_a_kept_lessons_value_and_names_it() -> None:
+    """The Sponsor's ledger keeps PETG large-footprint lessons for the plate at 75, the exhaust
+    at 10 and the side fan at 20: offering 0 would contradict what the shop has learned."""
+    asked: list[Orientation] = []
+    lessons = (_kept(3, "textured_plate_temp", "75"),
+               _kept(4, "textured_plate_temp_initial_layer", "75"),
+               _kept(5, "during_print_exhaust_fan_speed", "10"),
+               _kept(6, "additional_cooling_fan_speed", "20"))
+
+    def lessons_for(pose: Orientation) -> tuple[GivenLesson, ...]:
+        asked.append(pose)
+        return lessons
+
+    request = replace(_on_edge(), lessons_for=lessons_for)
+    person = Person("1", "3")
+    review = send_back(request, person.read, person.write)
+    assert asked == [LAID], "the lessons for the pose the person chose"
+    assert _offers(person) == [
+        "  1) a brim round the outside (brim_type=outer_only)",
+        "  2) the plate at 75 C, as lessons 3 and 4 keep it "
+        "(textured_plate_temp=75, textured_plate_temp_initial_layer=75)",
+        "  3) the chamber's exhaust at 10% while it prints, as lesson 5 keeps it "
+        "(during_print_exhaust_fan_speed=10)",
+        "  4) the side fan at 20%, as lesson 6 keeps it (additional_cooling_fan_speed=20)",
+    ]
+    assert review is not None
+    turned, exhaust = review.corrections
+    assert (exhaust.key, exhaust.value) == ("during_print_exhaust_fan_speed", "10")
+    assert turned.reason.endswith("the chamber's exhaust at 10% while it prints, as lesson 5 "
+                                  "keeps it")
+
+
+def test_a_lesson_withheld_for_its_filament_leaves_the_fixed_value() -> None:
+    withheld = (_kept(6, "additional_cooling_fan_speed", "20",
+                      withheld="learned on PETG; this print is PLA"),)
+    request = replace(_on_edge(), lessons_for=lambda pose: withheld)
+    person = Person("1", REASON)
+    send_back(request, person.read, person.write)
+    assert "  4) the side fan off (additional_cooling_fan_speed=0)" in _offers(person)
+
+
+def test_with_no_lesson_for_a_key_its_fixed_value_is_offered() -> None:
+    one = (_kept(6, "additional_cooling_fan_speed", "20"),)
+    request = replace(_on_edge(), lessons_for=lambda pose: one)
+    person = Person("1", REASON)
+    send_back(request, person.read, person.write)
+    assert _offers(person) == [
+        "  1) a brim round the outside (brim_type=outer_only)",
+        "  2) a warmer plate, 75 C (textured_plate_temp=75, textured_plate_temp_initial_layer=75)",
+        "  3) the chamber's exhaust off while it prints (during_print_exhaust_fan_speed=0)",
+        "  4) the side fan at 20%, as lesson 6 keeps it (additional_cooling_fan_speed=20)",
+    ]
 
 
 def test_a_reason_with_nothing_settings_answer_offers_no_settings() -> None:
@@ -309,6 +376,30 @@ def test_a_kept_orientation_lesson_reaches_the_next_parts_orientation_by_itself(
     assert given["lesson"] == lesson["id"]
     [scored] = ledger.query("SELECT score, why FROM print_lesson_scores")
     assert (scored["score"], scored["why"]) == ("used", "the pose wasn't sent back at the review")
+
+
+def test_the_ways_offered_take_the_lessons_for_the_pose_chosen(
+    shop: tuple[Ledger, Any], model: StandsItUp
+) -> None:
+    """Through the daemon: lessons kept for a flat, wide part reach the offers once the person
+    lays the lid flat, though the pose on its edge has neither trait."""
+    ledger, run = shop
+    ledger.record_start_requested(record("job-0"))
+    for key, value in (("during_print_exhaust_fan_speed", "10"),
+                       ("additional_cooling_fan_speed", "20")):
+        made = print_lessons.write(ledger, "job-0", "reviewer: test", "PETG lifts at the corners",
+                                   ["flat_and_wide", "large_bed_contact"], f"{key}={value}")
+        print_lessons.edit(ledger, made, "reviewer: test", material="any")
+    job_id, person = run("orientation", "1", "2", "ok")
+    exhaust = next(i for i, s in enumerate(person.shown) if "exhaust at 10%" in s)
+    assert person.shown[exhaust].startswith("  2) the chamber's exhaust at 10% while it prints, "
+                                            "as lesson 1 keeps it")
+    assert any(s.startswith("  3) the side fan at 20%, as lesson 2 keeps it")
+               for s in person.shown)
+    row = ledger.get(job_id)
+    assert row is not None and ("during_print_exhaust_fan_speed", "10") in [
+        (c.key, c.value) for c in row.corrections or ()
+    ]
 
 
 def test_an_orientation_lesson_never_sets_a_setting(

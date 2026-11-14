@@ -100,7 +100,7 @@ A print uses your tuning where there is one, and the standard where you haven't 
    **To send the orientation back,** type `orientation` (mqucifer/print-shop#128). It's a short conversation:
    - the step says why it turned the part, in its own words;
    - you pick the pose it should print in, from the others it weighed, each with its overhang, its area on the plate and its height;
-   - it asks why the turn was wrong. Where its reason was a risk that settings answer, such as warping, it lists those settings, each with Orca's time for it: a brim, a warmer plate, the chamber's exhaust off, the side fan off. Answer in your own words, or take one by its number. A reason is required.
+   - it asks why the turn was wrong. Where its reason was a risk that settings answer, such as warping, it lists those settings, each with Orca's time for it: a brim, a warmer plate, the chamber's exhaust off, the side fan off. Where a kept lesson sets one of them for this part, in the pose you chose and on this filament, it offers the lesson's value instead and names the lesson, such as "the side fan at 20%, as lesson 6 keeps it". Answer in your own words, or take one by its number. A reason is required.
 
    The part is then turned, proposed for and sliced again, keeping your answers to the questions and any corrections you'd already made. `orientation=1 because it's laid for printing` does it in one line, and `back` returns to the review. Your reason is recorded as the correction, and drawn as a lesson like any other (`docs/print-lessons.md`). Once a reviewer keeps it, the orientation step is given it, with its poses, for a later part with the same traits, and the review lists it.
 

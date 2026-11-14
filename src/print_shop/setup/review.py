@@ -40,6 +40,7 @@ from print_shop.setup.proposal import (
     PAUSE,
     PAUSE_NAMES,
     Change,
+    GivenLesson,
     Proposal,
     Source,
     pose_value,
@@ -85,6 +86,9 @@ class ReviewRequest:
     laid_traits: tuple[str, ...] = ()
     #: Orca's estimate with these changes over the proposal, to price a way by settings.
     cost: Callable[[tuple[Change, ...]], Estimate | None] | None = None
+    #: The kept lessons for this part in a pose, on its filament: a way by settings offers
+    #: their values for the keys they set.
+    lessons_for: Callable[[Orientation], tuple[GivenLesson, ...]] | None = None
 
     @property
     def proposed(self) -> tuple[Flag, ...]:
@@ -365,7 +369,8 @@ def send_back(
                 write(f"  a number from 1 to {len(others)}, or back")
     concern = concern_in(now.rationale)
     presets = {"process": request.process, "filament": request.filament}
-    offered = ways(concern, presets) if concern is not None else []
+    learned = request.lessons_for(chosen) if request.lessons_for is not None else ()
+    offered = ways(concern, presets, learned) if concern is not None else []
     question = f"Why is {pose_value(now.rotation_deg)} wrong for this part?"
     if offered:
         assert concern is not None

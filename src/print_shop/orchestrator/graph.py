@@ -271,6 +271,8 @@ def build_graph(
                         reviewer, applied, outdir / "proposed", intake,
                         poses=poses, laid_traits=state.get("laid_traits", ()),
                         cost=_coster(slicer, stl_to_slice, profiles, proposal, outdir / "offers"),
+                        lessons_for=_lessons_for(ledger, state["stl_path"], profiles,
+                                                 outdir / "poses"),
                         earlier=earlier,
                     )
                 except _Turned as turned:
@@ -639,6 +641,24 @@ def _with_orienting(proposal: Proposal, given: tuple[GivenLesson, ...]) -> Propo
     return proposal.model_copy(update={"lessons": proposal.lessons + marked})
 
 
+def _lessons_for(
+    ledger: Ledger | None, stl: str | Path, profiles: SlicerProfiles, outdir: Path,
+) -> Any:
+    """The kept lessons for the part in a pose, on the print's filament: what a way by settings
+    offers at the review, read in the pose the person chose (mqucifer/print-shop#128)."""
+    filament = _presets(profiles)[1].get("filament_type", "")
+    kind = str(filament[0] if isinstance(filament, list) and filament else filament)
+
+    def found(pose: Orientation) -> tuple[GivenLesson, ...]:
+        if ledger is None:
+            return ()
+        turned = stl if pose.rotation_deg == (0.0, 0.0, 0.0) else write_rotated(
+            stl, pose.rotation_deg, outdir / f"{pose_value(pose.rotation_deg)}.stl")
+        return print_lessons.for_part(ledger, measure(turned, pose.bed_contact_area_mm2), kind)
+
+    return found
+
+
 def _coster(
     slicer: Slicer, stl: str | Path, profiles: SlicerProfiles, proposal: Proposal, outdir: Path,
 ) -> Any:
@@ -669,6 +689,7 @@ def _propose_and_review(
     poses: tuple[Orientation, ...] = (),
     laid_traits: tuple[str, ...] = (),
     cost: Any = None,
+    lessons_for: Any = None,
     earlier: list[Change] | None = None,
 ) -> tuple[SliceResult, dict[str, Any]]:
     """Slice with the proposal; with a reviewer, again after each correction until approved.
@@ -711,6 +732,7 @@ def _propose_and_review(
                 candidates=poses,
                 laid_traits=laid_traits,
                 cost=cost,
+                lessons_for=lessons_for,
             )
         )
         if review.stop:
