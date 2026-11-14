@@ -36,6 +36,7 @@ import pytest
 from print_shop.core.mqtt import MqttConfig, command_topic
 from print_shop.env import SETTINGS_PATH
 from print_shop.orchestrator.daemon import Decision
+from tests.live import broker_config
 
 APPROVE = json.dumps({"decision": "approve"}).encode()
 REJECT = json.dumps({"decision": "reject"}).encode()
@@ -52,7 +53,9 @@ needs_broker = pytest.mark.skipif(not _env_present(), reason="no MQTT credential
 
 @pytest.fixture
 def cfg() -> MqttConfig:
-    return MqttConfig.from_env()
+    """The opted-in test broker under this run's own prefix and node, never the live device's
+    (mqucifer/print-shop#115)."""
+    return broker_config()
 
 
 @pytest.fixture

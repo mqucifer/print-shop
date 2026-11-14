@@ -38,6 +38,7 @@ from print_shop.core.mqtt import (
     state_topic,
 )
 from print_shop.env import SETTINGS_PATH
+from tests.live import broker_config
 
 
 def _env_present() -> bool:
@@ -55,6 +56,15 @@ needs_broker = pytest.mark.skipif(
 
 @pytest.fixture
 def cfg() -> MqttConfig:
+    """The opted-in test broker under this run's own prefix and node, never the live device's
+    (mqucifer/print-shop#115)."""
+    return broker_config()
+
+
+@pytest.fixture
+def settings_cfg() -> MqttConfig:
+    """The settings' config, for a test that only builds discovery from it and connects to
+    nothing."""
     return MqttConfig.from_env()
 
 
@@ -64,7 +74,9 @@ def cfg() -> MqttConfig:
 
 
 @needs_broker
-def test_reads_credentials_from_env(cfg: MqttConfig) -> None:
+def test_reads_credentials_from_env() -> None:
+    """Reads the settings, and connects to nothing."""
+    cfg = MqttConfig.from_env()
     assert cfg.host and cfg.port
     assert cfg.user and cfg.password
     assert cfg.topic_prefix == "3dprint-dev", "dev prefix, not the live one"
@@ -469,14 +481,14 @@ def ha_slugify(text: str) -> str:
     return re.sub(r"_+", "_", slug)
 
 
-def test_entity_ids_follow_from_the_device_and_entity_names(cfg: MqttConfig) -> None:
+def test_entity_ids_follow_from_the_device_and_entity_names(settings_cfg: MqttConfig) -> None:
     """The names are the contract, because HA builds the id out of them.
 
     Rename the device from "3D Print Agent", or an entity from "Print Time",
     and every card pointing at the old id silently stops resolving. This
     recomputes the ids the way HA does so that rename fails here first.
     """
-    payloads = {t: p for t, p in discovery_payloads(cfg)}
+    payloads = {t: p for t, p in discovery_payloads(settings_cfg)}
     assert len(payloads) == len(CONTRACTS_HA)
 
     got = {}
@@ -490,14 +502,14 @@ def test_entity_ids_follow_from_the_device_and_entity_names(cfg: MqttConfig) -> 
     assert got == CONTRACTS_HA
 
 
-def test_object_id_is_not_used_to_pin_entity_ids(cfg: MqttConfig) -> None:
+def test_object_id_is_not_used_to_pin_entity_ids(settings_cfg: MqttConfig) -> None:
     """A guard against re-adding a key that looks like it works and does not.
 
     HA 2026.8.3 ignores `object_id` in MQTT discovery. Setting it again would
     imply the ids are pinned when they are still name-derived, which is the
     more dangerous of the two states — it reads as a guarantee.
     """
-    for _, payload in discovery_payloads(cfg):
+    for _, payload in discovery_payloads(settings_cfg):
         assert "object_id" not in payload, (
             "object_id is ignored by HA; the entity id comes from the names. "
             "See discovery_payloads()."
@@ -557,11 +569,11 @@ def state_payload_for_test(orientation_deg: Any) -> str:
 
 
 def test_the_orientation_sensor_no_longer_claims_to_be_numeric(
-    cfg: MqttConfig,
+    settings_cfg: MqttConfig,
 ) -> None:
     """A unit on a text state is what produced the warning in the first place."""
-    payload = dict(discovery_payloads(cfg))[
-        f"{cfg.discovery_prefix}/sensor/{cfg.node_id}/orientation/config"
+    payload = dict(discovery_payloads(settings_cfg))[
+        f"{settings_cfg.discovery_prefix}/sensor/{settings_cfg.node_id}/orientation/config"
     ]
     assert "unit_of_measurement" not in payload
     assert "device_class" not in payload

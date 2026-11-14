@@ -35,6 +35,7 @@ from print_shop.orchestrator.daemon import (
     parse_command,
     state_payload,
 )
+from tests.live import broker_config
 from tests.test_print_node import FakePrinter, idle
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
@@ -132,7 +133,9 @@ needs_orca = pytest.mark.skipif(not ORCA.exists(), reason="OrcaSlicer not instal
 
 @pytest.fixture
 def cfg() -> MqttConfig:
-    return MqttConfig.from_env()
+    """The opted-in test broker under this run's own prefix and node, never the live device's
+    (mqucifer/print-shop#115)."""
+    return broker_config()
 
 
 @pytest.fixture
