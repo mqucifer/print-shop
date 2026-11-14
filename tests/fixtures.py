@@ -273,6 +273,31 @@ def _lid() -> trimesh.Trimesh:
     return lid
 
 
+def _rounded_lid() -> trimesh.Trimesh:
+    """A lid, 100 x 62 x 12 mm, its top edges rounded 4 mm, lying top-down: the round at the plate.
+
+    How the Sponsor's lid lay on its second try (mqucifer/print-shop#128). Orca slices a lid like
+    this with no supports, as each layer of the round is carried by the one under it. Every
+    downward face past 45 degrees off the plate counts the lower part of the round, about 950 mm2
+    here; what needs support is none of it. Its square-edged back up, and 4 mm in from each side
+    on the plate, (100 - 8) x (62 - 8) = 4968 mm2 of its flat top touches.
+    """
+    from manifold3d import Manifold
+
+    r, length, width, height = 4.0, 100.0, 62.0, 12.0
+    body = Manifold.cube((length, width, height - r))
+    corners = [Manifold.sphere(r, 48).translate((x, y, height - r))
+               for x in (r, length - r) for y in (r, width - r)]
+    skin = Manifold.cube((length, width, 0.01)).translate((0, 0, height - r - 0.01))
+    top = Manifold.batch_hull([*corners, skin]) ^ Manifold.cube((length, width, r)).translate(
+        (0, 0, height - r))
+    solid = (body + top).to_mesh()
+    lid = trimesh.Trimesh(vertices=solid.vert_properties[:, :3], faces=solid.tri_verts)
+    flip = trimesh.transformations.rotation_matrix(np.pi, (1, 0, 0))  # type: ignore[no-untyped-call]
+    lid.apply_transform(flip)
+    return lid
+
+
 _BUILDERS = {
     "cube": _cube,
     "tee": _tee,
@@ -287,6 +312,7 @@ _BUILDERS = {
     "stepped_round": _stepped_round,
     "long_strip": _long_strip,
     "lid": _lid,
+    "rounded_lid": _rounded_lid,
 }
 
 

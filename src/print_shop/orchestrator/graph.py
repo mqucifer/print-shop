@@ -22,6 +22,7 @@ can be asserted against the real graph rather than a synthetic list.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import uuid
@@ -203,7 +204,7 @@ def build_graph(
             except (RuntimeError, OSError):
                 return propose_geometric(req)
 
-        outcome = propose_validate(proposer, validate_orientation, request)
+        outcome = _resolved(propose_validate(proposer, validate_orientation, request), found)
         return {"orientation": outcome, "orientation_lessons": given, **poses}
 
     def slice_node(state: PrintJobState) -> dict[str, Any]:
@@ -565,6 +566,28 @@ def _print_record(
         features=tuple(state.get("features", ())),
         reading=state.get("slice_reading"),
         flags=tuple(state.get("slice_flags", ())),
+    )
+
+
+def _resolved(
+    outcome: Outcome[Orientation], found: tuple[Orientation, ...]
+) -> Outcome[Orientation]:
+    """An accepted pose with its own figures, and, where the validator moved it, saying why.
+
+    The corrector rewrites only the rotation (`contracts.default_corrector`), so a corrected pose
+    carried the figures of the one it replaced: the review showed a lid laid flat as 100 mm tall,
+    and its features were measured with the edge's area on the plate (mqucifer/print-shop#128).
+    """
+    if not outcome.accepted:
+        return outcome
+    chosen = next(c for c in found if c.rotation_deg == outcome.proposal.value.rotation_deg)
+    rationale = outcome.proposal.rationale
+    if outcome.proposal.source == "corrector" and outcome.history:
+        moved = "; ".join(v.detail for v in outcome.history[0].blockers if v.detail)
+        rationale = f"moved by the validator: {moved}. The model had said: {rationale}"
+    return dataclasses.replace(
+        outcome, proposal=Chosen(value=chosen, source=outcome.proposal.source,
+                                 rationale=rationale, confidence=outcome.proposal.confidence),
     )
 
 

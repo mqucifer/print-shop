@@ -17,7 +17,7 @@ import numpy as np
 import trimesh
 from pydantic import BaseModel
 
-__all__ = ["Feature", "measure"]
+__all__ = ["FLARE_MM", "Feature", "measure", "overhang_to_support"]
 
 #: A face this far from vertical, facing down, needs support (Orca's own
 #: threshold reasoning; the analyzer uses the same 45 degrees).
@@ -35,6 +35,14 @@ _FIRST_LAYER_MM = 0.2
 _ENVELOPE_MM = 0.4
 #: Each downward face is read at points this far apart at most.
 _SAMPLE_MM = 0.5
+#: A round or chamfer rising from the plate is carried by the layers under it, each a little
+#: wider than the last, from the plate up: it needs no support (mqucifer/print-shop#128). Orca
+#: sliced the Sponsor's lid lying on its rounded top edge with none, where this measure read
+#: 2580 mm2 of overhang and the orientation model stood the lid on its edge for it. It's the
+#: downward faces reached from the plate through downward faces, up to this high: a round's
+#: part steeper than 45 degrees rises 0.29 of its radius, so this holds rounds to about 17 mm.
+#: Above it, a face that leans out from the plate still counts.
+FLARE_MM = 5.0
 
 
 class Feature(BaseModel):
@@ -110,7 +118,49 @@ def _footprint(mesh: trimesh.Trimesh) -> tuple[float, float]:
     return float(best.max()), float(best.min())
 
 
-def _overhang(mesh: trimesh.Trimesh) -> tuple[float, float, float]:
+def overhang_to_support(mesh: trimesh.Trimesh) -> tuple[float, float]:
+    """What of a seated mesh, as it lies, would need support, and the round or chamfer rising
+    from the plate that's left out of it (`FLARE_MM`), in mm2: the orientation step's overhang
+    for each pose it weighs (mqucifer/print-shop#128)."""
+    needs = _overhang(mesh)[0]
+    return needs, max(_overhang(mesh, flares=False)[0] - needs, 0.0)
+
+
+def _from_the_plate(mesh: trimesh.Trimesh) -> np.ndarray:
+    """Each face that's part of a round or chamfer rising from the plate: a downward face reached
+    from the plate through downward faces, none of them higher than `FLARE_MM`. A flat one joins
+    only in the first layer: a ceiling reached through a chamfer is still a ceiling."""
+    z = mesh.triangles[:, :, 2] - mesh.bounds[0][2]
+    nz = mesh.face_normals[:, 2]
+    flat = nz < -_FLAT
+    low = (nz < -1e-6) & (z.max(axis=1) <= FLARE_MM) & (~flat | (z.max(axis=1) <= _FIRST_LAYER_MM))
+    found = np.zeros(len(mesh.faces), dtype=bool)
+    if not low.any():
+        return found
+    pairs = mesh.face_adjacency
+    pairs = pairs[low[pairs[:, 0]] & low[pairs[:, 1]]]
+    # Joined face to face, by union-find: no graph library is a dependency here.
+    root = np.arange(len(mesh.faces))
+
+    def find(face: int) -> int:
+        while root[face] != face:
+            root[face] = root[root[face]]
+            face = int(root[face])
+        return face
+
+    for a, b in pairs.tolist():
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            root[ra] = rb
+    lows = np.flatnonzero(low)
+    groups = np.array([find(int(f)) for f in lows])
+    # Touching the plate: as `analyzer.PLATE_MM` reads it, a few microns off zero included.
+    touching = set(groups[z[lows].min(axis=1) <= 0.01 + 1e-9].tolist())
+    found[lows[np.isin(groups, list(touching))]] = True
+    return found
+
+
+def _overhang(mesh: trimesh.Trimesh, flares: bool = True) -> tuple[float, float, float]:
     """The overhang's area, its steepest point, and the flat part of it, a bridge.
 
     In mm2, degrees past vertical, and mm2.
@@ -129,9 +179,11 @@ def _overhang(mesh: trimesh.Trimesh) -> tuple[float, float, float]:
     lo = mesh.bounds[0]
     normals = mesh.face_normals
     top = mesh.triangles[:, :, 2].max(axis=1) - lo[2]
-    # Facing down past the threshold, and not wholly in the first layer, on the plate.
+    # Facing down past the threshold, not wholly in the first layer, on the plate, and, unless
+    # `flares` is False, not a round or chamfer rising from the plate (mqucifer/print-shop#128).
+    rising = _from_the_plate(mesh) if flares else np.zeros(len(mesh.faces), dtype=bool)
     candidates = np.flatnonzero(
-        (normals[:, 2] < -np.cos(np.radians(_OVERHANG_DEG))) & (top > _FIRST_LAYER_MM)
+        (normals[:, 2] < -np.cos(np.radians(_OVERHANG_DEG))) & (top > _FIRST_LAYER_MM) & ~rising
     )
     if not len(candidates):
         return 0.0, 0.0, 0.0

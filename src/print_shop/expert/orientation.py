@@ -5,6 +5,13 @@ This module chooses among them: the model proposes, the validator disposes
 (`CONTRACTS.md` section 3). The validator's job is to catch choices that are
 *wrong*, not to enforce the geometric minimum — a small overhang regression is
 the model's judgment and passes as a warning.
+
+**A part isn't stood up for a risk that settings answer** (mqucifer/print-shop#128). The model
+reads the print-settings skill's symptom map: warping, lifting and elephant foot are the plate's,
+a brim's and the fans' to answer, so the step chooses on what needs support, fit and the area on
+the plate. And the validator corrects a pose stood up where a lower one beats it on both
+counts: no more than `STOOD_UP_TOLERANCE_MM2` more overhang, and `STOOD_UP_CONTACT_RATIO` times
+as much on the plate.
 """
 
 from __future__ import annotations
@@ -16,12 +23,16 @@ from pydantic import BaseModel
 from print_shop.core.contracts import NoAutoFix, OneOf, Proposal, Severity, Verdict, Violation
 from print_shop.core.state import Orientation
 from print_shop.expert.client import LLMConfig, complete_json
+from print_shop.setup.skill import SKILL_DIR
 
 __all__ = [
     "ENDPOINT_UNAVAILABLE",
     "MAX_OVERHANG_REGRESSION_MM2",
     "NO_MODEL_CONFIGURED",
+    "STOOD_UP_CONTACT_RATIO",
+    "STOOD_UP_TOLERANCE_MM2",
     "OrientationRequest",
+    "symptom_map",
     "propose_geometric",
     "propose_orientation",
     "validate_orientation",
@@ -31,6 +42,29 @@ __all__ = [
 #: allowed to make on its own judgment. Beyond this, the choice is corrected
 #: to the best candidate.
 MAX_OVERHANG_REGRESSION_MM2: float = 150.0
+
+#: A pose the model picked is corrected to one with no more than this much more overhang that
+#: puts at least this many times as much on the plate: a flat part lying flat is not a warping
+#: risk to be cured by standing it up (mqucifer/print-shop#128). The tolerance is a few faces'
+#: worth on a real mesh; the ratio keeps two flat poses of one part from trading places.
+STOOD_UP_TOLERANCE_MM2: float = 25.0
+STOOD_UP_CONTACT_RATIO: float = 2.0
+
+#: How the orientation step is told what it chooses on.
+_SYSTEM = (
+    "You pick a print orientation. Choose on what would need support, the part's fit to the "
+    "plate, and how much of it rests on the plate. A risk that settings answer, such as warping, "
+    "lifting or elephant foot, is never a reason to turn the part: the settings proposal "
+    "answers it, by the setting the skill's map below names. Reply with JSON only.\n\n"
+)
+
+
+def symptom_map() -> str:
+    """The print-settings skill's map of which Orca setting answers which symptom, as both the
+    orientation step and the settings proposal read it."""
+    text = (SKILL_DIR / "SKILL.md").read_text()
+    start = text.index("## Which setting answers which symptom")
+    return text[start:].split("\n## ", 1)[0].strip()
 
 
 class OrientationRequest(BaseModel):
@@ -162,9 +196,7 @@ def propose_orientation(
         },
         "strict": True,
     }
-    reply = complete_json(
-        config, "You pick a print orientation. Reply with JSON only.", user, schema
-    )
+    reply = complete_json(config, _SYSTEM + symptom_map(), user, schema)
 
     raw = reply["rotation_deg"]
     if len(raw) != 3:
@@ -228,7 +260,34 @@ def validate_orientation(
             )
         )
 
-    # 3. Large overhang regression against the best: a mistake, correct it.
+    # 3. Stood up for nothing settings can't answer: another pose has no more that needs support
+    # and far more on the plate (mqucifer/print-shop#128).
+    flatter = [
+        c for c in request.candidates
+        if c.fits_in(request.build_volume_mm)
+        and c.height_mm < chosen.height_mm
+        and c.overhang_area_mm2 <= chosen.overhang_area_mm2 + STOOD_UP_TOLERANCE_MM2
+        and c.bed_contact_area_mm2 >= STOOD_UP_CONTACT_RATIO * chosen.bed_contact_area_mm2
+    ]
+    if flatter:
+        lying = max(flatter, key=lambda c: (c.bed_contact_area_mm2, -c.overhang_area_mm2))
+        violations.append(
+            Violation(
+                field="rotation_deg",
+                rule="orientation.stood_up",
+                observed=chosen.rotation_deg,
+                allowed=OneOf(tuple(c.rotation_deg for c in flatter)),
+                suggested=lying.rotation_deg,
+                detail=f"{lying.rotation_deg} puts {lying.bed_contact_area_mm2:g} mm2 on the "
+                f"plate against {chosen.bed_contact_area_mm2:g}, with "
+                f"{lying.overhang_area_mm2:g} mm2 that needs support against "
+                f"{chosen.overhang_area_mm2:g}: a flat part lying flat isn't a warping risk to "
+                "cure by standing it up; the plate, a brim and the fans answer that",
+            )
+        )
+        return Verdict(tuple(violations))
+
+    # 4. Large overhang regression against the best: a mistake, correct it.
     regression = chosen.overhang_area_mm2 - best.overhang_area_mm2
     if regression > MAX_OVERHANG_REGRESSION_MM2:
         violations.append(
@@ -243,7 +302,7 @@ def validate_orientation(
             )
         )
     elif regression > 0:
-        # 4. Small regression: the model's judgment. Warn, do not block.
+        # 5. Small regression: the model's judgment. Warn, do not block.
         violations.append(
             Violation(
                 field="rotation_deg",

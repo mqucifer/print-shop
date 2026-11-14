@@ -12,6 +12,9 @@ slab is on the plate and nothing overhangs:
     (180, 0, 0)        0 mm2      400 mm2      <- correct answer
     (90, 0, 0)       100 mm2      200 mm2
 
+Those overhangs count every downward face (`measure_orientation`). A candidate's own overhang is
+what needs support, which leaves out the band the pillar carries (mqucifer/print-shop#128).
+
 **The scoring slice must enable supports.** With the stock Elegoo profile,
 support generation is off, so Orca extrudes the overhang into mid-air and both
 orientations come out at 850 s / 2.39 cm3 — the fitness function reports nothing
@@ -24,9 +27,17 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import trimesh
 
 from print_shop.core.state import Orientation
-from print_shop.ingest.orientation import AXIS_ALIGNED, candidates, write_rotated
+from print_shop.ingest.analyzer import measure_orientation
+from print_shop.ingest.orientation import (
+    AXIS_ALIGNED,
+    _rotation_matrix,
+    _seated,
+    candidates,
+    write_rotated,
+)
 from print_shop.orchestrator.fitness import scoring_profiles, slice_candidate
 from print_shop.slicer.orca import SlicerProfiles
 from tests.fakes import STORE_FILAMENT, STORE_MACHINE, STORE_PROCESS
@@ -65,18 +76,44 @@ def test_enumerates_the_six_axis_aligned_orientations(tmp_path: Path) -> None:
     assert {c.rotation_deg for c in got} == set(AXIS_ALIGNED)
 
 
-def test_scores_the_tee_exactly(tmp_path: Path) -> None:
-    """Every number here is derived on paper. See the module docstring."""
-    by_rot = {c.rotation_deg: c for c in candidates(write_stl("tee", tmp_path))}
+def _raw(stl: Path, rotation: tuple[float, float, float]) -> tuple[float, float, float]:
+    """`measure_orientation` on the mesh as a candidate lies: every downward face past 45 degrees
+    off the plate, its bed contact, and its height."""
+    mesh = trimesh.load(stl, force="mesh")
+    assert isinstance(mesh, trimesh.Trimesh)
+    mesh.apply_transform(_rotation_matrix(rotation))
+    return measure_orientation(_seated(mesh))
 
-    assert by_rot[(0.0, 0.0, 0.0)].overhang_area_mm2 == pytest.approx(300.0, abs=TOL)
+
+def test_scores_the_tee_exactly(tmp_path: Path) -> None:
+    """Every number here is derived on paper, face by face. See the module docstring."""
+    stl = write_stl("tee", tmp_path)
+    by_rot = {c.rotation_deg: c for c in candidates(stl)}
+
+    assert _raw(stl, (0.0, 0.0, 0.0))[0] == pytest.approx(300.0, abs=TOL)
     assert by_rot[(0.0, 0.0, 0.0)].bed_contact_area_mm2 == pytest.approx(100.0, abs=TOL)
 
-    assert by_rot[(180.0, 0.0, 0.0)].overhang_area_mm2 == pytest.approx(0.0, abs=TOL)
+    assert _raw(stl, (180.0, 0.0, 0.0))[0] == pytest.approx(0.0, abs=TOL)
     assert by_rot[(180.0, 0.0, 0.0)].bed_contact_area_mm2 == pytest.approx(400.0, abs=TOL)
 
-    assert by_rot[(90.0, 0.0, 0.0)].overhang_area_mm2 == pytest.approx(100.0, abs=TOL)
+    assert _raw(stl, (90.0, 0.0, 0.0))[0] == pytest.approx(100.0, abs=TOL)
     assert by_rot[(90.0, 0.0, 0.0)].bed_contact_area_mm2 == pytest.approx(200.0, abs=TOL)
+
+
+def test_a_candidates_overhang_is_what_needs_support(tmp_path: Path) -> None:
+    """mqucifer/print-shop#128: a candidate's overhang is the features' layer-aware reading, which
+    counts a point only where the part 0.4 mm lower is more than 0.4 mm away sideways. So the
+    0.4 mm band the pillar carries is left out, read at points 0.5 mm apart (within 3 mm2):
+
+        (0, 0, 0)    300 less the band round the pillar, 10.8^2 - 10^2 = 16.6   -> 283.4
+        (180, 0, 0)  0
+        (90, 0, 0)   100 less the band along the pillar, 0.4 x 10 = 4          ->  96
+    """
+    by_rot = {c.rotation_deg: c for c in candidates(write_stl("tee", tmp_path))}
+    assert by_rot[(0.0, 0.0, 0.0)].overhang_area_mm2 == pytest.approx(283.4, abs=3)
+    assert by_rot[(180.0, 0.0, 0.0)].overhang_area_mm2 == 0.0
+    assert by_rot[(90.0, 0.0, 0.0)].overhang_area_mm2 == pytest.approx(96.0, abs=3)
+    assert all(c.flare_area_mm2 == 0.0 for c in by_rot.values()), "nothing rises from the plate"
 
 
 def test_the_flipped_tee_is_the_unique_best_on_overhang(tmp_path: Path) -> None:

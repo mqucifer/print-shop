@@ -58,6 +58,16 @@ def _long_and_narrow(f: dict[str, float]) -> bool:
     return f["length"] >= LONG_MM and f["footprint_aspect"] >= NARROW_ASPECT
 
 
+#: A part this much on the plate can warp or lift at its edges as its layers cool: a risk the
+#: plate, a brim and the fans answer, never turning the part (mqucifer/print-shop#128). The
+#: trait `large_bed_contact`'s threshold.
+WARPS_MM2 = 5000.0
+
+
+def _warps(f: dict[str, float]) -> bool:
+    return f["bed_contact"] >= WARPS_MM2
+
+
 GROUPS: tuple[Group, ...] = (
     Group("walls-shells", ("wall_loops", "top_shell_layers", "bottom_shell_layers"), _always),
     Group("infill", ("sparse_infill_density", "sparse_infill_pattern"), _always),
@@ -65,14 +75,15 @@ GROUPS: tuple[Group, ...] = (
           lambda f: f["overhang"] > 0 or f["bridge"] > 0),
     Group("adhesion", ("brim_type", "textured_plate_temp", "textured_plate_temp_initial_layer",
                        "cool_plate_temp", "cool_plate_temp_initial_layer",
-                       "during_print_exhaust_fan_speed"),
-          lambda f: f["bed_contact"] < 200 or f["slenderness"] > 2.5 or _long_and_narrow(f)),
+                       "during_print_exhaust_fan_speed", "elefant_foot_compensation"),
+          lambda f: f["bed_contact"] < 200 or f["slenderness"] > 2.5 or _long_and_narrow(f)
+          or _warps(f)),
     Group("layer-height", ("layer_height",), lambda f: False),
     Group("speed-cooling", ("outer_wall_speed", "inner_wall_speed", "sparse_infill_speed",
                             "fan_max_speed", "fan_min_speed", "additional_cooling_fan_speed",
                             "slow_down_for_layer_cooling", "slow_down_layer_time",
                             "slow_down_min_speed"),
-          lambda f: f["overhang"] > 0 or f["bridge"] > 0),
+          lambda f: f["overhang"] > 0 or f["bridge"] > 0 or _warps(f)),
     Group("temperature", ("nozzle_temperature",), lambda f: False),
     # Which faces are seen decides both (mqucifer/print-shop#105), and every part has walls.
     Group("surface", ("ironing_type", "seam_position"), _always),

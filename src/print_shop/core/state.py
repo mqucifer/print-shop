@@ -139,9 +139,13 @@ class Orientation(BaseModel):
     #: Euler XYZ in degrees, applied before translating onto the plate.
     rotation_deg: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
+    #: What would need support, as it lies (`features.overhang_to_support`).
     overhang_area_mm2: float
     bed_contact_area_mm2: float
     height_mm: float
+    #: The round or chamfer rising from the plate, left out of the overhang: it's carried by the
+    #: layers under it (mqucifer/print-shop#128). Shown at the review beside the overhang.
+    flare_area_mm2: float = 0.0
 
     #: Extents after rotation. Orientation changes which axis is tallest, so the
     #: build-volume check is per-candidate, not per-part.

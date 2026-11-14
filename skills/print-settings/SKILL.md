@@ -29,15 +29,26 @@ Each is distilled from OrcaSlicer's wiki, which stays the source. Every setting 
 | `walls-shells` | `references/walls-shells.md` | `wall_loops`, `top_shell_layers`, `bottom_shell_layers` | always |
 | `infill` | `references/infill.md` | `sparse_infill_density`, `sparse_infill_pattern` | always |
 | `supports` | `references/supports.md` | `enable_support`, `support_type`, `support_threshold_angle` | it has an overhang or a bridge |
-| `adhesion` | `references/adhesion.md` | `brim_type`, `textured_plate_temp`, `textured_plate_temp_initial_layer`, `cool_plate_temp`, `cool_plate_temp_initial_layer`, `during_print_exhaust_fan_speed` | under 200 mm² on the plate, more than 2.5x as tall as its narrowest width, or at least 100 mm long and 3x as long as it is wide |
+| `adhesion` | `references/adhesion.md` | `brim_type`, `textured_plate_temp`, `textured_plate_temp_initial_layer`, `cool_plate_temp`, `cool_plate_temp_initial_layer`, `during_print_exhaust_fan_speed`, `elefant_foot_compensation` | under 200 mm² on the plate, more than 2.5x as tall as its narrowest width, at least 100 mm long and 3x as long as it is wide, or 5000 mm² or more on the plate |
 | `layer-height` | `references/layer-height.md` | `layer_height` | an intake option set it |
-| `speed-cooling` | `references/speed-cooling.md` | `outer_wall_speed`, `inner_wall_speed`, `sparse_infill_speed`, `fan_max_speed`, `fan_min_speed`, `additional_cooling_fan_speed`, `slow_down_for_layer_cooling`, `slow_down_layer_time`, `slow_down_min_speed` | it has an overhang or a bridge |
+| `speed-cooling` | `references/speed-cooling.md` | `outer_wall_speed`, `inner_wall_speed`, `sparse_infill_speed`, `fan_max_speed`, `fan_min_speed`, `additional_cooling_fan_speed`, `slow_down_for_layer_cooling`, `slow_down_layer_time`, `slow_down_min_speed` | it has an overhang or a bridge, or 5000 mm² or more on the plate |
 | `temperature` | `references/temperature.md` | `nozzle_temperature` | an intake option set it |
 | `surface` | `references/surface.md` | `ironing_type`, `seam_position` | always |
 
 Any group is also read when one of the intake's options set one of its settings.
 
 **The slice is read at the review** (mqucifer/print-shop#105): each layer's time, each feature's time and area, and where the seams fall. The review proposes a change from what it reads, such as slow-down on for short layers, with the reading it rests on, and the Sponsor takes it or not. print-shop asks which faces will be seen; don't ask it yourself.
+
+## Which setting answers which symptom
+Reach for the smallest lever that answers the symptom (the Sponsor, 2026-11-14, on mqucifer/print-shop#128: "it tried to solve the warping issue with orientation when it should have used the elefant foot issue - knowing orcas settings"). Both the orientation step and the settings proposal read this.
+
+| Symptom | What answers it, by Orca's key | Not this |
+|---|---|---|
+| Warping or lifting at the edges, corners or ends | the plate's temperature (`textured_plate_temp` and its first layer's, or `cool_plate_temp`'s), a brim (`brim_type`), the chamber's exhaust (`during_print_exhaust_fan_speed`), the side fan (`additional_cooling_fan_speed`) | turning the part: a flat part lying flat is the least likely to fall, and standing it up costs supports and hours |
+| Elephant foot: the first layers wider than the rest | `elefant_foot_compensation`; a plate that isn't warmer than it needs | turning the part |
+| A face that would print into the air | the orientation first: the pose with the least that needs support; then supports (`enable_support`, tree) | a setting that hides it |
+
+**The orientation step chooses on what would need support, the part's fit to the plate and how much of it rests there.** A risk in the first row or the second is the settings proposal's, and it names the setting that answers it.
 
 ## What holds whatever this skill says
 Code, not this skill, holds these guards (`src/print_shop/setup/bounds.py` and `proposal.py`):

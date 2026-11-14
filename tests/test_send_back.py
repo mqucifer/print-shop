@@ -266,20 +266,24 @@ class AnyPart(RecordedSlicer):
 
 class StandsItUp:
     """The orientation model as it was on 2026-11-14: the lid on its edge, for warping. Keeps
-    each request, with the lessons it was given."""
+    each request, with the lessons it was given. The validator now corrects that pose before
+    the review (`orientation.stood_up`), so `pose` lets a test turn it a way the rule allows and
+    the person still sends back: top-down, for the same reason."""
 
-    def __init__(self) -> None:
+    def __init__(self, pose: tuple[float, float, float] = (0.0, 90.0, 0.0)) -> None:
+        self.pose = pose
         self.requests: list[OrientationRequest] = []
 
     def __call__(self, request: OrientationRequest, config: LLMConfig) -> Chosen[Orientation]:
         self.requests.append(request)
-        edge = next(c for c in request.candidates if c.rotation_deg == (0.0, 90.0, 0.0))
-        return Chosen(value=edge, source="model:fake", rationale=WARPING, confidence=0.7)
+        chosen = next(c for c in request.candidates if c.rotation_deg == self.pose)
+        return Chosen(value=chosen, source="model:fake", rationale=WARPING, confidence=0.7)
 
 
 @pytest.fixture
 def model(monkeypatch: pytest.MonkeyPatch) -> StandsItUp:
-    fake = StandsItUp()
+    """Turns the lid top-down for warping: a pose the person sends back."""
+    fake = StandsItUp((180.0, 0.0, 0.0))
     monkeypatch.setattr(graph, "propose_orientation", fake)
     return fake
 
@@ -350,9 +354,9 @@ def test_the_correction_is_a_lesson_candidate_keyed_to_the_file_pose(
     assert json.loads(lesson["traits"]) == ["flat_and_wide", "large_bed_contact"]
     [evidence] = ledger.query("SELECT * FROM print_lesson_evidence")
     detail = json.loads(evidence["detail"])
-    assert (evidence["job_id"], detail["preset"], detail["value"]) == (job_id, "0,90,0", "0,0,0")
-    assert detail["reading"].startswith("the step's 0,90,0: 0 mm2 of overhang, 372 mm2")
-    assert "corrected orientation 0,90,0 -> 0,0,0: " + REASON in print_lessons.listing(ledger)
+    assert (evidence["job_id"], detail["preset"], detail["value"]) == (job_id, "180,0,0", "0,0,0")
+    assert detail["reading"].startswith("the step's 180,0,0: 0 mm2 of overhang, 6200 mm2")
+    assert "corrected orientation 180,0,0 -> 0,0,0: " + REASON in print_lessons.listing(ledger)
 
 
 def test_a_kept_orientation_lesson_reaches_the_next_parts_orientation_by_itself(
@@ -428,3 +432,62 @@ def test_a_lesson_isnt_given_to_a_part_without_its_traits(
 
     cube = measure(write_stl("cube", tmp_path), 400.0)
     assert print_lessons.for_orienting(ledger, cube) == ()
+
+
+def test_standing_the_lid_up_for_warping_is_corrected_before_the_review(
+    shop: tuple[Ledger, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """2026-11-14's pose: on its edge, 100 mm tall, for warping. The validator lays it flat
+    again (`orientation.stood_up`), and the review shows the flat pose, before anyone asks."""
+    fake = StandsItUp()
+    monkeypatch.setattr(graph, "propose_orientation", fake)
+    ledger, run = shop
+    job_id, person = run("ok")
+    row = ledger.get(job_id)
+    assert row is not None and row.rotation_deg in ((0.0, 0.0, 0.0), (180.0, 0.0, 0.0))
+    assert ("the part's features were read in this pose: rotation (0.0, 0.0, 0.0), 6 mm tall, "
+            "6200 mm2 on the plate") in person.said, "the flat pose's own figures"
+    assert "Orientation: (0.0, 0.0, 0.0), moved by the validator: (0.0, 0.0, 0.0) puts 6200 mm2 " \
+           "on the plate against 372" in person.said
+    assert f"The model had said: {WARPING}" in person.said
+    assert {f.id: f.value for f in row.features or ()}["bed_contact"] == pytest.approx(6200)
+
+
+def test_a_flat_part_with_a_warping_risk_keeps_its_pose_and_the_settings_answer_it(
+    shop: tuple[Ledger, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Sponsor's criterion: the model stands the lid up for warping; it keeps its flat pose,
+    and the proposal names the plate's temperature and a brim, by Orca's keys."""
+    monkeypatch.setattr(graph, "propose_orientation", StandsItUp())
+    ledger, run = shop
+    job_id, person = run("ok")
+    row = ledger.get(job_id)
+    assert row is not None and row.rotation_deg in ((0.0, 0.0, 0.0), (180.0, 0.0, 0.0))
+    assert row.proposal is not None
+    [risk] = [n for n in row.proposal.notes if n.startswith("warping risk")]
+    assert risk == (
+        "warping risk: 6200 mm2 on the plate. The plate's temperature (cool_plate_temp), a brim "
+        "(brim_type), the chamber's exhaust (during_print_exhaust_fan_speed) and the side fan "
+        "(additional_cooling_fan_speed) answer it, not turning the part"
+    )
+    assert f"  note: {risk}" in person.said, "the review shows it"
+
+
+def test_the_orientation_model_reads_the_skills_symptom_map(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from print_shop.expert import orientation as expert  # noqa: PLC0415
+
+    seen: list[str] = []
+
+    def reply(config: Any, system: str, user: str, schema: Any) -> dict[str, Any]:
+        seen.append(system)
+        return {"rotation_deg": [0, 0, 0], "rationale": "flat", "confidence": 0.9}
+
+    monkeypatch.setattr(expert, "complete_json", reply)
+    request = OrientationRequest(candidates=(LAID, EDGE), build_volume_mm=(256.0, 256.0, 256.0))
+    expert.propose_orientation(request, LLMConfig(api_key=SecretStr("x"), model="fake"))
+    [system] = seen
+    assert "never a reason to turn the part" in system
+    assert "## Which setting answers which symptom" in system
+    assert "`elefant_foot_compensation`" in system
