@@ -38,6 +38,7 @@ from print_shop.core.mqtt import (
     state_topic,
 )
 from print_shop.env import SETTINGS_PATH
+from tests.live import broker_config
 
 
 def _env_present() -> bool:
@@ -55,7 +56,9 @@ needs_broker = pytest.mark.skipif(
 
 @pytest.fixture
 def cfg() -> MqttConfig:
-    return MqttConfig.from_env()
+    """The opted-in test broker under this run's own prefix and node, never the live device's
+    (mqucifer/print-shop#115)."""
+    return broker_config()
 
 
 # --------------------------------------------------------------------------
@@ -64,7 +67,9 @@ def cfg() -> MqttConfig:
 
 
 @needs_broker
-def test_reads_credentials_from_env(cfg: MqttConfig) -> None:
+def test_reads_credentials_from_env() -> None:
+    """Reads the settings, and connects to nothing."""
+    cfg = MqttConfig.from_env()
     assert cfg.host and cfg.port
     assert cfg.user and cfg.password
     assert cfg.topic_prefix == "3dprint-dev", "dev prefix, not the live one"

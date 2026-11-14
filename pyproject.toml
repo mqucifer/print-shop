@@ -46,9 +46,9 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = [
     "slicer: shells out to a real OrcaSlicer binary (deselect with -m 'not slicer')",
-    "llm: calls a model through LiteLLM :4000 (deselect with -m 'not llm')",
-    "mqtt: publishes to the real MQTT broker (deselect with -m 'not mqtt')",
-    "ha: queries the real Home Assistant REST API (deselect with -m 'not ha')",
+    "llm: calls a model through LiteLLM :4000; runs only with PRINT_SHOP_TEST_LLM=1 (tests/live.py)",
+    "mqtt: publishes to a test broker, under its own run's prefix; runs only with PRINT_SHOP_TEST_BROKER=host[:port]",
+    "ha: reads the real Home Assistant REST API; runs only with PRINT_SHOP_TEST_HA=1",
     "bench: runs the CAD bench in its Docker image, built by scripts/bench.py build (deselect with -m 'not bench')",
     "bench_local: runs the CAD bench on a file only the Mac holds, and skips where it's absent",
 ]

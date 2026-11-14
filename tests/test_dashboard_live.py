@@ -74,22 +74,16 @@ def _state_ids() -> set[str]:
 
 @pytest.fixture(scope="module")
 def live_entity_ids() -> set[str]:
-    """Announce, then wait for HA to materialise the entities.
+    """Wait for HA to have the entities, reading only.
 
-    This has to establish its own precondition rather than assume one.
-    `tests/test_mqtt.py::test_cleanup_removes_the_entities` publishes empty
-    retained discovery payloads, which is HA's signal to *delete* an entity —
-    so whether these entities exist depends on what ran before. Asserting
-    against that is a test that passes or fails on collection order.
+    It used to announce them itself, as the live device, because
+    `tests/test_mqtt.py::test_cleanup_removes_the_entities` deleted them under
+    the live node. Since mqucifer/print-shop#115 the broker tests publish only
+    under their own run's node, so nothing a test does removes the live
+    entities, and this test only reads, as its `ha` marker says. The live
+    daemon announces them when it starts.
     """
     import time
-
-    from print_shop.core.mqtt import MqttBridge, MqttConfig
-
-    cfg = MqttConfig.from_env()
-    with MqttBridge(cfg, client_suffix="live-dashboard") as bridge:
-        bridge.announce()
-        bridge.wait_for(lambda: False, timeout_s=1.0)
 
     deadline = time.monotonic() + 45.0
     ids = _state_ids()
