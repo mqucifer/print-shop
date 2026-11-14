@@ -1,9 +1,15 @@
 """Candidate orientation enumeration and deterministic geometric scoring.
 
-No judgment here: a fixed set of rotations, each measured with the same
-overhang/bed-contact definitions as `analyzer.analyze`. Choosing between the
-candidates is the judgment node's job, and it will be scored against the
-slicing-based fitness function in `src/orchestrator/fitness.py`.
+No judgment here: a fixed set of rotations, each measured as it would lie. Choosing between the
+candidates is the judgment node's job, and it will be scored against the slicing-based fitness
+function in `src/orchestrator/fitness.py`.
+
+**A candidate's overhang is what would need support** (mqucifer/print-shop#128): the features'
+layer-aware reading (`features.overhang_to_support`), which leaves out a round or chamfer rising
+from the plate. Every downward face steeper than 45 degrees read the Sponsor's lid, lying on its
+rounded top edge, as 2580 mm2 of overhang, though Orca sliced it with no supports, and the model
+stood it on its edge for that. Its bed contact and height are `analyzer.measure_orientation`'s,
+and its extents are its box as it lies, so the build-volume check reads them.
 """
 
 from __future__ import annotations
@@ -15,6 +21,7 @@ import trimesh
 
 from print_shop.core.state import Orientation
 from print_shop.ingest.analyzer import measure_orientation
+from print_shop.setup.features import overhang_to_support
 
 __all__ = ["AXIS_ALIGNED", "candidates", "write_rotated"]
 
@@ -102,15 +109,19 @@ def candidates(
         rotated = mesh.copy()
         rotated.apply_transform(_rotation_matrix(rotation))
         _seated(rotated)
-        overhang_area, bed_contact_area, height_mm = measure_orientation(
+        _faces, bed_contact_area, height_mm = measure_orientation(
             rotated, overhang_threshold_deg
         )
+        overhang_area, flare_area = overhang_to_support(rotated)
+        extents = rotated.bounds[1] - rotated.bounds[0]
         result.append(
             Orientation(
                 rotation_deg=rotation,
-                overhang_area_mm2=overhang_area,
-                bed_contact_area_mm2=bed_contact_area,
-                height_mm=height_mm,
+                overhang_area_mm2=round(overhang_area, 1),
+                bed_contact_area_mm2=round(bed_contact_area, 1),
+                height_mm=round(height_mm, 2),
+                flare_area_mm2=round(flare_area, 1),
+                bbox_mm=(float(extents[0]), float(extents[1]), float(extents[2])),
             )
         )
     return result

@@ -188,6 +188,7 @@ def render(request: ReviewRequest) -> str:
         # The pose the features, and the lessons keyed to them, were read in
         # (mqucifer/print-shop#128).
         f"  the part's features were read in this pose: {request.orientation.pose()}",
+        *_poses(request),
     ]
     lines += _read(request)
     take = " or take what the slice proposes (take, or take 1)," if request.proposed else ""
@@ -199,6 +200,24 @@ def render(request: ReviewRequest) -> str:
         "pause_at=12.4 because white to black for a colour change at a height, or stop.",
     ]
     return "\n".join(lines)
+
+
+def _poses(request: ReviewRequest) -> list[str]:
+    """Each pose the orientation step weighed, with the figures its choice rested on
+    (mqucifer/print-shop#128): what would need support, the round or chamfer at the plate left out
+    of it, the area on the plate and the height."""
+    if not request.candidates:
+        return []
+    lines = ["  the poses it weighed (overhang is what would need support):"]
+    for c in request.candidates:
+        here = "  <- this print" if c.rotation_deg == request.orientation.rotation_deg else ""
+        flare = (f", {c.flare_area_mm2:g} mm2 rising from the plate left out"
+                 if c.flare_area_mm2 else "")
+        lines.append(
+            f"    {pose_value(c.rotation_deg):>9}  {c.overhang_area_mm2:g} mm2 overhang{flare}, "
+            f"{c.bed_contact_area_mm2:g} mm2 on the plate, {c.height_mm:g} mm tall{here}"
+        )
+    return lines
 
 
 def _read(request: ReviewRequest) -> list[str]:
