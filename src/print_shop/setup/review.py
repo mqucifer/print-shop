@@ -178,6 +178,8 @@ def render(request: ReviewRequest) -> str:
                 f"not given: {g.withheld}" if g.withheld
                 else "set it" if g.applied else (g.why or "read by the model")
             )
+            if g.looked_up:
+                used += "; the print loop looked it up with past_prints"
             lines.append(f"  {g.line()} ({used})")
     lines += [
         "",

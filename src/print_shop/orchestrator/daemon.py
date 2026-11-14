@@ -15,6 +15,7 @@ ledger row whose outcome is that it timed out, and nothing is sent to the printe
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import sqlite3
 import threading
@@ -48,6 +49,7 @@ from print_shop.printer.camera import Camera
 from print_shop.printer.centauri import PrinterClient
 from print_shop.setup import Proposer
 from print_shop.setup.intake import Asker
+from print_shop.setup.loop import PrintLoop
 from print_shop.setup.review import Reviewer
 from print_shop.slicer.orca import Slicer, SlicerProfiles, slice_model
 
@@ -192,6 +194,7 @@ class Daemon:
         asker: Asker | None = None,
         reviewer: Reviewer | None = None,
         gate_wait_s: float = GATE_WAIT_S,
+        loop: PrintLoop | None = None,
     ) -> None:
         """`printer` is what the approval gate ultimately commands.
 
@@ -226,6 +229,9 @@ class Daemon:
         `asker` and `reviewer` are the person's: while either has the job,
         `wait_for_gate` doesn't count the time (mqucifer/print-shop#125).
         `gate_wait_s` is how long the approval gate waits for a press.
+
+        `loop` is the print loop (mqucifer/print-shop#129), which decides the pose and the
+        settings after the questions; its questions to the person are the person's time too.
         """
         self._cfg = cfg
         self._profiles = profiles
@@ -259,6 +265,8 @@ class Daemon:
             proposer=proposer,
             asker=self._persons(asker) if asker is not None else None,
             reviewer=self._persons(reviewer) if reviewer is not None else None,
+            loop=(dataclasses.replace(loop, person=self._persons(loop.person))
+                  if loop is not None else None),
         )
 
         # MQTT bridge.

@@ -13,8 +13,9 @@ returned empty content (the prototype's AGENTS.md), and a 512-token answer
 leaves no room for reasoning anyway.
 
 Only what the expert nodes need: one chat completion call with structured JSON
-output enforced server-side. No streaming, no retries — a failed call is a
-failed call and the caller decides what to do with it.
+output enforced server-side, and one with tools for the print loop
+(`chat_with_tools`, mqucifer/print-shop#129). No streaming, no retries — a
+failed call is a failed call and the caller decides what to do with it.
 """
 
 from __future__ import annotations
@@ -29,7 +30,9 @@ from pydantic import BaseModel, SecretStr
 
 from print_shop.env import SETTINGS_PATH, load_env
 
-__all__ = ["CallInfo", "CutOff", "LLMConfig", "complete_json", "complete_json_call"]
+__all__ = [
+    "CallInfo", "CutOff", "LLMConfig", "chat_with_tools", "complete_json", "complete_json_call",
+]
 
 #: LiteLLM on the Mac. Loopback, so it is not an address the check would flag,
 #: and not a host anyone outside this machine could reach.
@@ -203,3 +206,57 @@ def complete_json_call(
     if not isinstance(parsed, dict):
         raise RuntimeError(f"LLM reply is not a JSON object: {text[:200]!r}")
     return parsed, info
+
+
+def chat_with_tools(
+    config: LLMConfig, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
+) -> tuple[dict[str, Any], CallInfo]:
+    """One chat completion that may call tools: the assistant's message as the server sent it
+    (its `content` and `tool_calls`, each call's `arguments` a JSON string), and its cost.
+
+    Raises:
+        CutOff: When `max_tokens` cut the reply off, with the call's cost.
+        RuntimeError: On a non-2xx response or a body that will not parse. The key is never
+            part of the message.
+    """
+    body: dict[str, Any] = {
+        "model": config.model,
+        "messages": messages,
+        "tools": tools,
+        "tool_choice": "auto",
+        "max_tokens": config.max_tokens,
+    }
+    headers = {"Authorization": f"Bearer {config.api_key.get_secret_value()}"}
+    started = time.monotonic()
+    try:
+        with httpx.Client(timeout=config.timeout_s) as client:
+            resp = client.post(f"{config.base_url}/chat/completions", json=body, headers=headers)
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"LLM endpoint {config.base_url} unreachable: {exc}") from exc
+    if resp.status_code // 100 != 2:
+        raise RuntimeError(f"LLM endpoint returned {resp.status_code}: {resp.text[:500]}")
+    try:
+        payload = resp.json()
+        choice = payload["choices"][0]
+        message = dict(choice["message"])
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError(f"LLM endpoint returned an unexpected body: {exc}") from exc
+    usage = payload.get("usage") or {}
+    info = CallInfo(
+        model=str(payload.get("model", config.model)),
+        finish_reason=str(choice.get("finish_reason", "")),
+        prompt_tokens=int(usage.get("prompt_tokens") or 0),
+        completion_tokens=int(usage.get("completion_tokens") or 0),
+        reasoning_tokens=int(
+            (usage.get("completion_tokens_details") or {}).get("reasoning_tokens") or 0
+        ),
+        max_tokens=config.max_tokens,
+        seconds=round(time.monotonic() - started, 1),
+    )
+    if info.finish_reason == "length":
+        raise CutOff(
+            f"cut off at max_tokens={config.max_tokens} after {info.completion_tokens} tokens"
+            f" ({info.reasoning_tokens} reasoning) and {info.seconds} s",
+            info,
+        )
+    return message, info
