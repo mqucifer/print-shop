@@ -390,8 +390,10 @@ def shop(tmp_path: Path) -> Iterator[tuple[Daemon, Sponsor, Ledger, Path]]:
         cfg=CFG, profiles=profiles, workdir=tmp_path / "work", printer=(printer := Printers()),
         slicer=lambda stl, p, out: replay(cube, p, out), bridge=lambda cfg: bridge,
         ledger=ledger,
-        proposer=Proposer(ask=_model, ask_questions=_questions,
-                          lessons=lambda features: lessons.for_part(ledger, features)),
+        proposer=Proposer(
+            ask=_model, ask_questions=_questions,
+            lessons=lambda features, filament: lessons.for_part(ledger, features, filament),
+        ),
         asker=replay_asker(ANSWERS), reviewer=sponsor,
     )
     daemon.press = lambda d: bridge.deliver(command_topic(CFG), {"decision": d})  # type: ignore[attr-defined]

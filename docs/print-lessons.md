@@ -19,9 +19,18 @@ A lesson is keyed to the part's **traits** (`src/print_shop/setup/traits.py`). E
 | `bridges` | `bridge` | flat downward faces off the plate |
 | `thin_walls` | `section` | a typical section under 2 mm |
 
-`long_and_narrow` is the skill's own test for the adhesion group (`skill.LONG_MM`, `skill.NARROW_ASPECT`, from mqucifer/print-shop#107), and the other thresholds are the adhesion group's numbers, so a trait and the skill read a part alike. **A lesson reaches a later part that has every trait it's keyed to.** Not the material (the Sponsor, 2026-11-13): the filament is in a lesson's evidence, for the reviewer and the model to weigh.
+`long_and_narrow` is the skill's own test for the adhesion group (`skill.LONG_MM`, `skill.NARROW_ASPECT`, from mqucifer/print-shop#107), and the other thresholds are the adhesion group's numbers, so a trait and the skill read a part alike. **A lesson reaches a later part that has every trait it's keyed to.** Shape decides where a lesson applies, not the material (the Sponsor, 2026-11-13), with one exception, below.
 
 The ledger now keeps each print's features (`prints.features`), so a print's traits can be read back. A print from before has none, and nothing is guessed: its lessons are listed as NOT KEYED until a reviewer keys them.
+
+### A filament's temperatures and fans also need the same filament
+
+**A lesson that sets a temperature or a fan also holds only for the filament type of the print it was learned on** (mqucifer/print-shop#117; the Sponsor, 2026-11-14). A plate temperature learned on PETG says nothing about PLA, and the model can't change a setting a lesson set, so without this it would set PETG's plate on a PLA part of the same shape.
+- **Which settings:** `bounds.MATERIAL`, beside `bounds.SETTINGS`. It holds every setting of the filament's own preset (nozzle and plate temperatures, the part-cooling, auxiliary and exhaust fans, layer cooling), and Orca's other temperatures and fans a correction may name. Brim, supports, walls, seam and the rest go by shape alone, and so does a lesson only read.
+- **Its material** is the `filament_type` the print it was learned on was sliced with. The same correction on another filament is a lesson of its own.
+- **At the review,** a lesson whose shape matched but whose filament didn't is listed as not given, with why ("learned on PETG; this print is PLA"). It sets nothing, the model isn't given it, and the ledger neither records it as given nor scores it.
+- **For the reviewer,** the listing shows each one's material. `edit ID --material any` widens it to every filament, and `--material PLA` names one.
+- **Lessons from before** take their material from their print's own record when the ledger opens, each with a step saying so. A print that doesn't say leaves the material NOT KNOWN, and the lesson isn't given until a reviewer names one. On a copy of the ledger with the first 11 lessons, the 6 temperature and fan lessons each took PETG from their prints, and a second open changed nothing.
 
 ## Candidates, drawn by code
 
@@ -42,7 +51,7 @@ uv run python scripts/print_lessons.py [JOB]                   every lesson, or 
 uv run python scripts/print_lessons.py draw                    candidates from every print, prints from before included
 uv run python scripts/print_lessons.py traits                  the traits, and what each means
 uv run python scripts/print_lessons.py accept ID --by WHO
-uv run python scripts/print_lessons.py edit ID --by WHO [--text FILE] [--setting K=V|none] [--traits T,T] [--why W]
+uv run python scripts/print_lessons.py edit ID --by WHO [--text FILE] [--setting K=V|none] [--traits T,T] [--material TYPE|any] [--why W]
 uv run python scripts/print_lessons.py reject ID --by WHO --why W
 uv run python scripts/print_lessons.py retire ID --by WHO --why W
 uv run python scripts/print_lessons.py promote ID --as skill --where owner/repo#n --by WHO
@@ -69,6 +78,6 @@ The setup model's proposal (`setup.Proposer`) is given each kept lesson for the 
 
 ## Tables
 
-In the print ledger, created if missing, without moving its schema version: `print_lessons`, `print_lesson_steps`, `print_lesson_evidence`, `job_lessons` and `print_lesson_scores`, and the column `prints.features`, added if missing. Older code still runs against the file: it inserts into `prints` by column name. On a copy of the real ledger every row reads back as it was, and a second open and draw changes nothing.
+In the print ledger, created if missing, without moving its schema version: `print_lessons`, `print_lesson_steps`, `print_lesson_evidence`, `job_lessons` and `print_lesson_scores`, and the columns `prints.features` and `print_lessons.material`, added if missing. Older code still runs against the file: it inserts into `prints` by column name. On a copy of the real ledger every row reads back as it was, and a second open and draw changes nothing.
 
 **Not yet:** keying a lesson to the intake's answer on which faces are seen (`questions.SEEN`), lessons entered from a file (`rounds.py lessons load`'s equivalent), and a lesson for the harness rather than the proposal.

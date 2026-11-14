@@ -136,7 +136,10 @@ def render(request: ReviewRequest) -> str:
     if proposal.lessons:
         lines += ["", "Lessons from earlier prints, kept by a reviewer, for a part like this:"]
         for g in proposal.lessons:
-            used = "set it" if g.applied else (g.why or "read by the model")
+            used = (
+                f"not given: {g.withheld}" if g.withheld
+                else "set it" if g.applied else (g.why or "read by the model")
+            )
             lines.append(f"  {g.line()} ({used})")
     lines += [
         "",

@@ -16,7 +16,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-__all__ = ["SETTINGS", "Setting", "check"]
+__all__ = ["MATERIAL", "SETTINGS", "Setting", "check"]
 
 
 @dataclass(frozen=True)
@@ -98,6 +98,24 @@ SETTINGS: dict[str, Setting] = {
     )
 }
 
+
+#: The settings that depend on the filament as much as on the part (mqucifer/print-shop#117, the
+#: Sponsor, 2026-11-14): its temperatures and its fans. A lesson that sets one applies only to a
+#: later print of the same filament type; one that sets anything else goes by the part's shape.
+#: Every setting of the filament's own preset above, and Orca's other temperatures and fans a
+#: correction at the review may name. A key in neither is the part's, not the filament's.
+MATERIAL: frozenset[str] = frozenset(
+    {key for key, setting in SETTINGS.items() if setting.filament}
+    | {
+        "nozzle_temperature_initial_layer",
+        "hot_plate_temp", "hot_plate_temp_initial_layer",
+        "eng_plate_temp", "eng_plate_temp_initial_layer",
+        "supertack_plate_temp", "supertack_plate_temp_initial_layer",
+        "chamber_temperature",
+        "overhang_fan_speed", "overhang_fan_threshold", "close_fan_the_first_x_layers",
+        "full_fan_speed_layer", "complete_print_exhaust_fan_speed",
+    }
+)
 
 def check(key: str, value: str, presets: dict[str, dict[str, Any]]) -> str:
     """Why `key=value` is refused, or '' when it may be proposed."""
