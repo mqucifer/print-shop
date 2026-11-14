@@ -144,6 +144,10 @@ class PrinterSnapshot(BaseModel):
     free_bytes: int
     machine: str = ""
     firmware: str = ""
+    #: The layer it's printing and how many there are, as `PrintInfo` says; None when it says
+    #: nothing. What a frame is taken at (mqucifer/print-shop#110).
+    layer: int | None = None
+    total_layers: int | None = None
 
     @property
     def ready_to_start(self) -> bool:
@@ -248,6 +252,8 @@ def snapshot_from(status: Status, attributes: Attributes) -> PrinterSnapshot:
         free_bytes=int(remaining) if isinstance(remaining, int | str) else 0,
         machine=attributes.machine_name or "",
         firmware=attributes.firmware_version or "",
+        layer=status.print_info.current_layer if status.print_info else None,
+        total_layers=status.print_info.total_layer if status.print_info else None,
     )
 
 

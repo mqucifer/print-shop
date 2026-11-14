@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from pathlib import Path
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -305,6 +306,14 @@ def draw(ledger: Ledger, row: Row) -> list[int]:
     ):
         text = said or f"it failed: {row.symptom}"
         detail = {**part, "result": str(row.result), "symptom": str(row.symptom), "note": said}
+        if row.symptom is not None and row.symptom != "none":
+            # Where a symptom was recorded, the camera's frames show where it began
+            # (mqucifer/print-shop#110): each with its layer, for the reviewer to page through.
+            detail["frames"] = [
+                {"kind": f.kind, "layer": f.layer, "total_layers": f.total_layers,
+                 "path": f.path}
+                for f in ledger.frames(row.job_id)
+            ]
         made.append(_new(
             ledger, row.job_id, OUTCOME, HARNESS, text, part["traits"], (OUTCOME, "", detail)
         ))
@@ -667,7 +676,7 @@ def _evidence_lines(ledger: Ledger, lesson: int) -> list[str]:
         elif e["kind"] == READING:
             said = f"took {d['key']} {d['preset']} -> {d['value']} from the slice: {d['reading']}"
         else:
-            said = f"{d['result']}, {d['symptom']}: {d['note']}"
+            said = f"{d['result']}, {d['symptom']}: {d['note']}" + _frames_said(d)
         lines.append(
             f"    - job {e['job_id']}, {part}, {said} [print: {outcome}"
             + (f"; the slice flagged {flagged}" if flagged else "") + "]"
@@ -685,6 +694,17 @@ def _evidence_lines(ledger: Ledger, lesson: int) -> list[str]:
             f"    - given to {g['stl_name']}, job {g['job_id']}: {scored} [print: {outcome}]"
         )
     return lines
+
+
+def _frames_said(detail: dict[str, Any]) -> str:
+    """The frames an outcome's evidence holds, in a phrase: how many, their layers, where."""
+    frames = detail.get("frames") or []
+    if not frames:
+        return ""
+    layers = [f["layer"] for f in frames if f.get("layer")]
+    span = f", layers {min(layers)} to {max(layers)}" if layers else ""
+    where = str(Path(frames[-1]["path"]).parent)
+    return f" ({len(frames)} frames{span}, in {where})"
 
 
 def listing(ledger: Ledger, job_id: str | None = None) -> str:

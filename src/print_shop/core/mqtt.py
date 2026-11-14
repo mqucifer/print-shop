@@ -43,6 +43,8 @@ __all__ = [
     "command_topic",
     "availability_topic",
     "discovery_payloads",
+    "outcome_frame_set_topic",
+    "outcome_frame_topic",
     "outcome_note_topic",
     "outcome_result_topic",
     "outcome_submit_topic",
@@ -128,6 +130,16 @@ def outcome_note_topic(cfg: MqttConfig) -> str:
 
 def outcome_submit_topic(cfg: MqttConfig) -> str:
     return f"{cfg.topic_prefix}/outcome/submit"
+
+
+def outcome_frame_topic(cfg: MqttConfig) -> str:
+    """The camera frame on show at the outcome gate, as JPEG bytes (mqucifer/print-shop#110)."""
+    return f"{cfg.topic_prefix}/outcome/frame"
+
+
+def outcome_frame_set_topic(cfg: MqttConfig) -> str:
+    """Earlier, later, first or last: which of the print's frames is on show."""
+    return f"{cfg.topic_prefix}/outcome/set/frame"
 
 
 # --------------------------------------------------------------------------
@@ -354,6 +366,41 @@ def discovery_payloads(cfg: MqttConfig) -> Iterable[tuple[str, dict[str, object]
                 "device": device,
             },
         ),
+        # The print's camera frames beside the answer (mqucifer/print-shop#110): the last
+        # on show, Earlier and Later to page. Evidence, never the answer.
+        (
+            f"{cfg.discovery_prefix}/image/{cfg.node_id}/outcome_frame/config",
+            {
+                "name": "Outcome Frame",
+                "unique_id": f"{cfg.node_id}_outcome_frame",
+                "image_topic": outcome_frame_topic(cfg),
+                "content_type": "image/jpeg",
+                "availability_topic": avail,
+                "device": device,
+            },
+        ),
+        (
+            f"{cfg.discovery_prefix}/button/{cfg.node_id}/outcome_frame_earlier/config",
+            {
+                "name": "Outcome Frame Earlier",
+                "unique_id": f"{cfg.node_id}_outcome_frame_earlier",
+                "command_topic": outcome_frame_set_topic(cfg),
+                "payload_press": "earlier",
+                "availability_topic": avail,
+                "device": device,
+            },
+        ),
+        (
+            f"{cfg.discovery_prefix}/button/{cfg.node_id}/outcome_frame_later/config",
+            {
+                "name": "Outcome Frame Later",
+                "unique_id": f"{cfg.node_id}_outcome_frame_later",
+                "command_topic": outcome_frame_set_topic(cfg),
+                "payload_press": "later",
+                "availability_topic": avail,
+                "device": device,
+            },
+        ),
         (
             f"{cfg.discovery_prefix}/button/{cfg.node_id}/record_outcome/config",
             {
@@ -391,7 +438,8 @@ class Bridge(Protocol):
     def publish_availability(self, online: bool) -> None: ...
 
     def publish(
-        self, topic: str, payload: dict[str, object] | str, retain: bool = False, qos: int = 1
+        self, topic: str, payload: dict[str, object] | str | bytes, retain: bool = False,
+        qos: int = 1,
     ) -> None: ...
 
     def subscribe(self, topic: str, handler: MessageHandler) -> None: ...
@@ -501,10 +549,11 @@ class MqttBridge:
     def publish(
         self,
         topic: str,
-        payload: dict[str, object] | str,
+        payload: dict[str, object] | str | bytes,
         retain: bool = False,
         qos: int = 1,
     ) -> None:
+        """A dict as JSON, a str as text, bytes as they are (a camera frame's JPEG)."""
         if isinstance(payload, dict):
             payload = json.dumps(payload)
         self._client.publish(topic, payload=payload, retain=retain, qos=qos)

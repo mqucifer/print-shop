@@ -186,6 +186,10 @@ def main(argv: list[str] | None = None) -> int:
                     break
                 time.sleep(5)
             print("\n" + describe(row))
+            frames = run.ledger.frames(job_id)
+            if frames:
+                print(f"frames         {len(frames)}, the last at {frames[-1].line()}, in"
+                      f" {Path(frames[-1].path).parent}")
             return 0
     except KeyboardInterrupt:
         print("\nStopped. Any print without an answer stays open in the ledger.")

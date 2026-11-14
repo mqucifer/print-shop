@@ -132,6 +132,8 @@ class MemoryBridge:
         self._lock = threading.Lock()
         self.published: list[Published] = []
         self.retained: dict[str, str] = {}
+        #: Bytes published to each topic (a camera frame), the last kept; b"" is a clear.
+        self.images: dict[str, bytes] = {}
         self._subscriptions: list[tuple[str, MessageHandler]] = []
         self.open = False
 
@@ -151,8 +153,13 @@ class MemoryBridge:
         self.publish("availability", "online" if online else "offline", retain=True)
 
     def publish(
-        self, topic: str, payload: dict[str, object] | str, retain: bool = False, qos: int = 1
+        self, topic: str, payload: dict[str, object] | str | bytes, retain: bool = False,
+        qos: int = 1,
     ) -> None:
+        if isinstance(payload, bytes):
+            with self._lock:
+                self.images[topic] = payload
+            return
         text = json.dumps(payload) if isinstance(payload, dict) else payload
         with self._lock:
             self.published.append(Published(topic, text, retain))
@@ -193,10 +200,15 @@ def _frames() -> dict[str, Any]:
     return frames
 
 
-def frame(name: str, filename: str = "", *, free_bytes: int | None = None) -> PrinterSnapshot:
-    """One SDCP status frame (and the attributes) as the real client would see it."""
+def frame(
+    name: str, filename: str = "", *, free_bytes: int | None = None, layer: int | None = None
+) -> PrinterSnapshot:
+    """One SDCP status frame (and the attributes) as the real client would see it. `layer`
+    replaces the recorded frame's `CurrentLayer`."""
     frames = _frames()
     payload = json.loads(json.dumps(frames["status"][name]).replace("{filename}", filename))
+    if layer is not None:
+        payload["PrintInfo"]["CurrentLayer"] = layer
     attributes = dict(frames["attributes"])
     if free_bytes is not None:
         attributes["RemainingMemory"] = free_bytes
@@ -241,3 +253,22 @@ class FramePrinter:
     @property
     def verbs(self) -> list[str]:
         return [verb for verb, _ in self.calls]
+
+
+#: The smallest thing a camera frame starts and ends like: SOI, a byte, EOI.
+JPEG = b"\xff\xd8\x00\xff\xd9"
+
+
+@dataclass
+class FakeCamera:
+    """A `Camera` with no printer behind it: each grab a tiny JPEG naming its number, or the
+    error it's told to raise."""
+
+    fail: Exception | None = None
+    grabs: int = 0
+
+    def grab(self) -> bytes:
+        self.grabs += 1
+        if self.fail is not None:
+            raise self.fail
+        return JPEG[:2] + str(self.grabs).encode() + JPEG[-2:]

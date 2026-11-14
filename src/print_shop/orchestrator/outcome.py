@@ -10,8 +10,12 @@ That state is what the printer said (`COMPLETED`, `STOPPED`, `ERROR`); it is
 never taken as the outcome. A start that raised gets a bounded look as well:
 if the printer turns out to be printing our file after all, the row is marked
 started and watched like any other. If not, it stays open with its error.
+With a camera, it also keeps the print's frames (`frames.FrameKeeper`,
+mqucifer/print-shop#110): one each time the layer it reads has moved on, and
+one at the end.
 
-**The desk** is the gate. It shows the oldest unanswered print on a retained
+**The desk** is the gate. With frames, it shows the last, and pages through
+the rest with Earlier and Later, beside the answer: evidence, never the answer. It shows the oldest unanswered print on a retained
 MQTT topic, holds the Sponsor's draft (a result, a symptom, a note) as Home
 Assistant's selects and text box set it, and records it on Record. An answer
 that does not add up is refused and the reason shown, not stored. Like the
@@ -27,19 +31,23 @@ import logging
 import threading
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from pycentauri.models import PrintStatus as SdcpPrintStatus
 
 from print_shop.core.mqtt import (
     MqttConfig,
+    outcome_frame_set_topic,
+    outcome_frame_topic,
     outcome_note_topic,
     outcome_result_topic,
     outcome_submit_topic,
     outcome_symptom_topic,
     outcome_topic,
 )
-from print_shop.ledger import Answer, Ledger, LedgerError, Result, Row, Symptom
+from print_shop.ledger import Answer, Frame, Ledger, LedgerError, Result, Row, Symptom
+from print_shop.orchestrator.frames import FrameKeeper
 from print_shop.printer.centauri import PrinterClient, PrinterSnapshot
 
 __all__ = [
@@ -109,8 +117,10 @@ class Watcher:
         printer: PrinterClient,
         on_ended: Callable[[], None],
         poll_s: float = 60.0,
+        frames: FrameKeeper | None = None,
     ) -> None:
         self._ledger = ledger
+        self._frames = frames
         self._printer = printer
         self._on_ended = on_ended
         self._poll_s = poll_s
@@ -166,12 +176,16 @@ class Watcher:
         for row in running:
             if print_ended(snapshot):
                 # One printer, one bed: what the agent started is over.
+                if self._frames is not None:
+                    self._frames.at_end(row.job_id, snapshot.layer, snapshot.total_layers)
                 self._ledger.record_ended(row.job_id, snapshot.print_status)
             elif snapshot.active_filename is not None and not _is_ours(snapshot, row):
                 # Something else holds the printer, so ours ended while nobody
                 # was looking. How it ended is not known, and is not guessed.
                 self._ledger.record_ended(row.job_id, None)
             else:
+                if self._frames is not None and _is_ours(snapshot, row):
+                    self._frames.at_layer(row.job_id, snapshot.layer, snapshot.total_layers)
                 continue
             ended_any = True
         if ended_any:
@@ -187,10 +201,16 @@ class OutcomeDesk:
         ledger: Ledger,
         cfg: MqttConfig,
         publish: Callable[[str, dict[str, Any]], None],
+        publish_image: Callable[[str, bytes], None] | None = None,
     ) -> None:
         self._ledger = ledger
         self._cfg = cfg
         self._publish = publish
+        self._publish_image = publish_image
+        #: The frame on show, by its place in the print's frames; None is the last.
+        self._frame: int | None = None
+        #: What the image topic holds now, so a frame is sent once, not at every refresh.
+        self._image: tuple[str, str] | None = None
         self._lock = threading.Lock()
         self._shown: str | None = None
         self._draft: dict[str, str] = {}
@@ -204,6 +224,7 @@ class OutcomeDesk:
             outcome_symptom_topic(self._cfg): self._setter("symptom", {UNSET, *Symptom}),
             outcome_note_topic(self._cfg): self._setter("note", None),
             outcome_submit_topic(self._cfg): self._on_submit,
+            outcome_frame_set_topic(self._cfg): self._on_frame,
         }
 
     def refresh(self) -> None:
@@ -214,12 +235,17 @@ class OutcomeDesk:
     def _show_locked(self) -> None:
         waiting = self._ledger.awaiting_answer()
         if not waiting:
-            self._shown, self._draft, self._error = None, {}, None
+            self._shown, self._draft, self._error, self._frame = None, {}, None, None
             self._publish(outcome_topic(self._cfg), {"pending": False, "waiting": 0})
+            self._show_frame(None)
             return
         row = waiting[0]
         if row.job_id != self._shown:
-            self._shown, self._draft, self._error = row.job_id, {}, None
+            self._shown, self._draft, self._error, self._frame = row.job_id, {}, None, None
+        frames = self._ledger.frames(row.job_id)
+        at = min(self._frame, len(frames) - 1) if self._frame is not None else len(frames) - 1
+        shown = frames[at] if frames else None
+        self._show_frame(shown)
         self._publish(
             outcome_topic(self._cfg),
             {
@@ -235,8 +261,46 @@ class OutcomeDesk:
                 "symptom": self._draft.get("symptom", UNSET),
                 "note": self._draft.get("note", ""),
                 "error": self._error,
+                "frames": len(frames),
+                "frame": at + 1 if frames else 0,
+                "frame_at": shown.line() if shown else "",
             },
         )
+
+    def _show_frame(self, frame: Frame | None) -> None:
+        """The frame on show on the image topic, or an empty one, which clears it."""
+        if self._publish_image is None:
+            return
+        want = (self._shown or "", frame.path) if frame else None
+        if want == self._image:
+            return
+        jpeg = b""
+        if frame is not None:
+            try:
+                jpeg = Path(frame.path).read_bytes()
+            except OSError:
+                logger.warning("frame %s is gone; nothing shown", frame.path)
+        self._publish_image(outcome_frame_topic(self._cfg), jpeg)
+        self._image = want
+
+    def _on_frame(self, topic: str, payload: bytes, retain: bool) -> None:
+        """Earlier, later, first or last: which frame is on show."""
+        if retain:
+            return
+        move = payload.decode("utf-8", "replace").strip()
+        if move not in ("earlier", "later", "first", "last"):
+            return
+        with self._lock:
+            if self._shown is None:
+                return
+            count = len(self._ledger.frames(self._shown))
+            if not count:
+                return
+            at = self._frame if self._frame is not None else count - 1
+            at = {"earlier": max(at - 1, 0), "later": min(at + 1, count - 1),
+                  "first": 0, "last": count - 1}[move]
+            self._frame = None if at == count - 1 else at
+            self._show_locked()
 
     def _setter(
         self, field: str, allowed: set[str] | None

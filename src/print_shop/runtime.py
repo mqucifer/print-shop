@@ -18,6 +18,7 @@ from print_shop.inventory import Material
 from print_shop.ledger import Ledger, Row, ledger_path
 from print_shop.orchestrator.daemon import Daemon
 from print_shop.orchestrator.outcome import end_name
+from print_shop.printer.camera import CentauriCamera
 from print_shop.printer.centauri import (
     CentauriClient,
     FrameRecorder,
@@ -122,6 +123,7 @@ def build_run(
     work = workdir or WORK_DIR
     work.mkdir(parents=True, exist_ok=True)
     llm = LLMConfig.from_settings(path)
+    printer_config = PrinterConfig.from_env(path)
     daemon = Daemon(
         cfg=cfg,
         profiles=(
@@ -141,7 +143,10 @@ def build_run(
         reviewer=reviewer,
         ledger=ledger,
         # Read-only: watching needs a snapshot and nothing else.
-        watch_printer=CentauriClient(PrinterConfig.from_env(path), recorder=recorder),
+        watch_printer=CentauriClient(printer_config, recorder=recorder),
+        # Read-only too: one JPEG from its stream at each new layer and at the end
+        # (mqucifer/print-shop#110).
+        camera=CentauriCamera(printer_config.host),
     )
     return Run(daemon=daemon, ledger=ledger, recorder=recorder)
 

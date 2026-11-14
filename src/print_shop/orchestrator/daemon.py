@@ -35,7 +35,9 @@ from print_shop.core.mqtt import (
 from print_shop.expert.client import LLMConfig
 from print_shop.ledger import Ledger
 from print_shop.orchestrator.graph import build_graph
+from print_shop.orchestrator.frames import FrameKeeper
 from print_shop.orchestrator.outcome import OutcomeDesk, Watcher
+from print_shop.printer.camera import Camera
 from print_shop.printer.centauri import PrinterClient
 from print_shop.setup import Proposer
 from print_shop.setup.intake import Asker
@@ -165,6 +167,7 @@ class Daemon:
         ledger: Ledger | None = None,
         watch_printer: PrinterClient | None = None,
         watch_poll_s: float = 60.0,
+        camera: Camera | None = None,
         proposer: Proposer | None = None,
         asker: Asker | None = None,
         reviewer: Reviewer | None = None,
@@ -191,6 +194,11 @@ class Daemon:
         running; `CentauriClient(PrinterConfig.from_env())` is unarmed. With a
         ledger the outcome gate runs either way; without a watcher nothing
         sees a print end, and its row stays open, which is honest.
+
+        `camera` is the printer's own, read-only (`CentauriCamera`): with a
+        watcher, each print keeps a frame at each new layer the watcher reads
+        and one at the end, in `workdir/<job>/frames/`, and the outcome gate
+        shows them (mqucifer/print-shop#110). None keeps no frames.
         """
         self._cfg = cfg
         self._profiles = profiles
@@ -243,6 +251,7 @@ class Daemon:
         self._ledger = ledger
         self._watch_printer = watch_printer
         self._watch_poll_s = watch_poll_s
+        self._camera = camera
         self._desk: OutcomeDesk | None = None
         self._watcher: Watcher | None = None
 
@@ -270,7 +279,8 @@ class Daemon:
             # start: its prints live in the ledger, not in this process, so a
             # restart shows the oldest unanswered one again.
             self._desk = OutcomeDesk(
-                ledger=self._ledger, cfg=self._cfg, publish=self._bridge_publish
+                ledger=self._ledger, cfg=self._cfg, publish=self._bridge_publish,
+                publish_image=self._bridge_publish_image,
             )
             for topic, handler in self._desk.topics.items():
                 self._bridge.subscribe(topic, handler)
@@ -281,6 +291,11 @@ class Daemon:
                     printer=self._watch_printer,
                     on_ended=self._desk.refresh,
                     poll_s=self._watch_poll_s,
+                    frames=(
+                        FrameKeeper(camera=self._camera, ledger=self._ledger, jobs=self._workdir)
+                        if self._camera is not None
+                        else None
+                    ),
                 )
                 self._watcher.start()
         return self
@@ -596,6 +611,11 @@ class Daemon:
             self._bridge.publish(
                 state_topic(self._cfg), state_payload(fields), retain=True
             )
+
+    def _bridge_publish_image(self, topic: str, jpeg: bytes) -> None:
+        """A camera frame, retained, so a dashboard opened later shows it. Empty clears it."""
+        if self._bridge is not None:
+            self._bridge.publish(topic, jpeg, retain=True)
 
     def _bridge_publish(self, topic: str, payload: dict[str, Any]) -> None:
         """Publish to a topic via the bridge.
