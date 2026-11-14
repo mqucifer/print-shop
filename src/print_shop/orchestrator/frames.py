@@ -1,9 +1,9 @@
-"""A print's camera frames: one as it moves to a new layer, and one at the end (mqucifer/print-shop#110).
+"""A print's camera frames: one as it moves to a new layer, and one at the end.
 
-The outcome watcher already reads the printer's status (`outcome.Watcher`); when the layer it
-reports has changed since the last frame, it asks for one here, and once more when the print
-ends. So frames are a layer apart at most, and further apart when layers come faster than the
-watcher looks: each is kept with the layer it was taken at.
+mqucifer/print-shop#110. The outcome watcher already reads the printer's status
+(`outcome.Watcher`); when the layer it reports has changed since the last frame, it asks for one
+here, and once more when the print ends. So frames are a layer apart at most, and further apart
+when layers come faster than the watcher looks: each is kept with the layer it was taken at.
 
 Each frame is a JPEG under the job's folder, `jobs/<id>/frames/`, named by its layer (or
 `end.jpg`), and a row of the ledger's `print_frames`. **A grab that fails is logged and skipped:

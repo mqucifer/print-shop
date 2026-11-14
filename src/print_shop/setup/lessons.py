@@ -34,9 +34,9 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from pathlib import Path
 from collections.abc import Iterable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from print_shop.rounds.lessons import (

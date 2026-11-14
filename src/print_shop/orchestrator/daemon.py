@@ -34,8 +34,8 @@ from print_shop.core.mqtt import (
 )
 from print_shop.expert.client import LLMConfig
 from print_shop.ledger import Ledger
-from print_shop.orchestrator.graph import build_graph
 from print_shop.orchestrator.frames import FrameKeeper
+from print_shop.orchestrator.graph import build_graph
 from print_shop.orchestrator.outcome import OutcomeDesk, Watcher
 from print_shop.printer.camera import Camera
 from print_shop.printer.centauri import PrinterClient

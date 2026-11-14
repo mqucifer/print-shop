@@ -14,14 +14,17 @@ With a camera, it also keeps the print's frames (`frames.FrameKeeper`,
 mqucifer/print-shop#110): one each time the layer it reads has moved on, and
 one at the end.
 
-**The desk** is the gate. With frames, it shows the last, and pages through
-the rest with Earlier and Later, beside the answer: evidence, never the answer. It shows the oldest unanswered print on a retained
+**The desk** is the gate. It shows the oldest unanswered print on a retained
 MQTT topic, holds the Sponsor's draft (a result, a symptom, a note) as Home
 Assistant's selects and text box set it, and records it on Record. An answer
 that does not add up is refused and the reason shown, not stored. Like the
 approval gate, a press is scoped to the print on show by time: only one print
 is shown at once, the draft resets whenever the print on show changes, and the
 part's name is on the card beside the buttons.
+
+With frames (mqucifer/print-shop#110), the desk also shows the last, and
+pages through the rest with Earlier and Later, beside the answer: evidence,
+never the answer.
 """
 
 from __future__ import annotations
