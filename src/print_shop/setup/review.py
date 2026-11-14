@@ -82,7 +82,7 @@ class Reviewer(Protocol):
 #: Who each change is from, as the review names it. Every `Source` has one, so a
 #: change from an intake answer shows like any other (it raised KeyError, 2026-11-13).
 _BY = {Source.ANSWER: "your answer", Source.MODEL: "model", Source.GUARD: "guard",
-       Source.SPONSOR: "you", Source.READING: "the slice"}
+       Source.SPONSOR: "you", Source.READING: "the slice", Source.LESSON: "lesson"}
 
 
 def render(request: ReviewRequest) -> str:
@@ -106,7 +106,7 @@ def render(request: ReviewRequest) -> str:
         head = "standard -> your tuning -> this print" if tuned else "your preset -> this print"
         lines.append(f"  {'setting'.ljust(width)}  {head}")
         for c in changes:
-            by = _BY[c.source]
+            by = _BY[c.source] + (f" {c.lesson}" if c.lesson is not None else "")
             cites = ", ".join(x for x in (c.feature, c.knowledge) if x)
             was = f"{c.standard} -> {c.preset or '-'}" if c.standard else (c.preset or "-")
             lines.append(f"  {c.key.ljust(width)}  {was} -> {c.value}")
@@ -116,7 +116,8 @@ def render(request: ReviewRequest) -> str:
     else:
         lines.append("  No changes: your presets as they are.")
     for c in proposal.kept:
-        lines.append(f"  kept {c.key} at {c.preset}: {c.reason}")
+        by = f" [lesson {c.lesson}]" if c.lesson is not None else ""
+        lines.append(f"  kept {c.key} at {c.preset}: {c.reason}{by}")
     for note in proposal.design_notes:
         lines.append(f"  design: {note}")
     for note in proposal.notes:
@@ -132,6 +133,11 @@ def render(request: ReviewRequest) -> str:
         lines.append(f"  the model was {proposal.model}; only the guards' changes stand")
     elif not proposal.model:
         lines.append("  no model was asked; only the guards' changes stand")
+    if proposal.lessons:
+        lines += ["", "Lessons from earlier prints, kept by a reviewer, for a part like this:"]
+        for g in proposal.lessons:
+            used = "set it" if g.applied else (g.why or "read by the model")
+            lines.append(f"  {g.line()} ({used})")
     lines += [
         "",
         f"Orca's estimate: {s.print_time_s // 60} min {s.print_time_s % 60} s, "

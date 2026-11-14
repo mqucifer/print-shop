@@ -211,7 +211,9 @@ def test_an_options_shown_settings_are_exactly_what_it_applies(part: str, tmp_pa
         for o in q.options:
             assert f"{o.label} ({settings_line(o.settings)}): " in o.line()
     asked = intake(part, tmp_path)
-    facts = PartFacts(intake=asked, features=features(part, tmp_path), **_presets())
+    p = _presets()
+    facts = PartFacts(intake=asked, features=features(part, tmp_path), machine=p["machine"],
+                      process=p["process"], filament=p["filament"])
     applied = {c.key: c.value for c in answered(facts)}
     shown: dict[str, str] = {}
     for _, option in asked.chosen():

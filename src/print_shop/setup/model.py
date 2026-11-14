@@ -130,6 +130,7 @@ def propose_by_model(facts: PartFacts, skill: Skill, ask: Ask, model: str) -> Pr
         return read.model_copy(update={"model": f"unavailable: {exc}"[:600]})
 
     answered_keys = {k for _, o in facts.intake.chosen() for k in o.settings}
+    by_lesson = {g.key: g.id for g in facts.lessons if g.applied}
     changes: list[Change] = []
     kept: list[Change] = []
     refused: list[str] = []
@@ -142,6 +143,8 @@ def propose_by_model(facts: PartFacts, skill: Skill, ask: Ask, model: str) -> Pr
             why = "its skill group wasn't read for this part"
         if key in answered_keys:
             why = "you answered it at the intake"
+        if key in by_lesson:
+            why = f"lesson {by_lesson[key]} set it"
         if key in {c.key for c in changes + kept}:
             why = "proposed twice"
         if why:
@@ -207,6 +210,7 @@ def prompt(facts: PartFacts, skill: Skill) -> str:
         "Its features, as it will sit on the plate:",
         *(f"- {f.line()}" for f in facts.features),
         "",
+        *_lessons(facts),
         "Settings you may change: the preset's value, and the bound a value must stay in:",
     ]
     for key in skill.settings:
@@ -216,6 +220,19 @@ def prompt(facts: PartFacts, skill: Skill) -> str:
         lines.append(f"- {key}: preset {facts.preset(key) or '(unset)'}; allowed {allowed}")
     lines += ["", f"Skill groups read for this part: {', '.join(skill.ids)}."]
     return "\n".join(lines)
+
+
+def _lessons(facts: PartFacts) -> list[str]:
+    """The reviewed lessons this part was given, if any (mqucifer/print-shop#106)."""
+    if not facts.lessons:
+        return []
+    return [
+        "Lessons from earlier prints, each kept by a reviewer, for parts with traits this one "
+        "has (what a lesson set is already set; don't change it):",
+        *(f"- {g.line()}" + ("" if g.applied or not g.key else f" (not set: {g.why})")
+          for g in facts.lessons),
+        "",
+    ]
 
 
 def _same(value: str, preset: str) -> bool:

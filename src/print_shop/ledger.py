@@ -19,6 +19,11 @@ printer said, never as the outcome. A print with no answer stays open.
 It follows the prototype's `Outcome` contract where it fits: an orientation is
 recorded with who proposed it, why, and whether the validator accepted it.
 
+**What a print teaches is drawn from its row** (mqucifer/print-shop#106): each
+correction at the review, and an outcome with something to say, is a candidate
+lesson, keyed to the part's traits (`setup/features.py`), in tables of its own
+(`setup/lessons.py`). A reviewer checks each before any reaches a proposal.
+
 The file lives outside every checkout, at `~/print-shop/ledger.sqlite`, and is
 archived nightly by mqucifer/infra#36.
 """
@@ -27,6 +32,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import sqlite3
 import threading
 from collections.abc import Iterator
@@ -41,7 +47,9 @@ from pydantic import BaseModel
 from print_shop.env import SETTINGS_PATH, load_env
 from print_shop.inventory import SCHEMA as INVENTORY_SCHEMA
 from print_shop.inventory import Material
+from print_shop.setup.features import Feature
 from print_shop.setup.intake import Intake
+from print_shop.setup.lessons import SCHEMA as LESSONS_SCHEMA
 from print_shop.setup.proposal import Change, Proposal
 from print_shop.setup.reading import Flag, SliceReading
 from print_shop.slicer.store import ProfilesUsed
@@ -59,6 +67,8 @@ __all__ = [
 ]
 
 DEFAULT_PATH = Path("~/print-shop/ledger.sqlite").expanduser()
+
+log = logging.getLogger(__name__)
 
 #: The settings key that moves the ledger, for a test run or a second machine.
 PATH_KEY = "PRINT_SHOP_LEDGER"
@@ -160,6 +170,9 @@ class PrintRecord(BaseModel):
     intake: Intake | None = None
     proposal: Proposal | None = None
     corrections: tuple[Change, ...] = ()
+    #: The part's measured features as it printed, which its lessons are keyed to
+    #: (mqucifer/print-shop#106).
+    features: tuple[Feature, ...] = ()
     #: The slice that goes to the printer, read layer by layer, and what it flagged for this
     #: part (mqucifer/print-shop#105), so a lesson can be keyed to it.
     reading: SliceReading | None = None
@@ -189,6 +202,8 @@ class Row(BaseModel):
     intake: Intake | None
     proposal: Proposal | None
     corrections: tuple[Change, ...] | None  # None: from before the review existed
+    #: None: from before the features were kept (mqucifer/print-shop#106).
+    features: tuple[Feature, ...] | None = None
     #: The printer, nozzle and spool from the inventory (mqucifer/print-shop#11).
     material: Material | None = None
     #: The slice as read, and its flags (mqucifer/print-shop#105). None: from before, or
@@ -272,12 +287,21 @@ CREATE TABLE IF NOT EXISTS slice_readings (
 #: 2: the profiles a print used, by store file, hash and commit (print-shop#6).
 #: A row from before has none: NULL, not a guess.
 #: 3: the intake, the proposed settings and the Sponsor's corrections (print-shop#7).
+#: Columns added since are in `ADDED`, each only if it's missing, without moving the version, so
+#: two pieces of work can each add one (mqucifer/print-shop#106 and
+#: mqucifer/print-shop#105, agreed 2026-11-13).
 MIGRATIONS = {
     2: "ALTER TABLE prints ADD COLUMN profiles TEXT",
     3: "ALTER TABLE prints ADD COLUMN intake TEXT;"
     " ALTER TABLE prints ADD COLUMN proposal TEXT;"
     " ALTER TABLE prints ADD COLUMN corrections TEXT",
 }
+
+
+#: Columns added to `prints` if missing, by name and type. A row from before has NULL.
+ADDED = (
+    ("features", "TEXT"),  # JSON [Feature]: the part's features (mqucifer/print-shop#106)
+)
 
 
 def ledger_path(settings: Path | None = None) -> Path:
@@ -320,9 +344,15 @@ class Ledger:
             for step in range(version + 1, SCHEMA_VERSION + 1):
                 self._conn.executescript(MIGRATIONS[step])
         self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
-        # The inventory's tables (mqucifer/print-shop#11) live in this file too,
-        # created if missing, without moving the ledger's schema version.
+        held = {r["name"] for r in self._conn.execute("PRAGMA table_info(prints)")}
+        for column, kind in ADDED:
+            if column not in held:
+                self._conn.execute(f"ALTER TABLE prints ADD COLUMN {column} {kind}")
+        # The inventory's tables (mqucifer/print-shop#11) and the lessons'
+        # (mqucifer/print-shop#106) live in this file too, created if missing,
+        # without moving the ledger's schema version.
         self._conn.executescript(INVENTORY_SCHEMA)
+        self._conn.executescript(LESSONS_SCHEMA)
         self._conn.executescript(READINGS_SCHEMA)
 
     def close(self) -> None:
@@ -363,8 +393,9 @@ class Ledger:
                         print_time_s, filament_cm3, layer_count, slicer_settings,
                         slicer_config, slicer_config_sha256, printer_machine,
                         printer_firmware, filament, profiles, intake, proposal,
-                        corrections, start_requested_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        corrections, features, start_requested_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                              ?)""",
                     (
                         record.job_id,
                         record.stl_name,
@@ -387,6 +418,8 @@ class Ledger:
                         record.intake.model_dump_json() if record.intake else None,
                         record.proposal.model_dump_json() if record.proposal else None,
                         json.dumps([c.model_dump(mode="json") for c in record.corrections]),
+                        json.dumps([f.model_dump(mode="json") for f in record.features])
+                        if record.features else None,
                         _now(),
                     ),
                 )
@@ -413,6 +446,7 @@ class Ledger:
                      ironing.time_s if ironing else 0.0,
                      reading.seam.stacked, _now()),
                 )
+        self._learn(record.job_id)
 
     def record_started(self, job_id: str) -> None:
         """The printer was seen to leave its ready state for this job."""
@@ -442,6 +476,31 @@ class Ledger:
             (answer.result.value, answer.symptom.value, answer.note, _now()),
             "ended_at IS NOT NULL AND result IS NULL",
         )
+        self._learn(job_id)
+
+    def _learn(self, job_id: str) -> None:
+        """What this print's row teaches: candidates from its corrections and outcome, and a
+        score for each lesson it was given (`lessons.after_print`). Never in the way of a
+        print: a failure here is logged, and `scripts/print_lessons.py draw` does it again."""
+        from print_shop.setup import lessons  # noqa: PLC0415 - lessons reads the ledger
+
+        try:
+            lessons.after_print(self, job_id)
+        except Exception:  # noqa: BLE001 - a print is never stopped by its lessons
+            log.exception("drawing lessons from job %s failed; draw them again by hand", job_id)
+
+    # --- the lessons' own tables (`setup/lessons.py`) -----------------------
+
+    def query(self, sql: str, *args: Any) -> list[dict[str, Any]]:
+        """Rows of any table in this file, as dicts."""
+        with self._lock:
+            return [dict(r) for r in self._conn.execute(sql, args).fetchall()]
+
+    @contextmanager
+    def writing(self) -> Iterator[sqlite3.Connection]:
+        """One transaction, for writes to the lessons' tables."""
+        with self._write() as db:
+            yield db
 
     def _update(self, job_id: str, assignments: str, values: tuple[Any, ...], guard: str) -> None:
         with self._write() as db:
@@ -511,6 +570,8 @@ def _row(row: sqlite3.Row) -> Row:
     if data["corrections"] is not None:
         found = json.loads(data["corrections"])
         data["corrections"] = tuple(Change.model_validate(c) for c in found)
+    if data.get("features") is not None:
+        data["features"] = tuple(Feature.model_validate(f) for f in json.loads(data["features"]))
     if data["reading"] is not None:
         data["reading"] = SliceReading.model_validate_json(data["reading"])
     if data["flags"] is not None:

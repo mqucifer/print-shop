@@ -18,7 +18,11 @@ goes back to my want for this to understand what it's doing." So:
   no decision about supports gets them, and supports are always tree (the
   Sponsor's practice). An overhang also gets a note that it could be
   designed out, for the CAD side;
-- **the Sponsor's correction** at the review replaces any of it.
+- **the Sponsor's correction** at the review replaces any of it;
+- **lessons from earlier prints,** each kept by a reviewer and keyed to the
+  part's traits (mqucifer/print-shop#106, `lessons.py`), set their setting
+  for a later part with the same traits, as an intake answer does, and the
+  model reads them. The review says which lesson set what.
 
 The changes are applied as whole copies of the process and filament
 profiles, the way the plate is (`with_bed_type`).
@@ -41,7 +45,17 @@ from print_shop.setup.intake import Intake
 if TYPE_CHECKING:  # the slicer imports the job state, which imports this
     from print_shop.slicer.orca import SlicerProfiles
 
-__all__ = ["Change", "PartFacts", "Proposal", "Source", "answered", "apply", "guard"]
+__all__ = [
+    "Change",
+    "GivenLesson",
+    "PartFacts",
+    "Proposal",
+    "Source",
+    "answered",
+    "apply",
+    "from_lessons",
+    "guard",
+]
 
 
 class Source(StrEnum):
@@ -49,6 +63,7 @@ class Source(StrEnum):
     MODEL = "model"
     GUARD = "guard"  # a rule that holds whatever the model says
     SPONSOR = "sponsor"
+    LESSON = "lesson"  # a reviewed lesson from an earlier print (mqucifer/print-shop#106)
     #: Read from the slice at the review, and taken there by the Sponsor (mqucifer/print-shop#105).
     READING = "reading"
 
@@ -68,8 +83,35 @@ class Change(BaseModel):
     source: Source
     feature: str = ""  # the feature id behind it, "purpose", or the reading's ("layer_time")
     knowledge: str = ""  # the skill's reference group it cites
+    lesson: int | None = None  # the lesson that set it, for a change from one
     #: What the slice showed that the change rests on, with its figures (a `Source.READING`).
     reading: str = ""
+
+
+class GivenLesson(BaseModel):
+    """A reviewed lesson as a proposal was given it: its words, its setting, where it came from,
+    and whether it set its setting here, or why not."""
+
+    model_config = {"frozen": True}
+
+    id: int
+    text: str
+    key: str = ""  # its setting, or "" for one that's only read
+    value: str = ""
+    job_id: str  # the print it was learned on
+    stl_name: str
+    traits: tuple[str, ...]  # what it's keyed to, which this part has
+    reviewed_by: str
+    applied: bool = False
+    why: str = ""  # why it set nothing, when it didn't
+
+    def line(self) -> str:
+        """The lesson as the model and the review read it."""
+        sets = f"{self.key}={self.value}: " if self.key else ""
+        return (
+            f"Lesson {self.id}, from {self.stl_name}, for a part that's "
+            f"{', '.join(self.traits)}, kept by {self.reviewed_by}: {sets}{self.text}"
+        )
 
 
 class Proposal(BaseModel):
@@ -97,6 +139,8 @@ class Proposal(BaseModel):
     #: traced to the skill as it stood.
     skill_groups: tuple[str, ...] = ()
     skill_sha256: str = ""
+    #: The reviewed lessons from earlier prints this part was given (mqucifer/print-shop#106).
+    lessons: tuple[GivenLesson, ...] = ()
 
     def get(self, key: str) -> Change | None:
         return next((c for c in self.changes if c.key == key), None)
@@ -120,6 +164,8 @@ class PartFacts:
     #: The standards the process and filament tune, when they are tunings.
     standard_process: dict[str, Any] = field(default_factory=dict)
     standard_filament: dict[str, Any] = field(default_factory=dict)
+    #: The reviewed lessons this part was given, each marked with whether it set its setting.
+    lessons: tuple[GivenLesson, ...] = ()
 
     def feature(self, id: str) -> float:
         return next((f.value for f in self.features if f.id == id), 0.0)
@@ -161,6 +207,55 @@ def answered(facts: PartFacts) -> list[Change]:
                 feature=question.feature,
             )
     return list(changes.values())
+
+
+def from_lessons(
+    facts: PartFacts, given: tuple[GivenLesson, ...]
+) -> tuple[list[Change], list[Change], tuple[GivenLesson, ...]]:
+    """The settings the lessons set: changes, those that keep the preset's value (a decision all
+    the same, so the guard leaves it), and each lesson marked with whether it set its setting.
+
+    An intake answer comes first, as it's the Sponsor's for this part. Of two lessons for one
+    setting, the one keyed to more traits sets it, then the newer.
+    """
+    answered_keys = {k for _, o in facts.intake.chosen() for k in o.settings}
+    order = sorted(
+        (g for g in given if g.key), key=lambda g: (-len(g.traits), -g.id)
+    )
+    setting: dict[str, GivenLesson] = {}
+    for g in order:
+        setting.setdefault(g.key, g)
+    changes: list[Change] = []
+    kept: list[Change] = []
+    marked = []
+    for g in given:
+        if not g.key:
+            marked.append(g.model_copy(update={"why": "read by the model; it sets nothing"}))
+            continue
+        if g.key in answered_keys:
+            marked.append(g.model_copy(update={"why": "your intake answer set it"}))
+            continue
+        if setting[g.key].id != g.id:
+            marked.append(g.model_copy(
+                update={"why": f"lesson {setting[g.key].id}, keyed closer, set it"}
+            ))
+            continue
+        preset = facts.preset(g.key)
+        change = Change(
+            key=g.key, preset=preset, value=g.value, source=Source.LESSON, lesson=g.id,
+            reason=f"learned on {g.stl_name}: {g.text}", feature=", ".join(g.traits),
+        )
+        same = _same_value(g.value, preset)
+        (kept if same else changes).append(change)
+        marked.append(g.model_copy(update={"applied": True}))
+    return changes, kept, tuple(marked)
+
+
+def _same_value(value: str, preset: str) -> bool:
+    try:
+        return float(value.rstrip("%")) == float(preset.rstrip("%"))
+    except ValueError:
+        return value == preset
 
 
 def guard(facts: PartFacts, proposal: Proposal) -> Proposal:

@@ -228,6 +228,7 @@ def build_graph(
                 ),
             )
             proposed["intake"] = intake
+            proposed["features"] = features
             result, reviewed = _propose_and_review(
                 proposer(intake, features, profiles),
                 profiles,
@@ -493,6 +494,7 @@ def _print_record(
         intake=state.get("intake"),
         proposal=state.get("proposal"),
         corrections=tuple(state.get("corrections", ())),
+        features=tuple(state.get("features", ())),
         reading=state.get("slice_reading"),
         flags=tuple(state.get("slice_flags", ())),
     )
