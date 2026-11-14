@@ -53,3 +53,11 @@ Allowed in print-shop: `no_brim`, `auto_brim`, `outer_only`, `brim_ears`.
 - **Bound:** 0 to 100 %. Enforced in code (`src/print_shop/setup/bounds.py`): a value outside it is refused, never clamped.
 
 Context only, print-shop does not set it: a raft is a sheet of support material under the model, used for warp-prone materials (ABS, ASA, PC, Nylon), a small contact area, thin features or sharp edges, or an uneven bed. It leaves a rougher underside and costs time, filament and removal; the wiki suggests trying a brim first when the problem is only adhesion or warping ([support_settings_raft](https://github.com/OrcaSlicer/OrcaSlicer/wiki/support_settings_raft)).
+
+## Elephant foot compensation (`elefant_foot_compensation`)
+[OrcaSlicer wiki: quality_settings_precision](https://github.com/OrcaSlicer/OrcaSlicer/wiki/quality_settings_precision#elephant-foot-compensation), read 2026-11-14.
+
+- **Effect:** "This feature compensates for the "elephant foot" effect, which occurs when the first few layers of a print are wider than the rest", from the weight above them, the material's thermal expansion, a plate too warm, or the plate's height. Orca shrinks the first layer by this distance, "decreasing linearly over the specified number of layers" (`elefant_foot_compensation_layers`). It's skipped with a raft.
+- **Trade-off:** The preview shows a smaller footprint; the print, if calibrated, comes out to size. At a high value the brim may look detached; Orca's "Brim use EFC outline" keeps it attached.
+- **Change it when:** the first layers of a part came out wider than its walls, the symptom the Sponsor named at mqucifer/print-shop#128. It answers that without turning the part. The Sponsor's profile has 0.1 mm.
+- **Bound:** 0 up to the first layer's line width (`initial_layer_line_width`, else the nozzle's): Orca takes any distance from 0 up, and the ceiling is print-shop's, as a compensation wider than the first layer's line takes its outer wall away. Enforced in code (`src/print_shop/setup/bounds.py`): a value outside it is refused, never clamped.

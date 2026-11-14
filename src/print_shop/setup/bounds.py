@@ -88,6 +88,13 @@ SETTINGS: dict[str, Setting] = {
         Setting("slow_down_layer_time", True, lambda p: (1, 60)),
         Setting("slow_down_min_speed", True,
                 lambda p: (1, _num(p, "process", "outer_wall_speed"))),
+        # Elephant foot (mqucifer/print-shop#128): Orca takes any distance from 0 up ("not in
+        # range [0, 3.4e38]", its own refusal of -1, 2026-11-14). The ceiling is the shop's: a
+        # compensation wider than the first layer's line takes its outer wall away. The
+        # nozzle's width where the process doesn't say.
+        Setting("elefant_foot_compensation", False,
+                lambda p: (0, _num(p, "process", "initial_layer_line_width")
+                           or _num(p, "machine", "nozzle_diameter"))),
         # Orca's own choices, as its config writes them.
         Setting("ironing_type", False, choices=("no ironing", "top", "topmost", "solid")),
         Setting("seam_position", False,

@@ -13,6 +13,7 @@ it reads each pose's box as it lies.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -20,7 +21,7 @@ import trimesh
 
 from print_shop.core.contracts import Proposal as Chosen
 from print_shop.core.contracts import Severity, propose_validate
-from print_shop.core.state import AppliedOrientation
+from print_shop.core.state import AppliedOrientation, Orientation
 from print_shop.expert.orientation import (
     OrientationRequest,
     propose_geometric,
@@ -37,10 +38,6 @@ from tests.test_review import _request
 
 #: The CC1's build volume.
 PLATE = (256.0, 256.0, 256.0)
-
-
-def _by_rotation(stl: Path) -> dict[tuple[float, float, float], object]:
-    return {c.rotation_deg: c for c in candidates(stl)}
 
 
 # The rounded lid
@@ -170,3 +167,55 @@ def test_the_review_shows_each_poses_figures(tmp_path: Path) -> None:
             "on the plate, 12 mm tall") in shown
     assert "       0,90,0  0 mm2 overhang, 108.3 mm2 rising from the plate left out, 496 mm2 on " \
            "the plate, 100 mm tall  <- this print" in shown
+
+
+# Elephant foot, and standing a part up
+# --------------------------------------------------------------------------
+
+
+def test_elephant_foot_is_bounded_from_zero_to_the_first_layers_line() -> None:
+    from print_shop.setup.bounds import check  # noqa: PLC0415
+
+    presets: dict[str, dict[str, Any]] = {
+        "machine": {"nozzle_diameter": ["0.4"]},
+        "process": {"initial_layer_line_width": "0.5"},
+        "filament": {},
+    }
+    assert check("elefant_foot_compensation", "0.1", presets) == ""
+    assert check("elefant_foot_compensation", "0.5", presets) == ""
+    assert check("elefant_foot_compensation", "0.6", presets) == "outside 0-0.5"
+    assert check("elefant_foot_compensation", "-0.1", presets) == "outside 0-0.5", (
+        "Orca refuses a negative itself"
+    )
+    no_width: dict[str, dict[str, Any]] = {**presets, "process": {}}
+    assert check("elefant_foot_compensation", "0.45", no_width) == "outside 0-0.4", (
+        "the nozzle's width where the process doesn't say"
+    )
+
+
+def _pose(rotation: tuple[float, float, float], overhang: float, contact: float,
+          height: float) -> Orientation:
+    return Orientation(rotation_deg=rotation, overhang_area_mm2=overhang,
+                       bed_contact_area_mm2=contact, height_mm=height, bbox_mm=(10, 10, height))
+
+
+@pytest.mark.parametrize(("flat", "edge", "moved"), [
+    ((0.0, 6200.0, 6.0), (0.0, 372.0, 100.0), True),     # the lid: stood up for nothing
+    ((20.0, 6200.0, 6.0), (0.0, 372.0, 100.0), True),    # within the tolerance
+    ((80.0, 6200.0, 6.0), (0.0, 372.0, 100.0), False),   # flat needs more support: the model's call
+    ((0.0, 600.0, 6.0), (0.0, 372.0, 100.0), False),     # not twice as much on the plate
+    ((0.0, 6200.0, 100.0), (0.0, 372.0, 100.0), False),  # no lower: not stood up
+])
+def test_a_pose_stood_up_is_moved_only_where_a_lower_one_beats_it(
+    flat: tuple[float, float, float], edge: tuple[float, float, float], moved: bool
+) -> None:
+    lying = _pose((0.0, 0.0, 0.0), *flat)
+    standing = _pose((0.0, 90.0, 0.0), *edge)
+    request = OrientationRequest(candidates=(lying, standing), build_volume_mm=PLATE)
+    verdict = validate_orientation(
+        Chosen(value=standing, source="model:fake", rationale="warping"), request
+    )
+    rules = [v.rule for v in verdict.blockers]
+    assert ("orientation.stood_up" in rules) is moved
+    if moved:
+        assert verdict.blockers[0].suggested == (0.0, 0.0, 0.0)

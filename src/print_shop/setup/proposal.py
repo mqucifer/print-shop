@@ -42,6 +42,7 @@ from pydantic import BaseModel
 from print_shop.setup.bounds import SETTINGS
 from print_shop.setup.features import Feature
 from print_shop.setup.intake import Intake
+from print_shop.setup.skill import WARPS_MM2
 
 if TYPE_CHECKING:  # the slicer imports the job state, which imports this
     from print_shop.slicer.orca import SlicerProfiles
@@ -342,6 +343,17 @@ def _notes(f: PartFacts) -> list[str]:
             )
     except ValueError:
         pass
+    contact = f.feature("bed_contact")
+    if contact >= WARPS_MM2:
+        # A risk the settings answer, never the orientation (mqucifer/print-shop#128): named by
+        # Orca's own keys, the plate's for the plate it's sliced on, as the skill's map has them.
+        plate = _first(f.process.get("curr_bed_type", "Cool Plate"))
+        temp = "textured_plate_temp" if plate == "Textured PEI Plate" else "cool_plate_temp"
+        notes.append(
+            f"warping risk: {contact:g} mm2 on the plate. The plate's temperature ({temp}), a "
+            "brim (brim_type), the chamber's exhaust (during_print_exhaust_fan_speed) and the side "
+            "fan (additional_cooling_fan_speed) answer it, not turning the part"
+        )
     return notes
 
 
