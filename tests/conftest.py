@@ -111,6 +111,7 @@ class LiveServiceRefused(RuntimeError):
     """Raised when a test reaches a live service it wasn't opted in to (mqucifer/print-shop#115)."""
 
 
+@pytest.hookimpl(tryfirst=True)
 def pytest_runtest_setup(item: pytest.Item) -> None:
     """A test marked `mqtt`, `llm` or `ha` runs only when its env var opts in."""
     for marker, var in OPT_IN.items():
@@ -174,7 +175,11 @@ def _refuse_live_services() -> Iterator[None]:
     send = httpx.Client.send
 
     def guarded_send(self: httpx.Client, request: httpx.Request, **kwargs: Any) -> Any:
-        if (request.url.host, request.url.port or 80) in llm and not opted_in("llm"):
+        # A test's own MockTransport answers in the process: nothing reaches the network.
+        mocked = isinstance(getattr(self, "_transport", None), httpx.MockTransport)
+        if not mocked and (request.url.host, request.url.port or 80) in llm and not opted_in(
+            "llm"
+        ):
             raise LiveServiceRefused(
                 f"a test called LiteLLM at {request.url}. Set {OPT_IN['llm']}=1 to opt in"
             )
