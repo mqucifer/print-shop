@@ -58,6 +58,7 @@ from print_shop.slicer.store import ProfilesUsed
 __all__ = [
     "DEFAULT_PATH",
     "Answer",
+    "Frame",
     "Ledger",
     "LedgerError",
     "PrintRecord",
@@ -180,6 +181,23 @@ class PrintRecord(BaseModel):
     flags: tuple[Flag, ...] = ()
 
 
+class Frame(BaseModel):
+    """One camera frame of a print: evidence beside its outcome, never the outcome."""
+
+    model_config = {"frozen": True}
+
+    kind: str  # "layer", taken as the printer moved to a layer, or "end"
+    layer: int | None
+    total_layers: int | None
+    path: str
+    bytes: int
+    taken_at: str
+
+    def line(self) -> str:
+        at = f"layer {self.layer}" + (f" of {self.total_layers}" if self.total_layers else "")
+        return ("the end, " + at if self.kind == "end" else at) if self.layer else self.kind
+
+
 class Row(BaseModel):
     """One print as the ledger holds it."""
 
@@ -284,6 +302,22 @@ CREATE TABLE IF NOT EXISTS slice_readings (
 );
 """
 
+#: The camera's frames of each print (mqucifer/print-shop#110), one row a frame, in a table of
+#: their own created if missing, without moving the schema version. The JPEGs are files in the
+#: job's folder; the ledger keeps where, at which layer, and when.
+FRAMES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS print_frames (
+    job_id        TEXT NOT NULL REFERENCES prints(job_id),
+    kind          TEXT NOT NULL CHECK (kind IN ('layer', 'end')),
+    layer         INTEGER,                -- the layer the printer said it was on, if it said
+    total_layers  INTEGER,
+    path          TEXT NOT NULL,          -- the JPEG, under jobs/<id>/frames/
+    bytes         INTEGER NOT NULL,
+    taken_at      TEXT NOT NULL,
+    PRIMARY KEY (job_id, path)
+);
+"""
+
 #: What each version adds to the one before, applied in order to an older file.
 #: 2: the profiles a print used, by store file, hash and commit (print-shop#6).
 #: A row from before has none: NULL, not a guess.
@@ -363,6 +397,7 @@ class Ledger:
             raise
         self._conn.execute("COMMIT")
         self._conn.executescript(READINGS_SCHEMA)
+        self._conn.executescript(FRAMES_SCHEMA)
 
     def close(self) -> None:
         with self._lock:
@@ -524,7 +559,29 @@ class Ledger:
             raise LedgerError(f"job {job_id} is not in the ledger")
         raise LedgerError(f"job {job_id} is not in a state for that ({guard})")
 
+    def record_frame(
+        self, job_id: str, kind: str, layer: int | None, total_layers: int | None, path: Path,
+        size: int,
+    ) -> None:
+        """A frame saved for a print. The same file twice is kept once."""
+        with self._write() as db:
+            db.execute(
+                "INSERT OR IGNORE INTO print_frames (job_id, kind, layer, total_layers, path,"
+                " bytes, taken_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (job_id, kind, layer, total_layers, str(path), size, _now()),
+            )
+
     # --- reads -----------------------------------------------------------
+
+    def frames(self, job_id: str) -> list[Frame]:
+        """A print's frames in the order they were taken, the end's last."""
+        with self._lock:
+            found = self._conn.execute(
+                "SELECT kind, layer, total_layers, path, bytes, taken_at FROM print_frames"
+                " WHERE job_id = ? ORDER BY kind = 'end', taken_at, layer",
+                (job_id,),
+            ).fetchall()
+        return [Frame.model_validate(dict(r)) for r in found]
 
     def get(self, job_id: str) -> Row | None:
         with self._lock:

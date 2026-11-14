@@ -115,7 +115,7 @@ A print uses your tuning where there is one, and the standard where you haven't 
 
 ## After
 
-1. **Answer.** When the printer finishes, the dashboard asks "How did it come out?" with the part's name and what the printer says (completed, stopped, error). The printer's word is not the outcome; yours is.
+1. **Answer.** When the printer finishes, the dashboard asks "How did it come out?" with the part's name and what the printer says (completed, stopped, error). The printer's word is not the outcome; yours is. Beside it is the printer's own camera, read-only: the last frame, and Earlier and Later to page back through one frame for each new layer the shop saw, to find where something started (mqucifer/print-shop#110). They're kept in `~/print-shop/jobs/<job>/frames/`, and a lesson from a print with a symptom names them. A frame is evidence for your answer, never the answer.
    - **Result:** success or failed.
    - **What went wrong:** `none` for a success. For a failure, the closest of adhesion, warping, stringing, layer_shift, spaghetti, under_extrusion, or other. Other needs a note.
    - **Note:** anything worth knowing, such as "corner lifted at layer 3".

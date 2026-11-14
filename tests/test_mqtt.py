@@ -34,6 +34,7 @@ from print_shop.core.mqtt import (
     command_topic,
     discovery_payloads,
     gate_topic,
+    outcome_frame_set_topic,
     outcome_submit_topic,
     state_topic,
 )
@@ -176,7 +177,9 @@ def test_the_buttons_publish_to_the_command_topic() -> None:
     buttons: dict[str, dict[str, Any]] = {
         t.split("/")[3]: p for t, p in discovery_payloads(c) if t.split("/")[1] == "button"
     }
-    assert set(buttons) == {"approve", "reject", "record_outcome"}
+    assert set(buttons) == {
+        "approve", "reject", "record_outcome", "outcome_frame_earlier", "outcome_frame_later"
+    }
     for name in ("approve", "reject"):
         assert buttons[name]["command_topic"] == command_topic(c)
         assert json.loads(str(buttons[name]["payload_press"]))["decision"] == name
@@ -184,6 +187,11 @@ def test_the_buttons_publish_to_the_command_topic() -> None:
     # has ended, and must not read as consent to start one.
     assert buttons["record_outcome"]["command_topic"] == outcome_submit_topic(c)
     assert buttons["record_outcome"]["command_topic"] != command_topic(c)
+    # Paging the camera's frames (mqucifer/print-shop#110) answers nothing, and starts nothing.
+    for move in ("earlier", "later"):
+        frame = buttons[f"outcome_frame_{move}"]
+        assert frame["command_topic"] == outcome_frame_set_topic(c)
+        assert frame["payload_press"] == move
 
 
 def test_discovery_payloads_are_json_serialisable() -> None:
@@ -469,6 +477,10 @@ CONTRACTS_HA = {
     "select.3d_print_agent_outcome_symptom": "select/3dprint_dev/outcome_symptom",
     "text.3d_print_agent_outcome_note": "text/3dprint_dev/outcome_note",
     "button.3d_print_agent_record_outcome": "button/3dprint_dev/record_outcome",
+    # The print's camera frames at the outcome gate (mqucifer/print-shop#110).
+    "image.3d_print_agent_outcome_frame": "image/3dprint_dev/outcome_frame",
+    "button.3d_print_agent_outcome_frame_earlier": "button/3dprint_dev/outcome_frame_earlier",
+    "button.3d_print_agent_outcome_frame_later": "button/3dprint_dev/outcome_frame_later",
 }
 
 
