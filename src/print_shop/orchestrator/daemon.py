@@ -195,10 +195,12 @@ class Daemon:
         ledger the outcome gate runs either way; without a watcher nothing
         sees a print end, and its row stays open, which is honest.
 
-        `camera` is the printer's own, read-only (`CentauriCamera`): with a
-        watcher, each print keeps a frame at each new layer the watcher reads
-        and one at the end, in `workdir/<job>/frames/`, and the outcome gate
-        shows them (mqucifer/print-shop#110). None keeps no frames.
+        `camera` is the printer's, read-only, through Home Assistant
+        (`HomeAssistantCamera`, mqucifer/print-shop#123): with a watcher, each
+        print keeps a frame at each new layer the watcher reads and one at the
+        end, in `workdir/<job>/frames/`, and the outcome gate shows them
+        (mqucifer/print-shop#110). `CameraOff` says once for each print why
+        there are none; None keeps none and says nothing.
         """
         self._cfg = cfg
         self._profiles = profiles

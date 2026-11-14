@@ -24,7 +24,10 @@ settings' key. So a test marked with one is skipped unless its env var opts in
 (`tests/live.py`), and, underneath the markers, while pytest runs:
 - a real MQTT connect is refused unless a test broker is opted in, and a
   bridge is refused under any prefix or node that isn't a test run's;
-- a request to LiteLLM is refused unless `PRINT_SHOP_TEST_LLM=1`.
+- a request to LiteLLM is refused unless `PRINT_SHOP_TEST_LLM=1`;
+- a request to Home Assistant, at the settings' address or for any camera's image, is
+  refused unless `PRINT_SHOP_TEST_HA=1` (mqucifer/print-shop#123: frames come from its camera
+  entity, and a test's camera is a `MockTransport`).
 """
 
 from __future__ import annotations
@@ -135,6 +138,21 @@ def _llm_hosts() -> set[tuple[str, int]]:
     return found
 
 
+def _ha_hosts() -> set[tuple[str, int]]:
+    """Where Home Assistant answers, as the settings name it (`camera.camera_from_env`)."""
+    try:
+        env = load_env(SETTINGS_PATH)
+    except OSError:
+        return set()
+    found = set()
+    for url in (env.get("HA_URL"), f"http://{env['MQTT_HOST']}:8123" if env.get("MQTT_HOST")
+                else None):
+        if url:
+            parts = urlsplit(url)
+            found.add((parts.hostname or "", parts.port or 80))
+    return found
+
+
 @pytest.fixture(autouse=True, scope="session")
 def _refuse_live_services() -> Iterator[None]:
     """The broker and LiteLLM, refused for the whole session unless opted in.
@@ -172,16 +190,22 @@ def _refuse_live_services() -> Iterator[None]:
     monkeypatch.setattr(MqttBridge, "__enter__", enter)
 
     llm = _llm_hosts()
+    ha = _ha_hosts()
     send = httpx.Client.send
 
     def guarded_send(self: httpx.Client, request: httpx.Request, **kwargs: Any) -> Any:
         # A test's own MockTransport answers in the process: nothing reaches the network.
         mocked = isinstance(getattr(self, "_transport", None), httpx.MockTransport)
-        if not mocked and (request.url.host, request.url.port or 80) in llm and not opted_in(
-            "llm"
-        ):
+        where = (request.url.host, request.url.port or 80)
+        if not mocked and where in llm and not opted_in("llm"):
             raise LiveServiceRefused(
                 f"a test called LiteLLM at {request.url}. Set {OPT_IN['llm']}=1 to opt in"
+            )
+        camera = request.url.path.startswith("/api/camera_proxy/")
+        if not mocked and (where in ha or camera) and not opted_in("ha"):
+            raise LiveServiceRefused(
+                f"a test called Home Assistant at {request.url}. Set {OPT_IN['ha']}=1 to opt "
+                "in; a test's camera answers from a MockTransport"
             )
         return send(self, request, **kwargs)
 

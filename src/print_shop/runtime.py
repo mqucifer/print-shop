@@ -18,7 +18,7 @@ from print_shop.inventory import Material
 from print_shop.ledger import Ledger, Row, ledger_path
 from print_shop.orchestrator.daemon import Daemon
 from print_shop.orchestrator.outcome import end_name
-from print_shop.printer.camera import CentauriCamera
+from print_shop.printer.camera import camera_from_env
 from print_shop.printer.centauri import (
     CentauriClient,
     FrameRecorder,
@@ -145,9 +145,10 @@ def build_run(
         ledger=ledger,
         # Read-only: watching needs a snapshot and nothing else.
         watch_printer=CentauriClient(printer_config, recorder=recorder),
-        # Read-only too: one JPEG from its stream at each new layer and at the end
-        # (mqucifer/print-shop#110).
-        camera=CentauriCamera(printer_config.host),
+        # Read-only too: Home Assistant's image of the printer's camera, one GET at each new
+        # layer and at the end, never the printer's own stream (mqucifer/print-shop#110,
+        # mqucifer/print-shop#123). Off, and said so, without its settings.
+        camera=camera_from_env(path),
     )
     return Run(daemon=daemon, ledger=ledger, recorder=recorder)
 
