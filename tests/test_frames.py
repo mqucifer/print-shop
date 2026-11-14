@@ -3,12 +3,16 @@
 mqucifer/print-shop#110. The watcher takes a frame each time the layer it reads has moved on,
 and one at the end; a grab that fails is logged and skipped, never stopping the watcher. The
 ledger keeps where each is, the outcome gate shows the last and pages through the rest, and a
-lesson drawn from an outcome with a symptom names them. Every camera here is a fake: no frame
-is grabbed from the real printer.
+lesson drawn from an outcome with a symptom names them.
+
+mqucifer/print-shop#123: nothing opens the printer's own stream, a grab that fails is one line
+saying why and at which layer, and a print with no frame says why at the outcome step. Every
+camera here is a fake: no frame is grabbed from the real printer, or from Home Assistant.
 """
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 from collections.abc import Iterator
@@ -26,9 +30,9 @@ from print_shop.core.mqtt import (
 from print_shop.ledger import Answer, Ledger, Result, Symptom
 from print_shop.orchestrator.frames import FrameKeeper
 from print_shop.orchestrator.outcome import OutcomeDesk, Watcher
-from print_shop.printer.camera import JPEG_START, CameraError, CentauriCamera
+from print_shop.printer.camera import HELD, JPEG_START, CameraError, CameraOff, camera_for_prints
 from print_shop.setup import lessons
-from tests.fakes import JPEG, FakeCamera, MemoryBridge, frame
+from tests.fakes import DATA, JPEG, FakeCamera, MemoryBridge, frame
 from tests.test_job_e2e import CFG, Rig
 from tests.test_ledger import record
 from tests.test_outcome import answer, shown, wait_until
@@ -72,10 +76,39 @@ def test_the_status_says_which_layer_it_is_on() -> None:
     assert frame("idle").layer == 0, "as it says it: idle is layer 0, which takes no frame"
 
 
-def test_the_real_camera_says_why_it_has_no_frame() -> None:
-    """Nothing listens on this address: the grab fails fast, said, and raises nothing else."""
-    with pytest.raises(CameraError, match="no frame from 127.0.0.1"):
-        CentauriCamera("127.0.0.1", timeout_s=0.5).grab()
+#: print-shop's own code: the package and its scripts.
+SOURCE = DATA.parent.parent / "src" / "print_shop"
+
+
+def _imports(path: Path) -> set[str]:
+    found: set[str] = set()
+    for node in ast.walk(ast.parse(path.read_text(), str(path))):
+        if isinstance(node, ast.Import):
+            found |= {a.name for a in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            found |= {f"{node.module}.{a.name}" for a in node.names} | {node.module}
+    return found
+
+
+def test_nothing_opens_the_printers_own_camera_stream() -> None:
+    """mqucifer/print-shop#123: the CC1's camera has a few slots, held badly, and a grab for each
+    layer starved them. No code here reads its stream, by pycentauri's camera or by its port."""
+    files = [*SOURCE.rglob("*.py"), *(SOURCE.parent.parent / "scripts").glob("*.py")]
+    assert len(files) > 50
+    readers = {"pycentauri.camera", "pycentauri.mjpeg_broadcast"}
+    for path in files:
+        assert not readers & _imports(path), f"{path} reads the printer's camera stream"
+        text = path.read_text()
+        told = ast.get_docstring(ast.parse(text)) or ""  # where it says why, not code
+        assert "3031" not in text.replace(told, ""), f"{path} names the printer's camera port"
+
+
+def test_a_print_takes_no_frame_until_the_source_is_chosen() -> None:
+    """Off, and saying so, until frames come through Home Assistant."""
+    camera = camera_for_prints()
+    assert camera is HELD and isinstance(camera, CameraOff)
+    with pytest.raises(CameraError, match="frames are off"):
+        camera.grab()
 
 
 # The keeper
@@ -111,11 +144,69 @@ def test_a_grab_that_fails_is_logged_and_skipped(
     with caplog.at_level(logging.WARNING):
         assert keeper.at_layer("job-1", 5, 100) is None
     assert "no layer frame for job job-1 at layer 5; skipped" in caplog.text
+    [line] = caplog.records
+    assert line.getMessage() == (
+        "no layer frame for job job-1 at layer 5; skipped: no frame from the printer: busy"
+    ), "one line: why, and the layer"
+    assert line.exc_info is None, "the traceback goes to debug, not the warning"
+    assert ledger.frames_missed("job-1") == "no frame from the printer: busy"
     assert ledger.frames("job-1") == []
     assert not (tmp_path / "jobs" / "job-1" / "frames" / "layer-0005.jpg").exists()
     camera.fail = None
     assert keeper.at_layer("job-1", 5, 100) is None, "that layer's chance has passed"
     assert keeper.at_layer("job-1", 6, 100) is not None, "the next layer's is taken"
+
+
+def test_a_silent_camera_is_one_line_a_layer_and_its_traceback_is_debug(
+    ledger: Ledger, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The first print after mqucifer/print-shop#121 logged a traceback each layer."""
+    started(ledger)
+    camera = FakeCamera(fail=CameraError("the camera gave no image in 5 s"))
+    keeper = FrameKeeper(camera=camera, ledger=ledger, jobs=tmp_path / "jobs")
+    with caplog.at_level(logging.DEBUG, logger="print_shop.orchestrator.frames"):
+        for layer in (1, 2):
+            keeper.at_layer("job-1", layer, 100)
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert [r.getMessage() for r in warnings] == [
+        f"no layer frame for job job-1 at layer {n}; skipped: the camera gave no image in 5 s"
+        for n in (1, 2)
+    ]
+    assert all(r.exc_info is None for r in warnings)
+    debug = [r for r in caplog.records if r.levelno == logging.DEBUG]
+    assert len(debug) == 2 and all(r.exc_info is not None for r in debug)
+    assert camera.grabs == 2, "one grab a frame, and nothing else"
+
+
+def test_a_camera_that_answers_then_stops_keeps_what_it_gave(
+    ledger: Ledger, tmp_path: Path
+) -> None:
+    started(ledger)
+    camera = FakeCamera()
+    keeper = FrameKeeper(camera=camera, ledger=ledger, jobs=tmp_path / "jobs")
+    keeper.at_layer("job-1", 1, 3)
+    camera.fail = CameraError("the camera answered with nothing")
+    keeper.at_layer("job-1", 2, 3)
+    keeper.at_end("job-1", 3, 3)
+    assert [(f.kind, f.layer) for f in ledger.frames("job-1")] == [("layer", 1)]
+    assert ledger.frames_missed("job-1") == "the camera answered with nothing"
+
+
+def test_with_the_camera_off_a_print_says_so_once_and_grabs_nothing(
+    ledger: Ledger, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    started(ledger)
+    keeper = FrameKeeper(camera=HELD, ledger=ledger, jobs=tmp_path / "jobs")
+    with caplog.at_level(logging.INFO):
+        for layer in (1, 2, 3):
+            assert keeper.at_layer("job-1", layer, 3) is None
+        assert keeper.at_end("job-1", 3, 3) is None
+    assert [r.getMessage() for r in caplog.records] == [
+        f"no camera frames for job job-1: {HELD.why}"
+    ]
+    assert ledger.frames("job-1") == []
+    assert not (tmp_path / "jobs" / "job-1").exists()
+    assert ledger.frames_missed("job-1") == HELD.why
 
 
 # The watcher
@@ -222,6 +313,53 @@ def test_a_frame_on_show_is_cleared_once_the_answer_is_in(desk: Any) -> None:
     assert bridge.images[outcome_frame_topic(CFG)] == b"", "an empty retained frame clears it"
     row = ledger.get("job-1")
     assert row is not None and row.result is Result.SUCCESS
+
+
+def _desk(ledger: Ledger) -> MemoryBridge:
+    bridge = MemoryBridge()
+    desk = OutcomeDesk(ledger=ledger, cfg=CFG,
+                       publish=lambda t, p: bridge.publish(t, p, retain=True),
+                       publish_image=lambda t, b: bridge.publish(t, b, retain=True))
+    ledger.record_ended("job-1", 9)
+    desk.refresh()
+    return bridge
+
+
+def test_a_print_with_no_frame_says_why_at_the_outcome_step(
+    ledger: Ledger, tmp_path: Path
+) -> None:
+    started(ledger)
+    camera = FakeCamera(fail=CameraError("the camera answered 404"))
+    keeper = FrameKeeper(camera=camera, ledger=ledger, jobs=tmp_path / "jobs")
+    keeper.at_layer("job-1", 1, 3)
+    keeper.at_end("job-1", 3, 3)
+    gate = shown(_desk(ledger))
+    assert (gate["frames"], gate["frame"]) == (0, 0)
+    assert gate["frames_why"] == (
+        "No camera frame was kept for this print: the camera answered 404."
+    )
+
+
+def test_a_print_with_the_camera_off_says_so_at_the_outcome_step(
+    ledger: Ledger, tmp_path: Path
+) -> None:
+    started(ledger)
+    FrameKeeper(camera=HELD, ledger=ledger, jobs=tmp_path / "jobs").at_layer("job-1", 1, 3)
+    assert shown(_desk(ledger))["frames_why"] == (
+        f"No camera frame was kept for this print: {HELD.why}."
+    )
+
+
+def test_a_print_nothing_asked_the_camera_about_says_that(ledger: Ledger) -> None:
+    started(ledger)
+    assert shown(_desk(ledger))["frames_why"] == (
+        "No camera frame was kept for this print: nothing was asked of the camera."
+    )
+
+
+def test_a_print_with_frames_has_no_why(desk: Any) -> None:
+    _, bridge, _ = desk
+    assert shown(bridge)["frames_why"] == ""
 
 
 def test_home_assistant_gets_an_image_and_two_buttons() -> None:

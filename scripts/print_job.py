@@ -26,6 +26,11 @@ ends saying which. The settings are then proposed and shown here for review:
 `ok`, or correct a setting by name and it slices again. Home Assistant's
 approval gate comes after that, unchanged.
 
+**The questions and the review take as long as you take** (mqucifer/print-shop#125). The
+hour for the slice to reach the approval gate starts when the review is approved; the gate
+then waits an hour for Approve or Reject, and says by when. A wait that runs out ends the job
+in one sentence, with a ledger row saying it timed out, and nothing printed.
+
 **This is the only place that arms the printer,** and only when the invocation
 says so: `PRINT_AGENT_ALLOW_HARDWARE=1` on this command's own line. Without it
 the job slices, parks at the approval gate in Home Assistant, and an approval
@@ -44,12 +49,15 @@ import argparse
 import logging
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 from print_shop.arming import ALLOW_HARDWARE_ENV, hardware_allowed
 from print_shop.env import SETTINGS_PATH
 from print_shop.inventory import SETUP, Inventory, InventoryError, Material
 from print_shop.ledger import Ledger, ledger_path
+from print_shop.orchestrator.daemon import GATE_WAIT_S
+from print_shop.orchestrator.outcome import no_frames
 from print_shop.printer.centauri import FrameRecorder, PrinterClient, live_printer
 from print_shop.runtime import WORK_DIR, build_run, describe, profiles_for, recording_path
 from print_shop.setup.intake import Asker, cli_asker, replay_asker
@@ -58,7 +66,9 @@ from print_shop.slicer.orca import SlicerProfiles
 from print_shop.slicer.store import STORE_DIR, NoChoice, Store, choose
 from print_shop.slicer.store import describe as describe_store
 
-APPROVAL_WAIT_S = 3600.0  # the daemon's own gate gives up after an hour
+#: From the review's `ok` (or the job's submit, with no review) to the approval gate: the slice
+#: and its reading. The intake and the review aren't counted (mqucifer/print-shop#125).
+APPROVAL_WAIT_S = 3600.0
 FINISH_WAIT_S = 900.0  # after the press: preflight, upload, and a five-minute start watch
 
 
@@ -88,6 +98,11 @@ def main(argv: list[str] | None = None) -> int:
         with Ledger(ledger_path(args.settings)) as ledger:
             rows = ledger.rows()
             print("\n\n".join(describe(r) for r in rows) if rows else "the ledger is empty")
+            unprinted = ledger.unprinted_jobs()
+            if unprinted:
+                print("\nEnded without printing:")
+                for job in unprinted:
+                    print(f"  {job.line()}")
         return 0
     if not args.serve and args.stl is None:
         parser.error("give a part to print, or --serve, or --list")
@@ -164,7 +179,11 @@ def main(argv: list[str] | None = None) -> int:
 
             job_id = run.daemon.submit(args.stl)
             print(f"Job {job_id}: orienting, then a few questions about the part, here.")
-            run.daemon.wait_for_gate(job_id, timeout_s=APPROVAL_WAIT_S)
+            try:
+                run.daemon.wait_for_gate(job_id, timeout_s=APPROVAL_WAIT_S)
+            except TimeoutError as ran_out:
+                print(ran_out)  # the sentence, and the ledger's row is written
+                return 1
             gate = run.daemon.pending_gate()
             if gate is not None:
                 print("At the approval gate. Approve or Reject on the dashboard.")
@@ -174,13 +193,25 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  because     {gate.get('orientation_rationale')}")
                 if gate.get("pause"):
                     print(f"  SWAP        {gate['pause']}: be at the printer for it")
-            result = run.daemon.wait_for_finish(job_id, timeout_s=APPROVAL_WAIT_S + FINISH_WAIT_S)
-            if result.error:
+                print(f"  answer by   {_answer_by(gate)}; after that it ends and nothing prints")
+            try:
+                result = run.daemon.wait_for_finish(job_id, timeout_s=GATE_WAIT_S + FINISH_WAIT_S)
+            except TimeoutError:
+                print(run.daemon.abandon(job_id, "waiting for the job to finish",
+                                         GATE_WAIT_S + FINISH_WAIT_S))
+                if run.ledger.get(job_id) is None:
+                    return 1
+                result = None
+            ended = run.ledger.unprinted(job_id)
+            if ended is not None:
+                print(ended.detail)  # the approval gate's own wait ran out
+                return 1
+            if result is not None and result.error:
                 print(f"The job ended without printing: {result.error}")
             row = run.ledger.get(job_id)
             if row is None:
                 print("Nothing was started, so the ledger has no row for this job.")
-                return 0 if not result.error else 1
+                return 0 if result is None or not result.error else 1
             print("Started. Watching the printer read-only; answer in Home Assistant when it ends.")
             while True:
                 row = run.ledger.get(job_id)
@@ -192,12 +223,24 @@ def main(argv: list[str] | None = None) -> int:
             if frames:
                 print(f"frames         {len(frames)}, the last at {frames[-1].line()}, in"
                       f" {Path(frames[-1].path).parent}")
+            else:
+                print(f"frames         {no_frames(run.ledger.frames_missed(job_id))}")
             return 0
     except KeyboardInterrupt:
         print("\nStopped. Any print without an answer stays open in the ledger.")
         return 130
     finally:
         run.ledger.close()
+
+
+def _answer_by(gate: dict[str, object]) -> str:
+    """The gate's deadline in local time, and the minutes left."""
+    raw = gate.get("answer_by")
+    if not isinstance(raw, str):
+        return "within the hour"
+    by = datetime.fromisoformat(raw).astimezone()
+    left = max(0, round((by - datetime.now(by.tzinfo)).total_seconds() / 60))
+    return f"{by:%H:%M} ({left} min left)"
 
 
 if __name__ == "__main__":

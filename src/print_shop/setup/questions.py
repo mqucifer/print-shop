@@ -16,6 +16,10 @@ index (SKILL.md), and proposes what those leave undecided:
   inside its bound (`bounds.check`): an option out of bounds is dropped, and
   a question left with fewer than 2 options is dropped. Exactly one option is
   recommended, with why;
+- an option's words and its settings agree on supports (mqucifer/print-shop#124): one whose
+  label says no support carries `enable_support=0`, added if the model left it out, so the
+  answer is a decision the support guard keeps and the review shows where it came from. One
+  that says no support and sets supports on is dropped;
 - each option's impact on strength, surface and risk in one line, in the
   model's words, which never restate its values: the settings line shown
   beside it is written from the settings it applies (`settings_line`). Its
@@ -29,6 +33,7 @@ cut-off call gives no questions, saying so, and the proposal goes on.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -40,7 +45,8 @@ from print_shop.setup.proposal import PartFacts
 from print_shop.setup.skill import SKILL_DIR
 
 __all__ = [
-    "MAX_QUESTIONS", "SEEN", "SEEN_FACES", "Asked", "estimate", "propose_questions", "schema",
+    "MAX_QUESTIONS", "SEEN", "SEEN_FACES", "Asked", "estimate", "propose_questions",
+    "says_no_support", "schema",
 ]
 
 MAX_QUESTIONS = 4
@@ -56,7 +62,8 @@ _SYSTEM = (
     "what it's for (ask that first). Each question has 2 to 4 concrete options; each option "
     "lists the settings it implies, one line on its impact (strength, surface, risk) that "
     "never restates a setting or a number (the settings are shown beside it), and exactly "
-    "one is recommended, with why, pointing at the part. Never ask what the features "
+    "one is recommended, with why, pointing at the part. An option that decides supports, "
+    "either way, sets enable_support. Never ask what the features "
     "already answer, and never ask open-ended questions. A simple part may need none. Don't "
     "state times or filament: those come from the slicer. Don't ask which faces will be "
     "seen: print-shop asks that itself.\n\n"
@@ -184,6 +191,12 @@ def propose_questions(facts: PartFacts, ask: Ask) -> Asked:
         options = []
         for o in q.get("options", ()):
             settings = {str(s["key"]): str(s["value"]) for s in o.get("settings", ())}
+            if says_no_support(str(o.get("label", ""))):
+                if settings.get("enable_support", "0") != "0":
+                    dropped.append(f"'{o.get('label')}' in '{q.get('text')}': says no support "
+                                   f"and sets enable_support={settings['enable_support']}")
+                    continue
+                settings["enable_support"] = "0"
             refused = [f"{k}={v}: {why}" for k, v in settings.items()
                        if (why := check(k, v, facts.presets))]
             if refused:
@@ -212,6 +225,20 @@ def propose_questions(facts: PartFacts, ask: Ask) -> Asked:
         questions = [*questions[: MAX_QUESTIONS - 1], SEEN]
         note = "; ".join(x for x in (note, said) if x)
     return Asked(tuple(questions), note, dict(reply.get("_call") or {}))
+
+
+#: An option's label that says it prints without supports: "Bridge it — no support", "without
+#: supports", "unsupported", "support-free". Not "no support marks", which is about the finish.
+_NO_SUPPORT = re.compile(
+    r"\b(?:no|without)\s+supports?\b(?!\s*(?:marks?|scars?|contact|interface|removal))"
+    r"|\bunsupported\b|\bsupport[- ]free\b",
+    re.IGNORECASE,
+)
+
+
+def says_no_support(label: str) -> bool:
+    """Whether an option's label says the part prints without supports."""
+    return _NO_SUPPORT.search(label) is not None
 
 
 def estimate(
