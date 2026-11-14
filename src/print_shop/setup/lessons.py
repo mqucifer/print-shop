@@ -16,6 +16,11 @@ its statuses, steps, scores and signatures, imported from there, not a second vo
 - **A kept lesson reaches a later part that has every trait it's keyed to** (`for_part`): it sets
   its setting, as an intake answer does, and the model reads it with where it came from. The
   review shows which lesson set what, and the ledger has a row of `job_lessons` for each given.
+- **A pose sent back at the review is a correction too** (mqucifer/print-shop#128): its lesson's
+  setting is `orientation`, its text the person's reason, and it's keyed to the part's traits in
+  the file's own pose, before any turn, as it's looked up. It's given to the orientation step
+  with its poses (`for_orienting`), never to the settings proposal, and the review lists it with
+  the others. It stood if the pose wasn't sent back again.
 - **Each is scored at the review by what the Sponsor did:** a setting that stood is `used`, one
   they corrected `in_the_way`, and one another lesson or their answer set `not_used`. A lesson only
   read by the model is scored by the reviewer (`score`). Its status follows each job's latest score
@@ -60,7 +65,7 @@ from print_shop.rounds.lessons import (
 from print_shop.rounds.lessons import writer as _writer
 from print_shop.setup.bounds import MATERIAL
 from print_shop.setup.features import Feature
-from print_shop.setup.proposal import PAUSE, GivenLesson, Source
+from print_shop.setup.proposal import ORIENTATION, PAUSE, GivenLesson, Source
 from print_shop.setup.traits import TRAITS, traits
 
 if TYPE_CHECKING:  # the ledger opens these tables, so it imports this
@@ -76,6 +81,7 @@ __all__ = [
     "after_print",
     "draw",
     "edit",
+    "for_orienting",
     "for_part",
     "listing",
     "one",
@@ -322,8 +328,15 @@ def draw(ledger: Ledger, row: Row) -> list[int]:
         if _drawn(ledger, row.job_id, kind, key):
             continue
         detail = {**part, "key": key, "preset": c.preset, "value": c.value, "reason": c.reason}
+        keyed = list(part["traits"])
         if kind == READING:
             detail["reading"] = c.reading
+        if key == ORIENTATION:
+            # Both poses' readings, and the traits in the file's own pose, which it's keyed to
+            # and looked up by: the pose printed is the one the person chose.
+            detail["reading"] = c.reading
+            keyed = [t for t in c.feature.split(", ") if t]
+            detail["laid_traits"] = keyed
         made_of = material_of(row.slicer_settings) if key in MATERIAL else None
         same = [
             found for found in ledger.query(
@@ -336,8 +349,8 @@ def draw(ledger: Ledger, row: Row) -> list[int]:
         ]
         if same:
             lesson = int(same[0]["id"])
-            keyed = json.loads(same[0]["traits"])
-            fits = set(keyed) <= set(part["traits"]) and bool(keyed)
+            held = json.loads(same[0]["traits"])
+            fits = set(held) <= set(keyed) and bool(held)
             said = f"the same {kind} again on {row.stl_name}" + (
                 "" if fits else ", whose part isn't every trait it's keyed to"
             )
@@ -347,7 +360,7 @@ def draw(ledger: Ledger, row: Row) -> list[int]:
             continue
         text = c.reason or ("the Sponsor's correction" if kind == CORRECTION else c.reading)
         made.append(_new(
-            ledger, row.job_id, kind, HARNESS, text, part["traits"], (kind, key, detail), key,
+            ledger, row.job_id, kind, HARNESS, text, keyed, (kind, key, detail), key,
             c.value, made_of,
         ))
     said = (row.note or "").strip()
@@ -568,13 +581,21 @@ def reviewed_by(ledger: Ledger, lesson: int) -> str:
     return _writer(found[0]["by"]) if found else "a reviewer"
 
 
+def for_orienting(ledger: Ledger, features: tuple[Feature, ...]) -> tuple[GivenLesson, ...]:
+    """Each kept orientation lesson for a part with these traits, read in the file's own pose:
+    what the orientation step is given with its poses (mqucifer/print-shop#128)."""
+    return for_part(ledger, features, orienting=True)
+
+
 def for_part(
-    ledger: Ledger, features: tuple[Feature, ...], filament_type: str = ""
+    ledger: Ledger, features: tuple[Feature, ...], filament_type: str = "", *,
+    orienting: bool = False,
 ) -> tuple[GivenLesson, ...]:
     """Each kept lesson keyed to traits this part has every one of, oldest first. One in the
     skill is read there, not given. One for a setting the filament decides holds only for its
     own filament type (mqucifer/print-shop#117): for another, or when either isn't known, it's
-    listed as withheld, with why, and sets nothing."""
+    listed as withheld, with why, and sets nothing. An orientation lesson is the orientation
+    step's (`orienting`), never the settings proposal's."""
     has = set(traits(features))
     this = filament_type.strip().upper()
     given = []
@@ -586,6 +607,8 @@ def for_part(
     ):
         keyed = json.loads(row["traits"])
         if not keyed or not set(keyed) <= has:
+            continue
+        if (row["setting"] == ORIENTATION) != orienting:
             continue
         made_of = row["material"] or ""
         withheld = ""
@@ -636,7 +659,14 @@ def _scored_at_review(ledger: Ledger, row: Row) -> None:
             row.job_id, g.id, AT_REVIEW,
         ):
             continue
-        if not g.applied:
+        if g.key == ORIENTATION:
+            # Given to the orientation step: it stood unless the pose was sent back again.
+            sent = corrected.get(ORIENTATION)
+            scored, why = (
+                ("in_the_way", f"the pose was sent back again, to {sent.value}: {sent.reason}")
+                if sent is not None else ("used", "the pose wasn't sent back at the review")
+            )
+        elif not g.applied:
             scored, why = "not_used", g.why
         elif g.key in corrected:
             c = corrected[g.key]
@@ -766,7 +796,9 @@ def _evidence_lines(ledger: Ledger, lesson: int) -> list[str]:
         flagged = ", ".join(f["id"] for f in d.get("flags") or [])
         outcome = f"{e['result']}, {e['symptom']}" if e["result"] else "no outcome yet"
         if e["kind"] == CORRECTION:
-            said = f"corrected {d['key']} {d['preset']} -> {d['value']}: {d['reason']}"
+            said = f"corrected {d['key']} {d['preset']} -> {d['value']}: {d['reason']}" + (
+                f" (read: {d['reading']})" if d.get("reading") else ""
+            )
         elif e["kind"] == READING:
             said = f"took {d['key']} {d['preset']} -> {d['value']} from the slice: {d['reading']}"
         else:

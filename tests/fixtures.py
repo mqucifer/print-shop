@@ -261,6 +261,18 @@ def _long_strip() -> trimesh.Trimesh:
     return strip
 
 
+def _lid() -> trimesh.Trimesh:
+    """A flat lid, 100 x 62 x 6 mm, laid on its face: how its design run left it for printing.
+
+    bed contact 100 x 62                    = 6200 mm^2: large_bed_contact
+    slenderness 6 / 62                      = 0.097: flat_and_wide
+    on its edge (0, 90, 0): 6 x 62          =  372 mm^2 on the plate, 100 mm tall, no overhang:
+    the pose the orientation model stood the Sponsor's lid in (mqucifer/print-shop#128).
+    """
+    lid: trimesh.Trimesh = trimesh.creation.box(extents=(100, 62, 6))
+    return lid
+
+
 _BUILDERS = {
     "cube": _cube,
     "tee": _tee,
@@ -274,6 +286,7 @@ _BUILDERS = {
     "stepped_ledge_50": lambda: _stepped_ledge(50.0),
     "stepped_round": _stepped_round,
     "long_strip": _long_strip,
+    "lid": _lid,
 }
 
 

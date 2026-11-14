@@ -1,6 +1,7 @@
 """Run one print job, or serve the outcome gate, on the Mac.
 
-    uv run python scripts/print_job.py PART.stl --nozzle 0.4 --filament NAME [--intake F] [--record]
+    uv run python scripts/print_job.py PART.stl --nozzle 0.4 --filament NAME [--as-laid]
+        [--answers F] [--record]
     uv run python scripts/print_job.py --serve [--record]
     uv run python scripts/print_job.py --list
     uv run python scripts/print_job.py --filaments
@@ -15,6 +16,9 @@ without them. `--filaments` lists what's in `profiles/`.
 Their tuning is used where there is one, the standard where there isn't;
 several tunings of one are listed to choose from. `--machine` and
 `--process` name a profile, when the Sponsor picks.
+
+**The part is oriented by the orientation model,** or, with `--as-laid`, kept as the file
+lays it: for a part already laid for printing, no model is asked (mqucifer/print-shop#128).
 
 **Then a few questions about the part,** proposed from its shape once it's
 oriented: each with numbered options, what each would cost (Orca's estimate)
@@ -85,6 +89,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--process", help="a process profile's exact name, to pick one")
     parser.add_argument("--printer", help="which printer, when the inventory has several")
     parser.add_argument("--answers", type=Path, help="recorded answers to the questions, as JSON")
+    parser.add_argument("--as-laid", action="store_true",
+                        help="keep the file's own pose: it's laid for printing")
     parser.add_argument(
         "--settings", type=Path, default=SETTINGS_PATH, help="the settings file (a path)"
     )
@@ -177,8 +183,9 @@ def main(argv: list[str] | None = None) -> int:
                 while True:
                     time.sleep(1)
 
-            job_id = run.daemon.submit(args.stl)
-            print(f"Job {job_id}: orienting, then a few questions about the part, here.")
+            job_id = run.daemon.submit(args.stl, as_laid=args.as_laid)
+            how = "kept as laid" if args.as_laid else "orienting"
+            print(f"Job {job_id}: {how}, then a few questions about the part, here.")
             try:
                 run.daemon.wait_for_gate(job_id, timeout_s=APPROVAL_WAIT_S)
             except TimeoutError as ran_out:

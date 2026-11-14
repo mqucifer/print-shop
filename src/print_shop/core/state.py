@@ -24,7 +24,7 @@ from pydantic import BaseModel
 from print_shop.core.contracts import Gate, GateDecision, Outcome
 from print_shop.setup.features import Feature
 from print_shop.setup.intake import Intake
-from print_shop.setup.proposal import Change, Proposal
+from print_shop.setup.proposal import Change, GivenLesson, Proposal
 from print_shop.setup.reading import Flag, SliceReading
 from print_shop.slicer.store import ProfilesUsed
 
@@ -168,6 +168,17 @@ class AppliedOrientation(BaseModel):
 
     rotation_deg: tuple[float, float, float] = (0.0, 0.0, 0.0)
     rationale: str = ""
+    #: The pose as measured, which the part's features and the lessons keyed to them are read
+    #: in (mqucifer/print-shop#128): its height, and its area on the plate. None: not measured.
+    height_mm: float | None = None
+    bed_contact_area_mm2: float | None = None
+
+    def pose(self) -> str:
+        """The pose as the review names it."""
+        if self.height_mm is None or self.bed_contact_area_mm2 is None:
+            return f"rotation {self.rotation_deg}"
+        return (f"rotation {self.rotation_deg}, {self.height_mm:g} mm tall, "
+                f"{self.bed_contact_area_mm2:g} mm2 on the plate")
 
 
 # --------------------------------------------------------------------------
@@ -183,6 +194,9 @@ class PrintJobState(TypedDict):
     trace_id: str
     entry: EntryPath
     created_at: str  # ISO-8601
+    #: Keep the file's own pose: the person laid it for printing (`--as-laid`,
+    #: mqucifer/print-shop#128), so no orientation is chosen for it.
+    as_laid: NotRequired[bool]
 
     # Artifacts. Local paths; the pipeline is one process (see CONTRACTS.md §1).
     stl_path: NotRequired[str]
@@ -195,6 +209,12 @@ class PrintJobState(TypedDict):
 
     # Judgment. Each is a full Outcome — proposal, verdict history, accepted.
     orientation: NotRequired[Outcome[Orientation]]
+    #: The poses the orientation step weighed, the part's traits in the file's own pose, and the
+    #: kept lessons it was given for them: for the review to send the pose back to one, and for
+    #: the lesson drawn from that (mqucifer/print-shop#128).
+    orientation_candidates: NotRequired[tuple[Orientation, ...]]
+    laid_traits: NotRequired[tuple[str, ...]]
+    orientation_lessons: NotRequired[tuple[GivenLesson, ...]]
 
     #: What the slicer actually did, which is not always what was decided.
     #: Every key a node returns must be declared here — LangGraph silently
