@@ -25,8 +25,9 @@ from print_shop.setup.bounds import check
 from print_shop.setup.features import Feature, measure
 from print_shop.setup.intake import Answer, Intake, Option, Question
 from print_shop.setup.model import Ask, llm_ask, prompt, setup_llm
-from print_shop.setup.proposal import PartFacts, Proposal, Source, apply
+from print_shop.setup.proposal import Change, PartFacts, Proposal, Source, apply
 from print_shop.setup.questions import PURPOSE, SEEN
+from print_shop.setup.review import render
 from print_shop.setup.skill import groups_for, load
 from print_shop.slicer.orca import (
     BedType,
@@ -39,6 +40,7 @@ from tests.fakes import DATA, STORE_PROFILES
 from tests.fixtures import write_stl
 from tests.test_graph import needs_orca
 from tests.test_questions import intake
+from tests.test_review import _request
 
 #: The alias the PR's proposals are recorded with; `crew-code`, without
 #: thinking, is kept beside it for comparison.
@@ -314,3 +316,81 @@ def test_the_default_limit_follows_the_sponsors_rule() -> None:
     config = setup_llm(base, {})
     assert (config.model, config.max_tokens) == ("crew-code-think", 16000)
     assert setup_llm(base, {"PRINT_SHOP_SETUP_MAX_TOKENS": "9000"}).max_tokens == 9000
+
+
+# An intake answer about supports is a decision (mqucifer/print-shop#124)
+# --------------------------------------------------------------------------
+
+
+def _snap_answering(tmp_path: Path, overhang: Answer) -> Intake:
+    """The snap's recorded questions, answered as recorded but for the overhang."""
+    asked = intake("snap", tmp_path)
+    answers = tuple(
+        overhang if q.feature == "overhang" else a
+        for q, a in zip(asked.questions, asked.answers, strict=True)
+    )
+    return asked.model_copy(update={"answers": answers})
+
+
+def _no_model() -> Ask:
+    return _reply(reasoning="the hook")
+
+
+def test_an_answer_to_bridge_without_support_is_kept_and_the_guard_leaves_it(
+    tmp_path: Path,
+) -> None:
+    """2026-11-14: "Bridge it — no support", over a preset with supports off, and the guard
+    switched tree supports on, as nothing had changed and so nothing had decided."""
+    bridge = _snap_answering(tmp_path, Answer(choice=0))
+    [(question, option)] = [(q, o) for q, o in bridge.chosen() if q.feature == "overhang"]
+    assert option.label == "Bridge, no support" and option.settings == {"enable_support": "0"}
+    facts = _facts("snap", tmp_path)
+    assert facts.preset("enable_support") == "0", "the preset is off: the answer changes nothing"
+    proposal = _proposal("snap", tmp_path, _no_model(), bridge)
+    assert proposal.get("enable_support") is None and proposal.get("support_type") is None
+    assert [(c.key, c.value, c.source, c.feature) for c in proposal.kept] == [
+        ("enable_support", "0", Source.ANSWER, "overhang")
+    ]
+    assert proposal.kept[0].reason.startswith("you chose 'Bridge, no support': ")
+    assert not any(c.source is Source.GUARD for c in proposal.changes)
+    assert any("chamfer" in n for n in proposal.design_notes), "the design note still stands"
+
+
+def test_the_review_says_supports_are_kept_off_because_of_the_answer(tmp_path: Path) -> None:
+    proposal = _proposal("snap", tmp_path, _no_model(), _snap_answering(tmp_path, Answer(choice=0)))
+    shown = render(_request(proposal))
+    assert "  kept enable_support at 0: you chose 'Bridge, no support': " in shown
+    assert "[your answer: overhang]" in shown
+    assert "[guard" not in shown
+
+
+def test_an_answer_that_chooses_support_works_as_before(tmp_path: Path) -> None:
+    proposal = _proposal("snap", tmp_path, _no_model(), _snap_answering(tmp_path, Answer(choice=1)))
+    assert [(c.key, c.value, c.source) for c in proposal.changes] == [
+        ("enable_support", "1", Source.ANSWER),
+        ("support_type", "tree(auto)", Source.ANSWER),
+    ]
+
+
+def test_with_no_answer_about_the_overhang_the_guard_still_switches_support_on(
+    tmp_path: Path,
+) -> None:
+    """Answered in words, the overhang question decides nothing, so the guard's rule holds."""
+    words = _snap_answering(tmp_path, Answer(other="whatever you think"))
+    proposal = _proposal("snap", tmp_path, _no_model(), words)
+    assert [(c.key, c.value, c.source) for c in proposal.changes if c.key.startswith("support")
+            or c.key == "enable_support"] == [
+        ("enable_support", "1", Source.GUARD),
+        ("support_type", "tree(auto)", Source.GUARD),
+    ]
+    assert not [c for c in proposal.kept if c.key == "enable_support"]
+
+
+def test_a_correction_at_the_review_still_decides_support(tmp_path: Path) -> None:
+    words = _snap_answering(tmp_path, Answer(other="whatever you think"))
+    proposal = _proposal("snap", tmp_path, _no_model(), words)
+    off = Change(key="enable_support", preset="0", value="0", reason="it bridges",
+                 source=Source.SPONSOR)
+    corrected = proposal.corrected([off])
+    change = corrected.get("enable_support")
+    assert change is not None and (change.value, change.source) == ("0", Source.SPONSOR)

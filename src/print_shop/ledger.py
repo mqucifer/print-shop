@@ -24,6 +24,10 @@ correction at the review, and an outcome with something to say, is a candidate
 lesson, keyed to the part's traits (`setup/features.py`), in tables of its own
 (`setup/lessons.py`). A reviewer checks each before any reaches a proposal.
 
+**A job that ends without printing because a wait ran out** has a row of its own, in
+`unprinted_jobs`, whose outcome says it timed out (mqucifer/print-shop#125). Nothing was sent to
+the printer, so it's no print, and it never reaches the outcome gate or a lesson.
+
 The file lives outside every checkout, at `~/print-shop/ledger.sqlite`, and is
 archived nightly by mqucifer/infra#36.
 """
@@ -59,12 +63,14 @@ __all__ = [
     "DEFAULT_PATH",
     "Answer",
     "Frame",
+    "JobEnding",
     "Ledger",
     "LedgerError",
     "PrintRecord",
     "Result",
     "Row",
     "Symptom",
+    "UnprintedJob",
     "ledger_path",
 ]
 
@@ -198,6 +204,27 @@ class Frame(BaseModel):
         return ("the end, " + at if self.kind == "end" else at) if self.layer else self.kind
 
 
+class JobEnding(StrEnum):
+    """How a job ended with nothing printed, when the ledger keeps it (mqucifer/print-shop#125)."""
+
+    TIMED_OUT = "timed_out"
+
+
+class UnprintedJob(BaseModel):
+    """A job that ended before anything was sent to the printer, and why, in one sentence."""
+
+    model_config = {"frozen": True}
+
+    job_id: str
+    stl_name: str
+    outcome: JobEnding
+    detail: str
+    ended_at: str
+
+    def line(self) -> str:
+        return f"job {self.job_id}  {self.stl_name}  {self.outcome}: {self.detail}"
+
+
 class Row(BaseModel):
     """One print as the ledger holds it."""
 
@@ -318,6 +345,30 @@ CREATE TABLE IF NOT EXISTS print_frames (
 );
 """
 
+#: Why a print has no frame, or is missing some: the last grab's reason, or that the camera is
+#: off (mqucifer/print-shop#123), so the outcome step can say it. A table of its own, created if
+#: missing, as the frames' is.
+FRAMES_MISSED_SCHEMA = """
+CREATE TABLE IF NOT EXISTS print_frames_missed (
+    job_id   TEXT PRIMARY KEY REFERENCES prints(job_id),
+    reason   TEXT NOT NULL,                -- one line: why the last grab gave no frame
+    at       TEXT NOT NULL
+);
+"""
+
+#: Jobs that ended with nothing sent to the printer because a wait ran out
+#: (mqucifer/print-shop#125). Not prints, so not in `prints`, whose rows are what the agent
+#: started; a table of their own, created if missing.
+UNPRINTED_SCHEMA = """
+CREATE TABLE IF NOT EXISTS unprinted_jobs (
+    job_id    TEXT PRIMARY KEY,
+    stl_name  TEXT NOT NULL,
+    outcome   TEXT NOT NULL CHECK (outcome IN ('timed_out')),
+    detail    TEXT NOT NULL,               -- one sentence: what ran out, after how long
+    ended_at  TEXT NOT NULL
+);
+"""
+
 #: What each version adds to the one before, applied in order to an older file.
 #: 2: the profiles a print used, by store file, hash and commit (print-shop#6).
 #: A row from before has none: NULL, not a guess.
@@ -398,6 +449,8 @@ class Ledger:
         self._conn.execute("COMMIT")
         self._conn.executescript(READINGS_SCHEMA)
         self._conn.executescript(FRAMES_SCHEMA)
+        self._conn.executescript(FRAMES_MISSED_SCHEMA)
+        self._conn.executescript(UNPRINTED_SCHEMA)
 
     def close(self) -> None:
         with self._lock:
@@ -424,11 +477,23 @@ class Ledger:
     # --- writes, in the order a print goes through them ------------------
 
     def record_start_requested(self, record: PrintRecord) -> None:
-        """Before `start()`: the agent is about to start this print."""
+        """Before `start()`: the agent is about to start this print.
+
+        Refused for a job that already ended unprinted (mqucifer/print-shop#125): the person was
+        told nothing would print, so nothing does.
+        """
         config = record.slicer_config
         key = {k: config[k] for k in KEY_SETTINGS if k in config}
         config_json = json.dumps(config, sort_keys=True)
         with self._write() as db:
+            ended = db.execute(
+                "SELECT detail FROM unprinted_jobs WHERE job_id = ?", (record.job_id,)
+            ).fetchone()
+            if ended is not None:
+                raise LedgerError(
+                    f"job {record.job_id} already ended unprinted ({ended['detail']}); it isn't "
+                    "started now"
+                )
             try:
                 db.execute(
                     """INSERT INTO prints (
@@ -571,7 +636,56 @@ class Ledger:
                 (job_id, kind, layer, total_layers, str(path), size, _now()),
             )
 
+    def record_frames_missed(self, job_id: str, reason: str) -> None:
+        """Why the last grab for a print gave no frame. A later reason replaces it."""
+        with self._write() as db:
+            db.execute(
+                "INSERT INTO print_frames_missed (job_id, reason, at) VALUES (?, ?, ?)"
+                " ON CONFLICT (job_id) DO UPDATE SET reason = excluded.reason, at = excluded.at",
+                (job_id, reason[:500], _now()),
+            )
+
+    def record_unprinted(
+        self, job_id: str, stl_name: str, outcome: JobEnding, detail: str
+    ) -> UnprintedJob:
+        """A job that ended before anything was sent to the printer. Once a job."""
+        with self._write() as db:
+            if db.execute("SELECT 1 FROM prints WHERE job_id = ?", (job_id,)).fetchone():
+                raise LedgerError(f"job {job_id} was sent to the printer; it's a print")
+            db.execute(
+                "INSERT OR IGNORE INTO unprinted_jobs (job_id, stl_name, outcome, detail,"
+                " ended_at) VALUES (?, ?, ?, ?, ?)",
+                (job_id, stl_name, str(outcome), detail, _now()),
+            )
+        found = self.unprinted(job_id)
+        assert found is not None
+        return found
+
     # --- reads -----------------------------------------------------------
+
+    def frames_missed(self, job_id: str) -> str | None:
+        """Why the last grab for a print gave no frame, if one didn't."""
+        with self._lock:
+            found = self._conn.execute(
+                "SELECT reason FROM print_frames_missed WHERE job_id = ?", (job_id,)
+            ).fetchone()
+        return str(found["reason"]) if found is not None else None
+
+    def unprinted(self, job_id: str) -> UnprintedJob | None:
+        """The job, if it ended before anything was sent to the printer."""
+        with self._lock:
+            found = self._conn.execute(
+                "SELECT * FROM unprinted_jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
+        return UnprintedJob.model_validate(dict(found)) if found is not None else None
+
+    def unprinted_jobs(self) -> list[UnprintedJob]:
+        """Every job that ended unprinted, oldest first."""
+        with self._lock:
+            found = self._conn.execute(
+                "SELECT * FROM unprinted_jobs ORDER BY ended_at, rowid"
+            ).fetchall()
+        return [UnprintedJob.model_validate(dict(r)) for r in found]
 
     def frames(self, job_id: str) -> list[Frame]:
         """A print's frames in the order they were taken, the end's last."""
