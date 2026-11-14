@@ -24,7 +24,8 @@ part's name is on the card beside the buttons.
 
 With frames (mqucifer/print-shop#110), the desk also shows the last, and
 pages through the rest with Earlier and Later, beside the answer: evidence,
-never the answer.
+never the answer. A print with no frame at all says why, in a sentence
+(mqucifer/print-shop#123): the camera off, or why its last grab failed.
 """
 
 from __future__ import annotations
@@ -59,6 +60,7 @@ __all__ = [
     "OutcomeDesk",
     "Watcher",
     "end_name",
+    "no_frames",
     "print_ended",
 ]
 
@@ -98,6 +100,13 @@ def print_ended(snapshot: PrinterSnapshot) -> bool:
 
 def end_name(status: int | None) -> str:
     return _END_NAMES.get(status, "unknown") if status is not None else "unknown"
+
+
+def no_frames(why: str | None) -> str:
+    """Why a print has no camera frame at all, as the outcome step says it: one sentence."""
+    if why is None:
+        return "No camera frame was kept for this print: nothing was asked of the camera."
+    return f"No camera frame was kept for this print: {why.rstrip('.')}."
 
 
 def _is_ours(snapshot: PrinterSnapshot, row: Row) -> bool:
@@ -272,6 +281,7 @@ class OutcomeDesk:
                 "frames": len(frames),
                 "frame": at + 1 if frames else 0,
                 "frame_at": shown.line() if shown else "",
+                "frames_why": "" if frames else no_frames(self._ledger.frames_missed(row.job_id)),
             },
         )
 

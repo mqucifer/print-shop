@@ -34,7 +34,14 @@ from print_shop.setup.intake import (
 )
 from print_shop.setup.model import Ask, llm_ask, setup_llm
 from print_shop.setup.proposal import Change, PartFacts, Proposal, Source, answered, apply
-from print_shop.setup.questions import MAX_SLICES, PURPOSE, SEEN, SEEN_FACES, estimate
+from print_shop.setup.questions import (
+    MAX_SLICES,
+    PURPOSE,
+    SEEN,
+    SEEN_FACES,
+    estimate,
+    says_no_support,
+)
 from print_shop.slicer.orca import BedType, slice_model, with_bed_type
 from tests.fakes import DATA, STORE_PROFILES
 from tests.fixtures import write_stl
@@ -141,6 +148,41 @@ def test_an_option_out_of_bounds_is_dropped_and_so_is_a_question_left_with_one(
     assert [o.label for o in strong.options] == ["light", "strong"]
     assert "'molten' in 'How hot?': nozzle_temperature=300: outside 190-240" in asked.note
     assert "'How hot?': fewer than 2 options in bounds" in asked.note
+
+
+def test_an_option_that_says_no_support_carries_supports_off(tmp_path: Path) -> None:
+    """mqucifer/print-shop#124: the option's words and the settings it maps to agree, so the
+    answer is a decision the support guard keeps, and the review shows where it came from."""
+    overhang = {"feature": "overhang", "text": "The ceiling?", "options": [
+        _option("Bridge it — no support", True, fan_min_speed="60"),
+        _option("Tree supports", enable_support="1", support_type="tree(auto)"),
+        _option("Without supports, but a chamfer", enable_support="1"),
+    ]}
+    asked = Proposer(ask_questions=_reply(overhang)).questions(
+        features("snap", tmp_path), STORE_PROFILES
+    )
+    [q] = [q for q in asked.questions if q.feature == "overhang"]
+    assert [(o.label, o.settings) for o in q.options] == [
+        ("Bridge it — no support", {"fan_min_speed": "60", "enable_support": "0"}),
+        ("Tree supports", {"enable_support": "1", "support_type": "tree(auto)"}),
+    ]
+    assert ("'Without supports, but a chamfer' in 'The ceiling?': says no support and sets "
+            "enable_support=1") in asked.note
+
+
+@pytest.mark.parametrize(("label", "says"), [
+    ("Bridge it — no support", True),
+    ("Bridge, no support", True),
+    ("No supports — bridge with cooling", True),
+    ("print it without supports", True),
+    ("unsupported, with more cooling", True),
+    ("support-free", True),
+    ("Tree supports", False),
+    ("Tree supports, no support marks on the top", False),
+    ("supports where it needs them", False),
+])
+def test_which_labels_say_no_support(label: str, says: bool) -> None:
+    assert says_no_support(label) is says
 
 
 def test_exactly_one_option_is_recommended_whatever_the_model_marks(tmp_path: Path) -> None:

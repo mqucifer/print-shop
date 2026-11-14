@@ -15,7 +15,8 @@ goes back to my want for this to understand what it's doing." So:
 - **the model reasons** (`model.py`), inside those bounds. A value outside
   them is refused and recorded as refused;
 - **two guards** hold whatever the model says: a part with an overhang and
-  no decision about supports gets them, and supports are always tree (the
+  no decision about supports gets them (an intake answer is a decision, even one that keeps
+  the preset's value, mqucifer/print-shop#124), and supports are always tree (the
   Sponsor's practice). An overhang also gets a note that it could be
   designed out, for the CAD side;
 - **the Sponsor's correction** at the review replaces any of it;
@@ -54,6 +55,7 @@ __all__ = [
     "Proposal",
     "Source",
     "answered",
+    "answered_kept",
     "apply",
     "from_lessons",
     "guard",
@@ -205,14 +207,27 @@ class PartFacts:
 
 def answered(facts: PartFacts) -> list[Change]:
     """The settings of each option the Sponsor chose at the intake, as changes."""
+    return [c for c in _answers(facts) if c.value != c.preset]
+
+
+def answered_kept(facts: PartFacts) -> list[Change]:
+    """The settings an option the Sponsor chose sets to the preset's own value.
+
+    A decision all the same (mqucifer/print-shop#124): "Bridge it — no support" over a preset
+    with supports off changes nothing, and it's still the person's answer, so the guard leaves
+    it and the review says it's kept because of it.
+    """
+    return [c for c in _answers(facts) if c.value == c.preset]
+
+
+def _answers(facts: PartFacts) -> list[Change]:
+    """Each setting the chosen options set, as a change from the preset; a later answer's value
+    for the same setting wins."""
     changes: dict[str, Change] = {}
     for question, option in facts.intake.chosen():
         for key, value in option.settings.items():
-            preset = facts.preset(key)
-            if value == preset:
-                continue
             changes[key] = Change(
-                key=key, preset=preset, value=value, source=Source.ANSWER,
+                key=key, preset=facts.preset(key), value=value, source=Source.ANSWER,
                 reason=f"you chose '{option.label}': {option.impact}",
                 feature=question.feature,
             )

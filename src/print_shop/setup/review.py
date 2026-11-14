@@ -116,7 +116,12 @@ def render(request: ReviewRequest) -> str:
     else:
         lines.append("  No changes: your presets as they are.")
     for c in proposal.kept:
-        by = f" [lesson {c.lesson}]" if c.lesson is not None else ""
+        by = (
+            f" [lesson {c.lesson}]" if c.lesson is not None
+            # An answer that keeps the preset's value is a decision too (mqucifer/print-shop#124).
+            else f" [{_BY[c.source]}: {c.feature}]" if c.source is Source.ANSWER
+            else ""
+        )
         lines.append(f"  kept {c.key} at {c.preset}: {c.reason}{by}")
     for note in proposal.design_notes:
         lines.append(f"  design: {note}")

@@ -23,6 +23,7 @@ from print_shop.setup.proposal import (
     PartFacts,
     Proposal,
     answered,
+    answered_kept,
     from_lessons,
     guard,
 )
@@ -76,7 +77,7 @@ class Proposer:
         # The Sponsor's answers first, then the lessons: the model may not change what they set.
         reasoned = reasoned.model_copy(update={
             "changes": tuple(answered(facts)) + tuple(learned) + reasoned.changes,
-            "kept": tuple(learned_kept) + reasoned.kept,
+            "kept": tuple(answered_kept(facts)) + tuple(learned_kept) + reasoned.kept,
             "lessons": marked,
         })
         return guard(facts, reasoned)

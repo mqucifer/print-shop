@@ -136,6 +136,9 @@ views:
                 {% set e = state_attr('sensor.3d_print_agent_outcome_part', 'error') %}
                 {%- if e %}**Not recorded:** {{ e }}{% endif %}
 
+                {% set nf = state_attr('sensor.3d_print_agent_outcome_part', 'frames_why') %}
+                {%- if nf %}*{{ nf }}*{% endif %}
+
             # The camera's frames, as evidence beside the answer (mqucifer/print-shop#110):
             # the last on show, Earlier and Later to page. Never the answer itself.
             - type: conditional

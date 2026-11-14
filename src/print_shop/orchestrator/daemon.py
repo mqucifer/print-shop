@@ -5,6 +5,12 @@ resumes the parked graph when a person presses Approve or Reject.
 
 CONTRACTS.md §1: the pipeline is one process. This is that process gaining a
 lifecycle, not a new service.
+
+**Waiting is counted only while the job isn't with the person** (mqucifer/print-shop#125).
+The intake's questions and the settings review take as long as the person takes; a caller's
+wait for the gate counts from when the job last came back from them. The gate then waits
+`GATE_WAIT_S` for Approve or Reject. A wait that runs out ends the job in one sentence, with a
+ledger row whose outcome is that it timed out, and nothing is sent to the printer after it.
 """
 
 from __future__ import annotations
@@ -15,10 +21,11 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from queue import Empty, Queue
-from typing import Any
+from typing import Any, ParamSpec, TypeVar
 
 from langgraph.types import Command as LgCommand
 from pydantic import BaseModel
@@ -33,7 +40,7 @@ from print_shop.core.mqtt import (
     state_topic,
 )
 from print_shop.expert.client import LLMConfig
-from print_shop.ledger import Ledger
+from print_shop.ledger import JobEnding, Ledger, LedgerError
 from print_shop.orchestrator.frames import FrameKeeper
 from print_shop.orchestrator.graph import build_graph
 from print_shop.orchestrator.outcome import OutcomeDesk, Watcher
@@ -45,6 +52,7 @@ from print_shop.setup.review import Reviewer
 from print_shop.slicer.orca import Slicer, SlicerProfiles, slice_model
 
 __all__ = [
+    "GATE_WAIT_S",
     "Decision",
     "Command",
     "JobRejected",
@@ -53,6 +61,18 @@ __all__ = [
     "state_payload",
     "Daemon",
 ]
+
+
+#: How long the approval gate waits for Approve or Reject, from when it opens.
+GATE_WAIT_S = 3600.0
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def duration(seconds: float) -> str:
+    """A wait's length as a sentence says it: "60 min", "45 s"."""
+    return f"{seconds / 60:g} min" if seconds >= 60 else f"{seconds:g} s"
 
 
 # --------------------------------------------------------------------------
@@ -171,6 +191,7 @@ class Daemon:
         proposer: Proposer | None = None,
         asker: Asker | None = None,
         reviewer: Reviewer | None = None,
+        gate_wait_s: float = GATE_WAIT_S,
     ) -> None:
         """`printer` is what the approval gate ultimately commands.
 
@@ -195,10 +216,16 @@ class Daemon:
         ledger the outcome gate runs either way; without a watcher nothing
         sees a print end, and its row stays open, which is honest.
 
-        `camera` is the printer's own, read-only (`CentauriCamera`): with a
-        watcher, each print keeps a frame at each new layer the watcher reads
-        and one at the end, in `workdir/<job>/frames/`, and the outcome gate
-        shows them (mqucifer/print-shop#110). None keeps no frames.
+        `camera` is the printer's, read-only, and never its own stream
+        (`camera.py`, mqucifer/print-shop#123): with a watcher, each
+        print keeps a frame at each new layer the watcher reads and one at the
+        end, in `workdir/<job>/frames/`, and the outcome gate shows them
+        (mqucifer/print-shop#110). `CameraOff` says once for each print why
+        there are none; None keeps none and says nothing.
+
+        `asker` and `reviewer` are the person's: while either has the job,
+        `wait_for_gate` doesn't count the time (mqucifer/print-shop#125).
+        `gate_wait_s` is how long the approval gate waits for a press.
         """
         self._cfg = cfg
         self._profiles = profiles
@@ -210,6 +237,16 @@ class Daemon:
         #: Closed on exit; the graph must not outlive it (CODE_REVIEW.md P0-3).
         self._conn: sqlite3.Connection | None = conn
 
+        # Whether the intake or the review is with the person, and when the job last came back
+        # from them (mqucifer/print-shop#125): their time isn't counted against a wait.
+        self._with_person = threading.Event()
+        self._back_at = time.monotonic()
+        self._gate_wait_s = gate_wait_s
+        #: Jobs a wait ran out on, with the sentence that ended them: no gate opens for one.
+        self._abandoned: dict[str, str] = {}
+        #: Each job's part, by name, for the ledger's row if it ends unprinted.
+        self._parts: dict[str, str] = {}
+
         # Compiled graph.
         self._graph = build_graph(
             profiles,
@@ -220,8 +257,8 @@ class Daemon:
             slicer=slicer,
             ledger=ledger,
             proposer=proposer,
-            asker=asker,
-            reviewer=reviewer,
+            asker=self._persons(asker) if asker is not None else None,
+            reviewer=self._persons(reviewer) if reviewer is not None else None,
         )
 
         # MQTT bridge.
@@ -329,6 +366,8 @@ class Daemon:
                 )
             job_id = str(uuid.uuid4())
             self._active_job_id = job_id
+            self._parts[job_id] = Path(stl_path).name
+            self._back_at = time.monotonic()
 
         self._publish_state({"status": "analyzing", "job_id": job_id})
 
@@ -343,26 +382,60 @@ class Daemon:
         return job_id
 
     def wait_for_gate(self, job_id: str, timeout_s: float) -> None:
-        """Block until the job reaches a gate, or ends before one (or times out).
+        """Block until the job reaches a gate, or ends before one (or a wait runs out).
 
         A job that ended without a gate, refused or stopped before it, returns
         at once, with `pending_gate()` None and its error in `wait_for_finish`,
         rather than leaving the caller waiting out the timeout.
 
-        Raises TimeoutError if the gate is not reached within timeout_s.
+        `timeout_s` counts from when the job last came back from the person:
+        its submit, its last intake answer, or the review's `ok` or `take`.
+        While the intake or the review is with them it doesn't count, however
+        long they take (mqucifer/print-shop#125).
+
+        Raises:
+            TimeoutError: If `timeout_s` runs out first. The job is ended
+                (`abandon`), and the error is the sentence that says so.
         """
-        deadline = time.monotonic() + timeout_s
-        while not self._at_gate.wait(timeout=min(0.2, max(0.0, deadline - time.monotonic()))):
+        while not self._at_gate.wait(timeout=0.2):
             with self._job_lock:
                 if self._active_job_id != job_id:
                     return
-            if time.monotonic() >= deadline:
-                raise TimeoutError(f"timed out waiting for gate on job {job_id}")
+            if self._with_person.is_set():
+                continue
+            if time.monotonic() - self._back_at >= timeout_s:
+                raise TimeoutError(
+                    self.abandon(job_id, "waiting for the approval gate", timeout_s)
+                )
+
+    def abandon(self, job_id: str, what: str, waited_s: float) -> str:
+        """End a job a wait ran out on: the sentence that says so, and the ledger's row.
+
+        Nothing is sent to the printer after this: no gate opens for the job, and the ledger
+        refuses its start. One sentence says what ran out, after how long, and that nothing
+        printed, and the ledger keeps it as timed out (mqucifer/print-shop#125). A job already
+        sent to the printer is a print, and its row stays open, said so instead.
+        """
+        sentence = f"Timed out {what} after {duration(waited_s)}, so nothing printed."
+        if self._ledger is not None:
+            try:
+                self._ledger.record_unprinted(
+                    job_id, self._parts.get(job_id, "?"), JobEnding.TIMED_OUT, sentence
+                )
+            except LedgerError:
+                sentence = (
+                    f"Timed out {what} after {duration(waited_s)}, after the printer was told to "
+                    "start, so its row in the ledger stays open."
+                )
+        with self._job_lock:
+            self._abandoned[job_id] = sentence
+        return sentence
 
     def wait_for_finish(self, job_id: str, timeout_s: float) -> JobResult:
         """Block until the job finishes (or times out).
 
-        Returns the JobResult. Raises TimeoutError on timeout.
+        Returns the JobResult. Raises TimeoutError on timeout; the caller ends the job with
+        `abandon`.
         """
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
@@ -391,6 +464,19 @@ class Daemon:
         return self._bridge is not None
 
     # -- internals ----------------------------------------------------------
+
+    def _persons(self, step: Callable[_P, _R]) -> Callable[_P, _R]:
+        """`step` (the intake or the review), marked as with the person while it runs."""
+
+        def with_person(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+            self._with_person.set()
+            try:
+                return step(*args, **kwargs)
+            finally:
+                self._back_at = time.monotonic()
+                self._with_person.clear()
+
+        return with_person
 
     def _open_gate(self) -> Queue[Command]:
         """Install a fresh inbox and return it. Called when a gate parks.
@@ -497,7 +583,18 @@ class Daemon:
         # the payload lives on `.value`.
         interrupt = result["__interrupt__"][0]
         gate_payload: dict[str, Any] = dict(interrupt.value)
-        self._pending_gate = {**gate_payload, "job_id": job_id}
+        with self._job_lock:
+            ended = self._abandoned.get(job_id)
+        if ended is not None:
+            # A wait ran out on it before the gate: the person was told nothing would print.
+            self._finish_job(job_id, approved=False, printed=False, error=ended)
+            return
+        # The time left to answer, shown with the gate (mqucifer/print-shop#125).
+        answer_by = datetime.now(UTC) + timedelta(seconds=self._gate_wait_s)
+        self._pending_gate = {
+            **gate_payload, "job_id": job_id, "answer_within_s": self._gate_wait_s,
+            "answer_by": answer_by.isoformat(timespec="seconds"),
+        }
 
         # Open a fresh inbox before publishing the gate, so a press that lands
         # the moment the dashboard updates has somewhere to go. It is scoped to
@@ -525,15 +622,15 @@ class Daemon:
 
         # Wait for a command from this gate's inbox.
         try:
-            cmd = inbox.get(timeout=3600)
+            cmd = inbox.get(timeout=self._gate_wait_s)
         except Empty:
             self._close_gate()
-            self._finish_job(
-                job_id,
-                approved=False,
-                printed=False,
-                error="timed out waiting for approval",
+            self._pending_gate = None
+            self._bridge_publish(gate_topic(self._cfg), {"pending": False})
+            sentence = self.abandon(
+                job_id, "waiting for Approve or Reject at the approval gate", self._gate_wait_s
             )
+            self._finish_job(job_id, approved=False, printed=False, error=sentence)
             return
 
         approved = cmd.decision is Decision.APPROVE
