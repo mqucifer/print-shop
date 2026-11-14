@@ -28,6 +28,8 @@ The ledger now keeps each print's features (`prints.features`), so a print's tra
 When the ledger records a print (`Ledger.record_start_requested`) and again when its outcome is answered (`record_answer`), `lessons.after_print` reads the row:
 - **Each correction at the review is a candidate:** its setting and value, the Sponsor's reason as its text, and the part's traits as its keys. If the same key was corrected twice at one review, the one that stood is used.
 - **The same correction on a later print is more evidence for the lesson it repeats,** not a second lesson. If that print's part doesn't have every trait the lesson is keyed to, the step says so, for the reviewer to widen the keys.
+- **A change the Sponsor took from the slice's reading is a candidate of its own kind** (`reading`, mqucifer/print-shop#105), not a correction: the reading's words are its evidence.
+- **Every lesson's evidence carries what that print's slice flagged,** with its shortest layer, ironing time and how stacked its seams were, where the slice was read.
 - **An outcome with something to say is a candidate:** a failure, or a success with a note. It sets nothing, and the model reads it.
 - Each print's evidence is drawn once, however often it's read. A failure here never stops a print: it's logged, and `draw` does it again.
 
@@ -61,7 +63,7 @@ The setup model's proposal (`setup.Proposer`) is given each kept lesson for the 
 
 ## Scoring, promoting and retiring
 
-- **The review scores a lesson's setting by what the Sponsor did with it:** it stood, `used`; they corrected it, `in_the_way`; their answer or a closer lesson set it, `not_used`. A lesson that sets nothing is scored by the reviewer (`score`). A lesson's status follows each print's latest score, as the CAD loop's does: `used` is `held`, `in_the_way` is `broken`.
+- **The review scores a lesson's setting by what the Sponsor did with it:** it stood, `used`; they corrected it, or took the slice's reading instead, `in_the_way`; their answer or a closer lesson set it, `not_used`. A lesson that sets nothing is scored by the reviewer (`score`). A lesson's status follows each print's latest score, as the CAD loop's does: `used` is `held`, `in_the_way` is `broken`.
 - **Used on two prints that didn't fail, without a correction, it's listed to promote:** a line in the print-settings skill, by PR, then `promote ID --as skill --where owner/repo#n`. Once in the skill it's read there, and isn't given as a lesson.
 - **One that got in the way, or was given twice and not used, is listed to retire.** Code retires nothing. A correction of a lesson's setting is also a candidate of its own.
 
@@ -69,4 +71,4 @@ The setup model's proposal (`setup.Proposer`) is given each kept lesson for the 
 
 In the print ledger, created if missing, without moving its schema version: `print_lessons`, `print_lesson_steps`, `print_lesson_evidence`, `job_lessons` and `print_lesson_scores`, and the column `prints.features`, added if missing. Older code still runs against the file: it inserts into `prints` by column name. On a copy of the real ledger every row reads back as it was, and a second open and draw changes nothing.
 
-**Not yet:** a print's slice readings as evidence (mqucifer/print-shop#105, once it lands), lessons entered from a file (`rounds.py lessons load`'s equivalent), and a lesson for the harness rather than the proposal.
+**Not yet:** keying a lesson to the intake's answer on which faces are seen (`questions.SEEN`), lessons entered from a file (`rounds.py lessons load`'s equivalent), and a lesson for the harness rather than the proposal.
