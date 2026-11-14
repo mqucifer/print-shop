@@ -125,6 +125,15 @@ class Part:
         bodies = self._mesh.split(only_watertight=False)
         if len(bodies) <= 1:
             return [self]
+        # trimesh fills a body's small holes as it splits, with networkx (mqucifer/print-shop#122):
+        # each body is then read filled, which the file isn't, so the reply says so.
+        filled = (
+            f"{self.name}'s mesh has edges with one face, an open seam: split into its "
+            f"{len(bodies)} bodies, each small hole trimesh could fill was filled, and each body "
+            "is read so. The file is as it was"
+        )
+        if not self._mesh.is_watertight and filled not in self.notes:
+            self.notes.append(filled)
         return [Part(f"{self.name}#{i + 1}", mesh=b) for i, b in enumerate(bodies)]
 
     def extent(self) -> np.ndarray:

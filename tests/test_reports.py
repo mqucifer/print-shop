@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+from typing import Any
 
 import print_shop
 from print_shop.rounds import needs, reports
@@ -430,6 +431,37 @@ def test_a_place_s_gap_settles_and_one_its_command_doesnt_name_is_refused() -> N
     ):
         (said,) = settled(command, number)
         assert says in said, (number, said)
+
+
+def test_a_hold_by_a_separate_body_is_a_verdict_no_need_may_ask_for() -> None:
+    """mqucifer/print-shop#122: `clearance --slide` says `HELD BY A SEPARATE BODY` where the hold is
+    by a body joined to nothing else in its file. A need on `HELD` isn't met by it, and a need
+    asking for it is refused, as one asking for FAIL is: a part meant to be apart is its own file.
+    Its numbers are walked like the slide's others."""
+    from print_shop.rounds import toolsets
+
+    slid = "clearance channel.step block.step --slide +z"
+    assert "HELD BY A SEPARATE BODY" in reports.VERDICTS["clearance"]
+    held = Need("hold", "x", "chosen", "bench", command=slid, verdicts=["HELD"])
+    record = {"verdict": "HELD BY A SEPARATE BODY", "numbers": {}}
+    read = needs.judge(held, 1, "verdict: HELD BY A SEPARATE BODY: ...", record)
+    assert not read.passed and "it must be HELD" in read.why
+    # With no verdict named, it's not a good one either.
+    plain = Need("hold", "x", "chosen", "bench", command=slid)
+    assert not needs.judge(plain, 1, "", record).passed
+
+    def entry(**check: Any) -> dict[str, Any]:
+        return {"id": "n", "what": "x", "source": "chosen",
+                "check": {"by": "bench", "command": slid, **check}}  # fmt: skip
+
+    _, wrong = needs.read(
+        [entry(verdicts=["HELD", "HELD BY A SEPARATE BODY"])], "", toolset=toolsets.EVERY
+    )
+    assert any("HELD BY A SEPARATE BODY is the bench saying" in w for w in wrong), wrong
+    found, wrong = needs.read(
+        [entry(number="slide.separate.0.gap_mm", at_most=0.0)], "", toolset=toolsets.EVERY
+    )
+    assert wrong == [] and needs.numbers_wrong(found) == []
 
 
 def test_a_hold_is_a_verdict_and_a_figure_a_need_can_name() -> None:

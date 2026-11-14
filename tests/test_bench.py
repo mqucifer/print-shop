@@ -20,7 +20,8 @@ from typing import Any
 import pytest
 
 from print_shop.bench import host
-from print_shop.rounds import reports, skills
+from print_shop.rounds import needs, reports, skills
+from print_shop.rounds.needs import Need
 
 pytestmark = pytest.mark.bench
 CASES = Path(__file__).parent / "bench_cases"
@@ -2483,6 +2484,96 @@ def test_a_slide_takes_two_files_and_no_gap_range(bench: Any) -> None:
     ):
         done = host.run(["clearance", *args], bench.work)
         assert done.returncode == 3 and says in done.stdout + done.stderr, (args, done.stderr)
+
+
+# A hold by a separate body, and a mesh split into bodies (mqucifer/print-shop#122)
+
+#: A block in a channel, its way out up, under a ledge 0.2 mm over it (`bench_cases`).
+BLOCK = ("bodies/block.step", "--slide", "+z")
+SEPARATE = "HELD BY A SEPARATE BODY"
+
+
+def test_a_mesh_of_two_bodies_with_an_open_seam_is_split_and_the_slide_answers(bench: Any) -> None:
+    """In an eval `clearance --slide` on a file of 2 bodies gave no answer, twice: trimesh fills a
+    body's open seam as it splits a mesh, with networkx, and `print-shop/bench:0.12` had none. On
+    0.12 each of these read `NO ANSWER: ModuleNotFoundError: No module named 'networkx'`. A hole
+    is filled, said, and the slide reads; a T-junction's hole has no area, nothing fills it, and
+    the bench says which body isn't closed."""
+    answer = bench("clearance", "bodies/channel-seam.stl", *BLOCK)
+    assert "networkx" not in answer.text and answer.verdict != "NO ANSWER", answer.text
+    (bodies,) = answer.numbers["bodies"]
+    assert bodies["file"] == "channel-seam.stl" and bodies["bodies"] == 2, answer.text
+    assert answer.verdict == SEPARATE and answer.code == 1, answer.text
+    (apart,) = answer.numbers["slide"]["separate"]
+    assert apart["part"] == "channel-seam.stl#2" and apart["gap_mm"] == pytest.approx(2.0, abs=1e-3)
+    assert answer.numbers["slide"]["first_mm"] == pytest.approx(0.2, abs=2 * 0.002 + 1e-4)
+    assert "channel-seam.stl's mesh has edges with one face, an open seam" in answer.text
+    assert "The file is as it was" in answer.text
+    tee = bench("clearance", "bodies/channel-tee.stl", *BLOCK)
+    assert tee.verdict == "NO ANSWER" and "networkx" not in tee.text, tee.text
+    assert tee.record["why"].startswith("channel-tee.stl#2 isn't a closed surface"), tee.text
+
+
+@pytest.mark.parametrize("channel", ["channel-loose.step", "channel-loose.stl"])
+def test_a_hold_by_a_body_joined_to_nothing_in_its_file_isnt_held(bench: Any, channel: str) -> None:
+    """In an eval a ledge built in a channel, off the wall it should have joined, stayed a second
+    body, and `--slide` read it `HELD` six times: the reply's lead said 2 bodies, and the need on
+    `HELD` passed. Here the ledge is 2 mm off the wall, 0.2 mm over the block: before, `HELD`."""
+    answer = bench("clearance", f"bodies/{channel}", *BLOCK)
+    assert answer.verdict == SEPARATE and answer.code == 1, answer.text
+    slide = answer.numbers["slide"]
+    assert slide["meets"] == [f"{channel}#2"]
+    (apart,) = slide["separate"]
+    assert apart == {
+        "part": f"{channel}#2",
+        "file": channel,
+        "bodies": 2,
+        "nearest": f"{channel}#1",
+        "gap_mm": apart["gap_mm"],
+        "pair": 0,
+    }
+    pair = answer.numbers["pairs"][0]
+    assert {pair["a"], pair["b"]} == {f"{channel}#1", f"{channel}#2"}
+    assert apart["gap_mm"] == pair["gap_mm"] == pytest.approx(2.0, abs=1e-3)
+    assert answer.record["why"].startswith(
+        f"sliding +z, it first meets {channel}#2 after 0.2000 mm, within --hold 1 mm, but "
+        f"{channel}#2 is a separate body, one of {channel}'s 2, joined to nothing else in it; "
+        f"{channel}: 2 bodies; "
+    ), answer.record["why"]
+    assert f"{SEPARATE}: block.step is held by a body joined to nothing else" in answer.text
+    assert f"its least gap to {channel}#1 is 2.0000 mm, as pairs.0.gap_mm" in answer.text
+    assert not reports.unlike("clearance", answer.numbers), reports.unlike(
+        "clearance", answer.numbers
+    )
+    # A need keyed on HELD isn't met, and none may ask for this verdict.
+    command = f"clearance bodies/{channel} {' '.join(BLOCK)}"
+    held = Need("hold", "x", "chosen", "bench", command=command, verdicts=["HELD"])
+    read = needs.judge(held, answer.code, answer.text, answer.record)
+    assert not read.passed and read.why.startswith(f"{SEPARATE}, and it must be HELD"), read.why
+    # Past --hold, it's NOT HELD as before: nothing holds it within reach, separate or not.
+    far = bench("clearance", f"bodies/{channel}", *BLOCK, "--hold", "0.1")
+    assert far.verdict == "NOT HELD" and far.numbers["slide"]["separate"] == [], far.text
+
+
+def test_a_hold_by_a_joined_body_or_by_a_part_in_its_own_file_reads_as_before(bench: Any) -> None:
+    """The controls. The ledge run out to the wall is one body with it: `HELD`, its reply word for
+    word as `print-shop/bench:0.12` gave it. The channel and the ledge as two files, parts meant to
+    be apart and each passed on its own: `HELD` by the ledge, as before."""
+    joined = bench("clearance", "bodies/channel-joined.step", *BLOCK)
+    assert joined.verdict == "HELD" and joined.code == 0, joined.text
+    assert joined.text.startswith(
+        "verdict: HELD: sliding +z, it first meets channel-joined.step after 0.2000 mm, within "
+        "--hold 1 mm; 1 pair(s): 1 touching\n"
+        "hold: sliding +z, block.step first meets channel-joined.step after 0.2000 mm, as "
+        "slide.first_mm, against --hold 1 mm: channel-joined.step holds it\n"
+    ), joined.text
+    assert joined.numbers["slide"]["separate"] == [] and "bodies" not in joined.numbers
+    assert "separate body" not in joined.text
+    apart = bench("clearance", "bodies/channel.step", "bodies/ledge.step", *BLOCK)
+    assert apart.verdict == "HELD" and apart.code == 0, apart.text
+    assert apart.numbers["slide"]["meets"] == ["ledge.step"]
+    assert apart.numbers["slide"]["separate"] == [] and "bodies" not in apart.numbers
+    assert SEPARATE not in apart.text
 
 
 # Replies that say where (mqucifer/print-shop#77)

@@ -132,7 +132,8 @@ def parser() -> Parser:
         help="slide the last file named along DIR, one of +x -x +y -y +z -z, its way out, until "
         "it's clear of every other part: an overlap where it lies, then the first part it meets "
         "and where, HELD within --hold, and everything on its path, which is what has to bend or "
-        "be fitted afterwards on its way in (mqucifer/print-shop#76)",
+        "be fitted afterwards on its way in (mqucifer/print-shop#76). A hold by a body joined to "
+        "nothing else in its file is HELD BY A SEPARATE BODY (mqucifer/print-shop#122)",
     )
     clearance.add_argument(
         "--hold",

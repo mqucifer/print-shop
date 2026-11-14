@@ -75,9 +75,13 @@ AXES = {"x": (1.0, 0.0, 0.0), "y": (0.0, 1.0, 0.0), "z": (0.0, 0.0, 1.0)}
 #: Worst first: the pairs' verdict is the worst of them.
 ORDER = ["DISAGREE", "INTERFERE", "TOO CLOSE", "TOO LOOSE", "TOUCHING", "CLEAR"]
 #: With `--slide`, worst first: the hold, then an overlap of parts that don't move. A pair's own
-#: touch or gap is a reading beside it (mqucifer/print-shop#76).
-SLIDE_ORDER = ["DISAGREE", "NOT HELD", "INTERFERE", "HELD", "TOO CLOSE", "TOO LOOSE", "TOUCHING",
-               "CLEAR"]  # fmt: skip
+#: touch or gap is a reading beside it (mqucifer/print-shop#76). A hold by a body joined to nothing
+#: else in its file is a hold the file doesn't make as one piece (mqucifer/print-shop#122), so it
+#: ranks with `NOT HELD`, over an overlap of parts that don't move: where a loose body also
+#: overlaps the one it belongs to, its being a body of its own is what to fix, and joining the two
+#: clears the overlap. The slide gives one verdict, so it and `NOT HELD` never meet.
+SLIDE_ORDER = ["DISAGREE", "NOT HELD", "HELD BY A SEPARATE BODY", "INTERFERE", "HELD", "TOO CLOSE",
+               "TOO LOOSE", "TOUCHING", "CLEAR"]  # fmt: skip
 #: A place that catches no surface of one of a pair: it gives no figure, and judges nothing.
 NOT_CAUGHT = "NOT CAUGHT"
 #: A face is `--facing` a way where its outward normal stays within this of it, in degrees,
@@ -553,9 +557,9 @@ def run(args: Any, report: Report) -> None:
             f"lifted: {moved}, moved {abs(lift):g} mm {way} along {along} before measuring, and "
             "only here: its file is where it was, and every figure below is with it moved"
         )
+    split = [(part, part.pieces()) for part in parts]
     for part in parts:
         report.notes += part.notes
-    split = [(part, part.pieces()) for part in parts]
     items = [piece for _, pieces in split for piece in pieces]
     lead = _bodies_said(report, split)
     if len(items) < 2:
@@ -586,8 +590,9 @@ def run(args: Any, report: Report) -> None:
         report.numbers["places"] = {p.name: p.plain() for p in named}
     slid = None
     if way_out:
-        others = [piece for part in parts[:-1] for piece in part.pieces()]
-        slid = what_holds(report, parts[-1], others, way_out, args.hold, boxes)
+        others = [piece for part, pieces in split[:-1] for piece in pieces]
+        alone = _separate(split, results)
+        slid = what_holds(report, parts[-1], others, way_out, args.hold, boxes, alone)
     brep = all(a.is_brep and b.is_brep for a, b in pairs)
     # Many pairs with nothing to report are one counted line: on `pi5-case-1` a lid of 5 bodies
     # gave 15 pairs, about 21k characters a reply (mqucifer/print-shop#77). Every pair whose
@@ -711,6 +716,36 @@ def _bodies_said(report: Report, split: list[tuple[Part, list[Part]]]) -> str:
     if rows:
         report.numbers["bodies"] = rows
     return "".join(f"{r['file']}: {r['bodies']} bodies; " for r in rows)
+
+
+def _separate(
+    split: list[tuple[Part, list[Part]]], results: list[dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    """Each body of a file of more than one, by its name: its file, how many bodies that has, and
+    the nearest of its other bodies, with the pair that reads the gap between them and checks it
+    by its second method. The slide reads a hold by one as by a separate body
+    (mqucifer/print-shop#122)."""
+    found: dict[str, dict[str, Any]] = {}
+    for part, pieces in split:
+        if len(pieces) < 2:
+            continue
+        names = {piece.name for piece in pieces}
+        for piece in pieces:
+            near = [
+                (i, r, r["b"] if r["a"] == piece.name else r["a"])
+                for i, r in enumerate(results)
+                if piece.name in (r["a"], r["b"]) and {r["a"], r["b"]} <= names
+            ]
+            i, r, other = min(near, key=lambda n: n[1]["gap_mm"])
+            found[piece.name] = {
+                "part": piece.name,
+                "file": part.name,
+                "bodies": len(pieces),
+                "nearest": other,
+                "gap_mm": r["gap_mm"],
+                "pair": i,
+            }
+    return found
 
 
 def _within(low: list[float], high: list[float], named: list[Place]) -> str:
