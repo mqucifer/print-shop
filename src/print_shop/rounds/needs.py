@@ -48,8 +48,9 @@ COMMANDS = (
 #: Verdicts that are no answer: they never pass a need, whatever it says.
 UNSURE = ("DISAGREE", "NO ANSWER")
 #: The bench saying that what it checks is wrong. On `cup-1` a need passed on `capture`'s FAIL:
-#: a need can't ask for the check to fail.
-WRONG = ("FAIL",)
+#: a need can't ask for the check to fail. Nor for a hold by a body joined to nothing else in its
+#: file (mqucifer/print-shop#122): a part meant to be apart is its own file, read as one.
+WRONG = ("FAIL", "HELD BY A SEPARATE BODY")
 GOOD = ("OK", "CLEAR", "TOUCHING")
 GEOMETRY = (".step", ".stp", ".stl", ".brep")
 #: The kind of need whose check is the side a file lies on, as `done`'s `on_bed` gives it.

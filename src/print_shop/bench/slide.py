@@ -15,6 +15,13 @@ where it lies until it's clear of every other part, and says, in this order:
   reaches from the edge of the moving part's outline, seen along the slide: not how far anything
   bends, as the bench doesn't know which way an arm bends. Read backwards, that's everything the
   part has to pass on its way in, so it's what has to bend, or be fitted afterwards.
+- **A hold by a separate body** (mqucifer/print-shop#122). Where a first contact is one of the
+  bodies of a file of more than one, joined to nothing else in it, the hold isn't one the file
+  makes as one piece: the verdict is `HELD BY A SEPARATE BODY`, naming the body, its file and the
+  gap to its nearest other body there, and a need on `HELD` isn't met. In an eval a ledge built in
+  a channel, off the wall it should have joined, read `HELD` six times while the reply's lead said
+  the channel was 2 bodies, and about five hours went on that hold. Parts meant to be
+  apart are each their own file, and a file of one body reads as before.
 - **The way in, blocked** (mqucifer/print-shop#100). A piece on the path that isn't one of the
   first contacts and reaches further in than every one of them is named, as `slide.blocked`: the
   part can't be fitted that way unless it bends or that piece is fitted afterwards.
@@ -656,6 +663,15 @@ def _blocked_said(found: dict[str, Any]) -> str:
     )
 
 
+def _separate_said(found: dict[str, Any]) -> str:
+    """Which first contacts are a body of a file of several, in words (mqucifer/print-shop#122)."""
+    return "; ".join(
+        f"{s['part']} is a separate body, one of {s['file']}'s {s['bodies']}, joined to nothing "
+        "else in it"
+        for s in found["separate"]
+    )
+
+
 def _room_said(found: dict[str, Any], piece: dict[str, Any]) -> str:
     """A piece past the catch that the part has room to be set in before."""
     name, along = found["file"], found["way"][1]
@@ -680,14 +696,22 @@ def _box_said(low: Any, high: Any) -> str:
 
 
 def what_holds(
-    report: Report, moving: Part, others: list[Part], way: str, hold: float, boxes: list[Any]
+    report: Report,
+    moving: Part,
+    others: list[Part],
+    way: str,
+    hold: float,
+    boxes: list[Any],
+    separate: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Slide the moving part along `way` until it's clear of the others, and say what holds it:
     where it lies, its first contact and the hold, then everything on its path. The slide's own
     verdict, `HELD` or `NOT HELD`, or `DISAGREE` where the two methods differ: one meets a part
     and the other doesn't, they read a different reach, or they read the first contact's
     distance differently and also differ on the verdict or on where it is. Two distances that
-    differ with the same verdict, at the same places, keep the verdict, and both are given."""
+    differ with the same verdict, at the same places, keep the verdict, and both are given. A hold
+    whose first contact is one of `separate`, the bodies of a file of more than one, is
+    `HELD BY A SEPARATE BODY` (mqucifer/print-shop#122)."""
     d = np.asarray(WAYS[way], dtype=float)
     axis = way[1]
     a_fine, a_coarse = moving.manifold(True), moving.manifold(False)
@@ -712,6 +736,7 @@ def what_holds(
         "catch_mm": None,
         "blocked": [],
         "room": [],
+        "separate": [],
         "verdict": "NOT HELD",
         "why": "",
     }
@@ -829,6 +854,9 @@ def what_holds(
         found["why"] = "; ".join(differs)
     elif _held(found, found["first_mm"], hold):
         found["verdict"] = "HELD"
+        found["separate"] = [(separate or {})[m] for m in found["meets"] if m in (separate or {})]
+        if found["separate"]:
+            found["verdict"] = "HELD BY A SEPARATE BODY"
     else:
         found["verdict"] = "NOT HELD"
     if figures and not differs:
@@ -866,12 +894,26 @@ def _said(
             hold_line += ": but it overlaps where it lies, so nothing holds it there"
         elif found["verdict"] == "HELD":
             hold_line += f": {meets} holds it"
+        elif found["separate"]:
+            hold_line += f": but {_separate_said(found)}"
         elif not found["overlaps"] and over(first, hold):
             hold_line += (
                 f": it moves {first:.4f} mm before anything stops it, more than {hold:g}. "
                 f"Bring what holds it within {hold:g} mm of where {name} lies"
             )
     report.line(hold_line)
+    if found["separate"]:
+        report.line(
+            f"HELD BY A SEPARATE BODY: {name} is held by a body joined to nothing else in its "
+            "file, so the file doesn't hold it as one piece. "
+            + "; ".join(
+                f"{s['part']} is one of {s['file']}'s {s['bodies']} bodies, and its least gap to "
+                f"{s['nearest']} is {s['gap_mm']:.4f} mm, as pairs.{s['pair']}.gap_mm"
+                for s in found["separate"]
+            )
+            + ". Join each to the body it belongs to, then run this again. A need on HELD isn't "
+            "met by this. A part meant to be apart is its own file: name it as one"
+        )
     if found["blocked"]:
         report.line(
             f"BLOCKED WAY IN: {name} meets the catch first, {_blocked_said(found)}. Each is in "
@@ -967,7 +1009,8 @@ def summary(found: dict[str, Any]) -> str:
     within = "within" if found["verdict"] == "HELD" or not over(first, found["hold_mm"]) else "past"
     agreed = f"; {found['why']}" if found["why"] else ""
     blocked = f", {_blocked_said(found)}" if found.get("blocked") else ""
+    apart = f", but {_separate_said(found)}" if found.get("separate") else ""
     return lead + (
         f"sliding {way}, it first meets {meets} after {first:.4f} mm, {within} --hold "
-        f"{found['hold_mm']:g} mm{blocked}{agreed}"
+        f"{found['hold_mm']:g} mm{apart}{blocked}{agreed}"
     )

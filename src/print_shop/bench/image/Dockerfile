@@ -19,7 +19,7 @@ RUN pip install --no-cache-dir --no-deps -r /opt/cad-eval/requirements.txt \
 # What the bench adds, locked with hashes by `uv pip compile --generate-hashes`.
 COPY requirements.txt /opt/bench/requirements.txt
 RUN pip install --no-cache-dir --no-deps --require-hashes -r /opt/bench/requirements.txt \
-    && python -c "import manifold3d, rtree, shapely; print(shapely.__version__)"
+    && python -c "import manifold3d, networkx, rtree, shapely; print(shapely.__version__)"
 
 # OSMesa, so VTK renders with no display, at its pinned version from Debian's archive as
 # it stood on a fixed date.
@@ -70,5 +70,7 @@ COPY --from=docs /build/docs.json /opt/cad-eval/docs.json
 # `thin`'s and `capture`'s, and `faces` and `slice` (mqucifer/print-shop#77). 0.12's slide reads a
 # contact where the parts already touch, and keeps a verdict both methods agree on
 # (mqucifer/print-shop#84), and `info` counts runs of strips, not narrow flat faces
-# (mqucifer/print-shop#85). Its code is mounted, not copied in.
-LABEL org.opencontainers.image.version="0.12"
+# (mqucifer/print-shop#85). 0.13 has networkx, which trimesh needs to split a mesh whose body has
+# an open seam into bodies, and to read a section's outlines (mqucifer/print-shop#122). Its code is
+# mounted, not copied in.
+LABEL org.opencontainers.image.version="0.13"

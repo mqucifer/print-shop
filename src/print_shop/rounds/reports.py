@@ -236,6 +236,20 @@ PATH_PIECE = Row(
 )
 #: A piece of a slide's path that reaches further in than the catch (mqucifer/print-shop#100).
 PAST_THE_CATCH = Row({"part": TEXT, **PATH_PIECE.fields}, closed=True)
+#: A first contact that's one of the bodies of a file of more than one: its file, how many bodies
+#: that has, its nearest other body there, the gap to it, and the pair that reads that gap
+#: (mqucifer/print-shop#122).
+SEPARATE_BODY = Row(
+    {
+        "part": TEXT,
+        "file": TEXT,
+        "bodies": NUMBER,
+        "nearest": TEXT,
+        "gap_mm": NUMBER,
+        "pair": NUMBER,
+    },
+    closed=True,
+)
 
 #: `clearance --slide`'s answer (mqucifer/print-shop#76). `first_mm` is None where it meets nothing.
 SLIDE = Row(
@@ -275,6 +289,9 @@ SLIDE = Row(
         "catch_mm": NUMBER,
         "blocked": Rows(PAST_THE_CATCH),
         "room": Rows(PAST_THE_CATCH),
+        # Each first contact that's a body joined to nothing else in its file: the hold is then
+        # `HELD BY A SEPARATE BODY` (mqucifer/print-shop#122).
+        "separate": Rows(SEPARATE_BODY),
         "verdict": TEXT,
     },
     closed=True,
@@ -491,7 +508,16 @@ SHAPES: dict[str, dict[str, Any]] = {
 
 VERDICTS: dict[str, tuple[str, ...]] = {
     "info": ("OK", "FAIL"),
-    "clearance": ("CLEAR", "TOUCHING", "TOO CLOSE", "TOO LOOSE", "INTERFERE", "HELD", "NOT HELD"),
+    "clearance": (
+        "CLEAR",
+        "TOUCHING",
+        "TOO CLOSE",
+        "TOO LOOSE",
+        "INTERFERE",
+        "HELD",
+        "NOT HELD",
+        "HELD BY A SEPARATE BODY",
+    ),
     "readback": ("OK", "FAIL", "NO CHANGE"),
     "rays": ("OK", "FAIL"),
     "panes": ("OK", "FAIL"),

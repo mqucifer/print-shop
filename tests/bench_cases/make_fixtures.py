@@ -705,6 +705,66 @@ def blocked_way_in() -> None:
     save(roomy.union(box(-15, -11.25, -15, 15, -9, -8)), "hold/bump-roomy")
 
 
+def separate_bodies() -> None:
+    """A hold by a body joined to nothing else in its file (mqucifer/print-shop#122), on parts of
+    our own: a block in a channel, pushed down onto its floor, so its way out is up.
+
+    - `bodies/block`: x -5 to 5, y -10 to 10, z 2 to 8, on the channel's floor.
+    - `bodies/channel`: a floor 20 x 20 x 2, z 0 to 2, and a wall each side 2 mm thick, x 8 to 10
+      and -10 to -8, up to z 12. Nothing over the block.
+    - `bodies/ledge`: a bar x 2 to 6, the channel's length in y, z 8.2 to 9.2: over the block,
+      0.2 mm above its top, and 2 mm off the +x wall's inside face.
+    - `bodies/channel-loose`: the channel and the ledge in one file, not joined: 2 bodies. As a
+      STEP of 2 solids, and as an STL of 2 closed bodies in one mesh.
+    - `bodies/channel-joined`: the channel with the ledge run out to the wall, x 2 to 8, so it's
+      joined: one body. Slid up, the block meets the ledge after 0.2 mm in each.
+    - `bodies/channel-seam.stl`: the 2 bodies of `channel-loose` as one mesh, one of the two
+      triangles of the ledge's top face left out: 3 edges with one face each, so trimesh's `split`
+      fills the hole, which takes networkx. `print-shop/bench:0.12` had none, and the slide gave
+      no answer.
+    - `bodies/channel-tee.stl`: the same, the ledge's top face meshed with a T-junction instead: a
+      vertex at the middle of its -y edge that the side face below doesn't share, as a CAD export
+      can leave. Its hole has no area, so nothing fills it, and the ledge isn't a closed body.
+    """
+    Path("bodies").mkdir(exist_ok=True)
+    save(box(-5, 5, -10, 10, 2, 8), "bodies/block")
+    channel = box(-10, 10, -10, 10, 0, 2)
+    for side in (1, -1):
+        channel = channel.union(box(*mirrored(side, 8, 10), -10, 10, 0, 12))
+    ledge = box(2, 6, -10, 10, 8.2, 9.2)
+    save(channel, "bodies/channel")
+    save(ledge, "bodies/ledge")
+    loose = cq.Workplane(obj=cq.Compound.makeCompound([channel.val(), ledge.val()]))
+    save(loose, "bodies/channel-loose")
+    loose.val().exportStl("bodies/channel-loose.stl", tolerance=0.002)
+    save(channel.union(box(2, 8, -10, 10, 8.2, 9.2)), "bodies/channel-joined")
+    channel.val().exportStl("bodies/channel-only.stl", tolerance=0.002)
+    walls: Any = trimesh.load("bodies/channel-only.stl", force="mesh")
+    Path("bodies/channel-only.stl").unlink()
+    bar = trimesh.creation.box(bounds=[(2, -10, 8.2), (6, 10, 9.2)])
+    up = np.flatnonzero(np.asarray(bar.face_normals)[:, 2] > 0.5)
+    # One of the two triangles of the ledge's top face left out: a hole trimesh fills.
+    kept = np.delete(np.arange(len(bar.faces)), up[0])
+    stl(walls, [trimesh.Trimesh(bar.vertices, bar.faces[kept])], "bodies/channel-seam.stl")
+    corners = [(2, -10, 9.2), (6, -10, 9.2), (6, 10, 9.2), (2, 10, 9.2)]
+    middle = (4, -10, 9.2)
+    # The top face as a fan from the middle of its -y edge, counter-clockwise seen from above.
+    fan = [(middle, corners[1], corners[2]), (middle, corners[2], corners[3]),
+           (middle, corners[3], corners[0])]  # fmt: skip
+    top = trimesh.Trimesh(np.asarray(fan, dtype=float).reshape(-1, 3), np.arange(9).reshape(3, 3))
+    sides = trimesh.Trimesh(bar.vertices, np.delete(bar.faces, up, axis=0))
+    stl(walls, [sides, top], "bodies/channel-tee.stl")
+
+
+def stl(first: Any, rest: list[Any], name: str) -> None:
+    """Meshes as one STL, merged as the bench reads one: a T-junction's middle stays apart."""
+    meshes = [first, *rest]
+    starts = np.cumsum([0] + [len(m.vertices) for m in meshes[:-1]])
+    vertices = np.vstack([m.vertices for m in meshes])
+    faces = np.vstack([m.faces + s for m, s in zip(meshes, starts, strict=True)])
+    trimesh.Trimesh(vertices, faces, process=True).export(name)
+
+
 def strips() -> None:
     """Strips told from narrow flat faces (mqucifer/print-shop#85), on parts of our own.
 
@@ -814,6 +874,7 @@ if __name__ == "__main__":
     enclosure()
     places()
     holds()
+    separate_bodies()
     strips()
     at_limits()
     print("made")
