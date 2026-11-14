@@ -154,7 +154,8 @@ def _from_the_plate(mesh: trimesh.Trimesh) -> np.ndarray:
             root[ra] = rb
     lows = np.flatnonzero(low)
     groups = np.array([find(int(f)) for f in lows])
-    touching = set(groups[z[lows].min(axis=1) <= 1e-3].tolist())
+    # Touching the plate: as `analyzer.PLATE_MM` reads it, a few microns off zero included.
+    touching = set(groups[z[lows].min(axis=1) <= 0.01 + 1e-9].tolist())
     found[lows[np.isin(groups, list(touching))]] = True
     return found
 

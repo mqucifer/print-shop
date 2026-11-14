@@ -219,3 +219,53 @@ def test_a_pose_stood_up_is_moved_only_where_a_lower_one_beats_it(
     assert ("orientation.stood_up" in rules) is moved
     if moved:
         assert verdict.blockers[0].suggested == (0.0, 0.0, 0.0)
+
+
+# On the plate, a few microns off zero
+# --------------------------------------------------------------------------
+
+
+def _jittered(tmp_path: Path) -> Path:
+    """A flat lid, 100 x 62 x 6 mm, its plate face in a 2 mm grid whose vertices are jittered by
+    up to +-0.005 mm: a file after Manifold's simplify (mqucifer/print-shop#128)."""
+    lid = trimesh.creation.box(extents=(100, 62, 6))
+    lid = lid.subdivide_to_size(2.0)
+    lid.apply_translation((0, 0, 3))
+    rng = np.random.default_rng(128)
+    bottom = lid.vertices[:, 2] < 1e-9
+    vertices = lid.vertices.copy()
+    vertices[bottom, 2] += rng.uniform(-0.005, 0.005, bottom.sum())
+    jittered = trimesh.Trimesh(vertices=vertices, faces=lid.faces, process=False)
+    path = tmp_path / "jittered_lid.stl"
+    jittered.export(path)
+    return path
+
+
+def test_a_plate_face_a_few_microns_off_zero_keeps_its_contact(tmp_path: Path) -> None:
+    stl = _jittered(tmp_path)
+    assert analyze(stl).bed_contact_area_mm2 == pytest.approx(6200, rel=0.001)
+    laid = next(c for c in candidates(stl) if c.rotation_deg == (0.0, 0.0, 0.0))
+    assert laid.bed_contact_area_mm2 == pytest.approx(6200, rel=0.001)
+    assert laid.overhang_area_mm2 == 0.0, "the jittered face is on the plate, not over the air"
+
+
+def test_its_contact_reaches_the_lessons_keyed_to_a_large_footprint(tmp_path: Path) -> None:
+    from print_shop.setup.traits import traits  # noqa: PLC0415
+
+    stl = _jittered(tmp_path)
+    assert "large_bed_contact" in traits(measure(stl, analyze(stl).bed_contact_area_mm2))
+
+
+def test_a_face_a_tenth_of_a_layer_up_is_not_on_the_plate(tmp_path: Path) -> None:
+    """The tolerance is well under a layer: a step 0.02 mm up is the part's, not the plate's."""
+    from print_shop.ingest.analyzer import PLATE_MM, on_the_plate  # noqa: PLC0415
+
+    low = trimesh.creation.box(extents=(10, 10, 2))
+    low.apply_translation((0, 0, 1))
+    high = trimesh.creation.box(extents=(10, 10, 2))
+    high.apply_translation((20, 0, 1.02))
+    both = trimesh.util.concatenate([low, high])
+    assert isinstance(both, trimesh.Trimesh)
+    on = on_the_plate(both)
+    assert PLATE_MM < 0.02
+    assert float(both.area_faces[on].sum()) == pytest.approx(100)

@@ -16,7 +16,29 @@ import trimesh
 
 from print_shop.core.state import MeshReport
 
-__all__ = ["StlChangedError", "analyze", "file_sha256", "measure_orientation", "verify_unchanged"]
+__all__ = [
+    "PLATE_MM",
+    "StlChangedError",
+    "analyze",
+    "file_sha256",
+    "measure_orientation",
+    "on_the_plate",
+    "verify_unchanged",
+]
+
+#: A downward face this close to the seated minimum is on the plate: well under a layer, and
+#: far over float noise. A face whose vertices sat a few microns off zero, after Manifold's
+#: simplify, read 0 mm2 of contact in every pose at 1e-6 (mqucifer/print-shop#128), and that
+#: reading decides which lessons reach a part (`large_bed_contact`).
+PLATE_MM = 0.01
+
+
+def on_the_plate(mesh: trimesh.Trimesh) -> np.ndarray:
+    """Each face that rests on the plate: facing down, its centroid within `PLATE_MM` of the
+    mesh's lowest point."""
+    downward = mesh.face_normals[:, 2] < -1e-6
+    lowest = float(mesh.bounds[0][2])
+    return np.asarray(downward & (mesh.triangles.mean(axis=1)[:, 2] - lowest <= PLATE_MM + 1e-9))
 
 
 class StlChangedError(RuntimeError):
@@ -69,17 +91,16 @@ def measure_orientation(
 
     Same definitions as `analyze`: overhang is downward-facing area (not on the
     plate) whose angle from vertical exceeds the threshold; bed contact is
-    downward-facing area at z ≈ 0. The mesh must already be seated (z_min == 0).
+    downward-facing area within `PLATE_MM` of the lowest point (`on_the_plate`).
     """
     normals: np.ndarray = mesh.face_normals
     areas: np.ndarray = mesh.area_faces
-    face_centroids: np.ndarray = mesh.triangles.mean(axis=1)
 
     # Downward-facing: normal.z < 0 (with small epsilon to avoid float noise)
     downward = normals[:, 2] < -1e-6
 
-    # Bed contact: downward-facing AND at the bottom of the model (z ≈ 0 after seating)
-    bed_contact = downward & (face_centroids[:, 2] < 1e-6)
+    # Bed contact: downward-facing AND at the bottom of the model, within `PLATE_MM`
+    bed_contact = on_the_plate(mesh)
 
     # Overhang: downward-facing, NOT bed contact, AND angle from vertical > threshold.
     # Angle from vertical = degrees(asin(|n.z|))).
@@ -149,7 +170,7 @@ def analyze(stl_path: str | Path, overhang_threshold_deg: float = 45.0) -> MeshR
     # Max overhang angle: the largest angle from vertical among overhang faces
     normals = mesh.face_normals
     downward = normals[:, 2] < -1e-6
-    bed_contact = downward & (mesh.triangles.mean(axis=1)[:, 2] < 1e-6)
+    bed_contact = on_the_plate(mesh)
     angles_from_vertical = np.degrees(np.arcsin(np.abs(normals[:, 2])))
     overhang_mask = (
         downward
