@@ -58,7 +58,7 @@ from print_shop.rounds.lessons import (
 )
 from print_shop.rounds.lessons import writer as _writer
 from print_shop.setup.features import Feature
-from print_shop.setup.proposal import GivenLesson, Source
+from print_shop.setup.proposal import PAUSE, GivenLesson, Source
 from print_shop.setup.traits import TRAITS, traits
 
 if TYPE_CHECKING:  # the ledger opens these tables, so it imports this
@@ -267,6 +267,10 @@ def draw(ledger: Ledger, row: Row) -> list[int]:
     made: list[int] = []
     last: dict[str, tuple[str, Any]] = {}
     for c in row.corrections or ():
+        if c.key == PAUSE:
+            # A colour change is a choice for that one part, not a lesson: it stays in the
+            # job's corrections and its reading (mqucifer/print-shop#119, the operator).
+            continue
         last[c.key] = (CORRECTION, c)  # corrected twice at one review: the one that stood
     for c in row.proposal.changes if row.proposal else ():
         if c.source is Source.READING and c.key not in last:

@@ -119,7 +119,7 @@ def test_orca_is_given_its_own_pause_file(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------
 
 
-def _request(max_z: float = 20.0) -> ReviewRequest:
+def _request(max_z: float = 25.0) -> ReviewRequest:
     return ReviewRequest(
         presets=("m", "p", "f"), proposal=Proposal(),
         slice=SliceResult(gcode_path=Path("x.gcode"), layer_count=100, max_z_mm=max_z,
@@ -129,19 +129,20 @@ def _request(max_z: float = 20.0) -> ReviewRequest:
     )
 
 
-@pytest.mark.parametrize("answer", ["pause_at=12.4 because white to black",
-                                    "colour_change=12.4mm because white to black"])
+@pytest.mark.parametrize("answer", ["pause_at=2.0 because a white floor under black walls",
+                                    "colour_change=2mm because a white floor under black walls"])
 def test_a_colour_change_is_asked_for_by_its_height(answer: str) -> None:
+    """The Sponsor's first: a swap at z 2.0 on a 25 mm part."""
     review = parse_answer(answer, _request())
     assert isinstance(review, Review)
     [change] = review.corrections
     assert (change.key, change.value, change.reason, change.source) == (
-        PAUSE, "12.4", "white to black", Source.SPONSOR
+        PAUSE, "2", "a white floor under black walls", Source.SPONSOR
     )
 
 
 @pytest.mark.parametrize(("answer", "why"), [
-    ("pause_at=25", "below its top, 20 mm"),
+    ("pause_at=25", "below its top, 25 mm"),
     ("pause_at=0", "above 0"),
     ("pause_at=high", "isn't a height"),
 ])
@@ -169,15 +170,15 @@ def test_the_reading_says_where_it_paused_and_how_far_in(tmp_path: Path) -> None
 @pytest.mark.slicer
 def test_orca_itself_pauses_at_the_layer_asked_for(tmp_path: Path) -> None:
     """With the real Orca and the store's own profiles, on the Mac: one pause, before the layer
-    whose top is 10 mm."""
+    whose top is 2 mm, the Sponsor's white floor under black walls."""
     process = tmp_path / "process.json"
     process.write_text(json.dumps({**json.loads(STORE_PROFILES.process.read_text()), **LAYERS}))
     profiles = STORE_PROFILES.model_copy(
-        update={"process": process, "pauses": (PauseAt(print_z=pause_z(LAYERS, 9.9)),)}
+        update={"process": process, "pauses": (PauseAt(print_z=pause_z(LAYERS, 2.0)),)}
     )
     result = slice_model(write_stl("cube", tmp_path), profiles, tmp_path / "out")
     [pause] = gcode.read(Path(result.gcode_path)).pauses
-    assert (pause["before_layer"], pause["z"]) == (50, 10.0)
+    assert (pause["before_layer"], pause["z"]) == (10, 2.0)
 
 
 # Through the daemon: the review, the gate, the ledger and the outcome step
@@ -191,7 +192,7 @@ def test_a_colour_change_asked_for_at_the_review_reaches_the_gcode_the_gate_and_
     process = json.loads(CI_PROFILES.process.read_text())
     (tmp_path / "process.json").write_text(json.dumps({**process, "wall_loops": "2", **LAYERS}))
     profiles = CI_PROFILES.model_copy(update={"process": tmp_path / "process.json"})
-    sponsor = Sponsor("pause_at=9.9 because white walls, a black top", "ok")
+    sponsor = Sponsor("pause_at=2.0 because a white floor under black walls", "ok")
     slicer = PausingSlicer()
     ledger = Ledger(tmp_path / "ledger.sqlite")
     bridge = MemoryBridge()
@@ -211,31 +212,55 @@ def test_a_colour_change_asked_for_at_the_review_reaches_the_gcode_the_gate_and_
         shown = sponsor.shown[-1]
         assert shown.reading is not None
         [pause] = shown.reading.pauses
-        assert (pause.before_layer, pause.z) == (50, 10.0)
-        assert slicer.pauses[-1] == (PauseAt(print_z=10.0, message="white walls, a black top"),)
+        assert (pause.before_layer, pause.z) == (10, 2.0)
+        assert slicer.pauses[-1] == (
+            PauseAt(print_z=2.0, message="a white floor under black walls"),
+        )
 
         # The gate says it, so the person is at the printer for it.
         gate = daemon.pending_gate() or {}
         assert gate["pause"].startswith(
-            "this print pauses for a filament swap before layer 50 (z 10 mm), about "
+            "this print pauses for a filament swap before layer 10 (z 2 mm), about "
         )
         bridge.deliver(command_topic(CFG), {"decision": "approve"})
         assert daemon.wait_for_finish(job_id, timeout_s=30).printed
 
-        # One pause in what went to the printer, before layer 50.
+        # One pause in what went to the printer, before layer 10.
         row = ledger.get(job_id)
         assert row is not None
         sent = Path(tmp_path / "work" / job_id / row.gcode_name)
-        assert [(p["before_layer"], p["z"]) for p in gcode.read(sent).pauses] == [(50, 10.0)]
+        assert [(p["before_layer"], p["z"]) for p in gcode.read(sent).pauses] == [(10, 2.0)]
 
         # The ledger keeps it with the corrections, and in the reading.
-        assert [(c.key, c.value) for c in row.corrections or ()] == [(PAUSE, "9.9")]
-        assert row.reading is not None and row.reading.pauses[0].before_layer == 50
-        assert "swap           pauses for a filament swap before layer 50" in describe(row)
+        assert [(c.key, c.value) for c in row.corrections or ()] == [(PAUSE, "2")]
+        assert row.reading is not None and row.reading.pauses[0].before_layer == 10
+        assert "swap           pauses for a filament swap before layer 10" in describe(row)
+        # A choice for that one part, not a lesson: none is drawn from it.
+        assert ledger.query("SELECT * FROM print_lessons WHERE setting=?", PAUSE) == []
 
         # The outcome step asks how the swap went.
         wait_until(lambda: bridge.retained_json(outcome_topic(CFG)).get("pending") is True)
         asked = bridge.retained_json(outcome_topic(CFG))
-        assert asked["swap"].startswith("pauses for a filament swap before layer 50")
+        assert asked["swap"].startswith("pauses for a filament swap before layer 10")
 
 
+
+
+def test_a_colour_change_draws_no_lesson(tmp_path: Path) -> None:
+    """A swap at z 2.0 is a choice for that one part (the operator, on mqucifer/print-shop#120):
+    it stays in the job's corrections, and no lesson is drawn from it. The brim beside it is."""
+    from tests.test_ledger import record  # noqa: PLC0415
+
+    pause = Change(key=PAUSE, preset="", value="2", reason="a white floor under black walls",
+                   source=Source.SPONSOR)
+    brim = Change(key="brim_type", preset="no_brim", value="outer_only", reason="the ends lift",
+                  source=Source.SPONSOR)
+    with Ledger(tmp_path / "ledger.sqlite") as ledger:
+        ledger.record_start_requested(
+            record("job-1").model_copy(update={"corrections": (pause, brim)})
+        )
+        row = ledger.get("job-1")
+        assert row is not None and [c.key for c in row.corrections or ()] == [PAUSE, "brim_type"]
+        assert [r["setting"] for r in ledger.query("SELECT setting FROM print_lessons")] == [
+            "brim_type"
+        ]
