@@ -40,6 +40,7 @@ from print_shop.expert.orientation import (
     propose_orientation,
     validate_orientation,
 )
+from tests.live import opted_in
 
 BUILD_VOLUME = (257.0, 257.0, 257.0)
 
@@ -203,9 +204,12 @@ def _endpoint_up(cfg: LLMConfig | None) -> bool:
 
 LIVE = _live_config()
 
+#: LiteLLM is asked whether it's up only when the run opts in to it (mqucifer/print-shop#115):
+#: this is read while the tests are collected, so it would ask on every run.
 needs_llm = pytest.mark.skipif(
-    not _endpoint_up(LIVE),
-    reason="no LiteLLM key in the settings, or LiteLLM :4000 is not answering",
+    not (opted_in("llm") and _endpoint_up(LIVE)),
+    reason="not opted in (PRINT_SHOP_TEST_LLM=1), no LiteLLM key in the settings, or LiteLLM "
+    ":4000 is not answering",
 )
 
 
