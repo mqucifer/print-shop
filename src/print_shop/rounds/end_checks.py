@@ -23,14 +23,18 @@ it, pushed the place's depth, its layers stacked along the axis `on_bed` gives t
 
 **What each place comes to:**
 - `TAKES`: an arm was found, and `bend` reads `OK`. The place passes.
-- `OVER`: an arm was found, and `bend` reads `FAIL`, between two printed parts. It fails.
+- `OVER`: a printed arm was found, and `bend` reads `FAIL`. It fails, whether what pushes
+  past it is printed or given: a rigid bought part forced past a printed clip that's over its
+  limit is the run's design to fix. A design run's fan couldn't be fitted in its slide-in
+  pocket for exactly this.
 - `STANDS`: between two printed parts, no arm was found, or `bend` had no answer for it. The
   place stands as `BLOCKED`, and fails, saying why no arm was read.
 - `SEATED`: the parts overlap where the part sits, which no bend clears. Between two printed
   parts it fails.
-- `PERSON`: one of the two is a given, bought part, and the printed one doesn't take it. A given
-  part isn't PETG, and may be what gives way, as a flexible strip pushed past a catch does: the
-  reading says how far it has to give, and a person judges it. It doesn't fail.
+- `PERSON`: one of the two is a given, bought part, and no printed arm was read there: none
+  was found, or `bend` had no answer for it. Then what has to give way is the given part itself,
+  as a flexible strip pushed past a catch does. A given part isn't PETG, so it isn't bent as
+  PETG: the reading says how far it has to give, and a person judges it. It doesn't fail.
 
 **A way that couldn't be read** (`fit-on` with no answer, no way out named, a file that isn't a
 STEP) is "can't tell", neither a pass nor a fail, as `thin` is, and is shown at the stop.
@@ -315,7 +319,8 @@ def _place(
         if reading.passed:
             place.status = TAKES
         elif reading.verdict == "FAIL":
-            place.status = PERSON if place.given else OVER
+            # Whatever pushes past it, printed or given: the printed arm is over its limit.
+            place.status = OVER
         else:
             place.status = fallback
         return
@@ -441,7 +446,8 @@ def place_said(way: Way, place: Place, accepted: dict[str, dict[str, Any]] | Non
         return f"  - {at}: passes. {_arm_said(place, lead=True)}. {_bent(place)}."
     if place.status == PERSON:
         printed = (
-            f"The printed arm there doesn't take it as PETG: {_arm_said(place)}; {_bent(place)}. "
+            f"What's printed there wasn't read as an arm that bends: {_arm_said(place)}; "
+            f"{_bent(place)}, which is no answer to rely on. "
             if place.command
             else f"No printed arm that could move was read there ({no_arm}). "
             if no_arm

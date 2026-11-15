@@ -484,11 +484,57 @@ def test_a_given_strip_pushed_past_a_printed_catch_is_named_for_a_person(tmp_pat
         "`references/strip.step` has to give way by 0.300 mm to pass, and whether it can is a "
         "person's to judge."
     ) in stop
-    assert "The printed arm there doesn't take it as PETG" in stop and "reads DISAGREE" in stop
+    assert "What's printed there wasn't read as an arm that bends" in stop
+    assert "reads DISAGREE" in stop
     assert rows(run, "SELECT COUNT(*) AS n FROM lessons")[0]["n"] == 0
     assert rows(run, "SELECT COUNT(*) AS n FROM decisions")[0]["n"] == 0
     kept = json.loads((run.folder / "rounds" / "001" / "end.json").read_text())
     assert kept["ways"][0]["places"][0]["status"] == end_checks.PERSON
+
+
+def test_a_printed_clip_over_its_limit_sends_the_run_back_though_a_given_part_pushes_it(
+    tmp_path: Path,
+) -> None:
+    """A rigid bought part forced past a printed clip that's over its limit is the run's design
+    to fix: only where no printed arm is read is the given part what has to give way."""
+    given = tmp_path / "given" / "fan.step"
+    given.parent.mkdir()
+    given.write_text("a fan, made up")
+    model = Scripted(
+        [tool("done", part=["pocket.step"], **DONE)], [tool("blocked", reason="Out of turns.")]
+    )
+    request = STRIP_REQUEST.replace("LED strip", "fan").replace("strip", "fan")
+    run = Run.start(tmp_path / "runs", "r", request, [given], model, sleep=lambda _: None)
+    fan = "references/fan.step"
+    clip = {**HOOK, "file": "pocket.step"}
+    box = Bench(
+        run.work,
+        {fan: ("BLOCKED", {"places": [clip], "depth_mm": 0.6})},
+        {"pocket.step": TOO_FAR},
+        {"pocket.step": SHORT_ARM},
+    )
+    box.makes = ("pocket.step",)
+    held = Need(
+        "caught",
+        "the fan is held in the pocket",
+        "request",
+        "bench",
+        quote="The fan is held in the channel by a catch it's pushed past.",
+        command=f"clearance pocket.step {fan} --slide +z",
+        verdicts=["HELD"],
+        measures="fit",
+    )
+    _in_rounds(run, box, held, ("pocket", "fan"), "a clip on the pocket's wall")
+    assert run.drive().name == "blocked"
+    note = run.state.end_sent["note"]  # type: ignore[index]
+    assert "DOESN'T PASS. The arm is `pocket.step`'s" in note
+    assert "2.98% across its layers against the 1% limit" in note
+    assert "for a person to judge" not in note
+    assert not (run.folder / "approvals").exists()
+    assert rows(run, "SELECT by FROM decisions") == [{"by": "harness"}]
+    assert rows(run, "SELECT COUNT(*) AS n FROM lessons")[0]["n"] == 1
+    kept = json.loads((run.folder / "rounds" / "001" / "end.json").read_text())
+    assert kept["ways"][0]["places"][0]["status"] == end_checks.OVER
 
 
 # The approval stop isn't asked until the checks pass, or the run asks a person about them

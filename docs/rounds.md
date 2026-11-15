@@ -345,10 +345,10 @@ mqucifer/print-shop#142 gave the bench `fit-on` and `bend`, and nothing made a r
 | | When | |
 |---|---|---|
 | passes | an arm was found, and `bend` reads `OK` | |
-| doesn't pass | an arm was found and `bend` reads `FAIL`; or, between two printed parts, no arm was found or `bend` had no answer; or the two overlap where the part sits, which no bend clears | the run is sent back |
-| for a person | one of the two is a given, bought part, and the printed one doesn't take it | it isn't failed |
+| doesn't pass | a printed arm was found and `bend` reads `FAIL`, whether what pushes past it is printed or given; or, between two printed parts, no arm was found, `bend` had no answer, or the two overlap where the part sits, which no bend clears | the run is sent back |
+| for a person | one of the two is a given, bought part, and no printed arm was read there: none was found, or `bend` had no answer | it isn't failed |
 
-**A given part isn't bent as PETG.** A flexible strip pushed past a catch gives way itself. Where one of the two is a given part and no printed arm takes the push, the reading says how far the given part has to give way, with what the printed arm read, and that a person judges it. It's shown at the stop for approval, and doesn't send the run back.
+**A given part isn't bent as PETG.** A flexible strip pushed past a catch gives way itself. Where one of the two is a given part and no printed arm was read at the place, what has to give way is the given part: the reading says how far, and that a person judges it. It's shown at the stop for approval, and doesn't send the run back. **A printed arm that reads `FAIL` sends the run back whatever pushes past it** (decided through the operator, 2026-11-15): a rigid bought part forced past a printed clip that's over its limit is the run's design to fix. *Evidence: a design run's fan couldn't be fitted in its slide-in pocket for exactly this (design-runs:33).*
 
 **When one doesn't pass:**
 - **A lesson is written,** a candidate, a `verify` lesson by `the harness`, for the model's route, reviewed like any other. Its evidence is the call and each command with its reading, so a reviewer can run them again (`lessons R` shows them as `end check`), and its keys are `fit-on` and `bend` with their verdicts. One lesson for each failing pair of files and what it came to: a second send-back for the same writes no second.
