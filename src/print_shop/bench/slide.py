@@ -761,6 +761,24 @@ def _point(p: Any) -> str:
     return "(" + ", ".join(f"{float(v):.4g}" for v in p) + ")"
 
 
+def _fit_on_said(report: Report, found: dict[str, Any]) -> None:
+    """Where the way in passes another part, the reading of that way (mqucifer/print-shop#142):
+    `fit-on`, as a command to run, with the files as this one was given them. A design run's
+    lid read `HELD` here, and nothing read how far its clips had to bend to let it on."""
+    given = {w.rpartition("/")[2]: w for w in report.argv if not w.startswith("-")}
+    names = [found["file"], *dict.fromkeys(p["part"].partition("#")[0] for p in found["path"])]
+    files = [given.get(n, n) for n in names]
+    if not all(f.lower().endswith((".step", ".stp")) for f in files):
+        return
+    out = max(1, math.ceil(found["clear_mm"]))
+    report.line(
+        f"  How far each has to bend is `fit-on`'s to read: `fit-on {files[0]} --onto "
+        f"{' '.join(files[1:])} --along {found['way']} --from {out}` places {found['file']} at "
+        "each step of its way in and says how deep it passes through each part, across; `bend` "
+        "then reads whether what's there takes that"
+    )
+
+
 def _box_said(low: Any, high: Any) -> str:
     return f"{_point(low)} to {_point(high)}"
 
@@ -1043,6 +1061,7 @@ def _said(
             f"seen along {way[1]}. It isn't how far anything bends: the bench doesn't know which "
             "way an arm bends. Read where the catch is from its box"
         )
+        _fit_on_said(report, found)
     else:
         report.line(f"path: nothing is in {name}'s way {way}, so nothing has to bend to fit it")
     if found["verdict"] == "NOT HELD":

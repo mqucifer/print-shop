@@ -22,6 +22,8 @@ from OCP.BRepTools import BRepTools
 from OCP.ShapeFix import ShapeFix_Solid
 from OCP.TopoDS import TopoDS
 
+from .report import NoAnswer as NoAnswer  # every command's, said here as it always was
+
 #: (chord tolerance in mm, angle tolerance in radians).
 COARSE = (0.01, 0.1)
 FINE = (0.002, 0.05)
@@ -30,10 +32,6 @@ VOLUME_FLOOR = 1e-3
 #: The share of a volume two methods may differ by, whatever the mesh's band: arithmetic's
 #: noise, kept small, or a real cut in a large part would fall inside it.
 VOLUME_SHARE = 1e-5
-
-
-class NoAnswer(Exception):
-    """A method couldn't run, so the command can't say. Its message is the reason."""
 
 
 def _tessellated(shape: Any, tolerance: tuple[float, float]) -> trimesh.Trimesh:

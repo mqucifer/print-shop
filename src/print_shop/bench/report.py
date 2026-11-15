@@ -25,6 +25,7 @@ BAD = {
     "PARTIAL",
     "NOT HELD",
     "HELD BY A SEPARATE BODY",
+    "BLOCKED",
 }
 #: There's no answer to rely on: the methods differ, or one couldn't run.
 UNSURE = {"DISAGREE", "NO ANSWER"}
@@ -61,6 +62,11 @@ def how_it_ran() -> dict[str, Any]:
         "memory_max": read("/sys/fs/cgroup/memory.max"),
         "user": os.getuid(),
     }
+
+
+class NoAnswer(Exception):
+    """A method couldn't run, so the command can't say. Its message is the reason. It's here, not
+    with the shapes, so the second image's commands raise it with no CadQuery to import."""
 
 
 class Report:

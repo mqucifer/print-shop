@@ -16,7 +16,7 @@ The first line is the verdict. Then come the numbers, each with how it was read,
 | Exit | Verdicts | It means |
 |---|---|---|
 | 0 | `OK`, `CLEAR`, `TOUCHING`, `HELD` | both methods agree, and nothing's wrong |
-| 1 | `FAIL`, `INTERFERE`, `TOO CLOSE`, `TOO LOOSE`, `NO CHANGE`, `PARTIAL`, `NOT HELD`, `HELD BY A SEPARATE BODY` | both methods agree that something's wrong |
+| 1 | `FAIL`, `INTERFERE`, `TOO CLOSE`, `TOO LOOSE`, `NO CHANGE`, `PARTIAL`, `NOT HELD`, `HELD BY A SEPARATE BODY`, `BLOCKED` | both methods agree that something's wrong |
 | 2 | `DISAGREE`, `NO ANSWER` | there's no answer to rely on: read the numbers, and don't pick one |
 | 3 | | the command itself was wrong |
 
@@ -37,6 +37,10 @@ The first line is the verdict. Then come the numbers, each with how it was read,
 | `layout FILE.json [--inset D]... [--join mitre\|round] [--min-width W]` | a flat layout of named pieces, in 2D: whether each is one piece, and where each part is; its least width and where, into a sharp tip or across a neck; what an inset of D leaves of it, how many parts and the narrowest neck, and where it cuts the piece; any two that overlap; and a picture with each piece labelled, which comes to you |
 | `faces FILE` | a STEP part's flat faces, by plane: the way each faces, where (`z=7.5`), its area and its box; and its round holes and bosses: centre, axis, radius, depth, and whether a hole is open at each end. A reading, for measuring a part, a bought one too, instead of a script of your own |
 | `slice FILE --at z=H [--at x=H]...` | the part cut by a plane, level (`z=`) or upright (`x=`, `y=`): each separate piece's area, box and outline, and each hole in it, with its centre and, where it's round, its diameter. A reading, for a cross-section instead of a script of your own |
+| `fit-on MOVING --onto FILE... --along DIR --from MM [--step MM]` | a part's way on. MOVING is the part where it sits once on, DIR its way out (`+z` for a lid lifted off upward), and it's placed at each step from MM out down to where it sits and intersected with every FILE. `CLEAR` when nothing is in its way. `BLOCKED` names each place it passes through something, deepest first: where, from how far out to how far, and `depth_mm`, how deep across, which is how far what's there has to move aside for the part to pass. A snap fit is meant to be `BLOCKED`: its depth is the push `bend` takes |
+| `bend FILE --arm X0,Y0,Z0,X1,Y1,Z1 --root AXIS=AT --push MM --toward DIR [--at far\|near\|both] [--layers AXIS] [--limit PCT] [--mesh MM]` | whether an arm survives being bent. The arm is FILE's material in the box, one side of the box on its root, where it joins the rest, and clear of the wall beside it; it's held at the root plane (`z=10`) and an edge of its hook is pushed MM `--toward` a way across it. It gives the strain across the layers (stacked along z unless `--layers` says), its peak and where, and how far the arm's back moves against the room behind it. `FAIL` over what the material takes across its layers (PETG 1%, or `--limit`), or where the arm meets what's behind it first. It pushes the hook's far edge and its near one, and judges the worse |
+
+**`fit-on` and `bend` run in a container of their own,** with FreeCAD, gmsh and CalculiX, under the same limits. They're bench commands only: a script of yours has no FreeCAD to import. `clearance --slide` reads what holds a part once it's on, and what lies on its path; `fit-on` reads how far that has to bend, and `bend` whether it can. Neither reads friction, how hard a push is, or how well a snug fit holds.
 
 **`pause`'s numbers are the bench's own,** largest opening first, not your files'.
 
@@ -91,6 +95,8 @@ A bench need names a command as you'd give it, and what must hold. The harness r
 | `one-piece` | the part is one connected solid | `thin FILE --one-body` |
 | `insert` | the layer to pause after to drop an insert in, and the room over it | `pause FILE --pocket-z Z --pane-thickness T --min-room R` |
 | `parameter` | a top-level number moves every piece it should | `params SCRIPT --set NAME=VALUE` |
+| `way-on` | a part's way on: what it passes through, and how far that has to bend | `fit-on LID.step --onto BASE.step --along +z --from MM`; for a snap fit, `verdicts` `["BLOCKED"]` and `number` `depth_mm` with `at_most` |
+| `bend` | the strain an arm takes across its layers when it's pushed aside | `bend FILE --arm X0,Y0,Z0,X1,Y1,Z1 --root AXIS=AT --push MM --toward DIR` |
 
 A check should hold what the need says. "A 0.2 mm margin" asks `pause --min-room 0.2`, "one connected solid" asks `thin --one-body`, "2 mm of wall round the hanging hole" asks `wall --hole X,Y,Z --min-wall 2` at that hole (not `info`, whose size is the whole part's, nor `thin`, whose thinnest figures are too), and "moves every piece" asks `params` with no `--max-left`. `render` draws and measures nothing: what only an eye can judge is an eye need. Whether a bought part is held is never one: `clearance <part> <bought part> --slide <its way out>` reads it, with `HELD`, and `needs` refuses an eye need on it, giving the command.
 

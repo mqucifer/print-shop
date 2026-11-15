@@ -102,3 +102,161 @@ def test_a_report_cant_use_an_unknown_verdict() -> None:
 )
 def test_exit_codes_tell_the_three_kinds_of_answer_apart(word: str, code: int) -> None:
     assert EXIT[word] == code
+
+
+# The second image (mqucifer/print-shop#142)
+
+
+def test_fit_on_and_bend_run_in_the_second_image_and_everything_else_in_the_first() -> None:
+    assert host.image_for(["fit-on", "lid.step", "--onto", "box.step"]) == host.CAE_IMAGE
+    assert host.image_for(["--out", "elsewhere", "bend", "clip.step"]) == host.CAE_IMAGE
+    assert host.image_for(["--out=elsewhere", "bend", "clip.step"]) == host.CAE_IMAGE
+    assert host.image_for(["clearance", "a.step", "bend.step"]) == host.IMAGE
+    assert host.image_for(["--out", "bend", "info", "a.step"]) == host.IMAGE, "a folder's name"
+    assert host.image_for([]) == host.IMAGE
+    import argparse
+
+    from print_shop.bench.cli import parser
+
+    commands = next(a for a in parser()._actions if isinstance(a, argparse._SubParsersAction))
+    assert set(host.CAE_COMMANDS) < set(commands.choices), "each is a command of the bench's"
+
+
+def test_the_second_image_s_container_has_the_same_limits(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(host, "image_id", lambda image=host.IMAGE: f"sha256:{image}")
+    monkeypatch.setattr(host, "code_version", lambda: "abc")
+    command = host.bench_command(["fit-on", "lid.step", "--onto", "box.step"])
+    assert command[:2] == [host.CAE_PYTHON, "-I"], "nothing in /work can shadow an import"
+    first = host.container(Path("/tmp/x"), ["python", "-V"], "n")
+    second = host.container(Path("/tmp/x"), command, "n", image=host.CAE_IMAGE)
+    cut = second.index(host.CAE_IMAGE)
+    assert second[cut + 1 :] == command
+    limits = [w for w in first[: first.index(host.IMAGE)] if not w.startswith("BENCH_IMAGE")]
+    assert [w for w in second[:cut] if not w.startswith("BENCH_IMAGE")] == limits
+    assert f"BENCH_IMAGE={host.CAE_IMAGE}" in second
+    assert f"BENCH_IMAGE_ID=sha256:{host.CAE_IMAGE}" in second, "the report names its own image"
+
+
+@pytest.mark.parametrize(
+    ("here", "free", "built"),
+    [
+        # Both to build: the second waits for room for both.
+        ((), host.FLOOR_GB + host.CAE_LIMIT_GB + host.IMAGE_LIMIT_GB - 0.5, False),
+        ((), host.FLOOR_GB + host.CAE_LIMIT_GB + host.IMAGE_LIMIT_GB + 0.5, True),
+        # The first is here: the second needs its own limit over the floor.
+        ((host.IMAGE,), host.FLOOR_GB + host.CAE_LIMIT_GB - 0.5, False),
+        ((host.IMAGE,), host.FLOOR_GB + host.CAE_LIMIT_GB + 0.5, True),
+        # It's here already: a build of it is its layers again, and isn't refused.
+        ((host.IMAGE, host.CAE_IMAGE), host.FLOOR_GB + 0.5, True),
+    ],
+)
+def test_the_second_image_s_build_counts_both_images_against_the_floor(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    here: tuple[str, ...],
+    free: float,
+    built: bool,
+) -> None:
+    ran: list[list[str]] = []
+
+    def build(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        ran.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(host, "free_gb", lambda: free)
+    monkeypatch.setattr(
+        host, "image_id", lambda image=host.IMAGE: "sha256:a" if image in here else None
+    )
+    monkeypatch.setattr(host, "check", lambda: 0)
+    monkeypatch.setattr(subprocess, "run", build)
+    assert host.build("cae") == (0 if built else 1)
+    said = capsys.readouterr().out
+    if built:
+        (argv,) = ran
+        assert argv[:2] == ["docker", "build"] and host.CAE_IMAGE in argv
+        assert argv[-1].endswith("cae-image")
+    else:
+        assert not ran, "nothing may be built"
+        assert "refused" in said and host.CAE_IMAGE in said
+
+
+def test_the_first_image_s_build_leaves_room_for_the_second_too(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ran: list[object] = []
+    monkeypatch.setattr(host, "free_gb", lambda: host.FLOOR_GB + host.IMAGE_LIMIT_GB + 0.5)
+    monkeypatch.setattr(host, "image_id", lambda image=host.IMAGE: None)
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: ran.append(a))
+    assert host.build() == 1 and not ran
+    said = capsys.readouterr().out
+    assert host.IMAGE in said and host.CAE_IMAGE in said
+
+
+def test_a_build_of_an_image_theres_none_of_is_a_usage_error(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert host.build("fea") == 3
+    assert "bench, cae" in capsys.readouterr().out
+
+
+def test_check_holds_each_image_to_its_limit_and_names_tags_left_behind(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sizes = {host.IMAGE: 2.1, host.CAE_IMAGE: 3.2}
+    monkeypatch.setattr(host, "image_id", lambda image=host.IMAGE: "sha256:abc")
+    monkeypatch.setattr(host, "image_gb", lambda image=host.IMAGE: sizes[image])
+    monkeypatch.setattr(host, "free_gb", lambda: host.FLOOR_GB + 1)
+    monkeypatch.setattr(host, "others", lambda image: ["print-shop/cae:0.0"])
+    assert host.check() == 0
+    said = capsys.readouterr().out
+    assert (
+        f"{host.IMAGE} sha256:abc: 2.10 GB" in said
+        and f"{host.CAE_IMAGE} sha256:abc: 3.20 GB" in said
+    )
+    assert "print-shop/cae:0.0" in said and "docker image rm" in said
+    sizes[host.CAE_IMAGE] = host.CAE_LIMIT_GB + 0.1
+    assert host.check() == 1
+    assert "over the limit" in capsys.readouterr().out
+
+
+def test_check_passes_with_the_second_image_still_to_build(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        host, "image_id", lambda image=host.IMAGE: "sha256:abc" if image == host.IMAGE else None
+    )
+    monkeypatch.setattr(host, "image_gb", lambda image=host.IMAGE: 2.1)
+    monkeypatch.setattr(host, "free_gb", lambda: host.FLOOR_GB + 1)
+    assert host.check() == 0
+    assert "scripts/bench.py build cae" in capsys.readouterr().out
+
+
+def test_the_second_image_s_packages_are_each_by_url_and_md5() -> None:
+    """Both platforms' lists: nothing is solved at a build, and the three the issue names are at
+    the versions it names."""
+    folder = host.HERE / host.IMAGES["cae"][2]
+    for arch in ("arm64", "amd64"):
+        lines = (folder / f"lock-{arch}.txt").read_text().splitlines()
+        assert "@EXPLICIT" in lines
+        packages = [line for line in lines if line and not line.startswith(("#", "@"))]
+        assert len(packages) > 250
+        for line in packages:
+            url, _, md5 = line.partition("#")
+            assert url.startswith("https://conda.anaconda.org/conda-forge/"), line
+            assert len(md5) == 32 and int(md5, 16) >= 0, line
+        names = {line.rpartition("/")[2] for line in packages}
+        for pin in ("freecad-1.1.3-", "calculix-2.23-", "gmsh-4.15.2-", "occt-7.9.3-"):
+            assert any(name.startswith(pin) for name in names), pin
+    dockerfile = (folder / "Dockerfile").read_text()
+    assert "@sha256:" in dockerfile.split("FROM ")[1].splitlines()[0], "the base by its digest"
+    assert "lock-${TARGETARCH}.txt" in dockerfile
+
+
+def test_a_rounds_run_without_the_second_image_is_told_and_goes_on(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from print_shop.rounds.box import Box
+
+    monkeypatch.setattr(host, "image_id", lambda image=host.IMAGE: None)
+    done = Box(tmp_path).bench(["fit-on", "lid.step", "--onto", "box.step"])
+    assert done.code == 3 and "scripts/bench.py build cae" in done.output
