@@ -102,7 +102,7 @@ def _when(iso: str | None) -> str:
     if not iso:
         return "-"
     try:
-        return f"{datetime.fromisoformat(iso).astimezone():%Y-%m-%d %H:%M}"
+        return f"{datetime.fromisoformat(iso).astimezone():%Y-%m-%d %H:%M %Z}"
     except ValueError:
         return iso
 
@@ -229,7 +229,7 @@ def _summary(row: Row, record: JobRecord) -> str:
 
 
 def _again(row: Row, record: JobRecord) -> str:
-    a = again(row, record.part_path, record.printers)
+    a = again(row, record.part_path, record.printers, record.part_found)
     parts = ["<section><h2>Run it again</h2>",
              "<h3>The command</h3>", _copy("again-command", a.command)]
     parts.append("<p class=\"muted\">It doesn't arm the printer: that's on the command's own "

@@ -2,9 +2,10 @@
 
 The Sponsor, 2026-11-15: "since im often re-running with the same settings, to be be able to see
 and re-copy those". Three things, each copied from the page and never run by it:
-- **the command line,** with the part's path from the job's log, the nozzle and filament the
-  print used, its machine and process profiles by name, `--as-laid` if it was kept as laid, and
-  `--answers` naming the answers file where the browser saves it;
+- **the command line,** with the part's file, found by the sha256 the ledger keeps
+  (`read.PartFinder`: the log's path, the parts folder, the job's folder), the nozzle and
+  filament the print used, its machine and process profiles by name, `--as-laid` if it was
+  kept as laid, and `--answers` naming the answers file where the browser saves it;
 - **the correction line,** typed at the review as it was then (`key=value because …; …`, read
   by `review.parse_answer`): the Sponsor's own corrections, in order;
 - **the answers file** for `--answers` (`intake.replay_asker`): each question by its text, each
@@ -81,14 +82,20 @@ def correction_line(row: Row) -> str:
     return "; ".join(parts)
 
 
-def again(row: Row, part_path: Path | None, printers: int = 1) -> Again:
-    """How to run `row`'s job again. `part_path` is the part's path as its log names it;
+def again(row: Row, part_path: Path | None, printers: int = 1, part_found: bool = False) -> Again:
+    """How to run `row`'s job again. `part_path` is the part's file, and `part_found` says it
+    has the bytes the job printed (by sha256); else it's the path the log names, if any.
     `printers` is how many the inventory has (`--printer` is needed with more than one)."""
     notes: list[str] = []
     part = str(part_path) if part_path is not None else row.stl_name
-    if part_path is None:
-        notes.append(f"This job is from before its log was kept, so the part's path isn't "
-                     f"known: give {row.stl_name}'s path in its place.")
+    if not part_found:
+        where = ("nothing in the parts folder or the job's folder has the bytes it printed "
+                 f"(sha256 {row.stl_sha256[:12]}…)")
+        if part_path is not None and part_path.is_file():
+            notes.append(f"{part_path} has changed since this job, and {where}: check it's "
+                         "the part you mean.")
+        else:
+            notes.append(f"{row.stl_name} wasn't found: {where}. Give its path in its place.")
     args = [part]
     material = row.material
     if material is not None:

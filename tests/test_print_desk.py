@@ -12,6 +12,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import shlex
 import sqlite3
 import threading
@@ -30,6 +31,7 @@ from print_shop import ledger as ledger_module
 from print_shop.core.state import AppliedOrientation, SliceResult
 from print_shop.desk import HOST, Desk, make_server
 from print_shop.desk.again import again, correction_line
+from print_shop.desk.read import PARTS_DIR, parts_dir
 from print_shop.inventory import Inventory
 from print_shop.ledger import Answer, JobEnding, Ledger, LedgerError, PrintRecord, Result, Symptom
 from print_shop.setup.intake import Answer as IntakeAnswer
@@ -52,11 +54,20 @@ TYPED = "wall_loops=4 because it carries the load; pause_at=12.4 because white t
         "seam_position=back"
 
 
+BRACKET = b"solid bracket\nendsolid bracket\n"
+CUBE_BYTES = b"solid cube\nendsolid cube\n"
+
+
+def _sha(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
 @dataclass
 class Shop:
     ledger: Path
     jobs: Path
-    part: Path
+    parts: Path
+    part: Path  # the bracket, found by its bytes in a subfolder of the parts folder
     request: ReviewRequest
     store_profiles: SlicerProfiles
 
@@ -137,13 +148,14 @@ def _shop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Shop:
     reading = reading.model_copy(update={"pauses": (
         PauseReading(before_layer=62, z=12.4, after_s=600.0),)})
     base = dict(
-        stl_sha256="ab" * 32, orientation_accepted=True, layer_count=100,
+        orientation_accepted=True, layer_count=100,
         slicer_config={"nozzle_diameter": "0.4", "filament_settings_id": TUNING},
         printer_machine="Centauri Carbon", printer_firmware="V1.1.46", profiles=used,
     )
     with Ledger(path) as ledger:
         ledger.record_start_requested(PrintRecord(
-            job_id=SIGN, stl_name="bracket.stl", rotation_deg=(0.0, 0.0, 0.0),
+            job_id=SIGN, stl_name="bracket.stl", stl_sha256=_sha(BRACKET),
+            rotation_deg=(0.0, 0.0, 0.0),
             orientation_source="model:crew-code-think", orientation_rationale="flat face down",
             gcode_name="bracket.gcode", print_time_s=5400, filament_cm3=31.5, intake=intake,
             proposal=proposal, corrections=corrections, reading=reading,
@@ -160,7 +172,8 @@ def _shop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Shop:
         ledger.record_answer(SIGN, Answer(result=Result.FAILED, symptom=Symptom.STRINGING,
                                           note="hairs between the channels <b>"))
         ledger.record_start_requested(PrintRecord(
-            job_id=CUBE, stl_name="cube.stl", rotation_deg=(0.0, 0.0, 0.0),
+            job_id=CUBE, stl_name="cube.stl", stl_sha256=_sha(CUBE_BYTES),
+            rotation_deg=(0.0, 0.0, 0.0),
             orientation_source="as_laid", orientation_rationale="kept as laid, by you",
             gcode_name="cube.gcode", print_time_s=1009, filament_cm3=3.3,
             intake=Intake(note="no questions: the part's features left nothing to ask"),
@@ -170,14 +183,24 @@ def _shop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Shop:
         ledger.record_frames_missed(CUBE, "the camera is off")
         ledger.record_unprinted(HOOK, "hook.stl", JobEnding.TIMED_OUT,
                                 "the approval gate waited an hour")
-    part = tmp_path / "parts" / "bracket.stl"
+    # The log names where the bracket was; it's since moved into a subfolder of the parts
+    # folder, renamed, beside a file that isn't it. The cube is only in its job's folder.
+    parts = tmp_path / "parts"
+    part = parts / "brackets" / "bracket-v2.stl"
+    part.parent.mkdir(parents=True)
+    part.write_bytes(BRACKET)
+    (parts / "brackets" / "bracket-v3.STL").write_bytes(b"solid other\nendsolid other\n")
+    (jobs / CUBE).mkdir()
+    (jobs / CUBE / "cube.stl").write_bytes(CUBE_BYTES)
     (jobs / SIGN / "job.log").write_text(f"print_job.py, 2026-11-15T10:00:00+00:00\n"
-                                        f"part: {part}\ncommand: ...\nAt the review.\n")
+                                        f"part: {tmp_path / 'desk' / 'bracket.stl'}\n"
+                                        "command: ...\nAt the review.\n")
     (jobs / CLIP).mkdir()
     (jobs / CLIP / "job.log").write_text("print_job.py\npart: /parts/clip.stl\nStopped.\n")
     later = datetime(2026, 11, 15, 11, 0, tzinfo=UTC).timestamp()  # after every row's
     os.utime(jobs / CLIP / "job.log", (later, later))
-    return Shop(ledger=path, jobs=jobs, part=part, request=request, store_profiles=profiles)
+    return Shop(ledger=path, jobs=jobs, parts=parts, part=part, request=request,
+                store_profiles=profiles)
 
 
 @pytest.fixture
@@ -187,7 +210,7 @@ def shop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Shop:
 
 @pytest.fixture
 def served(shop: Shop) -> Iterator[str]:
-    server = make_server(Desk(shop.ledger, shop.jobs), 0)
+    server = make_server(Desk(shop.ledger, shop.jobs, shop.parts), 0)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -280,6 +303,8 @@ def test_the_front_page_shows_whats_loaded_and_every_job_newest_first(
     assert "failed, stringing" in page and "printing" in page
     assert "ended unprinted: timed_out" in page and "its log only" in page
     assert "colour change" in page
+    zoned = r"2026-11-1\d \d\d:\d\d (?:[A-Z]{2,5}|[+-]\d{2,4})<"
+    assert re.search(zoned, page), "times say their zone"
 
 
 def test_a_jobs_page_shows_its_whole_record(shop: Shop, served: str) -> None:
@@ -326,19 +351,21 @@ def test_a_print_without_frames_says_why(shop: Shop, served: str) -> None:
 # --- run it again -------------------------------------------------------------------
 
 
-def _record(shop: Shop, job_id: str) -> tuple[ledger_module.Row, Path | None, int]:
-    record = Desk(shop.ledger, shop.jobs).job(job_id)
+def _record(shop: Shop, job_id: str) -> tuple[ledger_module.Row, Path | None, int, bool]:
+    record = Desk(shop.ledger, shop.jobs, shop.parts).job(job_id)
     assert record is not None and record.row is not None
-    return record.row, record.part_path, record.printers
+    return record.row, record.part_path, record.printers, record.part_found
 
 
 def test_run_it_again_reproduces_the_jobs_settings(shop: Shop, tmp_path: Path) -> None:
-    row, part, printers = _record(shop, SIGN)
-    a = again(row, part, printers)
+    row, part, printers, found = _record(shop, SIGN)
+    a = again(row, part, printers, found)
 
-    # The command: the same part, nozzle, spool and profiles.
+    # The command: the same part, found by its bytes, and the same nozzle, spool and profiles.
     args = shlex.split(a.command.replace("~/Downloads", str(tmp_path / "Downloads")))
     assert args[:5] == ["uv", "run", "python", "scripts/print_job.py", str(shop.part)]
+    assert _sha(Path(args[4]).read_bytes()) == row.stl_sha256
+    assert not any("wasn't found" in n or "has changed" in n for n in a.notes)
     given = dict(zip(args[5::2], args[6::2], strict=False))
     assert "--as-laid" not in args, "the model chose its pose; it was sent back at the review"
     with Inventory(shop.ledger) as inventory:
@@ -369,15 +396,53 @@ def test_run_it_again_reproduces_the_jobs_settings(shop: Shop, tmp_path: Path) -
 
 
 def test_a_print_kept_as_laid_runs_again_as_laid_with_no_answers(shop: Shop) -> None:
-    row, part, printers = _record(shop, CUBE)
-    a = again(row, part, printers)
-    assert a.command.split()[4] == "cube.stl" and "--as-laid" in a.command
+    row, part, printers, found = _record(shop, CUBE)
+    a = again(row, part, printers, found)
+    assert a.command.split()[4] == str(shop.jobs / CUBE / "cube.stl"), "found in its folder"
+    assert "--as-laid" in a.command
     assert "--answers" not in a.command and a.answers is None and a.corrections == ""
-    assert any("before its log was kept" in n for n in a.notes)
+    assert a.notes == ()
+
+
+def test_the_parts_folder_comes_from_the_settings(tmp_path: Path) -> None:
+    env = tmp_path / ".env"
+    env.write_text(f"PRINT_SHOP_PARTS={tmp_path}/my-parts\n")
+    assert parts_dir(env) == tmp_path / "my-parts"
+    assert parts_dir(tmp_path / "none.env") == PARTS_DIR == Path("~/print-shop/parts").expanduser()
+
+
+def test_a_part_nothing_hashes_to_is_not_found_and_says_so(shop: Shop) -> None:
+    shop.part.write_bytes(b"solid bracket, edited\nendsolid\n")
+    row, part, printers, found = _record(shop, SIGN)
+    assert not found and part == shop.ledger.parent / "desk" / "bracket.stl", "the log's path"
+    a = again(row, part, printers, found)
+    assert any(n.startswith("bracket.stl wasn't found: nothing in the parts folder")
+               for n in a.notes)
+    (shop.jobs / CUBE / "cube.stl").write_bytes(b"changed")
+    shop.part.parent.joinpath("cube.stl").write_bytes(b"changed too")
+    row, part, printers, found = _record(shop, CUBE)
+    assert (found, part) == (False, None)
+    assert again(row, part, printers, found).command.split()[4] == "cube.stl"
+
+
+def test_the_logs_path_is_kept_while_it_holds_the_same_bytes(shop: Shop) -> None:
+    named = shop.ledger.parent / "desk" / "bracket.stl"
+    named.parent.mkdir()
+    named.write_bytes(BRACKET)
+    _, part, _, found = _record(shop, SIGN)
+    assert (part, found) == (named, True), "the log's own path first, over the parts folder"
+    named.write_bytes(b"solid bracket, changed since\nendsolid\n")
+    row, part, printers, found = _record(shop, SIGN)
+    assert (part, found) == (shop.part, True), "then the parts folder"
+    shop.part.unlink()
+    row, part, printers, found = _record(shop, SIGN)
+    assert (part, found) == (named, False)
+    assert any(n.startswith(f"{named} has changed since this job")
+               for n in again(row, part, printers, found).notes)
 
 
 def test_a_reason_with_a_semicolon_doesnt_split_the_line(shop: Shop) -> None:
-    row, _, _ = _record(shop, SIGN)
+    row, _, _, _ = _record(shop, SIGN)
     split = Change(key="wall_loops", preset="2", value="4", source=Source.SPONSOR,
                    reason="strong; it hangs")
     line = correction_line(row.model_copy(update={"corrections": (split,)}))

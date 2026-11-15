@@ -4,24 +4,45 @@ The ledger is opened read-only for each view (`Ledger.read_only`, SQLite's `mode
 after it, so the desk holds nothing open between views and can't change a row. The jobs folder
 is only listed and read. A job id from a URL is checked to be a plain name before any path is
 made from it, and a frame is served by its number in the ledger, never by a path from the URL.
+
+**A past job's part is found by its hash** (`PartFinder`): the ledger keeps each part's sha256, so
+the file to print again is the one with the same bytes, wherever it is now: at the path its log
+names, else under the parts folder (`PRINT_SHOP_PARTS` in the settings, default
+`~/print-shop/parts`, and its subfolders), else in the job's own folder. A file is hashed once
+for each size and change time, so a page doesn't read every part again.
 """
 
 from __future__ import annotations
 
+import hashlib
 import re
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from print_shop.env import load_env
 from print_shop.inventory import Nozzle, Printer, Spool
 from print_shop.joblog import LOG_NAME
 from print_shop.ledger import Frame, Ledger, LedgerError, Row, UnprintedJob
 from print_shop.orchestrator.frames import FRAMES_DIR
 from print_shop.setup.proposal import PAUSE
 
-__all__ = ["Desk", "JobRecord", "JobSummary", "OnHand", "PrinterNow", "plain_id"]
+__all__ = [
+    "PARTS_DIR", "Desk", "JobRecord", "JobSummary", "OnHand", "PartFinder", "PrinterNow",
+    "parts_dir", "plain_id",
+]
+
+#: Where the Sponsor's part files are kept, searched with its subfolders for a past job's part.
+PARTS_DIR = Path("~/print-shop/parts").expanduser()
+
+#: The settings key that moves it.
+PARTS_KEY = "PRINT_SHOP_PARTS"
+
+#: The files a part can be: what `print_job.py` slices.
+_PART_SUFFIXES = (".stl", ".3mf")
 
 #: A job id as the daemon makes them (a uuid), or any plain name: nothing a path can climb out
 #: of the jobs folder with.
@@ -33,6 +54,57 @@ _PART = re.compile(r"^part: (.+)$", re.M)
 
 def plain_id(job_id: str) -> bool:
     return _PLAIN.fullmatch(job_id) is not None
+
+
+def parts_dir(settings: Path) -> Path:
+    """The parts folder: `PRINT_SHOP_PARTS` in the settings, or the default."""
+    value = load_env(settings).get(PARTS_KEY)
+    return Path(value).expanduser() if value else PARTS_DIR
+
+
+class PartFinder:
+    """Part files by their sha256, each file hashed once while its size and change time hold."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._hashes: dict[Path, tuple[int, int, str]] = {}
+
+    def sha256(self, path: Path) -> str | None:
+        try:
+            stat = path.stat()
+        except OSError:
+            return None
+        key = (stat.st_size, stat.st_mtime_ns)
+        with self._lock:
+            known = self._hashes.get(path)
+        if known is not None and known[:2] == key:
+            return known[2]
+        digest = hashlib.sha256()
+        try:
+            with path.open("rb") as f:
+                for block in iter(lambda: f.read(1 << 20), b""):
+                    digest.update(block)
+        except OSError:
+            return None
+        found = digest.hexdigest()
+        with self._lock:
+            self._hashes[path] = (*key, found)
+        return found
+
+    def find(self, sha256: str, named: Path | None, folders: tuple[Path, ...]) -> Path | None:
+        """The file with these bytes: `named` if it still has them, else the first under
+        `folders`, in order, by path."""
+        if named is not None and named.is_file() and self.sha256(named) == sha256:
+            return named
+        for folder in folders:
+            if not folder.is_dir():
+                continue
+            files = sorted(p for p in folder.rglob("*")
+                           if p.suffix.lower() in _PART_SUFFIXES and p.is_file())
+            for path in files:
+                if self.sha256(path) == sha256:
+                    return path
+        return None
 
 
 @dataclass(frozen=True)
@@ -78,8 +150,11 @@ class JobRecord:
     frames: tuple[Frame, ...] = ()
     frames_missed: str | None = None
     log: str | None = None
-    #: The part's full path as the log names it; None for a job from before the log.
+    #: The part's file: the one with its bytes (`PartFinder`), else the path its log names, else
+    #: None.
     part_path: Path | None = None
+    #: Whether `part_path` holds the bytes the job printed, by their sha256.
+    part_found: bool = False
     printers: int = 0
 
 
@@ -108,9 +183,11 @@ def has_swap(row: Row) -> bool:
 class Desk:
     """The ledger file and the jobs folder, read for each view."""
 
-    def __init__(self, ledger: Path, jobs: Path) -> None:
+    def __init__(self, ledger: Path, jobs: Path, parts: Path | None = None) -> None:
         self.ledger_path = ledger
         self.jobs_dir = jobs
+        self.parts_dir = parts if parts is not None else PARTS_DIR
+        self._finder = PartFinder()
 
     @contextmanager
     def _ledger(self) -> Iterator[Ledger | None]:
@@ -209,9 +286,13 @@ class Desk:
         text = log.read_text(encoding="utf-8", errors="replace") if log is not None else None
         if row is None and unprinted is None and text is None:
             return None
+        named = _part(text) if text is not None else None
+        found = (self._finder.find(row.stl_sha256, named,
+                                   (self.parts_dir, self.jobs_dir / job_id))
+                 if row is not None else None)
         return JobRecord(
             job_id=job_id, row=row, unprinted=unprinted, frames=frames, frames_missed=missed,
-            log=text, part_path=_part(text) if text is not None else None, printers=printers,
+            log=text, part_path=found or named, part_found=found is not None, printers=printers,
         )
 
     def log_path(self, job_id: str) -> Path | None:
