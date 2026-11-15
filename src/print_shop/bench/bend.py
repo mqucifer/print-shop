@@ -56,7 +56,7 @@ LIMITS = {"petg": 1.0}
 #: figure, and still be one answer. A wide arm bends partly as a plate, up to 1/(1 - ν²) stiffer
 #: where it can't curl across its width, 17% at ν 0.38, which moves strain along it, and a beam
 #: has no shear: on the planted clips the two are 7 to 11% apart. A stubby arm, twice as long
-#: as it's thick, is 23 to 35% apart, and that's no answer.
+#: as it's thick, is 24 to 34% apart, and that's no answer.
 AGREE = 0.2
 #: The slabs the beam cuts the arm into, from its root to the pushed edge.
 SLABS = 40

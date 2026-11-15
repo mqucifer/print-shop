@@ -30,11 +30,12 @@ TMP_SIZE = "1g"
 #: The disk limit, in GB: the image at its largest, and the free space never to go under.
 IMAGE_LIMIT_GB = 4.0
 FLOOR_GB = 5.0
-#: The second image: FreeCAD 1.1.3, gmsh and CalculiX from conda-forge, each package by its URL
-#: and MD5 in `cae-image/lock-*.txt`. To make the lists again, in any micromamba container with a
-#: network: `micromamba create -p /tmp/x --platform linux-aarch64 -c conda-forge
-#: --override-channels freecad=1.1.3 calculix=2.23 gmsh=4.15.2 --dry-run --json`, and each
-#: `actions.LINK` entry's `url#md5` in order; `linux-64` for CI.
+#: The second image: FreeCAD 1.1.3, gmsh and CalculiX from conda-forge, each package by its
+#: name, version, build and MD5 in `cae-image/lock-*.txt`. To make the lists again, in any
+#: micromamba container with a network: `micromamba create -p /tmp/x --platform linux-aarch64 -c
+#: conda-forge --override-channels freecad=1.1.3 calculix=2.23 gmsh=4.15.2 --dry-run --json`,
+#: and from each `actions.LINK` entry in order, its `subdir`, `name`, `v` and its `version`,
+#: `build`, the file type its `fn` ends in, and `md5`; `linux-64` for CI.
 CAE_IMAGE = "print-shop/cae:0.1"
 CAE_LIMIT_GB = 4.0
 #: The commands that run in it. Every other runs in `IMAGE`.
@@ -246,12 +247,18 @@ def build(which: str = "bench") -> int:
             "Nothing was built."
         )
         return 1
+    before = image_id(image)
     done = subprocess.run(
         ["docker", "build", "--memory", MEMORY, "-t", image, str(HERE / folder)], check=False
     )
     if done.returncode:
         print(f"the build failed: {done.returncode}")
         return done.returncode
+    if before is not None and image_id(image) != before:
+        # The image this build replaced has no tag now, and still holds its disk: a rebuild of
+        # the second image left 3.2 GB behind that way. Docker refuses if another tag has it.
+        subprocess.run(["docker", "image", "rm", before], capture_output=True, check=False)
+        print(f"removed the {image} this replaced, {before[:19]}")
     return check()
 
 

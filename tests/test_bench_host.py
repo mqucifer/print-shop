@@ -180,6 +180,29 @@ def test_the_second_image_s_build_counts_both_images_against_the_floor(
         assert "refused" in said and host.CAE_IMAGE in said
 
 
+def test_a_rebuild_removes_the_image_it_replaced_and_no_other(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ran: list[list[str]] = []
+    ids = iter(["sha256:old", "sha256:old", "sha256:old", "sha256:new"])
+
+    def run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        ran.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(host, "free_gb", lambda: host.FLOOR_GB + 0.5)
+    monkeypatch.setattr(host, "image_id", lambda image=host.IMAGE: next(ids))
+    monkeypatch.setattr(host, "check", lambda: 0)
+    monkeypatch.setattr(subprocess, "run", run)
+    assert host.build("cae") == 0
+    assert [argv[:3] for argv in ran] == [
+        ["docker", "build", "--memory"],
+        ["docker", "image", "rm"],
+    ]
+    assert ran[1][3:] == ["sha256:old"], "by its id: nothing else is pruned"
+    assert "removed the" in capsys.readouterr().out
+
+
 def test_the_first_image_s_build_leaves_room_for_the_second_too(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -231,25 +254,24 @@ def test_check_passes_with_the_second_image_still_to_build(
     assert "scripts/bench.py build cae" in capsys.readouterr().out
 
 
-def test_the_second_image_s_packages_are_each_by_url_and_md5() -> None:
+def test_the_second_image_s_packages_are_each_by_version_build_and_md5() -> None:
     """Both platforms' lists: nothing is solved at a build, and the three the issue names are at
     the versions it names."""
     folder = host.HERE / host.IMAGES["cae"][2]
-    for arch in ("arm64", "amd64"):
+    for arch, platform in (("arm64", "linux-aarch64"), ("amd64", "linux-64")):
         lines = (folder / f"lock-{arch}.txt").read_text().splitlines()
-        assert "@EXPLICIT" in lines
-        packages = [line for line in lines if line and not line.startswith(("#", "@"))]
+        packages = [line.split() for line in lines if line and not line.startswith("#")]
         assert len(packages) > 250
-        for line in packages:
-            url, _, md5 = line.partition("#")
-            assert url.startswith("https://conda.anaconda.org/conda-forge/"), line
-            assert len(md5) == 32 and int(md5, 16) >= 0, line
-        names = {line.rpartition("/")[2] for line in packages}
-        for pin in ("freecad-1.1.3-", "calculix-2.23-", "gmsh-4.15.2-", "occt-7.9.3-"):
-            assert any(name.startswith(pin) for name in names), pin
+        for subdir, _name, version, _build, kind, md5 in packages:
+            assert subdir in (platform, "noarch") and kind in ("conda", "tar.bz2")
+            assert version.startswith("v") and len(md5) == 32 and int(md5, 16) >= 0
+        pins = {name: version for _, name, version, *_ in packages}
+        assert (pins["freecad"], pins["calculix"], pins["gmsh"]) == ("v1.1.3", "v2.23", "v4.15.2")
+        assert pins["occt"] == "v7.9.3"
     dockerfile = (folder / "Dockerfile").read_text()
     assert "@sha256:" in dockerfile.split("FROM ")[1].splitlines()[0], "the base by its digest"
-    assert "lock-${TARGETARCH}.txt" in dockerfile
+    assert "lock-${TARGETARCH}.txt" in dockerfile and "@EXPLICIT" in dockerfile
+    assert "micromamba install -y -n base -f /tmp/packages.txt" in dockerfile, "no solve"
 
 
 def test_a_rounds_run_without_the_second_image_is_told_and_goes_on(
