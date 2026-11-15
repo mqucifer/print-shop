@@ -510,6 +510,13 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
                     "it and puts it beside the question, and only a pick other than none lets "
                     "that need stand. Optional.",
                 },
+                "end_checks": {
+                    "type": "boolean",
+                    "description": "true to ask a person about the harness's end checks that "
+                    "sent the part back, where a place is meant as it is: the harness reads "
+                    "them on your files as they stand and puts them beside the question, and "
+                    "a pick other than none lets those pairs of files by. Optional.",
+                },
             },
             question="What you're asking them to judge.",
         ),
@@ -939,7 +946,7 @@ class WorkTools:
 
     def call(self, name: Any, raw: Any) -> Judged:
         args = parse(raw)
-        for key in ("run", "try"):
+        for key in ("run", "try", "end_checks"):
             # Sent as text, as `cad_eval`'s V5 model sent `run`, it's read as the boolean it names.
             if isinstance(args, dict) and isinstance(args.get(key), str):
                 said = args[key].strip().lower()

@@ -212,7 +212,9 @@ CREATE TABLE IF NOT EXISTS timeline (
     seq INTEGER NOT NULL,
     -- start, resume, stop, compaction, restart, after_action, or asked: a call that ended
     -- without a tool call, asked what's missing. reasoning_trimmed: the reasoning-trim
-    -- switch's one step, on an eval's arm that turns it on.
+    -- switch's one step, on an eval's arm that turns it on. A restart's `name` is why the
+    -- conversation started again from the record: context_full, end_checks or send_back, and
+    -- none for a run from before mqucifer/print-shop#150, whose restarts were all context_full.
     kind TEXT NOT NULL,
     name TEXT,
     at TEXT,
@@ -285,7 +287,8 @@ CREATE TABLE IF NOT EXISTS decisions (
     -- The stop for approval it answers. A close of a run that never reached one has none.
     approval INTEGER,
     -- approved, sent_back or closed: a close ends a run without approving it. Who: `sponsor`, or
-    -- `stand-in: <who>`.
+    -- `stand-in: <who>`; or `harness` for the end checks' send-back, which answers no stop for
+    -- approval, as none was asked (mqucifer/print-shop#150).
     decision TEXT NOT NULL,
     by TEXT NOT NULL,
     note TEXT,

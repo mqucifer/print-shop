@@ -181,10 +181,24 @@ def missing(image: str) -> str:
     return f"no image {image}: run `scripts/bench.py build{'' if name == 'bench' else ' ' + name}`"
 
 
+#: The helpers that run in the second image: `arm` reads a part's shape with FreeCAD
+#: (mqucifer/print-shop#150).
+CAE_HELPERS = ("arm",)
+
+
+def helper_image(module: str) -> str:
+    """The image one of the bench's helpers runs in."""
+    return CAE_IMAGE if module in CAE_HELPERS else IMAGE
+
+
 def helper(module: str, args: list[str]) -> list[str]:
     """One of the bench package's own modules as the container runs it, `-I` too, so nothing a
     run left in /work can stand in for it."""
     entry = f"import sys; sys.path.insert(0, '/opt/bench'); from bench.{module} import main; main()"
+    if module in CAE_HELPERS:
+        # FreeCAD's modules are beside its libraries there, as for `CAE_ENTRY`.
+        entry = entry.replace("import sys; ", "import sys; sys.path.append('/opt/conda/lib'); ", 1)
+        return [CAE_PYTHON, "-I", "-c", entry, *args]
     return ["python", "-I", "-c", entry, *args]
 
 

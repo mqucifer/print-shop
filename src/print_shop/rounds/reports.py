@@ -140,6 +140,7 @@ REPORTS: dict[str, tuple[str, ...]] = {
     "fit-on": (
         "along",
         "depth_mm",
+        "from_clear",
         "from_mm",
         "moving",
         "onto",
@@ -161,6 +162,7 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "room_behind_mm",
         "thickness_mm",
         "worst",
+        "would_pass",
     ),
     "layout": (
         "least_width_mm",
@@ -545,6 +547,7 @@ SHAPES: dict[str, dict[str, Any]] = {
     "fit-on": {
         "along": TEXT,
         "depth_mm": NUMBER,
+        "from_clear": FLAG,
         "from_mm": NUMBER,
         "moving": TEXT,
         "onto": Rows(TEXT),
@@ -601,6 +604,11 @@ SHAPES: dict[str, dict[str, Any]] = {
         ),
         "thickness_mm": NUMBER,
         "worst": TEXT,
+        # What keeps the strain at the limit, from the reading's own peak
+        # (mqucifer/print-shop#150).
+        "would_pass": Row(
+            {"length_mm": NUMBER, "push_mm": NUMBER, "thickness_mm": NUMBER}, closed=True
+        ),
     },
 }
 

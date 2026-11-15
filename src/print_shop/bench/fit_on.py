@@ -280,13 +280,9 @@ class Way:
         for name in [args.moving, *args.onto]:
             if not name.lower().endswith((".step", ".stp")):
                 raise NoAnswer(f"fit-on reads STEP files, and {name} isn't one")
-        if args.start <= 0 or args.step <= 0:
+        clear = args.start == "clear"
+        if args.step <= 0 or (not clear and args.start <= 0):
             raise NoAnswer("--from and --step are distances, more than 0")
-        if args.start / args.step > 2000:
-            raise NoAnswer(
-                f"--from {args.start:g} in steps of {args.step:g} is over 2000 readings: give a "
-                "larger --step"
-            )
         self.vector = FreeCAD.Vector
         self.moving = Part.read(args.moving)
         self.onto = [Part.read(name) for name in args.onto]
@@ -298,7 +294,26 @@ class Way:
         self.axis = AXES.index(args.along[1])
         self.sign = 1 if args.along[0] == "+" else -1
         self.across = tuple(a for a in range(3) if a != self.axis)
-        self.offsets = offsets(args.start, args.step)
+        #: Whether `--from` was `clear`, and so read off the boxes.
+        self.cleared = clear
+        start = self.clear(args.step) if clear else float(args.start)
+        if start / args.step > 2000:
+            raise NoAnswer(
+                f"--from {start:g} in steps of {args.step:g} is over 2000 readings: give a "
+                "larger --step"
+            )
+        self.offsets = offsets(start, args.step)
+
+    def clear(self, step: float) -> float:
+        """How far out the moving part's box is past every other file's along its way out, and a
+        step more, as a whole number of steps: where `--from clear` starts."""
+        low, high = _box(self.moving)
+        lows, highs = zip(*(_box(shape) for shape in self.onto), strict=True)
+        if self.sign > 0:
+            apart = float(np.max(highs, axis=0)[self.axis] - low[self.axis])
+        else:
+            apart = float(high[self.axis] - np.min(lows, axis=0)[self.axis])
+        return (max(0, math.ceil(apart / step - 1e-9)) + 1) * step
 
     def pieces(self, out: float) -> list[dict[str, Any]]:
         """Each piece of overlap with the moving part `out` mm along its way out, by OCCT's
@@ -558,6 +573,7 @@ def _say(
     report.numbers["onto"] = way.names
     report.numbers["along"] = args.along
     report.numbers["from_mm"] = outs[0]
+    report.numbers["from_clear"] = way.cleared
     report.numbers["step_mm"] = args.step
     report.numbers["readings"] = len(outs)
     report.numbers["places"] = places
@@ -572,6 +588,11 @@ def _say(
     read = (
         f"from {outs[0]:g} mm out along {args.along} to where it sits, read every {args.step:g} mm"
     )
+    if way.cleared:
+        report.line(
+            f"--from clear: {outs[0]:g} mm out, where {way.name}'s box is past every other "
+            f"file's along {args.along}, and a step more"
+        )
     for number, place in enumerate(places[:SHOWN]):
         lasts = (
             f"at {place['first_mm']:g} mm out"

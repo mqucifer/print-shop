@@ -7,7 +7,7 @@ scripts/rounds.py start NAME --request FILE [--reference FILE]... [--trim-reason
 scripts/rounds.py resume NAME [--note FILE] [--from WHO] [--reopen-needs]
 scripts/rounds.py resume NAME --from sponsor|"stand-in: <who>" [--note FILE]   (at `questions`)
 scripts/rounds.py resume NAME --approve --by WHO [--note FILE]
-scripts/rounds.py resume NAME --send-back --by WHO --note FILE [--reopen-needs]
+scripts/rounds.py resume NAME --send-back --by WHO --note FILE [--reopen-needs] [--fresh]
 scripts/rounds.py resume NAME --close --by WHO --note FILE
 scripts/rounds.py status NAME
 scripts/rounds.py stop NAME
@@ -193,7 +193,7 @@ Each of these is in the ledger's `standing` table, by file and its hash, and a r
 
 **The delivered result is `review/`,** written by the harness at each stop for approval from its records, into `approvals/n/review/` and copied to the run's `review/`. One folder a group, lettered (`A-two-parts`, `B-one-frame-with-pause`), holds its own files under their names and every shared file, each named by its number, its label and its colour from `looks` (`pane_01-cup-blue.step`). Its README gives the size, which files take the same space and so are never loaded together, a table of the shared files, each requirement's reading against its limit and the files its check read, `thin` on each file, and what wasn't checked: files no need's check named, eye needs that passed on a pick, `thin`'s unsure answers and the swaps. The model's closing words are under their own heading. Nothing in it is sliced or printed.
 - `resume --approve --by WHO` ends the run as `approved`, with no model call, and then the model writes its after-action review (below). The run is approved whatever the review does.
-- `resume --send-back --by WHO --note FILE` goes on as a new round, with the note. A plain `resume` is refused here.
+- `resume --send-back --by WHO --note FILE` goes on as a new round, with the note. A plain `resume` is refused here. With `--fresh`, the conversation starts again from the record, the note its first message after the start, as the end checks' send-back does (mqucifer/print-shop#150). It's opt-in until reruns show whether it helps.
 - `resume --close --by WHO --note FILE` ends a run without approving it, below.
 - Anyone else is `--by "stand-in: <who>"`, as at a pick. `decisions` holds which, and who.
 - A send-back after approval is by hand, with the same `--send-back`. It becomes automatic only once there are more mechanical checks or agreements ahead of time. The refinement pass is still to come; the delivered result is `review/`, below.
@@ -223,7 +223,7 @@ Each of these is in the ledger's `standing` table, by file and its hash, and a r
 
 `questions`, `ask` and `met` aren't endings: the run waits, and `met` is what it rests in until a person decides. A run from before approval was a stop that says `met` stays ended, and `resume` refuses it, as it does a `closed` one. **`resume` goes on after any other,** from the very message it stopped at, with `--note` adding a message, and `--from` saying who the note is from. A crash loses at most the last call's answer, and that call is made again. A conversation started from the record keeps the notes as well.
 
-A conversation that won't fit even compacted starts again from the record, keeping the request, the answers, the needs, the facts, each check's latest tries and the files. Its reasoning is what's lost, and `restarts` counts them. Before that, a newest turn too big to fit goes back without its reasoning (mqucifer/print-shop#78).
+A conversation that won't fit even compacted starts again from the record, keeping the request, the answers, the needs, the facts, each check's latest tries and the files. Its reasoning is what's lost, and `restarts` counts them. A conversation also starts again on purpose (mqucifer/print-shop#150): where the end checks send the part back, and where a person's send-back says `--fresh`. Those don't count toward `restarts`, whose limit is for a conversation that won't fit. `state.json`'s `restart_kinds` has each one's kind, `context_full`, `end_checks` or `send_back`, and the call it came before; the ledger's `timeline` has the kind as the restart's `name`; and `summary.json` counts them by kind, so the evals can tell them apart. A restart from before this has no name, and was `context_full`. Before that, a newest turn too big to fit goes back without its reasoning (mqucifer/print-shop#78).
 
 ### A call that ends without acting (mqucifer/print-shop#47)
 
@@ -318,6 +318,45 @@ From the hold test (`~/print-shop/skill-evals/hold-test-2026-11-09/RESULTS.md`):
 - **The plan stop waits for a held part's first try and its reading** (`hold_unread`): a part file of the model's, and a `clearance ... <bought part> --slide <way out>` reading on it unchanged since, by `state.geometry`. It names what's missing and the command, and, without a fact or where `held_by` says the part is fixed, how to say so with `fixed: true`. The reading, whatever its verdict, is in the ask's reply, `asked.json`'s `holds` and `question.md` under "What holds each bought part, as the bench read it". The start says so in two lines where something was given, and the system prompt and `ask`'s `plan` say it too. A part that holds nothing is as it was. *Evidence: both fan-in-a-pocket runs spent over an hour at intake on a clip before anything was built; their lessons, pocket-1:1 and fan-2:3, ask to build and measure.*
 - **At intake, a hold read `HELD` says what comes next** (mqucifer/print-shop#92). Once a held part's slide reads `HELD` on its part file as it stands, that `bench` reply and each later `bench` and `run` reply at intake lead with one line: the hold is read, so next come `breakdown`, `needs` and the plan stop, and finishing such as edges and fillets is round work after the plan. It's gone once `needs` is settled, and `NOT HELD` doesn't get it; nothing at intake is refused for it. *Evidence: `pocket-3` read `HELD` at intake, then rounded edges for about 20 calls and 40 minutes, never sent `breakdown`, and was closed at 56 calls before its plan.*
 
+### When a run says it's done: the way on, and the bend (mqucifer/print-shop#150)
+
+mqucifer/print-shop#142 gave the bench `fit-on` and `bend`, and nothing made a run use them: a design run's lid was approved that could never be fitted, because nothing read its way on. The Sponsor, 2026-11-15: "we can force the run of these after things are delivered, add that to the learn ledger and send it back with the learnings. That's what I expected." So the harness runs them itself (`end_checks.py`). It calls the bench's commands and acts on what they say; nothing in it measures.
+
+**When they run.** At `done`, once every need has passed and every standing check above, on the files the clean run left, before the stop for approval is asked. A person only sees a design that passed them, or one the run asked a person about. A run that holds nothing is read for nothing.
+
+**The way on, for every held part.** The holds are the run's own (`holds.py`). A held part's slide, `clearance ... --slide <way out>`, names the file that moves, the files it's slid against and its way out: the slide a settled need runs, else the latest one the model ran, else, for a bought part whose fact gives its way in, that part against the model's own files. `fit-on <moving> --onto <the others> --along <way out> --from clear` reads it: `clear` starts where the moving part's box is past every other's along the way, and a step more. A held part with no slide and no way in, or a file that isn't a STEP, is said as not read, "can't tell".
+
+**The bend, for every place `fit-on` reads `BLOCKED`.** The arm is found by the harness, not asked of the model (`bench/arm.py`, in the second image), from the place and the printed part's shape, on each printed file of the two:
+1. A column through the place along its depth's axis is the material the place is in, from its front, the face the other part meets, to its back. The place is at the front, and the push is from the front toward the back.
+2. The part between two planes, 0.1 mm in front of that column and 0.1 mm behind it, falls into pieces. The piece the place is in is the arm with whatever joins it to the rest: where one of the planes cut it, it's joined.
+3. Along each of the other two axes, an arm has every such join on one side of the place. Its root is the plane at the end of the joins nearest the place, and its box is the piece past the root, 0.1 mm clear on every other side. Of two axes that give one, the longer arm is taken.
+
+**It isn't found** where the depth isn't across x, y or z; where the place is at no one face of what it's in; where what's there is joined level with the place or on both sides of it, as a band held at both ends is; or where less than 0.1 mm is clear behind it. The reply says which, and the place stands as `BLOCKED`. Then `bend <file> --arm <box> --root <plane> --push <the place's depth> --toward <way> --layers <axis>` reads the arm, its layers along the axis `on_bed` gives the file.
+
+**What each place comes to:**
+
+| | When | |
+|---|---|---|
+| passes | an arm was found, and `bend` reads `OK` | |
+| doesn't pass | an arm was found and `bend` reads `FAIL`; or, between two printed parts, no arm was found or `bend` had no answer; or the two overlap where the part sits, which no bend clears | the run is sent back |
+| for a person | one of the two is a given, bought part, and the printed one doesn't take it | it isn't failed |
+
+**A given part isn't bent as PETG.** A flexible strip pushed past a catch gives way itself. Where one of the two is a given part and no printed arm takes the push, the reading says how far the given part has to give way, with what the printed arm read, and that a person judges it. It's shown at the stop for approval, and doesn't send the run back.
+
+**When one doesn't pass:**
+- **A lesson is written,** a candidate, a `verify` lesson by `the harness`, for the model's route, reviewed like any other. Its evidence is the call and each command with its reading, so a reviewer can run them again (`lessons R` shows them as `end check`), and its keys are `fit-on` and `bend` with their verdicts. One lesson for each failing pair of files and what it came to: a second send-back for the same writes no second.
+- **The run is sent back by the harness.** `decisions` has it as `sent_back` by `harness`, with no approval, as none was asked, so it isn't taken for the Sponsor's. Its note says, for each failing place: where, how deep, which arm (its file, box, root and push), `bend`'s strain against the limit, the arm's back against the room behind it, and what would pass, each with the command that read it. The round isn't met, and the next begins.
+- **The conversation starts again from the record** (decided with the Sponsor, 2026-11-15: "it doesn't need its whole history when it gets this feedback"). It's the path a conversation that won't fit takes: the request, the answers, the needs, the facts, each check's latest tries and the files, and none of the earlier calls' reasoning. The note is the first message after the start, relayed as from `harness`, and never as what a person last said. Until the checks pass, each compaction's note and each later restart gives it again.
+- **The stop for approval isn't asked until they pass, or the run asks a person.** `ask` with `"end_checks": true` has the harness read them on the files as they stand and puts each failing place beside the question, under its own heading. Any pick but `none` accepts each failing pair of files: `done` no longer sends the part back for those, and the stop shows them as accepted, by whom and why. With none failing, that ask is refused.
+
+**When they pass,** the `done` reply and `stop.md` show each way and place under "Each held part's way on, and what bends on the way, by `fit-on` and `bend`", beside `thin` and the curves check. Each reading is a `standing` row (`way-on`, `bend`), and `rounds/nnn/end.json` and `end/` keep them.
+
+**A way the bench has no answer for** (`DISAGREE`, `NO ANSWER`, or the second image not built) is "can't tell", as `thin`'s is: neither a pass nor a fail, and shown at the stop.
+
+**Not in it:** `fit-on` or `bend` as needs a run must have (a run may still use them, and the end checks run either way), friction, how well a snug fit holds, or how a snap feels. Those stay with a person or a test print.
+
+*Made up, in the second image (`tests/cae_cases/make_fixtures.py`, `~/print-shop/proofs/m18-end-checks/planted/`):* a box with one snap clip, its arm 1.2 mm thick, and a lid whose band passes the clip's hook 0.6 mm deep. With the arm free for 8 mm, the arm found is the box `-4.1,-17.1,18` to `4.1,-14.9,26.1` from its root at z 18, pushed `-y`; `bend` reads 2.98% against 1%, `FAIL`, and the run is sent back with one lesson. With it free for 16 mm, the same from z 10, `bend` reads 0.59%, and the run stops for approval. A given strip pushed 0.3 mm past a catch on a channel's 2 mm wall, where `bend` reads `DISAGREE` on a wall that's no beam, is named for a person.
+
 ## Toolsets
 
 The Sponsor, 2026-11-03: "id be concerned with adding things like light-path commands unles its just a tool option or something, not everything is going to be a stained glass print." So the core stays general, and a check for one kind of object comes in that kind's toolset: its bench commands, the measures its needs may use, and its skills (`rounds/toolsets.py`). It's the first step to a shared core with toolsets per domain.
@@ -369,7 +408,7 @@ The Sponsor, 2026-11-03: "id be concerned with adding things like light-path com
 | `questions` | Intake's questions and answers, and who answered (`answered_by`) |
 | `changes` (a view) | Each need's reading before and after each round, with the diff |
 | `interventions` | Every note, answer, pick and send-back relayed to the model: when, at which call, who it's from, its text. The largest cause of change in a run |
-| `timeline` | Each start, stop, resume, compaction and restart, in order, and each `reasoning_trimmed` on an eval's arm that turns the switch on. A compaction has its size before and after, estimated and measured, and what it cut (`said`), and each process its harness commit, where `runs.harness_commit` holds only the first. Each call that ended without a tool call is an `asked` row, with what the next request offered |
+| `timeline` | Each start, stop, resume, compaction and restart, in order, a restart's `name` its kind (`context_full`, `end_checks` or `send_back`, mqucifer/print-shop#150), and each `reasoning_trimmed` on an eval's arm that turns the switch on. A compaction has its size before and after, estimated and measured, and what it cut (`said`), and each process its harness commit, where `runs.harness_commit` holds only the first. Each call that ended without a tool call is an `asked` row, with what the next request offered |
 | `calls` | Each call's seconds, tokens, finish and share of repeated reasoning, with its round, its phase (how many times a person had sent something) and its process |
 | `phases`, `round_costs` (views) | Calls, seconds and tokens, split by what a person sent or by round. `phases` also splits first rounds from refinement rounds: each phase's `rounds`, its `kind` (that of its first round to end) and that round's `improvement` |
 | `right_ranges` | A scenario's right answer, as ranges of what the bench reads, by the file's hash: the operator's, never shown to the model (below) |
@@ -377,7 +416,7 @@ The Sponsor, 2026-11-03: "id be concerned with adding things like light-path com
 | `round_kinds` (a view) | Each ended round's kind: `first`, `again` (no person between it and the round before) or `refinement` (after a note, a send-back, a pick or an answer) |
 | `runaways` | A call that hit the limit, was cut, or whose reasoning repeats, for review. See below |
 | `tries` | Each reading from a `try` |
-| `approvals`, `decisions` | Each stop for approval, with its sheet's hash, the part's hashes, the closing words and the delivered folder's groups and files (`review`), and each yes, send-back or close, and who. A close of a run that never stopped for approval has no `approval` |
+| `approvals`, `decisions` | Each stop for approval, with its sheet's hash, the part's hashes, the closing words and the delivered folder's groups and files (`review`), and each yes, send-back or close, and who. A close of a run that never stopped for approval has no `approval`, and nor has the end checks' send-back, whose `by` is `harness` (mqucifer/print-shop#150) |
 | `standing` | Each check the harness ran itself, whatever the needs say: `thin` on each file at `done`, and the needs' checks and `thin` at an ask, each with its file's hash. `unsure` is the bench with no answer to rely on |
 | `need_swaps` | Each need changed or dropped while its check failed on the files, with the old check and the new, both readings, the model's reason, and where it was shown |
 | `need_measures` | What each bench need of a version says it measures (`check.measures`): a table of its own, as `need_marks` is inserted into by position |
@@ -596,7 +635,7 @@ The Sponsor, 2026-11-05: "It should use orca's cli to add pauses not raw gcode. 
 | `questions/n.md`, `n.answers.md` | Each stop at intake |
 | `breakdown.md`, `breakdowns/n.json` | The latest breakdown, and each one |
 | `asks/n/` | `question.md`, `sheet.png` if it drew variants, `variants/`, `test-pieces/` and `pictures/` if it showed any, `asked.json` with the stop, the plan, the looks, the model's words on the sheet and the standing checks, and `pick.json` |
-| `rounds/nnn/` | `judged/` (what the clean run left), `readings/` (each need's answer, in text and numbers), `standing/` and `standing.json` (`thin` on each file, and which files take the same space), `run.txt`, `judgement.json`, `diff.patch` |
+| `rounds/nnn/` | `judged/` (what the clean run left), `readings/` (each need's answer, in text and numbers), `standing/` and `standing.json` (`thin` on each file, and which files take the same space), `end/` and `end.json` (each held part's way on by `fit-on`, and each arm by `bend`, where a part is held), `run.txt`, `judgement.json`, `diff.patch` |
 | `approvals/n/` | `sheet.png`, `stop.md`, `closing.md` and `review/`, for the person who decides |
 | `review/` | The latest stop's folder to print from: one folder a group, and its README |
 | `streams/n.jsonl` | A call's tool-call arguments as they arrived, if they didn't all come whole |
@@ -667,6 +706,8 @@ mqucifer/print-shop#19 then took what else it lacked: close-ups, sheets of the p
 `tests/test_memory.py` needs no Docker: what a shrunk reply keeps, the latest replies staying whole, `record/CHECKS.md` and a new conversation given it, and each way a refused `edit` says how its lines differ, or that its file changed and which call changed it. `tests/test_loop.py` needs no Docker: routes proposed and confirmed, keys, layers by kind of part and skill, delivery and a score on each route, a corrected score, a lesson's text stopping once its fix holds, a ledger from before sorted once with every row kept, the review's index of the harness's record and people's words, the review near its limit, and the effort read from a fake of LiteLLM's documented `/model/info`.
 
 `tests/test_stops.py` needs no Docker (mqucifer/print-shop#59): a settled need following the part's panes and count with every figure kept, `done` on renamed panes, a model's bench call at the part's own count, a fixed need sent again over the part's files; a number or a line's figure that's its command's own input; eye needs in one ask or set out in `later`, one pick answering each, an eye need on a picture alone, and a stop or eye need asked again on what a pick answered; curves stored as strips failing `done` until set aside, and shown at the stop; the replies that don't name the Sponsor before an answer; and the refinement pass's finding becoming a candidate lesson, and a proposal's try that moves more than the ceiling.
+
+`tests/test_end_checks.py` needs no Docker (mqucifer/print-shop#150): a held part's way on from a need's slide, the latest slide run or its fact; a run whose needs all pass sent back for a clip that bends too far, with its lesson, its decision by `harness` and the readings in the note; the send-back's new conversation, with the request, the needs, the facts and the files and none of the earlier turns; the same run stopped for approval where the clip takes it; a place with no arm standing as `BLOCKED`; a given strip named for a person; a person's pick at an ask letting a failing place by; `resume --send-back --fresh`; and `bend`'s "what would pass" against ε = 1.5·t·y/L². `tests/test_end_checks_cae.py` (`-m "cae and bench"`) reads the same on the planted parts in both images: the arm found from the place, `--from clear`, the push `bend` says would pass run again, and a scripted run sent back for the short clip and stopped for the long one.
 
 `tests/test_print_side.py` needs no Docker (mqucifer/print-shop#73): a bed need's file and side and what's refused of them, an eye need that names the print side refused with its reply, however the side is said, and one on how a feature holds taken; a fake model's run whose request names the print side settling it as a bed need, `done` refused with no side and another side before anything runs, and met with its own, with the reading and the README saying so; and the refinement pass confirming a bed need on the laid part, or calling it a change where the side isn't flat.
 

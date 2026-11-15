@@ -99,6 +99,16 @@ def _way(text: str) -> str:
     return way
 
 
+def _from(text: str) -> float | str:
+    """`6`, a distance, or `clear`: as far out as the parts' boxes need to be apart."""
+    if text.strip().lower() == "clear":
+        return "clear"
+    try:
+        return float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError("a distance in mm, or `clear`") from None
+
+
 def _plane(text: str) -> tuple[str, float]:
     """`z=3.75`: the axis a plane is square to, and where along it."""
     axis, sep, value = text.partition("=")
@@ -473,9 +483,11 @@ def parser() -> Parser:
         "--from",
         dest="start",
         required=True,
-        type=float,
+        type=_from,
         metavar="MM",
-        help="how far out it starts, in mm: far enough that it's clear of everything",
+        help="how far out it starts, in mm: far enough that it's clear of everything. `clear` "
+        "is as far as it takes for its box to be past every other file's along the way, and a "
+        "step more",
     )
     fit.add_argument(
         "--step",

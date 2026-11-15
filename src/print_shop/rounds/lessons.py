@@ -293,6 +293,13 @@ def evidence_lines(ledger: Readable, run: str, held: dict[str, Any]) -> list[str
         lines.append(
             f"refinement {row['n']}, {row['kind']} by {row['source']}: {str(row['read'])[:200]}"
         )
+    for check in held.get("end_checks") or []:
+        # The harness's end checks, each command as it ran with what it read, to run again
+        # (mqucifer/print-shop#150).
+        lines.append(
+            f"end check `{check.get('command')}`: {check.get('verdict') or 'no verdict'}, "
+            f"{str(check.get('why') or '')[:300]}"
+        )
     for reading in held.get("readings") or []:
         found = ledger.rows(
             "SELECT passed, why FROM readings WHERE run=? AND round=? AND need=?",
