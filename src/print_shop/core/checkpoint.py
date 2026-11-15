@@ -13,7 +13,12 @@ type that can appear in `PrintJobState` is registered here, and
 enabled so a new unregistered type fails the suite instead of printing a notice
 nobody reads.
 
-**Add a type to `PrintJobState`? Add it to `PERSISTED_TYPES`.**
+**Add a type to `PrintJobState`? Add it to `PERSISTED_TYPES`,** and every model and enum it
+holds: a value nested in a model is checkpointed with its own type too. M19 added the intake,
+the proposal, the features, the slice's reading and the profiles used, and none was registered:
+the Sponsor's job logged "Blocked deserialization ... not in allowed_msgpack_modules" at the
+approval gate on 2026-11-14, and read each back as a plain dict. `tests/test_checkpoint.py` now
+walks the state's types and fails on one left out.
 """
 
 from __future__ import annotations
@@ -45,6 +50,20 @@ from print_shop.core.state import (
     PrintStatus,
     SliceResult,
 )
+from print_shop.inventory import Material
+from print_shop.setup.features import Feature
+from print_shop.setup.intake import Answer, Estimate, Intake, Option, Question
+from print_shop.setup.proposal import Change, GivenLesson, Source
+from print_shop.setup.proposal import Proposal as SettingsProposal
+from print_shop.setup.reading import (
+    FeatureReading,
+    Flag,
+    LayerTime,
+    PauseReading,
+    SeamReading,
+    SliceReading,
+)
+from print_shop.slicer.store import ProfileRef, ProfilesUsed
 
 __all__ = ["PERSISTED_TYPES", "make_serializer", "open_checkpointer"]
 
@@ -69,6 +88,27 @@ PERSISTED_TYPES: tuple[type, ...] = (
     NoAutoFix,
     Gate,
     GateDecision,
+    # M19: the intake, the settings proposal, the part's features, the slice's reading, the
+    # profiles used and the material, and every model and enum inside them.
+    Intake,
+    Question,
+    Option,
+    Answer,
+    Estimate,
+    SettingsProposal,
+    Change,
+    GivenLesson,
+    Source,
+    Feature,
+    SliceReading,
+    LayerTime,
+    FeatureReading,
+    SeamReading,
+    PauseReading,
+    Flag,
+    ProfilesUsed,
+    ProfileRef,
+    Material,
 )
 
 
