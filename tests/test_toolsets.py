@@ -26,6 +26,9 @@ REQUEST = (
 
 
 def need(command: str, measures: str | None = None, **more: Any) -> dict[str, Any]:
+    # The quote is the need's own, beside `check`: inside it, it's refused with its place
+    # (mqucifer/print-shop#145).
+    quote = more.pop("quote", "At least 2 mm of wall round the hanging hole")
     check: dict[str, Any] = {"by": "bench", "command": command, **more}
     if measures is not None:
         check["measures"] = measures
@@ -33,7 +36,7 @@ def need(command: str, measures: str | None = None, **more: Any) -> dict[str, An
         "id": "it",
         "what": "what it must do",
         "source": "request",
-        "quote": more.pop("quote", "At least 2 mm of wall round the hanging hole"),
+        "quote": quote,
         "check": check,
     }
 

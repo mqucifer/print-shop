@@ -74,5 +74,8 @@ COPY --from=docs /build/docs.json /opt/cad-eval/docs.json
 # an open seam into bodies, and to read a section's outlines (mqucifer/print-shop#122). 0.14's slide
 # reads a first contact that runs round the part as one tie (mqucifer/print-shop#135), and `wall`
 # reads a stretch of a hole, `--z`, and says where a hole opens into a hollow
-# (mqucifer/print-shop#136). Its code is mounted, not copied in.
-LABEL org.opencontainers.image.version="0.14"
+# (mqucifer/print-shop#136). 0.15's slide follows a contact that widens back by its curve, so a
+# catch round a thin band reads what the rays do (mqucifer/print-shop#143), and `info` stacks an
+# STL's sections between its level faces (mqucifer/print-shop#144). Its code is mounted, not
+# copied in.
+LABEL org.opencontainers.image.version="0.15"

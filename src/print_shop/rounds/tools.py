@@ -34,6 +34,7 @@ from typing import Any, Protocol
 from print_shop.bench import hint as hint_module
 from print_shop.bench import picture as picture_module
 from print_shop.bench import search as search_module
+from print_shop.rounds import needs as needs_module
 from print_shop.rounds import paths, skills, toolsets
 from print_shop.rounds.box import Box, Ran
 from print_shop.rounds.needs import COMMANDS, QUOTED, SIDES, SOURCES
@@ -137,6 +138,30 @@ NEED_SHAPE = (
     "only which way a part prints is a bed need, never an eye need: `done` checks its side "
     "against `on_bed`."
 )
+
+
+def _goes_in(tool: str, unknown: list[str]) -> str:
+    """Where an argument a tool doesn't take belongs, where it's a field of one of the tool's
+    items: a need's field sent beside `needs`, or a part's or a join's beside `parts`
+    (mqucifer/print-shop#145)."""
+    said = []
+    if tool == "needs":
+        need = [a for a in unknown if a in needs_module.NEED_KEYS]
+        check = [a for a in unknown if a in needs_module.CHECK_KEYS]
+        if need:
+            named = ", ".join(f"`{a}`" for a in need)
+            said.append(f"{named} is a need's: each need is an object in the `needs` list")
+        if check:
+            named = ", ".join(f"`{a}`" for a in check)
+            said.append(f"{named} goes inside a need's `check`, in the `needs` list")
+    if tool == "breakdown":
+        part = [a for a in unknown if a in ("name", "what")]
+        if part:
+            named = ", ".join(f"`{a}`" for a in part)
+            said.append(f'{named} goes in each part, in `parts`: {{"name": "...", "what": "..."}}')
+        if "how" in unknown:
+            said.append('`how` goes in each join, in `joins`: {"parts": ["a", "b"], "how": "..."}')
+    return f" {'; '.join(said)}." if said else ""
 
 
 def _measures(toolset: Toolset) -> dict[str, Any]:
@@ -966,6 +991,9 @@ class WorkTools:
             if isinstance(args, dict) and isinstance(args.get(key), str):
                 with contextlib.suppress(ValueError):
                     args = {**args, key: json.loads(args[key])}
+        args, slip = self._json_text(name, args)
+        if slip is not None:
+            return slip
         bad = self._well_formed(name, args)
         if bad is not None:
             return bad
@@ -1022,6 +1050,54 @@ class WorkTools:
             f"{by[1]} changed it. `read` it before you edit it again.\n\n"
         )
 
+    def _json_text(self, name: Any, args: Any) -> tuple[Any, Judged | None]:
+        """A list or an object sent as a string holding its JSON: read as that value where it
+        can be, and refused by its name where it can't (mqucifer/print-shop#145).
+
+        Read, as what's meant is plain and a refusal would cost a call for a slip of quoting:
+        the string that parses as the kind its field takes is that value, for every tool's
+        fields. And a string that holds its field's value and then the call's other fields, as
+        an eval's `breakdown` did (`"parts": "[...], \"joins\": [...], \"look\": [...]}"`,
+        refused as needing `joins` and `look`), is read as those fields, where they're this
+        tool's and weren't also sent. Anything else in a field that takes a list or an object
+        is refused saying it's a string holding JSON, and to send the value itself, before the
+        call is said to lack a field it did send."""
+        spec = self.accepted.get(name) if isinstance(name, str) else None
+        if spec is None or not isinstance(args, dict):
+            return args, None
+        properties = spec["properties"]
+        for key in [k for k in args if k in properties]:
+            kind = properties[key].get("type")
+            value = args[key]
+            if kind not in ("array", "object") or not isinstance(value, str):
+                continue
+            wanted = TYPES[kind]
+            read: Any = None
+            with contextlib.suppress(ValueError):
+                read = json.loads(value)
+            if isinstance(read, wanted):
+                args = {**args, key: read}
+                continue
+            spilled: Any = None
+            with contextlib.suppress(ValueError):
+                spilled = json.loads(f"{{{json.dumps(key)}: {value}")
+            if (
+                isinstance(spilled, dict)
+                and isinstance(spilled.get(key), wanted)
+                and all(k in properties for k in spilled)
+                and not any(k in args for k in spilled if k != key)
+            ):
+                args = {**args, **spilled}
+                continue
+            a, shape = ("a list", "[...]") if kind == "array" else ("an object", "{...}")
+            holds = "a string holding JSON" if value.strip()[:1] in "[{" else "a string"
+            said = (
+                f"`{name}` wasn't run: `{key}` is {holds}, and it takes {a}. Send the value "
+                f'itself, `"{key}": {shape}`, not its text in quotes, `"{key}": "{shape}"`.'
+            )
+            return args, Judged(str(name), "ill_typed", said, "json_text")
+        return args, None
+
     def _well_formed(self, name: Any, args: Any) -> Judged | None:
         """The AST category: crew's `check_arguments` over these tools, then BFCL's type check."""
         shown = str(name)
@@ -1037,7 +1113,7 @@ class WorkTools:
         if unknown:
             named = ", ".join(f"`{a}`" for a in unknown)
             said = f"`{shown}` wasn't run: it doesn't take {named}. It takes {takes}."
-            said += self._taken_by(shown, unknown)
+            said += self._taken_by(shown, unknown) + _goes_in(shown, unknown)
             return Judged(shown, "malformed", said, "unknown")
         missing = [a for a in spec.get("required", []) if a not in args]
         if missing:

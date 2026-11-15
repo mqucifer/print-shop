@@ -5,12 +5,37 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
+
+import trimesh
+
+from print_shop.bench.refine import MARK as REFINE_MARK
+from print_shop.rounds.box import Ran
 
 
 def tool(name: str, /, **args: Any) -> dict[str, Any]:
     """One tool call, as a turn's script names it."""
     return {"name": name, "arguments": args}
+
+
+def laid(args: list[str], where: Path | None, meshes: dict[str, Any] | None = None) -> Ran:
+    """The bench's `refine` helper answering a `mesh` request, as a fake box gives it: each file
+    laid on the bed as an STL, a plain 10 mm cube unless `meshes` gives the file's own by its
+    name. A stop reads each printed file's downward faces from these (mqucifer/print-shop#147)."""
+    request = json.loads(args[0])
+    assert request["request"] == "mesh" and where is not None, request
+    out = where / request["out"]
+    out.mkdir(parents=True, exist_ok=True)
+    files = {}
+    for name in request["files"]:
+        plain = name.split("__", 1)[-1]
+        mesh = (meshes or {}).get(plain) or trimesh.creation.box(extents=(10, 10, 10))
+        target = out / (Path(name).stem + ".stl")
+        mesh.export(str(target))
+        side = (request.get("on_bed") or {}).get(name, "-z")
+        files[name] = {"on_bed": side, "stl": f"{request['out']}/{target.name}"}
+    return Ran(0, REFINE_MARK + json.dumps({"files": files}), 0.1)
 
 
 def raw(name: str, arguments: str) -> dict[str, Any]:

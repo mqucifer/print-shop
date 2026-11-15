@@ -173,6 +173,78 @@ def _unquoted(source: str, quote: str, theirs: str, relayed: str, picked: str) -
     return said
 
 
+#: A need's own keys, and its check's: a key sent in the other's place is refused with where it
+#: goes (mqucifer/print-shop#145).
+NEED_KEYS = ("id", "what", "source", "quote", "check", *MARKS)
+CHECK_KEYS = (
+    "by",
+    "measures",
+    "command",
+    "verdicts",
+    "number",
+    "at_least",
+    "at_most",
+    "look_for",
+    "no_bench",
+    "file",
+    "side",
+)
+#: The `needs` tool's own arguments, which go beside the list and in no need.
+TOOL_KEYS = ("needs", "try", "why_changed", "against_note")
+#: A check with a number's limit, as a refusal shows where one goes.
+LIMIT_SHAPE = (
+    '"check": {"by": "bench", "measures": "...", "command": "...", "number": "pairs.0.gap_mm", '
+    '"at_least": 0.2, "at_most": 0.4}'
+)
+
+
+def _named(keys: list[str]) -> str:
+    """Keys as a refusal names them: "`at_least`, `at_most` and `number`"."""
+    shown = [f"`{k}`" for k in keys]
+    return shown[0] if len(shown) == 1 else f"{', '.join(shown[:-1])} and {shown[-1]}"
+
+
+def misplaced(entry: dict[str, Any], shown: str) -> list[str]:
+    """Each key of a need that isn't where it goes, with its place (mqucifer/print-shop#145). A
+    refusal that only lists a need's keys says a key is wrong and not where it belongs: in an
+    eval a number's limit sent beside `check` was refused twice, the second time with `number`
+    moved and its limits left, before the model found they go inside it. So a check's key at
+    the need's top level is told to go inside `check`, a need's key inside `check` to go
+    beside it, and the tool's own beside the list; only a key that's nobody's gets the list."""
+    wrong: list[str] = []
+    unknown = sorted(set(entry) - set(NEED_KEYS), key=str)
+    inside = [k for k in unknown if k in CHECK_KEYS]
+    beside = [k for k in unknown if k in TOOL_KEYS]
+    if inside:
+        goes = "goes" if len(inside) == 1 else "go"
+        limit = f", as {LIMIT_SHAPE}" if {"number", "at_least", "at_most"} & set(inside) else ""
+        wrong.append(
+            f"{shown}: {_named(inside)} {goes} inside `check`, beside `by`, not beside "
+            f"`check`{limit}"
+        )
+    if beside:
+        goes = "is the `needs` tool's own argument: it goes" if len(beside) == 1 else (
+            "are the `needs` tool's own arguments: they go"
+        )
+        wrong.append(f"{shown}: {_named(beside)} {goes} beside the `needs` list, in no need")
+    rest = [k for k in unknown if k not in inside and k not in beside]
+    if rest:
+        wrong.append(
+            f"{shown}: it has only id, what, source, quote, check, covers, fixed and figure: "
+            f"not {_named([str(k) for k in rest])}"
+        )
+    check = entry.get("check")
+    if isinstance(check, dict):
+        outside = sorted(k for k in check if k in NEED_KEYS and k != "check")
+        if outside:
+            goes = "goes" if len(outside) == 1 else "go"
+            wrong.append(
+                f"{shown}: {_named(outside)} {goes} beside `check`, at the need's top level, "
+                "not inside it"
+            )
+    return wrong
+
+
 def read(
     raw: Any,
     said_by_sponsor: str,
@@ -207,12 +279,7 @@ def read(
             wrong.append("each need is an object")
             continue
         shown = f"the need {str(entry.get('id'))!r}"
-        unknown = set(entry) - {"id", "what", "source", "quote", "check", *MARKS}
-        if unknown:
-            wrong.append(
-                f"{shown}: it has only id, what, source, quote, check, covers, fixed and figure: "
-                f"not {unknown}"
-            )
+        wrong += misplaced(entry, shown)
         need_id = entry.get("id")
         if not isinstance(need_id, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,40}", need_id):
             wrong.append(f"{shown}: `id` is a short name, of letters, digits, `.`, `_` or `-`")
