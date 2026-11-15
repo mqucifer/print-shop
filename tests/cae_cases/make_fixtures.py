@@ -48,11 +48,41 @@ def clip(back: float, root_z: float = ROOT_Z, ramp: bool = False) -> Part.Shape:
     return arm.fuse(hook).fuse(foot)
 
 
-def base(back: float, wall_y: float = WALL_Y, ramp: bool = False, rim: float = 30.0) -> Part.Shape:
-    """The open box with its clip. `wall_y` thickens the front wall toward the clip, and `rim` is
-    the height of the walls' top."""
+def base(
+    back: float,
+    wall_y: float = WALL_Y,
+    ramp: bool = False,
+    rim: float = 30.0,
+    root_z: float = ROOT_Z,
+) -> Part.Shape:
+    """The open box with its clip. `wall_y` thickens the front wall toward the clip, `rim` is
+    the height of the walls' top, and `root_z` where the clip's arm starts."""
     shell = box((-30, -20, 0), (30, 20, rim)).cut(box((-28, wall_y, 2), (28, 18, rim + 0.1)))
-    return shell.fuse(clip(back, ramp=ramp)).removeSplitter()
+    return shell.fuse(clip(back, root_z, ramp=ramp)).removeSplitter()
+
+
+#: The channel and its strip (mqucifer/print-shop#150): the strip is 10 mm wide and 1.5 thick,
+#: 0.2 mm clear of each wall where it lies on the floor, and a catch on one wall's top stands
+#: 0.5 mm in over the channel, so the strip passes 0.3 mm through it on its way down.
+STRIP_W, STRIP_T, CHANNEL_PLAY, CATCH_IN, CHANNEL_LONG = 10.0, 1.5, 0.2, 0.5, 40.0
+
+
+def channel() -> Part.Shape:
+    """A printed channel, open at both ends: a floor 2 mm thick, two walls 2 mm thick and 3 mm
+    tall, and on the +x wall's top a catch 1 mm tall along its whole length."""
+    inner = STRIP_W / 2 + CHANNEL_PLAY
+    outer = inner + 2
+    half = CHANNEL_LONG / 2
+    room = box((-inner, -half - 1, 2), (inner, half + 1, 6))
+    shape = box((-outer, -half, 0), (outer, half, 5)).cut(room)
+    catch = box((inner - CATCH_IN, -half, 4), (inner, half, 5))
+    return shape.fuse(catch).removeSplitter()
+
+
+def strip() -> Part.Shape:
+    """The given strip where it sits, on the channel's floor."""
+    half = CHANNEL_LONG / 2
+    return box((-STRIP_W / 2, -half, 2), (STRIP_W / 2, half, 2 + STRIP_T))
 
 
 def lid() -> Part.Shape:
@@ -93,6 +123,11 @@ def main() -> None:
     save(slab.fuse(clip(seated)).removeSplitter(), out / "clip.step")
     save(slab.fuse(clip(seated, 18.0)).removeSplitter(), out / "clip-short.step")
     save(slab.fuse(clip(seated, ramp=True)).removeSplitter(), out / "clip-ramp.step")
+    # The clip half as long, from z 18: pushed the same 0.6 mm it takes more than PETG does
+    # across its layers (mqucifer/print-shop#150).
+    save(base(seated, root_z=18.0), out / "box-short.step")
+    save(channel(), out / "channel.step")
+    save(strip(), out / "strip.step")
     print("made", sorted(str(p) for p in out.glob("*.step")))
 
 

@@ -73,8 +73,15 @@ class Box:
     def helper(
         self, module: str, args: list[str], timeout: int = 120, where: Path | None = None
     ) -> Ran:
-        """One of the bench package's modules that isn't a bench command."""
-        return self._run(host.helper(module, args), where, timeout)
+        """One of the bench package's modules that isn't a bench command, in its own image: the
+        second for `arm` (mqucifer/print-shop#150), and said, not raised, where that isn't
+        built."""
+        image = host.helper_image(module)
+        if image != host.IMAGE and image not in self.built:
+            if host.image_id(image) is None:
+                return Ran(3, f"usage error: {host.missing(image)}, on the machine\n", 0.0)
+            self.built.add(image)
+        return self._run(host.helper(module, args), where, timeout, image)
 
     def _run(
         self,

@@ -369,7 +369,8 @@ def test_a_review_near_its_limit_goes_on_from_the_record_and_is_recorded(tmp_pat
         ("after_action", None),
         ("compaction", None),
         ("stop", "context_full"),
-        ("restart", None),
+        # Which kind of restart it was (mqucifer/print-shop#150).
+        ("restart", "context_full"),
         ("stop", "reviewed"),
     ]
     assert rows(run.ledger, "SELECT COUNT(*) AS n FROM lessons")[0]["n"] == 1

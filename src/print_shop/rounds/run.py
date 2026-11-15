@@ -44,6 +44,7 @@ from print_shop.rounds import (
     breakdown,
     descriptions,
     downward,
+    end_checks,
     facts,
     figures,
     holding,
@@ -78,6 +79,16 @@ MET = "met"
 APPROVED = "approved"
 #: A person ended it without approving it: it says the run ended without one.
 CLOSED = "closed"
+#: `done`'s ending where the harness's end checks sent the part back (`end_checks.py`,
+#: mqucifer/print-shop#150): never a run's last, as `drive` starts the conversation again from
+#: the record and goes on.
+SENT_BACK = "sent_back"
+#: Why a conversation started again from the record: it wouldn't fit even compacted, the end
+#: checks sent the part back, or a person's send-back asked for it with `--fresh`. `restarts`
+#: counts the first, against its limit, and `restart_kinds` and the ledger's timeline say which.
+CONTEXT_FULL = "context_full"
+END_CHECKS = "end_checks"
+FRESH_SEND_BACK = "send_back"
 #: The endings an after-action review follows, each a person's decision.
 DECIDED = (APPROVED, CLOSED)
 #: Stops, which wait for a person and aren't endings. `met` waits for approval.
@@ -210,6 +221,23 @@ class State:
     # Each overlap with a given part a person accepted at an ask: the need, its command, the ask
     # and who (mqucifer/print-shop#79).
     overlaps: list[dict[str, Any]] = field(default_factory=list)
+    # Each new conversation from the record: why, one of `context_full`, `end_checks` and
+    # `send_back`, and the call it came before (mqucifer/print-shop#150). `restarts` counts the
+    # `context_full` ones alone, against their limit.
+    restart_kinds: list[dict[str, Any]] = field(default_factory=list)
+    # The end checks' latest send-back, until they pass: its round, its note, the pairs of files
+    # that failed and its decision's id (`end_checks.py`). Each compaction's note and each new
+    # conversation gives the note again while it stands.
+    end_sent: dict[str, Any] | None = None
+    # Each failing pair of files a person accepted at an ask that showed the end checks: the
+    # pair, the ask, who and their reason.
+    end_accepted: list[dict[str, Any]] = field(default_factory=list)
+    # The lesson written for each failing pair and what it came to, so a second send-back for
+    # the same writes no second lesson.
+    end_lessons: dict[str, int] = field(default_factory=dict)
+    # Each approval a send-back after it withdrew: its stop, its decision's id, who withdrew it,
+    # why, when, and the send-back's own decision (mqucifer/print-shop#150).
+    withdrawn: list[dict[str, Any]] = field(default_factory=list)
 
 
 def repository_version() -> tuple[str, bool]:
@@ -876,11 +904,16 @@ class Run:
             return Judged(after_action.NAME, "failed", reply, "not_decided")
         return after_action.take(self.ledger, self.state.name, args, self.session.requests)
 
-    def send_back(self, by: str, note: str, reopen_needs: bool = False) -> list[str]:
+    def send_back(
+        self, by: str, note: str, reopen_needs: bool = False, fresh: bool = False
+    ) -> list[str]:
         """A person's no, with what's wrong, at the stop or by hand after approving it. It goes on
         as a new round. A pick on files that then change is asked again, as ever. With
         `reopen_needs`, the needs may be settled again: on `cup-1` a send-back couldn't add the
-        check it found missing, and the model was refused when it tried."""
+        check it found missing, and the model was refused when it tried. With `fresh`, the
+        conversation starts again from the record, the note its first message after the start,
+        as the end checks' send-back does (mqucifer/print-shop#150): opt-in, until reruns show
+        whether it helps."""
         stop = self.state.stop
         ending = (self.state.ending or {}).get("name")
         if ending == CLOSED:
@@ -891,8 +924,14 @@ class Run:
         if not note.strip():
             raise Refused("a send-back needs its note: it's what the model goes on from")
         n = int(stop["n"]) if stop else self.state.approvals
-        self.ledger.decided(self.state.name, n, "sent_back", by, note.strip())
+        sent = self.ledger.decided(self.state.name, n, "sent_back", by, note.strip())
+        if ending == APPROVED:
+            self._withdraw(n, by, note.strip(), sent)
         self._go_on()
+        if fresh:
+            # Before the note is kept, so the new conversation has it once: as the message
+            # after its start.
+            self._from_the_record(why=FRESH_SEND_BACK)
         self.state.notes.append(note.strip())
         self.state.notes_from.append(by)
         message = _answer_with_facts(
@@ -906,6 +945,36 @@ class Run:
         self._start_round()
         self.save()
         return [t for t in told if t]
+
+    def _withdraw(self, approval: int, by: str, why: str, sent_back: int) -> None:
+        """A send-back after approval withdraws that approval: it doesn't stand as a success
+        once new findings contradict it (mqucifer/print-shop#150). The approval's own decision
+        row says who withdrew it, why and when, and the state keeps the same for the run's
+        summary and for `read-back`."""
+        said = (self.state.ending or {}).get("said") or {}
+        decision = said.get("decision")
+        if decision is None:
+            found = self.ledger.rows(
+                "SELECT id FROM decisions WHERE run=? AND approval IS ? AND decision=? "
+                "ORDER BY id DESC LIMIT 1",
+                self.state.name,
+                approval,
+                APPROVED,
+            )
+            decision = found[0]["id"] if found else None
+        at = now()
+        one = {
+            "approval": approval,
+            "decision": decision,
+            "by": by,
+            "why": why,
+            "at": at,
+            "sent_back": sent_back,
+        }
+        if decision is not None:
+            self.ledger.withdrawn(int(decision), by, why, sent_back, at)
+        self.state.withdrawn.append(one)
+        self.session._record("approval_withdrawn", **one)
 
     def _take_answers(self, n: int, who: str) -> None:
         """The answers to the model's questions, said as whoever gave them: on `eval-choice-1` a
@@ -981,6 +1050,7 @@ class Run:
             said = f"{who} picked {pick}. Their reason: {reason}"
         said += self._stop_picked(asked.get("stop"), n, pick, by, reopening)
         said += self._overlap_picked(asked.get("overlap"), n, pick, by, reason)
+        said += self._end_picked(asked.get("end_checks"), n, pick, by, reason)
         self.state.said.append(f'On your question "{asked["question"]}": {said}')
         self._relay("pick", by, f"{pick}: {reason}", said)
         if fix_first:
@@ -1071,9 +1141,18 @@ class Run:
             ending = self._disk_floor()
             if ending is None:
                 ending = self.session.go()
-                while ending.name == "context_full" and self.state.restarts < self.limits.restarts:
-                    self.state.restarts += 1
-                    self._from_the_record()
+                while True:
+                    full = ending.name == CONTEXT_FULL
+                    if full and self.state.restarts < self.limits.restarts:
+                        self.state.restarts += 1
+                        self._from_the_record()
+                    elif ending.name == SENT_BACK:
+                        # The end checks sent the part back: a new conversation from the
+                        # record, on purpose, with their readings as its first message after
+                        # the start (mqucifer/print-shop#150).
+                        self._from_the_record(why=END_CHECKS)
+                    else:
+                        break
                     ending = self.session.go()
         except KeyboardInterrupt:
             ending = self.session._ended(Ending("stopped", {"by": "signal"}))
@@ -1106,9 +1185,16 @@ class Run:
         ending = self._disk_floor_ending()
         return self.session._ended(ending) if ending is not None else None
 
-    def _from_the_record(self, after: list[str] | None = None) -> None:
-        """A conversation that wouldn't fit even compacted: a new one, from the record, and then
-        `after`, what was said to it since, as the after-action review's decision and ask."""
+    def _from_the_record(self, after: list[str] | None = None, why: str = CONTEXT_FULL) -> None:
+        """A new conversation, from the record: for one that wouldn't fit even compacted, and on
+        purpose where the end checks sent the part back or a person's send-back asked for it
+        (`why`, mqucifer/print-shop#150). It keeps the request, the answers, the needs, the
+        facts, each check's latest tries and the files, and loses the earlier calls' reasoning.
+        Then the end checks' note, while it stands, and `after`, what was said to it since, as
+        the after-action review's decision and ask."""
+        before = self.session.requests + 1
+        self.state.restart_kinds.append({"why": why, "before_call": before})
+        self.session._record("restart", why=why, before_call=before)
         state = f"This is round {self.state.round}." if self.state.round else "This is intake."
         state = f"{state} {self._stops_said()}".strip()
         needs_json = json.dumps([n.plain() for n in self._needs()], indent=1)
@@ -1129,14 +1215,23 @@ class Run:
             state,
             checks,
             facts.block(self._facts()),
+            why,
         )
         self.session.begin(
             {"role": "system", "content": prompt.SYSTEM},
             {"role": "user", "content": text},
         )
         self._skills_given()
+        sent = self.state.end_sent
+        if sent and why == END_CHECKS:
+            # The harness's own note, signed so: kept as what it relayed, and never as what a
+            # person last said.
+            self._relay(END_CHECKS, end_checks.BY, str(sent["note"]))
+        elif sent:
+            self.session.say(str(sent["note"]))
         for said in after or []:
             self.session.say(said)
+        self.save()
 
     def _start_text(self) -> str:
         given = sorted(
@@ -1679,6 +1774,8 @@ class Run:
             # Led by the needs a note reopened, until `needs` is taken (mqucifer/print-shop#79).
             stuck.REOPENED if self.state.reopened else "",
             self.failing_said() or NOTHING_FAILING,
+            # The end checks' send-back, until they pass (mqucifer/print-shop#150).
+            str((self.state.end_sent or {}).get("note") or ""),
             facts.block(self._facts(), facts.NONE_YET),
             self._open_needs_said(),
             self._stops_said(),
@@ -2908,6 +3005,29 @@ class Run:
             and not any(one.failed for one in strips)
             and not any(one.failed for one in faces)
         )
+        # Once everything else has passed, before the stop for approval is asked: each held
+        # part's way on, and what bends on the way (`end_checks.py`, mqucifer/print-shop#150).
+        ends: list[end_checks.Checked] = []
+        ends_unread: list[str] = []
+        accepted = self._end_accepted()
+        if met:
+            ends, ends_unread = self._end_checks(part, folder / "judged", folder / "end", on_bed)
+            for one in end_checks.standing(ends, list(accepted)):
+                self._stood(one, "done", folder / "judged")
+            if ends or ends_unread:
+                (folder / "end.json").write_text(
+                    json.dumps(
+                        {
+                            "ways": [one.plain() for one in ends],
+                            "unread": ends_unread,
+                            "accepted": accepted,
+                        },
+                        indent=1,
+                    ),
+                    encoding="utf-8",
+                )
+        end_failed = any(one.failing(list(accepted)) for one in ends)
+        met = met and not end_failed
         files = paths.snapshot(self.work)
         diff = self._diff(folder)
         (folder / "diff.patch").write_text(diff, encoding="utf-8")
@@ -2940,6 +3060,9 @@ class Run:
             reply += "\n" + "\n".join([glass_checks.CURVES_HEADING, *glass_checks.said(strips)])
         if faces:
             reply += "\n" + "\n".join([f"{downward.HEADING}:", *downward.said(faces)])
+        if (ends or ends_unread) and not end_failed:
+            said_ends = end_checks.said(ends, ends_unread, accepted)
+            reply += "\n" + "\n".join([f"{end_checks.HEADING}:", *said_ends])
         held = self._holding()
         if held:
             # Whatever the needs read: a check that failed and hasn't passed since (`holding.py`).
@@ -2963,11 +3086,105 @@ class Run:
                 "downward": faces,
                 "overlap": overlap,
                 "held": held,
+                "end": (ends, ends_unread),
             }
+            self.state.end_sent = None
             return self._stop_for_approval(
                 rows, folder, judgement, wanted, closing, reply, detail, delivered
             )
+        if end_failed:
+            return self._end_sent_back(reply, detail, ends, on_bed)
         return self._next_round(reply, detail)
+
+    def _end_accepted(self) -> dict[str, dict[str, Any]]:
+        """Each failing pair of files a person accepted at an ask that showed the end checks."""
+        return {str(one["key"]): one for one in self.state.end_accepted}
+
+    def _end_checks(
+        self, part: list[str], where: Path, kept: Path, on_bed: dict[str, str] | None = None
+    ) -> tuple[list[end_checks.Checked], list[str]]:
+        """Each held part's way on and what bends on the way, read on the files in `where`, and
+        each held part whose way on couldn't be read (`end_checks.py`,
+        mqucifer/print-shop#150). The holds are the run's own (`holds.py`), and a run from
+        before the request's form carries on as it began."""
+        if self.toolset.legacy:
+            return [], []
+        held = self._holds()
+        if not held:
+            return [], []
+        rows = [
+            dict(row)
+            for row in self.ledger.rows(
+                "SELECT at_call, argv FROM bench_calls WHERE run=? ORDER BY id", self.state.name
+            )
+        ]
+        present = [p.as_posix() for p in paths.walk_plain(where)]
+        found, unread = end_checks.ways(held, self._needs_now(), rows, present, part)
+        return end_checks.read(self.box, found, on_bed or {}, where, kept), unread
+
+    def _end_sent_back(
+        self,
+        reply: str,
+        detail: dict[str, Any],
+        ends: list[end_checks.Checked],
+        on_bed: dict[str, str],
+    ) -> Judged:
+        """The end checks didn't pass: a lesson for each failing place not yet written, a
+        candidate by the harness with the readings as its evidence; the send-back, the
+        harness's own note and decision, `by: "harness"`; and the next round, in a conversation
+        `drive` starts again from the record (mqucifer/print-shop#150). The stop for approval
+        isn't asked."""
+        accepted = list(self._end_accepted())
+        n, at = self.state.round, self.session.requests
+        failing: list[str] = []
+        kept: list[int] = []
+        for one in ends:
+            for place in one.failing(accepted):
+                pair = end_checks.key(one.way, place)
+                failing.append(pair)
+                named = f"{pair}: {place.status}"
+                if named not in self.state.end_lessons:
+                    text, shape = end_checks.lesson(self.state.name, one.way, place)
+                    keys = [{"command": "fit-on", "verdict": one.verdict}]
+                    if place.command:
+                        keys.append({"command": "bend", "verdict": place.verdict})
+                    self.state.end_lessons[named] = lessons.write(
+                        self.ledger,
+                        self.state.name,
+                        written_by=lessons.HARNESS,
+                        fix_shape=shape,
+                        kind="verify",
+                        text=text,
+                        held={
+                            "calls": [at],
+                            "readings": [],
+                            "end_checks": end_checks.evidence(one.way, one, place),
+                        },
+                        routes=("model",),
+                        at_call=at,
+                        keys=keys,
+                    )
+                kept.append(self.state.end_lessons[named])
+        failing = list(dict.fromkeys(failing))
+        kept = sorted(set(kept))
+        note = end_checks.note(ends, accepted, kept)
+        decision = self.ledger.decided(self.state.name, None, SENT_BACK, end_checks.BY, note)
+        self.state.end_sent = {
+            "on_bed": on_bed,
+            "round": n,
+            "at_call": at,
+            "note": note,
+            "failing": failing,
+            "lessons": kept,
+            "decision": decision,
+        }
+        said = {"by": end_checks.BY, "round": n, "decision": decision, "lessons": kept}
+        self.session._record("end_checks", at_call=at, failing=failing, **said)
+        detail["end_checks"] = {"sent_back": True, "failing": failing, **said}
+        judged = self._next_round(f"{reply}\n\n{note}", detail)
+        if judged.ending is None:
+            judged.ending = Ending(SENT_BACK, said)
+        return judged
 
     def _curves(self, files: list[str], where: Path, kept: Path) -> list[judge.Standing]:
         """Each file's curves, if it has any, built as curves: `info`'s small flat faces as a
@@ -3219,6 +3436,8 @@ class Run:
             ]
         if delivered.get("downward"):
             lines += [f"## {downward.HEADING}", "", *downward.said(delivered["downward"]), ""]
+        ends, ends_unread = delivered.get("end") or ([], [])
+        lines += end_checks.at_stop(ends, ends_unread, self._end_accepted())
         if delivered.get("held"):
             lines += [
                 "## Checks whose latest try failed, which no need settles",
@@ -3471,6 +3690,9 @@ class Run:
         overlap = self._overlap_asked(args.get("overlap"))
         if isinstance(overlap, Judged):
             return overlap
+        ends_asked = self._end_asked(args.get("end_checks"))
+        if isinstance(ends_asked, Judged):
+            return ends_asked
         named: list[dict[str, Any]] = []
         for variant in variants:
             files = variant["files"] if isinstance(variant["files"], list) else [variant["files"]]
@@ -3565,6 +3787,8 @@ class Run:
         }
         if overlap is not None:
             self.state.draft["overlap"] = overlap
+        if ends_asked is not None:
+            self.state.draft["end_checks"] = ends_asked
         first_tries = self._first_tries()[0] if stop == forms.PLAN else []
         self.state.draft["holds"] = holds.plain(first_tries)
         self.save()
@@ -3600,6 +3824,11 @@ class Run:
                 stuck.overlap_said(
                     overlap["need"], overlap["command"], overlap["verdict"], overlap["why"]
                 )
+            )
+        if ends_asked is not None:
+            lines.append(
+                "The end checks that don't pass on your files as they stand go beside the "
+                "question, for a person to accept or not:\n" + "\n".join(ends_asked["lines"])
             )
         failing = [one for one in standing if not one.passed]
         if failing:
@@ -3688,6 +3917,69 @@ class Run:
             "\n".join(lines),
             images=images + shown,
             detail={"drafted": n, "standing_failing": len(failing), "stop": stop},
+        )
+
+    def _end_asked(self, given: Any) -> dict[str, Any] | Judged | None:
+        """The end checks that don't pass, for an ask to show a person: read by the harness on
+        the files as they stand (mqucifer/print-shop#150). A pick other than `none` accepts each
+        failing pair of files, and `done` then goes on to the stop for approval with them shown
+        as accepted. Only where one fails."""
+        if not given:
+            return None
+        scratch = self.folder / f".now-{uuid.uuid4().hex[:12]}"
+        on_bed = dict((self.state.end_sent or {}).get("on_bed") or {})
+        try:
+            paths.copy_plain(self.work, scratch, skip_made=True)
+            part = self.state.part or self._mine()
+            ends, _ = self._end_checks(part, scratch, scratch / ".kept", on_bed)
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+        accepted = self._end_accepted()
+        failing = list(
+            dict.fromkeys(
+                end_checks.key(one.way, place)
+                for one in ends
+                for place in one.failing(list(accepted))
+            )
+        )
+        if not failing:
+            reply = (
+                "No end check fails on your files as they stand, so there's nothing for a person "
+                "to accept: leave `end_checks` out, and send `done`."
+            )
+            return Judged("ask", "failed", reply, "no_end_check_fails")
+        return {
+            "failing": failing,
+            "lines": end_checks.said(ends, accepted=accepted, only_failing=True),
+        }
+
+    def _end_picked(
+        self, asked: dict[str, Any] | None, ask: int, pick: str, by: str, reason: str
+    ) -> str:
+        """The failing end checks an ask showed, accepted by any pick but `none`
+        (mqucifer/print-shop#150): `done` no longer sends the part back for those pairs."""
+        if not asked:
+            return ""
+        yes = pick != "none"
+        if yes:
+            for pair in asked["failing"]:
+                self.state.end_accepted.append(
+                    {"key": pair, "ask": ask, "by": by, "reason": reason}
+                )
+        self.session._record(
+            "end_checks_picked", ask=ask, failing=asked["failing"], accepted=yes, by=by
+        )
+        pairs = ", ".join(asked["failing"])
+        who = picked_by_words(by)
+        if yes:
+            return (
+                f"\n\n{who} accepted the end checks that don't pass ({pairs}), as the ask showed "
+                "them: `done` no longer sends the part back for those, and the stop for "
+                "approval shows them as accepted."
+            )
+        return (
+            f"\n\n{who} didn't accept the end checks that don't pass ({pairs}): change the part "
+            "so each passes, then send `done`."
         )
 
     def _overlap_asked(self, given: Any) -> dict[str, Any] | Judged | None:
@@ -3903,6 +4195,7 @@ class Run:
             "standing": draft["standing"],
             "overlap": draft.get("overlap"),
             "holds": draft.get("holds") or [],
+            "end_checks": draft.get("end_checks"),
         }
         (folder / "asked.json").write_text(json.dumps(asked, indent=1), encoding="utf-8")
         options = draft.get("options") or []
@@ -4034,6 +4327,19 @@ class Run:
             ]
         if draft.get("overlap"):
             lines += stuck.overlap_at_stop(draft["overlap"])
+        if draft.get("end_checks"):
+            lines += [
+                "## The harness's end checks that don't pass, for you to accept or not",
+                "",
+                "Once every need had passed, the harness read each held part's way on with "
+                "`fit-on` and each place it passes with `bend`, and sent the part back for "
+                "these. The model asks you about them as they are. Any pick but `none` accepts "
+                "each pair of files below as meant, and the part then comes to you for approval "
+                "with them shown as accepted; `none` leaves them for the model to change.",
+                "",
+                *draft["end_checks"]["lines"],
+                "",
+            ]
         lines += self._needs_refused_said()
         lines += self._asides_said()
         lines += self._swaps_said()
@@ -4437,8 +4743,15 @@ def summarise(folder: Path) -> dict[str, Any]:
         "picked_by": {need: pick.get("by") for need, pick in state["picks"].items()},
         "stops": state.get("stops") or {},
         "approvals": state.get("approvals", 0),
+        # Each approval a send-back after it withdrew, with who and why
+        # (mqucifer/print-shop#150): an approval listed here no longer stands.
+        "approvals_withdrawn": state.get("withdrawn") or [],
         "questions": state["questions"],
         "restarts": state["restarts"],
+        # Every new conversation from the record, by why: `restarts` counts `context_full` alone.
+        "restarts_by_kind": dict(
+            Counter(str(one["why"]) for one in state.get("restart_kinds") or [])
+        ),
         "harness": state["harness"],
         "model_calls": len(calls),
         "requests_recorded": len(requests),

@@ -582,6 +582,16 @@ def _read_on(one: Held, files: list[str], way: str) -> list[str]:
     return []
 
 
+def slide_of(one: Held, argv: list[str]) -> tuple[list[str], str] | None:
+    """A command's files and way, where it's this held part's slide: the file slid last, and
+    its way out. None for any other command. The end checks read the part's way on from it
+    (`end_checks.py`, mqucifer/print-shop#150)."""
+    slid = _slid(argv)
+    if slid is None or not _read_on(one, *slid):
+        return None
+    return slid
+
+
 def first_tries(
     holds: list[Held],
     bench_calls: list[dict[str, Any]],

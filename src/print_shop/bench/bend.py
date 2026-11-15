@@ -472,6 +472,22 @@ def run(args: Any, report: Report) -> None:
     _judge(args, report, pushes, limit, room)
 
 
+def would_pass(
+    push: float, thickness: float, length: float, peak: float, limit: float
+) -> dict[str, float]:
+    """What keeps the strain at the limit, from the reading's own peak: a strip's strain is
+    ε = 1.5·t·y/L², in proportion to its thickness and its push and to one over its length
+    squared, so each is scaled by how far the peak is from the limit, the other two as they
+    are. The most push at this arm, the most thickness at this push, and the least length at
+    this push, in mm."""
+    share = limit / peak
+    return {
+        "push_mm": push * share,
+        "thickness_mm": thickness * share,
+        "length_mm": length / share**0.5,
+    }
+
+
 def _judge(
     args: Any, report: Report, pushes: dict[str, Any], limit: float, room: float | None
 ) -> None:
@@ -524,6 +540,22 @@ def _judge(
         return
     strain_over = over(one["peak_pct"], limit)
     met = room is not None and over(report.numbers["back_moves_mm"], room)
+    passing = would_pass(
+        args.push, report.numbers["thickness_mm"], one["length_mm"], one["peak_pct"], limit
+    )
+    report.numbers["would_pass"] = passing
+    report.line(
+        f"what would pass, from this reading by the strip's ε = 1.5·t·y/L²: at this push, an arm "
+        f"at most {passing['thickness_mm']:.3f} mm thick at its root (it's "
+        f"{report.numbers['thickness_mm']:.3f}), or at least {passing['length_mm']:.3f} mm from "
+        f"its root to the pushed edge (it's {one['length_mm']:.3f}); at this arm, a push of at "
+        f"most {passing['push_mm']:.3f} mm (it's {args.push:g}), each as would_pass"
+        + (
+            f"; and at least {report.numbers['back_moves_mm']:.3f} mm of room behind it"
+            if met
+            else ""
+        )
+    )
     figure = (
         f"pushed {args.push:g} mm {args.toward} at its {worst} edge, the arm takes "
         f"{said(one['peak_pct'], limit, 2)}% across its layers, at {_xyz(one['peak_at'])}"

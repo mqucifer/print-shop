@@ -176,9 +176,13 @@ def index(ledger: DesignLedger, run: str, upto: int | None = None) -> list[str]:
                 f"(before call {at}: compaction {size}{then}: {_cut_said(t['said'])})"
             )
         elif t["kind"] == "restart":
+            why = {
+                "end_checks": "as the harness's end checks sent the part back",
+                "send_back": "as the part was sent back with a fresh start",
+            }.get(str(t["name"] or ""), "as the last one wouldn't fit even compacted")
             before.setdefault(at, []).append(
-                f"(before call {at}: a new conversation from the record, as the last one "
-                "wouldn't fit even compacted: its reasoning and tool replies are gone)"
+                f"(before call {at}: a new conversation from the record, {why}: its reasoning "
+                "and tool replies are gone)"
             )
         elif t["kind"] == "asked":
             after.setdefault(at, []).append(_asked(t["said"]))

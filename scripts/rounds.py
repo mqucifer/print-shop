@@ -8,7 +8,7 @@ scripts/rounds.py start NAME --request FILE [--reference FILE]... [--right FILE]
 scripts/rounds.py resume NAME [--note FILE] [--from WHO] [--reopen-needs]   go on after a stop
 scripts/rounds.py resume NAME --approve --by WHO [--note FILE]      a person's yes, then the
                                                                   model's after-action review
-scripts/rounds.py resume NAME --send-back --by WHO --note FILE [--reopen-needs]
+scripts/rounds.py resume NAME --send-back --by WHO --note FILE [--reopen-needs] [--fresh]
                                                                   a person's no, as a new round
 scripts/rounds.py resume NAME --close --by WHO --note FILE         ended without approval, then
                                                                   the model's after-action review
@@ -362,6 +362,12 @@ def main() -> int:
         help="who the note is from; at `questions`, who answered: sponsor, or stand-in: <who>",
     )
     resume.add_argument("--reopen-needs", action="store_true")
+    resume.add_argument(
+        "--fresh",
+        action="store_true",
+        help="with --send-back: start the conversation again from the record, the note its "
+        "first message, with none of the earlier calls' reasoning",
+    )
     decision = resume.add_mutually_exclusive_group()
     decision.add_argument("--approve", action="store_true")
     decision.add_argument("--send-back", action="store_true")
@@ -506,8 +512,10 @@ def main() -> int:
                 run = Run.load(folder, send)
                 (folder / "stop").unlink(missing_ok=True)
                 note = args.note.read_text(encoding="utf-8") if args.note else ""
+                if args.fresh and not args.send_back:
+                    raise Refused("--fresh goes with --send-back: it starts its conversation again")
                 if args.send_back:
-                    told = run.send_back(args.by, note, args.reopen_needs)
+                    told = run.send_back(args.by, note, args.reopen_needs, args.fresh)
                 else:
                     told = run.resume(note, args.reopen_needs, args.note_from)
                 # Said before the model goes on, so a reopening that left the fixed needs

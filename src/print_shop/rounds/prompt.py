@@ -124,6 +124,21 @@ AGAIN = (
     "Your files are as you left them: list and read what you need, starting with "
     "`record/ROUNDS.md`."
 )
+#: The same, where the conversation was started again on purpose (mqucifer/print-shop#150): the
+#: end checks sent the part back, or a person's send-back asked for a fresh start.
+AGAIN_WHY = {
+    "end_checks": (
+        "This conversation starts again from the record, on purpose: every need passed, and the "
+        "harness's own checks at the end sent the part back. What they read is the next "
+        "message. Your files are as you left them: list and read what you need, starting with "
+        "`record/ROUNDS.md`."
+    ),
+    "send_back": (
+        "This conversation starts again from the record, on purpose: the part was sent back, "
+        "and the note is the next message. Your files are as you left them: list and read what "
+        "you need, starting with `record/ROUNDS.md`."
+    ),
+}
 AGAIN_TRIES = (
     " Each check's latest tries are above, so there's no need to read `record/CHECKS.md`: it "
     "holds the same, and older tries only."
@@ -138,9 +153,11 @@ def again(
     state: str,
     checks: str = "",
     kept_facts: str = "",
+    why: str = "context_full",
 ) -> str:
-    """A new conversation from the record, when the last one wouldn't fit any more: nothing's
-    lost but its reasoning, as the part, the script and the record are all on the disk. Each
+    """A new conversation from the record, when the last one wouldn't fit any more, or on
+    purpose where `why` says the part was sent back (mqucifer/print-shop#150): nothing's lost
+    but its reasoning, as the part, the script and the record are all on the disk. Each
     check's latest tries come with it (`nudge.record`), so it can compare them without reading
     back what it tried (mqucifer/print-shop#39), and the facts the model kept, whole.
 
@@ -150,7 +167,8 @@ def again(
     answers = "\n\n".join(said)
     tried = f"{checks.strip()}\n\n" if checks.strip() else ""
     known = f"{kept_facts.strip()}\n\n" if kept_facts.strip() else ""
-    closing = AGAIN + (AGAIN_TRIES if tried else " `record/CHECKS.md` holds every check's tries.")
+    closing = AGAIN_WHY.get(why, AGAIN)
+    closing += AGAIN_TRIES if tried else " `record/CHECKS.md` holds every check's tries."
     closing += AGAIN_FACTS if known else ""
     return (
         f"{start_text}\n\n{answers}\n\nThe needs, as settled:\n{needs_json}\n\n{known}"

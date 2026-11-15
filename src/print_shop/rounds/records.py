@@ -110,6 +110,8 @@ class Recorder:
         self.nudges = 0
         self.after_stop = False
         self.last_stop: Any = None
+        #: Why the next new conversation starts, where the run said (`_on_restart`).
+        self.restart_why: str | None = None
         self.relayed: set[str] = set()
         self.compacted_at: int | None = None
         self.compactions = 0
@@ -338,14 +340,22 @@ class Recorder:
         self.requests = n
         self.cut = {}
         if self.after_stop:
-            # A conversation that wouldn't fit starts again from the record in the same process.
-            if self.last_stop == "context_full" and event.get("from") == 0:
+            # A conversation that wouldn't fit starts again from the record in the same process,
+            # and so does one the end checks sent back (mqucifer/print-shop#150).
+            if self.last_stop in ("context_full", "sent_back") and event.get("from") == 0:
                 self.after_stop = False
             else:
                 self._segment("resume", event.get("t"), n)
         self._appended(event.get("append") or [], n)
         if event.get("from") == 0 and n > 1:
-            self._row("restart", at=event.get("t"), at_call=n)
+            # Which kind, as the run said before it began: `context_full`, `end_checks` or
+            # `send_back`. A run from before mqucifer/print-shop#150 said none, and each of its
+            # restarts was a conversation that wouldn't fit.
+            self._row("restart", name=self.restart_why, at=event.get("t"), at_call=n)
+            self.restart_why = None
+
+    def _on_restart(self, event: dict[str, Any]) -> None:
+        self.restart_why = str(event.get("why") or "") or None
 
     # What it cost
 
@@ -690,6 +700,17 @@ def read_back(
                 _json(paths.geometry_hashes(judged)),
                 name,
                 row["round"],
+            )
+    for one in state.get("withdrawn") or []:
+        # An approval a send-back withdrew (mqucifer/print-shop#150), where its row doesn't
+        # say so yet.
+        if one.get("decision") is not None:
+            ledger.withdrawn(
+                int(one["decision"]),
+                str(one["by"]),
+                str(one["why"]),
+                int(one["sent_back"]),
+                str(one["at"]),
             )
     return {
         table: int(ledger.rows(f"SELECT COUNT(*) AS n FROM {table} WHERE run=?", name)[0]["n"])  # noqa: S608
