@@ -21,6 +21,7 @@ import bench.cli as cli  # type: ignore[import-not-found]  # noqa: E402
 import bench.slide as slide  # type: ignore[import-not-found]  # noqa: E402
 
 RING = ["clearance", "ring/channel.step", "ring/strip.step", "--slide", "+z"]
+CATCH = ["clearance", "catch/channel.step", "catch/strip.stl", "--slide", "+z"]
 contacts, meet = slide._contacts, slide._meet
 
 
@@ -48,6 +49,15 @@ def late(*args: Any) -> Any:
     return None if first is None else first + 0.05
 
 
+def as_the_eval(*args: Any) -> Any:
+    """The step and halving reading 0.0094 mm late, inside the tie band, as the eval read its
+    ring: 0.8094 against the rays' 0.8000. It read this ring's slope 0.005 mm late itself until
+    a widening contact was followed back by its curve (mqucifer/print-shop#143), and the two
+    methods' places are compared only where their distances differ, so the eval's is planted."""
+    first = meet(*args)
+    return None if first is None else first + 0.0094
+
+
 def ran(argv: list[str], **planted: Any) -> dict[str, Any]:
     slide._contacts = planted.get("contacts", contacts)
     slide._meet = planted.get("meet", meet)
@@ -73,9 +83,13 @@ def ran(argv: list[str], **planted: Any) -> dict[str, Any]:
 print(
     json.dumps(
         {
-            "patch_on_the_ring": ran(RING, contacts=ON_RING),
-            "patch_up_the_slope": ran(RING, contacts=UP_THE_SLOPE),
+            "patch_on_the_ring": ran(RING, contacts=ON_RING, meet=as_the_eval),
+            "patch_up_the_slope": ran(RING, contacts=UP_THE_SLOPE, meet=as_the_eval),
             "patch_read_late": ran(RING, contacts=ON_RING, meet=late),
+            # A catch round a thin band (mqucifer/print-shop#143), with nothing planted on its
+            # contacts: its teeth are first contacts no ray first meets. Read 0.05 mm late, the
+            # two methods' distances are past the tie band, and it's a disagreement still.
+            "catch_read_late": ran(CATCH, meet=late),
         }
     )
 )

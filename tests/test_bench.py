@@ -20,7 +20,8 @@ from typing import Any
 import pytest
 
 from print_shop.bench import host
-from print_shop.rounds import needs, reports, skills
+from print_shop.rounds import downward, needs, reports, skills
+from print_shop.rounds.box import Box
 from print_shop.rounds.needs import Need
 
 pytestmark = pytest.mark.bench
@@ -464,6 +465,49 @@ def test_an_open_mesh_isnt_given_a_volume(bench: Any) -> None:
     answer = bench("info", "form-holed.stl")
     assert answer.verdict == "NO ANSWER"
     assert answer.numbers["watertight"] is False
+
+
+# A plain STL as it's given: its second volume, stacked between level faces
+# (mqucifer/print-shop#144)
+
+
+def test_a_plain_watertight_tray_reads_one_volume_by_the_mesh_and_by_sections(bench: Any) -> None:
+    """In an eval a given channel letter, watertight and one body, read 60135.386 mm³ by the mesh
+    and 59683.300 by sections, 0.75% apart: `DISAGREE`, so every need on `info` or `readback` for
+    a part cut from it failed. Its floor's top lay inside one of the sections' steps, which read
+    the walls' area where some of it was still floor. Here a tray made like it (`given/tray.stl`),
+    its floor's top 0.047 mm into a step: main read 11076.130 by sections against 11171.269,
+    0.85%. Stacked between level faces, the sections read the mesh's own figure."""
+    answer = bench("info", "given/tray.stl")
+    assert answer.verdict == "OK" and answer.code == 0, answer.text
+    assert answer.numbers["watertight"] is True and answer.numbers["bodies_mesh"] == 1
+    mesh = answer.numbers["volume_mesh_mm3"]
+    # The exact shape's 11171.55, short by the chords on its curved walls.
+    assert mesh == pytest.approx(11171.55, abs=0.5)
+    said = re.search(r"second check: volume by sections: ([\d.]+) mm³, 128 sections stacked "
+                     r"between its level faces, within 0\.5% of the mesh's \(([\d.]+) mm³\)",
+                     answer.text)  # fmt: skip
+    assert said, answer.text
+    # Upright walls between level faces: the stack is exact, far inside its 0.5%.
+    assert float(said.group(1)) == pytest.approx(mesh, abs=0.01)
+    assert float(said.group(2)) == pytest.approx(0.005 * mesh, abs=0.01)
+    same = bench("readback", "given/tray.stl", "given/tray.stl", "--expect-delta", "0")
+    assert same.verdict == "OK", same.text
+    # A slope between level faces is still read by its steps, as before: a sphere has none.
+    form = bench("info", "form.stl")
+    assert form.verdict == "OK", form.text
+
+
+def test_a_mesh_that_crosses_itself_still_reads_two_volumes(bench: Any) -> None:
+    """Two cubes in one mesh, one into the other (`given/crossing.stl`): watertight, and the
+    mesh's own arithmetic counts their shared 350 mm³ twice. The sections read the material,
+    1650 mm³, exactly now, and it's `DISAGREE` still."""
+    answer = bench("info", "given/crossing.stl")
+    assert answer.verdict == "DISAGREE" and answer.code == 2, answer.text
+    assert answer.numbers["watertight"] is True
+    assert "2000.000 mm³ by the mesh and 1650.000 mm³ by sections" in answer.text, answer.text
+    cut = bench("readback", "given/tray.stl", "given/crossing.stl")
+    assert cut.verdict == "DISAGREE", cut.text
 
 
 # Panes from openings
@@ -2688,6 +2732,49 @@ def test_a_patch_of_a_ring_no_ray_first_met_is_a_tie_not_a_disagreement(bench: A
     assert late["tie"] is False
 
 
+def test_a_catch_that_widens_round_a_thin_band_is_held_where_the_rays_read_it(bench: Any) -> None:
+    """mqucifer/print-shop#143. In an eval a catch ring 0.2 mm over a strip's top edge, all round a
+    letter, read `DISAGREE`: the rays after 0.2000 mm, the step and halving after 0.2263, at a
+    first spot no ray first met. The strip touched the channel's walls, so the step read its
+    contact back along the overlap's growth, by its slope; the catch's underside sloped, so the
+    growth widened, and the slope read it late. Here the same, on parts of our own
+    (`catch/`): main read 0.2626 and `DISAGREE` at a tooth of the catch. Followed back by its
+    curve, the step reads what the rays do, within the chords: `HELD`, at the larger of the two,
+    and the reply says the contact runs round the band, along its outline."""
+    answer = bench("clearance", "catch/channel.step", "catch/strip.stl", "--slide", "+z")
+    assert answer.verdict == "HELD" and answer.code == 0, answer.text
+    slide = answer.numbers["slide"]
+    assert slide["first_rays_mm"] == pytest.approx(0.2, abs=1e-4)
+    # The larger of the two, and within the fine mesh's chords of the rays'.
+    assert slide["first_rays_mm"] <= slide["first_mm"] <= 0.2 + 2 * 0.002 + 1e-4, answer.text
+    assert "DISAGREE" not in answer.text and not answer.record["notes"], answer.text
+    # Six places, three of them teeth 0.03 mm long: in stretches, along 98% of the outline.
+    assert len(slide["contacts"]) == 6 and slide["tie"] is False
+    sizes = [max(h - lo for lo, h in zip(*c["box"], strict=True)) for c in slide["contacts"]]
+    teeth = [size for size in sizes if size < 0.05]
+    assert len(teeth) == 3, slide["contacts"]
+    assert slide["round"] == ["channel.step"]
+    assert slide["round_along"]["channel.step"] == pytest.approx(0.98, abs=0.01)
+    said = (
+        "the first contact with channel.step runs round strip.stl: seen along z its 6 places lie "
+        "along 98% of strip.stl's outline"
+    )
+    assert said in answer.text, answer.text
+
+
+def test_a_catch_round_a_band_read_past_the_tie_band_is_still_a_disagreement(bench: Any) -> None:
+    """mqucifer/print-shop#143. The same catch with the step and halving planted 0.05 mm late
+    (`bench_cases/planted_tie.py`): the two distances are past the tie band, and a tooth is a
+    first spot of the step's that no ray first met, so it's `DISAGREE`, as before."""
+    done = host.run(["planted_tie.py"], bench.work, python=True)
+    assert done.returncode == 0, done.stdout + done.stderr
+    late = json.loads(done.stdout.strip().splitlines()[-1])["catch_read_late"]
+    assert late["verdict"] == "DISAGREE" and late["code"] == 2, late["text"]
+    assert late["first_mm"] - late["first_rays_mm"] > 0.02 and late["tie"] is False
+    assert "where the rays find no first contact:" in late["text"], late["text"]
+    assert "runs round" not in late["text"], late["text"]
+
+
 def test_a_ring_caught_at_hold_by_one_method_and_past_it_by_the_other_says_how_to_hold(
     bench: Any,
 ) -> None:
@@ -2707,6 +2794,44 @@ def test_a_ring_caught_at_hold_by_one_method_and_past_it_by_the_other_says_how_t
     ), answer.text
     inside = bench(*RING, "ring/strip-at-hold.step", "--slide", "+z", "--hold", "1.03")
     assert inside.verdict == "HELD", inside.text
+
+
+# A stop's reading of downward faces, by the print loop's own function
+# (mqucifer/print-shop#147)
+
+
+def test_a_stop_reads_a_flat_ledge_and_passes_a_sloped_one_on_the_part_as_the_bench_lays_it(
+    bench: Any,
+) -> None:
+    """The stop's own reading, end to end: the bench lays each STEP file on its side and meshes
+    it, in the image, and `features.overhang_to_support` reads the mesh here. A tray whose ledge
+    has a flat underside (`ledge/tray-flat`), in a request that says no supports, doesn't pass;
+    the same with a 45 degree underside does; and turned over, each is read on that side, said
+    where in the file's own coordinates."""
+    box = Box(bench.work)
+    files = ["ledge/tray-flat.step", "ledge/tray-sloped.step", "references/given.step"]
+    said = 'the request says "It prints with no supports."'
+    kept = bench.work / "ledge-kept"
+    flat, sloped = downward.read(
+        box, files, {}, bench.work, kept, {"ledge/tray-flat.step": said, files[1]: said}
+    )
+    assert flat.check == "downward" and flat.file == "ledge/tray-flat.step"
+    assert flat.failed and flat.verdict == "NEEDS SUPPORT", flat.why
+    # 396 mm² by arithmetic; the print loop reads it at points 0.5 mm apart, short at its edge.
+    assert 300 < flat.numbers["to_support_mm2"] <= 396.0, flat.numbers
+    (place,) = flat.numbers["places"]
+    assert place["box"][0][2] == place["box"][1][2] == 16.0
+    assert place["flat_mm2"] == place["area_mm2"]
+    assert said in flat.why and "lying on its -z side" in flat.why
+    assert sloped.passed and sloped.verdict == "NONE", sloped.why
+    assert sloped.numbers["to_support_mm2"] == 0.0
+    over, _ = downward.read(box, files[:2], {files[0]: "+z"}, bench.work, kept, {})
+    assert over.passed and over.verdict == "NEEDS SUPPORT", "a reading, with nothing said"
+    assert over.numbers["side"] == "+z"
+    # Turned over, the floor's inside face is a ceiling: z 2 as the file is stored.
+    assert [p["box"][0][2] for p in over.numbers["places"]] == [2.0], over.numbers
+    gone = downward.read(box, ["ledge/none.step"], {}, bench.work, kept, {})
+    assert gone[0].unsure and not gone[0].failed and "isn't there" in gone[0].why
 
 
 # Replies that say where (mqucifer/print-shop#77)

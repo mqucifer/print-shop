@@ -23,7 +23,7 @@ from print_shop.rounds import facts, holds, transcript
 from print_shop.rounds.box import Ran
 from print_shop.rounds.needs import Need
 from print_shop.rounds.run import Run
-from tests.rounds_fakes import Scripted, tool
+from tests.rounds_fakes import Scripted, laid, tool
 
 FAN_REQUEST = """\
 A lid for the fan given, holding it under the lid by clips of its own.
@@ -73,6 +73,8 @@ class Answers:
     ) -> Ran:
         if module == "usage":
             return Ran(0, usage_module.MARK + json.dumps(["" for _ in args]), 0.1)
+        if module == "refine":
+            return laid(args, where)
         raise AssertionError(module)
 
 

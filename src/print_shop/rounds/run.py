@@ -43,6 +43,7 @@ from print_shop.rounds import (
     after_action,
     breakdown,
     descriptions,
+    downward,
     end_checks,
     facts,
     figures,
@@ -177,6 +178,10 @@ class State:
     # which carries on as it began: no lines held, no stops, and no breakdown asked for.
     form: dict[str, Any] | None = None
     breakdowns: int = 0
+    # The call the first breakdown was kept at, and the call a reply last said what comes next
+    # to a run building at intake, 0 if never (`nudge.py`, mqucifer/print-shop#146).
+    breakdown_call: int = 0
+    intake_nudged: int = 0
     # Each stop passed: its ask, the pick, who made it and at which call.
     stops: dict[str, dict[str, Any]] = field(default_factory=dict)
     # Who opened the fixed needs, with a note, so they may change at the next `needs`.
@@ -957,16 +962,17 @@ class Run:
                 APPROVED,
             )
             decision = found[0]["id"] if found else None
+        at = now()
         one = {
             "approval": approval,
             "decision": decision,
             "by": by,
             "why": why,
-            "at": now(),
+            "at": at,
             "sent_back": sent_back,
         }
         if decision is not None:
-            self.ledger.withdrawn(int(decision), by, why, sent_back, one["at"])
+            self.ledger.withdrawn(int(decision), by, why, sent_back, at)
         self.state.withdrawn.append(one)
         self.session._record("approval_withdrawn", **one)
 
@@ -1387,6 +1393,9 @@ class Run:
             said = "\n".join(f"- {w}" for w in wrong)
             return Judged("breakdown", "failed", f"The breakdown wasn't kept:\n{said}", "misses")
         self.state.breakdowns += 1
+        if self.state.breakdowns == 1:
+            # From here the intake nudge counts toward the needs (mqucifer/print-shop#146).
+            self.state.breakdown_call = self.session.requests
         n = self.state.breakdowns
         (self.folder / "breakdowns").mkdir(exist_ok=True)
         (self.folder / "breakdowns" / f"{n}.json").write_text(
@@ -1681,6 +1690,11 @@ class Run:
             if read:
                 lines.append(holds.read_at_intake(read))
                 more["hold_read"] = [one.bought for one in read]
+        if not lines:
+            building = self._building(name)
+            if building is not None:
+                lines.append(building[0])
+                more["intake_nudge"] = building[1]
         if self.state.reopened and (name == "bench" or ran):
             lines.append(stuck.REOPENED)
             said["reopened"] = True
@@ -1699,6 +1713,42 @@ class Run:
             reply="\n".join(lines) + "\n\n" + reply,
             detail={**judged.detail, **more},
         )
+
+    def _building(self, name: Any) -> tuple[str, dict[str, Any]] | None:
+        """What a reply leads with when the run is building at intake: once it has read a part
+        file of its own on the bench, with no breakdown kept, and each `nudge.INTAKE_EVERY` calls
+        until the breakdown and the needs come (`nudge.py`, mqucifer/print-shop#146). It's a line
+        in a reply, and refuses nothing. A run from before the request's form asks for no
+        breakdown, and carries on as it began; and a tool that is the next step isn't told to
+        take it."""
+        form = self._form()
+        if self.state.stage != "intake" or not self.state.needs_open or form is None:
+            return None
+        if name in ("breakdown", "needs", "ask", "send_ask", "questions", "blocked"):
+            return None
+        found = nudge.built(self._bench_tries(), self._mine())
+        if found is None:
+            return None
+        if any(one.verdict == holds.VERDICT for one in self._first_tries()[0]):
+            # A hold read `HELD` leads each reply with what comes next already
+            # (mqucifer/print-shop#92).
+            return None
+        first, file = found
+        n = self.session.requests
+        kept = self.state.breakdown_call if self.state.breakdowns else 0
+        if not nudge.intake_due(n, first.at_call, self.state.intake_nudged, kept):
+            return None
+        self.state.intake_nudged = n
+        self.save()
+        plan = form.stop(forms.PLAN) is not None
+        said = nudge.intake_said(first, file, n, bool(self.state.breakdowns), plan)
+        detail = {
+            "file": file,
+            "benched_at": first.at_call,
+            "breakdown": bool(self.state.breakdowns),
+            "every": nudge.INTAKE_EVERY,
+        }
+        return said, detail
 
     def _circled(self, n: int, judged: Judged) -> dict[str, Any] | None:
         """Why call `n` counts as one that went round in circles, or None."""
@@ -2908,6 +2958,7 @@ class Run:
         standing: list[judge.Standing] = []
         panes_read: list[judge.Standing] = []
         strips: list[judge.Standing] = []
+        faces: list[judge.Standing] = []
         overlap: dict[str, Any] = {}
         clashes: list[str] = []
         if judgement.met:
@@ -2925,6 +2976,11 @@ class Run:
             strips = self._curves(part, judged, folder / "standing")
             for one in strips:
                 self._stood(one, "done", judged)
+            # Each file's downward faces as it lies on the bed, beside `thin`
+            # (mqucifer/print-shop#147).
+            faces = self._downward(part, judged, folder / "standing", on_bed)
+            for one in faces:
+                self._stood(one, "done", judged)
             overlap = self._overlap(judged, part)
             clashes = _clashes(groups, part, overlap)
             (folder / "standing.json").write_text(
@@ -2933,6 +2989,7 @@ class Run:
                         "printable": [one.plain() for one in standing],
                         "glass": [one.plain() for one in panes_read],
                         "curves": [one.plain() for one in strips],
+                        "downward": [{**one.plain(), "numbers": one.numbers} for one in faces],
                         "overlap": overlap,
                         "clashes": clashes,
                     },
@@ -2946,6 +3003,7 @@ class Run:
             and not any(one.failed for one in standing)
             and not any(one.failed for one in panes_read)
             and not any(one.failed for one in strips)
+            and not any(one.failed for one in faces)
         )
         # Once everything else has passed, before the stop for approval is asked: each held
         # part's way on, and what bends on the way (`end_checks.py`, mqucifer/print-shop#150).
@@ -3000,6 +3058,8 @@ class Run:
             reply += "\n" + "\n".join([glass_checks.HEADING, *glass_checks.said(panes_read)])
         if any(not one.passed for one in strips):
             reply += "\n" + "\n".join([glass_checks.CURVES_HEADING, *glass_checks.said(strips)])
+        if faces:
+            reply += "\n" + "\n".join([f"{downward.HEADING}:", *downward.said(faces)])
         if (ends or ends_unread) and not end_failed:
             said_ends = end_checks.said(ends, ends_unread, accepted)
             reply += "\n" + "\n".join([f"{end_checks.HEADING}:", *said_ends])
@@ -3023,6 +3083,7 @@ class Run:
                 "standing": standing,
                 "glass": panes_read,
                 "curves": strips,
+                "downward": faces,
                 "overlap": overlap,
                 "held": held,
                 "end": (ends, ends_unread),
@@ -3135,6 +3196,21 @@ class Run:
             str(a["strips_file"]): str(a["why"]) for a in self.state.asides if a.get("strips_file")
         }
         return glass_checks.curves(self.box, files, where, kept, asides)
+
+    def _downward(
+        self, files: list[str], where: Path, kept: Path, on_bed: dict[str, str] | None = None
+    ) -> list[judge.Standing]:
+        """Each printed file's downward faces, as it lies on the side its bed need or `on_bed`
+        names, by the print loop's own overhang reading (`downward.py`,
+        mqucifer/print-shop#147). A run from before the request's form carries on as it began."""
+        if self.toolset.legacy:
+            return []
+        wanted = self._needs_now()
+        request = (self.folder / "request.md").read_text(encoding="utf-8")
+        plain = downward.unsupported(request, wanted, files)
+        return downward.read(
+            self.box, files, downward.sides(wanted, on_bed), where, kept, plain
+        )
 
     def _stood(self, one: judge.Standing, stop: str, where: Path, ask: int | None = None) -> None:
         sha = None
@@ -3358,6 +3434,8 @@ class Run:
                 *glass_checks.said(delivered["curves"]),
                 "",
             ]
+        if delivered.get("downward"):
+            lines += [f"## {downward.HEADING}", "", *downward.said(delivered["downward"]), ""]
         ends, ends_unread = delivered.get("end") or ([], [])
         lines += end_checks.at_stop(ends, ends_unread, self._end_accepted())
         if delivered.get("held"):
@@ -4038,6 +4116,7 @@ class Run:
             ]
             found += glass_checks.check(self.box, on_sheet, scratch, scratch / ".kept", ran)
             found += self._curves(files, scratch, scratch / ".kept")
+            found += self._downward(files, scratch, scratch / ".kept")
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
         return found
@@ -4167,6 +4246,14 @@ class Run:
         if stop == forms.PLAN:
             lines += self._plan_said(draft.get("plan") or "")
             lines += holds.at_stop(draft.get("holds") or [])
+        faces = [one for one in draft["standing"] if one["check"] == downward.DOWNWARD]
+        if faces:
+            lines += [
+                f"## {downward.HEADING}",
+                "",
+                *downward.said([judge.Standing(**one) for one in faces]),
+                "",
+            ]
         failing = [one for one in draft["standing"] if not one["passed"]]
         if failing:
             lines += [

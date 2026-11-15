@@ -20,10 +20,10 @@ import pytest
 from print_shop.bench import arm as arm_module
 from print_shop.bench import bend as bend_module
 from print_shop.bench import overlap as overlap_module
-from print_shop.rounds import end_checks, holds, lessons, needs, prompt, transcript
+from print_shop.rounds import end_checks, holds, lessons, needs, prompt, records, transcript
 from print_shop.rounds.box import Ran
 from print_shop.rounds.needs import Need
-from print_shop.rounds.run import Run
+from print_shop.rounds.run import Run, summarise
 from tests.rounds_fakes import Scripted, tool
 from tests.test_holding import Answers
 from tests.test_intake import pick
@@ -611,3 +611,54 @@ def test_what_would_pass_keeps_the_strip_s_strain_at_the_limit(
     assert scale * strip(thick, push, passing["length_mm"]) == pytest.approx(limit)
     over = peak > limit
     assert (passing["push_mm"] < push) == over and (passing["length_mm"] > length) == over
+
+
+# A send-back after approval withdraws that approval
+
+
+def test_a_send_back_after_approval_records_the_approval_as_withdrawn(tmp_path: Path) -> None:
+    """The Sponsor, 2026-11-15: "I don't want a success in a ledger when new information
+    contradicts it." The approval's own row says who withdrew it and why, and so do the run's
+    summary and its read-back."""
+    run, _ = started(tmp_path, LID_DONE, fit="CLEAR")
+    assert run.drive().name == "met"
+    assert run.approve("sponsor", "Print it.").name == "approved"
+    stands = rows(run, "SELECT decision, withdrawn_at, withdrawn_by FROM decisions")
+    assert stands == [{"decision": "approved", "withdrawn_at": None, "withdrawn_by": None}]
+    assert summarise(run.folder)["approvals_withdrawn"] == []
+    box = run.box
+    model = Scripted([tool("blocked", reason="Read.")])
+    run = Run.load(run.folder, model, sleep=lambda _: None)
+    run.box = box
+    run.tools.box = box
+    why = "`fit-on` reads the lid BLOCKED, and `bend` its clip FAIL."
+    run.send_back("stand-in: the operator", why, fresh=True)
+    decided = rows(run, "SELECT * FROM decisions ORDER BY id")
+    approved, sent = decided
+    assert (approved["decision"], sent["decision"]) == ("approved", "sent_back")
+    assert approved["withdrawn_by"] == "stand-in: the operator"
+    assert approved["withdrawn_why"] == why
+    assert approved["withdrawn_decision"] == sent["id"] and approved["withdrawn_at"]
+    assert sent["withdrawn_at"] is None, "only the approval is withdrawn"
+    kept = run.state.withdrawn
+    assert kept == [
+        {
+            "approval": 1,
+            "decision": approved["id"],
+            "by": "stand-in: the operator",
+            "why": why,
+            "at": approved["withdrawn_at"],
+            "sent_back": sent["id"],
+        }
+    ]
+    assert rows(run, "SELECT ending FROM runs") == [{"ending": None}], "it isn't a success"
+    assert summarise(run.folder)["approvals_withdrawn"] == kept
+    # Read back into a ledger whose row doesn't say so, it's written again, and only once.
+    run.ledger.change(
+        "UPDATE decisions SET withdrawn_at=NULL, withdrawn_by=NULL, withdrawn_why=NULL, "
+        "withdrawn_decision=NULL"
+    )
+    records.read_back(run.folder, run.ledger)
+    assert rows(run, "SELECT * FROM decisions ORDER BY id")[0] == approved
+    records.read_back(run.folder, run.ledger)
+    assert rows(run, "SELECT * FROM decisions ORDER BY id") == decided

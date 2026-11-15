@@ -2229,7 +2229,8 @@ def test_an_asks_sheet_goes_to_the_model_first_and_only_then_with_its_words(
     pick = rows(run, "picks")[0]
     assert pick["said_of_sheet_model_said"].startswith("The block in blue")
     at_ask = [r for r in rows(run, "standing") if r["stop"] == "ask"]
-    assert {r["check_name"] for r in at_ask} == {"need gap", "printable", "curves"}
+    # Each printed file's downward faces are read at an ask too (mqucifer/print-shop#147).
+    assert {r["check_name"] for r in at_ask} == {"need gap", "printable", "curves", "downward"}
     assert all(r["ask"] == 1 for r in at_ask)
     asked = json.loads((folder / "asked.json").read_text())
     assert asked["says_model_said"].startswith("The block in blue")
