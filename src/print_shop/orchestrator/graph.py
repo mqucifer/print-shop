@@ -881,7 +881,8 @@ def _propose_and_review(
     while True:
         result: SliceResult = slice_with(apply(profiles, proposal, workdir))
         reading = _read(result)
-        found = flags(reading, faces, process, filament, placed) if reading is not None else ()
+        found = (flags(reading, faces, process, filament, placed, proposal.changes)
+                 if reading is not None else ())
         if reviewer is None:
             break
         review = reviewer(

@@ -38,7 +38,7 @@ from print_shop.setup.context import (
 )
 from print_shop.setup.intake import Intake, replay_asker
 from print_shop.setup.loop import Part, PrintLoop, big
-from print_shop.setup.proposal import Change, PartFacts, Proposal, Source, guard
+from print_shop.setup.proposal import Change, GivenLesson, PartFacts, Proposal, Source, guard
 from print_shop.setup.reading import flags
 from print_shop.setup.review import Review, ReviewRequest, render
 from print_shop.setup.skill import GROUPS, load
@@ -405,13 +405,54 @@ def test_a_fit_at_the_plate_proposes_elephant_foot_compensation_not_applied(
     presets: dict[str, dict[str, Any]] = {"process": {"initial_layer_line_width": "0.5"},
                                           "machine": {}, "filament": {}}
     assert check(foot.change.key, foot.change.value, presets) == ""
-    # At the top, or compensated already, nothing is proposed.
+    # At the top, nothing is said; compensated already, the note says the fit is covered.
     at_top = flags(reading, ALL_SEEN, PROCESS, FILAMENT, place(context, stl, (180.0, 0.0, 0.0)))
     assert not [f for f in at_top if f.id == "fit_elephant_foot"]
     done = _read(tmp_path, layers=50, config=PETG | {"elefant_foot_compensation": "0.15"})
-    assert not [f for f in flags(done, ALL_SEEN, PROCESS, FILAMENT,
-                                 place(context, stl, (0.0, 0.0, 0.0)))
-                if f.id == "fit_elephant_foot"]
+    (covered,) = [f for f in flags(done, ALL_SEEN, PROCESS, FILAMENT,
+                                   place(context, stl, (0.0, 0.0, 0.0)))
+                  if f.id == "fit_elephant_foot"]
+    assert covered.change is None
+    assert covered.reading.endswith("elefant_foot_compensation is 0.15: the plate fit is "
+                                    "covered, as 0.15 mm is at least the 0.1 mm it wants, so "
+                                    "nothing is proposed")
+
+
+def _lesson(value: str) -> Change:
+    return Change(key="elefant_foot_compensation", preset="0", value=value, reason="learned",
+                  source=Source.LESSON, lesson=24)
+
+
+def test_a_lessons_larger_elephant_foot_stands_and_covers_the_fit(tmp_path: Path) -> None:
+    """Lesson 24 sets 0.2 for a part flat on the plate; the fit wants 0.1, and never lowers it."""
+    stl = _run(tmp_path)
+    placed = place(read_context(stl), stl, (0.0, 0.0, 0.0))
+    # The slice is read as made with the proposal: the lesson's value is the one in effect.
+    reading = _read(tmp_path, layers=50, config=PETG | {"elefant_foot_compensation": "0"})
+    (foot,) = [f for f in flags(reading, ALL_SEEN, PROCESS, FILAMENT, placed, (_lesson("0.2"),))
+               if f.id == "fit_elephant_foot"]
+    assert foot.change is None
+    assert "elefant_foot_compensation is 0.2, set by lesson 24: the plate fit is covered, as " \
+        "0.2 mm is at least the 0.1 mm it wants" in foot.reading
+
+
+def test_a_lessons_smaller_elephant_foot_is_proposed_up_to_the_fits(tmp_path: Path) -> None:
+    stl = _run(tmp_path)
+    placed = place(read_context(stl), stl, (0.0, 0.0, 0.0))
+    reading = _read(tmp_path, layers=50, config=PETG | {"elefant_foot_compensation": "0.05"})
+    (foot,) = [f for f in flags(reading, ALL_SEEN, PROCESS, FILAMENT, placed, (_lesson("0.05"),))
+               if f.id == "fit_elephant_foot"]
+    assert foot.change is not None and foot.change.value == "0.1"
+    assert "raising the 0.05 mm lesson 24 set" in foot.change.reason
+    # Held to its bound: a first layer narrower than the fit's value caps it, and a lesson
+    # already at the cap is covered.
+    narrow = {**PROCESS, "initial_layer_line_width": "0.08"}
+    (capped,) = [f for f in flags(reading, ALL_SEEN, narrow, FILAMENT, placed,
+                                  (_lesson("0.05"),)) if f.id == "fit_elephant_foot"]
+    assert capped.change is not None and capped.change.value == "0.08"
+    (at_cap,) = [f for f in flags(reading, ALL_SEEN, narrow, FILAMENT, placed,
+                                  (_lesson("0.08"),)) if f.id == "fit_elephant_foot"]
+    assert at_cap.change is None and "the plate fit is covered" in at_cap.reading
 
 
 def test_elephant_foot_is_held_to_a_narrower_first_layer(tmp_path: Path) -> None:
@@ -521,7 +562,8 @@ def job(tmp_path: Path) -> Iterator[Any]:
     with Ledger(tmp_path / "ledger.sqlite") as ledger:
         (tmp_path / "work").mkdir()
 
-        def run(stl: Path, loop: PrintLoop | None = None, **submit: Any) -> tuple[Any, Any]:
+        def run(stl: Path, loop: PrintLoop | None = None,
+                lessons: tuple[GivenLesson, ...] = (), **submit: Any) -> tuple[Any, Any]:
             shown: list[ReviewRequest] = []
 
             def review(request: ReviewRequest) -> Review:
@@ -532,7 +574,8 @@ def job(tmp_path: Path) -> Iterator[Any]:
             daemon = Daemon(
                 cfg=CFG, profiles=STORE_PROFILES, workdir=tmp_path / "work",
                 printer=FramePrinter(), slicer=AnyPart(), bridge=lambda cfg: bridge,
-                ledger=ledger, proposer=Proposer(ask=_random_seam, ask_questions=_questions),
+                ledger=ledger, proposer=Proposer(ask=_random_seam, ask_questions=_questions,
+                                                 lessons=lambda features, kind: lessons),
                 asker=replay_asker(ANSWERS), reviewer=review, loop=loop,
             )
             with daemon:
@@ -609,3 +652,42 @@ def test_a_sidecar_named_at_submit_is_read(job: Any, tmp_path: Path) -> None:
     assert row.proposal.context[0] == "from the sidecar cube-context.json"
     assert row.proposal.get("seam_position") is None
     assert any(f.id == "fit_elephant_foot" for f in review.flags)
+
+
+def _flat_lid_with_a_fit_at_the_plate(tmp_path: Path) -> Path:
+    """The lid laid on its top, 6898 mm2 on the plate, with a sidecar fit in its first 2 mm."""
+    return _sidecar(tmp_path, {"down": "-z", "fits": [
+        {"name": "rim in the base's groove", "play": 0.1, "z": [-50, -48]}]})
+
+
+def _lesson_24(value: str) -> GivenLesson:
+    return GivenLesson(id=24, text="the first layers of a flat part flared", reviewed_by="you",
+                       key="elefant_foot_compensation", value=value, job_id="job-7",
+                       stl_name="tray.stl", traits=("large_bed_contact",))
+
+
+def test_a_job_with_a_lessons_elephant_foot_and_a_fit_shows_both(job: Any, tmp_path: Path) -> None:
+    row, review = job(_flat_lid_with_a_fit_at_the_plate(tmp_path), lessons=(_lesson_24("0.2"),))
+    change = row.proposal.get("elefant_foot_compensation")
+    assert (change.value, change.source, change.lesson) == ("0.2", Source.LESSON, 24)
+    assert not [f for f in review.proposed if f.change.key == "elefant_foot_compensation"]
+    lines = render(review).splitlines()
+    # The lesson's 0.2 stands as a change, named for the lesson ...
+    at = next(n for n, line in enumerate(lines)
+              if line.startswith("  elefant_foot_compensation  "))
+    assert lines[at].endswith("-> 0.2")
+    assert lines[at + 1].endswith("[lesson 24: large_bed_contact]")
+    # ... and the fit's note says the plate fit is covered by it.
+    text = "\n".join(lines)
+    assert ("elefant_foot_compensation is 0.2, set by lesson 24: the plate fit is covered, as "
+            "0.2 mm is at least the 0.1 mm it wants, so nothing is proposed") in text
+
+
+def test_a_job_with_a_lessons_smaller_elephant_foot_is_proposed_the_fits(
+    job: Any, tmp_path: Path,
+) -> None:
+    row, review = job(_flat_lid_with_a_fit_at_the_plate(tmp_path), lessons=(_lesson_24("0.05"),))
+    assert row.proposal.get("elefant_foot_compensation").value == "0.05"
+    (foot,) = [f for f in review.proposed if f.change.key == "elefant_foot_compensation"]
+    assert foot.change.value == "0.1"
+    assert "raising the 0.05 mm lesson 24 set" in foot.change.reason
