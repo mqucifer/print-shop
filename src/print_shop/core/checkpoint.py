@@ -53,7 +53,7 @@ from print_shop.core.state import (
 from print_shop.inventory import Material
 from print_shop.setup.features import Feature
 from print_shop.setup.intake import Answer, Estimate, Intake, Option, Question
-from print_shop.setup.proposal import Change, GivenLesson, Source
+from print_shop.setup.proposal import Change, GivenLesson, LoopCall, Source
 from print_shop.setup.proposal import Proposal as SettingsProposal
 from print_shop.setup.reading import (
     FeatureReading,
@@ -98,6 +98,7 @@ PERSISTED_TYPES: tuple[type, ...] = (
     SettingsProposal,
     Change,
     GivenLesson,
+    LoopCall,
     Source,
     Feature,
     SliceReading,
