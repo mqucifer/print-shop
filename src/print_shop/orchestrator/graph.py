@@ -60,6 +60,8 @@ from print_shop.setup import Proposer
 from print_shop.setup import lessons as print_lessons
 from print_shop.setup.features import measure
 from print_shop.setup.intake import Asker, Estimate, Intake
+from print_shop.setup.loop import Part, PrintLoop
+from print_shop.setup.loop import run as run_loop
 from print_shop.setup.proposal import (
     ORIENTATION,
     Change,
@@ -72,6 +74,7 @@ from print_shop.setup.proposal import (
 from print_shop.setup.questions import estimate
 from print_shop.setup.reading import SliceReading, flags, read_slice, seen
 from print_shop.setup.review import Reviewer, ReviewRequest
+from print_shop.setup.skill import groups_for, load
 from print_shop.setup.traits import traits
 from print_shop.slicer.naming import job_id_from_filename, name_gcode
 from print_shop.slicer.orca import (
@@ -118,6 +121,7 @@ def build_graph(
     proposer: Proposer | None = None,
     asker: Asker | None = None,
     reviewer: Reviewer | None = None,
+    loop: PrintLoop | None = None,
 ) -> Any:
     """Build and compile the print pipeline graph.
 
@@ -159,6 +163,11 @@ def build_graph(
         reviewer: The Sponsor's review of the proposed settings, after each
             slice and before the approval gate; a correction slices again.
             None skips the review, and the approval gate still stands.
+        loop: The print loop (mqucifer/print-shop#129): with a proposer and an asker, one
+            conversation with tools decides the pose and the settings after the intake's
+            questions, in place of the orientation call and the settings call. The questions
+            are asked of the file's own pose. Past its limit the job falls back to the single
+            calls, and says so. None keeps the single calls.
 
     Returns:
         A compiled LangGraph ``CompiledStateGraph``.
@@ -195,8 +204,20 @@ def build_graph(
             return {"orientation": _as_laid(request), **poses}
         given = print_lessons.for_orienting(ledger, laid) if ledger is not None else ()
         request = request.model_copy(update={"lessons": tuple(g.line() for g in given)})
+        if loop is not None and proposer is not None and asker is not None:
+            # The print loop chooses the pose after the questions, which are asked of the
+            # file's own (mqucifer/print-shop#129).
+            own = next(c for c in found if c.rotation_deg == (0.0, 0.0, 0.0))
+            pending = Outcome(proposal=Chosen(value=own, source=LOOP_PENDING, rationale=(
+                "as the file lays it, for the questions: the print loop chooses the pose after "
+                "them")), accepted=True, attempts=0)
+            return {"orientation": pending, "orientation_lessons": given, **poses}
+        return {"orientation": orient_by_call(request), "orientation_lessons": given, **poses}
 
-        def proposer(req: OrientationRequest) -> Any:
+    def orient_by_call(request: OrientationRequest) -> Outcome[Orientation]:
+        """The single orientation call: the model proposes, the validator disposes."""
+
+        def chooses(req: OrientationRequest) -> Any:
             if llm is None:
                 return propose_geometric(req, NO_MODEL_CONFIGURED)
             try:
@@ -204,8 +225,8 @@ def build_graph(
             except (RuntimeError, OSError):
                 return propose_geometric(req)
 
-        outcome = _resolved(propose_validate(proposer, validate_orientation, request), found)
-        return {"orientation": outcome, "orientation_lessons": given, **poses}
+        return _resolved(propose_validate(chooses, validate_orientation, request),
+                         request.candidates)
 
     def slice_node(state: PrintJobState) -> dict[str, Any]:
         """Slice the model in the chosen orientation, writing into outdir_root/job_id.
@@ -256,11 +277,72 @@ def build_graph(
             )
             proposed["intake"] = intake
             earlier: list[Change] = []
+            looped: Proposal | None = None
+            fell_back: dict[str, Any] = {}
+            if outcome is not None and outcome.proposal.source == LOOP_PENDING:
+                assert loop is not None and build_volume is not None
+                found_by = run_loop(loop, Part(
+                    stl=Path(state["stl_path"]), facts=proposer.facts(intake, features, profiles),
+                    candidates=poses, build_volume_mm=build_volume,
+                    skill=load(groups_for(intake, features)), profiles=profiles, slicer=slicer,
+                    workdir=outdir / "loop", ledger=ledger,
+                    orienting=state.get("orientation_lessons", ()),
+                    lessons=proposer.lessons_for(features, profiles),
+                ))
+                record = {"loop": found_by.calls, "loop_ending": (
+                    f"{found_by.ended}, after {found_by.model_calls} calls in "
+                    f"{found_by.seconds:g} s")}
+                if found_by.proposed:
+                    assert found_by.pose is not None
+                    chosen = found_by.pose
+                    why = found_by.reply.get("reasoning", "") or "the print loop chose it"
+                    decided = Outcome(proposal=Chosen(
+                        value=chosen, source=f"loop:{loop.model}",
+                        rationale=f"the print loop: {why}"[:600]), accepted=True, attempts=1)
+                    earlier = list(found_by.corrections)
+                else:
+                    # Past its limit, or the model unreachable: today's single calls, said so.
+                    decided = orient_by_call(OrientationRequest(
+                        candidates=poses, build_volume_mm=build_volume,
+                        lessons=tuple(g.line() for g in state.get("orientation_lessons", ()))))
+                    fell_back = {**record, "notes": (
+                        f"the print loop stopped, {found_by.ended}, after "
+                        f"{found_by.model_calls} calls in {found_by.seconds:g} s: the pose and "
+                        "the settings came from the single calls",)}
+                proposed["orientation"] = decided
+                if decided.accepted:
+                    chosen = decided.proposal.value
+                    rotation_deg = chosen.rotation_deg
+                    applied = AppliedOrientation(
+                        rotation_deg=rotation_deg, rationale=decided.proposal.rationale,
+                        height_mm=chosen.height_mm,
+                        bed_contact_area_mm2=chosen.bed_contact_area_mm2)
+                    if rotation_deg != (0.0, 0.0, 0.0):
+                        stl_to_slice = write_rotated(
+                            state["stl_path"], rotation_deg,
+                            outdir / f"rotated-{pose_value(rotation_deg)}.stl")
+                if found_by.proposed:
+                    features = measure(stl_to_slice, applied.bed_contact_area_mm2 or 0.0)
+                    reply = found_by.reply
+                    made = dataclasses.replace(proposer, ask=lambda *_: reply, llm=None)(
+                        intake, features, profiles)
+                    looked = set(found_by.looked_up)
+                    looped = made.model_copy(update={
+                        **record, "model": f"loop:{loop.model}",
+                        "lessons": tuple(g.model_copy(update={"looked_up": g.id in looked})
+                                         for g in made.lessons),
+                    })
             while True:
                 features = measure(stl_to_slice, applied.bed_contact_area_mm2 or 0.0)
-                proposal = _with_orienting(
-                    proposer(intake, features, profiles), state.get("orientation_lessons", ())
-                )
+                if looped is not None:
+                    proposal, looped = looped, None
+                else:
+                    proposal = proposer(intake, features, profiles)
+                    if fell_back:
+                        proposal = proposal.model_copy(update={
+                            "loop": fell_back["loop"], "loop_ending": fell_back["loop_ending"],
+                            "notes": proposal.notes + fell_back["notes"]})
+                proposal = _with_orienting(proposal, state.get("orientation_lessons", ()))
                 carried = [c for c in earlier if c.key != ORIENTATION]
                 if carried:
                     # Corrections made before the part was turned stand after it.
@@ -590,6 +672,9 @@ def _resolved(
                                  rationale=rationale, confidence=outcome.proposal.confidence),
     )
 
+
+#: The source of an orientation the print loop will choose after the questions.
+LOOP_PENDING = "loop:pending"
 
 #: Where an orientation kept as the person laid it came from, as the ledger keeps it.
 AS_LAID = "as_laid"

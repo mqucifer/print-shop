@@ -82,6 +82,23 @@ class Proposer:
         })
         return guard(facts, reasoned)
 
+    def facts(
+        self, intake: Intake, features: tuple[Feature, ...], profiles: SlicerProfiles
+    ) -> PartFacts:
+        """What a proposal reads: the intake, the features and the presets, with the kept lessons
+        for this part, as the print loop is given them (mqucifer/print-shop#129)."""
+        facts = self._facts(intake, features, profiles)
+        _, _, marked = from_lessons(facts, self.lessons_for(features, profiles))
+        return dataclasses.replace(facts, lessons=marked)
+
+    def lessons_for(
+        self, features: tuple[Feature, ...], profiles: SlicerProfiles
+    ) -> tuple[GivenLesson, ...]:
+        """The kept lessons for a part with these features, on these presets' filament."""
+        if self.lessons is None:
+            return ()
+        return self.lessons(features, self._facts(Intake(), features, profiles).filament_type)
+
     def _facts(
         self, intake: Intake, features: tuple[Feature, ...], profiles: SlicerProfiles
     ) -> PartFacts:

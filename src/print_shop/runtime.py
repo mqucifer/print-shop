@@ -27,6 +27,7 @@ from print_shop.printer.centauri import (
 )
 from print_shop.setup import Proposer, lessons
 from print_shop.setup.intake import Asker
+from print_shop.setup.loop import PrintLoop, cli_person, llm_chat
 from print_shop.setup.model import setup_llm
 from print_shop.setup.review import Reviewer
 from print_shop.slicer.orca import BedType, SlicerProfiles, with_bed_type
@@ -109,7 +110,8 @@ def build_run(
     features (`cli_asker`, or `replay_asker` for recorded answers), and
     `reviewer` is the Sponsor's review of the proposed settings on the
     command (`cli_reviewer`). Both use `PRINT_SHOP_SETUP_MODEL` (default
-    `crew-code-think`).
+    `crew-code-think`), as does the print loop, which decides the pose and the settings after
+    the questions (mqucifer/print-shop#129).
 
     Raises:
         RuntimeError, FileNotFoundError: On missing settings, before a job starts.
@@ -142,6 +144,10 @@ def build_run(
         ),
         asker=asker,
         reviewer=reviewer,
+        # One loop with tools decides the pose and the settings after the questions, and asks
+        # the person on the command line only before a big change (mqucifer/print-shop#129).
+        loop=PrintLoop(chat=llm_chat(setup_llm(llm, env)), person=cli_person(),
+                       model=setup_llm(llm, env).model),
         ledger=ledger,
         # Read-only: watching needs a snapshot and nothing else.
         watch_printer=CentauriClient(printer_config, recorder=recorder),
