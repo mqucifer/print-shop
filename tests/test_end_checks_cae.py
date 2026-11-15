@@ -25,7 +25,8 @@ from print_shop.rounds.run import Run
 from tests.rounds_fakes import Scripted, tool
 from tests.test_cae import cae  # noqa: F401 - the session's planted parts, made once
 
-pytestmark = [pytest.mark.cae, pytest.mark.bench]
+#: `cae` alone: CI's bench shards have only the first image, and its `cae` job has both.
+pytestmark = pytest.mark.cae
 
 #: The place the lid's band passes the clip's hook, as `fit-on` reads it on the planted box.
 HOOK = [[-4.0, -15.6, 24.0], [4.0, -15.0, 25.6]]
