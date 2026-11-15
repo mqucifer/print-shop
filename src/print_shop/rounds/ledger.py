@@ -393,8 +393,10 @@ CREATE TABLE IF NOT EXISTS lessons (
     -- What a run taught, for the next: written by the model in its after-action review, or by a
     -- person, and checked by a reviewer before any reaches another run.
     id INTEGER PRIMARY KEY,
-    -- The run it came from.
-    run TEXT NOT NULL REFERENCES runs(run),
+    -- The run it came from: one of this ledger's, or for a lesson copied from another ledger,
+    -- that ledger's run (`lesson_copies`, mqucifer/print-shop#137). `lessons.write` holds one
+    -- written here to this ledger's runs.
+    run TEXT NOT NULL,
     -- `model`, or the person who wrote it, signed as a pick is.
     written_by TEXT NOT NULL,
     written_at TEXT NOT NULL,
@@ -417,7 +419,24 @@ CREATE TABLE IF NOT EXISTS lessons (
     becomes TEXT,
     -- What it became last, once promoted on a route (`lesson_routes` has each), and where.
     became TEXT,
-    became_where TEXT
+    became_where TEXT,
+    -- The kind of object it's for, as a request names it: empty is a general lesson.
+    part_kind TEXT
+);
+CREATE TABLE IF NOT EXISTS lesson_copies (
+    -- A lesson copied from another ledger (mqucifer/print-shop#137): the ledger it came from, by
+    -- its path, and its id, run and status there. Its evidence is that ledger's calls, checked
+    -- there as it was copied, and a lesson is copied from one ledger once.
+    lesson INTEGER PRIMARY KEY REFERENCES lessons(id),
+    ledger TEXT NOT NULL,
+    source_lesson INTEGER NOT NULL,
+    source_run TEXT NOT NULL,
+    source_status TEXT NOT NULL,
+    -- What the source ledger held at its calls and readings as it was copied, for when it's moved.
+    evidence_said TEXT NOT NULL,
+    by TEXT NOT NULL,
+    at TEXT NOT NULL,
+    UNIQUE (ledger, source_lesson)
 );
 CREATE TABLE IF NOT EXISTS lesson_steps (
     -- Each change to a lesson, who made it and why: an edit keeps the words it replaced.
@@ -832,8 +851,10 @@ FOLLOWED = (
 )
 #: Tables made again once, by `DesignLedger._made_again`, and how each copies its rows. Each is
 #: made again only while it's as it was: `decisions` and `after_actions` while `approval` can't be
-#: empty, and `lesson_scores` while a score needs the lesson given as text to the run, which a
-#: score on a route that isn't the model's has no row of (mqucifer/print-shop#40).
+#: empty, `lesson_scores` while a score needs the lesson given as text to the run, which a
+#: score on a route that isn't the model's has no row of (mqucifer/print-shop#40), and `lessons`
+#: while its run must be one of this ledger's, which a lesson copied from another ledger's run
+#: isn't (mqucifer/print-shop#137).
 REMADE = (
     (
         "decisions",
@@ -854,15 +875,24 @@ REMADE = (
         "route) SELECT id, run, lesson, score, calls, why, by, at_call, at, route "
         "FROM lesson_scores",
     ),
+    (
+        "lessons",
+        "INSERT INTO lessons_remade (id, run, written_by, written_at, at_call, fix_shape, kind, "
+        "text, evidence, status, status_by, status_at, becomes, became, became_where, part_kind) "
+        "SELECT id, run, written_by, written_at, at_call, fix_shape, kind, text, evidence, "
+        "status, status_by, status_at, becomes, became, became_where, part_kind FROM lessons",
+    ),
 )
 
 
 def _as_it_was(db: sqlite3.Connection, table: str) -> bool:
     """Whether a table in `REMADE` is still as it was, and so is to be made again."""
     held = {r["name"]: r for r in db.execute(f"PRAGMA table_info({table})")}
+    refers = {r["table"] for r in db.execute(f"PRAGMA foreign_key_list({table})")}
     if table == "lesson_scores":
-        refers = {r["table"] for r in db.execute(f"PRAGMA foreign_key_list({table})")}
         return "run_lessons" in refers
+    if table == "lessons":
+        return "runs" in refers
     return not all(c in held for c in _columns(table)) or bool(held["approval"]["notnull"])
 
 
@@ -923,7 +953,9 @@ class DesignLedger:
         from before names the approval decision of its approval, which is what it followed. An
         older checkout still running against this file inserts by column name into both.
         `lesson_scores` is made again so a score needn't follow a lesson given as text: one on
-        the harness's, the request's or the operator's route has none (mqucifer/print-shop#40)."""
+        the harness's, the request's or the operator's route has none (mqucifer/print-shop#40).
+        `lessons` is made again so its run needn't be this ledger's: a lesson copied from another
+        ledger names that ledger's run (mqucifer/print-shop#137)."""
         db = sqlite3.connect(self.path, timeout=60, isolation_level=None)
         db.row_factory = sqlite3.Row
         try:

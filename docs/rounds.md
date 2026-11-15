@@ -18,6 +18,7 @@ scripts/rounds.py lessons [RUN] [--ledger FILE]
 scripts/rounds.py lessons accept|edit|reject|retire|promote ID --by WHO ...
 scripts/rounds.py lessons score RUN ID --score used|not_used|in_the_way --by WHO [--calls N,N] [--route R]
 scripts/rounds.py lessons load FILE --by WHO
+scripts/rounds.py lessons copy LEDGER ID --by WHO [--ledger FILE]
 scripts/rounds.py refine NAME --nozzle MM --filament [COLOUR=]NAME...
 scripts/rounds.py refined NAME
 scripts/rounds.py proposal NAME ID --approve|--reject --by WHO [--note FILE]
@@ -490,6 +491,17 @@ A run that's `blocked`, stopped, cut off by a limit, or judged not to be going a
 - `accept` (`--routes R,R`, `--becomes B`), `edit` (`--text FILE`, `--kind`, `--shape`, `--routes`, `--becomes`, `--keys capture:FAIL,thin`, `--part-kind K`) or `reject` (`--why`), each a row of `lesson_steps`.
 - **A lesson for the harness is never given as a note.** It's accepted only with what it `--becomes`: `refusal`, `bench_check`, `toolset_check`, `stop` or `harness`. One for the request alone becomes `request`.
 - `lessons load FILE --by "reviewer: <who>"` takes a reviewer's steps from a file, in order, by the same rules: `{"steps": [{"do": "write", ...}, {"do": "accept", ...}, ...]}`, as `lessons.load` says. A step names a lesson by its key in the file, or by its number if it's in the ledger. It's all checked before anything is written, and refused whole if a lesson is already there. It's how lessons are entered by hand, and how the operator enters the first rows.
+
+### A lesson from another ledger (mqucifer/print-shop#137)
+
+A run is given the lessons of the ledger beside it. The Sponsor's design runs read `design-runs/ledger.sqlite`, and each eval round has its own `runs*/ledger.sqlite`, so a lesson learned in an eval reaches the Sponsor's runs only once it's in theirs. Written there with `lessons load`, its calls were checked against that ledger's run, which hasn't them ("the ledger has no call N of RUN"), and the only way through was to cite design-run calls that don't show it. On 2026-11-14 seven accepted model lessons from one eval, among them "a ledge must overlap its wall", couldn't be copied for that.
+
+- **`lessons copy LEDGER ID --by WHO [--ledger FILE]`** reads lesson `ID` in the ledger at `LEDGER`, where it came from, and writes it into this one (`--ledger`, or the one beside the runs): its words, area, routes, keys and kind of part as they stand there, and its evidence that ledger's run and calls. Each call and reading is checked in that ledger, as `evidence` checks one written here, and nothing is written if one isn't there, or if the lesson has none: nothing lets a lesson cite calls that don't show it.
+- **The ledger it came from is read, never written:** it's opened read-only, so nothing migrates or changes it.
+- **It's a `candidate` here, whatever it was there,** with a step saying where it came from and its status there. A reviewer lets it through on this ledger's terms (`accept`, with `--becomes` for one for the harness), and then it reaches this ledger's runs as any other lesson does, "from `RUN`" naming the eval's run. One rejected where it came from isn't copied.
+- **Where it came from is a row of `lesson_copies`:** the source ledger's path, the lesson's id, run and status there, who copied it and when, and what that ledger held at its calls as it was copied. A lesson is copied from a ledger once: a second `copy` is refused, naming the copy and who made it.
+- **`lessons` shows a copy's evidence from the ledger it came from:** every lesson's line says which lesson of which ledger it's a copy of, and a section after them gives each copy with what that ledger holds at its calls and readings. `lessons RUN`, for the eval's run, lists the copies from it the same way. If that ledger has moved, it says so, and shows what it held when the lesson was copied.
+- **A lesson's run needn't be this ledger's now.** `lessons.run` named one of this ledger's runs; a copy names the other's. The table is made again once when a ledger opens, every row kept, as `lesson_scores` was, and `write` and `load` still hold a lesson written here to this ledger's runs.
 
 ### Areas, routes and layers (mqucifer/print-shop#40)
 

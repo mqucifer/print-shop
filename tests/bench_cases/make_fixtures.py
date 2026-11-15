@@ -756,6 +756,43 @@ def separate_bodies() -> None:
     stl(walls, [sides, top], "bodies/channel-tee.stl")
 
 
+def ring_ledge() -> None:
+    """A slide whose first contact is a tie all round a ring (mqucifer/print-shop#135), on parts of
+    our own: a sloped ledge inside a channel, catching a strip slid up from below.
+
+    - `ring/channel`: a block 20 x 20, z 0 to 10, with a bore 12 mm square up to z 4, a ledge
+      sloping in at 45 degrees from there to a 10 mm square opening at z 5, and that opening on up
+      through the top. All its faces are flat, so its mesh is exact.
+    - `ring/strip`: a strip 11.6 mm square, z -2 to 3.4, in the bore. Its top edge meets the
+      slope where it is 11.6 mm across, at z 4.2, all round at once: slid up, it's caught after
+      0.8 mm, and every place on that ring is as first as another.
+    - `ring/strip-at-hold`: the same strip, z -2 to 3.2: caught after 1.0 mm, at `--hold 1`.
+    """
+    Path("ring").mkdir(exist_ok=True)
+    channel = box(-10, 10, -10, 10, 0, 10).cut(box(-6, 6, -6, 6, -1, 4))
+    channel = channel.cut(box(-5, 5, -5, 5, 4, 11))
+
+    def square(half: float, z: float) -> Any:
+        corners = [(-half, -half, z), (half, -half, z), (half, half, z), (-half, half, z)]
+        return cq.Wire.makePolygon(corners, close=True)
+
+    slope = cq.Solid.makeLoft([square(6, 4), square(5, 5)], True)
+    save(channel.cut(cq.Workplane(obj=slope)), "ring/channel")
+    save(box(-5.8, 5.8, -5.8, 5.8, -2, 3.4), "ring/strip")
+    save(box(-5.8, 5.8, -5.8, 5.8, -2, 3.2), "ring/strip-at-hold")
+
+
+def hollow_floor() -> None:
+    """A screw hole through a thin floor, under a hollow (mqucifer/print-shop#136), on a part of
+    our own: `wall/hollow-floor`, a box 20 x 20, z 0 to 12, hollowed from z 2 up and open at the
+    top, its side walls 1.6 mm thick, with a 3 mm hole through its 2 mm floor at (5, 0). The
+    floor round the hole is 3.5 mm to the outside, by arithmetic; the hole opens into the hollow
+    at z 2, and the hollow's walls are 1.6 mm."""
+    Path("wall").mkdir(exist_ok=True)
+    part = box(-10, 10, -10, 10, 0, 12).cut(box(-8.4, 8.4, -8.4, 8.4, 2, 12))
+    save(part.cut(cq.Workplane("XY").center(5, 0).circle(1.5).extrude(2)), "wall/hollow-floor")
+
+
 def stl(first: Any, rest: list[Any], name: str) -> None:
     """Meshes as one STL, merged as the bench reads one: a T-junction's middle stays apart."""
     meshes = [first, *rest]
@@ -875,6 +912,8 @@ if __name__ == "__main__":
     places()
     holds()
     separate_bodies()
+    ring_ledge()
+    hollow_floor()
     strips()
     at_limits()
     print("made")

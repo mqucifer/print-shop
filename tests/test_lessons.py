@@ -504,3 +504,183 @@ def test_the_reviewer_steps_through_the_command_line_on_the_ledger_it_names(
     assert lessons.one(DesignLedger(copy), build)["text"] == "New words."
     assert (tmp_path / "ledger.sqlite").read_bytes() == before, "only the ledger it was told"
     assert lessons.one(ledger, build)["status"] == "candidate"
+
+
+# A lesson copied from another ledger (mqucifer/print-shop#137)
+
+
+def two_ledgers(tmp_path: Path) -> tuple[DesignLedger, list[int], Run]:
+    """An eval's ledger with its run's three lessons, and a design runs' ledger beside a run of
+    its own, `design`, whose calls aren't the eval's."""
+    source, ids = candidates(tmp_path / "eval")
+    target = waiting(tmp_path / "design", "design")
+    return source, ids, target
+
+
+def test_a_lesson_is_copied_with_its_evidence_checked_where_it_came_from(tmp_path: Path) -> None:
+    """On 2026-11-14 seven accepted model lessons from one eval couldn't be written into the design
+    runs' ledger: their calls were checked against its run, which hasn't them. A copy cites the
+    eval's run and calls, each checked in the eval's ledger, and starts as a candidate here."""
+    source, (build, check, _), target = two_ledgers(tmp_path)
+    lessons.accept(source, build, BY)
+    before = source.path.read_bytes()
+    made = lessons.copy(target.ledger, source.path, build, BY)
+    assert source.path.read_bytes() == before, "the ledger it came from is read, never written"
+    copied = lessons.one(target.ledger, made)
+    original = lessons.one(source, build)
+    for key in ("run", "written_by", "fix_shape", "kind", "text", "evidence", "part_kind"):
+        assert copied[key] == original[key], key
+    assert (copied["run"], copied["status"], copied["status_by"]) == ("r", "candidate", BY)
+    assert json.loads(copied["evidence"])["calls"] == [1]
+    assert not target.ledger.rows("SELECT 1 FROM runs WHERE run='r'"), "the eval's run isn't here"
+    (row,) = rows(target.ledger, "SELECT * FROM lesson_copies")
+    assert row | {"at": None, "evidence_said": None} == {
+        "lesson": made,
+        "ledger": str(source.path.resolve()),
+        "source_lesson": build,
+        "source_run": "r",
+        "source_status": "accepted",
+        "evidence_said": None,
+        "by": BY,
+        "at": None,
+    }
+    assert "call 1 (round 0): read" in json.loads(row["evidence_said"])
+    assert list(lessons.routes_of(target.ledger, made)) == ["model"]
+    assert lessons.keys_of(target.ledger, made) == lessons.keys_of(source, build)
+    (step,) = rows(target.ledger, "SELECT * FROM lesson_steps WHERE lesson=?", made)
+    assert step["status"] == "candidate" and step["by"] == BY
+    assert f"copied from lesson {build} of {source.path.resolve()}, accepted there" in step["why"]
+    # Nothing reaches a run here until a reviewer lets it through on this ledger's terms.
+    assert lessons.to_give(target.ledger) == []
+    lessons.accept(target.ledger, made, BY)
+    (given,) = lessons.to_give(target.ledger)
+    assert given["id"] == made
+    assert lessons.line(given).startswith(
+        f"- **Lesson {made}** (understanding the job), from `r`, written by the model: Lay it out"
+    )
+    # A lesson for the harness keeps its route and still becomes something, never a note.
+    harness = lessons.copy(target.ledger, source.path, check, BY)
+    with pytest.raises(lessons.Refused, match="never given as a note"):
+        lessons.accept(target.ledger, harness, BY)
+
+
+def test_a_copy_whose_calls_arent_in_the_ledger_it_came_from_is_refused(tmp_path: Path) -> None:
+    """Nothing lets a lesson cite calls that don't show it: one whose evidence names a call its
+    own ledger hasn't isn't copied, and nothing is written."""
+    source, (build, _, context), target = two_ledgers(tmp_path)
+    with sqlite3.connect(source.path) as db:
+        db.execute("UPDATE lessons SET evidence=? WHERE id=?", (json.dumps({"calls": [99]}), build))
+        db.execute("UPDATE lessons SET evidence=? WHERE id=?", (json.dumps({"calls": []}), context))
+    with pytest.raises(lessons.Refused) as refused:
+        lessons.copy(target.ledger, source.path, build, BY)
+    assert f"lesson {build} isn't copied: its evidence isn't all in {source.path.resolve()}" in (
+        str(refused.value)
+    )
+    assert "the ledger has no call 99 of `r`: it has calls 1 to 4" in str(refused.value)
+    with pytest.raises(lessons.Refused, match="it needs the calls that show it"):
+        lessons.copy(target.ledger, source.path, context, BY)
+    assert not target.ledger.rows("SELECT * FROM lessons")
+    assert not target.ledger.rows("SELECT * FROM lesson_copies")
+
+
+def test_a_lesson_copied_twice_is_refused_naming_the_copy(tmp_path: Path) -> None:
+    source, (build, check, _), target = two_ledgers(tmp_path)
+    made = lessons.copy(target.ledger, source.path, build, BY)
+    with pytest.raises(lessons.Refused) as refused:
+        lessons.copy(target.ledger, tmp_path / "eval" / ".." / "eval" / "ledger.sqlite", build, BY)
+    assert (
+        f"lesson {build} of {source.path.resolve()} is copied here already, as lesson {made}, by "
+        f"{BY} at "
+    ) in str(refused.value)
+    assert len(target.ledger.rows("SELECT * FROM lessons")) == 1
+    # One rejected where it came from, one from this ledger itself, one that isn't there, and
+    # a ledger that isn't one, are refused too.
+    lessons.reject(source, check, BY, "a test")
+    with pytest.raises(lessons.Refused, match=f"lesson {check} was rejected in"):
+        lessons.copy(target.ledger, source.path, check, BY)
+    with pytest.raises(lessons.Refused, match="is this ledger"):
+        lessons.copy(target.ledger, target.ledger.path, made, BY)
+    with pytest.raises(lessons.Refused, match="has no lesson 9"):
+        lessons.copy(target.ledger, source.path, 9, BY)
+    with pytest.raises(lessons.Refused, match="there's no ledger at"):
+        lessons.copy(target.ledger, tmp_path / "nowhere.sqlite", 1, BY)
+    with pytest.raises(lessons.Refused, match="says who"):
+        lessons.copy(target.ledger, source.path, build, "model")
+
+
+def test_the_listing_shows_a_copys_evidence_from_the_ledger_it_came_from(tmp_path: Path) -> None:
+    source, (build, _, _), target = two_ledgers(tmp_path)
+    made = lessons.copy(target.ledger, source.path, build, BY)
+    every = lessons.listing(target.ledger)
+    path = source.path.resolve()
+    assert f"{made}. [candidate] understanding the job, for model, from `r`, copied from " in every
+    assert f"lesson {build} of {path}: Lay it out" in every
+    assert "## Copied from other ledgers, with their evidence where each came from" in every
+    assert f"- **Copied from** lesson {build} of {path}, `r`, candidate there, by {BY}" in every
+    assert f"What {path} holds where it points:" in every
+    assert "    call 1 (round 0): read" in every
+    by_run = lessons.listing(target.ledger, "r")
+    assert by_run.startswith("# Lessons copied from `r`, with their evidence where each came from")
+    assert "    call 1 (round 0): read" in by_run
+    # The design run's own listing doesn't take the copy for one of its own.
+    assert "Lay it out" not in lessons.listing(target.ledger, "design")
+    # Moved, the ledger it came from can't be read, and what it held then is shown.
+    source.path.rename(tmp_path / "moved.sqlite")
+    moved = lessons.listing(target.ledger)
+    assert f"{path} can't be read now: as it held it when copied, at " in moved
+    assert "      call 1 (round 0): read" in moved
+
+
+def test_the_command_line_copies_a_lesson_into_the_ledger_it_names(tmp_path: Path) -> None:
+    source, (build, _, _), target = two_ledgers(tmp_path)
+    root = tmp_path / "design"
+    words = ("lessons", "copy", str(source.path), str(build), "--by", BY)
+    done = cli(root, *words, "--ledger", str(target.ledger.path))
+    assert done.returncode == 0, done.stderr
+    assert (
+        f"lesson {build} of {source.path.resolve()}: copied here as lesson 1, candidate, by {BY}"
+        in done.stdout
+    )
+    twice = cli(root, *words)
+    assert twice.returncode == 3 and "is copied here already, as lesson 1" in twice.stderr
+    short = cli(root, "lessons", "copy", str(source.path), "--by", BY)
+    assert short.returncode == 3 and "`lessons copy` takes LEDGER ID" in short.stderr
+
+
+def test_a_ledger_whose_lessons_name_only_its_own_runs_is_made_again_keeping_every_row(
+    tmp_path: Path,
+) -> None:
+    """Before mqucifer/print-shop#137 a lesson's run had to be one of its ledger's. The table is
+    made again once, every row and every reference to it kept."""
+    ledger, ids = candidates(tmp_path)
+    lessons.accept(ledger, ids[0], BY)
+    with sqlite3.connect(ledger.path) as db:
+        db.execute("UPDATE lessons SET part_kind='frame' WHERE id=?", (ids[0],))
+    kept = {t: rows(ledger, f"SELECT * FROM {t}") for t in ("lessons", "lesson_steps")}  # noqa: S608
+    kept |= {t: rows(ledger, f"SELECT * FROM {t}") for t in ("lesson_routes", "lesson_keys")}  # noqa: S608
+    # The table as it was: its run held to this ledger's runs.
+    body = [
+        "id INTEGER PRIMARY KEY",
+        "run TEXT NOT NULL REFERENCES runs(run)",
+        *(
+            f"{c} {'INTEGER' if c == 'at_call' else 'TEXT'}"
+            for c in list(kept["lessons"][0])[2:]
+        ),
+    ]
+    db = sqlite3.connect(ledger.path)
+    db.execute("PRAGMA foreign_keys = OFF")
+    db.execute(f"CREATE TABLE lessons_old ({', '.join(body)})")
+    db.execute("INSERT INTO lessons_old SELECT * FROM lessons")
+    db.execute("DROP TABLE lessons")
+    db.execute("ALTER TABLE lessons_old RENAME TO lessons")
+    db.commit()
+    db.close()
+    assert [r["table"] for r in ledger.rows("PRAGMA foreign_key_list(lessons)")] == ["runs"]
+    again_ = DesignLedger(ledger.path)
+    assert again_.rows("PRAGMA foreign_key_list(lessons)") == []
+    for table, held in kept.items():
+        assert rows(again_, f"SELECT * FROM {table}") == held, table  # noqa: S608
+    assert again_.rows("PRAGMA foreign_key_check") == []
+    assert lessons.one(again_, ids[0])["part_kind"] == "frame"
+    DesignLedger(ledger.path)
+    assert rows(DesignLedger(ledger.path), "SELECT * FROM lessons") == kept["lessons"]
