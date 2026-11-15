@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -170,11 +171,28 @@ def test_a_reading_proposes_and_only_take_applies_it() -> None:
 
 
 @pytest.mark.parametrize(("answer", "why"), [
-    ("walls=3", "'walls' isn't a setting in the process preset"),
+    ("walls=3", "'walls' isn't a setting in the filament or the process preset"),
     ("wall_loops 3", "'wall_loops 3' isn't setting=value"),
 ])
 def test_an_unreadable_answer_says_why(answer: str, why: str) -> None:
     assert parse_answer(answer, _request()) == why
+
+
+def test_a_filament_setting_outside_the_bounded_ones_can_be_corrected() -> None:
+    """mqucifer/print-shop#129, the Sponsor's lid review: `overhang_fan_speed` is the filament
+    preset's, not one of `bounds.SETTINGS`, and was refused as "not in the process preset"."""
+    request = replace(_request(), filament={"overhang_fan_speed": ["100"]})
+    parsed = parse_answer("overhang_fan_speed=60 because the rim's overhang is short", request)
+    assert isinstance(parsed, Review)
+    [fan] = parsed.corrections
+    assert (fan.key, fan.preset, fan.value, fan.source) == (
+        "overhang_fan_speed", "100", "60", Source.SPONSOR)
+
+
+def test_a_process_setting_is_still_read_from_the_process() -> None:
+    request = replace(_request(), filament={"wall_loops": ["9"]})
+    parsed = parse_answer("wall_loops=3 because it's handled", request)
+    assert isinstance(parsed, Review) and parsed.corrections[0].preset == "2"
 
 
 # --------------------------------------------------------------------------

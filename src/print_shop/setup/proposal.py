@@ -53,6 +53,7 @@ __all__ = [
     "PAUSE_NAMES",
     "Change",
     "GivenLesson",
+    "LoopCall",
     "PartFacts",
     "Proposal",
     "Source",
@@ -118,6 +119,8 @@ class GivenLesson(BaseModel):
     #: Why it wasn't given though the part's shape matched: the filament isn't its own
     #: (mqucifer/print-shop#117). The review lists it; nothing else reads it.
     withheld: str = ""
+    #: The print loop looked it up with `past_prints` (mqucifer/print-shop#129): the review says so.
+    looked_up: bool = False
 
     def line(self) -> str:
         """The lesson as the model and the review read it."""
@@ -127,6 +130,18 @@ class GivenLesson(BaseModel):
             f"Lesson {self.id}, from {self.stl_name}, for a part that's "
             f"{', '.join(self.traits)}{made}, kept by {self.reviewed_by}: {sets}{self.text}"
         )
+
+
+class LoopCall(BaseModel):
+    """One tool call of the print loop (mqucifer/print-shop#129): what it called, with what, what
+    came back, and how long it took. A proposal keeps them all, so the ledger has them."""
+
+    model_config = {"frozen": True}
+
+    tool: str
+    arguments: dict[str, Any]
+    result: str
+    seconds: float
 
 
 class Proposal(BaseModel):
@@ -156,6 +171,10 @@ class Proposal(BaseModel):
     skill_sha256: str = ""
     #: The reviewed lessons from earlier prints this part was given (mqucifer/print-shop#106).
     lessons: tuple[GivenLesson, ...] = ()
+    #: The print loop's tool calls, in order, and how it ended (mqucifer/print-shop#129). Empty
+    #: for a proposal from the single calls.
+    loop: tuple[LoopCall, ...] = ()
+    loop_ending: str = ""
 
     def get(self, key: str) -> Change | None:
         return next((c for c in self.changes if c.key == key), None)
