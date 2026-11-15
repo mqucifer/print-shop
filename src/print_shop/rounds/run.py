@@ -230,6 +230,9 @@ class State:
     # The lesson written for each failing pair and what it came to, so a second send-back for
     # the same writes no second lesson.
     end_lessons: dict[str, int] = field(default_factory=dict)
+    # Each approval a send-back after it withdrew: its stop, its decision's id, who withdrew it,
+    # why, when, and the send-back's own decision (mqucifer/print-shop#150).
+    withdrawn: list[dict[str, Any]] = field(default_factory=list)
 
 
 def repository_version() -> tuple[str, bool]:
@@ -916,7 +919,9 @@ class Run:
         if not note.strip():
             raise Refused("a send-back needs its note: it's what the model goes on from")
         n = int(stop["n"]) if stop else self.state.approvals
-        self.ledger.decided(self.state.name, n, "sent_back", by, note.strip())
+        sent = self.ledger.decided(self.state.name, n, "sent_back", by, note.strip())
+        if ending == APPROVED:
+            self._withdraw(n, by, note.strip(), sent)
         self._go_on()
         if fresh:
             # Before the note is kept, so the new conversation has it once: as the message
@@ -935,6 +940,35 @@ class Run:
         self._start_round()
         self.save()
         return [t for t in told if t]
+
+    def _withdraw(self, approval: int, by: str, why: str, sent_back: int) -> None:
+        """A send-back after approval withdraws that approval: it doesn't stand as a success
+        once new findings contradict it (mqucifer/print-shop#150). The approval's own decision
+        row says who withdrew it, why and when, and the state keeps the same for the run's
+        summary and for `read-back`."""
+        said = (self.state.ending or {}).get("said") or {}
+        decision = said.get("decision")
+        if decision is None:
+            found = self.ledger.rows(
+                "SELECT id FROM decisions WHERE run=? AND approval IS ? AND decision=? "
+                "ORDER BY id DESC LIMIT 1",
+                self.state.name,
+                approval,
+                APPROVED,
+            )
+            decision = found[0]["id"] if found else None
+        one = {
+            "approval": approval,
+            "decision": decision,
+            "by": by,
+            "why": why,
+            "at": now(),
+            "sent_back": sent_back,
+        }
+        if decision is not None:
+            self.ledger.withdrawn(int(decision), by, why, sent_back, one["at"])
+        self.state.withdrawn.append(one)
+        self.session._record("approval_withdrawn", **one)
 
     def _take_answers(self, n: int, who: str) -> None:
         """The answers to the model's questions, said as whoever gave them: on `eval-choice-1` a
@@ -4622,6 +4656,9 @@ def summarise(folder: Path) -> dict[str, Any]:
         "picked_by": {need: pick.get("by") for need, pick in state["picks"].items()},
         "stops": state.get("stops") or {},
         "approvals": state.get("approvals", 0),
+        # Each approval a send-back after it withdrew, with who and why
+        # (mqucifer/print-shop#150): an approval listed here no longer stands.
+        "approvals_withdrawn": state.get("withdrawn") or [],
         "questions": state["questions"],
         "restarts": state["restarts"],
         # Every new conversation from the record, by why: `restarts` counts `context_full` alone.

@@ -293,6 +293,14 @@ CREATE TABLE IF NOT EXISTS decisions (
     by TEXT NOT NULL,
     note TEXT,
     at TEXT NOT NULL,
+    -- An approval a later send-back withdrew (mqucifer/print-shop#150): when, who sent it back,
+    -- their note, and that send-back's own row. Empty on an approval that stands, and on every
+    -- row that isn't an approval. "Approved, then withdrawn" is `decision = 'approved'` with
+    -- `withdrawn_at` set.
+    withdrawn_at TEXT,
+    withdrawn_by TEXT,
+    withdrawn_why TEXT,
+    withdrawn_decision INTEGER,
     FOREIGN KEY (run, approval) REFERENCES approvals(run, n)
 );
 CREATE TABLE IF NOT EXISTS standing (
@@ -803,6 +811,11 @@ ADDED = (
     ("lesson_scores", "route", "TEXT"),
     # The kind of object a lesson is for, as a request names it: empty is a general lesson.
     ("lessons", "part_kind", "TEXT"),
+    # An approval a later send-back withdrew (mqucifer/print-shop#150).
+    ("decisions", "withdrawn_at", "TEXT"),
+    ("decisions", "withdrawn_by", "TEXT"),
+    ("decisions", "withdrawn_why", "TEXT"),
+    ("decisions", "withdrawn_decision", "INTEGER"),
     # The reasoning effort the run's alias sends, read through LiteLLM, or `unknown`, and how.
     ("runs", "reasoning_effort", "TEXT"),
     ("runs", "reasoning_effort_from", "TEXT"),
@@ -1334,6 +1347,21 @@ class DesignLedger:
             by=by,
             note=note or None,
             at=now(),
+        )
+
+    def withdrawn(self, decision: int, by: str, why: str, sent_back: int, at: str) -> None:
+        """An approval that a send-back after it withdrew: it no longer stands, and its row says
+        who withdrew it, why, when and by which send-back (mqucifer/print-shop#150; the Sponsor,
+        2026-11-15: "I don't want a success in a ledger when new information contradicts it").
+        Only an approval that still stands is marked, so it can be done again."""
+        self.change(
+            "UPDATE decisions SET withdrawn_at=?, withdrawn_by=?, withdrawn_why=?, "
+            "withdrawn_decision=? WHERE id=? AND decision='approved' AND withdrawn_at IS NULL",
+            at,
+            by,
+            why,
+            sent_back,
+            decision,
         )
 
     def question(self, run: str, n: int, text: str, at_call: int) -> None:

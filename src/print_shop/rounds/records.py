@@ -701,6 +701,17 @@ def read_back(
                 name,
                 row["round"],
             )
+    for one in state.get("withdrawn") or []:
+        # An approval a send-back withdrew (mqucifer/print-shop#150), where its row doesn't
+        # say so yet.
+        if one.get("decision") is not None:
+            ledger.withdrawn(
+                int(one["decision"]),
+                str(one["by"]),
+                str(one["why"]),
+                int(one["sent_back"]),
+                str(one["at"]),
+            )
     return {
         table: int(ledger.rows(f"SELECT COUNT(*) AS n FROM {table} WHERE run=?", name)[0]["n"])  # noqa: S608
         for table in TABLES
