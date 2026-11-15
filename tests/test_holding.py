@@ -19,7 +19,7 @@ from print_shop.rounds.holding import Aside, Tried
 from print_shop.rounds.needs import Need
 from print_shop.rounds.nudge import Wanted
 from print_shop.rounds.run import Run
-from tests.rounds_fakes import Scripted, tool
+from tests.rounds_fakes import Scripted, laid, tool
 from tests.test_intake import PLAN_ASK, SENT, again, covered, pick, to_the_plan
 
 HELD = holding.HEADING
@@ -84,6 +84,8 @@ class Answers:
             shutil.copyfile(self.work / source, self.work / target)
             said = {"size": [8, 8], "shown": [8, 8], "out": target}
             return Ran(0, picture_module.MARK + json.dumps(said), 0.1)
+        if module == "refine":
+            return laid(args, where)
         raise AssertionError(module)
 
 

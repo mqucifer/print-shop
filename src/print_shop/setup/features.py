@@ -17,7 +17,7 @@ import numpy as np
 import trimesh
 from pydantic import BaseModel
 
-__all__ = ["FLARE_MM", "Feature", "measure", "overhang_to_support"]
+__all__ = ["FLARE_MM", "Feature", "Overhang", "measure", "overhang_places", "overhang_to_support"]
 
 #: A face this far from vertical, facing down, needs support (Orca's own
 #: threshold reasoning; the analyzer uses the same 45 degrees).
@@ -126,6 +126,51 @@ def overhang_to_support(mesh: trimesh.Trimesh) -> tuple[float, float]:
     return needs, max(_overhang(mesh, flares=False)[0] - needs, 0.0)
 
 
+class Overhang(BaseModel):
+    """One stretch of a seated mesh that would need support: its area, the box it fills in the
+    mesh's own coordinates, how much of it is flat, and its worst slope."""
+
+    model_config = {"frozen": True}
+
+    area_mm2: float
+    low: tuple[float, float, float]
+    high: tuple[float, float, float]
+    flat_mm2: float
+    steepest_deg: float
+
+
+#: Overhanging points further apart than this, in height, are two stretches: a ledge and a
+#: ceiling over it are said apart.
+_APART_MM = 1.0
+
+
+def overhang_places(mesh: trimesh.Trimesh) -> tuple[Overhang, ...]:
+    """Where a seated mesh, as it lies, would need support: `overhang_to_support`'s own area,
+    by the same reading, as each stretch of height it's in, lowest first. For a design run's
+    stops, which show a person where a part that prints without supports has downward faces
+    (mqucifer/print-shop#147)."""
+    found = _overhanging(mesh)
+    if found is None:
+        return ()
+    points, areas, read, flat = found
+    order = np.argsort(points[:, 2])
+    points, areas, read, flat = points[order], areas[order], read[order], flat[order]
+    starts = np.flatnonzero(np.diff(points[:, 2]) > _APART_MM) + 1
+    places = []
+    for at in np.split(np.arange(len(points)), starts):
+        low, high = points[at].min(axis=0), points[at].max(axis=0)
+        places.append(
+            Overhang(
+                area_mm2=float(areas[at].sum()),
+                low=(float(low[0]), float(low[1]), float(low[2])),
+                high=(float(high[0]), float(high[1]), float(high[2])),
+                flat_mm2=float(areas[at][flat[at]].sum()),
+                steepest_deg=float(read[at].max()),
+            )
+        )
+    return tuple(places)
+
+
 def _from_the_plate(mesh: trimesh.Trimesh) -> np.ndarray:
     """Each face that's part of a round or chamfer rising from the plate: a downward face reached
     from the plate through downward faces, none of them higher than `FLARE_MM`. A flat one joins
@@ -176,6 +221,19 @@ def _overhang(mesh: trimesh.Trimesh, flares: bool = True) -> tuple[float, float,
     the slope is read over (a step), when it's read at the steps' slope. The
     bridge is the overhang on flat faces deeper than that: a step is no bridge.
     """
+    found = _overhanging(mesh, flares)
+    if found is None:
+        return 0.0, 0.0, 0.0
+    _, areas, read, flat = found
+    return float(areas.sum()), float(read.max()), float(areas[flat].sum())
+
+
+def _overhanging(
+    mesh: trimesh.Trimesh, flares: bool = True
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+    """Each point of a seated mesh that overhangs, as `_overhang` reads it: where it is, in
+    the mesh's own coordinates, the area it stands for, its slope in degrees past vertical, and
+    whether it's on a flat face deeper than the slope is read over. None where nothing does."""
     lo = mesh.bounds[0]
     normals = mesh.face_normals
     top = mesh.triangles[:, :, 2].max(axis=1) - lo[2]
@@ -186,7 +244,7 @@ def _overhang(mesh: trimesh.Trimesh, flares: bool = True) -> tuple[float, float,
         (normals[:, 2] < -np.cos(np.radians(_OVERHANG_DEG))) & (top > _FIRST_LAYER_MM) & ~rising
     )
     if not len(candidates):
-        return 0.0, 0.0, 0.0
+        return None
     triangles, index = _bisect(mesh.triangles[candidates] - lo, _SAMPLE_MM)
     points = triangles.mean(axis=1)
     areas = np.linalg.norm(
@@ -196,7 +254,7 @@ def _overhang(mesh: trimesh.Trimesh, flares: bool = True) -> tuple[float, float,
     keep = points[:, 2] > _FIRST_LAYER_MM
     points, areas, down = points[keep], areas[keep], down[keep]
     if not len(points):
-        return 0.0, 0.0, 0.0
+        return None
     own = np.degrees(np.arcsin(np.clip(down, -1, 1)))
 
     seated = mesh.copy()
@@ -210,10 +268,10 @@ def _overhang(mesh: trimesh.Trimesh, flares: bool = True) -> tuple[float, float,
     slope = np.degrees(np.arctan2(reach, _ENVELOPE_MM))
     over = slope > _OVERHANG_DEG
     if not over.any():
-        return 0.0, 0.0, 0.0
+        return None
     read = np.where(depth > _ENVELOPE_MM, own, np.minimum(own, slope))
-    flat = over & (down > _FLAT) & (depth > _ENVELOPE_MM)
-    return float(areas[over].sum()), float(read[over].max()), float(areas[flat].sum())
+    flat = (down > _FLAT) & (depth > _ENVELOPE_MM)
+    return points[over] + lo, areas[over], read[over], flat[over]
 
 
 def _bisect(triangles: np.ndarray, longest: float) -> tuple[np.ndarray, np.ndarray]:

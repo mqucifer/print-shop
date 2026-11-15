@@ -22,7 +22,7 @@ from print_shop.rounds import stuck, transcript
 from print_shop.rounds.box import Ran
 from print_shop.rounds.needs import Need
 from print_shop.rounds.run import Run
-from tests.rounds_fakes import Scripted, Spoken, tool
+from tests.rounds_fakes import Scripted, Spoken, laid, tool
 from tests.test_intake import BROKEN_DOWN
 
 REQUEST = """\
@@ -83,6 +83,8 @@ class Answers:
             shutil.copyfile(self.work / source, self.work / target)
             said = {"size": [8, 8], "shown": [8, 8], "out": target}
             return Ran(0, picture_module.MARK + json.dumps(said), 0.1)
+        if module == "refine":
+            return laid(args, where)
         raise AssertionError(module)
 
 

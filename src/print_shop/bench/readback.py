@@ -8,6 +8,7 @@ body").
 
 from __future__ import annotations
 
+import itertools
 import os
 from typing import Any
 
@@ -34,6 +35,10 @@ from .shapes import (
 SECTIONS = 128
 #: A stack's share of a volume that's only its steps, for an STL.
 STACK_SHARE = 0.005
+#: A face is level where its normal's z is past this, as `flat_heights` reads one.
+LEVEL = 0.9999
+#: Level faces nearer than this to the mesh's lowest or highest are those, in mm.
+LEVEL_APART = 1e-6
 #: With no change stated, losing or gaining this share of the volume needs saying first.
 LARGE_CHANGE = 0.5
 def volumes(part: Part) -> dict[str, Any]:
@@ -69,12 +74,7 @@ def volumes(part: Part) -> dict[str, Any]:
         found["exact_mm3"] = exact
         found["resolved_mm3"] = band
         return found
-    low, high = np.asarray(fine.bounds)[:, 2]
-    step = (high - low) / SECTIONS
-    built = part.manifold()
-    stacked = step * sum(
-        float(slice_at(built, low + (k + 0.5) * step).area) for k in range(SECTIONS)
-    )
+    stacked = stacked_volume(part)
     band = max(VOLUME_FLOOR, STACK_SHARE * abs(mesh))
     found.update(sections_mm3=round(stacked, 4), band_mm3=round(band, 4), other="sections")
     found["agrees"] = abs(stacked - mesh) <= band and mesh > 0
@@ -83,6 +83,42 @@ def volumes(part: Part) -> dict[str, Any]:
     # An STL's mesh is the part: its own arithmetic is exact, and the stack only a cross-check.
     found["resolved_mm3"] = max(VOLUME_FLOOR, VOLUME_SHARE * abs(mesh))
     return found
+
+
+def levels(mesh: Any) -> list[float]:
+    """Each height a mesh has a level face at, and its lowest and highest: where its section
+    may change all at once."""
+    low, high = (float(v) for v in np.asarray(mesh.bounds)[:, 2])
+    level = np.abs(np.asarray(mesh.face_normals)[:, 2]) > LEVEL
+    at = np.unique(np.round(np.asarray(mesh.triangles_center)[level, 2], 6))
+    return [low, *[float(z) for z in at if low + LEVEL_APART < z < high - LEVEL_APART], high]
+
+
+def stacked_volume(part: Part) -> float:
+    """An STL's volume by plane sections: each section's area, by its polygons, times the
+    height it stands for. The mesh's own figure is the divergence theorem over its triangles, so
+    the two share only the file.
+
+    **Stacked between level faces** (mqucifer/print-shop#144). A section at a step's middle
+    stands for the whole step, which is right where the section changes evenly and wrong where it
+    changes all at once, at a level face inside the step. A given channel letter, a tray with a
+    2 mm floor and 25 mm tall, had its floor's top between two of 128 sections: the step read the
+    walls' area where 0.047 mm of it was still floor, 9644 mm² more, and the stack was 452 mm³
+    short, 0.75%, past its 0.5%: `DISAGREE`, on a plain watertight body. So each stretch
+    between two level faces is stacked on its own, with its share of `SECTIONS` and one at
+    least, and no step holds a level face. A stretch with upright sides is then exact, and what's
+    left is the steps over a slope or a curve, which `STACK_SHARE` is for."""
+    built = part.manifold()
+    heights = levels(part.fine())
+    whole = heights[-1] - heights[0]
+    total = 0.0
+    for low, high in itertools.pairwise(heights):
+        count = max(1, round(SECTIONS * (high - low) / whole))
+        step = (high - low) / count
+        total += step * sum(
+            float(slice_at(built, low + (k + 0.5) * step).area) for k in range(count)
+        )
+    return float(total)
 
 
 def _bounds(part: Part) -> list[list[float]]:
@@ -174,7 +210,15 @@ def run_info(args: Any, report: Report) -> None:
     found = volumes(part)
     report.fact("volume_mesh_mm3", found["mesh_mm3"], how="mesh, divergence theorem")
     report.fact("bodies_mesh", found["bodies_mesh"])
-    report.second(f"volume by {found['other']}: {found['other_mm3']:.4f} mm³")
+    report.second(
+        f"volume by {found['other']}: {found['other_mm3']:.4f} mm³"
+        + (
+            f", {SECTIONS} sections stacked between its level faces, within "
+            f"{STACK_SHARE:.1%} of the mesh's ({found['band_mm3']:.3f} mm³)"
+            if found["other"] == "sections"
+            else ""
+        )
+    )
     if found["mesh_mm3"] < 0:
         report.note("the mesh's volume is negative: its surface is inside out")
     if not found["agrees"]:

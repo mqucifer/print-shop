@@ -111,10 +111,12 @@ def test_a_join_refused_says_what_a_join_is_with_an_example() -> None:
             "look": ["a"],
         }
     )
-    assert wrong[0] == (
-        "a join names `frame`, which isn't one of `parts`: a join names each part exactly as "
-        "`parts` does (`frame (leading)`, `panes`)"
-    )
+    # The part it means is named, once, and isn't also said to be in no join
+    # (mqucifer/print-shop#145).
+    assert wrong == [
+        "a join names `frame`, and `parts` names it `frame (leading)`: a join names each part "
+        "exactly as `parts` does, so name it `frame (leading)` in the join, or `frame` in `parts`"
+    ]
 
 
 # Pictures at `questions`

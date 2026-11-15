@@ -782,6 +782,96 @@ def ring_ledge() -> None:
     save(box(-5.8, 5.8, -5.8, 5.8, -2, 3.2), "ring/strip-at-hold")
 
 
+def catch_round() -> None:
+    """A catch over a thin band's edge all round a closed outline, whose underside slopes
+    (mqucifer/print-shop#143), on parts of our own. In an eval the two methods read such a hold
+    0.026 mm apart, at different first spots, and it was `DISAGREE`.
+
+    - `catch/strip.stl`: a band 1 mm thick round a 30 x 20 mm outline with 4 mm corners, z 0 to 5.
+    - `catch/channel`: a block with a groove the band fills, its sides on both walls and its foot
+      on the floor, so the pair touches where it lies. From z 5.2, 0.2 mm over the band's top, the
+      outer wall slopes in at 45 degrees for 0.25 mm: the catch, whose overlap with the band
+      slid up grows as a square of the distance. Six gaps 0.3 mm wide cut it into three long
+      stretches and three teeth 0.03 mm long, each tooth between two of the points the rays go
+      from along the band's edge, 0.05 mm apart: no ray first meets one.
+    """
+    Path("catch").mkdir(exist_ok=True)
+
+    def column(w: float, h: float, r: float, z0: float, z1: float, taper: float = 0.0) -> Any:
+        sketch = cq.Workplane("XY").workplane(offset=z0).sketch().rect(w, h).vertices().fillet(r)
+        return sketch.finalize().extrude(z1 - z0, taper=taper)
+
+    island = column(28, 18, 3, -1, 8)
+    strip = column(30, 20, 4, 0, 5).cut(island)
+    cq.exporters.export(strip, "catch/strip.stl", tolerance=0.002, angularTolerance=0.05)
+    way = column(30, 20, 4, 0, 5.2).union(column(30, 20, 4, 5.2, 5.45, taper=45))
+    way = way.union(column(29.5, 19.5, 3.75, 5.45, 8))
+    gaps: list[tuple[float, float, float, float]] = [
+        (14, 15, 0.04, 0.34),
+        (14, 15, -0.29, 0.01),
+        (-15, -14, 0.04, 0.34),
+        (-15, -14, -0.29, 0.01),
+        (0.04, 0.34, 9, 10),
+        (-0.29, 0.01, 9, 10),
+    ]
+    for x0, x1, y0, y1 in gaps:
+        way = way.union(box(x0, x1, y0, y1, 5.2, 8).intersect(column(30, 20, 4, 5.2, 8)))
+    save(box(-20, 20, -15, 15, -2, 7).cut(way.cut(island)), "catch/channel")
+
+
+def given_stls() -> None:
+    """A plain STL as one is given (mqucifer/print-shop#144), on parts of our own. In an eval a
+    channel letter, watertight and one body, read `DISAGREE` on `info`: its floor's top lay between
+    two of the sections stacked for its second volume.
+
+    - `given/tray.stl`: a tray 60 x 40 mm with 10 mm corners, 25 mm tall, open at the top, its
+      floor 2 mm and its curved walls 1.6 mm: 11171.55 mm³ by arithmetic on the exact shape. Its
+      floor's top, z 2, is 0.047 mm into one of 128 even steps of its height.
+    - `given/crossing.stl`: two 10 mm cubes in one mesh, one moved (5, 0, 3) into the other. Each
+      is closed, so the mesh is watertight, and its own arithmetic counts their shared 350 mm³
+      twice: 2000 mm³, where the material is 1650.
+    """
+    Path("given").mkdir(exist_ok=True)
+
+    def column(w: float, h: float, r: float, z0: float, z1: float) -> Any:
+        sketch = cq.Workplane("XY").workplane(offset=z0).sketch().rect(w, h).vertices().fillet(r)
+        return sketch.finalize().extrude(z1 - z0)
+
+    tray = column(60, 40, 10, 0, 25).cut(column(56.8, 36.8, 8.4, 2, 26))
+    tray.val().exportStl("given/tray.stl", tolerance=0.002, angularTolerance=0.05)
+    one = trimesh.creation.box(extents=(10, 10, 10))
+    other = trimesh.creation.box(extents=(10, 10, 10))
+    other.apply_translation((5, 0, 3))
+    vertices = np.vstack([one.vertices, other.vertices])
+    faces = np.vstack([one.faces, other.faces + len(one.vertices)])
+    trimesh.Trimesh(vertices, faces, process=False).export("given/crossing.stl")
+
+
+def ledges() -> None:
+    """A part that prints with no supports, and a ledge inside it (mqucifer/print-shop#147), on
+    parts of our own. In an eval a catch was built with a flat underside in a channel the request
+    said prints with no supports, and nothing read it.
+
+    - `ledge/tray-flat`: a tray 40 x 40 x 20 mm, walls and floor 2 mm, with a ledge 3 mm in from
+      its walls all round, from z 16 to its rim: its underside is flat, 36 x 36 less 30 x 30,
+      396 mm² of ceiling.
+    - `ledge/tray-sloped`: the same, the ledge's underside sloped at 45 degrees from the wall
+      at z 13 to its edge at z 16.
+    """
+    Path("ledge").mkdir(exist_ok=True)
+    outside = box(-20, 20, -20, 20, 0, 20)
+    opening = box(-15, 15, -15, 15, 16, 21)
+    save(outside.cut(box(-18, 18, -18, 18, 2, 16)).cut(opening), "ledge/tray-flat")
+
+    def square(half: float, z: float) -> Any:
+        corners = [(-half, -half, z), (half, -half, z), (half, half, z), (-half, half, z)]
+        return cq.Wire.makePolygon(corners, close=True)
+
+    slope = cq.Solid.makeLoft([square(18, 13), square(15, 16)], True)
+    sloped = outside.cut(box(-18, 18, -18, 18, 2, 13)).cut(cq.Workplane(obj=slope)).cut(opening)
+    save(sloped, "ledge/tray-sloped")
+
+
 def hollow_floor() -> None:
     """A screw hole through a thin floor, under a hollow (mqucifer/print-shop#136), on a part of
     our own: `wall/hollow-floor`, a box 20 x 20, z 0 to 12, hollowed from z 2 up and open at the
@@ -913,6 +1003,9 @@ if __name__ == "__main__":
     holds()
     separate_bodies()
     ring_ledge()
+    catch_round()
+    given_stls()
+    ledges()
     hollow_floor()
     strips()
     at_limits()

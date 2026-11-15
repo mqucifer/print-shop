@@ -17,6 +17,22 @@ need's check with other arguments says so in its reply, pass or fail: `done` che
 try, and the start of what the bench said. It's the newest bench reply, so compaction keeps it
 whole. Each try is in `record/CHECKS.md` too (`record`).
 
+**Building at intake** (mqucifer/print-shop#146). A run that has written a part file and read
+it on the bench, with no breakdown kept, is told so in its next reply, and asked for its
+breakdown and needs, then the plan's `ask`; and again each `INTAKE_EVERY` calls until they come.
+Once the breakdown is kept the count starts again from it, for the needs. In an eval the run was
+building from call 8, benched its own part at call 35, and kept its first breakdown at call 98,
+its needs at 113 and its plan stop at 121, 5 h 18 m in, with the design it was later approved
+with. Nothing is refused: building at intake stays open (the Sponsor, 2026-11-15).
+
+`INTAKE_EVERY` is from the `intake-stalls` runs' records, read from their ledgers. Where a run
+moved on, its steps were 15 and 8 calls apart (`eval-neon-strip-2`: breakdown to needs, needs to
+the plan), so 8 calls with a part on the bench and no next step is as long as its shortest step
+took. The runs that stalled went on far past it: 63 calls from a part on the bench to the
+breakdown there, and 49 and 21 calls after the breakdown with no needs before `eval-pocket-3`
+and `eval-pocket-1` ended. `eval-pocket-4` and `eval-fan-5` never wrote a part: theirs was one
+long call, which this doesn't reach.
+
 `AFTER` is from the design runs' records (`~/print-shop/proofs/m18-close/streaks.json`): of 41 runs
 of failures of one check in a row, 35 were 3 or fewer, and the 6 of 4 or more include both of
 `suncatcher-2`'s loops. It's a line in a reply, never a limit: nothing is cut.
@@ -33,6 +49,9 @@ from print_shop.rounds import prompt
 
 #: Failures of one check, without a pass that counts, before its reply says so, and each one after.
 AFTER = 4
+#: Calls at intake with a part read on the bench, between one saying of what comes next and the
+#: next (mqucifer/print-shop#146).
+INTAKE_EVERY = 8
 #: The command was wrong: not an answer either way.
 USAGE = 3
 #: A word that names a file: it ends in a suffix that starts with a letter, so `0.35` isn't one.
@@ -347,3 +366,54 @@ def record(earlier: list[Try], wanted: list[Wanted], last: int | None = None) ->
             lines.append(f"- call {one.at_call}, {how}: {outcome}" + (f": {why}" if why else ""))
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
+
+
+# Building at intake (mqucifer/print-shop#146)
+
+GEOMETRY = (".step", ".stp", ".stl", ".brep")
+
+
+def built(tries: list[Try], mine: list[str]) -> tuple[Try, str] | None:
+    """The first bench check on a part file of the model's own, and that file: `tries` is every
+    bench call, oldest first, and `mine` the model's own geometry. A wrong command isn't one."""
+    own = set(mine)
+    for one in tries:
+        if one.exit == USAGE:
+            continue
+        named = [w for w in _words(one.argv)[1:] if w in own and w.lower().endswith(GEOMETRY)]
+        if named:
+            return one, named[0]
+    return None
+
+
+def intake_due(now: int, first: int, said: int, breakdown: int) -> bool:
+    """Whether a reply at call `now` says what comes next: `first` is the call of the first bench
+    check on the model's own part, `said` the call it was last said at and `breakdown` the call
+    the breakdown was kept at, each 0 if never. It's said at once where there's no breakdown, and
+    `INTAKE_EVERY` calls after it was last said, or after the breakdown was kept."""
+    if now < first or (said and now <= said):
+        return False
+    if not said and not breakdown:
+        return True
+    return now - max(said, breakdown, first) >= INTAKE_EVERY
+
+
+def intake_said(first: Try, file: str, now: int, breakdown: bool, plan: bool) -> str:
+    """What a reply at intake leads with once the run is building: what it has, and what comes
+    next. It asks, and refuses nothing."""
+    then = ", then show the plan with `ask`" if plan else ""
+    since = f"call {first.at_call}" if first.at_call != now else "this call"
+    if breakdown:
+        return (
+            f"You're still at intake, {now - first.at_call} calls after `{file}` was first read "
+            f"on the bench, and your breakdown is kept: settle `needs` next{then}. They need "
+            "only the breakdown and this first try with its readings. You can go on building "
+            "meanwhile: finishing is round work, after the plan."
+        )
+    return (
+        f"You have a part file, `{file}`, read on the bench since {since}, and no breakdown or "
+        f"needs yet. Write your `breakdown` and settle `needs` now{then}: they need only what "
+        "you know of how it's built and this first try with its readings, not a finished part. "
+        "You can go on building meanwhile, and what the plan's answer changes is cheaper to "
+        "change now."
+    )

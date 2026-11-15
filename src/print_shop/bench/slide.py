@@ -78,6 +78,15 @@ STEP = 0.1
 HALVED = 1e-4
 #: How far past its first contact the part is moved to read the contact's box, in mm.
 PROBE = 0.02
+#: An overlap's growth widens where its slope rises by more than this share of itself each mm:
+#: under it the growth is even, to arithmetic, and its slope alone is followed back
+#: (mqucifer/print-shop#143).
+BENDS = 1e-3
+#: How many times a widening growth is followed back, each from where the last landed.
+FOLLOWED = 6
+#: An overlap has begun to grow where it's this much over what it is at rest, in mm³: a
+#: thousandth of `VOLUME_FLOOR`, and a boolean's own arithmetic is under it.
+BEGUN = 1e-6
 #: The way a part slides out, as `--facing` and `edges` name ways.
 WAYS = {
     "+x": (1.0, 0.0, 0.0),
@@ -109,6 +118,9 @@ SAMPLES = 6000
 #: the step and halving read each first contact's box this far past it, so it holds them all
 #: already (mqucifer/print-shop#135).
 TIE = PROBE
+#: A first contact in stretches runs round the moving part where it lies along this share of one
+#: of its outlines, seen along the slide (mqucifer/print-shop#143).
+ROUND = 0.9
 #: The most contacts said one by one; the rest are counted.
 SHOWN = 8
 #: A first contact's place, seen along the slide, is opened by this, in mm: a face sliding along
@@ -205,13 +217,68 @@ def _began(volume: Callable[[float], float], rest: float, high: float) -> float:
     sides on a pocket's walls, has an overlap of no volume whose faces give the band its chords:
     in `hold/feet`, 0.64 mm³, which four feet 16 mm² across take 0.04 mm to pass. So the
     overlap's growth, read over `PROBE` past `high`, is followed back to where it was `rest`.
-    Head on it grows evenly, and that's exact; where the contact widens as it goes in, it grows
-    faster past `high`, and that's short of `high` but never before the contact."""
-    grown = float(volume(high)) - rest
-    rate = (float(volume(high + PROBE)) - rest - grown) / PROBE
+    Head on it grows evenly, and its slope is exact.
+
+    **By its curve, where it widens** (mqucifer/print-shop#143). Where the contact widens as it
+    goes in, as a catch whose underside slopes away from a strip's edge all round, the overlap
+    grows faster past `high` than before it, and its slope reads the contact late: in an eval a
+    ring caught at 0.2000 mm read 0.2263, past the tie band from the rays, and it was `DISAGREE`.
+    A flat face and a sloped one together grow as a square of the distance. So a growth that
+    widens is read at three distances, and followed back along the square through them
+    (`_back`); then again from where that lands, where the square is nearer the growth, until
+    it moves less than `HALVED`, or the growth left is under a volume's floor. It stops where a
+    move isn't under half the one before, which a growth that is closing on its start always is;
+    and where it lands with no growth at all, to `BEGUN`, the start is halved for between there
+    and the move before, so it's never before the contact."""
+    at, before, moved = high, high, math.inf
+    for _ in range(FOLLOWED):
+        grown = float(volume(at)) - rest
+        if BEGUN < grown <= VOLUME_FLOOR:
+            # It has begun to grow here, by less than a volume's floor: no nearer can be read.
+            return at
+        if grown <= BEGUN:
+            # Before the start: it's between here and where this was followed back from.
+            low, top = at, before
+            while top - low > HALVED:
+                mid = (low + top) / 2
+                grows = float(volume(mid)) - rest > VOLUME_FLOOR
+                low, top = (low, mid) if grows else (mid, top)
+            return top
+        back, widens = _back(volume, rest, at, grown)
+        if not widens or at - back < HALVED:
+            return back
+        if at - back > moved / 2:
+            return at
+        before, moved, at = at, at - back, back
+    return at
+
+
+def _back(
+    volume: Callable[[float], float], rest: float, at: float, grown: float
+) -> tuple[float, bool]:
+    """An overlap's growth at `at`, followed back to where it was `rest`: (where, whether the
+    growth widens). Read at `at`, half of `PROBE` past it and `PROBE` past it. An even growth is
+    followed by its slope, which is exact; one that widens, along the square through the three,
+    or by its slope where the square never comes down to `rest`, as a growth steeper than a
+    square's: a slope read past a widening growth lands short of `at`, and after its start."""
+    half = PROBE / 2
+    once = float(volume(at + half)) - rest
+    twice = float(volume(at + PROBE)) - rest
+    rate = (twice - grown) / PROBE
     if rate <= 0:
-        return high
-    return max(0.0, high - grown / rate)
+        return at, False
+    by_slope = max(0.0, at - grown / rate)
+    # grown + b*s + a*s*s through the three, s from `at`: where it's 0, the nearest before.
+    a = (twice - 2 * once + grown) / (2 * half * half)
+    if a <= BENDS * rate:
+        return by_slope, False
+    b = (once - grown) / half - a * half
+    root = b * b - 4 * a * grown
+    if b <= 0 or root < 0:
+        return by_slope, True
+    # A widening growth was slower before `at` than past it: it began no later than its slope
+    # says.
+    return float(max(0.0, min(by_slope, at - 2 * grown / (b + math.sqrt(root))))), True
 
 
 def _path(
@@ -566,13 +633,23 @@ def _contacts(
 
 def _runs_round(
     a: Any, b: Any, d: np.ndarray, axis: str, first: float, shadow: Any
-) -> bool:
-    """Whether a's first contact with b closes round a, seen along the slide, as a ledge meeting a
-    strip's edge all round its outline does (mqucifer/print-shop#135): a place with a hole that
-    holds some of a's own shadow. A face with holes in it, met whole, encloses only a's holes."""
+) -> float | None:
+    """Whether a's first contact with b runs round a, seen along the slide, and how much of the
+    way: 1.0 where it closes round, a share where it lies along that much of one of a's outlines,
+    or None.
+
+    It closes round as a ledge meeting a strip's edge all round its outline does
+    (mqucifer/print-shop#135): a place with a hole that holds some of a's own shadow. A face
+    with holes in it, met whole, encloses only a's holes.
+
+    It lies along an outline (mqucifer/print-shop#143) where a catch over a thin band's edge is
+    in stretches, as round a letter's corners: in an eval twelve places lay along 97% of a strip's
+    outer outline and closed round nothing. So a contact within the coarse mesh's chords of
+    `ROUND` of one outline of a's shadow, its outer one or a hole's, runs round, where it covers
+    under half of that shadow: a face met whole lies along all its outline, and isn't a ring."""
     overlap = a.translate(tuple(map(float, d * (first + PROBE)))) ^ b
     if float(overlap.volume()) <= 0:
-        return False
+        return None
     seen = _shadow(overlap, axis).buffer(-OPEN)
     # Most of what it encloses is a's: its holes, on the coarse mesh, differ from the fine
     # mesh's by a sliver only.
@@ -582,7 +659,22 @@ def _runs_round(
         if place.geom_type == "Polygon"
         for ring in place.interiors
     ]
-    return any(float(e.intersection(shadow).area) > e.area / 2 for e in enclosed)
+    if any(float(e.intersection(shadow).area) > e.area / 2 for e in enclosed):
+        return 1.0
+    if seen.area <= 0 or seen.area >= shadow.area / 2:
+        return None
+    near = seen.buffer(2 * COARSE[0])
+    outlines = [
+        ring
+        for part in getattr(shadow, "geoms", [shadow])
+        if part.geom_type == "Polygon"
+        for ring in (part.exterior, *part.interiors)
+    ]
+    along = max(
+        (float(ring.intersection(near).length) / ring.length for ring in outlines if ring.length),
+        default=0.0,
+    )
+    return along if along >= ROUND else None
 
 
 def _by_place(overlap: Any, d: np.ndarray, axis: str, floor: float) -> list[tuple[Any, Any, Any]]:
@@ -826,6 +918,7 @@ def what_holds(
         "room": [],
         "separate": [],
         "round": [],
+        "round_along": {},
         "tie": False,
         "verdict": "NOT HELD",
         "why": "",
@@ -925,11 +1018,13 @@ def what_holds(
         found["first_mm"] = first
         found["first_rays_mm"] = min(m["met_rays_mm"] for m in tied)
         found["meets"] = [m["part"] for m in tied]
-        found["round"] = [
-            m["part"]
-            for m in tied
-            if _runs_round(a_fine, m["_b"], d, axis, m["met_mm"], shadow)
-        ]
+        along = {
+            m["part"]: _runs_round(a_fine, m["_b"], d, axis, m["met_mm"], shadow) for m in tied
+        }
+        found["round"] = [part for part, share in along.items() if share is not None]
+        found["round_along"] = {
+            part: round(share, 4) for part, share in along.items() if share is not None
+        }
         for m in tied:
             for low, high in _contacts(a_fine, m["_b"], d, axis, m["met_mm"]):
                 found["contacts"].append(
@@ -941,6 +1036,20 @@ def what_holds(
                 )
     found["path"] = [{k: v for k, v in m.items() if not k.startswith("_")} for m in met]
     found["catch_mm"], found["blocked"], found["room"], unlike = _blocked(found, met)
+    if met and not figures and _held(found, found["first_mm"], hold) != _held(
+        found, found["first_rays_mm"], hold
+    ):
+        # Two distances within the chords of each other, with --hold between them: the
+        # methods agree on the contact and differ on the answer, so it's judged as any two
+        # that differ are (mqucifer/print-shop#143). A hold drawn at --hold, which the step and
+        # halving read 0.005 mm late, was a disagreement by that figure; read to the chords,
+        # it's one still.
+        figures += [
+            f"{m['part']}: the rays meet it after {m['met_rays_mm']:.4f} mm, the step and "
+            f"halving after {m['met_mm']:.4f}"
+            for m in met
+            if m["part"] in found["meets"]
+        ]
     if figures:
         # A figure on its own is a disagreement only where the answer or the place differs.
         differs += _figures_differ(found, met, hold, figures) if not differs else figures
@@ -1031,10 +1140,16 @@ def _said(
     if len(found["contacts"]) > SHOWN:
         report.line(f"  and {len(found['contacts']) - SHOWN} more contacts, in slide.contacts")
     for part in found["round"] if found["verdict"] != "DISAGREE" else []:
+        share = found["round_along"][part]
+        closes = (
+            "it closes round"
+            if share >= 1.0
+            else f"its {len(found['contacts'])} places lie along {share:.0%} of {name}'s outline"
+        )
         report.line(
-            f"  the first contact with {part} runs round {name}: seen along {way[1]} it closes "
-            f"round, as a ledge meeting {name}'s edge all round at one height does, so any place "
-            "on it is as first as another (slide.round)"
+            f"  the first contact with {part} runs round {name}: seen along {way[1]} {closes}, "
+            f"as a ledge meeting {name}'s edge all round at one height does, so any place on it "
+            "is as first as another (slide.round)"
         )
     if found["path"]:
         report.line(

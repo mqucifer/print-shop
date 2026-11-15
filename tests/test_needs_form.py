@@ -220,7 +220,8 @@ def test_a_try_skips_only_a_check_whose_command_cant_be_run(tmp_path: Path) -> N
     for skipped in ("holds", "nope", "glass"):
         assert f"- {skipped}: not run, as its check can't be run as it stands." in reply
     assert "the need 'holds': `command` can't be read: No closing quotation" in reply
-    assert "the need 'where': it has only id, what, source, quote, check" in reply
+    # A check's key beside it is told where it goes (mqucifer/print-shop#145).
+    assert "the need 'where': `measures` goes inside `check`, beside `by`" in reply
     assert "- side: checked at `done`, against `on_bed`." in reply
     read = [r["need"] for r in tried["detail"]["readings"]]
     assert read == ["holes", "arm", "plate", "../up", "where"]

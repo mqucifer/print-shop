@@ -323,6 +323,9 @@ SLIDE = Row(
         # The parts whose first contact closes round the moving part, seen along the slide, and
         # whether the methods' first contacts were read as one tie (mqucifer/print-shop#135).
         "round": Rows(TEXT),
+        # How much of the way round each runs: 1 where it closes, or the share of one of the
+        # moving part's outlines its stretches lie along (mqucifer/print-shop#143).
+        "round_along": Keyed(NUMBER),
         "tie": FLAG,
         "verdict": TEXT,
     },

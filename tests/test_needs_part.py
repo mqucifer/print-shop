@@ -245,7 +245,8 @@ def test_done_runs_light_and_capture_on_every_pane_and_isnt_met_while_one_fails(
     assert f"- `{LIGHT}`, ok: OK: ok on" in done["reply"]
     assert f"- `{HOLD}`, FAIL: FAIL: fail on" in done["reply"]
     rows = run.ledger.rows(
-        "SELECT check_name, stop, passed FROM standing WHERE run=? AND check_name != 'curves'",
+        "SELECT check_name, stop, passed FROM standing WHERE run=? AND check_name NOT IN "
+        "('curves', 'downward')",
         "r",
     )
     assert [(r["check_name"], r["stop"], r["passed"]) for r in rows][-3:] == [

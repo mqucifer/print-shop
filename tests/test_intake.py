@@ -23,7 +23,7 @@ from print_shop.rounds import breakdown, needs, prompt, request, transcript
 from print_shop.rounds.box import Ran
 from print_shop.rounds.run import Refused, Run, what_next
 from print_shop.rounds.session import Ending
-from tests.rounds_fakes import Scripted, tool
+from tests.rounds_fakes import Scripted, laid, tool
 
 BRACKET = """\
 A wall bracket for a small shelf, in PETG. It should look plain and sturdy.
@@ -176,6 +176,8 @@ class Box:
             shutil.copyfile(self.work / source, self.work / target)
             said = {"size": [8, 8], "shown": [8, 8], "out": target}
             return Ran(0, picture_module.MARK + json.dumps(said), 0.1)
+        if module == "refine":
+            return laid(args, where)
         raise AssertionError(module)
 
 
