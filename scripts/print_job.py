@@ -45,20 +45,27 @@ With a print started, it keeps running, watching the printer read-only, until
 the outcome is recorded in Home Assistant. Stopping it (Ctrl-C) leaves the
 ledger row open; `--serve` asks about it again later. The first deliberate
 print follows `docs/runbook-first-print.md`.
+
+**What a job shows here is also kept in its folder,** as `jobs/<id>/job.log`, with each answer
+typed, so it can be read after it's scrolled past (mqucifer/print-shop#139): by the print desk,
+`scripts/print_desk.py`, and by the operator. No key, token or password is written to it.
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import shlex
 import sys
 import time
-from datetime import datetime
+from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 
 from print_shop.arming import ALLOW_HARDWARE_ENV, hardware_allowed
 from print_shop.env import SETTINGS_PATH
 from print_shop.inventory import SETUP, Inventory, InventoryError, Material
+from print_shop.joblog import LOG_NAME, JobLog, secrets
 from print_shop.ledger import Ledger, ledger_path
 from print_shop.orchestrator.daemon import GATE_WAIT_S
 from print_shop.orchestrator.outcome import no_frames
@@ -96,7 +103,30 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    if args.stl is None or args.serve or args.list or args.filaments:
+        return _main(parser, args, None)
+    # A job: what it shows is kept in its folder too (mqucifer/print-shop#139).
+    job_log = JobLog(secrets(args.settings))
+    with job_log.capturing():
+        given = sys.argv[1:] if argv is None else argv
+        job_log.write(_header(args.stl, given))
+        try:
+            return _main(parser, args, job_log)
+        finally:
+            job_log.close()
 
+
+def _header(stl: Path, given: list[str]) -> str:
+    """The log's first lines: when, the part's full path, and the command as given. The print
+    desk reads the part's path from here, for its "run it again" line."""
+    return (f"print_job.py, {datetime.now(UTC).isoformat(timespec='seconds')}\n"
+            f"part: {stl.resolve()}\n"
+            f"command: uv run python scripts/print_job.py {shlex.join(given)}\n")
+
+
+def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
+          job_log: JobLog | None) -> int:
+    read: Callable[[str], str] = job_log.reader(input) if job_log is not None else input
     if args.filaments:
         print(describe_store(Store(STORE_DIR)))
         return 0
@@ -154,7 +184,7 @@ def main(argv: list[str] | None = None) -> int:
         for note in choice.notes:
             print(f"  ({note})")
         try:
-            asker = replay_asker(args.answers) if args.answers else cli_asker()
+            asker = replay_asker(args.answers) if args.answers else cli_asker(read=read)
         except ValueError as exc:
             parser.error(str(exc))
 
@@ -174,7 +204,7 @@ def main(argv: list[str] | None = None) -> int:
         recorder=recorder,
         settings=args.settings,
         asker=asker,
-        reviewer=cli_reviewer(),
+        reviewer=cli_reviewer(read=read),
     )
     try:
         with run.daemon:
@@ -184,6 +214,9 @@ def main(argv: list[str] | None = None) -> int:
                     time.sleep(1)
 
             job_id = run.daemon.submit(args.stl, as_laid=args.as_laid)
+            if job_log is not None:
+                job_log.open(WORK_DIR / job_id / LOG_NAME)
+                print(f"Job {job_id}'s log: {job_log.path}")
             how = "kept as laid" if args.as_laid else "orienting"
             print(f"Job {job_id}: {how}, then a few questions about the part, here.")
             try:
