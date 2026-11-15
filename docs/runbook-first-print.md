@@ -165,6 +165,28 @@ A print uses your tuning where there is one, and the standard where you haven't 
 
    The recording replaces the synthetic frames in `tests/data/sdcp/`.
 
+## The print desk: reading a job, and running it again
+
+A page on the Mac shows what's loaded and every job (mqucifer/print-shop#139), so a job can be read after it's scrolled past, and a past job's settings copied to print it again. From print-shop's checkout:
+
+```
+uv run python scripts/print_desk.py
+```
+
+Then open <http://127.0.0.1:8719/> in a browser on the Mac. `--port` picks another port. It listens on 127.0.0.1 only, so nothing else on the network reaches it, and Ctrl-C stops it. It can run beside a print.
+
+- **The front page** shows the printer's fitted nozzle and loaded spool, the spools on hand, and each job, newest first: where it is (printing, waiting for your answer, its outcome, or ended without printing), its time and plastic, a colour change, and its frames.
+- **A job's page** shows the part, its pose and why, the questions with your answers, each setting proposed with its reason and who it's from (your answer, the model, a guard, a lesson, the slice's reading, or you), your corrections at the review, the slice's reading and what it flagged, the colour change, the outcome with your note and the frames, and the job's log.
+- **The job's log** is what the command showed for it, with each answer you typed, kept as `~/print-shop/jobs/<job>/job.log`. No key, token or password is written to it. Jobs from before the log was kept have none.
+- **Run it again** gives three things, each with a Copy button:
+  - the command line: the same part, nozzle, spool and profiles, and `--answers`. The part is found by its bytes, which the ledger keeps the hash of: at the path the job's log names, else anywhere under `~/print-shop/parts/` (or `PRINT_SHOP_PARTS` in the settings), else in the job's folder. Renamed or moved, it's still found. If no file has the same bytes, the page says it wasn't found, and the command names the part by its file name for you to give its path;
+  - the correction line, to paste at the review when it asks;
+  - the answers file: press **Save** and it goes to `~/Downloads`, where the command line looks for it. If the browser names it differently, change the path in the command to match.
+
+  What the lines can't carry is said under them: a pose you sent back is sent back again at the review (`orientation`), and a change you took from the slice is taken again (`take`) if it proposes it. If the questions asked are different this time, `--answers` refuses the file and lists the new ones; answer them as they come.
+
+**The desk reads and copies; it never acts.** It opens the ledger read-only and writes nothing: it doesn't start a job, answer a question or arm the printer. The copied command line doesn't arm it either. Arming stays as above: `PRINT_AGENT_ALLOW_HARDWARE=1` on the command's own line, typed by you.
+
 ## If something goes wrong
 
 | What you see | What it means | What to do |
