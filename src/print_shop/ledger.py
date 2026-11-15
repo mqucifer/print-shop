@@ -452,6 +452,33 @@ class Ledger:
         self._conn.executescript(FRAMES_MISSED_SCHEMA)
         self._conn.executescript(UNPRINTED_SCHEMA)
 
+    @classmethod
+    def read_only(cls, path: Path) -> Ledger:
+        """The file opened read-only, for a reader that must change nothing: the print desk
+        (mqucifer/print-shop#139). Nothing is made, added or upgraded, as opening it to write
+        does; SQLite itself refuses any write (`mode=ro`). Every read below works on it.
+
+        Raises:
+            LedgerError: If there's no ledger at `path`, or it's newer than this code.
+        """
+        if not path.is_file():
+            raise LedgerError(f"there's no ledger at {path}")
+        self = cls.__new__(cls)
+        self.path = path
+        self._lock = threading.Lock()
+        self._conn = sqlite3.connect(
+            f"{path.resolve().as_uri()}?mode=ro", uri=True, check_same_thread=False
+        )
+        self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA busy_timeout=5000")
+        version = self._conn.execute("PRAGMA user_version").fetchone()[0]
+        if version > SCHEMA_VERSION:
+            self._conn.close()
+            raise LedgerError(
+                f"{path} is schema version {version}; this code knows {SCHEMA_VERSION}"
+            )
+        return self
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()

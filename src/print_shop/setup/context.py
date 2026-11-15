@@ -150,6 +150,8 @@ class PartContext(BaseModel):
 
     #: Where it came from, in words: "" for none.
     source: str = ""
+    #: The sidecar or the run's folder it was read from, which `--context` takes again.
+    path: str = ""
     #: What was read, each in a line: the files, and how many needs, facts and findings.
     read: tuple[str, ...] = ()
     fits: tuple[Fit, ...] = ()
@@ -303,7 +305,8 @@ def _from_sidecar(path: Path) -> PartContext:
     if down and down not in SIDES:
         raise ValueError(f"down is one of {', '.join(SIDES)}, not {down!r}")
     return PartContext(
-        source=f"the sidecar {path.name}", read=(str(path),), fits=tuple(fits),
+        source=f"the sidecar {path.name}", path=str(path.resolve()), read=(str(path),),
+        fits=tuple(fits),
         holds=tuple(holds), seen=_seen(data.get("seen")), down=down,
         down_from="the sidecar" if down else "",
         notes=(str(data["about"]),) if data.get("about") else (),
@@ -410,7 +413,8 @@ def _from_run(run: Path, stl: Path) -> PartContext:
     if not fits and not holds and not down:
         notes.append(f"no need of the run names `{part}`: its fits, holds and side aren't known")
     return PartContext(
-        source=f"the design run `{run.name}`, part `{part}`", read=tuple(read),
+        source=f"the design run `{run.name}`, part `{part}`", path=str(run.resolve()),
+        read=tuple(read),
         fits=tuple(fits), holds=tuple(holds), down=down, down_from=down_from,
         facts=tuple(facts_read), findings=tuple(findings), notes=tuple(notes),
     )

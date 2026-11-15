@@ -179,6 +179,9 @@ class Proposal(BaseModel):
     #: The part's context as it was read, from its design run or a sidecar, in lines
     #: (mqucifer/print-shop#130), or why there was none.
     context: tuple[str, ...] = ()
+    #: The sidecar or the design run's folder that context was read from, or "": what a run of
+    #: the job again names with `--context`, wherever its part is found.
+    context_from: str = ""
 
     def get(self, key: str) -> Change | None:
         return next((c for c in self.changes if c.key == key), None)

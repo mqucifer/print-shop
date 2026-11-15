@@ -1118,6 +1118,63 @@ def test_a_least_wall_between_corners_is_a_disagreement_said_why(bench: Any) -> 
     assert "isn't square to the hole, as between two corners" in answer.text
 
 
+def test_a_hole_through_a_thin_floor_reads_the_floor_within_a_range(bench: Any) -> None:
+    """mqucifer/print-shop#136. In an eval, screw holes through a 2 mm floor at the bottom of a
+    hollow channel read the channel's 1.6 mm side wall, `FAIL`, twice: the hole opens into the
+    hollow, and `wall` followed it up. A 3 mm hole through a 2 mm floor, 3.5 mm from the outside
+    by arithmetic, under a hollow whose walls are 1.6 mm: its whole run reads the hollow's walls,
+    and says where it opens and the range that reads the floor; that range reads the floor."""
+    whole = bench("wall", "wall/hollow-floor.step", "--hole", "5,0,1", "--min-wall", "2")
+    assert whole.verdict == "FAIL", whole.text
+    assert whole.numbers["least_wall_mm"] == pytest.approx(1.6, abs=1e-3)
+    assert whole.numbers["hole_opens_at"] == [2.0]
+    assert whole.numbers["hole_alone"] == [0.0, 2.0]
+    assert (
+        "the hole opens into a hollow at 2 along z, and this reads its whole run, the hollow "
+        "too: the least wall is at 2.300, in the hollow. To read the wall round the hole alone, "
+        "give --z 0,2" in whole.text.splitlines()[0]
+    ), whole.text
+    assert "OPENS INTO A HOLLOW: at 2 its section goes from 7.07 to 282.24 mm² in one layer" in (
+        whole.text
+    )
+    floor = bench(
+        "wall", "wall/hollow-floor.step", "--hole", "5,0,1", "--min-wall", "2", "--z", "0,2"
+    )
+    assert floor.verdict == "OK" and floor.code == 0, floor.text
+    assert floor.numbers["least_wall_mm"] == pytest.approx(3.5, abs=1e-3)
+    assert floor.numbers["least_wall_rays_mm"] == pytest.approx(3.5, abs=0.01)
+    assert floor.numbers["least_wall_toward"] == "the part's outside"
+    assert floor.numbers["hole_fit_d_mm"] == pytest.approx(3.0, abs=0.01)
+    assert floor.numbers["hole_from"] == pytest.approx(0.1)
+    assert floor.numbers["hole_to"] == pytest.approx(1.9)
+    assert floor.numbers["hole_read"] == [0.0, 2.0]
+    assert "OPENS INTO A HOLLOW" not in floor.text and "hollow" not in floor.text.splitlines()[0]
+    assert "read within --z 0,2 only" in floor.text
+    # A range that still reaches into the hollow reads it, and says so.
+    deep = bench("wall", "wall/hollow-floor.step", "--hole", "5,0,1", "--z", "3,5")
+    assert deep.numbers["least_wall_mm"] == pytest.approx(1.6, abs=1e-3), deep.text
+    assert "this reads --z 3,5, the hollow too" in deep.text.splitlines()[0], deep.text
+
+
+def test_a_hole_with_no_hollow_reads_as_before_and_a_range_past_it_is_no_answer(
+    bench: Any,
+) -> None:
+    """Without a range, a hole that opens into nothing reads as it always has, word for word; a
+    range it has no section in is no answer."""
+    answer = bench("wall", "hang.step", "--hole", "50,121.5,2", "--min-wall", "2")
+    assert answer.text.splitlines()[0] == (
+        "verdict: OK: the least wall round the hole is 2.000 mm, toward the part's outside, at "
+        "least the 2 mm asked for"
+    ), answer.text
+    assert "hole_opens_at" not in answer.numbers and "hole_alone" not in answer.numbers
+    assert "hollow" not in answer.text and "--z" not in answer.text
+    past = bench("wall", "hang.step", "--hole", "50,121.5,2", "--z", "5,6")
+    assert past.verdict == "NO ANSWER", past.text
+    assert "no section of the hole is within --z 5,6: it runs from 0.100 to 3.900" in past.text
+    wrong = host.run(["wall", "hang.step", "--hole", "50,121.5,2", "--z", "2,1"], bench.work)
+    assert wrong.returncode == 3 and "FROM,TO: two numbers, the first the lower" in wrong.stderr
+
+
 @pytest.mark.parametrize(
     ("point", "says"), [("5,5,2", "it's in material"), ("50,130,2", "open to the outside")]
 )
@@ -2574,6 +2631,82 @@ def test_a_hold_by_a_joined_body_or_by_a_part_in_its_own_file_reads_as_before(be
     assert apart.numbers["slide"]["meets"] == ["ledge.step"]
     assert apart.numbers["slide"]["separate"] == [] and "bodies" not in apart.numbers
     assert SEPARATE not in apart.text
+
+
+# A slide whose first contact is a tie round a ring (mqucifer/print-shop#135)
+
+RING = ("clearance", "ring/channel.step")
+
+
+def test_a_strip_caught_all_round_by_a_ring_ledge_is_held_and_runs_round(bench: Any) -> None:
+    """A sloped ledge meets a strip's top edge all round at one height: both methods catch it
+    after 0.8 mm, and the reply says the contact runs round the strip."""
+    answer = bench(*RING, "ring/strip.step", "--slide", "+z")
+    assert answer.verdict == "HELD" and answer.code == 0, answer.text
+    slide = answer.numbers["slide"]
+    assert slide["first_rays_mm"] == pytest.approx(0.8, abs=1e-4)
+    assert slide["first_mm"] == pytest.approx(0.8, abs=0.02), answer.text
+    assert slide["round"] == ["channel.step"] and slide["tie"] is False
+    assert "the first contact with channel.step runs round strip.step" in answer.text
+    # A face with holes met whole encloses only the moving part's holes: it doesn't run round.
+    face = bench("clearance", "hold/plain.step", "hold/holed-fan.step", "--slide", "+z")
+    assert face.verdict == "HELD" and face.numbers["slide"]["round"] == [], face.text
+    assert "runs round" not in face.text
+
+
+def test_a_patch_of_a_ring_no_ray_first_met_is_a_tie_not_a_disagreement(bench: Any) -> None:
+    """In an eval the step and halving read a 0.03 mm patch of the ring that no ray's first point
+    fell in, and `--slide` was `DISAGREE` four times, though both methods caught the strip within
+    the chords. Planted on the ring (`bench_cases/planted_tie.py`): the patch is a first contact
+    all the same, as the rays meet it within the tie band, and the hold is read. A patch up the
+    slope, which the rays meet only past the band, and the step and halving 0.05 mm late, past
+    the band from the rays, are still `DISAGREE`."""
+    done = host.run(["planted_tie.py"], bench.work, python=True)
+    assert done.returncode == 0, done.stdout + done.stderr
+    found = json.loads(done.stdout.strip().splitlines()[-1])
+    tie = found["patch_on_the_ring"]
+    assert tie["verdict"] == "HELD" and tie["code"] == 0, tie["text"]
+    assert tie["tie"] is True and tie["contacts"] == 2 and tie["round"] == ["channel.step"]
+    assert tie["first_rays_mm"] == pytest.approx(0.8, abs=1e-4)
+    said = (
+        "both methods find the first contact at one height round strip.step: a tie, its 2 places "
+        "on channel.step each met within 0.02 mm of the first by both methods, so any is as first "
+        "as another; 0.8000 mm by the rays"
+    )
+    assert said in tie["text"].splitlines()[0], tie["text"]
+    assert "DISAGREE" not in tie["text"], tie["text"]
+    up = found["patch_up_the_slope"]
+    assert up["verdict"] == "DISAGREE" and up["code"] == 2, up["text"]
+    assert re.search(
+        r"where the rays find no first contact, and the rays meet it there only after 1\.0\d+ "
+        r"mm, past the 0\.02 mm tie band from 0\.8000",
+        up["text"],
+    ), up["text"]
+    late = found["patch_read_late"]
+    assert late["verdict"] == "DISAGREE" and late["code"] == 2, late["text"]
+    assert "where the rays find no first contact:" in late["text"], late["text"]
+    assert late["tie"] is False
+
+
+def test_a_ring_caught_at_hold_by_one_method_and_past_it_by_the_other_says_how_to_hold(
+    bench: Any,
+) -> None:
+    """The same eval hit a hold straddling `--hold`: one method `HELD` at 1.0000, the other
+    `NOT HELD` just past it. Neither reading is loosened, so it stays `DISAGREE`, and the reply
+    says the two are one contact at the limit, and to bring it inside by the tie band."""
+    answer = bench(*RING, "ring/strip-at-hold.step", "--slide", "+z")
+    assert answer.verdict == "DISAGREE" and answer.code == 2, answer.text
+    slide = answer.numbers["slide"]
+    assert slide["first_mm"] > 1.0 and slide["first_rays_mm"] == pytest.approx(1.0, abs=1e-4)
+    assert re.search(
+        r"the step and halving read NOT HELD at 1\.0\d+ mm, the rays HELD at 1\.0000, against "
+        r"--hold 1 mm\. The two are within 0\.02 mm of each other, one first contact, and it lies "
+        r"on --hold within the readings' tie band: bring what holds it more than 0\.02 mm inside "
+        r"--hold 1 mm, and both read HELD",
+        answer.text,
+    ), answer.text
+    inside = bench(*RING, "ring/strip-at-hold.step", "--slide", "+z", "--hold", "1.03")
+    assert inside.verdict == "HELD", inside.text
 
 
 # Replies that say where (mqucifer/print-shop#77)

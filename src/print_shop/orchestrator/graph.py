@@ -877,7 +877,8 @@ def _propose_and_review(
               if context is not None and context.found and stl is not None else None)
     said = tuple([*(context.lines() if context is not None else ()),
                   *(placed.lines() if placed is not None else ())])
-    proposal = proposal.model_copy(update={"context": said})
+    proposal = proposal.model_copy(update={
+        "context": said, "context_from": context.path if context is not None else ""})
     while True:
         result: SliceResult = slice_with(apply(profiles, proposal, workdir))
         reading = _read(result)

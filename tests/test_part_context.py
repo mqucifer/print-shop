@@ -23,6 +23,7 @@ import pytest
 import trimesh
 
 from print_shop.core.mqtt import command_topic
+from print_shop.desk.again import again
 from print_shop.ingest.orientation import candidates
 from print_shop.ledger import Ledger
 from print_shop.orchestrator.daemon import Daemon
@@ -691,3 +692,32 @@ def test_a_job_with_a_lessons_smaller_elephant_foot_is_proposed_the_fits(
     (foot,) = [f for f in review.proposed if f.change.key == "elefant_foot_compensation"]
     assert foot.change.value == "0.1"
     assert "raising the 0.05 mm lesson 24 set" in foot.change.reason
+
+
+def test_running_a_job_again_names_its_context_wherever_the_part_is_found(
+    job: Any, tmp_path: Path,
+) -> None:
+    """The print desk may find the part by its bytes in the job's folder, away from its sidecar
+    or its run: the line it gives names the context, so the fits go with it."""
+    stl = _run(tmp_path)
+    row, _ = job(stl)
+    run = str((tmp_path / "eval-lid-9").resolve())
+    assert row.proposal.context_from == run
+    elsewhere = tmp_path / "jobs" / "lid.stl"
+    elsewhere.parent.mkdir()
+    elsewhere.write_bytes(stl.read_bytes())
+    line = again(row, elsewhere, 1, True)
+    assert line.command.split()[4:5] == [str(elsewhere)]
+    assert f"--context {run}" in line.command
+    # The context it names reads the same for the part found elsewhere.
+    assert read_context(elsewhere, Path(run)).fits == read_context(stl).fits
+    # Gone since, it's said.
+    gone = row.model_copy(update={"proposal": row.proposal.model_copy(
+        update={"context_from": str(tmp_path / "gone.json")})})
+    assert any("is gone" in n for n in again(gone, elsewhere, 1, True).notes)
+
+
+def test_a_job_with_no_context_runs_again_as_before(job: Any, tmp_path: Path) -> None:
+    row, _ = job(write_stl("cube", tmp_path))
+    assert row.proposal.context_from == ""
+    assert "--context" not in again(row, tmp_path / "cube.stl", 1, True).command
