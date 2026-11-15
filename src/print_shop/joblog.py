@@ -24,10 +24,10 @@ import logging
 import os
 import re
 import sys
-import threading
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from threading import Lock, local
 from typing import TextIO
 
 from print_shop.env import load_env
@@ -61,12 +61,12 @@ class JobLog:
     def __init__(self, secrets: Iterable[str]) -> None:
         self._secrets = sorted({s for s in secrets if len(s) >= _SHORTEST}, key=len,
                                reverse=True)
-        self._lock = threading.Lock()
+        self._lock = Lock()
         self._held: list[str] = []
         self._partial = ""
         self._file: TextIO | None = None
         self._closed = False
-        self._quiet = threading.local()
+        self._quiet = local()
         self.path: Path | None = None
 
     def redact(self, text: str) -> str:
