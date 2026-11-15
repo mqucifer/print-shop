@@ -51,6 +51,7 @@ markers = [
     "ha: reads the real Home Assistant REST API; runs only with PRINT_SHOP_TEST_HA=1",
     "bench: runs the CAD bench in its Docker image, built by scripts/bench.py build (deselect with -m 'not bench')",
     "bench_local: runs the CAD bench on a file only the Mac holds, and skips where it's absent",
+    "cae: runs the bench's second image, with FreeCAD, built by scripts/bench.py build cae (deselect with -m 'not cae')",
 ]
 
 [tool.ruff]
@@ -71,3 +72,8 @@ warn_unreachable = true
 module = ["cadquery.*", "cadquery", "OCP.*", "manifold3d.*", "manifold3d", "shapely.*", "shapely", "vtk.*", "vtk", "PIL.*", "scipy.*", "scipy"]
 ignore_missing_imports = true
 follow_imports = "skip"
+
+# The bench's second image (src/print_shop/bench/cae-image) has FreeCAD and its FEM workbench.
+[[tool.mypy.overrides]]
+module = ["FreeCAD", "Part", "ObjectsFem", "femmesh.*", "femtools", "femtools.*"]
+ignore_missing_imports = true

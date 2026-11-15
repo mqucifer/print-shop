@@ -44,6 +44,8 @@ COMMANDS = (
     "edges",
     "faces",
     "slice",
+    "fit-on",
+    "bend",
 )
 #: Verdicts that are no answer: they never pass a need, whatever it says.
 UNSURE = ("DISAGREE", "NO ANSWER")
