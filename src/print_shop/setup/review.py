@@ -89,6 +89,9 @@ class ReviewRequest:
     #: The kept lessons for this part in a pose, on its filament: a way by settings offers
     #: their values for the keys they set.
     lessons_for: Callable[[Orientation], tuple[GivenLesson, ...]] | None = None
+    #: The part's context from its design run or a sidecar, and placed in this pose, in lines
+    #: (mqucifer/print-shop#130): what was read, or that there was none.
+    context: tuple[str, ...] = ()
 
     @property
     def proposed(self) -> tuple[Flag, ...]:
@@ -192,6 +195,9 @@ def render(request: ReviewRequest) -> str:
         f"  the part's features were read in this pose: {request.orientation.pose()}",
         *_poses(request),
     ]
+    if request.context:
+        lines += ["", "The part's context (its design run, or a sidecar beside it):",
+                  *(f"  {line}" for line in request.context)]
     lines += _read(request)
     take = " or take what the slice proposes (take, or take 1)," if request.proposed else ""
     back = " send the orientation back (orientation)," if request.candidates else ""

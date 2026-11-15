@@ -211,6 +211,7 @@ def prompt(facts: PartFacts, skill: Skill) -> str:
         *(f"- {f.line()}" for f in facts.features),
         "",
         *_lessons(facts),
+        *_context(facts),
         "Settings you may change: the preset's value, and the bound a value must stay in:",
     ]
     for key in skill.settings:
@@ -232,6 +233,18 @@ def _lessons(facts: PartFacts) -> list[str]:
         "has (what a lesson set is already set; don't change it):",
         *(f"- {g.line()}" + ("" if g.applied or not g.key else f" (not set: {g.why})")
           for g in given),
+        "",
+    ]
+
+
+def _context(facts: PartFacts) -> list[str]:
+    """The part's context from its design run or a sidecar (mqucifer/print-shop#130), if any."""
+    if facts.context is None or not facts.context.found:
+        return []
+    return [
+        "The part's context, as the file lies (a fit is two parts meant to mate: never a random "
+        "seam on a part with one, and a fit at the plate wants elephant foot compensation):",
+        *(f"- {line}" for line in facts.context.lines()),
         "",
     ]
 

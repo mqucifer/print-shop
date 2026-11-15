@@ -84,6 +84,24 @@ A print uses your tuning where there is one, and the standard where you haven't 
 
    **A part already laid for printing keeps its pose with `--as-laid`** (mqucifer/print-shop#128): no orientation model is asked, it prints as the file lays it, and the review and the gate say it was kept as laid, by you. Without it, the orientation model chooses among the six square-on poses. Either way, the review names the pose the part's features were read in (its height, and its area on the plate), since the questions and the lessons are keyed to them.
 
+   **A part's context goes with it** (mqucifer/print-shop#130): which faces fit another part and with how much play, which are seen, the side it's laid on, and how it's held. For an STL inside a design run's folder (`~/print-shop/design-runs/<run>/`), it's read from the run: its needs, its facts and its latest refinement's findings, for the part the file is. A fit's place is derived from the geometry: the need's own `--box`, else where the part's box meets its mate's. The run's side is kept, with no orientation model asked, and the print loop asks before turning it off that side. A part you made or edited by hand won't match the run's file, so it gets a **sidecar**: `PART.part.json` beside `PART.stl`, or any file named with `--context`. Everything in it is in the STL's own coordinates, as the file lies:
+
+   ```json
+   {
+     "fits": [{"name": "skirt over the base", "mate": "the base box", "play": [0.05, 0.15], "z": [5, 10]}],
+     "seen": ["walls", "top"],
+     "down": "-z",
+     "holds": [{"name": "snaps on", "way": "+z"}]
+   }
+   ```
+
+   - `fits`: each fit's `play` in mm (one number, or the least and most), and where it is: `z` (from, to) for a band all round, or `box` (two corners, `[[x0, y0, z0], [x1, y1, z1]]`). With neither, the whole wall is held as the fit.
+   - `seen`: any of `walls`, `top` and `bottom`. The intake's answer comes first; this stands where it wasn't given.
+   - `down`: the side that lies on the plate, one of `-z` (as the file lies), `+z`, `-x`, `+x`, `-y`, `+y`.
+   - `holds`: the way a hold slides on or off, one of the same six.
+
+   Every key is optional, and a sidecar that can't be read is said at the start and the job goes on as before. A part with a fit never gets a random seam, whoever proposes it, and the review's reading says why, naming the fit. A fit at the plate gets elephant foot compensation proposed (0.1 mm, inside its bound), for you to take or not. A hold that slides on along the layers' stacking is said. The review lists what was read under "The part's context", or says there was none.
+
    **Then a few questions about the part,** once it's oriented. They come from its measured features, and often from what its shape can't show, such as what it's for. There are at most four, and a simple part may get none. Each option shows what it would set, its impact on strength, surface and risk, and Orca's time and filament for it ("Orca: 11 min, 3.1 g", or "no estimate"). One option is marked recommended, with why. Answer with its number, or `o` and your own words. The last asks which faces of the part will be seen, which decides what the review says about ironing and the seam. For the test cube, take the recommended option. To replay answers, pass `--answers file.json`, each answer naming its question by its text or its feature, e.g. `{"answers": [{"question": "purpose", "choice": 1}]}`. A file that doesn't answer exactly the questions asked is refused, and the job ends listing them.
 
    **Then the print loop decides how it prints** (mqucifer/print-shop#129): one short conversation with the setup model (`PRINT_SHOP_SETUP_MODEL`) that chooses the pose and the settings together, after the questions, which are asked of the part as the file lays it. It can slice a pose in Orca and read it, look up what a setting does and which setting answers which symptom, and look up earlier prints of parts like this one and the lessons kept from them. **It asks you, here, only before a big change:** a pose other than the file's own, supports, a temperature more than 5 °C or a fan more than 20 points past what a kept lesson or your preset backs, or more than a quarter added to the print's time. Code decides what's big, not the model. Answer `yes`, or say why not: a no is your correction, with your reason, and a lesson candidate, as a send-back is. Everything smaller comes to the review below. Every call it makes is kept with the job. If it runs past 16 calls or 15 minutes, or the model can't be reached, the job falls back to the separate orientation and settings calls, and the review says so.

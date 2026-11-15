@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel
 
 from print_shop.setup.bounds import SETTINGS
+from print_shop.setup.context import PartContext, refuses
 from print_shop.setup.features import Feature
 from print_shop.setup.intake import Intake
 from print_shop.setup.skill import WARPS_MM2
@@ -175,6 +176,9 @@ class Proposal(BaseModel):
     #: for a proposal from the single calls.
     loop: tuple[LoopCall, ...] = ()
     loop_ending: str = ""
+    #: The part's context as it was read, from its design run or a sidecar, in lines
+    #: (mqucifer/print-shop#130), or why there was none.
+    context: tuple[str, ...] = ()
 
     def get(self, key: str) -> Change | None:
         return next((c for c in self.changes if c.key == key), None)
@@ -200,6 +204,8 @@ class PartFacts:
     standard_filament: dict[str, Any] = field(default_factory=dict)
     #: The reviewed lessons this part was given, each marked with whether it set its setting.
     lessons: tuple[GivenLesson, ...] = ()
+    #: The part's context from its design run or a sidecar (mqucifer/print-shop#130), or None.
+    context: PartContext | None = None
 
     def feature(self, id: str) -> float:
         return next((f.value for f in self.features if f.id == id), 0.0)
@@ -331,6 +337,15 @@ def guard(facts: PartFacts, proposal: Proposal) -> Proposal:
             reason="tree supports, as you use them", source=Source.GUARD,
             feature="overhang", knowledge="supports"))
 
+    # A part with a fit never gets a random seam from the model or a lesson
+    # (mqucifer/print-shop#130); the person's own answer or correction stands.
+    refused = list(proposal.refused)
+    for c in [c for c in changes if c.source in (Source.MODEL, Source.LESSON)]:
+        why = refuses(facts.context, c.key, c.value)
+        if why:
+            changes.remove(c)
+            refused.append(f"{c.key}={c.value}: {why}")
+
     design = list(proposal.design_notes)
     if overhang > 0:
         design.insert(0, (
@@ -346,6 +361,7 @@ def guard(facts: PartFacts, proposal: Proposal) -> Proposal:
         "kept": tuple(with_standard(c) for c in proposal.kept),
         "design_notes": tuple(design),
         "notes": proposal.notes + tuple(_notes(facts)),
+        "refused": tuple(refused),
     })
 
 
