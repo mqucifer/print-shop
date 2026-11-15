@@ -22,11 +22,17 @@ production path. Mutation-checked — break `make_serializer()` and this fails.
 
 from __future__ import annotations
 
+import dataclasses
+import enum
+import logging
 import subprocess
 import sys
+import typing
 from pathlib import Path
+from typing import Any
 
 import pytest
+from pydantic import BaseModel
 
 from print_shop.core.checkpoint import PERSISTED_TYPES, make_serializer, open_checkpointer
 from print_shop.core.contracts import Gate, GateDecision
@@ -143,3 +149,89 @@ print("ROUNDTRIP_OK")
     assert "ROUNDTRIP_OK" in proc.stdout, f"stdout={proc.stdout}\nstderr={proc.stderr}"
     unregistered = combined.lower().count("unregistered type")
     assert unregistered == 0, f"{unregistered} unregistered type(s):\n{proc.stderr}"
+
+
+# Everything the job's state can hold since M19 (the Sponsor's job, 2026-11-14)
+# --------------------------------------------------------------------------
+
+
+def _reachable(tp: Any, found: set[type]) -> None:
+    """Every model, enum and dataclass `tp` names, and those their fields name in turn."""
+    if typing.get_origin(tp) is not None:
+        for arg in typing.get_args(tp):
+            _reachable(arg, found)
+        return
+    if not isinstance(tp, type) or tp in found:
+        return
+    if issubclass(tp, BaseModel):
+        found.add(tp)
+        for f in tp.model_fields.values():
+            _reachable(f.annotation, found)
+    elif issubclass(tp, enum.Enum):
+        found.add(tp)
+    elif dataclasses.is_dataclass(tp):
+        found.add(tp)
+        for hint in typing.get_type_hints(tp).values():
+            _reachable(hint, found)
+
+
+def test_every_type_the_jobs_state_can_hold_is_registered() -> None:
+    """Not only `state.py`'s own: the intake, the proposal, the features, the slice's reading and
+    the profiles used, and every model and enum inside them. On the Sponsor's job each read back
+    "Blocked deserialization ... not in allowed_msgpack_modules" at the approval gate."""
+    from print_shop.core import state
+
+    found: set[type] = set()
+    for hint in typing.get_type_hints(state.PrintJobState).values():
+        _reachable(hint, found)
+    missing = sorted(f"{t.__module__}.{t.__name__}" for t in found - set(PERSISTED_TYPES))
+    assert not missing, f"unregistered in PERSISTED_TYPES: {missing}"
+
+
+def test_a_job_read_back_at_the_gate_comes_back_whole_and_nothing_is_blocked(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A job run to the approval gate with its intake, proposal, correction, features and slice
+    reading, then read back on a fresh connection, as a resume reads it: no warning, and each
+    value the type it was, not a dict."""
+    from print_shop.orchestrator.graph import build_graph, new_job
+    from print_shop.setup import Proposer
+    from print_shop.setup.features import Feature
+    from print_shop.setup.intake import Intake, replay_asker
+    from print_shop.setup.proposal import Change, Proposal, Source
+    from print_shop.setup.reading import Flag, SliceReading
+    from print_shop.slicer.store import ProfilesUsed
+    from tests.fakes import STORE_PROFILES, RecordedSlicer
+    from tests.fixtures import write_stl
+    from tests.test_review import ANSWERS, Sponsor, _model, _questions
+
+    def graph(saver: Any) -> Any:
+        return build_graph(
+            STORE_PROFILES, outdir_root=tmp_path / "jobs", checkpointer=saver,
+            slicer=RecordedSlicer(), proposer=Proposer(ask=_model, ask_questions=_questions),
+            asker=replay_asker(ANSWERS),
+            reviewer=Sponsor("wall_loops=4 because I handle it", "ok"),
+        )
+
+    saver, conn = open_checkpointer(tmp_path / "jobs.sqlite")
+    job = new_job(write_stl("cube", tmp_path), entry=EntryPath.STL_UPLOAD)
+    cfg = {"configurable": {"thread_id": job["job_id"]}}
+    graph(saver).invoke(job, config=cfg)
+    conn.close()
+
+    with caplog.at_level(logging.WARNING):
+        saver2, conn2 = open_checkpointer(tmp_path / "jobs.sqlite")
+        values = graph(saver2).get_state(cfg).values
+        conn2.close()
+    blocked = [r.getMessage() for r in caplog.records
+               if "deserializ" in r.getMessage().lower()]
+    assert blocked == []
+    assert isinstance(values["intake"], Intake)
+    assert isinstance(values["proposal"], Proposal)
+    assert isinstance(values["profiles_used"], ProfilesUsed)
+    assert isinstance(values["slice_reading"], SliceReading)
+    assert all(isinstance(f, Feature) for f in values["features"]) and values["features"]
+    assert all(isinstance(f, Flag) for f in values["slice_flags"])
+    [fix] = values["corrections"]
+    assert isinstance(fix, Change) and fix.source is Source.SPONSOR
+    assert values["proposal"].changes[0].source in Source
