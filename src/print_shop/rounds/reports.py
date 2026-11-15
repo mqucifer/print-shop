@@ -85,10 +85,13 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "too_small_at",
     ),
     "wall": (
+        "hole_alone",
         "hole_fit_centre",
         "hole_fit_d_mm",
         "hole_from",
         "hole_mm2",
+        "hole_opens_at",
+        "hole_read",
         "hole_runs",
         "hole_to",
         "least_wall_from",
@@ -292,6 +295,10 @@ SLIDE = Row(
         # Each first contact that's a body joined to nothing else in its file: the hold is then
         # `HELD BY A SEPARATE BODY` (mqucifer/print-shop#122).
         "separate": Rows(SEPARATE_BODY),
+        # The parts whose first contact closes round the moving part, seen along the slide, and
+        # whether the methods' first contacts were read as one tie (mqucifer/print-shop#135).
+        "round": Rows(TEXT),
+        "tie": FLAG,
         "verdict": TEXT,
     },
     closed=True,
@@ -471,6 +478,11 @@ SHAPES: dict[str, dict[str, Any]] = {
         "openings_closing": NUMBER,
     },
     "wall": {
+        # Where the hole opens into a hollow, the stretch that reads it alone, and the stretch
+        # `--z` asked for (mqucifer/print-shop#136).
+        "hole_alone": Vector(2, NUMBER, ("from", "to")),
+        "hole_opens_at": Rows(NUMBER),
+        "hole_read": Vector(2, NUMBER, ("from", "to")),
         "hole_fit_centre": XYZ,
         "hole_fit_d_mm": NUMBER,
         "hole_mm2": NUMBER,

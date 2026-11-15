@@ -27,14 +27,26 @@ checking held until a check got in the way, and then the check was changed. So:
 
 Every change to a lesson is a row of `lesson_steps`, with who and why, and an edit keeps the words
 it replaced. Lessons from before the five are sorted once when a ledger opens (`migrate`).
+
+**A lesson reaches another ledger by a copy** (mqucifer/print-shop#137). A run is given the
+lessons of the ledger beside it, and each eval round has its own, so a lesson learned in an eval
+reaches the Sponsor's design runs only if it's written into theirs. Written there, its calls were
+checked against that ledger's run, which hasn't them: the only way through was to cite calls that
+don't show it. So `copy` reads the lesson in the ledger it came from, read and never written,
+checks its calls and readings there as `evidence` checks them, and writes it here as a
+`candidate` citing that ledger's run, with where it came from in `lesson_copies`. A reviewer lets
+it through on this ledger's terms, and it reaches this ledger's runs as any other lesson does. A
+lesson is copied from a ledger once.
 """
 
 from __future__ import annotations
 
 import json
+import sqlite3
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
+from urllib.parse import quote
 
 from print_shop.rounds import nudge
 from print_shop.rounds.judge import SPONSOR, STAND_IN
@@ -111,6 +123,32 @@ class Refused(RuntimeError):
     """A reviewer's step, or a lesson, that can't be taken, said in plain words. Nothing changed."""
 
 
+class Readable(Protocol):
+    """A ledger that can be read: this one, or another a lesson is copied from."""
+
+    def rows(self, sql: str, *args: Any) -> list[sqlite3.Row]: ...
+
+
+class Source:
+    """Another ledger, read and never written: where a copied lesson came from
+    (mqucifer/print-shop#137). It's opened read-only, so nothing here migrates or changes it."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path).expanduser().resolve()
+        if not self.path.is_file():
+            raise Refused(f"there's no ledger at {self.path}")
+
+    def rows(self, sql: str, *args: Any) -> list[sqlite3.Row]:
+        db = sqlite3.connect(f"file:{quote(str(self.path))}?mode=ro", uri=True, timeout=60)
+        db.row_factory = sqlite3.Row
+        try:
+            return list(db.execute(sql, args))
+        except sqlite3.DatabaseError as exc:
+            raise Refused(f"{self.path} can't be read as a ledger: {exc}") from exc
+        finally:
+            db.close()
+
+
 def signed(by: str, what: str = "--by") -> str:
     """Who did it: a reviewer, named, or as a pick is signed, the Sponsor or someone standing in
     for them, named."""
@@ -170,7 +208,7 @@ def _status(ledger: DesignLedger, lesson: int, status: str, by: str) -> None:
 
 
 def evidence(
-    ledger: DesignLedger, run: str, calls: Any, readings: Any = None, *, at_least_one: bool = True
+    ledger: Readable, run: str, calls: Any, readings: Any = None, *, at_least_one: bool = True
 ) -> tuple[dict[str, Any], list[str]]:
     """Calls by number and readings by round and need, each held to what the ledger has of the
     run: what's wrong, said, or the evidence as it's kept."""
@@ -211,7 +249,7 @@ def evidence(
     return found, wrong
 
 
-def evidence_lines(ledger: DesignLedger, run: str, held: dict[str, Any]) -> list[str]:
+def evidence_lines(ledger: Readable, run: str, held: dict[str, Any]) -> list[str]:
     """What the ledger holds at each call and reading a lesson names, for the reviewer to judge it
     by: the tools called, each bench answer, what a person sent, and each round's readings."""
     lines: list[str] = []
@@ -275,13 +313,13 @@ def evidence_lines(ledger: DesignLedger, run: str, held: dict[str, Any]) -> list
 # Routes and keys
 
 
-def routes_of(ledger: DesignLedger, lesson: int) -> dict[str, dict[str, Any]]:
+def routes_of(ledger: Readable, lesson: int) -> dict[str, dict[str, Any]]:
     """A lesson's routes, each as `lesson_routes` holds it."""
     found = ledger.rows("SELECT * FROM lesson_routes WHERE lesson=? ORDER BY route", lesson)
     return {str(r["route"]): dict(r) for r in found}
 
 
-def keys_of(ledger: DesignLedger, lesson: int) -> list[dict[str, str]]:
+def keys_of(ledger: Readable, lesson: int) -> list[dict[str, str]]:
     found = ledger.rows(
         "SELECT command, verdict FROM lesson_keys WHERE lesson=? ORDER BY command, verdict", lesson
     )
@@ -584,6 +622,118 @@ def promote(ledger: DesignLedger, lesson: int, by: str, became: str, where: str)
     _step(ledger, lesson, PROMOTED, by, f"became {became}, for {route}: {where.strip()}")
 
 
+# A lesson from another ledger (mqucifer/print-shop#137)
+
+
+def copy(ledger: DesignLedger, source: Path, lesson: int, by: str) -> int:
+    """Lesson `lesson` of the ledger at `source`, written here as a candidate: its words, kind,
+    routes, keys and kind of part as they stand there, and its evidence that ledger's run and
+    calls, each checked there. Nothing is written if one isn't there, if it was rejected there,
+    or if it's been copied here before, which names the copy."""
+    by = signed(by)
+    found = Source(source)
+    if found.path == Path(ledger.path).expanduser().resolve():
+        raise Refused(f"{found.path} is this ledger: a lesson is copied from another")
+    rows = found.rows("SELECT * FROM lessons WHERE id=?", lesson)
+    if not rows:
+        raise Refused(f"{found.path} has no lesson {lesson}")
+    row = dict(rows[0])
+    copied = ledger.rows(
+        "SELECT lesson, by, at FROM lesson_copies WHERE ledger=? AND source_lesson=?",
+        str(found.path),
+        lesson,
+    )
+    if copied:
+        c = copied[0]
+        raise Refused(
+            f"lesson {lesson} of {found.path} is copied here already, as lesson {c['lesson']}, by "
+            f"{c['by']} at {c['at']}: review that one (`lessons accept {c['lesson']}`)"
+        )
+    if row["status"] == REJECTED:
+        raise Refused(f"lesson {lesson} was rejected in {found.path}: it isn't copied")
+    run = str(row["run"])
+    stated = json.loads(row["evidence"] or "{}")
+    wrong: list[str] = []
+    if not found.rows("SELECT 1 FROM runs WHERE run=?", run):
+        wrong.append(f"it has no run `{run}`")
+    held, bad = evidence(found, run, stated.get("calls"), stated.get("readings"))
+    wrong += bad
+    for finding in stated.get("findings") or []:
+        if not found.rows("SELECT 1 FROM refine_findings WHERE id=?", finding):
+            wrong.append(f"it has no refinement finding {finding}")
+    if stated.get("findings"):
+        held["findings"] = stated["findings"]
+    if wrong:
+        raise Refused(
+            f"lesson {lesson} isn't copied: its evidence isn't all in {found.path}, the ledger it "
+            "came from: " + "; ".join(wrong)
+        )
+    routes = list(routes_of(found, lesson))
+    if not routes:
+        raise Refused(f"lesson {lesson} has no routes in {found.path}: it isn't copied")
+    said = evidence_lines(found, run, held)
+    copy_id = ledger.insert(
+        "lessons",
+        run=run,
+        written_by=row["written_by"],
+        written_at=row["written_at"],
+        at_call=row["at_call"],
+        fix_shape=row["fix_shape"],
+        kind=row["kind"],
+        text=row["text"],
+        evidence=_json(held),
+        status=CANDIDATE,
+        status_by=by,
+        status_at=now(),
+        part_kind=row.get("part_kind"),
+    )
+    try:
+        ledger.insert(
+            "lesson_copies",
+            lesson=copy_id,
+            ledger=str(found.path),
+            source_lesson=lesson,
+            source_run=run,
+            source_status=row["status"],
+            evidence_said=_json(said),
+            by=by,
+            at=now(),
+        )
+    except sqlite3.IntegrityError as exc:
+        # Copied by another step since it was looked for: this one is taken back whole.
+        ledger.change("DELETE FROM lessons WHERE id=?", copy_id)
+        raise Refused(f"lesson {lesson} of {found.path} was copied here just now: {exc}") from exc
+    _set_routes(ledger, copy_id, check_routes(routes, copy_id), by)
+    _set_keys(ledger, copy_id, keys_of(found, lesson))
+    _step(
+        ledger,
+        copy_id,
+        CANDIDATE,
+        by,
+        f"copied from lesson {lesson} of {found.path}, {row['status']} there, for "
+        f"{', '.join(sorted(routes))}: its evidence checked in that ledger's run `{run}`",
+    )
+    return copy_id
+
+
+def copied_from(ledger: Readable, lesson: int) -> dict[str, Any] | None:
+    """Where a copied lesson came from, or None for one written here."""
+    found = ledger.rows("SELECT * FROM lesson_copies WHERE lesson=?", lesson)
+    return dict(found[0]) if found else None
+
+
+def _copy_evidence(row: dict[str, Any], held: dict[str, Any]) -> list[str]:
+    """A copied lesson's evidence, as the ledger it came from holds it now, or as it held it when
+    it was copied, said so, if that ledger can't be read."""
+    try:
+        return evidence_lines(Source(Path(row["ledger"])), row["source_run"], held)
+    except (Refused, sqlite3.Error):
+        said = json.loads(row["evidence_said"])
+        return [f"{row['ledger']} can't be read now: as it held it when copied, at {row['at']}"] + [
+            f"  {e}" for e in said
+        ]
+
+
 # Giving them to a run, and scoring them
 
 
@@ -827,19 +977,29 @@ def listing(ledger: DesignLedger, run: str | None = None) -> str:
     waits to reach its route, and any to retire."""
     lines: list[str] = []
     if run is not None:
-        if not ledger.rows("SELECT 1 FROM runs WHERE run=?", run):
-            raise Refused(f"`{run}` isn't in this ledger")
-        lines += _run_listing(ledger, run)
+        if ledger.rows("SELECT 1 FROM runs WHERE run=?", run):
+            lines += _run_listing(ledger, run)
+        elif ledger.rows("SELECT 1 FROM lesson_copies WHERE source_run=?", run):
+            lines += _copies_listing(ledger, run)
+        else:
+            raise Refused(f"`{run}` isn't in this ledger, and no lesson here was copied from it")
     else:
         lines += ["# Every lesson", ""]
         for row in ledger.rows("SELECT * FROM lessons ORDER BY id"):
+            copy = copied_from(ledger, int(row["id"]))
+            source = (
+                f", copied from lesson {copy['source_lesson']} of {copy['ledger']}" if copy else ""
+            )
             lines.append(
                 f"- {row['id']}. [{row['status']}] {area(row['kind'])}, for "
-                f"{_routes_said(ledger, int(row['id']))}, from `{row['run']}`: {row['text'][:160]}"
+                f"{_routes_said(ledger, int(row['id']))}, from `{row['run']}`{source}: "
+                f"{row['text'][:160]}"
             )
         if len(lines) == 2:
             lines.append("None yet.")
         lines.append("")
+        if ledger.rows("SELECT 1 FROM lesson_copies"):
+            lines += _copies_listing(ledger)
     pending = waiting(ledger)
     if pending:
         lines += ["## Waiting to reach their route, for the operator", ""]
@@ -855,6 +1015,39 @@ def listing(ledger: DesignLedger, run: str | None = None) -> str:
         lines += [f"- Lesson {row['id']}: {why}. `retire {row['id']}`" for row, why in retiring]
         lines.append("")
     return "\n".join(lines)
+
+
+def _copies_listing(ledger: DesignLedger, run: str | None = None) -> list[str]:
+    """Each lesson copied here from another ledger, or from one run there, with its evidence as
+    the ledger it came from holds it (mqucifer/print-shop#137)."""
+    copies = ledger.rows(
+        "SELECT c.*, l.status, l.text, l.kind, l.evidence FROM lesson_copies AS c JOIN lessons "
+        "AS l ON l.id = c.lesson WHERE ? IS NULL OR c.source_run = ? ORDER BY c.lesson",
+        run,
+        run,
+    )
+    title = f"Lessons copied from `{run}`" if run else "Copied from other ledgers"
+    lines = [f"{'#' if run else '##'} {title}, with their evidence where each came from", ""]
+    for c in copies:
+        n = int(c["lesson"])
+        lines += [
+            f"{'##' if run else '###'} Lesson {n}: {c['status']}",
+            "",
+            f"- **Copied from** lesson {c['source_lesson']} of {c['ledger']}, `{c['source_run']}`"
+            f", {c['source_status']} there, by {c['by']} at {c['at']}",
+            f"- **Kind:** {area(c['kind'])}",
+            f"- **For:** {_routes_said(ledger, n)}",
+            f"- **Keyed to:** {_keys_said(ledger, n)}",
+            "",
+            str(c["text"]),
+            "",
+            f"What {c['ledger']} holds where it points:",
+            "",
+        ]
+        held = json.loads(c["evidence"])
+        lines += [f"    {e}" for e in _copy_evidence(dict(c), held)] or ["    nothing"]
+        lines.append("")
+    return lines
 
 
 def _as_for(route: str, row: dict[str, Any]) -> str:
@@ -882,7 +1075,11 @@ def _run_listing(ledger: DesignLedger, run: str) -> list[str]:
         )
     if reviews:
         lines.append("")
-    written = ledger.rows("SELECT * FROM lessons WHERE run=? ORDER BY id", run)
+    written = ledger.rows(
+        "SELECT * FROM lessons WHERE run=? AND id NOT IN (SELECT lesson FROM lesson_copies) "
+        "ORDER BY id",
+        run,
+    )
     if not written:
         lines += ["It has written none.", ""]
     for row in written:

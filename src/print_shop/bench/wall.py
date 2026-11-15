@@ -1,4 +1,5 @@
-"""The least wall round a named hole, along its whole length, by sections and by rays.
+"""The least wall round a named hole, along its whole length or a stretch of it, by sections and
+by rays.
 
 `thin`'s `thinnest_flat_mm` is about the whole part, and on `cup-1` it was quoted as the hanging
 hole's wall. This reads one hole: the one round a point given inside it.
@@ -10,6 +11,13 @@ to the hole's wall, and from where each meets it, a ray through the wall along t
 normal, to the far side. The least wall runs square to the hole's wall where it's least, so the
 two meet there. A least wall between two corners isn't square to either, and rays read it
 thicker: that's a disagreement, and said.
+
+**A hole that opens into a hollow** (mqucifer/print-shop#136). A screw hole through a 2 mm floor
+at the bottom of a hollow channel opens into the hollow above it, and the hollow is a closed hole
+in each section too, so `wall` followed it up and read the channel's 1.6 mm side wall, not the
+floor round the hole: `FAIL`, twice, in an eval. So where the hole's section more than doubles
+from one layer to the next, the reply says where it opens and names the stretch that reads the
+hole alone, as `--z FROM,TO`; given that, only the sections and rays within it are read.
 """
 
 from __future__ import annotations
@@ -35,6 +43,10 @@ CHORDS = 2 * FINE[0]
 LEVEL = 1e-3
 #: A wall whose normal is steeper than this (the z of its unit normal) isn't read by a level ray.
 STEEP = 0.9
+#: A hole whose section grows by more than this share from one layer to the next opens into a
+#: hollow, or a counterbore, there (mqucifer/print-shop#136): a 45-degree countersink on a 3 mm
+#: hole grows by 1.3 a layer.
+OPENS = 2.0
 
 
 def _state(section: Any, x: float, y: float) -> tuple[str, Any, int | None]:
@@ -127,6 +139,7 @@ def run(args: Any, report: Report) -> None:
         return [round(float(c), 3) for c in found]
 
     start = off_faces(z)
+    span = getattr(args, "z", None)
     state, poly, k = _state(slice_at(built, start), x, y)
     if state != "closed":
         said = "in material" if state == "material" else "open to the outside, not a closed hole"
@@ -139,16 +152,51 @@ def run(args: Any, report: Report) -> None:
     grid = low + (np.arange(count) + 0.5) * (high - low) / count
     heights = [start]
     ends = {}
+    assert poly is not None and k is not None, "the start is closed"
+    area = {start: float(shapely.Polygon(poly.interiors[k]).area)}
+    # Where the hole opens into a hollow each way: the last height before, and the first after.
+    opens: dict[int, tuple[float, float]] = {}
     for way, run_of in ((1, grid[grid > start]), (-1, grid[grid < start][::-1])):
         ends[way] = "the part's face"
+        last = start
         for h in run_of:
             h = off_faces(float(h))
-            found, _, _ = _state(slice_at(built, h), x, y)
+            found, around, ring = _state(slice_at(built, h), x, y)
             if found != "closed":
                 ends[way] = "material" if found == "material" else "the outside"
                 break
+            assert ring is not None
+            area[h] = float(shapely.Polygon(around.interiors[ring]).area)
+            if way not in opens and area[h] > OPENS * area[last]:
+                opens[way] = (last, h)
             heights.append(h)
+            last = h
     heights.sort()
+    whole = (heights[0], heights[-1])
+
+    def face_between(a: float, b: float) -> float:
+        """The level face between two heights, where the hole opens, or halfway."""
+        low_h, high_h = sorted((a, b))
+        between = [f for f in flats if low_h < f < high_h]
+        return round(between[0] if between else (low_h + high_h) / 2, 3)
+
+    def end_of(way: int) -> float:
+        """Where the hole's run ends that way: the part's face, or the last section read."""
+        if ends[way] == "the part's face":
+            return round(high if way > 0 else low, 3)
+        return round(whole[1] if way > 0 else whole[0], 3)
+
+    alone = [
+        face_between(*opens[-1]) if -1 in opens else end_of(-1),
+        face_between(*opens[1]) if 1 in opens else end_of(1),
+    ]
+    if span is not None:
+        heights = [h for h in heights if span[0] <= h <= span[1]]
+        if not heights:
+            raise NoAnswer(
+                f"no section of the hole is within --z {span[0]:g},{span[1]:g}: it runs from "
+                f"{whole[0]:.3f} to {whole[1]:.3f} along {args.axis}"
+            )
     rows = []
     differs, problems = [], []
     for h in heights:
@@ -161,13 +209,55 @@ def run(args: Any, report: Report) -> None:
     rays_h, _, rays = min(rows, key=lambda r: r[2]["wall"])
     hole = least["hole"]
     centre, diameter = _circle(np.asarray(hole.exterior.coords)[:-1])
-    report.fact(
-        "hole_runs",
-        f"{heights[0]:.3f} to {heights[-1]:.3f} along {args.axis}",
-        how=f"{len(heights)} section(s), a layer apart; it ends in {ends[-1]} below and "
-        f"{ends[1]} above",
-    )
+    if span is None:
+        report.fact(
+            "hole_runs",
+            f"{heights[0]:.3f} to {heights[-1]:.3f} along {args.axis}",
+            how=f"{len(heights)} section(s), a layer apart; it ends in {ends[-1]} below and "
+            f"{ends[1]} above",
+        )
+    else:
+        report.fact(
+            "hole_runs",
+            f"{heights[0]:.3f} to {heights[-1]:.3f} along {args.axis}",
+            how=f"{len(heights)} section(s), a layer apart, within --z {span[0]:g},{span[1]:g}; "
+            f"the hole runs from {whole[0]:.3f} to {whole[1]:.3f}",
+        )
+        report.numbers["hole_read"] = [span[0], span[1]]
     report.numbers["hole_from"], report.numbers["hole_to"] = heights[0], heights[-1]
+    # Where the hole opens into a hollow, and the stretch that reads it alone
+    # (mqucifer/print-shop#136).
+    opening = ""
+    if opens:
+        report.numbers["hole_opens_at"] = [face_between(*opens[w]) for w in (-1, 1) if w in opens]
+        report.numbers["hole_alone"] = alone
+    # What's read reaches into the hollow: an opening lies within it, or the least wall is past
+    # one. The hollow's walls are then read as the hole's.
+    read_from, read_to = heights[0], heights[-1]
+    inside = alone[0] <= least_h <= alone[1]
+    crossed = any(read_from < face_between(*opens[w]) < read_to for w in opens)
+    if opens and (crossed or not inside):
+        at = [face_between(*opens[w]) for w in (-1, 1) if w in opens]
+        grows = "; ".join(
+            f"at {face_between(*opens[w]):g} its section goes from {area[opens[w][0]]:.2f} to "
+            f"{area[opens[w][1]]:.2f} mm² in one layer"
+            for w in (-1, 1)
+            if w in opens
+        )
+        flag = f"--z {alone[0]:g},{alone[1]:g}"
+        reads = "its whole run" if span is None else f"--z {span[0]:g},{span[1]:g}"
+        opening = (
+            f"; the hole opens into a hollow at {', '.join(f'{a:g}' for a in at)} along "
+            f"{args.axis}, and this reads {reads}, the hollow too"
+            + ("" if inside else f": the least wall is at {least_h:.3f}, in the hollow")
+            + f". To read the wall round the hole alone, give {flag}"
+        )
+        report.line(
+            f"OPENS INTO A HOLLOW: {grows}, more than {OPENS:g} times, so the hole opens into a "
+            f"hollow or a counterbore there. The least wall here is read from {read_from:.3f} to "
+            f"{read_to:.3f}, the hollow's walls too. To read the wall round the hole alone, run "
+            f"this again with {flag}"
+        )
     report.fact("hole_mm2", round(float(hole.area), 3), how="the section where the wall is least")
     report.fact("hole_fit_d_mm", round(diameter, 3), how="a circle fit to that section's edge")
     report.numbers["hole_fit_centre"] = unturned((float(centre[0]), float(centre[1])), least_h)
@@ -196,6 +286,11 @@ def run(args: Any, report: Report) -> None:
     report.note(
         "read across the hole's axis only: material beyond the hole's ends isn't counted as wall"
     )
+    if span is not None:
+        report.note(
+            f"read within --z {span[0]:g},{span[1]:g} only: the hole's wall past that stretch "
+            "isn't read"
+        )
     band = max(BAND, 2 * FINE[0] + 0.01 * least["wall"])
     if missed:
         differs.append(f"the sections find a closed hole, and {missed} ray(s) met no wall")
@@ -221,9 +316,9 @@ def run(args: Any, report: Report) -> None:
             f"{CHORDS:g} mm of chords"
         )
     if differs:
-        report.verdict("DISAGREE", "; ".join(differs))
+        report.verdict("DISAGREE", "; ".join(differs) + opening)
     elif problems:
-        report.verdict("FAIL", "; ".join(problems))
+        report.verdict("FAIL", "; ".join(problems) + opening)
     else:
         held = ""
         if args.min_wall is not None:
@@ -233,5 +328,6 @@ def run(args: Any, report: Report) -> None:
         report.verdict(
             "OK",
             f"the least wall round the hole is {least['wall']:.3f} mm, toward {least['toward']}"
-            + held,
+            + held
+            + opening,
         )

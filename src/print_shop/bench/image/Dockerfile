@@ -71,6 +71,8 @@ COPY --from=docs /build/docs.json /opt/cad-eval/docs.json
 # contact where the parts already touch, and keeps a verdict both methods agree on
 # (mqucifer/print-shop#84), and `info` counts runs of strips, not narrow flat faces
 # (mqucifer/print-shop#85). 0.13 has networkx, which trimesh needs to split a mesh whose body has
-# an open seam into bodies, and to read a section's outlines (mqucifer/print-shop#122). Its code is
-# mounted, not copied in.
-LABEL org.opencontainers.image.version="0.13"
+# an open seam into bodies, and to read a section's outlines (mqucifer/print-shop#122). 0.14's slide
+# reads a first contact that runs round the part as one tie (mqucifer/print-shop#135), and `wall`
+# reads a stretch of a hole, `--z`, and says where a hole opens into a hollow
+# (mqucifer/print-shop#136). Its code is mounted, not copied in.
+LABEL org.opencontainers.image.version="0.14"

@@ -39,6 +39,8 @@ scripts/rounds.py lessons score RUN ID --score used|not_used|in_the_way --by WHO
 scripts/rounds.py lessons retire ID --by WHO --why W
 scripts/rounds.py lessons promote ID --as B --where WHERE --by WHO    delivered on its route
 scripts/rounds.py lessons load FILE --by WHO                        a reviewer's steps, in order
+scripts/rounds.py lessons copy LEDGER ID --by WHO [--ledger FILE]   lesson ID of another ledger,
+                                  its evidence checked there, written here as a candidate
 
 Exit: 0 it's approved, 10 it's waiting for a person, approval included, 20 another named ending,
 closed included, 3 refused. An approval is 0, and a close 20, whether its after-action review
@@ -132,7 +134,7 @@ def _after_action(folder: Path) -> str:
     )
 
 
-LESSON_ACTIONS = ("accept", "edit", "reject", "score", "retire", "promote", "load")
+LESSON_ACTIONS = ("accept", "edit", "reject", "score", "retire", "promote", "load", "copy")
 
 
 def _listed(words: str | None) -> list[str] | None:
@@ -158,9 +160,10 @@ def _lessons(args: argparse.Namespace, ledger: DesignLedger) -> str:
             raise Refused(f"`lessons` lists one run, or every lesson: not {' '.join(words)}")
         return lessons.listing(ledger, words[0] if words else None)
     action, rest = words[0], words[1:]
-    wanted = {"score": 2, "load": 1}.get(action, 1)
+    wanted = {"score": 2, "load": 1, "copy": 2}.get(action, 1)
     if len(rest) != wanted:
-        raise Refused(f"`lessons {action}` takes {'RUN ID' if action == 'score' else 'one'}")
+        takes = {"score": "RUN ID", "copy": "LEDGER ID"}.get(action, "one")
+        raise Refused(f"`lessons {action}` takes {takes}")
     if action == "load":
         ids = lessons.load(ledger, Path(rest[0]), args.by)
         return f"loaded: {json.dumps(ids)}"
@@ -191,6 +194,13 @@ def _lessons(args: argparse.Namespace, ledger: DesignLedger) -> str:
         lessons.retire(ledger, lesson, args.by, args.why)
     elif action == "promote":
         lessons.promote(ledger, lesson, args.by, args.became or "", args.where)
+    elif action == "copy":
+        made = lessons.copy(ledger, Path(rest[0]), lesson, args.by)
+        found = lessons.one(ledger, made)
+        return (
+            f"lesson {lesson} of {Path(rest[0]).expanduser().resolve()}: copied here as lesson "
+            f"{made}, {found['status']}, by {found['status_by']}"
+        )
     elif action == "score":
         by = lessons.signed(args.by)
         calls = [int(c) for c in args.calls.split(",") if c.strip()] if args.calls else []

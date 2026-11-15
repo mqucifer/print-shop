@@ -46,6 +46,15 @@ late, as it took that long for their overlap to pass the band. So there the cont
 read back along the overlap's growth to where it began, which head on is exact. And where the
 methods read a contact's distance differently but agree on the verdict and on where it is, the
 verdict stands, with both distances: `DISAGREE` is kept for a real difference.
+
+**A tie round the part** (mqucifer/print-shop#135). A sloped ledge meets a strip's top edge all
+round its outline at one height, so the first contact is a tie along that whole ring, and any patch
+of it is as first as another. In an eval the step and halving read one 0.03 mm patch of it that
+no ray's first point fell in, and it was `DISAGREE` four times, though both methods caught the
+strip within the chords. So where the two methods' first distances lie in one tie band, `TIE`, a
+contact of the step's that no ray first met is still a first contact if the rays meet it within
+that band; the reply says the contact runs round the part. One the rays meet only past the band,
+or never, is still `DISAGREE`, as are distances further apart than the band.
 """
 
 from __future__ import annotations
@@ -96,6 +105,10 @@ BACK = 1e-4
 PAST = 0.01
 #: Points sampled over each part's faces, as `clearance` samples them.
 SAMPLES = 6000
+#: Contacts met within this of the first, in mm, by either method, are one first contact, a tie:
+#: the step and halving read each first contact's box this far past it, so it holds them all
+#: already (mqucifer/print-shop#135).
+TIE = PROBE
 #: The most contacts said one by one; the rest are counted.
 SHOWN = 8
 #: A first contact's place, seen along the slide, is opened by this, in mm: a face sliding along
@@ -432,11 +445,25 @@ def _figures_differ(
     Then the figures are given and the verdict stands; otherwise it's `DISAGREE`."""
     rays_first = min(m["met_rays_mm"] for m in met)
     by_step, by_rays = _held(found, found["first_mm"], hold), _held(found, rays_first, hold)
+    earliest = min(found["first_mm"], rays_first)
+    in_band = False
+    tie = max(found["first_mm"], rays_first) <= earliest + TIE
     if by_step != by_rays:
         step_word, rays_word = ("HELD", "NOT HELD") if by_step else ("NOT HELD", "HELD")
+        straddle = ""
+        if tie:
+            # One contact, at the limit: each method puts it on its own side of --hold
+            # (mqucifer/print-shop#135). Neither is loosened, so it stays a disagreement.
+            straddle = (
+                f". The two are within {TIE:g} mm of each other, one first contact, and it lies on "
+                f"--hold within the readings' tie band: bring what holds it more than {TIE:g} mm "
+                f"inside --hold {hold:g} mm, and both read HELD"
+            )
         return [
             f"the step and halving read {step_word} at {found['first_mm']:.4f} mm, the rays "
-            f"{rays_word} at {rays_first:.4f}, against --hold {hold:g} mm: "
+            f"{rays_word} at {rays_first:.4f}, against --hold {hold:g} mm"
+            + straddle
+            + ": "
             + "; ".join(figures)
         ]
     band_mm = 2 * FINE[0] + HALVED
@@ -468,14 +495,30 @@ def _figures_differ(
                 ]
             for k in inside:
                 seen[k] = True
-    if not all(seen):
-        k = seen.index(False)
+    for k in (k for k, s in enumerate(seen) if not s):
+        # A contact of the step's that no ray first met: a first contact all the same where the
+        # rays meet it within the tie band, as round a ring met all at once
+        # (mqucifer/print-shop#135).
+        part, low, high = boxes[k]
+        there = _rays_met(next(m["_hits"] for m in met if m["part"] == part), low, high)
+        if tie and there is not None and there <= earliest + TIE:
+            in_band = True
+            continue
+        if not tie:
+            met_there = ""
+        elif there is None:
+            met_there = ", and no ray meets it there"
+        else:
+            met_there = (
+                f", and the rays meet it there only after {there:.4f} mm, past the "
+                f"{TIE:g} mm tie band from {earliest:.4f}"
+            )
         return [
-            f"the step and halving first meet {boxes[k][0]} in "
-            f"{_box_said(boxes[k][1], boxes[k][2])}, where the rays find no first contact: "
-            + "; ".join(figures)
+            f"the step and halving first meet {part} in {_box_said(low, high)}, where the rays "
+            f"find no first contact{met_there}: " + "; ".join(figures)
         ]
     found["first_rays_mm"] = round(rays_first, 4)
+    found["tie"] = in_band
     return []
 
 
@@ -489,6 +532,12 @@ def _agreed(found: dict[str, Any]) -> str:
         if named and all(c["in"] for c in found["contacts"])
         else f"the same {count} place{'s' if count != 1 else ''} on {', '.join(found['meets'])}"
     )
+    if found.get("tie"):
+        where = (
+            f"one height round {found['file']}: a tie, its {count} place"
+            f"{'s' if count != 1 else ''} on {', '.join(found['meets'])} each met within {TIE:g} "
+            "mm of the first by both methods, so any is as first as another"
+        )
     return (
         f"both methods find the first contact at {where}; {found['first_rays_mm']:.4f} mm by the "
         f"rays and {found['first_mm']:.4f} by the step and halving, and both read "
@@ -513,6 +562,27 @@ def _contacts(
         return []
     found = [(low, high) for _, low, high in _by_place(overlap, d, axis, 0.0)]
     return sorted(found, key=lambda c: tuple(c[0]))
+
+
+def _runs_round(
+    a: Any, b: Any, d: np.ndarray, axis: str, first: float, shadow: Any
+) -> bool:
+    """Whether a's first contact with b closes round a, seen along the slide, as a ledge meeting a
+    strip's edge all round its outline does (mqucifer/print-shop#135): a place with a hole that
+    holds some of a's own shadow. A face with holes in it, met whole, encloses only a's holes."""
+    overlap = a.translate(tuple(map(float, d * (first + PROBE)))) ^ b
+    if float(overlap.volume()) <= 0:
+        return False
+    seen = _shadow(overlap, axis).buffer(-OPEN)
+    # Most of what it encloses is a's: its holes, on the coarse mesh, differ from the fine
+    # mesh's by a sliver only.
+    enclosed = [
+        shapely.Polygon(ring)
+        for place in getattr(seen, "geoms", [seen])
+        if place.geom_type == "Polygon"
+        for ring in place.interiors
+    ]
+    return any(float(e.intersection(shadow).area) > e.area / 2 for e in enclosed)
 
 
 def _by_place(overlap: Any, d: np.ndarray, axis: str, floor: float) -> list[tuple[Any, Any, Any]]:
@@ -737,6 +807,8 @@ def what_holds(
         "blocked": [],
         "room": [],
         "separate": [],
+        "round": [],
+        "tie": False,
         "verdict": "NOT HELD",
         "why": "",
     }
@@ -824,6 +896,7 @@ def what_holds(
                 ],
                 "_b": b_fine,
                 "_firsts": firsts,
+                "_hits": hits,
                 "_spacing": spacing,
             }
         )
@@ -834,6 +907,11 @@ def what_holds(
         found["first_mm"] = first
         found["first_rays_mm"] = min(m["met_rays_mm"] for m in tied)
         found["meets"] = [m["part"] for m in tied]
+        found["round"] = [
+            m["part"]
+            for m in tied
+            if _runs_round(a_fine, m["_b"], d, axis, m["met_mm"], shadow)
+        ]
         for m in tied:
             for low, high in _contacts(a_fine, m["_b"], d, axis, m["met_mm"]):
                 found["contacts"].append(
@@ -934,6 +1012,12 @@ def _said(
         )
     if len(found["contacts"]) > SHOWN:
         report.line(f"  and {len(found['contacts']) - SHOWN} more contacts, in slide.contacts")
+    for part in found["round"] if found["verdict"] != "DISAGREE" else []:
+        report.line(
+            f"  the first contact with {part} runs round {name}: seen along {way[1]} it closes "
+            f"round, as a ledge meeting {name}'s edge all round at one height does, so any place "
+            "on it is as first as another (slide.round)"
+        )
     if found["path"]:
         report.line(
             f"path: sliding {way} until it's clear, {name} meets {len(found['path'])} part(s). "

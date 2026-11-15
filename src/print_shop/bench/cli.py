@@ -48,6 +48,17 @@ def _point(text: str) -> list[float]:
     return values
 
 
+def _span(text: str) -> tuple[float, float]:
+    """`0,2`: a stretch along an axis, from and to, in mm."""
+    try:
+        values = [float(v) for v in text.split(",")]
+    except ValueError:
+        values = []
+    if len(values) != 2 or not all(math.isfinite(v) for v in values) or values[0] >= values[1]:
+        raise argparse.ArgumentTypeError("FROM,TO: two numbers, the first the lower")
+    return values[0], values[1]
+
+
 #: A name for a selection of edges, as a need's number path holds it: no dots.
 NAME = re.compile(r"[A-Za-z0-9_-]+")
 
@@ -247,11 +258,20 @@ def parser() -> Parser:
         help="thin wall by rays alone, in mm², before it counts as a disagreement",
     )
 
-    wall = sub.add_parser("wall", help="the least wall round one hole, along its whole length")
+    wall = sub.add_parser(
+        "wall", help="the least wall round one hole, along its whole length or a stretch of it"
+    )
     wall.add_argument("file")
     wall.add_argument("--hole", type=_point, required=True, help="x,y,z: any point inside the hole")
     wall.add_argument("--axis", choices=("x", "y", "z"), default="z", help="the hole's axis")
     wall.add_argument("--min-wall", type=float, help="the least wall wanted, in mm: under is FAIL")
+    wall.add_argument(
+        "--z",
+        type=_span,
+        metavar="FROM,TO",
+        help="read only this stretch of the hole, along its axis (z, or --axis): a hole through a "
+        "thin floor, say --z 0,2, reads the floor round it, not the hollow it opens into",
+    )
     wall.add_argument("--layer", type=float, default=0.2, help="sections a layer apart")
     wall.add_argument("--n", type=int, default=360, help="rays at each height")
 
