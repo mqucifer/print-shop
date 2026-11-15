@@ -51,14 +51,24 @@ class Box:
         self.work = work
         self.timeout = timeout
         self.ran = 0
+        #: The images past the first that are known to be here.
+        self.built: set[str] = set()
 
     def python(self, script: str, where: Path | None = None, timeout: int | None = None) -> Ran:
         """A script, as `run` runs it: it may import what's beside it."""
         return self._run(["python", script], where, timeout)
 
     def bench(self, args: list[str], where: Path | None = None, timeout: int | None = None) -> Ran:
-        """A bench command. Only the bench's own: `build` and `check` aren't in the image."""
-        return self._run(host.bench_command(args), where, timeout)
+        """A bench command, in its own image: the second for `fit-on` and `bend`
+        (mqucifer/print-shop#142). Only the bench's own: `build` and `check` aren't in an image."""
+        image = host.image_for(args)
+        if image != host.IMAGE and image not in self.built:
+            if host.image_id(image) is None:
+                # Said as a command that couldn't run, not as Docker gone: the run goes on with
+                # the first image's commands.
+                return Ran(3, f"usage error: {host.missing(image)}, on the machine\n", 0.0)
+            self.built.add(image)
+        return self._run(host.bench_command(args), where, timeout, image)
 
     def helper(
         self, module: str, args: list[str], timeout: int = 120, where: Path | None = None
@@ -66,13 +76,19 @@ class Box:
         """One of the bench package's modules that isn't a bench command."""
         return self._run(host.helper(module, args), where, timeout)
 
-    def _run(self, command: list[str], where: Path | None, timeout: int | None) -> Ran:
+    def _run(
+        self,
+        command: list[str],
+        where: Path | None,
+        timeout: int | None,
+        image: str = host.IMAGE,
+    ) -> Ran:
         limit = self.timeout if timeout is None else timeout
         name = f"print-rounds-{uuid.uuid4().hex[:12]}"
         self.ran += 1
         began = time.monotonic()
         try:
-            argv = host.container(where or self.work, command, name)
+            argv = host.container(where or self.work, command, name, image=image)
             process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         except OSError as exc:
             raise Gone(f"docker couldn't be started: {type(exc).__name__}") from exc
@@ -109,11 +125,11 @@ class Box:
             raise Gone(f"docker couldn't run the container: {text[-400:]}")
         if timed_out:
             text += f"\nverdict: NO ANSWER: it ran past the {limit} s limit and was stopped\n"
-            code = 2 if command[:2] == ["python", "-I"] else 124
+            code = 2 if command[1:2] == ["-I"] else 124
         elif code == host.KILLED:
             text += (
                 f"\nverdict: NO ANSWER: it was killed, most likely at the {host.MEMORY} "
                 "memory limit\n"
             )
-            code = 2 if command[:2] == ["python", "-I"] else host.KILLED
+            code = 2 if command[1:2] == ["-I"] else host.KILLED
         return Ran(code, text, seconds, size[1], timed_out)

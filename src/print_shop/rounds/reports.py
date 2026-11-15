@@ -137,6 +137,31 @@ REPORTS: dict[str, tuple[str, ...]] = {
     "render": ("close_ups", "cuts", "files", "sections", "seen_px", "test_pieces", "views"),
     "faces": ("bosses", "flat_faces", "holes", "partial_cylinders"),
     "slice": ("cuts",),
+    "fit-on": (
+        "along",
+        "depth_mm",
+        "from_mm",
+        "moving",
+        "onto",
+        "places",
+        "rays",
+        "readings",
+        "step_mm",
+        "steps",
+    ),
+    "bend": (
+        "across_layers_pct",
+        "arm_mm3",
+        "back_moves_mm",
+        "layers",
+        "limit_from",
+        "limit_pct",
+        "mesh_mm",
+        "pushes",
+        "room_behind_mm",
+        "thickness_mm",
+        "worst",
+    ),
     "layout": (
         "least_width_mm",
         "least_width_piece",
@@ -518,6 +543,68 @@ SHAPES: dict[str, dict[str, Any]] = {
     },
     "render": {"seen_px": Keyed(Keyed(NUMBER)), "views": Keyed(Row())},
     "slice": {"cuts": SLICE},
+    # The second image's (mqucifer/print-shop#142). `fit-on`'s places are deepest first, and
+    # `bend`'s pushes are by the edge pushed, `far` or `near`.
+    "fit-on": {
+        "along": TEXT,
+        "depth_mm": NUMBER,
+        "from_mm": NUMBER,
+        "moving": TEXT,
+        "onto": Rows(TEXT),
+        "places": Rows(
+            Row(
+                {
+                    "across": XYZ,
+                    "along_mm": NUMBER,
+                    "box": CORNERS,
+                    "depth_mm": NUMBER,
+                    "file": TEXT,
+                    "first_mm": NUMBER,
+                    "height_mm": NUMBER,
+                    "last_mm": NUMBER,
+                    "out_mm": NUMBER,
+                    "readings": NUMBER,
+                    "seated": FLAG,
+                    "volume_mm3": NUMBER,
+                }
+            )
+        ),
+        "readings": NUMBER,
+        "step_mm": NUMBER,
+        "steps": Rows(
+            Row(
+                {"depth_mm": NUMBER, "out_mm": NUMBER, "overlap_mm3": NUMBER, "pieces": NUMBER},
+                closed=True,
+            )
+        ),
+    },
+    "bend": {
+        "across_layers_pct": NUMBER,
+        "arm_mm3": NUMBER,
+        "back_moves_mm": NUMBER,
+        "layers": TEXT,
+        "limit_from": TEXT,
+        "limit_pct": NUMBER,
+        "mesh_mm": NUMBER,
+        "pushes": Keyed(
+            Row(
+                {
+                    "back_moves_mm": NUMBER,
+                    "beam_half_way_pct": NUMBER,
+                    "beam_peak_pct": NUMBER,
+                    "beam_root_pct": NUMBER,
+                    "half_way_pct": NUMBER,
+                    "length_mm": NUMBER,
+                    "peak_at": XYZ,
+                    "peak_pct": NUMBER,
+                    "root_pct": NUMBER,
+                    "strip_pct": NUMBER,
+                }
+            )
+        ),
+        "thickness_mm": NUMBER,
+        "worst": TEXT,
+    },
 }
 
 
@@ -549,6 +636,10 @@ VERDICTS: dict[str, tuple[str, ...]] = {
     # Readings, with no limit: what's there, or DISAGREE where the two methods differ.
     "faces": ("OK",),
     "slice": ("OK",),
+    # The second image's (mqucifer/print-shop#142). A snap fit is meant to be `BLOCKED`: a need
+    # on one names the verdict, and holds its `depth_mm`.
+    "fit-on": ("CLEAR", "BLOCKED"),
+    "bend": ("OK", "FAIL"),
 }
 
 

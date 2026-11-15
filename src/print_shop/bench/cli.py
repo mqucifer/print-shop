@@ -13,8 +13,7 @@ import sys
 from pathlib import Path
 from typing import Any, NoReturn
 
-from .report import Report
-from .shapes import NoAnswer
+from .report import NoAnswer, Report
 
 
 class Parser(argparse.ArgumentParser):
@@ -29,11 +28,12 @@ class Parser(argparse.ArgumentParser):
 def _coordinates_joined(given: list[str]) -> list[str]:
     """`--close -5,0,2,4`, as `--close=-5,0,2,4`. To argparse a word starting with `-` that isn't
     a plain number is an option, so a point left of the origin would be a usage error. `--slide
-    -z`, the way out as it's said, likewise (mqucifer/print-shop#76)."""
+    -z`, the way out as it's said, likewise (mqucifer/print-shop#76), and `fit-on --along -z`,
+    `bend --toward -y` and `bend --arm -4,-17,...` (mqucifer/print-shop#142)."""
     joined: list[str] = []
     words = iter(given)
     for word in words:
-        if word in ("--close", "--centre", "--hole", "--slide"):
+        if word in ("--close", "--centre", "--hole", "--slide", "--along", "--toward", "--arm"):
             value = next(words, None)
             joined.append(word if value is None else f"{word}={value}")
         else:
@@ -84,6 +84,19 @@ def _named_box(text: str) -> tuple[str, tuple[list[float], list[float]]]:
     low = [min(a, b) for a, b in zip(values[:3], values[3:], strict=True)]
     high = [max(a, b) for a, b in zip(values[:3], values[3:], strict=True)]
     return name, (low, high)
+
+
+def _box(text: str) -> tuple[list[float], list[float]]:
+    """`-4,-17,10,4,-15,26`: a box's low and high corners."""
+    return _named_box(f"box={text}")[1]
+
+
+def _way(text: str) -> str:
+    """`+z`, or `z`, which is `+z`: a way along an axis."""
+    way = text if text[:1] in "+-" else f"+{text}"
+    if way not in FACINGS:
+        raise argparse.ArgumentTypeError(f"one of {' '.join(FACINGS)}, or x y z for +x +y +z")
+    return way
 
 
 def _plane(text: str) -> tuple[str, float]:
@@ -435,6 +448,109 @@ def parser() -> Parser:
         "width and size, and the plane's pieces wholly inside it, as cuts.N.places.NAME. So a "
         "need reads one wall or one tab whatever order the pieces come in",
     )
+    fit = sub.add_parser(
+        "fit-on",
+        help="a part's way on: what it passes through at each step from out to seated, and how "
+        "deep, which is how far something has to bend. Runs in the second image, with FreeCAD",
+    )
+    fit.add_argument("moving", help="the part that goes on, as a STEP, where it sits once on")
+    fit.add_argument(
+        "--onto",
+        nargs="+",
+        required=True,
+        metavar="FILE",
+        help="what it goes onto: each STEP file it could meet on its way",
+    )
+    fit.add_argument(
+        "--along",
+        required=True,
+        type=_way,
+        metavar="DIR",
+        help="its way out, one of +x -x +y -y +z -z, as `clearance --slide` takes it (z is +z): "
+        "it comes on against it. A lid lifted off upward is +z",
+    )
+    fit.add_argument(
+        "--from",
+        dest="start",
+        required=True,
+        type=float,
+        metavar="MM",
+        help="how far out it starts, in mm: far enough that it's clear of everything",
+    )
+    fit.add_argument(
+        "--step",
+        type=float,
+        default=0.25,
+        help="how far it moves between readings, in mm (0.25 unless given): something thinner "
+        "than this along the way, passing something as thin, can be stepped over",
+    )
+    bend = sub.add_parser(
+        "bend",
+        help="the strain an arm takes across its layers when it's pushed aside, against what its "
+        "material takes, and how far its back moves. Runs in the second image, with FreeCAD's FEM",
+    )
+    bend.add_argument("file", help="the part with the arm, as a STEP")
+    bend.add_argument(
+        "--arm",
+        required=True,
+        type=_box,
+        metavar="X0,Y0,Z0,X1,Y1,Z1",
+        help="a box round the arm, hook and all, one side of it on the arm's root and clear of "
+        "the wall beside it: the arm is the file's material inside it",
+    )
+    bend.add_argument(
+        "--root",
+        required=True,
+        type=_plane,
+        metavar="AXIS=AT",
+        help="the plane the arm is held at, where it joins the rest: z=10 is level at 10 mm",
+    )
+    bend.add_argument(
+        "--push",
+        required=True,
+        type=float,
+        metavar="MM",
+        help="how far the arm is pushed, in mm: `fit-on`'s depth where it meets the arm",
+    )
+    bend.add_argument(
+        "--toward",
+        required=True,
+        type=_way,
+        metavar="DIR",
+        help="the way it's pushed, one of +x -x +y -y +z -z, across the arm",
+    )
+    bend.add_argument(
+        "--at",
+        choices=("far", "near", "both"),
+        default="both",
+        help="the edge pushed, of those along the arm's extreme on the side the push comes from, "
+        "as a hook's face has: the furthest from the root, the nearest, or each in turn and the "
+        "worse judged (both, unless given). The nearer edge is the shorter arm",
+    )
+    bend.add_argument(
+        "--layers",
+        choices=("x", "y", "z"),
+        default="z",
+        help="the axis the layers are stacked along, as it's printed (z unless given)",
+    )
+    bend.add_argument(
+        "--material",
+        choices=("petg",),
+        default="petg",
+        help="whose limit across its layers the strain is held to (petg unless given)",
+    )
+    bend.add_argument(
+        "--limit",
+        type=float,
+        metavar="PCT",
+        help="the most strain across the layers, in percent, in place of the material's",
+    )
+    bend.add_argument(
+        "--mesh",
+        type=float,
+        metavar="MM",
+        help="the largest element, in mm: half the arm's thickness at its root unless given",
+    )
     render = sub.add_parser("render", help="pictures from the standard views")
     render.add_argument("files", nargs="*")
     render.add_argument(
@@ -554,6 +670,14 @@ def _dispatch(args: Any, report: Report) -> None:
         from .section import run as run_slice
 
         run_slice(args, report)
+    elif args.command == "fit-on":
+        from .fit_on import run as run_fit_on
+
+        run_fit_on(args, report)
+    elif args.command == "bend":
+        from .bend import run as run_bend
+
+        run_bend(args, report)
     elif args.command == "render":
         from .render import VIEWS, run
 

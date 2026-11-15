@@ -109,6 +109,9 @@ CORE_COMMANDS = (
     "layout",
     "faces",
     "slice",
+    # The second image's, with FreeCAD (mqucifer/print-shop#142): physics as a project needs it.
+    "fit-on",
+    "bend",
 )
 CORE_SKILLS = ("bench", "cadquery", "references")
 #: What every run builds with and checks with. On `suncatcher-3` neither was read in 325 calls,
@@ -178,6 +181,22 @@ CORE_MEASURES = (
         "or size across, such as a straight wall's thickness or a tab standing free of its wall",
         ("slice",),
         "slice FILE --at z=H [--box NAME=X0,Y0,Z0,X1,Y1,Z1]",
+    ),
+    # A design run approved a snap-on lid that could never be fitted: the hold was read, and the
+    # way on and the bend weren't (mqucifer/print-shop#142).
+    Measure(
+        "way-on",
+        "a part's way on: what it passes through at each step from out to where it sits, and "
+        "how deep, which is how far something has to bend to let it pass",
+        ("fit-on",),
+        "fit-on LID.step --onto BASE.step --along +z --from MM",
+    ),
+    Measure(
+        "bend",
+        "the strain an arm takes across its layers when it's pushed aside, such as a snap clip "
+        "as its part goes on, against what its material takes",
+        ("bend",),
+        "bend FILE --arm X0,Y0,Z0,X1,Y1,Z1 --root AXIS=AT --push MM --toward DIR",
     ),
 )
 CORE = Toolset(
