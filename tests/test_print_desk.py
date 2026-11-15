@@ -476,7 +476,7 @@ class _Daemon:
     def __exit__(self, *exc: object) -> None:
         pass
 
-    def submit(self, stl: Path, as_laid: bool = False) -> str:
+    def submit(self, stl: Path, as_laid: bool = False, context: Path | None = None) -> str:
         import logging
         import sys
 

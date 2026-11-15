@@ -362,11 +362,15 @@ class Daemon:
 
     # -- public API ---------------------------------------------------------
 
-    def submit(self, stl_path: Path | str, *, as_laid: bool = False) -> str:
+    def submit(
+        self, stl_path: Path | str, *, as_laid: bool = False, context: Path | str | None = None,
+    ) -> str:
         """Submit a new job. Returns the job_id.
 
         `as_laid` keeps the file's own pose, laid for printing by the person: no
-        orientation is chosen for it (mqucifer/print-shop#128).
+        orientation is chosen for it (mqucifer/print-shop#128). `context` names the part's
+        context, a sidecar or a design run's folder; None looks beside the STL and above it
+        (mqucifer/print-shop#130).
 
         Raises JobRejected if a job is already active.
         """
@@ -384,7 +388,7 @@ class Daemon:
 
         self._worker = threading.Thread(
             target=self._run_job,
-            args=(job_id, str(stl_path), as_laid),
+            args=(job_id, str(stl_path), as_laid, str(context) if context else None),
             daemon=True,
         )
         self._worker_alive = True
@@ -556,7 +560,9 @@ class Daemon:
             # scoping exists to close.
             inbox.put(cmd)
 
-    def _run_job(self, job_id: str, stl_path: str, as_laid: bool = False) -> None:
+    def _run_job(
+        self, job_id: str, stl_path: str, as_laid: bool = False, context: str | None = None,
+    ) -> None:
         """Run the graph for one job. Runs on a background thread."""
         thread_config = {"configurable": {"thread_id": job_id}}
         initial_state: dict[str, Any] = {
@@ -566,6 +572,7 @@ class Daemon:
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "stl_path": stl_path,
             "as_laid": as_laid,
+            "context_path": context,
         }
 
         try:

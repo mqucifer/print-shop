@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from print_shop.expert.client import LLMConfig
+from print_shop.setup.context import PartContext
 from print_shop.setup.features import Feature
 from print_shop.setup.intake import Intake
 from print_shop.setup.model import Ask, llm_ask, propose_by_model
@@ -61,9 +62,10 @@ class Proposer:
         return Asked((), "no questions: no model was asked")
 
     def __call__(
-        self, intake: Intake, features: tuple[Feature, ...], profiles: SlicerProfiles
+        self, intake: Intake, features: tuple[Feature, ...], profiles: SlicerProfiles,
+        context: PartContext | None = None,
     ) -> Proposal:
-        facts = self._facts(intake, features, profiles)
+        facts = self._facts(intake, features, profiles, context)
         given = self.lessons(features, facts.filament_type) if self.lessons is not None else ()
         learned, learned_kept, marked = from_lessons(facts, given)
         facts = dataclasses.replace(facts, lessons=marked)
@@ -83,11 +85,13 @@ class Proposer:
         return guard(facts, reasoned)
 
     def facts(
-        self, intake: Intake, features: tuple[Feature, ...], profiles: SlicerProfiles
+        self, intake: Intake, features: tuple[Feature, ...], profiles: SlicerProfiles,
+        context: PartContext | None = None,
     ) -> PartFacts:
         """What a proposal reads: the intake, the features and the presets, with the kept lessons
-        for this part, as the print loop is given them (mqucifer/print-shop#129)."""
-        facts = self._facts(intake, features, profiles)
+        for this part, as the print loop is given them (mqucifer/print-shop#129), and the part's
+        context (mqucifer/print-shop#130)."""
+        facts = self._facts(intake, features, profiles, context)
         _, _, marked = from_lessons(facts, self.lessons_for(features, profiles))
         return dataclasses.replace(facts, lessons=marked)
 
@@ -100,9 +104,11 @@ class Proposer:
         return self.lessons(features, self._facts(Intake(), features, profiles).filament_type)
 
     def _facts(
-        self, intake: Intake, features: tuple[Feature, ...], profiles: SlicerProfiles
+        self, intake: Intake, features: tuple[Feature, ...], profiles: SlicerProfiles,
+        context: PartContext | None = None,
     ) -> PartFacts:
         return PartFacts(
+            context=context,
             intake=intake,
             features=features,
             machine=json.loads(profiles.machine.read_text()),

@@ -50,6 +50,7 @@ from print_shop.expert.client import CutOff, LLMConfig, chat_with_tools
 from print_shop.expert.orientation import OrientationRequest, symptom_map, validate_orientation
 from print_shop.ingest.orientation import write_rotated
 from print_shop.setup.bounds import SETTINGS, check
+from print_shop.setup.context import refuses
 from print_shop.setup.model import prompt
 from print_shop.setup.proposal import (
     Change,
@@ -198,6 +199,10 @@ class Part:
     orienting: tuple[GivenLesson, ...] = ()
     #: The kept settings lessons for this part, in the file's own pose.
     lessons: tuple[GivenLesson, ...] = ()
+    #: The pose kept unless the loop asks: the file's own, or the side the part's context lays
+    #: it on (mqucifer/print-shop#130), and where that side was read.
+    kept: tuple[float, float, float] = AS_LAID
+    kept_from: str = ""
 
 
 @dataclass(frozen=True)
@@ -249,9 +254,11 @@ def big(
     """The big changes in a pose and settings, each as `(what, in words)`: what the loop asks
     before. Decided here, in code, never by the model."""
     found: list[tuple[str, str]] = []
-    if pose.rotation_deg != AS_LAID:
+    if pose.rotation_deg != part.kept:
+        own = (f"the pose {part.kept_from} lays it in ({pose_value(part.kept)})" if part.kept_from
+               else "the file's own pose")
         found.append((f"pose {pose_value(pose.rotation_deg)}",
-                      f"turn it to {pose_value(pose.rotation_deg)} from the file's own pose"))
+                      f"turn it to {pose_value(pose.rotation_deg)} from {own}"))
     decided = {k for _, o in part.facts.intake.chosen() for k in o.settings}
     support = changes.get("enable_support", part.facts.preset("enable_support"))
     guarded = (pose.overhang_area_mm2 > 0 and "enable_support" not in changes
@@ -356,6 +363,11 @@ def _user(part: Part) -> str:
     lines = [prompt(part.facts, part.skill), "",
              "The poses it may lie in (the file's own is 0,0,0). Overhang is what would need "
              "support; a round or chamfer rising from the plate is left out of it:"]
+    if part.kept_from:
+        lines[-1] = (f"The poses it may lie in. {part.kept_from.capitalize()} lays it in "
+                     f"{pose_value(part.kept)}, which is kept unless you ask. Overhang is what "
+                     "would need support; a round or chamfer rising from the plate is left out "
+                     "of it:")
     for c in part.candidates:
         lines.append(f"- {pose_value(c.rotation_deg)}: {c.overhang_area_mm2:g} mm2 overhang, "
                      f"{c.bed_contact_area_mm2:g} mm2 on the plate, {c.height_mm:g} mm tall")
@@ -382,7 +394,7 @@ def _tool(
 
 
 def _pose(part: Part, args: dict[str, Any]) -> Orientation:
-    raw = args.get("rotation") or list(AS_LAID)
+    raw = args.get("rotation") or list(part.kept)
     rotation = tuple(float(a) for a in raw)
     found = next((c for c in part.candidates if c.rotation_deg == rotation), None)
     if found is None:
@@ -397,7 +409,7 @@ def _settings(args: dict[str, Any]) -> dict[str, str]:
 
 def _bounded(part: Part, settings: dict[str, str]) -> list[str]:
     return [f"{k}={v}: {why}" for k, v in settings.items()
-            if (why := check(k, v, part.facts.presets))]
+            if (why := check(k, v, part.facts.presets) or refuses(part.facts.context, k, v))]
 
 
 def _seconds(part: Part, state: _State, pose: Orientation, settings: dict[str, str]) -> Any:
@@ -511,7 +523,7 @@ def _said_no(
     for what, _ in big_ones:
         if what.startswith("pose"):
             made.append(Change(key="orientation", preset=pose_value(pose.rotation_deg),
-                               value=pose_value(AS_LAID), reason=why, source=Source.SPONSOR,
+                               value=pose_value(part.kept), reason=why, source=Source.SPONSOR,
                                feature=", ".join(traits(part.facts.features))))
         elif what == "supports":
             made.append(Change(key="enable_support", preset=part.facts.preset("enable_support"),
@@ -532,7 +544,7 @@ def _propose(
     request = OrientationRequest(candidates=part.candidates, build_volume_mm=part.build_volume_mm)
     verdict = validate_orientation(Chosen(value=pose, source="loop", rationale=""), request)
     blockers = list(verdict.blockers)
-    if pose.rotation_deg == AS_LAID and any(w.startswith("pose") for w in state.refused):
+    if pose.rotation_deg == part.kept and any(w.startswith("pose") for w in state.refused):
         # The person said no to turning it: keeping the file's own pose is their decision, as a
         # send-back is. Only what the plate can't take still refuses it.
         blockers = [v for v in blockers if v.rule == "orientation.build_volume"]
@@ -549,7 +561,7 @@ def _propose(
     seconds = baseline = None
     try:
         if state.baseline_s is None:
-            laid = next(c for c in part.candidates if c.rotation_deg == AS_LAID)
+            laid = next(c for c in part.candidates if c.rotation_deg == part.kept)
             state.baseline_s = _seconds(part, state, laid, {}).print_time_s
         baseline = state.baseline_s
         seconds = _seconds(part, state, pose, settings).print_time_s

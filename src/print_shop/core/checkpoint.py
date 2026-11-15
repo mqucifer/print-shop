@@ -51,6 +51,7 @@ from print_shop.core.state import (
     SliceResult,
 )
 from print_shop.inventory import Material
+from print_shop.setup.context import Fit, Hold, PartContext, Seen
 from print_shop.setup.features import Feature
 from print_shop.setup.intake import Answer, Estimate, Intake, Option, Question
 from print_shop.setup.proposal import Change, GivenLesson, LoopCall, Source
@@ -110,6 +111,11 @@ PERSISTED_TYPES: tuple[type, ...] = (
     ProfilesUsed,
     ProfileRef,
     Material,
+    # The part's context from its design run or a sidecar (mqucifer/print-shop#130).
+    PartContext,
+    Fit,
+    Hold,
+    Seen,
 )
 
 

@@ -5,7 +5,8 @@ and re-copy those". Three things, each copied from the page and never run by it:
 - **the command line,** with the part's file, found by the sha256 the ledger keeps
   (`read.PartFinder`: the log's path, the parts folder, the job's folder), the nozzle and
   filament the print used, its machine and process profiles by name, `--as-laid` if it was
-  kept as laid, and `--answers` naming the answers file where the browser saves it;
+  kept as laid, `--context` naming the sidecar or design run its context was read from
+  (mqucifer/print-shop#130), and `--answers` naming the answers file where the browser saves it;
 - **the correction line,** typed at the review as it was then (`key=value because …; …`, read
   by `review.parse_answer`): the Sponsor's own corrections, in order;
 - **the answers file** for `--answers` (`intake.replay_asker`): each question by its text, each
@@ -113,6 +114,14 @@ def again(row: Row, part_path: Path | None, printers: int = 1, part_found: bool 
         args += ["--machine", row.profiles.machine.name, "--process", row.profiles.process.name]
     if row.orientation_source == AS_LAID:
         args.append("--as-laid")
+    # The part's context is named, as the part may be found elsewhere, away from its sidecar or
+    # its design run (mqucifer/print-shop#130).
+    context = row.proposal.context_from if row.proposal is not None else ""
+    if context:
+        args += ["--context", context]
+        if not Path(context).exists():
+            notes.append(f"Its context, {context}, is gone: without it the part prints with no "
+                         "fits, side or holds known. Give it again, or leave --context out.")
     answers = answers_file(row)
     name = f"answers-{row.job_id[:8]}.json"
     command = "uv run python scripts/print_job.py " + shlex.join(args)

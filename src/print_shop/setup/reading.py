@@ -7,9 +7,15 @@ on faces nobody sees, and an aligned seam on walls that are the part's whole loo
 
 So each slice is read layer by layer (`slicer/gcode.py`) into a `SliceReading`, kept with the
 job in the ledger, and `flags` says what matters for this part. Which faces are seen comes
-from the intake (`questions.SEEN`), never from which face is on top: settings depend on the
-part, not the material. A flag proposes a change with its reason and the reading it rests on,
-like every other change. It never applies one: the person takes it at the review, or doesn't.
+from the intake (`questions.SEEN`), or the part's context where the intake didn't say, never
+from which face is on top: settings depend on the part, not the material. A flag proposes a
+change with its reason and the reading it rests on, like every other change. It never applies
+one: the person takes it at the review, or doesn't.
+
+**A part's fits** (mqucifer/print-shop#130, `context.py`), placed as heights in the pose it
+prints in: a part with one never gets a random seam proposed, and the reason names the fit; a fit
+at the plate gets elephant foot compensation proposed, inside its bound. A hold that slides on
+along the layers' stacking is said.
 """
 
 from __future__ import annotations
@@ -20,6 +26,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from print_shop.setup.context import FitBand, Placed, Seen
 from print_shop.setup.intake import Intake
 from print_shop.setup.proposal import Change, Source
 from print_shop.slicer import gcode
@@ -51,7 +58,11 @@ JUDGED = (
     "slow_down_min_speed",
     "ironing_type",
     "seam_position",
+    "elefant_foot_compensation",
 )
+#: What a fit at the plate is proposed for elephant foot, in mm: the Sponsor's own profile's
+#: value (the skill's adhesion group), never past its bound.
+FIT_ELEPHANT_FOOT_MM = 0.1
 
 
 class LayerTime(BaseModel):
@@ -169,17 +180,6 @@ class SliceReading(BaseModel):
         return out
 
 
-class Seen(BaseModel):
-    """Which faces of the part will be seen, from the intake's answer."""
-
-    model_config = {"frozen": True}
-
-    walls: bool
-    top: bool  # the top as it prints
-    bottom: bool  # the face on the plate
-    said: str  # the answer, in its words
-
-
 class Flag(BaseModel):
     """Something the reading says matters for this part, and the change it proposes, if any."""
 
@@ -272,14 +272,23 @@ def flags(
     faces: Seen | None,
     process: dict[str, Any],
     filament: dict[str, Any],
+    placed: Placed | None = None,
+    changes: tuple[Change, ...] = (),
 ) -> tuple[Flag, ...]:
     """What the reading says matters for this part, each with the change it proposes.
 
     `process` and `filament` are the presets' own values: a proposed change is shown against
-    them, as every change is.
+    them, as every change is. `placed` is the part's context in this pose (mqucifer/print-shop#130):
+    its fits keep a random seam off them and propose elephant foot compensation at the plate, a
+    hold pulled across the layers is said, and its seen faces stand where the intake didn't say.
+    `changes` are the proposal's, which the slice was made with: a value they set, such as a
+    lesson's, is read as the one in effect and named.
     """
+    if faces is None and placed is not None:
+        faces = placed.seen
     found = [*_layer_time(reading, filament), *_ironing(reading, faces, process),
-             *_seam_flag(reading, faces, process)]
+             *_seam_flag(reading, faces, process, placed),
+             *_elephant_foot(reading, process, placed, changes), *_holds(placed)]
     return tuple(found)
 
 
@@ -356,8 +365,13 @@ def _ironing(reading: SliceReading, faces: Seen | None, process: dict[str, Any])
     return []
 
 
-def _seam_flag(reading: SliceReading, faces: Seen | None, process: dict[str, Any]) -> list[Flag]:
+def _seam_flag(
+    reading: SliceReading, faces: Seen | None, process: dict[str, Any], placed: Placed | None,
+) -> list[Flag]:
     seam = reading.seam
+    fits = placed.fits if placed is not None else ()
+    if fits:
+        return _seam_on_a_fit(reading, faces, process, fits)
     if not seam.is_line or faces is None or not faces.walls:
         return []
     where = f" at x {seam.at[0]:g} y {seam.at[1]:g}" if seam.at else ""
@@ -374,6 +388,120 @@ def _seam_flag(reading: SliceReading, faces: Seen | None, process: dict[str, Any
         source=Source.READING, feature="seen", knowledge="surface", reading=said,
         reason=f"you said '{faces.said}', so the walls are seen, and the seam is a line on "
                f"them: {how}"))]
+
+
+def fits_said(fits: tuple[FitBand, ...]) -> str:
+    """The fits as a reason names them."""
+    return "; ".join(band.line() for band in fits)
+
+
+def _seam_on_a_fit(
+    reading: SliceReading, faces: Seen | None, process: dict[str, Any],
+    fits: tuple[FitBand, ...],
+) -> list[Flag]:
+    """A part with a fit never gets a random seam (mqucifer/print-shop#130): it would scatter seam
+    bumps all round the fit. A line leaves one mark, at the back where the walls are seen."""
+    seam = reading.seam
+    now = reading.settings.get("seam_position", "")
+    named = fits_said(fits)
+    if now == "random":
+        value = "back" if faces is not None and faces.walls else "aligned"
+        said = (f"the seam is {now}: {seam.seams} wall loop starts scattered, "
+                f"{seam.stacked:.0%} on the one below")
+        where = ("back puts the line on the part's back (its largest y), as the walls are seen"
+                 if value == "back" else "aligned lines it up at the least seen spots")
+        return [Flag(id="seam_fit", reading=said, change=Change(
+            key="seam_position", preset=_first(process, "seam_position"), value=value,
+            source=Source.READING, feature="fit", knowledge="surface", reading=said,
+            reason=f"a random seam scatters seam bumps all round the fit, {named}: one line "
+                   f"leaves one mark; {where}"))]
+    if not seam.is_line or faces is None or not faces.walls:
+        return []
+    where = f" at x {seam.at[0]:g} y {seam.at[1]:g}" if seam.at else ""
+    said = (f"{seam.stacked:.0%} of {seam.seams} wall loops start on the one below: the seam "
+            f"is a line up the wall{where}, over {seam.at_layers} layers")
+    if now in ("back", "aligned_back"):
+        return [Flag(id="seam_fit", reading=(
+            f"{said}; the walls are seen, but random isn't proposed: it would scatter seam bumps "
+            f"all round the fit, {named}. The line stays at the back"))]
+    return [Flag(id="seam_fit", reading=said, change=Change(
+        key="seam_position", preset=_first(process, "seam_position"), value="back",
+        source=Source.READING, feature="fit", knowledge="surface", reading=said,
+        reason=f"you said '{faces.said}', so the walls are seen, and the seam is a line on them: "
+               "back puts the line on the part's back (its largest y). Not random: it would "
+               f"scatter seam bumps all round the fit, {named}"))]
+
+
+def _elephant_foot(
+    reading: SliceReading, process: dict[str, Any], placed: Placed | None,
+    changes: tuple[Change, ...],
+) -> list[Flag]:
+    """A fit at the plate wants elephant foot compensation: its bounded value is proposed, never
+    applied (the operator, 2026-11-14). A value already set at least as high, by a lesson, the
+    model or the person, stands, and the note says the fit is covered by it; one set lower is
+    proposed up to the fit's, never down."""
+    if placed is None or not reading.layers:
+        return []
+    first = reading.layers[0].z
+    at_plate = tuple(b for b in placed.fits if b.z_from <= first + 1e-6)
+    if not at_plate:
+        return []
+    preset = _first(process, "elefant_foot_compensation")
+    setting = next((c for c in changes if c.key == "elefant_foot_compensation"), None)
+    raw = setting.value if setting is not None else reading.settings.get(
+        "elefant_foot_compensation", preset)
+    try:
+        now = float(raw or 0)
+    except ValueError:
+        return []
+    width = _first(process, "initial_layer_line_width")
+    try:
+        # A share of the nozzle, which this reading doesn't know, leaves the default.
+        ceiling = 0.0 if width.endswith("%") else float(width or 0)
+    except ValueError:
+        ceiling = 0.0
+    wanted = min(FIT_ELEPHANT_FOOT_MM, ceiling) if ceiling > 0 else FIT_ELEPHANT_FOOT_MM
+    by = f", set by {_set_by(setting)}" if setting is not None else ""
+    said = (f"the first layer's top is z {first:g} mm and the fit reaches the plate: "
+            f"{fits_said(at_plate)}; elefant_foot_compensation is {now:g}{by}")
+    if now >= wanted:
+        return [Flag(id="fit_elephant_foot", reading=(
+            f"{said}: the plate fit is covered, as {now:g} mm is at least the {wanted:g} mm it "
+            "wants, so nothing is proposed"))]
+    raised = (f", raising the {now:g} mm {_set_by(setting)} set; that stands where it's larger"
+              if setting is not None and now > 0 else "")
+    return [Flag(id="fit_elephant_foot", reading=said, change=Change(
+        key="elefant_foot_compensation", preset=preset, value=f"{wanted:g}",
+        source=Source.READING, feature="fit", knowledge="adhesion",
+        reading=said,
+        reason="the first layers squash out wider than the rest (elephant foot), which closes "
+               f"the {at_plate[0].fit.play()} fit at the plate: compensation shrinks the first "
+               f"layer by {wanted:g} mm, inside its bound ({FIT_ELEPHANT_FOOT_MM:g} mm is your "
+               f"profile's own){raised}. Proposed, not applied"))]
+
+
+def _set_by(change: Change | None) -> str:
+    """Who set a change, as the reading names them."""
+    if change is None:
+        return "the preset"
+    if change.source is Source.LESSON:
+        return f"lesson {change.lesson}" if change.lesson is not None else "a lesson"
+    return {Source.MODEL: "the model", Source.ANSWER: "your answer", Source.SPONSOR: "you",
+            Source.GUARD: "a guard", Source.READING: "the slice's proposal you took"}[change.source]
+
+
+def _holds(placed: Placed | None) -> list[Flag]:
+    """A hold whose way on or off is up and down as it prints, and a pose off the context's side:
+    said, with no change (turning the part is the person's)."""
+    if placed is None:
+        return []
+    found = [Flag(id="hold_layers", reading=(
+        f"{h.line()}: it goes on and off along z as this prints, so its pull is across the layer "
+        "lines, where a print is weakest; laid with the slide across the plate it pulls along "
+        "them")) for h in placed.across]
+    if placed.off_side:
+        found.append(Flag(id="off_side", reading=placed.off_side))
+    return found
 
 
 def _first(data: dict[str, Any], key: str) -> str:

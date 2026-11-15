@@ -58,6 +58,7 @@ from print_shop.orchestrator.fitness import scoring_profiles
 from print_shop.printer.centauri import PreflightFailed, PrinterClient, preflight
 from print_shop.setup import Proposer
 from print_shop.setup import lessons as print_lessons
+from print_shop.setup.context import PartContext, place, pose_for, read_context
 from print_shop.setup.features import measure
 from print_shop.setup.intake import Asker, Estimate, Intake
 from print_shop.setup.loop import Part, PrintLoop
@@ -196,22 +197,37 @@ def build_graph(
         # is keyed to, and looked up by (mqucifer/print-shop#128).
         laid = measure(state["stl_path"], state["mesh"].bed_contact_area_mm2)
         found = tuple(candidates(state["stl_path"]))
-        poses = {"orientation_candidates": found, "laid_traits": traits(laid)}
+        poses: dict[str, Any] = {"orientation_candidates": found, "laid_traits": traits(laid)}
         request = OrientationRequest(
             candidates=found, build_volume_mm=build_volume, part_description="",
         )
+        # The part's context, from its design run or a sidecar (mqucifer/print-shop#130).
+        given_at = state.get("context_path")
+        context = read_context(Path(state["stl_path"]), Path(given_at) if given_at else None)
+        poses["part_context"] = context
         if state.get("as_laid"):
             return {"orientation": _as_laid(request), **poses}
         given = print_lessons.for_orienting(ledger, laid) if ledger is not None else ()
         request = request.model_copy(update={"lessons": tuple(g.line() for g in given)})
+        kept = _kept(context, found, build_volume)
         if loop is not None and proposer is not None and asker is not None:
             # The print loop chooses the pose after the questions, which are asked of the
-            # file's own (mqucifer/print-shop#129).
-            own = next(c for c in found if c.rotation_deg == (0.0, 0.0, 0.0))
+            # file's own, or of the side its context lays it on (mqucifer/print-shop#129, #130).
+            own = kept or next(c for c in found if c.rotation_deg == (0.0, 0.0, 0.0))
+            where = (f"on its {context.down} side, as {context.down_from} lays it" if kept
+                     else "as the file lays it")
             pending = Outcome(proposal=Chosen(value=own, source=LOOP_PENDING, rationale=(
-                "as the file lays it, for the questions: the print loop chooses the pose after "
-                "them")), accepted=True, attempts=0)
+                f"{where}, for the questions: the print loop chooses the pose after them")),
+                accepted=True, attempts=0)
             return {"orientation": pending, "orientation_lessons": given, **poses}
+        if kept is not None:
+            # The side its design run or sidecar lays it on is kept, as a pose laid by the
+            # person is: no model is asked (mqucifer/print-shop#130).
+            return {"orientation": Outcome(proposal=Chosen(
+                value=kept, source=CONTEXT, rationale=(
+                    f"kept on its {context.down} side, as {context.down_from} lays it: no "
+                    "orientation model was asked")), accepted=True, attempts=0),
+                "orientation_lessons": given, **poses}
         return {"orientation": orient_by_call(request), "orientation_lessons": given, **poses}
 
     def orient_by_call(request: OrientationRequest) -> Outcome[Orientation]:
@@ -276,18 +292,23 @@ def build_graph(
                 ),
             )
             proposed["intake"] = intake
+            context = state.get("part_context")
             earlier: list[Change] = []
             looped: Proposal | None = None
             fell_back: dict[str, Any] = {}
             if outcome is not None and outcome.proposal.source == LOOP_PENDING:
                 assert loop is not None and build_volume is not None
+                kept = _kept(context, poses, build_volume) if context is not None else None
                 found_by = run_loop(loop, Part(
-                    stl=Path(state["stl_path"]), facts=proposer.facts(intake, features, profiles),
+                    stl=Path(state["stl_path"]),
+                    facts=proposer.facts(intake, features, profiles, context),
                     candidates=poses, build_volume_mm=build_volume,
                     skill=load(groups_for(intake, features)), profiles=profiles, slicer=slicer,
                     workdir=outdir / "loop", ledger=ledger,
                     orienting=state.get("orientation_lessons", ()),
                     lessons=proposer.lessons_for(features, profiles),
+                    kept=kept.rotation_deg if kept is not None else (0.0, 0.0, 0.0),
+                    kept_from=context.down_from if kept is not None and context else "",
                 ))
                 record = {"loop": found_by.calls, "loop_ending": (
                     f"{found_by.ended}, after {found_by.model_calls} calls in "
@@ -302,9 +323,15 @@ def build_graph(
                     earlier = list(found_by.corrections)
                 else:
                     # Past its limit, or the model unreachable: today's single calls, said so.
-                    decided = orient_by_call(OrientationRequest(
-                        candidates=poses, build_volume_mm=build_volume,
-                        lessons=tuple(g.line() for g in state.get("orientation_lessons", ()))))
+                    # The side the part's context lays it on is kept, as the single calls keep it.
+                    decided = Outcome(proposal=Chosen(
+                        value=kept, source=CONTEXT, rationale=(
+                            f"kept on its {context.down} side, as {context.down_from} lays it: "
+                            "no orientation model was asked")), accepted=True, attempts=0,
+                    ) if kept is not None and context is not None else orient_by_call(
+                        OrientationRequest(
+                            candidates=poses, build_volume_mm=build_volume,
+                            lessons=tuple(g.line() for g in state.get("orientation_lessons", ()))))
                     fell_back = {**record, "notes": (
                         f"the print loop stopped, {found_by.ended}, after "
                         f"{found_by.model_calls} calls in {found_by.seconds:g} s: the pose and "
@@ -325,7 +352,7 @@ def build_graph(
                     features = measure(stl_to_slice, applied.bed_contact_area_mm2 or 0.0)
                     reply = found_by.reply
                     made = dataclasses.replace(proposer, ask=lambda *_: reply, llm=None)(
-                        intake, features, profiles)
+                        intake, features, profiles, context)
                     looked = set(found_by.looked_up)
                     looped = made.model_copy(update={
                         **record, "model": f"loop:{loop.model}",
@@ -337,7 +364,7 @@ def build_graph(
                 if looped is not None:
                     proposal, looped = looped, None
                 else:
-                    proposal = proposer(intake, features, profiles)
+                    proposal = proposer(intake, features, profiles, context)
                     if fell_back:
                         proposal = proposal.model_copy(update={
                             "loop": fell_back["loop"], "loop_ending": fell_back["loop_ending"],
@@ -357,6 +384,7 @@ def build_graph(
                         lessons_for=_lessons_for(ledger, state["stl_path"], profiles,
                                                  outdir / "poses"),
                         earlier=earlier,
+                        context=context, stl=state["stl_path"],
                     )
                 except _Turned as turned:
                     # Sent back at the review: turned to the person's pose, and sliced again.
@@ -390,8 +418,11 @@ def build_graph(
             result = slicer(stl_to_slice, active_profiles, outdir)
             reading = _read(result)
             proposed["slice_reading"] = reading
+            context = state.get("part_context")
+            placed = (place(context, state["stl_path"], rotation_deg)
+                      if context is not None and context.found else None)
             proposed["slice_flags"] = (
-                flags(reading, None, *_presets(active_profiles)) if reading else ()
+                flags(reading, None, *_presets(active_profiles), placed) if reading else ()
             )
         # Orca always writes `plate_1.gcode`. The printer's storage is one flat
         # namespace and `start_print` takes a bare name, so the file is renamed
@@ -679,6 +710,24 @@ LOOP_PENDING = "loop:pending"
 #: Where an orientation kept as the person laid it came from, as the ledger keeps it.
 AS_LAID = "as_laid"
 
+#: Where an orientation kept on the side the part's context lays it on came from
+#: (mqucifer/print-shop#130).
+CONTEXT = "context"
+
+
+def _kept(
+    context: PartContext | None, found: tuple[Orientation, ...],
+    build_volume: tuple[float, float, float] | None,
+) -> Orientation | None:
+    """The candidate that lays the part on the side its context gives, if it fits the plate."""
+    if context is None or not context.down:
+        return None
+    rotation = pose_for(context.down)
+    pose = next((c for c in found if c.rotation_deg == rotation), None)
+    if pose is None or (build_volume is not None and not pose.fits_in(build_volume)):
+        return None
+    return pose
+
 
 def _as_laid(request: OrientationRequest) -> Outcome[Orientation]:
     """The file's own pose, kept because the person laid it for printing (mqucifer/print-shop#128).
@@ -799,6 +848,8 @@ def _propose_and_review(
     cost: Any = None,
     lessons_for: Any = None,
     earlier: list[Change] | None = None,
+    context: PartContext | None = None,
+    stl: str | Path | None = None,
 ) -> tuple[SliceResult, dict[str, Any]]:
     """Slice with the proposal; with a reviewer, again after each correction until approved.
 
@@ -820,10 +871,19 @@ def _propose_and_review(
     process, filament = _presets(profiles)
     faces = seen(intake)
     corrections: list[Change] = list(earlier or ())
+    # The part's context in this pose (mqucifer/print-shop#130): its fits as heights, for the
+    # reading's seam rule and elephant foot, and what the review says was read.
+    placed = (place(context, stl, orientation.rotation_deg)
+              if context is not None and context.found and stl is not None else None)
+    said = tuple([*(context.lines() if context is not None else ()),
+                  *(placed.lines() if placed is not None else ())])
+    proposal = proposal.model_copy(update={
+        "context": said, "context_from": context.path if context is not None else ""})
     while True:
         result: SliceResult = slice_with(apply(profiles, proposal, workdir))
         reading = _read(result)
-        found = flags(reading, faces, process, filament) if reading is not None else ()
+        found = (flags(reading, faces, process, filament, placed, proposal.changes)
+                 if reading is not None else ())
         if reviewer is None:
             break
         review = reviewer(
@@ -841,6 +901,7 @@ def _propose_and_review(
                 laid_traits=laid_traits,
                 cost=cost,
                 lessons_for=lessons_for,
+                context=said,
             )
         )
         if review.stop:

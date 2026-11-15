@@ -1,7 +1,7 @@
 """Run one print job, or serve the outcome gate, on the Mac.
 
     uv run python scripts/print_job.py PART.stl --nozzle 0.4 --filament NAME [--as-laid]
-        [--answers F] [--record]
+        [--context PATH] [--answers F] [--record]
     uv run python scripts/print_job.py --serve [--record]
     uv run python scripts/print_job.py --list
     uv run python scripts/print_job.py --filaments
@@ -19,6 +19,12 @@ several tunings of one are listed to choose from. `--machine` and
 
 **The part is oriented by the orientation model,** or, with `--as-laid`, kept as the file
 lays it: for a part already laid for printing, no model is asked (mqucifer/print-shop#128).
+
+**The part's context goes with it** (mqucifer/print-shop#130): its fits, seen faces, the side
+it's laid on and its holds, from a sidecar beside it (`PART.part.json`), or from the design run
+whose folder it sits in. `--context` names a sidecar or a run's folder elsewhere. The slice's
+seam and elephant foot read its fits, and the review says what was read, or that there was none.
+A sidecar's shape is in `docs/runbook-first-print.md`.
 
 **Then a few questions about the part,** proposed from its shape once it's
 oriented: each with numbered options, what each would cost (Orca's estimate)
@@ -71,6 +77,7 @@ from print_shop.orchestrator.daemon import GATE_WAIT_S
 from print_shop.orchestrator.outcome import no_frames
 from print_shop.printer.centauri import FrameRecorder, PrinterClient, live_printer
 from print_shop.runtime import WORK_DIR, build_run, describe, profiles_for, recording_path
+from print_shop.setup.context import read_context
 from print_shop.setup.intake import Asker, cli_asker, replay_asker
 from print_shop.setup.review import cli_reviewer
 from print_shop.slicer.orca import SlicerProfiles
@@ -98,6 +105,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--answers", type=Path, help="recorded answers to the questions, as JSON")
     parser.add_argument("--as-laid", action="store_true",
                         help="keep the file's own pose: it's laid for printing")
+    parser.add_argument("--context", type=Path,
+                        help="the part's context: a sidecar, or its design run's folder")
     parser.add_argument(
         "--settings", type=Path, default=SETTINGS_PATH, help="the settings file (a path)"
     )
@@ -144,6 +153,8 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
         parser.error("give a part to print, or --serve, or --list")
     if args.stl is not None and not args.stl.is_file():
         parser.error(f"{args.stl} is not a file")
+    if args.context is not None and not args.context.exists():
+        parser.error(f"{args.context} is neither a sidecar nor a run's folder")
 
     profiles: SlicerProfiles | None = None
     asker: Asker | None = None
@@ -213,7 +224,9 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
                 while True:
                     time.sleep(1)
 
-            job_id = run.daemon.submit(args.stl, as_laid=args.as_laid)
+            context = read_context(args.stl, args.context)
+            print("The part's context: " + "; ".join(context.lines()[:2]))
+            job_id = run.daemon.submit(args.stl, as_laid=args.as_laid, context=args.context)
             if job_log is not None:
                 job_log.open(WORK_DIR / job_id / LOG_NAME)
                 print(f"Job {job_id}'s log: {job_log.path}")

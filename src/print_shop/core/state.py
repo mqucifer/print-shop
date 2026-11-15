@@ -22,6 +22,7 @@ from typing import NotRequired, TypedDict
 from pydantic import BaseModel
 
 from print_shop.core.contracts import Gate, GateDecision, Outcome
+from print_shop.setup.context import PartContext
 from print_shop.setup.features import Feature
 from print_shop.setup.intake import Intake
 from print_shop.setup.proposal import Change, GivenLesson, Proposal
@@ -201,6 +202,9 @@ class PrintJobState(TypedDict):
     #: Keep the file's own pose: the person laid it for printing (`--as-laid`,
     #: mqucifer/print-shop#128), so no orientation is chosen for it.
     as_laid: NotRequired[bool]
+    #: A sidecar or a design run's folder named for the part's context (`--context`,
+    #: mqucifer/print-shop#130); None looks beside the STL and above it.
+    context_path: NotRequired[str | None]
 
     # Artifacts. Local paths; the pipeline is one process (see CONTRACTS.md §1).
     stl_path: NotRequired[str]
@@ -219,6 +223,9 @@ class PrintJobState(TypedDict):
     orientation_candidates: NotRequired[tuple[Orientation, ...]]
     laid_traits: NotRequired[tuple[str, ...]]
     orientation_lessons: NotRequired[tuple[GivenLesson, ...]]
+    #: The part's context from its design run or a sidecar: its fits, seen faces, the side it's
+    #: laid on and its holds (mqucifer/print-shop#130).
+    part_context: NotRequired[PartContext]
 
     #: What the slicer actually did, which is not always what was decided.
     #: Every key a node returns must be declared here — LangGraph silently
