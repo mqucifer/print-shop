@@ -408,7 +408,7 @@ Both read one file, JSON, written by whoever designs the parts (`bench/assembly.
   - **Laid across its layers:** under 5 kg the beam's root is at 1.085%. Printed flat, that's along its layers, within 5.1%, and 0.599% across them: `OK`. Printed standing on its end, 1.081% is across its layers, over 1%: `FAIL`, saying to lay it so its layers run along the pull.
   - **A block on a slab,** touching, 2 kg on its top: pushed together by 19.61 N through the faces' middle, needing no friction. Pulled up, or pushed sideways, `FAIL`.
   - **A top on four legs,** each bolted, standing on the floor, 3 kg at its middle: each leg's joint carries 7.3 to 7.4 N, 29.4 in all. 20,000 elements, 12 s for both solves.
-  - **At the table's planned size** (a 400 mm top as four tiles on four legs 40 mm square and 520 tall, 8 parts and 8 joints, drawn from the roadmap's round figures only, `big.py` in the same folder): 32,000 elements at a 10 mm mesh, 20 s for both solves, inside the container's 3 GiB.
+  - **At the table's planned size** (a 400 mm top as four tiles on four legs 40 mm square and 520 tall, 8 parts and 8 joints, drawn from the roadmap's round figures only, `big.py` in the same folder): 32,000 elements at a 10 mm mesh, 20 s for both solves, inside the container's 3 GiB. Its bolts hold 44.6 N at most, and it reads `UNREAD`: its inserts have no figure.
 
 ### `fit-bed`
 
