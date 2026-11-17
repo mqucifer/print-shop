@@ -360,14 +360,15 @@ def enclosed(found: Map, row: dict[str, Any]) -> tuple[bool, float]:
 
 def lone_lead(found: Map, drawn: Pixels) -> list[dict[str, Any]]:
     """Dead ends by the map's pixels: each stretch of lead with one piece's glass, and nothing
-    else, within a lead's width all round, with how long it is and how wide at its widest."""
+    else, within a lead and a quarter all round, with how long it is and how wide at its widest."""
     from scipy import ndimage
 
     ids = drawn.ids
     lead = ids == 0
     if not lead.any():
         return []
-    radius = max(1, round(found.lead_mm * drawn.px_per_mm))
+    # A lead and a quarter, and a pixel: lead at one side of a usual line sees across it.
+    radius = max(1, round(1.25 * found.lead_mm * drawn.px_per_mm) + 1)
     big = int(ids.max()) + 2
     # Outside the panel is its own neighbour, so lead along the edge isn't alone with a piece.
     high = np.where(ids < 0, big, ids)
@@ -389,6 +390,11 @@ def lone_lead(found: Map, drawn: Pixels) -> list[dict[str, Any]]:
             {
                 "piece": int(most[window][mine][0]),
                 "at": drawn.at(window[0].start + centre[0], window[1].start + centre[1]),
+                # A pixel of the stretch itself: its middle may lie in the piece it runs round.
+                "on": drawn.at(
+                    window[0].start + float(np.argwhere(mine)[0][0]),
+                    window[1].start + float(np.argwhere(mine)[0][1]),
+                ),
                 "length_mm": round(math.hypot(height, width) * drawn.mm, 3),
                 "across_mm": 2.0 * float(half[window][mine].max()) * drawn.mm,
             }
@@ -434,7 +440,7 @@ def _dead_ends_differ(
         ]
         # Along a thick line between two pieces, the lead on each side is nearer its own
         # piece: that's the line's width, which the lead's widest point reads, and no dead end.
-        here = shapely.Point(r["at"])
+        here = shapely.Point(r["on"])
         beside = any(
             o.id != r["piece"] and o.shape.distance(here) <= 3.0 * lead for o in found.pieces
         )
@@ -520,9 +526,9 @@ def necks(shape: Any, step: float, limits: Limits) -> dict[str, Any]:
     `--min-width` wide on one side of it only, and a neck is one with it on both, by a cut
     across the place.
 
-    **The second check** is `layout`'s rays square to each edge, where they measure the same
-    thing: from one of the place's two sides to the other, each end within the place's own
-    width or a millimetre of its. There the two
+    **The second check**, of a place under `--min-neck`, is `layout`'s rays square to each
+    edge, where they measure the same thing: from one of the place's two sides to the other,
+    each end within the place's own width or a millimetre of its. There the two
     must agree, to what two such readings can differ by. Where the rays' narrowest is somewhere
     else, they've read another place, which is said and settles nothing: on a traced scene a
     piece read 1.02 mm by the nearest points and 1.34 mm by rays, at different places, and the
@@ -549,7 +555,9 @@ def necks(shape: Any, step: float, limits: Limits) -> dict[str, Any]:
         "differs": None,
         "elsewhere": None,
     }
-    if place is None:
+    if place is None or not under(place["width_mm"], limits.min_neck):
+        # Over the limit there's no neck to judge, and the widest way across a wide piece is
+        # no one place for two readings to agree on.
         return found
     # The same place is the same two sides: a ray whose ends are each within reach of one
     # of the place's own. A ray through its middle to sides further off is another width.
