@@ -126,6 +126,26 @@ def test_a_neck_is_the_nearest_facing_points_and_rays_elsewhere_settle_nothing(
     assert necked["narrowest_by_rays_mm"] == pytest.approx(necked["narrowest_mm"], abs=0.1)
 
 
+def test_two_methods_both_under_the_limit_at_different_figures_are_a_neck(bench: Any) -> None:
+    """0.854 mm by the nearest points and 1.1 mm by rays, at one place, both under 1.2: they
+    agree it's a neck, so it's `FAIL` with `neck` at the nearest points' figure, and the rays'
+    figure is said with the gap. It was `DISAGREE`."""
+    answer = bench("pieces", "check", "stepped.json")
+    assert answer.verdict == "FAIL" and answer.code == 1, answer.text
+    assert ("neck", 1) in flags_of(answer)
+    (row,) = answer.numbers["pieces"]
+    assert row["narrowest_mm"] == pytest.approx((0.3**2 + 0.8**2) ** 0.5, abs=0.01)
+    assert row["narrowest_by_rays_mm"] == pytest.approx(1.1, abs=0.01)
+    assert "Rays square to its edges read 1.10 mm there, 0.25 mm more, under the limit" in (
+        answer.text
+    )
+    # On opposite sides of the limit there's no answer: at 1.0 the nearest points say a neck
+    # and the rays say none.
+    split = bench("pieces", "check", "stepped.json", "--min-neck", 1.0)
+    assert split.verdict == "DISAGREE" and split.code == 2, split.text
+    assert "under --min-neck 1" in split.record["why"] and "not under it" in split.record["why"]
+
+
 def test_lines_joined_to_no_other_are_matched_by_place_not_by_count(bench: Any) -> None:
     """Three lines inside one piece: one too thin for a pixel to show, and two a hair apart
     that the pixels show as one body. Three by the outlines and one by the pixels was

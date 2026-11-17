@@ -432,12 +432,9 @@ def _dead_ends_differ(
     for r in pixel_rows:
         if r["length_mm"] < (DEAD_END + 2.5) * lead or r["across_mm"] > 1.5 * lead:
             continue
-        near = [
-            g
-            for g in all_gaps
-            if g["piece"] == r["piece"]
-            and math.dist(g["at"], r["at"]) <= g["length_mm"] + r["length_mm"] + 2.0 * lead
-        ]
+        # By where it lies: within two leads of a gap's own shape, whichever piece's.
+        spots = shapely.MultiPoint([r["at"], r["on"]])
+        near = [g for g in all_gaps if g["shape"].distance(spots) <= 2.0 * lead]
         # Along a thick line between two pieces, the lead on each side is nearer its own
         # piece: that's the line's width, which the lead's widest point reads, and no dead end.
         here = shapely.Point(r["on"])
@@ -574,12 +571,15 @@ def necks(shape: Any, step: float, limits: Limits) -> dict[str, Any]:
     if here:
         same = min(here, key=lambda r: r["width"])
         found["by_rays_mm"] = float(same["width"])
-        short = same["width"] - place["width_mm"]
-        if short < -2.0 * step - 1e-3 or short > layout.tolerance(step, same["width"]):
+        # The two differ where they land on opposite sides of the limit: one says a neck and
+        # the other none. Both under it, they agree it's a neck, and the figure is the
+        # nearest points': rays square to a curved or a stepped side read wider, as they
+        # should, and the gap is said.
+        if not under(same["width"], limits.min_neck):
             found["differs"] = (
-                f"{place['width_mm']:.3f} mm by the nearest points facing each other and "
-                f"{same['width']:.3f} mm by rays square to its edges, both at "
-                f"{piecemap.said_at(place['at'])}"
+                f"{place['width_mm']:.3f} mm by the nearest points facing each other, under "
+                f"--min-neck {limits.min_neck:g}, and {same['width']:.3f} mm by rays square to "
+                f"its edges, not under it, both at {piecemap.said_at(place['at'])}"
             )
     elif widths["rays"] is not None:
         found["elsewhere"] = (
@@ -669,7 +669,14 @@ def flag_piece(row: dict[str, Any], limits: Limits) -> list[dict[str, Any]]:
             "neck", narrow, limits.min_neck, row["narrowest_at"],
             f"piece {number} has a thin neck: {said(narrow, limits.min_neck, 2)} mm across at "
             f"{piecemap.said_at(row['narrowest_at'])}, under {limits.min_neck:g} mm, with glass "
-            f"{limits.min_width:g} mm wide or wider on both sides of it",
+            f"{limits.min_width:g} mm wide or wider on both sides of it"
+            + (
+                f". Rays square to its edges read {row['narrowest_by_rays_mm']:.2f} mm there, "
+                f"{row['narrowest_by_rays_mm'] - narrow:.2f} mm more, under the limit too"
+                if row["narrowest_by_rays_mm"] is not None
+                and row["narrowest_by_rays_mm"] - narrow > 0.005
+                else ""
+            ),
         )  # fmt: skip
     if row["notch_depth_mm"] is not None:
         ratio = row["notch_depth_mm"] / row["notch_mouth_mm"]

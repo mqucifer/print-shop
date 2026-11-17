@@ -213,6 +213,20 @@ def notched() -> dict[str, Any]:
     }
 
 
+def stepped() -> dict[str, Any]:
+    """The notched piece with its notches' ends closer and the upper one stepped: the nearest
+    two points are corners 0.3 mm apart along and 0.8 across, 0.854 mm, and the only rays
+    square to a side between those two ends run from the lower notch's flat end to the upper
+    one's step, 1.1 mm. Both are under 1.2 mm."""
+    found = notched()
+    found["pieces"][0]["outline"] = [
+        [1, 1], [12.3, 1], [12.3, 10.6], [13.0, 10.6], [13.0, 1], [41, 1], [41, 21],
+        [12.6, 21], [12.6, 11.7], [12.0, 11.7], [12.0, 11.4], [11.75, 11.4], [11.75, 21],
+        [1, 21],
+    ]  # fmt: skip
+    return found
+
+
 def rules(slit: bool, depth: float = 8.0) -> dict[str, Any]:
     lead = 1.2
     outlines = cells(lead)
@@ -259,7 +273,11 @@ for name, slit, depth in (
 ):
     with open(name, "w") as fh:
         json.dump(rules(slit, depth), fh)
-for name, made in (("lone.json", lone_lines()), ("notched.json", notched())):
+for name, made in (
+    ("lone.json", lone_lines()),
+    ("notched.json", notched()),
+    ("stepped.json", stepped()),
+):
     with open(name, "w") as fh:
         json.dump(made, fh)
 print("drawn")
