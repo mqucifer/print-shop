@@ -215,6 +215,7 @@ def _swap(found: Map, gone: list[int], made: list[Piece], entry: dict[str, Any])
         dict(found.source),
         [*found.history, entry],
         [f for f in found.flags if f.get("piece") not in gone],
+        dict(found.surface),
     )
 
 

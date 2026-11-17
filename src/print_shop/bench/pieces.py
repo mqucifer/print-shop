@@ -1,6 +1,7 @@
 """The `pieces` commands: a stained-glass panel as a piece map, read from a picture, checked
 against the rules glass cutting follows, fixed as a glass cutter would, and built into a frame
-and panes (mqucifer/print-shop#152, mqucifer/print-shop#153).
+and panes (mqucifer/print-shop#152, mqucifer/print-shop#153). A dome's map comes from rules, and
+is cut into flat slices (mqucifer/print-shop#154).
 
     pieces trace IMAGE --width MM       a picture's pieces, as a piece map
     pieces check MAP                    the map against glass-cutting rules, each a figure
@@ -9,6 +10,10 @@ and panes (mqucifer/print-shop#152, mqucifer/print-shop#153).
     pieces extend MAP --at X,Y          a dead-end line runs on to the next line or edge
     pieces drop-line MAP --at X,Y       a line is taken out, and the glass each side joins
     pieces build MAP --thickness T ...  the frame and a pane file for each colour
+    pieces dome --diameter D --height H --repeats N --bands FILE
+                                        a dome shade's pieces from rules, as a piece map
+    pieces flatten MAP --slices N       a dome's map cut into flat slices, each its own map,
+                                        with the bend at each fold
 
 On the first test from a traced scene a run spent about 250 calls writing its own geometry code
 before its plan, then ran one morphological opening over every piece in place of a merge, and
@@ -22,7 +27,9 @@ from typing import Any
 
 from .pieces_build import run_build
 from .pieces_check import run_check
+from .pieces_dome import run_dome
 from .pieces_fix import run_drop_line, run_extend, run_merge, run_split
+from .pieces_flatten import run_flatten
 from .pieces_trace import run_trace
 from .report import Report
 
@@ -40,5 +47,9 @@ def run(args: Any, report: Report) -> None:
         run_extend(args, report)
     elif args.action == "drop-line":
         run_drop_line(args, report)
+    elif args.action == "dome":
+        run_dome(args, report)
+    elif args.action == "flatten":
+        run_flatten(args, report)
     else:
         run_build(args, report)

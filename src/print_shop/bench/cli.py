@@ -838,6 +838,80 @@ def parser() -> Parser:
     trace.add_argument(
         "--to", metavar="FILE", help="the map's file: IMAGE's name with .pieces.json unless given"
     )
+    dome = action.add_parser(
+        "dome",
+        help="a dome shade's pieces from rules, as a piece map: one motif repeated round it, "
+        "in bands from its top to its hem",
+    )
+    dome.add_argument(
+        "--diameter", type=float, required=True, metavar="D", help="across at the hem, in mm"
+    )
+    dome.add_argument(
+        "--height", type=float, required=True, metavar="H", help="from the hem to the top, in mm"
+    )
+    dome.add_argument(
+        "--repeats", type=int, required=True, metavar="N", help="times the motif goes round"
+    )
+    dome.add_argument(
+        "--bands",
+        required=True,
+        metavar="FILE",
+        help="the bands from the top to the hem, as JSON: each its height down the dome, its "
+        "pattern (grid, swag, jewels, strip, triangles or scallop) and its cells' colours",
+    )
+    dome.add_argument(
+        "--top",
+        type=float,
+        metavar="MM",
+        help="the opening at the top, across, in mm (a fifth of the diameter unless given)",
+    )
+    dome.add_argument("--to", metavar="FILE", help="the map's file: dome.pieces.json unless given")
+    flatten = action.add_parser(
+        "flatten",
+        help="a dome's map cut along lead lines into slices, each laid flat as its own piece "
+        "map, with the angle each fold bends through",
+    )
+    flatten.add_argument("map", help="the dome's piece map, as `pieces dome` wrote it")
+    flatten.add_argument(
+        "--slices",
+        type=int,
+        metavar="N",
+        help="how many slices, cut evenly round from the map's x = 0 (the map's repeats "
+        "unless given)",
+    )
+    flatten.add_argument(
+        "--rows",
+        type=int,
+        metavar="R",
+        help="how many flat rows a slice is: it folds at R - 1 of the lead lines that run all "
+        "the way round, those that leave it nearest the dome (every such line unless given)",
+    )
+    flatten.add_argument(
+        "--bed",
+        type=_xy,
+        metavar="X,Y",
+        help="the bed each slice has to fit, in mm (256,256 unless given)",
+    )
+    flatten.add_argument(
+        "--tolerance",
+        type=float,
+        default=0.01,
+        metavar="MM",
+        help="how far a slice bent back by its angles may be from the dome's own corners and "
+        "flats, in mm (0.01 unless given)",
+    )
+    flatten.add_argument(
+        "--max-off",
+        type=float,
+        metavar="MM",
+        help="the furthest a flat row may stand from the curved dome, in mm: a reading with "
+        "no limit unless given",
+    )
+    flatten.add_argument(
+        "--to",
+        metavar="NAME",
+        help="the slices' files are NAME.slice-01.pieces.json and so on: MAP's name unless given",
+    )
     pieces.add_argument("--pieces-out", dest="out_pieces", default="pieces", help=argparse.SUPPRESS)
     render = sub.add_parser("render", help="pictures from the standard views")
     render.add_argument("files", nargs="*")
