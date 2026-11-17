@@ -29,6 +29,8 @@ is a Sponsor's scene or anything from one (mqucifer/print-shop#152, mqucifer/pri
   piece, so the pixels show the two as one stretch of lead.
 - `stairs.json`: a piece whose slanted side is a pixel's steps, 0.228 mm each, as a traced edge
   that was never read as a line.
+- `close.json`: the rules' map with two pieces 0.2 mm apart along 6 mm, lead under a nozzle's
+  width, and one piece 0.25 mm from the panel's edge, which the frame's border backs.
 - `hairs.json`: two cuts two microns wide whose ends face each other, which the
   outline has and no pixel shows.
 """
@@ -448,6 +450,19 @@ def stairs() -> dict[str, Any]:
     }
 
 
+def close() -> dict[str, Any]:
+    """The rules' map with a tab on piece 1's right side, 6 mm tall, that leaves 0.2 mm of lead
+    between it and piece 2, where the line is 1.2 mm; and piece 3's left side 0.25 mm in from
+    the panel's edge, where the frame's border stands outside it."""
+    found = rules(False)
+    found["pieces"][0]["outline"] = [
+        [0, 0], [29.4, 0], [29.4, 7], [30.4, 7], [30.4, 13], [29.4, 13], [29.4, 19.4], [0, 19.4],
+    ]  # fmt: skip
+    found["pieces"][2]["outline"] = [[0.25, 20.6], [29.4, 20.6], [29.4, 40], [0.25, 40]]
+    del found["source"]
+    return found
+
+
 def rules(slit: bool, depth: float = 8.0) -> dict[str, Any]:
     lead = 1.2
     outlines = cells(lead)
@@ -506,6 +521,7 @@ for name, made in (
     ("thin_lines.json", thin_lines()),
     ("quiet.json", quiet()),
     ("joined.json", joined()),
+    ("close.json", close()),
     ("stairs.json", stairs()),
     ("edge.json", edge()),
 ):

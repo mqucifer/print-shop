@@ -292,6 +292,7 @@ piece that breaks a rule, with where. Each flag has its fix:
 | `notch` | a notch deeper than it's wide | `pieces split` from the notch's end to the piece's far edge |
 | `gradient` | a colour that runs across one piece | `pieces split` where it changes, or keep it one colour and say so |
 | `wide-lead` | a patch of lead, not a line | `pieces merge` the pieces round it |
+| `thin-lead` | lead between two pieces under a nozzle's width, 0.4 mm: the frame's wall there wouldn't print, and `thin` would fail on it | `pieces merge MAP A B` joins the two, or draw the line wider and trace again |
 
 - **Each fix is one piece's, and you choose it.** A filter over every piece is not a fix: an
   opening, a closing, a buffer in and out or a simplification run over all of them rounds every

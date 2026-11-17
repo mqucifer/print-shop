@@ -88,7 +88,7 @@ def test_a_map_from_rules_reads_clean_and_its_share_is_arithmetic(bench: Any) ->
     assert answer.numbers["lead_widest_mm"] == pytest.approx(1.2 * 2**0.5, abs=0.02)
     assert answer.numbers["source_glass_share_pct"] == 95.06
     assert answer.numbers["flags"] == dict.fromkeys(answer.numbers["flags"], 0)
-    assert len(answer.record["second_check"]) == 3
+    assert len(answer.record["second_check"]) == 4
     assert (bench.work / answer.numbers["picture"]).is_file()
     assert not reports.unlike("pieces", answer.numbers)
 
@@ -205,6 +205,29 @@ def test_a_dead_end_is_matched_to_the_pixels_by_where_it_lies(bench: Any) -> Non
     assert [f["flag"] for f in answer.numbers["flagged"]] == ["dead-end"] * 2
     assert {end["kind"] for end in answer.numbers["dead_ends"]} == {"slit", "island"}
     assert not [n for n in answer.record["notes"] if "lone lead" in n], "read, not excused"
+
+
+def test_lead_under_a_nozzles_width_is_flagged_before_anything_is_built(bench: Any) -> None:
+    """mqucifer/print-shop#161: a frame built from a traced scene failed `thin` at ten places,
+    the thinnest 0.135 mm, and the map had 17 pairs of pieces under 0.4 mm apart: lead no
+    nozzle prints. `pieces check` reads it on the map, each place with its two pieces, how
+    wide and where, and its fix. Here two pieces are 0.2 mm apart. A third is 0.25 mm from the
+    panel's edge, which isn't flagged: the frame's border stands outside it."""
+    answer = bench("pieces", "check", "close.json")
+    assert answer.verdict == "FAIL" and answer.code == 1, answer.text
+    assert flags_of(answer) == {("thin-lead", 1)}
+    (between,) = answer.numbers["flagged"]
+    assert between["figure"] == pytest.approx(0.2, abs=1e-6) and between["limit"] == 0.4
+    assert between["at"][0] == pytest.approx(30.5, abs=0.01) and 7 <= between["at"][1] <= 13
+    assert "the lead between pieces 1 and 2 is 0.20 mm" in answer.text
+    assert "`pieces merge MAP 1 2` joins them" in answer.text
+    assert answer.numbers["limits"]["min_lead_mm"] == 0.4
+    assert "1 place(s) where the lead is under --min-lead 0.4 mm" in answer.text
+    # A limit under it reads none; the merge takes the line out, and its flag with it.
+    assert bench("pieces", "check", "close.json", "--min-lead", 0.15).verdict == "OK"
+    merged = bench("pieces", "merge", "close.json", 1, 2, "--to", "close-1.json")
+    assert merged.verdict == "OK", merged.text
+    assert bench("pieces", "check", "close-1.json").verdict == "OK"
 
 
 def test_a_second_reading_is_said_only_where_a_rule_flags_the_place(bench: Any) -> None:
@@ -406,6 +429,16 @@ def test_a_piece_with_dark_specks_in_it_is_traced_as_smooth_as_any(bench: Any) -
     )  # fmt: skip
     assert built.verdict == "OK", built.text
     assert built.numbers["frame_faces"] < 900, "it was 1,686 with two outlines of pixel steps"
+    # A lip is the lip asked for or up to --fit wider, never narrower: `capture`, at the rim
+    # asked for, read 1.177 mm for 1.2 on one pane, where an opening fitted to its inset stood
+    # up to --fit off between two points.
+    held = bench(
+        "capture", built.numbers["glass"]["frame"], "--pocket-z", 1.3, "--clearance", 0.25,
+        "--pane-thickness", 1, "--full-rim", 1.2, "--least-rim", 0.6, "--min-visible", 1,
+        "--panes", 20,
+    )  # fmt: skip
+    assert held.verdict == "OK", held.text
+    assert held.numbers["least_lip_mm"] >= 0.94, "1.2 mm less the play, to capture's reading"
 
 
 def test_a_picture_with_nothing_dark_or_too_small_has_no_answer(bench: Any) -> None:

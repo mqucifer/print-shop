@@ -13,7 +13,7 @@ drawn at. Don't edit a map by hand or with code of yours: each command writes a 
 | Command | Answers |
 |---|---|
 | `pieces trace PICTURE --width MM [--palette blue,red,gold=#f5c832] [--dark N] [--to FILE]` | the picture's pieces as a map, `PICTURE's name.pieces.json`: the panel is the picture inside its dark outer frame, MM wide; the lead is its dark pixels; each patch of colour between is a piece, numbered a row at a time from the top-left, in the nearest colour of `--palette`. Its picture comes to you: the picture, and beside it the map with each piece numbered and each rule break marked |
-| `pieces check MAP [--min-width MM] [--min-area MM2] [--min-neck MM] [--max-notch R] [--max-colour-run N] [--max-lead MM]` | the map against glass-cutting rules: each flag with its piece, its figure, its limit and where; the glass share against the trace's; the lead's widest point. `FAIL` with any flag, `OK` with none |
+| `pieces check MAP [--min-width MM] [--min-area MM2] [--min-neck MM] [--max-notch R] [--max-colour-run N] [--max-lead MM] [--min-lead MM]` | the map against glass-cutting rules: each flag with its piece, its figure, its limit and where; the glass share against the trace's; the lead's widest point. `FAIL` with any flag, `OK` with none |
 | `pieces merge MAP A B [--to FILE]` | piece A joins its neighbour B, which keeps its number and colour, and the line between them is glass. Refused when they don't touch, naming A's neighbours |
 | `pieces split MAP ID --line x1,y1,x2,y2,... [--lead MM] [--to FILE]` | a new lead line across piece ID along those points, from one of its edges to another: the largest part keeps the number, each other takes a new one |
 | `pieces extend MAP --at X,Y [--aim X,Y] [--to FILE]` | the dead-end line at X,Y runs straight on, or toward `--aim`, until it leaves the piece's glass: the piece is cut in two |
@@ -25,7 +25,7 @@ drawn at. Don't edit a map by hand or with code of yours: each command writes a 
 
 ## Reading them
 
-- **The limits** are the bench's unless you give the request's: a sliver is under 3 mm at its widest, a small piece under 25 mm², a neck under 1.2 mm with glass 3 mm wide on both sides, a notch deeper than its mouth is wide, a gradient a run of more than 40 of 255, and wide lead over three times the map's usual lead.
+- **The limits** are the bench's unless you give the request's: a sliver is under 3 mm at its widest, a small piece under 25 mm², a neck under 1.2 mm with glass 3 mm wide on both sides, a notch deeper than its mouth is wide, a gradient a run of more than 40 of 255, wide lead over three times the map's usual lead, and thin lead under 0.4 mm between two pieces, a nozzle's width.
 - **Specks aren't dead ends.** `pieces trace` fills a dark speck inside one piece, joined to no line and shorter than the lead is wide, as that piece's glass, and says how many (`specks_filled`). Each `dead-end` left is a real line: fix each.
 - **A spur isn't a neck.** A thin end of a piece, with wide glass on one side of it only, isn't flagged: the pane and the opening simply lose it, and `pieces build` says how much glass that was.
 - **`--at` is a point on the line,** as `pieces check` gives each dead end's: its end in the glass, or anywhere along it.

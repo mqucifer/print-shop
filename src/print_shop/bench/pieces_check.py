@@ -39,6 +39,13 @@ sides of a limit, each beyond the other's resolution (`limits.apart`).
 - **`wide-lead`**, lead wider than `--max-lead` at its widest. By the largest circle that fits
   in the lead, and by the furthest a lead pixel is from glass.
 
+- **`thin-lead`**, lead between two pieces narrower than `--min-lead`, a nozzle's width: no
+  nozzle prints it, and the frame built from the map has a wall that thin between two
+  pockets. By the nearest the two outlines come. And by twice the pixels' distance to the
+  glass at the middle of that place, on pixels drawn round it as a neck's are. On a traced
+  scene 17 pairs of pieces were under 0.4 mm apart, and a run learned it only from `thin` on
+  the frame it had built (mqucifer/print-shop#161).
+
 And two readings with every answer: the glass share, the pieces' area over the panel's, by
 their outlines and by their pixels, against the share the map's source had; and the lead's
 widest point.
@@ -60,7 +67,10 @@ from .piecemap import Map, Piece, Pixels
 from .report import Report
 
 #: The flags, in the order a reply says them.
-FLAGS = ("dead-end", "surrounds", "sliver", "small", "neck", "notch", "gradient", "wide-lead")
+FLAGS = (
+    "dead-end", "surrounds", "sliver", "small", "neck", "notch", "gradient", "wide-lead",
+    "thin-lead",
+)  # fmt: skip
 #: The limits when none is given. A piece under 3 mm across or 25 mm² can't be handled, and a
 #: place under 1.2 mm leaves no pane once its play and lips are taken: the operator's tracer's
 #: figures, on the first traced scene (2026-11-17).
@@ -74,6 +84,10 @@ MAX_COLOUR_RUN = 40.0
 #: Lead wider than this many of its usual width is a patch, not a line: where three lines meet
 #: it's up to one and a half.
 MAX_LEAD = 3.0
+#: Lead under this, in mm, is under a nozzle's width: `pieces build` and `thin` hold 0.4 mm.
+MIN_LEAD = 0.4
+#: Thin places of the lead said one by one, at most a map: the rest are counted.
+THIN_SAID = 40
 #: A gap is a dead end from this many lead widths deep: shallower is a corner's own shape.
 DEAD_END = 1.5
 #: A body of lead shows in the map's pixels where it's this share of the usual lead wide.
@@ -111,6 +125,7 @@ class Limits:
     max_notch: float = MAX_NOTCH
     max_colour_run: float = MAX_COLOUR_RUN
     max_lead: float | None = None
+    min_lead: float = MIN_LEAD
 
     def lead(self, usual: float) -> float:
         return self.max_lead if self.max_lead is not None else MAX_LEAD * usual
@@ -130,6 +145,7 @@ def limits_of(args: Any) -> Limits:
         given("max_notch", MAX_NOTCH),
         given("max_colour_run", MAX_COLOUR_RUN),
         getattr(args, "max_lead", None),
+        given("min_lead", MIN_LEAD),
     )
 
 
@@ -747,6 +763,71 @@ def necks(shape: Any, step: float, limits: Limits, map_mm: float) -> dict[str, A
     return found
 
 
+def thin_lead(
+    found: Map, limits: Limits, map_mm: float, only: list[int] | None
+) -> tuple[list[dict[str, Any]], list[str], list[str]]:
+    """Each two pieces with lead between them narrower than `--min-lead`, at the nearest they
+    come. As flags, narrowest first, with where the pixels' reading of the same place differs,
+    and what's worth a note. Lead between a piece and the panel's edge isn't read: the
+    frame's border stands outside it, so the wall there is the border and that lead."""
+    least = limits.min_lead
+    places: list[tuple[float, Piece, Piece, np.ndarray, np.ndarray]] = []
+    shapes = [p.shape for p in found.pieces]
+    tree = shapely.STRtree(shapes)
+    for a, b in tree.query(shapes, predicate="dwithin", distance=least).T:
+        if a >= b:
+            continue
+        one, two = found.pieces[int(a)], found.pieces[int(b)]
+        if only is not None and one.id not in only and two.id not in only:
+            continue
+        ends = shapely.get_coordinates(shapely.shortest_line(one.shape, two.shape))
+        places.append((float(math.dist(ends[0], ends[1])), one, two, ends[0], ends[1]))
+    flags: list[dict[str, Any]] = []
+    differs: list[str] = []
+    notes: list[str] = []
+    lead_shape = found.lead()
+    for width, mine, other, start, end in sorted(places, key=lambda row: row[0]):
+        if not under(width, least):
+            continue
+        middle = (start + end) / 2.0
+        between = f"pieces {mine.id} and {other.id}"
+        fix = f"`pieces merge MAP {mine.id} {other.id}` joins them and the line is glass"
+        flags.append(
+            {
+                "flag": "thin-lead",
+                "piece": mine.id,
+                "figure": width,
+                "limit": least,
+                "at": piecemap.xy(middle),
+                "said": f"the lead between {between} is {said(width, least, 2)} mm at "
+                f"{piecemap.said_at(middle)}, under the {least:g} mm a nozzle prints: {fix}, "
+                "or to keep the line, draw it wider in the picture and trace again",
+            }
+        )
+        if len(flags) > THIN_SAID:
+            continue  # counted, and read by its outline: the pixels read the first of them
+        place = {"width_mm": width, "from": start, "to": end}
+        window = shapely.Point(middle).buffer(3.0 * least + width, cap_style="square")
+        again = neck_by_pixels(lead_shape.intersection(window), place, least, map_mm)
+        how = apart(width, again["width_mm"], again["resolution_mm"], least, least=True)
+        both = (
+            f"the lead between {between} at {piecemap.said_at(middle)}: {width:.3f} mm by "
+            f"the nearest the two outlines come and {again['width_mm']:.3f} mm by twice its "
+            "pixels' distance to the glass"
+        )
+        if how == "split":
+            differs.append(
+                f"{both}, on opposite sides of --min-lead {least:g} and further apart than "
+                f"the {again['resolution_mm']:.3f} mm those pixels can tell"
+            )
+        elif how == "off":
+            notes.append(
+                f"{both}, further apart than the {again['resolution_mm']:.3f} mm those pixels "
+                f"can tell, and both under --min-lead {least:g}"
+            )
+    return flags, differs, notes
+
+
 def piece_row(
     found: Map,
     piece: Piece,
@@ -1101,6 +1182,14 @@ def read_map(found: Map, limits: Limits, only: list[int] | None = None) -> Readi
                 "lead, not a line",
             }  # fmt: skip
         )
+    thin, more, noted = thin_lead(found, limits, drawn.mm, only)
+    flags += thin
+    differs += more
+    notes += noted
+    for one in thin:
+        for row in rows:
+            if row["id"] == one["piece"] and "thin-lead" not in row["flags"]:
+                row["flags"].append("thin-lead")
     flags.sort(key=lambda f: (FLAGS.index(f["flag"]), f["piece"] or 0))
     seconds = [
         f"the glass share by the map's pixels, {drawn.px_per_mm:.1f} a mm: "
@@ -1113,6 +1202,8 @@ def read_map(found: Map, limits: Limits, only: list[int] | None = None) -> Readi
         f"{held} of {len(ends)} dead end(s) closed in by their own piece's glass, by rays from "
         "the line's end; and the map's pixels read for lead with one piece all round it, and "
         "for lead joined to no other",
+        f"{len(thin)} place(s) where the lead is under --min-lead {limits.min_lead:g} mm, each "
+        "by twice its pixels' distance to the glass at its middle",
     ]
     return Reading(rows, flags, ends, figures, seconds, differs, drawn, notes)
 
@@ -1187,6 +1278,7 @@ def say(found: Map, reading: Reading, report: Report, limits: Limits) -> None:
         "max_notch": limits.max_notch,
         "max_colour_run": limits.max_colour_run,
         "max_lead_mm": limits.lead(found.lead_mm),
+        "min_lead_mm": limits.min_lead,
     }
     report.numbers["flags"] = flag_counts(reading.flags)
     report.numbers["flagged"] = kept_flags(reading.flags)
@@ -1235,6 +1327,11 @@ def fixes_said(flags: list[dict[str, Any]]) -> str:
         )
     if "gradient" in names:
         ways.append("a gradient: `pieces split` it where the colour changes, or leave it one")
+    if "thin-lead" in names:
+        ways.append(
+            "lead under a nozzle's width: `pieces merge MAP A B` joins the two pieces and the "
+            "line is glass, or draw the line wider in the picture and trace again"
+        )
     if "wide-lead" in names:
         ways.append("a patch of lead: `pieces merge` the pieces round it, or redraw it as glass")
     return "; ".join(ways)

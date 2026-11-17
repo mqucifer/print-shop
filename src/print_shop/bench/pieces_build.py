@@ -825,15 +825,18 @@ def piece_curves(piece: Piece, lip: float, play: float, fit: float) -> dict[str,
     opening: list[Any] = [offset_ring(ring, lip) for ring in pocket]
     opening_exact = _same(opening, parts[0], 0.001 * parts[0].area + 0.01)
     if not opening_exact:
-        # Fitted within half of `fit` of an inset that much deeper, so the lip is never
-        # narrower than asked, and up to `fit` wider.
+        # An inset half of `fit` deeper, fitted within a quarter of `fit` of its points, which
+        # is half of `fit` of the sides between them: so the lip is never narrower than
+        # asked, and up to `fit` wider. Fitted within half of `fit` of its points, a side
+        # stood up to `fit` off, and a lip came out 0.045 mm narrower than asked along 15 mm
+        # of a pane's edge, which `capture` failed (mqucifer/print-shop#161).
         deeper = [
             part
             for part in _inset(pocket_2d, lip + fit / 2.0)
             if not under(piecemap.widest(part, 0.02)[0], LEAST_ACROSS)
         ]
         wanted = deeper[0] if len(deeper) == 1 else parts[0]
-        opening = _rings_of(wanted.simplify(fit / 20.0), fit / 2.0, NEAR)
+        opening = _rings_of(wanted.simplify(fit / 20.0), fit / 4.0, NEAR)
     return {
         "pocket": pocket,
         "pane": pane,

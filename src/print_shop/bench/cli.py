@@ -749,6 +749,13 @@ def parser() -> Parser:
             help="lead wider than this at its widest is a patch, not a line (three times the "
             "map's usual lead unless given)",
         )
+        reads.add_argument(
+            "--min-lead",
+            type=float,
+            metavar="MM",
+            help="lead narrower than this between two pieces is under a nozzle's width "
+            "(0.4 unless given)",
+        )
     merge = action.add_parser(
         "merge", help="piece A joins its neighbour B, and the line between them goes"
     )
