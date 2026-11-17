@@ -259,21 +259,33 @@ def _smooth_ring(ring: np.ndarray) -> np.ndarray | None:
     return np.concatenate(found)
 
 
+def _stepless(ring: np.ndarray) -> np.ndarray:
+    """A ring of pixel edges less each point within a stair's height of the line through its
+    neighbours, where three points or more are left: else as it is."""
+    plain = np.asarray(shapely.LinearRing(ring).simplify(STAIR_PX).coords)[:-1]
+    return plain if len(plain) >= 3 else ring
+
+
 def _smooth(shape: Any) -> Any:
     """A patch's pixel outline with its stairs read as lines and curves, where that's still
-    one valid piece within a pixel's width of the pixels; else as it is."""
+    one valid piece within a pixel's width of the pixels; else its pixels' edges less their
+    steps; and its pixels' own edges only where that isn't a valid piece either.
+
+    Each ring is read on its own. A ring too short to have a corner read on it, a dark speck
+    inside the patch a few pixels across, is kept less its steps, and the rest are smoothed.
+    One such ring used to leave the whole patch as its pixels' edges, a step at every pixel:
+    on a traced scene with 55 specks, four pieces of 457 to 1,173 points
+    (mqucifer/print-shop#161)."""
     rings = []
     for ring in (shape.exterior, *shape.interiors):
-        smooth = _smooth_ring(np.asarray(ring.coords)[:-1])
-        if smooth is None or len(smooth) < 3:
-            return shape
-        rings.append(smooth)
+        points = np.asarray(ring.coords)[:-1]
+        smooth = _smooth_ring(points)
+        rings.append(smooth if smooth is not None and len(smooth) >= 3 else _stepless(points))
     made = shapely.Polygon(rings[0], rings[1:])
-    if not made.is_valid or made.geom_type != "Polygon":
-        return shape
-    near = made.boundary.hausdorff_distance(shape.boundary) <= OFF_PX
-    if near and made.symmetric_difference(shape).area <= 1.0 * shape.length:
-        return made
+    if made.is_valid and made.geom_type == "Polygon":
+        near = made.boundary.hausdorff_distance(shape.boundary) <= OFF_PX
+        if near and made.symmetric_difference(shape).area <= 1.0 * shape.length:
+            return made
     # Smoothing lost the pixels somewhere, as at a neck a few pixels wide: the pixels' own
     # edges then, less each point within a stair's height of the line through its neighbours.
     plain = shape.simplify(STAIR_PX, preserve_topology=True)
@@ -295,10 +307,9 @@ def _parted(pieces: list[Piece], raw: list[Any], mm: float) -> set[int]:
     what they share and half a pixel round it, so a line a pixel wide lies between them again
     and both stay smooth. With the pieces it changed.
 
-    Each kept its pixels' own edges before: an outline of pixel steps, a thousand points round
-    a large piece. On a traced scene at 4.4 pixels a mm six of 53 pieces were that, and the
-    frame built from them was 47 MB and 10,608 faces (mqucifer/print-shop#161). A piece's
-    steps also stood past its neighbour's smoothed outline, so a picture with lines one pixel
+    Each kept its pixels' own edges before: an outline of pixel steps, hundreds of points
+    round a large piece (mqucifer/print-shop#161). A piece's steps also stood past its
+    neighbour's smoothed outline, so a picture with lines one pixel
     wide all over had no answer: its pieces overlapped. A piece that can't be parted this
     way, as it would be cut in two, keeps its pixels' edges less their steps, and its pixels'
     own edges only if that crosses too."""

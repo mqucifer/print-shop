@@ -380,6 +380,34 @@ def test_outlines_that_cross_over_a_thin_line_are_parted_and_stay_smooth(bench: 
     assert built.numbers["frame_faces"] < 900, "it was 1,341 with two outlines of pixel steps"
 
 
+def test_a_piece_with_dark_specks_in_it_is_traced_as_smooth_as_any(bench: Any) -> None:
+    """mqucifer/print-shop#161: the same 20 curved pieces, every line 4 pixels wide, with five
+    dark specks two pixels across inside two of them. A speck's own ring is too short to read
+    a corner on, and that left the whole piece as its pixels' edges: 314 and 282 points, 806
+    in the map, and a frame of 1,686 faces. Each ring is read on its own now."""
+    answer = bench("pieces", "trace", "speckled.png", "--width", 100, "--to", "speckled.json")
+    assert answer.verdict == "OK", answer.text
+    assert answer.numbers["specks_filled"] == 5 and answer.numbers["pieces_count"] == 20
+    saved = json.loads((bench.work / "speckled.json").read_text())
+    px = 1.0 / saved["source"]["px_per_mm"]
+    counts = [len(p["outline"]) for p in saved["pieces"]]
+    assert max(counts) < 40 and sum(counts) < 300, counts
+    assert not any(p.get("holes") for p in saved["pieces"])
+    for piece in saved["pieces"]:
+        ring = piece["outline"]
+        sides = sorted(
+            ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
+            for a, b in zip(ring, ring[1:] + ring[:1], strict=True)
+        )
+        assert sides[len(sides) // 2] > 3 * px, f"piece {piece['id']} is pixel steps"
+    built = bench(
+        "pieces", "build", "speckled.json", "--thickness", 3, "--pane", 1, "--lip", "1.2,0.6",
+        "--play", 0.25, "--build-out", "speckled",
+    )  # fmt: skip
+    assert built.verdict == "OK", built.text
+    assert built.numbers["frame_faces"] < 900, "it was 1,686 with two outlines of pixel steps"
+
+
 def test_a_picture_with_nothing_dark_or_too_small_has_no_answer(bench: Any) -> None:
     answer = bench("pieces", "trace", "clean.png", "--width", 120, "--dark", 3)
     assert answer.verdict == "NO ANSWER" and "no dark lines" in answer.record["why"]

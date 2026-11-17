@@ -6,6 +6,8 @@ is a Sponsor's scene or anything from one (mqucifer/print-shop#152, mqucifer/pri
 - `hills.png`: curved bands, slanted uprights and a round sun, for curves built as curves.
 - `thin_line.png`: curved bands and uprights at 5 pixels a mm, their lines 4 pixels wide but
   one band's, which is one pixel wide (mqucifer/print-shop#161).
+- `speckled.png`: that picture with every line 4 pixels wide, and five dark specks two pixels
+  across inside two of its curved pieces.
 - `margin.png`: the clean panel with a white margin round its frame, specks in the margin, and
   the frame's top uneven.
 - `specks.png`: the clean panel with clusters of dark specks inside its cells, and one real line
@@ -160,10 +162,11 @@ def hills() -> Any:
     return im
 
 
-def thin_line() -> Any:
+def thin_line(thin: int = 1, specks: bool = False) -> Any:
     """100 x 70 mm at 5 pixels a mm: four curved bands and three uprights in each strip, 20
-    pieces. Every line is 4 pixels wide but the second band's, which is one: the two smoothed
-    outlines either side of it cross, as a pixel is all that lies between them."""
+    pieces. Every line is 4 pixels wide but the second band's, which is `thin`, one: the two
+    smoothed outlines either side of it cross, as a pixel is all that lies between them. With
+    `specks`, five dark specks two pixels across lie inside two of the pieces."""
     s, w, h, f = 5, 100, 70, 8
     im = Image.new("RGB", (w * s + 2 * f, h * s + 2 * f), DARK)
     d = ImageDraw.Draw(im)
@@ -184,7 +187,8 @@ def thin_line() -> Any:
     for curve, colour in zip(bands, (WHITE, GREEN, GOLD, RED), strict=True):
         d.polygon([at(*p) for p in along(curve)] + [at(w, h), at(0, h)], fill=colour)
     for n, curve in enumerate(bands):
-        d.line([at(*p) for p in along(curve)], fill=DARK, width=1 if n == 1 else 4, joint="curve")
+        wide = thin if n == 1 else 4
+        d.line([at(*p) for p in along(curve)], fill=DARK, width=wide, joint="curve")
     edges: list[Any] = [lambda x: -3.0, *bands, lambda x: h + 3.0]
     for k, (low, high) in enumerate(zip(edges, edges[1:], strict=False)):
         for x, lean in ((22 + 7 * k, 6.0), (55 - 4 * k, -7.0), (80 + 2 * k, 3.0)):
@@ -193,6 +197,10 @@ def thin_line() -> Any:
                 for t in [j / 60 for j in range(61)]
             ]
             d.line([at(*p) for p in points], fill=DARK, width=4, joint="curve")
+    if specks:
+        for x, y in ((10, 22), (14, 25), (9, 27), (45, 40), (48, 37)):
+            cx, cy = at(x, y)
+            d.rectangle([cx, cy, cx + 1, cy + 1], fill=DARK)
     return im
 
 
@@ -478,6 +486,7 @@ clean().save("clean.png")
 broken().save("broken.png")
 hills().save("hills.png")
 thin_line().save("thin_line.png")
+thin_line(4, specks=True).save("speckled.png")
 margin().save("margin.png")
 specks().save("specks.png")
 for name, slit, depth in (
