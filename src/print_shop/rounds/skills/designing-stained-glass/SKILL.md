@@ -357,8 +357,11 @@ a flat panel. Steps 2, 3 and 5 are these, in this order:
 - **A flag on a slice is fixed in the bands file,** so every slice gets it: a sliver wants fewer
   columns or a taller band, a neck beside a jewel a smaller jewel or a taller band. Then make
   the dome and cut it again. A fix on one slice leaves the other slices as they were.
+- **Look at `dome`'s picture** before going on: the dome from the side and from above, and
+  one slice laid flat. A shade is judged by eye, so show it at the layout's stop.
 - **`flatten`'s reply** says which slices are the same map (`alike`): check and build one of
-  each group. It gives each fold's height and the angle it bends through, and how far the flat
-  rows stand from the curved dome. Bending and joining the slices isn't this step.
+  each group. It gives each fold's height and the angle it bends through, how many flat rows
+  a slice is, and how far they stand from the curved dome, with what fewer rows would give
+  (`--rows`). Bending and joining the slices isn't this step.
 - **Build with the border the reply gives,** half the lead: the frame's edge is then the middle
   of the cut line, and two slices meet in one line. Then run step 6's checks on what it built.

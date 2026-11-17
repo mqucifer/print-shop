@@ -36,6 +36,10 @@ flat, and those are what they read.
 **Second method.** The glass's share of the dome by each outline's own area on it, summed along
 the outline, against the map's pixels each weighed by the dome's radius at its row. And the
 pixels' separate patches of glass against the pieces, with the lead between them one body.
+
+**The picture** comes with the map, as a trace's does, since a shade is judged by eye: the
+dome in its colours from the side and from over it, one slice of its repeats laid flat with
+its pieces numbered and each fold's bend, and the map itself.
 """
 
 from __future__ import annotations
@@ -84,6 +88,8 @@ SUM_OFF = 0.05
 #: half a pixel's width along every outline, and this many points.
 SHARE_SLACK = 0.05
 PICTURE_PX = 1500
+#: The second view of the dome is from this many degrees over level.
+ABOVE = 35.0
 FORMAT = (
     'a bands file is JSON: {"lead_mm": 1.4, "colours": {NAME: {"rgb": [r, g, b]}}, "bands": '
     '[{"pattern": "grid", "height_mm": 40, "rows": 2, "columns": 2, "colours": ["amber", '
@@ -720,64 +726,120 @@ def by_pixels(found: Map, dome: Dome) -> dict[str, Any]:
     }
 
 
+def seen(found: Map, dome: Dome, above: float) -> dict[str, Any]:
+    """The dome as an eye sees it from one side, `above` degrees over level: each piece that
+    faces the eye, the furthest first, flat on the eye's plane; the dome's own outline; and
+    its opening. A dome bulges everywhere, so a piece that faces the eye has nothing in
+    front of it."""
+    lift = math.radians(above)
+    eye = np.array([0.0, -math.cos(lift), math.sin(lift)])
+
+    def flat(points: np.ndarray) -> np.ndarray:
+        return np.column_stack(
+            [points[:, 0], points[:, 1] * math.sin(lift) + points[:, 2] * math.cos(lift)]
+        )
+
+    shown = []
+    for piece in found.pieces:
+        places = dome.places(shapely.get_coordinates(piece.shape.exterior)[:-1])
+        lean = dome._at(places[:, 1])
+        out = np.column_stack(
+            [
+                np.cos(places[:, 0]) * np.sin(lean) / dome.a,
+                np.sin(places[:, 0]) * np.sin(lean) / dome.a,
+                np.cos(lean) / dome.b,
+            ]
+        )
+        if float(np.mean(out @ eye)) > 0:
+            points = dome.point(places[:, 0], places[:, 1])
+            shown.append((float(np.mean(points @ eye)), flat(points), piece))
+    shown.sort(key=lambda one: one[0])
+    round_it, down = np.meshgrid(
+        np.linspace(0.0, 2.0 * math.pi, 181), np.linspace(0.0, dome.length, 60)
+    )
+    body = flat(dome.point(round_it.ravel(), down.ravel()))
+    outline = shapely.get_coordinates(shapely.MultiPoint(body).convex_hull.exterior)
+    opening = flat(dome.point(np.linspace(0.0, 2.0 * math.pi, 91), np.zeros(91)))
+    return {"pieces": [(points, piece) for _far, points, piece in shown], "outline": outline,
+            "opening": opening}  # fmt: skip
+
+
 def draw(found: Map, dome: Dome, out: Path, name: str) -> str:
-    """The dome as a picture: seen from the side, and under it its map, each piece in its
-    colour."""
+    """The dome as one picture: from the side, from `ABOVE` degrees over it, and one slice
+    of its repeats laid flat with its pieces numbered and each fold's bend; and under them
+    its map, each piece in its colour and numbered."""
     from PIL import Image, ImageDraw, ImageFont
 
-    margin, gap, key_px = 16, 24, 22
-    x0, y0, x1, y1 = found.panel.bounds
-    scale = (PICTURE_PX - 2 * margin) / (x1 - x0)
-    side = min(4.0, (PICTURE_PX - 2 * margin) / (2.2 * dome.a))
-    side_tall = int(dome.b * side) + 2 * margin
-    chart_tall = int((y1 - y0) * scale)
-    height = side_tall + gap + chart_tall + margin + key_px
-    picture = Image.new("RGB", (PICTURE_PX, height), "white")
-    draw_on = ImageDraw.Draw(picture)
+    from .pieces_flatten import Rows, folds_of, paint, slice_of
+
+    margin, gap, key_px = 16, 28, 22
+    font = ImageFont.load_default(size=11)
 
     def tint(piece: Piece) -> tuple[int, ...]:
         rgb = (found.colours.get(piece.colour) or {}).get("rgb")
         return tuple(int(v) for v in rgb) if rgb else (200, 200, 200)
 
-    # From the side: the half of the dome that faces the eye, each piece where it stands.
-    middle = PICTURE_PX / 2.0
+    repeats = int(found.surface.get("repeats") or 12)
+    try:
+        rows = Rows(
+            dome, repeats, [dome.length - (low + high) / 2.0 for low, high in folds_of(found)]
+        )
+        laid = slice_of(found, dome, rows, 0, name)[0]
+    except NoAnswer:
+        laid = None
+    views = [seen(found, dome, 0.0), seen(found, dome, ABOVE)]
+    spans = [
+        (v["outline"][:, 0].min(), v["outline"][:, 1].min(), v["outline"][:, 0].max(),
+         v["outline"][:, 1].max())
+        for v in views
+    ]  # fmt: skip
+    slice_wide = laid.panel.bounds[2] if laid else 0.0
+    slice_tall = laid.panel.bounds[3] if laid else 0.0
+    wide = sum(s[2] - s[0] for s in spans) + slice_wide
+    scale = min(4.0, (PICTURE_PX - 2 * margin - 3 * gap - 50) / wide)
+    top_tall = int(max(slice_tall, *[s[3] - s[1] for s in spans]) * scale) + 2 * margin
+    x0, y0, x1, y1 = found.panel.bounds
+    chart = (PICTURE_PX - 2 * margin) / (x1 - x0)
+    height = top_tall + gap + int((y1 - y0) * chart) + margin + key_px
+    picture = Image.new("RGB", (PICTURE_PX, height), "white")
+    draw_on = ImageDraw.Draw(picture)
+    left = float(margin)
+    for view, span in zip(views, spans, strict=True):
 
-    def seen(points: np.ndarray) -> list[tuple[float, float]]:
-        return [(middle + x * side, margin + (dome.b - z) * side) for x, _y, z in points]
+        def at(points: Any, left: float = left, span: Any = span) -> list[tuple[float, float]]:
+            return [
+                (left + (x - span[0]) * scale, top_tall - margin - (y - span[1]) * scale)
+                for x, y in points
+            ]
 
-    down = np.linspace(0.0, dome.length, 200)
-    rim = np.concatenate([dome.point(0.0, down), dome.point(math.pi, down[::-1])])
-    draw_on.polygon(seen(rim), fill=(45, 45, 45))
-    for piece in found.pieces:
-        places = dome.places(shapely.get_coordinates(piece.shape.exterior)[:-1])
-        if math.sin(float(np.mean(places[:, 0]))) < -0.02:
-            draw_on.polygon(seen(dome.point(places[:, 0], places[:, 1])), fill=tint(piece))
+        draw_on.polygon(at(view["outline"]), fill=(45, 45, 45))
+        for points, piece in view["pieces"]:
+            draw_on.polygon(at(points), fill=tint(piece))
+        draw_on.polygon(at(view["opening"]), fill=(20, 20, 20))
+        left += (span[2] - span[0]) * scale + gap
+    if laid:
+        paint(draw_on, laid, left + gap, top_tall - margin, scale, font)
 
     # Its map.
-    top = side_tall + gap
+    top = top_tall + gap
 
     def px(points: Any) -> list[tuple[float, float]]:
-        return [(margin + (x - x0) * scale, top + (y1 - y) * scale) for x, y in points]
+        return [(margin + (x - x0) * chart, top + (y1 - y) * chart) for x, y in points]
 
     draw_on.polygon(px(found.panel.exterior.coords), fill=(45, 45, 45))
-    font = ImageFont.load_default(size=11)
     for piece in found.pieces:
         draw_on.polygon(px(piece.shape.exterior.coords), fill=tint(piece))
     if len(found.pieces) <= 400:
         for piece in found.pieces:
             (x, y) = px(shapely.get_coordinates(piece.shape.representative_point()))[0]
             draw_on.text(
-                (x, y),
-                str(piece.id),
-                fill=(0, 0, 0),
-                font=font,
-                anchor="mm",
-                stroke_width=2,
-                stroke_fill=(255, 255, 255),
-            )
+                (x, y), str(piece.id), fill=(0, 0, 0), font=font, anchor="mm",
+                stroke_width=2, stroke_fill=(255, 255, 255),
+            )  # fmt: skip
     key = (
-        "above: the dome from the side. Below: its map, the way round by the way up from the "
-        "hem; near the top a piece is drawn wider than it is"
+        f"above: the dome from the side, from {ABOVE:g}° over it, and one slice of {repeats} "
+        "laid flat, a fold at each magenta line with its bend. Below: its map, the way round "
+        "by the way up from the hem; near the top a piece is drawn wider than it is"
     )
     draw_on.text((margin, height - key_px + 3), key, fill=(0, 0, 0), font=font)
     out.mkdir(parents=True, exist_ok=True)
@@ -904,7 +966,11 @@ def run_dome(args: Any, report: Report) -> None:
     )
     shown = draw(found, dome, Path(args.out), Path(target).name.split(".")[0])
     report.wrote(shown)
-    report.numbers["picture"] = shown
+    report.fact(
+        "picture", shown,
+        how=f"the dome in its colours from the side and from {ABOVE:g}° over it, one slice of "
+        f"{repeats} laid flat with its pieces numbered and each fold's bend, and its map",
+    )  # fmt: skip
     report.note(
         "the map is the dome's chart: true to size up and down and round the hem, and drawn "
         "wider than the dome nearer its top. `pieces check` and `pieces build` read a flat "

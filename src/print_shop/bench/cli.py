@@ -811,6 +811,13 @@ def parser() -> Parser:
         "unless given)",
     )
     flatten.add_argument(
+        "--rows",
+        type=int,
+        metavar="R",
+        help="how many flat rows a slice is: it folds at R - 1 of the lead lines that run all "
+        "the way round, those that leave it nearest the dome (every such line unless given)",
+    )
+    flatten.add_argument(
         "--bed",
         type=_xy,
         metavar="X,Y",

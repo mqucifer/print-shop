@@ -150,6 +150,7 @@ def test_a_dome_of_three_bands_is_its_pieces_on_the_dome(bench: Any, three: Answ
     assert numbers["glass_patches"] == numbers["pieces_count"] and numbers["lead_bodies"] == 1
     assert len(three.record["second_check"]) == 2
     assert (bench.work / numbers["picture"]).is_file()
+    assert "from the side and from 35° over it, one slice of 12 laid flat" in three.text
     assert not reports.unlike("pieces", numbers)
     made = saved(bench, "three.pieces.json")
     assert made["piece_map"] == 1 and made["source"]["by"] == "pieces dome"
@@ -278,6 +279,35 @@ def test_the_flattened_slices_bent_by_their_angles_give_the_dome_back(
     assert chord - LEAD - 0.05 < width < chord - LEAD + 0.05
     assert side - 4 < length < side
     assert numbers["fits_bed"] is True and numbers["bed_mm"] == [256, 256]
+
+
+def test_fewer_rows_fold_at_the_lines_that_leave_them_nearest_the_dome(bench: Any) -> None:
+    """The six-band dome has six lines all the way round, so seven rows at most. The reply
+    says what each count costs, and `--rows` takes one of them."""
+    dome(bench, "six")
+    most = bench("pieces", "flatten", "six.pieces.json", "--to", "most")
+    table = most.numbers["rows_choice"]
+    assert [one["rows"] for one in table] == [1, 2, 3, 4, 5, 6, 7]
+    assert most.numbers["rows_count"] == 7, "every line, with no --rows"
+    assert table[6]["off_dome_mm"] == pytest.approx(most.numbers["rows_off_dome_mm"])
+    assert "rows against bends" in most.text and "7 flat row(s) of 7" in most.record["why"]
+    # A row more is never further off, and one flat row has no fold.
+    off = [one["off_dome_mm"] for one in table]
+    assert off == sorted(off, reverse=True) and table[0]["most_bend_deg"] == 0
+    sag = DIAMETER / 2 * (1 - math.cos(math.pi / REPEATS))
+    assert off[-1] > sag - 0.01 and off[0] > 5 * sag
+    four = bench("pieces", "flatten", "six.pieces.json", "--rows", 4, "--to", "four")
+    assert four.verdict == "OK", four.text
+    assert four.numbers["rows_count"] == 4 and len(four.numbers["folds"]) == 3
+    assert four.numbers["rows_off_dome_mm"] == pytest.approx(table[3]["off_dome_mm"])
+    assert max(f["bend_deg"] for f in four.numbers["folds"]) == pytest.approx(
+        table[3]["most_bend_deg"], abs=1e-4
+    )
+    assert four.numbers["corners_off_mm"] < 1e-3 and four.numbers["flats_off_mm"] < 1e-3
+    checked = bench("pieces", "check", "four.slice-01.pieces.json")
+    assert checked.verdict == "OK", checked.text
+    none = bench("pieces", "flatten", "six.pieces.json", "--rows", 8, "--to", "no")
+    assert none.verdict == "NO ANSWER" and "1 to 7 flat row(s)" in none.record["why"]
 
 
 def test_every_slice_passes_pieces_check(bench: Any, three_flat: Answer) -> None:

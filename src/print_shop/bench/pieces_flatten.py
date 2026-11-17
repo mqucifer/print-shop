@@ -37,6 +37,12 @@ angle round and nothing of the chain: each corner against its place on the dome,
 each piece against the flat through its row's three corners, and each edge against its
 neighbour's. All within `--tolerance`. How far the flat rows stand from the curved dome between
 their corners is a reading, and a limit only where `--max-off` gives one.
+
+**Rows against bends.** A slice folds at every lead line that runs all the way round, unless
+`--rows` asks for fewer: then it folds at the lines that leave its rows nearest the dome, and
+is flat across the rest. The reply says, for every count the map allows, how far the rows
+stand from the dome and the sharpest bend, so the choice is seen. More rows than the map has
+lines for come from the bands file: another band, or another row of a grid.
 """
 
 from __future__ import annotations
@@ -396,32 +402,72 @@ def read_back(path: str, rows: Rows) -> dict[str, Any]:
     return {"corners_off_mm": corners_off, "flats_off_mm": flats_off, "edges": edges}
 
 
+def span_off(dome: Dome, slices: int, low_s: float, high_s: float) -> float:
+    """How far one flat row stands from the dome it stands for, at its furthest: the row
+    between two heights down the dome, at each place across and up it, on the row and on the
+    dome."""
+    half_turn = math.pi / slices
+    across, share = np.meshgrid(np.linspace(-1.0, 1.0, ACROSS), np.linspace(0.0, 1.0, ACROSS))
+    ends = []
+    for s in (low_s, high_s):
+        radius, z = float(dome.radius(s)), float(dome.z(s))
+        ends.append(
+            np.stack(
+                [
+                    radius * math.cos(half_turn) + 0.0 * across,
+                    across * radius * math.sin(half_turn),
+                    z + 0.0 * across,
+                ],
+                axis=-1,
+            )
+        )
+    on_row = (1.0 - share)[..., None] * ends[0] + share[..., None] * ends[1]
+    on_dome = dome.point(across * half_turn, low_s - share * (low_s - high_s))
+    return float(np.linalg.norm(on_row - on_dome, axis=-1).max())
+
+
 def off_dome(rows: Rows) -> dict[str, Any]:
-    """How far a flat row stands from the dome it stands for, at its furthest: each place
-    across and up each row, on the row and on the dome."""
-    worst: dict[str, Any] = {"mm": 0.0}
-    dome = rows.dome
-    for i in range(rows.count):
-        for share in np.linspace(0.0, 1.0, ACROSS):
-            for across in np.linspace(-1.0, 1.0, ACROSS):
-                phi = rows.half_turn * (1.0 + across)
-                s = rows.s[i] - share * (rows.s[i] - rows.s[i + 1])
-                low = (1.0 - across) / 2.0 * rows.corner(0, -1, i) + (
-                    1.0 + across
-                ) / 2.0 * rows.corner(0, 1, i)
-                high = (1.0 - across) / 2.0 * rows.corner(0, -1, i + 1) + (
-                    1.0 + across
-                ) / 2.0 * rows.corner(0, 1, i + 1)
-                on_row = (1.0 - share) * low + share * high
-                gap = float(np.linalg.norm(on_row - dome.point(phi, s)))
-                if gap > worst["mm"]:
-                    worst = {
-                        "mm": gap,
-                        "row": i + 1,
-                        "up_row": round(float(share), 3),
-                        "across": round(float(across), 3),
-                    }
-    return worst
+    """The furthest any of a slice's rows stands from the dome, and which row."""
+    each = [
+        span_off(rows.dome, rows.slices, float(rows.s[i]), float(rows.s[i + 1]))
+        for i in range(rows.count)
+    ]
+    worst = int(np.argmax(each))
+    return {"mm": each[worst], "row": worst + 1}
+
+
+def choices(dome: Dome, slices: int, lines: list[float]) -> dict[int, dict[str, Any]]:
+    """For each count of rows the map's lines allow, the lines to fold at that leave the rows
+    nearest the dome: a slice folds at some or all of the lead lines that run all the way
+    round, and is flat across the rest. Every way of choosing is tried, a row at a time."""
+    levels = [dome.length, *sorted(lines, reverse=True), 0.0]
+    most = len(levels) - 1
+    off = {
+        (i, j): span_off(dome, slices, levels[i], levels[j])
+        for i in range(most)
+        for j in range(i + 1, most + 1)
+    }
+    best: dict[tuple[int, int], tuple[float, list[int]]] = {(0, 0): (0.0, [])}
+    for count in range(1, most + 1):
+        for j in range(count, most + 1):
+            ways = [
+                (max(best[(count - 1, i)][0], off[(i, j)]), [*best[(count - 1, i)][1], i])
+                for i in range(count - 1, j)
+                if (count - 1, i) in best
+            ]
+            best[(count, j)] = min(ways)
+    found = {}
+    for count in range(1, most + 1):
+        mm, starts = best[(count, most)]
+        folds = [levels[i] for i in starts[1:]]
+        rows = Rows(dome, slices, folds)
+        found[count] = {
+            "rows": count,
+            "folds_s": folds,
+            "off_dome_mm": mm,
+            "most_bend_deg": float(rows.bend.max()) if count > 1 else 0.0,
+        }
+    return found
 
 
 def _fits(size: list[float], bed: tuple[float, float]) -> bool:
@@ -462,6 +508,36 @@ def _alike(maps: list[Map], laid: list[list[np.ndarray]]) -> list[list[int]]:
     return groups
 
 
+def paint(draw_on: Any, one: Map, left: float, base: float, scale: float, font: Any) -> None:
+    """One flat slice on a picture, its bottom-left at `left`, `base`: each piece in its
+    colour and numbered, and each fold as a line across it with its bend."""
+
+    def px(points: Any) -> list[tuple[float, float]]:
+        return [(left + x * scale, base - y * scale) for x, y in points]
+
+    draw_on.polygon(px(one.panel.exterior.coords), fill=(45, 45, 45))
+    for piece in one.pieces:
+        rgb = (one.colours.get(piece.colour) or {}).get("rgb") or (200, 200, 200)
+        draw_on.polygon(px(piece.shape.exterior.coords), fill=tuple(int(v) for v in rgb))
+        (x, y) = px(shapely.get_coordinates(piece.shape.representative_point()))[0]
+        draw_on.text(
+            (x, y),
+            str(piece.id),
+            fill=(0, 0, 0),
+            font=font,
+            anchor="mm",
+            stroke_width=2,
+            stroke_fill=(255, 255, 255),
+        )
+    right = one.panel.bounds[2]
+    for fold in one.surface["folds"]:
+        (xa, ya), (xb, _yb) = px([(0.0, fold["y_mm"]), (right, fold["y_mm"])])
+        draw_on.line([(xa - 4, ya), (xb + 4, ya)], fill=(255, 0, 255), width=1)
+        draw_on.text(
+            (xb + 6, ya), f"{fold['bend_deg']:.1f}°", fill=(160, 0, 160), font=font, anchor="lm"
+        )
+
+
 def draw(maps: list[tuple[int, Map]], out: Path, name: str) -> str:
     """Each different slice laid flat, each piece in its colour and numbered, its folds as
     lines across it with the bend at each."""
@@ -478,34 +554,12 @@ def draw(maps: list[tuple[int, Map]], out: Path, name: str) -> str:
     font = ImageFont.load_default(size=12)
     left = float(margin)
     for number, one in maps:
-
-        def px(points: Any, left: float = left) -> list[tuple[float, float]]:
-            return [(left + x * scale, height - key_px - margin - y * scale) for x, y in points]
-
-        draw_on.polygon(px(one.panel.exterior.coords), fill=(45, 45, 45))
-        for piece in one.pieces:
-            rgb = (one.colours.get(piece.colour) or {}).get("rgb") or (200, 200, 200)
-            draw_on.polygon(px(piece.shape.exterior.coords), fill=tuple(int(v) for v in rgb))
-            (x, y) = px(shapely.get_coordinates(piece.shape.representative_point()))[0]
-            draw_on.text(
-                (x, y),
-                str(piece.id),
-                fill=(0, 0, 0),
-                font=font,
-                anchor="mm",
-                stroke_width=2,
-                stroke_fill=(255, 255, 255),
-            )
-        right = one.panel.bounds[2]
-        for fold in one.surface["folds"]:
-            (xa, ya), (xb, _yb) = px([(0.0, fold["y_mm"]), (right, fold["y_mm"])])
-            draw_on.line([(xa - 4, ya), (xb + 4, ya)], fill=(255, 0, 255), width=1)
-            draw_on.text(
-                (xb + 6, ya), f"{fold['bend_deg']:.1f}°", fill=(160, 0, 160), font=font, anchor="lm"
-            )
-        (x, y) = px([(right / 2.0, tall)])[0]
-        draw_on.text((x, margin / 2 + 2), f"slice {number}", fill=(0, 0, 0), font=font, anchor="mm")
-        left += right * scale + gap
+        paint(draw_on, one, left, height - key_px - margin, scale, font)
+        middle = left + one.panel.bounds[2] * scale / 2.0
+        draw_on.text(
+            (middle, margin / 2 + 2), f"slice {number}", fill=(0, 0, 0), font=font, anchor="mm"
+        )
+        left += one.panel.bounds[2] * scale + gap
     key = "each slice laid flat, seen from outside, hem down. Magenta: a fold, and its bend"
     draw_on.text((margin, height - key_px + 3), key, fill=(0, 0, 0), font=font)
     out.mkdir(parents=True, exist_ok=True)
@@ -527,7 +581,16 @@ def run_flatten(args: Any, report: Report) -> None:
         )
     _crossed(found, dome, slices)
     gaps = folds_of(found)
-    rows = Rows(dome, slices, [dome.length - (low + high) / 2.0 for low, high in gaps])
+    lines = [dome.length - (low + high) / 2.0 for low, high in gaps]
+    choice = choices(dome, slices, lines)
+    wanted = args.rows if args.rows is not None else len(choice)
+    if wanted not in choice:
+        raise NoAnswer(
+            f"--rows {wanted}: the map has {len(lines)} lead line(s) that run all the way "
+            f"round, so a slice is 1 to {len(choice)} flat row(s). Another band, or another "
+            "row of a grid, in the bands file adds a line"
+        )
+    rows = Rows(dome, slices, choice[wanted]["folds_s"])
     stem = args.to or Path(args.map).name.removesuffix(".json").removesuffix(".pieces")
     name = Path(args.map).name
     cut = [slice_of(found, dome, rows, k, name) for k in range(slices)]
@@ -547,11 +610,39 @@ def run_flatten(args: Any, report: Report) -> None:
         f"maps: {files[0]} to {files[-1]}, each a flat piece map, seen from outside the dome "
         "with its hem at the bottom"
     )
+    stood = off_dome(rows)
     report.fact(
         "rows_count",
         rows.count,
-        how=f"flat rows in each slice, between the {len(gaps)} lead line(s) that run all the "
-        "way round",
+        how=f"flat rows in each slice, of the {len(choice)} the map's {len(lines)} lead "
+        "line(s) all the way round allow: --rows, the most unless given"
+        + (
+            f". It folds at {rows.count - 1} of those lines, the ones that leave its rows "
+            "nearest the dome, and is flat across the rest"
+            if rows.count < len(choice)
+            else ". It folds at every one"
+        ),
+    )
+    report.fact(
+        "rows_off_dome_mm",
+        stood["mm"],
+        "mm",
+        f"the furthest a flat row stands from the curved dome it's cut from, in row "
+        f"{stood['row']}: its corners are on the dome, and between them it's flat"
+        + (f"; --max-off {args.max_off:g}" if args.max_off is not None else ""),
+    )
+    report.numbers["rows_off_dome_at"] = {"row": stood["row"]}
+    report.numbers["rows_choice"] = [
+        {k: v for k, v in one.items() if k != "folds_s"} for one in choice.values()
+    ]
+    report.line(
+        "rows against bends, each count's furthest off the dome and its sharpest bend: "
+        + "; ".join(
+            f"{one['rows']} row(s) {one['off_dome_mm']:.2f} mm"
+            + (f", {one['most_bend_deg']:.1f}°" if one["rows"] > 1 else ", no fold")
+            for one in choice.values()
+        )
+        + ". More slices, or more lines round the dome in the bands file, bring it nearer"
     )
     sizes = [
         [
@@ -662,20 +753,10 @@ def run_flatten(args: Any, report: Report) -> None:
         )
         for k in range(slices)
     )
-    stood = off_dome(rows)
     report.numbers["tolerance_mm"] = tolerance
     report.numbers["corners_off_mm"] = corners_off
     report.numbers["flats_off_mm"] = flats_off
     report.numbers["edges_off_mm"] = edges_off
-    report.fact(
-        "rows_off_dome_mm",
-        stood["mm"],
-        "mm",
-        f"the furthest a flat row stands from the curved dome it's cut from, in row "
-        f"{stood['row']}: its corners are on the dome, and between them it's flat"
-        + (f"; --max-off {args.max_off:g}" if args.max_off is not None else ""),
-    )
-    report.numbers["rows_off_dome_at"] = {k: v for k, v in stood.items() if k != "mm"}
     report.second(
         f"each slice's file bent back by its own angles, a chain of rows from the hem up, and "
         f"set round the dome: its corners, where a fold meets a cut, are within "
@@ -721,8 +802,9 @@ def run_flatten(args: Any, report: Report) -> None:
         return
     report.verdict(
         "OK",
-        f"{slices} slice(s) of {rows.count} flat row(s), each {largest[0]:g} by {largest[1]:g} "
-        f"mm, in {files[0]} to {files[-1]}; bent back by their angles they give the dome's "
+        f"{slices} slice(s) of {rows.count} flat row(s) of {len(choice)}, each {largest[0]:g} "
+        f"by {largest[1]:g} mm, in {files[0]} to {files[-1]}; bent back by their angles they "
+        "give the dome's "
         f"corners back within {max(corners_off, flats_off, edges_off):.5f} mm, and stand "
         f"{stood['mm']:.2f} mm from its curve at the furthest",
     )

@@ -19,8 +19,8 @@ drawn at. Don't edit a map by hand or with code of yours: each command writes a 
 | `pieces extend MAP --at X,Y [--aim X,Y] [--to FILE]` | the dead-end line at X,Y runs straight on, or toward `--aim`, until it leaves the piece's glass: the piece is cut in two |
 | `pieces drop-line MAP --at X,Y [--to FILE]` | the dead-end line at X,Y is filled with its piece's glass. On a line between two pieces, the smaller joins the larger |
 | `pieces build MAP --thickness T --pane P --lip FULL,LEAST --play C [--layer L] [--border MM] [--fit MM]` | `frame.step` and `pane_COLOUR.step` for each colour: each pane its piece inset by the play, each pocket the pane and the play round it, and a lip over the pane's edge on both faces, FULL wide where the opening stays one piece and down to LEAST where it doesn't |
-| `pieces dome --diameter D --height H --repeats N --bands FILE [--top MM] [--to FILE]` | a dome shade's map, `dome.pieces.json`: the bands of FILE from the top to the hem, laid N times round a dome D across at its hem and H tall, open at its top. The map is the dome's chart, the way round by the way up from the hem; its picture comes to you, the dome from the side over its chart |
-| `pieces flatten MAP [--slices N] [--bed X,Y] [--max-off MM] [--to NAME]` | the dome's map cut along lead lines into N slices, each laid flat as its own map, `MAP's name.slice-01.pieces.json` and so on: each slice's size and whether it fits the bed, the angle each fold bends through, and which slices are the same map |
+| `pieces dome --diameter D --height H --repeats N --bands FILE [--top MM] [--to FILE]` | a dome shade's map, `dome.pieces.json`: the bands of FILE from the top to the hem, laid N times round a dome D across at its hem and H tall, open at its top. The map is the dome's chart, the way round by the way up from the hem; its picture comes to you: the dome from the side and from above, one slice laid flat with its folds, and the chart |
+| `pieces flatten MAP [--slices N] [--rows R] [--bed X,Y] [--max-off MM] [--to NAME]` | the dome's map cut along lead lines into N slices, each laid flat as its own map, `MAP's name.slice-01.pieces.json` and so on: each slice's size and whether it fits the bed, the angle each fold bends through, and which slices are the same map |
 
 ## Reading them
 
@@ -62,4 +62,5 @@ JSON, the bands from the top to the hem. Each has a `pattern`, its `height_mm` d
 - **`alike`** groups the slices that are the same map: check and build one of each group.
 - **`folds`** are the lead lines a slice bends along, each with `y_mm` on the slice's map and `bend_deg`. A slice bends only there: don't merge two pieces across a fold.
 - **`pieces build MAP --border B`** with B half the map's lead, as the reply gives it: the frame's edge is then the middle of the cut line, and two slices meet in one line.
+- **`rows_count`** is how many flat rows a slice is: every lead line all the way round is a fold, unless `--rows R` asks for fewer. `rows_choice` says, for each count, how far the rows would stand from the dome and the sharpest bend: fewer rows are fewer bends, each sharper, and further off.
 - **`rows_off_dome_mm`** is how far the flat rows stand from the curved dome. It's a reading unless the request limits it: then give `--max-off`, and with `FAIL`, cut more slices or add a band.

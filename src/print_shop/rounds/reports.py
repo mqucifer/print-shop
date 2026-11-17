@@ -256,6 +256,7 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "repeats",
         "room_over_pane_mm",
         "rows",
+        "rows_choice",
         "rows_count",
         "rows_off_dome_at",
         "rows_off_dome_mm",
