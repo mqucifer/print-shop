@@ -23,6 +23,8 @@ is a Sponsor's scene or anything from one (mqucifer/print-shop#152, mqucifer/pri
 - `edge.json`: two pieces on the panel's right edge, the line between them slanting to it.
 - `joined.json`: a dead end whose tip is three microns from a long line inside the same
   piece, so the pixels show the two as one stretch of lead.
+- `stairs.json`: a piece whose slanted side is a pixel's steps, 0.228 mm each, as a traced edge
+  that was never read as a line.
 - `hairs.json`: two cuts two microns wide whose ends face each other, which the
   outline has and no pixel shows.
 """
@@ -379,6 +381,27 @@ def joined() -> dict[str, Any]:
     }
 
 
+def stairs() -> dict[str, Any]:
+    """One piece in a 60 x 60 mm panel: a square 40 mm across with one corner cut off along a
+    slant, the slant drawn as 120 steps of 0.228 mm, across then up. Every step is a square
+    corner, so the build keeps each, and the pocket has 240 sides shorter than the play."""
+    step, count = 0.228, 120
+    run = round(step * count, 3)
+    slant: list[list[float]] = []
+    for k in range(count):
+        slant += [[10 + k * step, 50 - run + k * step], [10 + (k + 1) * step, 50 - run + k * step]]
+    outline: list[list[float]] = [[10, 10], [50, 10], [50, 50], [10 + run, 50], *slant[::-1]]
+    return {
+        "piece_map": 1,
+        "panel": {"width_mm": 60, "height_mm": 60},
+        "lead_mm": 1.0,
+        "colours": {"blue": {"rgb": [40, 90, 220]}},
+        "pieces": [
+            {"id": 1, "colour": "blue", "outline": [[round(x, 4), round(y, 4)] for x, y in outline]}
+        ],
+    }
+
+
 def rules(slit: bool, depth: float = 8.0) -> dict[str, Any]:
     lead = 1.2
     outlines = cells(lead)
@@ -435,6 +458,7 @@ for name, made in (
     ("thin_lines.json", thin_lines()),
     ("quiet.json", quiet()),
     ("joined.json", joined()),
+    ("stairs.json", stairs()),
     ("edge.json", edge()),
 ):
     with open(name, "w") as fh:

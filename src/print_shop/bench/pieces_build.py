@@ -581,6 +581,29 @@ def _wire_points(wire: Any, step: float = 0.25) -> np.ndarray:
     return np.array([[p.x, p.y] for p in found])
 
 
+def _play_read(
+    points: np.ndarray, pocket: list[list[Arc]], pocket_2d: Any
+) -> tuple[np.ndarray, np.ndarray]:
+    """Each point of a pane's edge from its pocket's wall, and whether the nearest of the wall
+    is along a side or at a corner between two sides.
+
+    A pane is its pocket's lines and arcs moved in by the play, each corner kept a corner. So
+    square to a side the gap is the play, and that's what's held. Round a corner that points
+    into the pocket the pane's own corner is further off, by up to the play over the sine of
+    half the corner: 0.354 mm for a play of 0.25 at a square corner. The pane is never nearer
+    than the play there, which is held too. The reading was the middle gap of all the points,
+    which took a pocket of short sides and square corners, a traced edge's pixel steps, for a
+    pane 0.034 mm off its play (mqucifer/print-shop#161)."""
+    from scipy.spatial import cKDTree
+
+    wall = pocket_2d.boundary
+    gaps = shapely.distance(shapely.points(points), wall)
+    nearest = shapely.get_coordinates(shapely.shortest_line(shapely.points(points), wall))[1::2]
+    corners = np.array([arc.start for ring in pocket for arc in ring])
+    far, _ = cKDTree(corners).query(nearest)
+    return gaps, far > 10.0 * DENSE
+
+
 def _face_area(outer: Any, inners: list[Any]) -> float:
     import cadquery as cq
 
@@ -878,22 +901,24 @@ def run_build(args: Any, report: Report) -> None:
         pocket_outer, pocket_inners = _wires(curves["pocket"])
         pane_outer, pane_inners = _wires(curves["pane"])
         # The pane's edge from its pocket's wall, at points round the pane: nowhere closer
-        # than the play, and at it along the sides.
+        # than the play, and at the play wherever the nearest of the wall is along a side.
         at_wall = _wire_points(pane_outer, 0.5)
-        wall = shapely.points(at_wall)
-        gaps = shapely.distance(wall, curves["pocket_2d"].boundary)
-        mine = max(args.play - float(gaps.min()), abs(float(np.median(gaps)) - args.play))
+        gaps, on_side = _play_read(at_wall, curves["pocket"], curves["pocket_2d"])
+        closest = float(gaps.min())
+        along = gaps[on_side] if on_side.any() else gaps
+        furthest = int(np.abs(along - args.play).argmax())
+        mine = max(args.play - closest, float(abs(along[furthest] - args.play)))
         if mine > play_off:
-            # Which pane, and where: the place its edge is nearest its pocket's wall.
-            near = np.asarray(at_wall)[int(gaps.argmin())]
+            # Which pane, and where: the place along a side where its gap is furthest off.
+            where = (at_wall[on_side] if on_side.any() else at_wall)[furthest]
             play_worst = (
-                f"piece {piece.id}'s pane, nearest its pocket's wall at "
-                f"{piecemap.said_at(near)}: {float(gaps.min()):.3f} mm there and "
-                f"{float(np.median(gaps)):.3f} mm along its sides, for a play of {args.play:g}; "
+                f"piece {piece.id}'s pane is {float(along[furthest]):.3f} mm from its "
+                f"pocket's wall at {piecemap.said_at(where)}, along a side, and "
+                f"{closest:.3f} mm at its nearest, for a play of {args.play:g}; "
                 + (
-                    "its pocket is its outline's own arcs and its pane those moved in"
+                    "its pocket and its pane are the same lines and arcs, one moved by the play"
                     if curves["exact"]
-                    else "it was refitted, its pane cut back from a spur or a sharp tip"
+                    else "its pocket was fitted again to its pane and the play"
                 )
             )
         play_off = max(play_off, mine)
@@ -987,8 +1012,8 @@ def run_build(args: Any, report: Report) -> None:
         "play_off_mm",
         play_off,
         "mm",
-        f"how far a pane's edge is from {args.play:g} mm off its pocket's wall, at its closest "
-        "and along its sides",
+        f"how far a pane's edge is from {args.play:g} mm off its pocket's wall, at its closest, "
+        "and at each point of it whose nearest wall is along a side",
     )
     report.numbers["refitted"] = refitted
     report.numbers["refitted_lips"] = refitted_lips

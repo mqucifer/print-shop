@@ -806,6 +806,28 @@ def test_a_built_panes_play_is_read_at_its_edge(bench: Any, built: Answer) -> No
     assert place["gap_mm"] == pytest.approx(0.25, abs=1e-5)
 
 
+def test_a_pane_is_held_to_its_play_square_to_its_pockets_sides(bench: Any) -> None:
+    """mqucifer/print-shop#161: a piece whose slanted side is a traced edge's pixel steps, 240
+    sides of 0.228 mm with a square corner between each. Its pane is those sides moved in by
+    the play, and round each corner that points into the pocket the pane's own corner is
+    rightly further off. The middle gap of every point read 0.285 mm for a play of 0.25, and
+    the build was `DISAGREE`. Held square to each side, it's the play."""
+    answer = bench(
+        "pieces", "build", "stairs.json", "--thickness", 3, "--pane", 1, "--lip", "1.2,0.8",
+        "--play", 0.25, "--build-out", "stairs",
+    )  # fmt: skip
+    assert answer.verdict == "OK" and answer.code == 0, answer.text
+    assert answer.numbers["play_off_mm"] == pytest.approx(0.0, abs=0.001)
+    # The control: a pane that really is 0.03 mm further in than its play, along its sides.
+    shutil.copy(CASES / "planted_play.py", bench.work / "planted_play.py")
+    done = host.run(["planted_play.py"], bench.work, python=True)
+    said = json.loads(done.stdout.strip().splitlines()[-1])
+    assert said["verdict"] == "DISAGREE" and said["code"] == 2, done.stdout + done.stderr
+    assert "a pane's edge is 0.030 mm off the play, over the 0.012 mm" in said["why"]
+    assert "pane is 0.280 mm from its pocket's wall at" in said["why"]
+    assert "along a side, and 0.280 mm at its nearest, for a play of 0.25" in said["why"]
+
+
 def test_a_piece_too_thin_for_a_pane_is_named_and_nothing_is_built(
     bench: Any, broken: Answer
 ) -> None:
