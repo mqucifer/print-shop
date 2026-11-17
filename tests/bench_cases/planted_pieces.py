@@ -11,6 +11,12 @@ is a Sponsor's scene or anything from one (mqucifer/print-shop#152, mqucifer/pri
 - `deep.json`: the rules' map with a line that all but crosses one cell.
 - `rules.json`: a map as rules would write one, four cells each inset by half the lead.
 - `slit.json`: that map with a lead line ending in one cell's glass, and a line inside another.
+- `slanted.json`: a neck whose narrowest line runs on a slant between two offset notches, which
+  rays square to its edges read wider at the same place (mqucifer/print-shop#161).
+- `spiked.json`: a notch that ends in a spike thinner than a pixel, with the limit between its
+  depth by its outline and by its pixels.
+- `hairs.json`: two cuts a hundredth of a millimetre wide whose ends face each other, which the
+  outline has and no pixel shows.
 """
 
 from __future__ import annotations
@@ -227,6 +233,45 @@ def stepped() -> dict[str, Any]:
     return found
 
 
+def slanted() -> dict[str, Any]:
+    """The stepped piece with its step higher, as a traced scene read one: the nearest two
+    points are corners 0.3 mm apart along and 0.977 across, 1.022 mm, under 1.2. The only rays
+    square to a side between those two ends run from the lower notch's flat end up to the
+    step, 1.828 mm: along the slant's long way, over 1.2."""
+    found = notched()
+    found["pieces"][0]["outline"] = [
+        [1, 1], [12.3, 1], [12.3, 10.6], [13.0, 10.6], [13.0, 1], [41, 1], [41, 21],
+        [12.6, 21], [12.6, 12.428], [12.0, 12.428], [12.0, 11.577], [11.75, 11.577],
+        [11.75, 21], [1, 21],
+    ]  # fmt: skip
+    return found
+
+
+def spiked() -> dict[str, Any]:
+    """One piece 40 x 20 mm with a notch in its top: a mouth 2.6 mm wide, sloping in to 0.06 mm
+    wide at 1.7 mm deep, then a spike on to a point 2.77 mm deep. By its outline it's 2.77 mm
+    deep, 1.065 times its mouth, over 1. The spike is thinner than a pixel, so the furthest
+    pixel's centre in the notch is about 2.5 mm from its mouth, under 1 time its mouth."""
+    found = notched()
+    found["pieces"][0]["outline"] = [
+        [1, 1], [41, 1], [41, 21], [21.3, 21], [20.03, 19.3], [20.0, 18.23], [19.97, 19.3],
+        [18.7, 21], [1, 21],
+    ]  # fmt: skip
+    return found
+
+
+def hairs() -> dict[str, Any]:
+    """The notched piece with each notch 0.01 mm wide and their ends 1 mm apart, in line: a
+    neck by the outline, 1 mm under 1.2, and no pixel has either cut, so by the pixels the
+    glass there is as wide as the piece."""
+    found = notched()
+    found["pieces"][0]["outline"] = [
+        [1, 1], [12.495, 1], [12.495, 10.5], [12.505, 10.5], [12.505, 1], [41, 1], [41, 21],
+        [12.505, 21], [12.505, 11.5], [12.495, 11.5], [12.495, 21], [1, 21],
+    ]  # fmt: skip
+    return found
+
+
 def rules(slit: bool, depth: float = 8.0) -> dict[str, Any]:
     lead = 1.2
     outlines = cells(lead)
@@ -277,6 +322,9 @@ for name, made in (
     ("lone.json", lone_lines()),
     ("notched.json", notched()),
     ("stepped.json", stepped()),
+    ("slanted.json", slanted()),
+    ("spiked.json", spiked()),
+    ("hairs.json", hairs()),
 ):
     with open(name, "w") as fh:
         json.dump(made, fh)
