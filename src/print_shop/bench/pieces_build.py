@@ -160,6 +160,25 @@ class Arc:
         return np.asarray(np.where(within, on, ends))
 
 
+def _square_to(arc: Arc, points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Each point against one side: whether it lies square to the side, its foot on the side
+    between the side's two ends, and how far it is from the side's own line or circle."""
+    if arc.straight:
+        way = arc.end - arc.start
+        length = float(np.hypot(*way))
+        way = way / max(length, 1e-12)
+        rel = points - arc.start
+        along = rel @ way
+        return (along >= 0.0) & (along <= length), np.abs(rel[:, 0] * way[1] - rel[:, 1] * way[0])
+    rel = points - arc.centre
+    angle = np.arctan2(rel[:, 1], rel[:, 0]) - arc.a0
+    if arc.radius > 0:
+        within = (angle % (2.0 * math.pi)) <= arc.sweep
+    else:
+        within = ((-angle) % (2.0 * math.pi)) <= -arc.sweep
+    return within, np.abs(np.hypot(rel[:, 0], rel[:, 1]) - abs(arc.radius))
+
+
 def biarc(p0: np.ndarray, t0: np.ndarray, p1: np.ndarray, t1: np.ndarray) -> list[Arc] | None:
     """Two arcs from p0, leaving along t0, to p1, arriving along t1, that meet without a kink:
     the one whose two arcs have the same length of tangent. None where there isn't one."""
@@ -581,11 +600,9 @@ def _wire_points(wire: Any, step: float = 0.25) -> np.ndarray:
     return np.array([[p.x, p.y] for p in found])
 
 
-def _play_read(
-    points: np.ndarray, pocket: list[list[Arc]], pocket_2d: Any
-) -> tuple[np.ndarray, np.ndarray]:
-    """Each point of a pane's edge from its pocket's wall, and whether the nearest of the wall
-    is along a side or at a corner between two sides.
+def _play_read(points: np.ndarray, curves: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
+    """Each point of a pane's edge from its pocket's wall, and for each point that lies
+    square to a side of the pocket, how far it is from that side.
 
     A pane is its pocket's lines and arcs moved in by the play, each corner kept a corner. So
     square to a side the gap is the play, and that's what's held. Round a corner that points
@@ -593,15 +610,32 @@ def _play_read(
     half the corner: 0.354 mm for a play of 0.25 at a square corner. The pane is never nearer
     than the play there, which is held too. The reading was the middle gap of all the points,
     which took a pocket of short sides and square corners, a traced edge's pixel steps, for a
-    pane 0.034 mm off its play (mqucifer/print-shop#161)."""
+    pane 0.034 mm off its play (mqucifer/print-shop#161).
+
+    Where pane and pocket are the same sides, one moved, a point is read against the side its
+    own side was moved from, where its foot is on that side. Where the pocket was fitted again
+    to the pane and its play, a point is read against the nearest of the wall, where that's
+    along a side and not at a corner between two. Not a number (`nan`) for a point that isn't
+    square to a side."""
     from scipy.spatial import cKDTree
 
-    wall = pocket_2d.boundary
-    gaps = shapely.distance(shapely.points(points), wall)
+    wall = curves["pocket_2d"].boundary
+    gaps = np.asarray(shapely.distance(shapely.points(points), wall))
+    pocket, pane = curves["pocket"][0], curves["pane"][0]
+    side = np.full(len(points), np.nan)
+    if curves["exact"] and len(pocket) == len(pane):
+        mine = np.argmin(np.stack([arc.off(points) for arc in pane]), axis=0)
+        for k in np.unique(mine):
+            here = np.flatnonzero(mine == k)
+            square, far = _square_to(pocket[int(k)], points[here])
+            side[here[square]] = far[square]
+        return gaps, side
     nearest = shapely.get_coordinates(shapely.shortest_line(shapely.points(points), wall))[1::2]
-    corners = np.array([arc.start for ring in pocket for arc in ring])
+    corners = np.array([arc.start for ring in curves["pocket"] for arc in ring])
     far, _ = cKDTree(corners).query(nearest)
-    return gaps, far > 10.0 * DENSE
+    along = far > 10.0 * DENSE
+    side[along] = gaps[along]
+    return gaps, side
 
 
 def _face_area(outer: Any, inners: list[Any]) -> float:
@@ -903,17 +937,20 @@ def run_build(args: Any, report: Report) -> None:
         # The pane's edge from its pocket's wall, at points round the pane: nowhere closer
         # than the play, and at the play wherever the nearest of the wall is along a side.
         at_wall = _wire_points(pane_outer, 0.5)
-        gaps, on_side = _play_read(at_wall, curves["pocket"], curves["pocket_2d"])
+        gaps, side = _play_read(at_wall, curves)
         closest = float(gaps.min())
-        along = gaps[on_side] if on_side.any() else gaps
-        furthest = int(np.abs(along - args.play).argmax())
-        mine = max(args.play - closest, float(abs(along[furthest] - args.play)))
+        square = np.flatnonzero(~np.isnan(side))
+        furthest = (
+            int(square[np.abs(side[square] - args.play).argmax()]) if len(square) else -1
+        )
+        along = float(side[furthest]) if furthest >= 0 else args.play
+        mine = max(args.play - closest, abs(along - args.play))
         if mine > play_off:
-            # Which pane, and where: the place along a side where its gap is furthest off.
-            where = (at_wall[on_side] if on_side.any() else at_wall)[furthest]
+            # Which pane, and where: the place square to a side where its gap is furthest off.
+            where = at_wall[furthest] if furthest >= 0 else at_wall[int(gaps.argmin())]
             play_worst = (
-                f"piece {piece.id}'s pane is {float(along[furthest]):.3f} mm from its "
-                f"pocket's wall at {piecemap.said_at(where)}, along a side, and "
+                f"piece {piece.id}'s pane is {along:.3f} mm from its "
+                f"pocket's wall at {piecemap.said_at(where)}, square to a side, and "
                 f"{closest:.3f} mm at its nearest, for a play of {args.play:g}; "
                 + (
                     "its pocket and its pane are the same lines and arcs, one moved by the play"
@@ -1013,7 +1050,7 @@ def run_build(args: Any, report: Report) -> None:
         play_off,
         "mm",
         f"how far a pane's edge is from {args.play:g} mm off its pocket's wall, at its closest, "
-        "and at each point of it whose nearest wall is along a side",
+        "and at each point of it that lies square to a side of the pocket",
     )
     report.numbers["refitted"] = refitted
     report.numbers["refitted_lips"] = refitted_lips

@@ -280,6 +280,56 @@ def _smooth(shape: Any) -> Any:
     return plain if plain.is_valid and plain.geom_type == "Polygon" else shape
 
 
+def _crossing(pieces: list[Piece]) -> list[tuple[int, int]]:
+    """Each two pieces whose outlines share more than a map allows."""
+    tree = shapely.STRtree([p.shape for p in pieces])
+    return [
+        (int(a), int(b))
+        for a, b in tree.query([p.shape for p in pieces], predicate="intersects").T
+        if a < b and pieces[a].shape.intersection(pieces[b].shape).area > piecemap.OVERLAP_MM2 / 4
+    ]
+
+
+def _parted(pieces: list[Piece], raw: list[Any], mm: float) -> set[int]:
+    """Two smoothed outlines that cross, over a line a pixel or two wide, parted: each loses
+    what they share and half a pixel round it, so a line a pixel wide lies between them again
+    and both stay smooth. With the pieces it changed.
+
+    Each kept its pixels' own edges before: an outline of pixel steps, a thousand points round
+    a large piece. On a traced scene at 4.4 pixels a mm six of 53 pieces were that, and the
+    frame built from them was 47 MB and 10,608 faces (mqucifer/print-shop#161). A piece's
+    steps also stood past its neighbour's smoothed outline, so a picture with lines one pixel
+    wide all over had no answer: its pieces overlapped. A piece that can't be parted this
+    way, as it would be cut in two, keeps its pixels' edges less their steps, and its pixels'
+    own edges only if that crosses too."""
+    changed: set[int] = set()
+    half = 0.5 * mm
+    for attempt in range(6):
+        pairs = _crossing(pieces)
+        if not pairs:
+            break
+        for a, b in pairs:
+            shared = pieces[a].shape.intersection(pieces[b].shape)
+            if shared.is_empty:
+                continue  # parted already, by an earlier pair's cut
+            cut = shared.buffer(half, join_style="mitre", mitre_limit=2.0)
+            for k in (a, b):
+                parts = piecemap.polygons(pieces[k].shape.difference(cut))
+                whole = parts and parts[0].area >= 0.98 * sum(part.area for part in parts)
+                if whole and parts[0].is_valid and attempt < 4:
+                    made = parts[0]
+                elif attempt < 5:
+                    # The pixels' edges less their steps: nothing of it is past its pixels by
+                    # more than a step, and a pixel's line lay between the two patches.
+                    made = raw[k].simplify(0.45 * mm, preserve_topology=True)
+                    made = made if made.is_valid and made.geom_type == "Polygon" else raw[k]
+                else:
+                    made = raw[k]
+                pieces[k].shape = shapely.geometry.polygon.orient(made, 1.0)
+                changed.add(k)
+    return changed
+
+
 def _paint(rgb: np.ndarray, mask: np.ndarray) -> dict[str, Any]:
     """The picture's colour over a patch, away from its edge: its mean, and how far it runs
     from one end of the patch to the other, read two ways."""
@@ -383,14 +433,7 @@ def trace(picture: Any, width_mm: float, dark_under: int, palette: Any) -> dict[
         kept = shapely.set_precision(piece.shape, 10.0**-piecemap.PLACES)
         if kept.geom_type != "Polygon" or not kept.is_valid or kept.is_empty:
             piece.shape = raw[k]
-    tree = shapely.STRtree([p.shape for p in pieces])
-    crossed: set[int] = set()
-    for a, b in tree.query([p.shape for p in pieces], predicate="intersects").T:
-        if a < b and pieces[a].shape.intersection(pieces[b].shape).area > piecemap.OVERLAP_MM2:
-            crossed |= {int(a), int(b)}
-    for k in crossed:
-        # Two smoothed outlines cross over a line a pixel or two wide: each keeps its pixels'.
-        pieces[k].shape = raw[k]
+    crossed = _parted(pieces, raw, mm)
     # Numbered from the top-left, a row at a time, as a person reads the picture.
     band = max(height * mm / 12.0, 1e-6)
 
@@ -560,8 +603,9 @@ def run_trace(args: Any, report: Report) -> None:
     report.numbers["picture"] = shown
     if traced["kept_fine"]:
         report.note(
-            f"{traced['kept_fine']} piece(s) keep their pixels' own edges: smoothed, two of "
-            "them would overlap across a line a pixel or two wide"
+            f"{traced['kept_fine']} piece(s) were parted from a neighbour: smoothed, the two "
+            "outlines crossed over a line a pixel or two wide, so each lost what they shared "
+            "and half a pixel round it"
         )
     differs = list(reading.differs)
     if traced["lost"]:

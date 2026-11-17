@@ -4,6 +4,8 @@ is a Sponsor's scene or anything from one (mqucifer/print-shop#152, mqucifer/pri
 - `clean.png`: five flat cells between straight lines, 120 x 80 mm at 5 pixels a mm, in a frame.
 - `broken.png`: the same panel with one of each rule break `pieces check` reads.
 - `hills.png`: curved bands, slanted uprights and a round sun, for curves built as curves.
+- `thin_line.png`: curved bands and uprights at 5 pixels a mm, their lines 4 pixels wide but
+  one band's, which is one pixel wide (mqucifer/print-shop#161).
 - `margin.png`: the clean panel with a white margin round its frame, specks in the margin, and
   the frame's top uneven.
 - `specks.png`: the clean panel with clusters of dark specks inside its cells, and one real line
@@ -155,6 +157,42 @@ def hills() -> Any:
     # The sun stands on the upper band's line, so the line round it joins the others.
     cx, cy = at(84, 49)
     d.ellipse((cx - 48, cy - 48, cx + 48, cy + 48), fill=GOLD, outline=DARK, width=line)
+    return im
+
+
+def thin_line() -> Any:
+    """100 x 70 mm at 5 pixels a mm: four curved bands and three uprights in each strip, 20
+    pieces. Every line is 4 pixels wide but the second band's, which is one: the two smoothed
+    outlines either side of it cross, as a pixel is all that lies between them."""
+    s, w, h, f = 5, 100, 70, 8
+    im = Image.new("RGB", (w * s + 2 * f, h * s + 2 * f), DARK)
+    d = ImageDraw.Draw(im)
+
+    def at(x: float, y: float) -> tuple[float, float]:
+        return (f + x * s, f + (h - y) * s)
+
+    def along(curve: Any, n: int = 400) -> list[tuple[float, float]]:
+        return [(w * k / n, curve(w * k / n)) for k in range(n + 1)]
+
+    bands: list[Any] = [
+        lambda x: 14 + 4 * math.sin(x / 13),
+        lambda x: 30 + 5 * math.sin(x / 17 + 1),
+        lambda x: 47 + 6 * math.sin(x / 21 + 2),
+        lambda x: 60 + 3 * math.sin(x / 9),
+    ]
+    d.rectangle([at(0, h), at(w, 0)], fill=BLUE)
+    for curve, colour in zip(bands, (WHITE, GREEN, GOLD, RED), strict=True):
+        d.polygon([at(*p) for p in along(curve)] + [at(w, h), at(0, h)], fill=colour)
+    for n, curve in enumerate(bands):
+        d.line([at(*p) for p in along(curve)], fill=DARK, width=1 if n == 1 else 4, joint="curve")
+    edges: list[Any] = [lambda x: -3.0, *bands, lambda x: h + 3.0]
+    for k, (low, high) in enumerate(zip(edges, edges[1:], strict=False)):
+        for x, lean in ((22 + 7 * k, 6.0), (55 - 4 * k, -7.0), (80 + 2 * k, 3.0)):
+            points = [
+                (x + lean * t + 2 * math.sin(3 * t), low(x) + (high(x + lean) - low(x)) * t)
+                for t in [j / 60 for j in range(61)]
+            ]
+            d.line([at(*p) for p in points], fill=DARK, width=4, joint="curve")
     return im
 
 
@@ -439,6 +477,7 @@ def rules(slit: bool, depth: float = 8.0) -> dict[str, Any]:
 clean().save("clean.png")
 broken().save("broken.png")
 hills().save("hills.png")
+thin_line().save("thin_line.png")
 margin().save("margin.png")
 specks().save("specks.png")
 for name, slit, depth in (

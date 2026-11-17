@@ -349,6 +349,37 @@ def test_each_rule_break_in_a_picture_is_read_on_its_own_piece(bench: Any, broke
     assert len(saved["flags"]) == 9 and len(saved["colours"]) == 5
 
 
+def test_outlines_that_cross_over_a_thin_line_are_parted_and_stay_smooth(bench: Any) -> None:
+    """mqucifer/print-shop#161: 20 curved pieces whose lines are 4 pixels wide, but one that's
+    a single pixel. The smoothed outlines either side of it cross. Each kept its pixels' own
+    edges, a step at every pixel: two pieces of 262 and 230 points, 724 in the map, and a
+    frame of 1,341 faces. They're parted now, each less what they share and half a pixel round
+    it, and no outline is pixel steps."""
+    answer = bench("pieces", "trace", "thin_line.png", "--width", 100, "--to", "thin.json")
+    assert answer.verdict == "OK", answer.text
+    assert answer.numbers["pieces_count"] == 20
+    assert "2 piece(s) were parted from a neighbour" in answer.text
+    saved = json.loads((bench.work / "thin.json").read_text())
+    px = 1.0 / saved["source"]["px_per_mm"]
+    counts = [len(p["outline"]) for p in saved["pieces"]]
+    assert max(counts) < 40 and sum(counts) < 320, counts
+    for piece in saved["pieces"]:
+        ring = piece["outline"]
+        sides = sorted(
+            ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
+            for a, b in zip(ring, ring[1:] + ring[:1], strict=True)
+        )
+        assert sides[len(sides) // 2] > 3 * px, f"piece {piece['id']} is pixel steps"
+    # A pixel's line still lies between the two, and the glass is the trace's to 0.05 points.
+    assert answer.numbers["glass_share_pct"] == pytest.approx(93.57, abs=0.05)
+    built = bench(
+        "pieces", "build", "thin.json", "--thickness", 3, "--pane", 1, "--lip", "1.2,0.6",
+        "--play", 0.25, "--build-out", "thin",
+    )  # fmt: skip
+    assert built.verdict == "OK", built.text
+    assert built.numbers["frame_faces"] < 900, "it was 1,341 with two outlines of pixel steps"
+
+
 def test_a_picture_with_nothing_dark_or_too_small_has_no_answer(bench: Any) -> None:
     answer = bench("pieces", "trace", "clean.png", "--width", 120, "--dark", 3)
     assert answer.verdict == "NO ANSWER" and "no dark lines" in answer.record["why"]
@@ -825,7 +856,7 @@ def test_a_pane_is_held_to_its_play_square_to_its_pockets_sides(bench: Any) -> N
     assert said["verdict"] == "DISAGREE" and said["code"] == 2, done.stdout + done.stderr
     assert "a pane's edge is 0.030 mm off the play, over the 0.012 mm" in said["why"]
     assert "pane is 0.280 mm from its pocket's wall at" in said["why"]
-    assert "along a side, and 0.280 mm at its nearest, for a play of 0.25" in said["why"]
+    assert "square to a side, and 0.280 mm at its nearest, for a play of 0.25" in said["why"]
 
 
 def test_a_piece_too_thin_for_a_pane_is_named_and_nothing_is_built(
