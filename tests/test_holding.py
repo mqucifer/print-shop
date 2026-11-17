@@ -157,6 +157,20 @@ def test_a_pass_at_the_first_settings_clears_probes_and_a_looser_pass_clears_not
     assert [t.at_call for t in kept[0].tries] == [1]
 
 
+def test_a_failing_read_of_a_piece_map_isnt_held_as_each_fix_writes_a_new_map() -> None:
+    """`pieces check` on the traced map fails by its nature, and no later call can pass it: the
+    fixes go to new maps. The frame built from the last one is held as any frame is."""
+    tries = [
+        Tried(3, ["pieces", "check", "map-0.json"], False, "FAIL", "2 rule break(s)"),
+        Tried(4, ["pieces", "merge", "map-0.json", "8", "12", "--to", "map-1.json"], True, "OK"),
+        Tried(5, ["pieces", "check", "map-1.json"], True, "OK"),
+        Tried(7, ["capture", "frame.step", "--pocket-z", "1.3"], False, "FAIL", "pane 2 is loose"),
+    ]
+    present = {"map-0.json", "map-1.json", "frame.step"}
+    (held,) = holding.failing(tries, [], present, None, None)
+    assert held.check == ("capture", ("frame.step",))
+
+
 def test_a_check_set_aside_with_a_reason_goes_until_it_fails_again(tmp_path: Path) -> None:
     # Not `capture`: on the model's files, stained glass's own checks can't be set aside.
     wall = "wall pane.step references/frame.step --hole 1,2,3"
