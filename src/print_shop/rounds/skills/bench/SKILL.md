@@ -68,7 +68,7 @@ Then `bench layout layout.json --inset 0.5 --inset 1.7`, an inset for each offse
 
 ## Limits it runs under
 
-Each command, and each `run`, is a fresh container with no network, 2 CPUs, 3 GiB of memory, 1 GB of `/tmp` and 600 seconds. Only your directory stays. Inside a container the bench's own code is at `/opt/bench`, read-only, if a script of yours wants to call it (`sys.path.insert(0, "/opt/bench")`, then `from bench.cli import main`).
+Each command, and each `run`, is a fresh container with no network, 2 CPUs, 3 GiB of memory, 1 GB of `/tmp` and 600 seconds. Only your directory stays. Inside a container the bench's own code is at `/opt/bench`, read-only, if a script of yours wants to call it (`sys.path.insert(0, "/opt/bench")`, then `from bench.cli import main`). Each command a script runs that way is recorded as a bench call of yours, and its reply names each with its verdict. A `FAIL` inside a script is held as any failing check is. A pass inside a script doesn't clear a held check: run that check with `bench`.
 
 Meshes are at 0.002 mm, and a figure is good to the band it prints. Nothing on the bench has been compared with a print or sliced.
 

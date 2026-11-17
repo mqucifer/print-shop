@@ -42,6 +42,30 @@ JSON, in millimetres, x to the right and y up from the panel's bottom-left:
 
 **A map is written to a tenth of a micron,** and read back before it's saved, so no command writes a map the next can't read. A fix writes a new file and leaves the one it was given: `scene.pieces.json`, then `scene.pieces-1.json`, `-2` and so on, or `--to FILE`.
 
+## A file of fixes
+
+`pieces fix MAP STEPS` makes a list of fixes in one call (mqucifer/print-shop#161). STEPS is JSON: a list of steps, or `{"steps": [...]}`, each a fix's name and what its own command takes:
+
+```json
+[
+ {"fix": "merge", "a": 12, "b": 9},
+ {"fix": "split", "piece": 4, "line": [[40, 15.3], [80, 15.3]], "lead_mm": 1.4},
+ {"fix": "extend", "at": [20, 55], "aim": [20, 80]},
+ {"fix": "drop-line", "at": [41.5, 60]}
+]
+```
+
+| Step | It needs | It may have |
+|---|---|---|
+| `merge` | `a`, the piece that joins, and `b`, the neighbour it joins | |
+| `split` | `piece`, and `line`, two points or more from one of its edges to another | `lead_mm`, the new line's width: the map's unless given |
+| `extend` | `at`, a point on the dead end | `aim`, a point to run it toward |
+| `drop-line` | `at`, a point on the line | |
+
+- **The steps run in order,** each on the map the one before left, and a piece's number is what it is by then: a merge keeps B's, and a split's new pieces take the next numbers.
+- **A map's `history` is a steps file.** Each fix is written there as a step is given (an extension's `from` and `to` are read as `at` and `aim`), so the fixes a map has had can be made again on the map they began from, and give the same pieces.
+- **It stops at the first step that's refused,** and writes the map up to it. Every step is read before any is made, so a file with a step that can't be read changes nothing.
+
 ## What a map from rules needs
 
 `piece_map`, `panel`, `lead_mm`, and `pieces` with `id`, `colour` and `outline`. `colours` gives the pictures their colours, and `source.glass_share_pct` gives later readings something to be said against. Curves are points close enough that the lines and arcs `build` fits to them, within `--fit` of each point, are the curve meant: `tests/bench_cases/planted_pieces.py` writes such a map (`rules.json`), and `pieces dome` writes a dome's.
