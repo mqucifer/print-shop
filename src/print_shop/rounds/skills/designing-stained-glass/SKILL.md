@@ -273,10 +273,10 @@ pieces are the layout, so steps 2, 3 and 5 are these five, in this order:
 
 ```
 - [ ] a. Trace: `pieces trace PICTURE --width MM`
-- [ ] b. Check: `pieces check MAP`
+- [ ] b. Check: `pieces check MAP --lip L`, with the lip you'll build at
 - [ ] c. Fix each flagged piece by its own flag: one command for one fix, `pieces fix MAP STEPS` for several
 - [ ] d. Check again, until no flag is left that the request doesn't keep
-- [ ] e. Build: `pieces build MAP --thickness T --pane P --lip FULL,LEAST --play C`
+- [ ] e. Build: `pieces build MAP --thickness T --pane P --lip L --play C`
 ```
 
 `pieces trace` writes a **piece map**: each piece of glass, numbered, with its outline and its
@@ -288,7 +288,7 @@ piece that breaks a rule, with where. Each flag has its fix:
 |---|---|---|
 | `dead-end` | a lead line that ends in mid-glass | `pieces extend MAP --at X,Y` runs it on to the next line or the edge, or `pieces drop-line MAP --at X,Y` takes it out |
 | `sliver`, `small` | a piece too narrow or too small to handle | `pieces merge MAP A B`: it joins a neighbour B, and the line between them goes |
-| `neck` | a thin place with wide glass on both sides of it | `pieces split MAP ID --line x1,y1,x2,y2` cuts the piece there, edge to edge |
+| `neck` | a thin place with wide glass on both sides of it: under 1.2 mm, or with `--lip L` under twice the lip, where the lip on each side would close the opening | `pieces split MAP ID --line x1,y1,x2,y2` cuts the piece there, edge to edge |
 | `notch` | a notch deeper than it's wide | `pieces split` from the notch's end to the piece's far edge |
 | `gradient` | a colour that runs across one piece | `pieces split` where it changes, or keep it one colour and say so |
 | `wide-lead` | a patch of lead, not a line | `pieces merge` the pieces round it |
@@ -329,6 +329,9 @@ piece that breaks a rule, with where. Each flag has its fix:
   measure the same way: rays that run a slanted neck's long way, or a notch's end too thin for a
   pixel. The flag and its figure stand. `DISAGREE` is two readings of the same thing on
   opposite sides of a limit: read both figures, and don't pick one.
+- **Every piece takes the lip you give `pieces build`.** A piece with a waist the lip closes
+  over is refused, with the line to split it along: split it there, as a glass cutter splits a
+  neck. Don't lower the lip for one piece, and don't leave a bar of frame across the glass.
 - **`pieces build` makes `frame.step` and one pane file for each colour,** every curve as a
   curve, and its reply gives the checks to run and `done`'s `glass`: the pocket's height, the
   play, the pane's thickness, and how many panes there are. A pane file holds every pane of its
@@ -353,7 +356,7 @@ def bench(*words):
 
 bench("pieces", "trace", "references/scene.png", "--width", 220, "--to", "map-0.json")
 bench("pieces", "fix", "map-0.json", "fixes.json", "--to", "map-1.json")  # each fix, in order
-bench("pieces", "build", "map-1.json", "--thickness", 3, "--pane", 1, "--lip", "1.2,0.8", "--play", 0.25)
+bench("pieces", "build", "map-1.json", "--thickness", 3, "--pane", 1, "--lip", 1.2, "--play", 0.25)
 ```
 
 `references/pieces.md` (the skill `reading-a-piece-map`) says what a map holds and how to read

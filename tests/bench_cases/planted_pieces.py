@@ -32,6 +32,7 @@ is a Sponsor's scene or anything from one (mqucifer/print-shop#152, mqucifer/pri
 - `close.json`: the rules' map with two pieces 0.2 mm apart along 6 mm, lead under a nozzle's
   width, and one piece 0.25 mm from the panel's edge, which the frame's border backs.
 - `near.json`: two curved pieces, the line between them 1.2 mm wide but 0.2 mm along 10 mm.
+- `waist.json`: a piece 50 mm long and 14 mm wide with a waist 2 mm across at its middle.
 - `hairs.json`: two cuts two microns wide whose ends face each other, which the
   outline has and no pixel shows.
 """
@@ -491,6 +492,19 @@ def near() -> dict[str, Any]:
     }
 
 
+def waist() -> dict[str, Any]:
+    """One piece of a 60 x 24 mm panel: 50 mm long and 14 mm wide, drawn in to a waist 2 mm
+    across at its middle, from 8 mm either side. Over the 1.2 mm a neck is, and under the
+    2.4 mm a lip of 1.2 on each side closes over."""
+    found = notched()
+    found["panel"] = {"width_mm": 60, "height_mm": 24}
+    found["pieces"][0]["outline"] = [
+        [5, 5], [22, 5], [30, 11], [38, 5], [55, 5], [55, 19], [38, 19], [30, 13], [22, 19],
+        [5, 19],
+    ]  # fmt: skip
+    return found
+
+
 def rules(slit: bool, depth: float = 8.0) -> dict[str, Any]:
     lead = 1.2
     outlines = cells(lead)
@@ -551,6 +565,7 @@ for name, made in (
     ("joined.json", joined()),
     ("close.json", close()),
     ("near.json", near()),
+    ("waist.json", waist()),
     ("stairs.json", stairs()),
     ("edge.json", edge()),
 ):

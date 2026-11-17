@@ -64,7 +64,7 @@ import shapely
 from . import colours, layout, piecemap
 from .limits import apart, over, said, under
 from .piecemap import Map, Piece, Pixels
-from .report import Report
+from .report import NoAnswer, Report
 
 #: The flags, in the order a reply says them.
 FLAGS = (
@@ -126,6 +126,8 @@ class Limits:
     max_colour_run: float = MAX_COLOUR_RUN
     max_lead: float | None = None
     min_lead: float = MIN_LEAD
+    #: The lip a build will be given, where it's said: `min_neck` is then twice it or more.
+    lip: float | None = None
 
     def lead(self, usual: float) -> float:
         return self.max_lead if self.max_lead is not None else MAX_LEAD * usual
@@ -138,14 +140,23 @@ def limits_of(args: Any) -> Limits:
         value = getattr(args, name, None)
         return default if value is None else float(value)
 
+    # A lip on each side closes a build's opening over a place under twice it: a neck by the
+    # build's own rule, whatever --min-neck was given (mqucifer/print-shop#161).
+    lip = getattr(args, "lip", None)
+    neck = given("min_neck", MIN_NECK)
+    if lip is not None:
+        if not lip > 0:
+            raise NoAnswer("--lip is the lip a build will be given, in mm, over 0")
+        neck = max(neck, 2.0 * float(lip))
     return Limits(
         given("min_width", MIN_WIDTH),
         given("min_area", MIN_AREA),
-        given("min_neck", MIN_NECK),
+        neck,
         given("max_notch", MAX_NOTCH),
         given("max_colour_run", MAX_COLOUR_RUN),
         getattr(args, "max_lead", None),
         given("min_lead", MIN_LEAD),
+        float(lip) if lip is not None else None,
     )
 
 
@@ -932,6 +943,12 @@ def flag_piece(row: dict[str, Any], limits: Limits) -> list[dict[str, Any]]:
                 f". Twice its pixels' distance to the edge there reads "
                 f"{row['narrowest_by_pixels_mm']:.2f} mm"
                 if row.get("narrowest_by_pixels_mm") is not None
+                else ""
+            )
+            + (
+                f". A lip of {limits.lip:g} mm on each side closes a build's opening over a "
+                f"place under {2.0 * limits.lip:g} mm: `pieces split` the piece across it"
+                if limits.lip is not None and not under(narrow, MIN_NECK)
                 else ""
             ),
         )  # fmt: skip

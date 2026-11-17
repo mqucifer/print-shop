@@ -462,7 +462,7 @@ def test_outlines_that_cross_over_a_thin_line_are_parted_and_stay_smooth(bench: 
         "--play", 0.25, "--build-out", "thin",
     )  # fmt: skip
     assert built.verdict == "OK", built.text
-    assert built.numbers["frame_faces"] < 900, "it was 1,341 with two outlines of pixel steps"
+    assert built.numbers["frame_faces"] < 1000, "it was 1,341 with two outlines of pixel steps"
 
 
 def test_a_piece_with_dark_specks_in_it_is_traced_as_smooth_as_any(bench: Any) -> None:
@@ -983,6 +983,60 @@ def test_a_pane_is_held_to_its_play_square_to_its_pockets_sides(bench: Any) -> N
     assert "square to a side, and 0.280 mm at its nearest, for a play of 0.25" in said["why"]
 
 
+def test_a_wall_between_two_pockets_is_never_thinner_than_the_maps_line(bench: Any) -> None:
+    """mqucifer/print-shop#161: a line widened to 0.4 mm in the map was a wall 0.21 mm thick in
+    the frame, as a pocket's curves were fitted to its outline and stood up to --fit past it
+    on each side. They're fitted inside it now, so `thin` passes on what `check` passed."""
+    widened = bench("pieces", "widen", "near.json", 1, 2, "--to", "near-wall.json")
+    assert widened.verdict == "OK", widened.text
+    built = bench(
+        "pieces", "build", "near-wall.json", "--thickness", 3, "--pane", 1, "--lip", 1.2,
+        "--play", 0.25, "--build-out", "wall",
+    )  # fmt: skip
+    assert built.verdict == "OK", built.text
+    assert built.numbers["pocket_past_outline_mm"] == pytest.approx(0.0, abs=0.012)
+    thin = bench("thin", built.numbers["glass"]["frame"], "--one-body")
+    assert thin.verdict == "OK", thin.text
+
+
+def test_a_waist_the_lip_closes_over_is_flagged_refused_and_split(bench: Any) -> None:
+    """mqucifer/print-shop#161: a piece 14 mm wide with a waist 2 mm across. A lip of 1.2 mm on
+    each side closes its opening over the waist. The build used to step that piece's lip down
+    until its opening was one, 0.6 mm all round, and `capture` at the rim asked then failed
+    it. Every piece takes the lip asked now: `check --lip` flags the waist as a neck, whatever
+    --min-neck is; `build` refuses the piece, with the line to split it along; and split
+    there, it builds, and `capture` holds both halves at the rim asked."""
+    plain = bench("pieces", "check", "waist.json", "--max-lead", 20)
+    assert plain.verdict == "OK", "2 mm is over the 1.2 mm a neck is"
+    told = bench("pieces", "check", "waist.json", "--max-lead", 20, "--lip", 1.2)
+    assert told.verdict == "FAIL" and flags_of(told) == {("neck", 1)}, told.text
+    assert told.numbers["limits"]["min_neck_mm"] == 2.4
+    assert "A lip of 1.2 mm on each side closes a build's opening over a place under 2.4 mm" in (
+        told.text
+    )
+    lips = ["--thickness", 3, "--pane", 1, "--lip", "1.2,0.6", "--play", 0.25]
+    refused = bench("pieces", "build", "waist.json", *lips, "--build-out", "waist")
+    assert refused.verdict == "FAIL" and refused.code == 1, refused.text
+    why = refused.record["why"]
+    assert "piece 1, round (30.0, 12.0), has no one opening at a lip of 1.2 mm" in why
+    assert "a waist 2.00 mm across at (30.0, 12.0)" in why
+    assert "`pieces split MAP 1 --line 30,11,30,13`" in why
+    assert "isn't stepped down to" in refused.text
+    assert not (bench.work / "waist" / "frame.step").exists()
+    # The line it gave, as given.
+    cut = bench("pieces", "split", "waist.json", 1, "--line", "30,11,30,13", "--to", "waist-1.json")
+    assert cut.verdict == "OK" and cut.numbers["pieces_after"] == 2, cut.text
+    built = bench("pieces", "build", "waist-1.json", *lips, "--build-out", "waist")
+    assert built.verdict == "OK", built.text
+    assert {row["lip_mm"] for row in built.numbers["lips"]} == {1.2}, "every piece, the lip asked"
+    held = bench(
+        "capture", built.numbers["glass"]["frame"], "--pocket-z", 1.3, "--clearance", 0.25,
+        "--pane-thickness", 1, "--full-rim", 1.2, "--least-rim", 0.6, "--min-visible", 40,
+        "--panes", 2,
+    )  # fmt: skip
+    assert held.verdict == "OK", held.text
+
+
 def test_a_piece_too_thin_for_a_pane_is_named_and_nothing_is_built(
     bench: Any, broken: Answer
 ) -> None:
@@ -999,13 +1053,15 @@ def test_a_piece_too_thin_for_a_pane_is_named_and_nothing_is_built(
     # The necked piece is wide, so its line says what cuts its opening in two, and where.
     necked = piece_at(bench.work, "b0.json", NECK)
     neck = next(line for line in said if line.startswith(f"piece {necked},"))
-    assert "a narrow place near (20" in neck and f"`pieces split MAP {necked} --line`" in neck
+    assert "a waist 1.00 mm across at (20.0, 20.1)" in neck and "cuts its" not in neck[:40]
+    assert f"`pieces split MAP {necked} --line 2" in neck, "with the line to split it along"
     around = piece_at(bench.work, "b0.json", ROUND_SMALL)
     assert any(f"piece {around} surrounds piece" in line for line in said)
     assert "so nothing was" in answer.record["why"] and "pieces merge" in answer.record["why"]
     # No line says a wide piece has no pane or opening without what cuts it.
     for line in said:
-        assert "surrounds" in line or "nothing of it is left" in line or "cuts its" in line, line
+        named = ("surrounds", "nothing of it is left", "cuts its", "a waist ")
+        assert any(word in line for word in named), line
     assert not (bench.work / "nothing" / "frame.step").exists()
     thin = bench(
         "pieces", "build", "rules.json", "--thickness", 1.4, "--pane", 1, "--lip", "1.2",

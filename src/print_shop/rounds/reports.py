@@ -244,6 +244,8 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "pieces_count",
         "play_off_mm",
         "pocket_floor_z",
+        "pocket_moved_in_mm",
+        "pocket_past_outline_mm",
         "pocket_top_z",
         "pocket_z",
         "profile",

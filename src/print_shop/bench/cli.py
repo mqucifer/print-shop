@@ -750,6 +750,14 @@ def parser() -> Parser:
             "map's usual lead unless given)",
         )
         reads.add_argument(
+            "--lip",
+            type=float,
+            metavar="MM",
+            help="the lip `pieces build` will be given: a place under twice it, with wide "
+            "glass on both sides, is a neck whatever --min-neck is, as the lip on each side "
+            "closes the opening over it",
+        )
+        reads.add_argument(
             "--min-lead",
             type=float,
             metavar="MM",
@@ -844,9 +852,10 @@ def parser() -> Parser:
         "--lip",
         type=_lips,
         required=True,
-        metavar="FULL,LEAST",
-        help="the lip over each pane's edge on both faces, in mm before play: FULL on every "
-        "piece that keeps an opening with it, down to LEAST on one that doesn't",
+        metavar="FULL",
+        help="the lip over each pane's edge on both faces, in mm before play, on every piece: "
+        "a piece whose opening it closes over at a waist is refused, with the line to split it "
+        "along. A second figure, FULL,LEAST, is read and not used",
     )
     build.add_argument(
         "--play", type=float, required=True, metavar="C", help="the gap round each pane, in mm"

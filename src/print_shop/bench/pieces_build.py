@@ -16,10 +16,12 @@ either side of it. The reply says how much glass the tips and corners were:
 the layer line at or under half of what the pane leaves, and its top on the first layer line
 that leaves the pane `ROOM` or more. The pause is at the pocket's top, as `pause` reads it.
 
-**The lip** is `--lip`'s FULL on every piece whose opening is still one piece with it, and
-otherwise the widest, by tenths of a mm down to LEAST, that leaves one. A piece that has no
-opening even at LEAST, or no pane once the play is taken, is named, and nothing is built:
-it's a sliver or a neck, which `pieces merge` or `pieces split` fixes in the map.
+**The lip** is `--lip` on every piece. A piece whose opening that lip closes over at a
+waist, or that has no pane once the play is taken, is named, and nothing is built: it's a
+sliver or a neck, which `pieces merge` or `pieces split` fixes in the map, and a waist's line
+gives the split's own `--line`. A piece's lip used to step down by tenths of a mm until its
+opening was one, and `capture`, at the rim asked, then failed that pane all round
+(mqucifer/print-shop#161).
 
 **Curves** (the Sponsor, 2026-11-05: "Build it right the first time with right tools"). A
 map's outline is points. A turn sharper than `CORNER_DEG` is a corner, and stays one. Between
@@ -77,8 +79,6 @@ ROUND_SEGS = 32
 #: A pane keeps its sharp corners where rounding them by half a nozzle moves none by more than
 #: this, in mm: past it the corner is a tip, which is cut back and rounded.
 TIP = 0.3
-#: The lip steps down by this, in mm, where a piece has no opening at the full one.
-LIP_STEP = 0.1
 #: A built curve is drawn as points this close to it, in mm, where Shapely insets it.
 DENSE = 0.002
 #: How far a solid's volume may be from its outline's area times its height.
@@ -463,7 +463,32 @@ def _printable(shape: Any) -> list[Any]:
     ]
 
 
-def _why(found: Map, piece: Piece, left: list[Any], what: str) -> str:
+def _across(piece: Piece, a: Any, b: Any) -> tuple[float, list[float], list[float]] | None:
+    """The waist between two parts of a piece's opening: how wide the piece is there, and the
+    two ends of a line across it, square to the way from one part to the other."""
+    ends = shapely.get_coordinates(shapely.shortest_line(a, b))
+    way = ends[1] - ends[0]
+    long = float(np.hypot(*way))
+    if long < 1e-9:
+        return None
+    middle = (ends[0] + ends[1]) / 2.0
+    square = np.array([-way[1], way[0]]) / long
+    x0, y0, x1, y1 = piece.shape.bounds
+    reach = math.hypot(x1 - x0, y1 - y0)
+    line = shapely.LineString([middle - reach * square, middle + reach * square])
+    here = shapely.Point(middle)
+    chords = [
+        part
+        for part in shapely.get_parts(line.intersection(piece.shape))
+        if part.geom_type == "LineString" and part.distance(here) < 1e-6
+    ]
+    if not chords:
+        return None
+    one, two = shapely.get_coordinates(chords[0])[[0, -1]]
+    return float(chords[0].length), piecemap.xy(one), piecemap.xy(two)
+
+
+def _why(found: Map, piece: Piece, left: list[Any], what: str, lip: float | None = None) -> str:
     """Why a piece has no one pane or opening, from what's left of it, and its fix: it's too
     narrow all over, or something cuts it in two, a dead end or a narrow place, said with
     where. A wide piece is never said to have none without what cuts it."""
@@ -492,6 +517,16 @@ def _why(found: Map, piece: Piece, left: list[Any], what: str) -> str:
             f"{piecemap.said_at(end['at'])}, cuts its {what} in two: {cut}. `pieces extend MAP "
             f"--at {spot}` runs the line on to the piece's edge, or `pieces drop-line MAP --at "
             f"{spot}` takes it out"
+        )
+    waist = _across(piece, a, b)
+    if waist is not None and lip is not None:
+        wide, one, two = waist
+        line = f"{one[0]:g},{one[1]:g},{two[0]:g},{two[1]:g}"
+        return (
+            f"a waist {wide:.2f} mm across at {piecemap.said_at(at)}, which a lip of {lip:g} mm "
+            f"on each side closes over: {cut}. `pieces split MAP {piece.id} --line {line}` cuts "
+            "it there into two pieces, each with its own opening. Or give every piece a "
+            f"`--lip` under {wide / 2.0:.2f} mm"
         )
     return (
         f"a narrow place near {piecemap.said_at(at)} cuts its {what} in two, the parts "
@@ -550,26 +585,22 @@ def plan(
             )
             continue
         pocket = pane.buffer(play, quad_segs=ROUND_SEGS)
-        lip = full
-        opening = _one_wide(pocket, lip)
-        while opening is None and lip - LIP_STEP >= least - 1e-9:
-            lip = round(lip - LIP_STEP, 6)
-            opening = _one_wide(pocket, lip)
-        if opening is None and lip > least:
-            lip = least
-            opening = _one_wide(pocket, lip)
-        if opening is None:
+        # Every piece takes the lip asked. A narrower lip all round a piece, stepped down
+        # until its opening was one, made a pane `capture` then failed at the rim asked: a
+        # piece with a waist the lip closes over is split there, as a glass cutter would
+        # (mqucifer/print-shop#161).
+        if _one_wide(pocket, full) is None:
             left = [
                 part
-                for part in _inset(pocket, least)
+                for part in _inset(pocket, full)
                 if not under(piecemap.widest(part, 0.02)[0], LEAST_ACROSS)
             ]
             wrong.append(
-                f"piece {piece.id}, round {where}, has no opening at even the least lip, "
-                f"{least:g} mm: {_why(found, piece, left, 'opening')}"
+                f"piece {piece.id}, round {where}, has no one opening at a lip of {full:g} mm: "
+                f"{_why(found, piece, left, 'opening', full)}"
             )
             continue
-        rows.append({"piece": piece, "lip_mm": lip, "pocket": pocket})
+        rows.append({"piece": piece, "lip_mm": full, "pocket": pocket})
     return rows, wrong
 
 
@@ -636,6 +667,15 @@ def _play_read(points: np.ndarray, curves: dict[str, Any]) -> tuple[np.ndarray, 
     along = far > 10.0 * DENSE
     side[along] = gaps[along]
     return gaps, side
+
+
+def _past(pocket: Any, shape: Any) -> float:
+    """How far a pocket stands past its piece's outline, into the lead: the furthest any of
+    it outside the outline is from the outline. 0 where none of it is."""
+    out = pocket.difference(shape)
+    if out.is_empty:
+        return 0.0
+    return float(shapely.distance(shapely.points(shapely.get_coordinates(out)), shape).max())
 
 
 def _face_area(outer: Any, inners: list[Any]) -> float:
@@ -771,7 +811,20 @@ def _same(rings: list[list[Arc] | None], wanted: Any, slack: float) -> bool:
 
 
 def piece_curves(piece: Piece, lip: float, play: float, fit: float) -> dict[str, Any]:
-    """One piece's pocket, pane and opening as rings of lines and arcs.
+    """One piece's pocket, pane and opening as rings of lines and arcs, its pocket nowhere
+    past the piece's outline. Where a pocket fitted again round a cut-back pane still stands
+    past it, the piece's curves are moved in that much more and made again."""
+    found = _curves(piece, lip, play, fit, 0.0)
+    for _ in range(3):
+        if found["past_mm"] <= 2.0 * CLOSE:
+            break
+        found = _curves(piece, lip, play, fit, found["more_mm"] + found["past_mm"] + CLOSE)
+    return found
+
+
+def _curves(piece: Piece, lip: float, play: float, fit: float, more: float) -> dict[str, Any]:
+    """One piece's pocket, pane and opening as rings of lines and arcs, its fitted outline
+    moved in by `more` past what keeps it inside the piece's.
 
     The piece's outline is fitted to arcs, within `fit`. The plain way, the pocket is those
     arcs and the pane the same arcs moved in by the play. Where the pane has a spur or a sharp
@@ -779,11 +832,42 @@ def piece_curves(piece: Piece, lip: float, play: float, fit: float) -> dict[str,
     and the pocket is the pane's arcs moved out, or fitted to the pane and its play. The
     opening is the pocket's arcs moved in by the lip, or where a bend is tighter than the lip,
     Shapely's inset fitted so the lip is the lip asked for or up to `fit` wider."""
+    # The pocket never stands past the piece's outline into the lead, as a lip is never
+    # narrower than asked. The outline is fitted to lines and arcs, within `fit`, and those
+    # are then moved in by however far the furthest of them stands past the outline: a line
+    # moves over and an arc keeps its centre, so they're the same curves, as few, and all
+    # inside. Left where they were fitted, a pocket stood up to twice `fit` past its outline
+    # on each side of a line, and a line 0.4 mm wide in the map was a wall 0.21 mm thick in
+    # the frame (mqucifer/print-shop#161).
     outline: list[list[Arc]] = []
+    pane_2d = None
+    moved_in, fit_off = 0.0, 0.0
     for share in (0.8, 0.4, 0.2, 0.1, 0.05):
-        outline = _rings_of(piece.shape, share * fit)
-        built = _ring_polygon(outline)
-        pane_2d = pane_of(built, play) if built.is_valid else None
+        fitted = _rings_of(piece.shape, share * fit)
+        first = _ring_polygon(fitted)
+        if not first.is_valid:
+            continue
+        past = _past(first, piece.shape)
+        moved: list[Any] = (
+            [offset_ring(ring, past + CLOSE + more) for ring in fitted]
+            if past > 0 or more > 0
+            else fitted
+        )
+        if any(ring is None for ring in moved):
+            continue
+        built = _ring_polygon(moved)
+        if not built.is_valid or _past(built, piece.shape) > 2.0 * CLOSE:
+            continue
+        outline = moved
+        moved_in = past + CLOSE + more if past > 0 or more > 0 else 0.0
+        # How far the fit itself is from the outline, before it's moved in: what `--fit` holds.
+        fit_off = float(
+            shapely.distance(
+                shapely.points(shapely.get_coordinates(first.boundary)[::10]),
+                orient(piece.shape, 1.0).boundary,
+            ).max()
+        )
+        pane_2d = pane_of(built, play)
         if pane_2d is not None:
             break
     if pane_2d is None:
@@ -846,12 +930,10 @@ def piece_curves(piece: Piece, lip: float, play: float, fit: float) -> dict[str,
         "opening_exact": opening_exact,
         "pocket_2d": pocket_2d,
         "pane_2d": _ring_polygon(pane),
-        "off_mm": float(
-            shapely.distance(
-                shapely.points(shapely.get_coordinates(built.boundary)[::10]),
-                orient(piece.shape, 1.0).boundary,
-            ).max()
-        ),
+        "past_mm": _past(pocket_2d, piece.shape),
+        "off_mm": fit_off,
+        "moved_in_mm": moved_in,
+        "more_mm": more,
     }
 
 
@@ -882,6 +964,12 @@ def run_build(args: Any, report: Report) -> None:
             "frame aren't built yet"
         )
     full, least = args.lip
+    if least < full:
+        report.note(
+            f"every piece takes the lip asked, {full:g} mm: --lip's second figure, {least:g}, "
+            "isn't stepped down to. A piece whose opening that lip closes over is named, with "
+            "the line to split it along"
+        )
     if not args.play > 0:
         raise NoAnswer("--play is the gap round each pane, in mm, over 0")
     if not least > args.play:
@@ -923,6 +1011,8 @@ def run_build(args: Any, report: Report) -> None:
     refitted_lips = 0
     lost = 0.0
     off, play_off = 0.0, 0.0
+    past, past_piece = 0.0, 0
+    moved_in = 0.0
     play_worst = ""
     expected = outline.area * args.thickness
     pocket_tall = z["pocket_top_z"] - z["pocket_floor_z"]
@@ -931,6 +1021,9 @@ def run_build(args: Any, report: Report) -> None:
         piece: Piece = row["piece"]
         curves = piece_curves(piece, row["lip_mm"], args.play, args.fit)
         off = max(off, curves["off_mm"])
+        moved_in = max(moved_in, curves["moved_in_mm"])
+        if curves["past_mm"] > past:
+            past, past_piece = curves["past_mm"], piece.id
         lost += max(0.0, float(piece.shape.area - curves["pocket_2d"].area))
         if not curves["exact"]:
             refitted.append(piece.id)
@@ -1055,6 +1148,20 @@ def run_build(args: Any, report: Report) -> None:
         f"how far a pane's edge is from {args.play:g} mm off its pocket's wall, at its closest, "
         "and at each point of it that lies square to a side of the pocket",
     )
+    report.fact(
+        "pocket_past_outline_mm",
+        past,
+        "mm",
+        "how far a pocket stands past its piece's outline, into the lead: a wall between two "
+        "pockets is never thinner than the map's line there",
+    )
+    report.fact(
+        "pocket_moved_in_mm",
+        moved_in,
+        "mm",
+        "the furthest a piece's fitted curves were moved in so none stands past its outline: "
+        "its pocket is that much inside the fit, at the most",
+    )
     report.numbers["refitted"] = refitted
     report.numbers["refitted_lips"] = refitted_lips
     kinds = sorted({face.geomType() for face in frame.Faces()})
@@ -1112,6 +1219,10 @@ def run_build(args: Any, report: Report) -> None:
     if abs(worst[1] - worst[2]) > VOLUME_OFF * worst[2]:
         differs.append(
             f"piece {worst[0]}'s pane is {worst[1]:.2f} mm³, and its inset makes {worst[2]:.2f}"
+        )
+    if past > 4.0 * CLOSE:
+        differs.append(
+            f"piece {past_piece}'s pocket stands {past:.3f} mm past its outline, into the lead"
         )
     if play_off > 4.0 * CLOSE:
         differs.append(
