@@ -191,6 +191,63 @@ def test_a_picture_with_nothing_dark_or_too_small_has_no_answer(bench: Any) -> N
     assert answer.verdict == "NO ANSWER" and "mauve=#rrggbb" in answer.record["why"]
 
 
+def test_the_panel_is_inside_the_frame_and_a_margin_outside_it_is_no_piece(bench: Any) -> None:
+    """A white margin with specks in it, and a frame uneven at the top: the margin over the
+    frame was traced as a piece, and the panel came out taller than the frame's inside."""
+    answer = bench("pieces", "trace", "margin.png", "--width", 120, "--to", "margin.json")
+    assert answer.verdict == "OK", answer.text
+    numbers = answer.numbers
+    assert numbers["pieces_count"] == 5 and not numbers["flagged"]
+    assert numbers["panel_px"] == [601, 401], "as the same panel with no margin"
+    assert numbers["panel_mm"] == [120.0, pytest.approx(80.067, abs=0.001)]
+    # The frame's top is 10 pixels on its left half and 6 on its right: 6 all the way across.
+    assert numbers["frame_px"] == {"top": 6, "bottom": 9, "left": 10, "right": 9}
+    assert sorted(numbers["colours"]) == ["blue", "green", "red", "white", "yellow"]
+
+
+def test_specks_in_a_piece_are_filled_and_a_line_that_ends_in_glass_is_one_dead_end(
+    bench: Any,
+) -> None:
+    answer = bench("pieces", "trace", "specks.png", "--width", 120, "--to", "specks.json")
+    assert answer.verdict == "OK", answer.text
+    assert answer.numbers["specks_filled"] == 12, "two clusters of six"
+    assert "specks_filled: 12 (dark specks inside one piece" in answer.text
+    assert flags_of(answer) == {("dead-end", piece_at(bench.work, "specks.json", (10, 20)))}
+    (end,) = answer.numbers["dead_ends"]
+    assert end["kind"] == "slit" and end["length_mm"] == pytest.approx(12 - 0.7, abs=0.6)
+    saved = json.loads((bench.work / "specks.json").read_text())
+    assert not any(piece.get("holes") for piece in saved["pieces"])
+    # A line inside a piece as long as a lead is wide is still a dead end: not every lone
+    # line is a speck.
+    lone = bench("pieces", "check", "slit.json")
+    assert ("dead-end", 4) in flags_of(lone)
+
+
+def test_a_dead_end_that_cuts_a_wide_pieces_opening_is_named_with_its_fix(bench: Any) -> None:
+    """A piece 14 mm wide was said to have no pane, with its width and no cause."""
+    answer = bench(
+        "pieces", "build", "deep.json", "--thickness", 3, "--pane", 1, "--lip", "1.2,0.6",
+        "--play", 0.25, "--build-out", "nothing",
+    )  # fmt: skip
+    assert answer.verdict == "FAIL"
+    cut, lone = answer.numbers["unbuildable"]
+    assert cut.startswith("piece 1,") and "a dead end inside it, from (15.0, 19.4) to" in cut
+    assert "cuts its opening in two" in cut and "though it's 14.40 mm at its widest" in cut
+    assert "`pieces extend MAP --at 14.4,1`" in cut and "`pieces drop-line MAP --at 14.4,1`" in cut
+    assert lone.startswith("piece 4,") and "a lead line inside it" in lone
+    assert "`pieces drop-line MAP --at 45,30`" in lone
+    # And the fix it names is one the bench takes.
+    fixed = bench("pieces", "drop-line", "deep.json", "--at", "14.4,1", "--to", "undeep.json")
+    assert fixed.verdict == "OK", fixed.text
+    again = bench("pieces", "drop-line", "undeep.json", "--at", "45,30", "--to", "whole.json")
+    assert again.verdict == "OK", again.text
+    built = bench(
+        "pieces", "build", "whole.json", "--thickness", 3, "--pane", 1, "--lip", "1.2,0.6",
+        "--play", 0.25, "--build-out", "whole",
+    )  # fmt: skip
+    assert built.verdict == "OK" and built.numbers["panes_count"] == 4, built.text
+
+
 # The fixes
 
 
@@ -442,10 +499,19 @@ def test_a_piece_too_thin_for_a_pane_is_named_and_nothing_is_built(
     )  # fmt: skip
     assert answer.verdict == "FAIL" and answer.code == 1
     said = answer.numbers["unbuildable"]
-    assert any(f"piece {sliver} has no opening" in line for line in said)
+    thin = next(line for line in said if line.startswith(f"piece {sliver},"))
+    assert "nothing of it is left, as it's 2.00 mm at its widest" in thin
+    assert "`pieces merge` it into a neighbour" in thin
+    # The necked piece is wide, so its line says what cuts its opening in two, and where.
+    necked = piece_at(bench.work, "b0.json", NECK)
+    neck = next(line for line in said if line.startswith(f"piece {necked},"))
+    assert "a narrow place near (20" in neck and f"`pieces split MAP {necked} --line`" in neck
     around = piece_at(bench.work, "b0.json", ROUND_SMALL)
     assert any(f"piece {around} surrounds piece" in line for line in said)
     assert "so nothing was" in answer.record["why"] and "pieces merge" in answer.record["why"]
+    # No line says a wide piece has no pane or opening without what cuts it.
+    for line in said:
+        assert "surrounds" in line or "nothing of it is left" in line or "cuts its" in line, line
     assert not (bench.work / "nothing" / "frame.step").exists()
     thin = bench(
         "pieces", "build", "rules.json", "--thickness", 1.4, "--pane", 1, "--lip", "1.2",

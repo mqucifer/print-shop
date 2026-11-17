@@ -4,13 +4,17 @@
 The picture is flat colours between dark lines, inside a dark outer frame, as the image model
 composes a scene. Its dark pixels are the lead, and each patch of colour between them is a piece:
 
-1. **The panel** is the picture inside its outer frame: the dark rows and columns at its edges,
-   past any margin. `--width` is the panel's width in mm, which sets the scale.
+1. **The panel** is the picture inside its outer frame on all four sides: on each, the first
+   row or column from the picture's edge that's mostly dark, and those after it that are. A
+   margin outside the frame, and anything in it, isn't the panel. `--width` is the panel's
+   width in mm, which sets the scale.
 2. **The lead** is every pixel with each channel under `--dark`, closed by a square `HAIR_MM`
    across and at least 3 pixels: a hairline gap in a line doesn't join two pieces, and a hair
    of colour beside a line isn't glass. The reply says how much of the panel that was.
 3. **A piece** is a patch of the rest, joined edge to edge. A patch under `SPECK_PX` pixels is a
-   speck between lines, and is lead.
+   speck between lines, and is lead. A speck of dark inside one piece, joined to no line and
+   shorter than the lead is wide, is the picture's noise and is that piece's glass: a real
+   line that ends in glass is longer, and `pieces check` flags it.
 4. **Its outline** is its pixels' own edges, with each corner kept at its pixel's corner and
    the staircase between two corners read as the line or the curve it stands for
    (`_smooth_ring`). In mm, x right and y up from the panel's bottom-left.
@@ -44,8 +48,10 @@ from .report import NoAnswer, Report
 SPECK_PX = 40
 #: A gap between dark pixels narrower than this, in mm, and never under 3 pixels, is lead.
 HAIR_MM = 0.5
-#: A row or a column of the picture's edge is the outer frame where this share of it is dark.
+#: A row or a column of the picture's edge is the outer frame where this share of it is dark,
+#: and the frame starts within this share of the picture from its edge.
 FRAME_SHARE = 0.6
+FRAME_WITHIN = 0.25
 #: A corner is read over this many pixels each side, where the way along the outline turns by
 #: more than this many degrees: a staircase's own turns over that reach are under 20.
 CORNER_PX = 6
@@ -100,29 +106,52 @@ def _run(flags: np.ndarray) -> int:
     return int(clear[0]) if len(clear) else len(flags)
 
 
+def _frame_side(dark_share: np.ndarray) -> tuple[int, int]:
+    """Where the frame lies along one side, from the picture's edge inward: the first row or
+    column, within the outer `FRAME_WITHIN` of the picture, that's dark over `FRAME_SHARE` of
+    its length, and how many in a row from there are. A margin before it, with whatever specks
+    it has, is outside the frame. (0, 0) where the side has no frame."""
+    flags = dark_share > FRAME_SHARE
+    outer = np.flatnonzero(flags[: max(1, int(len(flags) * FRAME_WITHIN))])
+    if not len(outer):
+        return 0, 0
+    first = int(outer[0])
+    return first, _run(flags[first:])
+
+
 def panel_of(dark: np.ndarray) -> tuple[slice, slice, dict[str, int]]:
-    """The panel: the picture inside its outer frame, as a window of it, and the frame's
-    thickness on each side in pixels. A side with no frame is the picture's own edge, less any
-    margin with nothing dark in it."""
-    rows = np.flatnonzero(dark.any(axis=1))
-    cols = np.flatnonzero(dark.any(axis=0))
-    if not len(rows):
+    """The panel: the picture inside its outer frame on all four sides, as a window of it, and
+    the frame's thickness on each side in pixels. Whatever lies outside the frame, a margin and
+    anything in it, isn't the panel. A side with no frame is the picture's own edge there, less
+    any margin with nothing dark in it."""
+    if not dark.any():
         raise NoAnswer("the picture has no dark lines: nothing in it is under --dark")
-    r0, r1, c0, c1 = int(rows[0]), int(rows[-1]) + 1, int(cols[0]), int(cols[-1]) + 1
-    inside = dark[r0:r1, c0:c1]
-    across = inside.mean(axis=1) > FRAME_SHARE
-    down = inside.mean(axis=0) > FRAME_SHARE
-    frame = {
-        "top": _run(across),
-        "bottom": _run(across[::-1]),
-        "left": _run(down),
-        "right": _run(down[::-1]),
-    }
+    height, width = dark.shape
+    rows, cols = slice(0, height), slice(0, width)
+    found: dict[str, tuple[int, int]] = {}
+    # Twice: a side's share is read over the span the other two sides' frames leave, so a
+    # margin beside the frame doesn't thin it.
+    for _ in range(2):
+        across = dark[:, cols].mean(axis=1)
+        down = dark[rows, :].mean(axis=0)
+        found = {
+            "top": _frame_side(across),
+            "bottom": _frame_side(across[::-1]),
+            "left": _frame_side(down),
+            "right": _frame_side(down[::-1]),
+        }
+        rows = slice(found["top"][0], height - found["bottom"][0])
+        cols = slice(found["left"][0], width - found["right"][0])
+    frame = {side: run for side, (_, run) in found.items()}
     if not any(frame.values()):
         # No frame at all: the whole picture is the panel, margins and all.
-        return slice(0, dark.shape[0]), slice(0, dark.shape[1]), frame
-    top, bottom = r0 + frame["top"], r1 - frame["bottom"]
-    left, right = c0 + frame["left"], c1 - frame["right"]
+        return slice(0, height), slice(0, width), frame
+    lit_rows = np.flatnonzero(dark.any(axis=1))
+    lit_cols = np.flatnonzero(dark.any(axis=0))
+    top = sum(found["top"]) if frame["top"] else int(lit_rows[0])
+    bottom = height - sum(found["bottom"]) if frame["bottom"] else int(lit_rows[-1]) + 1
+    left = sum(found["left"]) if frame["left"] else int(lit_cols[0])
+    right = width - sum(found["right"]) if frame["right"] else int(lit_cols[-1]) + 1
     if bottom - top < 3 or right - left < 3:
         raise NoAnswer("the picture is dark all over: nothing in it is over --dark")
     return slice(top, bottom), slice(left, right), frame
@@ -387,11 +416,30 @@ def trace(picture: Any, width_mm: float, dark_under: int, palette: Any) -> dict[
         entry["in_picture"] = own
     found = Map(panel, 1.0, table, pieces)
     found.lead_mm = max(piecemap.usual_lead(found), mm)
+    # A speck of dark inside one piece, joined to no line and shorter than a lead is wide, is
+    # the picture's noise, not a line that ends in glass: it's glass.
+    filled = 0
+    for piece in pieces:
+        kept = []
+        for ring in piece.shape.interiors:
+            hole = shapely.Polygon(ring)
+            sides = shapely.get_coordinates(hole.minimum_rotated_rectangle)
+            long = max(math.dist(sides[0], sides[1]), math.dist(sides[1], sides[2]))
+            lone = not any(o is not piece and o.shape.intersects(hole) for o in pieces)
+            if lone and long < found.lead_mm:
+                filled += 1
+            else:
+                kept.append(ring)
+        if len(kept) != len(piece.shape.interiors):
+            piece.shape = shapely.geometry.polygon.orient(
+                shapely.Polygon(piece.shape.exterior, kept), 1.0
+            )
     return {
         "map": found,
         "labels": labels,
         "patches": patches,
         "specks": len(specks),
+        "specks_filled": filled,
         "hairs_pct": 100.0 * float((lines & ~dark).mean()),
         "hair_px": side,
         "speck_mm2": SPECK_PX * mm * mm,
@@ -478,6 +526,11 @@ def run_trace(args: Any, report: Report) -> None:
     report.fact(
         "specks", traced["specks"],
         how=f"patches under {SPECK_PX} pixels, {traced['speck_mm2']:.2f} mm², read as lead",
+    )  # fmt: skip
+    report.fact(
+        "specks_filled", traced["specks_filled"],
+        how=f"dark specks inside one piece, joined to no line and under the lead's "
+        f"{found.lead_mm:.2f} mm long: the picture's noise, filled as that piece's glass",
     )  # fmt: skip
     report.fact(
         "hairs_pct", traced["hairs_pct"], "%",

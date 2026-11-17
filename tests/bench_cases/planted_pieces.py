@@ -4,6 +4,11 @@ is a Sponsor's scene or anything from one (mqucifer/print-shop#152, mqucifer/pri
 - `clean.png`: five flat cells between straight lines, 120 x 80 mm at 5 pixels a mm, in a frame.
 - `broken.png`: the same panel with one of each rule break `pieces check` reads.
 - `hills.png`: curved bands, slanted uprights and a round sun, for curves built as curves.
+- `margin.png`: the clean panel with a white margin round its frame, specks in the margin, and
+  the frame's top uneven.
+- `specks.png`: the clean panel with clusters of dark specks inside its cells, and one real line
+  that ends in glass.
+- `deep.json`: the rules' map with a line that all but crosses one cell.
 - `rules.json`: a map as rules would write one, four cells each inset by half the lead.
 - `slit.json`: that map with a lead line ending in one cell's glass, and a line inside another.
 """
@@ -137,6 +142,33 @@ def hills() -> Any:
     return im
 
 
+def margin() -> Any:
+    """The clean panel on white, 40 pixels of margin all round, with the frame's top 4 pixels
+    thinner over its right half and three specks of dark in the margin above it."""
+    inner = clean()
+    im = Image.new("RGB", (inner.width + 80, inner.height + 80), (250, 250, 250))
+    im.paste(inner, (40, 40))
+    d = ImageDraw.Draw(im)
+    d.rectangle((40 + inner.width // 2, 40, 40 + inner.width, 43), fill=(250, 250, 250))
+    for x, y in ((120, 12), (300, 20), (520, 9)):
+        d.ellipse((x, y, x + 3, y + 3), fill=DARK)
+    return im
+
+
+def specks() -> Any:
+    """The clean panel with two clusters of six dark specks, 2 to 4 pixels across, inside two
+    cells, and a lead line 12 mm long that ends in a third cell's glass."""
+    im = clean()
+    d = ImageDraw.Draw(im)
+    for cx, cy in ((20, 60), (100, 20)):
+        for k in range(6):
+            x, y = px(cx + 3 * (k % 3) - 3, cy + 4 * (k // 3) - 2)
+            size = 2 + k % 3
+            d.ellipse((x, y, x + size, y + size), fill=DARK)
+    line(d, [(30, 40), (30, 28)])
+    return im
+
+
 def cells(lead: float) -> list[list[list[float]]]:
     """Four cells of a 60 x 40 mm panel, each inset by half the lead: a map from rules."""
     half = lead / 2
@@ -151,7 +183,7 @@ def cells(lead: float) -> list[list[list[float]]]:
     return found
 
 
-def rules(slit: bool) -> dict[str, Any]:
+def rules(slit: bool, depth: float = 8.0) -> dict[str, Any]:
     lead = 1.2
     outlines = cells(lead)
     pieces = [
@@ -161,15 +193,15 @@ def rules(slit: bool) -> dict[str, Any]:
         )
     ]
     if slit:
-        # A lead line 1.2 mm wide from piece 1's top edge, 8 mm down into its glass.
+        # A lead line 1.2 mm wide from piece 1's top edge, `depth` mm down into its glass.
         x0, y0, x1, y1 = 0.0, 0.0, 29.4, 19.4
         pieces[0]["outline"] = [
             [x0, y0],
             [x1, y0],
             [x1, y1],
             [15.6, y1],
-            [15.6, 11.4],
-            [14.4, 11.4],
+            [15.6, y1 - depth],
+            [14.4, y1 - depth],
             [14.4, y1],
             [x0, y1],
         ]
@@ -188,7 +220,13 @@ def rules(slit: bool) -> dict[str, Any]:
 clean().save("clean.png")
 broken().save("broken.png")
 hills().save("hills.png")
-for name, slit in (("rules.json", False), ("slit.json", True)):
+margin().save("margin.png")
+specks().save("specks.png")
+for name, slit, depth in (
+    ("rules.json", False, 0),
+    ("slit.json", True, 8),
+    ("deep.json", True, 18.4),
+):
     with open(name, "w") as fh:
-        json.dump(rules(slit), fh)
+        json.dump(rules(slit, depth), fh)
 print("drawn")

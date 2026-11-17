@@ -237,6 +237,7 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "room_over_pane_mm",
         "source_glass_share_pct",
         "specks",
+        "specks_filled",
         "unbuildable",
         "upper_lip_mm",
     ),

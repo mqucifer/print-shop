@@ -57,6 +57,7 @@ from shapely.geometry.polygon import orient
 from . import piecemap
 from .limits import under
 from .piecemap import Map, Piece
+from .pieces_check import gaps
 from .report import NoAnswer, Report
 
 #: A turn sharper than this between two sides, in degrees, is a corner, not a curve.
@@ -430,6 +431,56 @@ def pane_of(shape: Any, play: float) -> Any:
     return parts[0] if len(parts) == 1 else None
 
 
+def _printable(shape: Any) -> list[Any]:
+    """What a nozzle prints of a shape: its parts `LEAST_ACROSS` wide or wider, once whatever
+    is under a nozzle's width is gone. Largest first."""
+    opened = shape.buffer(-NOZZLE / 2.0, quad_segs=ROUND_SEGS).buffer(
+        NOZZLE / 2.0, quad_segs=ROUND_SEGS
+    )
+    return [
+        part
+        for part in piecemap.polygons(opened)
+        if not under(piecemap.widest(part, 0.02)[0], LEAST_ACROSS)
+    ]
+
+
+def _why(found: Map, piece: Piece, left: list[Any], what: str) -> str:
+    """Why a piece has no one pane or opening, from what's left of it, and its fix: it's too
+    narrow all over, or something cuts it in two, a dead end or a narrow place, said with
+    where. A wide piece is never said to have none without what cuts it."""
+    across = piecemap.widest(piece.shape)[0]
+    if not left:
+        return (
+            f"nothing of it is left, as it's {across:.2f} mm at its widest. `pieces merge` it "
+            "into a neighbour"
+        )
+    if len(left) < 2:
+        return f"what's left of it is under {LEAST_ACROSS:g} mm wide somewhere a nozzle must pass"
+    a, b = left[0], left[1]
+    near = shapely.shortest_line(a, b)
+    at = shapely.get_coordinates(near.interpolate(0.5, normalized=True))[0]
+    ends = [
+        row
+        for row in gaps(found, piece)
+        if row["shape"].distance(shapely.Point(at)) <= 2.0 * found.lead_mm
+    ]
+    cut = f"its {what} comes out in {len(left)} parts, though it's {across:.2f} mm at its widest"
+    if ends:
+        end = ends[0]
+        spot = f"{end['at'][0]:g},{end['at'][1]:g}"
+        return (
+            f"a dead end inside it, from {piecemap.said_at(end['from'])} to "
+            f"{piecemap.said_at(end['at'])}, cuts its {what} in two: {cut}. `pieces extend MAP "
+            f"--at {spot}` runs the line on to the piece's edge, or `pieces drop-line MAP --at "
+            f"{spot}` takes it out"
+        )
+    return (
+        f"a narrow place near {piecemap.said_at(at)} cuts its {what} in two, the parts "
+        f"{near.length:.2f} mm apart there: {cut}. `pieces split MAP {piece.id} --line` across "
+        "it makes two pieces, each with its own"
+    )
+
+
 def plan(
     found: Map, lips: tuple[float, float], play: float
 ) -> tuple[list[dict[str, Any]], list[str]]:
@@ -453,11 +504,30 @@ def plan(
                 f"piece {piece.id} from that lead to its outer edge"
             )
             continue
+        lone = [
+            shapely.Polygon(ring)
+            for ring in piece.shape.interiors
+            if not any(
+                o.id != piece.id and o.shape.intersects(shapely.Polygon(ring))
+                for o in found.pieces
+            )
+        ]
+        if lone:
+            at = shapely.get_coordinates(lone[0].representative_point())[0]
+            spot = f"{at[0]:.4g},{at[1]:.4g}"
+            wrong.append(
+                f"piece {piece.id}, round {where}, has a lead line inside it, round "
+                f"{piecemap.said_at(at)}, that joins no other: it would be a body of its own, "
+                f"joined to nothing. `pieces drop-line MAP --at {spot}` takes it out, or "
+                f"`pieces extend MAP --at {spot}` runs it on to the piece's edge"
+            )
+            continue
         pane = pane_of(piece.shape, play)
         if pane is None:
+            left = _printable(piece.shape.buffer(-play, join_style="mitre", mitre_limit=5.0))
             wrong.append(
-                f"piece {piece.id} has no pane once {play:g} mm of play is taken all round: "
-                f"it's {piecemap.widest(piece.shape)[0]:.2f} mm at its widest, round {where}"
+                f"piece {piece.id}, round {where}, has no pane once {play:g} mm of play is "
+                f"taken all round: {_why(found, piece, left, 'pane')}"
             )
             continue
         pocket = pane.buffer(play, quad_segs=ROUND_SEGS)
@@ -470,17 +540,14 @@ def plan(
             lip = least
             opening = _one_wide(pocket, lip)
         if opening is None:
-            parts = _inset(pocket, least)
-            why = (
-                "leaves nothing of it"
-                if not parts
-                else f"cuts it into {len(parts)} openings"
-                if len(parts) > 1
-                else f"leaves it under {LEAST_ACROSS:g} mm wide"
-            )
+            left = [
+                part
+                for part in _inset(pocket, least)
+                if not under(piecemap.widest(part, 0.02)[0], LEAST_ACROSS)
+            ]
             wrong.append(
-                f"piece {piece.id} has no opening: even the least lip, {least:g} mm, {why}. "
-                f"It's {piecemap.widest(piece.shape)[0]:.2f} mm at its widest, round {where}"
+                f"piece {piece.id}, round {where}, has no opening at even the least lip, "
+                f"{least:g} mm: {_why(found, piece, left, 'opening')}"
             )
             continue
         rows.append({"piece": piece, "lip_mm": lip, "pocket": pocket})
@@ -782,8 +849,7 @@ def run_build(args: Any, report: Report) -> None:
             f"{len(wrong)} of {len(found.pieces)} piece(s) can't be built, so nothing was: "
             + "; ".join(wrong[:3])
             + (f"; and {len(wrong) - 3} more" if len(wrong) > 3 else "")
-            + ". Fix each in the map, `pieces merge` for a sliver and `pieces split` for a "
-            "neck, and build again",
+            + ". Fix each in the map as its line says, and build again",
         )
         return
     out = Path(args.out_build)
