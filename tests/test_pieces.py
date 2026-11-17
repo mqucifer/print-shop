@@ -8,6 +8,7 @@ curved scene, and two maps as rules would write them. Right answers are arithmet
 from __future__ import annotations
 
 import json
+import math
 import re
 import shutil
 from pathlib import Path
@@ -220,7 +221,8 @@ def test_lead_under_a_nozzles_width_is_flagged_before_anything_is_built(bench: A
     assert between["figure"] == pytest.approx(0.2, abs=1e-6) and between["limit"] == 0.4
     assert between["at"][0] == pytest.approx(30.5, abs=0.01) and 7 <= between["at"][1] <= 13
     assert "the lead between pieces 1 and 2 is 0.20 mm" in answer.text
-    assert "`pieces merge MAP 1 2` joins them" in answer.text
+    assert "`pieces widen MAP 1 2` moves each piece's edge back" in answer.text
+    assert "`pieces merge MAP 1 2`" not in answer.text, "blue and gold: the line stays"
     assert answer.numbers["limits"]["min_lead_mm"] == 0.4
     assert "1 place(s) where the lead is under --min-lead 0.4 mm" in answer.text
     # A limit under it reads none; the merge takes the line out, and its flag with it.
@@ -228,6 +230,66 @@ def test_lead_under_a_nozzles_width_is_flagged_before_anything_is_built(bench: A
     merged = bench("pieces", "merge", "close.json", 1, 2, "--to", "close-1.json")
     assert merged.verdict == "OK", merged.text
     assert bench("pieces", "check", "close-1.json").verdict == "OK"
+
+
+def test_a_line_under_a_nozzles_width_is_widened_where_its_thin_and_keeps_its_path(
+    bench: Any,
+) -> None:
+    """mqucifer/print-shop#161: 16 of a traced scene's 17 thin lines lay between two pieces of
+    one colour, a sun's rays and a river's inner lines, which a merge would take out. `pieces
+    widen` keeps the line: each piece's edge moves back by half of what's short, only where
+    it's short. Here a curved line 1.2 mm wide is 0.2 mm along 10 mm."""
+    before = bench("pieces", "check", "near.json")
+    assert flags_of(before) == {("thin-lead", 1)}, before.text
+    # Both blue, so a merge is named too, after the widening, for a line that isn't meant.
+    said = before.text.index("`pieces widen MAP 1 2`"), before.text.index("`pieces merge MAP 1 2`")
+    assert said[0] < said[1] and "if the picture doesn't mean the line" in before.text
+    answer = bench("pieces", "widen", "near.json", 1, 2, "--to", "near-1.json")
+    assert answer.verdict == "OK" and answer.code == 0, answer.text
+    numbers = answer.numbers
+    # 0.2 mm up and down, a little less square to the line where it slants.
+    assert numbers["widened_from_mm"] == pytest.approx(0.2, abs=0.01)
+    assert 0.4 <= numbers["widened_to_mm"] <= 0.41
+    assert 10.0 <= numbers["widened_along_mm"] <= 13.0, "the 10 mm, and its two tapers' ends"
+    # 0.1 mm off each piece along 10 mm, and the tapers: about 2 mm² and a little.
+    assert numbers["glass_added_mm2"] == 0 and 2.0 <= numbers["glass_taken_mm2"] <= 3.2
+    assert numbers["glass_taken_by_pixels_mm2"] == pytest.approx(numbers["glass_taken_mm2"], abs=1)
+    assert (numbers["pieces_before"], numbers["pieces_after"]) == (2, 2)
+    assert "The line keeps its path" in answer.record["why"]
+    # Only where it was thin: outside x 23 to 37 both outlines are as they were.
+    was, now = (
+        json.loads((bench.work / name).read_text())["pieces"]
+        for name in ("near.json", "near-1.json")
+    )
+    for old, new in zip(was, now, strict=True):
+        given = {(round(x, 3), round(y, 3)) for x, y in old["outline"]}
+        outside = [p for p in new["outline"] if not 23 <= p[0] <= 37]
+        # No point is moved or added there: a few on a straight run of the curve are dropped.
+        assert all((round(x, 3), round(y, 3)) in given for x, y in outside), old["id"]
+        assert len(outside) > 150
+    # The line's middle is where it was: at x 30 the two edges are 0.2 mm either side of it.
+    edges = [
+        min((abs(x - 30), y) for x, y in piece["outline"] if abs(x - 30) < 0.3)[1] for piece in now
+    ]
+    middle = 20 + 2 * math.sin(30 / 8)
+    assert edges[0] == pytest.approx(middle - 0.2, abs=0.01)
+    assert edges[1] == pytest.approx(middle + 0.2, abs=0.01)
+    again = bench("pieces", "check", "near-1.json")
+    assert again.verdict == "OK" and not flags_of(again), again.text
+    assert json.loads((bench.work / "near-1.json").read_text())["history"] == [
+        {"fix": "widen", "a": 1, "b": 2, "lead_mm": 0.4}
+    ]
+    # Nothing to widen, and a width of its own.
+    wide = bench("pieces", "widen", "near-1.json", 1, 2)
+    assert wide.verdict == "NO ANSWER" and "there's nothing to widen" in wide.record["why"]
+    more = bench("pieces", "widen", "near.json", 1, 2, "--lead", 0.8, "--to", "near-8.json")
+    assert more.verdict == "OK" and 0.8 <= more.numbers["widened_to_mm"] <= 0.81, more.text
+    # As a step of a file of fixes, it writes the same map.
+    (bench.work / "widen.json").write_text(json.dumps([{"fix": "widen", "a": 1, "b": 2}]))
+    step = bench("pieces", "fix", "near.json", "widen.json", "--to", "near-2.json")
+    assert step.verdict == "OK", step.text
+    assert step.numbers["steps"][0]["widened_to_mm"] == numbers["widened_to_mm"]
+    assert rings(bench.work, "near-1.json") == rings(bench.work, "near-2.json")
 
 
 def test_a_second_reading_is_said_only_where_a_rule_flags_the_place(bench: Any) -> None:
@@ -765,7 +827,8 @@ def test_a_maps_history_is_a_steps_file_that_makes_it_again(bench: Any, broken: 
     ("steps", "says"),
     [
         ('{"steps": []}', "no step"),
-        ('[{"fix": "polish"}]', "`fix` is one of merge, split, extend, drop-line"),
+        ('[{"fix": "polish"}]', "`fix` is one of merge, split, extend, drop-line, widen"),
+        ('[{"fix": "widen", "a": 1}]', "step 1, a widen, needs `b`"),
         ('[{"fix": "merge", "a": 1}]', "step 1, a merge, needs `b`"),
         ('[{"fix": "split", "piece": 1, "line": [[1, 2]]}]', "`line` is two points or more"),
         ("not json", "isn't JSON"),

@@ -17,6 +17,11 @@ the glass share fell from 91% to 83%. Here each fix is one piece's, by name:
 - **`drop-line --at X,Y`**: a dead end is filled with its piece's glass; a line between two
   pieces is their merge, the smaller joining the larger.
 
+- **`widen A B`**: the line between two pieces, where it's under a nozzle's width, becomes
+  that wide: each piece's edge moves back by half of what's short, only along the stretch
+  that's under, so the line keeps its path. A line the picture means, a sun's ray or a
+  river's inner line between two pieces of one colour, is kept that way where a merge would
+  take it out (mqucifer/print-shop#161).
 - **`fix STEPS`**: a file of those fixes, run in order in one call with one reply
   (mqucifer/print-shop#161). A map takes dozens of fixes, and a run chained them from its own
   script, where none was a bench call. It says each step's result, stops at the first step
@@ -45,8 +50,10 @@ import numpy as np
 import shapely
 
 from . import piecemap
+from .limits import under
 from .piecemap import Map, Piece
 from .pieces_check import (
+    MIN_LEAD,
     PIXELS_OFF,
     Limits,
     dead_ends,
@@ -69,7 +76,10 @@ GRID = 1e-6
 #: A crumb of glass under this, in mm², left by a cut is lead.
 CRUMB_MM2 = 0.05
 #: The fixes a steps file may name, and what each needs.
-FIXES = ("merge", "split", "extend", "drop-line")
+FIXES = ("merge", "split", "extend", "drop-line", "widen")
+#: A widened line is this much wider than asked, in mm, so it reads at its width however its
+#: curve is drawn as points.
+WIDEN_OVER = 0.004
 #: Steps said one by one in a reply, at most: the rest are in the saved numbers.
 STEPS_SAID = 60
 
@@ -353,6 +363,10 @@ def _settle(
 
 def _finish(args: Any, report: Report, before: Map, made: Made) -> None:
     """One fix's reply: the new map written, what changed, and its verdict."""
+    if "widened_to_mm" in made.numbers:
+        report.numbers["widened_from_mm"] = made.numbers["widened_from_mm"]
+        report.numbers["widened_to_mm"] = made.numbers["widened_to_mm"]
+        report.numbers["widened_along_mm"] = made.numbers["widened_along_mm"]
     if "ran_to" in made.numbers:
         report.numbers["ran_on_mm"] = made.numbers["ran_on_mm"]
         report.numbers["ran_from"] = made.numbers["ran_from"]
@@ -544,6 +558,89 @@ def do_drop_line(found: Map, at: Any) -> Made:
     )  # fmt: skip
 
 
+def _between(a: Any, b: Any, reach: float, step: float) -> list[Any]:
+    """The middle of the lead between two shapes, wherever they're nearer than `reach`: each
+    stretch a line through the points half way from one's edge to the nearest of the
+    other's."""
+    ring = shapely.get_coordinates(a.exterior.segmentize(step))[:-1]
+    feet = shapely.get_coordinates(shapely.shortest_line(shapely.points(ring), b))[1::2]
+    near = np.hypot(*(feet - ring).T) < reach
+    if not near.any():
+        return []
+    middle = (ring + feet) / 2.0
+    # From a point that isn't near, so a stretch across the ring's start is one stretch.
+    start = int(np.argmin(near)) if not near.all() else 0
+    order = np.roll(np.arange(len(ring)), -start)
+    found: list[Any] = []
+    run: list[Any] = []
+    for k in order:
+        if near[k]:
+            run.append(middle[k])
+        elif run:
+            found.append(shapely.LineString(run) if len(run) > 1 else shapely.Point(run[0]))
+            run = []
+    if run:
+        found.append(shapely.LineString(run) if len(run) > 1 else shapely.Point(run[0]))
+    return found
+
+
+def do_widen(found: Map, a_id: int, b_id: int, lead_mm: float | None) -> Made:
+    a, b = found.piece(a_id), found.piece(b_id)
+    if a.id == b.id:
+        raise NoAnswer("a line lies between two pieces: name two")
+    wide = MIN_LEAD if lead_mm is None else float(lead_mm)
+    if not wide > 0:
+        raise NoAnswer("--lead is the line's least width in mm, over 0")
+    was = float(a.shape.distance(b.shape))
+    if not under(was, wide):
+        raise NoAnswer(
+            f"the lead between pieces {a.id} and {b.id} is {was:.2f} mm at its narrowest, not "
+            f"under {wide:g}: there's nothing to widen"
+        )
+    reach = wide + WIDEN_OVER
+    # From each piece's own edge: where the line tapers, a point of one edge is under the
+    # width from the other while the point facing it isn't, so each side finds its own.
+    step = min(0.05, wide / 8.0)
+    middles = _between(a.shape, b.shape, reach, step)
+    theirs = _between(b.shape, a.shape, reach, step)
+    cut = shapely.union_all([m.buffer(reach / 2.0, quad_segs=16) for m in [*middles, *theirs]])
+    made: list[Piece] = []
+    for one in (a, b):
+        parts = [p for p in piecemap.polygons(one.shape.difference(cut)) if p.area > CRUMB_MM2]
+        if len(parts) != 1:
+            raise NoAnswer(
+                f"widened to {wide:g} mm, the line would cut piece {one.id} into "
+                f"{len(parts)}: it's that thin beside the line. `pieces merge MAP {a.id} "
+                f"{b.id}` joins the two, or `pieces split` it there first"
+            )
+        made.append(Piece(one.id, one.colour, parts[0], one.thickness_mm, one.paint))
+    now = float(made[0].shape.distance(made[1].shape))
+    if under(now, wide):
+        raise NoAnswer(
+            f"the line between pieces {a.id} and {b.id} came out {now:.3f} mm, under "
+            f"{wide:g}: it wasn't widened"
+        )
+    after = _swap(
+        found, [a.id, b.id], made, {"fix": "widen", "a": a.id, "b": b.id, "lead_mm": wide}
+    )
+    along = max(float(sum(m.length for m in middles)), float(sum(m.length for m in theirs)))
+    took = float(a.shape.area + b.shape.area - made[0].shape.area - made[1].shape.area)
+    return Made(
+        after, [a.id, b.id],
+        f"the line between pieces {a.id} and {b.id}, {was:.2f} mm at its narrowest, is "
+        f"{now:.2f} mm there now: each piece's edge moved back by up to "
+        f"{(wide - was) / 2.0:.2f} mm, along {along:.1f} mm of the line, and "
+        f"{took:.2f} mm² of glass is lead. The line keeps its path",
+        (0.0, took),
+        {"widened_from_mm": was, "widened_to_mm": now, "widened_along_mm": along},
+    )  # fmt: skip
+
+
+def run_widen(args: Any, report: Report) -> None:
+    found = piecemap.load(args.map)
+    _finish(args, report, found, do_widen(found, args.a, args.b, args.lead))
+
+
 def run_merge(args: Any, report: Report) -> None:
     found = piecemap.load(args.map)
     _finish(args, report, found, do_merge(found, args.a, args.b))
@@ -590,7 +687,8 @@ def read_steps(path: str) -> list[dict[str, Any]]:
     - `split`: `piece`, and `line`, its points `[[x, y], ...]`; `lead_mm`, the line's width;
     - `extend`: `at`, a point on the dead end (or `from`, as a history has it); `aim`, a point
       to run it toward (or `to`);
-    - `drop-line`: `at`, a point on the line.
+    - `drop-line`: `at`, a point on the line;
+    - `widen`: `a` and `b`, the two pieces the line lies between; `lead_mm`, its least width.
 
     Every step is read before any is made, so a file that can't be read changes nothing."""
     found = Path(path)
@@ -623,6 +721,14 @@ def read_steps(path: str) -> list[dict[str, Any]]:
             if b is None:
                 raise needs("b", "the neighbour it joins, by its number")
             steps.append({"fix": name, "a": a, "b": b})
+        elif name == "widen":
+            a, b = _whole(row.get("a")), _whole(row.get("b"))
+            if a is None or b is None:
+                raise needs("a" if a is None else "b", "a piece the line lies beside, by number")
+            lead = row.get("lead_mm")
+            if lead is not None and not (isinstance(lead, int | float) and lead > 0):
+                raise NoAnswer(f"step {n}, a widen: `lead_mm` is the line's width in mm, over 0")
+            steps.append({"fix": name, "a": a, "b": b, "lead_mm": lead})
         elif name == "split":
             piece = _whole(row.get("piece", row.get("id")))
             if piece is None:
@@ -659,6 +765,8 @@ def step_said(step: dict[str, Any]) -> str:
     """A step as a line names it."""
     if step["fix"] == "merge":
         return f"merge {step['a']} into {step['b']}"
+    if step["fix"] == "widen":
+        return f"widen the line between {step['a']} and {step['b']}"
     if step["fix"] == "split":
         ends = step["line"][0], step["line"][-1]
         return (
@@ -671,6 +779,8 @@ def step_said(step: dict[str, Any]) -> str:
 def do_step(found: Map, step: dict[str, Any]) -> Made:
     if step["fix"] == "merge":
         return do_merge(found, step["a"], step["b"])
+    if step["fix"] == "widen":
+        return do_widen(found, step["a"], step["b"], step["lead_mm"])
     if step["fix"] == "split":
         return do_split(found, step["piece"], step["line"], step["lead_mm"])
     if step["fix"] == "extend":

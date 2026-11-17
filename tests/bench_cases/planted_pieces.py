@@ -31,6 +31,7 @@ is a Sponsor's scene or anything from one (mqucifer/print-shop#152, mqucifer/pri
   that was never read as a line.
 - `close.json`: the rules' map with two pieces 0.2 mm apart along 6 mm, lead under a nozzle's
   width, and one piece 0.25 mm from the panel's edge, which the frame's border backs.
+- `near.json`: two curved pieces, the line between them 1.2 mm wide but 0.2 mm along 10 mm.
 - `hairs.json`: two cuts two microns wide whose ends face each other, which the
   outline has and no pixel shows.
 """
@@ -463,6 +464,33 @@ def close() -> dict[str, Any]:
     return found
 
 
+def near() -> dict[str, Any]:
+    """Two pieces of a 60 x 40 mm panel, one colour, with a curved line between them: 1.2 mm
+    wide, but 0.2 mm from x 25 to 35, narrowing over a millimetre at each end. A line the
+    picture means, too thin for a nozzle along 10 mm."""
+
+    def middle(x: float) -> float:
+        return 20 + 2 * math.sin(x / 8)
+
+    def width(x: float) -> float:
+        inside = min(x - 24, 36 - x)
+        return 1.2 if inside <= 0 else 0.2 if inside >= 1 else 1.2 - inside
+
+    xs = [k / 4 for k in range(241)]
+    low = [[x, round(middle(x) - width(x) / 2, 4)] for x in xs]
+    high = [[x, round(middle(x) + width(x) / 2, 4)] for x in xs]
+    return {
+        "piece_map": 1,
+        "panel": {"width_mm": 60, "height_mm": 40},
+        "lead_mm": 1.2,
+        "colours": {"blue": {"rgb": [40, 90, 220]}},
+        "pieces": [
+            {"id": 1, "colour": "blue", "outline": [[0, 0], [60, 0], *low[::-1]]},
+            {"id": 2, "colour": "blue", "outline": [*high, [60, 40], [0, 40]]},
+        ],
+    }
+
+
 def rules(slit: bool, depth: float = 8.0) -> dict[str, Any]:
     lead = 1.2
     outlines = cells(lead)
@@ -522,6 +550,7 @@ for name, made in (
     ("quiet.json", quiet()),
     ("joined.json", joined()),
     ("close.json", close()),
+    ("near.json", near()),
     ("stairs.json", stairs()),
     ("edge.json", edge()),
 ):

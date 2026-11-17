@@ -799,9 +799,20 @@ def parser() -> Parser:
             metavar="X,Y",
             help="a point on the line, as `pieces check` says each dead end's",
         )
+    widen = action.add_parser(
+        "widen",
+        help="the line between two pieces, where it's under a nozzle's width, becomes that "
+        "wide: each piece's edge moves back by half of what's short, and the line keeps its path",
+    )
+    widen.add_argument("map")
+    widen.add_argument("a", type=int, metavar="A", help="a piece the line lies beside")
+    widen.add_argument("b", type=int, metavar="B", help="the piece on its other side")
+    widen.add_argument(
+        "--lead", type=float, metavar="MM", help="the line's least width (0.4 unless given)"
+    )
     fixes = action.add_parser(
         "fix",
-        help="a file of fixes (merge, split, extend, drop-line) made in order in one call: "
+        help="a file of fixes (merge, split, extend, drop-line, widen) made in order in one call: "
         "each step's result, and the map up to the first step that's refused",
     )
     fixes.add_argument("map")
@@ -810,9 +821,10 @@ def parser() -> Parser:
         metavar="STEPS",
         help='JSON: a list of steps, or {"steps": [...]}, each {"fix": "merge", "a": A, "b": B}, '
         '{"fix": "split", "piece": ID, "line": [[x1, y1], [x2, y2]]}, {"fix": "extend", "at": '
-        '[x, y]} or {"fix": "drop-line", "at": [x, y]}: `docs/pieces.md`',
+        '[x, y]}, {"fix": "drop-line", "at": [x, y]} or {"fix": "widen", "a": A, "b": B}: '
+        "`docs/pieces.md`",
     )
-    for fix in (merge, split, extend, drop, fixes):
+    for fix in (merge, split, extend, drop, widen, fixes):
         fix.add_argument(
             "--to",
             metavar="FILE",

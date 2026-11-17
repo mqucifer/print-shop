@@ -9,6 +9,8 @@ is cut into flat slices (mqucifer/print-shop#154).
     pieces split MAP ID --line ...      a new lead line across a piece, from edge to edge
     pieces extend MAP --at X,Y          a dead-end line runs on to the next line or edge
     pieces drop-line MAP --at X,Y       a line is taken out, and the glass each side joins
+    pieces widen MAP A B                the line between A and B, where it's under a nozzle's
+                                        width, becomes that wide, and keeps its path
     pieces fix MAP STEPS                a file of those fixes, in order, in one call
     pieces build MAP --thickness T ...  the frame and a pane file for each colour
     pieces dome --diameter D --height H --repeats N --bands FILE
@@ -29,7 +31,14 @@ from typing import Any
 from .pieces_build import run_build
 from .pieces_check import run_check
 from .pieces_dome import run_dome
-from .pieces_fix import run_drop_line, run_extend, run_fix, run_merge, run_split
+from .pieces_fix import (
+    run_drop_line,
+    run_extend,
+    run_fix,
+    run_merge,
+    run_split,
+    run_widen,
+)
 from .pieces_flatten import run_flatten
 from .pieces_trace import run_trace
 from .report import Report
@@ -48,6 +57,8 @@ def run(args: Any, report: Report) -> None:
         run_extend(args, report)
     elif args.action == "drop-line":
         run_drop_line(args, report)
+    elif args.action == "widen":
+        run_widen(args, report)
     elif args.action == "fix":
         run_fix(args, report)
     elif args.action == "dome":

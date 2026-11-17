@@ -292,12 +292,16 @@ piece that breaks a rule, with where. Each flag has its fix:
 | `notch` | a notch deeper than it's wide | `pieces split` from the notch's end to the piece's far edge |
 | `gradient` | a colour that runs across one piece | `pieces split` where it changes, or keep it one colour and say so |
 | `wide-lead` | a patch of lead, not a line | `pieces merge` the pieces round it |
-| `thin-lead` | lead between two pieces under a nozzle's width, 0.4 mm: the frame's wall there wouldn't print, and `thin` would fail on it | `pieces merge MAP A B` joins the two, or draw the line wider and trace again |
+| `thin-lead` | lead between two pieces under a nozzle's width, 0.4 mm: the frame's wall there wouldn't print, and `thin` would fail on it | `pieces widen MAP A B` widens the line where it's thin and keeps it. `pieces merge` takes the line out: only where the two are one colour and the picture doesn't mean the line |
 
 - **Each fix is one piece's, and you choose it.** A filter over every piece is not a fix: an
   opening, a closing, a buffer in and out or a simplification run over all of them rounds every
   corner and drops what it cuts into the lead. In one run that turned 15 to 22% of one band's
   glass into grey patches up to 19 mm wide.
+- **A thin line the picture means is widened, not merged.** A sun's rays or a river's inner
+  lines lie between two pieces of one colour, and a merge erases them: the composition stays.
+  `pieces widen` moves each piece's edge back by half of what the line is short, only where
+  it's short, so the line keeps its path.
 - **A fix becomes glass, not lead.** Each reply says the glass share and the lead's widest point
   before and after, and the share the trace had. A merge or a dropped line adds glass; a split
   takes one line's worth. A share well under the trace's means glass went into the lead.
@@ -316,7 +320,8 @@ piece that breaks a rule, with where. Each flag has its fix:
  {"fix": "merge", "a": 12, "b": 9},
  {"fix": "drop-line", "at": [41.5, 60]},
  {"fix": "split", "piece": 4, "line": [[40, 15.3], [80, 15.3]]},
- {"fix": "extend", "at": [20, 55]}
+ {"fix": "extend", "at": [20, 55]},
+ {"fix": "widen", "a": 46, "b": 47}
 ]
 ```
 

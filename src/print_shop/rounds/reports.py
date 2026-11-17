@@ -274,6 +274,9 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "top_mm",
         "unbuildable",
         "upper_lip_mm",
+        "widened_along_mm",
+        "widened_from_mm",
+        "widened_to_mm",
     ),
     # Joined parts under a weight, and each part against the bed (mqucifer/print-shop#156).
     "load": (

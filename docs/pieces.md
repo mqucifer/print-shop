@@ -51,7 +51,8 @@ JSON, in millimetres, x to the right and y up from the panel's bottom-left:
  {"fix": "merge", "a": 12, "b": 9},
  {"fix": "split", "piece": 4, "line": [[40, 15.3], [80, 15.3]], "lead_mm": 1.4},
  {"fix": "extend", "at": [20, 55], "aim": [20, 80]},
- {"fix": "drop-line", "at": [41.5, 60]}
+ {"fix": "drop-line", "at": [41.5, 60]},
+ {"fix": "widen", "a": 46, "b": 47}
 ]
 ```
 
@@ -61,6 +62,7 @@ JSON, in millimetres, x to the right and y up from the panel's bottom-left:
 | `split` | `piece`, and `line`, two points or more from one of its edges to another | `lead_mm`, the new line's width: the map's unless given |
 | `extend` | `at`, a point on the dead end | `aim`, a point to run it toward |
 | `drop-line` | `at`, a point on the line | |
+| `widen` | `a` and `b`, the two pieces the line lies between | `lead_mm`, the line's least width: 0.4 unless given |
 
 - **The steps run in order,** each on the map the one before left, and a piece's number is what it is by then: a merge keeps B's, and a split's new pieces take the next numbers.
 - **A map's `history` is a steps file.** Each fix is written there as a step is given (an extension's `from` and `to` are read as `at` and `aim`), so the fixes a map has had can be made again on the map they began from, and give the same pieces.

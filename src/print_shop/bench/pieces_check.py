@@ -791,7 +791,17 @@ def thin_lead(
             continue
         middle = (start + end) / 2.0
         between = f"pieces {mine.id} and {other.id}"
-        fix = f"`pieces merge MAP {mine.id} {other.id}` joins them and the line is glass"
+        fix = (
+            f"`pieces widen MAP {mine.id} {other.id}` moves each piece's edge back so the "
+            f"line is {least:g} mm there and keeps its path"
+        )
+        if mine.colour == other.colour:
+            # A merge takes the line out, so it's a fix only where the two are one colour
+            # and the picture doesn't mean the line.
+            fix += (
+                f"; or, if the picture doesn't mean the line, `pieces merge MAP {mine.id} "
+                f"{other.id}` joins the two, both {mine.colour}"
+            )
         flags.append(
             {
                 "flag": "thin-lead",
@@ -800,8 +810,7 @@ def thin_lead(
                 "limit": least,
                 "at": piecemap.xy(middle),
                 "said": f"the lead between {between} is {said(width, least, 2)} mm at "
-                f"{piecemap.said_at(middle)}, under the {least:g} mm a nozzle prints: {fix}, "
-                "or to keep the line, draw it wider in the picture and trace again",
+                f"{piecemap.said_at(middle)}, under the {least:g} mm a nozzle prints: {fix}",
             }
         )
         if len(flags) > THIN_SAID:
@@ -1329,8 +1338,9 @@ def fixes_said(flags: list[dict[str, Any]]) -> str:
         ways.append("a gradient: `pieces split` it where the colour changes, or leave it one")
     if "thin-lead" in names:
         ways.append(
-            "lead under a nozzle's width: `pieces merge MAP A B` joins the two pieces and the "
-            "line is glass, or draw the line wider in the picture and trace again"
+            "lead under a nozzle's width: `pieces widen MAP A B` widens the line there and "
+            "keeps it; `pieces merge MAP A B` takes it out, where the two are one colour and "
+            "the picture doesn't mean the line"
         )
     if "wide-lead" in names:
         ways.append("a patch of lead: `pieces merge` the pieces round it, or redraw it as glass")
