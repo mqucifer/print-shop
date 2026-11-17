@@ -842,14 +842,24 @@ def within(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """The lessons a start gives and those it leaves out, under a budget in characters: they're
     taken in order while each one's line, as given, fits in what's left, and the first that
-    doesn't ends them, so none is given ahead of a better one. One left out is still kept, and
-    the `lessons` tool finds it."""
-    used = 0
-    for i, one in enumerate(found):
-        used += len(line(one))
-        if used > budget:
-            return found[:i], found[i:]
-    return found, []
+    doesn't ends them, so none is given ahead of a better one. The one exception is a lesson
+    whose line is longer than the whole budget: no start can give it, so it's left out, marked
+    `too_long`, and the filling goes on past it, as one such lesson mustn't empty a start. One
+    left out is still kept, and the `lessons` tool finds it."""
+    given: list[dict[str, Any]] = []
+    left: list[dict[str, Any]] = []
+    used, full = 0, False
+    for one in found:
+        size = len(line(one))
+        if 0 < budget < size:
+            left.append({**one, "too_long": True})
+        elif full or used + size > budget:
+            full = True
+            left.append(one)
+        else:
+            used += size
+            given.append(one)
+    return given, left
 
 
 def writer(written_by: str) -> str:
@@ -884,11 +894,19 @@ def left_said(left: list[dict[str, Any]], part_kind: str | None = None) -> str:
     counts += [f"{general} general"] if general else []
     one = len(left) == 1
     yours = f"`{kind}`, or `general`" if kind not in (None, GENERAL) else "`general`, or a kind's"
+    long = [str(found["id"]) for found in left if found.get("too_long")]
+    too_long = ""
+    if long:
+        many = len(long) > 1
+        too_long = (
+            f" Lesson{'s' if many else ''} {', '.join(long)} {'are' if many else 'is'} too long "
+            f"for the start: read {'each' if many else 'it'} with its `id`."
+        )
     return (
         f"{len(left)} more kept lesson{' isn' if one else 's aren'}'t here, to keep the start "
-        f"short: {' and '.join(counts)}. The `lessons` tool finds {'it' if one else 'them'}: by "
-        f"`words`, by `kind` ({yours}), and one whole by its `id`. One you read whole, you'll "
-        "be asked about at the end, as you will these."
+        f"short: {' and '.join(counts)}.{too_long} The `lessons` tool finds "
+        f"{'it' if one else 'them'}: by `words`, by `kind` ({yours}), and one whole by its `id`. "
+        "One you read whole, you'll be asked about at the end, as you will these."
     )
 
 
@@ -931,8 +949,14 @@ def give(
 def leave_out(ledger: DesignLedger, run: str, left: Iterable[dict[str, Any]], budget: int) -> None:
     """A row of `run_lessons_left` for each lesson a run's start left out, and why. Nothing of
     the lesson changes: it isn't given, and it isn't dropped."""
-    why = f"over the start's budget of {budget} characters (`Limits.start_lessons_chars`)"
+    over = f"over the start's budget of {budget} characters (`Limits.start_lessons_chars`)"
     for found in left:
+        why = over
+        if found.get("too_long"):
+            why = (
+                f"too long for the start: its line is {len(line(found))} characters, and the "
+                f"start's whole budget is {budget} (`Limits.start_lessons_chars`)"
+            )
         ledger.add("run_lessons_left", run=run, lesson=found["id"], at=now(), why=why)
 
 
@@ -1268,6 +1292,18 @@ def listing(ledger: DesignLedger, run: str | None = None) -> str:
             f"{str(k['text'])[:SHAPE_CHARS]}"
             for k in unsorted
         ]
+        lines.append("")
+    long = [(k, len(line(k))) for k in kept if len(line(k)) > START_CHARS]
+    if long:
+        lines += [
+            "## Too long for a start, for the reviewer",
+            "",
+            f"Each one's line is over a start's whole budget, {START_CHARS} characters unless a "
+            "run sets it (`Limits.start_lessons_chars`), so no start gives it, and only the "
+            "`lessons` tool finds it. `edit ID --text FILE` shortens it.",
+            "",
+        ]
+        lines += [f"- Lesson {k['id']}: {size} characters." for k, size in long]
         lines.append("")
     folding = to_fold(ledger)
     if folding:

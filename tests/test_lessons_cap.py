@@ -131,9 +131,9 @@ def test_the_budget_has_a_stated_default_and_none_fits_a_budget_of_nothing(
     assert "6 more kept lessons aren't here" in said
     assert "3 for stained-glass parts and 3 general" in said
     # They're taken in order: the first that doesn't fit ends the start's, so none jumps a better.
-    given, left = lessons.within(found, room_for(ledger, n["e"]) + 3)
-    assert [g["id"] for g in given] == [n["e"]]
-    assert len(left) == 5
+    given, left = lessons.within(found, room_for(ledger, n["e"], n["c"]) + 3)
+    assert [g["id"] for g in given] == [n["e"], n["c"]]
+    assert len(left) == 4 and not any(one.get("too_long") for one in left)
 
 
 def test_the_tool_finds_a_lesson_left_out_by_words_and_by_kind(tmp_path: Path) -> None:
@@ -243,3 +243,41 @@ def test_the_review_lists_a_kept_lesson_with_no_kind_and_gives_it_one(tmp_path: 
     lessons.promote(ledger, lid, BY, "skill", "src/print_shop/rounds/skills/enclosure")
     assert f"lesson {lid}." not in lessons.listing(ledger)
     assert [g["id"] for g in lessons.to_give(ledger, "enclosure")] == [plain, pane]
+
+
+def test_a_lesson_longer_than_the_whole_budget_doesnt_empty_the_start(tmp_path: Path) -> None:
+    ledger, n = kept(tmp_path)
+    # The best of its kind, and far longer than any start's budget.
+    long = "Check each pane's seat with capture, not by eye. " * 150
+    lessons.edit(ledger, n["e"], BY, text=long, why="made long, for a test")
+    assert lessons.to_give(ledger, "stained-glass")[0]["id"] == n["e"]
+    limits = Limits(start_lessons_chars=room_for(ledger, n["c"], n["d"], n["g"]))
+    model = Scripted([tool("lessons", id=n["e"])], [tool("blocked", reason="x")])
+    run = Run.start(tmp_path, "next", GLASS, [], model, limits, sleep=lambda _: None)
+    run.drive()
+    start = model.bodies[0]["messages"][1]["content"]
+    # It's left out and named, and the filling goes on past it, in order, with no other jump.
+    assert f"**Lesson {n['e']}**" not in start
+    at = [start.index(f"**Lesson {n[k]}**") for k in ("c", "d", "g")]
+    assert at == sorted(at)
+    assert f"**Lesson {n['b']}**" not in start and f"**Lesson {n['a']}**" not in start
+    assert (
+        "3 more kept lessons aren't here, to keep the start short: 1 for stained-glass parts "
+        f"and 2 general. Lesson {n['e']} is too long for the start: read it with its `id`."
+    ) in start
+    out = rows(ledger, "SELECT lesson, why FROM run_lessons_left WHERE run='next' ORDER BY rowid")
+    assert [o["lesson"] for o in out] == [n["e"], n["b"], n["a"]]
+    assert out[0]["why"].startswith("too long for the start: its line is ")
+    assert out[1]["why"].startswith("over the start's budget of ")
+    # The tool still gives it whole, and both listings say it's too long.
+    assert told(run)[0]["detail"] == {"read": n["e"], "given": "tool"}
+    assert f"- Lesson {n['e']}: too long for the start" in lessons.listing(ledger, "next")
+    listed = lessons.listing(ledger)
+    assert "## Too long for a start, for the reviewer" in listed
+    assert f"- Lesson {n['e']}: {len(lessons.line(lessons.one(ledger, n['e'])))} char" in listed
+    # A shorter one that only doesn't fit what's left still ends the start's.
+    given, left = lessons.within(
+        lessons.to_give(ledger, "stained-glass"), room_for(ledger, n["c"], n["d"]) + 3
+    )
+    assert [g["id"] for g in given] == [n["c"], n["d"]]
+    assert [one["id"] for one in left] == [n[k] for k in ("e", "g", "b", "a")]
