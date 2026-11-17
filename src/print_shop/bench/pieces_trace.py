@@ -62,7 +62,7 @@ SMOOTH_PX = 5
 #: And lose each point within this of the line through its neighbours, in pixels: a shallow
 #: slope's steps, a pixel tall and many apart, stand half a pixel either side of the line they
 #: stand for, and averaging doesn't take them out.
-SIMPLIFY_PX = 0.6
+SIMPLIFY_PX = 1.0
 #: The fewest pixels across the panel a trace reads: under this a lead line is a pixel or two.
 LEAST_PX = 200
 #: A piece's colour is read from at most this many of its pixels, away from its edge.

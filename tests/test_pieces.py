@@ -376,7 +376,9 @@ def test_the_existing_checks_read_a_build_as_any_frame(bench: Any, built: Answer
     )  # fmt: skip
     assert held.verdict == "OK", held.text
     assert held.numbers["panes_read"] == 10
-    assert held.numbers["least_lip_mm"] == pytest.approx(0.95, abs=0.1), "1.2 less the play"
+    # 1.2 mm less the play, 0.95: up to --fit wider where an opening is fitted, and read up to
+    # 0.1 less at a corner, where `capture` reads the lip to the corner's point.
+    assert 0.85 <= held.numbers["least_lip_mm"] <= 1.05
     by_files = bench(
         "capture", frame, "--pocket-z", 1.3, "--clearance", 0.25, "--pane-thickness", 1,
         "--panes", len(panes),

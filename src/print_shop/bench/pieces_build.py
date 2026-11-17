@@ -28,14 +28,15 @@ arcs: each pair of arcs (a biarc) leaves one point along the points' own directi
 arrives at another along its, spanning as many points as stay within `--fit` of it, and the
 sides between them within twice that. So a
 curve is a few arcs that meet without a kink, a file's faces are planes and cylinders, and
-none is a strip. The pane is Shapely's inset of those curves by the play, rounded, fitted
-again: the inset of an arc is an arc, so a few arcs take it within `CLOSE` mm. The pocket is
-the pane's own arcs moved out by the play (`offset_ring`): a line moves over, an arc keeps
-its centre, and two sides at a corner run on or are cut back to where they meet. So each arc
-of the pocket has its twin in the pane, and the play is exact. Where the arcs moved out aren't
-the pane and the play round it, the pocket is fitted within `CLOSE` instead, and the reply
-names the piece. (OpenCascade's own `offset2D` failed on 11 of 36 outlines of a traced test
-scene, so it isn't used.)
+none is a strip. Where one arc fits, one stands in place of the pair.
+
+The pocket is those lines and arcs, and the pane the same ones moved in by the play
+(`offset_ring`): a line moves over, an arc keeps its centre, and two sides at a corner run on
+or are cut back to where they meet. So each arc of the pane has its twin in the pocket, and the
+play is exact. Where a pane has a spur, or a tip sharper than about 45 degrees, which no nozzle
+prints, the pane is Shapely's inset cut back and rounded and fitted again within `CLOSE` mm, and
+its pocket follows it; the reply names the piece. (OpenCascade's own `offset2D` failed on 11 of
+36 outlines of a traced test scene, so it isn't used.)
 
 **Second method.** Each solid's volume by OpenCascade against its outline's area in Shapely
 times its height; the built curves' distance from the map's outline, at points along them; and
@@ -72,6 +73,9 @@ LEAST_ACROSS = 0.8
 NOZZLE = 0.4
 #: A rounded corner is drawn in Shapely with this many points a quarter turn, then fitted.
 ROUND_SEGS = 32
+#: A pane keeps its sharp corners where rounding them by half a nozzle moves none by more than
+#: this, in mm: past it the corner is a tip, which is cut back and rounded.
+TIP = 0.3
 #: The lip steps down by this, in mm, where a piece has no opening at the full one.
 LIP_STEP = 0.1
 #: A built curve is drawn as points this close to it, in mm, where Shapely insets it.
@@ -84,6 +88,9 @@ REACH = 1.5
 NEAR = 0.06
 #: Arcs fitted to such points keep within this of them, in mm.
 CLOSE = 0.003
+#: One arc stands for a pair where it arrives within this many degrees of the pair's way: a
+#: join that slight is a curve's, not a corner.
+KINK_DEG = 3.0
 #: A biarc's arc turns through no more than this, in degrees.
 MOST_SWEEP = 150.0
 
@@ -105,7 +112,7 @@ class Arc:
     """An arc from `start` to `end`, leaving along `leave`."""
 
     def __init__(self, start: np.ndarray, leave: np.ndarray, end: np.ndarray) -> None:
-        self.start, self.end = start, end
+        self.start, self.end, self.leave = start, end, leave
         chord = end - start
         normal = np.array([-leave[1], leave[0]])
         across = float(chord @ normal)
@@ -267,9 +274,19 @@ def _fit_run(run: np.ndarray, closed: bool, fit: float, span: float) -> list[Arc
         # Within `fit` of the run's points, and twice that of the sides between them: a side
         # is a chord of the curve its points stand for, and lies inside it.
         own = np.array([run[n % count] for n in range(k, j + 1)])
+        points = _samples(run, k, j, step)
+        # One arc where one will do: it leaves as the pair does, and arrives within
+        # `KINK_DEG` of the way the pair would.
+        one = Arc(run[k], pair[0].leave, run[j % count])
+        if (
+            abs(one.sweep) <= math.radians(MOST_SWEEP)
+            and float(one.arrive @ pair[1].arrive) >= math.cos(math.radians(KINK_DEG))
+            and float(one.off(own).max()) <= fit
+            and float(one.off(points).max()) <= 2.0 * fit
+        ):
+            return [one]
         if float(np.minimum(pair[0].off(own), pair[1].off(own)).max()) > fit:
             return None
-        points = _samples(run, k, j, step)
         off = np.minimum(pair[0].off(points), pair[1].off(points))
         return pair if float(off.max()) <= 2.0 * fit else None
 
@@ -632,29 +649,47 @@ def _same(rings: list[list[Arc] | None], wanted: Any, slack: float) -> bool:
 def piece_curves(piece: Piece, lip: float, play: float, fit: float) -> dict[str, Any]:
     """One piece's pocket, pane and opening as rings of lines and arcs.
 
-    The piece's outline is fitted to arcs, within `fit`. Its pane is those curves inset by
-    the play and rounded (`pane_of`), which Shapely makes, fitted again within `CLOSE`: the
-    inset of an arc is an arc, so a few take it. The pocket is the pane's own arcs moved out
-    by the play, each the twin of one of the pane's, so the play is exact; where that isn't
-    the pane and the play round it, as where a notch is tighter than the play, it's fitted
-    within `CLOSE` instead. The opening is the pocket's arcs moved in by the lip, or where a
-    bend is tighter than the lip, Shapely's inset fitted within half of `fit`."""
-    # Fitted a little inside `fit`, and closer still where the curves cross themselves or
-    # pinch the pane in two, as loose arcs can at a narrow place.
-    pane_2d = None
+    The piece's outline is fitted to arcs, within `fit`. The plain way, the pocket is those
+    arcs and the pane the same arcs moved in by the play. Where the pane has a spur or a sharp
+    tip, it's Shapely's inset cut back and rounded (`pane_of`) and fitted again within `CLOSE`,
+    and the pocket is the pane's arcs moved out, or fitted to the pane and its play. The
+    opening is the pocket's arcs moved in by the lip, or where a bend is tighter than the lip,
+    Shapely's inset fitted so the lip is the lip asked for or up to `fit` wider."""
+    outline: list[list[Arc]] = []
     for share in (0.8, 0.4, 0.2, 0.1, 0.05):
-        built = _ring_polygon(_rings_of(piece.shape, share * fit))
+        outline = _rings_of(piece.shape, share * fit)
+        built = _ring_polygon(outline)
         pane_2d = pane_of(built, play) if built.is_valid else None
         if pane_2d is not None:
             break
     if pane_2d is None:
         raise NoAnswer(f"piece {piece.id}'s outline, fitted to curves, leaves no one pane")
-    pane = _close(pane_2d)
-    grown = pane_2d.buffer(play, quad_segs=4 * ROUND_SEGS)
-    pocket: list[Any] = [offset_ring(ring, -play) for ring in pane]
-    exact = _same(pocket, grown, 0.001 * grown.area + 0.01)
-    if not exact:
-        pocket = _close(grown)
+    # The plain way, and the fewest arcs: the pocket is the outline's own arcs and the pane
+    # those arcs moved in by the play, where that's the inset and no nozzle would lose more
+    # of it than a corner's point: no spur, and no tip sharper than about 45 degrees.
+    pane: list[Any] = [offset_ring(ring, play) for ring in outline]
+    inset = [
+        part
+        for part in _inset(built, play)
+        if not under(piecemap.widest(part, 0.02)[0], LEAST_ACROSS)
+    ]
+    plain = len(inset) == 1 and _same(pane, inset[0], 0.001 * inset[0].area + 0.01)
+    if plain:
+        sharp = _ring_polygon(pane)
+        printed = piecemap.polygons(sharp.buffer(-NOZZLE / 2.0).buffer(NOZZLE / 2.0))
+        plain = len(printed) == 1 and (
+            sharp.boundary.hausdorff_distance(printed[0].boundary) <= TIP
+        )
+    if plain:
+        pocket: list[Any] = outline
+        exact = True
+    else:
+        pane = _close(pane_2d)
+        grown = pane_2d.buffer(play, quad_segs=4 * ROUND_SEGS)
+        pocket = [offset_ring(ring, -play) for ring in pane]
+        exact = _same(pocket, grown, 0.001 * grown.area + 0.01)
+        if not exact:
+            pocket = _close(grown)
     pocket_2d = _ring_polygon(pocket)
     parts = [
         part
@@ -666,12 +701,21 @@ def piece_curves(piece: Piece, lip: float, play: float, fit: float) -> dict[str,
     opening: list[Any] = [offset_ring(ring, lip) for ring in pocket]
     opening_exact = _same(opening, parts[0], 0.001 * parts[0].area + 0.01)
     if not opening_exact:
-        opening = _rings_of(parts[0].simplify(fit / 20.0), fit / 2.0, NEAR)
+        # Fitted within half of `fit` of an inset that much deeper, so the lip is never
+        # narrower than asked, and up to `fit` wider.
+        deeper = [
+            part
+            for part in _inset(pocket_2d, lip + fit / 2.0)
+            if not under(piecemap.widest(part, 0.02)[0], LEAST_ACROSS)
+        ]
+        wanted = deeper[0] if len(deeper) == 1 else parts[0]
+        opening = _rings_of(wanted.simplify(fit / 20.0), fit / 2.0, NEAR)
     return {
         "pocket": pocket,
         "pane": pane,
         "opening": opening,
         "exact": exact,
+        "plain": plain,
         "opening_exact": opening_exact,
         "pocket_2d": pocket_2d,
         "pane_2d": _ring_polygon(pane),
@@ -897,7 +941,7 @@ def run_build(args: Any, report: Report) -> None:
     if refitted_lips:
         report.note(
             f"{refitted_lips} opening(s) are fitted to Shapely's inset of the pocket, where a "
-            f"bend tighter than the lip goes: each within {args.fit / 2.0:g} mm of its lip"
+            f"bend tighter than the lip goes: each lip is its own or up to {args.fit:g} mm wider"
         )
     report.second(
         f"the frame's volume, {volume:.1f} mm³ by OpenCascade, against {expected:.1f} mm³ from "
