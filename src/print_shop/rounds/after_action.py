@@ -1,12 +1,12 @@
 """The after-action review: one more turn on a run's own session, after a person's decision.
 
 The model writes its run's lessons while it still has its context (the Sponsor, 2026-11-02), and
-scores each lesson it was given at the start. It follows an approval, or a close: a run that ended
-without approval gets one too once a person closes it (mqucifer/print-shop#32), as "It still has
-learnings" (the Sponsor, 2026-11-03). Then it's asked what didn't work and why, what would have
-changed it, and what it would do first next time. It's its own tool, `after_action`, apart from
-`review.py`, which writes the folder a person prints from: the two are never the same word, in
-code, in what the model's told, or in the ledger.
+scores each lesson it was given, at the start or by the `lessons` tool. It follows an approval,
+or a close: a run that ended without approval gets one too once a person closes it
+(mqucifer/print-shop#32), as "It still has learnings" (the Sponsor, 2026-11-03). Then it's asked
+what didn't work and why, what would have changed it, and what it would do first next time. It's
+its own tool, `after_action`, apart from `review.py`, which writes the folder a person prints
+from: the two are never the same word, in code, in what the model's told, or in the ledger.
 
 - It runs after the decision is recorded, so the run stays approved or closed whatever happens
   here. A failure is a row of `after_actions`, and the reviewer can enter lessons by hand
@@ -84,7 +84,8 @@ def spec() -> dict[str, Any]:
                     },
                     "scores": {
                         "type": "array",
-                        "description": "One for each lesson you were given at the start: "
+                        "description": "One for each lesson you were given, at the start or "
+                        "read whole with `lessons`: "
                         '{"lesson": its number, "score": "used", "not_used" or "in_the_way", '
                         '"calls": [the calls that show it], "why": "in a line"}. An empty list if '
                         "you were given none.",
@@ -314,9 +315,12 @@ def ask(ledger: DesignLedger, run: str, upto: int, closed: bool = False) -> str:
     given = lessons.given_to(ledger, run)
     if given:
         lines = [f"- Lesson {g['lesson']}, given {g['how']}: {g['text']}" for g in given]
-        was_given = "The lessons you were given at the start, to score:\n" + "\n".join(lines)
+        was_given = (
+            "The lessons you were given, at the start or read whole with `lessons`, to score:\n"
+            + "\n".join(lines)
+        )
     else:
-        was_given = "You were given no lessons at the start, so `scores` is an empty list."
+        was_given = "You were given no lessons, so `scores` is an empty list."
     calls = "\n".join(index(ledger, run, upto))
     if closed:
         opening = (

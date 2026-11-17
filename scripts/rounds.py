@@ -2,9 +2,11 @@
 """A run of the local model in rounds on the bench. `docs/rounds.md` says what it does.
 
 scripts/rounds.py start NAME --request FILE [--reference FILE]... [--right FILE]
-                  [--trim-reasoning]                              intake, then rounds; a right
+                  [--trim-reasoning] [--start-lessons-chars N]    intake, then rounds; a right
                                                                   answer is the scenario's ranges;
-                                                                  the trim is an eval arm's, off
+                                                                  the trim is an eval arm's, off;
+                                                                  the start's lessons fit N
+                                                                  characters, 6000 unless given
 scripts/rounds.py resume NAME [--note FILE] [--from WHO] [--reopen-needs]   go on after a stop
 scripts/rounds.py resume NAME --approve --by WHO [--note FILE]      a person's yes, then the
                                                                   model's after-action review
@@ -29,10 +31,13 @@ scripts/rounds.py replay NAME N [--times K] [--label L] [--out DIR] [CHANGE]   c
                                   --tool NAME=FILE; none is the control. Into
                                   ~/print-shop/replays/, never the run's folder
 
-scripts/rounds.py lessons [RUN] [--ledger FILE]                     what a run wrote, its evidence
-scripts/rounds.py lessons accept ID --by WHO [--routes R,R] [--becomes B]
+scripts/rounds.py lessons [RUN] [--ledger FILE]                     what a run wrote, its evidence;
+                                  with none, every lesson, those with no kind of part, and each
+                                  kind's to fold into its skill
+scripts/rounds.py lessons accept ID --by WHO [--routes R,R] [--becomes B] [--part-kind K|general]
 scripts/rounds.py lessons edit ID --by WHO [--text FILE] [--kind K] [--shape S] [--routes R,R]
-                                  [--becomes B] [--keys CMD:VERDICT,...] [--part-kind K] [--why W]
+                                  [--becomes B] [--keys CMD:VERDICT,...] [--part-kind K|general]
+                                  [--why W]
 scripts/rounds.py lessons reject ID --by WHO --why W
 scripts/rounds.py lessons score RUN ID --score used|not_used|in_the_way --by WHO [--calls 1,2]
                                   [--route model|harness|request|operator]
@@ -172,7 +177,9 @@ def _lessons(args: argparse.Namespace, ledger: DesignLedger) -> str:
     except ValueError as exc:
         raise Refused(f"a lesson is its number: not {rest[-1]!r}") from exc
     if action == "accept":
-        lessons.accept(ledger, lesson, args.by, args.becomes, _listed(args.routes))
+        lessons.accept(
+            ledger, lesson, args.by, args.becomes, _listed(args.routes), args.part_kind
+        )
     elif action == "edit":
         text = args.text.read_text(encoding="utf-8") if args.text else None
         lessons.edit(
@@ -352,6 +359,13 @@ def main() -> int:
         help=f"an eval's arm: past reasoning over {TRIM_AT:,} tokens keeps only the last "
         f"{TRIM_KEEP} turns', in one step, for the whole run. Off unless given",
     )
+    start.add_argument(
+        "--start-lessons-chars",
+        type=int,
+        default=lessons.START_CHARS,
+        help="the characters of kept lessons its start holds, its kind's first and best-scored "
+        f"first: {lessons.START_CHARS} unless given. The `lessons` tool finds the rest",
+    )
     resume = sub.add_parser("resume")
     resume.add_argument("name")
     resume.add_argument("--note", type=Path)
@@ -433,7 +447,10 @@ def main() -> int:
     taught.add_argument("--routes", help="who acts on it, by commas: " + ", ".join(lessons.ROUTES))
     taught.add_argument("--route", default="model", choices=tuple(lessons.ROUTES))
     taught.add_argument("--keys", help="the checks it's about: capture:FAIL,thin (any verdict)")
-    taught.add_argument("--part-kind", help="the kind of part it's for; empty makes it general")
+    taught.add_argument(
+        "--part-kind",
+        help="the kind of part it's for, or `general` for every kind; empty takes its kind away",
+    )
     taught.add_argument("--as", dest="became", choices=tuple(lessons.BECAME))
     taught.add_argument("--where", default="", help="where it is now: owner/repo#n, or a path")
     taught.add_argument("--score", choices=tuple(lessons.SCORES))
@@ -504,7 +521,10 @@ def main() -> int:
                         scores.load_right(args.right)
                     except scores.NotRight as exc:
                         raise Refused(str(exc)) from exc
-                limits = Limits(trim_reasoning_at=TRIM_AT) if args.trim_reasoning else None
+                limits = Limits(
+                    trim_reasoning_at=TRIM_AT if args.trim_reasoning else 0,
+                    start_lessons_chars=args.start_lessons_chars,
+                )
                 run = Run.start(root, args.name, request, args.reference, send, limits)
                 if args.right:
                     scores.keep_right(run.folder, args.right, run.ledger)

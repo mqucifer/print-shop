@@ -91,7 +91,8 @@ def test_the_start_holds_general_lessons_and_those_for_its_kind_of_part(tmp_path
         lessons.accept(ledger, n, BY)
     lessons.edit(ledger, glass, BY, part_kind="stained-glass", why="only for panes")
     assert [g["id"] for g in lessons.to_give(ledger)] == [general]
-    assert [g["id"] for g in lessons.to_give(ledger, "stained-glass")] == [general, glass]
+    # Its kind's first, then the general ones (mqucifer/print-shop#155).
+    assert [g["id"] for g in lessons.to_give(ledger, "stained-glass")] == [glass, general]
     # Folded into a kind's skill, it's read there and not given at the start.
     lessons.promote(ledger, glass, BY, "skill", "src/print_shop/rounds/skills/glass")
     assert [g["id"] for g in lessons.to_give(ledger, "stained-glass")] == [general]

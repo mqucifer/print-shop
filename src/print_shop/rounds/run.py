@@ -496,15 +496,37 @@ class Run:
         return run
 
     def _give_lessons(self) -> None:
-        """Every lesson about how to build a reviewer kept, into the first message, and a row of
-        `run_lessons` for each. `lessons.md` holds them as given, so a conversation started again
-        from the record has the same."""
-        form = self._form()
-        kept = lessons.to_give(self.ledger, form.kind if form is not None else None)
-        if not kept:
+        """The lessons a reviewer kept for the model, into the first message: its kind's first,
+        then the general ones, best-scored first, up to the start's budget
+        (`Limits.start_lessons_chars`), with how many were left out and how to find them
+        (mqucifer/print-shop#155). A row of `run_lessons` for each given, and of
+        `run_lessons_left` for each left out. `lessons.md` holds them as given, so a conversation
+        started again from the record has the same."""
+        kind = self._part_kind()
+        budget = self.limits.start_lessons_chars
+        kept, left = lessons.within(lessons.to_give(self.ledger, kind), budget)
+        if not kept and not left:
             return
-        (self.folder / "lessons.md").write_text(lessons.block(kept) + "\n", encoding="utf-8")
+        said = lessons.block(kept, left, kind)
+        (self.folder / "lessons.md").write_text(said + "\n", encoding="utf-8")
         lessons.give(self.ledger, self.state.name, kept)
+        lessons.leave_out(self.ledger, self.state.name, left, budget)
+
+    def _part_kind(self) -> str | None:
+        """The request's kind of part, as it wrote it."""
+        form = self._form()
+        return form.kind if form is not None else None
+
+    def lessons(self, args: dict[str, Any]) -> Judged:
+        """The model's `lessons` tool: a kept lesson found by words or by kind, or one whole by
+        its number, which this run is then given (`lessons.look_up`). It changes nothing of the
+        part, and no lesson's words."""
+        found, reply, detail = lessons.look_up(
+            self.ledger, self.state.name, self._part_kind(), args
+        )
+        if not found:
+            return Judged("lessons", "failed", reply, "no_lesson", detail=detail)
+        return Judged("lessons", "ok", reply, detail=detail)
 
     def _listen(self) -> None:
         """Each event from here on goes to the ledger as it's kept."""
