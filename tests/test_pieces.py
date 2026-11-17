@@ -16,7 +16,8 @@ from typing import Any
 import pytest
 
 from print_shop.bench import host
-from print_shop.rounds import reports, standing
+from print_shop.rounds import downward, reports, standing
+from print_shop.rounds.box import Box
 from tests.test_bench import Answer
 
 pytestmark = pytest.mark.bench
@@ -392,6 +393,30 @@ def test_the_existing_checks_read_a_build_as_any_frame(bench: Any, built: Answer
     info = bench("info", frame)
     assert info.numbers["strip_faces"] == 0, "no curve is stored as strips"
     assert info.numbers["solids"] == 1
+
+
+def test_a_built_frames_lips_pass_with_its_panes_in_place_and_fail_without(
+    bench: Any, built: Answer
+) -> None:
+    """The harness's reading of a paused frame, on the bench's own meshes of a build: its top
+    lips print over the panes. Without them, the control, each lip is a ceiling over air."""
+    declared = built.numbers["glass"]
+    files = [declared["frame"], *declared["panes"]]
+    glass = standing.read([declared], files, bench.work)
+    assert isinstance(glass, list) and glass[0].count() == 10, glass
+    said = dict.fromkeys(files, 'the request says "It prints flat, with no supports."')
+    box, kept = Box(bench.work), bench.work / ".kept"
+    frame, *panes = downward.read(box, files, {}, bench.work, kept, said, glass)
+    assert frame.passed and frame.verdict == "NONE", frame.why
+    assert frame.numbers["panes_in_place"] == 10
+    assert frame.numbers["without_panes_mm2"] > 300, "ten lips, each 1.2 mm wide"
+    assert all(pane.passed for pane in panes), [pane.why for pane in panes]
+    alone, *_ = downward.read(box, files, {}, bench.work, kept, said)
+    assert not alone.passed and alone.verdict == "NEEDS SUPPORT"
+    assert alone.numbers["to_support_mm2"] == pytest.approx(
+        frame.numbers["without_panes_mm2"], abs=0.01
+    )
+    assert "panes_in_place" not in alone.numbers
 
 
 def test_a_built_panes_play_is_read_at_its_edge(bench: Any, built: Answer) -> None:
