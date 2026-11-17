@@ -284,7 +284,43 @@ ENCLOSURE = Toolset(
     required=("designing-enclosures", *CORE_REQUIRED, "ref-fdm"),
     added=ENCLOSURE_COMMANDS,
 )
-KINDS = {STAINED_GLASS.kind: STAINED_GLASS, ENCLOSURE.kind: ENCLOSURE}
+#: Furniture: a part bigger than the bed, printed as several and joined, that carries a weight
+#: (mqucifer/print-shop#156, M20's side table). `load` reads the joined parts under the request's
+#: weight, with FreeCAD's FEM in the second image, and `fit-bed` each part against the bed. The
+#: weight is the request's, with no default, so a `load` need quotes it. **No standing checks:**
+#: which file is the assembly, and what weight goes where, are a need's to say.
+FURNITURE_COMMANDS = ("load", "fit-bed")
+FURNITURE = Toolset(
+    "furniture",
+    "furniture",
+    CORE_COMMANDS + FURNITURE_COMMANDS,
+    CORE_MEASURES
+    + (
+        Measure(
+            "load",
+            "the joined parts under the request's weight: each part's strain against its "
+            "layers, each joint's force, and how far the loaded place moves",
+            ("load",),
+            "load assembly.json --weight KG --at X,Y,Z",
+            limits=("--weight",),
+            limited=True,
+        ),
+        Measure(
+            "bed-fit",
+            "each part fits the bed, laid on the side it's printed on",
+            ("fit-bed",),
+            "fit-bed assembly.json",
+        ),
+    ),
+    CORE_SKILLS + ("designing-furniture",),
+    required=("designing-furniture", *CORE_REQUIRED),
+    added=FURNITURE_COMMANDS,
+)
+KINDS = {
+    STAINED_GLASS.kind: STAINED_GLASS,
+    ENCLOSURE.kind: ENCLOSURE,
+    FURNITURE.kind: FURNITURE,
+}
 #: A run from before toolsets: every command it had then, its skills, and needs read as they were.
 EVERY = Toolset(
     None,

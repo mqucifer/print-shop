@@ -241,6 +241,27 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "unbuildable",
         "upper_lip_mm",
     ),
+    # Joined parts under a weight, and each part against the bed (mqucifer/print-shop#156).
+    "load": (
+        "coarse_mesh_mm",
+        "elements",
+        "force_n",
+        "held",
+        "joints",
+        "loads",
+        "mesh_mm",
+        "mesh_s",
+        "most_moves_at",
+        "most_moves_mm",
+        "moves_mm",
+        "nodes",
+        "parts",
+        "reaction_n",
+        "solve_s",
+        "toward",
+        "weight_kg",
+    ),
+    "fit-bed": ("bed_mm", "parts"),
 }
 
 
@@ -680,6 +701,58 @@ SHAPES: dict[str, dict[str, Any]] = {
             {"length_mm": NUMBER, "push_mm": NUMBER, "thickness_mm": NUMBER}, closed=True
         ),
     },
+    # A need names a part or a joint by its name in the assembly file, `parts.top.stretch_pct`
+    # or `joints.top+leg1.bolt_pull_n` (mqucifer/print-shop#156).
+    "load": {
+        "coarse_mesh_mm": NUMBER,
+        "elements": NUMBER,
+        "force_n": NUMBER,
+        "joints": Keyed(
+            Row(
+                {
+                    "area_mm2": NUMBER,
+                    "at": XYZ,
+                    "bending_nmm": NUMBER,
+                    "force_n": XYZ,
+                    "kind": TEXT,
+                    "moment_nmm": XYZ,
+                    "pull_n": NUMBER,
+                    "shear_n": NUMBER,
+                    "twist_nmm": NUMBER,
+                }
+            )
+        ),
+        "loads": Rows(
+            Row({"at": XYZ, "moved": XYZ, "moves_mm": NUMBER, "part": TEXT, "patch_mm2": NUMBER})
+        ),
+        "mesh_mm": NUMBER,
+        "most_moves_at": XYZ,
+        "most_moves_mm": NUMBER,
+        "moves_mm": NUMBER,
+        "nodes": NUMBER,
+        "parts": Keyed(
+            Row(
+                {
+                    "across_at": XYZ,
+                    "across_layers_pct": NUMBER,
+                    "across_limit_pct": NUMBER,
+                    "layers": XYZ,
+                    "material": TEXT,
+                    "stretch_at": XYZ,
+                    "stretch_from_layers_deg": NUMBER,
+                    "stretch_limit_pct": NUMBER,
+                    "stretch_pct": NUMBER,
+                }
+            )
+        ),
+        "reaction_n": XYZ,
+        "toward": TEXT,
+        "weight_kg": NUMBER,
+    },
+    "fit-bed": {
+        "bed_mm": XYZ,
+        "parts": Keyed(Row({"box_mm": XYZ, "file": TEXT, "fits": FLAG})),
+    },
 }
 
 
@@ -716,6 +789,8 @@ VERDICTS: dict[str, tuple[str, ...]] = {
     # on one names the verdict, and holds its `depth_mm`.
     "fit-on": ("CLEAR", "BLOCKED"),
     "bend": ("OK", "FAIL"),
+    "load": ("OK", "FAIL"),
+    "fit-bed": ("OK", "FAIL"),
 }
 
 

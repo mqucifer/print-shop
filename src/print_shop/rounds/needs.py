@@ -47,6 +47,8 @@ COMMANDS = (
     "fit-on",
     "bend",
     "pieces",
+    "load",
+    "fit-bed",
 )
 #: Verdicts that are no answer: they never pass a need, whatever it says.
 UNSURE = ("DISAGREE", "NO ANSWER")

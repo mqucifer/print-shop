@@ -608,6 +608,75 @@ def parser() -> Parser:
         metavar="MM",
         help="the largest element, in mm: half the arm's thickness at its root unless given",
     )
+    load = sub.add_parser(
+        "load",
+        help="joined parts under a weight: each part's worst strain against its layers, each "
+        "joint's force, and how far the loaded place moves. Runs in the second image, with "
+        "FreeCAD's FEM",
+    )
+    load.add_argument(
+        "assembly",
+        help="the assembly file, JSON: the parts' STEP files, their places, each one's material "
+        "and the way its layers are stacked, the joints, and where it's held",
+    )
+    load.add_argument("--weight", required=True, type=float, metavar="KG", help="the load, in kg")
+    load.add_argument(
+        "--at",
+        action="append",
+        required=True,
+        type=_point,
+        metavar="X,Y,Z",
+        help="a place on the assembly's surface the weight sits on. Give it more than once to "
+        "share the weight equally between several",
+    )
+    load.add_argument(
+        "--toward",
+        type=_way,
+        default="-z",
+        metavar="DIR",
+        help="the way the weight pulls, one of +x -x +y -y +z -z (-z, down, unless given)",
+    )
+    load.add_argument(
+        "--over",
+        type=float,
+        default=10.0,
+        metavar="MM",
+        help="how far round each place the weight is spread over the surface, in mm (10 unless "
+        "given): a cup's foot, not a point",
+    )
+    load.add_argument(
+        "--friction",
+        type=float,
+        metavar="MU",
+        help="the most friction a touching joint may need to stay put. There's no default: "
+        "without it the friction needed is a figure, not a limit",
+    )
+    load.add_argument(
+        "--mesh",
+        type=float,
+        metavar="MM",
+        help="the largest element, in mm: half the thinnest part unless given, and no finer "
+        "than the container solves in a minute or two",
+    )
+    bed = sub.add_parser(
+        "fit-bed",
+        help="each part against the bed: the side it's laid on, its footprint turned to fit, "
+        "its height, and whether it fits",
+    )
+    bed.add_argument(
+        "parts",
+        nargs="+",
+        metavar="PARTS",
+        help="the parts, each a STEP file, or one assembly file, whose parts are each read on "
+        "the side its `layers` names",
+    )
+    bed.add_argument(
+        "--bed",
+        type=_point,
+        default=[256.0, 256.0, 256.0],
+        metavar="X,Y,Z",
+        help="the bed's width, depth and height, in mm (256,256,256 unless given)",
+    )
     pieces = sub.add_parser(
         "pieces",
         help="a stained-glass panel as a piece map: traced from a picture, checked against "
@@ -897,6 +966,14 @@ def _dispatch(args: Any, report: Report) -> None:
         from .bend import run as run_bend
 
         run_bend(args, report)
+    elif args.command == "load":
+        from .load import run as run_load
+
+        run_load(args, report)
+    elif args.command == "fit-bed":
+        from .fit_bed import run as run_fit_bed
+
+        run_fit_bed(args, report)
     elif args.command == "pieces":
         from .pieces import run as run_pieces
 

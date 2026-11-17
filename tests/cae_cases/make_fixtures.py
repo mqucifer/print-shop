@@ -7,12 +7,18 @@ wall behind it, with a hook 2 mm tall standing 0.8 mm out from its face at the t
 skirt comes down inside the walls, 0.2 mm clear of the arm's face, with a window the hook snaps
 into: the band of skirt under that window has to pass over the hook, 0.8 - 0.2 = 0.6 mm deep and
 8 mm along, from 4 mm out down to 0.4 mm out.
+
+`load/` (mqucifer/print-shop#156): a beam 120 x 20 x 10 along x, whole and as two halves that
+meet at x 60; a block 20 x 20 x 20 on a slab 60 x 60 x 10; and a small table, a top 100 x 100 x 6
+on four legs 10 x 10 x 60, with an assembly file for each way they're joined, held and printed.
 """
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
+from typing import Any
 
 sys.path.append("/opt/conda/lib")
 
@@ -103,7 +109,81 @@ def save(shape: Part.Shape, path: Path) -> None:
     shape.exportStep(str(path))
 
 
+#: The beam (mqucifer/print-shop#156), as the tests' arithmetic reads it.
+BEAM_L, BEAM_W, BEAM_T = 120.0, 20.0, 10.0
+BOLT = {"kind": "bolted", "bolt": "m4-8.8", "insert": "m4-heat-set"}
+
+
+Rows = list[dict[str, Any]]
+
+
+def assembly(path: Path, parts: Rows, joints: Rows | None = None, held: Rows | None = None) -> None:
+    path.write_text(json.dumps({"parts": parts, "joints": joints or [], "held": held or []}))
+
+
+def loads() -> None:
+    """The parts `load` and `fit-bed` read, and an assembly file for each case."""
+    out = Path("load")
+    half = BEAM_L / 2
+    save(box((0, 0, 0), (BEAM_L, BEAM_W, BEAM_T)), out / "beam.step")
+    save(box((0, 0, 0), (half, BEAM_W, BEAM_T)), out / "half.step")
+    save(box((0, 0, 0), (60, 60, 10)), out / "slab.step")
+    save(box((0, 0, 0), (20, 20, 20)), out / "block.step")
+    save(box((0, 0, 0), (100, 100, 6)), out / "top.step")
+    save(box((0, 0, 0), (10, 10, 60)), out / "leg.step")
+    # Too long for a 256 mm bed any way round, and one that fits only corner to corner.
+    save(box((0, 0, 0), (400, 30, 20)), out / "long.step")
+    save(box((0, 0, 0), (300, 30, 20)), out / "diagonal.step")
+    wall = [{"plane": "x=0", "how": "fixed"}]
+
+    def beam(layers: str) -> Rows:
+        return [{"name": "beam", "file": "beam.step", "layers": layers}]
+
+    def halves(second_at: float = half) -> Rows:
+        return [
+            {"name": "root", "file": "half.step", "layers": "z"},
+            {"name": "tip", "file": "half.step", "at": [second_at, 0, 0], "layers": "z"},
+        ]
+
+    middle = [[half, BEAM_W / 2, BEAM_T / 2]]
+    bolted: Rows = [{"between": ["root", "tip"], **BOLT, "at": middle}]
+    assembly(out / "one.json", beam("z"), held=wall)
+    # The same beam printed standing on its end: its layers are stacked along its length.
+    assembly(out / "across.json", beam("x"), held=wall)
+    assembly(out / "two.json", halves(), bolted, wall)
+    bonded: Rows = [{"between": ["root", "tip"], "kind": "bonded"}]
+    assembly(out / "two-bonded.json", halves(), bonded, wall)
+    weak: Rows = [{**bolted[0], "pull_n": 60, "source": "a figure made up for this test"}]
+    assembly(out / "two-weak.json", halves(), weak, wall)
+    assembly(out / "unnamed.json", halves(), held=wall)
+    assembly(out / "gap.json", halves(half + 0.5), bolted, wall)
+    assembly(out / "through.json", halves(half - 1), bolted, wall)
+    rest: Rows = [
+        {"name": "slab", "file": "slab.step", "layers": "z"},
+        {"name": "block", "file": "block.step", "at": [20, 20, 10], "layers": "z"},
+    ]
+    touching: Rows = [{"between": ["slab", "block"], "kind": "touching"}]
+    assembly(out / "rest.json", rest, touching)
+    assembly(out / "rest-fixed.json", rest, touching, [{"plane": "z=0", "how": "fixed"}])
+    corners = [(0, 0), (90, 0), (0, 90), (90, 90)]
+    table: Rows = [{"name": "top", "file": "top.step", "at": [0, 0, 60], "layers": "z"}]
+    table += [
+        {"name": f"leg{n}", "file": "leg.step", "at": [x, y, 0], "layers": "z"}
+        for n, (x, y) in enumerate(corners, 1)
+    ]
+    joints: Rows = [
+        {"between": ["top", f"leg{n}"], **BOLT, "at": [[x + 5, y + 5, 60]]}
+        for n, (x, y) in enumerate(corners, 1)
+    ]
+    assembly(out / "table.json", table, joints)
+    # A leg printed lying down, turned upright in the assembly: its layers turn with it.
+    lying = [dict(p) for p in table]
+    lying[1] = {**lying[1], "layers": "x"}
+    assembly(out / "table-lying.json", lying, joints)
+
+
 def main() -> None:
+    loads()
     out = Path("snap")
     seated = WALL_Y + ROOM
     save(base(seated), out / "box.step")
