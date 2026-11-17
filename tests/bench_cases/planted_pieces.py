@@ -183,6 +183,36 @@ def cells(lead: float) -> list[list[list[float]]]:
     return found
 
 
+def lone_lines() -> dict[str, Any]:
+    """The rules' map with three lines inside piece 4, each joined to no other: one 0.4 mm
+    wide, too thin for a pixel to show as a line, and two 1.2 mm wide lying 0.05 mm apart,
+    which the map's pixels show as one body of lead."""
+    found = rules(False)
+    found["pieces"][3]["holes"] = [
+        [[34, 24], [44, 24], [44, 24.4], [34, 24.4]],
+        [[40, 29.4], [50, 29.4], [50, 30.6], [40, 30.6]],
+        [[40, 30.65], [50, 30.65], [50, 31.85], [40, 31.85]],
+    ]
+    return found
+
+
+def notched() -> dict[str, Any]:
+    """One piece 40 x 20 mm in a panel, with a notch from its top at x 12 and one from its
+    bottom at x 13, each 0.5 mm wide and 9.6 mm deep: between their ends, the glass is 0.94 mm
+    across, a neck, straight across nowhere a ray square to a side goes."""
+    outline = [
+        [1, 1], [12.75, 1], [12.75, 10.6], [13.25, 10.6], [13.25, 1], [41, 1], [41, 21],
+        [12.25, 21], [12.25, 11.4], [11.75, 11.4], [11.75, 21], [1, 21],
+    ]  # fmt: skip
+    return {
+        "piece_map": 1,
+        "panel": {"width_mm": 42, "height_mm": 22},
+        "lead_mm": 1.0,
+        "colours": {"blue": {"rgb": [40, 90, 220]}},
+        "pieces": [{"id": 1, "colour": "blue", "outline": outline}],
+    }
+
+
 def rules(slit: bool, depth: float = 8.0) -> dict[str, Any]:
     lead = 1.2
     outlines = cells(lead)
@@ -229,4 +259,7 @@ for name, slit, depth in (
 ):
     with open(name, "w") as fh:
         json.dump(rules(slit, depth), fh)
+for name, made in (("lone.json", lone_lines()), ("notched.json", notched())):
+    with open(name, "w") as fh:
+        json.dump(made, fh)
 print("drawn")

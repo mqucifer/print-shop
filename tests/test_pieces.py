@@ -107,6 +107,35 @@ def test_a_line_that_ends_in_glass_and_a_line_joined_to_no_other_are_dead_ends(b
     assert "pieces extend MAP --at X,Y" in answer.text and "pieces drop-line" in answer.text
 
 
+def test_a_neck_is_the_nearest_facing_points_and_rays_elsewhere_settle_nothing(
+    bench: Any, broken: Answer
+) -> None:
+    """Two notches whose ends lie 0.94 mm apart on a slant: the narrowest place, by the nearest
+    points facing each other. No ray square to a side crosses it, and their narrowest is 10 mm
+    off, at another place. That was `DISAGREE`; it's a neck, and the rays are a note."""
+    answer = bench("pieces", "check", "notched.json")
+    assert answer.verdict == "FAIL" and answer.code == 1, answer.text
+    assert ("neck", 1) in flags_of(answer)
+    (row,) = answer.numbers["pieces"]
+    assert row["narrowest_mm"] == pytest.approx((0.5**2 + 0.8**2) ** 0.5, abs=0.01)
+    assert row["narrowest_by_rays_mm"] is None, "no ray runs from one of its sides to the other"
+    assert "Rays square to its edges read no width across that place" in answer.text
+    assert "so they neither confirm it nor differ" in answer.text
+    # Where rays do cross the place, they're its second check, and agree: the necked cell.
+    necked = next(r for r in broken.numbers["pieces"] if "neck" in r["flags"])
+    assert necked["narrowest_by_rays_mm"] == pytest.approx(necked["narrowest_mm"], abs=0.1)
+
+
+def test_lines_joined_to_no_other_are_matched_by_place_not_by_count(bench: Any) -> None:
+    """Three lines inside one piece: one too thin for a pixel to show, and two a hair apart
+    that the pixels show as one body. Three by the outlines and one by the pixels was
+    `DISAGREE`; each is now looked for where it lies."""
+    answer = bench("pieces", "check", "lone.json")
+    assert answer.verdict == "FAIL" and answer.code == 1, answer.text
+    assert [f["flag"] for f in answer.numbers["flagged"]] == ["dead-end"] * 3
+    assert {end["kind"] for end in answer.numbers["dead_ends"]} == {"island"}
+
+
 @pytest.mark.parametrize(
     ("change", "says"),
     [
