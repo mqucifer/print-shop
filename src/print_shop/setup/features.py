@@ -118,12 +118,19 @@ def _footprint(mesh: trimesh.Trimesh) -> tuple[float, float]:
     return float(best.max()), float(best.min())
 
 
-def overhang_to_support(mesh: trimesh.Trimesh) -> tuple[float, float]:
+def overhang_to_support(
+    mesh: trimesh.Trimesh, beneath: trimesh.Trimesh | None = None
+) -> tuple[float, float]:
     """What of a seated mesh, as it lies, would need support, and the round or chamfer rising
     from the plate that's left out of it (`FLARE_MM`), in mm2: the orientation step's overhang
-    for each pose it weighs (mqucifer/print-shop#128)."""
-    needs = _overhang(mesh)[0]
-    return needs, max(_overhang(mesh, flares=False)[0] - needs, 0.0)
+    for each pose it weighs (mqucifer/print-shop#128).
+
+    `beneath` is what else stands under the mesh when its faces are printed, in the mesh's own
+    coordinates, such as the panes put in a frame at its pause: a face with it right under
+    is carried, as one with the part's own material under it is (mqucifer/print-shop#153).
+    None of `beneath`'s own faces is read."""
+    needs = _overhang(mesh, beneath=beneath)[0]
+    return needs, max(_overhang(mesh, flares=False, beneath=beneath)[0] - needs, 0.0)
 
 
 class Overhang(BaseModel):
@@ -144,12 +151,14 @@ class Overhang(BaseModel):
 _APART_MM = 1.0
 
 
-def overhang_places(mesh: trimesh.Trimesh) -> tuple[Overhang, ...]:
+def overhang_places(
+    mesh: trimesh.Trimesh, beneath: trimesh.Trimesh | None = None
+) -> tuple[Overhang, ...]:
     """Where a seated mesh, as it lies, would need support: `overhang_to_support`'s own area,
     by the same reading, as each stretch of height it's in, lowest first. For a design run's
     stops, which show a person where a part that prints without supports has downward faces
     (mqucifer/print-shop#147)."""
-    found = _overhanging(mesh)
+    found = _overhanging(mesh, beneath=beneath)
     if found is None:
         return ()
     points, areas, read, flat = found
@@ -205,7 +214,9 @@ def _from_the_plate(mesh: trimesh.Trimesh) -> np.ndarray:
     return found
 
 
-def _overhang(mesh: trimesh.Trimesh, flares: bool = True) -> tuple[float, float, float]:
+def _overhang(
+    mesh: trimesh.Trimesh, flares: bool = True, beneath: trimesh.Trimesh | None = None
+) -> tuple[float, float, float]:
     """The overhang's area, its steepest point, and the flat part of it, a bridge.
 
     In mm2, degrees past vertical, and mm2.
@@ -221,7 +232,7 @@ def _overhang(mesh: trimesh.Trimesh, flares: bool = True) -> tuple[float, float,
     the slope is read over (a step), when it's read at the steps' slope. The
     bridge is the overhang on flat faces deeper than that: a step is no bridge.
     """
-    found = _overhanging(mesh, flares)
+    found = _overhanging(mesh, flares, beneath)
     if found is None:
         return 0.0, 0.0, 0.0
     _, areas, read, flat = found
@@ -229,7 +240,7 @@ def _overhang(mesh: trimesh.Trimesh, flares: bool = True) -> tuple[float, float,
 
 
 def _overhanging(
-    mesh: trimesh.Trimesh, flares: bool = True
+    mesh: trimesh.Trimesh, flares: bool = True, beneath: trimesh.Trimesh | None = None
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
     """Each point of a seated mesh that overhangs, as `_overhang` reads it: where it is, in
     the mesh's own coordinates, the area it stands for, its slope in degrees past vertical, and
@@ -258,6 +269,13 @@ def _overhanging(
     own = np.degrees(np.arcsin(np.clip(down, -1, 1)))
 
     seated = mesh.copy()
+    if beneath is not None:
+        # What a point has under it is the part and whatever else stands there by then.
+        seated = trimesh.Trimesh(
+            np.vstack([mesh.vertices, beneath.vertices]),
+            np.vstack([mesh.faces, beneath.faces + len(mesh.vertices)]),
+            process=False,
+        )
     seated.apply_translation(-lo)
     # Below the first layer is the plate, which holds the first layer: a point lower than
     # that over the first layer is read against the first layer's outline, at its middle,

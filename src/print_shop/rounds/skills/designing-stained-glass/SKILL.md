@@ -263,3 +263,69 @@ the last layer before its pocket closes, as the nozzle would meet it. Give the p
 closing words as `pause` reads it, the layer and its z, never as the pocket's floor: in two runs
 the closing words put the pause at the pocket's floor, neither ran `pause`, and both were wrong. Where it fails, raise the pocket's ceiling to the first
 layer line over the pane, or set the pane lower.
+
+## From a picture: the piece map (mqucifer/print-shop#152, mqucifer/print-shop#153)
+
+Where the request gives a stained-glass picture, flat colours between dark lines, its pieces
+aren't yours to work out, and no geometry code of yours reads or fixes them: the bench does,
+with `pieces`. In one run about 250 calls went on such code before the plan. The picture's
+pieces are the layout, so steps 2, 3 and 5 are these five, in this order:
+
+```
+- [ ] a. Trace: `pieces trace PICTURE --width MM`
+- [ ] b. Check: `pieces check MAP`
+- [ ] c. Fix each flagged piece by its own flag, one command a fix
+- [ ] d. Check again, until no flag is left that the request doesn't keep
+- [ ] e. Build: `pieces build MAP --thickness T --pane P --lip FULL,LEAST --play C`
+```
+
+`pieces trace` writes a **piece map**: each piece of glass, numbered, with its outline and its
+colour, and the lead between them. Its picture comes to you, each piece numbered and each rule
+break marked. `pieces check` reads the map against what glass cutting allows, and names each
+piece that breaks a rule, with where. Each flag has its fix:
+
+| Flag | It is | Its fix |
+|---|---|---|
+| `dead-end` | a lead line that ends in mid-glass | `pieces extend MAP --at X,Y` runs it on to the next line or the edge, or `pieces drop-line MAP --at X,Y` takes it out |
+| `sliver`, `small` | a piece too narrow or too small to handle | `pieces merge MAP A B`: it joins a neighbour B, and the line between them goes |
+| `neck` | a thin place with wide glass on both sides of it | `pieces split MAP ID --line x1,y1,x2,y2` cuts the piece there, edge to edge |
+| `notch` | a notch deeper than it's wide | `pieces split` from the notch's end to the piece's far edge |
+| `gradient` | a colour that runs across one piece | `pieces split` where it changes, or keep it one colour and say so |
+| `wide-lead` | a patch of lead, not a line | `pieces merge` the pieces round it |
+
+- **Each fix is one piece's, and you choose it.** A filter over every piece is not a fix: an
+  opening, a closing, a buffer in and out or a simplification run over all of them rounds every
+  corner and drops what it cuts into the lead. In one run that turned 15 to 22% of one band's
+  glass into grey patches up to 19 mm wide.
+- **A fix becomes glass, not lead.** Each reply says the glass share and the lead's widest point
+  before and after, and the share the trace had. A merge or a dropped line adds glass; a split
+  takes one line's worth. A share well under the trace's means glass went into the lead.
+- **Each fix writes a new map** and says its name: give that one to the next command. Read the
+  piece's line in the reply: it says what the piece breaks now.
+- **`pieces build` makes `frame.step` and one pane file for each colour,** every curve as a
+  curve, and its reply gives the checks to run and `done`'s `glass`: the pocket's height, the
+  play, the pane's thickness, and how many panes there are. A pane file holds every pane of its
+  colour, so `--panes` is the panes, never the files. A piece it can't build is named, with why:
+  fix it in the map and build again. Then run step 6's checks on what it built.
+- **Your script is the list of fixes,** so `done`'s clean run makes the part again from the
+  picture. It calls the bench's own commands:
+
+```python
+import sys
+
+sys.path.insert(0, "/opt/bench")
+from bench.cli import main
+
+
+def bench(*words):
+    assert main([str(w) for w in words]) == 0, words
+
+
+bench("pieces", "trace", "references/scene.png", "--width", 220, "--to", "map-0.json")
+bench("pieces", "merge", "map-0.json", 12, 9, "--to", "map-1.json")  # the sliver joins the sky
+bench("pieces", "drop-line", "map-1.json", "--at", "41.5,60", "--to", "map-2.json")
+bench("pieces", "build", "map-2.json", "--thickness", 3, "--pane", 1, "--lip", "1.2,0.8", "--play", 0.25)
+```
+
+`references/pieces.md` (the skill `reading-a-piece-map`) says what a map holds and how to read
+each reply.

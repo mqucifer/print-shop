@@ -3209,7 +3209,13 @@ class Run:
         request = (self.folder / "request.md").read_text(encoding="utf-8")
         plain = downward.unsupported(request, wanted, files)
         return downward.read(
-            self.box, files, downward.sides(wanted, on_bed), where, kept, plain
+            self.box,
+            files,
+            downward.sides(wanted, on_bed),
+            where,
+            kept,
+            plain,
+            glass_checks.load(self.state.glass),
         )
 
     def _stood(self, one: judge.Standing, stop: str, where: Path, ask: int | None = None) -> None:

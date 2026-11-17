@@ -27,20 +27,22 @@ afterwards.
 **Their limits.** Where a settled need runs the same check on that frame (and, for `light`, every
 pane of it), the need's reading is the standing check's, at the request's own figures: a rim the
 request sizes by share can be under the bench's 0.4 mm, and would fail every such design. Where
-none does, `capture` runs at the bench's own least lip, 0.4 mm after play, a nozzle's width, with
-`--panes` the panes declared, and `light` with no limit, failing a pane with nothing open straight
-through: the kind's rule is that light passes through every pane.
+none does, `capture` runs at the bench's own least lip, 0.4 mm after play, a nozzle's width,
+with `--panes` the bodies in the pane files declared (`Glass.count`), and `light` with no
+limit, failing a pane with nothing open straight through: the kind's rule is that light passes
+through every pane.
 """
 
 from __future__ import annotations
 
 import math
+import re
 import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from print_shop.rounds import judge
+from print_shop.rounds import judge, paths
 from print_shop.rounds.needs import UNSURE, Need, Reading
 
 LIGHT = "light"
@@ -72,12 +74,22 @@ class Glass:
     clearance: float
     pane_thickness: float
     others: tuple[str, ...] = field(default=())
+    #: How many panes the pane files hold: their bodies, as the harness counted them when the
+    #: frame was declared (`bodies_in`), or None where a file's couldn't be counted.
+    bodies: int | None = None
 
     def files(self) -> list[str]:
         return [self.frame, *self.panes, *self.others]
 
+    def count(self) -> int:
+        """How many panes the frame has: the bodies in its pane files, and where they couldn't
+        be counted, the files (mqucifer/print-shop#153). A file may hold every pane of one
+        colour: on the first traced scene six files held 52 panes, and `capture --panes 6`
+        failed a frame that held all 52."""
+        return self.bodies if self.bodies is not None else len(self.panes)
+
     def plain(self) -> dict[str, Any]:
-        return {
+        kept: dict[str, Any] = {
             "frame": self.frame,
             "panes": list(self.panes),
             "with": list(self.others),
@@ -85,6 +97,9 @@ class Glass:
             "clearance": self.clearance,
             "pane_thickness": self.pane_thickness,
         }
+        if self.bodies is not None:
+            kept["pane_bodies"] = self.bodies
+        return kept
 
     def commands(self) -> dict[str, str]:
         """Each check's command, by its name."""
@@ -95,7 +110,7 @@ class Glass:
             HOLD: (
                 f"capture {q(self.frame)} --pocket-z {self.pocket_z:g} --clearance "
                 f"{self.clearance:g} --pane-thickness {self.pane_thickness:g} --panes "
-                f"{len(self.panes)}"
+                f"{self.count()}"
             ),
             INSERT: (
                 f"pause {q(self.frame)} --pocket-z {self.pocket_z:g} --pane-thickness "
@@ -114,9 +129,59 @@ def load(kept: list[dict[str, Any]] | None) -> list[Glass]:
             d["clearance"],
             d["pane_thickness"],
             tuple(d.get("with") or ()),
+            d.get("pane_bodies"),
         )
         for d in kept or []
     ]
+
+
+#: A solid in a STEP file, as ISO 10303-21 writes one: a pane file's bodies are these.
+STEP_SOLID = re.compile(rb"=\s*(?:MANIFOLD_SOLID_BREP|BREP_WITH_VOIDS)\s*\(")
+
+
+def bodies_in(work: Path, name: str) -> int | None:
+    """How many bodies a pane file holds: a STEP file's solids, by the entities it lists, or
+    an STL's closed shells where nothing joins them. None where the file can't be read so."""
+    if paths.inside(work, name) is None:
+        return None
+    try:
+        data = paths.read_bytes_inside(work, name)
+    except OSError:
+        return None
+    ending = name.lower().rsplit(".", 1)[-1]
+    if ending in ("step", "stp"):
+        return len(STEP_SOLID.findall(data)) or None
+    if ending == "stl":
+        try:
+            import io
+
+            import numpy as np
+            import trimesh
+
+            mesh = trimesh.load_mesh(io.BytesIO(data), file_type="stl", process=True)
+            faces = np.asarray(mesh.faces)
+        except Exception:  # noqa: BLE001 - whatever it is, it isn't a mesh to count
+            return None
+        # Faces joined through the points they share, by union-find: no graph library here.
+        root = list(range(len(mesh.vertices)))
+
+        def find(k: int) -> int:
+            while root[k] != k:
+                root[k] = root[root[k]]
+                k = root[k]
+            return k
+
+        for a, b, c in faces.tolist():
+            root[find(a)] = find(b)
+            root[find(c)] = find(b)
+        return len({find(int(k)) for k in np.unique(faces)}) or None
+    return None
+
+
+def pane_bodies(work: Path, panes: list[str]) -> int | None:
+    """The bodies in a frame's pane files, or None where any file's can't be counted."""
+    counts = [bodies_in(work, name) for name in panes]
+    return None if any(c is None for c in counts) else sum(c for c in counts if c is not None)
 
 
 def _figure(entry: dict[str, Any], key: str, positive: bool = True) -> float | None:
@@ -178,6 +243,7 @@ def read(given: Any, part: list[str], work: Path, whole: bool = True) -> list[Gl
                 figures["clearance"] or 0.0,
                 figures["pane_thickness"] or 0.0,
                 tuple(others),
+                pane_bodies(work, panes),
             )
         )
     left = [name for name in part if name not in named]

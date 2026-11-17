@@ -46,6 +46,7 @@ COMMANDS = (
     "slice",
     "fit-on",
     "bend",
+    "pieces",
 )
 #: Verdicts that are no answer: they never pass a need, whatever it says.
 UNSURE = ("DISAGREE", "NO ANSWER")
@@ -619,7 +620,9 @@ def on_part(need: Need, glass: list[Any]) -> tuple[Need, str]:
     for name, value in options:
         role = roles.get(name)
         if role == reports.COUNT and one is not None:
-            moved.append((name, str(len(one.panes))))
+            # The bodies in the pane files, not the files: one file may hold a colour's panes
+            # (mqucifer/print-shop#153).
+            moved.append((name, str(one.count())))
         elif role == reports.WITH and one is not None:
             continue  # put back from the declaration below
         else:
