@@ -1094,6 +1094,11 @@ def run_check(args: Any, report: Report) -> None:
     target = draw(found, reading, Path(args.out), Path(args.map).stem)
     report.wrote(target)
     report.numbers["picture"] = target
+    if found.surface.get("kind") == "dome":
+        report.note(
+            "this map is a dome's chart, drawn wider than the dome nearer its top, so its "
+            "widths and areas aren't the glass's: `pieces flatten` it, and check each slice"
+        )
     if reading.differs:
         report.verdict("DISAGREE", "; ".join(reading.differs[:6]))
         return

@@ -13,7 +13,7 @@ both ways in share everything after the pieces are drawn.
      "lead_mm": 1.4,
      "colours": {"blue": {"rgb": [40, 110, 220]}},
      "pieces": [{"id": 1, "colour": "blue", "outline": [[x, y], ...], "holes": [[[x, y], ...]]}],
-     "flags": [...], "source": {...}, "history": [...]}
+     "flags": [...], "source": {...}, "history": [...], "surface": {...}}
 
 - **A piece is its glass:** the outline is where the glass meets the lead, so the lead is the
   panel less every piece, and no line is stored twice. Two pieces never overlap. A map from rules
@@ -23,6 +23,9 @@ both ways in share everything after the pieces are drawn.
 - **`flags`** are the rule breaks `pieces check` last read, and **`source`** says what drew the
   map and its glass share then, which every later reading is said against. Both are for a
   reader: no command trusts them, and `pieces check` reads the pieces again.
+- **`surface`** is there only where the map isn't a flat panel's: a dome's chart, as `pieces
+  dome` writes it, or one flat slice of a dome with its folds and the edges it shares with
+  its neighbours, as `pieces flatten` does (mqucifer/print-shop#154). Every command keeps it.
 
 This module is the geometry every command shares: the lead, the glass share, the lead's widest
 point, and the map as pixels, which is each reading's second method.
@@ -81,6 +84,9 @@ class Map:
     source: dict[str, Any] = field(default_factory=dict)
     history: list[dict[str, Any]] = field(default_factory=list)
     flags: list[dict[str, Any]] = field(default_factory=list)
+    #: What the map lies on, where that isn't a flat panel: a dome's chart, or one flat slice
+    #: of a dome with its folds and edges (`pieces dome`, `pieces flatten`). Empty for a panel.
+    surface: dict[str, Any] = field(default_factory=dict)
 
     def piece(self, number: int) -> Piece:
         for one in self.pieces:
@@ -185,6 +191,7 @@ def read(data: Any, name: str = "the map") -> Map:
         dict(data.get("source") or {}),
         list(data.get("history") or []),
         list(data.get("flags") or []),
+        dict(data.get("surface") or {}) if isinstance(data.get("surface"), dict) else {},
     )
     _held(found)
     return found
@@ -249,7 +256,7 @@ def plain(found: Map) -> dict[str, Any]:
         if one.paint:
             entry["paint"] = one.paint
         pieces.append(entry)
-    return {
+    data = {
         "piece_map": VERSION,
         "units": "mm",
         "panel": panel,
@@ -260,6 +267,9 @@ def plain(found: Map) -> dict[str, Any]:
         "source": found.source,
         "history": found.history,
     }
+    if found.surface:
+        data["surface"] = found.surface
+    return data
 
 
 def save(found: Map, path: str) -> None:

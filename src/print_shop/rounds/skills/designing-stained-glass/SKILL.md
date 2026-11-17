@@ -329,3 +329,36 @@ bench("pieces", "build", "map-2.json", "--thickness", 3, "--pane", 1, "--lip", "
 
 `references/pieces.md` (the skill `reading-a-piece-map`) says what a map holds and how to read
 each reply.
+
+## A dome shade, from rules: bands, then flat slices (mqucifer/print-shop#154)
+
+Where the request is a dome shade, one motif repeated round it in bands, its pieces aren't
+traced and aren't yours to compute: `pieces dome` makes them from a bands file, and `pieces
+flatten` cuts the dome into slices that print flat. A dome of glass is made of flat pieces, and
+its curve comes from slight angles along the lead lines, so each slice is checked and built as
+a flat panel. Steps 2, 3 and 5 are these, in this order:
+
+```
+- [ ] a. Write the bands file: each band's pattern, height and colours, top to hem
+- [ ] b. Make the dome: `pieces dome --diameter D --height H --repeats N --bands FILE`
+- [ ] c. Cut it: `pieces flatten MAP --slices N`
+- [ ] d. Check each different slice: `pieces check SLICE`, and fix the bands file, not the slice
+- [ ] e. Build each different slice: `pieces build SLICE ... --border HALF-THE-LEAD`
+```
+
+- **The bands file is the design.** A band is a `grid`, a `swag`, `jewels`, a `strip`,
+  `triangles` or a `scallop` hem, with its height down the dome and its few figures.
+  `references/pieces.md` has each one's figures. The heights add up to the dome's side, which
+  `pieces dome` says: leave one band's height out and it takes the rest.
+- **Use `dome` and `flatten` only for a dome.** A flat panel from a picture is `pieces trace`,
+  and a flat panel of your own layout is step 2.
+- **Never check or build the dome's own map:** it's a chart, drawn wider than the dome near its
+  top. Its slices are true to size.
+- **A flag on a slice is fixed in the bands file,** so every slice gets it: a sliver wants fewer
+  columns or a taller band, a neck beside a jewel a smaller jewel or a taller band. Then make
+  the dome and cut it again. A fix on one slice leaves the other slices as they were.
+- **`flatten`'s reply** says which slices are the same map (`alike`): check and build one of
+  each group. It gives each fold's height and the angle it bends through, and how far the flat
+  rows stand from the curved dome. Bending and joining the slices isn't this step.
+- **Build with the border the reply gives,** half the lead: the frame's edge is then the middle
+  of the cut line, and two slices meet in one line. Then run step 6's checks on what it built.

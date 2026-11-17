@@ -1,6 +1,6 @@
 ---
 name: reading-a-piece-map
-description: Explains the stained-glass piece map and what each pieces command answers (trace, check, merge, split, extend, drop-line and build), with the numbers in each reply. Use when tracing a stained-glass picture, reading a pieces reply, choosing a fix for a flagged piece, or building a frame and panes from a map.
+description: Explains the stained-glass piece map and what each pieces command answers (trace, check, merge, split, extend, drop-line, build, dome and flatten), with the numbers in each reply. Use when tracing a stained-glass picture, reading a pieces reply, choosing a fix for a flagged piece, building a frame and panes from a map, or making a dome shade's map from bands and cutting it into flat slices.
 ---
 
 # The piece map and the `pieces` commands
@@ -19,6 +19,8 @@ drawn at. Don't edit a map by hand or with code of yours: each command writes a 
 | `pieces extend MAP --at X,Y [--aim X,Y] [--to FILE]` | the dead-end line at X,Y runs straight on, or toward `--aim`, until it leaves the piece's glass: the piece is cut in two |
 | `pieces drop-line MAP --at X,Y [--to FILE]` | the dead-end line at X,Y is filled with its piece's glass. On a line between two pieces, the smaller joins the larger |
 | `pieces build MAP --thickness T --pane P --lip FULL,LEAST --play C [--layer L] [--border MM] [--fit MM]` | `frame.step` and `pane_COLOUR.step` for each colour: each pane its piece inset by the play, each pocket the pane and the play round it, and a lip over the pane's edge on both faces, FULL wide where the opening stays one piece and down to LEAST where it doesn't |
+| `pieces dome --diameter D --height H --repeats N --bands FILE [--top MM] [--to FILE]` | a dome shade's map, `dome.pieces.json`: the bands of FILE from the top to the hem, laid N times round a dome D across at its hem and H tall, open at its top. The map is the dome's chart, the way round by the way up from the hem; its picture comes to you, the dome from the side over its chart |
+| `pieces flatten MAP [--slices N] [--bed X,Y] [--max-off MM] [--to NAME]` | the dome's map cut along lead lines into N slices, each laid flat as its own map, `MAP's name.slice-01.pieces.json` and so on: each slice's size and whether it fits the bed, the angle each fold bends through, and which slices are the same map |
 
 ## Reading them
 
@@ -31,3 +33,33 @@ drawn at. Don't edit a map by hand or with code of yours: each command writes a 
 - **`pieces build`'s reply** has `pause_z`, the height the print pauses at; `pocket_z`, `panes_count`, and `glass`, which is what `done`'s `glass` takes; `least_lip_before_play_mm` and each piece's lip under `lips`; and `glass_left_as_lead_mm2`, the tips and spurs no nozzle prints as a pane. A piece that can't be built is `FAIL`, and nothing is built: its line says what stops it, with where, and the command that fixes it.
 - **Its curves:** a turn sharper than 30° is a corner; between corners the outline is lines and arcs within `--fit` of its points. A pane's corners are rounded by half a nozzle, as the nozzle rounds them.
 - **`DISAGREE`** means two readings of the same thing differ: read both figures, and don't pick one. A fix that isn't sure of a piece says which.
+
+## A dome's bands file
+
+JSON, the bands from the top to the hem. Each has a `pattern`, its `height_mm` down the dome, the pattern's own figures, and its cells' `colours`. The heights add up to the dome's side, which `pieces dome` says (`meridian_mm`); one band may leave its height out, and takes what the others leave.
+
+```json
+{"lead_mm": 1.4, "bands": [
+ {"pattern": "grid", "height_mm": 48, "rows": 2, "columns": 2, "colours": ["amber", "green"]},
+ {"pattern": "swag", "height_mm": 38, "depth_mm": 12, "colours": ["blue", "cream"]},
+ {"pattern": "jewels", "height_mm": 18, "diameter_mm": 8, "count": 2, "colours": ["red", "gold"]},
+ {"pattern": "strip", "height_mm": 8, "colours": ["green"]},
+ {"pattern": "triangles", "height_mm": 16, "count": 2, "colours": ["amber", "blue"]},
+ {"pattern": "scallop", "depth_mm": 10, "colours": ["red"]}
+]}
+```
+
+| Pattern | In one repeat | Figures | `colours` |
+|---|---|---|---|
+| `grid` | `rows` by `columns` cells | `rows`, `columns` | by row + column, round the list |
+| `swag` | a drape hung between the repeat's sides, over its ground | `depth_mm`, `shoulder_mm` | the drape, the ground |
+| `jewels` | `count` round jewels, each with its ground in two pieces | `diameter_mm` of the glass, `count` | the jewel, the ground |
+| `strip` | `count` pieces side by side | `count` | each in turn |
+| `triangles` | `count` point down, the rest point up between them | `count` | down, up |
+| `scallop` | the hem: `count` cells with a curved bottom edge. The last band only | `depth_mm`, `count` | each in turn |
+
+- **A dome's map isn't checked or built:** it's drawn wider than the dome near its top. `pieces flatten` it, then `pieces check` and `pieces build` each different slice.
+- **`alike`** groups the slices that are the same map: check and build one of each group.
+- **`folds`** are the lead lines a slice bends along, each with `y_mm` on the slice's map and `bend_deg`. A slice bends only there: don't merge two pieces across a fold.
+- **`pieces build MAP --border B`** with B half the map's lead, as the reply gives it: the frame's edge is then the middle of the cut line, and two slices meet in one line.
+- **`rows_off_dome_mm`** is how far the flat rows stand from the curved dome. It's a reading unless the request limits it: then give `--max-off`, and with `FAIL`, cut more slices or add a band.
