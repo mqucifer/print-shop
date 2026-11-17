@@ -275,15 +275,27 @@ def plain(found: Map) -> dict[str, Any]:
 def save(found: Map, path: str) -> None:
     """Write the map, read back first: a command never writes a map the next can't read. Each
     outline is put on the grid the file keeps it to, so rounding can't make one cross itself."""
-    for piece in found.pieces:
-        kept = polygons(shapely.set_precision(piece.shape, 10.0**-PLACES))
-        if kept:
-            piece.shape = kept[0]
-    data = plain(found)
+    data = _on_grid(found)
     read(json.loads(json.dumps(data)), path)
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(data, indent=1) + "\n", encoding="utf-8")
+
+
+def _on_grid(found: Map) -> dict[str, Any]:
+    """The map as its JSON, each outline put on the grid the file keeps it to."""
+    for piece in found.pieces:
+        kept = polygons(shapely.set_precision(piece.shape, 10.0**-PLACES))
+        if kept:
+            piece.shape = kept[0]
+    return plain(found)
+
+
+def as_saved(found: Map) -> Map:
+    """The map as the next command would read it from its file, with no file written: `pieces
+    fix` makes each step on this, so a file of steps writes the map the same commands write one
+    by one (mqucifer/print-shop#161)."""
+    return read(json.loads(json.dumps(_on_grid(found))), "the map between two steps")
 
 
 def polygons(shape: Any) -> list[Any]:

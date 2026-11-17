@@ -841,6 +841,9 @@ ADDED = (
     ("set_asides", "unread_file", "TEXT"),
     # Whether a skill was read with `skill` or given whole in the start (mqucifer/print-shop#61).
     ("skill_reads", "how", "TEXT"),
+    # A bench command the model's own script ran, at that `run`'s call: `run`. Empty is a
+    # `bench` call (mqucifer/print-shop#161).
+    ("bench_calls", "via", "TEXT"),
 )
 #: Calls, seconds and tokens by what a person had sent, and first rounds apart from refinement
 #: rounds (mqucifer/print-shop#67): each phase's rounds, its kind (that of the first round to end
@@ -1212,14 +1215,17 @@ class DesignLedger:
         record: dict[str, Any] | None,
         files: dict[str, str],
         seconds: float,
+        via: str | None = None,
     ) -> None:
         """Each bench answer the model asked for, between the harness's: calls to the first clean
-        bench pass come from these (ADR 0010's fourth signal)."""
+        bench pass come from these (ADR 0010's fourth signal). `via` is `run` for a command the
+        model's own script ran, at that `run`'s call (mqucifer/print-shop#161), and empty for a
+        `bench` call."""
         record = record or {}
         with self._open() as db:
             db.execute(
                 "INSERT INTO bench_calls (run, round, at_call, argv, exit, verdict, why, numbers, "
-                "files, seconds) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "files, seconds, via) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     run,
                     round_n,
@@ -1231,6 +1237,7 @@ class DesignLedger:
                     _json(record.get("numbers")),
                     _json(files),
                     seconds,
+                    via,
                 ),
             )
 

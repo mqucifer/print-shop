@@ -110,11 +110,17 @@ def image_for(args: list[str]) -> str:
 
 
 def container(
-    work: Path, command: list[str], name: str, workdir: str = "/work", image: str = IMAGE
+    work: Path,
+    command: list[str],
+    name: str,
+    workdir: str = "/work",
+    image: str = IMAGE,
+    env: dict[str, str] | None = None,
 ) -> list[str]:
     """The `docker run` for a command over a working directory, in either image under the same
-    limits. It holds no secret."""
+    limits. It holds no secret. `env` is more of its environment, none of it a secret either."""
     user = f"{os.getuid()}:{os.getgid()}"
+    more = [word for key, value in (env or {}).items() for word in ("-e", f"{key}={value}")]
     return [
         "docker",
         "run",
@@ -157,6 +163,7 @@ def container(
         f"BENCH_IMAGE_ID={image_id(image) or 'unknown'}",
         "-e",
         f"BENCH_CODE={code_version()}",
+        *more,
         "-v",
         f"{work.resolve()}:/work",
         "-v",

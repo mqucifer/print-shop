@@ -128,6 +128,9 @@ class Desk:
     def bench_said(self, argv: list[str], ran: Ran, record: dict[str, Any] | None) -> None:
         self.bench.append(argv)
 
+    def script_benched(self, calls: list[dict[str, Any]]) -> None:
+        self.bench += [one["argv"] for one in calls]
+
 
 class NoBox:
     """A box that says what it was asked and runs nothing: it's for the host-side logic."""

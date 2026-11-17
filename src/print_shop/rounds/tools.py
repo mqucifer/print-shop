@@ -767,6 +767,7 @@ class Desk(Protocol):
     def bench_said(
         self, argv: list[str], ran: Ran, record: dict[str, Any] | None
     ) -> dict[str, Any] | None: ...
+    def script_benched(self, calls: list[dict[str, Any]]) -> None: ...
     def standing_said(self) -> str: ...
     def failing_said(self) -> str: ...
 
@@ -935,6 +936,33 @@ def _apart(lines: list[str], want: list[str]) -> list[int] | None:
         if len(found) == len(want):
             return found
     return None
+
+
+#: The bench commands of one script named in its reply, at most.
+INSIDE_SAID = 12
+
+
+def _inside_said(inside: list[dict[str, Any]], more: int) -> str:
+    """What a `run` reply gains where its script ran bench commands itself
+    (mqucifer/print-shop#161): that each is recorded, and what each answered."""
+    lines = [
+        f"{len(inside)} bench command(s) ran inside this script, each recorded as a bench call "
+        "of this call's, as if you'd called it. A `FAIL` inside a script is held as any failing "
+        "check is, and a pass inside a script doesn't clear a held check: a `bench` call does. "
+        "For a list of fixes to a piece map, `bench pieces fix MAP STEPS` runs them in one call."
+    ]
+    for one in inside[:INSIDE_SAID]:
+        record = one["record"] or {}
+        answered = record.get("verdict") or "no answer could be read"
+        lines.append(f"- `{' '.join(one['argv'])}`: {answered}")
+    if len(inside) > INSIDE_SAID:
+        lines.append(f"- and {len(inside) - INSIDE_SAID} more, each in its saved file")
+    if more:
+        lines.append(
+            f"The script ran {more} bench commands, and only the first {len(inside)} are "
+            "recorded."
+        )
+    return "\n".join(lines)
 
 
 def parse(raw: Any) -> Any:
@@ -1365,11 +1393,28 @@ class WorkTools:
         if done.code != 0:
             hinted = self._hint(done.output)
             reply += f"\n\n{hinted}" if hinted else ""
+        # The bench commands the script ran itself, each recorded as a bench call before the
+        # held checks are said, so a `FAIL` among them is held from this reply on.
+        inside = [one for one in done.benched if one["argv"]]
+        more = sum(int(one.get("more", 0)) for one in done.benched)
+        if inside:
+            self.desk.script_benched(inside)
+            reply += f"\n\n{_inside_said(inside, more)}"
         # A part file whose last `thin` failed, and each check whose latest try failed, said
         # until it passes (`unprintable.py`, `holding.py`).
         unprinted = self.desk.standing_said()
         reply += f"\n\n{unprinted}" if unprinted else ""
-        return Judged("run", "ok", reply, detail={"code": done.code, "seconds": done.seconds})
+        detail: dict[str, Any] = {"code": done.code, "seconds": done.seconds}
+        if inside:
+            detail["bench_inside"] = [
+                {
+                    "command": " ".join(one["argv"]),
+                    "exit": one["code"],
+                    "verdict": (one["record"] or {}).get("verdict"),
+                }
+                for one in inside
+            ]
+        return Judged("run", "ok", reply, detail=detail)
 
     def check_size(self) -> None:
         """/work is a folder on the Mac with no quota of its own."""

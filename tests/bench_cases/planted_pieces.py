@@ -15,7 +15,7 @@ is a Sponsor's scene or anything from one (mqucifer/print-shop#152, mqucifer/pri
   rays square to its edges read wider at the same place (mqucifer/print-shop#161).
 - `spiked.json`: a notch that ends in a spike thinner than a pixel, with the limit between its
   depth by its outline and by its pixels.
-- `hairs.json`: two cuts a hundredth of a millimetre wide whose ends face each other, which the
+- `hairs.json`: two cuts two microns wide whose ends face each other, which the
   outline has and no pixel shows.
 """
 
@@ -261,13 +261,13 @@ def spiked() -> dict[str, Any]:
 
 
 def hairs() -> dict[str, Any]:
-    """The notched piece with each notch 0.01 mm wide and their ends 1 mm apart, in line: a
-    neck by the outline, 1 mm under 1.2, and no pixel has either cut, so by the pixels the
-    glass there is as wide as the piece."""
+    """The notched piece with each notch 0.002 mm wide and their ends 1 mm apart, 0.02 mm
+    to each side of one line: a neck by the outline, 1 mm under 1.2, and no pixel has either
+    cut, so by the pixels the glass there is as wide as the piece."""
     found = notched()
     found["pieces"][0]["outline"] = [
-        [1, 1], [12.495, 1], [12.495, 10.5], [12.505, 10.5], [12.505, 1], [41, 1], [41, 21],
-        [12.505, 21], [12.505, 11.5], [12.495, 11.5], [12.495, 21], [1, 21],
+        [1, 1], [12.509, 1], [12.509, 10.5], [12.511, 10.5], [12.511, 1], [41, 1], [41, 21],
+        [12.491, 21], [12.491, 11.5], [12.489, 11.5], [12.489, 21], [1, 21],
     ]  # fmt: skip
     return found
 

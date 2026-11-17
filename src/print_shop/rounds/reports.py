@@ -267,6 +267,9 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "source_glass_share_pct",
         "specks",
         "specks_filled",
+        "steps",
+        "steps_given",
+        "steps_made",
         "tolerance_mm",
         "top_mm",
         "unbuildable",
@@ -812,7 +815,8 @@ VERDICTS: dict[str, tuple[str, ...]] = {
     "params": ("OK", "NO CHANGE", "PARTIAL"),
     "render": ("OK", "FAIL"),
     "layout": ("OK", "FAIL"),
-    "pieces": ("OK", "FAIL"),
+    # `PARTIAL` is `pieces fix`'s, stopped at a step that was refused (mqucifer/print-shop#161).
+    "pieces": ("OK", "FAIL", "PARTIAL"),
     # Readings, with no limit: what's there, or DISAGREE where the two methods differ.
     "faces": ("OK",),
     "slice": ("OK",),

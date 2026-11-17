@@ -136,9 +136,9 @@ def test_two_methods_both_under_the_limit_at_different_figures_are_a_neck(bench:
     (row,) = answer.numbers["pieces"]
     assert row["narrowest_mm"] == pytest.approx((0.3**2 + 0.8**2) ** 0.5, abs=0.01)
     assert row["narrowest_by_rays_mm"] == pytest.approx(1.1, abs=0.01)
-    assert "Rays square to its edges read 1.10 mm there, 0.25 mm more, under the limit" in (
-        answer.text
-    )
+    assert row["narrowest_by_pixels_mm"] == pytest.approx(row["narrowest_mm"], abs=0.06)
+    noted = [n for n in answer.record["notes"] if "Rays square to its edges" in n]
+    assert "read 1.10 mm there, 0.25 mm more than the nearest points" in noted[0]
     # At 1.0 the rays' 1.1 mm is over the limit and the nearest points' 0.854 under it. The
     # rays run from the notch's flat end to the step, not between the two nearest points: they
     # measure something else, so that's a note (mqucifer/print-shop#161). It was `DISAGREE`.
@@ -168,14 +168,14 @@ def test_a_slanted_neck_reads_the_same_by_both_methods_and_rays_are_a_note(bench
 def test_a_neck_the_pixels_dont_have_on_the_other_side_of_the_limit_is_still_disagree(
     bench: Any,
 ) -> None:
-    """The control: two cuts a hundredth of a millimetre wide, their ends 1 mm apart. By the
+    """The control: two cuts two microns wide, their ends 1 mm apart. By the
     outline that's a neck under 1.2 mm; no pixel shows either cut, so twice the pixels'
     distance to the edge there is the piece's own width, far over the limit and far past a
     pixel. The same place, opposite sides of the limit, each beyond the other's resolution."""
     answer = bench("pieces", "check", "hairs.json")
     assert answer.verdict == "DISAGREE" and answer.code == 2, answer.text
     assert "by the nearest points facing each other, under --min-neck 1.2" in answer.record["why"]
-    assert "by twice its pixels' distance to the edge" in answer.record["why"]
+    assert "by its pixels' distance to the edge" in answer.record["why"]
     # With the limit under both, they agree there's no neck to flag, and the gap is a note.
     loose = bench("pieces", "check", "hairs.json", "--min-neck", 0.5)
     assert loose.verdict != "DISAGREE", loose.text
@@ -473,6 +473,20 @@ def test_a_piece_that_surrounds_another_is_opened_by_a_line_to_its_edge(
     assert built.verdict in ("FAIL", "NO ANSWER")
 
 
+def rings(work: Path, name: str) -> list[Any]:
+    """A map's pieces with each ring begun at its lowest point: the same points in the same
+    order round are the same outline, wherever the file starts it."""
+
+    def begun(ring: list[list[float]]) -> list[list[float]]:
+        k = ring.index(min(ring))
+        return ring[k:] + ring[:k]
+
+    return [
+        (p["id"], p["colour"], begun(p["outline"]), sorted(begun(h) for h in p.get("holes", [])))
+        for p in json.loads((work / name).read_text())["pieces"]
+    ]
+
+
 def five_steps(work: Path) -> list[dict[str, Any]]:
     """Five fixes to the broken panel, one of each kind and a second merge."""
     sliver, beside = piece_at(work, "b0.json", SLIVER), piece_at(work, "b0.json", BESIDE_SLIVER)
@@ -505,29 +519,30 @@ def test_a_file_of_five_fixes_runs_in_one_call_with_one_reply(bench: Any, broken
     assert (numbers["pieces_before"], numbers["pieces_after"]) == (11, 11)
     # A fix keeps the glass: three steps add it, and the two splits take a line's worth each.
     assert numbers["glass_added_mm2"] > 0 and numbers["glass_taken_mm2"] > 30
+    # As the trace read it, to what writing the map to a tenth of a micron moves.
     assert numbers["glass_share_before_pct"] == pytest.approx(
-        broken.numbers["glass_share_pct"], abs=1e-6
+        broken.numbers["glass_share_pct"], abs=1e-3
     )
     assert numbers["lead_widest_before_mm"] == pytest.approx(
-        broken.numbers["lead_widest_mm"], abs=1e-6
+        broken.numbers["lead_widest_mm"], abs=1e-3
     )
     assert "every other piece's outline is the same, point for point" in answer.text
     # One by one, the same five write the same map.
     name = "b0.json"
     for k, step in enumerate(steps):
-        words: list[Any] = {
-            "merge": lambda s: ["merge", name, s["a"], s["b"]],
-            "drop-line": lambda s: ["drop-line", name, "--at", "{},{}".format(*s["at"])],
-            "split": lambda s: [
-                "split", name, s["piece"], "--line", ",".join(str(v) for p in s["line"] for v in p)
-            ],
-        }[step["fix"]](step)  # fmt: skip
+        if step["fix"] == "merge":
+            words = ["merge", name, step["a"], step["b"]]
+        elif step["fix"] == "drop-line":
+            words = ["drop-line", name, "--at", "{},{}".format(*step["at"])]
+        else:
+            line = ",".join(str(v) for point in step["line"] for v in point)
+            words = ["split", name, step["piece"], "--line", line]
         one = bench("pieces", *words, "--to", f"one-{k}.json")
         assert one.verdict == "OK", one.text
         name = f"one-{k}.json"
+    assert rings(bench.work, "fixed.json") == rings(bench.work, name), "point for point"
     together = json.loads((bench.work / "fixed.json").read_text())
     apart = json.loads((bench.work / name).read_text())
-    assert together["pieces"] == apart["pieces"]
     assert together["history"] == apart["history"] and len(together["history"]) == 5
     # The reading after is the check's own.
     again = bench("pieces", "check", "fixed.json")
@@ -537,7 +552,16 @@ def test_a_file_of_five_fixes_runs_in_one_call_with_one_reply(bench: Any, broken
     assert numbers["lead_widest_after_mm"] == pytest.approx(
         again.numbers["lead_widest_mm"], abs=1e-6
     )
-    assert not {"sliver", "dead-end", "notch", "surrounds", "small"} & {f for f, _ in flags_of(again)}
+    left = flags_of(again)
+    assert not {"sliver", "surrounds", "small"} & {flag for flag, _ in left}
+    ended = piece_at(bench.work, "b0.json", DEAD_END)
+    assert ("dead-end", ended) not in left and ("notch", steps[2]["piece"]) not in left
+    # The reply's own reading of each changed piece is the check's: the opening line, with the
+    # small piece joined across it, now ends in the piece's glass, and the reply says so.
+    around = steps[4]["b"]
+    changed = {row["id"]: row["flags"] for row in numbers["changed"]}
+    assert changed[around] == ["dead-end"] and ("dead-end", around) in left
+    assert sum(1 for flags in changed.values() if flags) == 1
     assert not reports.unlike("pieces", numbers)
 
 
@@ -564,6 +588,22 @@ def test_a_fix_file_stops_at_the_first_refused_step_and_writes_the_map_up_to_it(
     none = bench("pieces", "fix", "b0.json", "first.json", "--to", "none.json")
     assert none.verdict == "NO ANSWER" and none.code == 2
     assert "step 1 of 3, " in none.record["why"] and not (bench.work / "none.json").exists()
+
+
+def test_a_maps_history_is_a_steps_file_that_makes_it_again(bench: Any, broken: Answer) -> None:
+    """Each fix is written in the map's `history` as a step is given, so the fixes a map has had
+    can be made again on the map they began from: a dead end run on, then the five."""
+    steps = [{"fix": "extend", "at": [20, 55]}, *five_steps(bench.work)[2:]]
+    (bench.work / "ran-on.json").write_text(json.dumps(steps))
+    first = bench("pieces", "fix", "b0.json", "ran-on.json", "--to", "h1.json")
+    assert first.verdict == "OK", first.text
+    assert first.numbers["steps"][0]["ran_to"][1] == pytest.approx(80.07, abs=0.05)
+    history = json.loads((bench.work / "h1.json").read_text())["history"]
+    assert [h["fix"] for h in history] == ["extend", "split", "split", "merge"]
+    (bench.work / "history.json").write_text(json.dumps(history))
+    again = bench("pieces", "fix", "b0.json", "history.json", "--to", "h2.json")
+    assert again.verdict == "OK", again.text
+    assert rings(bench.work, "h1.json") == rings(bench.work, "h2.json")
 
 
 @pytest.mark.parametrize(

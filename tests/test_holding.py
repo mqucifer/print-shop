@@ -610,7 +610,7 @@ def test_a_bench_run_inside_a_script_is_recorded_as_a_call_and_its_fail_is_held(
 def test_a_pass_inside_a_script_is_no_answer_to_rely_on_and_a_fail_is_a_fail() -> None:
     present = {"references/frame.step", "pane.step"}
     argv = [*CAPTURE.split(), "--min-lip", "0.4"]
-    tries = [Tried(1, argv, False, "FAIL", by="run"), Tried(2, argv, None, "OK", by="run")]
+    tries = [Tried(1, argv, False, "FAIL"), Tried(2, argv, None, "OK")]
     (held,) = holding.failing(tries, [], present, None, None)
     assert [t.at_call for t in held.tries] == [1]
     assert not holding.failing([*tries, Tried(3, argv, True, "OK")], [], present, None, None)

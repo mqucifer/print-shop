@@ -48,3 +48,24 @@ def test_a_needs_number_is_held_by_the_benchs_own_rule() -> None:
     assert not under.passed and "is 0.24996, under 0.25" in under.why
     over = judged(need, 0.4001)
     assert not over.passed and "is 0.4001, over 0.4" in over.why
+
+
+def test_two_readings_differ_only_past_a_resolution_and_across_the_limit() -> None:
+    """mqucifer/print-shop#161: a second check closer to the first than its resolution is the
+    same reading. `DISAGREE` is two readings on opposite sides of a limit, each beyond the
+    other's resolution; further apart on one side of it, they agree on the rule."""
+    # A neck 1.022 mm by its outline, under a least of 1.2: pixels 0.07 mm coarse read 1.07.
+    assert limits.apart(1.022, 1.07, 0.07, 1.2, least=True) == "same"
+    # Within the resolution with the limit between them is still the same reading.
+    assert limits.apart(1.18, 1.22, 0.07, 1.2, least=True) == "same"
+    # Past it, and across the limit: one says a neck and the other none.
+    assert limits.apart(1.022, 1.828, 0.07, 1.2, least=True) == "split"
+    assert limits.apart(1.828, 1.022, 0.07, 1.2, least=True) == "split"
+    # Past it on one side of the limit: both say a neck, or both say none.
+    assert limits.apart(0.854, 1.1, 0.07, 1.2, least=True) == "off"
+    assert limits.apart(1.5, 2.4, 0.07, 1.2, least=True) == "off"
+    # A figure at its limit passes, whichever way the limit runs.
+    assert limits.apart(1.2, 1.5, 0.07, 1.2, least=True) == "off", "at a least isn't under it"
+    assert limits.apart(1.2, 1.5, 0.07, 1.2, least=False) == "split", "1.5 is over a most"
+    assert limits.apart(1.0, 0.8, 0.07, 1.0, least=False) == "off", "at a most isn't over it"
+    assert limits.apart(1.0, 0.8, 0.07, 1.0, least=True) == "split", "0.8 is under a least"

@@ -17,6 +17,11 @@ the glass share fell from 91% to 83%. Here each fix is one piece's, by name:
 - **`drop-line --at X,Y`**: a dead end is filled with its piece's glass; a line between two
   pieces is their merge, the smaller joining the larger.
 
+- **`fix STEPS`**: a file of those fixes, run in order in one call with one reply
+  (mqucifer/print-shop#161). A map takes dozens of fixes, and a run chained them from its own
+  script, where none was a bench call. It says each step's result, stops at the first step
+  that's refused, and writes the map up to it.
+
 **A fix becomes glass, not lead** (the Sponsor, 2026-11-17): a merge and a dropped line only
 add glass, and a split or an extension takes one lead line's worth. Every reply says the pieces,
 the glass share and the lead's widest point before and after, and nothing but the pieces named
@@ -29,8 +34,10 @@ pixels join.
 
 from __future__ import annotations
 
+import json
 import math
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -61,6 +68,22 @@ NEAR = 3.0
 GRID = 1e-6
 #: A crumb of glass under this, in mm², left by a cut is lead.
 CRUMB_MM2 = 0.05
+#: The fixes a steps file may name, and what each needs.
+FIXES = ("merge", "split", "extend", "drop-line")
+#: Steps said one by one in a reply, at most: the rest are in the saved numbers.
+STEPS_SAID = 60
+
+
+@dataclass
+class Made:
+    """One fix, made: the map after it, the pieces it changed, what it did in words, and the
+    glass it added and took, in mm², by the outlines."""
+
+    after: Map
+    changed: list[int]
+    did: str
+    glass: tuple[float, float]
+    numbers: dict[str, Any] = field(default_factory=dict)
 
 
 def next_name(path: str, to: str | None) -> str:
@@ -228,21 +251,50 @@ def _glass_by_pixels(before: Map, after: Map) -> tuple[float, float]:
     return added, took
 
 
-def _finish(
-    args: Any,
+def _differ_by_pixels(
+    before: Map, after: Map, changed: list[int], glass: tuple[float, float]
+) -> tuple[tuple[float, float], bool, list[str]]:
+    """One fix read again: the glass it added and took by the two maps' pixels, whether every
+    piece it didn't name is the same point for point, and where either differs from what the
+    outlines say."""
+    same = all(
+        p.shape.equals(before.piece(p.id).shape)
+        for p in after.pieces
+        if p.id not in changed and any(o.id == p.id for o in before.pieces)
+    )
+    by_pixels = _glass_by_pixels(before, after)
+    px_per_mm = piecemap.pixels(after).px_per_mm
+    rims = sum(after.piece(n).shape.length for n in changed)
+    slack = PIXELS_OFF * rims / px_per_mm + 0.5
+    differs = []
+    both = (("added", glass[0], by_pixels[0]), ("taken", glass[1], by_pixels[1]))
+    for name, mine, theirs in both:
+        if abs(mine - theirs) > slack:
+            differs.append(
+                f"the glass {name} is {mine:.2f} mm² by the outlines and {theirs:.2f} mm² by "
+                "the pixels"
+            )
+    if not same:
+        differs.append("a piece that wasn't named changed")
+    return by_pixels, same, differs
+
+
+def _settle(
     report: Report,
     before: Map,
     after: Map,
     changed: list[int],
-    did: str,
     glass: tuple[float, float],
-) -> None:
+    by_pixels: tuple[float, float],
+    same: bool,
+    target: str,
+) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
     """Write the new map and say what changed: the pieces, the glass share and the lead's
-    widest point before and after, and each changed piece as `pieces check` reads it."""
+    widest point before and after, and each changed piece as `pieces check` reads it. With the
+    readings before and after, and where the second method differs."""
     was, now = quick(before), quick(after)
     reading = read_map(after, Limits(), only=changed)
     after.flags = [*after.flags, *kept_flags(reading.flags)]
-    target = next_name(args.map, args.to)
     piecemap.save(after, target)
     report.wrote(target)
     report.fact("map", target, how="the new map: the one given is as it was")
@@ -279,12 +331,8 @@ def _finish(
         )
     for one in reading.flags:
         report.line(f"  {one['flag']}: {one['said']}")
-    same = all(
-        p.shape.equals(before.piece(p.id).shape)
-        for p in after.pieces
-        if p.id not in changed and any(o.id == p.id for o in before.pieces)
-    )
-    by_pixels = _glass_by_pixels(before, after)
+    for text in reading.notes[:4]:
+        report.note(text)
     report.numbers["glass_added_by_pixels_mm2"] = by_pixels[0]
     report.numbers["glass_taken_by_pixels_mm2"] = by_pixels[1]
     report.second(
@@ -298,57 +346,60 @@ def _finish(
         if same
         else "a piece that wasn't named has a different outline"
     )
-    differs = quick_differs(after, now) + list(reading.differs)
-    rims = sum(after.piece(n).shape.length for n in changed)
-    slack = PIXELS_OFF * rims / now["px_per_mm"] + 0.5
-    for name, mine, theirs in (("added", added, by_pixels[0]), ("taken", took, by_pixels[1])):
-        if abs(mine - theirs) > slack:
-            differs.append(
-                f"the glass {name} is {mine:.2f} mm² by the outlines and {theirs:.2f} mm² by "
-                "the pixels"
-            )
-    if not same:
-        differs.append("a piece that wasn't named changed")
+    return was, now, quick_differs(after, now) + list(reading.differs)
+
+
+def _finish(args: Any, report: Report, before: Map, made: Made) -> None:
+    """One fix's reply: the new map written, what changed, and its verdict."""
+    if "ran_to" in made.numbers:
+        report.numbers["ran_on_mm"] = made.numbers["ran_on_mm"]
+        report.numbers["ran_from"] = made.numbers["ran_from"]
+        report.numbers["ran_to"] = made.numbers["ran_to"]
+    by_pixels, same, differs = _differ_by_pixels(before, made.after, made.changed, made.glass)
+    target = next_name(args.map, args.to)
+    was, now, more = _settle(
+        report, before, made.after, made.changed, made.glass, by_pixels, same, target
+    )
+    differs = more + differs
     if differs:
         report.verdict("DISAGREE", "; ".join(differs[:6]))
         return
     report.verdict(
         "OK",
-        f"{did}. Before: {quick_said(was)}. After: {quick_said(now)}. The new map is {target}",
+        f"{made.did}. Before: {quick_said(was)}. After: {quick_said(now)}. The new map is "
+        f"{target}",
     )
 
 
-def run_merge(args: Any, report: Report) -> None:
-    found = piecemap.load(args.map)
-    a, b = found.piece(args.a), found.piece(args.b)
+def do_merge(found: Map, a_id: int, b_id: int) -> Made:
+    a, b = found.piece(a_id), found.piece(b_id)
     shape, line = merged(found, a, b)
     made = Piece(
         b.id, b.colour, shape, b.thickness_mm, {"rgb": b.paint["rgb"]} if b.paint else None
     )
     after = _swap(found, [a.id, b.id], [made], {"fix": "merge", "a": a.id, "b": b.id})
     lost = float(_joined([a.shape, b.shape]).difference(shape).area)
-    _finish(
-        args, report, found, after, [b.id],
+    return Made(
+        after, [b.id],
         f"piece {a.id} joined piece {b.id}, which keeps its number and its {b.colour}: the "
         f"line between them, {line:.1f} mm² of lead, is glass",
         (line, lost),
     )  # fmt: skip
 
 
-def run_split(args: Any, report: Report) -> None:
-    found = piecemap.load(args.map)
-    piece = found.piece(args.id)
-    lead = args.lead if args.lead is not None else found.lead_mm
+def do_split(found: Map, number: int, line: list[Any], lead_mm: float | None) -> Made:
+    piece = found.piece(number)
+    lead = lead_mm if lead_mm is not None else found.lead_mm
     if not lead > 0:
         raise NoAnswer("--lead is the new line's width in mm, over 0")
-    parts, strip = cut(piece, args.line, lead)
+    parts, strip = cut(piece, line, lead)
     # A piece that surrounds another is opened by a line from its hole to its edge: still one
     # piece, with one hole fewer.
     opened = len(parts) == 1 and len(parts[0].interiors) < len(piece.shape.interiors)
     if len(parts) < 2 and not opened:
         ends = [
             piecemap.said_at(p)
-            for p in (args.line[0], args.line[-1])
+            for p in (line[0], line[-1])
             if piece.shape.contains(shapely.Point(p))
             and piece.shape.exterior.distance(shapely.Point(p)) > lead
         ]
@@ -362,12 +413,12 @@ def run_split(args: Any, report: Report) -> None:
     made = _take(found, piece, parts)
     after = _swap(
         found, [piece.id], made,
-        {"fix": "split", "piece": piece.id, "line": [list(p) for p in args.line], "lead_mm": lead,
+        {"fix": "split", "piece": piece.id, "line": [list(p) for p in line], "lead_mm": lead,
          "made": [m.id for m in made]},
     )  # fmt: skip
     took = float(piece.shape.area - sum(p.area for p in parts))
-    _finish(
-        args, report, found, after, [m.id for m in made],
+    return Made(
+        after, [m.id for m in made],
         f"piece {piece.id} is opened by a new lead line {lead:.2f} mm wide from the lead "
         "inside it to its edge: it surrounds no piece now"
         if opened
@@ -377,11 +428,10 @@ def run_split(args: Any, report: Report) -> None:
     )  # fmt: skip
 
 
-def run_extend(args: Any, report: Report) -> None:
-    found = piecemap.load(args.map)
-    row = _dead_end_at(found, args.at)
+def do_extend(found: Map, at: Any, aim: Any) -> Made:
+    row = _dead_end_at(found, at)
     if row is None:
-        raise _no_dead_end(found, args.at)
+        raise _no_dead_end(found, at)
     piece = found.piece(row["piece"])
     lead = found.lead_mm
     width = min(max(row["width_mm"], 0.5 * lead), 1.5 * lead)
@@ -389,13 +439,13 @@ def run_extend(args: Any, report: Report) -> None:
     if row["kind"] == "island":
         # Whichever end of the lone line is nearer `--at` runs on.
         a, b = np.asarray(row["at"]), np.asarray(row["from"])
-        if math.dist(args.at, b) < math.dist(args.at, a):
+        if math.dist(at, b) < math.dist(at, a):
             a, b = b, a
         end, way = a, (a - b) / max(float(np.linalg.norm(a - b)), 1e-12)
     else:
         way = np.asarray(row["way"])
-    if args.aim is not None:
-        toward = np.asarray(args.aim) - end
+    if aim is not None:
+        toward = np.asarray(aim) - end
         if float(np.linalg.norm(toward)) < 1e-9:
             raise NoAnswer("--aim is the line's end itself: give a point to run it toward")
         way = toward / float(np.linalg.norm(toward))
@@ -423,8 +473,10 @@ def run_extend(args: Any, report: Report) -> None:
     made = _take(found, piece, parts)
     after = _swap(
         found, [piece.id], made,
-        {"fix": "extend", "piece": piece.id, "from": row["at"], "to": piecemap.xy(reached),
-         "made": [m.id for m in made]},
+        # Where it ran to as it is, not as a line says it: a history given back as steps
+        # (`read_steps`) aims at this point, and has to cut the same line.
+        {"fix": "extend", "piece": piece.id, "from": row["at"],
+         "to": [float(reached[0]), float(reached[1])], "made": [m.id for m in made]},
     )  # fmt: skip
     beyond = shapely.Point(reached)
     if found.panel.exterior.distance(beyond) <= lead:
@@ -435,22 +487,23 @@ def run_extend(args: Any, report: Report) -> None:
         )
         meets = f"the line beside piece {near[0][1]}" if near else "the lead"
     took = float(piece.shape.area - sum(p.area for p in parts))
-    report.numbers["ran_on_mm"] = float(math.dist(end, reached))
-    report.numbers["ran_from"] = row["at"]
-    report.numbers["ran_to"] = piecemap.xy(reached)
-    _finish(
-        args, report, found, after, [m.id for m in made],
+    return Made(
+        after, [m.id for m in made],
         f"the dead end in piece {piece.id} ran on {math.dist(end, reached):.1f} mm, "
         f"{width:.2f} mm wide, from {piecemap.said_at(row['at'])} to "
         f"{piecemap.said_at(reached)}, where it meets {meets}: piece {piece.id} is now pieces "
         f"{piecemap.numbered([m.id for m in made])}",
         (0.0, took),
+        {
+            "ran_on_mm": float(math.dist(end, reached)),
+            "ran_from": row["at"],
+            "ran_to": piecemap.xy(reached),
+        },
     )  # fmt: skip
 
 
-def run_drop_line(args: Any, report: Report) -> None:
-    found = piecemap.load(args.map)
-    row = _dead_end_at(found, args.at)
+def do_drop_line(found: Map, at: Any) -> Made:
+    row = _dead_end_at(found, at)
     if row is not None:
         piece = found.piece(row["piece"])
         shape = _one(_joined([piece.shape, row["shape"]]), f"piece {piece.id} with the line out")
@@ -458,33 +511,257 @@ def run_drop_line(args: Any, report: Report) -> None:
         after = _swap(
             found, [piece.id], [made], {"fix": "drop-line", "piece": piece.id, "at": row["at"]}
         )
-        _finish(
-            args, report, found, after, [piece.id],
+        return Made(
+            after, [piece.id],
             f"the dead end in piece {piece.id}, {row['length_mm']:.1f} mm long to "
             f"{piecemap.said_at(row['at'])}, is out: its {row['shape'].area:.1f} mm² of lead "
             "is that piece's glass",
             (float(shape.area - piece.shape.area), float(piece.shape.difference(shape).area)),
         )  # fmt: skip
-        return
-    here = shapely.Point(args.at)
+    here = shapely.Point(at)
     if any(p.shape.contains(here) for p in found.pieces):
-        raise _no_dead_end(found, args.at)
+        raise _no_dead_end(found, at)
     near = sorted((float(here.distance(p.shape)), p.id) for p in found.pieces)[:2]
     reach = REACH * found.lead_mm
     if len(near) < 2 or near[1][0] > reach:
-        raise _no_dead_end(found, args.at)
+        raise _no_dead_end(found, at)
     a, b = sorted((found.piece(n) for _, n in near), key=lambda p: p.shape.area)
     shape, line = merged(found, a, b)
     made = Piece(
         b.id, b.colour, shape, b.thickness_mm, {"rgb": b.paint["rgb"]} if b.paint else None
     )
     after = _swap(
-        found, [a.id, b.id], [made], {"fix": "drop-line", "a": a.id, "b": b.id, "at": list(args.at)}
+        found, [a.id, b.id], [made], {"fix": "drop-line", "a": a.id, "b": b.id, "at": list(at)}
     )
-    _finish(
-        args, report, found, after, [b.id],
-        f"the line at {piecemap.said_at(args.at)} lay between pieces {a.id} and {b.id}, and is "
+    return Made(
+        after, [b.id],
+        f"the line at {piecemap.said_at(at)} lay between pieces {a.id} and {b.id}, and is "
         f"out: the smaller, {a.id}, joined {b.id}, which keeps its number and its {b.colour} "
         f"(`pieces merge` chooses which joins which), and {line:.1f} mm² of lead is glass",
         (line, float(_joined([a.shape, b.shape]).difference(shape).area)),
     )  # fmt: skip
+
+
+def run_merge(args: Any, report: Report) -> None:
+    found = piecemap.load(args.map)
+    _finish(args, report, found, do_merge(found, args.a, args.b))
+
+
+def run_split(args: Any, report: Report) -> None:
+    found = piecemap.load(args.map)
+    _finish(args, report, found, do_split(found, args.id, args.line, args.lead))
+
+
+def run_extend(args: Any, report: Report) -> None:
+    found = piecemap.load(args.map)
+    _finish(args, report, found, do_extend(found, args.at, args.aim))
+
+
+def run_drop_line(args: Any, report: Report) -> None:
+    found = piecemap.load(args.map)
+    _finish(args, report, found, do_drop_line(found, args.at))
+
+
+# A file of fixes
+
+
+def _xy(value: Any) -> list[float] | None:
+    if (
+        isinstance(value, list | tuple)
+        and len(value) == 2
+        and all(isinstance(v, int | float) and not isinstance(v, bool) for v in value)
+    ):
+        return [float(value[0]), float(value[1])]
+    return None
+
+
+def _whole(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def read_steps(path: str) -> list[dict[str, Any]]:
+    """A steps file: a JSON list of fixes, or `{"steps": [...]}`, each `{"fix": NAME, ...}` with
+    what that fix's own command takes. A map's `history` is such a list, so the fixes a map
+    has had can be made again on the map they began from:
+
+    - `merge`: `a`, the piece that joins, and `b`, the neighbour it joins;
+    - `split`: `piece`, and `line`, its points `[[x, y], ...]`; `lead_mm`, the line's width;
+    - `extend`: `at`, a point on the dead end (or `from`, as a history has it); `aim`, a point
+      to run it toward (or `to`);
+    - `drop-line`: `at`, a point on the line.
+
+    Every step is read before any is made, so a file that can't be read changes nothing."""
+    found = Path(path)
+    if not found.is_file():
+        raise NoAnswer(f"no file {path} in the working directory")
+    try:
+        data = json.loads(found.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        raise NoAnswer(f"{path} isn't JSON: {exc}") from exc
+    rows = data.get("steps") if isinstance(data, dict) else data
+    if not isinstance(rows, list):
+        raise NoAnswer(
+            f'{path} is a list of steps, or {{"steps": [...]}}, each {{"fix": NAME, ...}}'
+        )
+    if not rows:
+        raise NoAnswer(f"{path} has no step: give one fix or more")
+    steps = []
+    for n, row in enumerate(rows, start=1):
+        name = row.get("fix") if isinstance(row, dict) else None
+        if name not in FIXES:
+            raise NoAnswer(f"step {n}: `fix` is one of {', '.join(FIXES)}, as {{\"fix\": NAME}}")
+
+        def needs(key: str, what: str, n: int = n, name: Any = name) -> NoAnswer:
+            return NoAnswer(f"step {n}, a {name}, needs `{key}`: {what}")
+
+        if name == "merge":
+            a, b = _whole(row.get("a")), _whole(row.get("b"))
+            if a is None:
+                raise needs("a", "the piece that joins, by its number")
+            if b is None:
+                raise needs("b", "the neighbour it joins, by its number")
+            steps.append({"fix": name, "a": a, "b": b})
+        elif name == "split":
+            piece = _whole(row.get("piece", row.get("id")))
+            if piece is None:
+                raise needs("piece", "the piece to cut, by its number")
+            line = row.get("line")
+            points = [_xy(p) for p in line] if isinstance(line, list) else []
+            if len(points) < 2 or any(p is None for p in points):
+                raise NoAnswer(
+                    f"step {n}, a split: `line` is two points or more, [[x1, y1], [x2, y2]], "
+                    "from one edge of the piece to another"
+                )
+            lead = row.get("lead_mm")
+            if lead is not None and not (isinstance(lead, int | float) and lead > 0):
+                raise NoAnswer(f"step {n}, a split: `lead_mm` is the line's width in mm, over 0")
+            steps.append(
+                {"fix": name, "piece": piece, "line": points, "lead_mm": lead}
+            )
+        else:
+            at = _xy(row.get("at", row.get("from") if name == "extend" else None))
+            if at is None:
+                raise needs("at", "a point on the line, [x, y]")
+            step: dict[str, Any] = {"fix": name, "at": at}
+            if name == "extend":
+                given = row.get("aim", row.get("to"))
+                aim = _xy(given)
+                if given is not None and aim is None:
+                    raise NoAnswer(f"step {n}, an extend: `aim` is a point, [x, y]")
+                step["aim"] = aim
+            steps.append(step)
+    return steps
+
+
+def step_said(step: dict[str, Any]) -> str:
+    """A step as a line names it."""
+    if step["fix"] == "merge":
+        return f"merge {step['a']} into {step['b']}"
+    if step["fix"] == "split":
+        ends = step["line"][0], step["line"][-1]
+        return (
+            f"split {step['piece']} from {piecemap.said_at(ends[0])} to "
+            f"{piecemap.said_at(ends[1])}"
+        )
+    return f"{step['fix']} at {piecemap.said_at(step['at'])}"
+
+
+def do_step(found: Map, step: dict[str, Any]) -> Made:
+    if step["fix"] == "merge":
+        return do_merge(found, step["a"], step["b"])
+    if step["fix"] == "split":
+        return do_split(found, step["piece"], step["line"], step["lead_mm"])
+    if step["fix"] == "extend":
+        return do_extend(found, step["at"], step["aim"])
+    return do_drop_line(found, step["at"])
+
+
+def run_fix(args: Any, report: Report) -> None:
+    """`pieces fix MAP STEPS`: each step made on the map the one before left, in memory, and
+    one map written at the end. Each step is read again as a fix on its own is, by the two
+    maps' pixels; the changed pieces are read once, on the last map."""
+    steps = read_steps(args.steps)
+    first = found = piecemap.load(args.map)
+    rows: list[dict[str, Any]] = []
+    changed: list[int] = []
+    added = took = added_px = took_px = 0.0
+    same = True
+    differs: list[str] = []
+    stopped = ""
+    for n, step in enumerate(steps, start=1):
+        name = f"step {n} of {len(steps)}, {step_said(step)}"
+        try:
+            made = do_step(found, step)
+        except NoAnswer as exc:
+            stopped = f"{name}, was refused: {exc}"
+            rows.append({"step": n, "fix": step["fix"], "made": False, "said": str(exc)})
+            break
+        by_pixels, kept, differ = _differ_by_pixels(found, made.after, made.changed, made.glass)
+        if differ:
+            # The step's own second check differs: it isn't made, and nothing after it is.
+            differs = [f"{name}: {one}" for one in differ]
+            rows.append({"step": n, "fix": step["fix"], "made": False, "said": "; ".join(differ)})
+            break
+        # As the next command would read it from its file: a file of steps then writes the map
+        # the same commands write one by one, point for point.
+        found = piecemap.as_saved(made.after)
+        same = same and kept
+        added, took = added + made.glass[0], took + made.glass[1]
+        added_px, took_px = added_px + by_pixels[0], took_px + by_pixels[1]
+        changed = [*changed, *[c for c in made.changed if c not in changed]]
+        rows.append(
+            {
+                "step": n,
+                "fix": step["fix"],
+                "made": True,
+                "said": made.did,
+                "changed": made.changed,
+                "pieces_after": len(found.pieces),
+                "glass_share_after_pct": piecemap.share(found),
+                "glass_added_mm2": made.glass[0],
+                "glass_taken_mm2": made.glass[1],
+                **made.numbers,
+            }
+        )
+    count = sum(1 for row in rows if row["made"])
+    report.fact("steps_given", len(steps), how=f"in {args.steps}")
+    report.fact("steps_made", count, how="in order, each on the map the one before left")
+    report.numbers["steps"] = rows
+    for row in rows[:STEPS_SAID]:
+        step = steps[row["step"] - 1]
+        name = f"step {row['step']} of {len(steps)}, {step_said(step)}"
+        report.line(
+            f"{name}: {row['said']}. {row['pieces_after']} piece(s), glass share "
+            f"{row['glass_share_after_pct']:.2f}%"
+            if row["made"]
+            else f"{name}: not made: {row['said']}"
+        )
+    if len(rows) > STEPS_SAID:
+        report.line(f"and {len(rows) - STEPS_SAID} more step(s), each in the saved numbers")
+    if not count:
+        if differs:
+            report.second("the first step's two maps as pixels, and its other pieces' outlines")
+            report.verdict("DISAGREE", "; ".join(differs[:6]) + ". No map is written")
+            return
+        raise NoAnswer(f"{stopped}. Nothing is made, and no map is written")
+    present = {p.id for p in found.pieces}
+    target = next_name(args.map, args.to)
+    was, now, more = _settle(
+        report, first, found, [c for c in changed if c in present], (added, took),
+        (added_px, took_px), same, target,
+    )  # fmt: skip
+    differs = differs + more
+    reach = (
+        f"Before: {quick_said(was)}. After: {quick_said(now)}. The map "
+        f"{'up to there' if count < len(steps) else 'they leave'} is {target}"
+    )
+    if differs:
+        report.verdict("DISAGREE", "; ".join(differs[:6]) + f". {count} step(s) are made. {reach}")
+    elif stopped:
+        report.verdict(
+            "PARTIAL",
+            f"{stopped}. The {count} step(s) before it are made, and none after it was tried. "
+            f"{reach}: give it the steps that are left",
+        )
+    else:
+        report.verdict("OK", f"{count} of {len(steps)} step(s) made, in order. {reach}")
