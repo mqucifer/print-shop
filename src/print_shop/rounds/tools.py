@@ -327,7 +327,8 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
             "bench",
             "Ask the bench about your files: any bench command, in a fresh container, with a "
             "second check by a different method behind each answer. The first line of the reply "
-            f"is the verdict. {commands} (`render`'s and `layout`'s pictures come to you). "
+            f"is the verdict. {commands} (`render`'s, `layout`'s and `pieces`' pictures come to "
+            "you). "
             "`<command> --help` "
             "gives its arguments, and the skills say what each answers.",
             command="The command and its arguments, such as `clearance lid.step cup.step "
@@ -1439,8 +1440,10 @@ class WorkTools:
 
     def _rendered(self, record: dict[str, Any] | None) -> list[tuple[str, str]]:
         """The picture a `render` wrote: its sheet, if it made one, or its one view. `layout`'s
-        one picture, its pieces labelled, comes the same way (mqucifer/print-shop#61)."""
-        if not record or record.get("command") not in ("render", "layout"):
+        one picture, its pieces labelled, comes the same way (mqucifer/print-shop#61), and so
+        does a `pieces trace`'s or `pieces check`'s, the map with each piece numbered and each
+        rule break marked (mqucifer/print-shop#152)."""
+        if not record or record.get("command") not in ("render", "layout", "pieces"):
             return []
         files = [str(f) for f in record.get("files") or [] if str(f).endswith(".png")]
         sheets = [f for f in files if f.endswith("-sheet.png")]

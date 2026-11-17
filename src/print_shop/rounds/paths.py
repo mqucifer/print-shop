@@ -24,7 +24,7 @@ from pathlib import Path, PurePosixPath
 
 MAX_PATH = 200
 #: Made by the bench or by a run, never part of what a clean run starts from.
-MADE = ("bench-out", "renders", "panes", ".pictures", "record", "__pycache__")
+MADE = ("bench-out", "renders", "panes", "pieces", ".pictures", "record", "__pycache__")
 #: What counts as text for a round's diff.
 TEXT = (".py", ".md", ".txt", ".json", ".csv", ".yaml", ".yml", ".toml")
 #: What's geometry, for what a pick saw and what a clean run left.

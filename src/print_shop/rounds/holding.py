@@ -54,6 +54,13 @@ HOW = (
 )
 
 
+#: Commands that read or write a step on the way to the part, not the part: `pieces` reads a
+#: piece map, and each fix writes a new one, so a `FAIL` on an earlier map can never pass and
+#: would be named at every stop (mqucifer/print-shop#152). The frame and panes it builds are held
+#: by the checks that read them: `capture`, `light`, `pause` and `thin`.
+ON_THE_WAY = ("pieces",)
+
+
 @dataclass(frozen=True)
 class Tried:
     """One reading of a check: the model's `bench` call, or the harness's of a need at a stop.
@@ -120,6 +127,8 @@ def failing(
             by_check.setdefault(check, []).append(one)
     found: list[Held] = []
     for check, mine in by_check.items():
+        if nudge.command_of(check) in ON_THE_WAY:
+            continue
         needs = nudge.wanted_for(check, wanted)
         open_: dict[object, Tried] = {}
         first = _settings(mine[0].argv)

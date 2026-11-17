@@ -206,7 +206,11 @@ CORE = Toolset(
 #: `capture` and `panes` read a pane in its pocket, held by lips: only stained glass has those.
 #: `light` and `thickness` read what a person sees through a pane. `pause` stays in the core: an
 #: insert dropped in mid-print, a nut or a magnet, is any kind's.
-STAINED_GLASS_COMMANDS = ("capture", "panes", "light", "thickness")
+#: `pieces` reads a picture's pieces into a piece map, checks it against glass-cutting rules,
+#: fixes it piece by piece and builds its frame and panes (mqucifer/print-shop#152,
+#: mqucifer/print-shop#153). It reads a map and makes the part, as `layout` reads a layout: no
+#: need names it, and the part it builds is checked by the others.
+STAINED_GLASS_COMMANDS = ("capture", "panes", "light", "thickness", "pieces")
 STAINED_GLASS = Toolset(
     "stained-glass",
     "stained glass",

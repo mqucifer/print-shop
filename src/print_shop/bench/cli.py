@@ -33,12 +33,19 @@ def _coordinates_joined(given: list[str]) -> list[str]:
     joined: list[str] = []
     words = iter(given)
     for word in words:
-        if word in ("--close", "--centre", "--hole", "--slide", "--along", "--toward", "--arm"):
+        if word in JOINED:
             value = next(words, None)
             joined.append(word if value is None else f"{word}={value}")
         else:
             joined.append(word)
     return joined
+
+
+#: Options whose value may start with `-`: a point, a way or a line left of or under the origin.
+JOINED = (
+    "--close", "--centre", "--hole", "--slide", "--along", "--toward", "--arm",
+    "--at", "--line", "--aim",
+)  # fmt: skip
 
 
 def _point(text: str) -> list[float]:
@@ -119,6 +126,44 @@ def _plane(text: str) -> tuple[str, float]:
     if not sep or axis not in ("x", "y", "z") or not math.isfinite(at):
         raise argparse.ArgumentTypeError("AXIS=AT, AXIS one of x y z: z=3 is level at 3 mm")
     return axis, at
+
+
+def _xy(text: str) -> tuple[float, float]:
+    """`12.5,40`: a point on a piece map, in mm."""
+    try:
+        values = [float(v) for v in text.split(",")]
+    except ValueError:
+        values = []
+    if len(values) != 2 or not all(math.isfinite(v) for v in values):
+        raise argparse.ArgumentTypeError("X,Y: two numbers, in the map's mm")
+    return values[0], values[1]
+
+
+def _line(text: str) -> list[tuple[float, float]]:
+    """`10,0,12,8,10,16`: a line's points on a piece map, two or more."""
+    try:
+        values = [float(v) for v in text.split(",")]
+    except ValueError:
+        values = []
+    if len(values) < 4 or len(values) % 2 or not all(math.isfinite(v) for v in values):
+        raise argparse.ArgumentTypeError("x1,y1,x2,y2,...: two points or more, in the map's mm")
+    return list(zip(values[::2], values[1::2], strict=True))
+
+
+def _lips(text: str) -> tuple[float, float]:
+    """`1.2,0.8`: the full lip and the least, before play."""
+    try:
+        values = [float(v) for v in text.split(",")]
+    except ValueError:
+        values = []
+    if len(values) == 1:
+        values = values * 2
+    if len(values) != 2 or not 0 < values[1] <= values[0]:
+        raise argparse.ArgumentTypeError(
+            "FULL,LEAST: the lip every piece has, and the least a small piece may have, in mm "
+            "before play, the least no more than the full"
+        )
+    return values[0], values[1]
 
 
 #: The ways `edges --facing` takes, as `bench/edges.py` reads them.
@@ -563,6 +608,168 @@ def parser() -> Parser:
         metavar="MM",
         help="the largest element, in mm: half the arm's thickness at its root unless given",
     )
+    pieces = sub.add_parser(
+        "pieces",
+        help="a stained-glass panel as a piece map: traced from a picture, checked against "
+        "glass-cutting rules, fixed piece by piece, and built into a frame and panes",
+    )
+    action = pieces.add_subparsers(dest="action", required=True, parser_class=Parser)
+    trace = action.add_parser(
+        "trace", help="a picture's pieces as a piece map: flat colours between dark lines"
+    )
+    trace.add_argument("image", help="the picture: PNG or JPEG")
+    trace.add_argument(
+        "--width", type=float, required=True, metavar="MM", help="the panel's width, in mm"
+    )
+    trace.add_argument(
+        "--palette",
+        metavar="NAME[=#rrggbb],...",
+        help="the colours a piece may be, each a name the bench knows or NAME=#rrggbb: each "
+        "piece takes the nearest. With none, each takes the nearest named colour to its own",
+    )
+    trace.add_argument(
+        "--dark",
+        type=int,
+        default=40,
+        metavar="N",
+        help="a pixel is lead where every channel is under N, of 255 (40 unless given)",
+    )
+    check = action.add_parser(
+        "check", help="a piece map against the rules glass cutting follows, each a figure"
+    )
+    check.add_argument("map", help="the piece map, as `pieces trace` or a fix wrote it")
+    for reads in (trace, check):
+        reads.add_argument(
+            "--min-width",
+            type=float,
+            metavar="MM",
+            help="a piece under this at its widest is a sliver (3 unless given)",
+        )
+        reads.add_argument(
+            "--min-area",
+            type=float,
+            metavar="MM2",
+            help="a piece under this is too small to handle (25 unless given)",
+        )
+        reads.add_argument(
+            "--min-neck",
+            type=float,
+            metavar="MM",
+            help="a place under this straight across, in a piece wider than --min-width, is a "
+            "thin neck (1.2 unless given)",
+        )
+        reads.add_argument(
+            "--max-notch",
+            type=float,
+            metavar="R",
+            help="a notch deeper than R times its mouth's width is a deep notch (1 unless given)",
+        )
+        reads.add_argument(
+            "--max-colour-run",
+            type=float,
+            metavar="N",
+            help="a colour that changes by more than N of 255 across one piece is a gradient "
+            "(40 unless given)",
+        )
+        reads.add_argument(
+            "--max-lead",
+            type=float,
+            metavar="MM",
+            help="lead wider than this at its widest is a patch, not a line (three times the "
+            "map's usual lead unless given)",
+        )
+    merge = action.add_parser(
+        "merge", help="piece A joins its neighbour B, and the line between them goes"
+    )
+    merge.add_argument("map")
+    merge.add_argument("a", type=int, metavar="A", help="the piece that joins")
+    merge.add_argument("b", type=int, metavar="B", help="the neighbour it joins: B's colour stays")
+    split = action.add_parser(
+        "split", help="a new lead line across a piece, from edge to edge: two pieces or more"
+    )
+    split.add_argument("map")
+    split.add_argument("id", type=int, metavar="ID", help="the piece to cut")
+    split.add_argument(
+        "--line",
+        type=_line,
+        required=True,
+        metavar="x1,y1,x2,y2,...",
+        help="the line's points, in the map's mm: from one edge of the piece to another",
+    )
+    split.add_argument(
+        "--lead", type=float, metavar="MM", help="the new line's width (the map's unless given)"
+    )
+    extend = action.add_parser(
+        "extend", help="a dead-end line runs on to the next line or the panel's edge"
+    )
+    extend.add_argument("map")
+    extend.add_argument(
+        "--aim",
+        type=_xy,
+        metavar="X,Y",
+        help="a point to run it toward, in place of straight on",
+    )
+    drop = action.add_parser(
+        "drop-line", help="a line is taken out, and the glass on either side of it joins"
+    )
+    drop.add_argument("map")
+    for ends in (extend, drop):
+        ends.add_argument(
+            "--at",
+            type=_xy,
+            required=True,
+            metavar="X,Y",
+            help="a point on the line, as `pieces check` says each dead end's",
+        )
+    for fix in (merge, split, extend, drop):
+        fix.add_argument(
+            "--to",
+            metavar="FILE",
+            help="the new map's file: MAP's name with the next number unless given",
+        )
+    build = action.add_parser(
+        "build", help="the frame and a pane file for each colour, every curve built as a curve"
+    )
+    build.add_argument("map")
+    build.add_argument(
+        "--thickness", type=float, required=True, metavar="T", help="the frame's, in mm"
+    )
+    build.add_argument(
+        "--pane", type=float, required=True, metavar="P", help="each pane's thickness, in mm"
+    )
+    build.add_argument(
+        "--lip",
+        type=_lips,
+        required=True,
+        metavar="FULL,LEAST",
+        help="the lip over each pane's edge on both faces, in mm before play: FULL on every "
+        "piece that keeps an opening with it, down to LEAST on one that doesn't",
+    )
+    build.add_argument(
+        "--play", type=float, required=True, metavar="C", help="the gap round each pane, in mm"
+    )
+    build.add_argument("--layer", type=float, default=0.2, help="the layer's height, in mm")
+    build.add_argument(
+        "--border",
+        type=float,
+        metavar="MM",
+        help="the frame round the panel's edge, in mm (twice the map's lead unless given)",
+    )
+    build.add_argument(
+        "--fit",
+        type=float,
+        default=0.1,
+        metavar="MM",
+        help="how far a built curve may be from the points of the map's outline, in mm (0.1 "
+        "unless given)",
+    )
+    build.add_argument(
+        "--build-out", dest="out_build", default=".", help="where the frame and panes go"
+    )
+    trace.add_argument(
+        "--to", metavar="FILE", help="the map's file: IMAGE's name with .pieces.json unless given"
+    )
+    pieces.add_argument("--pieces-out", dest="out_pieces", default="pieces", help=argparse.SUPPRESS)
     render = sub.add_parser("render", help="pictures from the standard views")
     render.add_argument("files", nargs="*")
     render.add_argument(
@@ -690,6 +897,11 @@ def _dispatch(args: Any, report: Report) -> None:
         from .bend import run as run_bend
 
         run_bend(args, report)
+    elif args.command == "pieces":
+        from .pieces import run as run_pieces
+
+        args.out = args.out_pieces
+        run_pieces(args, report)
     elif args.command == "render":
         from .render import VIEWS, run
 
