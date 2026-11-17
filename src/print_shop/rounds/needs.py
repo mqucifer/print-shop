@@ -51,7 +51,7 @@ COMMANDS = (
     "fit-bed",
 )
 #: Verdicts that are no answer: they never pass a need, whatever it says.
-UNSURE = ("DISAGREE", "NO ANSWER")
+UNSURE = ("DISAGREE", "NO ANSWER", "UNREAD")
 #: The bench saying that what it checks is wrong. On `cup-1` a need passed on `capture`'s FAIL:
 #: a need can't ask for the check to fail. Nor for a hold by a body joined to nothing else in its
 #: file (mqucifer/print-shop#122): a part meant to be apart is its own file, read as one.

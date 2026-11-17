@@ -98,7 +98,7 @@ def test_a_report_cant_use_an_unknown_verdict() -> None:
 @pytest.mark.parametrize(
     ("word", "code"),
     [("OK", 0), ("CLEAR", 0), ("TOUCHING", 0), ("FAIL", 1), ("INTERFERE", 1), ("TOO CLOSE", 1)]
-    + [("NO CHANGE", 1), ("DISAGREE", 2), ("NO ANSWER", 2)],
+    + [("NO CHANGE", 1), ("DISAGREE", 2), ("NO ANSWER", 2), ("UNREAD", 2)],
 )
 def test_exit_codes_tell_the_three_kinds_of_answer_apart(word: str, code: int) -> None:
     assert EXIT[word] == code

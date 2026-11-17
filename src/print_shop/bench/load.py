@@ -26,6 +26,10 @@ is and as a bolted one is while its bolts hold. So a bolted joint is judged by w
 have to hold: the joint's pull shared between them, and its bending moment taken about the face's
 edge on the pushed side, each bolt in proportion to its distance from that edge, against the least
 of the bolt's proof load, the insert's pull-out where one is sourced, and the joint's own figure.
+An insert pulls out of printed plastic long before a steel bolt gives, so
+where a bolt has a pull to hold and neither its insert nor its joint has a figure, the answer is
+`UNREAD`, never `OK` on the bolt alone.
+
 A touching joint is held by nothing: it fails where it's pulled apart, or where its push falls
 outside the faces that meet, which tips it open; the friction it needs to stay put is a figure,
 held to `--friction` where that's given.
@@ -57,7 +61,7 @@ from typing import Any
 
 import numpy as np
 
-from .assembly import AXES, Assembly, Joint, read
+from .assembly import AXES, Assembly, Held, Joint, read
 from .cae import freecad
 from .limits import over, said
 from .report import NoAnswer, Report
@@ -321,7 +325,7 @@ class _Model:
         held = list(self.assembly.held)
         if not held:
             low = self.shape.BoundBox.ZMin
-            held = [type("Lowest", (), {"axis": "z", "at": low, "how": "standing", "part": None})()]
+            held = [Held("z", low, "standing")]
         names = [p.name for p in self.assembly.parts]
         self.fixed: list[Any] = []
         self.standing: dict[int, list[Any]] = {}
@@ -872,6 +876,7 @@ def run(args: Any, report: Report) -> None:
     apart: list[str] = []
     _parts(report, fine, coarse, fails, apart)
     _joints(assembly, args, report, fine, coarse, fails, apart)
+    unread = [n for n, j in report.numbers["joints"].items() if j.get("insert_unread")]
     report.numbers["loads"] = fine["loads"]
     for one, other in zip(fine["loads"], coarse["loads"], strict=True):
         one["coarse_moves_mm"] = other["moves_mm"]
@@ -916,6 +921,19 @@ def run(args: Any, report: Report) -> None:
         )
     elif fails:
         report.verdict("FAIL", "; and ".join(fails))
+    elif unread:
+        inserts = sorted(
+            {j.insert.name for j in assembly.joints if j.name in unread and j.insert is not None}
+        )
+        report.verdict(
+            "UNREAD",
+            f"the bolted joint(s) {', '.join(unread)} have a pull to hold, "
+            f"{max(report.numbers['joints'][n]['bolt_pull_n'] for n in unread):.1f} N a bolt at "
+            f"most, and the insert {', '.join(inserts)} has no pull-out figure: in printed "
+            "plastic the insert gives long before the bolt, so the bolt's own figure doesn't say "
+            "it holds. Give each such joint its `pull_n`, what each bolt holds in N, and its "
+            "`source`, from the request or a pull test. Everything else read is within its limit",
+        )
     else:
         worst = max(fine["parts"].items(), key=lambda p: p[1]["across_layers_pct"])
         report.verdict(
@@ -1048,15 +1066,6 @@ def _joints(
         elif joint.kind == "touching":
             _touching(joint, args, report, one, read, force, fails)
     report.numbers["joints"] = saved
-    bare = [j for j in assembly.joints if saved[j.name].get("insert_unjudged")]
-    if bare:
-        inserts = sorted({j.insert.name for j in bare if j.insert is not None})
-        report.note(
-            f"the insert {', '.join(inserts)} has no pull-out figure (no figure for printed PETG "
-            f"has a source yet), so in the joint(s) {', '.join(j.name for j in bare)} only the "
-            "bolt is judged, and an insert in its plastic gives before a steel bolt does: give "
-            "each joint its own `pull_n` and `source`, from a pull test"
-        )
 
 
 def _bolted(
@@ -1085,8 +1094,14 @@ def _bolted(
         f"to hold is a pull of {worst:.1f} N, with {bolts[0]['shear_n']:.1f} N across it, as "
         f"joints.{joint.name}.bolt_pull_n, against {limit:.0f} N ({whose})"
     )
-    if joint.insert.pull_n is None and joint.pull_n is None:
-        one["insert_unjudged"] = True
+    # In printed plastic the insert pulls out long before a steel bolt gives, so a bolt that
+    # has anything to hold, with no figure for its insert, isn't read (the operator's ruling on
+    # mqucifer/print-shop#160).
+    one["insert_unread"] = (
+        joint.insert.pull_n is None
+        and joint.pull_n is None
+        and worst > NOTHING * report.numbers["force_n"]
+    )
     ways = {"on the coarser mesh": _bolts(joint, other, other["force"], other["moment"])}
     if statics is not None:
         ways["by statics"] = _bolts(joint, read, *statics)

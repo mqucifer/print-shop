@@ -529,8 +529,7 @@ def test_a_beam_bolted_at_its_middle_matches_the_one_piece_beam(cae: Any) -> Non
     assert joint["bolt_pull_statics_n"] == pytest.approx(moment / (BEAM_T / 2), rel=1e-4)
     assert joint["bolt_pull_n"] == pytest.approx(moment / (BEAM_T / 2), rel=2e-3)
     assert reports.unlike("load", two.numbers) == []
-    assert joint["holds_n"] == pytest.approx(580 * 8.78) and "ISO 898-1" in joint["holds_from"]
-    assert "has no pull-out figure" in two.text, "the insert isn't judged, and that's said"
+    assert joint["holds_n"] == 500 and joint["holds_from"].startswith("the joint's own figure")
     bonded = cae("load", "load/two-bonded.json", "--weight", "1", *TIP)
     assert bonded.numbers["moves_mm"] == pytest.approx(two.numbers["moves_mm"], rel=1e-6)
     assert "bolts" not in bonded.numbers["joints"]["root+tip"]
@@ -556,6 +555,31 @@ def test_a_part_laid_across_its_layers_fails_where_the_same_part_laid_along_them
     assert "lay it on the bed so its layers run along this pull" in across.record["why"]
     # Under 1 kg it's 0.23% either way, and both pass.
     assert cae("load", "load/across.json", "--weight", "1", *TIP).verdict == "OK"
+
+
+def test_a_bolted_joint_with_no_figure_for_its_insert_is_unread_never_ok(cae: Any) -> None:
+    """In printed PETG the insert pulls out long before the bolt gives, and no insert has a
+    sourced figure. So the same two halves with no `pull_n` on their joint aren't `OK` on the
+    bolt's 5092 N: the answer is `UNREAD`, naming the joint and the insert, and a need that
+    asks for `OK` fails until the joint gives a figure. Every reading is still there."""
+    answer = cae("load", "load/two-unread.json", "--weight", "1", *TIP)
+    assert answer.verdict == "UNREAD" and answer.code == 2, answer.text
+    why = answer.record["why"]
+    assert "the bolted joint(s) root+tip have a pull to hold, 104.4 N a bolt" in why
+    assert "the insert m4-heat-set has no pull-out figure" in why and "`pull_n`" in why
+    joint = answer.numbers["joints"]["root+tip"]
+    assert joint["insert_unread"] is True
+    assert joint["holds_n"] == pytest.approx(580 * 8.78) and "ISO 898-1" in joint["holds_from"]
+    read = cae("load", "load/two.json", "--weight", "1", *TIP)
+    assert read.verdict == "OK" and read.numbers["joints"]["root+tip"]["insert_unread"] is False
+    assert joint["bolt_pull_n"] == pytest.approx(read.numbers["joints"]["root+tip"]["bolt_pull_n"])
+    command = "load load/two-unread.json --weight 1 --at 115,10,10"
+    need = Need("holds", "it holds 1 kg", "request", "holds 1 kg", "bench", command)
+    assert not needs.judge(need, answer.code, answer.text, answer.record).passed
+    named = Need(
+        "holds", "it holds 1 kg", "request", "holds 1 kg", "bench", command, verdicts=["UNREAD"]
+    )
+    assert not needs.judge(named, answer.code, answer.text, answer.record).passed, "never a pass"
 
 
 def test_a_bolt_asked_to_hold_more_than_its_joint_s_figure_fails(cae: Any) -> None:

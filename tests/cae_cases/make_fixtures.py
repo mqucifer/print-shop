@@ -112,6 +112,8 @@ def save(shape: Part.Shape, path: Path) -> None:
 #: The beam (mqucifer/print-shop#156), as the tests' arithmetic reads it.
 BEAM_L, BEAM_W, BEAM_T = 120.0, 20.0, 10.0
 BOLT = {"kind": "bolted", "bolt": "m4-8.8", "insert": "m4-heat-set"}
+#: What each bolt holds, for the cases that are read through: no insert has a sourced figure.
+HOLDS = {"pull_n": 500, "source": "a figure made up for this test"}
 
 
 Rows = list[dict[str, Any]]
@@ -146,7 +148,9 @@ def loads() -> None:
         ]
 
     middle = [[half, BEAM_W / 2, BEAM_T / 2]]
-    bolted: Rows = [{"between": ["root", "tip"], **BOLT, "at": middle}]
+    unread: Rows = [{"between": ["root", "tip"], **BOLT, "at": middle}]
+    bolted: Rows = [{**unread[0], **HOLDS}]
+    assembly(out / "two-unread.json", halves(), unread, wall)
     assembly(out / "one.json", beam("z"), held=wall)
     # The same beam printed standing on its end: its layers are stacked along its length.
     assembly(out / "across.json", beam("x"), held=wall)
@@ -172,7 +176,7 @@ def loads() -> None:
         for n, (x, y) in enumerate(corners, 1)
     ]
     joints: Rows = [
-        {"between": ["top", f"leg{n}"], **BOLT, "at": [[x + 5, y + 5, 60]]}
+        {"between": ["top", f"leg{n}"], **BOLT, **HOLDS, "at": [[x + 5, y + 5, 60]]}
         for n, (x, y) in enumerate(corners, 1)
     ]
     assembly(out / "table.json", table, joints)
