@@ -181,6 +181,56 @@ def test_a_neck_the_pixels_dont_have_on_the_other_side_of_the_limit_is_still_dis
     assert loose.verdict != "DISAGREE", loose.text
 
 
+def test_a_dead_end_the_pixels_cant_show_is_a_note_not_a_disagree(bench: Any) -> None:
+    """mqucifer/print-shop#161, from a trace at a low `--dark`: a line inside a piece, 8 mm
+    long, with another piece 1.4 mm from all of it. The pixels look 3 mm round a line for one
+    piece's glass alone, so they can't show this one: it's flagged by its outline, and the
+    pixels' reading is a note. It was `DISAGREE`, "isn't lone lead by the pixels"."""
+    answer = bench("pieces", "check", "thin_lines.json")
+    assert answer.verdict == "FAIL" and answer.code == 1, answer.text
+    assert flags_of(answer) == {("dead-end", 1), ("dead-end", 4)}
+    (noted,) = [n for n in answer.record["notes"] if "isn't lone lead by the pixels" in n]
+    assert "piece 4's dead end" in noted and "so they can't show it" in noted
+    assert "Only its outline reads it" in noted
+
+
+def test_a_second_reading_is_said_only_where_a_rule_flags_the_place(bench: Any) -> None:
+    """A spur under the neck limit and a notch shallower than its mouth, each read differently
+    by its pixels, and neither flagged: the reply has no note of either. On a traced scene
+    each check printed four to six such notes."""
+    # The lead beside the spur is wide, which isn't what this reads.
+    answer = bench("pieces", "check", "quiet.json", "--max-lead", 10)
+    assert answer.verdict == "OK" and answer.code == 0, answer.text
+    (row,) = answer.numbers["pieces"]
+    assert row["spurs"] == 1 and not row["neck"], "the 0.8 mm spur is looked past"
+    assert row["narrowest_by_pixels_mm"] is None, "with no neck there's no rule to settle"
+    gap = row["notch_depth_mm"] - row["notch_depth_by_pixels_mm"]
+    assert gap > 0.2 and row["notch_depth_mm"] / row["notch_mouth_mm"] < 1.0
+    assert answer.record["notes"] == []
+
+
+def test_a_piece_on_the_panels_edge_is_inside_and_one_past_it_is_said_with_how_far(
+    bench: Any,
+) -> None:
+    """Two pieces on the panel's edge merge, and what they make ends at the edge. A piece a
+    hundredth of a millimetre past it is on it; one further is refused, saying which piece, how
+    far and where."""
+    answer = bench("pieces", "merge", "edge.json", 1, 2, "--to", "edge-1.json")
+    assert answer.verdict == "OK", answer.text
+    (whole,) = json.loads((bench.work / "edge-1.json").read_text())["pieces"]
+    assert max(x for x, _ in whole["outline"]) == 60.0
+    assert sorted(whole["outline"]) == [[0.0, 0.0], [0.0, 40.0], [60.0, 0.0], [60.0, 40.0]]
+    data = json.loads((bench.work / "edge.json").read_text())
+    for past, name in ((0.008, "on.json"), (0.5, "past.json")):
+        data["pieces"][0]["outline"][1:3] = [[60 + past, 26], [60 + past, 40]]
+        (bench.work / name).write_text(json.dumps(data))
+    assert bench("pieces", "check", "on.json").verdict in ("OK", "FAIL")
+    refused = bench("pieces", "check", "past.json")
+    assert refused.verdict == "NO ANSWER"
+    assert "piece 1 by 0.500 mm at (60.5, " in refused.record["why"]
+    assert "more than the 0.01 mm a piece on the edge may" in refused.record["why"]
+
+
 def test_a_notch_a_pixel_cant_show_the_end_of_reads_with_a_note(bench: Any) -> None:
     """mqucifer/print-shop#161: a notch 2.77 mm deep by its outline, 1.065 times its mouth,
     whose last millimetre is a spike thinner than a pixel. Its pixels read it about 2.5 mm

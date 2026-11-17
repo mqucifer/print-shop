@@ -131,6 +131,8 @@ def line_between(found: Map, a: Piece, b: Piece) -> list[Any]:
     both = _joined([a.shape, b.shape])
     zone = a.shape.buffer(reach).intersection(b.shape.buffer(reach))
     others = [o.shape for o in found.pieces if o.id not in (a.id, b.id)]
+    # Within the panel: two pieces on its edge are joined up to the edge, and no further.
+    zone = zone.intersection(found.panel)
     line = piecemap.closed(both, reach / 2.0).difference(both).intersection(zone)
     if others:
         line = line.difference(shapely.union_all(others))
@@ -703,8 +705,15 @@ def run_fix(args: Any, report: Report) -> None:
             rows.append({"step": n, "fix": step["fix"], "made": False, "said": "; ".join(differ)})
             break
         # As the next command would read it from its file: a file of steps then writes the map
-        # the same commands write one by one, point for point.
-        found = piecemap.as_saved(made.after)
+        # the same commands write one by one, point for point. A map that can't be read back
+        # is one its own command wouldn't have written: the step is refused.
+        try:
+            after = piecemap.as_saved(made.after)
+        except NoAnswer as exc:
+            stopped = f"{name}, was refused: the map it leaves can't be read back: {exc}"
+            rows.append({"step": n, "fix": step["fix"], "made": False, "said": str(exc)})
+            break
+        found = after
         same = same and kept
         added, took = added + made.glass[0], took + made.glass[1]
         added_px, took_px = added_px + by_pixels[0], took_px + by_pixels[1]

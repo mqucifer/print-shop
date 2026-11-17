@@ -15,6 +15,12 @@ is a Sponsor's scene or anything from one (mqucifer/print-shop#152, mqucifer/pri
   rays square to its edges read wider at the same place (mqucifer/print-shop#161).
 - `spiked.json`: a notch that ends in a spike thinner than a pixel, with the limit between its
   depth by its outline and by its pixels.
+- `thin_lines.json`: a panel big enough that a pixel is 0.18 mm, with a dead end in a narrow
+  piece, its neighbours nearer than the pixels look round, and a line inside a piece closer to
+  that piece's edge than a pixel.
+- `quiet.json`: a spur under the neck limit and a spiked notch shallower than its mouth, neither
+  of which any rule flags.
+- `edge.json`: two pieces on the panel's right edge, the line between them slanting to it.
 - `hairs.json`: two cuts two microns wide whose ends face each other, which the
   outline has and no pixel shows.
 """
@@ -272,6 +278,67 @@ def hairs() -> dict[str, Any]:
     return found
 
 
+def thin_lines() -> dict[str, Any]:
+    """A 250 x 200 mm panel whose map says its usual lead is 1.4 mm, with lines 0.4 mm wide
+    round a narrow piece: as a trace at a low `--dark` leaves some lines a pixel or two thin
+    (mqucifer/print-shop#161). Piece 1 is a strip 3.4 mm wide with a dead end 0.5 mm wide and
+    8 mm long down from its top: the pieces each side of the strip are 1.85 mm from it, nearer
+    than the lead and a quarter the pixels look round for a line with one piece's glass. Piece
+    4 has a line inside it 1 mm wide, joined to no other, 0.005 mm from its bottom edge: no
+    pixel shows that gap, so by the pixels the line joins the lead."""
+    strip = [
+        [100, 0], [103.4, 0], [103.4, 100], [101.95, 100], [101.95, 92], [101.45, 92],
+        [101.45, 100], [100, 100],
+    ]  # fmt: skip
+    pieces: list[dict[str, Any]] = [
+        {"id": 1, "colour": "blue", "outline": strip},
+        {"id": 2, "colour": "gold", "outline": [[0, 0], [99.6, 0], [99.6, 100], [0, 100]]},
+        {"id": 3, "colour": "green", "outline": [[103.8, 0], [250, 0], [250, 100], [103.8, 100]]},
+        {
+            "id": 4,
+            "colour": "red",
+            "outline": [[0, 100.4], [250, 100.4], [250, 200], [0, 200]],
+            "holes": [[[150, 100.405], [158, 100.405], [158, 101.405], [150, 101.405]]],
+        },
+    ]
+    return {
+        "piece_map": 1,
+        "panel": {"width_mm": 250, "height_mm": 200},
+        "lead_mm": 1.4,
+        "colours": {"blue": {"rgb": [40, 90, 220]}},
+        "pieces": pieces,
+    }
+
+
+def quiet() -> dict[str, Any]:
+    """One piece 40 x 20 mm with nothing a rule flags, and two places a second reading would
+    differ on: a spur 0.8 mm wide and 4 mm long off its right side, under the 1.2 mm neck
+    limit with wide glass on one side of it only; and the spiked notch with its mouth 4.4 mm
+    wide, 0.63 times as deep as that, whose pixels read it 0.3 mm shallower."""
+    found = notched()
+    found["panel"] = {"width_mm": 47, "height_mm": 22}
+    found["pieces"][0]["outline"] = [
+        [1, 1], [41, 1], [41, 10.6], [45, 10.6], [45, 11.4], [41, 11.4], [41, 21],
+        [22.2, 21], [20.03, 19.3], [20.0, 18.23], [19.97, 19.3], [17.8, 21], [1, 21],
+    ]  # fmt: skip
+    return found
+
+
+def edge() -> dict[str, Any]:
+    """Two pieces of a 60 x 40 mm panel, both on its right edge, with a slanted line 1.4 mm
+    wide between them that runs to the edge."""
+    return {
+        "piece_map": 1,
+        "panel": {"width_mm": 60, "height_mm": 40},
+        "lead_mm": 1.4,
+        "colours": {"blue": {"rgb": [40, 90, 220]}},
+        "pieces": [
+            {"id": 1, "colour": "blue", "outline": [[0, 22], [60, 26], [60, 40], [0, 40]]},
+            {"id": 2, "colour": "gold", "outline": [[0, 0], [60, 0], [60, 24.6], [0, 20.6]]},
+        ],
+    }
+
+
 def rules(slit: bool, depth: float = 8.0) -> dict[str, Any]:
     lead = 1.2
     outlines = cells(lead)
@@ -325,6 +392,9 @@ for name, made in (
     ("slanted.json", slanted()),
     ("spiked.json", spiked()),
     ("hairs.json", hairs()),
+    ("thin_lines.json", thin_lines()),
+    ("quiet.json", quiet()),
+    ("edge.json", edge()),
 ):
     with open(name, "w") as fh:
         json.dump(made, fh)

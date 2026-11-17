@@ -93,6 +93,9 @@ SHARE_OFF = 0.5
 #: place's width and the neck limit, so a pixel there is a small part of what's judged, and
 #: never coarser than the map's own.
 NECK_PX_ACROSS = 64.0
+#: Those pixels' window is this many across at most: a place a hundredth of a millimetre wide
+#: is then read on coarser pixels, and its resolution says so.
+NECK_PX_MOST = 800
 #: Flags said one by one, at most.
 SAID = 12
 #: Notes said, at most.
@@ -220,7 +223,19 @@ def loose_differ(
     for end in ends:
         if end["kind"] != "island":
             continue
-        shown = piecemap.widest(end["shape"], 0.02)[0] >= LOOSE_SHARE * found.lead_mm + slack
+        # Shown as a body of its own where it's wide enough for a pixel, and further than two
+        # pixels from any other lead: nearer, the pixels join the two.
+        piece = found.piece(end["piece"])
+        edges = [piece.shape.exterior, *piece.shape.interiors]
+        apart_mm = min(
+            float(end["shape"].distance(edge))
+            for edge in edges
+            if shapely.Polygon(edge).symmetric_difference(end["shape"]).area > 1e-9
+        )
+        shown = (
+            piecemap.widest(end["shape"], 0.02)[0] >= LOOSE_SHARE * found.lead_mm + slack
+            and apart_mm >= slack
+        )
         holes.append((end["shape"], shown, f"the line inside piece {end['piece']}"))
     for ring in rings:
         piece = found.piece(ring["piece"])
@@ -372,6 +387,39 @@ def enclosed(found: Map, row: dict[str, Any]) -> tuple[bool, float]:
     return True, furthest
 
 
+def _alone_px(found: Map, drawn: Pixels) -> int:
+    """How far round a lead pixel the pixels look for one piece's glass and nothing else: a
+    lead and a quarter, and a pixel, so lead at one side of a usual line sees across it."""
+    return max(1, round(1.25 * found.lead_mm * drawn.px_per_mm) + 1)
+
+
+def _pixels_cant_show(found: Map, drawn: Pixels, row: dict[str, Any]) -> str | None:
+    """Why the map's pixels can't surely show a dead end as lead alone with its piece, or None
+    where they can (mqucifer/print-shop#161): the reading's resolution. It needs a lead pixel
+    in the line with no other piece, and no panel's edge, in the square it looks round: so a
+    line under two pixels wide may have none, and a line with another piece nearer than that
+    square's corner all along has none. On a trace at a low `--dark`, lines a pixel or two
+    thin beside narrow pieces read `DISAGREE` this way."""
+    across = piecemap.widest(row["shape"], 0.02)[0]
+    if across < 2.0 * drawn.mm:
+        return (
+            f"it's {across:.2f} mm wide, under two of the map's {drawn.mm:.2f} mm pixels, so "
+            "they may not have it"
+        )
+    others = [o.shape for o in found.pieces if o.id != row["piece"]]
+    rest = shapely.union_all([*others, found.panel.exterior])
+    points = shapely.get_coordinates(row["shape"].segmentize(drawn.mm))
+    clear = float(shapely.distance(shapely.points(points), rest).max())
+    looks = (_alone_px(found, drawn) * math.sqrt(2.0) + 1.0) * drawn.mm
+    if clear < looks:
+        return (
+            f"another piece or the panel's edge is within {clear:.2f} mm of all of it, and "
+            f"the pixels look {looks:.2f} mm round a line for one piece's glass alone, so "
+            "they can't show it"
+        )
+    return None
+
+
 def lone_lead(found: Map, drawn: Pixels) -> list[dict[str, Any]]:
     """Dead ends by the map's pixels: each stretch of lead with one piece's glass, and nothing
     else, within a lead and a quarter all round, with how long it is and how wide at its widest."""
@@ -381,8 +429,7 @@ def lone_lead(found: Map, drawn: Pixels) -> list[dict[str, Any]]:
     lead = ids == 0
     if not lead.any():
         return []
-    # A lead and a quarter, and a pixel: lead at one side of a usual line sees across it.
-    radius = max(1, round(1.25 * found.lead_mm * drawn.px_per_mm) + 1)
+    radius = _alone_px(found, drawn)
     big = int(ids.max()) + 2
     # Outside the panel is its own neighbour, so lead along the edge isn't alone with a piece.
     high = np.where(ids < 0, big, ids)
@@ -428,7 +475,9 @@ def _dead_ends_differ(
     lead = found.lead_mm
     pixel_rows = lone_lead(found, drawn)
     all_gaps = [g for rows in read.values() for g in rows]
-    differs, notes = [], []
+    differs: list[str] = []
+    notes: list[str] = []
+    unflagged: list[dict[str, Any]] = []
     for row in vector:
         if row["length_mm"] < (DEAD_END + 2.5) * lead:
             continue
@@ -439,10 +488,17 @@ def _dead_ends_differ(
             and math.dist(r["at"], row["at"]) <= row["length_mm"] + 2.0 * lead
         ]
         if not near:
-            differs.append(
+            both = (
                 f"piece {row['piece']}'s dead end at {piecemap.said_at(row['at'])}, "
-                f"{row['length_mm']:.1f} mm long by its outline, isn't lone lead by the pixels"
+                f"{row['length_mm']:.1f} mm long and {row['width_mm']:.2f} mm wide by its "
+                "outline, isn't lone lead by the pixels"
             )
+            why = _pixels_cant_show(found, drawn, row)
+            if why is None:
+                differs.append(both)
+            else:
+                # The dead end is flagged by its outline, and has no second reading here.
+                notes.append(f"{both}: {why}. Only its outline reads it")
     for r in pixel_rows:
         if r["length_mm"] < (DEAD_END + 2.5) * lead or r["across_mm"] > 1.5 * lead:
             continue
@@ -456,11 +512,16 @@ def _dead_ends_differ(
             o.id != r["piece"] and o.shape.distance(here) <= 3.0 * lead for o in found.pieces
         )
         if not near and not beside:
-            notes.append(
-                f"{r['length_mm']:.1f} mm of lead round {piecemap.said_at(r['at'])} has only "
-                f"piece {r['piece']}'s glass within a lead's width of it by the pixels, and "
-                "that piece's outline has no dead end there: look at the picture"
-            )
+            unflagged.append(r)
+    if unflagged:
+        # No rule flags these places, so they're one line, not a note each.
+        first = unflagged[0]
+        notes.append(
+            f"{len(unflagged)} stretch(es) of lead have one piece's glass alone round them by "
+            "the pixels where no outline has a dead end, and none is flagged: the first is "
+            f"{first['length_mm']:.1f} mm round {piecemap.said_at(first['at'])}, by piece "
+            f"{first['piece']}. Look at the picture"
+        )
     return differs, notes
 
 
@@ -534,12 +595,12 @@ def neck_by_pixels(
     from scipy import ndimage
 
     width = float(place["width_mm"])
-    mm = min(map_mm, min(width, limit) / NECK_PX_ACROSS)
     a, b = np.asarray(place["from"], dtype=float), np.asarray(place["to"], dtype=float)
     middle = (a + b) / 2.0
-    # Wide enough to hold the piece's own edge wherever it is within reach of the place, and
-    # no wider than reading a clear width past the limit takes.
-    half = max(2.0 * limit, width) + 4.0 * mm
+    # Wide enough to read a clear width well past the limit, and no wider.
+    reach = max(2.0 * limit, width)
+    mm = max(min(map_mm, min(width, limit) / NECK_PX_ACROSS), 2.0 * reach / NECK_PX_MOST)
+    half = reach + 4.0 * mm
     count = 2 * int(math.ceil(half / mm)) + 1
     left, top = middle[0] - count * mm / 2.0, middle[1] + count * mm / 2.0
     glass = np.zeros((count, count), dtype=bool)
@@ -623,9 +684,10 @@ def necks(shape: Any, step: float, limits: Limits, map_mm: float) -> dict[str, A
         "noted": None,
         "elsewhere": None,
     }
-    if place is None or not under(place["width_mm"], limits.min_neck):
+    if place is None or not neck:
         # Over the limit there's no neck to judge, and the widest way across a wide piece is
-        # no one place for two readings to agree on.
+        # no one place for two readings to agree on. A place under it that's a spur or a tip
+        # isn't flagged, so a second reading of it has no rule to settle and isn't said.
         return found
     # The same place is the same two sides: a ray whose ends are each within reach of one
     # of the place's own. A ray through its middle to sides further off is another width.
@@ -973,14 +1035,19 @@ def read_map(found: Map, limits: Limits, only: list[int] | None = None) -> Readi
                     f"{mouth:.2f} mm mouth and further apart than the {allowed:.2f} mm its "
                     "pixels can tell"
                 )
-            elif how == "off":
+            over_it = over(row["notch_depth_mm"] / mouth, limits.max_notch)
+            between = over_it != over(again / mouth, limits.max_notch)
+            # A note only where the rule flags the notch, or the limit lies between the two.
+            if how == "off" and over_it:
                 notes.append(
                     f"{both}, further apart than the {allowed:.2f} mm its pixels can tell, "
                     f"and on the same side of {limits.max_notch:g} times its mouth"
                 )
-            elif abs(again - row["notch_depth_mm"]) > PIXELS_OFF * drawn.mm:
-                over_it = over(row["notch_depth_mm"] / mouth, limits.max_notch)
-                between = over_it != over(again / mouth, limits.max_notch)
+            elif (
+                how == "same"
+                and (over_it or between)
+                and abs(again - row["notch_depth_mm"]) > PIXELS_OFF * drawn.mm
+            ):
                 notes.append(
                     (
                         f"{both}: it's too thin all along for a pixel to show, so only its "

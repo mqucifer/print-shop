@@ -200,10 +200,21 @@ def read(data: Any, name: str = "the map") -> Map:
 def _held(found: Map) -> None:
     """A map's own rules: every piece inside the panel, and no two overlapping."""
     reach = found.panel.buffer(PAST_EDGE)
-    outside = [p.id for p in found.pieces if not reach.covers(p.shape)]
+    outside = [p for p in found.pieces if not reach.covers(p.shape)]
     if outside:
+        # How far, and where: a piece on the edge is inside, to `PAST_EDGE`, so one that isn't
+        # is said with the figure that shows it (mqucifer/print-shop#161).
+        said = []
+        for one in outside[:6]:
+            points = shapely.get_coordinates(one.shape)
+            far = shapely.distance(shapely.points(points), found.panel)
+            worst = points[int(far.argmax())]
+            said.append(f"piece {one.id} by {float(far.max()):.3f} mm at {said_at(worst)}")
+        x0, y0, x1, y1 = found.panel.bounds
         raise NoAnswer(
-            f"piece {numbered(outside)} reaches past the panel's edge: every piece lies inside it"
+            f"{len(outside)} piece(s) reach past the panel's edge by more than the "
+            f"{PAST_EDGE:g} mm a piece on the edge may: {'; '.join(said)}. The panel is from "
+            f"{said_at((x0, y0))} to {said_at((x1, y1))}, and every piece lies inside it"
         )
     tree = shapely.STRtree([p.shape for p in found.pieces])
     for a, b in tree.query([p.shape for p in found.pieces], predicate="intersects").T:

@@ -863,6 +863,7 @@ def run_build(args: Any, report: Report) -> None:
     refitted_lips = 0
     lost = 0.0
     off, play_off = 0.0, 0.0
+    play_worst = ""
     expected = outline.area * args.thickness
     pocket_tall = z["pocket_top_z"] - z["pocket_floor_z"]
     pane_volumes: list[tuple[int, float, float]] = []
@@ -878,11 +879,24 @@ def run_build(args: Any, report: Report) -> None:
         pane_outer, pane_inners = _wires(curves["pane"])
         # The pane's edge from its pocket's wall, at points round the pane: nowhere closer
         # than the play, and at it along the sides.
-        wall = shapely.points(_wire_points(pane_outer, 0.5))
+        at_wall = _wire_points(pane_outer, 0.5)
+        wall = shapely.points(at_wall)
         gaps = shapely.distance(wall, curves["pocket_2d"].boundary)
-        play_off = max(
-            play_off, args.play - float(gaps.min()), abs(float(np.median(gaps)) - args.play)
-        )
+        mine = max(args.play - float(gaps.min()), abs(float(np.median(gaps)) - args.play))
+        if mine > play_off:
+            # Which pane, and where: the place its edge is nearest its pocket's wall.
+            near = np.asarray(at_wall)[int(gaps.argmin())]
+            play_worst = (
+                f"piece {piece.id}'s pane, nearest its pocket's wall at "
+                f"{piecemap.said_at(near)}: {float(gaps.min()):.3f} mm there and "
+                f"{float(np.median(gaps)):.3f} mm along its sides, for a play of {args.play:g}; "
+                + (
+                    "its pocket is its outline's own arcs and its pane those moved in"
+                    if curves["exact"]
+                    else "it was refitted, its pane cut back from a spur or a sharp tip"
+                )
+            )
+        play_off = max(play_off, mine)
         pockets.append(_prism(pocket_outer, pocket_inners, z["pocket_floor_z"], z["pocket_top_z"]))
         openings.append(_wires(curves["opening"]))
         solid = _prism(pane_outer, pane_inners, z["pocket_floor_z"], z["pane_top_z"])
@@ -1035,7 +1049,10 @@ def run_build(args: Any, report: Report) -> None:
             f"piece {worst[0]}'s pane is {worst[1]:.2f} mm³, and its inset makes {worst[2]:.2f}"
         )
     if play_off > 4.0 * CLOSE:
-        differs.append(f"a pane's edge is {play_off:.3f} mm off the play")
+        differs.append(
+            f"a pane's edge is {play_off:.3f} mm off the play, over the {4.0 * CLOSE:g} mm a "
+            f"pane and its own pocket may differ by: {play_worst}"
+        )
     if differs:
         report.verdict("DISAGREE", "; ".join(differs))
         return
