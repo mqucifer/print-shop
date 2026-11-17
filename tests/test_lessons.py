@@ -268,7 +268,9 @@ def test_the_listing_shows_each_lesson_with_what_the_ledger_holds_where_it_point
     assert "## Lesson 1: candidate" in shown and "Written by** model, at call 4" in shown
     assert "call 1 (round 0): read" in shown
     assert "It was given" not in shown
-    assert "- **Kind:** understanding the job, general" in shown
+    # One no reviewer has given a kind of part says so, apart from one said to be general
+    # (mqucifer/print-shop#155).
+    assert "- **Kind:** understanding the job, with no kind of part yet" in shown
     assert "- **For:** model" in shown and "- **Keyed to:** none" in shown
     assert "1. [candidate] understanding the job, for model, from `r`" in lessons.listing(ledger)
     with pytest.raises(lessons.Refused, match="isn't in this ledger"):

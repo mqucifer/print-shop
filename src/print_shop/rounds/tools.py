@@ -695,6 +695,30 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
             },
         ),
         _spec(
+            "lessons",
+            "Find a lesson kept from earlier runs: your start holds only the first of them, and "
+            "says how many it left out. With `words` or `kind`, each one that matches in a line: "
+            "its number, its area, its kind of part and its fix's shape. With `id`, that one "
+            "whole. With nothing, those for your part's kind and the general ones. It only "
+            "reads. One you read whole, you'll be asked about at the end.",
+            {
+                "words": {
+                    "type": "string",
+                    "description": "Words to find, such as `lip clearance` or `capture FAIL`: "
+                    "the lessons that hold every one, or failing that any.",
+                },
+                "kind": {
+                    "type": "string",
+                    "description": "A kind of part, as a request's `## Kind` names one, such as "
+                    "`stained-glass`, or `general` for those for every kind.",
+                },
+                "id": {
+                    "type": "integer",
+                    "description": "A lesson's number, to read it whole.",
+                },
+            },
+        ),
+        _spec(
             "blocked",
             "End the run without the part, saying what's missing. A person reads it.",
             reason="What's missing.",
@@ -718,6 +742,7 @@ DESK = (
     "set_aside",
     "restate",
     "fact",
+    "lessons",
     "blocked",
     "after_action",
 )
@@ -735,6 +760,7 @@ class Desk(Protocol):
     def set_aside(self, args: dict[str, Any]) -> Judged: ...
     def restate(self, args: dict[str, Any]) -> Judged: ...
     def fact(self, args: dict[str, Any]) -> Judged: ...
+    def lessons(self, args: dict[str, Any]) -> Judged: ...
     def blocked(self, args: dict[str, Any]) -> Judged: ...
     def after_action(self, args: dict[str, Any]) -> Judged: ...
     def bench_said(

@@ -11,7 +11,8 @@ The exceptions are marked as such: `rounds.fix_shape_model_said` holds what kind
 was, in the model's own words, with the vocabulary settled later, and `rounds.closing_model_said`
 what it said to the person at the end. They decide nothing.
 
-Lessons are here (`lessons`, `run_lessons`, `lesson_scores`, `lesson_steps`, and `after_actions`
+Lessons are here (`lessons`, `run_lessons`, `run_lessons_left`, `lesson_scores`, `lesson_steps`,
+and `after_actions`
 for the model's review that writes them): `lessons.py` says how they're checked and given. Looking a
 lesson up when a reading fails isn't here yet. `changes` gives each need's reading before and after
 each round, and `round_scores` each round against a scenario's right answer (`scores.py`), which
@@ -431,7 +432,9 @@ CREATE TABLE IF NOT EXISTS lessons (
     -- What it became last, once promoted on a route (`lesson_routes` has each), and where.
     became TEXT,
     became_where TEXT,
-    -- The kind of object it's for, as a request names it: empty is a general lesson.
+    -- The kind of part it's for, as a request names it and by its toolset's key, or `general`
+    -- once a reviewer has said it's for every kind. Empty is one no reviewer has given a kind:
+    -- it's given as a general one, and listed for the review (mqucifer/print-shop#155).
     part_kind TEXT
 );
 CREATE TABLE IF NOT EXISTS lesson_copies (
@@ -465,9 +468,21 @@ CREATE TABLE IF NOT EXISTS run_lessons (
     run TEXT NOT NULL REFERENCES runs(run),
     lesson INTEGER NOT NULL REFERENCES lessons(id),
     given_at TEXT NOT NULL,
-    -- `start`, in the first message, or by hand in the request, before there was code for it.
+    -- `start`, in the first message; `tool`, read whole with the `lessons` tool; or by hand in
+    -- the request, before there was code for it.
     how TEXT NOT NULL,
     text TEXT NOT NULL,
+    PRIMARY KEY (run, lesson)
+);
+CREATE TABLE IF NOT EXISTS run_lessons_left (
+    -- Each kept lesson for a run's kind, or a general one, that its start left out, and why: it
+    -- was over the start's budget (`Limits.start_lessons_chars`, mqucifer/print-shop#155). It's
+    -- not dropped: the `lessons` tool finds it, and one read whole that way is a row of
+    -- `run_lessons`, `how` being `tool`.
+    run TEXT NOT NULL REFERENCES runs(run),
+    lesson INTEGER NOT NULL REFERENCES lessons(id),
+    at TEXT NOT NULL,
+    why TEXT NOT NULL,
     PRIMARY KEY (run, lesson)
 );
 CREATE TABLE IF NOT EXISTS lesson_scores (

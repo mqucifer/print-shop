@@ -3,7 +3,7 @@
 The local model works in rounds on the bench, and every round is recorded (mqucifer/print-shop#17, M18 in mqucifer/project-print `ROADMAP.md`, ADR 0010 there). It closes the loop [the bench](bench.md) left open: intake, make or change, read the bench's answer, change again. Limits start high and are lowered from evidence, there's no budget on thinking, and every failure has a named ending.
 
 ```
-scripts/rounds.py start NAME --request FILE [--reference FILE]... [--trim-reasoning]
+scripts/rounds.py start NAME --request FILE [--reference FILE]... [--trim-reasoning] [--start-lessons-chars N]
 scripts/rounds.py resume NAME [--note FILE] [--from WHO] [--reopen-needs]
 scripts/rounds.py resume NAME --from sponsor|"stand-in: <who>" [--note FILE]   (at `questions`)
 scripts/rounds.py resume NAME --approve --by WHO [--note FILE]
@@ -15,7 +15,7 @@ scripts/rounds.py summary NAME
 scripts/rounds.py read-back NAME [--ledger FILE]
 scripts/rounds.py after-action NAME
 scripts/rounds.py lessons [RUN] [--ledger FILE]
-scripts/rounds.py lessons accept|edit|reject|retire|promote ID --by WHO ...
+scripts/rounds.py lessons accept|edit|reject|retire|promote ID --by WHO ...   (accept and edit take --part-kind K|general)
 scripts/rounds.py lessons score RUN ID --score used|not_used|in_the_way --by WHO [--calls N,N] [--route R]
 scripts/rounds.py lessons load FILE --by WHO
 scripts/rounds.py lessons copy LEDGER ID --by WHO [--ledger FILE]
@@ -56,7 +56,7 @@ A request is free text, as it always was, with up to four headings of its own (`
 |---|---|---|
 | `## Requirements` | What the part must do, ids `R1`, `R2` | Each is covered by a need that names it in `covers`, or `needs` is refused naming the lines left over, with their words |
 | `## Non-negotiables` | What mustn't change, ids `N1`, `N2` | Each is covered by a need marked `fixed`, whose quote is from that line. A need that covers one is fixed. Where the line holds a figure, the need says in `figure` how it's read, and where something changes it, which: a lip before or after play. The model is told to ask with `questions` where the request doesn't say. Its check carries the figure, at both ends where the line gives a range or an exact figure (below) |
-| `## Kind` | One word, such as `stained-glass` | Read and kept, and `start` gives the lessons for that kind of part (`lessons.part_kind`) with the general ones, and loads its toolset: its bench commands, measures and skill (below). A kind with no toolset of its own has the core |
+| `## Kind` | One word, such as `stained-glass` | Read and kept, and `start` gives the lessons for that kind of part (`lessons.part_kind`) first, then the general ones, under its budget, and loads its toolset: its bench commands, measures and skill (below). A kind with no toolset of its own has the core |
 | `## Stops` | What's shown before the run goes on, in order, ids `S1`, `S2` | Below. The line `no plan` leaves the plan out |
 
 **A request's pictures and reference files go in at `start`** (`--reference`), with the request, so the plan is written from them.
@@ -447,7 +447,8 @@ The Sponsor, 2026-11-03: "id be concerned with adding things like light-path com
 | `refusals` | Each tool call not carried out as asked: its call, tool, outcome and reason's code, from the events |
 | `said_weighed` | What the after-action review made of each thing a person said: the lesson it became, if any, and why |
 | `lesson_steps` | Each change to a lesson, who made it and why. An edit keeps the words it replaced |
-| `run_lessons` | Each lesson a run was given, how (`start`, or by hand in the request before this), and the words it was given in |
+| `run_lessons` | Each lesson a run was given, how (`start`; `tool`, read whole with the `lessons` tool; or by hand in the request before this), and the words it was given in |
+| `run_lessons_left` | Each kept lesson a run's start left out, and why: it was over the start's budget. It's still kept, and the `lessons` tool finds it |
 | `refinements`, `refine_files`, `refine_slices`, `refine_findings` | Each refinement pass: the approval and decision it follows, the commit, Orca's version and the context. Each file by its hash, its part and colour, and how it was meshed against OCCT. Each plate Orca sliced, its command, filaments, pauses and G-code's hash. Each finding: its kind, whose (`orca`, `bench` or `pass`), where, what it read and means, and whether it needs the part to change |
 | `refine_proposals`, `proposal_decisions` | Each change proposed, its cost, the parameter and how it was checked, and each yes or no to it, and who |
 | `lesson_scores` | Whether a lesson held on a route in a run (`used`, `not_used`, `in_the_way`), with the calls that show it: on the model's route by the model at its review or a reviewer, on the others by the analysis (`route`, empty from before) |
@@ -510,7 +511,7 @@ A change that finds nothing to change is refused, so a replay never runs as a co
 The first of the learn loop in code (mqucifer/print-shop#28, M18's "learning logic", ADR 0010's decision 5 as changed on 2026-11-02). Before this, the operator wrote lessons into a run's analysis and copied them into the next run's request by hand. On `cup-1` four were given that way. The two about how to build were followed. The one about checking held until a check got in the way, and then the check was changed.
 
 **The model writes its run's lessons, after the approval or a close, while it still has its context.** `resume --approve` records the decision and ends the run as `approved`, then makes one more turn on the same session. `after_action.py` holds it, apart from `review.py`, which writes the folder a person prints from: the two never share a name, in code, in what the model's told, or in the ledger.
-- The model is told the part is approved, with the person's note, and asked for its after-action review. The message lists the lessons it was given at the start, and the run call by call from the ledger: the tools each call made, each bench answer and its verdict, and each round's readings where the round ended. A lesson names its calls from that.
+- The model is told the part is approved, with the person's note, and asked for its after-action review. The message lists the lessons it was given, at the start or read whole with the `lessons` tool, and the run call by call from the ledger: the tools each call made, each bench answer and its verdict, and each round's readings where the round ended. A lesson names its calls from that.
 - **It sees the harness's record** (mqucifer/print-shop#40). On `suncatcher-2` the review missed the harness's part: replies cut to `exit 1`, the run hitting `context_full`, and that `blocked` was never weighed. So the index shows, at their calls, each compaction and what it cut (replies shrunk by tool, turns' reasoning dropped, texts made a note), each new conversation after `context_full`, and each refusal and failed edit (`refusals`), nudge and runaway. It's told that where the harness hid something, or a stop wasn't made, that's a lesson for the harness. On `suncatcher-2`'s record, read back through a copy of the ledger, it shows 24 compactions, the restart, both `context_full` stops, 7 failed edits, 6 other refusals and 14 runaways (`~/print-shop/proofs/m18-loop/index-suncatcher-2.json`).
 - **It sees what people said, in their words:** each note, answer, pick with its reason, fix-first, send-back and the decision itself, marked `[said N]`. Before, the index named only each one's kind and sender. `people` weighs each one: whether it should be a lesson, which of the review's lessons it became, and why. Every one is weighed, or nothing is kept, and each is a row of `said_weighed`.
 - **Near its limit, it goes on from the record.** `suncatcher-2`'s review ran on a conversation compacted many times. If the review's won't fit even compacted, it goes on in a new conversation from the record, as a run does, with the decision and the ask after it: the index is from the ledger, so it holds the whole run. The restart is in the timeline and `restarts`, and the review is recorded as ever. Nothing cuts a call, and compaction's limit is as it was.
@@ -533,8 +534,9 @@ A run that's `blocked`, stopped, cut off by a limit, or judged not to be going a
 - The system prompt says the same where it offers `blocked`, and so do the refusals of `questions` and `needs` once the needs are settled. In five runs before this, the model had never called `blocked`.
 
 **A reviewer checks each against the ledger.** For now that's the operator, who signs `--by "reviewer: <who>"`: checking lessons is the reviewer's own job, not standing in for the Sponsor. `sponsor` and `stand-in: <who>` are taken too. Picks and decisions don't take `reviewer:`.
-- `lessons RUN` lists what the run wrote, each with what the ledger holds at each call and reading it names, then what it was given and how each was scored. `lessons` alone lists every lesson.
-- `accept` (`--routes R,R`, `--becomes B`), `edit` (`--text FILE`, `--kind`, `--shape`, `--routes`, `--becomes`, `--keys capture:FAIL,thin`, `--part-kind K`) or `reject` (`--why`), each a row of `lesson_steps`.
+- `lessons RUN` lists what the run wrote, each with what the ledger holds at each call and reading it names, then what it was given and how each was scored, and what its start left out. `lessons` alone lists every lesson. Either way it ends with what's waiting for a route, what to retire, the kept lessons with no kind of part, any too long for a start, and each kind's to fold into its skill.
+- `accept` (`--routes R,R`, `--becomes B`, `--part-kind K`), `edit` (`--text FILE`, `--kind`, `--shape`, `--routes`, `--becomes`, `--keys capture:FAIL,thin`, `--part-kind K`) or `reject` (`--why`), each a row of `lesson_steps`.
+- **A review gives each lesson its kind of part** (mqucifer/print-shop#155): `--part-kind K`, a kind as a request's `## Kind` names it and kept by its toolset's key (`Stained glass` is `stained-glass`), or `--part-kind general` for one that's for every kind. An empty `--part-kind` on `edit` takes its kind away. A kept lesson for the model with none is listed under "Kept for the model with no kind of part": it starts every run until it has one.
 - **A lesson for the harness is never given as a note.** It's accepted only with what it `--becomes`: `refusal`, `bench_check`, `toolset_check`, `stop` or `harness`. One for the request alone becomes `request`.
 - `lessons load FILE --by "reviewer: <who>"` takes a reviewer's steps from a file, in order, by the same rules: `{"steps": [{"do": "write", ...}, {"do": "accept", ...}, ...]}`, as `lessons.load` says. A step names a lesson by its key in the file, or by its number if it's in the ledger. It's all checked before anything is written, and refused whole if a lesson is already there. It's how lessons are entered by hand, and how the operator enters the first rows.
 
@@ -557,7 +559,7 @@ A run is given the lessons of the ledger beside it. The Sponsor's design runs re
 
 | Route | Delivered as | Scored by |
 |---|---|---|
-| `model` | text the next run is given: general lessons at the start, a kind's lessons in its skill | that run's own review, as before |
+| `model` | text the next run is given: at the start, under its budget, its kind's lessons first and then general ones, the rest by the `lessons` tool, and a kind's lessons in its skill once folded in | that run's own review, as before |
 | `harness` | an issue in the next batch, `promote`d when merged | the next analysis |
 | `request` | a line in the request template the operator writes from | the analysis |
 | `operator` | a line in the checklist below, for the operator and stand-in | the analysis |
@@ -567,8 +569,9 @@ A run is given the lessons of the ledger beside it. The Sponsor's design runs re
 - **A lesson can move route.** Once it's built into the harness or folded into a skill, and a run's score after that shows it holding, its text stops being given at the start, with a step saying why.
 
 **Lessons for the model come in layers, not all at once.** "We can't just dump everything in context" (the Sponsor, 2026-11-03).
-- `start` gives each kept lesson for the model that's general, or for the request's kind of part (`lessons.part_kind`, empty for a general one).
-- One promoted `--as skill` lives in that kind's skill, and isn't given at the start.
+- `start` draws from each kept lesson for the model that's for the request's kind of part, or general (`lessons.part_kind`: a kind, `general`, or empty for one no reviewer has sorted, which is given as a general one). It gives as many as its budget holds, as below.
+- The `lessons` tool finds the rest, and any other kind's.
+- One promoted `--as skill` lives in that kind's skill, and isn't given at the start or found by the tool.
 - **Each is keyed to the checks it's about,** by command and verdict (`lesson_keys`): the failing bench answers and readings its evidence names, or the keys the model or the reviewer gives. They're there for a look-up at the failure, which is the next batch (the Sponsor, 2026-11-03).
 
 **Lessons from before the five are sorted once** when a ledger opens (`lessons.migrate`), each with a step keeping its old kind: build lessons to the model, check lessons to the harness, lesson 10 to the request and the operator, lesson 13 to the operator and the model, and 14 and 19 to the model, as settled with the Sponsor. Each one's area is the builder's sort, for the reviewer to check with `edit --kind`. Then, once, each lesson's status follows its scores, each change a step: lesson 7, corrected from `in_the_way` to `not_used`, reads `given`. `lesson_scores` is made again, every row kept, so a score on a route that isn't the model's needn't follow a lesson given as text. On a copy of the real ledger every row is kept and reads back: 26 routes, 12 keys and 25 steps are added, and a second open changes nothing (`~/print-shop/proofs/m18-loop/migration-ledger-copy.json`, `read-back-ledger-copy.json`). A lesson of an old kind written later by older code is sorted when the ledger next opens.
@@ -582,7 +585,25 @@ For the operator, at each review and each ask (mqucifer/print-shop#40). It's the
 - **Read a bench verdict before its picture.** On `cup-1` the stand-in gave a false cause, read from a picture whose check said FAIL.
 - **Give the reference pictures at the start,** with `start --reference`, not after the first round. On `stainedglass-1` the Sponsor's intent arrived late, after the plan had been written without it. The other half of that lesson, reading the plan at the first write, is now the plan stop (mqucifer/print-shop#38).
 
-**The next run starts with what was kept for the model.** `start` puts each kept lesson for the model (`accepted`, `edited`, `given`, `held`, `broken` or `promoted`, its text still given, as above) into the first message, after the request and its files, under `## Lessons from earlier runs`, each with its number, its area, the run it came from and who wrote it. `lessons.md` in the run's folder holds them as given, so a conversation started again from the record has the same, and `run_lessons` has a row for each. A lesson for the harness, the request or the operator alone isn't given.
+**The next run starts with what was kept for the model.** `start` puts the kept lessons for the model (`accepted`, `edited`, `given`, `held`, `broken` or `promoted`, its text still given, as above) that its budget holds, as below, into the first message, after the request and its files, under `## Lessons from earlier runs`, each with its number, its area, the run it came from and who wrote it. `lessons.md` in the run's folder holds them as given, so a conversation started again from the record has the same, and `run_lessons` has a row for each. A lesson for the harness, the request or the operator alone isn't given.
+
+### A bounded start, and the `lessons` tool (mqucifer/print-shop#155)
+
+Before this, `start` gave a run every kept lesson for the model, oldest first, filtered only by kind of part, and almost none had a kind. In the design runs' ledger on 2026-11-17, 34 of the 35 kept for the model had none, so every design run started with all 34, about 16,500 characters, and the list only grew.
+
+- **The order** (`lessons.to_give`): those for the run's kind of part first, then the general ones. Within each, the lessons scored `used` on most runs come first, by each run's latest score of the lesson's text, and any a run's latest score says got `in_the_way` come last. Among equals, the oldest first.
+- **The budget** is `Limits.start_lessons_chars`, in characters of the lessons' lines as given, each with its number, area, run and writer. Its default is 6000, about a dozen lessons at the 485 characters those 34 average. `start --start-lessons-chars N` sets it for a run, and it's recorded with the run's other limits.
+- **They're taken in order** while each fits in what's left (`lessons.within`). The first that doesn't fit ends them, so none is given ahead of a better one.
+- **A lesson longer than the whole budget is never given at a start,** and the filling goes on past it: one such lesson mustn't empty a start. It's the only one passed over. The start's left-out line names it ("Lesson 12 is too long for the start: read it with its `id`"), its row of `run_lessons_left` says so with its length, and the listing names each under "Too long for a start", by the default budget, for a reviewer to shorten with `edit ID --text FILE`.
+- **The start says how many it left out, and how to find them,** after the lessons: "2 more kept lessons aren't here, to keep the start short: 1 for stained-glass parts and 1 general. The `lessons` tool finds them...". `lessons.md` holds it as given.
+- **A lesson is never dropped to fit.** One left out isn't given, so its status and scores stay as they were, and it's a row of `run_lessons_left` with why. `lessons RUN` lists them under "Left out of its start".
+- **The model's `lessons` tool finds a kept lesson** (`lessons.look_up`). It only reads.
+  - With `words`, each kept lesson for the model that holds every word, in its text, its fix's shape, its area or its kind of part; if none holds every word, those that hold any, most first.
+  - With `kind`, those for that kind of part, or `general`. With both, both. With neither, the run's own: its kind's and the general ones, in the start's order.
+  - The reply is short: one line a lesson, with its number, its area, its kind of part, whether it's in the start, and its fix's shape. At most 30 lines.
+  - With `id`, that lesson whole, as a start gives one.
+- **A lesson read whole is given to the run:** a row of `run_lessons` whose `how` is `tool`, so the after-action review lists it to score with the start's, and a reviewer can score it (`lessons score RUN ID`). Listing a lesson gives nothing. The call is in `calls` and the events like any tool's, with the lessons it found, or the one it read.
+- **Folding a kind's lessons into its skill stays the main route.** The budget and the tool stop a run starting with everything; they don't replace the review. The listing ends with "To fold into a kind's skill": each kind's kept lessons its skill doesn't hold yet, by kind, with the skill's name. Once one is in the skill, `promote ID --as skill --where PATH` takes it out of the start and the tool, as before.
 
 **Scoring and retiring.** Each run's latest score moves a lesson, as above. A reviewer can score again (`lessons score RUN ID`), and the latest counts. A lesson given twice and not used, or that got in the way, is listed for the reviewer under "To retire", and `retire ID --why` takes it out. Nothing retires one by code.
 
@@ -646,7 +667,7 @@ The Sponsor, 2026-11-05: "It should use orca's cli to add pauses not raw gcode. 
 | `approvals/n/` | `sheet.png`, `stop.md`, `closing.md` and `review/`, for the person who decides |
 | `review/` | The latest stop's folder to print from: one folder a group, and its README |
 | `streams/n.jsonl` | A call's tool-call arguments as they arrived, if they didn't all come whole |
-| `lessons.md` | The lessons it was given at the start, as given |
+| `lessons.md` | The lessons it was given at the start, as given, with how many were left out |
 | `after-action-fault-n.txt` | A fault of ours in the after-action review, its trace |
 | `final-sheet.png` | The latest `part` to pass, one row each, for the people who see the result. It decides nothing |
 | `refinements/n/` | Each refinement pass: `README.md` (print steps, findings, proposals), `plates/` (each plate's G-code and Orca's log), `meshing/`, `bench/`, `cover/`, `findings.json`, and `proposals/` with each check's files |
@@ -660,7 +681,7 @@ The session is ported from mqucifer/model-performance's `cad_eval` at 22ea8b7, n
 | Here | From | Changed |
 |---|---|---|
 | `session.py` | `session.py`, the base arm | It outlives its stops, every tool call in a turn gets a reply, a call is retried, and `restore` reads it back |
-| `tools.py` | `tools.py`: `write`, `edit`, `read`, `run`, `lookup`, `docs`, `skill` | Adds `bench`, and `read` shows pictures. `edit` keeps crew's `replace_text` rules |
+| `tools.py` | `tools.py`: `write`, `edit`, `read`, `run`, `lookup`, `docs`, `skill` | Adds `bench` and `lessons`, and `read` shows pictures. `edit` keeps crew's `replace_text` rules |
 | `paths.py` | `inside`, `open_inside`, `copy_plain` | Unchanged in what they refuse |
 | `send.py`, `transcript.py` | `send.py`, `common/litellm.py`, `transcript.py` | `snapshot` events |
 | `needs.py` | The idea of `plan.py`: a quote held to the source | Needs, not a plan |

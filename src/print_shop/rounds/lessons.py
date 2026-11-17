@@ -15,11 +15,22 @@ checking held until a check got in the way, and then the check was changed. So:
 - **A reviewer checks each against the ledger** (the operator, for now): `accept`, `edit` or
   `reject`, signed `reviewer: <who>`. A lesson for the harness is never given as a note: it's
   accepted only with what it `becomes` there, and built.
-- **Lessons for the model come in layers.** `start` gives the general ones, and those for the
-  request's kind of object, in the first message under `HEADING`, and `run_lessons` has each one
+- **Lessons for the model come in layers.** `start` gives those for the request's kind of part,
+  then the general ones, in the first message under `HEADING`, and `run_lessons` has each one
   given. One folded into a kind's skill is read there instead. Each is keyed to the checks it's
   about, by command and verdict (`lesson_keys`), for a look-up at the failure, which is the next
   batch. "We can't just dump everything in context" (the Sponsor, 2026-11-03).
+- **The start's lessons are bounded** (mqucifer/print-shop#155). On 2026-11-17 every design run
+  started with all 34 kept for the model, about 16,500 characters, as 34 of the 35 had no kind of
+  part. So they're ordered (`to_give`): the kind's first, then general, and in each those scored
+  `used` on most runs first and any that got in the way last. The start takes them in that order
+  up to a budget in characters (`within`, `Limits.start_lessons_chars`), and says how many it left
+  out. None is dropped: `run_lessons_left` has each left out, and the model's `lessons` tool
+  finds any kept lesson by words or by kind (`look_up`), in a short reply, and gives one whole by
+  its number, which the run is then given (`run_lessons`, `how` being `tool`) and its review
+  scores. Folding a kind's lessons into its skill stays the main route: the listing names each
+  kept lesson with no kind, for a reviewer to give one, and each kind's that its skill doesn't
+  hold yet.
 - **Each route is scored:** the model's by the run's own review, the others by the analysis after
   they're delivered (`promote`). A lesson's status follows each run's latest score on each route
   (`settle`): used is `held`, in the way `broken`, and a correction replaces that run's earlier
@@ -42,15 +53,17 @@ lesson is copied from a ledger once.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import quote
 
-from print_shop.rounds import nudge
+from print_shop.rounds import nudge, toolsets
 from print_shop.rounds.judge import SPONSOR, STAND_IN
 from print_shop.rounds.ledger import DesignLedger, now
+from print_shop.rounds.session import START_LESSONS_CHARS
 
 MODEL = "model"
 HARNESS = "the harness"
@@ -108,8 +121,18 @@ SCORED = (GIVEN, HELD, BROKEN, PROMOTED)
 AFTER_SCORE = {"used": HELD, "in_the_way": BROKEN}
 #: How a lesson reached a run: in its first message, by code.
 AT_START = "start"
+#: Or later, whole, by the `lessons` tool, for one its start left out.
+AT_TOOL = "tool"
 #: Given twice and not used, it's shown to the reviewer to retire.
 UNUSED_TO_RETIRE = 2
+#: A lesson's kind of part once a reviewer has said it's for every kind. With none, it's given as
+#: a general one too, and listed for the review until it's given one (mqucifer/print-shop#155).
+GENERAL = "general"
+#: The characters of lessons a start holds, unless the run's limits say (`Limits`).
+START_CHARS = START_LESSONS_CHARS
+#: The most lessons one reply of the `lessons` tool lists, and the characters of each one's shape.
+FOUND_MOST = 30
+SHAPE_CHARS = 160
 
 HEADING = "## Lessons from earlier runs"
 ABOUT = (
@@ -442,6 +465,27 @@ def _becomes(routes: Iterable[str], becomes: str | None, lesson: int | str) -> s
     return None
 
 
+def part_kind_of(said: str | None) -> str | None:
+    """A lesson's kind of part as it's kept: a kind by its toolset's key, as a request's `## Kind`
+    is read, `general` for one a reviewer says is for every kind, or none."""
+    said = (said or "").strip()
+    if not said:
+        return None
+    return toolsets.key(said)
+
+
+def is_general(found: dict[str, Any]) -> bool:
+    """Given whatever the run's kind: said to be general, or with no kind yet."""
+    return part_kind_of(found.get("part_kind")) in (None, GENERAL)
+
+
+def _for_said(found: dict[str, Any]) -> str:
+    kind = part_kind_of(found.get("part_kind"))
+    if kind is None:
+        return "with no kind of part yet"
+    return GENERAL if kind == GENERAL else f"for {kind} parts"
+
+
 # Writing one, and the reviewer's steps
 
 
@@ -481,7 +525,7 @@ def write(
         status=CANDIDATE,
         status_by=written_by,
         status_at=now(),
-        part_kind=(part_kind or "").strip() or None,
+        part_kind=part_kind_of(part_kind),
     )
     _set_routes(ledger, lesson, proposed, written_by)
     _set_keys(ledger, lesson, keys if keys is not None else keys_from(ledger, run, held))
@@ -495,9 +539,11 @@ def accept(
     by: str,
     becomes: str | None = None,
     routes: Iterable[str] | None = None,
+    part_kind: str | None = None,
 ) -> None:
     """Let through, on the routes proposed or those the reviewer names. A lesson for the harness
-    only as what it becomes there, never a note."""
+    only as what it becomes there, never a note. `part_kind` gives it its kind of part, or
+    `general`, as it's let through."""
     by = signed(by)
     found = one(ledger, lesson)
     if found["status"] not in (CANDIDATE, REJECTED):
@@ -507,8 +553,13 @@ def accept(
     becomes = _becomes(chosen, becomes, lesson)
     was = _set_routes(ledger, lesson, chosen, by)
     ledger.change("UPDATE lessons SET becomes=? WHERE id=?", becomes, lesson)
-    _status(ledger, lesson, ACCEPTED, by)
     said = f"for {', '.join(chosen)}" + (f", becomes {becomes}" if becomes else "")
+    kind = part_kind_of(part_kind)
+    if kind is not None and kind != found.get("part_kind"):
+        ledger.change("UPDATE lessons SET part_kind=? WHERE id=?", kind, lesson)
+        was = {**(was or {}), "part_kind": found.get("part_kind")}
+        said += f", {_for_said({'part_kind': kind})}"
+    _status(ledger, lesson, ACCEPTED, by)
     _step(ledger, lesson, ACCEPTED, by, said, was=_json(was) if was else None)
 
 
@@ -527,8 +578,9 @@ def edit(
     why: str = "",
 ) -> None:
     """The reviewer's own words, kept beside the ones they replace. A candidate edited is let
-    through as edited. A lesson made one for the harness says what it becomes. `part_kind` "" makes
-    it general."""
+    through as edited. A lesson made one for the harness says what it becomes. `part_kind` is a
+    kind of part, `general` for every kind, or "" to take its kind away, which lists it for the
+    review again."""
     by = signed(by)
     found = one(ledger, lesson)
     if found["status"] in (REJECTED, RETIRED):
@@ -556,7 +608,7 @@ def edit(
         kind or found["kind"],
         (fix_shape or found["fix_shape"]).strip(),
         becomes,
-        (part_kind.strip() or None) if part_kind is not None else found.get("part_kind"),
+        part_kind_of(part_kind) if part_kind is not None else found.get("part_kind"),
         lesson,
     )
     _set_routes(ledger, lesson, chosen, by)
@@ -744,20 +796,70 @@ def _copy_evidence(row: dict[str, Any], held: dict[str, Any]) -> list[str]:
 # Giving them to a run, and scoring them
 
 
-def to_give(ledger: DesignLedger, part_kind: str | None = None) -> list[dict[str, Any]]:
-    """What a run's first message holds: each kept lesson for the model whose text is still
-    given, oldest first, if it's general or for this kind of part. One folded into a skill is read
-    there, and one for the harness alone never reaches the model."""
+def kept_for_model(ledger: DesignLedger) -> list[dict[str, Any]]:
+    """Each kept lesson for the model whose text is still given, of every kind, oldest first.
+    One folded into a skill is read there, and one for the harness alone never reaches the model."""
     found = ledger.rows(
         "SELECT lessons.* FROM lessons JOIN lesson_routes AS r ON r.lesson = lessons.id "
         f"AND r.route = 'model' AND r.ended_at IS NULL WHERE lessons.status IN "  # noqa: S608
         f"({','.join('?' * len(KEPT))}, ?) AND COALESCE(r.became, '') != 'skill' "
-        "AND (lessons.part_kind IS NULL OR lessons.part_kind = ?) ORDER BY lessons.id",
+        "ORDER BY lessons.id",
         *KEPT,
         PROMOTED,
-        part_kind,
     )
     return [dict(r) for r in found]
+
+
+def _standing(ledger: DesignLedger, lesson: int) -> tuple[int, int]:
+    """Where a lesson's scores put it among its like, lowest first: whether any run's latest
+    score of its text says it got in the way, then the runs whose latest says it was used, most
+    first."""
+    scores = [
+        s for (_, route), s in latest_scores(ledger, lesson).items() if route == "model"
+    ]
+    in_the_way = any(s["score"] == "in_the_way" for s in scores)
+    return int(in_the_way), -sum(s["score"] == "used" for s in scores)
+
+
+def _ordered(ledger: DesignLedger, found: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(found, key=lambda one: (*_standing(ledger, int(one["id"])), int(one["id"])))
+
+
+def to_give(ledger: DesignLedger, part_kind: str | None = None) -> list[dict[str, Any]]:
+    """What a run's start draws from, in the order it takes them: each kept lesson for the model
+    whose text is still given, those for this kind of part first, then the general ones, and in
+    each those scored `used` on most runs first, any that got in the way last, and the oldest
+    first among equals. `within` holds them to the start's budget."""
+    kind = part_kind_of(part_kind)
+    kept = kept_for_model(ledger)
+    mine = [k for k in kept if not is_general(k) and part_kind_of(k["part_kind"]) == kind]
+    general = [k for k in kept if is_general(k)]
+    return _ordered(ledger, mine) + _ordered(ledger, general)
+
+
+def within(
+    found: list[dict[str, Any]], budget: int
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """The lessons a start gives and those it leaves out, under a budget in characters: they're
+    taken in order while each one's line, as given, fits in what's left, and the first that
+    doesn't ends them, so none is given ahead of a better one. The one exception is a lesson
+    whose line is longer than the whole budget: no start can give it, so it's left out, marked
+    `too_long`, and the filling goes on past it, as one such lesson mustn't empty a start. One
+    left out is still kept, and the `lessons` tool finds it."""
+    given: list[dict[str, Any]] = []
+    left: list[dict[str, Any]] = []
+    used, full = 0, False
+    for one in found:
+        size = len(line(one))
+        if 0 < budget < size:
+            left.append({**one, "too_long": True})
+        elif full or used + size > budget:
+            full = True
+            left.append(one)
+        else:
+            used += size
+            given.append(one)
+    return given, left
 
 
 def writer(written_by: str) -> str:
@@ -783,11 +885,44 @@ def line(found: dict[str, Any]) -> str:
     )
 
 
-def block(given: list[dict[str, Any]]) -> str:
-    """The lessons under their fixed heading, for the first message."""
-    if not given:
+def left_said(left: list[dict[str, Any]], part_kind: str | None = None) -> str:
+    """What a start says of the lessons it left out: how many, and how to find them."""
+    kind = part_kind_of(part_kind)
+    general = sum(is_general(one) for one in left)
+    mine = len(left) - general
+    counts = [f"{mine} for {kind} parts"] if mine else []
+    counts += [f"{general} general"] if general else []
+    one = len(left) == 1
+    yours = f"`{kind}`, or `general`" if kind not in (None, GENERAL) else "`general`, or a kind's"
+    long = [str(found["id"]) for found in left if found.get("too_long")]
+    too_long = ""
+    if long:
+        many = len(long) > 1
+        too_long = (
+            f" Lesson{'s' if many else ''} {', '.join(long)} {'are' if many else 'is'} too long "
+            f"for the start: read {'each' if many else 'it'} with its `id`."
+        )
+    return (
+        f"{len(left)} more kept lesson{' isn' if one else 's aren'}'t here, to keep the start "
+        f"short: {' and '.join(counts)}.{too_long} The `lessons` tool finds "
+        f"{'it' if one else 'them'}: by `words`, by `kind` ({yours}), and one whole by its `id`. "
+        "One you read whole, you'll be asked about at the end, as you will these."
+    )
+
+
+def block(
+    given: list[dict[str, Any]],
+    left: list[dict[str, Any]] | None = None,
+    part_kind: str | None = None,
+) -> str:
+    """The lessons under their fixed heading, for the first message, and after them how many the
+    start's budget left out, and how to find them."""
+    if not given and not left:
         return ""
-    return "\n".join([HEADING, "", ABOUT, "", *(line(g) for g in given)])
+    lines = [HEADING, "", ABOUT, "", *(line(g) for g in given)]
+    if left:
+        lines += [*([""] if given else []), left_said(left, part_kind)]
+    return "\n".join(lines)
 
 
 def give(
@@ -799,16 +934,137 @@ def give(
     texts: dict[int, str] | None = None,
 ) -> None:
     """A row of `run_lessons` for each, in the words it was given in, and each the first time
-    it's given is `given`. Only `start` gives one by code, and only one for the model: `how`
-    otherwise records one given by hand before there was code for it."""
+    it's given is `given`. Code gives one at `start`, or whole by the `lessons` tool, and only one
+    for the model: `how` otherwise records one given by hand before there was code for it."""
     for found in given:
-        if how == AT_START and "model" not in routes_of(ledger, found["id"]):
+        if how in (AT_START, AT_TOOL) and "model" not in routes_of(ledger, found["id"]):
             raise Refused(f"lesson {found['id']} isn't for the model: it isn't given as text")
         text = (texts or {}).get(found["id"]) or line(found)
         ledger.add("run_lessons", run=run, lesson=found["id"], given_at=now(), how=how, text=text)
         if found["status"] in (ACCEPTED, EDITED):
             _status(ledger, found["id"], GIVEN, by)
         _step(ledger, found["id"], GIVEN, by, how, run=run)
+
+
+def leave_out(ledger: DesignLedger, run: str, left: Iterable[dict[str, Any]], budget: int) -> None:
+    """A row of `run_lessons_left` for each lesson a run's start left out, and why. Nothing of
+    the lesson changes: it isn't given, and it isn't dropped."""
+    over = f"over the start's budget of {budget} characters (`Limits.start_lessons_chars`)"
+    for found in left:
+        why = over
+        if found.get("too_long"):
+            why = (
+                f"too long for the start: its line is {len(line(found))} characters, and the "
+                f"start's whole budget is {budget} (`Limits.start_lessons_chars`)"
+            )
+        ledger.add("run_lessons_left", run=run, lesson=found["id"], at=now(), why=why)
+
+
+def left_out_of(ledger: DesignLedger, run: str) -> list[dict[str, Any]]:
+    """Each lesson a run's start left out, in the order the start would have taken them."""
+    found = ledger.rows("SELECT * FROM run_lessons_left WHERE run=? ORDER BY rowid", run)
+    return [dict(r) for r in found]
+
+
+# The model's `lessons` tool: a kept lesson found by words or by kind, and one whole by its id
+
+
+def _found_line(found: dict[str, Any], had: dict[int, str]) -> str:
+    """One lesson as a search names it: its number, area, kind of part and fix's shape."""
+    how = had.get(int(found["id"]))
+    seen = ", read already" if how == AT_TOOL else ", in your start" if how else ""
+    kind = GENERAL if is_general(found) else _for_said(found)
+    shape = " ".join(str(found["fix_shape"]).split())
+    if len(shape) > SHAPE_CHARS:
+        shape = shape[:SHAPE_CHARS].rstrip() + "..."
+    return f"- Lesson {found['id']} ({area(found['kind'])}, {kind}{seen}): {shape}"
+
+
+def _matches(found: dict[str, Any], words: list[str]) -> int:
+    """How many of the words a lesson holds: in its text, its fix's shape, its area or its kind
+    of part."""
+    held = " ".join(
+        str(found.get(k) or "") for k in ("text", "fix_shape", "kind", "part_kind")
+    )
+    held = f"{held} {area(found['kind'])}".casefold()
+    return sum(word in held for word in words)
+
+
+def _kinds_said(kept: list[dict[str, Any]]) -> str:
+    kinds = sorted({str(part_kind_of(k["part_kind"])) for k in kept if not is_general(k)})
+    return ", ".join(f"`{k}`" for k in [*kinds, GENERAL])
+
+
+def look_up(
+    ledger: DesignLedger, run: str, part_kind: str | None, args: dict[str, Any]
+) -> tuple[bool, str, dict[str, Any]]:
+    """The `lessons` tool's answer: whether it's one, its words, and what the run's events keep.
+    With `id`, that kept lesson whole, as a start gives one, and the run is given it
+    (`run_lessons`, as `tool`), so its review scores it. Otherwise each kept lesson for the model
+    that holds every one of `words`, or failing that any of them, and is for `kind`, in a line:
+    its number, area, kind of part and fix's shape. With neither, the run's own: its kind's and
+    the general ones, as the start orders them. It reads, and changes no lesson's words."""
+    kept = kept_for_model(ledger)
+    had = {int(g["lesson"]): str(g["how"]) for g in given_to(ledger, run)}
+    if args.get("id") is not None:
+        wanted = int(args["id"])
+        found = next((k for k in kept if int(k["id"]) == wanted), None)
+        if found is None:
+            said = (
+                f"There's no kept lesson {wanted} for you. `lessons` with `words` or `kind` "
+                "names each by its number."
+            )
+            return False, said, {"read": wanted}
+        if wanted not in had:
+            give(ledger, run, [found], AT_TOOL)
+        how = had.get(wanted, AT_TOOL)
+        said = f"{line(found)}\n\nIts fix's shape: {found['fix_shape']}"
+        if how == AT_TOOL:
+            said += (
+                "\n\nUse it where it fits your part, and leave it where it doesn't: at the "
+                "end you'll be asked whether you used it."
+            )
+        else:
+            said += "\n\nIt's in your first message too, under `" + HEADING + "`."
+        return True, said, {"read": wanted, "given": how}
+    words = re.findall(r"[\w'.-]+", str(args.get("words") or "").casefold())
+    asked = part_kind_of(str(args.get("kind") or ""))
+    if asked is None and not words:
+        found_all = to_give(ledger, part_kind)
+        of = " for your part's kind, and general"
+    elif asked is None:
+        found_all, of = _ordered(ledger, kept), ""
+    elif asked == GENERAL:
+        found_all, of = _ordered(ledger, [k for k in kept if is_general(k)]), " that are general"
+    else:
+        mine = [k for k in kept if not is_general(k) and part_kind_of(k["part_kind"]) == asked]
+        found_all, of = _ordered(ledger, mine), f" for {asked} parts"
+    some = ""
+    if words:
+        counted = [(k, _matches(k, words)) for k in found_all]
+        found_all = [k for k, n in counted if n == len(words)]
+        if not found_all:
+            # None holds every word: those that hold any, most first.
+            counted.sort(key=lambda pair: -pair[1])
+            found_all = [k for k, n in counted if n]
+            some = " None has every word, so these have some, most first."
+        of += f" with {' '.join(words)!r}"
+    detail: dict[str, Any] = {"found": [int(k["id"]) for k in found_all]}
+    if not kept:
+        return True, "No lessons are kept for you yet.", detail
+    if not found_all:
+        said = f"There's no kept lesson{of}."
+        said += " Try other words, or fewer." if words else ""
+        return True, f"{said} The kinds that have lessons: {_kinds_said(kept)}.", detail
+    lines = [_found_line(k, had) for k in found_all[:FOUND_MOST]]
+    more = len(found_all) - len(lines)
+    if more:
+        lines.append(f"- and {more} more: narrow it with `words` or `kind`.")
+    head = (
+        f"{len(found_all)} kept lesson{'' if len(found_all) == 1 else 's'}{of}, each by its "
+        f"number, area, kind of part and fix's shape.{some} `lessons` with `id` gives one whole."
+    )
+    return True, "\n".join([head, "", *lines]), detail
 
 
 def given_to(ledger: DesignLedger, run: str) -> list[dict[str, Any]]:
@@ -1021,7 +1277,67 @@ def listing(ledger: DesignLedger, run: str | None = None) -> str:
         lines += ["## To retire, for the reviewer", ""]
         lines += [f"- Lesson {row['id']}: {why}. `retire {row['id']}`" for row, why in retiring]
         lines.append("")
+    kept = kept_for_model(ledger)
+    unsorted = [k for k in kept if part_kind_of(k["part_kind"]) is None]
+    if unsorted:
+        lines += [
+            "## Kept for the model with no kind of part, for the reviewer",
+            "",
+            "Each starts every run, of any kind, until it has one. Give each its kind with "
+            "`edit ID --part-kind K`, or `--part-kind general` if it's for every kind.",
+            "",
+        ]
+        lines += [
+            f"- Lesson {k['id']} ({area(k['kind'])}): {_sentence(k['fix_shape'])} "
+            f"{str(k['text'])[:SHAPE_CHARS]}"
+            for k in unsorted
+        ]
+        lines.append("")
+    long = [(k, len(line(k))) for k in kept if len(line(k)) > START_CHARS]
+    if long:
+        lines += [
+            "## Too long for a start, for the reviewer",
+            "",
+            f"Each one's line is over a start's whole budget, {START_CHARS} characters unless a "
+            "run sets it (`Limits.start_lessons_chars`), so no start gives it, and only the "
+            "`lessons` tool finds it. `edit ID --text FILE` shortens it.",
+            "",
+        ]
+        lines += [f"- Lesson {k['id']}: {size} characters." for k, size in long]
+        lines.append("")
+    folding = to_fold(ledger)
+    if folding:
+        lines += [
+            "## To fold into a kind's skill, for the reviewer",
+            "",
+            "Kept for a kind whose skill doesn't hold them yet. A kind's lessons belong in its "
+            "skill: once one is there, `promote ID --as skill --where PATH`, and it leaves the "
+            "start.",
+            "",
+        ]
+        for kind, found in folding.items():
+            own = toolsets.KINDS.get(kind)
+            skill = f"the `{own.skills[-1]}` skill" if own else "which has no skill of its own yet"
+            named = ", ".join(str(k["id"]) for k in found)
+            lines.append(f"- `{kind}`, {skill}: lesson{'' if len(found) == 1 else 's'} {named}.")
+        lines.append("")
     return "\n".join(lines)
+
+
+def _sentence(words: str) -> str:
+    words = " ".join(str(words).split())
+    return words if words.endswith((".", "!", "?")) else f"{words}."
+
+
+def to_fold(ledger: DesignLedger) -> dict[str, list[dict[str, Any]]]:
+    """Each kind's kept lessons for the model that its skill doesn't hold yet, by kind: the
+    candidates to fold in, which stays the main route (mqucifer/print-shop#155). One promoted as
+    `skill` is read there, and isn't here."""
+    found: dict[str, list[dict[str, Any]]] = {}
+    for one in kept_for_model(ledger):
+        if not is_general(one):
+            found.setdefault(str(part_kind_of(one["part_kind"])), []).append(one)
+    return dict(sorted(found.items()))
 
 
 def _copies_listing(ledger: DesignLedger, run: str | None = None) -> list[str]:
@@ -1092,7 +1408,7 @@ def _run_listing(ledger: DesignLedger, run: str) -> list[str]:
     for row in written:
         n = int(row["id"])
         becomes = f", becomes {row['becomes']}" if row["becomes"] else ""
-        part = f", for {row['part_kind']} parts" if row["part_kind"] else ", general"
+        part = f", {_for_said(dict(row))}"
         lines += [
             f"## Lesson {n}: {row['status']}",
             "",
@@ -1123,6 +1439,14 @@ def _run_listing(ledger: DesignLedger, run: str) -> list[str]:
                 f"- Lesson {g['lesson']} ({g['how']}, now {g['status']}): {said or 'not scored'}"
             )
         lines.append("")
+    left = left_out_of(ledger, run)
+    if left:
+        read = {int(g["lesson"]) for g in given if g["how"] == AT_TOOL}
+        lines += ["## Left out of its start", ""]
+        for one in left:
+            later = ", and read whole with the `lessons` tool" if int(one["lesson"]) in read else ""
+            lines.append(f"- Lesson {one['lesson']}: {one['why']}{later}")
+        lines.append("")
     scored = ledger.rows(
         "SELECT * FROM lesson_scores WHERE run=? AND COALESCE(route, 'model') != 'model' "
         "ORDER BY id",
@@ -1150,12 +1474,12 @@ def load(ledger: DesignLedger, path: Path, by: str) -> dict[str, int]:
     """A reviewer's steps from a JSON file, in order, by the same rules as at the command line:
     `{"steps": [{"do": "write", "key": "a", "run": ..., "fix_shape": ..., "kind": ..., "routes":
     [...], "text": ..., "calls": [...], "readings": [...], "keys": [...], "part_kind": ...},
-    {"do": "accept", "lesson": "a", "becomes": ..., "routes": [...]}, {"do": "give", "lesson":
-    "a", "run": ..., "how": ..., "text": ...}, {"do": "score", ..., "route": ...}, {"do": "edit" |
-    "reject" | "retire" | "promote", ...}]}`. A lesson is named by its `key` in the file, or by
-    its number if it's in the ledger already. It's all checked before anything is written, and
-    refused whole if a lesson's text is already in the ledger for its run, so it can't be loaded
-    twice."""
+    {"do": "accept", "lesson": "a", "becomes": ..., "routes": [...], "part_kind": ...}, {"do":
+    "give", "lesson": "a", "run": ..., "how": ..., "text": ...}, {"do": "score", ..., "route":
+    ...}, {"do": "edit" | "reject" | "retire" | "promote", ...}]}`. A lesson is named by its
+    `key` in the file, or by its number if it's in the ledger already. It's all checked before
+    anything is written, and refused whole if a lesson's text is already in the ledger for its
+    run, so it can't be loaded twice."""
     by = signed(by)
     try:
         steps = json.loads(path.read_text(encoding="utf-8"))["steps"]
@@ -1185,7 +1509,9 @@ def load(ledger: DesignLedger, path: Path, by: str) -> dict[str, int]:
         named = step["lesson"]
         lesson = named if isinstance(named, int) else ids[named]
         if do == "accept":
-            accept(ledger, lesson, by, step.get("becomes"), step.get("routes"))
+            accept(
+                ledger, lesson, by, step.get("becomes"), step.get("routes"), step.get("part_kind")
+            )
         elif do == "edit":
             edit(
                 ledger,
@@ -1229,7 +1555,7 @@ STEP_KEYS = {
         {"key", "run", "fix_shape", "kind", "routes", "text", "calls"},
         {"readings", "keys", "part_kind"},
     ),
-    "accept": ({"lesson"}, {"becomes", "routes"}),
+    "accept": ({"lesson"}, {"becomes", "routes", "part_kind"}),
     "edit": (
         {"lesson"},
         {"text", "kind", "fix_shape", "becomes", "routes", "keys", "part_kind", "why"},

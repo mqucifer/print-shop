@@ -158,6 +158,8 @@ WITHHELD = (
 #: sets them (mqucifer/print-shop#78, the context study's option (e)).
 TRIM_AT = 40_000
 TRIM_KEEP = 3
+#: The characters of lessons a run's start holds (`Limits.start_lessons_chars`), unless it's set.
+START_LESSONS_CHARS = 6000
 RETRY_STATUS = (408, 409, 425, 429, 500, 502, 503, 504)
 
 
@@ -197,6 +199,11 @@ class Limits:
     # The after-action review's calls, after the approval: it ends on `after_action`, and this is
     # only so a review that never calls it ends by name.
     after_action_calls: int = 30
+    # The characters of lessons a run's start holds, by each lesson's line as given: those for
+    # its kind first, best-scored first, and the rest left to the `lessons` tool
+    # (mqucifer/print-shop#155). 6000 is about a dozen: on 2026-11-17 the design runs' 34 came to
+    # about 16,500 characters, some 485 each, and every run started with all of them.
+    start_lessons_chars: int = START_LESSONS_CHARS
 
     def recorded(self) -> dict[str, Any]:
         return asdict(self)
