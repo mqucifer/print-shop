@@ -449,3 +449,212 @@ def test_a_need_on_a_snap_s_depth_and_on_its_bend_is_judged_by_the_answers(cae: 
     bent = cae("bend", "snap/clip.step", *CLIP, "--push", "0.6")
     arm = need(f"bend snap/clip.step --arm {ARM} --root z=10 --toward -y --push 0.6")
     assert needs.judge(arm, bent.code, bent.text, bent.record).passed
+
+
+# Joined parts under a weight (mqucifer/print-shop#156)
+
+#: The beam, as `make_fixtures.py` draws it: 120 x 20 x 10 along x, held at x 0, of PETG at
+#: 1500 MPa, loaded 115 mm out, on its top.
+BEAM_L, BEAM_W, BEAM_T, MODULUS, G = 115.0, 20.0, 10.0, 1500.0, 9.80665
+TIP = ("--at", "115,10,10")
+#: How far a two-part beam's figures may be from the one-piece beam's: the same shape and the
+#: same joined mesh but for the triangles on the joint's face.
+SAME = 0.02
+
+
+def beam_strain(kg: float, at: float = 0.0) -> float:
+    """A cantilever's strain on its top and bottom faces, `at` mm from its root, in percent:
+    ε = 6·F·(L - at)/(E·b·h²)."""
+    return 100 * 6 * kg * G * (BEAM_L - at) / (MODULUS * BEAM_W * BEAM_T**2)
+
+
+def test_load_runs_sealed_in_the_second_image(cae: Any) -> None:
+    ran = cae("load", "load/one.json", "--weight", "1", *TIP).record["ran"]
+    assert ran["network_up"] == ["lo"] and ran["network_routes"] == 0
+    assert ran["image"] == host.CAE_IMAGE and ran["user"] != 0
+
+
+def test_a_one_piece_beam_reads_as_the_beam_formula_says(cae: Any) -> None:
+    """Held at one end with 1 kg 115 mm out: 0.226% at the root by ε = 6FL/(Ebh²), and the
+    loaded place moves FL³/(3EI) = 1.99 mm, less a little as the weight is spread over a patch
+    whose middle is nearer the root. The held face's reaction is the weight."""
+    answer = cae("load", "load/one.json", "--weight", "1", *TIP, "--over", "5")
+    assert answer.verdict == "OK" and answer.code == 0, answer.text
+    beam = answer.numbers["parts"]["beam"]
+    assert beam["stretch_pct"] == pytest.approx(beam_strain(1), rel=0.1)
+    assert beam["stretch_at"][0] < 10, "at the root"
+    assert beam["stretch_from_layers_deg"] < 10, "along its length, in its layers' plane"
+    inertia = BEAM_W * BEAM_T**3 / 12
+    assert answer.numbers["moves_mm"] == pytest.approx(
+        G * BEAM_L**3 / (3 * MODULUS * inertia), rel=0.06
+    )
+    assert answer.numbers["reaction_n"] == pytest.approx([0, 0, G], abs=1e-3)
+    assert answer.numbers["force_n"] == pytest.approx(G)
+    assert "second check: the same solve on a mesh of at most 7.5 mm" in answer.text
+    assert "Prusament PETG's datasheet" in answer.text, "the limits' source"
+    assert answer.record["seconds"] < 30
+
+
+def test_a_beam_bolted_at_its_middle_matches_the_one_piece_beam(cae: Any) -> None:
+    """The same beam as two halves, bolted where they meet at x 60: its worst strain and how far
+    it moves are the one-piece beam's within 2%, and so is it bonded. The joint carries the
+    weight as shear and, by statics, the weight times its distance to the load as a moment,
+    which the solve's own balance gives within 0.2%. Its one bolt at the face's middle holds
+    that moment about the face's bottom edge, 5 mm away: about 522 / 5 = 104 N."""
+    one = cae("load", "load/one.json", "--weight", "1", *TIP)
+    two = cae("load", "load/two.json", "--weight", "1", *TIP)
+    assert two.verdict == "OK", two.text
+    whole, root = one.numbers["parts"]["beam"], two.numbers["parts"]["root"]
+    assert root["stretch_pct"] == pytest.approx(whole["stretch_pct"], rel=SAME)
+    assert root["across_layers_pct"] == pytest.approx(whole["across_layers_pct"], rel=SAME)
+    assert two.numbers["moves_mm"] == pytest.approx(one.numbers["moves_mm"], rel=SAME)
+    assert two.numbers["most_moves_mm"] == pytest.approx(one.numbers["most_moves_mm"], rel=SAME)
+    # The half past the joint is strained as the whole beam is there, 60 mm from the root.
+    assert two.numbers["parts"]["tip"]["stretch_pct"] == pytest.approx(beam_strain(1, 60), rel=0.1)
+    joint = two.numbers["joints"]["root+tip"]
+    # The weight acts at the middle of its patch, which the beam's end cuts off: a little
+    # nearer the root than the place named.
+    middle = two.numbers["loads"][0]["middle"][0]
+    assert BEAM_L - 4 < middle < BEAM_L
+    moment = G * (middle - 60)
+    assert joint["statics_force_n"] == pytest.approx([0, 0, -G], abs=1e-4)
+    # The patch's middle is within a tenth of a millimetre of the beam's centre line.
+    assert joint["statics_moment_nmm"] == pytest.approx([0, moment, 0], abs=1.0)
+    assert joint["statics_moment_nmm"][1] == pytest.approx(moment, abs=0.01)
+    # The solve's own balance at the joint's nodes is statics, to what its figures are saved at.
+    assert joint["force_n"] == pytest.approx(joint["statics_force_n"], abs=0.01)
+    assert joint["moment_nmm"] == pytest.approx(joint["statics_moment_nmm"], abs=1.0)
+    assert joint["shear_n"] == pytest.approx(G, rel=1e-3)
+    assert joint["bending_nmm"] == pytest.approx(moment, rel=2e-3)
+    assert joint["bolt_pull_statics_n"] == pytest.approx(moment / (BEAM_T / 2), rel=1e-4)
+    assert joint["bolt_pull_n"] == pytest.approx(moment / (BEAM_T / 2), rel=2e-3)
+    assert reports.unlike("load", two.numbers) == []
+    assert joint["holds_n"] == 500 and joint["holds_from"].startswith("the joint's own figure")
+    bonded = cae("load", "load/two-bonded.json", "--weight", "1", *TIP)
+    assert bonded.numbers["moves_mm"] == pytest.approx(two.numbers["moves_mm"], rel=1e-6)
+    assert "bolts" not in bonded.numbers["joints"]["root+tip"]
+
+
+def test_a_part_laid_across_its_layers_fails_where_the_same_part_laid_along_them_passes(
+    cae: Any,
+) -> None:
+    """The same beam under 5 kg bends to 1.13% at its root, along its length. Printed flat, its
+    layers run along that pull, and 1.13% is within the 5.1% PETG takes in their plane. Printed
+    standing on its end, the pull is across its layers, over the 1% they take."""
+    along = cae("load", "load/one.json", "--weight", "5", *TIP)
+    across = cae("load", "load/across.json", "--weight", "5", *TIP)
+    assert along.verdict == "OK" and along.code == 0, along.text
+    assert across.verdict == "FAIL" and across.code == 1, across.text
+    flat, standing = along.numbers["parts"]["beam"], across.numbers["parts"]["beam"]
+    assert flat["stretch_pct"] == pytest.approx(standing["stretch_pct"]), "the same solve"
+    assert standing["across_layers_pct"] == pytest.approx(beam_strain(5), rel=0.1)
+    assert standing["across_layers_pct"] > standing["across_limit_pct"] == 1.0
+    assert flat["across_layers_pct"] < 1.0 < flat["stretch_pct"] < flat["stretch_limit_pct"] == 5.1
+    assert standing["stretch_from_layers_deg"] > 80 > 10 > flat["stretch_from_layers_deg"]
+    assert "pulled across its layers by" in across.record["why"]
+    assert "lay it on the bed so its layers run along this pull" in across.record["why"]
+    # Under 1 kg it's 0.23% either way, and both pass.
+    assert cae("load", "load/across.json", "--weight", "1", *TIP).verdict == "OK"
+
+
+def test_a_bolted_joint_with_no_figure_for_its_insert_is_unread_never_ok(cae: Any) -> None:
+    """In printed PETG the insert pulls out long before the bolt gives, and no insert has a
+    sourced figure. So the same two halves with no `pull_n` on their joint aren't `OK` on the
+    bolt's 5092 N: the answer is `UNREAD`, naming the joint and the insert, and a need that
+    asks for `OK` fails until the joint gives a figure. Every reading is still there."""
+    answer = cae("load", "load/two-unread.json", "--weight", "1", *TIP)
+    assert answer.verdict == "UNREAD" and answer.code == 2, answer.text
+    why = answer.record["why"]
+    assert "the bolted joint(s) root+tip have a pull to hold, 104.4 N a bolt" in why
+    assert "the insert m4-heat-set has no pull-out figure" in why and "`pull_n`" in why
+    joint = answer.numbers["joints"]["root+tip"]
+    assert joint["insert_unread"] is True
+    assert joint["holds_n"] == pytest.approx(580 * 8.78) and "ISO 898-1" in joint["holds_from"]
+    read = cae("load", "load/two.json", "--weight", "1", *TIP)
+    assert read.verdict == "OK" and read.numbers["joints"]["root+tip"]["insert_unread"] is False
+    assert joint["bolt_pull_n"] == pytest.approx(read.numbers["joints"]["root+tip"]["bolt_pull_n"])
+    command = "load load/two-unread.json --weight 1 --at 115,10,10"
+    need = Need("holds", "it holds 1 kg", "request", "holds 1 kg", "bench", command)
+    assert not needs.judge(need, answer.code, answer.text, answer.record).passed
+    named = Need(
+        "holds", "it holds 1 kg", "request", "holds 1 kg", "bench", command, verdicts=["UNREAD"]
+    )
+    assert not needs.judge(named, answer.code, answer.text, answer.record).passed, "never a pass"
+
+
+def test_a_bolt_asked_to_hold_more_than_its_joint_s_figure_fails(cae: Any) -> None:
+    """The joint's own figure, 60 N a bolt, is under the 108 N its bolt has to hold."""
+    answer = cae("load", "load/two-weak.json", "--weight", "1", *TIP)
+    assert answer.verdict == "FAIL", answer.text
+    assert "worst bolt has to hold" in answer.record["why"]
+    assert "over its 60 N" in answer.record["why"]
+    assert answer.numbers["joints"]["root+tip"]["holds_from"].startswith("the joint's own figure")
+
+
+def test_parts_that_dont_meet_face_to_face_are_said_and_nothing_is_solved(cae: Any) -> None:
+    for name, said in (
+        ("unnamed", "root and tip meet over 200.0 mm²"),
+        ("gap", "they're 0.500 mm apart"),
+        ("through", "pass through each other where the assembly puts them, by 200.000 mm³"),
+    ):
+        answer = cae("load", f"load/{name}.json", "--weight", "1", *TIP)
+        assert answer.verdict == "NO ANSWER" and said in answer.record["why"], answer.text
+    off = cae("load", "load/one.json", "--weight", "1", "--at", "115,10,15")
+    assert off.verdict == "NO ANSWER"
+    assert "5.000 mm from the assembly's surface" in off.record["why"]
+    slides = cae("load", "load/rest.json", "--weight", "1", "--at", "40,30,25", "--toward", "+x")
+    assert slides.verdict == "NO ANSWER" and "it would slide" in slides.record["why"]
+
+
+def test_a_touching_joint_pushes_and_fails_where_its_pulled_or_tipped(cae: Any) -> None:
+    """A block standing on a slab, held by nothing. A weight on its top pushes it down through
+    the middle of the faces that meet: it holds, needing no friction to speak of. Pulled up, or
+    pushed sideways with nothing pressing it down, it comes away."""
+    rests = cae("load", "load/rest.json", "--weight", "2", "--at", "30,30,30")
+    assert rests.verdict == "OK", rests.text
+    joint = rests.numbers["joints"]["slab+block"]
+    assert joint["pull_n"] == pytest.approx(-2 * G, rel=1e-3), "a push of the weight"
+    assert joint["statics_force_n"] == pytest.approx([0, 0, -2 * G], abs=1e-4)
+    assert joint["push_off_faces_mm"] == pytest.approx(0, abs=0.01)
+    assert joint["friction_needed"] < 0.01
+    assert "which has no limit unless --friction gives one" in rests.text
+    up = ("--at", "30,30,30", "--toward", "+z")
+    lifted = cae("load", "load/rest-fixed.json", "--weight", "2", *up)
+    assert lifted.verdict == "FAIL" and "is pulled apart by" in lifted.record["why"], lifted.text
+    side = ("--at", "40,30,25", "--toward", "+x")
+    pushed = cae("load", "load/rest-fixed.json", "--weight", "2", *side)
+    assert pushed.verdict == "FAIL", pushed.text
+    assert "tips open" in pushed.record["why"] or "slides or tips" in pushed.record["why"]
+
+
+def test_a_table_standing_on_four_legs_shares_its_weight_between_them(cae: Any) -> None:
+    """A top on four legs, each bolted, standing free on the floor, with 3 kg at its middle:
+    each joint pushes down with about a quarter of the weight, the four together with all of
+    it, and statics alone can't say which leg takes what. A leg printed lying down has its
+    layers turned with it."""
+    answer = cae("load", "load/table.json", "--weight", "3", "--at", "50,50,66")
+    assert answer.verdict == "OK", answer.text
+    joints = answer.numbers["joints"]
+    assert len(joints) == 4 and all("statics_force_n" not in j for j in joints.values())
+    pushes = [-j["pull_n"] for j in joints.values()]
+    assert sum(pushes) == pytest.approx(3 * G, rel=1e-3), "the four carry all of it"
+    assert max(pushes) - min(pushes) < 0.02 * 3 * G / 4, "a quarter each, by symmetry"
+    assert answer.numbers["held"] == ["standing on z=0, 4 face(s), 400.0 mm²"]
+    assert answer.numbers["reaction_n"] == pytest.approx([0, 0, 3 * G], abs=1e-3)
+    assert answer.record["seconds"] < 120
+    lying = cae("load", "load/table-lying.json", "--weight", "3", "--at", "50,50,66")
+    assert lying.numbers["parts"]["leg1"]["layers"] == pytest.approx([1, 0, 0])
+    assert lying.numbers["parts"]["leg2"]["layers"] == pytest.approx([0, 0, 1])
+
+
+def test_a_need_on_a_load_is_judged_by_its_verdict_and_how_far_it_moves(cae: Any) -> None:
+    answer = cae("load", "load/two.json", "--weight", "1", *TIP)
+
+    def need(**more: Any) -> Need:
+        command = "load load/two.json --weight 1 --at 115,10,10"
+        return Need("holds", "it holds 1 kg", "request", "holds 1 kg", "bench", command, **more)
+
+    assert needs.judge(need(), answer.code, answer.text, answer.record).passed
+    stiff = need(number="moves_mm", at_most=1.0)
+    read = needs.judge(stiff, answer.code, answer.text, answer.record)
+    assert not read.passed and read.value == pytest.approx(answer.numbers["moves_mm"])

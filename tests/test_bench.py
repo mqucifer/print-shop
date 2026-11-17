@@ -2982,3 +2982,75 @@ def test_light_that_disagrees_names_both_figures_their_methods_and_where(bench: 
     assert "% open by the first method, its footprint less the frame's shadow" in why
     assert "0.0% by the second, " in why and "rays straight up through the frame" in why
     assert "Neither is the answer: render a cut" in why
+
+
+# Each part against the bed (mqucifer/print-shop#156)
+
+
+def test_fit_bed_names_the_side_each_part_lies_on_and_fails_one_too_long(bench: Any) -> None:
+    """A 120 mm beam fits as it's drawn, on its largest flat. A 300 mm one fits a 256 mm bed only
+    turned toward its corner: at 45° it needs (300 + 30)/√2 = 233.3 mm each way. A 400 mm one
+    needs 304.1 at its best, 48.1 over, and fails, saying to split it."""
+    answer = bench("fit-bed", "bed/beam.step", "bed/diagonal.step")
+    assert answer.verdict == "OK" and answer.code == 0, answer.text
+    beam, diagonal = (answer.numbers["parts"][n] for n in ("beam", "diagonal"))
+    assert beam["side"] in ("-z", "+z") and beam["turned_deg"] == 0
+    assert beam["footprint_mm"] == pytest.approx([120, 20])
+    assert beam["height_mm"] == pytest.approx(10)
+    assert beam["flat_mm2"] == pytest.approx(2400)
+    assert [s["side"] for s in beam["sides"]] == ["-z", "+z", "-y", "+y", "-x", "+x"]
+    assert diagonal["fits"] and 0 < diagonal["turned_deg"] < 90
+    assert max(diagonal["footprint_mm"]) <= 256
+    assert diagonal["exact_mm"][:2] == pytest.approx(diagonal["footprint_mm"], abs=1e-3)
+    assert "second check: beam on its -z face, the exact solid turned the same way" in answer.text
+    long = bench("fit-bed", "bed/beam.step", "bed/long.step")
+    assert long.verdict == "FAIL" and long.code == 1, long.text
+    assert long.numbers["parts"]["beam"]["fits"] and not long.numbers["parts"]["long"]["fits"]
+    assert long.numbers["parts"]["long"]["footprint_mm"] == pytest.approx(
+        [430 / math.sqrt(2)] * 2, abs=1e-3
+    )
+    assert "long doesn't fit on any flat side" in long.record["why"]
+    assert "48.1 mm over" in long.record["why"]
+    assert "split it" in long.record["why"]
+    # On a longer bed it fits, as it's drawn or turned.
+    assert bench("fit-bed", "bed/long.step", "--bed", "400,256,256").verdict == "OK"
+    assert reports.unlike("fit-bed", long.numbers) == []
+
+
+def test_fit_bed_reads_an_assembly_s_parts_on_the_side_their_layers_name(bench: Any) -> None:
+    """A rail 300 mm long printed standing on its end is 300 mm tall on a 256 mm bed: it fails
+    on its height, where the same rail lying down fits. A part with no flat face square to its
+    layers has no side to lie on."""
+    standing = bench("fit-bed", "bed/standing.json")
+    assert standing.verdict == "FAIL", standing.text
+    rail = standing.numbers["parts"]["rail"]
+    assert rail["side"] in ("-z", "+z") and rail["height_mm"] == pytest.approx(300)
+    assert rail["spare_mm"] == pytest.approx(-44)
+    assert "rail doesn't fit on any flat side square to z" in standing.record["why"]
+    lying = bench("fit-bed", "bed/lying.json")
+    assert lying.verdict == "OK", lying.text
+    assert lying.numbers["parts"]["rail"]["side"] in ("-y", "+y")
+    assert lying.numbers["parts"]["rail"]["height_mm"] == pytest.approx(20)
+    none = bench("fit-bed", "bed/no-side.json")
+    assert none.verdict == "FAIL"
+    assert "disc has no flat face to lie on square to x" in none.record["why"]
+    assert bench("fit-bed", "bed/ball.step").verdict == "FAIL"
+
+
+def test_fit_bed_holds_a_curved_part_to_the_bed_by_its_exact_solid_too(bench: Any) -> None:
+    """A disc 256 mm across is at the bed's size: the mesh's chords read it a hair under, and
+    the exact solid at it, and both fit. One 256.2 mm across is over by both."""
+    disc = bench("fit-bed", "bed/disc.step")
+    assert disc.verdict == "OK", disc.text
+    read = disc.numbers["parts"]["disc"]
+    assert read["exact_mm"][0] == pytest.approx(256, abs=1e-4)
+    assert 255.99 < read["footprint_mm"][0] <= 256 + 1e-6
+    wide = bench("fit-bed", "bed/disc-wide.step")
+    assert wide.verdict == "FAIL" and "0.2 mm over" in wide.record["why"], wide.text
+
+
+def test_fit_bed_refuses_what_it_cant_read(bench: Any) -> None:
+    both = bench("fit-bed", "bed/beam.step", "bed/lying.json")
+    assert both.verdict == "NO ANSWER" and "or one assembly file, not both" in both.record["why"]
+    stl = bench("fit-bed", "cube.stl")
+    assert stl.verdict == "NO ANSWER" and "an STL has none" in stl.record["why"]

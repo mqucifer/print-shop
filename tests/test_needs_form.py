@@ -22,7 +22,14 @@ from tests.test_intake import BRACKET, BROKEN_DOWN, begin, covered, told
 
 #: The `needs` tool's description on main before this, by toolset: the schema says the fields
 #: now, so the words are no longer than they were.
-DESCRIBED_BEFORE = {"every": 1804, "core": 2816, "stained-glass": 3306, "enclosure": 2960}
+DESCRIBED_BEFORE = {
+    "every": 1804,
+    "core": 2816,
+    "stained-glass": 3306,
+    "enclosure": 2960,
+    # New with its toolset (mqucifer/print-shop#156): its length then.
+    "furniture": 1180,
+}
 TOOLSETS: dict[str, toolsets.Toolset] = {
     "every": toolsets.EVERY,
     "core": toolsets.CORE,
