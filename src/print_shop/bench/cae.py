@@ -1,8 +1,9 @@
 """What the second image's commands share (mqucifer/print-shop#142): FreeCAD, loaded in order.
 
-`fit-on` and `bend` run in `print-shop/cae`, where FreeCAD's modules are beside its libraries
+`fit-on`, `bend` and `load` (mqucifer/print-shop#156) run in `print-shop/cae`, where FreeCAD's
+modules are beside its libraries
 (`host.CAE_ENTRY` puts them on the path). The first image has no FreeCAD, and a script there that
-calls one of the two is told so, not left with an import's traceback.
+calls one of them is told so, not left with an import's traceback.
 """
 
 from __future__ import annotations

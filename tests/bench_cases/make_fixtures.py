@@ -979,7 +979,34 @@ def sections() -> None:
         save(part, f"slice/{name}")
 
 
+def beds() -> None:
+    """Parts for `fit-bed` (mqucifer/print-shop#156), against a 256 mm bed: a beam that fits as
+    it's drawn, one that fits only corner to corner, one too long any way round, a disc whose
+    curved edge the mesh's chords cut, one 0.2 mm too wide, and an assembly whose rail is said
+    to be printed standing on its end."""
+    import json
+
+    Path("bed").mkdir(exist_ok=True)
+    save(box(0, 120, 0, 20, 0, 10), "bed/beam")
+    save(box(0, 300, 0, 30, 0, 20), "bed/diagonal")
+    save(box(0, 400, 0, 30, 0, 20), "bed/long")
+    save(box(0, 30, 0, 20, 0, 300), "bed/rail")
+    save(cq.Workplane("XY").circle(128.0).extrude(5), "bed/disc")
+    save(cq.Workplane("XY").circle(128.1).extrude(5), "bed/disc-wide")
+    save(cq.Workplane("XY").sphere(20), "bed/ball")
+    parts = [
+        {"name": "beam", "file": "beam.step", "layers": "z"},
+        {"name": "rail", "file": "rail.step", "layers": "z"},
+    ]
+    Path("bed/standing.json").write_text(json.dumps({"parts": parts}))
+    parts[1]["layers"] = "y"
+    Path("bed/lying.json").write_text(json.dumps({"parts": parts}))
+    parts.append({"name": "disc", "file": "disc.step", "layers": "x"})
+    Path("bed/no-side.json").write_text(json.dumps({"parts": parts}))
+
+
 if __name__ == "__main__":
+    beds()
     where()
     sections()
     near_touching()

@@ -27,8 +27,9 @@ BAD = {
     "HELD BY A SEPARATE BODY",
     "BLOCKED",
 }
-#: There's no answer to rely on: the methods differ, or one couldn't run.
-UNSURE = {"DISAGREE", "NO ANSWER"}
+#: There's no answer to rely on: the methods differ, one couldn't run, or what would give first
+#: has no figure to be read against (`load`'s `UNREAD`, mqucifer/print-shop#156).
+UNSURE = {"DISAGREE", "NO ANSWER", "UNREAD"}
 EXIT = {**dict.fromkeys(GOOD, 0), **dict.fromkeys(BAD, 1), **dict.fromkeys(UNSURE, 2)}
 
 

@@ -44,7 +44,7 @@ The first line is the verdict. Then come the numbers, each with how it was read,
 
 **`pause`'s numbers are the bench's own,** largest opening first, not your files'.
 
-A kind's toolset adds commands of its own, such as stained glass's `capture` and `light`, or an enclosure's `edges`, and its skill says what each answers.
+A kind's toolset adds commands of its own, such as stained glass's `capture` and `light`, an enclosure's `edges`, or furniture's `load` and `fit-bed`, and its skill says what each answers.
 
 **A 2D question has a reading: `layout`.** Which piece an inset makes, which piece is which, how narrow a neck is, whether a frame in 2D is one piece: write the layout to a file and ask, rather than work it out by reasoning or by printing bounding boxes. The file is JSON, each piece's name and its outline as GeoJSON or WKT, in mm, which your script writes from the layout it built:
 

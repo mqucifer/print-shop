@@ -7,7 +7,8 @@ than two CPUs and 3 GiB. Standard library only: this runs outside the image.
 
 There are two images (mqucifer/print-shop#142). `print-shop/bench` holds CadQuery and the
 second-check libraries, and runs every command but two. `print-shop/cae` holds FreeCAD, gmsh and
-CalculiX, and runs `fit-on` and `bend`, under the same limits. The disk guard counts both: a
+CalculiX, and runs `fit-on`, `bend` and `load` (mqucifer/print-shop#156), under the same
+limits. The disk guard counts both: a
 build leaves room for whichever of them isn't built yet.
 """
 
@@ -39,7 +40,7 @@ FLOOR_GB = 5.0
 CAE_IMAGE = "print-shop/cae:0.1"
 CAE_LIMIT_GB = 4.0
 #: The commands that run in it. Every other runs in `IMAGE`.
-CAE_COMMANDS = ("fit-on", "bend")
+CAE_COMMANDS = ("fit-on", "bend", "load")
 #: Each image by the name `build` takes: its tag, its limit and its Dockerfile's folder.
 IMAGES = {
     "bench": (IMAGE, IMAGE_LIMIT_GB, "image"),
@@ -97,7 +98,7 @@ def code_version() -> str:
 
 
 def image_for(args: list[str]) -> str:
-    """The image a bench command runs in: the second for `fit-on` and `bend`, by the command's
+    """The image a bench command runs in: the second for `CAE_COMMANDS`, by the command's
     own word, which follows the bench's `--out DIR` where that's given."""
     words = iter(args)
     for word in words:
