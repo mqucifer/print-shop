@@ -194,6 +194,19 @@ def test_a_dead_end_the_pixels_cant_show_is_a_note_not_a_disagree(bench: Any) ->
     assert "Only its outline reads it" in noted
 
 
+def test_a_dead_end_is_matched_to_the_pixels_by_where_it_lies(bench: Any) -> None:
+    """mqucifer/print-shop#161, from a trace at a low `--dark`: a dead end 8 mm long and 1.2 mm
+    wide, wide enough for the pixels and with nothing near it, whose tip all but meets a line
+    40 mm long inside the same piece. The pixels show the two as one stretch of lead, whose
+    middle is 24 mm from the dead end, and it was matched by that middle: `DISAGREE`, "isn't
+    lone lead by the pixels". It's matched now by the lead pixels in the dead end's own shape."""
+    answer = bench("pieces", "check", "joined.json")
+    assert answer.verdict == "FAIL" and answer.code == 1, answer.text
+    assert [f["flag"] for f in answer.numbers["flagged"]] == ["dead-end"] * 2
+    assert {end["kind"] for end in answer.numbers["dead_ends"]} == {"slit", "island"}
+    assert not [n for n in answer.record["notes"] if "lone lead" in n], "read, not excused"
+
+
 def test_a_second_reading_is_said_only_where_a_rule_flags_the_place(bench: Any) -> None:
     """A spur under the neck limit and a notch shallower than its mouth, each read differently
     by its pixels, and neither flagged: the reply has no note of either. On a traced scene

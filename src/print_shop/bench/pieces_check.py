@@ -420,15 +420,13 @@ def _pixels_cant_show(found: Map, drawn: Pixels, row: dict[str, Any]) -> str | N
     return None
 
 
-def lone_lead(found: Map, drawn: Pixels) -> list[dict[str, Any]]:
-    """Dead ends by the map's pixels: each stretch of lead with one piece's glass, and nothing
-    else, within a lead and a quarter all round, with how long it is and how wide at its widest."""
+def _alone(found: Map, drawn: Pixels) -> tuple[np.ndarray, np.ndarray]:
+    """The lead pixels with one piece's glass, and nothing else, within a lead and a quarter
+    all round, and at each which piece that is."""
     from scipy import ndimage
 
     ids = drawn.ids
     lead = ids == 0
-    if not lead.any():
-        return []
     radius = _alone_px(found, drawn)
     big = int(ids.max()) + 2
     # Outside the panel is its own neighbour, so lead along the edge isn't alone with a piece.
@@ -437,7 +435,18 @@ def lone_lead(found: Map, drawn: Pixels) -> list[dict[str, Any]]:
     size = 2 * radius + 1
     most = ndimage.maximum_filter(high, size=size, mode="constant", cval=big)
     least = ndimage.minimum_filter(low, size=size, mode="constant", cval=big)
-    alone = lead & (most == least) & (most > 0) & (most < big)
+    return lead & (most == least) & (most > 0) & (most < big), most
+
+
+def lone_lead(found: Map, drawn: Pixels) -> list[dict[str, Any]]:
+    """Dead ends by the map's pixels: each stretch of lead with one piece's glass, and nothing
+    else, within a lead and a quarter all round, with how long it is and how wide at its widest."""
+    from scipy import ndimage
+
+    lead = drawn.ids == 0
+    if not lead.any():
+        return []
+    alone, most = _alone(found, drawn)
     labels, count = ndimage.label(alone, structure=np.ones((3, 3)))
     if not count:
         return []
@@ -474,6 +483,8 @@ def _dead_ends_differ(
     that no gap in an outline accounts for, which is said, as lead beside a patch reads so too."""
     lead = found.lead_mm
     pixel_rows = lone_lead(found, drawn)
+    alone, beside_piece = _alone(found, drawn)
+    x0, _, _, y1 = found.panel.bounds
     all_gaps = [g for rows in read.values() for g in rows]
     differs: list[str] = []
     notes: list[str] = []
@@ -481,13 +492,15 @@ def _dead_ends_differ(
     for row in vector:
         if row["length_mm"] < (DEAD_END + 2.5) * lead:
             continue
-        near = [
-            r
-            for r in pixel_rows
-            if r["piece"] == row["piece"]
-            and math.dist(r["at"], row["at"]) <= row["length_mm"] + 2.0 * lead
-        ]
-        if not near:
+        # By where it lies: a lead pixel alone with this piece's glass, in the dead end's own
+        # shape or a pixel from it. The stretch it's part of may run on far past it, where the
+        # line all but meets another line inside the piece, so its middle is no place to match
+        # by: on a traced scene a dead end 5.4 mm long in a piece 115 mm wide wasn't found.
+        window, inside = piecemap._cover(
+            row["shape"].buffer(drawn.mm), x0, y1, drawn.mm, alone.shape
+        )
+        shown = bool((alone[window] & inside & (beside_piece[window] == row["piece"])).any())
+        if not shown:
             both = (
                 f"piece {row['piece']}'s dead end at {piecemap.said_at(row['at'])}, "
                 f"{row['length_mm']:.1f} mm long and {row['width_mm']:.2f} mm wide by its "

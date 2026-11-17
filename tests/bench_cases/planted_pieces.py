@@ -21,6 +21,8 @@ is a Sponsor's scene or anything from one (mqucifer/print-shop#152, mqucifer/pri
 - `quiet.json`: a spur under the neck limit and a spiked notch shallower than its mouth, neither
   of which any rule flags.
 - `edge.json`: two pieces on the panel's right edge, the line between them slanting to it.
+- `joined.json`: a dead end whose tip is three microns from a long line inside the same
+  piece, so the pixels show the two as one stretch of lead.
 - `hairs.json`: two cuts two microns wide whose ends face each other, which the
   outline has and no pixel shows.
 """
@@ -339,6 +341,44 @@ def edge() -> dict[str, Any]:
     }
 
 
+def joined() -> dict[str, Any]:
+    """The rules' map, twice the size, with a dead end 1.2 mm wide and 8 mm long down from
+    piece 3's top edge, and a line inside piece 3, 1.2 mm wide and 40 mm long, that starts
+    0.003 mm under the dead end's tip and runs on down. By the outline they're two: a dead end
+    and a line joined to no other. No pixel shows the 0.003 mm between them, so the pixels'
+    lead alone with piece 3 is one stretch 48 mm long, whose middle is 24 mm from the dead
+    end's tip."""
+    lead, half = 1.2, 0.6
+    boxes = [(0, 0, 60, 60), (60, 0, 120, 60), (0, 60, 60, 120), (60, 60, 120, 120)]
+    outlines = []
+    for x0, y0, x1, y1 in boxes:
+        a = x0 if x0 == 0 else x0 + half
+        b = y0 if y0 == 0 else y0 + half
+        c = x1 if x1 == 120 else x1 - half
+        e = y1 if y1 == 120 else y1 - half
+        outlines.append([[a, b], [c, b], [c, e], [a, e]])
+    pieces: list[dict[str, Any]] = [
+        {"id": k + 1, "colour": colour, "outline": outline}
+        for k, (outline, colour) in enumerate(
+            zip(outlines, ("blue", "gold", "green", "red"), strict=True)
+        )
+    ]
+    # Piece 3 is the top-left cell: the dead end runs up into it from its bottom edge.
+    low, top, right = 60.6, 120.0, 59.4
+    pieces[2]["outline"] = [
+        [0, low], [29.4, low], [29.4, low + 8], [30.6, low + 8], [30.6, low], [right, low],
+        [right, top], [0, top],
+    ]  # fmt: skip
+    pieces[2]["holes"] = [[[29.4, 68.603], [30.6, 68.603], [30.6, 108.603], [29.4, 108.603]]]
+    return {
+        "piece_map": 1,
+        "panel": {"width_mm": 120, "height_mm": 120},
+        "lead_mm": lead,
+        "colours": {"blue": {"rgb": [40, 90, 220]}},
+        "pieces": pieces,
+    }
+
+
 def rules(slit: bool, depth: float = 8.0) -> dict[str, Any]:
     lead = 1.2
     outlines = cells(lead)
@@ -394,6 +434,7 @@ for name, made in (
     ("hairs.json", hairs()),
     ("thin_lines.json", thin_lines()),
     ("quiet.json", quiet()),
+    ("joined.json", joined()),
     ("edge.json", edge()),
 ):
     with open(name, "w") as fh:
