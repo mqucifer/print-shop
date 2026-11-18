@@ -36,7 +36,7 @@ JSON, in millimetres, x to the right and y up from the panel's bottom-left:
 | `flags` | the rule breaks as `trace` or a fix last read them | a reader only: `check` reads the pieces again, and no command trusts these |
 | `source` | what drew the map, and its glass share then | `check` and each fix, which say the share now against it |
 | `history` | each fix made, in order | a reader only |
-| `surface` | what the map lies on, where that isn't a flat panel: a dome's chart, or one flat slice of a dome with its folds and edges ([below](#a-dome-from-rules-and-its-flat-slices)). A flat panel's map has none | `flatten`, which cuts a dome's chart; the joining stage, which reads a slice's; every fix keeps it |
+| `surface` | what the map lies on, where that isn't a flat panel: a dome's chart, or one flat slice of a dome with its folds and edges ([below](#a-dome-from-rules-and-its-flat-slices)). A flat panel's map has none | `flatten`, which cuts a dome's chart; `build --seam` and `seam`, which read a slice's edges and folds; every fix keeps it |
 
 **A piece is its glass.** Its outline is where the glass meets the lead, so the lead is the panel less every piece and no line is stored twice. Two pieces never overlap, and every piece lies inside the panel: a map that breaks either is refused, saying which pieces. A map from rules writes each cell inset by half its lead.
 
@@ -74,7 +74,7 @@ JSON, in millimetres, x to the right and y up from the panel's bottom-left:
 
 ## A dome from rules, and its flat slices
 
-(mqucifer/print-shop#154, M20's lamp.) A shade is a dome of stained glass: one motif repeated round it, in bands from its top to its hem. Its pieces follow the dome's own lines, down and around, so they're made from a few figures, in code (decided at M20's planning session, 2026-11-17). A real dome is made of flat pieces, and its curve comes from slight angles along the lead lines. So the dome's map is cut along lead lines into slices, each laid flat as its own map, and those are what `check` reads and `build` builds. Bending and joining them is the lamp's next stage.
+(mqucifer/print-shop#154, M20's lamp.) A shade is a dome of stained glass: one motif repeated round it, in bands from its top to its hem. Its pieces follow the dome's own lines, down and around, so they're made from a few figures, in code (decided at M20's planning session, 2026-11-17). A real dome is made of flat pieces, and its curve comes from slight angles along the lead lines. So the dome's map is cut along lead lines into slices, each laid flat as its own map, and those are what `check` reads and `build` builds. They join edge to edge by bevelled, pinned seams ([below](#the-seams-between-slices)); bending them, and the lamp's fitting, are still to come.
 
 ### The bands file
 
@@ -132,7 +132,7 @@ JSON, in millimetres, x to the right and y up from the panel's bottom-left:
 - **A place on the dome goes to the row's place** as far between its folds, by the way down the dome, and as far between its cuts, by the angle round. A line down the dome stays straight, and a line round it becomes a straight line across, so a slice bends along straight lines. A flat row is a little shorter and narrower than the dome it stands for, and away from a slice's middle its lines down the dome lean toward the top, so a shape is a little off true there. On the six-band test dome the lead between two neighbours reads 1.34 to 1.40 mm flat where the dome's is 1.4, and a round jewel of 8 mm, a quarter of the way across its slice, is 7.70 by 8.13 mm (`~/print-shop/proofs/m20-dome/six/`).
 - **It's drawn as seen from outside the dome,** its hem at the bottom, in mm from its outline's bottom-left.
 - **Its panel's edge is the glass's edge,** half a lead inside each cut's middle. So `pieces build MAP --border 0.7`, half the lead, puts the frame's edge on the cut's middle, and two slices meet in one line as wide as the lead. A wider border overlaps its neighbour's.
-- **`surface`** holds what the joining stage reads, each y in the map's own mm:
+- **`surface`** holds what `build --seam` and `seam` read, each y in the map's own mm:
 
 | Key | It holds |
 |---|---|
@@ -149,3 +149,34 @@ JSON, in millimetres, x to the right and y up from the panel's bottom-left:
 - **Slices that are the same** are said (`alike`), and written point for point the same, so one check and one build stand for each group.
 - **`--bed X,Y`** is the bed each has to fit, 256 by 256 unless given: `FAIL` where one doesn't.
 - **A fix on a slice keeps its `surface`.** One that joins two pieces across a fold leaves glass where the slice bends: a slice bends only along lead, so don't.
+
+### The seams between slices
+
+(mqucifer/print-shop#166, agreed with the Sponsor on 2026-11-17.) Two neighbouring slices stand at an angle to each other, a different one at each flat row: `join_deg`. So a slice's long edge is a row of straight lengths, one a row, and each is bevelled by half the join there. The two faces then lie on one plane, the one through the dome's axis and the cut, and meet flat. Small pins on one edge enter holes in its neighbour's, to line the slices up and hold them while the glue sets.
+
+`pieces build SLICE ... --seam LEFT,RIGHT` builds a slice's two long edges so. LEFT and RIGHT are what each edge is built as: `pins`, `holes` or `plain`, a bevel alone. `--seam holes,pins` on every slice puts each one's pins in its neighbour's holes.
+
+- **Where a face is.** The frame's middle, half its thickness up, is taken to lie on the slice's rows, whose corners are on the dome. A length's face passes through the cut's middle there and leans out toward the outer face, the one the map is seen from, by its bevel. So the frame is wider than the cut at its outer face and narrower at its inner: 0.40 mm each way on a frame 3 mm thick at 15°.
+- **`--border` is then the frame at the top and the hem only.** At a seam the frame's side is the cut's middle, whatever the border.
+- **A pin** is a small key, square in section, so it prints as part of each layer's outline: `--pin ALONG,THROUGH,OUT`, how far it runs along the edge, through the frame's thickness, and out of the face, 1.2, 1.6 and 0.5 mm unless given. It stands square to the face, on the frame's middle. Its hole is `--pin-play` larger all round and deeper, 0.1 mm unless given.
+- **`--pins N`** is how many each straight length has, 1 unless given, evenly along it: the same places on both slices, as both read the same edge. A length too short for N, each 1 mm or more from a fold, is refused, saying how many fit.
+- **The reply gives** each length's bevel and its pins (`seam`), the pins and holes in all (`pins_count`, `holes_count`), and the least lead a bevel leaves beside a pocket (`seam_wall_mm`).
+- **What's refused, with nothing built.** A seam lies inside the lead line, half of which is this slice's. Each of these is named, with its figure and where:
+  - a bevel that leaves under 0.4 mm of lead, a nozzle's width, beside a pocket at the pocket's floor;
+  - a bevel that passes under a pane's edge at the frame's inner face, which would cut that pane's lip;
+  - a hole that leaves under 0.4 mm of lead between it and the nearest pocket.
+
+  The reply says the lead that would leave room (`lead_needed_mm`).
+- **A lead of 1.4 mm takes the bevels and no pin.** Each half of a seam's line is then 0.7 mm. On the six-band dome at 12 slices and 3 mm thick, the bevels leave 0.50 mm beside a pocket, and the pin above would need a lead of about 2.5 mm. `--seam plain,plain` builds the bevels alone.
+- **Second method.** Each join by the rows' own corners on the dome, against `flatten`'s figure: apart by 0.01° is `DISAGREE`. Each seam's face read back from the frame, against its bevel. The frame's volume by OpenCascade, against its sections in Shapely at 13 heights. The dome's own surface turns a little more than its flat rows do, 12.33° where the top rows stand 12.01° apart: that's the curve's angle and not the rows', another thing measured, so it's a note.
+
+`pieces seam A B --frames FA FB` reads two built neighbours as they'd stand on the dome. Each frame is cut at its folds into its flat rows, and each row is set where its slice's map puts it: bent by the folds from the hem up, and turned round the dome's axis.
+
+- **At each length:** the two faces that meet, how far off parallel they are (`faces_apart_deg`), and the furthest a corner of either stands off the other's plane (`gap_mm`); what the two rows share (`overlap_mm3`); and each pin, which is whatever of a row stands 0.1 mm or more past its own face, with whether the other row is round it on four sides and past its end (`pins_in_holes`) and how near they come (`pin_play_mm`).
+- **Verdict:** `OK` where the faces meet within `--gap`, 0.05 mm unless given, nothing is shared, and every pin is in a hole. `INTERFERE` where the rows share anything, saying whether it's pins with no hole or faces that cross. `FAIL` where the faces stand apart or a pin has no hole. Two slices that aren't neighbours are `NO ANSWER`.
+- **It writes the two slices as placed** (`placed`, and each slice's own file beside it), for `render`:
+
+![Two neighbouring slices of a twelve-slice test dome, each bent by its folds and placed, seen from four sides; the pins stand out of the free edge](pieces-seam.png)
+
+- **Second method:** points, with no boolean. Each face's and each pin's own corners, moved 0.02 mm into their own row, are asked whether they're inside the other row too; and the nearest the two rows come is read by OpenCascade's distance between shapes.
+- **What it can't read:** how a heated lead line bends. Each row is placed as a rigid flat piece, so they overlap a little at a fold's inner side, and a real seam is as true as its folds are bent.

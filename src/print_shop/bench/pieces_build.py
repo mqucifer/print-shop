@@ -56,10 +56,20 @@ import numpy as np
 import shapely
 from shapely.geometry.polygon import orient
 
-from . import piecemap, pieces_seam
+from . import piecemap
 from .limits import under
 from .piecemap import Map, Piece
 from .pieces_check import gaps
+from .pieces_seam import (
+    faces_read,
+    refuse_seams,
+    say_seams,
+    seam_checks,
+    seam_plan,
+    volume_by_sections,
+    widened,
+    with_seams,
+)
 from .report import NoAnswer, Report
 
 #: A turn sharper than this between two sides, in degrees, is a corner, not a curve.
@@ -1222,8 +1232,18 @@ def run_build(args: Any, report: Report) -> None:
     border = args.border if args.border is not None else 2.0 * found.lead_mm
     if not border > 0:
         raise NoAnswer("--border is the frame round the panel's edge, in mm, over 0")
+    given = [
+        f"--{name.replace('_', '-')}"
+        for name in ("pins", "pin", "pin_play")
+        if getattr(args, name, None) is not None
+    ]
+    if given and not getattr(args, "seam", None):
+        raise NoAnswer(
+            f"{' and '.join(given)} size a seam's pins, and there's no --seam: `--seam "
+            "holes,pins` builds a slice's two long edges as seams"
+        )
     seam = (
-        pieces_seam.plan(found, args.map, args, z) if getattr(args, "seam", None) else None
+        seam_plan(found, args.map, args, z) if getattr(args, "seam", None) else None
     )
     rows, wrong = plan(found, (full, least), args.play, args.fit, share)
     report.numbers["unbuildable"] = wrong
@@ -1243,13 +1263,13 @@ def run_build(args: Any, report: Report) -> None:
         )
         return
     if seam is not None and seam.refused:
-        pieces_seam.refuse(seam, report)
+        refuse_seams(seam, report)
         return
     out = Path(args.out_build)
     out.mkdir(parents=True, exist_ok=True)
     # With seams the plate is wider than the cuts, and they're cut from it: the frame's side
     # is then each cut's middle, whatever the border.
-    wide = found.panel if seam is None else pieces_seam.widened(found, seam)
+    wide = found.panel if seam is None else widened(found, seam)
     outline = wide.buffer(border, join_style="mitre")
     frame_wire = _wire(fit_ring(_points(outline.exterior), args.fit))
     openings: list[Any] = []
@@ -1266,7 +1286,7 @@ def run_build(args: Any, report: Report) -> None:
     expected = (
         outline.area * args.thickness
         if seam is None
-        else pieces_seam.volume_by_sections(seam, outline)
+        else volume_by_sections(seam, outline)
     )
     pocket_tall = z["pocket_top_z"] - z["pocket_floor_z"]
     pane_volumes: list[tuple[int, float, float]] = []
@@ -1326,7 +1346,7 @@ def run_build(args: Any, report: Report) -> None:
     # pocket between the lips: two cuts, each by tools that don't meet each other.
     plate = _prism(frame_wire, [], 0.0, args.thickness)
     if seam is not None:
-        plate = pieces_seam.with_seams(plate, seam, outline)
+        plate = with_seams(plate, seam, outline)
     through = [_prism(outer, inners, 0.0, args.thickness) for outer, inners in openings]
     frame = plate.cut(cq.Compound.makeCompound(through))
     frame = frame.cut(cq.Compound.makeCompound(pockets)).clean()
@@ -1392,8 +1412,8 @@ def run_build(args: Any, report: Report) -> None:
     )  # fmt: skip
     seam_off = 0.0
     if seam is not None:
-        pieces_seam.say(seam, report, found.lead_mm)
-        seam_off = pieces_seam.faces_read(frame, seam)
+        say_seams(seam, report, found.lead_mm)
+        seam_off = faces_read(frame, seam)
         report.numbers["seam_faces_off_deg"] = seam_off
     glass_mm2 = sum(p.shape.area for p in found.pieces)
     report.fact(
@@ -1487,7 +1507,7 @@ def run_build(args: Any, report: Report) -> None:
             f"each length's seam face read back from the frame: a flat face through the cut's "
             f"middle whose normal is within {seam_off:.4f}° of the bevel's"
         )
-        differs += pieces_seam.checks(seam, report)
+        differs += seam_checks(seam, report)
         if seam_off > 0.01:
             differs.append(
                 f"a seam's face in the frame is {seam_off:.3f}° off its bevel, or isn't there"

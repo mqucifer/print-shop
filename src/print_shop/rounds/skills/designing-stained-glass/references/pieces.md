@@ -1,6 +1,6 @@
 ---
 name: reading-a-piece-map
-description: Explains the stained-glass piece map and what each pieces command answers (trace, check, merge, split, extend, drop-line, widen, fix, build, dome and flatten), with the numbers in each reply. Use when tracing a stained-glass picture, reading a pieces reply, choosing a fix for a flagged piece, building a frame and panes from a map, or making a dome shade's map from bands and cutting it into flat slices.
+description: Explains the stained-glass piece map and what each pieces command answers (trace, check, merge, split, extend, drop-line, widen, fix, build, dome, flatten and seam), with the numbers in each reply. Use when tracing a stained-glass picture, reading a pieces reply, choosing a fix for a flagged piece, building a frame and panes from a map, making a dome shade's map from bands and cutting it into flat slices, or building a slice's seams and reading how two slices meet.
 ---
 
 # The piece map and the `pieces` commands
@@ -23,6 +23,8 @@ drawn at. Don't edit a map by hand or with code of yours: each command writes a 
 | `pieces build MAP --thickness T --pane P --lip FULL[,LEAST] --play C [--min-visible S] [--layer L] [--border MM] [--fit MM]` | `frame.step` and `pane_COLOUR.step` for each colour: each pane its piece inset by the play, each pocket the pane and the play round it, and a lip over the pane's edge on both faces, FULL wide on every piece, or with `--min-visible S` the rim `capture` asks of each pane: FULL where it keeps S percent visible, else the widest that does, never under LEAST. A piece with a waist the lip closes over is refused, with the line to split it along |
 | `pieces dome --diameter D --height H --repeats N --bands FILE [--top MM] [--to FILE]` | a dome shade's map, `dome.pieces.json`: the bands of FILE from the top to the hem, laid N times round a dome D across at its hem and H tall, open at its top. The map is the dome's chart, the way round by the way up from the hem; its picture comes to you: the dome from the side and from above, one slice laid flat with its folds, and the chart |
 | `pieces flatten MAP [--slices N] [--rows R] [--bed X,Y] [--max-off MM] [--to NAME]` | the dome's map cut along lead lines into N slices, each laid flat as its own map, `MAP's name.slice-01.pieces.json` and so on: each slice's size and whether it fits the bed, the angle each fold bends through, and which slices are the same map |
+| `pieces build SLICE ... --seam LEFT,RIGHT [--pins N] [--pin ALONG,THROUGH,OUT] [--pin-play MM]` | a slice's frame with its two long edges built as seams: each straight length bevelled by half the angle between the two slices there, with LEFT and RIGHT each `pins`, `holes` or `plain`. `seam` has each length's bevel and pins. `FAIL`, with nothing built, where a bevel or a hole would leave under 0.4 mm of lead beside a pocket, with each place and `lead_needed_mm` |
+| `pieces seam A B --frames FA FB [--gap MM]` | two neighbouring slices' built frames, bent by their folds and placed round the dome: how far their faces stand apart (`gap_mm`, `faces_apart_deg`), what they share (`overlap_mm3`), and how many pins are in holes (`pins_in_holes` of `pins_count`). It writes both as placed (`placed`), for `render` |
 
 ## Reading them
 
@@ -70,3 +72,6 @@ JSON, the bands from the top to the hem. Each has a `pattern`, its `height_mm` d
 - **`pieces build MAP --border B`** with B half the map's lead, as the reply gives it: the frame's edge is then the middle of the cut line, and two slices meet in one line.
 - **`rows_count`** is how many flat rows a slice is: every lead line all the way round is a fold, unless `--rows R` asks for fewer. `rows_choice` says, for each count, how far the rows would stand from the dome and the sharpest bend: fewer rows are fewer bends, each sharper, and further off.
 - **`rows_off_dome_mm`** is how far the flat rows stand from the curved dome. It's a reading unless the request limits it: then give `--max-off`, and with `FAIL`, cut more slices or add a band.
+- **`--seam holes,pins` on every slice** puts each slice's pins in its neighbour's holes. The frame's side is then the cut's middle, and `--border` is the frame at the top and the hem.
+- **A refused seam names what to change.** A hole with no room wants a wider lead in the bands file, `lead_needed_mm`, or `--seam plain,plain`, the bevels alone, where the request fixes the lead. A bevel with no room wants more slices, a thinner frame or a wider lead.
+- **`pieces seam`** takes two neighbours, slice N and slice N + 1, each built with the same `--seam`, `--pins` and `--pin`. `INTERFERE` with pins that meet no hole means the two were built with different pins.

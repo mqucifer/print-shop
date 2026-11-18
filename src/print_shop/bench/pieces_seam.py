@@ -277,7 +277,7 @@ def _hole_corners(length: Length, at: np.ndarray, seam: Seam, grow: float) -> np
     )
 
 
-def plan(found: Map, name: str, args: Any, z: dict[str, float]) -> Seam:
+def seam_plan(found: Map, name: str, args: Any, z: dict[str, float]) -> Seam:
     """A slice's seams, with every place one would cut a pocket or a lip.
 
     A piece's pocket never stands past its outline, so the lead beside a seam is read from the
@@ -334,8 +334,8 @@ def plan(found: Map, name: str, args: Any, z: dict[str, float]) -> Seam:
                         "why": f"{said}: a bevel of {length.bevel_deg:.2f}° comes in "
                         f"{at_floor:.2f} mm at the pocket's floor, and the nearest pocket is "
                         f"{length.half_mm:.2f} mm from the cut's middle, which leaves "
-                        f"{length.wall_mm:.2f} mm of lead beside that pocket, under the "
-                        f"{WALL:g} mm a nozzle prints",
+                        + (f"{length.wall_mm:.2f} mm of" if length.wall_mm > 0.005 else "no")
+                        + f" lead beside that pocket, where a nozzle prints {WALL:g} mm",
                     }  # fmt: skip
                 )
             elif under(length.half_mm - at_face, 0.0):
@@ -381,8 +381,10 @@ def plan(found: Map, name: str, args: Any, z: dict[str, float]) -> Seam:
                             "why": f"{said}: a hole for a pin {pin[2]:g} mm out, at "
                             f"{piecemap.said_at(at)}, reaches {reach:.2f} mm in from the cut's "
                             f"middle, and the nearest pocket is {length.half_mm:.2f} mm from "
-                            f"it, which leaves {max(wall, 0.0):.2f} mm of lead between the hole "
-                            f"and that pocket, under the {WALL:g} mm a nozzle prints",
+                            "it, which leaves "
+                            + (f"{wall:.2f} mm of" if wall > 0.005 else "no")
+                            + f" lead between the hole and that pocket, where a nozzle prints "
+                            f"{WALL:g} mm",
                         }  # fmt: skip
                     )
     if seam.refused:
@@ -555,7 +557,7 @@ def faces_read(frame: Any, seam: Seam) -> float:
     return worst
 
 
-def say(seam: Seam, report: Report, lead: float) -> None:
+def say_seams(seam: Seam, report: Report, lead: float) -> None:
     """A build's lines about its seams: each length's bevel and its pins."""
     numbers: dict[str, Any] = {}
     for edge in seam.edges:
@@ -578,11 +580,12 @@ def say(seam: Seam, report: Report, lead: float) -> None:
         report.line(
             f"seam, {edge.name} edge, shared with slice {edge.slice}, built as "
             + ("bevels alone" if edge.kind == "plain" else f"bevels and {edge.kind}")
-            + ", each straight length from the hem up, its bevel and its "
-            + ("pins: " if edge.kind != "holes" else "holes: ")
+            + ", each straight length from the hem up, its bevel"
+            + ("" if edge.kind == "plain" else f" and its {edge.kind}")
+            + ": "
             + "; ".join(
-                f"length {length.row}, {length.length:.1f} mm, {length.bevel_deg:.2f}°, "
-                f"{length.pins}"
+                f"length {length.row}, {length.length:.1f} mm, {length.bevel_deg:.2f}°"
+                + ("" if edge.kind == "plain" else f", {length.pins}")
                 for length in edge.lengths
             )
         )
@@ -614,7 +617,7 @@ def say(seam: Seam, report: Report, lead: float) -> None:
     )
 
 
-def refuse(seam: Seam, report: Report) -> None:
+def refuse_seams(seam: Seam, report: Report) -> None:
     """A seam that would cut a pocket or a lip: each place, and what would fit."""
     report.numbers["seam_refused"] = [
         {k: v for k, v in row.items() if k != "why"} for row in seam.refused
@@ -642,7 +645,7 @@ def refuse(seam: Seam, report: Report) -> None:
     )
 
 
-def checks(seam: Seam, report: Report) -> list[str]:
+def seam_checks(seam: Seam, report: Report) -> list[str]:
     """The joins read a second way, and what differs."""
     lengths = [length for edge in seam.edges for length in edge.lengths]
     off = max(abs(length.by_corners_deg - length.join_deg) for length in lengths)
