@@ -396,12 +396,18 @@ def _cover(shape: Any, x0: float, y1: float, mm: float, size: tuple[int, int]) -
     return (slice(r0, r1), slice(c0, c1)), shapely.contains_xy(shape, grid_x, grid_y)
 
 
+def usual_px_per_mm(found: Map) -> float:
+    """The scale a map is drawn at for the second readings, unless another is asked for."""
+    x0, y0, x1, y1 = found.panel.bounds
+    return min(FINEST_PX_PER_MM, math.sqrt(MOST_PX / ((x1 - x0) * (y1 - y0))))
+
+
 def pixels(found: Map, px_per_mm: float | None = None) -> Pixels:
     """The map drawn as pixels, by which pixel centres each piece covers: no drawing library's
     edges, so a piece's pixels are its area to a pixel's width round its outline."""
     x0, y0, x1, y1 = found.panel.bounds
     if px_per_mm is None:
-        px_per_mm = min(FINEST_PX_PER_MM, math.sqrt(MOST_PX / ((x1 - x0) * (y1 - y0))))
+        px_per_mm = usual_px_per_mm(found)
     mm = 1.0 / px_per_mm
     size = (max(1, round((y1 - y0) * px_per_mm)), max(1, round((x1 - x0) * px_per_mm)))
     ids = np.zeros(size, dtype=np.int32)

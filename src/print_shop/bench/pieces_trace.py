@@ -41,17 +41,22 @@ import shapely
 
 from . import colours, piecemap
 from .piecemap import Map, Piece
-from .pieces_check import counts_said, draw, fixes_said, limits_of, read_map, say
+from .pieces_check import (
+    counts_said,
+    dead_ends,
+    draw,
+    fixes_said,
+    limits_of,
+    read_map,
+    say,
+)
+from .pieces_picture import DEFAULT_DARK, paint_of, panel_of
 from .report import NoAnswer, Report
 
 #: A patch of colour under this many pixels is a speck between lines: lead, not a piece.
 SPECK_PX = 40
 #: A gap between dark pixels narrower than this, in mm, and never under 3 pixels, is lead.
 HAIR_MM = 0.5
-#: A row or a column of the picture's edge is the outer frame where this share of it is dark,
-#: and the frame starts within this share of the picture from its edge.
-FRAME_SHARE = 0.6
-FRAME_WITHIN = 0.25
 #: A corner is read over this many pixels each side, where the way along the outline turns by
 #: more than this many degrees: a staircase's own turns over that reach are under 20.
 CORNER_PX = 6
@@ -69,10 +74,11 @@ SMOOTH_PX = 5
 #: slope's steps, a pixel tall and many apart, stand half a pixel either side of the line they
 #: stand for, and averaging doesn't take them out.
 SIMPLIFY_PX = 1.0
+#: Two pieces have a line of their own between them where they're no further apart than this
+#: many of the map's usual lead (`pieces_fix.WIDE_GAP`).
+LINE_REACH = 1.25
 #: The fewest pixels across the panel a trace reads: under this a lead line is a pixel or two.
 LEAST_PX = 200
-#: A piece's colour is read from at most this many of its pixels, away from its edge.
-COLOUR_PX = 20_000
 
 
 def palette_of(text: str | None) -> dict[str, tuple[int, int, int]] | None:
@@ -98,63 +104,6 @@ def palette_of(text: str | None) -> dict[str, tuple[int, int, int]] | None:
     if not found:
         raise NoAnswer("--palette names one colour or more")
     return found
-
-
-def _run(flags: np.ndarray) -> int:
-    """How many of the first entries are set, in a row."""
-    clear = np.flatnonzero(~flags)
-    return int(clear[0]) if len(clear) else len(flags)
-
-
-def _frame_side(dark_share: np.ndarray) -> tuple[int, int]:
-    """Where the frame lies along one side, from the picture's edge inward: the first row or
-    column, within the outer `FRAME_WITHIN` of the picture, that's dark over `FRAME_SHARE` of
-    its length, and how many in a row from there are. A margin before it, with whatever specks
-    it has, is outside the frame. (0, 0) where the side has no frame."""
-    flags = dark_share > FRAME_SHARE
-    outer = np.flatnonzero(flags[: max(1, int(len(flags) * FRAME_WITHIN))])
-    if not len(outer):
-        return 0, 0
-    first = int(outer[0])
-    return first, _run(flags[first:])
-
-
-def panel_of(dark: np.ndarray) -> tuple[slice, slice, dict[str, int]]:
-    """The panel: the picture inside its outer frame on all four sides, as a window of it, and
-    the frame's thickness on each side in pixels. Whatever lies outside the frame, a margin and
-    anything in it, isn't the panel. A side with no frame is the picture's own edge there, less
-    any margin with nothing dark in it."""
-    if not dark.any():
-        raise NoAnswer("the picture has no dark lines: nothing in it is under --dark")
-    height, width = dark.shape
-    rows, cols = slice(0, height), slice(0, width)
-    found: dict[str, tuple[int, int]] = {}
-    # Twice: a side's share is read over the span the other two sides' frames leave, so a
-    # margin beside the frame doesn't thin it.
-    for _ in range(2):
-        across = dark[:, cols].mean(axis=1)
-        down = dark[rows, :].mean(axis=0)
-        found = {
-            "top": _frame_side(across),
-            "bottom": _frame_side(across[::-1]),
-            "left": _frame_side(down),
-            "right": _frame_side(down[::-1]),
-        }
-        rows = slice(found["top"][0], height - found["bottom"][0])
-        cols = slice(found["left"][0], width - found["right"][0])
-    frame = {side: run for side, (_, run) in found.items()}
-    if not any(frame.values()):
-        # No frame at all: the whole picture is the panel, margins and all.
-        return slice(0, height), slice(0, width), frame
-    lit_rows = np.flatnonzero(dark.any(axis=1))
-    lit_cols = np.flatnonzero(dark.any(axis=0))
-    top = sum(found["top"]) if frame["top"] else int(lit_rows[0])
-    bottom = height - sum(found["bottom"]) if frame["bottom"] else int(lit_rows[-1]) + 1
-    left = sum(found["left"]) if frame["left"] else int(lit_cols[0])
-    right = width - sum(found["right"]) if frame["right"] else int(lit_cols[-1]) + 1
-    if bottom - top < 3 or right - left < 3:
-        raise NoAnswer("the picture is dark all over: nothing in it is over --dark")
-    return slice(top, bottom), slice(left, right), frame
 
 
 def _outline(mask: np.ndarray, row0: int, col0: int) -> Any:
@@ -341,44 +290,59 @@ def _parted(pieces: list[Piece], raw: list[Any], mm: float) -> set[int]:
     return changed
 
 
-def _paint(rgb: np.ndarray, mask: np.ndarray) -> dict[str, Any]:
-    """The picture's colour over a patch, away from its edge: its mean, and how far it runs
-    from one end of the patch to the other, read two ways."""
-    from scipy import ndimage
-
-    core = ndimage.binary_erosion(mask, iterations=2)
-    if core.sum() < 12:
-        core = mask
-    rows, cols = np.nonzero(core)
-    if len(rows) > COLOUR_PX:
-        pick = np.linspace(0, len(rows) - 1, COLOUR_PX).astype(int)
-        rows, cols = rows[pick], cols[pick]
-    values = rgb[rows, cols].astype(float)
-    mean = values.mean(axis=0)
-    paint: dict[str, Any] = {
-        "rgb": [int(round(v)) for v in mean],
-        "spread": round(float(np.linalg.norm(values.std(axis=0))), 2),
-        "run": 0.0,
-        "run_fitted": 0.0,
-    }
-    if len(rows) < 24:
-        return paint
-    # A plane fitted to each channel: the way the colour changes fastest, and by how much from
-    # one end of the patch to the other along it.
-    at = np.stack([cols - cols.mean(), rows - rows.mean()], axis=1).astype(float)
-    slopes, *_ = np.linalg.lstsq(np.column_stack([at, np.ones(len(at))]), values - mean, rcond=None)
-    _, strength, ways = np.linalg.svd(slopes[:2].T)
-    along = at @ ways[0]
-    low, high = np.percentile(along, [10.0, 90.0])
-    paint["run_fitted"] = round(float(strength[0] * (high - low)), 2)
-    # The same two ends by their own colours: the tenth of the patch at each.
-    ends = values[along <= low].mean(axis=0) - values[along >= high].mean(axis=0)
-    paint["run"] = round(float(np.linalg.norm(ends)), 2)
-    return paint
-
-
 def _nearest(rgb: Any, palette: dict[str, tuple[int, int, int]]) -> str:
     return min(palette, key=lambda name: math.dist(rgb, palette[name]))
+
+
+def lead_of(dark: np.ndarray, mm: float) -> tuple[np.ndarray, int]:
+    """The lead: the dark pixels with each gap under `HAIR_MM` wide closed, a hairline break
+    in a line or a hair of colour beside one, as no nozzle prints glass that thin. With the
+    square it's closed by, in pixels. Past the edge is the frame, so a hair of colour along
+    the edge is closed too."""
+    from scipy import ndimage
+
+    side = max(3, 2 * int(HAIR_MM / mm / 2.0) + 1)
+    lines = ndimage.binary_closing(
+        np.pad(dark, side, constant_values=True), structure=np.ones((side, side))
+    )
+    return lines[side:-side, side:-side], side
+
+
+def unspecked(pieces: list[Piece], lead_mm: float) -> int:
+    """Each speck of dark inside one piece, joined to no line and shorter than a lead is wide,
+    filled as that piece's glass: it's the picture's noise, not a line that ends in glass.
+    With how many."""
+    filled = 0
+    for piece in pieces:
+        kept = []
+        for ring in piece.shape.interiors:
+            hole = shapely.Polygon(ring)
+            sides = shapely.get_coordinates(hole.minimum_rotated_rectangle)
+            long = max(math.dist(sides[0], sides[1]), math.dist(sides[1], sides[2]))
+            lone = not any(o is not piece and o.shape.intersects(hole) for o in pieces)
+            if lone and long < lead_mm:
+                filled += 1
+            else:
+                kept.append(ring)
+        if len(kept) != len(piece.shape.interiors):
+            piece.shape = shapely.geometry.polygon.orient(
+                shapely.Polygon(piece.shape.exterior, kept), 1.0
+            )
+    return filled
+
+
+def lines_of(found: Map, within: Any = None) -> int:
+    """How many lead lines a map has, or the part of it `within` a shape: each two pieces
+    with a line of their own between them, no further apart than a line and a quarter."""
+    shapes = [p.shape for p in found.pieces]
+    if within is not None:
+        shapes = [s.intersection(within) for s in shapes if s.intersects(within)]
+        shapes = [s for s in shapes if s.area > 0]
+    if len(shapes) < 2:
+        return 0
+    tree = shapely.STRtree(shapes)
+    pairs = tree.query(shapes, predicate="dwithin", distance=LINE_REACH * found.lead_mm).T
+    return sum(1 for a, b in pairs if a < b)
 
 
 def trace(picture: Any, width_mm: float, dark_under: int, palette: Any) -> dict[str, Any]:
@@ -396,14 +360,7 @@ def trace(picture: Any, width_mm: float, dark_under: int, palette: Any) -> dict[
             "line is more than a pixel or two"
         )
     mm = width_mm / width
-    # A gap in the lead under `HAIR_MM` wide, a hairline break in a line or a hair of colour
-    # beside one, is lead: no nozzle prints glass that thin.
-    side = max(3, 2 * int(HAIR_MM / mm / 2.0) + 1)
-    # Past the panel's edge is the frame, so a hair of colour along the edge is closed too.
-    lines = ndimage.binary_closing(
-        np.pad(dark, side, constant_values=True), structure=np.ones((side, side))
-    )
-    lines = lines[side:-side, side:-side]
+    lines, side = lead_of(dark, mm)
     labels, count = ndimage.label(~lines)
     sizes = np.atleast_1d(ndimage.sum(~lines, labels, np.arange(1, count + 1)))
     specks = [k for k in range(1, count + 1) if sizes[k - 1] < SPECK_PX]
@@ -427,7 +384,7 @@ def trace(picture: Any, width_mm: float, dark_under: int, palette: Any) -> dict[
         if not fine:
             lost.append(k)
             continue
-        pieces.append(Piece(0, "", fine[0], paint=_paint(rgb[window], mask)))
+        pieces.append(Piece(0, "", fine[0], paint=paint_of(rgb[window], mask)))
         raw.append(
             piecemap.polygons(
                 shapely.transform(
@@ -470,24 +427,7 @@ def trace(picture: Any, width_mm: float, dark_under: int, palette: Any) -> dict[
         entry["in_picture"] = own
     found = Map(panel, 1.0, table, pieces)
     found.lead_mm = max(piecemap.usual_lead(found), mm)
-    # A speck of dark inside one piece, joined to no line and shorter than a lead is wide, is
-    # the picture's noise, not a line that ends in glass: it's glass.
-    filled = 0
-    for piece in pieces:
-        kept = []
-        for ring in piece.shape.interiors:
-            hole = shapely.Polygon(ring)
-            sides = shapely.get_coordinates(hole.minimum_rotated_rectangle)
-            long = max(math.dist(sides[0], sides[1]), math.dist(sides[1], sides[2]))
-            lone = not any(o is not piece and o.shape.intersects(hole) for o in pieces)
-            if lone and long < found.lead_mm:
-                filled += 1
-            else:
-                kept.append(ring)
-        if len(kept) != len(piece.shape.interiors):
-            piece.shape = shapely.geometry.polygon.orient(
-                shapely.Polygon(piece.shape.exterior, kept), 1.0
-            )
+    filled = unspecked(pieces, found.lead_mm)
     return {
         "map": found,
         "labels": labels,
@@ -530,6 +470,54 @@ def laid_over(found: Map, traced: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def cost_said(
+    report: Report,
+    found: Map,
+    ends: int,
+    picture: Any,
+    width_mm: float,
+    palette: Any,
+    dark: int,
+) -> None:
+    """What a `--dark` other than the default cost (mqucifer/print-shop#172): the pieces, the
+    lines and the dead ends it reads, against the default darkness on the same picture. A run
+    retraced a whole picture at `--dark 18` to lose one dark patch, and 41 of its lines
+    broke into dead ends: the reply that did it said nothing of them."""
+    lines = lines_of(found)
+    report.fact(
+        "lines_count", lines,
+        how="each two pieces with a line of their own between them, at this --dark",
+    )  # fmt: skip
+    report.fact("dead_ends_count", ends, how="lines that end in glass, at this --dark")
+    try:
+        usual: Map = trace(picture, width_mm, DEFAULT_DARK, palette)["map"]
+    except NoAnswer as exc:
+        report.note(
+            f"at the default --dark {DEFAULT_DARK} this picture has no trace to set these "
+            f"against: {exc}"
+        )
+        return
+    usual_ends, usual_lines = len(dead_ends(usual)), lines_of(usual)
+    report.fact(
+        "pieces_at_default_dark", len(usual.pieces),
+        how=f"the same picture at --dark {DEFAULT_DARK}",
+    )  # fmt: skip
+    report.fact("lines_at_default_dark", usual_lines, how="its lines")
+    report.fact("dead_ends_at_default_dark", usual_ends, how="its dead ends")
+    report.line(
+        f"--dark {dark} against the default {DEFAULT_DARK} on this picture: "
+        f"{len(found.pieces)} piece(s) against {len(usual.pieces)}, {lines} line(s) against "
+        f"{usual_lines}, {ends} dead end(s) against {usual_ends}"
+    )
+    if ends > usual_ends or len(found.pieces) < len(usual.pieces) or lines < usual_lines:
+        report.note(
+            f"--dark {dark} changes every line of the picture, and this is what it cost. To "
+            "fix one place and keep the rest, trace at the default and then `pieces retrace "
+            f"MAP --box X0,Y0,X1,Y1 --dark {dark}` reads only that place at this darkness; "
+            "`pieces fill MAP --at X,Y` turns one patch of lead into glass"
+        )
+
+
 def run_trace(args: Any, report: Report) -> None:
     from PIL import Image
 
@@ -555,6 +543,7 @@ def run_trace(args: Any, report: Report) -> None:
     found.source = {
         "by": "pieces trace",
         "image": source.name,
+        "image_path": args.image,
         "px_per_mm": round(1.0 / traced["mm"], 4),
         "dark_under": args.dark,
         "pieces": len(found.pieces),
@@ -601,6 +590,8 @@ def run_trace(args: Any, report: Report) -> None:
         + (" (the nearest of --palette)" if palette else " (the nearest named colour to each)")
     )
     say(found, reading, report, limits)
+    if args.dark != DEFAULT_DARK:
+        cost_said(report, found, len(reading.dead_ends), picture, args.width, palette, args.dark)
     over = laid_over(found, traced)
     report.numbers["laid_over"] = over
     report.second(

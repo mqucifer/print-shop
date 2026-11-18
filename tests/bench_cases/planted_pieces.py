@@ -43,6 +43,13 @@ is a Sponsor's scene or anything from one (mqucifer/print-shop#152, mqucifer/pri
   40% of its pane.
 - `tailed.json`: a piece 20 by 5 mm with a tail 2.5 mm wide past a pinch, whose share-sized
   opening has a part under two nozzles wide in the tail.
+- `shadow.png`: the clean panel with one dark patch in its green cell, 9 by 7 mm and darker
+  than `--dark 40`, as a tree's shadow in a scene: read as lead, though it's no line
+  (mqucifer/print-shop#172).
+- `faint.png`: the clean panel with the top half of one upright line faint, under `--dark 40`
+  and over `--dark 20`: at the lower darkness the line ends in glass.
+- `band.json`: three pieces of a 60 x 40 mm panel round a band of lead 12 mm tall, one above it
+  and two below with a line between them.
 - `hairs.json`: two cuts two microns wide whose ends face each other, which the
   outline has and no pixel shows.
 """
@@ -100,6 +107,44 @@ def clean() -> Any:
     for seg in ([(0, 40), (120, 40)], *uprights):
         line(d, seg)
     return im
+
+
+#: The shadow in `shadow.png`: its middle and its half-widths in mm, and its colour, under
+#: `--dark 40` on every channel and over `--dark 20`.
+SHADOW_AT, SHADOW_HALF, SHADOW = (30, 20), (4.5, 3.5), (30, 36, 28)
+
+
+def shadow() -> Any:
+    im = clean()
+    d = ImageDraw.Draw(im)
+    (x, y), (a, b) = SHADOW_AT, SHADOW_HALF
+    d.ellipse([px(x - a, y + b), px(x + a, y - b)], fill=SHADOW)
+    return im
+
+
+def faint() -> Any:
+    im = clean()
+    d = ImageDraw.Draw(im)
+    d.line([px(40, 60), px(40, 80)], fill=SHADOW, width=LINE)
+    return im
+
+
+def band() -> dict[str, Any]:
+    """Three pieces round a band of lead from y 14 to 26, right across a 60 x 40 mm panel:
+    piece 1 above it, pieces 2 and 3 below, with a line 1.2 mm wide between those two at x 30.
+    The band is as near piece 1 as the two below along y 20, and as near piece 2 as piece 3
+    along x 30."""
+    return {
+        "piece_map": 1,
+        "panel": {"width_mm": 60, "height_mm": 40},
+        "lead_mm": 1.2,
+        "colours": {"blue": {"rgb": [40, 90, 220]}},
+        "pieces": [
+            {"id": 1, "colour": "blue", "outline": [[0, 26], [60, 26], [60, 40], [0, 40]]},
+            {"id": 2, "colour": "green", "outline": [[0, 0], [29.4, 0], [29.4, 14], [0, 14]]},
+            {"id": 3, "colour": "gold", "outline": [[30.6, 0], [60, 0], [60, 14], [30.6, 14]]},
+        ],
+    }
 
 
 def broken() -> Any:
@@ -670,6 +715,8 @@ thin_line().save("thin_line.png")
 thin_line(4, specks=True).save("speckled.png")
 margin().save("margin.png")
 specks().save("specks.png")
+shadow().save("shadow.png")
+faint().save("faint.png")
 for name, slit, depth in (
     ("rules.json", False, 0),
     ("slit.json", True, 8),
@@ -698,6 +745,7 @@ for name, made in (
     ("bend.json", bend()),
     ("stairs.json", stairs()),
     ("edge.json", edge()),
+    ("band.json", band()),
 ):
     with open(name, "w") as fh:
         json.dump(made, fh)

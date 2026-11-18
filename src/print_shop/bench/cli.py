@@ -152,6 +152,19 @@ def _line(text: str) -> list[tuple[float, float]]:
     return list(zip(values[::2], values[1::2], strict=True))
 
 
+def _box_xy(text: str) -> tuple[float, float, float, float]:
+    """`20,10,70,30`: two corners of a box on a piece map."""
+    try:
+        values = [float(v) for v in text.split(",")]
+    except ValueError:
+        values = []
+    if len(values) != 4 or not all(math.isfinite(v) for v in values):
+        raise argparse.ArgumentTypeError("X0,Y0,X1,Y1: two corners, in the map's mm")
+    if values[0] == values[2] or values[1] == values[3]:
+        raise argparse.ArgumentTypeError("X0,Y0,X1,Y1: two corners apart both ways")
+    return values[0], values[1], values[2], values[3]
+
+
 def _lips(text: str) -> tuple[float, float]:
     """`1.2,0.8`: the full lip and the least, before play."""
     try:
@@ -843,10 +856,87 @@ def parser() -> Parser:
     widen.add_argument(
         "--lead", type=float, metavar="MM", help="the line's least width (0.4 unless given)"
     )
+    retrace = action.add_parser(
+        "retrace",
+        help="the picture traced again inside a box, at its own --dark and --palette, and "
+        "spliced into the map: nothing outside the box changes, and each line that crosses "
+        "its edge stays where it was and joins the line found inside",
+    )
+    retrace.add_argument("map")
+    retrace.add_argument(
+        "--box",
+        type=_box_xy,
+        required=True,
+        metavar="X0,Y0,X1,Y1",
+        help="two corners of the place to trace again, in the map's mm: it's moved in to the "
+        "picture's pixels",
+    )
+    retrace.add_argument(
+        "--dark",
+        type=int,
+        metavar="N",
+        help="in the box a pixel is lead where every channel is under N, of 255 (the map's "
+        "own trace's unless given)",
+    )
+    retrace.add_argument(
+        "--palette",
+        metavar="NAME[=#rrggbb],...",
+        help="the colours a piece found wholly inside the box may be (the map's unless "
+        "given). A piece that reaches out of the box keeps its colour",
+    )
+    fill = action.add_parser(
+        "fill",
+        help="a patch of lead becomes glass, shared among the pieces round it: each takes "
+        "the part nearer to it than to any other, and a line is left between each two",
+    )
+    fill.add_argument("map")
+    fill.add_argument(
+        "--at",
+        type=_xy,
+        required=True,
+        metavar="X,Y",
+        help="a point in the patch, as `pieces check` says the lead's widest point",
+    )
+    fill.add_argument(
+        "--lead",
+        type=float,
+        metavar="MM",
+        help="the width of the lines left between the shares (the map's unless given)",
+    )
+    paint = action.add_parser(
+        "paint",
+        help="a piece takes another of the map's colours, or a new one with its RGB: how far "
+        "it is from the picture's own colour in that piece",
+    )
+    paint.add_argument("map")
+    paint.add_argument("id", type=int, metavar="ID", help="the piece to colour")
+    paint.add_argument(
+        "colour",
+        metavar="COLOUR",
+        help="one of the map's colours or one the bench has a name for, or NAME=#rrggbb for "
+        "a new one",
+    )
+    move = action.add_parser(
+        "move-line",
+        help="the line between two neighbours drawn again along new points, as wide as it "
+        "was: the glass on each side follows it, and the lines it meets stay joined",
+    )
+    move.add_argument("map")
+    move.add_argument("a", type=int, metavar="A", help="a piece the line lies beside")
+    move.add_argument("b", type=int, metavar="B", help="the piece on its other side")
+    move.add_argument(
+        "--line",
+        type=_line,
+        required=True,
+        metavar="x1,y1,x2,y2,...",
+        help="the new path's points, in the map's mm: from one end of the old line to the "
+        "other, edge to edge of the two pieces together",
+    )
     fixes = action.add_parser(
         "fix",
-        help="a file of fixes (merge, split, extend, drop-line, widen) made in order in one call: "
-        "each step's result, and the map up to the first step that's refused",
+        help="a file of fixes (merge, split, extend, drop-line, widen, retrace, fill, paint, "
+        "move-line) made in order in one call: each step's result, and the map up to the "
+        "first step that's refused",
     )
     fixes.add_argument("map")
     fixes.add_argument(
@@ -854,14 +944,23 @@ def parser() -> Parser:
         metavar="STEPS",
         help='JSON: a list of steps, or {"steps": [...]}, each {"fix": "merge", "a": A, "b": B}, '
         '{"fix": "split", "piece": ID, "line": [[x1, y1], [x2, y2]]}, {"fix": "extend", "at": '
-        '[x, y]}, {"fix": "drop-line", "at": [x, y]} or {"fix": "widen", "a": A, "b": B}: '
-        "`docs/pieces.md`",
+        '[x, y]}, {"fix": "drop-line", "at": [x, y]}, {"fix": "widen", "a": A, "b": B}, '
+        '{"fix": "retrace", "box": [x0, y0, x1, y1], "dark": N}, {"fix": "fill", "at": [x, y]}, '
+        '{"fix": "paint", "piece": ID, "colour": NAME} or {"fix": "move-line", "a": A, "b": B, '
+        '"line": [[x1, y1], [x2, y2]]}: `docs/pieces.md`',
     )
-    for fix in (merge, split, extend, drop, widen, fixes):
+    for fix in (merge, split, extend, drop, widen, retrace, fill, paint, move, fixes):
         fix.add_argument(
             "--to",
             metavar="FILE",
             help="the new map's file: MAP's name with the next number unless given",
+        )
+    for reads in (check, retrace, paint, fixes):
+        reads.add_argument(
+            "--image",
+            metavar="FILE",
+            help="the picture the map was traced from, where it isn't where the map says: "
+            "its colours are read from it",
         )
     build = action.add_parser(
         "build", help="the frame and a pane file for each colour, every curve built as a curve"

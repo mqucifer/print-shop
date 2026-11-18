@@ -1,6 +1,7 @@
 """The `pieces` commands: a stained-glass panel as a piece map, read from a picture, checked
 against the rules glass cutting follows, fixed as a glass cutter would, and built into a frame
-and panes (mqucifer/print-shop#152, mqucifer/print-shop#153). A dome's map comes from rules, and
+and panes (mqucifer/print-shop#152, mqucifer/print-shop#153), one place at a time where most of
+it is right (mqucifer/print-shop#172). A dome's map comes from rules, and
 is cut into flat slices (mqucifer/print-shop#154), which join by bevelled seams, came strips
 and rings (mqucifer/print-shop#166).
 
@@ -12,6 +13,13 @@ and rings (mqucifer/print-shop#166).
     pieces drop-line MAP --at X,Y       a line is taken out, and the glass each side joins
     pieces widen MAP A B                the line between A and B, where it's under a nozzle's
                                         width, becomes that wide, and keeps its path
+    pieces retrace MAP --box X0,Y0,X1,Y1
+                                        the picture traced again inside a box, at its own
+                                        --dark and --palette, and the rest of the map kept
+    pieces fill MAP --at X,Y            a patch of lead becomes glass, shared among the
+                                        pieces round it
+    pieces paint MAP ID COLOUR          a piece takes another colour
+    pieces move-line MAP A B --line ... the line between two neighbours, along new points
     pieces fix MAP STEPS                a file of those fixes, in order, in one call
     pieces build MAP --thickness T ...  the frame and a pane file for each colour
     pieces dome --diameter D --height H --repeats N --bands FILE
@@ -51,6 +59,7 @@ from .pieces_fix import (
     run_widen,
 )
 from .pieces_flatten import run_flatten
+from .pieces_local import run_fill, run_move_line, run_paint, run_retrace
 from .pieces_seam import run_seam
 from .pieces_trace import run_trace
 from .report import Report
@@ -71,6 +80,14 @@ def run(args: Any, report: Report) -> None:
         run_drop_line(args, report)
     elif args.action == "widen":
         run_widen(args, report)
+    elif args.action == "retrace":
+        run_retrace(args, report)
+    elif args.action == "fill":
+        run_fill(args, report)
+    elif args.action == "paint":
+        run_paint(args, report)
+    elif args.action == "move-line":
+        run_move_line(args, report)
     elif args.action == "fix":
         run_fix(args, report)
     elif args.action == "dome":

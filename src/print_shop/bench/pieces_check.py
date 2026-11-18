@@ -35,7 +35,9 @@ and what's between them is a note. `DISAGREE` is two readings of the same thing 
 sides of a limit, each beyond the other's resolution (`limits.apart`).
 - **`gradient`**, a colour that runs across one piece by more than `--max-colour-run`. By the
   picture's colour at the piece's two ends, as `pieces trace` read it, and by a plane fitted to
-  its colour, as it read it.
+  its colour, as it read it. A piece a fix has changed has no run of its own: a merge kept one
+  piece's colour and dropped the run, so two colours joined read as one. Its run comes from
+  the picture again, over the piece as it is now (mqucifer/print-shop#172).
 - **`wide-lead`**, lead wider than `--max-lead` at its widest. By the largest circle that fits
   in the lead, and by the furthest a lead pixel is from glass.
 
@@ -71,6 +73,7 @@ import shapely
 from . import colours, layout, piecemap
 from .limits import apart, over, said, under
 from .piecemap import Map, Piece, Pixels
+from .pieces_picture import picture_of
 from .report import NoAnswer, Report
 
 #: The flags, in the order a reply says them.
@@ -1086,14 +1089,42 @@ def quick_said(figures: dict[str, Any]) -> str:
     )
 
 
-def read_map(found: Map, limits: Limits, only: list[int] | None = None) -> Reading:
-    """Every figure and flag of a map, or with `only`, the map's own figures and those pieces'."""
+def repainted(found: Map, pieces: list[Piece], image: str | None = None) -> str | None:
+    """Each piece with no colour run of its own, one a fix has changed, given the picture's
+    colour and its run over the piece as it is now: a merge keeps one piece's colour, so two
+    colours joined would read as one and no gradient would show (mqucifer/print-shop#172).
+    The pieces keep what's read, so a fix's new map has it. With what to say where the
+    picture can't be read; a map from rules has no picture, and nothing to say."""
+    unread = [p for p in pieces if not (p.paint and "run" in p.paint)]
+    if not unread or not (image or found.source.get("image")):
+        return None
+    try:
+        picture = picture_of(found, image)
+    except NoAnswer as exc:
+        return (
+            f"{len(unread)} piece(s) a fix has changed, "
+            f"{piecemap.numbered([p.id for p in unread])}, have no colour run read, so no "
+            f"gradient is read on them: {exc}"
+        )
+    for piece in unread:
+        paint = picture.paint(piece.shape)
+        if paint is not None:
+            piece.paint = paint
+    return None
+
+
+def read_map(
+    found: Map, limits: Limits, only: list[int] | None = None, image: str | None = None
+) -> Reading:
+    """Every figure and flag of a map, or with `only`, the map's own figures and those pieces'.
+    `image` is the picture it was traced from, where that isn't the one its source names."""
     from scipy import ndimage
 
     drawn = piecemap.pixels(found)
     figures = quick(found, drawn)
     differs = quick_differs(found, figures)
     pieces = [p for p in found.pieces if only is None or p.id in only]
+    unpainted = repainted(found, pieces, image)
     step = layout.spacing({str(p.id): shapely.MultiPolygon([p.shape]) for p in pieces})
     read = every_gap(found) if only is None else {p.id: gaps(found, p) for p in pieces}
     ends = dead_ends(found, read)
@@ -1133,6 +1164,8 @@ def read_map(found: Map, limits: Limits, only: list[int] | None = None) -> Readi
     if only is None:
         more, notes = _dead_ends_differ(found, ends, drawn, read)
         differs += more
+    if unpainted:
+        notes.append(unpainted)
     rings = surrounding(found, pieces)
     for ring in rings:
         inside = piecemap.numbered(ring["holds"])
@@ -1293,7 +1326,9 @@ def read_map(found: Map, limits: Limits, only: list[int] | None = None) -> Readi
                 "at": figures["lead_widest_at"],
                 "said": f"the lead is {said(figures['lead_widest_mm'], most, 2)} mm wide at "
                 f"{piecemap.said_at(figures['lead_widest_at'])}, over {most:g} mm: a patch of "
-                "lead, not a line",
+                "lead, not a line. `pieces fill MAP --at "
+                f"{figures['lead_widest_at'][0]:g},{figures['lead_widest_at'][1]:g}` turns it "
+                "into glass, shared among the pieces round it",
             }  # fmt: skip
         )
     thin, more, noted = thin_lead(found, limits, drawn.mm, only)
@@ -1446,7 +1481,10 @@ def fixes_said(flags: list[dict[str, Any]]) -> str:
             "it with a new line"
         )
     if "gradient" in names:
-        ways.append("a gradient: `pieces split` it where the colour changes, or leave it one")
+        ways.append(
+            "a gradient: `pieces split MAP ID --line x1,y1,x2,y2` cuts it where the colour "
+            "changes, or leave it one colour"
+        )
     if "thin-lead" in names:
         ways.append(
             "lead under a nozzle's width: `pieces widen MAP A B` widens the line there and "
@@ -1460,7 +1498,12 @@ def fixes_said(flags: list[dict[str, Any]]) -> str:
             "with a narrower lip"
         )
     if "wide-lead" in names:
-        ways.append("a patch of lead: `pieces merge` the pieces round it, or redraw it as glass")
+        ways.append(
+            "a patch of lead: `pieces fill MAP --at X,Y` turns it into glass, shared among "
+            "the pieces round it; `pieces retrace MAP --box X0,Y0,X1,Y1 --dark N` reads the "
+            "picture again there, where the patch is a dark place in the picture and not a "
+            "line; `pieces merge MAP A B` joins two pieces across it"
+        )
     return "; ".join(ways)
 
 
@@ -1537,7 +1580,7 @@ def draw(found: Map, reading: Reading, out: Path, name: str, beside: Any = None)
 def run_check(args: Any, report: Report) -> None:
     found = piecemap.load(args.map)
     limits = limits_of(args)
-    reading = read_map(found, limits)
+    reading = read_map(found, limits, image=getattr(args, "image", None))
     say(found, reading, report, limits)
     target = draw(found, reading, Path(args.out), Path(args.map).stem)
     report.wrote(target)
