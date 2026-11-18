@@ -35,6 +35,8 @@ is a Sponsor's scene or anything from one (mqucifer/print-shop#152, mqucifer/pri
 - `waist.json`: a piece 50 mm long and 14 mm wide with a waist 2 mm across at its middle.
 - `slanted_waist.json`: a long piece on a slant, with a waist a quarter of the way along it.
 - `bend.json`: a piece round a bend, narrow all the way round it.
+- `curved_waist.json`: a piece with curved sides drawn in to a waist 2.45 mm across, a hair
+  over the 2.4 mm a lip of 1.2 on each side closes over.
 - `hairs.json`: two cuts two microns wide whose ends face each other, which the
   outline has and no pixel shows.
 """
@@ -548,6 +550,24 @@ def bend() -> dict[str, Any]:
     return found
 
 
+def curved_waist() -> dict[str, Any]:
+    """One piece of a 60 x 24 mm panel, 50 mm long, its two long sides curves that come
+    within 2.45 mm of each other at its middle and open to 14 mm. On its outline a lip of 1.2
+    mm leaves an opening 0.05 mm wide through the waist, one piece. Its pocket, as built, is
+    its fitted curves moved inside the outline, and the opening there is two."""
+
+    def half(x: float) -> float:
+        return min(7.0, 1.225 + 0.02 * (x - 30) ** 2)
+
+    xs = [5 + k * 0.5 for k in range(101)]
+    low = [[x, round(12 - half(x), 4)] for x in xs]
+    high = [[x, round(12 + half(x), 4)] for x in xs]
+    found = notched()
+    found["panel"] = {"width_mm": 60, "height_mm": 24}
+    found["pieces"][0]["outline"] = low + high[::-1]
+    return found
+
+
 def rules(slit: bool, depth: float = 8.0) -> dict[str, Any]:
     lead = 1.2
     outlines = cells(lead)
@@ -609,6 +629,7 @@ for name, made in (
     ("close.json", close()),
     ("near.json", near()),
     ("waist.json", waist()),
+    ("curved_waist.json", curved_waist()),
     ("slanted_waist.json", slanted_waist()),
     ("bend.json", bend()),
     ("stairs.json", stairs()),

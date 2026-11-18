@@ -1072,6 +1072,29 @@ def test_every_waist_a_build_refuses_comes_with_a_line_that_split_takes(
     assert built.verdict == "OK", built.text
 
 
+def test_a_piece_is_judged_on_its_pocket_as_built_and_refused_the_same_way(bench: Any) -> None:
+    """mqucifer/print-shop#161: a waist 2.45 mm across, between two curved sides. On the
+    piece's outline a lip of 1.2 mm leaves its opening one piece, a hair wide at the waist. Its
+    pocket as built is its fitted curves moved inside the outline, and there the opening is
+    two. The plan passed the piece and the build then ended `NO ANSWER`, "leaves no one
+    opening", with no place and no fix. The plan judges the pocket as it's built now."""
+    lips = ["--thickness", 3, "--pane", 1, "--lip", 1.2, "--play", 0.25]
+    refused = bench("pieces", "build", "curved_waist.json", *lips, "--build-out", "curved")
+    assert refused.verdict == "FAIL" and refused.code == 1, refused.text
+    why = refused.record["why"]
+    assert "once its pocket's curves are fitted inside its outline" in why
+    assert "a waist 2.45 mm across at (30.0, " in why
+    line = re.search(r"`pieces split MAP 1 --line ([-0-9.,]+)`", why)
+    assert line, why
+    assert len(refused.record["second_check"]) >= 1, "a refusal with its second check"
+    cut = bench(
+        "pieces", "split", "curved_waist.json", 1, "--line", line.group(1), "--to", "curved-1.json"
+    )
+    assert cut.verdict == "OK" and cut.numbers["pieces_after"] == 2, cut.text
+    built = bench("pieces", "build", "curved-1.json", *lips, "--build-out", "curved")
+    assert built.verdict == "OK", built.text
+
+
 def test_a_piece_too_thin_for_a_pane_is_named_and_nothing_is_built(
     bench: Any, broken: Answer
 ) -> None:
@@ -1083,7 +1106,7 @@ def test_a_piece_too_thin_for_a_pane_is_named_and_nothing_is_built(
     assert answer.verdict == "FAIL" and answer.code == 1
     said = answer.numbers["unbuildable"]
     thin = next(line for line in said if line.startswith(f"piece {sliver},"))
-    assert "nothing of it is left, as it's 2.00 mm at its widest" in thin
+    assert "leaves it no opening 0.8 mm wide, as it's 2.00 mm at its widest" in thin
     assert "`pieces merge` it into a neighbour" in thin
     # The necked piece is wide, so its line says what cuts its opening in two, and where.
     necked = piece_at(bench.work, "b0.json", NECK)
@@ -1095,7 +1118,7 @@ def test_a_piece_too_thin_for_a_pane_is_named_and_nothing_is_built(
     assert "so nothing was" in answer.record["why"] and "pieces merge" in answer.record["why"]
     # No line says a wide piece has no pane or opening without what cuts it.
     for line in said:
-        named = ("surrounds", "nothing of it is left", "cuts its", "a waist ", "a narrow run")
+        named = ("surrounds", "leaves it no", "cuts its", "a waist ", "a narrow run")
         assert any(word in line for word in named), line
     assert not (bench.work / "nothing" / "frame.step").exists()
     thin = bench(

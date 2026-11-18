@@ -534,6 +534,12 @@ def _why(found: Map, piece: Piece, left: list[Any], what: str, lip: float | None
     narrow all over, or something cuts it in two, a dead end or a narrow place, said with
     where. A wide piece is never said to have none without what cuts it."""
     across = piecemap.widest(piece.shape)[0]
+    if not left and lip is not None:
+        return (
+            f"a lip of {lip:g} mm on each side leaves it no {what} {LEAST_ACROSS:g} mm wide, as "
+            f"it's {across:.2f} mm at its widest. `pieces merge` it into a neighbour, or give "
+            "every piece a narrower `--lip`"
+        )
     if not left:
         return (
             f"nothing of it is left, as it's {across:.2f} mm at its widest. `pieces merge` it "
@@ -603,11 +609,18 @@ def _why(found: Map, piece: Piece, left: list[Any], what: str, lip: float | None
 
 
 def plan(
-    found: Map, lips: tuple[float, float], play: float
+    found: Map, lips: tuple[float, float], play: float, fit: float
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    """Each piece's pane, pocket and opening in 2D, with the lip it takes, and what's wrong
-    with any that can't be built. The pocket is the pane and the play round it, so a pane
-    fills its pocket to the play everywhere, and what a pane can't fill stays lead."""
+    """Each piece's pane, pocket and opening in 2D, with the lip it takes and its curves as
+    they'll be built, and what's wrong with any that can't be. The pocket is the pane and the
+    play round it, so a pane fills its pocket to the play everywhere, and what a pane can't
+    fill stays lead.
+
+    A piece is judged twice, and refused the same way either time: on its outline, and on its
+    pocket as it's built, its curves fitted and moved inside the outline. The second is up to
+    1.6 of `fit` narrower, so an opening that's whole on the outline can come apart on it: a
+    build then ended with "leaves no one opening", no place and no fix
+    (mqucifer/print-shop#161)."""
     full, least = lips
     rows, wrong = [], []
     for piece in sorted(found.pieces, key=lambda p: p.id):
@@ -667,7 +680,19 @@ def plan(
                 f"{_why(found, piece, left, 'opening', full)}"
             )
             continue
-        rows.append({"piece": piece, "lip_mm": full, "pocket": pocket})
+        try:
+            curves = piece_curves(piece, full, play, fit)
+        except NoOpening as exc:
+            wrong.append(
+                f"piece {piece.id}, round {where}, has no one opening at a lip of {full:g} mm, "
+                f"once its pocket's curves are fitted inside its outline: "
+                f"{_why(found, piece, exc.left, 'opening', full)}"
+            )
+            continue
+        except NoAnswer as exc:
+            wrong.append(f"piece {piece.id}, round {where}, can't be built: {exc}")
+            continue
+        rows.append({"piece": piece, "lip_mm": full, "pocket": pocket, "curves": curves})
     return rows, wrong
 
 
@@ -734,6 +759,15 @@ def _play_read(points: np.ndarray, curves: dict[str, Any]) -> tuple[np.ndarray, 
     along = far > 10.0 * DENSE
     side[along] = gaps[along]
     return gaps, side
+
+
+class NoOpening(NoAnswer):
+    """A piece's pocket, as it's built, has no one opening at the lip asked. With what the
+    lip leaves of it: the parts its opening comes out in."""
+
+    def __init__(self, why: str, left: list[Any]) -> None:
+        super().__init__(why)
+        self.left = left
 
 
 def _past(pocket: Any, shape: Any) -> float:
@@ -972,7 +1006,7 @@ def _curves(piece: Piece, lip: float, play: float, fit: float, more: float) -> d
         if not under(piecemap.widest(part, 0.02)[0], LEAST_ACROSS)
     ]
     if len(parts) != 1:
-        raise NoAnswer(f"piece {piece.id}'s pocket, as built, leaves no one opening")
+        raise NoOpening(f"piece {piece.id}'s pocket, as built, leaves no one opening", parts)
     opening: list[Any] = [offset_ring(ring, lip) for ring in pocket]
     opening_exact = _same(opening, parts[0], 0.001 * parts[0].area + 0.01)
     if not opening_exact:
@@ -1050,7 +1084,7 @@ def run_build(args: Any, report: Report) -> None:
     border = args.border if args.border is not None else 2.0 * found.lead_mm
     if not border > 0:
         raise NoAnswer("--border is the frame round the panel's edge, in mm, over 0")
-    rows, wrong = plan(found, (full, least), args.play)
+    rows, wrong = plan(found, (full, least), args.play, args.fit)
     report.numbers["unbuildable"] = wrong
     if wrong:
         for line in wrong[:12]:
@@ -1086,7 +1120,7 @@ def run_build(args: Any, report: Report) -> None:
     pane_volumes: list[tuple[int, float, float]] = []
     for row in rows:
         piece: Piece = row["piece"]
-        curves = piece_curves(piece, row["lip_mm"], args.play, args.fit)
+        curves = row["curves"]
         off = max(off, curves["off_mm"])
         moved_in = max(moved_in, curves["moved_in_mm"])
         if curves["past_mm"] > past:
