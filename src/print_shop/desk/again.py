@@ -18,6 +18,10 @@ reading is taken again (`take`) when the slice proposes it. Neither is put in th
 line, which would record them as the Sponsor's own corrections, and each correction is drawn as
 a lesson.
 
+**A hand-sliced job runs again by its id** (mqucifer/print-shop#164): `--again JOB_ID` sends the
+file it printed, kept in its folder, as a new job marked as a reprint of it. There's no part to
+find, nothing to answer and nothing to correct, so that one line is all there is.
+
 The line doesn't arm the printer. Arming stays on the command's own line, as the runbook says.
 """
 
@@ -87,6 +91,8 @@ def again(row: Row, part_path: Path | None, printers: int = 1, part_found: bool 
     """How to run `row`'s job again. `part_path` is the part's file, and `part_found` says it
     has the bytes the job printed (by sha256); else it's the path the log names, if any.
     `printers` is how many the inventory has (`--printer` is needed with more than one)."""
+    if row.sliced is not None:
+        return _sliced_again(row, part_path, printers, part_found)
     notes: list[str] = []
     part = str(part_path) if part_path is not None else row.stl_name
     if not part_found:
@@ -145,3 +151,23 @@ def again(row: Row, part_path: Path | None, printers: int = 1, part_found: bool 
                      + "; ".join(f"{c.key}={c.value}" for c in taken) + ".")
     return Again(command=command, corrections=correction_line(row), answers=answers,
                  answers_name=name, notes=tuple(notes))
+
+
+def _sliced_again(row: Row, kept: Path | None, printers: int, kept_found: bool) -> Again:
+    """A hand-sliced job again: `--again` and its id. `kept` is the file it printed, in its
+    folder, and `kept_found` says it still holds the bytes that were sent."""
+    args = ["--again", row.job_id]
+    if printers > 1 and row.material is not None:
+        args += ["--printer", row.material.printer_id]
+    notes = [
+        "It sends the file this job printed, kept in its folder, as a new job marked as a "
+        "reprint of this one. Nothing is asked, proposed or sliced again.",
+        "It's refused if what's loaded and fitted isn't the filament and nozzle the file names; "
+        "add --loaded-ok to print it with what's loaded.",
+    ]
+    if not kept_found:
+        where = f" ({kept})" if kept is not None else ""
+        notes.append(f"The file this job printed isn't in its folder any more, or has changed"
+                     f"{where}, so --again will refuse it: send the file again with --sliced.")
+    return Again(command="uv run python scripts/print_job.py " + shlex.join(args),
+                 corrections="", answers=None, answers_name="", notes=tuple(notes))

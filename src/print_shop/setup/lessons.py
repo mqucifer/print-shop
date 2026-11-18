@@ -21,6 +21,12 @@ its statuses, steps, scores and signatures, imported from there, not a second vo
   the file's own pose, before any turn, as it's looked up. It's given to the orientation step
   with its poses (`for_orienting`), never to the settings proposal, and the review lists it with
   the others. It stood if the pose wasn't sent back again.
+- **A hand-sliced print teaches by its outcome only** (mqucifer/print-shop#164): nothing in it
+  was chosen by the loop, so it has no correction, and no lesson is given to it or scored on it.
+  Its outcome is a candidate like any other, whose evidence is marked `sliced: by hand` and
+  carries the file's own settings: its profiles, what differs from the inventory's tuning, and
+  each object's overrides. No part was measured, so it's keyed to no trait until a reviewer
+  keys it.
 - **Each is scored at the review by what the Sponsor did:** a setting that stood is `used`, one
   they corrected `in_the_way`, and one another lesson or their answer set `not_used`. A lesson only
   read by the model is scored by the reviewer (`score`). Its status follows each job's latest score
@@ -266,6 +272,24 @@ def _part(row: Row) -> dict[str, Any]:
         "features": {f.id: f.value for f in features},
         "flags": [{"id": f.id, "reading": f.reading} for f in row.flags or ()],
     }
+    if row.sliced is not None:
+        # Sliced by hand: nothing here was the loop's choice, and what the outcome is keyed
+        # by is the file's own settings (mqucifer/print-shop#164).
+        kept = row.sliced
+        part["sliced"] = kept.sliced
+        part["settings"] = {
+            "profiles": {"machine": kept.machine, "process": kept.process,
+                         "filament": kept.filament},
+            "key": dict(row.slicer_settings),
+            "differs": ({d.key: d.file for d in kept.compared.differs}
+                        if kept.compared is not None else None),
+            "objects": ({o.name: {**o.settings, **{f"{part_name}: {k}": v
+                                                   for part_name, of_part in o.parts.items()
+                                                   for k, v in of_part.items()}}
+                         for o in kept.overrides} if kept.overrides is not None else None),
+        }
+        if kept.reprint_of:
+            part["reprint_of"] = kept.reprint_of
     if row.reading is not None:
         shortest = row.reading.shortest()
         ironing = row.reading.feature("Ironing")

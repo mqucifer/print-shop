@@ -8,6 +8,7 @@ can at worst fail to print, never print.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -31,7 +32,7 @@ from print_shop.setup.loop import PrintLoop, cli_person, llm_chat
 from print_shop.setup.model import setup_llm
 from print_shop.setup.review import Reviewer
 from print_shop.slicer.orca import BedType, SlicerProfiles, with_bed_type
-from print_shop.slicer.store import Choice
+from print_shop.slicer.store import Choice, Store
 
 __all__ = ["Run", "bed_type", "build_run", "describe", "profiles_for", "recording_path"]
 
@@ -99,6 +100,8 @@ def build_run(
     workdir: Path | None = None,
     asker: Asker | None = None,
     reviewer: Reviewer | None = None,
+    show: Callable[[str], None] | None = None,
+    store: Store | None = None,
 ) -> Run:
     """A daemon wired to the real broker, Orca, LiteLLM, ledger and a read-only watcher.
 
@@ -112,6 +115,10 @@ def build_run(
     command (`cli_reviewer`). Both use `PRINT_SHOP_SETUP_MODEL` (default
     `crew-code-think`), as does the print loop, which decides the pose and the settings after
     the questions (mqucifer/print-shop#129).
+
+    A hand-sliced file (`daemon.submit_sliced`, mqucifer/print-shop#164) uses none of those:
+    `show` is where its slice's report is shown before the gate, and `store` the profiles its
+    settings are sorted by.
 
     Raises:
         RuntimeError, FileNotFoundError: On missing settings, before a job starts.
@@ -155,6 +162,8 @@ def build_run(
         # layer starved (mqucifer/print-shop#123): off, and said so, until frames come through
         # Home Assistant.
         camera=camera_for_prints(),
+        show=show,
+        store=store,
     )
     return Run(daemon=daemon, ledger=ledger, recorder=recorder)
 
@@ -164,10 +173,12 @@ def describe(row: Row) -> str:
     lines = [
         f"job            {row.job_id}",
         f"part           {row.stl_name}  (sha256 {row.stl_sha256[:12]}…)",
-        f"orientation    {row.rotation_deg} by {row.orientation_source}"
-        f"{'' if row.orientation_accepted else ' (not accepted; authored pose)'}",
+        ("orientation    as the file lays it: nothing was turned" if row.sliced is not None
+         else f"orientation    {row.rotation_deg} by {row.orientation_source}"
+         f"{'' if row.orientation_accepted else ' (not accepted; authored pose)'}"),
         f"g-code         {row.gcode_name}  ~{row.print_time_s // 60} min,"
         f" {row.filament_cm3} cm3, {row.layer_count} layers",
+        *_sliced_lines(row),
         f"profiles       {row.slicer_settings.get('printer_settings_id', '?')} /"
         f" {row.slicer_settings.get('print_settings_id', '?')} / {row.filament}",
         *_store_lines(row),
@@ -195,6 +206,8 @@ def describe(row: Row) -> str:
 def _store_lines(row: Row) -> list[str]:
     """Where the profiles came from: print-shop's store, by file, hash and commit."""
     used = row.profiles
+    if row.sliced is not None:
+        return ["store          - (sliced by hand in Orca, not from profiles/)"]
     if used is None:
         return ["store          - (sliced before print-shop kept its own profiles)"]
     commit = used.commit[:12] or "no commit"
@@ -205,6 +218,33 @@ def _store_lines(row: Row) -> list[str]:
         lines.append(f"  {ref.file}  (sha256 {ref.sha256[:12]}…)")
         if ref.standard_file:
             lines.append(f"    over {ref.standard_file}  (sha256 {ref.standard_sha256[:12]}…)")
+    return lines
+
+
+def _minutes(seconds: int) -> str:
+    return f"{seconds // 60} min" if seconds >= 60 else f"{seconds} s"
+
+
+def _sliced_lines(row: Row) -> list[str]:
+    """A hand-sliced file's own record (mqucifer/print-shop#164): where it came from, what it
+    was sliced with, and Orca's estimate beside the real time."""
+    kept = row.sliced
+    if kept is None:
+        return []
+    lines = [f"sliced         {kept.sliced}: {kept.source}"
+             + (f", plate {kept.plate} of Orca's sliced plate file" if kept.kind == "plate"
+                else "") + f"  (sent sha256 {kept.gcode_sha256[:12]}…)"]
+    if kept.reprint_of:
+        lines.append(f"reprint of     job {kept.reprint_of}")
+    lines += [f"  {line}" for line in kept.lines()]
+    real = row.real_time_s
+    lines.append(
+        f"time           {_minutes(kept.print_time_s)} estimated by Orca; "
+        + (f"{_minutes(real)} from its start to its end, heating included" if real is not None
+           else "not ended yet"))
+    grams = f"{kept.filament_g:g} g, " if kept.filament_g is not None else ""
+    lines.append(f"filament       {grams}{kept.filament_cm3:g} cm3 estimated by Orca; the "
+                 "printer doesn't report what it used")
     return lines
 
 

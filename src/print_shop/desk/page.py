@@ -207,6 +207,13 @@ def job_page(record: JobRecord) -> str:
                         "is below.</p>")
         body.append("</section>")
         return _page(title, "".join(body) + _log(record))
+    if row.sliced is not None:
+        # Sliced by hand: no pose, question, proposal, correction or lesson to show.
+        sections = [
+            _summary(row, record), _again(row, record), _sliced(row), _reading(row),
+            _swap(row), _outcome(row, record), _log(record),
+        ]
+        return _page(row.stl_name, "".join(sections))
     sections = [
         _summary(row, record), _again(row, record), _pose(row), _questions(row),
         _settings(row), _corrections(row), _lessons(row), _reading(row), _swap(row),
@@ -223,7 +230,8 @@ def _summary(row: Row, record: JobRecord) -> str:
         f"{_when(row.start_requested_at)}</p>"
         f"<p><strong>{escape(status(row))}</strong>. Orca's estimate: "
         f"{_minutes(row.print_time_s)}, {row.filament_cm3:g} cm³, {row.layer_count} layers"
-        + ("; with a colour change" if has_swap(row) else "") + ".</p>"
+        + ("; with a colour change" if has_swap(row) else "")
+        + ("; sliced by hand" if row.sliced is not None else "") + ".</p>"
         f"<p>{escape(material)}</p></section>"
     )
 
@@ -234,9 +242,10 @@ def _again(row: Row, record: JobRecord) -> str:
              "<h3>The command</h3>", _copy("again-command", a.command)]
     parts.append("<p class=\"muted\">It doesn't arm the printer: that's on the command's own "
                  "line, as the runbook says.</p>")
-    parts.append("<h3>The correction line, at the review</h3>")
-    parts.append(_copy("again-corrections", a.corrections) if a.corrections
-                 else "<p class=\"muted\">No corrections were made at the review.</p>")
+    if row.sliced is None:
+        parts.append("<h3>The correction line, at the review</h3>")
+        parts.append(_copy("again-corrections", a.corrections) if a.corrections
+                     else "<p class=\"muted\">No corrections were made at the review.</p>")
     if a.answers is not None:
         parts.append("<h3>The answers file</h3>")
         parts.append(_copy("again-answers", json.dumps(a.answers, indent=2)))
@@ -246,6 +255,39 @@ def _again(row: Row, record: JobRecord) -> str:
     if a.notes:
         parts.append("<ul>" + "".join(f"<li>{escape(n)}</li>" for n in a.notes) + "</ul>")
     parts.append("</section>")
+    return "".join(parts)
+
+
+def _sliced(row: Row) -> str:
+    """A hand-sliced file's own record (mqucifer/print-shop#164): where it came from, the
+    settings Orca wrote, what differs from the tuning, each object's overrides, and Orca's
+    estimate beside the real time."""
+    kept = row.sliced
+    assert kept is not None
+    took = row.real_time_s
+    parts = [
+        "<section><h2>Sliced by hand</h2>",
+        "<p>Sent as the file is: nothing was asked, proposed, turned or sliced again, and no "
+        "lesson was applied.</p><ul>",
+        f"<li>From {escape(kept.source)}"
+        + (f", plate {kept.plate} of Orca's sliced plate file" if kept.kind == "plate" else "")
+        + f"; the bytes sent have sha256 <code>{escape(kept.gcode_sha256)}</code></li>",
+    ]
+    if kept.reprint_of:
+        parts.append(f"<li>A reprint of <a href=\"/job/{escape(kept.reprint_of)}\">job "
+                     f"{escape(kept.reprint_of)}</a></li>")
+    parts.append(
+        f"<li>Orca's estimate: {_minutes(kept.print_time_s)}, "
+        + (f"{kept.filament_g:g} g, " if kept.filament_g is not None else "")
+        + f"{kept.filament_cm3:g} cm³. Real: "
+        + (f"{_minutes(took)} from its start to its end, heating included"
+           if took is not None else "not ended yet")
+        + "; the printer doesn't report the filament it used</li>")
+    parts.append("</ul><ul>")
+    for line in kept.lines():
+        tag = "<li class=\"muted\">" if line.startswith("  ") else "<li>"
+        parts.append(f"{tag}{escape(line.strip())}</li>")
+    parts.append("</ul></section>")
     return "".join(parts)
 
 

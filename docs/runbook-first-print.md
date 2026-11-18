@@ -183,6 +183,48 @@ A print uses your tuning where there is one, and the standard where you haven't 
 
    The recording replaces the synthetic frames in `tests/data/sdcp/`.
 
+## A file you sliced by hand
+
+For a print you set up yourself in Orca (mqucifer/print-shop#164): a test with a different setting on each object, a calibration print, or a job you know is good. print-shop sends it **as it is** and keeps it in the ledger. It asks no questions, proposes nothing, applies no lesson and slices nothing again.
+
+1. **Export it from Orca.** Slice the plate, then either:
+   - **the plate's sliced file** (`.gcode.3mf`; File, Export, "Export plate sliced file"). **Use this one when objects have their own settings:** it carries each object's overrides, and print-shop keeps them. The G-code inside it is what's sent, byte for byte;
+   - **G-code** (`.gcode`). Its settings are kept, but G-code names its objects without their overrides. Add `--project light-test.3mf`, the saved Orca project it was sliced from, and they're read from there, matched to the G-code's objects by name. Without it the ledger says they weren't kept.
+
+   The plate file's overrides were tested on the file Orca 2.4.2's command line exports. **Check the dry run's "per-object overrides" lines against what you set in Orca:** if the file you exported from Orca's window carries none, it says so, and `--project` gives them.
+
+   A file with several sliced plates ("Export all sliced file") needs `--plate N`. An unsliced project is refused.
+
+2. **A dry run, unarmed,** then the print:
+
+   ```
+   uv run python scripts/print_job.py --sliced ~/print-shop/parts/light-test.gcode.3mf
+   PRINT_AGENT_ALLOW_HARDWARE=1 uv run python scripts/print_job.py --sliced ~/print-shop/parts/light-test.gcode.3mf
+   ```
+
+   Arming is the same as for any job: only `PRINT_AGENT_ALLOW_HARDWARE=1` on the command's own line, typed by you. The bed is clear, as before.
+
+3. **What it shows before the gate,** which is what the ledger keeps:
+   - which file it took, and the sha256 of the bytes it will send;
+   - Orca's estimate: the time, the filament and the layers;
+   - the three profile names Orca wrote, and **each setting that differs from your tuning** for the loaded spool, as `tuning -> file`. A slice made with exactly your tuning lists none. A setting your tuning doesn't state is listed when Orca itself says it was changed from its system preset, with `Orca's default` as the tuning's value;
+   - **each object's overrides,** named as the G-code names the object;
+   - the slice read layer by layer, as the review reads one: each layer's time, each feature's time and area, the seam, and **any pause or filament swap written in the file.** It's a report. Nothing is proposed and nothing is written back.
+
+4. **The loaded filament and the fitted nozzle are checked against the file.** If the file is sliced for another filament type, another variety print-shop knows, or another nozzle than the inventory says is on the printer, it isn't sent, and it says what differs. Change the inventory if it's wrong (`stock load`, `stock fit`). To print it anyway with what's loaded, add `--loaded-ok`; the ledger keeps that you did.
+
+5. **Then the approval gate, the watching, the frames and the outcome question,** exactly as above. The file is copied into the job's folder when the job starts, under a name carrying the job id, and that copy is what you approve: it's hashed again just before the upload, and a file that has changed isn't sent. Editing the file in Orca after that changes nothing for this job; send it again for a new one.
+
+6. **In the ledger** (`--list`, and the print desk) the job is marked `sliced by hand`, with the settings by profile, what differed, the overrides, Orca's estimate beside the real time from its start to its end, your outcome, your note and the frames. The printer doesn't report the filament it used, so only Orca's estimate is kept for that. An outcome with a note or a failure is a lesson candidate, keyed by the file's own settings (`docs/print-lessons.md`).
+
+**To print one again,** by its job id (the print desk shows the line to copy):
+
+```
+PRINT_AGENT_ALLOW_HARDWARE=1 uv run python scripts/print_job.py --again 3f2a…
+```
+
+It sends the file that job printed, kept in its folder, as a new job marked as a reprint of the old one, with the old one's overrides. It's refused if the kept file has changed or is gone (send the file again with `--sliced`), and if what's loaded isn't what the file names, unless you add `--loaded-ok`. A job that print-shop sliced itself isn't printed again this way: its page on the desk gives the command for it.
+
 ## The print desk: reading a job, and running it again
 
 A page on the Mac shows what's loaded and every job (mqucifer/print-shop#139), so a job can be read after it's scrolled past, and a past job's settings copied to print it again. From print-shop's checkout:
@@ -201,6 +243,8 @@ Then open <http://127.0.0.1:8719/> in a browser on the Mac. `--port` picks anoth
   - the correction line, to paste at the review when it asks;
   - the answers file: press **Save** and it goes to `~/Downloads`, where the command line looks for it. If the browser names it differently, change the path in the command to match.
 
+  A job you sliced by hand has one line, `--again` and its id, and a "Sliced by hand" section with what was kept of the file.
+
   What the lines can't carry is said under them: a pose you sent back is sent back again at the review (`orientation`), and a change you took from the slice is taken again (`take`) if it proposes it. If the questions asked are different this time, `--answers` refuses the file and lists the new ones; answer them as they come.
 
 **The desk reads and copies; it never acts.** It opens the ledger read-only and writes nothing: it doesn't start a job, answer a question or arm the printer. The copied command line doesn't arm it either. Arming stays as above: `PRINT_AGENT_ALLOW_HARDWARE=1` on the command's own line, typed by you.
@@ -218,6 +262,9 @@ Then open <http://127.0.0.1:8719/> in a browser on the Mac. `--port` picks anoth
 | `Several PLA varieties are in the store` | the filament was given by type | name the loaded variety, from the list |
 | `You've tuned '…' more than once` | that variety has several tunings | name the tuning you want, from the list |
 | `can't print with … by Orca's rule` | the filament isn't marked for this machine or process | don't print; tell the operator, and fix the preset in Orca, then re-import |
+| `… holds no G-code: it's a project, not a sliced plate` | `--sliced` was given an unsliced Orca project | slice it in Orca and export the plate's sliced file, or its G-code |
+| `Not sent: the file is sliced for …` | the hand-sliced file names another filament or nozzle than the inventory says is loaded | load or fit what it names, fix the inventory, or add `--loaded-ok` |
+| `… has changed since it was taken … nothing was uploaded` | the job's copy of a hand-sliced file was changed after the gate opened | send the file again with `--sliced` |
 | `printer preflight failed — printer.ready` | the printer is busy, paused, or in error | clear it at the machine, then run again |
 | `printer preflight failed — printer.free_space` | the printer's storage is full | delete old files on the printer |
 | The approval card never appears | the broker or the dashboard is wrong | check the broker settings; re-paste the dashboard |

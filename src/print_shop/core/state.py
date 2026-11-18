@@ -27,6 +27,7 @@ from print_shop.setup.features import Feature
 from print_shop.setup.intake import Intake
 from print_shop.setup.proposal import Change, GivenLesson, Proposal
 from print_shop.setup.reading import Flag, SliceReading
+from print_shop.sliced import SlicedJob
 from print_shop.slicer.store import ProfilesUsed
 
 __all__ = [
@@ -42,6 +43,8 @@ __all__ = [
 
 class EntryPath(StrEnum):
     STL_UPLOAD = "stl_upload"
+    #: A file the person sliced by hand: sent as it is (mqucifer/print-shop#164).
+    SLICED_FILE = "sliced_file"
 
 
 class PrintStatus(StrEnum):
@@ -205,6 +208,10 @@ class PrintJobState(TypedDict):
     #: A sidecar or a design run's folder named for the part's context (`--context`,
     #: mqucifer/print-shop#130); None looks beside the STL and above it.
     context_path: NotRequired[str | None]
+
+    #: A hand-sliced file, sent as it is (mqucifer/print-shop#164). With it the job has no STL,
+    #: and nothing is ingested, oriented, asked, proposed, sliced or reviewed.
+    sliced: NotRequired[SlicedJob]
 
     # Artifacts. Local paths; the pipeline is one process (see CONTRACTS.md §1).
     stl_path: NotRequired[str]

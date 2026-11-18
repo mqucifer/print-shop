@@ -51,7 +51,9 @@ from print_shop.setup import Proposer
 from print_shop.setup.intake import Asker
 from print_shop.setup.loop import PrintLoop
 from print_shop.setup.review import Reviewer
+from print_shop.sliced import SlicedJob
 from print_shop.slicer.orca import Slicer, SlicerProfiles, slice_model
+from print_shop.slicer.store import Store
 
 __all__ = [
     "GATE_WAIT_S",
@@ -195,6 +197,8 @@ class Daemon:
         reviewer: Reviewer | None = None,
         gate_wait_s: float = GATE_WAIT_S,
         loop: PrintLoop | None = None,
+        show: Callable[[str], None] | None = None,
+        store: Store | None = None,
     ) -> None:
         """`printer` is what the approval gate ultimately commands.
 
@@ -232,6 +236,9 @@ class Daemon:
 
         `loop` is the print loop (mqucifer/print-shop#129), which decides the pose and the
         settings after the questions; its questions to the person are the person's time too.
+
+        `show` is where a hand-sliced file's report is shown before the gate, and `store` the
+        profiles its settings are sorted by (`submit_sliced`, mqucifer/print-shop#164).
         """
         self._cfg = cfg
         self._profiles = profiles
@@ -267,6 +274,8 @@ class Daemon:
             reviewer=self._persons(reviewer) if reviewer is not None else None,
             loop=(dataclasses.replace(loop, person=self._persons(loop.person))
                   if loop is not None else None),
+            show=show,
+            store=store,
         )
 
         # MQTT bridge.
@@ -374,6 +383,15 @@ class Daemon:
 
         Raises JobRejected if a job is already active.
         """
+        return self._submit(Path(stl_path).name, {
+            "entry": "stl_upload",
+            "stl_path": str(stl_path),
+            "as_laid": as_laid,
+            "context_path": str(context) if context else None,
+        })
+
+    def _submit(self, part: str, given: dict[str, Any]) -> str:
+        """Start a job's worker with `given` as its state, if no job is active."""
         with self._job_lock:
             if self._active_job_id is not None:
                 raise JobRejected(
@@ -381,20 +399,31 @@ class Daemon:
                 )
             job_id = str(uuid.uuid4())
             self._active_job_id = job_id
-            self._parts[job_id] = Path(stl_path).name
+            self._parts[job_id] = part
             self._back_at = time.monotonic()
 
         self._publish_state({"status": "analyzing", "job_id": job_id})
 
         self._worker = threading.Thread(
             target=self._run_job,
-            args=(job_id, str(stl_path), as_laid, str(context) if context else None),
+            args=(job_id, given),
             daemon=True,
         )
         self._worker_alive = True
         self._at_gate.clear()
         self._worker.start()
         return job_id
+
+    def submit_sliced(self, job: SlicedJob) -> str:
+        """Submit a hand-sliced file, to be sent as it is (mqucifer/print-shop#164). Returns
+        the job_id.
+
+        It goes to the same approval gate, print node, ledger and watcher as any job. Nothing
+        is asked or proposed for it, no lesson is applied, and nothing is sliced.
+
+        Raises JobRejected if a job is already active.
+        """
+        return self._submit(job.name, {"entry": "sliced_file", "sliced": job})
 
     def wait_for_gate(self, job_id: str, timeout_s: float) -> None:
         """Block until the job reaches a gate, or ends before one (or a wait runs out).
@@ -560,19 +589,14 @@ class Daemon:
             # scoping exists to close.
             inbox.put(cmd)
 
-    def _run_job(
-        self, job_id: str, stl_path: str, as_laid: bool = False, context: str | None = None,
-    ) -> None:
+    def _run_job(self, job_id: str, given: dict[str, Any]) -> None:
         """Run the graph for one job. Runs on a background thread."""
         thread_config = {"configurable": {"thread_id": job_id}}
         initial_state: dict[str, Any] = {
             "job_id": job_id,
             "trace_id": str(uuid.uuid4()),
-            "entry": "stl_upload",
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "stl_path": stl_path,
-            "as_laid": as_laid,
-            "context_path": context,
+            **given,
         }
 
         try:

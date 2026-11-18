@@ -64,6 +64,7 @@ from print_shop.setup.reading import (
     SeamReading,
     SliceReading,
 )
+from print_shop.sliced import Comparison, Difference, ObjectOverrides, SlicedFile, SlicedJob
 from print_shop.slicer.store import ProfileRef, ProfilesUsed
 
 __all__ = ["PERSISTED_TYPES", "make_serializer", "open_checkpointer"]
@@ -116,6 +117,12 @@ PERSISTED_TYPES: tuple[type, ...] = (
     Fit,
     Hold,
     Seen,
+    # A hand-sliced file on its way to the gate (mqucifer/print-shop#164).
+    SlicedJob,
+    SlicedFile,
+    ObjectOverrides,
+    Comparison,
+    Difference,
 )
 
 
