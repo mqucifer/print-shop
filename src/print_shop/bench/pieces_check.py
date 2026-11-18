@@ -46,6 +46,13 @@ sides of a limit, each beyond the other's resolution (`limits.apart`).
   scene 17 pairs of pieces were under 0.4 mm apart, and a run learned it only from `thin` on
   the frame it had built (mqucifer/print-shop#161).
 
+- **`no-opening`**, with `--lip`, the lip a build will be given: a piece that lip leaves no
+  one opening in. A waist the lip closes over, with the line to split it along; an opening
+  pinched in two where an edge comes in; or none two nozzles wide. By `pieces build`'s own
+  plan, the piece's pocket as it would be built. And by the piece's pixels further than the
+  lip from its edge, which hold at least what a build's opening holds. A run learned each
+  only from a build's refusal (mqucifer/print-shop#161).
+
 And two readings with every answer: the glass share, the pieces' area over the panel's, by
 their outlines and by their pixels, against the share the map's source had; and the lead's
 widest point.
@@ -69,7 +76,7 @@ from .report import NoAnswer, Report
 #: The flags, in the order a reply says them.
 FLAGS = (
     "dead-end", "surrounds", "sliver", "small", "neck", "notch", "gradient", "wide-lead",
-    "thin-lead",
+    "thin-lead", "no-opening",
 )  # fmt: skip
 #: The limits when none is given. A piece under 3 mm across or 25 mm² can't be handled, and a
 #: place under 1.2 mm leaves no pane once its play and lips are taken: the operator's tracer's
@@ -86,6 +93,9 @@ MAX_COLOUR_RUN = 40.0
 MAX_LEAD = 3.0
 #: Lead under this, in mm, is under a nozzle's width: `pieces build` and `thin` hold 0.4 mm.
 MIN_LEAD = 0.4
+#: An opening is one where it's this wide somewhere, in mm: two nozzles, as `pieces build` has
+#: it (`LEAST_ACROSS`).
+LEAST_OPENING = 0.8
 #: Thin places of the lead said one by one, at most a map: the rest are counted.
 THIN_SAID = 40
 #: A gap is a dead end from this many lead widths deep: shallower is a corner's own shape.
@@ -126,8 +136,11 @@ class Limits:
     max_colour_run: float = MAX_COLOUR_RUN
     max_lead: float | None = None
     min_lead: float = MIN_LEAD
-    #: The lip a build will be given, where it's said: `min_neck` is then twice it or more.
+    #: The lip a build will be given, where it's said, and its play and fit: the build's
+    #: defaults unless given.
     lip: float | None = None
+    play: float = 0.25
+    fit: float = 0.1
 
     def lead(self, usual: float) -> float:
         return self.max_lead if self.max_lead is not None else MAX_LEAD * usual
@@ -140,14 +153,10 @@ def limits_of(args: Any) -> Limits:
         value = getattr(args, name, None)
         return default if value is None else float(value)
 
-    # A lip on each side closes a build's opening over a place under twice it: a neck by the
-    # build's own rule, whatever --min-neck was given (mqucifer/print-shop#161).
     lip = getattr(args, "lip", None)
     neck = given("min_neck", MIN_NECK)
-    if lip is not None:
-        if not lip > 0:
-            raise NoAnswer("--lip is the lip a build will be given, in mm, over 0")
-        neck = max(neck, 2.0 * float(lip))
+    if lip is not None and not lip > 0:
+        raise NoAnswer("--lip is the lip a build will be given, in mm, over 0")
     return Limits(
         given("min_width", MIN_WIDTH),
         given("min_area", MIN_AREA),
@@ -157,6 +166,8 @@ def limits_of(args: Any) -> Limits:
         getattr(args, "max_lead", None),
         given("min_lead", MIN_LEAD),
         float(lip) if lip is not None else None,
+        given("play", 0.25),
+        given("fit", 0.1),
     )
 
 
@@ -774,6 +785,45 @@ def necks(shape: Any, step: float, limits: Limits, map_mm: float) -> dict[str, A
     return found
 
 
+def build_refuses(found: Map, limits: Limits) -> dict[int, str]:
+    """Each piece `pieces build` would refuse at the lip it will be given, for want of one
+    opening or a pane, with the build's own words: a waist the lip closes over and the line
+    to split it along, an opening pinched in two, or none left. It's the build's own plan,
+    made here, so the check and the build can't disagree: a run learned each of these only
+    from a build's refusal (mqucifer/print-shop#161). A line inside a piece, or a piece round
+    another, is another flag's."""
+    import re
+
+    from .pieces_build import plan
+
+    assert limits.lip is not None
+    _, wrong = plan(found, (limits.lip, limits.lip), limits.play, limits.fit)
+    found_wrong: dict[int, str] = {}
+    for line in wrong:
+        named = re.match(r"piece (\d+), ", line)
+        if named and ("no one opening" in line or "has no pane" in line):
+            found_wrong[int(named.group(1))] = line
+    return found_wrong
+
+
+def openings_by_pixels(drawn: Pixels, far: np.ndarray, number: int, lip: float) -> int:
+    """The same by the map's pixels: those of the piece further than the lip from its edge,
+    counted where they join, each lot `LEAST_OPENING` wide at its widest."""
+    from scipy import ndimage
+
+    window = ndimage.find_objects((drawn.ids == number).astype(np.int8))[0]
+    if window is None:
+        return 0
+    mine = drawn.ids[window] == number
+    # A pixel's distance is to the nearest other pixel's centre: half a pixel less to the edge.
+    deep = (far[window] - 0.5) * drawn.mm
+    labels, count = ndimage.label(mine & (deep > lip), structure=np.ones((3, 3)))
+    if not count:
+        return 0
+    most = np.atleast_1d(ndimage.maximum(deep, labels, np.arange(1, count + 1)))
+    return int((2.0 * (most - lip) >= LEAST_OPENING).sum())
+
+
 def thin_lead(
     found: Map, limits: Limits, map_mm: float, only: list[int] | None
 ) -> tuple[list[dict[str, Any]], list[str], list[str]]:
@@ -944,12 +994,6 @@ def flag_piece(row: dict[str, Any], limits: Limits) -> list[dict[str, Any]]:
                 f"{row['narrowest_by_pixels_mm']:.2f} mm"
                 if row.get("narrowest_by_pixels_mm") is not None
                 else ""
-            )
-            + (
-                f". A lip of {limits.lip:g} mm on each side closes a build's opening over a "
-                f"place under {2.0 * limits.lip:g} mm: `pieces split` the piece across it"
-                if limits.lip is not None and not under(narrow, MIN_NECK)
-                else ""
             ),
         )  # fmt: skip
     if row["notch_depth_mm"] is not None:
@@ -1106,9 +1150,43 @@ def read_map(found: Map, limits: Limits, only: list[int] | None = None) -> Readi
     ids = [r["id"] for r in rows]
     by_pixels = dict(zip(ids, np.atleast_1d(ndimage.maximum(far, drawn.ids, ids)), strict=True))
     counted = dict(zip(ids, np.atleast_1d(ndimage.sum(drawn.ids > 0, drawn.ids, ids)), strict=True))
+    refused = build_refuses(found, limits) if limits.lip is not None else {}
     for row in rows:
         row["widest_by_pixels_mm"] = max(0.0, 2.0 * float(by_pixels[row["id"]]) - 1.0) * drawn.mm
         row["area_by_pixels_mm2"] = float(counted[row["id"]]) * drawn.mm**2
+        if limits.lip is not None:
+            refusal = refused.get(row["id"])
+            # The pixels of the piece further than the lip from its edge, by true distance:
+            # they hold at least what a build's opening holds, as its lip keeps a corner a
+            # corner and so covers more. A pixel less of lip, so its own coarseness can't
+            # close an opening.
+            seen = openings_by_pixels(drawn, far, row["id"], limits.lip - drawn.mm)
+            row["openings_by_pixels"] = seen
+            if refusal is None and seen == 0:
+                differs.append(
+                    f"piece {row['id']} has an opening at a lip of {limits.lip:g} mm as "
+                    "`pieces build` would build it, and none by its pixels further than the "
+                    "lip from its edge"
+                )
+            if refusal is not None:
+                row["no_opening"] = True
+                flags.append(
+                    {
+                        "flag": "no-opening",
+                        "piece": row["id"],
+                        "figure": float(seen),
+                        "limit": 1.0,
+                        "at": row["centre"],
+                        "said": refusal,
+                    }  # fmt: skip
+                )
+                if seen >= 1 and "leaves it no" in refusal:
+                    notes.append(
+                        f"piece {row['id']}: by true distance a lip of {limits.lip:g} mm "
+                        f"leaves {seen} opening(s) {LEAST_OPENING:g} mm wide. A build's lip "
+                        "keeps each corner a corner, so past the end of a slit in the piece's "
+                        "edge it covers more, and that's what leaves none"
+                    )
         if abs(row["widest_by_pixels_mm"] - row["widest_mm"]) > PIXELS_OFF * drawn.mm:
             differs.append(
                 f"piece {row['id']} is {row['widest_mm']:.2f} mm at its widest by the largest "
@@ -1185,6 +1263,8 @@ def read_map(found: Map, limits: Limits, only: list[int] | None = None) -> Readi
                 )
         mine = flag_piece(row, limits)
         row["flags"] = sorted({f["flag"] for f in mine}, key=FLAGS.index)
+        if row.pop("no_opening", False):
+            row["flags"].append("no-opening")
         flags += mine
         del row["notch"]
     by_id = {r["id"]: r for r in rows}
@@ -1231,6 +1311,12 @@ def read_map(found: Map, limits: Limits, only: list[int] | None = None) -> Readi
         f"{len(thin)} place(s) where the lead is under --min-lead {limits.min_lead:g} mm, each "
         "by twice its pixels' distance to the glass at its middle",
     ]
+    if limits.lip is not None:
+        seconds.append(
+            f"{len(refused)} piece(s) a lip of {limits.lip:g} mm leaves no one opening in, by "
+            "`pieces build`'s own plan; and each piece's pixels further than the lip from its "
+            "edge, which hold at least what a build's opening holds"
+        )
     return Reading(rows, flags, ends, figures, seconds, differs, drawn, notes)
 
 
@@ -1358,6 +1444,12 @@ def fixes_said(flags: list[dict[str, Any]]) -> str:
             "lead under a nozzle's width: `pieces widen MAP A B` widens the line there and "
             "keeps it; `pieces merge MAP A B` takes it out, where the two are one colour and "
             "the picture doesn't mean the line"
+        )
+    if "no-opening" in names:
+        ways.append(
+            "a piece the lip leaves no one opening in: its line says which, `pieces split` "
+            "along the line it gives, `pieces merge` a small one into a neighbour, or build "
+            "with a narrower lip"
         )
     if "wide-lead" in names:
         ways.append("a patch of lead: `pieces merge` the pieces round it, or redraw it as glass")

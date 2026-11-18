@@ -753,9 +753,14 @@ def parser() -> Parser:
             "--lip",
             type=float,
             metavar="MM",
-            help="the lip `pieces build` will be given: a place under twice it, with wide "
-            "glass on both sides, is a neck whatever --min-neck is, as the lip on each side "
-            "closes the opening over it",
+            help="the lip `pieces build` will be given: each piece it leaves no one opening in "
+            "is flagged, as the build would refuse it, with the line to split a waist along",
+        )
+        reads.add_argument(
+            "--play", type=float, metavar="C", help="with --lip, the build's play (0.25)"
+        )
+        reads.add_argument(
+            "--fit", type=float, metavar="MM", help="with --lip, the build's --fit (0.1)"
         )
         reads.add_argument(
             "--min-lead",

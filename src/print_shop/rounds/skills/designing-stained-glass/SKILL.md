@@ -288,7 +288,8 @@ piece that breaks a rule, with where. Each flag has its fix:
 |---|---|---|
 | `dead-end` | a lead line that ends in mid-glass | `pieces extend MAP --at X,Y` runs it on to the next line or the edge, or `pieces drop-line MAP --at X,Y` takes it out |
 | `sliver`, `small` | a piece too narrow or too small to handle | `pieces merge MAP A B`: it joins a neighbour B, and the line between them goes |
-| `neck` | a thin place with wide glass on both sides of it: under 1.2 mm, or with `--lip L` under twice the lip, where the lip on each side would close the opening | `pieces split MAP ID --line x1,y1,x2,y2` cuts the piece there, edge to edge |
+| `neck` | a thin place with wide glass on both sides of it | `pieces split MAP ID --line x1,y1,x2,y2` cuts the piece there, edge to edge |
+| `no-opening` | with `--lip L`: a piece that lip leaves no one opening in, so `pieces build` would refuse it | as its line says: `pieces split` along the line it gives for a waist; `pieces merge` a piece too small for an opening into a neighbour; or a narrower `--lip` for every piece |
 | `notch` | a notch deeper than it's wide | `pieces split` from the notch's end to the piece's far edge |
 | `gradient` | a colour that runs across one piece | `pieces split` where it changes, or keep it one colour and say so |
 | `wide-lead` | a patch of lead, not a line | `pieces merge` the pieces round it |

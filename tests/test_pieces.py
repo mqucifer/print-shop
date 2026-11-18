@@ -1003,17 +1003,16 @@ def test_a_waist_the_lip_closes_over_is_flagged_refused_and_split(bench: Any) ->
     """mqucifer/print-shop#161: a piece 14 mm wide with a waist 2 mm across. A lip of 1.2 mm on
     each side closes its opening over the waist. The build used to step that piece's lip down
     until its opening was one, 0.6 mm all round, and `capture` at the rim asked then failed
-    it. Every piece takes the lip asked now: `check --lip` flags the waist as a neck, whatever
-    --min-neck is; `build` refuses the piece, with the line to split it along; and split
+    it. Every piece takes the lip asked now: `check --lip` flags the piece as the build would
+    refuse it, with the line to split it along; `build` refuses it the same way; and split
     there, it builds, and `capture` holds both halves at the rim asked."""
     plain = bench("pieces", "check", "waist.json", "--max-lead", 20)
     assert plain.verdict == "OK", "2 mm is over the 1.2 mm a neck is"
     told = bench("pieces", "check", "waist.json", "--max-lead", 20, "--lip", 1.2)
-    assert told.verdict == "FAIL" and flags_of(told) == {("neck", 1)}, told.text
-    assert told.numbers["limits"]["min_neck_mm"] == 2.4
-    assert "A lip of 1.2 mm on each side closes a build's opening over a place under 2.4 mm" in (
-        told.text
-    )
+    assert told.verdict == "FAIL" and flags_of(told) == {("no-opening", 1)}, told.text
+    assert "a waist 2.00 mm across at (30.0, 12.0)" in told.text
+    assert "`pieces split MAP 1 --line 30,11,30,13`" in told.text, "the build's own words"
+    assert len(told.record["second_check"]) == 5
     lips = ["--thickness", 3, "--pane", 1, "--lip", "1.2,0.6", "--play", 0.25]
     refused = bench("pieces", "build", "waist.json", *lips, "--build-out", "waist")
     assert refused.verdict == "FAIL" and refused.code == 1, refused.text
@@ -1093,6 +1092,66 @@ def test_a_piece_is_judged_on_its_pocket_as_built_and_refused_the_same_way(bench
     assert cut.verdict == "OK" and cut.numbers["pieces_after"] == 2, cut.text
     built = bench("pieces", "build", "curved-1.json", *lips, "--build-out", "curved")
     assert built.verdict == "OK", built.text
+
+
+def test_check_with_a_lip_flags_what_a_build_would_refuse_and_nothing_else(bench: Any) -> None:
+    """mqucifer/print-shop#161: `pieces check --lip L` makes the build's own plan, so a piece
+    the build would refuse for want of one opening is flagged before it: here a waist that's
+    whole on its outline and closes on its pocket as built. A map the build takes has no such
+    flag."""
+    told = bench("pieces", "check", "curved_waist.json", "--max-lead", 20, "--lip", 1.2)
+    assert told.verdict == "FAIL" and flags_of(told) == {("no-opening", 1)}, told.text
+    assert "once its pocket's curves are fitted inside its outline" in told.text
+    assert re.search(r"`pieces split MAP 1 --line [-0-9.,]+`", told.text)
+    assert bench("pieces", "check", "curved_waist.json", "--max-lead", 20).verdict == "OK"
+    fine = bench("pieces", "check", "rules.json", "--lip", 1.2)
+    assert fine.verdict == "OK" and not flags_of(fine), fine.text
+    # At a lip the waist takes, nothing is flagged.
+    narrow = bench("pieces", "check", "curved_waist.json", "--max-lead", 20, "--lip", 0.8)
+    assert narrow.verdict == "OK", narrow.text
+
+
+def test_a_merge_across_a_patch_of_lead_takes_the_lead_between_and_builds_first_time(
+    bench: Any,
+) -> None:
+    """mqucifer/print-shop#161: a small piece 1.6 mm from a large one, with no line of their
+    own between them and one corner near. On a traced scene such a merge joined the two by a
+    neck, with scraps of the old lead left as lines inside the piece, and a run fixed it one
+    build at a time. The merge takes the lead between them now: the small piece's hull with
+    what of the large one lies near it."""
+    answer = bench("pieces", "merge", "apart.json", 2, 1, "--to", "apart-1.json")
+    assert answer.verdict == "OK", answer.text
+    assert "They were 1.60 mm apart at the nearest, wider than the map's usual 0.95 mm line" in (
+        answer.record["why"]
+    )
+    (row,) = answer.numbers["changed"]
+    assert row["flags"] == [] and answer.numbers["pieces_after"] == 2
+    saved = json.loads((bench.work / "apart-1.json").read_text())
+    whole = next(p for p in saved["pieces"] if p["id"] == 1)
+    assert not whole.get("holes"), "no scrap of lead is left inside it"
+    # The diamond's far corner is where it was, and the third piece keeps its lead.
+    assert max(x for x, _ in whole["outline"]) == pytest.approx(49.4, abs=1e-6)
+    assert "every other piece's outline is the same, point for point" in answer.text
+    again = bench("pieces", "check", "apart-1.json", "--max-lead", 99, "--lip", 1.2)
+    assert not flags_of(again), again.text
+    built = bench(
+        "pieces", "build", "apart-1.json", "--thickness", 3, "--pane", 1, "--lip", 1.2,
+        "--play", 0.25, "--build-out", "apart",
+    )  # fmt: skip
+    assert built.verdict == "OK", built.text
+
+
+def test_a_build_names_everything_that_stops_a_piece_together(bench: Any) -> None:
+    """Three lines inside one piece, each joined to no other: one refusal names all three,
+    each with its own place and fix, where it named one a build."""
+    answer = bench(
+        "pieces", "build", "lone.json", "--thickness", 3, "--pane", 1, "--lip", 1.2,
+        "--play", 0.25, "--build-out", "lone",
+    )  # fmt: skip
+    assert answer.verdict == "FAIL", answer.text
+    (line,) = answer.numbers["unbuildable"]
+    assert line.startswith("piece 4, ") and line.count("has a lead line inside it") == 3
+    assert line.count("`pieces drop-line MAP --at ") == 3
 
 
 def test_a_piece_too_thin_for_a_pane_is_named_and_nothing_is_built(

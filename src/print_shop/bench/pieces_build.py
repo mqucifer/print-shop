@@ -646,51 +646,64 @@ def plan(
                 for o in found.pieces
             )
         ]
-        if lone:
-            at = shapely.get_coordinates(lone[0].representative_point())[0]
+        # Everything that stops this piece, together: each line inside it, and what would
+        # still stop it with those out. One a build, a run fixed a merged piece three times
+        # over (mqucifer/print-shop#161).
+        stops: list[str] = []
+        for hole in lone:
+            at = shapely.get_coordinates(hole.representative_point())[0]
             spot = f"{at[0]:.4g},{at[1]:.4g}"
-            wrong.append(
-                f"piece {piece.id}, round {where}, has a lead line inside it, round "
-                f"{piecemap.said_at(at)}, that joins no other: it would be a body of its own, "
-                f"joined to nothing. `pieces drop-line MAP --at {spot}` takes it out, or "
-                f"`pieces extend MAP --at {spot}` runs it on to the piece's edge"
+            stops.append(
+                f"has a lead line inside it, round {piecemap.said_at(at)}, that joins no "
+                "other: it would be a body of its own, joined to nothing. `pieces drop-line "
+                f"MAP --at {spot}` takes it out, or `pieces extend MAP --at {spot}` runs it on "
+                "to the piece's edge"
             )
-            continue
-        pane = pane_of(piece.shape, play)
+        judged = piece
+        if lone:
+            kept = [ring for ring in piece.shape.interiors if shapely.Polygon(ring) not in lone]
+            judged = Piece(
+                piece.id, piece.colour, shapely.Polygon(piece.shape.exterior, kept),
+                piece.thickness_mm, piece.paint,
+            )  # fmt: skip
+        after = "with those lines out, it " if lone else ""
+        pocket = curves = None
+        pane = pane_of(judged.shape, play)
         if pane is None:
-            left = _printable(piece.shape.buffer(-play, join_style="mitre", mitre_limit=5.0))
-            wrong.append(
-                f"piece {piece.id}, round {where}, has no pane once {play:g} mm of play is "
-                f"taken all round: {_why(found, piece, left, 'pane')}"
+            left = _printable(judged.shape.buffer(-play, join_style="mitre", mitre_limit=5.0))
+            stops.append(
+                f"{after}has no pane once {play:g} mm of play is taken all round: "
+                f"{_why(found, judged, left, 'pane')}"
             )
-            continue
-        pocket = pane.buffer(play, quad_segs=ROUND_SEGS)
-        # Every piece takes the lip asked. A narrower lip all round a piece, stepped down
-        # until its opening was one, made a pane `capture` then failed at the rim asked: a
-        # piece with a waist the lip closes over is split there, as a glass cutter would
-        # (mqucifer/print-shop#161).
-        if _one_wide(pocket, full) is None:
-            left = [
-                part
-                for part in _inset(pocket, full)
-                if not under(piecemap.widest(part, 0.02)[0], LEAST_ACROSS)
-            ]
-            wrong.append(
-                f"piece {piece.id}, round {where}, has no one opening at a lip of {full:g} mm: "
-                f"{_why(found, piece, left, 'opening', full)}"
-            )
-            continue
-        try:
-            curves = piece_curves(piece, full, play, fit)
-        except NoOpening as exc:
-            wrong.append(
-                f"piece {piece.id}, round {where}, has no one opening at a lip of {full:g} mm, "
-                f"once its pocket's curves are fitted inside its outline: "
-                f"{_why(found, piece, exc.left, 'opening', full)}"
-            )
-            continue
-        except NoAnswer as exc:
-            wrong.append(f"piece {piece.id}, round {where}, can't be built: {exc}")
+        else:
+            pocket = pane.buffer(play, quad_segs=ROUND_SEGS)
+            # Every piece takes the lip asked. A narrower lip all round a piece, stepped down
+            # until its opening was one, made a pane `capture` then failed at the rim asked: a
+            # piece with a waist the lip closes over is split there, as a glass cutter would
+            # (mqucifer/print-shop#161).
+            if _one_wide(pocket, full) is None:
+                left = [
+                    part
+                    for part in _inset(pocket, full)
+                    if not under(piecemap.widest(part, 0.02)[0], LEAST_ACROSS)
+                ]
+                stops.append(
+                    f"{after}has no one opening at a lip of {full:g} mm: "
+                    f"{_why(found, judged, left, 'opening', full)}"
+                )
+            else:
+                try:
+                    curves = piece_curves(judged, full, play, fit)
+                except NoOpening as exc:
+                    stops.append(
+                        f"{after}has no one opening at a lip of {full:g} mm, once its pocket's "
+                        f"curves are fitted inside its outline: "
+                        f"{_why(found, judged, exc.left, 'opening', full)}"
+                    )
+                except NoAnswer as exc:
+                    stops.append(f"{after}can't be built: {exc}")
+        if stops:
+            wrong.append(f"piece {piece.id}, round {where}, " + ". And ".join(stops))
             continue
         rows.append({"piece": piece, "lip_mm": full, "pocket": pocket, "curves": curves})
     return rows, wrong

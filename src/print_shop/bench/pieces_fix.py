@@ -69,6 +69,9 @@ from .report import NoAnswer, Report
 #: Two pieces are neighbours where the lead between them is no wider than this many of the
 #: map's usual lead: wider, and something else lies between them.
 REACH = 2.5
+#: Two pieces further apart than this many of the map's usual lead have no line of their own
+#: between them: a merge then takes the patch of lead between them, not a line.
+WIDE_GAP = 1.25
 #: A dead end is the one meant where `--at` is within this many leads of it.
 NEAR = 3.0
 #: Coordinates are joined on this grid, in mm, so sides that lie on each other become one.
@@ -121,17 +124,42 @@ def _one(shape: Any, what: str) -> Any:
     return parts[0]
 
 
-def _refilled(found: Map, shape: Any, was: list[Any], keep: int) -> Any:
+def _refilled(found: Map, shape: Any, was: list[Any], joined: tuple[int, ...]) -> Any:
     """A joined shape with each new hole that holds nothing but lead filled: what's left of the
-    line where it was wider than a line."""
+    line where it was wider than a line. `joined` are the pieces the shape is made of, which
+    a hole touches and doesn't hold: counted as held, a scrap of lead between the two stayed
+    as a line inside the piece, joined to no other (mqucifer/print-shop#161)."""
     kept = []
     for ring in shape.interiors:
         hole = shapely.Polygon(ring)
-        holds = any(o.id != keep and o.shape.intersects(hole) for o in found.pieces)
+        holds = any(o.id not in joined and o.shape.intersects(hole) for o in found.pieces)
         old = any(hole.symmetric_difference(w).area < 0.01 * hole.area for w in was)
         if holds or old:
             kept.append(ring)
     return shapely.Polygon(shape.exterior, kept)
+
+
+def _facing(a: Any, b: Any, reach: float) -> list[Any]:
+    """The lead one shape faces another across: each stretch of its edge within `reach` of the
+    other, joined to the nearest points of the other's edge."""
+    ring = shapely.get_coordinates(a.exterior.segmentize(0.1))[:-1]
+    feet = shapely.get_coordinates(shapely.shortest_line(shapely.points(ring), b))[1::2]
+    near = np.hypot(*(feet - ring).T) <= reach
+    if not near.any():
+        return []
+    start = int(np.argmin(near)) if not near.all() else 0
+    order = np.roll(np.arange(len(ring)), -start)
+    found: list[Any] = []
+    run: list[int] = []
+    for k in [*order, -1]:
+        if k >= 0 and near[k]:
+            run.append(int(k))
+            continue
+        if len(run) > 1:
+            made = shapely.Polygon([*ring[run], *feet[run][::-1]]).buffer(0)
+            found += [part for part in piecemap.polygons(made) if part.area > 0]
+        run = []
+    return found
 
 
 def line_between(found: Map, a: Piece, b: Piece) -> list[Any]:
@@ -144,6 +172,30 @@ def line_between(found: Map, a: Piece, b: Piece) -> list[Any]:
     # Within the panel: two pieces on its edge are joined up to the edge, and no further.
     zone = zone.intersection(found.panel)
     line = piecemap.closed(both, reach / 2.0).difference(both).intersection(zone)
+    # And all the lead they face each other across: from each point of one's edge within
+    # reach of the other, straight to the nearest of the other's. A closing alone, between
+    # two pieces 1.6 mm apart with no line of their own, joined them by a neck with slits
+    # either side of it, which a build then refused one at a time
+    # (mqucifer/print-shop#161).
+    facing = [*_facing(a.shape, b.shape, reach), *_facing(b.shape, a.shape, reach)]
+    if facing:
+        line = shapely.union_all([line, *facing]).difference(both).intersection(zone)
+    gap = float(a.shape.distance(b.shape))
+    if gap > WIDE_GAP * found.lead_mm:
+        # No line of their own lies between them: they're apart across a patch of lead. The
+        # smaller joins the larger across all of it, as a glass cutter takes a scrap into its
+        # neighbour: the lead inside the smaller piece's hull with what of the larger lies
+        # within reach of it. Joined by what they face each other across alone, the two met
+        # at a neck, which a lip then closed over.
+        small, large = sorted((a.shape, b.shape), key=lambda shape: shape.area)
+        beside = large.intersection(small.buffer(gap + reach))
+        bay = shapely.union_all([small, beside]).convex_hull.intersection(found.panel)
+        line = shapely.union_all([line, bay.difference(both)])
+        if others:
+            # Clear of every other piece by the lead it had from the nearer of the two.
+            for other in others:
+                keep = min(float(other.distance(a.shape)), float(other.distance(b.shape)))
+                line = line.difference(other.buffer(min(keep, found.lead_mm)))
     if others:
         line = line.difference(shapely.union_all(others))
     touch = 1e-3 * found.lead_mm
@@ -174,7 +226,7 @@ def merged(found: Map, a: Piece, b: Piece) -> tuple[Any, float]:
         )
     lone = [shapely.Polygon(ring) for one in (a, b) for ring in one.shape.interiors]
     shape = _one(_joined([a.shape, b.shape, *line]), f"pieces {a.id} and {b.id} joined")
-    shape = _refilled(found, shape, lone, b.id)
+    shape = _refilled(found, shape, lone, (a.id, b.id))
     return shape, float(shape.area - a.shape.area - b.shape.area)
 
 
@@ -389,6 +441,7 @@ def _finish(args: Any, report: Report, before: Map, made: Made) -> None:
 
 def do_merge(found: Map, a_id: int, b_id: int) -> Made:
     a, b = found.piece(a_id), found.piece(b_id)
+    gap = float(a.shape.distance(b.shape))
     shape, line = merged(found, a, b)
     made = Piece(
         b.id, b.colour, shape, b.thickness_mm, {"rgb": b.paint["rgb"]} if b.paint else None
@@ -398,7 +451,13 @@ def do_merge(found: Map, a_id: int, b_id: int) -> Made:
     return Made(
         after, [b.id],
         f"piece {a.id} joined piece {b.id}, which keeps its number and its {b.colour}: the "
-        f"line between them, {line:.1f} mm² of lead, is glass",
+        f"line between them, {line:.1f} mm² of lead, is glass"
+        + (
+            f". They were {gap:.2f} mm apart at the nearest, wider than the map's usual "
+            f"{found.lead_mm:.2f} mm line: all the lead they faced each other across is glass"
+            if gap > WIDE_GAP * found.lead_mm
+            else ""
+        ),
         (line, lost),
     )  # fmt: skip
 

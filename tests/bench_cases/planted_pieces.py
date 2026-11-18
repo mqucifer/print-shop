@@ -37,6 +37,8 @@ is a Sponsor's scene or anything from one (mqucifer/print-shop#152, mqucifer/pri
 - `bend.json`: a piece round a bend, narrow all the way round it.
 - `curved_waist.json`: a piece with curved sides drawn in to a waist 2.45 mm across, a hair
   over the 2.4 mm a lip of 1.2 on each side closes over.
+- `apart.json`: a small piece 1.6 mm from a large one across a patch of lead, with no line of
+  their own between them, and a third piece beside it.
 - `hairs.json`: two cuts two microns wide whose ends face each other, which the
   outline has and no pixel shows.
 """
@@ -568,6 +570,28 @@ def curved_waist() -> dict[str, Any]:
     return found
 
 
+def apart() -> dict[str, Any]:
+    """Three pieces of a 60 x 40 mm panel whose usual lead is 0.95 mm. Piece 1 is large, the
+    panel's left 40 mm. Piece 2 is small, a diamond 7.8 by 7 mm, one corner 1.6 mm off piece
+    1's right side, in a patch of lead: further than a line is wide, so they share no line,
+    and only that corner is near. Piece 3 is the panel's right side, 1.2 mm beyond piece 2."""
+    return {
+        "piece_map": 1,
+        "panel": {"width_mm": 60, "height_mm": 40},
+        "lead_mm": 0.95,
+        "colours": {"blue": {"rgb": [40, 90, 220]}},
+        "pieces": [
+            {"id": 1, "colour": "green", "outline": [[0, 0], [40, 0], [40, 40], [0, 40]]},
+            {
+                "id": 2,
+                "colour": "green",
+                "outline": [[41.6, 18], [45.5, 14.5], [49.4, 18], [45.5, 21.5]],
+            },
+            {"id": 3, "colour": "blue", "outline": [[50.6, 0], [60, 0], [60, 40], [50.6, 40]]},
+        ],
+    }
+
+
 def rules(slit: bool, depth: float = 8.0) -> dict[str, Any]:
     lead = 1.2
     outlines = cells(lead)
@@ -629,6 +653,7 @@ for name, made in (
     ("close.json", close()),
     ("near.json", near()),
     ("waist.json", waist()),
+    ("apart.json", apart()),
     ("curved_waist.json", curved_waist()),
     ("slanted_waist.json", slanted_waist()),
     ("bend.json", bend()),
