@@ -324,6 +324,9 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "force_n",
         "held",
         "joints",
+        # The part the assembly is lifted by, where that's the load case
+        # (mqucifer/print-shop#170).
+        "lift",
         "loads",
         "mesh_mm",
         "mesh_s",
@@ -515,6 +518,19 @@ SLICE_PLACE = Row(
 )
 #: `slice`'s answer at each `--at` (mqucifer/print-shop#77): each piece, largest first, with its
 #: least width (mqucifer/print-shop#101), and how many pieces and holes there are.
+#: A piece of a part solved by itself, as `load` reads a dovetail's neck, its socket's walls
+#: and its latch's tab (mqucifer/print-shop#170).
+_STRAINED = Row(
+    {
+        "across_at": XYZ,
+        "across_layers_pct": NUMBER,
+        "elements": NUMBER,
+        "mesh_mm": NUMBER,
+        "stretch_at": XYZ,
+        "stretch_is": TEXT,
+        "stretch_pct": NUMBER,
+    }
+)
 SLICE = Rows(
     Row(
         {
@@ -800,11 +816,63 @@ SHAPES: dict[str, dict[str, Any]] = {
                     # washers, its nut and its plastic is nearest its limit, and by what share.
                     "gives_first": TEXT,
                     "nearest_share": NUMBER,
+                    # A dovetail's (mqucifer/print-shop#170): the way its tail slides in, how
+                    # hard the load drives it that way, each face's push, what its faces leave
+                    # held by nothing, its latch, and the tail's neck and the socket's walls.
+                    "glue_unread": FLAG,
+                    "slides": TEXT,
+                    "drive_n": NUMBER,
+                    "opens": FLAG,
+                    "latched": FLAG,
+                    "left_n": XYZ,
+                    "left_nmm": XYZ,
+                    "faces": Rows(
+                        Row(
+                            {
+                                "area_mm2": NUMBER,
+                                "at": XYZ,
+                                "bears_mm2": NUMBER,
+                                "kind": TEXT,
+                                "normal": XYZ,
+                                "pressed": TEXT,
+                                "pressed_part": TEXT,
+                                "pressure_limit_mpa": NUMBER,
+                                "pressure_mpa": NUMBER,
+                                "push_n": NUMBER,
+                            },
+                            closed=True,
+                        )
+                    ),
+                    "latch": Row(
+                        {
+                            "catch_at": XYZ,
+                            "catch_mm2": NUMBER,
+                            "holds_n": NUMBER,
+                            "on": TEXT,
+                            "play_mm": NUMBER,
+                            "pressure_limit_mpa": NUMBER,
+                            "pressure_mpa": NUMBER,
+                            "tab": _STRAINED,
+                        }
+                    ),
+                    "neck": _STRAINED,
+                    "walls": _STRAINED,
                 }
             )
         ),
+        "lift": TEXT,
         "loads": Rows(
-            Row({"at": XYZ, "moved": XYZ, "moves_mm": NUMBER, "part": TEXT, "patch_mm2": NUMBER})
+            Row(
+                {
+                    "at": XYZ,
+                    "grams": NUMBER,
+                    "moved": XYZ,
+                    "moves_mm": NUMBER,
+                    "part": TEXT,
+                    "patch_mm2": NUMBER,
+                    "volume_mm3": NUMBER,
+                }
+            )
         ),
         "mesh_mm": NUMBER,
         "most_moves_at": XYZ,

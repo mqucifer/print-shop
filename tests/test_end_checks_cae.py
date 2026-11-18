@@ -172,6 +172,34 @@ def test_a_clip_that_bends_too_far_is_over_and_the_same_longer_takes_it(
     assert (read[0].verdict, read[0].places, read[0].unsure) == ("CLEAR", [], False)
 
 
+def test_a_dovetail_s_latch_is_read_on_its_way_on_as_any_snap_is(
+    cae: Any,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    """A leg's lower piece hangs on a click latch (mqucifer/print-shop#170): a tab on the
+    tail's part whose hook passes the socket's part 0.6 mm deep on the way in. The end checks
+    read it with nothing new: the slide's way out, `fit-on` back along it, the tab found from
+    the place on the part that moves, and `bend` with the hook's depth as its push."""
+    work = tmp_path / "leg"
+    work.mkdir()
+    for name in ("socket", "tail"):
+        shutil.copy(cae.work / "dovetail" / f"{name}-latch.step", work / f"{name}.step")
+    tail = holds.Held("tail", "", holds.PRINTED, "socket")
+    slide = "clearance socket.step tail.step --slide +z"
+    read = end_checks.read(Box(work), ways(work, slide, tail), {}, work, tmp_path / "kept")
+    place = read[0].places[0]
+    assert read[0].verdict == "BLOCKED"
+    assert place.depth_mm == pytest.approx(0.6, abs=0.005) and place.across == "y"
+    assert place.arm_file == "tail.step", "the tab is on the part that moves"
+    assert place.command == (
+        "bend tail.step --arm -2.6,-0.7,9.9,2.6,1.7,30 --root z=30 --push 0.6 "
+        "--toward +y --layers z"
+    )
+    assert (place.status, place.verdict) == (end_checks.TAKES, "OK")
+    assert place.numbers["across_layers_pct"] == pytest.approx(0.34, abs=0.03)
+    assert read[0].failing() == []
+
+
 def test_a_given_strip_pushed_past_a_printed_catch_is_for_a_person(
     cae: Any,  # noqa: F811
     tmp_path: Path,

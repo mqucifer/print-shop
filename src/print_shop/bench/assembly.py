@@ -21,7 +21,12 @@ whoever designs the parts (`docs/bench.md` has it in full):
   is, a point on its axis. `through` (mqucifer/print-shop#168) names a bolt that passes right
   through both parts, its nut and the washer under each side, its head on the first part named
   and its nut on the second; with `pocket`, the nut sits in a pocket there that holds it by its
-  flats, at that play, with no washer under it. `touching` is held by nothing: it can push, and
+  flats, at that play, with no washer under it. `dovetail` (mqucifer/print-shop#170) is a
+  tail on the first part named in a socket in the second: `slides` is the way the tail goes in,
+  toward its seat, in the assembly's own axes, and `latch`, where it has one, is the flexing
+  tab that holds it there: the part it's `on`, a box round it, `arm`, and the plane of its
+  `root`, as `bend` takes an arm. It takes nothing else: glue channels are the parts' own
+  shape, and no field gives glue a figure. `touching` is held by nothing: it can push, and
   can't pull.
 - **`held`** is where the assembly stands or is fixed: the flat faces in a plane, `standing` on
   it (held along the plane's axis only, free to slide) or `fixed` to it. With none, it stands on
@@ -44,7 +49,9 @@ from .bend import LIMITS
 from .report import NoAnswer
 
 AXES = ("x", "y", "z")
-KINDS = ("bonded", "bolted", "through", "touching")
+KINDS = ("bonded", "bolted", "through", "dovetail", "touching")
+#: The ways a dovetail's tail can slide in: along one of the assembly's axes.
+WAYS = ("+x", "-x", "+y", "-y", "+z", "-z")
 HOW = ("standing", "fixed")
 
 
@@ -65,6 +72,9 @@ class Material:
     press_across_mpa: float = 0.0
     press_along_mpa: float = 0.0
     press_source: str = ""
+    #: Its density, in g/cm³, which gives a solid part its weight, and where it's from.
+    density_g_cm3: float = 0.0
+    density_source: str = ""
 
     def press(self, way: np.ndarray, layers: np.ndarray) -> tuple[float, str]:
         """The most pressure it takes pushed along `way`, with its layers stacked along
@@ -100,6 +110,14 @@ PRESS = (
     "47 ± 2 MPa (ISO 527-1); pressed along them, the low end of its interlayer adhesion, "
     "18 ± 4 MPa",
 )
+#: The same sheet's "Typical material properties": "Density [g/cm3] 1.27", by ISO 1183. A part's
+#: own weight (mqucifer/print-shop#170) is its solid volume at this: a printed part has walls
+#: and infill, so it's lighter than that, and the solid weight is the careful one to hang.
+DENSITY = (
+    1.27,
+    "Prusament PETG's datasheet (Prusa Polymers, version 1.1, 16-02-2022), \"Typical material "
+    "properties\": \"Density [g/cm3] 1.27\", by ISO 1183",
+)
 MATERIALS = {
     "petg": Material(
         "petg",
@@ -111,6 +129,7 @@ MATERIALS = {
         "modulus of 1.5 GPa, 18 MPa of interlayer adhesion over it for about 1% across the "
         "layers, and 5.1% at yield in their plane",
         *PRESS,
+        *DENSITY,
     )
 }
 
@@ -265,6 +284,20 @@ class PartAt:
 
 
 @dataclass(frozen=True)
+class Latch:
+    """A dovetail's click latch: a flexing tab on one of its two parts that snaps over a ledge
+    on the other when the tail is home."""
+
+    #: The part the tab is on.
+    on: str
+    #: A box round the tab, hook and all, one side of it on the tab's root: two corners, in the
+    #: assembly's coordinates.
+    arm: tuple[tuple[float, float, float], tuple[float, float, float]]
+    #: The plane the tab is held at, where it joins the rest of its part: its axis and where.
+    root: tuple[str, float]
+
+
+@dataclass(frozen=True)
 class Joint:
     between: tuple[str, str]
     kind: str
@@ -280,10 +313,21 @@ class Joint:
     #: The play between each of the nut's flats and the wall of the pocket it sits in, in mm,
     #: where it sits in one, with no washer under it.
     pocket: float | None = None
+    #: A dovetail's: the way its tail, on the first part, slides into its socket, in the second,
+    #: toward its seat, as a sign and an axis of the assembly's, and its latch where it has one.
+    slides: str | None = None
+    latch: Latch | None = None
 
     @property
     def name(self) -> str:
         return "+".join(self.between)
+
+    def slides_way(self) -> np.ndarray:
+        """The way a dovetail's tail slides in, as a unit vector."""
+        assert self.slides is not None
+        way = np.zeros(3)
+        way[AXES.index(self.slides[1])] = 1.0 if self.slides[0] == "+" else -1.0
+        return way
 
     def holds(self) -> tuple[float, str] | None:
         """The most pull each bolt of it takes, and whose figure that is: the least of the
@@ -385,12 +429,21 @@ def _joint(entry: Any, names: list[str]) -> Joint:
     kind = _one_of(entry.get("kind"), KINDS, f"the joint {first}+{second}'s `kind`")
     if kind == "through":
         return _through(entry, first, second)
+    if kind == "dovetail":
+        return _dovetail(entry, first, second)
     if kind != "bolted":
         extra = sorted({"bolt", "insert", "at", "pull_n", "nut", "washer", "pocket"} & set(entry))
         if extra:
             raise NoAnswer(
                 f"the joint {first}+{second} is {kind} and gives {', '.join(extra)}: only a "
                 "bolted or a through joint has a bolt"
+            )
+        extra = sorted({"slides", "latch"} & set(entry))
+        if extra:
+            raise NoAnswer(
+                f"the joint {first}+{second} is {kind} and gives {', '.join(extra)}: only a "
+                "dovetail slides in, and a dovetail is never read as "
+                + ("glued" if kind == "bonded" else kind)
             )
         return Joint((first, second), kind)
     extra = sorted({"nut", "washer", "pocket"} & set(entry))
@@ -458,6 +511,65 @@ def _through(entry: dict[str, Any], first: str, second: str) -> Joint:
     return Joint(
         (first, second), "through", bolt, None, points, nut=nut, washer=washer, pocket=play
     )
+
+
+#: What a dovetail joint gives, and nothing else.
+DOVETAIL_FIELDS = {"between", "kind", "slides", "latch"}
+LATCH_FIELDS = {"on", "arm", "root"}
+
+
+def _dovetail(entry: dict[str, Any], first: str, second: str) -> Joint:
+    """A tail on the first part in a socket in the second: the way it slides in, and its latch.
+    Nothing here gives glue a figure, or a hold of any other kind."""
+    what = f"the dovetail joint {first}+{second}"
+    extra = sorted(set(entry) - DOVETAIL_FIELDS)
+    if extra:
+        raise NoAnswer(
+            f"{what} gives {', '.join(extra)}: a dovetail gives `slides`, the way its tail goes "
+            "in, and its `latch` where it has one, and nothing else. It's held by its own "
+            "flanks, its seat and its latch: glue channels are the parts' shape and count as "
+            "nothing, and no field gives glue, a bolt or the joint a figure"
+        )
+    slides = entry.get("slides")
+    if not isinstance(slides, str) or slides not in WAYS:
+        raise NoAnswer(
+            f"{what}'s `slides` is the way the tail, on {first}, goes into its socket, in "
+            f"{second}, toward its seat, one of {', '.join(WAYS)} in the assembly's axes, not "
+            f"{slides!r}"
+        )
+    latch = entry.get("latch")
+    if latch is None:
+        return Joint((first, second), "dovetail", slides=slides)
+    shape = (
+        '{"on": PART, "arm": [[x0, y0, z0], [x1, y1, z1]], "root": "z=10"}: the part its tab is '
+        "on, a box round the tab, hook and all, with one side on the tab's root, and the "
+        "root's plane, in the assembly's coordinates"
+    )
+    if not isinstance(latch, dict) or set(latch) != LATCH_FIELDS:
+        raise NoAnswer(f"{what}'s `latch` is {shape}, not {latch!r}")
+    on = str(latch["on"])
+    if on not in (first, second):
+        raise NoAnswer(f"{what}'s latch is `on` {first} or {second}, not {on}")
+    try:
+        first_corner, second_corner = (_point(c, f"{what}'s latch's `arm`") for c in latch["arm"])
+        axis, _, at = str(latch["root"]).partition("=")
+        root = (str(_one_of(axis.strip(), AXES, f"{what}'s latch's `root` axis")), float(at))
+    except (TypeError, ValueError) as exc:
+        raise NoAnswer(f"{what}'s `latch` is {shape}, not {latch!r}") from exc
+    pairs = list(zip(first_corner, second_corner, strict=True))
+    box = (_point([min(p) for p in pairs], "a corner"), _point([max(p) for p in pairs], "a corner"))
+    if min(b - a for a, b in zip(*box, strict=True)) <= 0:
+        raise NoAnswer(
+            f"{what}'s latch's `arm` has no room inside it: two corners apart on x, y and z"
+        )
+    k = AXES.index(root[0])
+    if min(abs(root[1] - box[0][k]), abs(root[1] - box[1][k])) > 1e-6:
+        raise NoAnswer(
+            f"{what}'s latch's `root`, {root[0]}={root[1]:g}, isn't a side of its `arm`, which "
+            f"runs from {box[0][k]:g} to {box[1][k]:g} along {root[0]}: one side of the box is "
+            "on the tab's root, where it joins the rest of its part"
+        )
+    return Joint((first, second), "dovetail", slides=slides, latch=Latch(on, box, root))
 
 
 def _held(entry: Any, names: list[str]) -> Held:
