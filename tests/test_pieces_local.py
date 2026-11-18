@@ -445,11 +445,27 @@ def test_a_merged_pieces_gradient_is_read_from_the_picture_again(bench: Any, cle
     # And where the picture isn't there, that's said, and --image says where it is.
     found["source"]["image"] = found["source"]["image_path"] = "gone.png"
     (bench.work / "c5.json").write_text(json.dumps(found))
+    # The verdict says so, and isn't OK: a rule that wasn't read hasn't passed.
     blind = bench("pieces", "check", "c5.json")
-    assert flags_of(blind) == set()
-    assert f"1 piece(s) a fix has changed, {white}, have no colour run read" in blind.text
+    assert blind.verdict == "PARTIAL" and blind.code == 1, blind.text
+    assert flags_of(blind) == set() and blind.numbers["colour_unread"] == [white]
+    why = blind.record["why"]
+    assert f"the colour run of 1 piece(s) a fix has changed, {white}, wasn't read" in why
+    assert "gone.png, isn't in the working directory: give --image FILE" in why
+    # With another rule broken it's FAIL, and the verdict still names what wasn't read.
+    both = bench("pieces", "check", "c5.json", "--min-area", 5000)
+    assert both.verdict == "FAIL" and f", {white}, wasn't read" in both.record["why"]
+    # A fix on such a map says it in its own verdict.
+    gold = piece_at(bench.work, "c5.json", GOLD)
+    painted = bench("pieces", "paint", "c5.json", gold, "red", "--to", "c6.json")
+    assert painted.verdict == "OK" and painted.numbers["colour_unread"] == []
+    green = piece_at(bench.work, "c5.json", GREEN)
+    joined = bench("pieces", "merge", "c5.json", green, gold, "--to", "c7.json")
+    assert joined.numbers["colour_unread"] == [gold]
+    said = f"Not read: the colour run of 1 piece(s) a fix has changed, {gold}"
+    assert joined.verdict == "OK" and said in joined.record["why"]
     told = bench("pieces", "check", "c5.json", "--image", "clean.png")
-    assert flags_of(told) == {("gradient", white)}
+    assert flags_of(told) == {("gradient", white)} and told.numbers["colour_unread"] == []
 
 
 # A file of fixes

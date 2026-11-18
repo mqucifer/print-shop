@@ -66,6 +66,7 @@ from .pieces_check import (
     quick_differs,
     quick_said,
     read_map,
+    unread_said,
 )
 from .pieces_picture import picture_of
 from .report import NoAnswer, Report
@@ -373,10 +374,11 @@ def _settle(
     same: bool,
     target: str,
     image: str | None = None,
-) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
+) -> tuple[dict[str, Any], dict[str, Any], list[str], str]:
     """Write the new map and say what changed: the pieces, the glass share and the lead's
     widest point before and after, and each changed piece as `pieces check` reads it. With the
-    readings before and after, and where the second method differs."""
+    readings before and after, where the second method differs, and which changed pieces'
+    colour run couldn't be read from the picture, for the verdict to say."""
     was, now = quick(before), quick(after)
     reading = read_map(after, Limits(), only=changed, image=image)
     after.flags = [*after.flags, *kept_flags(reading.flags)]
@@ -431,7 +433,8 @@ def _settle(
         if same
         else "a piece that wasn't named has a different outline"
     )
-    return was, now, quick_differs(after, now) + list(reading.differs)
+    report.numbers["colour_unread"] = list(reading.unread)
+    return was, now, quick_differs(after, now) + list(reading.differs), unread_said(reading)
 
 
 def _finish(args: Any, report: Report, before: Map, made: Made) -> None:
@@ -448,7 +451,7 @@ def _finish(args: Any, report: Report, before: Map, made: Made) -> None:
     target = next_name(args.map, args.to)
     for text in made.lines:
         report.line(text)
-    was, now, more = _settle(
+    was, now, more, unread = _settle(
         report, before, made.after, made.changed, made.glass, by_pixels, same, target,
         getattr(args, "image", None),
     )  # fmt: skip
@@ -461,7 +464,7 @@ def _finish(args: Any, report: Report, before: Map, made: Made) -> None:
     report.verdict(
         "OK",
         f"{made.did}. Before: {quick_said(was)}. After: {quick_said(now)}. The new map is "
-        f"{target}",
+        f"{target}" + (f". Not read: {unread}" if unread else ""),
     )
 
 
@@ -1042,7 +1045,7 @@ def run_fix(args: Any, report: Report) -> None:
         raise NoAnswer(f"{stopped}. Nothing is made, and no map is written")
     present = {p.id for p in found.pieces}
     target = next_name(args.map, args.to)
-    was, now, more = _settle(
+    was, now, more, unread = _settle(
         report, first, found, [c for c in changed if c in present], (added, took),
         (added_px, took_px), same, target, getattr(args, "image", None),
     )  # fmt: skip
@@ -1050,6 +1053,7 @@ def run_fix(args: Any, report: Report) -> None:
     reach = (
         f"Before: {quick_said(was)}. After: {quick_said(now)}. The map "
         f"{'up to there' if count < len(steps) else 'they leave'} is {target}"
+        + (f". Not read: {unread}" if unread else "")
     )
     if differs:
         report.verdict("DISAGREE", "; ".join(differs[:6]) + f". {count} step(s) are made. {reach}")

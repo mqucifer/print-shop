@@ -191,6 +191,7 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "colour_nearest",
         "colour_off",
         "colour_rgb",
+        "colour_unread",
         "colour_was_off",
         "colours",
         "corners_off_mm",
