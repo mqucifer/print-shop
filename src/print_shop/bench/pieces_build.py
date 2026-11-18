@@ -79,6 +79,9 @@ ROUND_SEGS = 32
 #: A pane keeps its sharp corners where rounding them by half a nozzle moves none by more than
 #: this, in mm: past it the corner is a tip, which is cut back and rounded.
 TIP = 0.3
+#: A part of a share-sized opening under `LEAST_ACROSS` wide is cut where it's this big, in
+#: mm²: smaller is no share of any pane, and too few points to fit a curve to.
+NARROW_MM2 = 0.05
 #: A built curve is drawn as points this close to it, in mm, where Shapely insets it.
 DENSE = 0.002
 #: How far a solid's volume may be from its outline's area times its height.
@@ -1105,6 +1108,7 @@ def _curves(
         for part in _inset(pocket_2d, lip)
         if not under(piecemap.widest(part, 0.02)[0], LEAST_ACROSS)
     ]
+    narrow: list[Any] = []
     if by_share:
         # As `capture` reads a rim sized to the share: the pane, its pocket less the play,
         # moved in by the rim less the play at a true distance, round at each corner that
@@ -1113,19 +1117,28 @@ def _curves(
         seen = pocket_2d.buffer(-play, join_style="mitre").buffer(
             -(lip - play), quad_segs=ROUND_SEGS
         )
+        every = piecemap.polygons(seen)
         parts = [
-            part
-            for part in piecemap.polygons(seen)
-            if not under(piecemap.widest(part, 0.02)[0], LEAST_ACROSS)
+            part for part in every if not under(piecemap.widest(part, 0.02)[0], LEAST_ACROSS)
         ]
+        # What's left of it under two nozzles wide, a tail past a pinch: `capture` counts
+        # it as visible, so it's cut too, where it's big enough to be a curve. Left out,
+        # three panes of a traced scene came out 58.8% to 59.5% visible at the rim that keeps
+        # 60 (mqucifer/print-shop#161).
+        narrow = [part for part in every if part not in parts and part.area >= NARROW_MM2]
     if len(parts) != 1:
         raise NoOpening(
             f"piece {piece.id}'s pocket, as built, leaves no one opening", parts, pocket_2d
         )
     opening: list[Any] = [offset_ring(ring, lip) for ring in pocket]
     opening_exact = not by_share and _same(opening, parts[0], 0.001 * parts[0].area + 0.01)
+    tails: list[list[Any]] = []
     if by_share:
         opening = _close(parts[0])
+        for part in narrow:
+            rings = _close(part)
+            if all(len(ring) >= 2 for ring in rings) and _ring_polygon(rings).is_valid:
+                tails.append(rings)
     elif not opening_exact:
         # An inset half of `fit` deeper, fitted within a quarter of `fit` of its points, which
         # is half of `fit` of the sides between them: so the lip is never narrower than
@@ -1148,7 +1161,10 @@ def _curves(
         # A rim sized to the share is the rim itself, to `CLOSE`: not a lip that may be wider.
         "opening_exact": opening_exact or by_share,
         "pocket_2d": pocket_2d,
-        "opening_2d": _ring_polygon(opening),
+        "opening_2d": shapely.union_all(
+            [_ring_polygon(opening), *[_ring_polygon(rings) for rings in tails]]
+        ),
+        "opening_more": tails,
         "pane_2d": _ring_polygon(pane),
         "past_mm": _past(pocket_2d, piece.shape),
         "off_mm": fit_off,
@@ -1228,6 +1244,7 @@ def run_build(args: Any, report: Report) -> None:
     outline = found.panel.buffer(border, join_style="mitre")
     frame_wire = _wire(fit_ring(_points(outline.exterior), args.fit))
     openings: list[Any] = []
+    narrow_parts = 0
     pockets: list[Any] = []
     panes: dict[str, list[Any]] = {}
     refitted: list[int] = []
@@ -1280,11 +1297,16 @@ def run_build(args: Any, report: Report) -> None:
         play_off = max(play_off, mine)
         pockets.append(_prism(pocket_outer, pocket_inners, z["pocket_floor_z"], z["pocket_top_z"]))
         openings.append(_wires(curves["opening"]))
+        mine_open = [openings[-1]]
+        for rings in curves["opening_more"]:
+            openings.append(_wires(rings))
+            mine_open.append(openings[-1])
+        narrow_parts += len(curves["opening_more"])
         solid = _prism(pane_outer, pane_inners, z["pocket_floor_z"], z["pane_top_z"])
         panes.setdefault(piece.colour or "pane", []).append(solid)
         pane_volumes.append((piece.id, float(solid.Volume()), curves["pane_2d"].area * args.pane))
         pocket_area = _face_area(pocket_outer, pocket_inners)
-        open_area = _face_area(*openings[-1])
+        open_area = sum(_face_area(*one) for one in mine_open)
         expected -= open_area * (args.thickness - pocket_tall) + pocket_area * pocket_tall
         row["pocket_mm2"], row["opening_mm2"] = pocket_area, open_area
     # Each opening is cut through the plate, an island inside one left standing, and then each
@@ -1385,6 +1407,12 @@ def run_build(args: Any, report: Report) -> None:
         "the furthest a piece's fitted curves were moved in so none stands past its outline: "
         "its pocket is that much inside the fit, at the most",
     )
+    if narrow_parts:
+        report.note(
+            f"{narrow_parts} part(s) of an opening under {LEAST_ACROSS:g} mm wide are cut, as "
+            "`capture` counts them in a pane's visible share: a slot that narrow may print "
+            "closed"
+        )
     report.numbers["refitted"] = refitted
     report.numbers["refitted_lips"] = refitted_lips
     kinds = sorted({face.geomType() for face in frame.Faces()})

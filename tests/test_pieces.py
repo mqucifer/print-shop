@@ -1199,6 +1199,33 @@ def test_a_lip_is_sized_to_the_panes_visible_share_as_capture_reads_it(bench: An
     assert fine.verdict == "OK", fine.text
 
 
+def test_a_share_sized_opening_is_the_shape_capture_measures_narrow_parts_and_all(
+    bench: Any,
+) -> None:
+    """mqucifer/print-shop#161: a piece with a tail 2.5 mm wide past a pinch. At the rim that
+    keeps 60% of its pane visible, 0.903 mm, the tail still shows a strip 0.7 mm wide, apart
+    from the body's opening. `capture` counts that strip; the build left it out as under two
+    nozzles wide, and `capture` then read the rim as right and 55.8% visible: "the frame
+    covers it elsewhere". It's cut now, and the reply says a slot that narrow may print
+    closed."""
+    built = bench(
+        "pieces", "build", "tailed.json", "--thickness", 3, "--pane", 1, "--play", 0.25,
+        "--lip", "1.2,0.6", "--min-visible", 60, "--build-out", "tailed",
+    )  # fmt: skip
+    assert built.verdict == "OK", built.text
+    (row,) = built.numbers["lips"]
+    assert row["lip_mm"] == pytest.approx(0.903, abs=0.002)
+    assert "1 part(s) of an opening under 0.8 mm wide are cut" in built.text
+    frame = built.numbers["glass"]["frame"]
+    held = bench(
+        "capture", frame, "--pocket-z", 1.3, "--clearance", 0.25, "--pane-thickness", 1,
+        "--full-rim", 1.2, "--least-rim", 0.6, "--min-visible", 60, "--panes", 1,
+    )  # fmt: skip
+    assert held.verdict == "OK", held.text
+    assert bench("thin", frame, "--one-body").verdict == "OK"
+    assert bench("info", frame).numbers["solids"] == 1
+
+
 def test_a_piece_too_thin_for_a_pane_is_named_and_nothing_is_built(
     bench: Any, broken: Answer
 ) -> None:

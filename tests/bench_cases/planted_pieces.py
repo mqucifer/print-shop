@@ -41,6 +41,8 @@ is a Sponsor's scene or anything from one (mqucifer/print-shop#152, mqucifer/pri
   their own between them, and a third piece beside it.
 - `crescent.json`: a thin crescent, 5 mm across at its middle, whose full lip hides more than
   40% of its pane.
+- `tailed.json`: a piece 20 by 5 mm with a tail 2.5 mm wide past a pinch, whose share-sized
+  opening has a part under two nozzles wide in the tail.
 - `hairs.json`: two cuts two microns wide whose ends face each other, which the
   outline has and no pixel shows.
 """
@@ -613,6 +615,20 @@ def crescent() -> dict[str, Any]:
     return found
 
 
+def tailed() -> dict[str, Any]:
+    """One piece of a 40 x 21 mm panel: a body 20 by 5 mm, then a pinch 1.5 mm wide and 1 mm
+    long, then a tail 2.5 mm wide and 8 mm long. A lip of 1.2 mm hides too much of it, so its
+    rim is sized to its share, about 0.9 mm. At that rim the tail still shows a strip 0.7 mm
+    wide, apart from the body's opening and under the two nozzles an opening is."""
+    found = notched()
+    found["panel"] = {"width_mm": 40, "height_mm": 21}
+    found["pieces"][0]["outline"] = [
+        [5, 8], [25, 8], [25, 9.75], [26, 9.75], [26, 9.25], [34, 9.25], [34, 11.75],
+        [26, 11.75], [26, 11.25], [25, 11.25], [25, 13], [5, 13],
+    ]  # fmt: skip
+    return found
+
+
 def rules(slit: bool, depth: float = 8.0) -> dict[str, Any]:
     lead = 1.2
     outlines = cells(lead)
@@ -674,6 +690,7 @@ for name, made in (
     ("close.json", close()),
     ("near.json", near()),
     ("waist.json", waist()),
+    ("tailed.json", tailed()),
     ("crescent.json", crescent()),
     ("apart.json", apart()),
     ("curved_waist.json", curved_waist()),
