@@ -43,6 +43,11 @@ its pocket follows it; the reply names the piece. (OpenCascade's own `offset2D` 
 **Second method.** Each solid's volume by OpenCascade against its outline's area in Shapely
 times its height; the built curves' distance from the map's outline, at points along them; and
 each pane's distance from its pocket's wall, at points round it.
+
+**Seams.** With `--seam`, a dome's slice has its two long edges built as seams, each straight
+length bevelled by half the angle between the two slices there, with pins on one edge and
+holes on the other (`pieces_seam.py`, mqucifer/print-shop#166). The frame's side is then each
+cut's middle, and `--border` is the frame at the top and the hem.
 """
 
 from __future__ import annotations
