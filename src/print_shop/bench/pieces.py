@@ -1,8 +1,8 @@
 """The `pieces` commands: a stained-glass panel as a piece map, read from a picture, checked
 against the rules glass cutting follows, fixed as a glass cutter would, and built into a frame
 and panes (mqucifer/print-shop#152, mqucifer/print-shop#153). A dome's map comes from rules, and
-is cut into flat slices (mqucifer/print-shop#154), which join by bevelled, pinned seams
-(mqucifer/print-shop#166).
+is cut into flat slices (mqucifer/print-shop#154), which join by bevelled seams, came strips
+and rings (mqucifer/print-shop#166).
 
     pieces trace IMAGE --width MM       a picture's pieces, as a piece map
     pieces check MAP                    the map against glass-cutting rules, each a figure
@@ -18,11 +18,15 @@ is cut into flat slices (mqucifer/print-shop#154), which join by bevelled, pinne
                                         a dome shade's pieces from rules, as a piece map
     pieces flatten MAP --slices N       a dome's map cut into flat slices, each its own map,
                                         with the bend at each fold
-    pieces build MAP ... --seam LEFT,RIGHT
-                                        a slice's two long edges as seams: bevelled at each
-                                        straight length, with pins on one and holes on the other
-    pieces seam A B --frames FA FB      two built neighbours placed round the dome: how their
-                                        faces meet, and each pin in its hole
+    pieces build MAP ... --seam         a slice's two long edges as seams: bevelled at each
+                                        straight length, a came's web apart from its neighbour
+    pieces came SLICE --thickness T --lip L
+                                        the came strips that clip over two slices' edges, one a
+                                        straight length of a seam
+    pieces ring SLICE --thickness T     the rings whose grooves take every slice's hem and top
+    pieces seam A B --frames FA FB [--came FILE] [--rings FILE...]
+                                        two built neighbours placed round the dome: how their
+                                        faces meet, and the strips and rings on them
 
 On the first test from a traced scene a run spent about 250 calls writing its own geometry code
 before its plan, then ran one morphological opening over every piece in place of a merge, and
@@ -35,6 +39,7 @@ from __future__ import annotations
 from typing import Any
 
 from .pieces_build import run_build
+from .pieces_came import run_came, run_ring
 from .pieces_check import run_check
 from .pieces_dome import run_dome
 from .pieces_fix import (
@@ -74,5 +79,9 @@ def run(args: Any, report: Report) -> None:
         run_flatten(args, report)
     elif args.action == "seam":
         run_seam(args, report)
+    elif args.action == "came":
+        run_came(args, report)
+    elif args.action == "ring":
+        run_ring(args, report)
     else:
         run_build(args, report)

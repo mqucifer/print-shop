@@ -45,9 +45,9 @@ times its height; the built curves' distance from the map's outline, at points a
 each pane's distance from its pocket's wall, at points round it.
 
 **Seams.** With `--seam`, a dome's slice has its two long edges built as seams, each straight
-length bevelled by half the angle between the two slices there, with pins on one edge and
-holes on the other (`pieces_seam.py`, mqucifer/print-shop#166). The frame's side is then each
-cut's middle, and `--border` is the frame at the top and the hem.
+length bevelled by half the angle between the two slices there and set back half the gap a
+came strip's web takes (`pieces_seam.py`, mqucifer/print-shop#166). The frame's side is then
+set by each cut, and `--border` is the frame at the top and the hem.
 """
 
 from __future__ import annotations
@@ -1237,15 +1237,10 @@ def run_build(args: Any, report: Report) -> None:
     border = args.border if args.border is not None else 2.0 * found.lead_mm
     if not border > 0:
         raise NoAnswer("--border is the frame round the panel's edge, in mm, over 0")
-    given = [
-        f"--{name.replace('_', '-')}"
-        for name in ("pins", "pin", "pin_play")
-        if getattr(args, name, None) is not None
-    ]
-    if given and not getattr(args, "seam", None):
+    if getattr(args, "seam_gap", None) is not None and not getattr(args, "seam", False):
         raise NoAnswer(
-            f"{' and '.join(given)} size a seam's pins, and there's no --seam: `--seam "
-            "holes,pins` builds a slice's two long edges as seams"
+            "--seam-gap is the gap between two slices' seam faces, and there's no --seam: "
+            "`--seam` builds a slice's two long edges as seams"
         )
     seam = (
         seam_plan(found, args.map, args, z) if getattr(args, "seam", None) else None
@@ -1509,8 +1504,8 @@ def run_build(args: Any, report: Report) -> None:
     differs = []
     if seam is not None:
         report.second(
-            f"each length's seam face read back from the frame: a flat face through the cut's "
-            f"middle whose normal is within {seam_off:.4f}° of the bevel's"
+            f"each length's seam face read back from the frame: a flat face half the gap back "
+            f"from the cut's middle, whose normal is within {seam_off:.4f}° of the bevel's"
         )
         differs += seam_checks(seam, report)
         if seam_off > 0.01:
@@ -1548,8 +1543,8 @@ def run_build(args: Any, report: Report) -> None:
         f"z={z['pocket_top_z']:g}"
         + (
             f"; its two long edges are seams, bevelled at each of "
-            f"{len(seam.edges[0].lengths)} length(s), with {seam.count('pins')} pin(s) and "
-            f"{seam.count('holes')} hole(s)"
+            f"{len(seam.edges[0].lengths)} length(s), each face {seam.back:g} mm back from the "
+            "cut's middle"
             if seam is not None
             else ""
         ),

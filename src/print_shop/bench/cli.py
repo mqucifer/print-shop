@@ -901,36 +901,21 @@ def parser() -> Parser:
     )
     build.add_argument(
         "--seam",
-        metavar="LEFT,RIGHT",
+        action="store_true",
         help="for a dome's slice: its two long edges as seams, each straight length bevelled "
-        "by half the angle between the two slices there. LEFT and RIGHT are what each edge is "
-        "built as: pins, holes or plain. `holes,pins` on every slice puts each one's pins in "
-        "its neighbour's holes",
+        "by half the angle between the two slices there, and set back half of --seam-gap",
     )
     build.add_argument(
-        "--pins",
-        type=int,
-        metavar="N",
-        help="with --seam: how many pins, or holes, each straight length has (1 unless given)",
-    )
-    build.add_argument(
-        "--pin",
-        type=_point,
-        metavar="ALONG,THROUGH,OUT",
-        help="with --seam: a pin's size, in mm: along the edge, through the frame's thickness "
-        "and out of the face (1.2,1.6,0.5 unless given)",
-    )
-    build.add_argument(
-        "--pin-play",
+        "--seam-gap",
         type=float,
         metavar="MM",
-        help="with --seam: the gap round a pin in its hole, and past its end, in mm (0.1 "
-        "unless given)",
+        help="with --seam: how far apart two neighbours' faces stand, for a came strip's web "
+        "and its play on each side, in mm (0.6 unless given)",
     )
     seam = action.add_parser(
         "seam",
         help="two neighbouring slices' built frames, bent by their folds and placed round the "
-        "dome: how their faces meet, what they share, and each pin in its hole",
+        "dome: how their faces meet, what they share, and the came strips and rings on them",
     )
     seam.add_argument(
         "maps", nargs=2, metavar="MAP", help="two neighbouring slices' maps, as `flatten` wrote"
@@ -946,8 +931,91 @@ def parser() -> Parser:
         "--gap",
         type=float,
         metavar="MM",
-        help="how far the two faces may stand apart and still meet, in mm (0.05 unless given)",
+        help="the gap the seams were built for, `build`'s --seam-gap, in mm (0.6 unless given)",
     )
+    seam.add_argument(
+        "--came",
+        metavar="FILE",
+        help="the strips on this seam, as `pieces came` placed them: read on the two slices",
+    )
+    seam.add_argument(
+        "--press",
+        type=float,
+        metavar="MM",
+        help="the most a strip may press into a slice's face, in mm (0.1 unless given)",
+    )
+    seam.add_argument(
+        "--rings",
+        nargs="+",
+        metavar="FILE",
+        help="the rings, as `pieces ring` placed them: each slice's hem and top edge is read "
+        "in their grooves",
+    )
+    came = action.add_parser(
+        "came",
+        help="the came strips for a slice's seams: an H in section, one for each straight "
+        "length, its channels at the angle between the two slices there",
+    )
+    ring = action.add_parser(
+        "ring",
+        help="the rings that keep a dome's slices round: one at the hem and a seat and a cap "
+        "at the top, each with a groove for every slice's edge",
+    )
+    for made in (came, ring):
+        made.add_argument("map", help="a slice's map, as `pieces flatten` wrote it")
+        made.add_argument(
+            "--thickness", type=float, required=True, metavar="T", help="the frames', in mm"
+        )
+        made.add_argument(
+            "--play", type=float, metavar="MM", help="the play round a slice's edge, in mm"
+        )
+        made.add_argument(
+            "--bed", type=_xy, metavar="X,Y", help="the bed, in mm (256,256 unless given)"
+        )
+    came.add_argument(
+        "--lip",
+        type=float,
+        required=True,
+        metavar="MM",
+        help="the least lip the frames were built with, in mm: a flange that reaches past the "
+        "lead and that lip is over a pane's opening, and is refused",
+    )
+    came.add_argument(
+        "--gap", type=float, metavar="MM", help="`build`'s --seam-gap, in mm (0.6 unless given)"
+    )
+    came.add_argument(
+        "--grip",
+        type=float,
+        metavar="MM",
+        help="how far each bead stands into a slice's face, in mm (0.05 unless given)",
+    )
+    came.add_argument(
+        "--flange",
+        type=_xy,
+        metavar="REACH,THICK",
+        help="how far a flange reaches from the cut's middle, and how thick it is, in mm "
+        "(1.5,0.8 unless given)",
+    )
+    came.add_argument(
+        "--hem", type=float, metavar="MM", help="the first strip starts this far up the seam"
+    )
+    came.add_argument(
+        "--top", type=float, metavar="MM", help="the last strip stops this far short of the top"
+    )
+    came.add_argument("--came-out", dest="out_came", default="came", help="where the strips go")
+    ring.add_argument(
+        "--border", type=float, metavar="MM", help="`build`'s --border (half the map's lead)"
+    )
+    ring.add_argument("--depth", type=float, metavar="MM", help="a groove's depth (4)")
+    ring.add_argument("--wall", type=float, metavar="MM", help="a ring's walls (1.2)")
+    ring.add_argument(
+        "--hole",
+        type=float,
+        metavar="MM",
+        help="the hole through the top ring's two parts, across, for the lamp's fitting: a "
+        "stated figure until the fitting is chosen (10)",
+    )
+    ring.add_argument("--rings-out", dest="out_rings", default="rings", help="where they go")
     trace.add_argument(
         "--to", metavar="FILE", help="the map's file: IMAGE's name with .pieces.json unless given"
     )
