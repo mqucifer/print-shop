@@ -89,10 +89,13 @@ class Material:
 #: its low end, 45. Pressed along its layers it spreads sideways, which pulls one layer off the
 #: next, and all the sheet gives for that is "Interlayer Adhesion [MPa] 18 ± 4", at its low
 #: end, 14.
+#: A pull's figure stands in on the safe side (the operator's ruling on
+#: mqucifer/print-shop#169): a thermoplastic yields pressed at no less than it yields pulled.
 PRESS = (
     45.0,
     14.0,
-    "the same sheet, which has no compressive figure, so its figures for a pull stand in: "
+    "the same sheet, which has no compressive figure, so its figures for a pull stand in, on the "
+    "safe side as a thermoplastic yields pressed at no less than it does pulled: "
     "pressed across its layers, the low end of its tensile yield strength printed flat, "
     "47 ± 2 MPa (ISO 527-1); pressed along them, the low end of its interlayer adhesion, "
     "18 ± 4 MPa",
