@@ -703,7 +703,11 @@ def test_a_through_bolt_s_washers_bear_as_the_hand_figure_says(cae: Any) -> None
         assert 0 < around["across_layers_pct"] < 1.0 and 0 < around["stretch_pct"] < 5.1
         assert around["coarse"]["stretch_pct"] == pytest.approx(around["stretch_pct"], rel=0.1)
         assert around["held_mm"] == 2 * WASHER and around["coarse"]["mesh_mm"] > around["mesh_mm"]
-    assert 0 < joint["nearest_share"] < 1 and "the plastic round the hole" in joint["gives_first"]
+    # The washers' pressure and the plastic round a hole are each about 8% of their limits here,
+    # and which is the nearer depends on the mesh: the share is the larger of them, and named.
+    pressed = head["pressure_mpa"] / 45
+    assert pressed <= joint["nearest_share"] < 0.12
+    assert joint["gives_first"].startswith(("the plastic round the hole", "the pressure under"))
     assert "the nearest its limit is" in answer.text
     assert "no compressive figure" in answer.text, "what stands in for it is said"
     assert "worst bolt by statics" in answer.text and "the plastic round" in answer.text
