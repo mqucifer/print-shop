@@ -22,6 +22,8 @@ the glass share fell from 91% to 83%. Here each fix is one piece's, by name:
   that's under, so the line keeps its path. A line the picture means, a sun's ray or a
   river's inner line between two pieces of one colour, is kept that way where a merge would
   take it out (mqucifer/print-shop#161).
+- **`retrace`, `fill`, `paint` and `move-line`** fix one place of a map and keep the rest
+  (mqucifer/print-shop#172): `pieces_local.py`. Each is a step here too.
 - **`fix STEPS`**: a file of those fixes, run in order in one call with one reply
   (mqucifer/print-shop#161). A map takes dozens of fixes, and a run chained them from its own
   script, where none was a bench call. It says each step's result, stops at the first step
@@ -42,6 +44,7 @@ from __future__ import annotations
 import json
 import math
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -63,7 +66,9 @@ from .pieces_check import (
     quick_differs,
     quick_said,
     read_map,
+    unread_said,
 )
+from .pieces_picture import picture_of
 from .report import NoAnswer, Report
 
 #: Two pieces are neighbours where the lead between them is no wider than this many of the
@@ -79,7 +84,9 @@ GRID = 1e-6
 #: A crumb of glass under this, in mm², left by a cut is lead.
 CRUMB_MM2 = 0.05
 #: The fixes a steps file may name, and what each needs.
-FIXES = ("merge", "split", "extend", "drop-line", "widen")
+FIXES = (
+    "merge", "split", "extend", "drop-line", "widen", "retrace", "fill", "paint", "move-line",
+)  # fmt: skip
 #: A widened line is this much wider than asked, in mm, so it reads at its width however its
 #: curve is drawn as points.
 WIDEN_OVER = 0.004
@@ -97,6 +104,11 @@ class Made:
     did: str
     glass: tuple[float, float]
     numbers: dict[str, Any] = field(default_factory=dict)
+    #: More of the reply: its own lines, what a second method of its own found, and where
+    #: that differs from the first.
+    lines: list[str] = field(default_factory=list)
+    seconds: list[str] = field(default_factory=list)
+    differs: list[str] = field(default_factory=list)
 
 
 def next_name(path: str, to: str | None) -> str:
@@ -285,19 +297,28 @@ def _no_dead_end(found: Map, at: tuple[float, float]) -> NoAnswer:
     )
 
 
-def _swap(found: Map, gone: list[int], made: list[Piece], entry: dict[str, Any]) -> Map:
-    """The map with some pieces replaced, and the fix written in its history."""
-    for one in made:
+def _swap(
+    found: Map,
+    gone: list[int],
+    made: list[Piece],
+    entry: dict[str, Any],
+    tidy: bool = True,
+    colours: dict[str, dict[str, Any]] | None = None,
+) -> Map:
+    """The map with some pieces replaced, and the fix written in its history. `tidy` is off
+    where every point outside the place a fix worked on has to stay as it was; `colours` are
+    the map's, where the fix changed them."""
+    for one in made if tidy else []:
         # A point left on a straight side where two sides were joined goes: nothing moves by
         # more than the grid they were joined on.
-        tidy = one.shape.simplify(10.0 * GRID, preserve_topology=True)
-        if tidy.is_valid and tidy.geom_type == "Polygon":
-            one.shape = shapely.geometry.polygon.orient(tidy, 1.0)
+        plain = one.shape.simplify(10.0 * GRID, preserve_topology=True)
+        if plain.is_valid and plain.geom_type == "Polygon":
+            one.shape = shapely.geometry.polygon.orient(plain, 1.0)
     pieces = [p for p in found.pieces if p.id not in gone] + made
     return Map(
         found.panel,
         found.lead_mm,
-        {name: dict(c) for name, c in found.colours.items()},
+        {name: dict(c) for name, c in (colours or found.colours).items()},
         sorted(pieces, key=lambda p: p.id),
         dict(found.source),
         [*found.history, entry],
@@ -352,12 +373,14 @@ def _settle(
     by_pixels: tuple[float, float],
     same: bool,
     target: str,
-) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
+    image: str | None = None,
+) -> tuple[dict[str, Any], dict[str, Any], list[str], str]:
     """Write the new map and say what changed: the pieces, the glass share and the lead's
     widest point before and after, and each changed piece as `pieces check` reads it. With the
-    readings before and after, and where the second method differs."""
+    readings before and after, where the second method differs, and which changed pieces'
+    colour run couldn't be read from the picture, for the verdict to say."""
     was, now = quick(before), quick(after)
-    reading = read_map(after, Limits(), only=changed)
+    reading = read_map(after, Limits(), only=changed, image=image)
     after.flags = [*after.flags, *kept_flags(reading.flags)]
     piecemap.save(after, target)
     report.wrote(target)
@@ -410,7 +433,8 @@ def _settle(
         if same
         else "a piece that wasn't named has a different outline"
     )
-    return was, now, quick_differs(after, now) + list(reading.differs)
+    report.numbers["colour_unread"] = list(reading.unread)
+    return was, now, quick_differs(after, now) + list(reading.differs), unread_said(reading)
 
 
 def _finish(args: Any, report: Report, before: Map, made: Made) -> None:
@@ -425,17 +449,22 @@ def _finish(args: Any, report: Report, before: Map, made: Made) -> None:
         report.numbers["ran_to"] = made.numbers["ran_to"]
     by_pixels, same, differs = _differ_by_pixels(before, made.after, made.changed, made.glass)
     target = next_name(args.map, args.to)
-    was, now, more = _settle(
-        report, before, made.after, made.changed, made.glass, by_pixels, same, target
-    )
-    differs = more + differs
+    for text in made.lines:
+        report.line(text)
+    was, now, more, unread = _settle(
+        report, before, made.after, made.changed, made.glass, by_pixels, same, target,
+        getattr(args, "image", None),
+    )  # fmt: skip
+    for text in made.seconds:
+        report.second(text)
+    differs = more + differs + made.differs
     if differs:
         report.verdict("DISAGREE", "; ".join(differs[:6]))
         return
     report.verdict(
         "OK",
         f"{made.did}. Before: {quick_said(was)}. After: {quick_said(now)}. The new map is "
-        f"{target}",
+        f"{target}" + (f". Not read: {unread}" if unread else ""),
     )
 
 
@@ -747,7 +776,12 @@ def read_steps(path: str) -> list[dict[str, Any]]:
     - `extend`: `at`, a point on the dead end (or `from`, as a history has it); `aim`, a point
       to run it toward (or `to`);
     - `drop-line`: `at`, a point on the line;
-    - `widen`: `a` and `b`, the two pieces the line lies between; `lead_mm`, its least width.
+    - `widen`: `a` and `b`, the two pieces the line lies between; `lead_mm`, its least width;
+    - `retrace`: `box`, `[x0, y0, x1, y1]`; `dark`, the darkness inside it; `palette`, as
+      `--palette` takes it;
+    - `fill`: `at`, a point in the patch of lead; `lead_mm`, the width of the lines it leaves;
+    - `paint`: `piece`, and `colour`, its name; `rgb`, `[r, g, b]`, for a colour new to the map;
+    - `move-line`: `a` and `b`, the two neighbours, and `line`, the new path's points.
 
     Every step is read before any is made, so a file that can't be read changes nothing."""
     found = Path(path)
@@ -805,6 +839,58 @@ def read_steps(path: str) -> list[dict[str, Any]]:
             steps.append(
                 {"fix": name, "piece": piece, "line": points, "lead_mm": lead}
             )
+        elif name == "move-line":
+            a, b = _whole(row.get("a")), _whole(row.get("b"))
+            if a is None or b is None:
+                raise needs("a" if a is None else "b", "a piece the line lies beside, by number")
+            line = row.get("line")
+            points = [_xy(p) for p in line] if isinstance(line, list) else []
+            if len(points) < 2 or any(p is None for p in points):
+                raise NoAnswer(
+                    f"step {n}, a move-line: `line` is the new path, two points or more, "
+                    "[[x1, y1], [x2, y2]], from one end of the line to the other"
+                )
+            steps.append({"fix": name, "a": a, "b": b, "line": points})
+        elif name == "paint":
+            piece = _whole(row.get("piece", row.get("id")))
+            if piece is None:
+                raise needs("piece", "the piece to colour, by its number")
+            colour = row.get("colour")
+            if not isinstance(colour, str) or not colour.strip():
+                raise needs("colour", "the colour's name, one of the map's or a new one")
+            rgb = row.get("rgb")
+            if rgb is not None and not (
+                isinstance(rgb, list)
+                and len(rgb) == 3
+                and all(_whole(v) is not None and 0 <= v <= 255 for v in rgb)
+            ):
+                raise NoAnswer(f"step {n}, a paint: `rgb` is [r, g, b], each 0 to 255")
+            steps.append({"fix": name, "piece": piece, "colour": colour.strip(), "rgb": rgb})
+        elif name == "retrace":
+            box = row.get("box")
+            if not (
+                isinstance(box, list)
+                and len(box) == 4
+                and all(isinstance(v, int | float) and not isinstance(v, bool) for v in box)
+            ):
+                raise needs("box", "the place to trace again, [x0, y0, x1, y1] in the map's mm")
+            dark = row.get("dark")
+            if dark is not None and (_whole(dark) is None or not 0 < dark <= 255):
+                raise NoAnswer(f"step {n}, a retrace: `dark` is a whole number, 1 to 255")
+            palette = row.get("palette")
+            if palette is not None and not isinstance(palette, str):
+                raise NoAnswer(f"step {n}, a retrace: `palette` is text, as --palette takes it")
+            steps.append(
+                {"fix": name, "box": [float(v) for v in box], "dark": dark, "palette": palette}
+            )
+        elif name == "fill":
+            at = _xy(row.get("at"))
+            if at is None:
+                raise needs("at", "a point in the patch of lead, [x, y]")
+            lead = row.get("lead_mm")
+            if lead is not None and not (isinstance(lead, int | float) and lead > 0):
+                raise NoAnswer(f"step {n}, a fill: `lead_mm` is a line's width in mm, over 0")
+            steps.append({"fix": name, "at": at, "lead_mm": lead})
         else:
             at = _xy(row.get("at", row.get("from") if name == "extend" else None))
             if at is None:
@@ -832,10 +918,31 @@ def step_said(step: dict[str, Any]) -> str:
             f"split {step['piece']} from {piecemap.said_at(ends[0])} to "
             f"{piecemap.said_at(ends[1])}"
         )
+    if step["fix"] == "move-line":
+        return f"move the line between {step['a']} and {step['b']}"
+    if step["fix"] == "paint":
+        return f"paint {step['piece']} {step['colour']}"
+    if step["fix"] == "retrace":
+        return "retrace the box " + ",".join(f"{v:g}" for v in step["box"])
     return f"{step['fix']} at {piecemap.said_at(step['at'])}"
 
 
-def do_step(found: Map, step: dict[str, Any]) -> Made:
+def do_step(found: Map, step: dict[str, Any], picture: Callable[[Map], Any]) -> Made:
+    """One step made. `picture` reads the picture the map was traced from, for a step that
+    needs it: it's read once, the first time one does."""
+    # Here, not at the top: `pieces_local` builds on this module.
+    from . import pieces_local
+
+    if step["fix"] == "move-line":
+        return pieces_local.do_move_line(found, step["a"], step["b"], step["line"])
+    if step["fix"] == "paint":
+        return pieces_local.do_paint(found, step["piece"], step["colour"], step["rgb"], picture)
+    if step["fix"] == "retrace":
+        return pieces_local.do_retrace(
+            found, picture(found), step["box"], step["dark"], step["palette"]
+        )
+    if step["fix"] == "fill":
+        return pieces_local.do_fill(found, step["at"], step["lead_mm"])
     if step["fix"] == "merge":
         return do_merge(found, step["a"], step["b"])
     if step["fix"] == "widen":
@@ -847,12 +954,25 @@ def do_step(found: Map, step: dict[str, Any]) -> Made:
     return do_drop_line(found, step["at"])
 
 
+def reader(image: str | None) -> Callable[[Map], Any]:
+    """The picture a map was traced from, read the first time it's asked for and kept."""
+    kept: list[Any] = []
+
+    def picture(found: Map) -> Any:
+        if not kept:
+            kept.append(picture_of(found, image))
+        return kept[0]
+
+    return picture
+
+
 def run_fix(args: Any, report: Report) -> None:
     """`pieces fix MAP STEPS`: each step made on the map the one before left, in memory, and
     one map written at the end. Each step is read again as a fix on its own is, by the two
     maps' pixels; the changed pieces are read once, on the last map."""
     steps = read_steps(args.steps)
     first = found = piecemap.load(args.map)
+    picture = reader(getattr(args, "image", None))
     rows: list[dict[str, Any]] = []
     changed: list[int] = []
     added = took = added_px = took_px = 0.0
@@ -862,12 +982,13 @@ def run_fix(args: Any, report: Report) -> None:
     for n, step in enumerate(steps, start=1):
         name = f"step {n} of {len(steps)}, {step_said(step)}"
         try:
-            made = do_step(found, step)
+            made = do_step(found, step, picture)
         except NoAnswer as exc:
             stopped = f"{name}, was refused: {exc}"
             rows.append({"step": n, "fix": step["fix"], "made": False, "said": str(exc)})
             break
         by_pixels, kept, differ = _differ_by_pixels(found, made.after, made.changed, made.glass)
+        differ = differ + made.differs
         if differ:
             # The step's own second check differs: it isn't made, and nothing after it is.
             differs = [f"{name}: {one}" for one in differ]
@@ -924,14 +1045,15 @@ def run_fix(args: Any, report: Report) -> None:
         raise NoAnswer(f"{stopped}. Nothing is made, and no map is written")
     present = {p.id for p in found.pieces}
     target = next_name(args.map, args.to)
-    was, now, more = _settle(
+    was, now, more, unread = _settle(
         report, first, found, [c for c in changed if c in present], (added, took),
-        (added_px, took_px), same, target,
+        (added_px, took_px), same, target, getattr(args, "image", None),
     )  # fmt: skip
     differs = differs + more
     reach = (
         f"Before: {quick_said(was)}. After: {quick_said(now)}. The map "
         f"{'up to there' if count < len(steps) else 'they leave'} is {target}"
+        + (f". Not read: {unread}" if unread else "")
     )
     if differs:
         report.verdict("DISAGREE", "; ".join(differs[:6]) + f". {count} step(s) are made. {reach}")

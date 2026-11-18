@@ -35,7 +35,11 @@ and what's between them is a note. `DISAGREE` is two readings of the same thing 
 sides of a limit, each beyond the other's resolution (`limits.apart`).
 - **`gradient`**, a colour that runs across one piece by more than `--max-colour-run`. By the
   picture's colour at the piece's two ends, as `pieces trace` read it, and by a plane fitted to
-  its colour, as it read it.
+  its colour, as it read it. A piece a fix has changed has no run of its own: a merge kept one
+  piece's colour and dropped the run, so two colours joined read as one. Its run comes from
+  the picture again, over the piece as it is now (mqucifer/print-shop#172). Where the
+  picture isn't there, the verdict names the pieces whose run wasn't read, and isn't `OK`:
+  `PARTIAL` with no other rule broken.
 - **`wide-lead`**, lead wider than `--max-lead` at its widest. By the largest circle that fits
   in the lead, and by the furthest a lead pixel is from glass.
 
@@ -61,7 +65,7 @@ widest point.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +75,7 @@ import shapely
 from . import colours, layout, piecemap
 from .limits import apart, over, said, under
 from .piecemap import Map, Piece, Pixels
+from .pieces_picture import picture_of
 from .report import NoAnswer, Report
 
 #: The flags, in the order a reply says them.
@@ -1036,6 +1041,10 @@ class Reading:
     differs: list[str]
     drawn: Pixels
     notes: list[str]
+    #: The pieces a fix has changed whose colour run couldn't be read from the picture, and
+    #: why: no gradient is read on them, and a verdict says so.
+    unread: list[int] = field(default_factory=list)
+    unread_why: str = ""
 
 
 def quick(found: Map, drawn: Pixels | None = None) -> dict[str, Any]:
@@ -1086,14 +1095,55 @@ def quick_said(figures: dict[str, Any]) -> str:
     )
 
 
-def read_map(found: Map, limits: Limits, only: list[int] | None = None) -> Reading:
-    """Every figure and flag of a map, or with `only`, the map's own figures and those pieces'."""
+def repainted(
+    found: Map, pieces: list[Piece], image: str | None = None
+) -> tuple[list[int], str]:
+    """Each piece with no colour run of its own, one a fix has changed, given the picture's
+    colour and its run over the piece as it is now: a merge keeps one piece's colour, so two
+    colours joined would read as one and no gradient would show (mqucifer/print-shop#172).
+    The pieces keep what's read, so a fix's new map has it. With the pieces whose run
+    couldn't be read, and why: the picture isn't there. A map from rules has no picture,
+    and no run to read."""
+    unread = [p for p in pieces if not (p.paint and "run" in p.paint)]
+    if not unread or not (image or found.source.get("image")):
+        return [], ""
+    try:
+        picture = picture_of(found, image)
+    except NoAnswer as exc:
+        return [p.id for p in unread], str(exc)
+    left = []
+    for piece in unread:
+        paint = picture.paint(piece.shape)
+        if paint is not None:
+            piece.paint = paint
+        else:
+            left.append(piece.id)
+    return left, "the picture has no pixel of glass under them" if left else ""
+
+
+def unread_said(reading: Reading) -> str:
+    """Which pieces' colour run wasn't read, and why, as a verdict says it; or nothing."""
+    if not reading.unread:
+        return ""
+    return (
+        f"the colour run of {len(reading.unread)} piece(s) a fix has changed, "
+        f"{piecemap.numbered(reading.unread)}, wasn't read, so no gradient is read on them: "
+        f"{reading.unread_why}"
+    )
+
+
+def read_map(
+    found: Map, limits: Limits, only: list[int] | None = None, image: str | None = None
+) -> Reading:
+    """Every figure and flag of a map, or with `only`, the map's own figures and those pieces'.
+    `image` is the picture it was traced from, where that isn't the one its source names."""
     from scipy import ndimage
 
     drawn = piecemap.pixels(found)
     figures = quick(found, drawn)
     differs = quick_differs(found, figures)
     pieces = [p for p in found.pieces if only is None or p.id in only]
+    unread, unread_why = repainted(found, pieces, image)
     step = layout.spacing({str(p.id): shapely.MultiPolygon([p.shape]) for p in pieces})
     read = every_gap(found) if only is None else {p.id: gaps(found, p) for p in pieces}
     ends = dead_ends(found, read)
@@ -1293,7 +1343,9 @@ def read_map(found: Map, limits: Limits, only: list[int] | None = None) -> Readi
                 "at": figures["lead_widest_at"],
                 "said": f"the lead is {said(figures['lead_widest_mm'], most, 2)} mm wide at "
                 f"{piecemap.said_at(figures['lead_widest_at'])}, over {most:g} mm: a patch of "
-                "lead, not a line",
+                "lead, not a line. `pieces fill MAP --at "
+                f"{figures['lead_widest_at'][0]:g},{figures['lead_widest_at'][1]:g}` turns it "
+                "into glass, shared among the pieces round it",
             }  # fmt: skip
         )
     thin, more, noted = thin_lead(found, limits, drawn.mm, only)
@@ -1325,7 +1377,7 @@ def read_map(found: Map, limits: Limits, only: list[int] | None = None) -> Readi
             "`pieces build`'s own plan; and each piece's pixels further than the lip from its "
             "edge, which hold at least what a build's opening holds"
         )
-    return Reading(rows, flags, ends, figures, seconds, differs, drawn, notes)
+    return Reading(rows, flags, ends, figures, seconds, differs, drawn, notes, unread, unread_why)
 
 
 def flag_counts(flags: list[dict[str, Any]]) -> dict[str, int]:
@@ -1407,6 +1459,9 @@ def say(found: Map, reading: Reading, report: Report, limits: Limits) -> None:
         for end in reading.dead_ends
     ]
     report.numbers["pieces"] = kept_rows(reading.rows)
+    report.numbers["colour_unread"] = list(reading.unread)
+    if reading.unread:
+        report.line(f"not read: {unread_said(reading)}")
     if reading.flags:
         report.line(f"rule breaks, {len(reading.flags)}: {counts_said(reading.flags)}")
         for one in reading.flags[:SAID]:
@@ -1446,7 +1501,10 @@ def fixes_said(flags: list[dict[str, Any]]) -> str:
             "it with a new line"
         )
     if "gradient" in names:
-        ways.append("a gradient: `pieces split` it where the colour changes, or leave it one")
+        ways.append(
+            "a gradient: `pieces split MAP ID --line x1,y1,x2,y2` cuts it where the colour "
+            "changes, or leave it one colour"
+        )
     if "thin-lead" in names:
         ways.append(
             "lead under a nozzle's width: `pieces widen MAP A B` widens the line there and "
@@ -1460,7 +1518,12 @@ def fixes_said(flags: list[dict[str, Any]]) -> str:
             "with a narrower lip"
         )
     if "wide-lead" in names:
-        ways.append("a patch of lead: `pieces merge` the pieces round it, or redraw it as glass")
+        ways.append(
+            "a patch of lead: `pieces fill MAP --at X,Y` turns it into glass, shared among "
+            "the pieces round it; `pieces retrace MAP --box X0,Y0,X1,Y1 --dark N` reads the "
+            "picture again there, where the patch is a dark place in the picture and not a "
+            "line; `pieces merge MAP A B` joins two pieces across it"
+        )
     return "; ".join(ways)
 
 
@@ -1537,7 +1600,7 @@ def draw(found: Map, reading: Reading, out: Path, name: str, beside: Any = None)
 def run_check(args: Any, report: Report) -> None:
     found = piecemap.load(args.map)
     limits = limits_of(args)
-    reading = read_map(found, limits)
+    reading = read_map(found, limits, image=getattr(args, "image", None))
     say(found, reading, report, limits)
     target = draw(found, reading, Path(args.out), Path(args.map).stem)
     report.wrote(target)
@@ -1550,12 +1613,22 @@ def run_check(args: Any, report: Report) -> None:
     if reading.differs:
         report.verdict("DISAGREE", "; ".join(reading.differs[:6]))
         return
+    unread = unread_said(reading)
     if reading.flags:
         report.note(f"to fix {fixes_said(reading.flags)}. Then run `pieces check` again")
         report.verdict(
             "FAIL",
             f"{len(reading.flags)} rule break(s) in {len(found.pieces)} piece(s): "
-            f"{counts_said(reading.flags)}; glass share {reading.numbers['glass_share_pct']:.2f}%",
+            f"{counts_said(reading.flags)}; glass share {reading.numbers['glass_share_pct']:.2f}%"
+            + (f". And {unread}" if unread else ""),
+        )
+        return
+    if unread:
+        # Every other rule is read and none is broken, and one rule isn't read on these
+        # pieces: that isn't OK, and it isn't a rule break either.
+        report.verdict(
+            "PARTIAL",
+            f"no rule break in what was read, {len(found.pieces)} piece(s), and {unread}",
         )
         return
     report.verdict(
