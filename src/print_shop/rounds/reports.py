@@ -819,6 +819,7 @@ SHAPES: dict[str, dict[str, Any]] = {
                     # A dovetail's (mqucifer/print-shop#170): the way its tail slides in, how
                     # hard the load drives it that way, each face's push, what its faces leave
                     # held by nothing, its latch, and the tail's neck and the socket's walls.
+                    "glue_unread": FLAG,
                     "slides": TEXT,
                     "drive_n": NUMBER,
                     "opens": FLAG,

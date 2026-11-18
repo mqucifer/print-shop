@@ -536,6 +536,15 @@ def test_a_beam_bolted_at_its_middle_matches_the_one_piece_beam(cae: Any) -> Non
     bonded = cae("load", "load/two-bonded.json", "--weight", "1", *TIP)
     assert bonded.numbers["moves_mm"] == pytest.approx(two.numbers["moves_mm"], rel=1e-6)
     assert "bolts" not in bonded.numbers["joints"]["root+tip"]
+    # Glue is a second hold only (mqucifer/print-shop#170): what a glued joint carries has
+    # no figure to be read against, so it's unread, never `OK`, and no need passes on it.
+    assert bonded.verdict == "UNREAD" and bonded.code == 2, bonded.text
+    assert bonded.numbers["joints"]["root+tip"]["glue_unread"] is True
+    assert "the bonded joint(s) root+tip carry load" in bonded.record["why"]
+    assert "glue is a second hold only" in bonded.record["why"]
+    holds = Need("holds", "it holds 1 kg", "request", "holds 1 kg", "bench",
+                 "load load/two-bonded.json --weight 1 --at 115,10,10")  # fmt: skip
+    assert not needs.judge(holds, bonded.code, bonded.text, bonded.record).passed
 
 
 def test_a_part_laid_across_its_layers_fails_where_the_same_part_laid_along_them_passes(

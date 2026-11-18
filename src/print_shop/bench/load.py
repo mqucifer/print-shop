@@ -28,7 +28,8 @@ edge on the pushed side, each bolt in proportion to its distance from that edge,
 of the bolt's proof load, the insert's pull-out where one is sourced, and the joint's own figure.
 An insert pulls out of printed plastic long before a steel bolt gives, so
 where a bolt has a pull to hold and neither its insert nor its joint has a figure, the answer is
-`UNREAD`, never `OK` on the bolt alone.
+`UNREAD`, never `OK` on the bolt alone. A bonded joint that carries anything is `UNREAD` too
+(mqucifer/print-shop#170): glue is a second hold only, and no glue line has a figure here.
 
 **A through joint** (mqucifer/print-shop#168, `load_through.py`) is a bolt right through both
 parts, with a nut and washers, and no insert to give first. Its bolts' pulls are found the same
@@ -1049,6 +1050,7 @@ def run(args: Any, report: Report) -> None:
     _parts(report, fine, coarse, fails, apart)
     _joints(assembly, args, report, fine, coarse, fails, apart, (ways, placed, catches))
     unread = [n for n, j in report.numbers["joints"].items() if j.get("insert_unread")]
+    glued = [n for n, j in report.numbers["joints"].items() if j.get("glue_unread")]
     report.numbers["loads"] = fine["loads"]
     for one, other in zip(fine["loads"], coarse["loads"], strict=True):
         one["coarse_moves_mm"] = other["moves_mm"]
@@ -1108,18 +1110,30 @@ def run(args: Any, report: Report) -> None:
         )
     elif fails:
         report.verdict("FAIL", "; and ".join(fails))
-    elif unread:
-        inserts = sorted(
-            {j.insert.name for j in assembly.joints if j.name in unread and j.insert is not None}
-        )
+    elif unread or glued:
+        why = []
+        if unread:
+            inserts = sorted(
+                {j.insert.name for j in assembly.joints if j.name in unread and j.insert}
+            )
+            why.append(
+                f"the bolted joint(s) {', '.join(unread)} have a pull to hold, "
+                f"{max(report.numbers['joints'][n]['bolt_pull_n'] for n in unread):.1f} N a bolt "
+                f"at most, and the insert {', '.join(inserts)} has no pull-out figure: in "
+                "printed plastic the insert gives long before the bolt, so the bolt's own "
+                "figure doesn't say it holds. Give each such joint its `pull_n`, what each "
+                "bolt holds in N, and its `source`, from the request or a pull test"
+            )
+        if glued:
+            most = max(np.linalg.norm(report.numbers["joints"][n]["force_n"]) for n in glued)
+            why.append(
+                f"the bonded joint(s) {', '.join(glued)} carry load, {most:.2f} N at most, and "
+                "glue is a second hold only: no glue line in printed plastic has a figure "
+                "here, so nothing says it holds. Join the parts by something that's read, a "
+                "`through` bolt or a `dovetail`, and keep glue for its channels"
+            )
         report.verdict(
-            "UNREAD",
-            f"the bolted joint(s) {', '.join(unread)} have a pull to hold, "
-            f"{max(report.numbers['joints'][n]['bolt_pull_n'] for n in unread):.1f} N a bolt at "
-            f"most, and the insert {', '.join(inserts)} has no pull-out figure: in printed "
-            "plastic the insert gives long before the bolt, so the bolt's own figure doesn't say "
-            "it holds. Give each such joint its `pull_n`, what each bolt holds in N, and its "
-            "`source`, from the request or a pull test. Everything else read is within its limit",
+            "UNREAD", "; and ".join(why) + ". Everything else read is within its limit"
         )
     else:
         worst = max(fine["parts"].items(), key=lambda p: p[1]["across_layers_pct"])
@@ -1272,6 +1286,23 @@ def _joints(
             )  # fmt: skip
         elif joint.kind == "touching":
             _touching(joint, args, report, one, read, force, fails)
+        elif joint.kind == "bonded":
+            # Glue is a second hold only, and no glue line in printed plastic has a sourced
+            # figure: a glued joint that carries anything isn't read (the operator's ruling on
+            # mqucifer/print-shop#171), as an insert with no figure isn't.
+            size = float(np.ptp(read["outline"], axis=0).max()) or 1.0
+            carries = max(np.linalg.norm(read["force"]), np.linalg.norm(read["moment"]) / size)
+            one["glue_unread"] = bool(carries > NOTHING * force)
+            report.line(
+                "  it's bonded, and nothing here says what a glue line in printed plastic "
+                "holds: "
+                + (
+                    "what it carries isn't read against anything, as joints."
+                    f"{joint.name}.glue_unread"
+                    if one["glue_unread"]
+                    else "it carries nothing to speak of under this load"
+                )
+            )
     report.numbers["joints"] = saved
 
 
