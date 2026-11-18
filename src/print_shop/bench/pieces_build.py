@@ -16,10 +16,12 @@ either side of it. The reply says how much glass the tips and corners were:
 the layer line at or under half of what the pane leaves, and its top on the first layer line
 that leaves the pane `ROOM` or more. The pause is at the pocket's top, as `pause` reads it.
 
-**The lip** is `--lip`'s FULL on every piece whose opening is still one piece with it, and
-otherwise the widest, by tenths of a mm down to LEAST, that leaves one. A piece that has no
-opening even at LEAST, or no pane once the play is taken, is named, and nothing is built:
-it's a sliver or a neck, which `pieces merge` or `pieces split` fixes in the map.
+**The lip** is `--lip` on every piece. A piece whose opening that lip closes over at a
+waist, or that has no pane once the play is taken, is named, and nothing is built: it's a
+sliver or a neck, which `pieces merge` or `pieces split` fixes in the map, and a waist's line
+gives the split's own `--line`. A piece's lip used to step down by tenths of a mm until its
+opening was one, and `capture`, at the rim asked, then failed that pane all round
+(mqucifer/print-shop#161).
 
 **Curves** (the Sponsor, 2026-11-05: "Build it right the first time with right tools"). A
 map's outline is points. A turn sharper than `CORNER_DEG` is a corner, and stays one. Between
@@ -77,8 +79,9 @@ ROUND_SEGS = 32
 #: A pane keeps its sharp corners where rounding them by half a nozzle moves none by more than
 #: this, in mm: past it the corner is a tip, which is cut back and rounded.
 TIP = 0.3
-#: The lip steps down by this, in mm, where a piece has no opening at the full one.
-LIP_STEP = 0.1
+#: A part of a share-sized opening under `LEAST_ACROSS` wide is cut where it's this big, in
+#: mm²: smaller is no share of any pane, and too few points to fit a curve to.
+NARROW_MM2 = 0.05
 #: A built curve is drawn as points this close to it, in mm, where Shapely insets it.
 DENSE = 0.002
 #: How far a solid's volume may be from its outline's area times its height.
@@ -158,6 +161,25 @@ class Arc:
         on = np.abs(np.hypot(rel[:, 0], rel[:, 1]) - abs(self.radius))
         ends = np.minimum(np.hypot(*(points - self.start).T), np.hypot(*(points - self.end).T))
         return np.asarray(np.where(within, on, ends))
+
+
+def _square_to(arc: Arc, points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Each point against one side: whether it lies square to the side, its foot on the side
+    between the side's two ends, and how far it is from the side's own line or circle."""
+    if arc.straight:
+        way = arc.end - arc.start
+        length = float(np.hypot(*way))
+        way = way / max(length, 1e-12)
+        rel = points - arc.start
+        along = rel @ way
+        return (along >= 0.0) & (along <= length), np.abs(rel[:, 0] * way[1] - rel[:, 1] * way[0])
+    rel = points - arc.centre
+    angle = np.arctan2(rel[:, 1], rel[:, 0]) - arc.a0
+    if arc.radius > 0:
+        within = (angle % (2.0 * math.pi)) <= arc.sweep
+    else:
+        within = ((-angle) % (2.0 * math.pi)) <= -arc.sweep
+    return within, np.abs(np.hypot(rel[:, 0], rel[:, 1]) - abs(arc.radius))
 
 
 def biarc(p0: np.ndarray, t0: np.ndarray, p1: np.ndarray, t1: np.ndarray) -> list[Arc] | None:
@@ -444,11 +466,83 @@ def _printable(shape: Any) -> list[Any]:
     ]
 
 
-def _why(found: Map, piece: Piece, left: list[Any], what: str) -> str:
+def _across(
+    piece: Piece, a: Any, b: Any, lip: float, lead: float
+) -> tuple[float, list[float], list[float], list[float]] | None:
+    """The place where a piece's opening comes apart into two parts: where, the two ends of
+    the shortest straight line across the piece there that leaves one part on each side, as
+    `pieces split` will cut it with a line `lead` wide, and that line's length.
+
+    The place is found in the piece itself: what's left of the piece once each part is grown
+    back by the lip is the glass the lip closes over, and the stretch of it that reaches both
+    parts is the narrow place, a waist or a long narrow run round a bend. Where the two parts,
+    grown back, meet, it's half way from one to the other. Through it, lines every 5 degrees
+    are tried, and the shortest that parts the two is the line. A line square to the way from
+    one part to the other ran along a slanted piece, 18 mm for a waist of 2; and the middle
+    between two parts either side of a bend lay outside the piece, so no line was given
+    (mqucifer/print-shop#161)."""
+    grown = [part.buffer(lip + 0.02, quad_segs=8) for part in (a, b)]
+    left = piece.shape.difference(shapely.union_all(grown))
+    between = [
+        part for part in piecemap.polygons(left) if all(part.distance(one) <= 0.1 for one in grown)
+    ]
+    if between:
+        here = np.asarray(piecemap.widest(between[0], 0.02)[1], dtype=float)
+    else:
+        here = shapely.get_coordinates(shapely.shortest_line(a, b)).mean(axis=0)
+        if not piece.shape.contains(shapely.Point(here)):
+            return None
+    x0, y0, x1, y1 = piece.shape.bounds
+    far = math.hypot(x1 - x0, y1 - y0)
+    spot = shapely.Point(here)
+    best: tuple[float, np.ndarray, np.ndarray, float] | None = None
+
+    def tried(angle: float) -> None:
+        nonlocal best
+        way = np.array([math.cos(math.radians(angle)), math.sin(math.radians(angle))])
+        line = shapely.LineString([here - far * way, here + far * way])
+        chords = [
+            part
+            for part in shapely.get_parts(line.intersection(piece.shape))
+            if part.geom_type == "LineString" and part.distance(spot) < 1e-6
+        ]
+        if not chords or (best is not None and chords[0].length >= best[0]):
+            return
+        one, two = shapely.get_coordinates(chords[0])[[0, -1]]
+        along = (two - one) / max(float(np.hypot(*(two - one))), 1e-12)
+        # As `pieces split` cuts it: a line `lead` wide, run on a lead's width past each end.
+        strip = shapely.LineString([one - lead * along, two + lead * along]).buffer(
+            lead / 2.0, cap_style="flat"
+        )
+        halves = [h for h in piecemap.polygons(piece.shape.difference(strip)) if h.area > 0.05]
+        if len(halves) < 2:
+            return
+        holds = [int(np.argmax([h.intersection(part).area for h in halves])) for part in (a, b)]
+        if holds[0] != holds[1]:
+            best = (float(chords[0].length), one, two, angle)
+
+    # Every 5 degrees, then every half a degree round the best of those.
+    for angle in np.arange(0.0, 180.0, 5.0):
+        tried(float(angle))
+    if best is not None:
+        for more in np.arange(-4.5, 5.0, 0.5):
+            tried(best[3] + float(more))
+    if best is None:
+        return None
+    return best[0], piecemap.xy(here), piecemap.xy(best[1]), piecemap.xy(best[2])
+
+
+def _why(found: Map, piece: Piece, left: list[Any], what: str, lip: float | None = None) -> str:
     """Why a piece has no one pane or opening, from what's left of it, and its fix: it's too
     narrow all over, or something cuts it in two, a dead end or a narrow place, said with
     where. A wide piece is never said to have none without what cuts it."""
     across = piecemap.widest(piece.shape)[0]
+    if not left and lip is not None:
+        return (
+            f"a lip of {lip:g} mm on each side leaves it no {what} {LEAST_ACROSS:g} mm wide, as "
+            f"it's {across:.2f} mm at its widest. `pieces merge` it into a neighbour, or give "
+            "every piece a narrower `--lip`"
+        )
     if not left:
         return (
             f"nothing of it is left, as it's {across:.2f} mm at its widest. `pieces merge` it "
@@ -474,6 +568,42 @@ def _why(found: Map, piece: Piece, left: list[Any], what: str) -> str:
             f"--at {spot}` runs the line on to the piece's edge, or `pieces drop-line MAP --at "
             f"{spot}` takes it out"
         )
+    waist = _across(piece, a, b, lip, found.lead_mm) if lip is not None else None
+    if waist is not None and lip is not None:
+        wide, here, one, two = waist
+        line = f"{one[0]:g},{one[1]:g},{two[0]:g},{two[1]:g}"
+        closes = f"which a lip of {lip:g} mm on each side closes over"
+        if near.length > 4.0 * lip:
+            run = (
+                f"a narrow run, about {near.length:.0f} mm of the piece that leaves no opening "
+                f"{LEAST_ACROSS:g} mm wide under a lip of {lip:g} mm on each side, {wide:.2f} mm "
+                f"across at {piecemap.said_at(here)}"
+            )
+        elif wide <= 2.0 * lip + LEAST_ACROSS:
+            run = f"a waist {wide:.2f} mm across at {piecemap.said_at(here)}, {closes}"
+        else:
+            run = (
+                f"a place at {piecemap.said_at(here)} where its edge comes in and the lip, "
+                f"{lip:g} mm from each side, pinches its opening in two: the shortest line "
+                f"across the piece there is {wide:.2f} mm"
+            )
+        return (
+            f"{run}: {cut}. `pieces split MAP {piece.id} --line {line}` cuts it there into two "
+            "pieces, each with its own opening"
+            + (
+                f". Or give every piece a `--lip` under {wide / 2.0:.2f} mm"
+                if wide <= 2.0 * lip + LEAST_ACROSS
+                else ""
+            )
+        )
+    if lip is not None:
+        return (
+            f"a narrow place near {piecemap.said_at(at)}, under {2.0 * lip:g} mm across, which "
+            f"a lip of {lip:g} mm on each side closes over: {cut}. No one straight line across "
+            f"it was found that cuts the piece in two with a part on each side: `pieces split "
+            f"MAP {piece.id} --line x1,y1,x2,y2,...` takes a line of several points, from one "
+            "edge of the piece to the other across the narrow place"
+        )
     return (
         f"a narrow place near {piecemap.said_at(at)} cuts its {what} in two, the parts "
         f"{near.length:.2f} mm apart there: {cut}. `pieces split MAP {piece.id} --line` across "
@@ -481,12 +611,92 @@ def _why(found: Map, piece: Piece, left: list[Any], what: str) -> str:
     )
 
 
+def _by_share(
+    found: Map, piece: Piece, lips: tuple[float, float], play: float, fit: float, share: float
+) -> tuple[float, dict[str, Any] | None, str]:
+    """One piece's lip sized to its pane's visible share, as `capture` sizes a rim
+    (`capture.rim_needed`), with its curves at that lip, or why it can't be built so.
+
+    The pane is the built pocket less the play, as `capture` reads one from a frame. Where
+    the pane keeps the share at the full lip, it takes the full lip and its opening is its
+    pocket's own curves moved in, unless those cover more than the share allows at a corner
+    that points in: then, as for a smaller rim, the opening is the pane moved in at a true
+    distance, which is the shape `capture` reckoned the share by."""
+    from types import SimpleNamespace
+
+    from .capture import rim_needed
+
+    full, least = lips
+    pocket_2d = None
+    curves: dict[str, Any] | None = None
+    closed: NoOpening | None = None
+    try:
+        curves = piece_curves(piece, full, play, fit)
+        pocket_2d = curves["pocket_2d"]
+    except NoOpening as exc:
+        closed, pocket_2d = exc, exc.pocket
+    except NoAnswer as exc:
+        return full, None, f"can't be built: {exc}"
+    seen = piecemap.polygons(pocket_2d.buffer(-play, join_style="mitre"))
+    if not seen:
+        return full, None, f"has no pane once {play:g} mm of play is taken from its pocket"
+    rim = rim_needed(
+        seen[0],
+        SimpleNamespace(clearance=play, full_rim=full, least_rim=least, min_visible=share),
+    )
+    if rim["remove"]:
+        return full, None, (
+            f"keeps {rim['visible_at_least_pct']:.1f}% of its pane visible at even the least "
+            f"lip, {least:g} mm, where {share:g}% is wanted, and "
+            f"{rim['visible_at_full_pct']:.1f}% at {full:g} mm: it's "
+            f"{piecemap.widest(piece.shape)[0]:.2f} mm at its widest. `pieces merge` it into a "
+            "neighbour, or give a smaller least lip or a lower --min-visible"
+        )  # fmt: skip
+    lip = full if rim["chosen"] == "full" else float(rim["set_mm"])
+    if rim["chosen"] == "full" and curves is not None:
+        shown = 100.0 * curves["opening_2d"].area / seen[0].area
+        if not under(shown, share):
+            return full, curves, ""
+    if rim["chosen"] == "full" and closed is not None:
+        return full, None, (
+            f"has no one opening at a lip of {full:g} mm, which keeps "
+            f"{rim['visible_at_full_pct']:.1f}% of its pane visible, at least the {share:g}% "
+            f"wanted: {_why(found, piece, closed.left, 'opening', full)}"
+        )
+    try:
+        return lip, piece_curves(piece, lip, play, fit, by_share=True), ""
+    except NoOpening as exc:
+        return lip, None, (
+            f"has no one opening at a lip of {lip:g} mm, the widest that keeps {share:g}% of "
+            f"its pane visible: {_why(found, piece, exc.left, 'opening', lip)}"
+        )
+    except NoAnswer as exc:
+        return lip, None, f"can't be built: {exc}"
+
+
 def plan(
-    found: Map, lips: tuple[float, float], play: float
+    found: Map,
+    lips: tuple[float, float],
+    play: float,
+    fit: float,
+    min_visible: float | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    """Each piece's pane, pocket and opening in 2D, with the lip it takes, and what's wrong
-    with any that can't be built. The pocket is the pane and the play round it, so a pane
-    fills its pocket to the play everywhere, and what a pane can't fill stays lead."""
+    """Each piece's pane, pocket and opening in 2D, with the lip it takes and its curves as
+    they'll be built, and what's wrong with any that can't be. The pocket is the pane and the
+    play round it, so a pane fills its pocket to the play everywhere, and what a pane can't
+    fill stays lead.
+
+    A piece is judged twice, and refused the same way either time: on its outline, and on its
+    pocket as it's built, its curves fitted and moved inside the outline. The second is up to
+    1.6 of `fit` narrower, so an opening that's whole on the outline can come apart on it: a
+    build then ended with "leaves no one opening", no place and no fix
+    (mqucifer/print-shop#161).
+
+    With `min_visible`, each piece's lip is the rim `capture` would ask of its pane, by
+    `capture`'s own function: the full one if the pane keeps that share visible with it, else
+    the widest that keeps it, never under the least. A piece that can't keep it at the least
+    is refused. With every piece at the full lip, a long curved piece came out 43% visible
+    where the request asked 60, and `capture` failed it."""
     full, least = lips
     rows, wrong = [], []
     for piece in sorted(found.pieces, key=lambda p: p.id):
@@ -512,45 +722,72 @@ def plan(
                 for o in found.pieces
             )
         ]
-        if lone:
-            at = shapely.get_coordinates(lone[0].representative_point())[0]
+        # Everything that stops this piece, together: each line inside it, and what would
+        # still stop it with those out. One a build, a run fixed a merged piece three times
+        # over (mqucifer/print-shop#161).
+        stops: list[str] = []
+        for hole in lone:
+            at = shapely.get_coordinates(hole.representative_point())[0]
             spot = f"{at[0]:.4g},{at[1]:.4g}"
-            wrong.append(
-                f"piece {piece.id}, round {where}, has a lead line inside it, round "
-                f"{piecemap.said_at(at)}, that joins no other: it would be a body of its own, "
-                f"joined to nothing. `pieces drop-line MAP --at {spot}` takes it out, or "
-                f"`pieces extend MAP --at {spot}` runs it on to the piece's edge"
+            stops.append(
+                f"has a lead line inside it, round {piecemap.said_at(at)}, that joins no "
+                "other: it would be a body of its own, joined to nothing. `pieces drop-line "
+                f"MAP --at {spot}` takes it out, or `pieces extend MAP --at {spot}` runs it on "
+                "to the piece's edge"
             )
-            continue
-        pane = pane_of(piece.shape, play)
-        if pane is None:
-            left = _printable(piece.shape.buffer(-play, join_style="mitre", mitre_limit=5.0))
-            wrong.append(
-                f"piece {piece.id}, round {where}, has no pane once {play:g} mm of play is "
-                f"taken all round: {_why(found, piece, left, 'pane')}"
-            )
-            continue
-        pocket = pane.buffer(play, quad_segs=ROUND_SEGS)
+        judged = piece
+        if lone:
+            kept = [ring for ring in piece.shape.interiors if shapely.Polygon(ring) not in lone]
+            judged = Piece(
+                piece.id, piece.colour, shapely.Polygon(piece.shape.exterior, kept),
+                piece.thickness_mm, piece.paint,
+            )  # fmt: skip
+        after = "with those lines out, it " if lone else ""
+        pocket = curves = None
         lip = full
-        opening = _one_wide(pocket, lip)
-        while opening is None and lip - LIP_STEP >= least - 1e-9:
-            lip = round(lip - LIP_STEP, 6)
-            opening = _one_wide(pocket, lip)
-        if opening is None and lip > least:
-            lip = least
-            opening = _one_wide(pocket, lip)
-        if opening is None:
-            left = [
-                part
-                for part in _inset(pocket, least)
-                if not under(piecemap.widest(part, 0.02)[0], LEAST_ACROSS)
-            ]
-            wrong.append(
-                f"piece {piece.id}, round {where}, has no opening at even the least lip, "
-                f"{least:g} mm: {_why(found, piece, left, 'opening')}"
+        pane = pane_of(judged.shape, play)
+        if pane is None:
+            left = _printable(judged.shape.buffer(-play, join_style="mitre", mitre_limit=5.0))
+            stops.append(
+                f"{after}has no pane once {play:g} mm of play is taken all round: "
+                f"{_why(found, judged, left, 'pane')}"
             )
+        elif min_visible is not None:
+            pocket = pane.buffer(play, quad_segs=ROUND_SEGS)
+            lip, curves, stop = _by_share(found, judged, (full, least), play, fit, min_visible)
+            if stop:
+                stops.append(after + stop)
+        else:
+            pocket = pane.buffer(play, quad_segs=ROUND_SEGS)
+            # Every piece takes the lip asked. A narrower lip all round a piece, stepped down
+            # until its opening was one, made a pane `capture` then failed at the rim asked: a
+            # piece with a waist the lip closes over is split there, as a glass cutter would
+            # (mqucifer/print-shop#161).
+            if _one_wide(pocket, full) is None:
+                left = [
+                    part
+                    for part in _inset(pocket, full)
+                    if not under(piecemap.widest(part, 0.02)[0], LEAST_ACROSS)
+                ]
+                stops.append(
+                    f"{after}has no one opening at a lip of {full:g} mm: "
+                    f"{_why(found, judged, left, 'opening', full)}"
+                )
+            else:
+                try:
+                    curves = piece_curves(judged, full, play, fit)
+                except NoOpening as exc:
+                    stops.append(
+                        f"{after}has no one opening at a lip of {full:g} mm, once its pocket's "
+                        f"curves are fitted inside its outline: "
+                        f"{_why(found, judged, exc.left, 'opening', full)}"
+                    )
+                except NoAnswer as exc:
+                    stops.append(f"{after}can't be built: {exc}")
+        if stops:
+            wrong.append(f"piece {piece.id}, round {where}, " + ". And ".join(stops))
             continue
-        rows.append({"piece": piece, "lip_mm": lip, "pocket": pocket})
+        rows.append({"piece": piece, "lip_mm": lip, "pocket": pocket, "curves": curves})
     return rows, wrong
 
 
@@ -579,6 +816,63 @@ def _wire_points(wire: Any, step: float = 0.25) -> np.ndarray:
         n = max(2, int(math.ceil(edge.Length() / step)))
         found += [edge.positionAt(share) for share in np.linspace(0.0, 1.0, n, endpoint=False)]
     return np.array([[p.x, p.y] for p in found])
+
+
+def _play_read(points: np.ndarray, curves: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
+    """Each point of a pane's edge from its pocket's wall, and for each point that lies
+    square to a side of the pocket, how far it is from that side.
+
+    A pane is its pocket's lines and arcs moved in by the play, each corner kept a corner. So
+    square to a side the gap is the play, and that's what's held. Round a corner that points
+    into the pocket the pane's own corner is further off, by up to the play over the sine of
+    half the corner: 0.354 mm for a play of 0.25 at a square corner. The pane is never nearer
+    than the play there, which is held too. The reading was the middle gap of all the points,
+    which took a pocket of short sides and square corners, a traced edge's pixel steps, for a
+    pane 0.034 mm off its play (mqucifer/print-shop#161).
+
+    Where pane and pocket are the same sides, one moved, a point is read against the side its
+    own side was moved from, where its foot is on that side. Where the pocket was fitted again
+    to the pane and its play, a point is read against the nearest of the wall, where that's
+    along a side and not at a corner between two. Not a number (`nan`) for a point that isn't
+    square to a side."""
+    from scipy.spatial import cKDTree
+
+    wall = curves["pocket_2d"].boundary
+    gaps = np.asarray(shapely.distance(shapely.points(points), wall))
+    pocket, pane = curves["pocket"][0], curves["pane"][0]
+    side = np.full(len(points), np.nan)
+    if curves["exact"] and len(pocket) == len(pane):
+        mine = np.argmin(np.stack([arc.off(points) for arc in pane]), axis=0)
+        for k in np.unique(mine):
+            here = np.flatnonzero(mine == k)
+            square, far = _square_to(pocket[int(k)], points[here])
+            side[here[square]] = far[square]
+        return gaps, side
+    nearest = shapely.get_coordinates(shapely.shortest_line(shapely.points(points), wall))[1::2]
+    corners = np.array([arc.start for ring in curves["pocket"] for arc in ring])
+    far, _ = cKDTree(corners).query(nearest)
+    along = far > 10.0 * DENSE
+    side[along] = gaps[along]
+    return gaps, side
+
+
+class NoOpening(NoAnswer):
+    """A piece's pocket, as it's built, has no one opening at the lip asked. With what the
+    lip leaves of it: the parts its opening comes out in."""
+
+    def __init__(self, why: str, left: list[Any], pocket: Any = None) -> None:
+        super().__init__(why)
+        self.left = left
+        self.pocket = pocket
+
+
+def _past(pocket: Any, shape: Any) -> float:
+    """How far a pocket stands past its piece's outline, into the lead: the furthest any of
+    it outside the outline is from the outline. 0 where none of it is."""
+    out = pocket.difference(shape)
+    if out.is_empty:
+        return 0.0
+    return float(shapely.distance(shapely.points(shapely.get_coordinates(out)), shape).max())
 
 
 def _face_area(outer: Any, inners: list[Any]) -> float:
@@ -713,8 +1007,28 @@ def _same(rings: list[list[Arc] | None], wanted: Any, slack: float) -> bool:
     return bool(made.is_valid and made.symmetric_difference(wanted).area <= slack)
 
 
-def piece_curves(piece: Piece, lip: float, play: float, fit: float) -> dict[str, Any]:
-    """One piece's pocket, pane and opening as rings of lines and arcs.
+def piece_curves(
+    piece: Piece, lip: float, play: float, fit: float, by_share: bool = False
+) -> dict[str, Any]:
+    """One piece's pocket, pane and opening as rings of lines and arcs, its pocket nowhere
+    past the piece's outline. Where a pocket fitted again round a cut-back pane still stands
+    past it, the piece's curves are moved in that much more and made again. With `by_share`
+    the opening is the pane moved in by the rim at a true distance, as `capture` sizes a rim
+    to a pane's visible share."""
+    found = _curves(piece, lip, play, fit, 0.0, by_share)
+    for _ in range(3):
+        if found["past_mm"] <= 2.0 * CLOSE:
+            break
+        more = found["more_mm"] + found["past_mm"] + CLOSE
+        found = _curves(piece, lip, play, fit, more, by_share)
+    return found
+
+
+def _curves(
+    piece: Piece, lip: float, play: float, fit: float, more: float, by_share: bool = False
+) -> dict[str, Any]:
+    """One piece's pocket, pane and opening as rings of lines and arcs, its fitted outline
+    moved in by `more` past what keeps it inside the piece's.
 
     The piece's outline is fitted to arcs, within `fit`. The plain way, the pocket is those
     arcs and the pane the same arcs moved in by the play. Where the pane has a spur or a sharp
@@ -722,11 +1036,42 @@ def piece_curves(piece: Piece, lip: float, play: float, fit: float) -> dict[str,
     and the pocket is the pane's arcs moved out, or fitted to the pane and its play. The
     opening is the pocket's arcs moved in by the lip, or where a bend is tighter than the lip,
     Shapely's inset fitted so the lip is the lip asked for or up to `fit` wider."""
+    # The pocket never stands past the piece's outline into the lead, as a lip is never
+    # narrower than asked. The outline is fitted to lines and arcs, within `fit`, and those
+    # are then moved in by however far the furthest of them stands past the outline: a line
+    # moves over and an arc keeps its centre, so they're the same curves, as few, and all
+    # inside. Left where they were fitted, a pocket stood up to twice `fit` past its outline
+    # on each side of a line, and a line 0.4 mm wide in the map was a wall 0.21 mm thick in
+    # the frame (mqucifer/print-shop#161).
     outline: list[list[Arc]] = []
+    pane_2d = None
+    moved_in, fit_off = 0.0, 0.0
     for share in (0.8, 0.4, 0.2, 0.1, 0.05):
-        outline = _rings_of(piece.shape, share * fit)
-        built = _ring_polygon(outline)
-        pane_2d = pane_of(built, play) if built.is_valid else None
+        fitted = _rings_of(piece.shape, share * fit)
+        first = _ring_polygon(fitted)
+        if not first.is_valid:
+            continue
+        past = _past(first, piece.shape)
+        moved: list[Any] = (
+            [offset_ring(ring, past + CLOSE + more) for ring in fitted]
+            if past > 0 or more > 0
+            else fitted
+        )
+        if any(ring is None for ring in moved):
+            continue
+        built = _ring_polygon(moved)
+        if not built.is_valid or _past(built, piece.shape) > 2.0 * CLOSE:
+            continue
+        outline = moved
+        moved_in = past + CLOSE + more if past > 0 or more > 0 else 0.0
+        # How far the fit itself is from the outline, before it's moved in: what `--fit` holds.
+        fit_off = float(
+            shapely.distance(
+                shapely.points(shapely.get_coordinates(first.boundary)[::10]),
+                orient(piece.shape, 1.0).boundary,
+            ).max()
+        )
+        pane_2d = pane_of(built, play)
         if pane_2d is not None:
             break
     if pane_2d is None:
@@ -763,35 +1108,68 @@ def piece_curves(piece: Piece, lip: float, play: float, fit: float) -> dict[str,
         for part in _inset(pocket_2d, lip)
         if not under(piecemap.widest(part, 0.02)[0], LEAST_ACROSS)
     ]
+    narrow: list[Any] = []
+    if by_share:
+        # As `capture` reads a rim sized to the share: the pane, its pocket less the play,
+        # moved in by the rim less the play at a true distance, round at each corner that
+        # points in. So the rim is the rim asked everywhere, to `CLOSE`, and the share is
+        # the share `capture` reckoned it by.
+        seen = pocket_2d.buffer(-play, join_style="mitre").buffer(
+            -(lip - play), quad_segs=ROUND_SEGS
+        )
+        every = piecemap.polygons(seen)
+        parts = [
+            part for part in every if not under(piecemap.widest(part, 0.02)[0], LEAST_ACROSS)
+        ]
+        # What's left of it under two nozzles wide, a tail past a pinch: `capture` counts
+        # it as visible, so it's cut too, where it's big enough to be a curve. Left out,
+        # three panes of a traced scene came out 58.8% to 59.5% visible at the rim that keeps
+        # 60 (mqucifer/print-shop#161).
+        narrow = [part for part in every if part not in parts and part.area >= NARROW_MM2]
     if len(parts) != 1:
-        raise NoAnswer(f"piece {piece.id}'s pocket, as built, leaves no one opening")
+        raise NoOpening(
+            f"piece {piece.id}'s pocket, as built, leaves no one opening", parts, pocket_2d
+        )
     opening: list[Any] = [offset_ring(ring, lip) for ring in pocket]
-    opening_exact = _same(opening, parts[0], 0.001 * parts[0].area + 0.01)
-    if not opening_exact:
-        # Fitted within half of `fit` of an inset that much deeper, so the lip is never
-        # narrower than asked, and up to `fit` wider.
+    opening_exact = not by_share and _same(opening, parts[0], 0.001 * parts[0].area + 0.01)
+    tails: list[list[Any]] = []
+    if by_share:
+        opening = _close(parts[0])
+        for part in narrow:
+            rings = _close(part)
+            if all(len(ring) >= 2 for ring in rings) and _ring_polygon(rings).is_valid:
+                tails.append(rings)
+    elif not opening_exact:
+        # An inset half of `fit` deeper, fitted within a quarter of `fit` of its points, which
+        # is half of `fit` of the sides between them: so the lip is never narrower than
+        # asked, and up to `fit` wider. Fitted within half of `fit` of its points, a side
+        # stood up to `fit` off, and a lip came out 0.045 mm narrower than asked along 15 mm
+        # of a pane's edge, which `capture` failed (mqucifer/print-shop#161).
         deeper = [
             part
             for part in _inset(pocket_2d, lip + fit / 2.0)
             if not under(piecemap.widest(part, 0.02)[0], LEAST_ACROSS)
         ]
         wanted = deeper[0] if len(deeper) == 1 else parts[0]
-        opening = _rings_of(wanted.simplify(fit / 20.0), fit / 2.0, NEAR)
+        opening = _rings_of(wanted.simplify(fit / 20.0), fit / 4.0, NEAR)
     return {
         "pocket": pocket,
         "pane": pane,
         "opening": opening,
         "exact": exact,
         "plain": plain,
-        "opening_exact": opening_exact,
+        # A rim sized to the share is the rim itself, to `CLOSE`: not a lip that may be wider.
+        "opening_exact": opening_exact or by_share,
         "pocket_2d": pocket_2d,
-        "pane_2d": _ring_polygon(pane),
-        "off_mm": float(
-            shapely.distance(
-                shapely.points(shapely.get_coordinates(built.boundary)[::10]),
-                orient(piece.shape, 1.0).boundary,
-            ).max()
+        "opening_2d": shapely.union_all(
+            [_ring_polygon(opening), *[_ring_polygon(rings) for rings in tails]]
         ),
+        "opening_more": tails,
+        "pane_2d": _ring_polygon(pane),
+        "past_mm": _past(pocket_2d, piece.shape),
+        "off_mm": fit_off,
+        "moved_in_mm": moved_in,
+        "more_mm": more,
     }
 
 
@@ -822,6 +1200,15 @@ def run_build(args: Any, report: Report) -> None:
             "frame aren't built yet"
         )
     full, least = args.lip
+    share = getattr(args, "min_visible", None)
+    if share is not None and not 0 < share < 100:
+        raise NoAnswer("--min-visible is the share of each pane to stay visible, in percent")
+    if least < full and share is None:
+        report.note(
+            f"every piece takes the lip asked, {full:g} mm: --lip's second figure, {least:g}, "
+            "isn't stepped down to. A piece whose opening that lip closes over is named, with "
+            "the line to split it along"
+        )
     if not args.play > 0:
         raise NoAnswer("--play is the gap round each pane, in mm, over 0")
     if not least > args.play:
@@ -835,7 +1222,7 @@ def run_build(args: Any, report: Report) -> None:
     border = args.border if args.border is not None else 2.0 * found.lead_mm
     if not border > 0:
         raise NoAnswer("--border is the frame round the panel's edge, in mm, over 0")
-    rows, wrong = plan(found, (full, least), args.play)
+    rows, wrong = plan(found, (full, least), args.play, args.fit, share)
     report.numbers["unbuildable"] = wrong
     if wrong:
         for line in wrong[:12]:
@@ -857,19 +1244,26 @@ def run_build(args: Any, report: Report) -> None:
     outline = found.panel.buffer(border, join_style="mitre")
     frame_wire = _wire(fit_ring(_points(outline.exterior), args.fit))
     openings: list[Any] = []
+    narrow_parts = 0
     pockets: list[Any] = []
     panes: dict[str, list[Any]] = {}
     refitted: list[int] = []
     refitted_lips = 0
     lost = 0.0
     off, play_off = 0.0, 0.0
+    past, past_piece = 0.0, 0
+    moved_in = 0.0
+    play_worst = ""
     expected = outline.area * args.thickness
     pocket_tall = z["pocket_top_z"] - z["pocket_floor_z"]
     pane_volumes: list[tuple[int, float, float]] = []
     for row in rows:
         piece: Piece = row["piece"]
-        curves = piece_curves(piece, row["lip_mm"], args.play, args.fit)
+        curves = row["curves"]
         off = max(off, curves["off_mm"])
+        moved_in = max(moved_in, curves["moved_in_mm"])
+        if curves["past_mm"] > past:
+            past, past_piece = curves["past_mm"], piece.id
         lost += max(0.0, float(piece.shape.area - curves["pocket_2d"].area))
         if not curves["exact"]:
             refitted.append(piece.id)
@@ -877,19 +1271,42 @@ def run_build(args: Any, report: Report) -> None:
         pocket_outer, pocket_inners = _wires(curves["pocket"])
         pane_outer, pane_inners = _wires(curves["pane"])
         # The pane's edge from its pocket's wall, at points round the pane: nowhere closer
-        # than the play, and at it along the sides.
-        wall = shapely.points(_wire_points(pane_outer, 0.5))
-        gaps = shapely.distance(wall, curves["pocket_2d"].boundary)
-        play_off = max(
-            play_off, args.play - float(gaps.min()), abs(float(np.median(gaps)) - args.play)
+        # than the play, and at the play wherever the nearest of the wall is along a side.
+        at_wall = _wire_points(pane_outer, 0.5)
+        gaps, side = _play_read(at_wall, curves)
+        closest = float(gaps.min())
+        square = np.flatnonzero(~np.isnan(side))
+        furthest = (
+            int(square[np.abs(side[square] - args.play).argmax()]) if len(square) else -1
         )
+        along = float(side[furthest]) if furthest >= 0 else args.play
+        mine = max(args.play - closest, abs(along - args.play))
+        if mine > play_off:
+            # Which pane, and where: the place square to a side where its gap is furthest off.
+            where = at_wall[furthest] if furthest >= 0 else at_wall[int(gaps.argmin())]
+            play_worst = (
+                f"piece {piece.id}'s pane is {along:.3f} mm from its "
+                f"pocket's wall at {piecemap.said_at(where)}, square to a side, and "
+                f"{closest:.3f} mm at its nearest, for a play of {args.play:g}; "
+                + (
+                    "its pocket and its pane are the same lines and arcs, one moved by the play"
+                    if curves["exact"]
+                    else "its pocket was fitted again to its pane and the play"
+                )
+            )
+        play_off = max(play_off, mine)
         pockets.append(_prism(pocket_outer, pocket_inners, z["pocket_floor_z"], z["pocket_top_z"]))
         openings.append(_wires(curves["opening"]))
+        mine_open = [openings[-1]]
+        for rings in curves["opening_more"]:
+            openings.append(_wires(rings))
+            mine_open.append(openings[-1])
+        narrow_parts += len(curves["opening_more"])
         solid = _prism(pane_outer, pane_inners, z["pocket_floor_z"], z["pane_top_z"])
         panes.setdefault(piece.colour or "pane", []).append(solid)
         pane_volumes.append((piece.id, float(solid.Volume()), curves["pane_2d"].area * args.pane))
         pocket_area = _face_area(pocket_outer, pocket_inners)
-        open_area = _face_area(*openings[-1])
+        open_area = sum(_face_area(*one) for one in mine_open)
         expected -= open_area * (args.thickness - pocket_tall) + pocket_area * pocket_tall
         row["pocket_mm2"], row["opening_mm2"] = pocket_area, open_area
     # Each opening is cut through the plate, an island inside one left standing, and then each
@@ -947,7 +1364,7 @@ def run_build(args: Any, report: Report) -> None:
         "least_lip_before_play_mm", lips[0], "mm",
         f"{len(rows) - len(narrow)} piece(s) at the full {full:g} mm"
         + (
-            "; narrower so each keeps one opening: "
+            f"; narrower, so each keeps {share:g}% of its pane visible: "
             + ", ".join(f"piece {r['piece'].id} at {r['lip_mm']:g}" for r in narrow[:12])
             + (f", and {len(narrow) - 12} more" if len(narrow) > 12 else "")
             if narrow
@@ -973,9 +1390,29 @@ def run_build(args: Any, report: Report) -> None:
         "play_off_mm",
         play_off,
         "mm",
-        f"how far a pane's edge is from {args.play:g} mm off its pocket's wall, at its closest "
-        "and along its sides",
+        f"how far a pane's edge is from {args.play:g} mm off its pocket's wall, at its closest, "
+        "and at each point of it that lies square to a side of the pocket",
     )
+    report.fact(
+        "pocket_past_outline_mm",
+        past,
+        "mm",
+        "how far a pocket stands past its piece's outline, into the lead: a wall between two "
+        "pockets is never thinner than the map's line there",
+    )
+    report.fact(
+        "pocket_moved_in_mm",
+        moved_in,
+        "mm",
+        "the furthest a piece's fitted curves were moved in so none stands past its outline: "
+        "its pocket is that much inside the fit, at the most",
+    )
+    if narrow_parts:
+        report.note(
+            f"{narrow_parts} part(s) of an opening under {LEAST_ACROSS:g} mm wide are cut, as "
+            "`capture` counts them in a pane's visible share: a slot that narrow may print "
+            "closed"
+        )
     report.numbers["refitted"] = refitted
     report.numbers["refitted_lips"] = refitted_lips
     kinds = sorted({face.geomType() for face in frame.Faces()})
@@ -1034,8 +1471,15 @@ def run_build(args: Any, report: Report) -> None:
         differs.append(
             f"piece {worst[0]}'s pane is {worst[1]:.2f} mm³, and its inset makes {worst[2]:.2f}"
         )
+    if past > 4.0 * CLOSE:
+        differs.append(
+            f"piece {past_piece}'s pocket stands {past:.3f} mm past its outline, into the lead"
+        )
     if play_off > 4.0 * CLOSE:
-        differs.append(f"a pane's edge is {play_off:.3f} mm off the play")
+        differs.append(
+            f"a pane's edge is {play_off:.3f} mm off the play, over the {4.0 * CLOSE:g} mm a "
+            f"pane and its own pocket may differ by: {play_worst}"
+        )
     if differs:
         report.verdict("DISAGREE", "; ".join(differs))
         return

@@ -4,6 +4,10 @@ is a Sponsor's scene or anything from one (mqucifer/print-shop#152, mqucifer/pri
 - `clean.png`: five flat cells between straight lines, 120 x 80 mm at 5 pixels a mm, in a frame.
 - `broken.png`: the same panel with one of each rule break `pieces check` reads.
 - `hills.png`: curved bands, slanted uprights and a round sun, for curves built as curves.
+- `thin_line.png`: curved bands and uprights at 5 pixels a mm, their lines 4 pixels wide but
+  one band's, which is one pixel wide (mqucifer/print-shop#161).
+- `speckled.png`: that picture with every line 4 pixels wide, and five dark specks two pixels
+  across inside two of its curved pieces.
 - `margin.png`: the clean panel with a white margin round its frame, specks in the margin, and
   the frame's top uneven.
 - `specks.png`: the clean panel with clusters of dark specks inside its cells, and one real line
@@ -11,6 +15,36 @@ is a Sponsor's scene or anything from one (mqucifer/print-shop#152, mqucifer/pri
 - `deep.json`: the rules' map with a line that all but crosses one cell.
 - `rules.json`: a map as rules would write one, four cells each inset by half the lead.
 - `slit.json`: that map with a lead line ending in one cell's glass, and a line inside another.
+- `slanted.json`: a neck whose narrowest line runs on a slant between two offset notches, which
+  rays square to its edges read wider at the same place (mqucifer/print-shop#161).
+- `spiked.json`: a notch that ends in a spike thinner than a pixel, with the limit between its
+  depth by its outline and by its pixels.
+- `thin_lines.json`: a panel big enough that a pixel is 0.18 mm, with a dead end in a narrow
+  piece, its neighbours nearer than the pixels look round, and a line inside a piece closer to
+  that piece's edge than a pixel.
+- `quiet.json`: a spur under the neck limit and a spiked notch shallower than its mouth, neither
+  of which any rule flags.
+- `edge.json`: two pieces on the panel's right edge, the line between them slanting to it.
+- `joined.json`: a dead end whose tip is three microns from a long line inside the same
+  piece, so the pixels show the two as one stretch of lead.
+- `stairs.json`: a piece whose slanted side is a pixel's steps, 0.228 mm each, as a traced edge
+  that was never read as a line.
+- `close.json`: the rules' map with two pieces 0.2 mm apart along 6 mm, lead under a nozzle's
+  width, and one piece 0.25 mm from the panel's edge, which the frame's border backs.
+- `near.json`: two curved pieces, the line between them 1.2 mm wide but 0.2 mm along 10 mm.
+- `waist.json`: a piece 50 mm long and 14 mm wide with a waist 2 mm across at its middle.
+- `slanted_waist.json`: a long piece on a slant, with a waist a quarter of the way along it.
+- `bend.json`: a piece round a bend, narrow all the way round it.
+- `curved_waist.json`: a piece with curved sides drawn in to a waist 2.45 mm across, a hair
+  over the 2.4 mm a lip of 1.2 on each side closes over.
+- `apart.json`: a small piece 1.6 mm from a large one across a patch of lead, with no line of
+  their own between them, and a third piece beside it.
+- `crescent.json`: a thin crescent, 5 mm across at its middle, whose full lip hides more than
+  40% of its pane.
+- `tailed.json`: a piece 20 by 5 mm with a tail 2.5 mm wide past a pinch, whose share-sized
+  opening has a part under two nozzles wide in the tail.
+- `hairs.json`: two cuts two microns wide whose ends face each other, which the
+  outline has and no pixel shows.
 """
 
 from __future__ import annotations
@@ -142,6 +176,48 @@ def hills() -> Any:
     return im
 
 
+def thin_line(thin: int = 1, specks: bool = False) -> Any:
+    """100 x 70 mm at 5 pixels a mm: four curved bands and three uprights in each strip, 20
+    pieces. Every line is 4 pixels wide but the second band's, which is `thin`, one: the two
+    smoothed outlines either side of it cross, as a pixel is all that lies between them. With
+    `specks`, five dark specks two pixels across lie inside two of the pieces."""
+    s, w, h, f = 5, 100, 70, 8
+    im = Image.new("RGB", (w * s + 2 * f, h * s + 2 * f), DARK)
+    d = ImageDraw.Draw(im)
+
+    def at(x: float, y: float) -> tuple[float, float]:
+        return (f + x * s, f + (h - y) * s)
+
+    def along(curve: Any, n: int = 400) -> list[tuple[float, float]]:
+        return [(w * k / n, curve(w * k / n)) for k in range(n + 1)]
+
+    bands: list[Any] = [
+        lambda x: 14 + 4 * math.sin(x / 13),
+        lambda x: 30 + 5 * math.sin(x / 17 + 1),
+        lambda x: 47 + 6 * math.sin(x / 21 + 2),
+        lambda x: 60 + 3 * math.sin(x / 9),
+    ]
+    d.rectangle([at(0, h), at(w, 0)], fill=BLUE)
+    for curve, colour in zip(bands, (WHITE, GREEN, GOLD, RED), strict=True):
+        d.polygon([at(*p) for p in along(curve)] + [at(w, h), at(0, h)], fill=colour)
+    for n, curve in enumerate(bands):
+        wide = thin if n == 1 else 4
+        d.line([at(*p) for p in along(curve)], fill=DARK, width=wide, joint="curve")
+    edges: list[Any] = [lambda x: -3.0, *bands, lambda x: h + 3.0]
+    for k, (low, high) in enumerate(zip(edges, edges[1:], strict=False)):
+        for x, lean in ((22 + 7 * k, 6.0), (55 - 4 * k, -7.0), (80 + 2 * k, 3.0)):
+            points = [
+                (x + lean * t + 2 * math.sin(3 * t), low(x) + (high(x + lean) - low(x)) * t)
+                for t in [j / 60 for j in range(61)]
+            ]
+            d.line([at(*p) for p in points], fill=DARK, width=4, joint="curve")
+    if specks:
+        for x, y in ((10, 22), (14, 25), (9, 27), (45, 40), (48, 37)):
+            cx, cy = at(x, y)
+            d.rectangle([cx, cy, cx + 1, cy + 1], fill=DARK)
+    return im
+
+
 def margin() -> Any:
     """The clean panel on white, 40 pixels of margin all round, with the frame's top 4 pixels
     thinner over its right half and three specks of dark in the margin above it."""
@@ -227,6 +303,332 @@ def stepped() -> dict[str, Any]:
     return found
 
 
+def slanted() -> dict[str, Any]:
+    """The stepped piece with its step higher, as a traced scene read one: the nearest two
+    points are corners 0.3 mm apart along and 0.977 across, 1.022 mm, under 1.2. The only rays
+    square to a side between those two ends run from the lower notch's flat end up to the
+    step, 1.828 mm: along the slant's long way, over 1.2."""
+    found = notched()
+    found["pieces"][0]["outline"] = [
+        [1, 1], [12.3, 1], [12.3, 10.6], [13.0, 10.6], [13.0, 1], [41, 1], [41, 21],
+        [12.6, 21], [12.6, 12.428], [12.0, 12.428], [12.0, 11.577], [11.75, 11.577],
+        [11.75, 21], [1, 21],
+    ]  # fmt: skip
+    return found
+
+
+def spiked() -> dict[str, Any]:
+    """One piece 40 x 20 mm with a notch in its top: a mouth 2.6 mm wide, sloping in to 0.06 mm
+    wide at 1.7 mm deep, then a spike on to a point 2.77 mm deep. By its outline it's 2.77 mm
+    deep, 1.065 times its mouth, over 1. The spike is thinner than a pixel, so the furthest
+    pixel's centre in the notch is about 2.5 mm from its mouth, under 1 time its mouth."""
+    found = notched()
+    found["pieces"][0]["outline"] = [
+        [1, 1], [41, 1], [41, 21], [21.3, 21], [20.03, 19.3], [20.0, 18.23], [19.97, 19.3],
+        [18.7, 21], [1, 21],
+    ]  # fmt: skip
+    return found
+
+
+def hairs() -> dict[str, Any]:
+    """The notched piece with each notch 0.002 mm wide and their ends 1 mm apart, 0.02 mm
+    to each side of one line: a neck by the outline, 1 mm under 1.2, and no pixel has either
+    cut, so by the pixels the glass there is as wide as the piece."""
+    found = notched()
+    found["pieces"][0]["outline"] = [
+        [1, 1], [12.509, 1], [12.509, 10.5], [12.511, 10.5], [12.511, 1], [41, 1], [41, 21],
+        [12.491, 21], [12.491, 11.5], [12.489, 11.5], [12.489, 21], [1, 21],
+    ]  # fmt: skip
+    return found
+
+
+def thin_lines() -> dict[str, Any]:
+    """A 250 x 200 mm panel whose map says its usual lead is 1.4 mm, with lines 0.4 mm wide
+    round a narrow piece: as a trace at a low `--dark` leaves some lines a pixel or two thin
+    (mqucifer/print-shop#161). Piece 1 is a strip 3.4 mm wide with a dead end 0.5 mm wide and
+    8 mm long down from its top: the pieces each side of the strip are 1.85 mm from it, nearer
+    than the lead and a quarter the pixels look round for a line with one piece's glass. Piece
+    4 has a line inside it 1 mm wide, joined to no other, 0.005 mm from its bottom edge: no
+    pixel shows that gap, so by the pixels the line joins the lead."""
+    strip = [
+        [100, 0], [103.4, 0], [103.4, 100], [101.95, 100], [101.95, 92], [101.45, 92],
+        [101.45, 100], [100, 100],
+    ]  # fmt: skip
+    pieces: list[dict[str, Any]] = [
+        {"id": 1, "colour": "blue", "outline": strip},
+        {"id": 2, "colour": "gold", "outline": [[0, 0], [99.6, 0], [99.6, 100], [0, 100]]},
+        {"id": 3, "colour": "green", "outline": [[103.8, 0], [250, 0], [250, 100], [103.8, 100]]},
+        {
+            "id": 4,
+            "colour": "red",
+            "outline": [[0, 100.4], [250, 100.4], [250, 200], [0, 200]],
+            "holes": [[[150, 100.405], [158, 100.405], [158, 101.405], [150, 101.405]]],
+        },
+    ]
+    return {
+        "piece_map": 1,
+        "panel": {"width_mm": 250, "height_mm": 200},
+        "lead_mm": 1.4,
+        "colours": {"blue": {"rgb": [40, 90, 220]}},
+        "pieces": pieces,
+    }
+
+
+def quiet() -> dict[str, Any]:
+    """One piece 40 x 20 mm with nothing a rule flags, and two places a second reading would
+    differ on: a spur 0.8 mm wide and 4 mm long off its right side, under the 1.2 mm neck
+    limit with wide glass on one side of it only; and the spiked notch with its mouth 4.4 mm
+    wide, 0.63 times as deep as that, whose pixels read it 0.3 mm shallower."""
+    found = notched()
+    found["panel"] = {"width_mm": 47, "height_mm": 22}
+    found["pieces"][0]["outline"] = [
+        [1, 1], [41, 1], [41, 10.6], [45, 10.6], [45, 11.4], [41, 11.4], [41, 21],
+        [22.2, 21], [20.03, 19.3], [20.0, 18.23], [19.97, 19.3], [17.8, 21], [1, 21],
+    ]  # fmt: skip
+    return found
+
+
+def edge() -> dict[str, Any]:
+    """Two pieces of a 60 x 40 mm panel, both on its right edge, with a slanted line 1.4 mm
+    wide between them that runs to the edge."""
+    return {
+        "piece_map": 1,
+        "panel": {"width_mm": 60, "height_mm": 40},
+        "lead_mm": 1.4,
+        "colours": {"blue": {"rgb": [40, 90, 220]}},
+        "pieces": [
+            {"id": 1, "colour": "blue", "outline": [[0, 22], [60, 26], [60, 40], [0, 40]]},
+            {"id": 2, "colour": "gold", "outline": [[0, 0], [60, 0], [60, 24.6], [0, 20.6]]},
+        ],
+    }
+
+
+def joined() -> dict[str, Any]:
+    """The rules' map, twice the size, with a dead end 1.2 mm wide and 8 mm long down from
+    piece 3's top edge, and a line inside piece 3, 1.2 mm wide and 40 mm long, that starts
+    0.003 mm under the dead end's tip and runs on down. By the outline they're two: a dead end
+    and a line joined to no other. No pixel shows the 0.003 mm between them, so the pixels'
+    lead alone with piece 3 is one stretch 48 mm long, whose middle is 24 mm from the dead
+    end's tip."""
+    lead, half = 1.2, 0.6
+    boxes = [(0, 0, 60, 60), (60, 0, 120, 60), (0, 60, 60, 120), (60, 60, 120, 120)]
+    outlines = []
+    for x0, y0, x1, y1 in boxes:
+        a = x0 if x0 == 0 else x0 + half
+        b = y0 if y0 == 0 else y0 + half
+        c = x1 if x1 == 120 else x1 - half
+        e = y1 if y1 == 120 else y1 - half
+        outlines.append([[a, b], [c, b], [c, e], [a, e]])
+    pieces: list[dict[str, Any]] = [
+        {"id": k + 1, "colour": colour, "outline": outline}
+        for k, (outline, colour) in enumerate(
+            zip(outlines, ("blue", "gold", "green", "red"), strict=True)
+        )
+    ]
+    # Piece 3 is the top-left cell: the dead end runs up into it from its bottom edge.
+    low, top, right = 60.6, 120.0, 59.4
+    pieces[2]["outline"] = [
+        [0, low], [29.4, low], [29.4, low + 8], [30.6, low + 8], [30.6, low], [right, low],
+        [right, top], [0, top],
+    ]  # fmt: skip
+    pieces[2]["holes"] = [[[29.4, 68.603], [30.6, 68.603], [30.6, 108.603], [29.4, 108.603]]]
+    return {
+        "piece_map": 1,
+        "panel": {"width_mm": 120, "height_mm": 120},
+        "lead_mm": lead,
+        "colours": {"blue": {"rgb": [40, 90, 220]}},
+        "pieces": pieces,
+    }
+
+
+def stairs() -> dict[str, Any]:
+    """One piece in a 60 x 60 mm panel: a square 40 mm across with one corner cut off along a
+    slant, the slant drawn as 120 steps of 0.228 mm, across then up. Every step is a square
+    corner, so the build keeps each, and the pocket has 240 sides shorter than the play."""
+    step, count = 0.228, 120
+    run = round(step * count, 3)
+    slant: list[list[float]] = []
+    for k in range(count):
+        slant += [[10 + k * step, 50 - run + k * step], [10 + (k + 1) * step, 50 - run + k * step]]
+    outline: list[list[float]] = [[10, 10], [50, 10], [50, 50], [10 + run, 50], *slant[::-1]]
+    return {
+        "piece_map": 1,
+        "panel": {"width_mm": 60, "height_mm": 60},
+        "lead_mm": 1.0,
+        "colours": {"blue": {"rgb": [40, 90, 220]}},
+        "pieces": [
+            {"id": 1, "colour": "blue", "outline": [[round(x, 4), round(y, 4)] for x, y in outline]}
+        ],
+    }
+
+
+def close() -> dict[str, Any]:
+    """The rules' map with a tab on piece 1's right side, 6 mm tall, that leaves 0.2 mm of lead
+    between it and piece 2, where the line is 1.2 mm; and piece 3's left side 0.25 mm in from
+    the panel's edge, where the frame's border stands outside it."""
+    found = rules(False)
+    found["pieces"][0]["outline"] = [
+        [0, 0], [29.4, 0], [29.4, 7], [30.4, 7], [30.4, 13], [29.4, 13], [29.4, 19.4], [0, 19.4],
+    ]  # fmt: skip
+    found["pieces"][2]["outline"] = [[0.25, 20.6], [29.4, 20.6], [29.4, 40], [0.25, 40]]
+    del found["source"]
+    return found
+
+
+def near() -> dict[str, Any]:
+    """Two pieces of a 60 x 40 mm panel, one colour, with a curved line between them: 1.2 mm
+    wide, but 0.2 mm from x 25 to 35, narrowing over a millimetre at each end. A line the
+    picture means, too thin for a nozzle along 10 mm."""
+
+    def middle(x: float) -> float:
+        return 20 + 2 * math.sin(x / 8)
+
+    def width(x: float) -> float:
+        inside = min(x - 24, 36 - x)
+        return 1.2 if inside <= 0 else 0.2 if inside >= 1 else 1.2 - inside
+
+    xs = [k / 4 for k in range(241)]
+    low = [[x, round(middle(x) - width(x) / 2, 4)] for x in xs]
+    high = [[x, round(middle(x) + width(x) / 2, 4)] for x in xs]
+    return {
+        "piece_map": 1,
+        "panel": {"width_mm": 60, "height_mm": 40},
+        "lead_mm": 1.2,
+        "colours": {"blue": {"rgb": [40, 90, 220]}},
+        "pieces": [
+            {"id": 1, "colour": "blue", "outline": [[0, 0], [60, 0], *low[::-1]]},
+            {"id": 2, "colour": "blue", "outline": [*high, [60, 40], [0, 40]]},
+        ],
+    }
+
+
+def waist() -> dict[str, Any]:
+    """One piece of a 60 x 24 mm panel: 50 mm long and 14 mm wide, drawn in to a waist 2 mm
+    across at its middle, from 8 mm either side. Over the 1.2 mm a neck is, and under the
+    2.4 mm a lip of 1.2 on each side closes over."""
+    found = notched()
+    found["panel"] = {"width_mm": 60, "height_mm": 24}
+    found["pieces"][0]["outline"] = [
+        [5, 5], [22, 5], [30, 11], [38, 5], [55, 5], [55, 19], [38, 19], [30, 13], [22, 19],
+        [5, 19],
+    ]  # fmt: skip
+    return found
+
+
+def slanted_waist() -> dict[str, Any]:
+    """One piece of a 70 x 50 mm panel: a band 56 mm long and 10 mm wide, lying at 31 degrees,
+    drawn in to a waist 2 mm across 14 mm from its lower end. A line square to the way from
+    one half of its opening to the other runs along the band, not across it."""
+    turn = math.atan2(30, 50)
+    along, across = (math.cos(turn), math.sin(turn)), (-math.sin(turn), math.cos(turn))
+    half = [(0, 5), (8, 5), (14, 1), (20, 5), (56, 5)]
+    ring = [(u, -v) for u, v in half] + [(u, v) for u, v in reversed(half)]
+    found = notched()
+    found["panel"] = {"width_mm": 70, "height_mm": 50}
+    found["pieces"][0]["outline"] = [
+        [round(10 + u * along[0] + v * across[0], 4), round(12 + u * along[1] + v * across[1], 4)]
+        for u, v in ring
+    ]
+    return found
+
+
+def bend() -> dict[str, Any]:
+    """One piece of a 60 x 40 mm panel, round a bend: a band along an arc 20 mm in radius, 10
+    mm wide at its two ends and 2 mm wide from 50 to 100 degrees round, 17 mm of narrow run.
+    The middle between the two halves of its opening lies in the bend's hollow, outside the
+    piece."""
+
+    def half(deg: float) -> float:
+        return 1.0 if 50 <= deg <= 100 else 5.0 if deg <= 40 or deg >= 110 else (
+            1.0 + 4.0 * (50 - deg) / 10 if deg < 50 else 1.0 + 4.0 * (deg - 100) / 10
+        )
+
+    def at(deg: float, radius: float) -> list[float]:
+        turn = math.radians(deg)
+        return [round(30 + radius * math.cos(turn), 4), round(6 + radius * math.sin(turn), 4)]
+
+    degrees = [10 + 2 * k for k in range(66)]
+    outer = [at(d, 20 + half(d)) for d in degrees]
+    inner = [at(d, 20 - half(d)) for d in reversed(degrees)]
+    found = notched()
+    found["panel"] = {"width_mm": 60, "height_mm": 40}
+    found["pieces"][0]["outline"] = outer + inner
+    return found
+
+
+def curved_waist() -> dict[str, Any]:
+    """One piece of a 60 x 24 mm panel, 50 mm long, its two long sides curves that come
+    within 2.45 mm of each other at its middle and open to 14 mm. On its outline a lip of 1.2
+    mm leaves an opening 0.05 mm wide through the waist, one piece. Its pocket, as built, is
+    its fitted curves moved inside the outline, and the opening there is two."""
+
+    def half(x: float) -> float:
+        return min(7.0, 1.225 + 0.02 * (x - 30) ** 2)
+
+    xs = [5 + k * 0.5 for k in range(101)]
+    low = [[x, round(12 - half(x), 4)] for x in xs]
+    high = [[x, round(12 + half(x), 4)] for x in xs]
+    found = notched()
+    found["panel"] = {"width_mm": 60, "height_mm": 24}
+    found["pieces"][0]["outline"] = low + high[::-1]
+    return found
+
+
+def apart() -> dict[str, Any]:
+    """Three pieces of a 60 x 40 mm panel whose usual lead is 0.95 mm. Piece 1 is large, the
+    panel's left 40 mm. Piece 2 is small, a diamond 7.8 by 7 mm, one corner 1.6 mm off piece
+    1's right side, in a patch of lead: further than a line is wide, so they share no line,
+    and only that corner is near. Piece 3 is the panel's right side, 1.2 mm beyond piece 2."""
+    return {
+        "piece_map": 1,
+        "panel": {"width_mm": 60, "height_mm": 40},
+        "lead_mm": 0.95,
+        "colours": {"blue": {"rgb": [40, 90, 220]}},
+        "pieces": [
+            {"id": 1, "colour": "green", "outline": [[0, 0], [40, 0], [40, 40], [0, 40]]},
+            {
+                "id": 2,
+                "colour": "green",
+                "outline": [[41.6, 18], [45.5, 14.5], [49.4, 18], [45.5, 21.5]],
+            },
+            {"id": 3, "colour": "blue", "outline": [[50.6, 0], [60, 0], [60, 40], [50.6, 40]]},
+        ],
+    }
+
+
+def crescent() -> dict[str, Any]:
+    """One piece of a 64 x 26 mm panel: the part of a circle 30 mm in radius that lies above
+    the same circle 5 mm lower, from 60 to 120 degrees round. A crescent 5 mm across at its
+    middle and 4.4 at its ends, 31 mm long. A lip of 1.2 mm on each side leaves about half of
+    its pane visible; one of about 1 mm leaves 60%."""
+
+    def at(deg: float, lower: float) -> list[float]:
+        turn = math.radians(deg)
+        return [round(32 + 30 * math.cos(turn), 4), round(30 * math.sin(turn) - lower - 8, 4)]
+
+    degrees = [60 + k for k in range(61)]
+    outer = [at(d, 0.0) for d in degrees]
+    inner = [at(d, 5.0) for d in reversed(degrees)]
+    found = notched()
+    found["panel"] = {"width_mm": 64, "height_mm": 26}
+    found["pieces"][0]["outline"] = inner + outer
+    return found
+
+
+def tailed() -> dict[str, Any]:
+    """One piece of a 40 x 21 mm panel: a body 20 by 5 mm, then a pinch 1.5 mm wide and 1 mm
+    long, then a tail 2.5 mm wide and 8 mm long. A lip of 1.2 mm hides too much of it, so its
+    rim is sized to its share, about 0.9 mm. At that rim the tail still shows a strip 0.7 mm
+    wide, apart from the body's opening and under the two nozzles an opening is."""
+    found = notched()
+    found["panel"] = {"width_mm": 40, "height_mm": 21}
+    found["pieces"][0]["outline"] = [
+        [5, 8], [25, 8], [25, 9.75], [26, 9.75], [26, 9.25], [34, 9.25], [34, 11.75],
+        [26, 11.75], [26, 11.25], [25, 11.25], [25, 13], [5, 13],
+    ]  # fmt: skip
+    return found
+
+
 def rules(slit: bool, depth: float = 8.0) -> dict[str, Any]:
     lead = 1.2
     outlines = cells(lead)
@@ -264,6 +666,8 @@ def rules(slit: bool, depth: float = 8.0) -> dict[str, Any]:
 clean().save("clean.png")
 broken().save("broken.png")
 hills().save("hills.png")
+thin_line().save("thin_line.png")
+thin_line(4, specks=True).save("speckled.png")
 margin().save("margin.png")
 specks().save("specks.png")
 for name, slit, depth in (
@@ -277,6 +681,23 @@ for name, made in (
     ("lone.json", lone_lines()),
     ("notched.json", notched()),
     ("stepped.json", stepped()),
+    ("slanted.json", slanted()),
+    ("spiked.json", spiked()),
+    ("hairs.json", hairs()),
+    ("thin_lines.json", thin_lines()),
+    ("quiet.json", quiet()),
+    ("joined.json", joined()),
+    ("close.json", close()),
+    ("near.json", near()),
+    ("waist.json", waist()),
+    ("tailed.json", tailed()),
+    ("crescent.json", crescent()),
+    ("apart.json", apart()),
+    ("curved_waist.json", curved_waist()),
+    ("slanted_waist.json", slanted_waist()),
+    ("bend.json", bend()),
+    ("stairs.json", stairs()),
+    ("edge.json", edge()),
 ):
     with open(name, "w") as fh:
         json.dump(made, fh)

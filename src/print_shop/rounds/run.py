@@ -1406,6 +1406,30 @@ class Run:
             return None
         return {"said": "\n\n".join(lines), "detail": detail, "lead": lead}
 
+    def script_benched(self, calls: list[dict[str, Any]]) -> None:
+        """Each bench command the model's own script ran, kept in the ledger as a bench call at
+        that `run`'s call, marked `via` `run` (mqucifer/print-shop#161). On the first eval with
+        the `pieces` commands a run chained merges and splits from its scripts, and none was in
+        the ledger, the tool counts, the held checks or the stop sheets. What's kept is read
+        from the script's own folder, so `_held_tries` holds a `FAIL` from it and lets no pass
+        from it clear one."""
+        files = paths.snapshot(self.work)
+        for one in calls:
+            self.ledger.bench_call(
+                self.state.name,
+                self.state.round,
+                self.session.requests,
+                [str(word) for word in one["argv"]],
+                int(one["code"]),
+                one.get("record"),
+                files,
+                float(one.get("seconds") or 0.0),
+                via="run",
+            )
+        self._seen()
+        tries = self._bench_tries()
+        paths.write_inside(self.work, "record/CHECKS.md", nudge.record(tries, self._wanted()))
+
     def breakdown(self, args: dict[str, Any]) -> Judged:
         """How the reference and the request are built, kept before the needs and shown at the
         first stop (mqucifer/print-shop#36)."""
@@ -1952,7 +1976,7 @@ class Run:
         found: list[tuple[int, int, holding.Tried]] = []
         wanted = self._needs_now()
         for row in self.ledger.rows(
-            "SELECT at_call, argv, exit, verdict, why, numbers FROM bench_calls WHERE run=? "
+            "SELECT at_call, argv, exit, verdict, why, numbers, via FROM bench_calls WHERE run=? "
             "ORDER BY id",
             self.state.name,
         ):
@@ -1962,6 +1986,10 @@ class Run:
                 continue
             verdict, why = str(row["verdict"] or ""), str(row["why"] or "")
             passed: bool | None = {0: True, 1: False}.get(code)
+            # A command the model's own script ran (mqucifer/print-shop#161): its answer was
+            # read from the script's folder, where the script could have written it. A fail
+            # there is held as a call's is; a pass there is no answer to rely on.
+            inside = row["via"] == "run"
             check = nudge.check_of(argv)
             for need in wanted:
                 if (
@@ -1981,6 +2009,8 @@ class Run:
                     if not reading.passed and not unsure:
                         why = reading.why
                     break
+            if inside and passed:
+                passed = None
             tried = holding.Tried(int(row["at_call"]), argv, passed, verdict, why)
             found.append((tried.at_call, 0, tried))
         for row in self.ledger.rows(

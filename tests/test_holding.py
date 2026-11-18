@@ -531,3 +531,86 @@ def test_a_settled_slide_needs_own_failing_reading_cant_be_set_aside(tmp_path: P
     assert f"`held` runs it as `{SLIDE}`, which `done` checks." in told[0]["reply"]
     assert told[1]["why"] == "a_needs_check" and "`held`" in told[1]["reply"]
     assert told[3]["outcome"] == "ok", "the other way is a check no need runs"
+
+
+# A bench run inside the model's own script (mqucifer/print-shop#161)
+
+
+class Scripting(Answers):
+    """A box whose scripts ran bench commands themselves: each `run` gives the next list of
+    them, as `Box.python` reads them from what the container's bench wrote down."""
+
+    def __init__(self, work: Path, inside: list[list[tuple[str, str]]]) -> None:
+        super().__init__(work)
+        self.inside = inside
+
+    def python(self, script: str, where: Path | None = None, timeout: int | None = None) -> Ran:
+        calls = [
+            {
+                "argv": command.split(),
+                "code": {"OK": 0, "FAIL": 1}.get(verdict, 2),
+                "record": {"verdict": verdict, "why": f"{verdict.lower()} in a script"},
+                "seconds": 0.2,
+            }
+            for command, verdict in (self.inside.pop(0) if self.inside else [])
+        ]
+        return Ran(0, "ran\n", 0.1, benched=calls)
+
+
+def test_a_bench_run_inside_a_script_is_recorded_as_a_call_and_its_fail_is_held(
+    tmp_path: Path,
+) -> None:
+    """A script that calls the bench's own commands, as the stained-glass skill has it. Each
+    is in the ledger as a bench call, marked as a script's; a `FAIL` inside it is held as a
+    tool call's is; and a pass inside a script clears nothing, as a script could write one."""
+    lip = f"{CAPTURE} --min-lip 0.4"
+    run = started(
+        tmp_path,
+        tool("run", path="make.py"),
+        tool("bench", command="info pane.step"),
+        tool("run", path="make.py"),
+        tool("bench", command=lip),
+        tool("bench", command="info pane.step"),
+    )
+    box: Any = Scripting(
+        run.work, [[("info pane.step", "OK"), (lip, "FAIL")], [(lip, "OK")]]
+    )
+    run.box = run.tools.box = box
+    assert run.drive().name == "blocked"
+    told = replies(run)
+    kept = run.ledger.rows(
+        "SELECT at_call, argv, exit, verdict, via FROM bench_calls WHERE run=? ORDER BY id",
+        run.state.name,
+    )
+    inside = [dict(r) for r in kept if r["via"] == "run"]
+    assert [(json.loads(r["argv"])[0], r["verdict"], r["at_call"]) for r in inside] == [
+        ("info", "OK", 1),
+        ("capture", "FAIL", 1),
+        ("capture", "OK", 3),
+    ]
+    assert [r["via"] for r in kept if r["at_call"] in (2, 4, 5)] == [None, None, None]
+    # The script's reply says what was recorded, and the tool's detail counts it.
+    assert "2 bench command(s) ran inside this script, each recorded as a bench call" in (
+        told[0]["reply"]
+    )
+    assert f"`{lip}`: FAIL" in told[0]["reply"]
+    assert told[0]["detail"]["bench_inside"] == [
+        {"command": "info pane.step", "exit": 0, "verdict": "OK"},
+        {"command": lip, "exit": 1, "verdict": "FAIL"},
+    ]
+    # Held from the script's own call, through the next bench call and the script's pass.
+    line = f"- `{lip}`, call 1: FAIL: fail in a script"
+    for i in (0, 1, 2):
+        assert HELD in told[i]["reply"] and line in told[i]["reply"], i
+    assert "a pass inside a script doesn't clear" in told[2]["reply"]
+    # A `bench` call's pass clears it.
+    assert HELD not in told[3]["reply"] and HELD not in told[4]["reply"]
+
+
+def test_a_pass_inside_a_script_is_no_answer_to_rely_on_and_a_fail_is_a_fail() -> None:
+    present = {"references/frame.step", "pane.step"}
+    argv = [*CAPTURE.split(), "--min-lip", "0.4"]
+    tries = [Tried(1, argv, False, "FAIL"), Tried(2, argv, None, "OK")]
+    (held,) = holding.failing(tries, [], present, None, None)
+    assert [t.at_call for t in held.tries] == [1]
+    assert not holding.failing([*tries, Tried(3, argv, True, "OK")], [], present, None, None)

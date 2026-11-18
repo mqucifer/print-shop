@@ -273,10 +273,10 @@ pieces are the layout, so steps 2, 3 and 5 are these five, in this order:
 
 ```
 - [ ] a. Trace: `pieces trace PICTURE --width MM`
-- [ ] b. Check: `pieces check MAP`
-- [ ] c. Fix each flagged piece by its own flag, one command a fix
+- [ ] b. Check: `pieces check MAP --lip FULL,LEAST --min-visible S`, as you'll build
+- [ ] c. Fix each flagged piece by its own flag: one command for one fix, `pieces fix MAP STEPS` for several
 - [ ] d. Check again, until no flag is left that the request doesn't keep
-- [ ] e. Build: `pieces build MAP --thickness T --pane P --lip FULL,LEAST --play C`
+- [ ] e. Build: `pieces build MAP --thickness T --pane P --lip FULL,LEAST --play C --min-visible S`
 ```
 
 `pieces trace` writes a **piece map**: each piece of glass, numbered, with its outline and its
@@ -289,26 +289,65 @@ piece that breaks a rule, with where. Each flag has its fix:
 | `dead-end` | a lead line that ends in mid-glass | `pieces extend MAP --at X,Y` runs it on to the next line or the edge, or `pieces drop-line MAP --at X,Y` takes it out |
 | `sliver`, `small` | a piece too narrow or too small to handle | `pieces merge MAP A B`: it joins a neighbour B, and the line between them goes |
 | `neck` | a thin place with wide glass on both sides of it | `pieces split MAP ID --line x1,y1,x2,y2` cuts the piece there, edge to edge |
+| `no-opening` | with `--lip L`: a piece that lip leaves no one opening in, so `pieces build` would refuse it | as its line says: `pieces split` along the line it gives for a waist; `pieces merge` a piece too small for an opening into a neighbour; or a narrower `--lip` for every piece |
 | `notch` | a notch deeper than it's wide | `pieces split` from the notch's end to the piece's far edge |
 | `gradient` | a colour that runs across one piece | `pieces split` where it changes, or keep it one colour and say so |
 | `wide-lead` | a patch of lead, not a line | `pieces merge` the pieces round it |
+| `thin-lead` | lead between two pieces under a nozzle's width, 0.4 mm: the frame's wall there wouldn't print, and `thin` would fail on it | `pieces widen MAP A B` widens the line where it's thin and keeps it. `pieces merge` takes the line out: only where the two are one colour and the picture doesn't mean the line |
 
 - **Each fix is one piece's, and you choose it.** A filter over every piece is not a fix: an
   opening, a closing, a buffer in and out or a simplification run over all of them rounds every
   corner and drops what it cuts into the lead. In one run that turned 15 to 22% of one band's
   glass into grey patches up to 19 mm wide.
+- **A thin line the picture means is widened, not merged.** A sun's rays or a river's inner
+  lines lie between two pieces of one colour, and a merge erases them: the composition stays.
+  `pieces widen` moves each piece's edge back by half of what the line is short, only where
+  it's short, so the line keeps its path.
 - **A fix becomes glass, not lead.** Each reply says the glass share and the lead's widest point
   before and after, and the share the trace had. A merge or a dropped line adds glass; a split
   takes one line's worth. A share well under the trace's means glass went into the lead.
 - **Each fix writes a new map** and says its name: give that one to the next command. Read the
   piece's line in the reply: it says what the piece breaks now.
+- **Several fixes go in one call: `pieces fix MAP STEPS`.** Once `pieces check` has named the
+  pieces, write the fixes you've chosen as a file of steps, in the order they're to be made,
+  and run it with `bench`: one reply says each step's result, and the glass share and the
+  lead's widest point before and after. It stops at the first step that's refused and writes
+  the map up to it, so fix that step and give the steps left to that map. Use one command for
+  one fix, or to try a fix you aren't sure of. A piece's number is what it is by then: a
+  merge keeps B's number, and a split's new pieces take the next ones.
+
+```json
+[
+ {"fix": "merge", "a": 12, "b": 9},
+ {"fix": "drop-line", "at": [41.5, 60]},
+ {"fix": "split", "piece": 4, "line": [[40, 15.3], [80, 15.3]]},
+ {"fix": "extend", "at": [20, 55]},
+ {"fix": "widen", "a": 46, "b": 47}
+]
+```
+
+- **A note isn't a `DISAGREE`.** A reply's `note:` lines say what a second reading couldn't
+  measure the same way: rays that run a slanted neck's long way, or a notch's end too thin for a
+  pixel. The flag and its figure stand. `DISAGREE` is two readings of the same thing on
+  opposite sides of a limit: read both figures, and don't pick one.
+- **Where the request sizes a rim by the share of a pane that stays visible,** give
+  `pieces build` and `pieces check` the request's three figures: `--lip FULL,LEAST
+  --min-visible S`. Each piece then takes the rim `capture --full-rim FULL --least-rim LEAST
+  --min-visible S` will ask of it: the full one where the pane keeps the share, else the
+  widest that keeps it. A piece that can't keep it at the least is refused, with its fix.
+- **Without a share, every piece takes the lip you give `pieces build`.** A piece with a waist the lip closes
+  over is refused, with the line to split it along: split it there, as a glass cutter splits a
+  neck. Don't lower the lip for one piece, and don't leave a bar of frame across the glass.
 - **`pieces build` makes `frame.step` and one pane file for each colour,** every curve as a
   curve, and its reply gives the checks to run and `done`'s `glass`: the pocket's height, the
   play, the pane's thickness, and how many panes there are. A pane file holds every pane of its
   colour, so `--panes` is the panes, never the files. A piece it can't build is named, with why:
   fix it in the map and build again. Then run step 6's checks on what it built.
 - **Your script is the list of fixes,** so `done`'s clean run makes the part again from the
-  picture. It calls the bench's own commands:
+  picture. It calls the bench's own commands, with the steps file you ran. Each command it
+  runs is recorded as a bench call of yours, and a `FAIL` inside it is held as any failing
+  check is. Run each command with `bench` first, where its reply and its picture come to you,
+  and keep the script for the clean run:
 
 ```python
 import sys
@@ -322,9 +361,8 @@ def bench(*words):
 
 
 bench("pieces", "trace", "references/scene.png", "--width", 220, "--to", "map-0.json")
-bench("pieces", "merge", "map-0.json", 12, 9, "--to", "map-1.json")  # the sliver joins the sky
-bench("pieces", "drop-line", "map-1.json", "--at", "41.5,60", "--to", "map-2.json")
-bench("pieces", "build", "map-2.json", "--thickness", 3, "--pane", 1, "--lip", "1.2,0.8", "--play", 0.25)
+bench("pieces", "fix", "map-0.json", "fixes.json", "--to", "map-1.json")  # each fix, in order
+bench("pieces", "build", "map-1.json", "--thickness", 3, "--pane", 1, "--lip", "1.2,0.6", "--play", 0.25, "--min-visible", 60)
 ```
 
 `references/pieces.md` (the skill `reading-a-piece-map`) says what a map holds and how to read

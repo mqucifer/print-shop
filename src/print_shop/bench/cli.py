@@ -7,7 +7,9 @@ wrong, 2 there's no answer to rely on, 3 the command itself was wrong.
 from __future__ import annotations
 
 import argparse
+import json
 import math
+import os
 import re
 import sys
 from pathlib import Path
@@ -747,6 +749,33 @@ def parser() -> Parser:
             help="lead wider than this at its widest is a patch, not a line (three times the "
             "map's usual lead unless given)",
         )
+        reads.add_argument(
+            "--lip",
+            type=_lips,
+            metavar="FULL[,LEAST]",
+            help="the lip `pieces build` will be given: each piece it leaves no one opening in "
+            "is flagged, as the build would refuse it, with the line to split a waist along",
+        )
+        reads.add_argument(
+            "--min-visible",
+            type=float,
+            metavar="P",
+            help="with --lip, the build's --min-visible: each piece's lip sized to its pane's "
+            "visible share",
+        )
+        reads.add_argument(
+            "--play", type=float, metavar="C", help="with --lip, the build's play (0.25)"
+        )
+        reads.add_argument(
+            "--fit", type=float, metavar="MM", help="with --lip, the build's --fit (0.1)"
+        )
+        reads.add_argument(
+            "--min-lead",
+            type=float,
+            metavar="MM",
+            help="lead narrower than this between two pieces is under a nozzle's width "
+            "(0.4 unless given)",
+        )
     merge = action.add_parser(
         "merge", help="piece A joins its neighbour B, and the line between them goes"
     )
@@ -790,7 +819,32 @@ def parser() -> Parser:
             metavar="X,Y",
             help="a point on the line, as `pieces check` says each dead end's",
         )
-    for fix in (merge, split, extend, drop):
+    widen = action.add_parser(
+        "widen",
+        help="the line between two pieces, where it's under a nozzle's width, becomes that "
+        "wide: each piece's edge moves back by half of what's short, and the line keeps its path",
+    )
+    widen.add_argument("map")
+    widen.add_argument("a", type=int, metavar="A", help="a piece the line lies beside")
+    widen.add_argument("b", type=int, metavar="B", help="the piece on its other side")
+    widen.add_argument(
+        "--lead", type=float, metavar="MM", help="the line's least width (0.4 unless given)"
+    )
+    fixes = action.add_parser(
+        "fix",
+        help="a file of fixes (merge, split, extend, drop-line, widen) made in order in one call: "
+        "each step's result, and the map up to the first step that's refused",
+    )
+    fixes.add_argument("map")
+    fixes.add_argument(
+        "steps",
+        metavar="STEPS",
+        help='JSON: a list of steps, or {"steps": [...]}, each {"fix": "merge", "a": A, "b": B}, '
+        '{"fix": "split", "piece": ID, "line": [[x1, y1], [x2, y2]]}, {"fix": "extend", "at": '
+        '[x, y]}, {"fix": "drop-line", "at": [x, y]} or {"fix": "widen", "a": A, "b": B}: '
+        "`docs/pieces.md`",
+    )
+    for fix in (merge, split, extend, drop, widen, fixes):
         fix.add_argument(
             "--to",
             metavar="FILE",
@@ -810,9 +864,19 @@ def parser() -> Parser:
         "--lip",
         type=_lips,
         required=True,
-        metavar="FULL,LEAST",
-        help="the lip over each pane's edge on both faces, in mm before play: FULL on every "
-        "piece that keeps an opening with it, down to LEAST on one that doesn't",
+        metavar="FULL[,LEAST]",
+        help="the lip over each pane's edge on both faces, in mm before play, on every piece: "
+        "a piece whose opening it closes over at a waist is refused, with the line to split it "
+        "along. LEAST is used with --min-visible",
+    )
+    build.add_argument(
+        "--min-visible",
+        type=float,
+        metavar="P",
+        help="size each piece's lip to its pane's visible share, as `capture --full-rim FULL "
+        "--least-rim LEAST --min-visible P` reads it: FULL where the pane keeps P percent "
+        "visible, else the widest lip that keeps it, never under LEAST. From the request: "
+        "there's no default",
     )
     build.add_argument(
         "--play", type=float, required=True, metavar="C", help="the gap round each pane, in mm"
@@ -1182,6 +1246,29 @@ def main(argv: list[str] | None = None) -> int:
         report.verdict("NO ANSWER", str(exc))
     except Exception as exc:  # noqa: BLE001 - whatever fails is said, and saved
         report.verdict("NO ANSWER", f"{type(exc).__name__}: {exc}"[:500])
-    report.save(out)
+    saved = report.save(out)
     print(report.text, end="")
+    _written_down(given, saved)
     return report.exit_code
+
+
+#: Where a command run from a script of the model's own says that it ran: a file `rounds/box.py`
+#: names for each `run`, a line for each command, so the harness records it as a bench call
+#: (mqucifer/print-shop#161). A `bench` tool call's container has none, and nor has a test's.
+CALLS = "BENCH_CALLS"
+
+
+def _written_down(given: list[str], saved: Path) -> None:
+    """One line in the run's list of the bench commands its script ran: the words, and the
+    answer's saved file. A script chains the bench's commands, as a map takes dozens of fixes,
+    and none of those was a `bench` call: the ledger, the held checks and the stop sheets saw
+    nothing of them."""
+    journal = os.environ.get(CALLS)
+    if not journal:
+        return
+    try:
+        Path(journal).parent.mkdir(parents=True, exist_ok=True)
+        with open(journal, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"argv": given, "saved": os.path.abspath(saved)}) + "\n")
+    except OSError:
+        pass  # a script that took the folder away has an answer still, and no record of it

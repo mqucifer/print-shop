@@ -200,10 +200,21 @@ def read(data: Any, name: str = "the map") -> Map:
 def _held(found: Map) -> None:
     """A map's own rules: every piece inside the panel, and no two overlapping."""
     reach = found.panel.buffer(PAST_EDGE)
-    outside = [p.id for p in found.pieces if not reach.covers(p.shape)]
+    outside = [p for p in found.pieces if not reach.covers(p.shape)]
     if outside:
+        # How far, and where: a piece on the edge is inside, to `PAST_EDGE`, so one that isn't
+        # is said with the figure that shows it (mqucifer/print-shop#161).
+        said = []
+        for one in outside[:6]:
+            points = shapely.get_coordinates(one.shape)
+            far = shapely.distance(shapely.points(points), found.panel)
+            worst = points[int(far.argmax())]
+            said.append(f"piece {one.id} by {float(far.max()):.3f} mm at {said_at(worst)}")
+        x0, y0, x1, y1 = found.panel.bounds
         raise NoAnswer(
-            f"piece {numbered(outside)} reaches past the panel's edge: every piece lies inside it"
+            f"{len(outside)} piece(s) reach past the panel's edge by more than the "
+            f"{PAST_EDGE:g} mm a piece on the edge may: {'; '.join(said)}. The panel is from "
+            f"{said_at((x0, y0))} to {said_at((x1, y1))}, and every piece lies inside it"
         )
     tree = shapely.STRtree([p.shape for p in found.pieces])
     for a, b in tree.query([p.shape for p in found.pieces], predicate="intersects").T:
@@ -275,15 +286,27 @@ def plain(found: Map) -> dict[str, Any]:
 def save(found: Map, path: str) -> None:
     """Write the map, read back first: a command never writes a map the next can't read. Each
     outline is put on the grid the file keeps it to, so rounding can't make one cross itself."""
-    for piece in found.pieces:
-        kept = polygons(shapely.set_precision(piece.shape, 10.0**-PLACES))
-        if kept:
-            piece.shape = kept[0]
-    data = plain(found)
+    data = _on_grid(found)
     read(json.loads(json.dumps(data)), path)
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(data, indent=1) + "\n", encoding="utf-8")
+
+
+def _on_grid(found: Map) -> dict[str, Any]:
+    """The map as its JSON, each outline put on the grid the file keeps it to."""
+    for piece in found.pieces:
+        kept = polygons(shapely.set_precision(piece.shape, 10.0**-PLACES))
+        if kept:
+            piece.shape = kept[0]
+    return plain(found)
+
+
+def as_saved(found: Map) -> Map:
+    """The map as the next command would read it from its file, with no file written: `pieces
+    fix` makes each step on this, so a file of steps writes the map the same commands write one
+    by one (mqucifer/print-shop#161)."""
+    return read(json.loads(json.dumps(_on_grid(found))), "the map between two steps")
 
 
 def polygons(shape: Any) -> list[Any]:

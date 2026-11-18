@@ -35,6 +35,21 @@ def over(value: float, most: float) -> bool:
     return value > most + ARITHMETIC
 
 
+def apart(first: float, second: float, resolution: float, limit: float, least: bool) -> str:
+    """How two readings of the same thing stand to each other and to a limit
+    (mqucifer/print-shop#161): `same`, closer than `resolution`, what the coarser of the two
+    can tell apart; `split`, further apart than that and on opposite sides of the limit, so
+    one says a rule is broken and the other that it isn't; `off`, further apart on the same
+    side, where they agree on the rule and the gap is worth saying. Only `split` is no answer
+    to rely on. `least` says which way the limit runs: a least, which a figure under it
+    breaks, or a most, which a figure over it breaks. A figure at its limit passes, as `under`
+    and `over` have it."""
+    if abs(first - second) <= resolution + ARITHMETIC:
+        return "same"
+    breaks = under if least else over
+    return "split" if breaks(first, limit) != breaks(second, limit) else "off"
+
+
 def said(value: float, limit: float, places: int | None = 3) -> str:
     """`value` to `places`, or with `places` None as `:g` says it, and with as many more places as
     it takes to read apart from `limit` when it's over or under it: 0.4000004 against 0.4 is

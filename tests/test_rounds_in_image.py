@@ -452,6 +452,57 @@ def test_a_script_that_fails_from_a_clean_start_is_said_with_its_output(tmp_path
     assert "didn't finish from a clean start" in said
 
 
+def test_a_bench_command_a_script_runs_is_recorded_as_a_call_and_its_fail_is_held(
+    tmp_path: Path,
+) -> None:
+    """mqucifer/print-shop#161, in real containers: a script calls the bench's own commands, as
+    the skills say it may. Each is in the ledger at that script's call, marked as a script's. A
+    failing one is held as a `bench` call's is, a pass inside a script clears nothing, and a
+    `bench` call's pass does."""
+    close = "clearance block.step tab.step --min-gap 5"
+    chain = (
+        "import sys\nsys.path.insert(0, '/opt/bench')\nfrom bench.cli import main\n"
+        "main(['info', 'block.step'])\n"
+        f"main({close.split()!r})\n"
+    )
+    run, _ = begin(
+        tmp_path,
+        [BROKEN_DOWN, tool("needs", needs=[SIZE_NEED])],
+        [write("make.py", script(gap=2.0), run=True)],
+        [write("chain.py", chain, run=True)],
+        [tool("bench", command="info block.step")],
+        [tool("edit", path="make.py", old="GAP = 2.0", new="GAP = 6.0", run=True)],
+        [tool("run", path="chain.py")],
+        [tool("bench", command=close)],
+        [tool("bench", command="info block.step")],
+        [tool("blocked", reason="stop")],
+    )
+    run.drive()
+    told = replies(run)
+    chained = next(e for e in told if e["name"] == "write" and "chain.py" in e["arguments"])
+    again = [e for e in told if e["name"] == "run"][-1]
+    inside = [b for b in rows(run, "bench_calls") if b["via"] == "run"]
+    assert [(json.loads(b["argv"])[0], b["verdict"], b["exit"]) for b in inside] == [
+        ("info", "OK", 0),
+        ("clearance", "TOO CLOSE", 1),
+        ("info", "OK", 0),
+        ("clearance", "CLEAR", 0),
+    ]
+    assert all(b["files"] and json.loads(b["numbers"]) for b in inside)
+    assert len({b["at_call"] for b in inside}) == 2, "each at its own script's call"
+    assert len([b for b in rows(run, "bench_calls") if b["via"] is None]) == 3
+    assert not list((run.work / "record").glob("bench-calls-*")), "the list is taken away"
+    said = "2 bench command(s) ran inside this script, each recorded as a bench call"
+    assert said in chained["reply"] and f"`{close}`: TOO CLOSE" in chained["reply"]
+    held = f"- `{close}`, call"
+    benches = [e for e in told if e["name"] == "bench"]
+    assert held in chained["reply"] and held in benches[0]["reply"]
+    # The script's own pass, after the gap was widened, clears nothing; the `bench` call's does.
+    assert f"`{close}`: CLEAR" in again["reply"] and held in again["reply"]
+    assert benches[1]["reply"].startswith("exit 0") and held not in benches[1]["reply"]
+    assert held not in benches[2]["reply"]
+
+
 def test_nothing_a_run_plants_can_stand_in_for_the_bench(tmp_path: Path) -> None:
     run, _ = begin(
         tmp_path,

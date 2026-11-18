@@ -8,6 +8,7 @@ curved scene, and two maps as rules would write them. Right answers are arithmet
 from __future__ import annotations
 
 import json
+import math
 import re
 import shutil
 from pathlib import Path
@@ -88,7 +89,7 @@ def test_a_map_from_rules_reads_clean_and_its_share_is_arithmetic(bench: Any) ->
     assert answer.numbers["lead_widest_mm"] == pytest.approx(1.2 * 2**0.5, abs=0.02)
     assert answer.numbers["source_glass_share_pct"] == 95.06
     assert answer.numbers["flags"] == dict.fromkeys(answer.numbers["flags"], 0)
-    assert len(answer.record["second_check"]) == 3
+    assert len(answer.record["second_check"]) == 4
     assert (bench.work / answer.numbers["picture"]).is_file()
     assert not reports.unlike("pieces", answer.numbers)
 
@@ -136,14 +137,214 @@ def test_two_methods_both_under_the_limit_at_different_figures_are_a_neck(bench:
     (row,) = answer.numbers["pieces"]
     assert row["narrowest_mm"] == pytest.approx((0.3**2 + 0.8**2) ** 0.5, abs=0.01)
     assert row["narrowest_by_rays_mm"] == pytest.approx(1.1, abs=0.01)
-    assert "Rays square to its edges read 1.10 mm there, 0.25 mm more, under the limit" in (
-        answer.text
-    )
-    # On opposite sides of the limit there's no answer: at 1.0 the nearest points say a neck
-    # and the rays say none.
+    assert row["narrowest_by_pixels_mm"] == pytest.approx(row["narrowest_mm"], abs=0.06)
+    noted = [n for n in answer.record["notes"] if "Rays square to its edges" in n]
+    assert "read 1.10 mm there, 0.25 mm more than the nearest points" in noted[0]
+    # At 1.0 the rays' 1.1 mm is over the limit and the nearest points' 0.854 under it. The
+    # rays run from the notch's flat end to the step, not between the two nearest points: they
+    # measure something else, so that's a note (mqucifer/print-shop#161). It was `DISAGREE`.
     split = bench("pieces", "check", "stepped.json", "--min-neck", 1.0)
-    assert split.verdict == "DISAGREE" and split.code == 2, split.text
-    assert "under --min-neck 1" in split.record["why"] and "not under it" in split.record["why"]
+    assert split.verdict == "FAIL" and split.code == 1, split.text
+    assert ("neck", 1) in flags_of(split)
+
+
+def test_a_slanted_neck_reads_the_same_by_both_methods_and_rays_are_a_note(bench: Any) -> None:
+    """mqucifer/print-shop#161: 1.022 mm by the nearest points facing each other, and 1.828 mm
+    by rays square to its edges at the same place, which run the slant's long way. The second
+    check is now twice the pixels' distance to the edge at the narrowest place, which measures
+    across the same line. It was `DISAGREE`."""
+    answer = bench("pieces", "check", "slanted.json")
+    assert answer.verdict == "FAIL" and answer.code == 1, answer.text
+    assert ("neck", 1) in flags_of(answer)
+    (row,) = answer.numbers["pieces"]
+    width = (0.3**2 + 0.977**2) ** 0.5
+    assert row["narrowest_mm"] == pytest.approx(width, abs=0.01)
+    assert row["narrowest_by_pixels_mm"] == pytest.approx(width, abs=row["narrowest_px_mm"])
+    assert row["narrowest_px_mm"] <= 0.06, "its own resolution, finer than the map's pixels"
+    assert row["narrowest_by_rays_mm"] == pytest.approx(1.828, abs=0.01)
+    noted = [n for n in answer.record["notes"] if "Rays square to its edges" in n]
+    assert noted and "1.83 mm" in noted[0] and "measure something else" in noted[0]
+
+
+def test_a_neck_the_pixels_dont_have_on_the_other_side_of_the_limit_is_still_disagree(
+    bench: Any,
+) -> None:
+    """The control: two cuts two microns wide, their ends 1 mm apart. By the
+    outline that's a neck under 1.2 mm; no pixel shows either cut, so twice the pixels'
+    distance to the edge there is the piece's own width, far over the limit and far past a
+    pixel. The same place, opposite sides of the limit, each beyond the other's resolution."""
+    answer = bench("pieces", "check", "hairs.json")
+    assert answer.verdict == "DISAGREE" and answer.code == 2, answer.text
+    assert "by the nearest points facing each other, under --min-neck 1.2" in answer.record["why"]
+    assert "by its pixels' distance to the edge" in answer.record["why"]
+    # With the limit under both, they agree there's no neck to flag, and the gap is a note.
+    loose = bench("pieces", "check", "hairs.json", "--min-neck", 0.5)
+    assert loose.verdict != "DISAGREE", loose.text
+
+
+def test_a_dead_end_the_pixels_cant_show_is_a_note_not_a_disagree(bench: Any) -> None:
+    """mqucifer/print-shop#161, from a trace at a low `--dark`: a line inside a piece, 8 mm
+    long, with another piece 1.4 mm from all of it. The pixels look 3 mm round a line for one
+    piece's glass alone, so they can't show this one: it's flagged by its outline, and the
+    pixels' reading is a note. It was `DISAGREE`, "isn't lone lead by the pixels"."""
+    answer = bench("pieces", "check", "thin_lines.json")
+    assert answer.verdict == "FAIL" and answer.code == 1, answer.text
+    assert flags_of(answer) == {("dead-end", 1), ("dead-end", 4)}
+    (noted,) = [n for n in answer.record["notes"] if "isn't lone lead by the pixels" in n]
+    assert "piece 4's dead end" in noted and "so they can't show it" in noted
+    assert "Only its outline reads it" in noted
+
+
+def test_a_dead_end_is_matched_to_the_pixels_by_where_it_lies(bench: Any) -> None:
+    """mqucifer/print-shop#161, from a trace at a low `--dark`: a dead end 8 mm long and 1.2 mm
+    wide, wide enough for the pixels and with nothing near it, whose tip all but meets a line
+    40 mm long inside the same piece. The pixels show the two as one stretch of lead, whose
+    middle is 24 mm from the dead end, and it was matched by that middle: `DISAGREE`, "isn't
+    lone lead by the pixels". It's matched now by the lead pixels in the dead end's own shape."""
+    answer = bench("pieces", "check", "joined.json")
+    assert answer.verdict == "FAIL" and answer.code == 1, answer.text
+    assert [f["flag"] for f in answer.numbers["flagged"]] == ["dead-end"] * 2
+    assert {end["kind"] for end in answer.numbers["dead_ends"]} == {"slit", "island"}
+    assert not [n for n in answer.record["notes"] if "lone lead" in n], "read, not excused"
+
+
+def test_lead_under_a_nozzles_width_is_flagged_before_anything_is_built(bench: Any) -> None:
+    """mqucifer/print-shop#161: a frame built from a traced scene failed `thin` at ten places,
+    the thinnest 0.135 mm, and the map had 17 pairs of pieces under 0.4 mm apart: lead no
+    nozzle prints. `pieces check` reads it on the map, each place with its two pieces, how
+    wide and where, and its fix. Here two pieces are 0.2 mm apart. A third is 0.25 mm from the
+    panel's edge, which isn't flagged: the frame's border stands outside it."""
+    answer = bench("pieces", "check", "close.json")
+    assert answer.verdict == "FAIL" and answer.code == 1, answer.text
+    assert flags_of(answer) == {("thin-lead", 1)}
+    (between,) = answer.numbers["flagged"]
+    assert between["figure"] == pytest.approx(0.2, abs=1e-6) and between["limit"] == 0.4
+    assert between["at"][0] == pytest.approx(30.5, abs=0.01) and 7 <= between["at"][1] <= 13
+    assert "the lead between pieces 1 and 2 is 0.20 mm" in answer.text
+    assert "`pieces widen MAP 1 2` moves each piece's edge back" in answer.text
+    assert "`pieces merge MAP 1 2`" not in answer.text, "blue and gold: the line stays"
+    assert answer.numbers["limits"]["min_lead_mm"] == 0.4
+    assert "1 place(s) where the lead is under --min-lead 0.4 mm" in answer.text
+    # A limit under it reads none; the merge takes the line out, and its flag with it.
+    assert bench("pieces", "check", "close.json", "--min-lead", 0.15).verdict == "OK"
+    merged = bench("pieces", "merge", "close.json", 1, 2, "--to", "close-1.json")
+    assert merged.verdict == "OK", merged.text
+    assert bench("pieces", "check", "close-1.json").verdict == "OK"
+
+
+def test_a_line_under_a_nozzles_width_is_widened_where_its_thin_and_keeps_its_path(
+    bench: Any,
+) -> None:
+    """mqucifer/print-shop#161: 16 of a traced scene's 17 thin lines lay between two pieces of
+    one colour, a sun's rays and a river's inner lines, which a merge would take out. `pieces
+    widen` keeps the line: each piece's edge moves back by half of what's short, only where
+    it's short. Here a curved line 1.2 mm wide is 0.2 mm along 10 mm."""
+    before = bench("pieces", "check", "near.json")
+    assert flags_of(before) == {("thin-lead", 1)}, before.text
+    # Both blue, so a merge is named too, after the widening, for a line that isn't meant.
+    said = before.text.index("`pieces widen MAP 1 2`"), before.text.index("`pieces merge MAP 1 2`")
+    assert said[0] < said[1] and "if the picture doesn't mean the line" in before.text
+    answer = bench("pieces", "widen", "near.json", 1, 2, "--to", "near-1.json")
+    assert answer.verdict == "OK" and answer.code == 0, answer.text
+    numbers = answer.numbers
+    # 0.2 mm up and down, a little less square to the line where it slants.
+    assert numbers["widened_from_mm"] == pytest.approx(0.2, abs=0.01)
+    assert 0.4 <= numbers["widened_to_mm"] <= 0.41
+    assert 10.0 <= numbers["widened_along_mm"] <= 13.0, "the 10 mm, and its two tapers' ends"
+    # 0.1 mm off each piece along 10 mm, and the tapers: about 2 mm² and a little.
+    assert numbers["glass_added_mm2"] == 0 and 2.0 <= numbers["glass_taken_mm2"] <= 3.2
+    assert numbers["glass_taken_by_pixels_mm2"] == pytest.approx(numbers["glass_taken_mm2"], abs=1)
+    assert (numbers["pieces_before"], numbers["pieces_after"]) == (2, 2)
+    assert "The line keeps its path" in answer.record["why"]
+    # Only where it was thin: outside x 23 to 37 both outlines are as they were.
+    was, now = (
+        json.loads((bench.work / name).read_text())["pieces"]
+        for name in ("near.json", "near-1.json")
+    )
+    for old, new in zip(was, now, strict=True):
+        given = {(round(x, 3), round(y, 3)) for x, y in old["outline"]}
+        outside = [p for p in new["outline"] if not 23 <= p[0] <= 37]
+        # No point is moved or added there: a few on a straight run of the curve are dropped.
+        assert all((round(x, 3), round(y, 3)) in given for x, y in outside), old["id"]
+        assert len(outside) > 150
+    # The line's middle is where it was: at x 30 the two edges are 0.2 mm either side of it.
+    edges = [
+        min((abs(x - 30), y) for x, y in piece["outline"] if abs(x - 30) < 0.3)[1] for piece in now
+    ]
+    middle = 20 + 2 * math.sin(30 / 8)
+    assert edges[0] == pytest.approx(middle - 0.2, abs=0.01)
+    assert edges[1] == pytest.approx(middle + 0.2, abs=0.01)
+    again = bench("pieces", "check", "near-1.json")
+    assert again.verdict == "OK" and not flags_of(again), again.text
+    assert json.loads((bench.work / "near-1.json").read_text())["history"] == [
+        {"fix": "widen", "a": 1, "b": 2, "lead_mm": 0.4}
+    ]
+    # Nothing to widen, and a width of its own.
+    wide = bench("pieces", "widen", "near-1.json", 1, 2)
+    assert wide.verdict == "NO ANSWER" and "there's nothing to widen" in wide.record["why"]
+    more = bench("pieces", "widen", "near.json", 1, 2, "--lead", 0.8, "--to", "near-8.json")
+    assert more.verdict == "OK" and 0.8 <= more.numbers["widened_to_mm"] <= 0.81, more.text
+    # As a step of a file of fixes, it writes the same map.
+    (bench.work / "widen.json").write_text(json.dumps([{"fix": "widen", "a": 1, "b": 2}]))
+    step = bench("pieces", "fix", "near.json", "widen.json", "--to", "near-2.json")
+    assert step.verdict == "OK", step.text
+    assert step.numbers["steps"][0]["widened_to_mm"] == numbers["widened_to_mm"]
+    assert rings(bench.work, "near-1.json") == rings(bench.work, "near-2.json")
+
+
+def test_a_second_reading_is_said_only_where_a_rule_flags_the_place(bench: Any) -> None:
+    """A spur under the neck limit and a notch shallower than its mouth, each read differently
+    by its pixels, and neither flagged: the reply has no note of either. On a traced scene
+    each check printed four to six such notes."""
+    # The lead beside the spur is wide, which isn't what this reads.
+    answer = bench("pieces", "check", "quiet.json", "--max-lead", 10)
+    assert answer.verdict == "OK" and answer.code == 0, answer.text
+    (row,) = answer.numbers["pieces"]
+    assert row["spurs"] == 1 and not row["neck"], "the 0.8 mm spur is looked past"
+    assert row["narrowest_by_pixels_mm"] is None, "with no neck there's no rule to settle"
+    gap = row["notch_depth_mm"] - row["notch_depth_by_pixels_mm"]
+    assert gap > 0.2 and row["notch_depth_mm"] / row["notch_mouth_mm"] < 1.0
+    assert answer.record["notes"] == []
+
+
+def test_a_piece_on_the_panels_edge_is_inside_and_one_past_it_is_said_with_how_far(
+    bench: Any,
+) -> None:
+    """Two pieces on the panel's edge merge, and what they make ends at the edge. A piece a
+    hundredth of a millimetre past it is on it; one further is refused, saying which piece, how
+    far and where."""
+    answer = bench("pieces", "merge", "edge.json", 1, 2, "--to", "edge-1.json")
+    assert answer.verdict == "OK", answer.text
+    (whole,) = json.loads((bench.work / "edge-1.json").read_text())["pieces"]
+    assert max(x for x, _ in whole["outline"]) == 60.0
+    assert sorted(whole["outline"]) == [[0.0, 0.0], [0.0, 40.0], [60.0, 0.0], [60.0, 40.0]]
+    data = json.loads((bench.work / "edge.json").read_text())
+    for past, name in ((0.008, "on.json"), (0.5, "past.json")):
+        data["pieces"][0]["outline"][1:3] = [[60 + past, 26], [60 + past, 40]]
+        (bench.work / name).write_text(json.dumps(data))
+    assert bench("pieces", "check", "on.json").verdict in ("OK", "FAIL")
+    refused = bench("pieces", "check", "past.json")
+    assert refused.verdict == "NO ANSWER"
+    assert "piece 1 by 0.500 mm at (60.5, " in refused.record["why"]
+    assert "more than the 0.01 mm a piece on the edge may" in refused.record["why"]
+
+
+def test_a_notch_a_pixel_cant_show_the_end_of_reads_with_a_note(bench: Any) -> None:
+    """mqucifer/print-shop#161: a notch 2.77 mm deep by its outline, 1.065 times its mouth,
+    whose last millimetre is a spike thinner than a pixel. Its pixels read it about 2.5 mm
+    deep, under 1 time its mouth, with the limit between. A pixel can't show the spike, so the
+    two are closer than the pixels' resolution there: the outline's figure flags it, and the
+    pixels' is a note. It was `DISAGREE`."""
+    answer = bench("pieces", "check", "spiked.json")
+    assert answer.verdict == "FAIL" and answer.code == 1, answer.text
+    assert flags_of(answer) == {("notch", 1)}
+    (row,) = answer.numbers["pieces"]
+    assert row["notch_depth_mm"] == pytest.approx(2.77, abs=0.005)
+    gap = row["notch_depth_mm"] - row["notch_depth_by_pixels_mm"]
+    assert 0.2 < gap <= row["notch_px_mm"], "past the old 2.5 pixels, within what a pixel shows"
+    assert row["notch_depth_by_pixels_mm"] / row["notch_mouth_mm"] < 1.0, "the limit is between"
+    noted = [n for n in answer.record["notes"] if "notch" in n]
+    assert noted and "closer than" in noted[0], answer.record["notes"]
 
 
 def test_lines_joined_to_no_other_are_matched_by_place_not_by_count(bench: Any) -> None:
@@ -231,6 +432,75 @@ def test_each_rule_break_in_a_picture_is_read_on_its_own_piece(bench: Any, broke
     assert rows[at(BESIDE_SLIVER)]["flags"] == [], "its neighbour breaks nothing"
     saved = json.loads((bench.work / "b0.json").read_text())
     assert len(saved["flags"]) == 9 and len(saved["colours"]) == 5
+
+
+def test_outlines_that_cross_over_a_thin_line_are_parted_and_stay_smooth(bench: Any) -> None:
+    """mqucifer/print-shop#161: 20 curved pieces whose lines are 4 pixels wide, but one that's
+    a single pixel. The smoothed outlines either side of it cross. Each kept its pixels' own
+    edges, a step at every pixel: two pieces of 262 and 230 points, 724 in the map, and a
+    frame of 1,341 faces. They're parted now, each less what they share and half a pixel round
+    it, and no outline is pixel steps."""
+    answer = bench("pieces", "trace", "thin_line.png", "--width", 100, "--to", "thin.json")
+    assert answer.verdict == "OK", answer.text
+    assert answer.numbers["pieces_count"] == 20
+    assert "2 piece(s) were parted from a neighbour" in answer.text
+    saved = json.loads((bench.work / "thin.json").read_text())
+    px = 1.0 / saved["source"]["px_per_mm"]
+    counts = [len(p["outline"]) for p in saved["pieces"]]
+    assert max(counts) < 40 and sum(counts) < 320, counts
+    for piece in saved["pieces"]:
+        ring = piece["outline"]
+        sides = sorted(
+            ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
+            for a, b in zip(ring, ring[1:] + ring[:1], strict=True)
+        )
+        assert sides[len(sides) // 2] > 3 * px, f"piece {piece['id']} is pixel steps"
+    # A pixel's line still lies between the two, and the glass is the trace's to 0.05 points.
+    assert answer.numbers["glass_share_pct"] == pytest.approx(93.57, abs=0.05)
+    built = bench(
+        "pieces", "build", "thin.json", "--thickness", 3, "--pane", 1, "--lip", "1.2,0.6",
+        "--play", 0.25, "--build-out", "thin",
+    )  # fmt: skip
+    assert built.verdict == "OK", built.text
+    assert built.numbers["frame_faces"] < 1000, "it was 1,341 with two outlines of pixel steps"
+
+
+def test_a_piece_with_dark_specks_in_it_is_traced_as_smooth_as_any(bench: Any) -> None:
+    """mqucifer/print-shop#161: the same 20 curved pieces, every line 4 pixels wide, with five
+    dark specks two pixels across inside two of them. A speck's own ring is too short to read
+    a corner on, and that left the whole piece as its pixels' edges: 314 and 282 points, 806
+    in the map, and a frame of 1,686 faces. Each ring is read on its own now."""
+    answer = bench("pieces", "trace", "speckled.png", "--width", 100, "--to", "speckled.json")
+    assert answer.verdict == "OK", answer.text
+    assert answer.numbers["specks_filled"] == 5 and answer.numbers["pieces_count"] == 20
+    saved = json.loads((bench.work / "speckled.json").read_text())
+    px = 1.0 / saved["source"]["px_per_mm"]
+    counts = [len(p["outline"]) for p in saved["pieces"]]
+    assert max(counts) < 40 and sum(counts) < 300, counts
+    assert not any(p.get("holes") for p in saved["pieces"])
+    for piece in saved["pieces"]:
+        ring = piece["outline"]
+        sides = sorted(
+            ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
+            for a, b in zip(ring, ring[1:] + ring[:1], strict=True)
+        )
+        assert sides[len(sides) // 2] > 3 * px, f"piece {piece['id']} is pixel steps"
+    built = bench(
+        "pieces", "build", "speckled.json", "--thickness", 3, "--pane", 1, "--lip", "1.2,0.6",
+        "--play", 0.25, "--build-out", "speckled",
+    )  # fmt: skip
+    assert built.verdict == "OK", built.text
+    assert built.numbers["frame_faces"] < 900, "it was 1,686 with two outlines of pixel steps"
+    # A lip is the lip asked for or up to --fit wider, never narrower: `capture`, at the rim
+    # asked for, read 1.177 mm for 1.2 on one pane, where an opening fitted to its inset stood
+    # up to --fit off between two points.
+    held = bench(
+        "capture", built.numbers["glass"]["frame"], "--pocket-z", 1.3, "--clearance", 0.25,
+        "--pane-thickness", 1, "--full-rim", 1.2, "--least-rim", 0.6, "--min-visible", 1,
+        "--panes", 20,
+    )  # fmt: skip
+    assert held.verdict == "OK", held.text
+    assert held.numbers["least_lip_mm"] >= 0.94, "1.2 mm less the play, to capture's reading"
 
 
 def test_a_picture_with_nothing_dark_or_too_small_has_no_answer(bench: Any) -> None:
@@ -420,6 +690,159 @@ def test_a_piece_that_surrounds_another_is_opened_by_a_line_to_its_edge(
     assert built.verdict in ("FAIL", "NO ANSWER")
 
 
+def rings(work: Path, name: str) -> list[Any]:
+    """A map's pieces with each ring begun at its lowest point: the same points in the same
+    order round are the same outline, wherever the file starts it."""
+
+    def begun(ring: list[list[float]]) -> list[list[float]]:
+        k = ring.index(min(ring))
+        return ring[k:] + ring[:k]
+
+    return [
+        (p["id"], p["colour"], begun(p["outline"]), sorted(begun(h) for h in p.get("holes", [])))
+        for p in json.loads((work / name).read_text())["pieces"]
+    ]
+
+
+def five_steps(work: Path) -> list[dict[str, Any]]:
+    """Five fixes to the broken panel, one of each kind and a second merge."""
+    sliver, beside = piece_at(work, "b0.json", SLIVER), piece_at(work, "b0.json", BESIDE_SLIVER)
+    notch, around = piece_at(work, "b0.json", NOTCH), piece_at(work, "b0.json", ROUND_SMALL)
+    small = piece_at(work, "b0.json", SMALL)
+    return [
+        {"fix": "merge", "a": sliver, "b": beside},
+        {"fix": "drop-line", "at": [20, 55]},
+        {"fix": "split", "piece": notch, "line": [[40, 15.3], [80, 15.3]]},
+        {"fix": "split", "piece": around, "line": [[103.5, 20], [121, 20]]},
+        {"fix": "merge", "a": small, "b": around},
+    ]
+
+
+def test_a_file_of_five_fixes_runs_in_one_call_with_one_reply(bench: Any, broken: Answer) -> None:
+    """mqucifer/print-shop#161: `pieces fix MAP STEPS` runs a file of steps in order, says each
+    step's result, and the glass share and the lead's widest point before and after. The map it
+    writes is the map the same five commands write one by one."""
+    steps = five_steps(bench.work)
+    (bench.work / "five.json").write_text(json.dumps({"steps": steps}))
+    answer = bench("pieces", "fix", "b0.json", "five.json", "--to", "fixed.json")
+    assert answer.verdict == "OK" and answer.code == 0, answer.text
+    numbers = answer.numbers
+    assert (numbers["steps_given"], numbers["steps_made"]) == (5, 5)
+    assert [s["fix"] for s in numbers["steps"]] == [s["fix"] for s in steps]
+    assert all(s["made"] for s in numbers["steps"])
+    assert [s["pieces_after"] for s in numbers["steps"]] == [10, 10, 12, 12, 11]
+    for n in range(1, 6):
+        assert f"step {n} of 5, " in answer.text
+    assert (numbers["pieces_before"], numbers["pieces_after"]) == (11, 11)
+    # A fix keeps the glass: three steps add it, and the two splits take a line's worth each.
+    assert numbers["glass_added_mm2"] > 0 and numbers["glass_taken_mm2"] > 30
+    # As the trace read it, to what writing the map to a tenth of a micron moves.
+    assert numbers["glass_share_before_pct"] == pytest.approx(
+        broken.numbers["glass_share_pct"], abs=1e-3
+    )
+    assert numbers["lead_widest_before_mm"] == pytest.approx(
+        broken.numbers["lead_widest_mm"], abs=1e-3
+    )
+    assert "every other piece's outline is the same, point for point" in answer.text
+    # One by one, the same five write the same map.
+    name = "b0.json"
+    for k, step in enumerate(steps):
+        if step["fix"] == "merge":
+            words = ["merge", name, step["a"], step["b"]]
+        elif step["fix"] == "drop-line":
+            words = ["drop-line", name, "--at", "{},{}".format(*step["at"])]
+        else:
+            line = ",".join(str(v) for point in step["line"] for v in point)
+            words = ["split", name, step["piece"], "--line", line]
+        one = bench("pieces", *words, "--to", f"one-{k}.json")
+        assert one.verdict == "OK", one.text
+        name = f"one-{k}.json"
+    assert rings(bench.work, "fixed.json") == rings(bench.work, name), "point for point"
+    together = json.loads((bench.work / "fixed.json").read_text())
+    apart = json.loads((bench.work / name).read_text())
+    assert together["history"] == apart["history"] and len(together["history"]) == 5
+    # The reading after is the check's own.
+    again = bench("pieces", "check", "fixed.json")
+    assert numbers["glass_share_after_pct"] == pytest.approx(
+        again.numbers["glass_share_pct"], abs=1e-6
+    )
+    assert numbers["lead_widest_after_mm"] == pytest.approx(
+        again.numbers["lead_widest_mm"], abs=1e-6
+    )
+    left = flags_of(again)
+    assert not {"sliver", "surrounds", "small"} & {flag for flag, _ in left}
+    ended = piece_at(bench.work, "b0.json", DEAD_END)
+    assert ("dead-end", ended) not in left and ("notch", steps[2]["piece"]) not in left
+    # The reply's own reading of each changed piece is the check's: the opening line, with the
+    # small piece joined across it, now ends in the piece's glass, and the reply says so.
+    around = steps[4]["b"]
+    changed = {row["id"]: row["flags"] for row in numbers["changed"]}
+    assert changed[around] == ["dead-end"] and ("dead-end", around) in left
+    assert sum(1 for flags in changed.values() if flags) == 1
+    assert not reports.unlike("pieces", numbers)
+
+
+def test_a_fix_file_stops_at_the_first_refused_step_and_writes_the_map_up_to_it(
+    bench: Any, broken: Answer
+) -> None:
+    steps = five_steps(bench.work)
+    far, here = piece_at(bench.work, "b0.json", GRADIENT), piece_at(bench.work, "b0.json", DEAD_END)
+    steps[2] = {"fix": "merge", "a": here, "b": far}
+    (bench.work / "stops.json").write_text(json.dumps(steps))
+    answer = bench("pieces", "fix", "b0.json", "stops.json", "--to", "stopped.json")
+    assert answer.verdict == "PARTIAL" and answer.code == 1, answer.text
+    numbers = answer.numbers
+    assert (numbers["steps_given"], numbers["steps_made"]) == (5, 2)
+    refused = numbers["steps"][2]
+    assert not refused["made"] and f"pieces {here} and {far} don't touch" in refused["said"]
+    assert len(numbers["steps"]) == 3, "the steps after it weren't tried"
+    assert "step 3 of 5, " in answer.record["why"] and "stopped.json" in answer.record["why"]
+    saved = json.loads((bench.work / "stopped.json").read_text())
+    assert [h["fix"] for h in saved["history"]] == ["merge", "drop-line"]
+    assert numbers["pieces_after"] == 10
+    # Refused at its first step, nothing is made and nothing is written.
+    (bench.work / "first.json").write_text(json.dumps(steps[2:]))
+    none = bench("pieces", "fix", "b0.json", "first.json", "--to", "none.json")
+    assert none.verdict == "NO ANSWER" and none.code == 2
+    assert "step 1 of 3, " in none.record["why"] and not (bench.work / "none.json").exists()
+
+
+def test_a_maps_history_is_a_steps_file_that_makes_it_again(bench: Any, broken: Answer) -> None:
+    """Each fix is written in the map's `history` as a step is given, so the fixes a map has had
+    can be made again on the map they began from: a dead end run on, then the five."""
+    steps = [{"fix": "extend", "at": [20, 55]}, *five_steps(bench.work)[2:]]
+    (bench.work / "ran-on.json").write_text(json.dumps(steps))
+    first = bench("pieces", "fix", "b0.json", "ran-on.json", "--to", "h1.json")
+    assert first.verdict == "OK", first.text
+    assert first.numbers["steps"][0]["ran_to"][1] == pytest.approx(80.07, abs=0.05)
+    history = json.loads((bench.work / "h1.json").read_text())["history"]
+    assert [h["fix"] for h in history] == ["extend", "split", "split", "merge"]
+    (bench.work / "history.json").write_text(json.dumps(history))
+    again = bench("pieces", "fix", "b0.json", "history.json", "--to", "h2.json")
+    assert again.verdict == "OK", again.text
+    assert rings(bench.work, "h1.json") == rings(bench.work, "h2.json")
+
+
+@pytest.mark.parametrize(
+    ("steps", "says"),
+    [
+        ('{"steps": []}', "no step"),
+        ('[{"fix": "polish"}]', "`fix` is one of merge, split, extend, drop-line, widen"),
+        ('[{"fix": "widen", "a": 1}]', "step 1, a widen, needs `b`"),
+        ('[{"fix": "merge", "a": 1}]', "step 1, a merge, needs `b`"),
+        ('[{"fix": "split", "piece": 1, "line": [[1, 2]]}]', "`line` is two points or more"),
+        ("not json", "isn't JSON"),
+    ],
+)
+def test_a_fix_file_that_cant_be_read_says_which_step_and_what_it_needs(
+    bench: Any, broken: Answer, steps: str, says: str
+) -> None:
+    (bench.work / "odd.json").write_text(steps)
+    answer = bench("pieces", "fix", "b0.json", "odd.json", "--to", "odd-out.json")
+    assert answer.verdict == "NO ANSWER" and says in answer.record["why"], answer.text
+    assert not (bench.work / "odd-out.json").exists()
+
+
 def test_a_fix_names_its_new_map_by_the_next_number(bench: Any, broken: Answer) -> None:
     sliver = piece_at(bench.work, "b0.json", SLIVER)
     beside = piece_at(bench.work, "b0.json", BESIDE_SLIVER)
@@ -538,6 +961,271 @@ def test_a_built_panes_play_is_read_at_its_edge(bench: Any, built: Answer) -> No
     assert place["gap_mm"] == pytest.approx(0.25, abs=1e-5)
 
 
+def test_a_pane_is_held_to_its_play_square_to_its_pockets_sides(bench: Any) -> None:
+    """mqucifer/print-shop#161: a piece whose slanted side is a traced edge's pixel steps, 240
+    sides of 0.228 mm with a square corner between each. Its pane is those sides moved in by
+    the play, and round each corner that points into the pocket the pane's own corner is
+    rightly further off. The middle gap of every point read 0.285 mm for a play of 0.25, and
+    the build was `DISAGREE`. Held square to each side, it's the play."""
+    answer = bench(
+        "pieces", "build", "stairs.json", "--thickness", 3, "--pane", 1, "--lip", "1.2,0.8",
+        "--play", 0.25, "--build-out", "stairs",
+    )  # fmt: skip
+    assert answer.verdict == "OK" and answer.code == 0, answer.text
+    assert answer.numbers["play_off_mm"] == pytest.approx(0.0, abs=0.001)
+    # The control: a pane that really is 0.03 mm further in than its play, along its sides.
+    shutil.copy(CASES / "planted_play.py", bench.work / "planted_play.py")
+    done = host.run(["planted_play.py"], bench.work, python=True)
+    said = json.loads(done.stdout.strip().splitlines()[-1])
+    assert said["verdict"] == "DISAGREE" and said["code"] == 2, done.stdout + done.stderr
+    assert "a pane's edge is 0.030 mm off the play, over the 0.012 mm" in said["why"]
+    assert "pane is 0.280 mm from its pocket's wall at" in said["why"]
+    assert "square to a side, and 0.280 mm at its nearest, for a play of 0.25" in said["why"]
+
+
+def test_a_wall_between_two_pockets_is_never_thinner_than_the_maps_line(bench: Any) -> None:
+    """mqucifer/print-shop#161: a line widened to 0.4 mm in the map was a wall 0.21 mm thick in
+    the frame, as a pocket's curves were fitted to its outline and stood up to --fit past it
+    on each side. They're fitted inside it now, so `thin` passes on what `check` passed."""
+    widened = bench("pieces", "widen", "near.json", 1, 2, "--to", "near-wall.json")
+    assert widened.verdict == "OK", widened.text
+    built = bench(
+        "pieces", "build", "near-wall.json", "--thickness", 3, "--pane", 1, "--lip", 1.2,
+        "--play", 0.25, "--build-out", "wall",
+    )  # fmt: skip
+    assert built.verdict == "OK", built.text
+    assert built.numbers["pocket_past_outline_mm"] == pytest.approx(0.0, abs=0.012)
+    thin = bench("thin", built.numbers["glass"]["frame"], "--one-body")
+    assert thin.verdict == "OK", thin.text
+
+
+def test_a_waist_the_lip_closes_over_is_flagged_refused_and_split(bench: Any) -> None:
+    """mqucifer/print-shop#161: a piece 14 mm wide with a waist 2 mm across. A lip of 1.2 mm on
+    each side closes its opening over the waist. The build used to step that piece's lip down
+    until its opening was one, 0.6 mm all round, and `capture` at the rim asked then failed
+    it. Every piece takes the lip asked now: `check --lip` flags the piece as the build would
+    refuse it, with the line to split it along; `build` refuses it the same way; and split
+    there, it builds, and `capture` holds both halves at the rim asked."""
+    plain = bench("pieces", "check", "waist.json", "--max-lead", 20)
+    assert plain.verdict == "OK", "2 mm is over the 1.2 mm a neck is"
+    told = bench("pieces", "check", "waist.json", "--max-lead", 20, "--lip", 1.2)
+    assert told.verdict == "FAIL" and flags_of(told) == {("no-opening", 1)}, told.text
+    assert "a waist 2.00 mm across at (30.0, 12.0)" in told.text
+    assert "`pieces split MAP 1 --line 30,11,30,13`" in told.text, "the build's own words"
+    assert len(told.record["second_check"]) == 5
+    lips = ["--thickness", 3, "--pane", 1, "--lip", "1.2,0.6", "--play", 0.25]
+    refused = bench("pieces", "build", "waist.json", *lips, "--build-out", "waist")
+    assert refused.verdict == "FAIL" and refused.code == 1, refused.text
+    why = refused.record["why"]
+    assert "piece 1, round (30.0, 12.0), has no one opening at a lip of 1.2 mm" in why
+    assert "a waist 2.00 mm across at (30.0, 12.0)" in why
+    assert "`pieces split MAP 1 --line 30,11,30,13`" in why
+    assert "isn't stepped down to" in refused.text
+    assert not (bench.work / "waist" / "frame.step").exists()
+    # The line it gave, as given.
+    cut = bench("pieces", "split", "waist.json", 1, "--line", "30,11,30,13", "--to", "waist-1.json")
+    assert cut.verdict == "OK" and cut.numbers["pieces_after"] == 2, cut.text
+    built = bench("pieces", "build", "waist-1.json", *lips, "--build-out", "waist")
+    assert built.verdict == "OK", built.text
+    assert {row["lip_mm"] for row in built.numbers["lips"]} == {1.2}, "every piece, the lip asked"
+    held = bench(
+        "capture", built.numbers["glass"]["frame"], "--pocket-z", 1.3, "--clearance", 0.25,
+        "--pane-thickness", 1, "--full-rim", 1.2, "--least-rim", 0.6, "--min-visible", 40,
+        "--panes", 2,
+    )  # fmt: skip
+    assert held.verdict == "OK", held.text
+
+
+@pytest.mark.parametrize(
+    ("name", "says", "wide"),
+    [
+        # A band on a slant with its waist a quarter of the way along: the width is the
+        # waist's, 2 mm, not the 18 mm a line along the band was.
+        ("slanted_waist", "a waist 2.0", 2.0),
+        # Round a bend, narrow for 17 mm: the middle between the opening's two halves is in
+        # the bend's hollow, outside the piece, and no line was given.
+        ("bend", "a narrow run, about 18 mm of the piece that leaves no opening", 2.0),
+    ],
+)
+def test_every_waist_a_build_refuses_comes_with_a_line_that_split_takes(
+    bench: Any, name: str, says: str, wide: float
+) -> None:
+    """mqucifer/print-shop#161: on a traced scene one refusal gave an 18 mm "waist", the line's
+    own length along a slanted piece, and another, for a piece round a bend, gave no line and
+    "the parts 49.84 mm apart". The narrow place is found in the piece itself, and its line
+    crosses it square to the nearest edge."""
+    lips = ["--thickness", 3, "--pane", 1, "--lip", 1.2, "--play", 0.25]
+    refused = bench("pieces", "build", f"{name}.json", *lips, "--build-out", name)
+    assert refused.verdict == "FAIL", refused.text
+    why = refused.record["why"]
+    assert says in why and "mm apart" not in why, why
+    line = re.search(r"`pieces split MAP 1 --line ([-0-9.,]+)`", why)
+    assert line, why
+    x1, y1, x2, y2 = (float(v) for v in line.group(1).split(","))
+    assert ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5 == pytest.approx(wide, abs=0.05)
+    cut = bench(
+        "pieces", "split", f"{name}.json", 1, "--line", line.group(1), "--to", f"{name}-1.json"
+    )
+    assert cut.verdict == "OK" and cut.numbers["pieces_after"] == 2, cut.text
+    built = bench("pieces", "build", f"{name}-1.json", *lips, "--build-out", name)
+    assert built.verdict == "OK", built.text
+
+
+def test_a_piece_is_judged_on_its_pocket_as_built_and_refused_the_same_way(bench: Any) -> None:
+    """mqucifer/print-shop#161: a waist 2.45 mm across, between two curved sides. On the
+    piece's outline a lip of 1.2 mm leaves its opening one piece, a hair wide at the waist. Its
+    pocket as built is its fitted curves moved inside the outline, and there the opening is
+    two. The plan passed the piece and the build then ended `NO ANSWER`, "leaves no one
+    opening", with no place and no fix. The plan judges the pocket as it's built now."""
+    lips = ["--thickness", 3, "--pane", 1, "--lip", 1.2, "--play", 0.25]
+    refused = bench("pieces", "build", "curved_waist.json", *lips, "--build-out", "curved")
+    assert refused.verdict == "FAIL" and refused.code == 1, refused.text
+    why = refused.record["why"]
+    assert "once its pocket's curves are fitted inside its outline" in why
+    assert "a waist 2.45 mm across at (30.0, " in why
+    line = re.search(r"`pieces split MAP 1 --line ([-0-9.,]+)`", why)
+    assert line, why
+    assert len(refused.record["second_check"]) >= 1, "a refusal with its second check"
+    cut = bench(
+        "pieces", "split", "curved_waist.json", 1, "--line", line.group(1), "--to", "curved-1.json"
+    )
+    assert cut.verdict == "OK" and cut.numbers["pieces_after"] == 2, cut.text
+    built = bench("pieces", "build", "curved-1.json", *lips, "--build-out", "curved")
+    assert built.verdict == "OK", built.text
+
+
+def test_check_with_a_lip_flags_what_a_build_would_refuse_and_nothing_else(bench: Any) -> None:
+    """mqucifer/print-shop#161: `pieces check --lip L` makes the build's own plan, so a piece
+    the build would refuse for want of one opening is flagged before it: here a waist that's
+    whole on its outline and closes on its pocket as built. A map the build takes has no such
+    flag."""
+    told = bench("pieces", "check", "curved_waist.json", "--max-lead", 20, "--lip", 1.2)
+    assert told.verdict == "FAIL" and flags_of(told) == {("no-opening", 1)}, told.text
+    assert "once its pocket's curves are fitted inside its outline" in told.text
+    assert re.search(r"`pieces split MAP 1 --line [-0-9.,]+`", told.text)
+    assert bench("pieces", "check", "curved_waist.json", "--max-lead", 20).verdict == "OK"
+    fine = bench("pieces", "check", "rules.json", "--lip", 1.2)
+    assert fine.verdict == "OK" and not flags_of(fine), fine.text
+    # At a lip the waist takes, nothing is flagged.
+    narrow = bench("pieces", "check", "curved_waist.json", "--max-lead", 20, "--lip", 0.8)
+    assert narrow.verdict == "OK", narrow.text
+
+
+def test_a_merge_across_a_patch_of_lead_takes_the_lead_between_and_builds_first_time(
+    bench: Any,
+) -> None:
+    """mqucifer/print-shop#161: a small piece 1.6 mm from a large one, with no line of their
+    own between them and one corner near. On a traced scene such a merge joined the two by a
+    neck, with scraps of the old lead left as lines inside the piece, and a run fixed it one
+    build at a time. The merge takes the lead between them now: the small piece's hull with
+    what of the large one lies near it."""
+    answer = bench("pieces", "merge", "apart.json", 2, 1, "--to", "apart-1.json")
+    assert answer.verdict == "OK", answer.text
+    assert "They were 1.60 mm apart at the nearest, wider than the map's usual 0.95 mm line" in (
+        answer.record["why"]
+    )
+    (row,) = answer.numbers["changed"]
+    assert row["flags"] == [] and answer.numbers["pieces_after"] == 2
+    saved = json.loads((bench.work / "apart-1.json").read_text())
+    whole = next(p for p in saved["pieces"] if p["id"] == 1)
+    assert not whole.get("holes"), "no scrap of lead is left inside it"
+    # The diamond's far corner is where it was, and the third piece keeps its lead.
+    assert max(x for x, _ in whole["outline"]) == pytest.approx(49.4, abs=1e-6)
+    assert "every other piece's outline is the same, point for point" in answer.text
+    again = bench("pieces", "check", "apart-1.json", "--max-lead", 99, "--lip", 1.2)
+    assert not flags_of(again), again.text
+    built = bench(
+        "pieces", "build", "apart-1.json", "--thickness", 3, "--pane", 1, "--lip", 1.2,
+        "--play", 0.25, "--build-out", "apart",
+    )  # fmt: skip
+    assert built.verdict == "OK", built.text
+
+
+def test_a_build_names_everything_that_stops_a_piece_together(bench: Any) -> None:
+    """Three lines inside one piece, each joined to no other: one refusal names all three,
+    each with its own place and fix, where it named one a build."""
+    answer = bench(
+        "pieces", "build", "lone.json", "--thickness", 3, "--pane", 1, "--lip", 1.2,
+        "--play", 0.25, "--build-out", "lone",
+    )  # fmt: skip
+    assert answer.verdict == "FAIL", answer.text
+    (line,) = answer.numbers["unbuildable"]
+    assert line.startswith("piece 4, ") and line.count("has a lead line inside it") == 3
+    assert line.count("`pieces drop-line MAP --at ") == 3
+
+
+def test_a_lip_is_sized_to_the_panes_visible_share_as_capture_reads_it(bench: Any) -> None:
+    """mqucifer/print-shop#161: a thin crescent, 5 mm across. At the full lip of 1.2 mm only
+    52% of its pane is visible, and `capture`, asked for 60%, said to set its rim to 1.031 mm:
+    the widest that keeps 60%. With `--min-visible` the build sizes each piece's lip by
+    `capture`'s own function, so the two can't differ on a rim. A piece that can't keep the
+    share at the least lip is refused, with its fix, and `check --lip` reads the same."""
+    lips = ["--thickness", 3, "--pane", 1, "--play", 0.25, "--lip", "1.2,0.6"]
+    rim = [
+        "--pocket-z", 1.3, "--clearance", 0.25, "--pane-thickness", 1, "--full-rim", 1.2,
+        "--least-rim", 0.6, "--min-visible", 60, "--panes", 1,
+    ]  # fmt: skip
+    plain = bench("pieces", "build", "crescent.json", *lips, "--build-out", "crescent-full")
+    assert plain.verdict == "OK", plain.text
+    short = bench("capture", plain.numbers["glass"]["frame"], *rim)
+    assert short.verdict == "FAIL" and "set this pane's rim to 1.031 mm" in short.record["why"]
+    built = bench(
+        "pieces", "build", "crescent.json", *lips, "--min-visible", 60, "--build-out", "crescent"
+    )
+    assert built.verdict == "OK", built.text
+    (row,) = built.numbers["lips"]
+    assert row["lip_mm"] == pytest.approx(1.031, abs=0.002), "the rim `capture` asked for"
+    assert "narrower, so each keeps 60% of its pane visible: piece 1 at 1.031" in built.text
+    held = bench("capture", built.numbers["glass"]["frame"], *rim)
+    assert held.verdict == "OK", held.text
+    # At 90% even the least lip hides too much: refused by the build, and flagged by the check.
+    refused = bench(
+        "pieces", "build", "crescent.json", *lips, "--min-visible", 90, "--build-out", "crescent-90"
+    )
+    assert refused.verdict == "FAIL", refused.text
+    assert "keeps 81.5% of its pane visible at even the least lip, 0.6 mm, where 90% is wanted" in (
+        refused.record["why"]
+    )
+    assert "`pieces merge` it into a neighbour" in refused.record["why"]
+    told = bench(
+        "pieces", "check", "crescent.json", "--max-lead", 99, "--lip", "1.2,0.6",
+        "--min-visible", 90,
+    )  # fmt: skip
+    assert flags_of(told) == {("no-opening", 1)} and "where 90% is wanted" in told.text
+    fine = bench(
+        "pieces", "check", "crescent.json", "--max-lead", 99, "--lip", "1.2,0.6",
+        "--min-visible", 60,
+    )  # fmt: skip
+    assert fine.verdict == "OK", fine.text
+
+
+def test_a_share_sized_opening_is_the_shape_capture_measures_narrow_parts_and_all(
+    bench: Any,
+) -> None:
+    """mqucifer/print-shop#161: a piece with a tail 2.5 mm wide past a pinch. At the rim that
+    keeps 60% of its pane visible, 0.903 mm, the tail still shows a strip 0.7 mm wide, apart
+    from the body's opening. `capture` counts that strip; the build left it out as under two
+    nozzles wide, and `capture` then read the rim as right and 55.8% visible: "the frame
+    covers it elsewhere". It's cut now, and the reply says a slot that narrow may print
+    closed."""
+    built = bench(
+        "pieces", "build", "tailed.json", "--thickness", 3, "--pane", 1, "--play", 0.25,
+        "--lip", "1.2,0.6", "--min-visible", 60, "--build-out", "tailed",
+    )  # fmt: skip
+    assert built.verdict == "OK", built.text
+    (row,) = built.numbers["lips"]
+    assert row["lip_mm"] == pytest.approx(0.903, abs=0.002)
+    assert "1 part(s) of an opening under 0.8 mm wide are cut" in built.text
+    frame = built.numbers["glass"]["frame"]
+    held = bench(
+        "capture", frame, "--pocket-z", 1.3, "--clearance", 0.25, "--pane-thickness", 1,
+        "--full-rim", 1.2, "--least-rim", 0.6, "--min-visible", 60, "--panes", 1,
+    )  # fmt: skip
+    assert held.verdict == "OK", held.text
+    assert bench("thin", frame, "--one-body").verdict == "OK"
+    assert bench("info", frame).numbers["solids"] == 1
+
+
 def test_a_piece_too_thin_for_a_pane_is_named_and_nothing_is_built(
     bench: Any, broken: Answer
 ) -> None:
@@ -549,18 +1237,20 @@ def test_a_piece_too_thin_for_a_pane_is_named_and_nothing_is_built(
     assert answer.verdict == "FAIL" and answer.code == 1
     said = answer.numbers["unbuildable"]
     thin = next(line for line in said if line.startswith(f"piece {sliver},"))
-    assert "nothing of it is left, as it's 2.00 mm at its widest" in thin
+    assert "leaves it no opening 0.8 mm wide, as it's 2.00 mm at its widest" in thin
     assert "`pieces merge` it into a neighbour" in thin
     # The necked piece is wide, so its line says what cuts its opening in two, and where.
     necked = piece_at(bench.work, "b0.json", NECK)
     neck = next(line for line in said if line.startswith(f"piece {necked},"))
-    assert "a narrow place near (20" in neck and f"`pieces split MAP {necked} --line`" in neck
+    assert "a waist 1.00 mm across at (" in neck or "a narrow run, about" in neck, neck
+    assert re.search(rf"`pieces split MAP {necked} --line [0-9.]+,", neck), "with its line"
     around = piece_at(bench.work, "b0.json", ROUND_SMALL)
     assert any(f"piece {around} surrounds piece" in line for line in said)
     assert "so nothing was" in answer.record["why"] and "pieces merge" in answer.record["why"]
     # No line says a wide piece has no pane or opening without what cuts it.
     for line in said:
-        assert "surrounds" in line or "nothing of it is left" in line or "cuts its" in line, line
+        named = ("surrounds", "leaves it no", "cuts its", "a waist ", "a narrow run")
+        assert any(word in line for word in named), line
     assert not (bench.work / "nothing" / "frame.step").exists()
     thin = bench(
         "pieces", "build", "rules.json", "--thickness", 1.4, "--pane", 1, "--lip", "1.2",
