@@ -147,6 +147,8 @@ class Edge:
     kind: str
     slice: int
     lengths: list[Length]
+    #: From the panel's edge to the cut's middle, on the dome.
+    half_line: float = 0.0
 
 
 @dataclass
@@ -256,7 +258,8 @@ def edges_of(found: Map, name: str, kinds: tuple[str, str]) -> list[Edge]:
                     by_corners_deg=checks[j][0], by_dome_deg=checks[j][1],
                 )  # fmt: skip
             )
-        edges.append(Edge(word, side, kind, int(given["slice"]), lengths))
+        half_line = float(given.get("half_line_mm") or found.lead_mm / 2.0)
+        edges.append(Edge(word, side, kind, int(given["slice"]), lengths, half_line))
     return edges
 
 
@@ -392,32 +395,60 @@ def seam_plan(found: Map, name: str, args: Any, z: dict[str, float]) -> Seam:
     return seam
 
 
+def _run_on(ring: np.ndarray, near: np.ndarray, corner: int, inside: np.ndarray) -> Any:
+    """The half of the plane on the panel's side of an edge run on past a corner: the hem, or
+    the top, as it arrives at the panel's side, carried on to the cut and past it."""
+    count = len(ring)
+    for step in (1, -1):
+        k = (corner + step) % count
+        if near[k]:
+            continue
+        while float(np.hypot(*(ring[k] - ring[corner]))) < 0.5 and not near[(k + step) % count]:
+            k = (k + step) % count
+        way = ring[corner] - ring[k]
+        way = way / np.hypot(*way)
+        square = np.array([-way[1], way[0]])
+        if float((inside - ring[corner]) @ square) < 0:
+            square = -square
+        far = 1000.0
+        a, b = ring[corner] - far * way, ring[corner] + far * way
+        return shapely.Polygon([a, b, b + far * square, a + far * square])
+    raise NoAnswer("the panel's side has no hem or top beside it")
+
+
 def widened(found: Map, seam: Seam) -> Any:
-    """The panel and a strip past each cut, level with the panel's own corners there: the
-    plate the seams are cut from. It's wider than any bevel reaches at the outer face."""
+    """The panel and a strip past each cut, between the panel's hem and its top run on as they
+    arrive at its side: the plate the seams are cut from. It's wider than any bevel reaches at
+    the outer face, and two neighbours' hems meet at the cut."""
     most = max(length.lean for edge in seam.edges for length in edge.lengths)
     past = seam.mid * most + 0.5
-    outline = shapely.get_coordinates(found.panel.exterior)
+    ring = shapely.get_coordinates(found.panel.exterior)[:-1]
+    # A map may say a corner twice: each point once, so a corner's neighbours are other places.
+    ring = ring[np.hypot(*(ring - np.roll(ring, 1, axis=0)).T) > 1e-6]
+    inside = shapely.get_coordinates(found.panel.representative_point())[0]
     parts = [found.panel]
     for edge in seam.edges:
-        near = np.zeros(len(outline), dtype=bool)
+        # The panel's own side: its points half a lead from the cut, from corner to corner.
+        near = np.zeros(len(ring), dtype=bool)
         for length in edge.lengths:
-            inside = -(outline - length.a) @ length.out
-            along = (outline - length.a) @ length.way
-            near |= (inside < 2.0 * max(found.lead_mm, 1.0)) & (along > -1.0) & (
+            off = -(ring - length.a) @ length.out
+            along = (ring - length.a) @ length.way
+            near |= (off < 1.3 * edge.half_line + 0.05) & (along > -1.0) & (
                 along < length.length + 1.0
             )
         if not near.any():
             raise NoAnswer(f"the panel's outline doesn't reach its {edge.name} cut")
-        low, high = float(outline[near, 1].min()), float(outline[near, 1].max())
-        x0, _y0, x1, _y1 = found.panel.bounds
-        band = shapely.box(x0 - past - 5.0, low, x1 + past + 5.0, high)
+        mine = np.flatnonzero(near)
+        low, high = int(mine[ring[mine, 1].argmin()]), int(mine[ring[mine, 1].argmax()])
+        between = _run_on(ring, near, low, inside).intersection(
+            _run_on(ring, near, high, inside)
+        )
         for length in edge.lengths:
             e, o = length.way, length.out
             a, b = length.a - 2.0 * e, length.b + 2.0 * e
-            inner = max(found.lead_mm, 1.0)
+            inner = 1.3 * edge.half_line + 0.05
             strip = shapely.Polygon([a - inner * o, b - inner * o, b + past * o, a + past * o])
-            parts.append(strip.intersection(band))
+            parts.append(strip.intersection(between))
     whole = piecemap.polygons(shapely.union_all(parts).buffer(0))
     if len(whole) != 1:
         raise NoAnswer("the panel and its seams' strips aren't one outline")
