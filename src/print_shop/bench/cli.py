@@ -899,6 +899,55 @@ def parser() -> Parser:
     build.add_argument(
         "--build-out", dest="out_build", default=".", help="where the frame and panes go"
     )
+    build.add_argument(
+        "--seam",
+        metavar="LEFT,RIGHT",
+        help="for a dome's slice: its two long edges as seams, each straight length bevelled "
+        "by half the angle between the two slices there. LEFT and RIGHT are what each edge is "
+        "built as: pins, holes or plain. `holes,pins` on every slice puts each one's pins in "
+        "its neighbour's holes",
+    )
+    build.add_argument(
+        "--pins",
+        type=int,
+        metavar="N",
+        help="with --seam: how many pins, or holes, each straight length has (1 unless given)",
+    )
+    build.add_argument(
+        "--pin",
+        type=_point,
+        metavar="ALONG,THROUGH,OUT",
+        help="with --seam: a pin's size, in mm: along the edge, through the frame's thickness "
+        "and out of the face (1.2,1.6,0.5 unless given)",
+    )
+    build.add_argument(
+        "--pin-play",
+        type=float,
+        metavar="MM",
+        help="with --seam: the gap round a pin in its hole, and past its end, in mm (0.1 "
+        "unless given)",
+    )
+    seam = action.add_parser(
+        "seam",
+        help="two neighbouring slices' built frames, bent by their folds and placed round the "
+        "dome: how their faces meet, what they share, and each pin in its hole",
+    )
+    seam.add_argument(
+        "maps", nargs=2, metavar="MAP", help="two neighbouring slices' maps, as `flatten` wrote"
+    )
+    seam.add_argument(
+        "--frames",
+        nargs=2,
+        required=True,
+        metavar="FRAME",
+        help="each slice's frame, in the maps' order, as `pieces build --seam` wrote it",
+    )
+    seam.add_argument(
+        "--gap",
+        type=float,
+        metavar="MM",
+        help="how far the two faces may stand apart and still meet, in mm (0.05 unless given)",
+    )
     trace.add_argument(
         "--to", metavar="FILE", help="the map's file: IMAGE's name with .pieces.json unless given"
     )
