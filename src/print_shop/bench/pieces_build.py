@@ -43,6 +43,11 @@ its pocket follows it; the reply names the piece. (OpenCascade's own `offset2D` 
 **Second method.** Each solid's volume by OpenCascade against its outline's area in Shapely
 times its height; the built curves' distance from the map's outline, at points along them; and
 each pane's distance from its pocket's wall, at points round it.
+
+**Seams.** With `--seam`, a dome's slice has its two long edges built as seams, each straight
+length bevelled by half the angle between the two slices there and set back half the gap a
+came strip's web takes (`pieces_seam.py`, mqucifer/print-shop#166). The frame's side is then
+set by each cut, and `--border` is the frame at the top and the hem.
 """
 
 from __future__ import annotations
@@ -60,6 +65,16 @@ from . import piecemap
 from .limits import under
 from .piecemap import Map, Piece
 from .pieces_check import gaps
+from .pieces_seam import (
+    faces_read,
+    refuse_seams,
+    say_seams,
+    seam_checks,
+    seam_plan,
+    volume_by_sections,
+    widened,
+    with_seams,
+)
 from .report import NoAnswer, Report
 
 #: A turn sharper than this between two sides, in degrees, is a corner, not a curve.
@@ -1222,6 +1237,14 @@ def run_build(args: Any, report: Report) -> None:
     border = args.border if args.border is not None else 2.0 * found.lead_mm
     if not border > 0:
         raise NoAnswer("--border is the frame round the panel's edge, in mm, over 0")
+    if getattr(args, "seam_gap", None) is not None and not getattr(args, "seam", False):
+        raise NoAnswer(
+            "--seam-gap is the gap between two slices' seam faces, and there's no --seam: "
+            "`--seam` builds a slice's two long edges as seams"
+        )
+    seam = (
+        seam_plan(found, args.map, args, z) if getattr(args, "seam", None) else None
+    )
     rows, wrong = plan(found, (full, least), args.play, args.fit, share)
     report.numbers["unbuildable"] = wrong
     if wrong:
@@ -1239,9 +1262,15 @@ def run_build(args: Any, report: Report) -> None:
             + ". Fix each in the map as its line says, and build again",
         )
         return
+    if seam is not None and seam.refused:
+        refuse_seams(seam, report)
+        return
     out = Path(args.out_build)
     out.mkdir(parents=True, exist_ok=True)
-    outline = found.panel.buffer(border, join_style="mitre")
+    # With seams the plate is wider than the cuts, and they're cut from it: the frame's side
+    # is then each cut's middle, whatever the border.
+    wide = found.panel if seam is None else widened(found, seam)
+    outline = wide.buffer(border, join_style="mitre")
     frame_wire = _wire(fit_ring(_points(outline.exterior), args.fit))
     openings: list[Any] = []
     narrow_parts = 0
@@ -1254,7 +1283,11 @@ def run_build(args: Any, report: Report) -> None:
     past, past_piece = 0.0, 0
     moved_in = 0.0
     play_worst = ""
-    expected = outline.area * args.thickness
+    expected = (
+        outline.area * args.thickness
+        if seam is None
+        else volume_by_sections(seam, outline)
+    )
     pocket_tall = z["pocket_top_z"] - z["pocket_floor_z"]
     pane_volumes: list[tuple[int, float, float]] = []
     for row in rows:
@@ -1312,6 +1345,8 @@ def run_build(args: Any, report: Report) -> None:
     # Each opening is cut through the plate, an island inside one left standing, and then each
     # pocket between the lips: two cuts, each by tools that don't meet each other.
     plate = _prism(frame_wire, [], 0.0, args.thickness)
+    if seam is not None:
+        plate = with_seams(plate, seam, outline)
     through = [_prism(outer, inners, 0.0, args.thickness) for outer, inners in openings]
     frame = plate.cut(cq.Compound.makeCompound(through))
     frame = frame.cut(cq.Compound.makeCompound(pockets)).clean()
@@ -1371,7 +1406,15 @@ def run_build(args: Any, report: Report) -> None:
             else ""
         ),
     )  # fmt: skip
-    report.fact("border_mm", border, "mm", "the frame round the panel's edge")
+    report.fact(
+        "border_mm", border, "mm",
+        "the frame round the panel's edge" if seam is None else "the frame at the top and the hem",
+    )  # fmt: skip
+    seam_off = 0.0
+    if seam is not None:
+        say_seams(seam, report, found.lead_mm)
+        seam_off = faces_read(frame, seam)
+        report.numbers["seam_faces_off_deg"] = seam_off
     glass_mm2 = sum(p.shape.area for p in found.pieces)
     report.fact(
         "glass_left_as_lead_mm2", lost, "mm²",
@@ -1459,6 +1502,16 @@ def run_build(args: Any, report: Report) -> None:
         f"{play_off:.4f} mm, at points round it"
     )
     differs = []
+    if seam is not None:
+        report.second(
+            f"each length's seam face read back from the frame: a flat face half the gap back "
+            f"from the cut's middle, whose normal is within {seam_off:.4f}° of the bevel's"
+        )
+        differs += seam_checks(seam, report)
+        if seam_off > 0.01:
+            differs.append(
+                f"a seam's face in the frame is {seam_off:.3f}° off its bevel, or isn't there"
+            )
     if len(solids) != 1:
         differs.append(f"the frame is {len(solids)} solids, not one body")
     if abs(volume - expected) > VOLUME_OFF * expected:
@@ -1487,5 +1540,12 @@ def run_build(args: Any, report: Report) -> None:
         "OK",
         f"{frame_file} and {len(pane_files)} pane file(s) holding {len(rows)} pane(s), from "
         f"{len(found.pieces)} piece(s): the frame {args.thickness:g} mm thick, the pause at "
-        f"z={z['pocket_top_z']:g}",
+        f"z={z['pocket_top_z']:g}"
+        + (
+            f"; its two long edges are seams, bevelled at each of "
+            f"{len(seam.edges[0].lengths)} length(s), each face {seam.back:g} mm back from the "
+            "cut's middle"
+            if seam is not None
+            else ""
+        ),
     )
