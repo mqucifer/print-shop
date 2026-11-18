@@ -241,6 +241,47 @@ def came_section(
     }
 
 
+def draw_section(
+    section: Any, bevel_deg: float, thick: float, gap: float, sizes: dict[str, float], to: Path
+) -> str:
+    """A strip's section on the two slices' edges it clips over, as a picture: across the
+    seam, the dome's outside up."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    a = math.radians(bevel_deg)
+    shown = 2.5
+    scale, margin = 70.0, 40
+    x0, y0, x1, y1 = section.bounds
+    x0, x1 = x0 - shown, x1 + shown
+    y0 = y0 - shown * math.sin(a)
+
+    def px(points: Any) -> list[tuple[float, float]]:
+        return [(margin + (x - x0) * scale, margin + (y1 - y) * scale) for x, y in points]
+
+    size = (int((x1 - x0) * scale) + 2 * margin, int((y1 - y0) * scale) + 2 * margin + 50)
+    picture = Image.new("RGB", size, "white")
+    draw = ImageDraw.Draw(picture)
+    font = ImageFont.load_default(size=14)
+    for side, colour in ((-1.0, (181, 101, 29)), (1.0, (46, 111, 142))):
+        along = np.array([side * math.cos(a), -math.sin(a)])
+        corner = np.array([side * gap / 2.0, -gap / 2.0 * math.tan(a)])
+        outer = corner + np.array([0.0, thick / math.cos(a)])
+        far = (x1 - corner[0] * side - 0.2) / math.cos(a) if side > 0 else 0.0
+        far = far if side > 0 else (-x0 + corner[0] - 0.2) / math.cos(a)
+        draw.polygon(px([corner, corner + far * along, outer + far * along, outer]), fill=colour)
+    draw.polygon(px(section.exterior.coords), fill=(34, 34, 34))
+    for row, text in enumerate(
+        (
+            "a came strip on two slices' edges, cut across the seam, the dome's outside up",
+            f"channels {2.0 * bevel_deg:.1f}° apart, slot {sizes['slot_mm']:g} mm, web "
+            f"{sizes['web_mm']:g} mm, {sizes['wide_mm']:.2f} mm wide",
+        )
+    ):
+        draw.text((12, size[1] - 46 + 20 * row), text, fill=(0, 0, 0), font=font)
+    picture.save(to)
+    return str(to)
+
+
 def _faces_toward(solid: Any, way: np.ndarray) -> list[tuple[float, np.ndarray, float]]:
     """A solid's flat faces by how near they face a way: the angle, the middle and the area."""
     found = []
@@ -395,6 +436,14 @@ def run_came(args: Any, report: Report) -> None:
                 "prints": read,
             }
         )
+    first_section, first_sizes = came_section(
+        edge.lengths[0].bevel_deg, thick, gap, play, grip, reach, flange
+    )
+    shown = draw_section(
+        first_section, edge.lengths[0].bevel_deg, thick, gap, first_sizes, out / "section.png"
+    )
+    report.wrote(shown)
+    report.numbers["picture"] = shown
     together = out / f"placed-{int(surface['slice']):02d}-{edge.slice:02d}.step"
     cq.Compound.makeCompound(placed).exportStep(str(together))
     report.wrote(str(together))
