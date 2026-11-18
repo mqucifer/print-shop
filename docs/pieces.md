@@ -19,7 +19,7 @@ JSON, in millimetres, x to the right and y up from the panel's bottom-left:
    "holes": [[[60, 55], [70, 55], [70, 65], [60, 65]]]}
  ],
  "flags": [{"flag": "sliver", "piece": 7, "figure": 2.0, "limit": 3.0, "at": [41.7, 60.4]}],
- "source": {"by": "pieces trace", "image": "scene.png", "px_per_mm": 5.0, "glass_share_pct": 91.2},
+ "source": {"by": "pieces trace", "image": "scene.png", "image_path": "references/scene.png", "px_per_mm": 5.0, "dark_under": 40, "glass_share_pct": 91.2},
  "history": [{"fix": "merge", "a": 12, "b": 9}],
  "surface": {"kind": "dome-slice", "slice": 1, "folds": [{"fold": 1, "y_mm": 55.03, "bend_deg": 13.74}]}
 }
@@ -34,7 +34,7 @@ JSON, in millimetres, x to the right and y up from the panel's bottom-left:
 | `pieces` | each piece: `id`, a whole number from 1; `colour`; `outline`, three points or more; `holes`, where another piece or a line lies inside it; and from a trace `paint`, the picture's colour over it and how far it runs across | every command |
 | `thickness_mm` (a piece's) | its pane's own thickness, where it isn't the frame's usual | `build` refuses a map that names several: panes of several thicknesses in one frame aren't built yet |
 | `flags` | the rule breaks as `trace` or a fix last read them | a reader only: `check` reads the pieces again, and no command trusts these |
-| `source` | what drew the map, and its glass share then | `check` and each fix, which say the share now against it |
+| `source` | what drew the map, and its glass share then; from a trace, the picture (`image`, and `image_path` as the trace was given it), its scale and the darkness it was read at | `check` and each fix, which say the share now against it; `retrace`, `paint` and `check`, which read the picture again ([below](#a-file-of-fixes)) |
 | `history` | each fix made, in order | a reader only |
 | `surface` | what the map lies on, where that isn't a flat panel: a dome's chart, or one flat slice of a dome with its folds and edges ([below](#a-dome-from-rules-and-its-flat-slices)). A flat panel's map has none | `flatten`, which cuts a dome's chart; `build --seam`, `came`, `ring` and `seam`, which read a slice's edges and folds; every fix keeps it |
 
@@ -52,7 +52,11 @@ JSON, in millimetres, x to the right and y up from the panel's bottom-left:
  {"fix": "split", "piece": 4, "line": [[40, 15.3], [80, 15.3]], "lead_mm": 1.4},
  {"fix": "extend", "at": [20, 55], "aim": [20, 80]},
  {"fix": "drop-line", "at": [41.5, 60]},
- {"fix": "widen", "a": 46, "b": 47}
+ {"fix": "widen", "a": 46, "b": 47},
+ {"fix": "retrace", "box": [20, 10, 70, 30], "dark": 20},
+ {"fix": "fill", "at": [30.2, 20.1]},
+ {"fix": "paint", "piece": 7, "colour": "teal", "rgb": [0, 128, 128]},
+ {"fix": "move-line", "a": 3, "b": 4, "line": [[30, 0], [26, 10], [30, 20]]}
 ]
 ```
 
@@ -63,9 +67,14 @@ JSON, in millimetres, x to the right and y up from the panel's bottom-left:
 | `extend` | `at`, a point on the dead end | `aim`, a point to run it toward |
 | `drop-line` | `at`, a point on the line | |
 | `widen` | `a` and `b`, the two pieces the line lies between | `lead_mm`, the line's least width: 0.4 unless given |
+| `retrace` | `box`, `[x0, y0, x1, y1]`, the place to trace again | `dark`, the darkness inside it: the map's own unless given. `palette`, as `--palette` takes it |
+| `fill` | `at`, a point in the patch of lead | `lead_mm`, the width of the lines left between the shares: the map's unless given |
+| `paint` | `piece`, and `colour`, the colour's name | `rgb`, `[r, g, b]`, for a colour new to the map |
+| `move-line` | `a` and `b`, the two neighbours, and `line`, the new path's points | |
 
 - **The steps run in order,** each on the map the one before left, and a piece's number is what it is by then: a merge keeps B's, and a split's new pieces take the next numbers.
 - **A map's `history` is a steps file.** Each fix is written there as a step is given (an extension's `from` and `to` are read as `at` and `aim`), so the fixes a map has had can be made again on the map they began from, and give the same pieces.
+- **A retrace and a paint read the picture** the map was traced from: `source.image_path`, as the trace was given it, or `--image FILE` on `pieces fix`. It's read once, the first time a step needs it.
 - **It stops at the first step that's refused,** and writes the map up to it. Every step is read before any is made, so a file with a step that can't be read changes nothing.
 
 ## What a map from rules needs

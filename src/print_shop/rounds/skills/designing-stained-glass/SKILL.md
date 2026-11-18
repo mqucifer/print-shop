@@ -274,7 +274,7 @@ pieces are the layout, so steps 2, 3 and 5 are these five, in this order:
 ```
 - [ ] a. Trace: `pieces trace PICTURE --width MM`
 - [ ] b. Check: `pieces check MAP --lip FULL,LEAST --min-visible S`, as you'll build
-- [ ] c. Fix each flagged piece by its own flag: one command for one fix, `pieces fix MAP STEPS` for several
+- [ ] c. Fix each flagged piece or place by its own flag, and keep the rest: one command for one fix, `pieces fix MAP STEPS` for several
 - [ ] d. Check again, until no flag is left that the request doesn't keep
 - [ ] e. Build: `pieces build MAP --thickness T --pane P --lip FULL,LEAST --play C --min-visible S`
 ```
@@ -291,14 +291,31 @@ piece that breaks a rule, with where. Each flag has its fix:
 | `neck` | a thin place with wide glass on both sides of it | `pieces split MAP ID --line x1,y1,x2,y2` cuts the piece there, edge to edge |
 | `no-opening` | with `--lip L`: a piece that lip leaves no one opening in, so `pieces build` would refuse it | as its line says: `pieces split` along the line it gives for a waist; `pieces merge` a piece too small for an opening into a neighbour; or a narrower `--lip` for every piece |
 | `notch` | a notch deeper than it's wide | `pieces split` from the notch's end to the piece's far edge |
-| `gradient` | a colour that runs across one piece | `pieces split` where it changes, or keep it one colour and say so |
-| `wide-lead` | a patch of lead, not a line | `pieces merge` the pieces round it |
+| `gradient` | a colour that runs across one piece: also two colours a merge joined, read from the picture again | `pieces split MAP ID --line x1,y1,x2,y2` where it changes, or keep it one colour and say so |
+| `wide-lead` | a patch of lead, not a line | `pieces fill MAP --at X,Y` turns it into glass, shared among the pieces round it. Where it's a dark place in the picture, a shadow and not a line, `pieces retrace MAP --box X0,Y0,X1,Y1 --dark N` reads the picture again there |
 | `thin-lead` | lead between two pieces under a nozzle's width, 0.4 mm: the frame's wall there wouldn't print, and `thin` would fail on it | `pieces widen MAP A B` widens the line where it's thin and keeps it. `pieces merge` takes the line out: only where the two are one colour and the picture doesn't mean the line |
 
 - **Each fix is one piece's, and you choose it.** A filter over every piece is not a fix: an
   opening, a closing, a buffer in and out or a simplification run over all of them rounds every
   corner and drops what it cuts into the lead. In one run that turned 15 to 22% of one band's
   glass into grey patches up to 19 mm wide.
+- **Fix the place that's wrong, and keep the rest.** When most of a map is right, don't trace
+  the picture again: a new `--dark` or `--palette` changes every line and every colour. In one
+  run a tree's shadow read as a patch of lead; the whole picture was traced again at
+  `--dark 18`, 41 of its lines broke into dead ends, and dropping them took away the trees,
+  the river's course and a band of hill. Four commands each change one place:
+  - `pieces retrace MAP --box X0,Y0,X1,Y1 --dark N` traces the picture again inside the box
+    only. Nothing outside it moves, and each line that crosses its edge stays and joins the
+    line inside. Its reply says any line that ends at the box's edge: make the box larger.
+  - `pieces fill MAP --at X,Y` turns a patch of lead into glass, at the point `pieces check`
+    gives for it.
+  - `pieces paint MAP ID COLOUR` gives one piece another colour, `NAME=#rrggbb` for a new
+    one, and says how far it is from the picture's own colour there.
+  - `pieces move-line MAP A B --line x1,y1,x2,y2,...` draws the line between two neighbours
+    along new points, from one end of the old line to the other.
+- **Trace the whole picture again only when most of it is wrong:** a frame that wasn't found,
+  or lines missing all over. `pieces trace` with a `--dark` other than 40 says what it cost:
+  its pieces, lines and dead ends against the default's. Read that line before you keep it.
 - **A thin line the picture means is widened, not merged.** A sun's rays or a river's inner
   lines lie between two pieces of one colour, and a merge erases them: the composition stays.
   `pieces widen` moves each piece's edge back by half of what the line is short, only where
@@ -322,7 +339,11 @@ piece that breaks a rule, with where. Each flag has its fix:
  {"fix": "drop-line", "at": [41.5, 60]},
  {"fix": "split", "piece": 4, "line": [[40, 15.3], [80, 15.3]]},
  {"fix": "extend", "at": [20, 55]},
- {"fix": "widen", "a": 46, "b": 47}
+ {"fix": "widen", "a": 46, "b": 47},
+ {"fix": "retrace", "box": [20, 10, 70, 30], "dark": 20},
+ {"fix": "fill", "at": [30.2, 20.1]},
+ {"fix": "paint", "piece": 7, "colour": "teal", "rgb": [0, 128, 128]},
+ {"fix": "move-line", "a": 3, "b": 4, "line": [[30, 0], [26, 10], [30, 20]]}
 ]
 ```
 
