@@ -33,6 +33,8 @@ is a Sponsor's scene or anything from one (mqucifer/print-shop#152, mqucifer/pri
   width, and one piece 0.25 mm from the panel's edge, which the frame's border backs.
 - `near.json`: two curved pieces, the line between them 1.2 mm wide but 0.2 mm along 10 mm.
 - `waist.json`: a piece 50 mm long and 14 mm wide with a waist 2 mm across at its middle.
+- `slanted_waist.json`: a long piece on a slant, with a waist a quarter of the way along it.
+- `bend.json`: a piece round a bend, narrow all the way round it.
 - `hairs.json`: two cuts two microns wide whose ends face each other, which the
   outline has and no pixel shows.
 """
@@ -505,6 +507,47 @@ def waist() -> dict[str, Any]:
     return found
 
 
+def slanted_waist() -> dict[str, Any]:
+    """One piece of a 70 x 50 mm panel: a band 56 mm long and 10 mm wide, lying at 31 degrees,
+    drawn in to a waist 2 mm across 14 mm from its lower end. A line square to the way from
+    one half of its opening to the other runs along the band, not across it."""
+    turn = math.atan2(30, 50)
+    along, across = (math.cos(turn), math.sin(turn)), (-math.sin(turn), math.cos(turn))
+    half = [(0, 5), (8, 5), (14, 1), (20, 5), (56, 5)]
+    ring = [(u, -v) for u, v in half] + [(u, v) for u, v in reversed(half)]
+    found = notched()
+    found["panel"] = {"width_mm": 70, "height_mm": 50}
+    found["pieces"][0]["outline"] = [
+        [round(10 + u * along[0] + v * across[0], 4), round(12 + u * along[1] + v * across[1], 4)]
+        for u, v in ring
+    ]
+    return found
+
+
+def bend() -> dict[str, Any]:
+    """One piece of a 60 x 40 mm panel, round a bend: a band along an arc 20 mm in radius, 10
+    mm wide at its two ends and 2 mm wide from 50 to 100 degrees round, 17 mm of narrow run.
+    The middle between the two halves of its opening lies in the bend's hollow, outside the
+    piece."""
+
+    def half(deg: float) -> float:
+        return 1.0 if 50 <= deg <= 100 else 5.0 if deg <= 40 or deg >= 110 else (
+            1.0 + 4.0 * (50 - deg) / 10 if deg < 50 else 1.0 + 4.0 * (deg - 100) / 10
+        )
+
+    def at(deg: float, radius: float) -> list[float]:
+        turn = math.radians(deg)
+        return [round(30 + radius * math.cos(turn), 4), round(6 + radius * math.sin(turn), 4)]
+
+    degrees = [10 + 2 * k for k in range(66)]
+    outer = [at(d, 20 + half(d)) for d in degrees]
+    inner = [at(d, 20 - half(d)) for d in reversed(degrees)]
+    found = notched()
+    found["panel"] = {"width_mm": 60, "height_mm": 40}
+    found["pieces"][0]["outline"] = outer + inner
+    return found
+
+
 def rules(slit: bool, depth: float = 8.0) -> dict[str, Any]:
     lead = 1.2
     outlines = cells(lead)
@@ -566,6 +609,8 @@ for name, made in (
     ("close.json", close()),
     ("near.json", near()),
     ("waist.json", waist()),
+    ("slanted_waist.json", slanted_waist()),
+    ("bend.json", bend()),
     ("stairs.json", stairs()),
     ("edge.json", edge()),
 ):

@@ -463,29 +463,70 @@ def _printable(shape: Any) -> list[Any]:
     ]
 
 
-def _across(piece: Piece, a: Any, b: Any) -> tuple[float, list[float], list[float]] | None:
-    """The waist between two parts of a piece's opening: how wide the piece is there, and the
-    two ends of a line across it, square to the way from one part to the other."""
-    ends = shapely.get_coordinates(shapely.shortest_line(a, b))
-    way = ends[1] - ends[0]
-    long = float(np.hypot(*way))
-    if long < 1e-9:
-        return None
-    middle = (ends[0] + ends[1]) / 2.0
-    square = np.array([-way[1], way[0]]) / long
-    x0, y0, x1, y1 = piece.shape.bounds
-    reach = math.hypot(x1 - x0, y1 - y0)
-    line = shapely.LineString([middle - reach * square, middle + reach * square])
-    here = shapely.Point(middle)
-    chords = [
-        part
-        for part in shapely.get_parts(line.intersection(piece.shape))
-        if part.geom_type == "LineString" and part.distance(here) < 1e-6
+def _across(
+    piece: Piece, a: Any, b: Any, lip: float, lead: float
+) -> tuple[float, list[float], list[float], list[float]] | None:
+    """The place where a piece's opening comes apart into two parts: where, the two ends of
+    the shortest straight line across the piece there that leaves one part on each side, as
+    `pieces split` will cut it with a line `lead` wide, and that line's length.
+
+    The place is found in the piece itself: what's left of the piece once each part is grown
+    back by the lip is the glass the lip closes over, and the stretch of it that reaches both
+    parts is the narrow place, a waist or a long narrow run round a bend. Where the two parts,
+    grown back, meet, it's half way from one to the other. Through it, lines every 5 degrees
+    are tried, and the shortest that parts the two is the line. A line square to the way from
+    one part to the other ran along a slanted piece, 18 mm for a waist of 2; and the middle
+    between two parts either side of a bend lay outside the piece, so no line was given
+    (mqucifer/print-shop#161)."""
+    grown = [part.buffer(lip + 0.02, quad_segs=8) for part in (a, b)]
+    left = piece.shape.difference(shapely.union_all(grown))
+    between = [
+        part for part in piecemap.polygons(left) if all(part.distance(one) <= 0.1 for one in grown)
     ]
-    if not chords:
+    if between:
+        here = np.asarray(piecemap.widest(between[0], 0.02)[1], dtype=float)
+    else:
+        here = shapely.get_coordinates(shapely.shortest_line(a, b)).mean(axis=0)
+        if not piece.shape.contains(shapely.Point(here)):
+            return None
+    x0, y0, x1, y1 = piece.shape.bounds
+    far = math.hypot(x1 - x0, y1 - y0)
+    spot = shapely.Point(here)
+    best: tuple[float, np.ndarray, np.ndarray, float] | None = None
+
+    def tried(angle: float) -> None:
+        nonlocal best
+        way = np.array([math.cos(math.radians(angle)), math.sin(math.radians(angle))])
+        line = shapely.LineString([here - far * way, here + far * way])
+        chords = [
+            part
+            for part in shapely.get_parts(line.intersection(piece.shape))
+            if part.geom_type == "LineString" and part.distance(spot) < 1e-6
+        ]
+        if not chords or (best is not None and chords[0].length >= best[0]):
+            return
+        one, two = shapely.get_coordinates(chords[0])[[0, -1]]
+        along = (two - one) / max(float(np.hypot(*(two - one))), 1e-12)
+        # As `pieces split` cuts it: a line `lead` wide, run on a lead's width past each end.
+        strip = shapely.LineString([one - lead * along, two + lead * along]).buffer(
+            lead / 2.0, cap_style="flat"
+        )
+        halves = [h for h in piecemap.polygons(piece.shape.difference(strip)) if h.area > 0.05]
+        if len(halves) < 2:
+            return
+        holds = [int(np.argmax([h.intersection(part).area for h in halves])) for part in (a, b)]
+        if holds[0] != holds[1]:
+            best = (float(chords[0].length), one, two, angle)
+
+    # Every 5 degrees, then every half a degree round the best of those.
+    for angle in np.arange(0.0, 180.0, 5.0):
+        tried(float(angle))
+    if best is not None:
+        for more in np.arange(-4.5, 5.0, 0.5):
+            tried(best[3] + float(more))
+    if best is None:
         return None
-    one, two = shapely.get_coordinates(chords[0])[[0, -1]]
-    return float(chords[0].length), piecemap.xy(one), piecemap.xy(two)
+    return best[0], piecemap.xy(here), piecemap.xy(best[1]), piecemap.xy(best[2])
 
 
 def _why(found: Map, piece: Piece, left: list[Any], what: str, lip: float | None = None) -> str:
@@ -518,15 +559,41 @@ def _why(found: Map, piece: Piece, left: list[Any], what: str, lip: float | None
             f"--at {spot}` runs the line on to the piece's edge, or `pieces drop-line MAP --at "
             f"{spot}` takes it out"
         )
-    waist = _across(piece, a, b)
+    waist = _across(piece, a, b, lip, found.lead_mm) if lip is not None else None
     if waist is not None and lip is not None:
-        wide, one, two = waist
+        wide, here, one, two = waist
         line = f"{one[0]:g},{one[1]:g},{two[0]:g},{two[1]:g}"
+        closes = f"which a lip of {lip:g} mm on each side closes over"
+        if near.length > 4.0 * lip:
+            run = (
+                f"a narrow run, about {near.length:.0f} mm of the piece that leaves no opening "
+                f"{LEAST_ACROSS:g} mm wide under a lip of {lip:g} mm on each side, {wide:.2f} mm "
+                f"across at {piecemap.said_at(here)}"
+            )
+        elif wide <= 2.0 * lip + LEAST_ACROSS:
+            run = f"a waist {wide:.2f} mm across at {piecemap.said_at(here)}, {closes}"
+        else:
+            run = (
+                f"a place at {piecemap.said_at(here)} where its edge comes in and the lip, "
+                f"{lip:g} mm from each side, pinches its opening in two: the shortest line "
+                f"across the piece there is {wide:.2f} mm"
+            )
         return (
-            f"a waist {wide:.2f} mm across at {piecemap.said_at(at)}, which a lip of {lip:g} mm "
-            f"on each side closes over: {cut}. `pieces split MAP {piece.id} --line {line}` cuts "
-            "it there into two pieces, each with its own opening. Or give every piece a "
-            f"`--lip` under {wide / 2.0:.2f} mm"
+            f"{run}: {cut}. `pieces split MAP {piece.id} --line {line}` cuts it there into two "
+            "pieces, each with its own opening"
+            + (
+                f". Or give every piece a `--lip` under {wide / 2.0:.2f} mm"
+                if wide <= 2.0 * lip + LEAST_ACROSS
+                else ""
+            )
+        )
+    if lip is not None:
+        return (
+            f"a narrow place near {piecemap.said_at(at)}, under {2.0 * lip:g} mm across, which "
+            f"a lip of {lip:g} mm on each side closes over: {cut}. No one straight line across "
+            f"it was found that cuts the piece in two with a part on each side: `pieces split "
+            f"MAP {piece.id} --line x1,y1,x2,y2,...` takes a line of several points, from one "
+            "edge of the piece to the other across the narrow place"
         )
     return (
         f"a narrow place near {piecemap.said_at(at)} cuts its {what} in two, the parts "

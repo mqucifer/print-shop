@@ -1037,6 +1037,41 @@ def test_a_waist_the_lip_closes_over_is_flagged_refused_and_split(bench: Any) ->
     assert held.verdict == "OK", held.text
 
 
+@pytest.mark.parametrize(
+    ("name", "says", "wide"),
+    [
+        # A band on a slant with its waist a quarter of the way along: the width is the
+        # waist's, 2 mm, not the 18 mm a line along the band was.
+        ("slanted_waist", "a waist 2.0", 2.0),
+        # Round a bend, narrow for 17 mm: the middle between the opening's two halves is in
+        # the bend's hollow, outside the piece, and no line was given.
+        ("bend", "a narrow run, about 18 mm of the piece that leaves no opening", 2.0),
+    ],
+)
+def test_every_waist_a_build_refuses_comes_with_a_line_that_split_takes(
+    bench: Any, name: str, says: str, wide: float
+) -> None:
+    """mqucifer/print-shop#161: on a traced scene one refusal gave an 18 mm "waist", the line's
+    own length along a slanted piece, and another, for a piece round a bend, gave no line and
+    "the parts 49.84 mm apart". The narrow place is found in the piece itself, and its line
+    crosses it square to the nearest edge."""
+    lips = ["--thickness", 3, "--pane", 1, "--lip", 1.2, "--play", 0.25]
+    refused = bench("pieces", "build", f"{name}.json", *lips, "--build-out", name)
+    assert refused.verdict == "FAIL", refused.text
+    why = refused.record["why"]
+    assert says in why and "mm apart" not in why, why
+    line = re.search(r"`pieces split MAP 1 --line ([-0-9.,]+)`", why)
+    assert line, why
+    x1, y1, x2, y2 = (float(v) for v in line.group(1).split(","))
+    assert ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5 == pytest.approx(wide, abs=0.05)
+    cut = bench(
+        "pieces", "split", f"{name}.json", 1, "--line", line.group(1), "--to", f"{name}-1.json"
+    )
+    assert cut.verdict == "OK" and cut.numbers["pieces_after"] == 2, cut.text
+    built = bench("pieces", "build", f"{name}-1.json", *lips, "--build-out", name)
+    assert built.verdict == "OK", built.text
+
+
 def test_a_piece_too_thin_for_a_pane_is_named_and_nothing_is_built(
     bench: Any, broken: Answer
 ) -> None:
@@ -1053,14 +1088,14 @@ def test_a_piece_too_thin_for_a_pane_is_named_and_nothing_is_built(
     # The necked piece is wide, so its line says what cuts its opening in two, and where.
     necked = piece_at(bench.work, "b0.json", NECK)
     neck = next(line for line in said if line.startswith(f"piece {necked},"))
-    assert "a waist 1.00 mm across at (20.0, 20.1)" in neck and "cuts its" not in neck[:40]
-    assert f"`pieces split MAP {necked} --line 2" in neck, "with the line to split it along"
+    assert "a waist 1.00 mm across at (" in neck or "a narrow run, about" in neck, neck
+    assert re.search(rf"`pieces split MAP {necked} --line [0-9.]+,", neck), "with its line"
     around = piece_at(bench.work, "b0.json", ROUND_SMALL)
     assert any(f"piece {around} surrounds piece" in line for line in said)
     assert "so nothing was" in answer.record["why"] and "pieces merge" in answer.record["why"]
     # No line says a wide piece has no pane or opening without what cuts it.
     for line in said:
-        named = ("surrounds", "nothing of it is left", "cuts its", "a waist ")
+        named = ("surrounds", "nothing of it is left", "cuts its", "a waist ", "a narrow run")
         assert any(word in line for word in named), line
     assert not (bench.work / "nothing" / "frame.step").exists()
     thin = bench(
