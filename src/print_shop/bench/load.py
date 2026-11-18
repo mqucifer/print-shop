@@ -38,6 +38,18 @@ what the plastic takes pressed that way to its layers; and the plastic round eac
 again by itself under the bolt's pull and shear and read as strain, as any part is. The reply
 names which is nearest its limit. It's never `OK` on the bolt alone.
 
+**A dovetail joint** (mqucifer/print-shop#170, `dovetail.py` and `load_dovetail.py`) is a tail
+slid into a socket: a leg split for the bed. Its flanks and its seat only push, so what the
+tied solve says the joint carries is put back on its faces as pushes alone. It's judged by the
+worst of: a load that drives the tail out of its seat, which only its latch holds, never
+friction or glue; a load its faces can't balance by pushing, which opens it; the pressure on
+each face; the latch's catch and its tab, solved by itself under what it holds; and the tail's
+neck and the socket's walls, each solved again by itself under the faces' pushes.
+
+**Lifted** (`--lift PART`, mqucifer/print-shop#170), the assembly is held by that part's
+highest level and every other part hangs by its own weight: its solid volume at its material's
+density. That's the case that pulls a leg's lower piece the way its tail slides out.
+
 A touching joint is held by nothing: it fails where it's pulled apart, or where its push falls
 outside the faces that meet, which tips it open; the friction it needs to stay put is a figure,
 held to `--friction` where that's given.
@@ -53,8 +65,8 @@ it, whatever the mesh. Two readings of one figure on opposite sides of its limit
 stiff and less strong than this), a printed part's stiffness the other way (one modulus every
 way), creep under a weight left on for months, a bolt's preload or a joint that opens (it's the
 first, linear answer, with no contact), shear where an insert bears on its plastic, a nut's
-thread, a bolt's length, the parts' own weight, buckling, and anything that isn't still: a knock,
-or someone sitting down.
+thread, a bolt's length, a dovetail's glue and friction, the parts' own weight under a
+`--weight`, buckling, and anything that isn't still: a knock, or someone sitting down.
 """
 
 from __future__ import annotations
@@ -72,8 +84,8 @@ from typing import Any
 
 import numpy as np
 
-from . import load_through
-from .assembly import AXES, DIAMETER, Assembly, Held, Joint, read
+from . import dovetail, load_dovetail, load_through
+from .assembly import AXES, DIAMETER, Assembly, Held, Joint, PartAt, read
 from .cae import freecad
 from .limits import over, said
 from .report import NoAnswer, Report
@@ -324,6 +336,10 @@ class _Model:
                     "meet face to face"
                 )
         self.joint_faces = {j.name: self.met[frozenset(j.between)] for j in self.assembly.joints}
+        for joint in self.assembly.joints:
+            if joint.kind == "dovetail":
+                tail = self.solids[names.index(joint.between[0])]
+                load_dovetail.check(joint, self.joint_faces[joint.name], tail)
         self.between = [f for faces in self.met.values() for f in faces]
 
     def _face_name(self, face: Any) -> str:
@@ -335,10 +351,16 @@ class _Model:
     def hold(self) -> None:
         """The faces each held plane names: fixed, or standing on it."""
         held = list(self.assembly.held)
-        if not held:
+        names = [p.name for p in self.assembly.parts]
+        if self.args.lift is not None:
+            # Lifted by one part: held by that part's highest level, and by nothing else.
+            axis = int(np.abs(self.toward).argmax())
+            span = _span(self.solids[names.index(self.args.lift)].BoundBox, axis)
+            top = span[0 if self.toward[axis] > 0 else 1]
+            held = [Held(AXES[axis], top, "fixed", self.args.lift)]
+        elif not held:
             low = self.shape.BoundBox.ZMin
             held = [Held("z", low, "standing")]
-        names = [p.name for p in self.assembly.parts]
         self.fixed: list[Any] = []
         self.standing: dict[int, list[Any]] = {}
         self.held_parts: set[str] = set()
@@ -353,6 +375,11 @@ class _Model:
                     if _flat(face, axis, one.at) and not any(face.isSame(b) for b in self.between):
                         faces.append(face)
                         self.held_parts.add(name)
+            if not faces and self.args.lift is not None:
+                raise NoAnswer(
+                    f"--lift {one.part}: {one.part} has no flat face at its highest level, "
+                    f"{one.axis}={one.at:g}, to be lifted by"
+                )
             if not faces:
                 box = self.shape.BoundBox
                 raise NoAnswer(
@@ -487,7 +514,7 @@ class _Model:
         forces = element_forces(
             self.points[wired], self.moved[wired], material.modulus_mpa, material.poisson
         )
-        owned = self._owned(wired)
+        owned = self._owned(wired, self.row, self.points)
         self.part_rows = {name: np.unique(wired[owned[k]]) for k, name in enumerate(names)}
         self.within = {}
         for k, name in enumerate(names):
@@ -507,15 +534,16 @@ class _Model:
                     self.outside[name][self.row[node]] += self.held_force.pop(node)
         # A pin's reaction, on no held face of its own: it's nothing where the load is square.
 
-    def _owned(self, wired: np.ndarray) -> np.ndarray:
-        """Which part each element is in, as a row of flags for each part. Elements that share
+    def _owned(self, wired: np.ndarray, row: dict[int, int], points: np.ndarray) -> np.ndarray:
+        """Which part each element is in, as a row of flags for each part: `wired` is each
+        element's nodes as rows of `points`, and `row` each node's. Elements that share
         a face are in one part, but for a face that's one of a joint's triangles: so each part
         is what's reached from one of its elements without crossing a joint, and which part
         that is, is asked of the solid once, at one element's middle."""
         import FreeCAD as App
 
         joined = {
-            tuple(sorted(self.row[n] for n in nodes[:3]))
+            tuple(sorted(row[n] for n in nodes[:3]))
             for face in self.between
             for nodes, _, _ in self._triangles(face)
         }
@@ -543,7 +571,7 @@ class _Model:
                         seen[other] = True
                         reached.append(other)
                         todo.append(other)
-            middle = App.Vector(*self.points[wired[start, :4]].mean(axis=0))
+            middle = App.Vector(*points[wired[start, :4]].mean(axis=0))
             part = next(
                 (k for k, s in enumerate(self.solids) if s.isInside(middle, 1e-6, False)), None
             )
@@ -620,10 +648,58 @@ class _Model:
                 }
             )
 
+    def _weights(self) -> None:
+        """Each part's own weight but the lifted one's (mqucifer/print-shop#170): its solid
+        volume at its material's density, pulling `--toward`, put on every node of its own
+        elements. A uniform pull on a second-order tetrahedron is a fifth of it on each
+        mid-side node, less a twentieth on each corner."""
+        order = sorted(self.nodes)
+        row = {n: i for i, n in enumerate(order)}
+        points = np.array([self.nodes[n] for n in order])
+        wired = np.array([[row[n] for n in self.fem.getElementNodes(e)] for e in self.fem.Volumes])
+        owned = self._owned(wired, row, points)
+        corners = points[wired[:, :4]]
+        volume = np.abs(np.linalg.det(corners[:, 1:] - corners[:, :1])) / 6
+        self.loads = []
+        self.pushed = {}
+        for k, (part, solid) in enumerate(zip(self.assembly.parts, self.placed, strict=True)):
+            if part.name == self.args.lift:
+                continue
+            grams = solid.Volume * part.material.density_g_cm3 / 1000
+            newtons = grams / 1000 * G
+            mine = owned[k]
+            # The mesh's own volume differs from the solid's by its chords on a curved face.
+            each = volume[mine] * newtons / float(volume[mine].sum())
+            shared = np.zeros(len(points))
+            np.add.at(shared, wired[mine, :4], -each[:, None] / 20)
+            np.add.at(shared, wired[mine, 4:], each[:, None] / 5)
+            rows = np.unique(wired[mine])
+            pushes = {order[r]: shared[r] * self.toward for r in rows if shared[r] != 0}
+            for node, push in pushes.items():
+                self.pushed[node] = self.pushed.get(node, 0) + push
+            centre = solid.CenterOfMass
+            middle = np.array([centre.x, centre.y, centre.z])
+            self.loads.append(
+                {
+                    "at": middle,
+                    "part": part.name,
+                    "force": newtons * self.toward,
+                    "patch_mm2": None,
+                    "nodes": [order[r] for r in rows],
+                    "pushes": pushes,
+                    "middle": middle,
+                    "volume_mm3": float(solid.Volume),
+                    "grams": grams,
+                }
+            )
+
     def _add_to(self, path: str) -> None:
         """The loads, the pins that stop a standing assembly sliding, and the held faces'
         reaction asked for, written into the input FreeCAD made."""
-        self._patches()
+        if self.args.lift is not None:
+            self._weights()
+        else:
+            self._patches()
         held = sorted(
             {
                 n
@@ -699,7 +775,8 @@ class _Model:
         names = [p.name for p in self.assembly.parts]
         first = self.solids[names.index(joint.between[0])]
         pieces = []
-        for face in self.joint_faces[joint.name]:
+        of_face = []
+        for index, face in enumerate(self.joint_faces[joint.name]):
             triangles = self._triangles(face)
             if not triangles:
                 continue
@@ -712,6 +789,7 @@ class _Model:
                 if not first.isInside(App.Vector(*inside), 1e-6, False):
                     normal = -normal
                 pieces.append((nodes, area, centre, normal))
+                of_face.append(index)
         if not pieces:
             raise NoAnswer(
                 f"the mesh has no triangle on the joint {joint.name}: give a finer --mesh"
@@ -755,12 +833,22 @@ class _Model:
             "pushed_n": push,
             "outline": outline,
             "faces": list(self.joint_faces[joint.name]),
+            # Each triangle of the faces: its centre, its way out of the first part, its area
+            # and which face it's on.
+            "pieces": (
+                np.array([p[2] for p in pieces]),
+                np.array([p[3] for p in pieces]),
+                np.array([p[1] for p in pieces]),
+                np.array(of_face),
+            ),
         }
 
     def loads_read(self) -> list[dict[str, Any]]:
         found = []
         for load in self.loads:
             moved = self.moved[[self.row[n] for n in load["nodes"] if n in self.row]].mean(axis=0)
+            # A part's own weight says its volume and its mass too.
+            own: dict[str, Any] = {k: load[k] for k in ("volume_mm3", "grams") if k in load}
             found.append(
                 {
                     "at": _list(load["at"], 3),
@@ -770,6 +858,7 @@ class _Model:
                     "middle": _list(load["middle"], 3),
                     "moved": _list(moved),
                     "moves_mm": float(moved @ self.toward),
+                    **own,
                 }
             )
         return found
@@ -870,34 +959,79 @@ def _bolts(joint: Joint, read: dict[str, Any], force: np.ndarray, moment: np.nda
 
 def run(args: Any, report: Report) -> None:
     freecad("load")
-    if args.weight <= 0:
+    args.lift = getattr(args, "lift", None)
+    if args.lift is not None and (args.weight is not None or args.at):
+        raise NoAnswer(
+            "--lift hangs every other part from the one named, by its own weight: it takes no "
+            "--weight and no --at. A weight on it is a load case of its own"
+        )
+    if args.lift is None and (args.weight is None or not args.at):
+        raise NoAnswer(
+            "load takes --weight KG and --at X,Y,Z, the weight and a place it sits on; or "
+            "--lift PART, the assembly lifted by that part with every other part's own weight "
+            "hanging from it"
+        )
+    if args.lift is None and args.weight <= 0:
         raise NoAnswer("--weight is the load in kg, more than 0")
     if args.over <= 0:
         raise NoAnswer("--over is how far round each place the weight is spread, more than 0 mm")
     assembly = read(args.assembly)
+    if args.lift is not None and args.lift not in [p.name for p in assembly.parts]:
+        raise NoAnswer(
+            f"--lift {args.lift}: the parts are {', '.join(p.name for p in assembly.parts)}"
+        )
     stiff = {(p.material.modulus_mpa, p.material.poisson) for p in assembly.parts}
     if len(stiff) > 1:
         raise NoAnswer("parts of different stiffness aren't solved together yet: one material")
     placed = _placed(assembly)
     # Each through-bolt's way through both parts, before anything is solved.
     ways = load_through.ways(assembly, placed)
+    # And each dovetail's latch as what it catches on.
+    catches = {
+        j.name: load_dovetail.catch(assembly, j, placed)
+        for j in assembly.joints
+        if j.kind == "dovetail"
+    }
     size = _mesh_size(placed, args.mesh)
     fine = _solved(assembly, placed, args, size)
     coarse = _solved(assembly, placed, args, round(size * COARSER, 3))
-    force = args.weight * G
-    report.line(
-        f"the assembly: {len(assembly.parts)} part(s) and {len(assembly.joints)} joint(s) from "
-        f"{args.assembly}, {'; '.join(fine['held'])}; {args.weight:g} kg, {force:.2f} N, "
-        f"--toward {args.toward}, shared between {len(args.at)} place(s), each over the surface "
-        f"within {args.over:g} mm of it; a mesh of at most {size:g} mm ({fine['nodes']} nodes, "
-        f"{fine['elements']} elements, meshed in {fine['mesh_s']} s and solved in "
-        f"{fine['solve_s']} s)"
+    force = float(sum(np.linalg.norm(one["force"]) for one in fine["raw_loads"]))
+    meshed = (
+        f"a mesh of at most {size:g} mm ({fine['nodes']} nodes, {fine['elements']} elements, "
+        f"meshed in {fine['mesh_s']} s and solved in {fine['solve_s']} s)"
     )
+    start = (
+        f"the assembly: {len(assembly.parts)} part(s) and {len(assembly.joints)} joint(s) from "
+        f"{args.assembly}, "
+    )
+    if args.lift is not None:
+        args.weight = force / G
+        dense = sorted(
+            {
+                f"{p.material.name} at {p.material.density_g_cm3:g} g/cm³, from "
+                f"{p.material.density_source}"
+                for p in assembly.parts
+                if p.name != args.lift
+            }
+        )
+        report.line(
+            f"{start}lifted by {args.lift}: {'; '.join(fine['held'])}, and held by nothing "
+            f"else, the assembly's own `held` set aside. Every other part hangs by its own "
+            f"weight, --toward {args.toward}: its solid volume, {'; '.join(dense)}, "
+            f"{1000 * args.weight:.2f} g and {force:.4f} N in all; {meshed}"
+        )
+        report.numbers["lift"] = args.lift
+    else:
+        report.line(
+            f"{start}{'; '.join(fine['held'])}; {args.weight:g} kg, {force:.2f} N, "
+            f"--toward {args.toward}, shared between {len(args.at)} place(s), each over the "
+            f"surface within {args.over:g} mm of it; {meshed}"
+        )
     off = float(np.linalg.norm(fine["reaction"] + force * fine["toward"]))
     if off > REACTION * force:
         raise NoAnswer(
             f"the held faces' reaction, {_xyz(fine['reaction'])} N as CalculiX sums it, isn't "
-            f"the {force:.2f} N put on, by {off:.3f} N: the load didn't go on as asked"
+            f"the {force:.4g} N put on, by {off:.3f} N: the load didn't go on as asked"
         )
     report.numbers["weight_kg"] = args.weight
     report.numbers["force_n"] = force
@@ -913,11 +1047,18 @@ def run(args: Any, report: Report) -> None:
     fails: list[str] = []
     apart: list[str] = []
     _parts(report, fine, coarse, fails, apart)
-    _joints(assembly, args, report, fine, coarse, fails, apart, (ways, placed))
+    _joints(assembly, args, report, fine, coarse, fails, apart, (ways, placed, catches))
     unread = [n for n, j in report.numbers["joints"].items() if j.get("insert_unread")]
     report.numbers["loads"] = fine["loads"]
     for one, other in zip(fine["loads"], coarse["loads"], strict=True):
         one["coarse_moves_mm"] = other["moves_mm"]
+        if one["patch_mm2"] is None:
+            report.line(
+                f"the part {one['part']} hangs by its own weight: {one['volume_mm3']:.1f} mm³ "
+                f"solid is {one['grams']:.2f} g, {np.linalg.norm(one['force_n']):.4f} N, at its "
+                f"middle, {_xyz(one['middle'])}; it moves {one['moves_mm']:.4f} mm {args.toward}"
+            )
+            continue
         report.line(
             f"the place at {_xyz(one['at'])}, on {one['part']}: it moves {one['moves_mm']:.3f} mm "
             f"{args.toward} under its {np.linalg.norm(one['force_n']):.2f} N, spread over "
@@ -942,15 +1083,23 @@ def run(args: Any, report: Report) -> None:
     )
     report.second(
         f"the held faces' reaction, as CalculiX sums it: {_xyz(fine['reaction'])} N, against the "
-        f"{force:.2f} N put on --toward {args.toward}, {off:.4f} N apart"
+        f"{force:.4g} N put on --toward {args.toward}, {off:.4f} N apart"
     )
     sources = sorted({p.material.source for p in assembly.parts})
     report.line("the limits are from " + "; ".join(sources))
-    report.note(
-        "each part is read as solid, with one stiffness every way, and every joint as one piece "
-        "while it holds: walls and infill, creep, a joint that opens and the parts' own weight "
-        "aren't in it"
-    )
+    if args.lift is not None:
+        report.note(
+            "each part is read as solid, with one stiffness every way, and hangs at its solid "
+            "weight, which is more than a printed part's with its walls and infill: creep, a "
+            f"knock, and the weight of anything bought that hangs with them aren't in it, and "
+            f"nor is {args.lift}'s own weight, which is in the hand that lifts it"
+        )
+    else:
+        report.note(
+            "each part is read as solid, with one stiffness every way, and every joint as one "
+            "piece while it holds: walls and infill, creep, a joint that opens and the parts' "
+            "own weight aren't in it"
+        )
     if apart:
         report.verdict(
             "DISAGREE",
@@ -974,12 +1123,18 @@ def run(args: Any, report: Report) -> None:
         )
     else:
         worst = max(fine["parts"].items(), key=lambda p: p[1]["across_layers_pct"])
+        under = (
+            f"lifted by {args.lift}, with {1000 * args.weight:.1f} g hanging from it,"
+            if args.lift is not None
+            else f"under {args.weight:g} kg"
+        )
         report.verdict(
             "OK",
-            f"under {args.weight:g} kg every part is within its material's limits and every "
+            f"{under} every part is within its material's limits and every "
             f"joint holds: the most across any part's layers is "
-            f"{worst[1]['across_layers_pct']:.3f}%, in {worst[0]}, and the loaded place moves "
-            f"{moves_most:.3f} mm",
+            f"{worst[1]['across_layers_pct']:.3f}%, in {worst[0]}, and "
+            + ("what hangs" if args.lift is not None else "the loaded place")
+            + f" moves {moves_most:.3f} mm",
         )
 
 
@@ -1046,10 +1201,10 @@ def _joints(
     coarse: dict[str, Any],
     fails: list[str],
     apart: list[str],
-    through: tuple[dict[str, list[dict[str, Any]]], list[Any]],
+    through: tuple[dict[str, list[dict[str, Any]]], list[Any], dict[str, Any]],
 ) -> None:
     """Each joint's force, and whether what holds it can."""
-    force = args.weight * G
+    force = report.numbers["force_n"]
     saved: dict[str, Any] = {}
     for joint in assembly.joints:
         read, other = fine["joints"][joint.name], coarse["joints"][joint.name]
@@ -1102,9 +1257,15 @@ def _joints(
             )
         if joint.kind == "bolted":
             _bolted(joint, report, one, read, other, statics, fails, apart)
-        elif joint.kind == "through":
-            ways, placed = through
+        elif joint.kind in ("through", "dovetail"):
+            ways, placed, catches = through
             solids = [placed[[p.name for p in assembly.parts].index(n)] for n in joint.between]
+            if joint.kind == "dovetail":
+                _dovetail(
+                    assembly, joint, report, one, read, other, statics, fails, apart,
+                    catches[joint.name], solids,
+                )  # fmt: skip
+                continue
             _through(
                 assembly, joint, report, one, read, other, statics, fails, apart,
                 ways[joint.name], solids,
@@ -1381,6 +1542,371 @@ def _through(
         "hard presses its washers on the plastic by its own preload, which isn't in this, and "
         "PETG creeps under it. The pressure is taken as even under each washer"
     )
+
+
+#: A dovetail's faces said one by one, the most pushed first: the rest are counted.
+FACES_SAID = 6
+
+
+def _pressed(parts: list[PartAt], way: np.ndarray) -> tuple[float, str, str]:
+    """The least pressure two parts that meet take pushed along `way`: the figure, which way
+    that is to that part's layers, and the part."""
+    found = [(*part.material.press(way, part.layers_way()), part.name) for part in parts]
+    return min(found)
+
+
+def _dovetail(
+    assembly: Assembly,
+    joint: Joint,
+    report: Report,
+    one: dict[str, Any],
+    read: dict[str, Any],
+    other: dict[str, Any],
+    statics: tuple[np.ndarray, np.ndarray] | None,
+    fails: list[str],
+    apart: list[str],
+    caught: dict[str, Any] | None,
+    solids: list[Any],
+) -> None:
+    """A tapered dovetail (mqucifer/print-shop#170): which way the load drives its tail, its
+    flanks and its seat as pushes alone, its latch against what's left to hold, and the tail's
+    neck and the socket's walls solved again by themselves. The joint's answer is the worst of
+    them, named. Glue is counted nowhere."""
+    name = joint.name
+    tail, socket = joint.between
+    parts = [assembly.part(n) for n in joint.between]
+    slides = joint.slides_way()
+    total = report.numbers["force_n"]
+    assert joint.slides is not None
+    out = ("-" if joint.slides[0] == "+" else "+") + joint.slides[1]
+
+    def driven(force: np.ndarray) -> float:
+        """How hard the load drives the tail along its way in: what the socket puts on the
+        tail is the other way."""
+        return -float(force @ slides)
+
+    def bedded(pieces: Any, force: np.ndarray, moment: np.ndarray) -> tuple[Any, bool, Any]:
+        """The faces' pushes that balance what the joint carries: by its flanks and its seat
+        alone, and with its latch where those leave something over."""
+        centres, normals, areas, _ = pieces
+        plain = dovetail.bed(centres, normals, areas, force, moment, read["at"])
+        if plain["holds"] or caught is None:
+            return plain, False, areas
+        more = load_dovetail.catch_patches(caught, slides)
+        every = (
+            np.vstack([centres, more[0]]),
+            np.vstack([normals, more[1]]),
+            np.concatenate([areas, more[2]]),
+        )
+        return dovetail.bed(*every, force, moment, read["at"]), True, every[2]
+
+    arms = np.linalg.norm(read["pieces"][0] - read["at"], axis=1).max()
+    if max(np.linalg.norm(read["force"]), np.linalg.norm(read["moment"]) / arms) <= (
+        NOTHING * total
+    ):
+        one.update(slides=joint.slides, drive_n=driven(read["force"]), opens=False, latched=False)
+        report.line(f"the dovetail joint {name} carries nothing to speak of under this load")
+        return
+    drive = driven(read["force"])
+    leaving = drive < -NOTHING * total
+    one.update(slides=joint.slides, drive_n=drive)
+    if leaving:
+        way = f"out of its seat, {out}, the way it would leave, by {-drive:.2f} N"
+    elif drive > NOTHING * total:
+        way = f"into its seat by {drive:.2f} N"
+    else:
+        way = "neither in nor out, to speak of"
+    report.line(
+        f"its tail, on {tail}, slides {joint.slides} into its socket, in {socket}, toward its "
+        f"seat: this load drives it {way}, as joints.{name}.drive_n (more than 0 is into its "
+        "seat)"
+    )
+    seconds = {"on the coarser mesh": (other["pieces"], other["force"], other["moment"])}
+    if statics is not None:
+        seconds["by statics"] = (read["pieces"], *statics)
+    for how, (_, force, _) in seconds.items():
+        again = driven(force)
+        if (again < -NOTHING * total) != leaving:
+            apart.append(
+                f"the dovetail joint {name}'s tail is driven {drive:.2f} N toward its seat by "
+                f"the solve and {again:.2f} N {how}, either side of leaving it"
+            )
+    # Its faces, pushing only.
+    result, latched, areas = bedded(read["pieces"], read["force"], read["moment"])
+    centres, normals, _, of_face = read["pieces"]
+    count = len(of_face)
+    push = result["pressure"] * areas
+    faces: list[dict[str, Any]] = []
+    for index in sorted(set(of_face.tolist())):
+        mine = of_face == index
+        normal = (normals[mine] * areas[:count][mine, None]).sum(axis=0)
+        normal = normal / np.linalg.norm(normal)
+        limit, pressed, weaker = _pressed(parts, normal)
+        faces.append(
+            {
+                "kind": dovetail.kind(normal, slides),
+                "at": _list((centres[mine] * areas[:count][mine, None]).sum(axis=0)
+                            / areas[:count][mine].sum(), 3),
+                "normal": _list(normal),
+                "area_mm2": float(areas[:count][mine].sum()),
+                "push_n": float(push[:count][mine].sum()),
+                "bears_mm2": float(areas[:count][mine][push[:count][mine] > 0].sum()),
+                "pressure_mpa": float(result["pressure"][:count][mine].max()),
+                "pressure_limit_mpa": limit,
+                "pressed": pressed,
+                "pressed_part": weaker,
+            }
+        )  # fmt: skip
+    faces.sort(key=lambda f: -f["push_n"])
+    latch_n = float(push[count:].sum()) if latched else 0.0
+    one.update(
+        faces=faces,
+        opens=not result["holds"],
+        latched=latched,
+        left_n=_list(result["left_n"]),
+        left_nmm=_list(result["left_nmm"]),
+    )
+    pushing = [f for f in faces if f["push_n"] > NOTHING * total]
+    report.line(
+        f"  its {len(faces)} face(s) only push: {sum(f['kind'] == 'seat' for f in faces)} "
+        f"seat(s), square to the slide, and {sum(f['kind'] == 'flank' for f in faces)} "
+        f"flank(s), along it. Under this load {len(pushing)} push"
+        + (", and the rest have come away or carry nothing" if len(pushing) < len(faces) else "")
+        + f", as joints.{name}.faces, the most pushed first"
+    )
+    for face in pushing[:FACES_SAID]:
+        report.line(
+            f"    a {face['kind']} at {_xyz(face['at'])}, facing {_xyz(face['normal'])} out of "
+            f"{tail}: pushed by {face['push_n']:.2f} N over {face['bears_mm2']:.1f} of its "
+            f"{face['area_mm2']:.1f} mm², {face['pressure_mpa']:.3f} MPa at most, against "
+            f"{face['pressure_limit_mpa']:g} MPa pressed {face['pressed']} in "
+            f"{face['pressed_part']}"
+        )
+    if len(pushing) > FACES_SAID:
+        report.line(f"    and {len(pushing) - FACES_SAID} more, pushed less")
+    for how, (pieces, force, moment) in seconds.items():
+        again, again_latched, again_areas = bedded(pieces, force, moment)
+        held = float((again["pressure"] * again_areas)[len(pieces[3]) :].sum())
+        report.second(
+            f"the dovetail joint {name}'s faces {how}: "
+            + ("they balance what it carries" if again["holds"] else "they leave "
+               f"{np.linalg.norm(again['left_n']):.2f} N of it held by nothing")
+            + (f", its latch holding {held:.2f} N" if again_latched else "")
+        )  # fmt: skip
+        if again["holds"] != result["holds"]:
+            apart.append(
+                f"the dovetail joint {name}'s faces balance what it carries "
+                + ("by the solve and not " if result["holds"] else "not by the solve and do ")
+                + how
+            )
+    if not result["holds"]:
+        left, turn = np.linalg.norm(result["left_n"]), np.linalg.norm(result["left_nmm"])
+        along = float(result["left_n"] @ slides)
+        one.update(gives_first="nothing holds what its faces can't push back on")
+        if caught is None and leaving:
+            fails.append(
+                f"the dovetail joint {name}: this load drives the tail out of its seat by "
+                f"{-drive:.2f} N, {out}, and it has no latch: only friction or glue would "
+                "hold it, and neither is counted. Give it a latch at its seat, or point the "
+                "taper so that this load seats it"
+            )
+        else:
+            fails.append(
+                f"the dovetail joint {name} opens: its flanks and its seat can only push, and "
+                f"pushing they leave {left:.2f} N and {turn:.1f} N·mm of what it carries held "
+                "by nothing"
+                + (", its latch counted" if caught is not None else "")
+                + (
+                    f"; {along:.2f} N of that is along the way out, {out}, where a taper's "
+                    "flanks squeeze the tail back out as they're pushed, and only a latch "
+                    "would hold it: friction and glue aren't counted"
+                    if along > NOTHING * total and caught is None
+                    else ": a face there would have to pull"
+                )
+            )
+        report.line(
+            f"  pushing alone, its faces leave {left:.2f} N, {_xyz(result['left_n'])}, and "
+            f"{turn:.1f} N·mm of what the joint carries held by nothing, as "
+            f"joints.{name}.left_n: the tail's neck and the socket's walls aren't read under "
+            "a load the joint doesn't hold"
+        )
+        return
+    #: Every reading as its share of its limit, to name the nearest.
+    shares: list[tuple[float, str]] = []
+    for face in pushing:
+        most = face["pressure_limit_mpa"]
+        where = f"the {face['kind']} at {_xyz(face['at'])}"
+        shares.append(
+            (face["pressure_mpa"] / most,
+             f"the pressure on {where}, at {face['pressure_mpa']:.2f} MPa of {most:g} MPa")
+        )  # fmt: skip
+        if over(face["pressure_mpa"], most):
+            fails.append(
+                f"the dovetail joint {name}: {where} is pressed by "
+                f"{said(face['pressure_mpa'], most, 2)} MPa, {face['pressed']} in "
+                f"{face['pressed_part']}, over its {most:g} MPa: a longer or deeper tail, or a "
+                "seat square to the slide to take the weight off the taper"
+            )
+    press_source = parts[0].material.press_source
+    if caught is not None:
+        _latch(assembly, joint, report, one, caught, latch_n, solids, shares, fails, apart)
+    carried = (read["force"], read["moment"], read["at"])
+    for part, solid, role in zip(parts, solids, ("the tail's neck", "the socket's walls"),
+                                 strict=True):  # fmt: skip
+        with _quiet():
+            fine, rough = (
+                load_dovetail.around(
+                    solid, part, joint, read["faces"], carried, caught if latched else None, by
+                )
+                for by in (1.0, COARSER)
+            )
+        key = "neck" if part.name == tail else "walls"
+        one[key] = {**fine, "coarse": rough, "part": part.name}
+        where = f"{role}, in {part.name}"
+        report.line(
+            f"  {where}, cut off {fine['held_mm']:.1f} mm from the joint and held there "
+            f"({', '.join(fine['cut_on'])}), under the faces' pushes ({fine['elements']} "
+            f"elements of at most {fine['mesh_mm']:g} mm): pulled across its layers by "
+            f"{fine['across_layers_pct']:.3f}% at most, at {_xyz(fine['across_at'])}, against "
+            f"{part.material.across_pct:g}%; its largest stretch any way is a "
+            f"{fine['stretch_is']} of {fine['stretch_pct']:.3f}%, at "
+            f"{_xyz(fine['stretch_at'])}, against {part.material.along_pct:g}%, as "
+            f"joints.{name}.{key}"
+        )
+        report.second(
+            f"the dovetail joint {name}: {where} on a mesh of at most {rough['mesh_mm']:g} mm: "
+            f"{rough['across_layers_pct']:.3f}% across its layers "
+            f"({_share(rough['across_layers_pct'], fine['across_layers_pct'])} apart) and "
+            f"{rough['stretch_pct']:.3f}% any way "
+            f"({_share(rough['stretch_pct'], fine['stretch_pct'])} apart)"
+        )
+        _strained(f"the dovetail joint {name}: {where}", where, fine, rough, part, shares, fails,
+                  apart, "make it wider or deeper there, round its inside corners, or lay the "
+                  "part so its layers run along this pull")  # fmt: skip
+    share, nearest = max(shares) if shares else (0.0, "nothing: it carries nothing to speak of")
+    one.update(gives_first=nearest, nearest_share=share)
+    report.line(
+        f"  of its faces, its latch, the tail's neck and the socket's walls, the nearest its "
+        f"limit is {nearest}: {100 * share:.1f}% of it, as joints.{name}.nearest_share"
+    )
+    if press_source:
+        report.line(f"  what the plastic takes pressed is from {press_source}")
+    report.note(
+        f"the dovetail joint {name} is read with no glue and no friction: each face pushes "
+        "square to itself, in proportion to how far the tail is pressed into it, the tail "
+        "taken as stiff, which is a reading of its balance and not a contact solve. It's "
+        "read where the file puts it, seated, with no play: a tail drawn loose in its socket "
+        "meets it on fewer faces than a printed one does. The latch's way on is the "
+        "harness's to read, with `fit-on` and `bend`"
+    )
+
+
+def _strained(
+    where: str,
+    short: str,
+    fine: dict[str, Any],
+    rough: dict[str, Any],
+    part: PartAt,
+    shares: list[tuple[float, str]],
+    fails: list[str],
+    apart: list[str],
+    change: str,
+) -> None:
+    """A piece of a part solved by itself on two meshes, against its material's limits."""
+    for key, most, what, at in (
+        ("across_layers_pct", part.material.across_pct, "pulled across its layers", "across_at"),
+        ("stretch_pct", part.material.along_pct, "stretched", "stretch_at"),
+    ):
+        value = fine[key]
+        shares.append((value / most, f"{short}, {what} by {value:.3f}% of {most:g}%"))
+        if over(value, most) != over(rough[key], most):
+            apart.append(
+                f"{where} is {what} by {said(value, most)}% on the mesh and "
+                f"{said(rough[key], most)}% on the coarser one, either side of its {most:g}% "
+                "limit"
+            )
+        elif over(value, most):
+            fails.append(
+                f"{where} is {what} by {said(value, most, 2)}% at {_xyz(fine[at])}, over its "
+                f"material's {most:g}%: {change}"
+            )
+
+
+def _latch(
+    assembly: Assembly,
+    joint: Joint,
+    report: Report,
+    one: dict[str, Any],
+    caught: dict[str, Any],
+    holds: float,
+    solids: list[Any],
+    shares: list[tuple[float, str]],
+    fails: list[str],
+    apart: list[str],
+) -> None:
+    """A dovetail's latch against what it has to hold: the pressure on its catch, and its tab,
+    solved by itself with that pull on its hook."""
+    name = joint.name
+    parts = [assembly.part(n) for n in joint.between]
+    on = assembly.part(caught["on"])
+    solid = solids[joint.between.index(caught["on"])]
+    saved: dict[str, Any] = {
+        "on": caught["on"],
+        "catch_mm2": caught["area_mm2"],
+        "catch_at": _list(caught["at"], 3),
+        "play_mm": caught["gap_mm"],
+        "holds_n": holds,
+    }
+    one["latch"] = saved
+    report.line(
+        f"  its latch, a tab on {caught['on']}, catches {caught['other']} over "
+        f"{caught['area_mm2']:.2f} mm² round {_xyz(caught['at'])}, {caught['gap_mm']:.3f} mm "
+        "clear of it along the slide, read from the two parts' own faces"
+    )
+    if holds <= NOTHING * report.numbers["force_n"]:
+        report.line("  under this load its flanks and its seat hold it, and the latch nothing")
+        return
+    most, pressed, weaker = _pressed(parts, joint.slides_way())
+    pressure = holds / caught["area_mm2"]
+    saved.update(pressure_mpa=pressure, pressure_limit_mpa=most)
+    shares.append(
+        (pressure / most, f"the pressure on the latch's catch, at {pressure:.2f} MPa of "
+         f"{most:g} MPa")
+    )  # fmt: skip
+    report.line(
+        f"  the latch has {holds:.2f} N to hold, as joints.{name}.latch.holds_n: what draws "
+        f"the tail out, and what its flanks add as they're pushed. On its catch that's "
+        f"{pressure:.3f} MPa, against {most:g} MPa pressed {pressed} in {weaker}"
+    )
+    if over(pressure, most):
+        fails.append(
+            f"the dovetail joint {name}'s latch: its catch is pressed by "
+            f"{said(pressure, most, 2)} MPa, {pressed} in {weaker}, over its {most:g} MPa: a "
+            "deeper or wider hook"
+        )
+    with _quiet():
+        fine, rough = (load_dovetail.tab(solid, on, joint, caught, holds, by)
+                       for by in (1.0, COARSER))  # fmt: skip
+    saved["tab"] = {**fine, "coarse": rough}
+    report.line(
+        f"  its tab, {fine['thickness_mm']:.2f} mm thick at its root, held there with that "
+        f"pull on its hook ({fine['elements']} elements of at most {fine['mesh_mm']:g} mm): "
+        f"pulled across its layers by {fine['across_layers_pct']:.3f}% at most, at "
+        f"{_xyz(fine['across_at'])}, against {on.material.across_pct:g}%; its largest stretch "
+        f"any way is a {fine['stretch_is']} of {fine['stretch_pct']:.3f}%, at "
+        f"{_xyz(fine['stretch_at'])}, against {on.material.along_pct:g}%, as "
+        f"joints.{name}.latch.tab"
+    )
+    report.second(
+        f"the dovetail joint {name}'s tab on a mesh of at most {rough['mesh_mm']:g} mm: "
+        f"{rough['across_layers_pct']:.3f}% across its layers "
+        f"({_share(rough['across_layers_pct'], fine['across_layers_pct'])} apart) and "
+        f"{rough['stretch_pct']:.3f}% any way "
+        f"({_share(rough['stretch_pct'], fine['stretch_pct'])} apart)"
+    )
+    _strained(f"the dovetail joint {name}'s tab", "the latch's tab", fine, rough, on, shares,
+              fails, apart, "a thicker or wider tab, a hook nearer its line, or the part laid "
+              "so the tab's length runs along its layers")  # fmt: skip
 
 
 def _touching(

@@ -13,10 +13,10 @@ from typing import Any
 import numpy as np
 import pytest
 
-from print_shop.bench import assembly, host, through
+from print_shop.bench import assembly, dovetail, host, through
 from print_shop.bench.load import MIDS, beyond, bolt_pulls, element_forces
 from print_shop.bench.report import NoAnswer
-from print_shop.rounds import needs, skills, toolsets
+from print_shop.rounds import needs, reports, skills, toolsets
 
 FURNITURE = toolsets.FURNITURE
 Z = np.array([0.0, 0.0, 1.0])
@@ -327,6 +327,181 @@ def pulls(force: list[float], moment: list[float], bolts: list[list[float]]) -> 
     )  # fmt: skip
     return [b["pull_n"] for b in found]
 
+# A dovetail: its joint in the file, and its faces pushing only (mqucifer/print-shop#170)
+
+DOVETAIL = {"between": ["a", "b"], "kind": "dovetail", "slides": "-z"}
+LATCH = {"on": "a", "arm": [[-3, -1, 10], [3, 2, 30]], "root": "z=30"}
+#: A tapered tail's flank, as the planted one leans: 2 mm wider at its far face, 6 mm in, and
+#: 2 mm narrower over its 40 mm length. Its share along the slide is the taper's slope.
+FLANK = np.array([240.0, 80.0, -12.0]) / np.linalg.norm([240.0, 80.0, -12.0])
+DOWN = np.array([0.0, 0.0, -1.0])
+
+
+def test_a_dovetail_joint_names_the_way_its_tail_slides_in_and_its_latch(tmp_path: Path) -> None:
+    """The tail's part is named first and the socket's second. `slides` is the way the tail
+    goes in, toward its seat. A latch is the part its tab is on, a box round the tab and the
+    plane of its root, as `bend` takes an arm."""
+    joint = assembly.read(written(tmp_path, joints=[DOVETAIL])).joints[0]
+    assert (joint.kind, joint.between, joint.slides, joint.latch) == (
+        "dovetail", ("a", "b"), "-z", None,
+    )  # fmt: skip
+    assert joint.slides_way() == pytest.approx([0, 0, -1])
+    assert joint.holds() is None, "nothing bought holds it"
+    latched = assembly.read(written(tmp_path, joints=[{**DOVETAIL, "latch": LATCH}])).joints[0]
+    assert latched.latch == assembly.Latch("a", ((-3, -1, 10), (3, 2, 30)), ("z", 30.0))
+    # The box's corners in either order.
+    turned = {**LATCH, "arm": [[3, 2, 30], [-3, -1, 10]]}
+    again = assembly.read(written(tmp_path, joints=[{**DOVETAIL, "latch": turned}])).joints[0]
+    assert again.latch == latched.latch
+
+
+@pytest.mark.parametrize(
+    ("joint", "said"),
+    [
+        ({"between": ["a", "b"], "kind": "dovetail"}, "`slides` is the way the tail, on a"),
+        ({**DOVETAIL, "slides": "z"}, r"one of \+x, -x, \+y, -y, \+z, -z"),
+        ({**DOVETAIL, "slides": "down"}, "toward its seat"),
+        # Glue channels are the parts' shape: no field gives glue, or anything else, a figure.
+        ({**DOVETAIL, "glue": "epoxy"}, "gives glue: a dovetail gives `slides`"),
+        ({**DOVETAIL, "glue_n": 200}, "no field gives glue, a bolt or the joint a figure"),
+        ({**DOVETAIL, "pull_n": 200, "source": "a test"}, "gives pull_n, source"),
+        ({**DOVETAIL, "bolt": "m5-8.8"}, "gives bolt"),
+        ({**DOVETAIL, "bonded": True}, "gives bonded"),
+        # And glue can't stand in for it: a glued joint doesn't slide in, or latch.
+        ({"between": ["a", "b"], "kind": "bonded", "slides": "-z"}, "never read as glued"),
+        ({"between": ["a", "b"], "kind": "bonded", "latch": LATCH}, "only a dovetail slides in"),
+        ({"between": ["a", "b"], "kind": "touching", "slides": "-z"}, "never read as touching"),
+        ({**DOVETAIL, "latch": "yes"}, "`latch` is"),
+        ({**DOVETAIL, "latch": {**LATCH, "holds_n": 50}}, "`latch` is"),
+        ({**DOVETAIL, "latch": {**LATCH, "on": "c"}}, "latch is `on` a or b, not c"),
+        ({**DOVETAIL, "latch": {**LATCH, "arm": [[0, 0, 0]]}}, "`latch` is"),
+        ({**DOVETAIL, "latch": {**LATCH, "arm": [[-3, -1, 10], [3, -1, 30]]}}, "no room inside"),
+        ({**DOVETAIL, "latch": {**LATCH, "root": "z=20"}}, "isn't a side of its `arm`"),
+        ({**DOVETAIL, "latch": {**LATCH, "root": "w=30"}}, "`root` axis is one of"),
+    ],
+)  # fmt: skip
+def test_a_dovetail_joint_that_gives_anything_else_is_refused(
+    tmp_path: Path, joint: dict[str, Any], said: str
+) -> None:
+    with pytest.raises(NoAnswer, match=said):
+        assembly.read(written(tmp_path, joints=[joint]))
+
+
+def test_petg_s_density_is_the_datasheet_s_with_its_table() -> None:
+    """A part's own weight is its solid volume at this: 1.27 g/cm³, ISO 1183, from the
+    sheet's "Typical material properties"."""
+    petg = assembly.MATERIALS["petg"]
+    assert petg.density_g_cm3 == 1.27
+    for said in (
+        "Prusament PETG's datasheet",
+        "version 1.1, 16-02-2022",
+        '"Typical material properties"',
+        '"Density [g/cm3] 1.27"',
+        "ISO 1183",
+    ):
+        assert said in petg.density_source, said
+
+
+def test_a_face_is_a_seat_or_a_flank_by_the_way_the_tail_slides_in() -> None:
+    assert dovetail.kind(DOWN, DOWN) == "seat", "square to the slide: it stops the tail"
+    assert dovetail.kind(FLANK, DOWN) == "flank", "a taper's flank leans into the way in"
+    assert dovetail.kind([0, -1, 0], DOWN) == "flank", "along the slide"
+    assert dovetail.kind([0, 0, 1], DOWN) == "against", "it faces the way out"
+    assert dovetail.kind(FLANK * [1, 1, -1], DOWN) == "against", "a taper pointing the other way"
+
+
+def tail(seat: bool = False) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """A tapered tail's faces in small pieces of 1 mm²: its two flanks, the floor of its
+    socket under its far face, and with `seat` its tip, square to the slide."""
+    along, deep = np.meshgrid(np.linspace(30, 70, 21), np.linspace(-6, 0, 7))
+    centres, normals = [], []
+    for side in (1.0, -1.0):
+        across = side * (3 + (along - 30) / 20 - deep / 3)
+        centres.append(np.column_stack([across.ravel(), deep.ravel(), along.ravel()]))
+        normals.append(np.tile(FLANK * [side, 1, 1], (along.size, 1)))
+    across, along = np.meshgrid(np.linspace(-6, 6, 7), np.linspace(30, 70, 21))
+    centres.append(np.column_stack([across.ravel(), np.full(across.size, -6.0), along.ravel()]))
+    normals.append(np.tile([0.0, -1.0, 0.0], (across.size, 1)))
+    if seat:
+        across, deep = np.meshgrid(np.linspace(-3, 3, 7), np.linspace(-6, 0, 7))
+        centres.append(np.column_stack([across.ravel(), deep.ravel(), np.full(across.size, 30.0)]))
+        normals.append(np.tile(DOWN, (across.size, 1)))
+    both = np.vstack(centres)
+    return both, np.vstack(normals), np.ones(len(both))
+
+
+def bedded(faces: Any, force: list[float]) -> tuple[dict[str, Any], np.ndarray]:
+    centres, normals, areas = faces
+    about = np.array([0.0, -3.0, 50.0])
+    found = dovetail.bed(centres, normals, areas, np.array(force), np.zeros(3), about)
+    return found, found["pressure"] * areas
+
+
+def test_a_weight_that_seats_a_taper_is_held_by_its_flanks_as_a_wedge() -> None:
+    """A weight W on the tail's part pushes the tail down its taper, so the socket pushes it
+    back up with W. With no seat under its tip, only the flanks have a share that way: each
+    is pushed square to itself by W over twice the taper's slope, 12/253.3, so about 10.6 W.
+    Every push is a push, and together they're what the joint carries."""
+    faces = tail()
+    found, push = bedded(faces, [0, 0, 49.0])
+    # The weak spring that takes what no face can holds a millionth of the weight here.
+    assert found["holds"] and np.linalg.norm(found["left_n"]) < 1e-3
+    assert (found["pressure"] >= 0).all()
+    slope = -float(FLANK @ [0, 0, 1])
+    assert slope == pytest.approx(12 / np.linalg.norm([240, 80, 12]))
+    flanks = push[:147].sum(), push[147:294].sum()
+    assert flanks == pytest.approx([49.0 / (2 * slope)] * 2, rel=1e-5)
+    assert -(push[:, None] * faces[1]).sum(axis=0) == pytest.approx([0, 0, 49.0], abs=1e-3)
+    # The flanks' undercut pulls the tail into its socket, and the socket's floor pushes back.
+    assert push[294:].sum() == pytest.approx(2 * flanks[0] * FLANK[1], rel=1e-5)
+
+
+def test_a_seat_square_to_the_slide_takes_the_weight_off_the_taper() -> None:
+    """Each bit of face pushes back in proportion to how far the tail presses into it, and a
+    shift down the slide presses a seat by all of it and a flank by the taper's slope of it.
+    So a seat of 49 mm² takes nearly all the weight, and the flanks a few percent."""
+    found, push = bedded(tail(seat=True), [0, 0, 49.0])
+    assert found["holds"]
+    seat, flanks = push[-49:].sum(), push[:294].sum()
+    assert 0.9 * 49 < seat < 49
+    assert 0 < flanks < 0.1 * 49 / (12 / np.linalg.norm([240, 80, 12]))
+
+
+def test_a_load_that_draws_the_tail_out_is_left_over_as_no_face_can_pull() -> None:
+    """Pulled back up the way it came in, no face of the tail pushes that way, seat or no
+    seat: the whole pull is left over, and it's said as not held."""
+    for seat in (False, True):
+        found, push = bedded(tail(seat), [0, 0, -49.0])
+        assert not found["holds"]
+        assert found["left_n"] == pytest.approx([0, 0, -49.0], abs=1e-3)
+        assert push.sum() == pytest.approx(0, abs=1e-3), "nothing pushes"
+
+
+def test_a_pull_off_the_socket_is_held_by_the_undercut_and_squeezes_a_taper_out() -> None:
+    """Pulled off its socket, +y, the tail is held by its flanks' undercut. But a tapered
+    flank's push has a share up the slide too, and with no friction counted nothing pushes
+    back against that: it's left over, along the way out. With the weight seating it as well,
+    more than that share, the joint holds."""
+    found, push = bedded(tail(seat=True), [0, -30.0, 0])
+    assert not found["holds"]
+    assert push[:294].sum() > 0 and found["left_n"][2] < -1, "squeezed out, +z"
+    assert abs(found["left_n"][2]) == pytest.approx(push[:294].sum() * 12 / 253.3, rel=0.02)
+    seated, _ = bedded(tail(seat=True), [0, -30.0, 49.0])
+    assert seated["holds"]
+
+
+def test_a_latch_is_one_more_face_that_pushes_the_tail_home() -> None:
+    """A latch's catch is a face of the tail's part that looks back along the way in. Added
+    to the tail's own, it holds exactly what draws the tail out."""
+    centres, normals, areas = tail(seat=True)
+    catch = (np.array([[0.0, 0.3, 12.0]]), np.array([[0.0, 0.0, 1.0]]), np.array([3.0]))
+    every = [np.concatenate([a, b]) for a, b in zip((centres, normals, areas), catch,
+                                                    strict=True)]  # fmt: skip
+    about = np.array([0.0, 0.3, 12.0])
+    found = dovetail.bed(every[0], every[1], every[2], np.array([0, 0, -4.9]), np.zeros(3), about)
+    assert found["holds"]
+    assert found["pressure"][-1] * 3.0 == pytest.approx(4.9, rel=1e-3)
+
 
 def test_a_pull_is_shared_between_the_bolts_and_a_push_needs_none() -> None:
     assert pulls([0, 0, 90], [0, 0, 0], [[-5, 0, 0], [5, 0, 0], [0, 3, 0]]) == pytest.approx(
@@ -421,6 +596,29 @@ def test_statics_gives_a_joint_the_load_beyond_it(tmp_path: Path) -> None:
 # Where they run, and the toolset
 
 
+def test_a_dovetail_s_numbers_have_the_shape_a_need_reads() -> None:
+    """A need names a dovetail's figures by their path, such as
+    `joints.upper+lower.latch.holds_n`, so the shapes say what's there."""
+    tab = {"across_at": [0, 0, 0], "across_layers_pct": 0.2, "elements": 9, "mesh_mm": 0.6,
+           "stretch_at": [0, 0, 0], "stretch_is": "pull", "stretch_pct": 0.5}  # fmt: skip
+    face = {"kind": "seat", "at": [0, 0, 0], "normal": [0, 0, -1], "area_mm2": 48.0,
+            "push_n": 46.0, "bears_mm2": 48.0, "pressure_mpa": 1.0, "pressure_limit_mpa": 14.0,
+            "pressed": "along its layers", "pressed_part": "lower"}  # fmt: skip
+    joint = {"kind": "dovetail", "slides": "-z", "drive_n": 49.0, "opens": False,
+             "latched": True, "left_n": [0, 0, 0], "left_nmm": [0, 0, 0], "faces": [face],
+             "latch": {"on": "upper", "catch_mm2": 3.0, "catch_at": [0, 0, 12], "play_mm": 0.2,
+                       "holds_n": 5.0, "pressure_mpa": 1.7, "pressure_limit_mpa": 14.0,
+                       "tab": tab},
+             "neck": tab, "walls": tab}  # fmt: skip
+    numbers = {"joints": {"upper+lower": joint}, "lift": "upper"}
+    assert reports.unlike("load", numbers) == []
+    assert reports.wrong_path("load", "joints.upper+lower.latch.holds_n") is None
+    assert reports.wrong_path("load", "joints.upper+lower.drive_n") is None
+    assert reports.wrong_path("load", "joints.upper+lower.neck.across_layers_pct") is None
+    wrong = {"joints": {"upper+lower": {**joint, "faces": [{**face, "glue_n": 9.0}]}}}
+    assert "glue_n" in reports.unlike("load", wrong)[0]
+
+
 def test_load_runs_in_the_second_image_and_fit_bed_in_the_first() -> None:
     assert host.image_for(["load", "table.json", "--weight", "5"]) == host.CAE_IMAGE
     assert host.image_for(["fit-bed", "table.json"]) == host.IMAGE
@@ -464,6 +662,25 @@ def test_a_load_need_takes_its_weight_from_the_request() -> None:
     assert "`load` is in the furniture toolset, and this run's is the core" in core[0]
 
 
+def test_a_lift_need_has_no_weight_to_quote() -> None:
+    """Lifted by its top, what hangs is the parts' own weight, which the bench works out
+    (mqucifer/print-shop#170): a `lift` need gives `--lift` and no figure. A `load` need
+    still gives the request's weight."""
+
+    def read(entry: dict[str, Any]) -> list[str]:
+        return needs.read([entry], REQUEST, "", FURNITURE)[1]
+
+    assert read(need("load table.json --lift top", "lift")) == []
+    assert "`lift` is read by `load` with `--lift`" in read(
+        need("load table.json --weight 5 --at 200,200,520", "lift")
+    )[0]
+    assert "a `load` need gives its limit, `--weight`" in read(
+        need("load table.json --lift top", "load")
+    )[0]
+    lift = FURNITURE.measure("lift")
+    assert lift is not None and not lift.limited
+
+
 def test_the_skill_says_how_to_split_and_gives_each_check_its_command() -> None:
     body = skills.registry(skills.ALL)["designing-furniture"][1]
     for said in (
@@ -478,10 +695,19 @@ def test_the_skill_says_how_to_split_and_gives_each_check_its_command() -> None:
         "`through` where it takes load",
         "A through joint is never `OK` on its bolt alone",
         '"kind": "through", "bolt": "m5-8.8", "nut": "m5-nut"',
+        # mqucifer/print-shop#170: a part split for the bed, its dovetail, its latch.
+        "a part split for the bed joins with a tapered dovetail",
+        "The taper points so the weight seats it",
+        "Glue channels are a second hold only",
+        "A latch holds the lift",
+        "A leg prints on its side, with its curve in the bed's plane",
+        '"kind": "dovetail", "slides": "-z"',
+        "a dovetail is never named `bonded`",
+        "`load assembly.json --lift top`",
     ):
         assert said in body, said
     for measure in FURNITURE.measures:
-        if measure.name in ("load", "bed-fit"):
+        if measure.name in ("load", "lift", "bed-fit"):
             assert f"| `{measure.name}` | `{measure.commands[0]} " in body, measure.name
-    for term in ("load path", "layers", "split", "joint", "seat", "assembly file"):
+    for term in ("load path", "layers", "split", "joint", "seat", "tail", "latch", "assembly file"):
         assert f"- **{term}**:" in body, term

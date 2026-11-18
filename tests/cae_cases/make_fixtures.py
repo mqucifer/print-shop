@@ -16,6 +16,14 @@ on four legs 10 x 10 x 60, with an assembly file for each way they're joined, he
 60 x 40 on it, each with a 5.5 mm hole, joined by one M5 through-bolt: pulled straight up off
 it, on washers and with the nut in a hex pocket; and as a lap pulled along, the upper plate's
 hole 5.5 mm from its end and 20 mm from it.
+
+`dovetail/` (mqucifer/print-shop#170): two bars 30 mm wide that lap over 40 mm, joined by a
+tapered dovetail: a tail 6 mm proud of the upper bar's lap face, 6 mm wide at its neck where
+it's lowest and 10 at its top, each flank undercut by 2 mm, in a socket in the lower bar that's
+open at its top. It slides in downward, so a weight on the upper bar seats it. With the tail
+4 mm short of its seat each flank has 0.2 mm of play; with the socket 1 mm deeper than the tail
+it's seated on its flanks alone; mirrored top to bottom, the same weight drives it out; and
+with a tab hanging from the upper bar, its hook 0.6 mm into a window in the lower, it's latched.
 """
 
 from __future__ import annotations
@@ -248,9 +256,127 @@ def throughs() -> None:
         assembly(out / f"lap-{name}.json", parts, lapped, wall)
 
 
+#: The dovetailed bars (mqucifer/print-shop#170), as the tests' arithmetic reads them. Both are
+#: `BAR_W` wide along x and meet on the plane y 0: the socket's bar behind it, the tail's in
+#: front, lapped from `LAP[0]` up to `LAP[1]`.
+BAR_W, SOCKET_T, TAIL_T, LAP, BAR_TOP = 30.0, 20.0, 12.0, (30.0, 70.0), 110.0
+#: The tail: how far it stands off the lap face, half its neck's width at its tip and at its
+#: wide end, and how much wider each side is at its far face, the undercut.
+TAIL_DEEP, NECK, FLARE = 6.0, (3.0, 5.0), 2.0
+#: The latch: a tab `TAB_W` wide and `TAB_T` thick hanging `TAB_L` from the tail's bar, its face
+#: `TAB_CLEAR` off the socket's bar, with a hook `HOOK_IN` into a window there, `HOOK_TALL`
+#: tall, `LATCH_PLAY` under the window's top.
+TAB_W, TAB_T, TAB_L, TAB_CLEAR, HOOK_IN, LATCH_PLAY = 5.0, 1.2, 20.0, 0.4, 0.6, 0.2
+#: The arm on the tail's bar that levers the tail off the lap face: how far out, and how tall.
+ARM_OUT, ARM_TALL = 60.0, 40.0
+
+
+def wedge(low: float, high: float, necks: tuple[float, float], grow: float = 0.0) -> Part.Shape:
+    """A tail from z `low` to `high`: a trapezoid `TAIL_DEEP` into -y from the lap face, half
+    as wide at its neck as `necks` says at each end and `FLARE` more at its far face, every face
+    flat. `grow` makes it that much wider a side and deeper, as a socket with play is."""
+    rings = []
+    for z, neck in zip((low, high), necks, strict=True):
+        near, far, deep = neck + grow, neck + FLARE + grow, -(TAIL_DEEP + grow)
+        rings.append([App.Vector(x, y, z) for x, y in
+                      ((-near, 0), (near, 0), (far, deep), (-far, deep))])  # fmt: skip
+    bottom, top = rings
+    faces = [bottom[::-1], top]
+    faces += [[bottom[k], bottom[(k + 1) % 4], top[(k + 1) % 4], top[k]] for k in range(4)]
+    shell = Part.makeShell([Part.Face(Part.makePolygon([*f, f[0]])) for f in faces])
+    solid = Part.makeSolid(shell)
+    if solid.Volume < 0:
+        solid.reverse()
+    return solid
+
+
+def tab() -> Part.Shape:
+    """The latch's tab, hanging from the tail's bar, with its hook at its foot."""
+    foot = LAP[0] - TAB_L
+    arm = box((-TAB_W / 2, TAB_CLEAR, foot), (TAB_W / 2, TAB_CLEAR + TAB_T, LAP[0]))
+    hook = box((-TAB_W / 2, -HOOK_IN, foot), (TAB_W / 2, TAB_CLEAR, foot + 2))
+    return arm.fuse(hook)
+
+
+def window() -> Part.Shape:
+    """The window the hook snaps into, in the socket's bar: its top is the ledge."""
+    foot = LAP[0] - TAB_L
+    top = foot + 2 + LATCH_PLAY
+    return box((-TAB_W / 2 - 1, -2 * HOOK_IN, foot - 0.5), (TAB_W / 2 + 1, 0, top))
+
+
+def dovetails() -> None:
+    """Two bars joined by a tapered dovetail, each way up, seated, latched and on its way in."""
+    out = Path("dovetail")
+    half = BAR_W / 2
+    low, high = LAP
+    socket_bar = box((-half, -SOCKET_T, 0), (half, 0, high))
+    tail_bar = box((-half, 0, low), (half, TAIL_T, BAR_TOP))
+    tail = tail_bar.fuse(wedge(low, high, NECK)).removeSplitter()
+    socket = socket_bar.cut(wedge(low, high, NECK))
+    save(tail, out / "tail.step")
+    save(socket, out / "socket.step")
+    # The socket 1 mm deeper than the tail is long: the tail's tip is clear, and it's seated on
+    # its two flanks alone, as a wedge.
+    slope = (NECK[1] - NECK[0]) / (high - low)
+    deep = socket_bar.cut(wedge(low - 1, high, (NECK[0] - slope, NECK[1])))
+    save(deep, out / "socket-deep.step")
+    # The tail 4 mm short of its seat: each flank is 4 x (5 - 3) / 40 = 0.2 mm clear, across x.
+    out_by = tail.copy()
+    out_by.translate(App.Vector(0, 0, 4))
+    save(out_by, out / "tail-out.step")
+    # Mirrored top to bottom: the tail is widest at its foot, so it goes in upward, through a
+    # channel as wide as its foot, and a weight on its bar drives it back out.
+    up = NECK[::-1]
+    save(tail_bar.fuse(wedge(low, high, up)).removeSplitter(), out / "tail-up.step")
+    channel = wedge(0, low, (up[0], up[0]))
+    save(socket_bar.cut(wedge(low, high, up)).cut(channel), out / "socket-up.step")
+    # Latched: a tab on the tail's bar, and the window its hook snaps into.
+    save(tail.fuse(tab()).removeSplitter(), out / "tail-latch.step")
+    save(socket.cut(window()), out / "socket-latch.step")
+
+    def pair(tail_file: str, socket_file: str, layers: tuple[str, str] = ("y", "y")) -> Rows:
+        return [
+            {"name": "upper", "file": tail_file, "layers": layers[0]},
+            {"name": "lower", "file": socket_file, "layers": layers[1]},
+        ]
+
+    floor = [{"plane": "z=0", "how": "fixed"}]
+    down: Rows = [{"between": ["upper", "lower"], "kind": "dovetail", "slides": "-z"}]
+    assembly(out / "seat.json", pair("tail.step", "socket.step"), down, floor)
+    assembly(out / "wedge.json", pair("tail.step", "socket-deep.step"), down, floor)
+    # The file says the tail goes in upward, and its tip's seat faces the other way.
+    lied: Rows = [{**down[0], "slides": "+z"}]
+    assembly(out / "lied.json", pair("tail.step", "socket.step"), lied, floor)
+    assembly(out / "wrong.json", pair("tail-up.step", "socket-up.step"), lied, floor)
+    foot = low - TAB_L
+    latch = {
+        "on": "upper",
+        "arm": [[-TAB_W / 2 - 0.1, -HOOK_IN - 0.1, foot - 0.1],
+                [TAB_W / 2 + 0.1, TAB_CLEAR + TAB_T + 0.1, low]],
+        "root": f"z={low:g}",
+    }  # fmt: skip
+    latched: Rows = [{**down[0], "latch": latch}]
+    assembly(out / "latch.json", pair("tail-latch.step", "socket-latch.step"), latched, floor)
+    # The same, the tail's bar printed standing: the tab's length is across its layers.
+    standing = pair("tail-latch.step", "socket-latch.step", ("z", "y"))
+    assembly(out / "latch-standing.json", standing, latched, floor)
+    # An arm 60 mm out from the top of the tail's bar, the lower bar held by its back: a weight
+    # at the arm's end seats the tail and levers its top off the lap face, so the tail hangs
+    # by its neck there. That's across its layers printed lap face down, and along them
+    # printed on its side.
+    arm = box((-half, TAIL_T, BAR_TOP - ARM_TALL), (half, TAIL_T + ARM_OUT, BAR_TOP))
+    save(tail.fuse(arm).removeSplitter(), out / "tail-arm.step")
+    back = [{"plane": f"y={-SOCKET_T:g}", "how": "fixed"}]
+    for name, layers in (("across", "y"), ("along", "x")):
+        parts = pair("tail-arm.step", "socket.step", (layers, "z"))
+        assembly(out / f"neck-{name}.json", parts, down, back)
+
+
 def main() -> None:
     loads()
     throughs()
+    dovetails()
     out = Path("snap")
     seated = WALL_Y + ROOM
     save(base(seated), out / "box.step")

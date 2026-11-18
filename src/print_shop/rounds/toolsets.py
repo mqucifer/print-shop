@@ -288,7 +288,9 @@ ENCLOSURE = Toolset(
 #: Furniture: a part bigger than the bed, printed as several and joined, that carries a weight
 #: (mqucifer/print-shop#156, M20's side table). `load` reads the joined parts under the request's
 #: weight, with FreeCAD's FEM in the second image, and `fit-bed` each part against the bed. The
-#: weight is the request's, with no default, so a `load` need quotes it. **No standing checks:**
+#: weight is the request's, with no default, so a `load` need quotes it; a `lift` need, the
+#: assembly lifted by one part with the rest hanging by their own weight
+#: (mqucifer/print-shop#170), has no figure to quote. **No standing checks:**
 #: which file is the assembly, and what weight goes where, are a need's to say.
 FURNITURE_COMMANDS = ("load", "fit-bed")
 FURNITURE = Toolset(
@@ -305,6 +307,16 @@ FURNITURE = Toolset(
             "load assembly.json --weight KG --at X,Y,Z",
             limits=("--weight",),
             limited=True,
+        ),
+        # Lifted by one part (mqucifer/print-shop#170): its limit is the parts' own weight,
+        # which the bench works out, so the request gives none.
+        Measure(
+            "lift",
+            "the joined parts lifted by one of them, every other hanging by its own weight: "
+            "each joint's force, and a dovetail's latch against what it has to hold",
+            ("load",),
+            "load assembly.json --lift PART",
+            flag="--lift",
         ),
         Measure(
             "bed-fit",

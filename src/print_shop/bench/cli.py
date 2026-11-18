@@ -612,24 +612,36 @@ def parser() -> Parser:
     )
     load = sub.add_parser(
         "load",
-        help="joined parts under a weight: each part's worst strain against its layers, each "
-        "joint's force, a through-bolt's washers, nut and the plastic round it, and how far "
-        "the loaded place moves. Runs in the second image, with FreeCAD's FEM",
+        help="joined parts under a weight, or lifted by one of them: each part's worst strain "
+        "against its layers, each joint's force, a through-bolt's washers, nut and the "
+        "plastic round it, a dovetail's flanks, seat and latch, and how far the loaded place "
+        "moves. Runs in the second image, with FreeCAD's FEM",
     )
     load.add_argument(
         "assembly",
         help="the assembly file, JSON: the parts' STEP files, their places, each one's material "
         "and the way its layers are stacked, the joints, and where it's held",
     )
-    load.add_argument("--weight", required=True, type=float, metavar="KG", help="the load, in kg")
+    load.add_argument(
+        "--weight",
+        type=float,
+        metavar="KG",
+        help="the load, in kg: with --at, unless --lift is the load case",
+    )
     load.add_argument(
         "--at",
         action="append",
-        required=True,
         type=_point,
         metavar="X,Y,Z",
         help="a place on the assembly's surface the weight sits on. Give it more than once to "
         "share the weight equally between several",
+    )
+    load.add_argument(
+        "--lift",
+        metavar="PART",
+        help="the assembly lifted by this part, in place of --weight and --at: it's held by "
+        "that part's highest level, and every other part hangs by its own solid weight, "
+        "--toward the way down",
     )
     load.add_argument(
         "--toward",

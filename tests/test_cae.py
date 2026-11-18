@@ -17,10 +17,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 
 from print_shop.bench import host
-from print_shop.rounds import needs, reports
+from print_shop.rounds import end_checks, needs, reports
+from print_shop.rounds.box import Box
 from print_shop.rounds.needs import Need
 
 pytestmark = pytest.mark.cae
@@ -789,3 +791,312 @@ def test_a_through_bolt_with_no_hole_to_pass_through_is_said_and_nothing_is_solv
     assert "in upper, no round hole has its axis through that point" in answer.record["why"]
     assert "passes right through both parts" in answer.record["why"]
     assert answer.record["seconds"] < 10
+
+
+# A tapered dovetail, its latch and the lift (mqucifer/print-shop#170)
+
+#: The bars, as `make_fixtures.py` draws them: the lower 30 x 20 x 70 with the socket in it, the
+#: upper 30 x 12 from z 30 to 110 with the tail on it, lapped on the plane y 0 from z 30 to 70.
+#: The tail is 6 mm proud, 6 mm wide at its neck at its tip and 10 at its top, and 2 mm wider a
+#: side at its far face. A flank leans 2 mm in 40 down the slide and 2 in 6 into the socket, so
+#: its share along the slide is 12 / |(240, 80, 12)|.
+TAPER = 12 / math.hypot(240, 80, 12)
+JOINT = "upper+lower"
+ON_TOP = ("--at", "0,6,110")
+UPWARD = (*ON_TOP, "--toward", "+z")
+ON_ARM = ("--at", "0,62,110")
+#: The latch's tab: 5 mm wide and 1.2 thick, its hook 0.6 into the window, its face 0.4 off
+#: the lower bar. What it holds acts on the catch's middle, 1.3 mm off the tab's own.
+TAB_W, TAB_T, HOOK_IN, TAB_OFF = 5.0, 1.2, 0.6, 0.4 + 1.2 / 2 + 0.6 / 2
+#: The lower bar with its socket and its latch's window, in mm³: the socket is 6 deep and
+#: its width at the neck and at the far face average 10 between them over its 40 mm.
+LOWER_MM3 = 30 * 20 * 70 - 6 * 10 * 40 - 7 * 1.2 * 2.7
+DENSITY = 1.27
+
+
+def driven_out(why: str) -> tuple[float, str]:
+    """The force a reply says drives a tail out of its seat, in N, and which way."""
+    found = re.search(r"drives the tail out of its seat by (\S+) N, ([+-][xyz]),", why)
+    assert found, why
+    return float(found.group(1)), found.group(2)
+
+
+def flanks(joint: dict[str, Any]) -> list[dict[str, Any]]:
+    """A dovetail's two leaning flanks, of its faces."""
+    return [f for f in joint["faces"] if abs(f["normal"][0]) > 0.9]
+
+
+def test_a_weight_that_seats_a_tapered_dovetail_holds_with_every_flank_pushing(cae: Any) -> None:
+    """5 kg on the upper bar drives its tail down the taper into its seat, by the weight. Its
+    faces only push, and together they're what the joint carries: the seat under the tail's
+    tip takes most of the weight, being square to the slide, and both flanks, the socket's
+    floor and the lap faces push too, holding the bars' offset. The tail's neck and the
+    socket's walls are then read under those pushes, each part by itself."""
+    answer = cae("load", "dovetail/seat.json", "--weight", "5", *ON_TOP)
+    assert answer.verdict == "OK" and answer.code == 0, answer.text
+    joint = answer.numbers["joints"][JOINT]
+    assert (joint["kind"], joint["slides"]) == ("dovetail", "-z")
+    assert joint["statics_force_n"] == pytest.approx([0, 0, 5 * G], abs=1e-3)
+    assert joint["drive_n"] == pytest.approx(5 * G, rel=1e-3), "into its seat, by the weight"
+    assert (joint["opens"], joint["latched"]) == (False, False)
+    faces = joint["faces"]
+    assert sorted(f["kind"] for f in faces) == ["flank"] * 5 + ["seat"]
+    assert all(f["push_n"] > 0 and f["pressure_mpa"] > 0 for f in faces), "every one pushes"
+    assert len(flanks(joint)) == 2 and all(f["kind"] == "flank" for f in flanks(joint))
+    # The pushes, each square to its face and into the tail, are what the joint carries.
+    carried = -np.sum([np.array(f["normal"]) * f["push_n"] for f in faces], axis=0)
+    assert carried == pytest.approx(joint["force_n"], abs=0.05)
+    (seat,) = (f for f in faces if f["kind"] == "seat")
+    assert seat["normal"] == pytest.approx([0, 0, -1], abs=1e-6)
+    assert seat["area_mm2"] == pytest.approx(48.0, rel=1e-3), "(6 + 10) / 2 x 6 at its tip"
+    assert 0.85 * 5 * G < seat["push_n"] < 5 * G
+    for piece, part in ((joint["neck"], "upper"), (joint["walls"], "lower")):
+        assert piece["part"] == part
+        assert 0 < piece["across_layers_pct"] < 1.0 and 0 < piece["stretch_pct"] < 5.1
+        assert piece["coarse"]["mesh_mm"] > piece["mesh_mm"]
+    assert 0 < joint["nearest_share"] < 0.2
+    assert "the nearest its limit is" in answer.text
+    assert "no glue and no friction" in answer.text, "what it leaves out is said"
+    assert "faces on the coarser mesh: they balance" in answer.text
+    assert "faces by statics: they balance" in answer.text
+    assert reports.unlike("load", answer.numbers) == []
+    assert answer.record["seconds"] < 120
+
+
+def test_the_reverse_load_on_a_dovetail_with_no_latch_fails_naming_the_unseating_force(
+    cae: Any,
+) -> None:
+    """The same joint with the upper bar pulled up: that's the way its tail came in, and no
+    face of it pushes back that way. With no latch it fails, naming the 49 N, and says only
+    friction or glue would hold it: neither is counted. Nothing is read under a load the
+    joint doesn't hold."""
+    answer = cae("load", "dovetail/seat.json", "--weight", "5", *UPWARD)
+    assert answer.verdict == "FAIL" and answer.code == 1, answer.text
+    why = answer.record["why"]
+    newtons, way = driven_out(why)
+    assert newtons == pytest.approx(5 * G, abs=0.02) and way == "+z"
+    assert "it has no latch: only friction or glue would hold it" in why
+    assert "neither is counted" in why
+    joint = answer.numbers["joints"][JOINT]
+    assert joint["drive_n"] == pytest.approx(-5 * G, rel=1e-3)
+    assert joint["opens"] is True and joint["latched"] is False
+    assert np.linalg.norm(joint["left_n"]) == pytest.approx(5 * G, rel=0.05)
+    assert "neck" not in joint and "walls" not in joint and "latch" not in joint
+    assert reports.unlike("load", answer.numbers) == []
+
+
+def test_a_latch_is_read_against_the_unseating_force_and_holds(cae: Any) -> None:
+    """The same pull, 0.5 kg, with a tab on the upper bar whose hook sits 0.2 mm under a
+    ledge in the lower: the catch is found from the two parts' own faces, 5 x 0.6 mm. The
+    latch holds what draws the tail out, and a little more that the flanks add as the bars'
+    offset pushes them. Its tab is then solved with that pull on its hook: pulled along, and
+    bent by the hook's 1.3 mm offset, ε = F/(E·w·t) + F·e·(t/2)/(E·w·t³/12)."""
+    answer = cae("load", "dovetail/latch.json", "--weight", "0.5", *UPWARD)
+    assert answer.verdict == "OK" and answer.code == 0, answer.text
+    joint = answer.numbers["joints"][JOINT]
+    drawn = 0.5 * G
+    assert joint["drive_n"] == pytest.approx(-drawn, rel=1e-3)
+    assert (joint["opens"], joint["latched"]) == (False, True)
+    latch = joint["latch"]
+    assert latch["on"] == "upper"
+    assert latch["catch_mm2"] == pytest.approx(TAB_W * HOOK_IN, rel=1e-6)
+    assert latch["catch_at"] == pytest.approx([0, -HOOK_IN / 2, 12], abs=1e-6)
+    assert latch["play_mm"] == pytest.approx(0.2, abs=1e-6)
+    assert drawn <= latch["holds_n"] < 1.1 * drawn
+    assert latch["pressure_mpa"] == pytest.approx(latch["holds_n"] / (TAB_W * HOOK_IN))
+    tab = latch["tab"]
+    section, inertia = TAB_W * TAB_T, TAB_W * TAB_T**3 / 12
+    by_hand = 100 * latch["holds_n"] / MODULUS * (1 / section + TAB_OFF * TAB_T / 2 / inertia)
+    assert tab["stretch_pct"] == pytest.approx(by_hand, rel=0.3) and tab["stretch_is"] == "pull"
+    assert tab["coarse"]["stretch_pct"] == pytest.approx(by_hand, rel=0.3)
+    assert tab["across_layers_pct"] < 1.0 and tab["thickness_mm"] == pytest.approx(TAB_T)
+    assert "its latch, a tab on upper, catches lower over 3.00 mm²" in answer.text
+    assert "its latch holding" in answer.text, "on the coarser mesh and by statics too"
+    assert reports.unlike("load", answer.numbers) == []
+    assert answer.record["seconds"] < 120
+
+
+def test_a_latch_s_tab_is_read_across_its_layers(cae: Any) -> None:
+    """Under 1.5 kg the tab is stretched 1.5% along its length. With its bar printed lap
+    face down, that's along its layers, and it holds. With the bar printed standing, the
+    tab's length is across its layers, over the 1% they take: it fails, on both meshes."""
+    lying = cae("load", "dovetail/latch.json", "--weight", "1.5", *UPWARD)
+    standing = cae("load", "dovetail/latch-standing.json", "--weight", "1.5", *UPWARD)
+    assert lying.verdict == "OK", lying.text
+    assert standing.verdict == "FAIL" and standing.code == 1, standing.text
+    assert "'s tab is pulled across its layers by" in standing.record["why"]
+    assert "the tab's length runs along its layers" in standing.record["why"]
+    flat, upright = (a.numbers["joints"][JOINT]["latch"]["tab"] for a in (lying, standing))
+    assert flat["stretch_pct"] == pytest.approx(upright["stretch_pct"]), "the same solve"
+    assert upright["across_layers_pct"] > 1.0 and upright["coarse"]["across_layers_pct"] > 1.0
+    assert flat["across_layers_pct"] < 1.0 < flat["stretch_pct"] < 5.1
+    assert "the latch's tab" in standing.numbers["joints"][JOINT]["gives_first"]
+
+
+def test_a_taper_pointing_the_wrong_way_for_its_load_fails(cae: Any) -> None:
+    """The same bars with the tail widest at its foot: it goes in upward, so the weight on
+    its bar drives it back out, and nothing holds it. And a file that says a tail goes in a
+    way its own faces lean against is refused before anything is solved."""
+    answer = cae("load", "dovetail/wrong.json", "--weight", "5", *ON_TOP)
+    assert answer.verdict == "FAIL" and answer.code == 1, answer.text
+    newtons, way = driven_out(answer.record["why"])
+    assert newtons == pytest.approx(5 * G, abs=0.02) and way == "-z"
+    assert "point the taper so that this load seats it" in answer.record["why"]
+    joint = answer.numbers["joints"][JOINT]
+    assert joint["slides"] == "+z" and joint["drive_n"] == pytest.approx(-5 * G, rel=1e-3)
+    lied = cae("load", "dovetail/lied.json", "--weight", "5", *ON_TOP)
+    assert lied.verdict == "NO ANSWER" and lied.code == 2, lied.text
+    assert "against the way the file says the tail slides in, +z" in lied.record["why"]
+    assert "the tail could never have gone in that way" in lied.record["why"]
+    assert lied.record["seconds"] < 10
+
+
+def test_a_tail_seated_on_its_flanks_alone_pushes_them_as_a_wedge_does(cae: Any) -> None:
+    """With the socket 1 mm deeper than the tail is long, nothing is under the tail's tip:
+    it's seated on its two flanks, and they alone have a share along the slide. So their
+    pushes add up to the weight over the taper's slope, about 21 times it, whatever else
+    the joint carries: 2 kg puts 207 N on each."""
+    answer = cae("load", "dovetail/wedge.json", "--weight", "2", *ON_TOP)
+    assert answer.verdict == "OK", answer.text
+    joint = answer.numbers["joints"][JOINT]
+    assert all(f["kind"] == "flank" for f in joint["faces"]), "no seat"
+    left, right = flanks(joint)
+    assert left["push_n"] + right["push_n"] == pytest.approx(joint["drive_n"] / TAPER, rel=1e-3)
+    assert left["push_n"] == pytest.approx(2 * G / (2 * TAPER), rel=0.01)
+    assert left["push_n"] == pytest.approx(right["push_n"], rel=0.01)
+    assert abs(left["normal"][2]) == pytest.approx(TAPER, rel=1e-3)
+    # The wedge spreads the socket: its walls are what's nearest their limit.
+    assert joint["walls"]["across_layers_pct"] > joint["neck"]["across_layers_pct"]
+
+
+def test_a_tail_s_neck_printed_the_wrong_way_fails_across_its_layers(cae: Any) -> None:
+    """30 kg at the end of an arm on the upper bar seats the tail and levers its top off the
+    lap face, so the tail hangs by its neck there, pulled off its bar. Printed lap face down,
+    the tail is built up from that face layer on layer, and the pull is across them: over
+    1%, on both meshes, and nothing else fails. Printed on its side, the same pull runs
+    along its layers, and the same joint holds."""
+    across = cae("load", "dovetail/neck-across.json", "--weight", "30", *ON_ARM)
+    along = cae("load", "dovetail/neck-along.json", "--weight", "30", *ON_ARM)
+    assert across.verdict == "FAIL" and across.code == 1, across.text
+    assert along.verdict == "OK" and along.code == 0, along.text
+    why = across.record["why"]
+    assert "the tail's neck, in upper is pulled across its layers by" in why
+    assert "lay the part so its layers run along this pull" in why
+    assert "; and " not in why, "nothing else fails"
+    wrong, right = (a.numbers["joints"][JOINT] for a in (across, along))
+    assert wrong["neck"]["across_layers_pct"] > 1.0
+    assert wrong["neck"]["coarse"]["across_layers_pct"] > 1.0, "on both meshes"
+    assert wrong["neck"]["across_at"][2] > 60, "at the tail's top, where it's levered off"
+    assert right["neck"]["across_layers_pct"] < 1.0
+    assert right["neck"]["stretch_pct"] == pytest.approx(wrong["neck"]["stretch_pct"])
+    assert 1.0 < right["neck"]["stretch_pct"] < 5.1, "the same pull, along its layers"
+    assert "the tail's neck, in upper, pulled across its layers" in wrong["gives_first"]
+    assert wrong["nearest_share"] > 1 > right["nearest_share"]
+    # The weight seats it harder than the levered flanks squeeze it out, so its faces hold.
+    assert wrong["drive_n"] == pytest.approx(30 * G, rel=1e-3) and wrong["opens"] is False
+    assert all(f["pressure_mpa"] < f["pressure_limit_mpa"] for f in right["faces"])
+
+
+def test_lifted_by_its_upper_part_the_lower_hangs_by_its_own_weight_on_the_latch(
+    cae: Any,
+) -> None:
+    """Lifted by the upper bar, the lower one hangs from its dovetail, pulled the way the
+    tail slides out, by its own weight: its solid volume, 39,577 mm³ by hand, at Prusament
+    PETG's 1.27 g/cm³, so 50.3 g and 0.493 N. The latch holds that, and the same joint
+    with no latch drops it."""
+    answer = cae("load", "dovetail/latch.json", "--lift", "upper")
+    assert answer.verdict == "OK" and answer.code == 0, answer.text
+    grams = LOWER_MM3 * DENSITY / 1000
+    weight = grams / 1000 * G
+    assert answer.numbers["lift"] == "upper"
+    (hangs,) = answer.numbers["loads"]
+    assert hangs["part"] == "lower"
+    assert hangs["volume_mm3"] == pytest.approx(LOWER_MM3, rel=1e-5)
+    assert hangs["grams"] == pytest.approx(grams, rel=1e-5)
+    assert answer.numbers["force_n"] == pytest.approx(weight, rel=1e-5)
+    assert answer.numbers["weight_kg"] == pytest.approx(grams / 1000, rel=1e-5)
+    assert answer.numbers["reaction_n"] == pytest.approx([0, 0, weight], abs=1e-4)
+    assert answer.numbers["held"][0].startswith("fixed to z=110"), "the upper bar's top"
+    joint = answer.numbers["joints"][JOINT]
+    assert joint["statics_force_n"] == pytest.approx([0, 0, -weight], abs=1e-4)
+    assert joint["drive_n"] == pytest.approx(-weight, rel=1e-3), "the way the tail slides out"
+    assert joint["latched"] is True
+    assert weight <= joint["latch"]["holds_n"] < 1.1 * weight
+    assert "lifted by upper" in answer.text and "the assembly's own `held` set aside" in answer.text
+    assert '"Density [g/cm3] 1.27", by ISO 1183' in answer.text, "the density's source"
+    assert "hangs by its own weight" in answer.text
+    assert reports.unlike("load", answer.numbers) == []
+    dropped = cae("load", "dovetail/seat.json", "--lift", "upper")
+    assert dropped.verdict == "FAIL" and "it has no latch" in dropped.record["why"]
+    assert dropped.numbers["joints"][JOINT]["drive_n"] < 0
+
+
+@pytest.mark.parametrize(
+    ("args", "says"),
+    [
+        (("--lift", "upper", "--weight", "5", "--at", "0,6,110"), "takes no --weight"),
+        (("--lift", "top"), "the parts are upper, lower"),
+        ((), "or --lift PART"),
+        (("--weight", "5"), "or --lift PART"),
+    ],
+)
+def test_a_lift_is_a_load_case_of_its_own(cae: Any, args: tuple[str, ...], says: str) -> None:
+    answer = cae("load", "dovetail/latch.json", *args)
+    assert answer.verdict == "NO ANSWER" and says in answer.record["why"], answer.text
+
+
+def test_the_slide_reads_a_tapered_tail_going_in_free_until_it_seats(cae: Any) -> None:
+    """The tail drawn 4 mm short of its seat: its neck narrows 2 mm a side over its 40 mm,
+    so each flank has 4 x 2 / 40 = 0.2 mm of play there. Slid the way it goes in, it meets
+    nothing for those 4 mm, and then its tip's seat and both flanks at once, by both
+    methods: the flanks closing after exactly 4 mm is the 0.2 mm of play, read."""
+    if host.image_id() is None:
+        pytest.fail(f"{host.missing(host.IMAGE)} first")
+    pair = ("clearance", "dovetail/socket.step", "dovetail/tail-out.step")
+    answer = cae(*pair, "--slide", "-z", "--hold", "4.5")
+    assert answer.verdict == "HELD", answer.text
+    slide = answer.numbers["slide"]
+    assert slide["first_mm"] == pytest.approx(4.0, abs=2 * 0.002 + 1e-4)
+    assert slide["first_rays_mm"] == pytest.approx(4.0, abs=1e-3)
+    assert slide["meets"] == ["socket.step"] and slide["overlaps"] == []
+    # What it meets is the socket, from its end under the tail's tip up its flanks.
+    low, high = slide["contacts"][0]["box"]
+    assert low[2] == pytest.approx(30, abs=0.03) and high[2] > 60
+    # Once home it slides back out the way it came, held by nothing: that's the latch's job.
+    out = cae("clearance", "dovetail/socket.step", "dovetail/tail.step", "--slide", "+z")
+    assert out.verdict == "NOT HELD" and out.numbers["slide"]["first_mm"] is None
+
+
+def test_the_snap_on_check_and_bend_read_a_latch_on_a_dovetail(cae: Any) -> None:
+    """The latched tail is held on its way out by the hook, 0.2 mm under its ledge. The
+    slide's reply gives the `fit-on` command; run as given, the hook passes the lower bar
+    0.6 mm deep, across y, on the way in. The harness's arm finder reads the tab from that
+    place, the same box the assembly file gives the latch, and `bend` reads the tab pushed
+    aside by that depth: the strip formula for its nearer edge, 18 mm from its root."""
+    if host.image_id() is None:
+        pytest.fail(f"{host.missing(host.IMAGE)} first")
+    files = ("dovetail/socket-latch.step", "dovetail/tail-latch.step")
+    slide = cae("clearance", *files, "--slide", "+z")
+    assert slide.verdict == "HELD", slide.text
+    assert slide.numbers["slide"]["first_mm"] == pytest.approx(0.2, abs=2 * 0.002 + 1e-4)
+    found = re.search(r"`(fit-on [^`]+)`", slide.text)
+    assert found, slide.text
+    command = found.group(1).split()
+    assert command[:6] == ["fit-on", files[1], "--onto", files[0], "--along", "+z"]
+    on = cae(*command)
+    assert on.verdict == "BLOCKED" and on.numbers["depth_mm"] == pytest.approx(HOOK_IN, abs=1e-6)
+    place = on.numbers["places"][0]
+    assert np.abs(place["across"]) == pytest.approx([0, 1, 0], abs=1e-6)
+    # The hook where the tail's part sits: the place, back along its way out.
+    hook = [[-2.5, -HOOK_IN, 10.0], [2.5, 0.0, 12.0]]
+    arm = end_checks._find_arm(Box(cae.work), files[1], hook, "y", cae.work)
+    assert arm["found"] is True
+    assert arm["arm"] == [[-2.6, -0.7, 9.9], [2.6, 1.7, 30.0]], "the assembly file's `arm`"
+    assert (arm["root"], arm["toward"], arm["length_mm"]) == (["z", 30.0], "+y", 20.0)
+    latch = json.loads((cae.work / "dovetail" / "latch.json").read_text())["joints"][0]["latch"]
+    assert np.array(latch["arm"]) == pytest.approx(np.array(arm["arm"])) and latch["root"] == "z=30"
+    bent = cae(*end_checks.bend_command(files[1], arm, HOOK_IN, "z").split())
+    assert bent.verdict == "OK", bent.text
+    by_strip = 100 * 1.5 * TAB_T * HOOK_IN / 18.0**2
+    assert bent.numbers["across_layers_pct"] == pytest.approx(by_strip, rel=0.15)
+    assert bent.numbers["worst"] == "near"
