@@ -23,6 +23,13 @@ flat-sided one; where they land on opposite sides of the bed's size it's `DISAGR
 
 It reads the part as drawn: what a slicer adds round it, and whether the side needs supports,
 aren't in it.
+
+**A nut's pocket** (mqucifer/print-shop#168). Where an assembly's `through` joint states a
+`pocket`, its nut sits in one in the second part, held by its flats. The pocket is read from
+that part's own flat faces (`through.py`): the walls that stand on the hole's end and face
+each other across its axis. It fails where the nut doesn't go in, where it's wide enough for
+the nut to turn, and where its play isn't the file's. Second method: the fine mesh cut square
+to the bolt half way up the pocket, and the nearest that outline comes to the axis.
 """
 
 from __future__ import annotations
@@ -34,8 +41,9 @@ from typing import Any
 import numpy as np
 from shapely.geometry import MultiPoint
 
-from .assembly import AXES, read
-from .faces import _flat_by_mesh, _flats, facing
+from . import through
+from .assembly import AXES, Assembly, Joint, read
+from .faces import _cylinders, _flat_by_mesh, _flats, facing
 from .limits import over, said
 from .report import NoAnswer, Report
 from .shapes import Part, load
@@ -48,6 +56,8 @@ BELOW = 1e-3
 LEAST_FLAT = 1.0
 #: How many sides a reply names for a part; every one is in the record.
 SIDES_SAID = 3
+#: A pocket's nearest wall by its faces and by the mesh's section are one within this, in mm.
+POCKET_AGREE = 0.01
 
 
 def _down(normal: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
@@ -157,6 +167,183 @@ def _sides(part: Part, bed: list[float], layers: str | None) -> list[dict[str, A
     return sorted(found, key=lambda s: (not s["fits"], -s["flat_mm2"], s["height_mm"]))
 
 
+def _in_place(assembly: Assembly, name: str, part: Part) -> dict[str, Any]:
+    """A part's round and flat faces, and its fine mesh's triangles, where the assembly puts
+    it, as `through.py` reads them."""
+    from OCP.BRepAdaptor import BRepAdaptor_Surface
+    from OCP.GeomAbs import GeomAbs_Plane
+
+    placed = assembly.part(name)
+    turn, move = placed.matrix(), np.asarray(placed.at, dtype=float)
+    cylinders = []
+    for one in _cylinders(part)[0]:
+        axis = turn @ one["axis"]
+        shift = float(move @ axis)
+        cylinders.append(
+            {
+                "axis": axis,
+                "origin": turn @ one["origin"] + move,
+                "radius": one["radius"],
+                "hole": one["hole"],
+                "low": one["along"][0] + shift,
+                "high": one["along"][1] + shift,
+                "turns": one["turns"],
+            }
+        )
+    planes, corners = [], []
+    for face in part.shape.Faces():
+        if BRepAdaptor_Surface(face.wrapped).GetType() != GeomAbs_Plane:
+            continue
+        normal = np.asarray(face.normalAt().toTuple(), dtype=float)
+        planes.append(
+            {
+                "normal": turn @ (normal / np.linalg.norm(normal)),
+                "at": turn @ np.asarray(face.Center().toTuple(), dtype=float) + move,
+            }
+        )
+        own = np.array([v.toTuple() for v in face.Vertices()], dtype=float)
+        corners.append(own @ turn.T + move)
+    mesh = part.fine()
+    triangles = np.asarray(mesh.triangles, dtype=float) @ turn.T + move
+    return {"cylinders": cylinders, "planes": planes, "corners": corners, "triangles": triangles}
+
+
+def _nearest_by_mesh(triangles: np.ndarray, centre: np.ndarray, axis: np.ndarray) -> float | None:
+    """The nearest a part's surface comes to a point, in the plane through it square to
+    `axis`: each triangle's cut by that plane as a segment, and the point's distance to it."""
+    height = (triangles - centre) @ axis
+    crossing = (height.min(axis=1) < 0) & (height.max(axis=1) > 0)
+    least: float | None = None
+    for corners, heights in zip(triangles[crossing], height[crossing], strict=True):
+        ends = []
+        for i, j in ((0, 1), (1, 2), (2, 0)):
+            if (heights[i] < 0) != (heights[j] < 0):
+                share = heights[i] / (heights[i] - heights[j])
+                ends.append(corners[i] + share * (corners[j] - corners[i]) - centre)
+        if len(ends) != 2:
+            continue
+        start, run = ends[0], ends[1] - ends[0]
+        length = float(run @ run)
+        along_it = 0.0 if length < 1e-18 else min(1.0, max(0.0, float(-start @ run) / length))
+        distance = float(np.linalg.norm(start + along_it * run))
+        least = distance if least is None else min(least, distance)
+    return least
+
+
+def _pockets(
+    assembly: Assembly, folder: Path, report: Report, fails: list[str], apart: list[str]
+) -> None:
+    """Each nut's pocket against its nut, for the through joints that state one."""
+    saved: dict[str, Any] = {}
+    read_parts: dict[str, dict[str, Any]] = {}
+
+    def faces_of(name: str) -> dict[str, Any]:
+        if name not in read_parts:
+            read_parts[name] = _in_place(
+                assembly, name, load(str(folder / assembly.part(name).file))
+            )
+        return read_parts[name]
+
+    for joint in assembly.joints:
+        if joint.kind != "through" or joint.pocket is None:
+            continue
+        saved[joint.name] = [
+            _pocket(joint, k, point, [faces_of(n) for n in joint.between], report, fails, apart)
+            for k, point in enumerate(joint.at)
+        ]
+    if saved:
+        report.numbers["pockets"] = saved
+
+
+def _pocket(
+    joint: Joint,
+    index: int,
+    point: tuple[float, float, float],
+    faces: list[dict[str, Any]],
+    report: Report,
+    fails: list[str],
+    apart: list[str],
+) -> dict[str, Any]:
+    assert joint.nut is not None and joint.pocket is not None
+    nut, part = joint.nut, joint.between[1]
+    spot = "(" + ", ".join(f"{v:g}" for v in point) + ")"
+    what = f"the nut's pocket of the through joint {joint.name}'s bolt at {spot}, in {part}"
+    holes = []
+    for name, read_faces in zip(joint.between, faces, strict=True):
+        hole = through.bore(read_faces["cylinders"], point)
+        if isinstance(hole, str):
+            raise NoAnswer(
+                f"the through joint {joint.name}'s bolt at {spot}: in {name}, {hole}. A "
+                "through-bolt passes right through both parts, in a round hole in each"
+            )
+        holes.append(hole)
+    way = through.meet(holes[0], holes[1])
+    if isinstance(way, str):
+        raise NoAnswer(f"the through joint {joint.name}'s bolt at {spot}: {way}")
+    axis, seat = way["axis"], way["seats"][1]
+    planes = faces[1]["planes"]
+    through.along(planes, axis, faces[1]["corners"])
+    found = through.pocket(planes, holes[1], seat, axis, 2 * nut.corners_mm)
+    one: dict[str, Any] = {
+        "at": list(point),
+        "part": part,
+        "nut": nut.name,
+        "nut_flats_mm": nut.flats_mm,
+        "nut_corners_mm": nut.corners_mm,
+        "nut_height_mm": nut.height_mm,
+        "stated_play_mm": joint.pocket,
+        "fits": False,
+    }
+    if isinstance(found, str):
+        fails.append(f"{what}: {found}")
+        report.line(f"{what}: {found}")
+        report.second(f"{what}: no pocket, so nothing to measure again")
+        return one
+    across = found["across_flats_mm"]
+    play = (across - nut.flats_mm) / 2
+    wrong = through.nut_fits(found, nut, joint.pocket)
+    nearest = across / 2 - found["off_middle_mm"]
+    origin = np.asarray(holes[1]["origin"], dtype=float)
+    centre = origin + (seat + found["depth_mm"] / 2 - float(origin @ axis)) * axis
+    by_mesh = _nearest_by_mesh(faces[1]["triangles"], centre, axis)
+    one.update(
+        across_flats_mm=across,
+        play_mm=play,
+        depth_mm=found["depth_mm"],
+        walls=found["walls"],
+        nearest_wall_mm=nearest,
+        nearest_by_mesh_mm=by_mesh,
+        fits=not wrong,
+    )
+    proud = nut.height_mm - found["depth_mm"]
+    report.line(
+        f"{what}: {found['walls']} flat walls in {found['pairs']} pair(s) across the hole, "
+        f"{across:.3f} mm across the flats, as pockets.{joint.name}.{index}.across_flats_mm, "
+        f"round the nut {nut.name}'s "
+        f"{nut.flats_mm:g} mm ({nut.source}): a play of {play:.3f} mm a side, where the file "
+        f"states {joint.pocket:g}; {found['depth_mm']:.2f} mm deep, so the nut "
+        + (f"stands {proud:.2f} mm proud" if proud > 1e-6 else "sits within it")
+    )
+    report.second(
+        f"{what}, by the fine mesh cut square to the bolt half way up it: the outline's "
+        + (
+            "nothing there"
+            if by_mesh is None
+            else f"nearest point is {by_mesh:.4f} mm from the axis, where its walls' planes put "
+            f"the nearest at {nearest:.4f}"
+        )
+    )
+    if by_mesh is None or abs(by_mesh - nearest) > POCKET_AGREE:
+        apart.append(
+            f"{what}: its nearest wall is {nearest:.4f} mm from the bolt's axis by its faces and "
+            + ("not found" if by_mesh is None else f"{by_mesh:.4f} mm")
+            + " by the mesh's section"
+        )
+    elif wrong:
+        fails.append(f"{what}: " + "; and ".join(wrong))
+    return one
+
+
 def _parts(args: Any) -> list[tuple[str, str, str | None]]:
     """Each part's name, its file and, from an assembly, the axis its layers are stacked along."""
     given = list(args.parts)
@@ -246,13 +433,20 @@ def run(args: Any, report: Report) -> None:
             )
     report.numbers["bed_mm"] = bed
     report.numbers["parts"] = saved
+    if len(args.parts) == 1 and args.parts[0].lower().endswith(".json"):
+        _pockets(read(args.parts[0]), Path(args.parts[0]).parent, report, fails, apart)
     if apart:
         report.verdict("DISAGREE", "; and ".join(apart) + ": read both, and don't pick one")
     elif fails:
         report.verdict("FAIL", "; and ".join(fails))
     else:
         laid = ", ".join(f"{n} on its {p['side']} face" for n, p in saved.items())
-        report.verdict("OK", f"every part fits the bed, {size}: {laid}")
+        pockets = sum(len(p) for p in report.numbers.get("pockets", {}).values())
+        report.verdict(
+            "OK",
+            f"every part fits the bed, {size}: {laid}"
+            + f"; and each of {pockets} nut's pocket(s) holds its nut by its flats" * bool(pockets),
+        )
 
 
 def _where(side: dict[str, Any]) -> str:

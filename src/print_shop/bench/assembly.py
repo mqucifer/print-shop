@@ -18,7 +18,11 @@ whoever designs the parts (`docs/bench.md` has it in full):
   file its layers are stacked along, the way up on the bed: it turns with the part.
 - **A joint** is between two parts that meet face to face. `bonded` is glued or welded over the
   faces that meet. `bolted` names a bolt and an insert from the tables here, and where each bolt
-  is, a point on its axis. `touching` is held by nothing: it can push, and can't pull.
+  is, a point on its axis. `through` (mqucifer/print-shop#168) names a bolt that passes right
+  through both parts, its nut and the washer under each side, its head on the first part named
+  and its nut on the second; with `pocket`, the nut sits in a pocket there that holds it by its
+  flats, at that play, with no washer under it. `touching` is held by nothing: it can push, and
+  can't pull.
 - **`held`** is where the assembly stands or is fixed: the flat faces in a plane, `standing` on
   it (held along the plane's axis only, free to slide) or `fixed` to it. With none, it stands on
   its lowest level.
@@ -40,7 +44,7 @@ from .bend import LIMITS
 from .report import NoAnswer
 
 AXES = ("x", "y", "z")
-KINDS = ("bonded", "bolted", "touching")
+KINDS = ("bonded", "bolted", "through", "touching")
 HOW = ("standing", "fixed")
 
 
@@ -56,6 +60,19 @@ class Material:
     across_pct: float
     along_pct: float
     source: str
+    #: The most pressure it takes under a washer, a nut or a bolt's shank, in MPa: pressed
+    #: across its layers, and pressed along them. `PRESS` says where each is from.
+    press_across_mpa: float = 0.0
+    press_along_mpa: float = 0.0
+    press_source: str = ""
+
+    def press(self, way: np.ndarray, layers: np.ndarray) -> tuple[float, str]:
+        """The most pressure it takes pushed along `way`, with its layers stacked along
+        `layers`, and which figure that is: across them where the push is nearer their
+        stacking than their plane."""
+        if abs(float(way @ layers)) >= math.cos(math.radians(45)):
+            return self.press_across_mpa, "across its layers"
+        return self.press_along_mpa, "along its layers"
 
 
 #: Prusament PETG's datasheet (Prusa Polymers, version 1.1, 16-02-2022), as `bend` reads it: a
@@ -63,6 +80,26 @@ class Material:
 #: strain, 0.9% at the low end of both, so 1% across the layers (`bend.LIMITS`); and 5.1 ± 0.1%
 #: elongation at yield for a part printed flat, pulled in the plane of its layers. Poisson's ratio
 #: is `bend`'s.
+#:
+#: **Under a washer, a nut or a bolt's shank** (mqucifer/print-shop#168) the plastic is pressed,
+#: and the same sheet has no compressive figure: the word isn't on it. So a pressure is held to
+#: the sheet's own figures for what the plastic takes pulled, which stand in for it and are
+#: said as that. Pressed across its layers, which pushes them together, it's the solid
+#: plastic's "Tensile Yield Strength [MPa] 47 ± 2" for a specimen printed flat (ISO 527-1), at
+#: its low end, 45. Pressed along its layers it spreads sideways, which pulls one layer off the
+#: next, and all the sheet gives for that is "Interlayer Adhesion [MPa] 18 ± 4", at its low
+#: end, 14.
+#: A pull's figure stands in on the safe side (the operator's ruling on
+#: mqucifer/print-shop#169): a thermoplastic yields pressed at no less than it yields pulled.
+PRESS = (
+    45.0,
+    14.0,
+    "the same sheet, which has no compressive figure, so its figures for a pull stand in, on the "
+    "safe side as a thermoplastic yields pressed at no less than it does pulled: "
+    "pressed across its layers, the low end of its tensile yield strength printed flat, "
+    "47 ± 2 MPa (ISO 527-1); pressed along them, the low end of its interlayer adhesion, "
+    "18 ± 4 MPa",
+)
 MATERIALS = {
     "petg": Material(
         "petg",
@@ -73,6 +110,7 @@ MATERIALS = {
         "Prusament PETG's datasheet (Prusa Polymers, version 1.1, 16-02-2022): a tensile "
         "modulus of 1.5 GPa, 18 MPa of interlayer adhesion over it for about 1% across the "
         "layers, and 5.1% at yield in their plane",
+        *PRESS,
     )
 }
 
@@ -128,6 +166,80 @@ INSERTS = {
 
 
 @dataclass(frozen=True)
+class Nut:
+    name: str
+    thread: str
+    #: Across its flats at most, its nominal size, and across its corners at least, in mm.
+    flats_mm: float
+    corners_mm: float
+    #: Its height at most, and the least diameter of the face it bears on, in mm.
+    height_mm: float
+    bears_mm: float
+    source: str
+
+
+@dataclass(frozen=True)
+class Washer:
+    name: str
+    thread: str
+    #: Its hole, its outside diameter and its thickness, in mm, each its nominal size.
+    hole_mm: float
+    outer_mm: float
+    thick_mm: float
+    source: str
+
+
+#: A thread's nominal diameter, in mm: what its name says (ISO 261's designation, M5 is 5 mm).
+DIAMETER = {"m3": 3.0, "m4": 4.0, "m5": 5.0, "m6": 6.0, "m8": 8.0}
+#: A hexagon regular nut, style 1, product grades A and B (NUT_FROM): across its flats s at
+#: most, across its corners e at least, its height m at most and its bearing face dw at least.
+NUT_FROM = "ISO 4032:2012, hexagon regular nuts (style 1), table 1"
+NUT_SIZES = {
+    "m3": (5.5, 6.01, 2.4, 4.6),
+    "m4": (7.0, 7.66, 3.2, 5.9),
+    "m5": (8.0, 8.79, 4.7, 6.9),
+    "m6": (10.0, 11.05, 5.2, 8.9),
+    "m8": (13.0, 14.38, 6.8, 11.6),
+}
+NUTS = {
+    f"{thread}-nut": Nut(
+        f"{thread}-nut",
+        thread,
+        flats,
+        corners,
+        height,
+        bears,
+        f"{NUT_FROM}: {thread.upper()} is {flats:g} mm across its flats at most, {corners:g} "
+        f"across its corners at least, {height:g} tall at most, and bears on a face at least "
+        f"{bears:g} across",
+    )
+    for thread, (flats, corners, height, bears) in NUT_SIZES.items()
+}
+#: A plain washer, normal series, product grade A (WASHER_FROM): its hole d1, its outside
+#: diameter d2 and its thickness h, each nominal.
+WASHER_FROM = "ISO 7089:2000, plain washers, normal series, product grade A"
+WASHER_SIZES = {
+    "m3": (3.2, 7.0, 0.5),
+    "m4": (4.3, 9.0, 0.8),
+    "m5": (5.3, 10.0, 1.0),
+    "m6": (6.4, 12.0, 1.6),
+    "m8": (8.4, 16.0, 1.6),
+}
+WASHERS = {
+    f"{thread}-washer": Washer(
+        f"{thread}-washer",
+        thread,
+        hole,
+        outer,
+        thick,
+        f"{WASHER_FROM}: for {thread.upper()}, a hole of {hole:g} mm, {outer:g} across and "
+        f"{thick:g} thick",
+    )
+    for thread, (hole, outer, thick) in WASHER_SIZES.items()
+}
+
+
+@dataclass(frozen=True)
 class PartAt:
     name: str
     file: str
@@ -162,6 +274,12 @@ class Joint:
     #: The joint's own figure for what each bolt holds, in N, and where it's from.
     pull_n: float | None = None
     source: str = ""
+    #: A through-bolt's nut and the washer under each side. Its head is on the first part.
+    nut: Nut | None = None
+    washer: Washer | None = None
+    #: The play between each of the nut's flats and the wall of the pocket it sits in, in mm,
+    #: where it sits in one, with no washer under it.
+    pocket: float | None = None
 
     @property
     def name(self) -> str:
@@ -265,14 +383,22 @@ def _joint(entry: Any, names: list[str]) -> Joint:
     if first == second:
         raise NoAnswer(f"a joint is between two parts, not {first} and itself")
     kind = _one_of(entry.get("kind"), KINDS, f"the joint {first}+{second}'s `kind`")
+    if kind == "through":
+        return _through(entry, first, second)
     if kind != "bolted":
-        extra = sorted({"bolt", "insert", "at", "pull_n"} & set(entry))
+        extra = sorted({"bolt", "insert", "at", "pull_n", "nut", "washer", "pocket"} & set(entry))
         if extra:
             raise NoAnswer(
                 f"the joint {first}+{second} is {kind} and gives {', '.join(extra)}: only a "
-                "bolted joint has a bolt"
+                "bolted or a through joint has a bolt"
             )
         return Joint((first, second), kind)
+    extra = sorted({"nut", "washer", "pocket"} & set(entry))
+    if extra:
+        raise NoAnswer(
+            f"the joint {first}+{second} is bolted, into an insert, and gives "
+            f"{', '.join(extra)}: a bolt with a nut is a `through` joint"
+        )
     what = f"the bolted joint {first}+{second}"
     bolt = BOLTS[_one_of(entry.get("bolt"), BOLTS, f"{what}'s `bolt`")]
     insert = INSERTS[_one_of(entry.get("insert"), INSERTS, f"{what}'s `insert`")]
@@ -295,6 +421,42 @@ def _joint(entry: Any, names: list[str]) -> Joint:
         points,
         None if pull is None else float(pull),
         str(entry.get("source", "")).strip(),
+    )
+
+
+def _through(entry: dict[str, Any], first: str, second: str) -> Joint:
+    """A bolt right through both parts: its head and a washer on the first, its nut on the
+    second, on a washer or in a pocket."""
+    what = f"the through joint {first}+{second}"
+    extra = sorted({"insert", "pull_n", "source"} & set(entry))
+    if extra:
+        raise NoAnswer(
+            f"{what} gives {', '.join(extra)}: a through-bolt goes into a nut, not an insert, "
+            "and what it holds is read from the bolt, the washers and the plastic"
+        )
+    bolt = BOLTS[_one_of(entry.get("bolt"), BOLTS, f"{what}'s `bolt`")]
+    nut = NUTS[_one_of(entry.get("nut"), NUTS, f"{what}'s `nut`")]
+    washer = WASHERS[_one_of(entry.get("washer"), WASHERS, f"{what}'s `washer`")]
+    if nut.thread != bolt.thread:
+        raise NoAnswer(f"{what}: the nut {nut.name} doesn't go on the bolt {bolt.name}")
+    if washer.thread != bolt.thread:
+        raise NoAnswer(f"{what}: the washer {washer.name} isn't the bolt {bolt.name}'s size")
+    points = tuple(_point(p, f"{what}'s `at`") for p in entry.get("at", ()))
+    if not points:
+        raise NoAnswer(f"{what} says where each bolt is, in `at`: a point on its axis, [x, y, z]")
+    play = entry.get("pocket")
+    if play is not None:
+        try:
+            play = float(play)
+        except (TypeError, ValueError):
+            play = -1.0
+        if isinstance(entry["pocket"], bool) or play < 0:
+            raise NoAnswer(
+                f"{what}'s `pocket` is the play between each of the nut's flats and its "
+                f"pocket's wall, in mm, 0 or more, not {entry['pocket']!r}"
+            )
+    return Joint(
+        (first, second), "through", bolt, None, points, nut=nut, washer=washer, pocket=play
     )
 
 

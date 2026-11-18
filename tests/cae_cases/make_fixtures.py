@@ -11,11 +11,17 @@ into: the band of skirt under that window has to pass over the hook, 0.8 - 0.2 =
 `load/` (mqucifer/print-shop#156): a beam 120 x 20 x 10 along x, whole and as two halves that
 meet at x 60; a block 20 x 20 x 20 on a slab 60 x 60 x 10; and a small table, a top 100 x 100 x 6
 on four legs 10 x 10 x 60, with an assembly file for each way they're joined, held and printed.
+
+`through/` (mqucifer/print-shop#168): a plate 100 x 40 x 8 held at both ends, and a plate
+60 x 40 on it, each with a 5.5 mm hole, joined by one M5 through-bolt: pulled straight up off
+it, on washers and with the nut in a hex pocket; and as a lap pulled along, the upper plate's
+hole 5.5 mm from its end and 20 mm from it.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any
@@ -186,8 +192,65 @@ def loads() -> None:
     assembly(out / "table-lying.json", lying, joints)
 
 
+#: The through-bolted plates (mqucifer/print-shop#168), as the tests' arithmetic reads them.
+PLATE_T, HOLE, POCKET_FLATS, POCKET_DEEP = 8.0, 5.5, 8.4, 4.0
+M5 = {"kind": "through", "bolt": "m5-8.8", "nut": "m5-nut", "washer": "m5-washer"}
+
+
+def plate(length: float, hole_x: float, thick: float = PLATE_T, pocket: bool = False) -> Part.Shape:
+    """A plate `length` x 40, with a hole through it at `hole_x` on its centre line and, with
+    `pocket`, a hex pocket for the nut in its top face."""
+    made = box((0, 0, 0), (length, 40, thick))
+    made = made.cut(Part.makeCylinder(HOLE / 2, thick, App.Vector(hole_x, 20, 0)))
+    if pocket:
+        reach = POCKET_FLATS / 3**0.5
+        corners = [
+            App.Vector(hole_x + reach * math.cos(k * math.pi / 3),
+                       20 + reach * math.sin(k * math.pi / 3), thick - POCKET_DEEP)
+            for k in range(7)
+        ]  # fmt: skip
+        hexagon = Part.Face(Part.makePolygon(corners)).extrude(App.Vector(0, 0, POCKET_DEEP))
+        made = made.cut(hexagon)
+    return made
+
+
+def throughs() -> None:
+    """Two plates joined by one M5 through-bolt, pulled apart and pulled along."""
+    out = Path("through")
+    save(plate(100, 50), out / "lower.step")
+    save(plate(60, 30), out / "upper.step")
+    save(plate(60, 30, 12, pocket=True), out / "upper-pocket.step")
+    save(box((0, 0, 0), (60, 40, PLATE_T)), out / "upper-solid.step")
+    ends = [{"plane": "x=0", "how": "fixed"}, {"plane": "x=100", "how": "fixed"}]
+
+    def pair(upper: str, at: float, layers: str = "z") -> Rows:
+        return [
+            {"name": "lower", "file": "lower.step", "layers": "z"},
+            {"name": "upper", "file": upper, "at": [at, 0, PLATE_T], "layers": layers},
+        ]
+
+    joint: Rows = [{"between": ["lower", "upper"], **M5, "at": [[50, 20, PLATE_T]]}]
+    assembly(out / "pull.json", pair("upper.step", 20), joint, ends)
+    pocketed: Rows = [{**joint[0], "pocket": 0.2}]
+    assembly(out / "pull-pocket.json", pair("upper-pocket.step", 20), pocketed, ends)
+    assembly(out / "pull-no-hole.json", pair("upper-solid.step", 20), joint, ends)
+    # A lap pulled along: the upper plate's hole 5.5 mm from its end at x 40, where
+    # its washer just sits on it, and 20 mm from it.
+    wall = [{"plane": "x=0", "how": "fixed"}]
+    for name, edge in (("edge", 5.5), ("in", 20.0)):
+        save(plate(60, edge), out / f"upper-{name}.step")
+        save(plate(100, 40 + edge), out / f"lower-{name}.step")
+        parts: Rows = [
+            {"name": "lower", "file": f"lower-{name}.step", "layers": "z"},
+            {"name": "upper", "file": f"upper-{name}.step", "at": [40, 0, PLATE_T], "layers": "y"},
+        ]
+        lapped: Rows = [{**joint[0], "at": [[40 + edge, 20, PLATE_T]]}]
+        assembly(out / f"lap-{name}.json", parts, lapped, wall)
+
+
 def main() -> None:
     loads()
+    throughs()
     out = Path("snap")
     seated = WALL_Y + ROOM
     save(base(seated), out / "box.step")

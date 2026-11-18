@@ -3037,6 +3037,45 @@ def test_fit_bed_reads_an_assembly_s_parts_on_the_side_their_layers_name(bench: 
     assert bench("fit-bed", "bed/ball.step").verdict == "FAIL"
 
 
+def test_fit_bed_holds_a_nut_s_pocket_to_its_nut(bench: Any) -> None:
+    """A through joint that states a pocket (mqucifer/print-shop#168): an M5 nut is 8 mm
+    across its flats and at least 8.79 across its corners (ISO 4032). A hex pocket 8.4 mm
+    across holds it with 0.2 mm of play a side, as the file states, read by its faces and by
+    the mesh's section; so does a slot of the same width. One 7.9 across doesn't take the nut,
+    one 9.0 lets it turn, a round one has no flats, and a play that isn't the file's is said."""
+    good = bench("fit-bed", "bed/pocket.json")
+    assert good.verdict == "OK" and good.code == 0, good.text
+    assert "each of 1 nut's pocket(s) holds its nut by its flats" in good.record["why"]
+    pocket = good.numbers["pockets"]["lower+upper"][0]
+    assert pocket["across_flats_mm"] == pytest.approx(8.4, abs=1e-6)
+    assert pocket["play_mm"] == pytest.approx(0.2, abs=1e-6) and pocket["stated_play_mm"] == 0.2
+    assert pocket["depth_mm"] == pytest.approx(4.0) and pocket["walls"] == 6
+    assert pocket["nut_flats_mm"] == 8.0 and pocket["part"] == "upper" and pocket["fits"] is True
+    assert pocket["nearest_by_mesh_mm"] == pytest.approx(pocket["nearest_wall_mm"], abs=1e-3)
+    assert pocket["nearest_wall_mm"] == pytest.approx(4.2, abs=1e-6)
+    assert "ISO 4032:2012" in good.text and "the nut stands 0.70 mm proud" in good.text
+    assert "by the fine mesh cut square to the bolt" in good.text
+    assert reports.unlike("fit-bed", good.numbers) == []
+    slot = bench("fit-bed", "bed/pocket-slot.json")
+    assert slot.verdict == "OK", slot.text
+    assert slot.numbers["pockets"]["lower+upper"][0]["walls"] == 3
+    for name, said in (
+        ("pocket-tight", "7.900 mm across its flats and the nut m5-nut is 8: the nut doesn't go"),
+        ("pocket-loose", "as little as 8.79 across its corners: the nut turns in it"),
+        ("pocket-round", "no pocket there holds a nut by its flats"),
+        ("pocket-turned", "its play is 0.200 mm a side round the nut's 8 mm, and the assembly "
+         "file states 0.3"),
+    ):  # fmt: skip
+        answer = bench("fit-bed", f"bed/{name}.json")
+        assert answer.verdict == "FAIL" and answer.code == 1, answer.text
+        assert said in answer.record["why"], answer.record["why"]
+        assert answer.numbers["pockets"]["lower+upper"][0]["fits"] is False
+        assert all(p["fits"] for p in answer.numbers["parts"].values()), "the parts still fit"
+    # Stood on its side in the assembly, the pocket is read where it's put: the same 8.4 mm.
+    turned = bench("fit-bed", "bed/pocket-turned.json").numbers["pockets"]["lower+upper"][0]
+    assert turned["across_flats_mm"] == pytest.approx(8.4, abs=1e-6)
+
+
 def test_fit_bed_holds_a_curved_part_to_the_bed_by_its_exact_solid_too(bench: Any) -> None:
     """A disc 256 mm across is at the bed's size: the mesh's chords read it a hair under, and
     the exact solid at it, and both fit. One 256.2 mm across is over by both."""

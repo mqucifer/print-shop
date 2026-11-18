@@ -398,7 +398,7 @@ The Sponsor, 2026-11-03: "id be concerned with adding things like light-path com
 **The furniture toolset** (mqucifer/print-shop#156, M20's side table), for a part bigger than the bed that carries a weight. It adds two commands and a short skill:
 - **`load`** reads the joined parts under the request's weight, with FreeCAD's FEM in the bench's second image ([the bench](bench.md#joined-parts-under-a-weight-and-each-part-against-the-bed)). Its measure, `load`, is limited: the weight is the request's, with no default, so a need's `--weight` is in its quote.
 - **`fit-bed`** reads each part against the bed, on the side its `layers` names. Its measure is `bed-fit`. Which side a part prints on is still a bed need, as for any kind.
-- **`designing-furniture`**, given whole in the start: split along the load's path, put each joint where the load is low, lay each part so its layers run along its pull, bolts and inserts where it takes load, and the assembly file both commands read. It's held to the skill-authoring rules by `tests/test_skill_rules.py`.
+- **`designing-furniture`**, given whole in the start: split along the load's path, put each joint where the load is low, lay each part so its layers run along its pull, through-bolts with nuts and washers where it takes load and never glue (mqucifer/print-shop#168), and the assembly file both commands read. It's held to the skill-authoring rules by `tests/test_skill_rules.py`.
 - **No standing checks:** which file is the assembly, and what weight sits where, are a need's to say. No model has run it yet.
 
 **The enclosure skill after batch 4** (mqucifer/print-shop#65). Of batch 4's long calls, about 3 were on the enclosure skill's text and about 7 on a tool's reply, none on length. The skill now:
