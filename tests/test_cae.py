@@ -10,6 +10,7 @@ arithmetic.
 from __future__ import annotations
 
 import json
+import math
 import re
 import shutil
 from dataclasses import dataclass
@@ -658,3 +659,129 @@ def test_a_need_on_a_load_is_judged_by_its_verdict_and_how_far_it_moves(cae: Any
     stiff = need(number="moves_mm", at_most=1.0)
     read = needs.judge(stiff, answer.code, answer.text, answer.record)
     assert not read.passed and read.value == pytest.approx(answer.numbers["moves_mm"])
+
+
+# A through-bolt, its washers, its nut and the plastic round it (mqucifer/print-shop#168)
+
+#: The plates, as `make_fixtures.py` draws them: 8 mm thick, a 5.5 mm hole, and an M5 washer
+#: 10 mm across (ISO 7089) or an M5 nut bearing on a face 6.9 mm across (ISO 4032).
+HOLE, WASHER, NUT_FACE = 5.5, 10.0, 6.9
+RING = math.pi / 4 * (WASHER**2 - HOLE**2)
+NUT_RING = math.pi / 4 * (NUT_FACE**2 - HOLE**2)
+#: Pulled straight up, either side of the bolt, so the weight acts on its axis.
+UP = ("--at", "40,20,16", "--at", "60,20,16", "--toward", "+z")
+UP_POCKET = ("--at", "40,20,20", "--at", "60,20,20", "--toward", "+z")
+ALONG = ("--at", "100,20,12", "--toward", "+x")
+
+
+def test_a_through_bolt_s_washers_bear_as_the_hand_figure_says(cae: Any) -> None:
+    """Two plates joined by one M5 through-bolt, the upper pulled straight up off the lower
+    with 20 kg: the bolt holds the weight, and each washer presses it on the ring between the
+    5.5 mm hole and its own 10 mm, π/4·(10² − 5.5²) = 54.78 mm²: 3.58 MPa by hand. The joint
+    is read from the bolt, the washers and the plastic round each hole, and says which is
+    nearest its limit: never from the bolt alone."""
+    answer = cae("load", "through/pull.json", "--weight", "20", *UP)
+    assert answer.verdict == "OK" and answer.code == 0, answer.text
+    joint = answer.numbers["joints"]["lower+upper"]
+    assert joint["kind"] == "through"
+    assert joint["statics_force_n"] == pytest.approx([0, 0, 20 * G], abs=1e-3)
+    # The weight, and a little from the bending the joint's own stiffness leaves in it.
+    assert joint["bolt_pull_n"] == pytest.approx(20 * G, rel=0.02)
+    assert joint["holds_n"] == pytest.approx(580 * 14.2) and "ISO 898-1" in joint["holds_from"]
+    head, nut = joint["bolts"][0]["ends"]
+    assert (head["part"], nut["part"]) == ("lower", "upper")
+    assert head["under"] == nut["under"] == "washer"
+    for end in (head, nut):
+        assert end["bears_mm2"] == pytest.approx(RING, rel=1e-4)
+        assert end["pressure_mpa"] == pytest.approx(joint["bolt_pull_n"] / RING, rel=1e-4)
+        assert end["pressure_mpa"] == pytest.approx(20 * G / RING, rel=0.02), "the hand figure"
+        assert (end["pressure_limit_mpa"], end["pressed"]) == (45.0, "across its layers")
+        assert (end["hole_mm"], end["hole_length_mm"]) == pytest.approx((HOLE, 8.0))
+        assert "wall_pressure_mpa" not in end, "nothing leans on the hole: it's a straight pull"
+        # The plastic round the hole, read as any part is, on two meshes.
+        around = end["round"]
+        assert 0 < around["across_layers_pct"] < 1.0 and 0 < around["stretch_pct"] < 5.1
+        assert around["coarse"]["stretch_pct"] == pytest.approx(around["stretch_pct"], rel=0.1)
+        assert around["held_mm"] == 2 * WASHER and around["coarse"]["mesh_mm"] > around["mesh_mm"]
+    assert 0 < joint["nearest_share"] < 1 and "the plastic round the hole" in joint["gives_first"]
+    assert "the nearest its limit is" in answer.text
+    assert "no compressive figure" in answer.text, "what stands in for it is said"
+    assert "worst bolt by statics" in answer.text and "the plastic round" in answer.text
+    assert reports.unlike("load", answer.numbers) == []
+    assert answer.record["seconds"] < 90
+
+
+def test_a_nut_in_a_pocket_bears_on_its_own_face_and_fails_where_the_bolt_alone_would_pass(
+    cae: Any,
+) -> None:
+    """The same pull with the nut in a hex pocket and no washer under it: it bears on the ring
+    between the hole and its 6.9 mm bearing face, 13.63 mm², a quarter of a washer's. Under
+    20 kg that's 14.4 MPa, within the 45 PETG takes pressed across its layers, and it's what's
+    named as nearest its limit. Under 70 kg it's 50 MPa: the joint fails on the plastic under
+    the nut, where the bolt has a twelfth of its 8236 N to hold."""
+    answer = cae("load", "through/pull-pocket.json", "--weight", "20", *UP_POCKET)
+    assert answer.verdict == "OK", answer.text
+    joint = answer.numbers["joints"]["lower+upper"]
+    head, nut = joint["bolts"][0]["ends"]
+    assert (head["under"], nut["under"]) == ("washer", "nut")
+    assert nut["bears_mm2"] == pytest.approx(NUT_RING, rel=1e-3)
+    assert nut["pressure_mpa"] == pytest.approx(20 * G / NUT_RING, rel=0.02)
+    assert head["pressure_mpa"] == pytest.approx(20 * G / RING, rel=0.02)
+    assert "the pressure under the nut m5-nut in its pocket on upper" in joint["gives_first"]
+    assert joint["nearest_share"] == pytest.approx(nut["pressure_mpa"] / 45, rel=1e-6)
+    heavy = cae("load", "through/pull-pocket.json", "--weight", "70", *UP_POCKET)
+    assert heavy.verdict == "FAIL" and heavy.code == 1, heavy.text
+    assert "the plastic under the nut m5-nut in its pocket is pressed by" in heavy.record["why"]
+    assert "over its 45 MPa" in heavy.record["why"]
+    crushed = heavy.numbers["joints"]["lower+upper"]
+    assert crushed["bolt_pull_n"] < crushed["holds_n"] / 10, "the bolt alone would pass"
+    assert crushed["nearest_share"] > 1
+    need = Need(
+        "holds", "it holds 70 kg", "request", "holds 70 kg", "bench",
+        "load through/pull-pocket.json --weight 70 --at 40,20,20 --at 60,20,20 --toward +z",
+    )  # fmt: skip
+    assert not needs.judge(need, heavy.code, heavy.text, heavy.record).passed
+
+
+def test_a_bolt_near_an_edge_tears_out_where_the_same_bolt_further_in_holds(cae: Any) -> None:
+    """A lap pulled along with 50 kg, the upper plate printed on its edge: the bolt's shank
+    leans on each hole with the whole weight, 12.3 MPa over its 5 mm by the 8 mm of hole.
+    With the upper plate's hole 20 mm from its end, the plastic round it holds. With the same
+    bolt 5.5 mm from the end, where its washer still sits wholly on the plate, the 2.75 mm of
+    plastic between the hole and the edge is pulled across its layers past the 1% it takes:
+    it tears out, and the reply says so. Everything else about the two is the same."""
+    inner = cae("load", "through/lap-in.json", "--weight", "50", *ALONG)
+    edge = cae("load", "through/lap-edge.json", "--weight", "50", *ALONG)
+    assert inner.verdict == "OK" and inner.code == 0, inner.text
+    assert edge.verdict == "FAIL" and edge.code == 1, edge.text
+    why = edge.record["why"]
+    assert "in upper: the plastic round the hole is pulled across its layers by" in why
+    assert "it tears out there" in why and "further from the edge" in why
+    assert "; and " not in why, "nothing else fails"
+    held, torn = (a.numbers["joints"]["lower+upper"] for a in (inner, edge))
+    for joint in (held, torn):
+        assert joint["shear_n"] == pytest.approx(50 * G, rel=1e-3)
+        for end in joint["bolts"][0]["ends"]:
+            assert end["wall_pressure_mpa"] == pytest.approx(50 * G / (5 * 8), rel=1e-3)
+            assert (end["wall_limit_mpa"], end["wall_pressed"]) == (14.0, "along its layers")
+            assert end["pressure_mpa"] < 2, "its washers carry next to nothing"
+    far, near = held["bolts"][0]["ends"][1]["round"], torn["bolts"][0]["ends"][1]["round"]
+    assert near["across_layers_pct"] > 1.0 > far["across_layers_pct"]
+    assert near["coarse"]["across_layers_pct"] > 1.0, "on both meshes"
+    assert near["across_at"][0] == pytest.approx(40, abs=1.5), "at the plate's end"
+    assert near["across_layers_pct"] > 2 * far["across_layers_pct"]
+    # The lower plate's hole is far from any edge in both, and reads the same.
+    below = [j["bolts"][0]["ends"][0]["round"]["across_layers_pct"] for j in (held, torn)]
+    assert below[0] == pytest.approx(below[1], rel=0.05) and max(below) < 1.0
+    assert "the plastic round the hole in upper" in torn["gives_first"]
+    assert torn["nearest_share"] > 1 > held["nearest_share"]
+
+
+def test_a_through_bolt_with_no_hole_to_pass_through_is_said_and_nothing_is_solved(
+    cae: Any,
+) -> None:
+    answer = cae("load", "through/pull-no-hole.json", "--weight", "20", "--at", "40,20,16")
+    assert answer.verdict == "NO ANSWER" and answer.code == 2, answer.text
+    assert "in upper, no round hole has its axis through that point" in answer.record["why"]
+    assert "passes right through both parts" in answer.record["why"]
+    assert answer.record["seconds"] < 10

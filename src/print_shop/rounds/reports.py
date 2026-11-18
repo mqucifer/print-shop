@@ -300,7 +300,8 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "toward",
         "weight_kg",
     ),
-    "fit-bed": ("bed_mm", "parts"),
+    # `pockets`: each nut's pocket of a through joint that states one (mqucifer/print-shop#168).
+    "fit-bed": ("bed_mm", "parts", "pockets"),
 }
 
 
@@ -758,6 +759,10 @@ SHAPES: dict[str, dict[str, Any]] = {
                     "pull_n": NUMBER,
                     "shear_n": NUMBER,
                     "twist_nmm": NUMBER,
+                    # A through joint's (mqucifer/print-shop#168): which of its bolt, its
+                    # washers, its nut and its plastic is nearest its limit, and by what share.
+                    "gives_first": TEXT,
+                    "nearest_share": NUMBER,
                 }
             )
         ),
@@ -791,6 +796,23 @@ SHAPES: dict[str, dict[str, Any]] = {
     "fit-bed": {
         "bed_mm": XYZ,
         "parts": Keyed(Row({"box_mm": XYZ, "file": TEXT, "fits": FLAG})),
+        "pockets": Keyed(
+            Rows(
+                Row(
+                    {
+                        "across_flats_mm": NUMBER,
+                        "at": XYZ,
+                        "depth_mm": NUMBER,
+                        "fits": FLAG,
+                        "nut": TEXT,
+                        "nut_flats_mm": NUMBER,
+                        "part": TEXT,
+                        "play_mm": NUMBER,
+                        "stated_play_mm": NUMBER,
+                    }
+                )
+            )
+        ),
     },
 }
 

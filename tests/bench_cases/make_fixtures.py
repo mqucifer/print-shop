@@ -1003,6 +1003,54 @@ def beds() -> None:
     Path("bed/lying.json").write_text(json.dumps({"parts": parts}))
     parts.append({"name": "disc", "file": "disc.step", "layers": "x"})
     Path("bed/no-side.json").write_text(json.dumps({"parts": parts}))
+    nut_pockets()
+
+
+def nut_pockets() -> None:
+    """A nut's pocket for `fit-bed` (mqucifer/print-shop#168): two plates 40 x 40, the lower
+    8 mm thick and the upper 12, a 5.5 mm hole through both at their middle for one M5
+    through-bolt, and in the upper's top face a hex pocket 4 mm deep for the nut, which is
+    8 mm across its flats and at least 8.79 across its corners (ISO 4032): 8.4 mm across, a
+    play of 0.2 a side; 7.9, which the nut doesn't go into; 9.0, which it turns in; a slot the
+    same 8.4 mm wide run out to the plate's edge; and a round pocket, with no flats at all.
+    The upper plate is also turned on its side in the assembly, to be read where it's put."""
+    import json
+
+    def holed(thick: float) -> Any:
+        return box(0, 40, 0, 40, 0, thick).cut(
+            cq.Workplane("XY").center(20, 20).circle(2.75).extrude(thick)
+        )
+
+    def cut(tool: Any) -> Any:
+        return holed(12).cut(tool.translate((20, 20, 8)))
+
+    def hexagon(flats: float) -> Any:
+        return cq.Workplane("XY").polygon(6, flats, circumscribed=True).extrude(4)
+
+    save(holed(8), "bed/plate")
+    save(cut(hexagon(8.4)), "bed/pocket")
+    save(cut(hexagon(7.9)), "bed/pocket-tight")
+    save(cut(hexagon(9.0)), "bed/pocket-loose")
+    # From 4.2 mm short of the bolt's axis out past the plate's edge at x 40.
+    slot = cq.Workplane("XY").rect(30, 8.4).extrude(4).translate((10.8, 0, 0))
+    save(cut(slot), "bed/pocket-slot")
+    save(cut(cq.Workplane("XY").circle(4.5).extrude(4)), "bed/pocket-round")
+    joint = {"between": ["lower", "upper"], "kind": "through", "bolt": "m5-8.8", "nut": "m5-nut",
+             "washer": "m5-washer", "at": [[20, 20, 8]], "pocket": 0.2}  # fmt: skip
+    for name in ("pocket", "pocket-tight", "pocket-loose", "pocket-slot", "pocket-round"):
+        parts = [
+            {"name": "lower", "file": "plate.step", "layers": "z"},
+            {"name": "upper", "file": f"{name}.step", "at": [0, 0, 8], "layers": "z"},
+        ]
+        Path(f"bed/{name}.json").write_text(json.dumps({"parts": parts, "joints": [joint]}))
+    # The same pair stood on its side: turned a quarter about x, so the bolt runs along y.
+    parts = [
+        {"name": "lower", "file": "plate.step", "turn": [["x", 90]], "layers": "z"},
+        {"name": "upper", "file": "pocket.step", "turn": [["x", 90]], "at": [0, -8, 0],
+         "layers": "z"},
+    ]  # fmt: skip
+    turned = {**joint, "at": [[20, -8, 20]], "pocket": 0.3}
+    Path("bed/pocket-turned.json").write_text(json.dumps({"parts": parts, "joints": [turned]}))
 
 
 if __name__ == "__main__":

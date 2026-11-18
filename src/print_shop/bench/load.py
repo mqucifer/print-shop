@@ -30,6 +30,14 @@ An insert pulls out of printed plastic long before a steel bolt gives, so
 where a bolt has a pull to hold and neither its insert nor its joint has a figure, the answer is
 `UNREAD`, never `OK` on the bolt alone.
 
+**A through joint** (mqucifer/print-shop#168, `load_through.py`) is a bolt right through both
+parts, with a nut and washers, and no insert to give first. Its bolts' pulls are found the same
+way, and it's judged by the worst of: the bolt against its proof load; the pressure under each
+washer, or under the nut in its pocket, and where the shank leans on its hole's wall, against
+what the plastic takes pressed that way to its layers; and the plastic round each hole, solved
+again by itself under the bolt's pull and shear and read as strain, as any part is. The reply
+names which is nearest its limit. It's never `OK` on the bolt alone.
+
 A touching joint is held by nothing: it fails where it's pulled apart, or where its push falls
 outside the faces that meet, which tips it open; the friction it needs to stay put is a figure,
 held to `--friction` where that's given.
@@ -44,24 +52,28 @@ it, whatever the mesh. Two readings of one figure on opposite sides of its limit
 **What it can't read:** a part's walls and infill (each is solid here, so a sparse part is less
 stiff and less strong than this), a printed part's stiffness the other way (one modulus every
 way), creep under a weight left on for months, a bolt's preload or a joint that opens (it's the
-first, linear answer, with no contact), shear where an insert bears on its plastic, the parts' own
-weight, buckling, and anything that isn't still: a knock, or someone sitting down.
+first, linear answer, with no contact), shear where an insert bears on its plastic, a nut's
+thread, a bolt's length, the parts' own weight, buckling, and anything that isn't still: a knock,
+or someone sitting down.
 """
 
 from __future__ import annotations
 
+import contextlib
 import math
 import os
 import re
 import sys
 import tempfile
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from .assembly import AXES, Assembly, Held, Joint, read
+from . import load_through
+from .assembly import AXES, DIAMETER, Assembly, Held, Joint, read
 from .cae import freecad
 from .limits import over, said
 from .report import NoAnswer, Report
@@ -406,6 +418,10 @@ class _Model:
         mesh.Shape = self.feature
         mesh.CharacteristicLengthMax = self.size
         mesh.ElementOrder = "2nd"
+        # A second-order element's curved side, on a bolt's hole far smaller than the mesh,
+        # can turn it inside out, and CalculiX then solves nothing: gmsh straightens those
+        # (mqucifer/print-shop#168). A part with flat sides only is meshed as it was.
+        mesh.HighOrderOptimize = "Optimization"
         analysis.addObject(mesh)
         doc.recompute()
         began = time.time()
@@ -429,6 +445,12 @@ class _Model:
         fea.load_results()
         self.solve_s = round(time.time() - began, 2)
         results = [o for o in analysis.Group if o.isDerivedFrom("Fem::FemResultObject")]
+        if "nonpositive jacobian" in str(getattr(fea, "ccx_stdout", "")):
+            raise NoAnswer(
+                f"CalculiX solved nothing: an element of the mesh, at most {self.size:g} mm, is "
+                "turned inside out, as one with a curved side on a small hole or a tight round "
+                "can be. Give a finer --mesh"
+            )
         if not results or not results[0].NodeStrainXX:
             raise NoAnswer(
                 f"CalculiX gave no result for the {fem.VolumeCount} elements, at a mesh of "
@@ -780,6 +802,21 @@ def _mesh_size(placed: list[Any], given: float | None) -> float:
     return float(round(max(MESH_LEAST, budget, thin / ACROSS), 3))
 
 
+@contextlib.contextmanager
+def _quiet() -> Iterator[None]:
+    """The workbench prints as it goes, and a reply's first line is its verdict."""
+    said_before = os.dup(1)
+    sys.stdout.flush()
+    with open(os.devnull, "w") as nowhere:
+        os.dup2(nowhere.fileno(), 1)
+    try:
+        yield
+    finally:
+        sys.stdout.flush()
+        os.dup2(said_before, 1)
+        os.close(said_before)
+
+
 def _solved(assembly: Assembly, placed: list[Any], args: Any, size: float) -> dict[str, Any]:
     """One solve at one mesh, and everything read from it."""
     import FreeCAD as App
@@ -788,11 +825,13 @@ def _solved(assembly: Assembly, placed: list[Any], args: Any, size: float) -> di
     App.ParamGet("User parameter:BaseApp/Preferences/Mod/Fem/Gmsh").SetInt("NumOfThreads", 1)
     doc = App.newDocument("Load")
     model = _Model(assembly, placed, args, size)
-    # The workbench prints as it goes, and a reply's first line is its verdict.
-    said_before = os.dup(1)
-    sys.stdout.flush()
-    with open(os.devnull, "w") as nowhere:
-        os.dup2(nowhere.fileno(), 1)
+    with _quiet():
+        return _read_solved(assembly, model, doc, size)
+
+
+def _read_solved(assembly: Assembly, model: _Model, doc: Any, size: float) -> dict[str, Any]:
+    import FreeCAD as App
+
     try:
         model.join(doc)
         model.hold()
@@ -817,9 +856,6 @@ def _solved(assembly: Assembly, placed: list[Any], args: Any, size: float) -> di
             "solve_s": model.solve_s,
         }
     finally:
-        sys.stdout.flush()
-        os.dup2(said_before, 1)
-        os.close(said_before)
         App.closeDocument(doc.Name)
 
 
@@ -843,6 +879,8 @@ def run(args: Any, report: Report) -> None:
     if len(stiff) > 1:
         raise NoAnswer("parts of different stiffness aren't solved together yet: one material")
     placed = _placed(assembly)
+    # Each through-bolt's way through both parts, before anything is solved.
+    ways = load_through.ways(assembly, placed)
     size = _mesh_size(placed, args.mesh)
     fine = _solved(assembly, placed, args, size)
     coarse = _solved(assembly, placed, args, round(size * COARSER, 3))
@@ -875,7 +913,7 @@ def run(args: Any, report: Report) -> None:
     fails: list[str] = []
     apart: list[str] = []
     _parts(report, fine, coarse, fails, apart)
-    _joints(assembly, args, report, fine, coarse, fails, apart)
+    _joints(assembly, args, report, fine, coarse, fails, apart, (ways, placed))
     unread = [n for n, j in report.numbers["joints"].items() if j.get("insert_unread")]
     report.numbers["loads"] = fine["loads"]
     for one, other in zip(fine["loads"], coarse["loads"], strict=True):
@@ -1008,6 +1046,7 @@ def _joints(
     coarse: dict[str, Any],
     fails: list[str],
     apart: list[str],
+    through: tuple[dict[str, list[dict[str, Any]]], list[Any]],
 ) -> None:
     """Each joint's force, and whether what holds it can."""
     force = args.weight * G
@@ -1063,6 +1102,13 @@ def _joints(
             )
         if joint.kind == "bolted":
             _bolted(joint, report, one, read, other, statics, fails, apart)
+        elif joint.kind == "through":
+            ways, placed = through
+            solids = [placed[[p.name for p in assembly.parts].index(n)] for n in joint.between]
+            _through(
+                assembly, joint, report, one, read, other, statics, fails, apart,
+                ways[joint.name], solids,
+            )  # fmt: skip
         elif joint.kind == "touching":
             _touching(joint, args, report, one, read, force, fails)
     report.numbers["joints"] = saved
@@ -1120,6 +1166,221 @@ def _bolted(
             f"its {limit:.0f} N ({whose}): more bolts, further from the edge it turns about, "
             "or a joint where the load is lower"
         )
+
+
+def _through(
+    assembly: Assembly,
+    joint: Joint,
+    report: Report,
+    one: dict[str, Any],
+    read: dict[str, Any],
+    other: dict[str, Any],
+    statics: tuple[np.ndarray, np.ndarray] | None,
+    fails: list[str],
+    apart: list[str],
+    ways: list[dict[str, Any]],
+    solids: list[Any],
+) -> None:
+    """A bolt right through both parts (mqucifer/print-shop#168): the bolt against its proof
+    load, the pressure under each washer or the nut and on each hole's wall, and the plastic
+    round each hole, solved again by itself. The joint's answer is the worst of them, named."""
+    assert joint.bolt is not None and joint.nut is not None and joint.washer is not None
+    name = joint.name
+    if not read["flat"]:
+        raise NoAnswer(
+            f"the through joint {name}'s faces aren't in one plane: a bolt's pull is read "
+            "square to one flat face. Give each flat face's joint to its own pair of parts"
+        )
+    normal = read["normal"]
+    for way in ways:
+        if abs(abs(float(way["axis"] @ normal)) - 1) > 1e-6:
+            raise NoAnswer(
+                f"the through joint {name}'s bolt at {_xyz(way['sides'][0]['seat'])} isn't "
+                "square to the faces that meet: its pull is read square to them"
+            )
+    limit = joint.bolt.pull_n
+    whose = f"the bolt {joint.bolt.name}: {joint.bolt.source}"
+    bolts = _bolts(joint, read, read["force"], read["moment"])
+    count = len(bolts)
+    # What the second part's shank puts on the first part's hole, and the other way on its own.
+    across = (read["force"] - float(read["force"] @ normal) * normal) / count
+    shank = DIAMETER[joint.bolt.thread]
+    parts = [assembly.part(n) for n in joint.between]
+    force = report.numbers["force_n"]
+    #: Every reading as its share of its limit, to name the nearest.
+    shares: list[tuple[float, str]] = []
+    worst = max(b["pull_n"] for b in bolts)
+    shares.append((worst / limit, f"the bolt, at {worst:.1f} N of its {limit:.0f} N"))
+    one.update(bolts=bolts, bolt_pull_n=worst, holds_n=limit, holds_from=whose)
+    seat = "in a pocket, at a play of " + f"{joint.pocket:g} mm" if joint.pocket is not None else ""
+    report.line(
+        f"its {count} through-bolt(s), {joint.bolt.name} with the nut {joint.nut.name}"
+        + (f" {seat}" if seat else "")
+        + f" and the washer {joint.washer.name}: the most one has to hold is a pull of "
+        f"{worst:.1f} N, with {bolts[0]['shear_n']:.1f} N across it, as "
+        f"joints.{name}.bolt_pull_n, against {limit:.0f} N ({whose})"
+    )
+    if over(worst, limit):
+        fails.append(
+            f"the joint {name}'s worst bolt has to hold {said(worst, limit, 1)} N, over its "
+            f"{limit:.0f} N ({whose}): more bolts, further from the edge it turns about, or a "
+            "larger bolt"
+        )
+    again = {"on the coarser mesh": _bolts(joint, other, other["force"], other["moment"])}
+    if statics is not None:
+        again["by statics"] = _bolts(joint, read, *statics)
+    for how, theirs in again.items():
+        pull = max(b["pull_n"] for b in theirs)
+        one[f"bolt_pull_{how.split()[-1]}_n"] = pull
+        report.second(f"the joint {name}'s worst bolt {how}: a pull of {pull:.1f} N")
+        if over(pull, limit) != over(worst, limit):
+            apart.append(
+                f"the joint {name}'s worst bolt holds {said(worst, limit, 1)} N by the solve "
+                f"and {said(pull, limit, 1)} N {how}, either side of its {limit:.0f} N"
+            )
+    press_source = ""
+    for index, (bolt, way) in enumerate(zip(bolts, ways, strict=True)):
+        ends = []
+        for k, (side, part, solid) in enumerate(zip(way["sides"], parts, solids, strict=True)):
+            layers = part.layers_way()
+            where = f"the joint {name}'s bolt at {_xyz(side['seat'])}, in {part.name}"
+            press_source = part.material.press_source
+            # Under the washer, or the nut.
+            most, pressed = part.material.press(way["axis"], layers)
+            pressure = bolt["pull_n"] / side["bears_mm2"]
+            end: dict[str, Any] = {
+                "part": part.name,
+                "under": "nut" if side["on_nut"] else "washer",
+                "seat": _list(side["seat"], 3),
+                "bears_mm2": side["bears_mm2"],
+                "pressure_mpa": pressure,
+                "pressure_limit_mpa": most,
+                "pressed": pressed,
+                "hole_mm": side["hole_mm"],
+                "hole_length_mm": side["hole_length_mm"],
+            }
+            shares.append(
+                (pressure / most, f"the pressure under {side['under']} on {part.name}, at "
+                 f"{pressure:.2f} MPa of {most:g} MPa")
+            )  # fmt: skip
+            report.line(
+                f"  {side['under']} bears on {side['bears_mm2']:.2f} mm² of {part.name} round a "
+                f"hole {side['hole_mm']:.2f} mm across and {side['hole_length_mm']:.2f} mm long: "
+                f"{pressure:.3f} MPa under the bolt's {bolt['pull_n']:.1f} N, pressed {pressed}, "
+                f"against {most:g} MPa, as joints.{name}.bolts.{index}.ends.{k}.pressure_mpa"
+            )
+            if not side["seated"]:
+                fails.append(
+                    f"{where}: {side['under']} sits on {side['bears_mm2']:.1f} mm² of the part, "
+                    f"of its ring's {side['ring_mm2']:.1f} mm²: it overhangs an edge or a "
+                    "step. Move the bolt in, or make its seat flat and wide enough"
+                )
+            if over(pressure, most):
+                fails.append(
+                    f"{where}: the plastic under {side['under']} is pressed by "
+                    f"{said(pressure, most, 2)} MPa, {pressed}, over its {most:g} MPa: a "
+                    "wider washer, more bolts, or a larger bolt"
+                )
+            for how, theirs in again.items():
+                second = theirs[index]["pull_n"] / side["bears_mm2"]
+                if over(second, most) != over(pressure, most):
+                    apart.append(
+                        f"{where}: the pressure under {side['under']} is "
+                        f"{said(pressure, most, 2)} MPa by the solve and "
+                        f"{said(second, most, 2)} MPa {how}, either side of its {most:g} MPa"
+                    )
+            # Where the shank leans on the hole's wall.
+            push = across if k == 0 else -across
+            leans = float(np.linalg.norm(push))
+            if leans > NOTHING * force:
+                wall_most, wall_pressed = part.material.press(push / leans, layers)
+                wall = leans / (shank * side["hole_length_mm"])
+                end.update(
+                    wall_pressure_mpa=wall, wall_limit_mpa=wall_most, wall_pressed=wall_pressed
+                )
+                shares.append(
+                    (wall / wall_most, f"the shank on the hole's wall in {part.name}, at "
+                     f"{wall:.2f} MPa of {wall_most:g} MPa")
+                )  # fmt: skip
+                report.line(
+                    f"  the shank leans on {part.name}'s hole with {leans:.1f} N over its "
+                    f"{shank:g} mm by {side['hole_length_mm']:.2f} mm: {wall:.3f} MPa, pressed "
+                    f"{wall_pressed}, against {wall_most:g} MPa"
+                )
+                if over(wall, wall_most):
+                    fails.append(
+                        f"{where}: the shank presses the hole's wall by "
+                        f"{said(wall, wall_most, 2)} MPa, {wall_pressed}, over its "
+                        f"{wall_most:g} MPa: a thicker part there, more bolts, or a larger bolt"
+                    )
+            # The plastic round the hole, solved by itself under this bolt.
+            if bolt["pull_n"] > NOTHING * force or leans > NOTHING * force:
+                with _quiet():
+                    solves = [
+                        load_through.round_bolt(
+                            solid, part, side, way["axis"], bolt["pull_n"], push, coarser
+                        )
+                        for coarser in (1.0, COARSER)
+                    ]  # fmt: skip
+                fine, rough = solves
+                end["round"] = {**fine, "coarse": rough}
+                report.line(
+                    f"  the plastic round it in {part.name}, cut off {fine['held_mm']:.1f} mm "
+                    f"from the bolt's axis and held there, under the bolt's pull and shear "
+                    f"({fine['elements']} elements of at most {fine['mesh_mm']:g} mm): pulled "
+                    f"across its layers by {fine['across_layers_pct']:.3f}% at most, at "
+                    f"{_xyz(fine['across_at'])}, against {part.material.across_pct:g}%; its "
+                    f"largest stretch any way is a {fine['stretch_is']} of "
+                    f"{fine['stretch_pct']:.3f}%, at {_xyz(fine['stretch_at'])}, against "
+                    f"{part.material.along_pct:g}%"
+                )
+                report.second(
+                    f"the plastic round {where} on a mesh of at most {rough['mesh_mm']:g} mm: "
+                    f"{rough['across_layers_pct']:.3f}% across its layers "
+                    f"({_share(rough['across_layers_pct'], fine['across_layers_pct'])} apart) "
+                    f"and {rough['stretch_pct']:.3f}% any way "
+                    f"({_share(rough['stretch_pct'], fine['stretch_pct'])} apart)"
+                )
+                for key, most_pct, what, at in (
+                    ("across_layers_pct", part.material.across_pct, "pulled across its layers",
+                     "across_at"),
+                    ("stretch_pct", part.material.along_pct, "stretched", "stretch_at"),
+                ):  # fmt: skip
+                    value = fine[key]
+                    shares.append(
+                        (value / most_pct, f"the plastic round the hole in {part.name}, {what} "
+                         f"by {value:.3f}% of {most_pct:g}%")
+                    )  # fmt: skip
+                    if over(value, most_pct) != over(rough[key], most_pct):
+                        apart.append(
+                            f"{where}: the plastic round the hole is {what} by "
+                            f"{said(value, most_pct)}% on the mesh and "
+                            f"{said(rough[key], most_pct)}% on the coarser one, either side of "
+                            f"its {most_pct:g}% limit"
+                        )
+                    elif over(value, most_pct):
+                        fails.append(
+                            f"{where}: the plastic round the hole is {what} by "
+                            f"{said(value, most_pct, 2)}% at {_xyz(fine[at])}, over its "
+                            f"material's {most_pct:g}%: it tears out there. Move the bolt "
+                            "further from the edge, make the part thicker round it, or lay it "
+                            "so its layers run along this pull"
+                        )
+            ends.append(end)
+        bolt["ends"] = ends
+    share, nearest = max(shares)
+    one.update(gives_first=nearest, nearest_share=share)
+    report.line(
+        f"  of the bolt, the washers, the nut and the plastic, the nearest its limit is "
+        f"{nearest}: {100 * share:.1f}% of it, as joints.{name}.nearest_share"
+    )
+    if press_source:
+        report.line(f"  what the plastic takes pressed is from {press_source}")
+    report.note(
+        f"the through joint {name} is read with its bolts snug and no more: a bolt tightened "
+        "hard presses its washers on the plastic by its own preload, which isn't in this, and "
+        "PETG creeps under it. The pressure is taken as even under each washer"
+    )
 
 
 def _touching(

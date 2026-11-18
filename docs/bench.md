@@ -354,7 +354,7 @@ A second check has to ask the same question as the first, or it only makes noise
 
 ## Joined parts under a weight, and each part against the bed
 
-(mqucifer/print-shop#156; M20's side table, in mqucifer/project-print `ROADMAP.md`.) A side table is bigger than the bed, so it's printed as parts and joined, with bought bolts and inserts where it takes load. `bend` reads one arm pushed aside. Nothing read several parts joined together with a weight on them, or a set of parts against the bed. The table's load is read with FreeCAD (decided with the Sponsor at M20's planning session, 2026-11-17), as M18 reads the way on and the bend: a tool we have, not the harness. `load` runs in the second image as it is, `print-shop/cae:0.1`, with no new package, and `fit-bed` in the first.
+(mqucifer/print-shop#156 and mqucifer/print-shop#168; M20's side table, in mqucifer/project-print `ROADMAP.md`.) A side table is bigger than the bed, so it's printed as parts and joined, with bought bolts, nuts and washers where it takes load: printed parts are held mechanically, never by glue, by through-bolts (decided with the Sponsor, 2026-11-18). `bend` reads one arm pushed aside. Nothing read several parts joined together with a weight on them, or a set of parts against the bed. The table's load is read with FreeCAD (decided with the Sponsor at M20's planning session, 2026-11-17), as M18 reads the way on and the bend: a tool we have, not the harness. `load` runs in the second image as it is, `print-shop/cae:0.1`, with no new package, and `fit-bed` in the first.
 
 **When to use which.**
 
@@ -364,6 +364,8 @@ A second check has to ask the same question as the first, or it only makes noise
 | Do the joined parts hold the weight, the way each is printed? | `load assembly.json --weight KG --at X,Y,Z` |
 | How far does the top move under it? | the same reply's `moves_mm` |
 | What does each joint have to carry? | the same reply's `joints.NAME` |
+| Does a through-bolt hold, and what gives first: the bolt, the plastic under a washer or the nut, or the plastic round the hole? | the same reply's `joints.NAME.gives_first` and `nearest_share` |
+| Does each nut's pocket fit its nut? | `fit-bed assembly.json`, `pockets.NAME` |
 
 ### The assembly file
 
@@ -374,8 +376,8 @@ Both read one file, JSON, written by whoever designs the parts (`bench/assembly.
    {"name": "top", "file": "top.step", "at": [0, 0, 500], "material": "petg", "layers": "z"},
    {"name": "leg1", "file": "leg.step", "at": [10, 10, 0], "turn": [["z", 90]], "layers": "x"}],
  "joints": [
-   {"between": ["top", "leg1"], "kind": "bolted", "bolt": "m4-8.8", "insert": "m4-heat-set",
-    "at": [[30, 30, 500]]}],
+   {"between": ["top", "leg1"], "kind": "through", "bolt": "m5-8.8", "nut": "m5-nut",
+    "washer": "m5-washer", "at": [[30, 30, 500]], "pocket": 0.2}],
  "held": [{"plane": "z=0", "how": "standing"}]}
 ```
 
@@ -385,13 +387,14 @@ Both read one file, JSON, written by whoever designs the parts (`bench/assembly.
   - `material`, `petg` unless given, the only one so far;
   - `layers`, the axis of its own file its layers are stacked along: the way up on the bed. It turns with the part. There's no default: a printed part is weaker across its layers, so the file says how each is printed.
 - **`joints`**, each `between` two parts that meet face to face, with its `kind`:
-  - `bonded`: glued or welded over the faces that meet;
+  - `through` (mqucifer/print-shop#168): a bolt right through both parts. A `bolt`, a `nut` and a `washer` from the tables below, all one thread, or the file is refused; and `at`, where each bolt is, a point on its axis. The bolt's head, on a washer, is on the first part named, and its nut on the second: on a washer too, or, with `pocket`, in a pocket there that holds it by its flats, with no washer under it. `pocket` is the play between each of the nut's flats and its pocket's wall, in mm. It takes no `insert` and no `pull_n`: what it holds is read;
+  - `bonded`: glued or welded over the faces that meet. Printed parts aren't held this way (the Sponsor, 2026-11-18: "It needs some mechanical hold"), and `load` judges nothing of it;
   - `bolted`: a `bolt` and an `insert` from the tables below, and `at`, where each bolt is, a point on its axis. Its own figure for what each bolt holds is `pull_n`, in N, with its `source`, the words that say where it's from;
   - `touching`: held by nothing. It can push, and can't pull.
 - **`held`**, where the assembly stands or is fixed: each a `plane` (`z=0`) and `how`, `standing` on it, held square to the plane and free to slide, or `fixed` to it, as a bracket is to a wall; and `part`, to hold one part's faces only. With none, it stands on its lowest level.
 - **Parts meet face to face.** Two that pass through each other, two that meet with no joint named, a joint whose parts don't meet, and a held plane with no flat face in it are each `NO ANSWER`, saying where and by how much, and nothing is solved.
 
-**The bought parts**, each figure with where it's from (`assembly.BOLTS`, `assembly.INSERTS`):
+**The bought parts**, each figure with where it's from (`assembly.BOLTS`, `assembly.NUTS`, `assembly.WASHERS`, `assembly.INSERTS`):
 
 | Name | What it holds | From |
 |---|---|---|
@@ -399,13 +402,40 @@ Both read one file, JSON, written by whoever designs the parts (`bench/assembly.
 | `m3-a2-70` to `m8-a2-70` | 450 MPa over the same areas: 2264, 3951, 6390, 9045 and 16470 N | ISO 3506-1: the 0.2% proof stress of stainless A2-70 |
 | `m3-heat-set` to `m8-heat-set` | no figure | none yet: see below |
 
+Nuts and washers (mqucifer/print-shop#168), in mm. A nut's figures are its size across its flats at most, s, which is its nominal size; across its corners at least, e; its height at most, m; and the least diameter of the face it bears on, dw. A washer's are its hole, d1, its outside diameter, d2, and its thickness, h, each nominal.
+
+| Name | Across flats | Across corners | Height | Bearing face | From |
+|---|---|---|---|---|---|
+| `m3-nut` | 5.5 | 6.01 | 2.4 | 4.6 | ISO 4032:2012, hexagon regular nuts (style 1), product grades A and B, table 1 "Preferred threads": s max, e min, m max and dw min. The 1999 edition's table 1 gives the same |
+| `m4-nut` | 7 | 7.66 | 3.2 | 5.9 | the same table |
+| `m5-nut` | 8 | 8.79 | 4.7 | 6.9 | the same table |
+| `m6-nut` | 10 | 11.05 | 5.2 | 8.9 | the same table |
+| `m8-nut` | 13 | 14.38 | 6.8 | 11.6 | the same table |
+
+| Name | Hole | Outside | Thickness | From |
+|---|---|---|---|---|
+| `m3-washer` | 3.2 | 7 | 0.5 | ISO 7089:2000, plain washers, normal series, product grade A: d1 nominal (its least), d2 nominal (its most) and h nominal |
+| `m4-washer` | 4.3 | 9 | 0.8 | the same table |
+| `m5-washer` | 5.3 | 10 | 1 | the same table |
+| `m6-washer` | 6.4 | 12 | 1.6 | the same table |
+| `m8-washer` | 8.4 | 16 | 1.6 | the same table |
+
+- **How they were read** (2026-11-18): ISO's own text is sold, so each table was read from copies of it, two at least that agree on every figure here, saved with their addresses in `~/print-shop/proofs/m20-through/sources/`. ISO 4032: a copy of the 2012 edition, the 1999 edition's preview from iTeh, and globalfastener.com's two pages for it. ISO 7089: globalfastener.com's page for the 2000 edition and Westfield Fasteners' table. Two other pages each differed from those in one figure not used here (one nut's least height, one nut's height), and aren't relied on.
+- **A bolt's width** is its thread's name: M5 is 5 mm (`assembly.DIAMETER`).
+- **A nut's own thread isn't judged.** ISO 898-2 pairs a class 8 nut with a class 8.8 bolt so that the pair can be tightened to the bolt's proof load without the thread stripping (its clause on the design of bolt and nut assemblies, for M5 to M39), and a bolt here is held to its proof load. M3 and M4 are outside that clause.
+
+**What printed PETG takes pressed** (`assembly.PRESS`, mqucifer/print-shop#168). Under a washer, a nut or a bolt's shank the plastic is pressed, and Prusament PETG's datasheet (version 1.1, 16-02-2022) has no compressive figure: the word isn't on it. So a pressure is held to the same sheet's figures for a pull, which stand in for it, and every reply says so:
+- **pressed across its layers,** which pushes them together: 45 MPa, the low end of "Tensile Yield Strength [MPa] 47 ± 2" for a specimen printed flat (ISO 527-1);
+- **pressed along its layers,** which spreads them sideways and so pulls one off the next: 14 MPa, the low end of "Interlayer Adhesion [MPa] 18 ± 4", the figure `bend`'s 1% across the layers comes from.
+- A push is across the layers where it's nearer the way they're stacked than their plane. Nothing here has been compared with a print, and a crush test on the Sponsor's own PETG would be the figure to trust.
+
 **An insert's pull-out has no source yet.** A brass insert melted into printed PETG pulls out of its plastic long before a steel bolt stretches, so the insert's figure is the one that matters, and none is in the table. The figures found on 2026-11-17 were for other plastics (a test in nylon), an average across several plastics with no figure for PETG, or a claim with no method, and the two pages that might have given more couldn't be read. **So a bolted joint with no figure is `UNREAD`, never `OK` on its bolt alone** (the operator's ruling on mqucifer/print-shop#160): where a bolt has any pull to hold, and neither its insert nor its joint has a figure, the answer names the joint and the insert as unread, exit 2, and no need passes on it. A joint gives its own `pull_n` and `source`, from the request or a pull test, and is then read against the least of that and its bolt. A pull test on the Sponsor's own PETG and inserts is the figure to trust, and is the operator's to put to the Sponsor when the table's run is near.
 
 ### `load`
 
 (`bench/load.py`.) `--weight` kg is shared equally between the places `--at` names, each on the assembly's surface, within 0.5 mm, and each spread over the surface within `--over` mm of it (10 unless given: a cup's foot, not a point). It pulls `--toward -z`, down, unless given.
 
-- **One body, solved once.** The parts are put in their places and joined by FreeCAD's `generalFuse`, so the faces that meet are shared and gmsh meshes both sides of each joint with the same nodes. CalculiX solves it linear and static through the FEM workbench, on second-order tetrahedra of at most half the thinnest part, and no finer than leaves about 40,000 of them, on one thread, so the same parts give the same figures every time. The weight is put on as a force on each node of the surface's triangles in the patch, and the reply says the patch's area and its middle, which is where the weight acts: a patch cut off by an edge isn't round.
+- **One body, solved once.** The parts are put in their places and joined by FreeCAD's `generalFuse`, so the faces that meet are shared and gmsh meshes both sides of each joint with the same nodes. CalculiX solves it linear and static through the FEM workbench, on second-order tetrahedra of at most half the thinnest part, and no finer than leaves about 40,000 of them, on one thread, so the same parts give the same figures every time. Where a curved side would turn an element inside out, as on a bolt's hole far smaller than the mesh, gmsh straightens it (its high-order optimisation, mqucifer/print-shop#168): without that CalculiX solved nothing for a table-sized top with 5.5 mm holes at a 10 mm mesh. Where it still does, the reply says an element is turned inside out and to give a finer `--mesh`. The weight is put on as a force on each node of the surface's triangles in the patch, and the reply says the patch's area and its middle, which is where the weight acts: a patch cut off by an edge isn't round.
 - **Standing** holds each face in the plane square to it only, so a table's feet are free to spread, as on a floor: that's the more careful reading of the joints at the tops of its legs. Two nodes stop the rest sliding and turning, and carry nothing under a load square to the plane; a load along a standing plane is refused, saying to hold a plane `fixed`.
 - **Each part** (`parts.NAME`):
   - `across_layers_pct`, the most it's pulled across its layers, the stretch along the way its layers are stacked, and `across_at`, where. It's held to the material's limit across its layers. A push across the layers parts nothing, so only a pull counts: a leg printed standing and pushed straight down passes.
@@ -415,10 +445,18 @@ Both read one file, JSON, written by whoever designs the parts (`bench/assembly.
   - **It's read from the nodes' own balance,** not the surface's stress (`load.element_forces`): at each node of the faces that meet, the force the first part's own elements carry, each element's stiffness times how far its nodes moved, less what's put on that part there from outside. CalculiX balances exactly that sum at every node, so a part's joints add up to what's on it. The first reading summed the stress on the faces, and at a sharp inside corner, where a leg meets the underside of a top, it was up to 32% low: four legs carried 20.1 N of a 29.4 N weight between them. They now carry 7.34, 7.37, 7.34 and 7.36 N, 29.4 in all.
   - **Every joint is solved as one piece,** the faces tied all over, as a glued joint is and as a bolted one is while its bolts hold. What differs is how each is judged.
   - **Bolted:** what each bolt has to hold (`bolts`, and `bolt_pull_n` for the worst). The joint's pull is shared between its bolts. Its bending moment, less what a push through the faces' middle takes off it, is taken about the faces' edge on the pushed side, each bolt in proportion to its distance from that edge. The worst is held to `holds_n`: the least of the bolt's proof load, the insert's pull-out where one has a source, and the joint's own `pull_n` (`holds_from` says which). With neither an insert's figure nor the joint's, and a pull to hold, the joint is unread (`insert_unread`). The shear is shared between the bolts and said, and isn't judged: where an insert bears sideways on its plastic has no figure. A bolted joint's faces are in one plane.
+  - **Through** (mqucifer/print-shop#168, `bench/load_through.py`): a bolt right through both parts, with nothing that depends on an insert. Its bolts' pulls are found as a bolted joint's are, and it's judged by the worst of three, for every bolt, in both parts:
+    - **the bolt,** its pull against its proof load (`bolt_pull_n`, `holds_n`);
+    - **the plastic pressed:** under each washer, or under the nut where it sits in a pocket, the bolt's pull over what bears there (`bolts.N.ends.K.pressure_mpa`, `bears_mm2`), and where the shank leans on the hole's wall, the shear over the bolt's width times the hole's length (`wall_pressure_mpa`), each against what the plastic takes pressed that way to its layers. What bears is the ring from the hole, or the washer's own hole where that's wider, out to the washer's outside, or to the nut's bearing face, cut to the part's own flat faces at the hole's end. A washer that isn't wholly on the part fails, saying how much of it is;
+    - **the plastic round the hole,** read by the FEM as strain, as any part is (`bolts.N.ends.K.round`). The part alone is cut off two diameters of what bears on it from the bolt's axis and held where it's cut. The bolt's pull is spread over what the washer or the nut bears on, toward the other part, and its shear is put on the half of the hole's wall the shank leans on, most where it leans square. It's solved on a mesh of its own, and read within three quarters of the cut, as the hold strains what's beside it: pulled across the layers against the material's limit there, and the largest stretch any way against its limit in their plane. A hole near an edge leaves a thin bridge of plastic that the shank stretches, and that's where it tears out.
+    - **The reply names what's nearest its limit** (`gives_first`), and by what share (`nearest_share`, 1 at the limit): it's never `OK` on the bolt alone. A joint whose bolts have nothing to hold, pushed together and not sheared, says so.
+    - **Before anything is solved,** each bolt's way through is read from the parts' own faces (`bench/through.py`): a round hole in each part along the bolt's axis, within 0.05 mm of the place named, no narrower than the bolt, the two meeting end to end where the parts meet, each ending on a flat face square to the bolt. One without is `NO ANSWER`, saying which part and why.
+    - **Second methods:** each bolt's pull on the coarser mesh and by statics, and the pressures from them, `DISAGREE` where one lands on the other side of a limit; and the plastic round each hole again on a mesh half as coarse again.
+    - **What a through joint's reading leaves out:** it's read with its bolts snug and no more, so a bolt tightened hard, which presses its washers on the plastic by its own preload, isn't in it, and nor is PETG creeping under that; the pressure is taken as even under each washer; all the shear is taken by the shanks, none by friction, and a twist about the faces' normal by none; the bolt's length and its nut's thread aren't checked.
   - **Touching:** `FAIL` where it's pulled apart; where it carries shear or bending with no push to hold it; and where its push, which acts at `push_at`, falls outside the faces that meet (`push_off_faces_mm`), which tips it open. The friction it needs to stay put, its shear over its push, is `friction_needed`. **That has no default limit:** `--friction MU` holds it, and without it it's a reading that says so. A touching joint whose faces aren't in one plane isn't judged, and a note says how much of it the solve pulls on.
   - **Bonded:** its force is read and nothing is judged: a glue's strength isn't the bench's.
 - **How far it moves:** each loaded place, along the load (`loads.N.moves_mm`), the most of those (`moves_mm`), and the most any point moves and where (`most_moves_mm`). A need holds `moves_mm` with `at_most`.
-- **Verdict:** `OK`; `FAIL`, naming each part over a limit, each bolt over what it holds and each touching joint that comes away, with what to change; or `UNREAD`, where nothing read fails and a bolted joint with a pull to hold has no figure for its insert. A need never passes on `UNREAD`, whatever verdicts it names.
+- **Verdict:** `OK`; `FAIL`, naming each part over a limit, each bolt over what it holds, each through-bolt's washer, nut or hole whose plastic is over its limit, and each touching joint that comes away, with what to change; or `UNREAD`, where nothing read fails and a bolted joint with a pull to hold has no figure for its insert. A need never passes on `UNREAD`, whatever verdicts it names.
 - **Second methods:**
   - **The whole solve again on a mesh half as coarse again,** and every judged figure on both. Two readings of one figure on opposite sides of its limit are `DISAGREE`; on the same side, the gap is said and the finer mesh's figure stands. A sharp inside corner has no one strain in any mesh, so that's where they part.
   - **The held faces' reaction,** which CalculiX prints, against the weight: past 1% apart the load didn't go on as asked, and it's `NO ANSWER`.
@@ -428,7 +466,7 @@ Both read one file, JSON, written by whoever designs the parts (`bench/assembly.
   - a printed part's stiffness the other way: one modulus every way, with the layers only in the limits;
   - creep under a weight left on for months, a knock, someone sitting down, and buckling;
   - a bolt's preload, a joint that opens, and contact: it's the first, linear answer;
-  - shear where an insert bears on its plastic, and a glue's strength;
+  - shear where an insert bears on its plastic, a glue's strength, a nut's thread and a bolt's length;
   - the parts' own weight.
   - Nothing here has been compared with a print.
 - **Planted** (`tests/cae_cases/make_fixtures.py`, `load/`), each figure in `~/print-shop/proofs/m20-load/planted/`:
@@ -439,6 +477,13 @@ Both read one file, JSON, written by whoever designs the parts (`bench/assembly.
   - **A top on four legs,** each bolted, standing on the floor, 3 kg at its middle: each leg's joint carries 7.3 to 7.4 N, 29.4 in all. 20,000 elements, 12 s for both solves.
   - **At the table's planned size** (a 400 mm top as four tiles on four legs 40 mm square and 520 tall, 8 parts and 8 joints, drawn from the roadmap's round figures only, `big.py` in the same folder): 32,000 elements at a 10 mm mesh, 20 s for both solves, inside the container's 3 GiB. Its bolts hold 44.6 N at most, and it reads `UNREAD`: its inserts have no figure.
 
+  - **Two plates joined by one M5 through-bolt** (`through/`, mqucifer/print-shop#168; each figure in `~/print-shop/proofs/m20-through/planted/`). A plate 100 x 40 x 8 held at both ends and one 60 x 40 x 8 on it, a 5.5 mm hole through both.
+    - **Pulled straight up,** 20 kg shared between two places either side of the bolt: the bolt holds 197.7 N, the weight's 196.13 and a little from the joint's bending. Each washer bears on 54.78 mm², π/4 · (10² − 5.5²), so 3.609 MPa, where the weight over that ring is 3.580 by hand: `OK`, the nearest its limit the plastic round a hole.
+    - **With the nut in a hex pocket** in a plate 12 mm thick, at a play of 0.2 mm: the nut bears on 13.63 mm², π/4 · (6.9² − 5.5²), so 14.39 MPa under the same pull, four times a washer's, and that's named as nearest its limit, 32% of 45 MPa. Under 70 kg it's 50.36 MPa: `FAIL`, where the bolt's own 8236 N would have passed it twelve times over.
+    - **A lap pulled along,** 50 kg, the upper plate printed on its edge so its layers are stacked across it: the shank leans on each hole with 490.3 N, 12.26 MPa over 5 x 8 mm, within 14. With the upper plate's hole 20 mm from its end the plastic round it is pulled across its layers by 0.372%: `OK`. With the same hole 5.5 mm from the end, where its washer just sits on the plate, the 2.75 mm bridge of plastic to the edge is pulled by 1.287%, 1.208% on the coarser mesh, over 1%: `FAIL`, saying it tears out there.
+    - **With no hole in the upper plate:** `NO ANSWER`, saying a through-bolt passes right through both parts.
+    - **At the table's planned size** (`big.py` there: the four tiles and four legs above, one M5 through-bolt down through each tile into its leg, its nut in a slot in the leg's side; round figures only): 20 kg spread over the top, each bolt holds 48 N, the joints' bending, and the nearest its limit is the plastic under each nut, 3.5 MPa, 8% of 45: `OK`. 10 kg at one corner: `OK`, the bolts holding 4 N at most. 150 to 170 s each with another suite running beside it, of the container's 600: every bolt that has something to hold is solved four times, twice in each part.
+
 ### `fit-bed`
 
 (`bench/fit_bed.py`.) `--bed X,Y,Z` is the bed's width, depth and height, 256 mm each unless given.
@@ -448,6 +493,10 @@ Both read one file, JSON, written by whoever designs the parts (`bench/assembly.
 - **It's the whole bed,** with no margin for a brim or a skirt, which the slicer adds, and it doesn't read whether the side needs supports.
 - **Verdict:** `OK` when every part has a side that fits, `FAIL` naming each that doesn't. `parts.NAME.fits` is each part's.
 - **Second method:** the exact solid turned the same way and measured by OpenCascade's own box round it (`BRepBndLib.AddOptimal`, with no triangulation and no margin: CadQuery's own box is padded, and read a disc exactly as wide as the bed as 0.001 mm over). The two differ by the mesh's chords on a curved part. Where they land on opposite sides of the bed's size it's `DISAGREE`.
+- **A nut's pocket** (mqucifer/print-shop#168). Where the assembly's `through` joint states a `pocket`, its nut sits in one at the far end of the second part's hole. `fit-bed` reads it from that part's own faces, where the assembly puts it (`bench/through.py`): the flat walls that stand on the hole's end, face its axis, and face each other across it in pairs. Each pair holds the nut by two flats: six walls are a hex pocket, and two with an open end a slot the nut slides into. `pockets.NAME.N` has each bolt's: `across_flats_mm`, the narrowest pair; `play_mm`, half of that less the nut's size across its flats; `depth_mm`; and `fits`.
+  - **It fails** where the pocket is narrower than the nut, which then doesn't go in; where it's as wide as the nut's least size across its corners, so the nut turns in it; where its play isn't what the file states, within 0.005 mm; and where no two flat walls face each other there. A pocket shallower than the nut is said, and isn't a failure: the nut stands proud.
+  - **Second method:** the part's fine mesh cut square to the bolt half way up the pocket, and the nearest that outline comes to the axis, against the nearest wall by its faces. Past 0.01 mm apart it's `DISAGREE`.
+  - **Planted** (`bed/pocket*`): an M5 nut, 8 mm across its flats and at least 8.79 across its corners. A hex pocket 8.4 mm across, 4 mm deep, stated at 0.2: `OK`, 0.200 mm a side by its faces and 4.2000 mm to its nearest wall by both methods, the nut 0.70 mm proud. The same pair turned on its side reads the same. A slot 8.4 mm wide, open at the plate's edge: `OK`, three walls in one pair. 7.9 mm across: `FAIL`, the nut doesn't go in. 9.0: `FAIL`, the nut turns in it. A round pocket: `FAIL`, no flat walls. Stated at 0.3 where it's drawn at 0.2: `FAIL`, saying both.
 - **Planted** (`tests/bench_cases/make_fixtures.py`, `bed/`): a 120 mm beam fits as it's drawn, on its largest flat; a 300 x 30 one fits a 256 mm bed only turned 37.75°, at 255.57 x 207.39; a 400 mm one needs 304.1 mm at its best, 48.1 over, and fails, saying to split it; a rail 300 mm long printed standing is 44 mm too tall, and lying down fits; a disc 256 mm across fits, and one 256.2 doesn't. At the table's planned size, a leg 520 mm tall fits no way round, standing or lying.
 
 ## Limits
@@ -460,4 +509,4 @@ Both read one file, JSON, written by whoever designs the parts (`bench/assembly.
 
 ## Tests
 
-Planted fixtures are made from scratch by `tests/bench_cases/make_fixtures.py`, with right answers from arithmetic: `uv run pytest -q -m bench`. `tests/test_pieces.py` draws its own pictures and maps (`bench_cases/planted_pieces.py`): a clean panel, one with one of each rule break, a curved scene and two maps as rules would write them. `tests/test_pieces_dome.py` writes its own bands files for a dome of the planned size, and bends each slice back by its file's angles in plain Python, against the ellipse. The second image's are made in FreeCAD by `tests/cae_cases/make_fixtures.py`: `uv run pytest -q -m cae`, which needs both images, as one test follows the slide's reply into `fit-on` and `bend`. `load`'s cases are there too, and `fit-bed`'s in the first image's. `tests/test_load.py` needs no image: the assembly file, the arithmetic that shares a joint's force between its bolts, statics across a joint, an element's forces, and the furniture toolset. No Sponsor's design, or anything derived from one, is in this repository, and `scripts/bench_local_run.py` refuses to write inside it. `tests/test_bench_local.py` (`-m bench_local`) runs on the Sponsor's exported frame where it's present, and skips elsewhere. The frame's heights and play are in `~/print-shop/bench-local.json` on the Mac, off this repository. `scripts/bench_local_run.py triforce --out DIR` saves that run's figures to a folder off the repository, and `reference --out DIR` runs the commands over our reference parts in mqucifer/model-performance.
+Planted fixtures are made from scratch by `tests/bench_cases/make_fixtures.py`, with right answers from arithmetic: `uv run pytest -q -m bench`. `tests/test_pieces.py` draws its own pictures and maps (`bench_cases/planted_pieces.py`): a clean panel, one with one of each rule break, a curved scene and two maps as rules would write them. `tests/test_pieces_dome.py` writes its own bands files for a dome of the planned size, and bends each slice back by its file's angles in plain Python, against the ellipse. The second image's are made in FreeCAD by `tests/cae_cases/make_fixtures.py`: `uv run pytest -q -m cae`, which needs both images, as one test follows the slide's reply into `fit-on` and `bend`. `load`'s cases are there too, and `fit-bed`'s in the first image's. `tests/test_load.py` needs no image: the assembly file, the bought parts' tables, a through-bolt's hole and its nut's pocket read from plain rows of faces, the arithmetic that shares a joint's force between its bolts, statics across a joint, an element's forces, and the furniture toolset. No Sponsor's design, or anything derived from one, is in this repository, and `scripts/bench_local_run.py` refuses to write inside it. `tests/test_bench_local.py` (`-m bench_local`) runs on the Sponsor's exported frame where it's present, and skips elsewhere. The frame's heights and play are in `~/print-shop/bench-local.json` on the Mac, off this repository. `scripts/bench_local_run.py triforce --out DIR` saves that run's figures to a folder off the repository, and `reference --out DIR` runs the commands over our reference parts in mqucifer/model-performance.

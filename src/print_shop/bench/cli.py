@@ -613,8 +613,8 @@ def parser() -> Parser:
     load = sub.add_parser(
         "load",
         help="joined parts under a weight: each part's worst strain against its layers, each "
-        "joint's force, and how far the loaded place moves. Runs in the second image, with "
-        "FreeCAD's FEM",
+        "joint's force, a through-bolt's washers, nut and the plastic round it, and how far "
+        "the loaded place moves. Runs in the second image, with FreeCAD's FEM",
     )
     load.add_argument(
         "assembly",
@@ -663,7 +663,8 @@ def parser() -> Parser:
     bed = sub.add_parser(
         "fit-bed",
         help="each part against the bed: the side it's laid on, its footprint turned to fit, "
-        "its height, and whether it fits",
+        "its height, and whether it fits; and, for an assembly's through joints that state "
+        "one, each nut's pocket against its nut",
     )
     bed.add_argument(
         "parts",
