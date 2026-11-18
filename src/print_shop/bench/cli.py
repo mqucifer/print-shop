@@ -751,10 +751,17 @@ def parser() -> Parser:
         )
         reads.add_argument(
             "--lip",
-            type=float,
-            metavar="MM",
+            type=_lips,
+            metavar="FULL[,LEAST]",
             help="the lip `pieces build` will be given: each piece it leaves no one opening in "
             "is flagged, as the build would refuse it, with the line to split a waist along",
+        )
+        reads.add_argument(
+            "--min-visible",
+            type=float,
+            metavar="P",
+            help="with --lip, the build's --min-visible: each piece's lip sized to its pane's "
+            "visible share",
         )
         reads.add_argument(
             "--play", type=float, metavar="C", help="with --lip, the build's play (0.25)"
@@ -857,10 +864,19 @@ def parser() -> Parser:
         "--lip",
         type=_lips,
         required=True,
-        metavar="FULL",
+        metavar="FULL[,LEAST]",
         help="the lip over each pane's edge on both faces, in mm before play, on every piece: "
         "a piece whose opening it closes over at a waist is refused, with the line to split it "
-        "along. A second figure, FULL,LEAST, is read and not used",
+        "along. LEAST is used with --min-visible",
+    )
+    build.add_argument(
+        "--min-visible",
+        type=float,
+        metavar="P",
+        help="size each piece's lip to its pane's visible share, as `capture --full-rim FULL "
+        "--least-rim LEAST --min-visible P` reads it: FULL where the pane keeps P percent "
+        "visible, else the widest lip that keeps it, never under LEAST. From the request: "
+        "there's no default",
     )
     build.add_argument(
         "--play", type=float, required=True, metavar="C", help="the gap round each pane, in mm"

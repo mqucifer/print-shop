@@ -608,8 +608,75 @@ def _why(found: Map, piece: Piece, left: list[Any], what: str, lip: float | None
     )
 
 
+def _by_share(
+    found: Map, piece: Piece, lips: tuple[float, float], play: float, fit: float, share: float
+) -> tuple[float, dict[str, Any] | None, str]:
+    """One piece's lip sized to its pane's visible share, as `capture` sizes a rim
+    (`capture.rim_needed`), with its curves at that lip, or why it can't be built so.
+
+    The pane is the built pocket less the play, as `capture` reads one from a frame. Where
+    the pane keeps the share at the full lip, it takes the full lip and its opening is its
+    pocket's own curves moved in, unless those cover more than the share allows at a corner
+    that points in: then, as for a smaller rim, the opening is the pane moved in at a true
+    distance, which is the shape `capture` reckoned the share by."""
+    from types import SimpleNamespace
+
+    from .capture import rim_needed
+
+    full, least = lips
+    pocket_2d = None
+    curves: dict[str, Any] | None = None
+    closed: NoOpening | None = None
+    try:
+        curves = piece_curves(piece, full, play, fit)
+        pocket_2d = curves["pocket_2d"]
+    except NoOpening as exc:
+        closed, pocket_2d = exc, exc.pocket
+    except NoAnswer as exc:
+        return full, None, f"can't be built: {exc}"
+    seen = piecemap.polygons(pocket_2d.buffer(-play, join_style="mitre"))
+    if not seen:
+        return full, None, f"has no pane once {play:g} mm of play is taken from its pocket"
+    rim = rim_needed(
+        seen[0],
+        SimpleNamespace(clearance=play, full_rim=full, least_rim=least, min_visible=share),
+    )
+    if rim["remove"]:
+        return full, None, (
+            f"keeps {rim['visible_at_least_pct']:.1f}% of its pane visible at even the least "
+            f"lip, {least:g} mm, where {share:g}% is wanted, and "
+            f"{rim['visible_at_full_pct']:.1f}% at {full:g} mm: it's "
+            f"{piecemap.widest(piece.shape)[0]:.2f} mm at its widest. `pieces merge` it into a "
+            "neighbour, or give a smaller least lip or a lower --min-visible"
+        )  # fmt: skip
+    lip = full if rim["chosen"] == "full" else float(rim["set_mm"])
+    if rim["chosen"] == "full" and curves is not None:
+        shown = 100.0 * curves["opening_2d"].area / seen[0].area
+        if not under(shown, share):
+            return full, curves, ""
+    if rim["chosen"] == "full" and closed is not None:
+        return full, None, (
+            f"has no one opening at a lip of {full:g} mm, which keeps "
+            f"{rim['visible_at_full_pct']:.1f}% of its pane visible, at least the {share:g}% "
+            f"wanted: {_why(found, piece, closed.left, 'opening', full)}"
+        )
+    try:
+        return lip, piece_curves(piece, lip, play, fit, by_share=True), ""
+    except NoOpening as exc:
+        return lip, None, (
+            f"has no one opening at a lip of {lip:g} mm, the widest that keeps {share:g}% of "
+            f"its pane visible: {_why(found, piece, exc.left, 'opening', lip)}"
+        )
+    except NoAnswer as exc:
+        return lip, None, f"can't be built: {exc}"
+
+
 def plan(
-    found: Map, lips: tuple[float, float], play: float, fit: float
+    found: Map,
+    lips: tuple[float, float],
+    play: float,
+    fit: float,
+    min_visible: float | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Each piece's pane, pocket and opening in 2D, with the lip it takes and its curves as
     they'll be built, and what's wrong with any that can't be. The pocket is the pane and the
@@ -620,7 +687,13 @@ def plan(
     pocket as it's built, its curves fitted and moved inside the outline. The second is up to
     1.6 of `fit` narrower, so an opening that's whole on the outline can come apart on it: a
     build then ended with "leaves no one opening", no place and no fix
-    (mqucifer/print-shop#161)."""
+    (mqucifer/print-shop#161).
+
+    With `min_visible`, each piece's lip is the rim `capture` would ask of its pane, by
+    `capture`'s own function: the full one if the pane keeps that share visible with it, else
+    the widest that keeps it, never under the least. A piece that can't keep it at the least
+    is refused. With every piece at the full lip, a long curved piece came out 43% visible
+    where the request asked 60, and `capture` failed it."""
     full, least = lips
     rows, wrong = [], []
     for piece in sorted(found.pieces, key=lambda p: p.id):
@@ -668,6 +741,7 @@ def plan(
             )  # fmt: skip
         after = "with those lines out, it " if lone else ""
         pocket = curves = None
+        lip = full
         pane = pane_of(judged.shape, play)
         if pane is None:
             left = _printable(judged.shape.buffer(-play, join_style="mitre", mitre_limit=5.0))
@@ -675,6 +749,11 @@ def plan(
                 f"{after}has no pane once {play:g} mm of play is taken all round: "
                 f"{_why(found, judged, left, 'pane')}"
             )
+        elif min_visible is not None:
+            pocket = pane.buffer(play, quad_segs=ROUND_SEGS)
+            lip, curves, stop = _by_share(found, judged, (full, least), play, fit, min_visible)
+            if stop:
+                stops.append(after + stop)
         else:
             pocket = pane.buffer(play, quad_segs=ROUND_SEGS)
             # Every piece takes the lip asked. A narrower lip all round a piece, stepped down
@@ -705,7 +784,7 @@ def plan(
         if stops:
             wrong.append(f"piece {piece.id}, round {where}, " + ". And ".join(stops))
             continue
-        rows.append({"piece": piece, "lip_mm": full, "pocket": pocket, "curves": curves})
+        rows.append({"piece": piece, "lip_mm": lip, "pocket": pocket, "curves": curves})
     return rows, wrong
 
 
@@ -778,9 +857,10 @@ class NoOpening(NoAnswer):
     """A piece's pocket, as it's built, has no one opening at the lip asked. With what the
     lip leaves of it: the parts its opening comes out in."""
 
-    def __init__(self, why: str, left: list[Any]) -> None:
+    def __init__(self, why: str, left: list[Any], pocket: Any = None) -> None:
         super().__init__(why)
         self.left = left
+        self.pocket = pocket
 
 
 def _past(pocket: Any, shape: Any) -> float:
@@ -924,19 +1004,26 @@ def _same(rings: list[list[Arc] | None], wanted: Any, slack: float) -> bool:
     return bool(made.is_valid and made.symmetric_difference(wanted).area <= slack)
 
 
-def piece_curves(piece: Piece, lip: float, play: float, fit: float) -> dict[str, Any]:
+def piece_curves(
+    piece: Piece, lip: float, play: float, fit: float, by_share: bool = False
+) -> dict[str, Any]:
     """One piece's pocket, pane and opening as rings of lines and arcs, its pocket nowhere
     past the piece's outline. Where a pocket fitted again round a cut-back pane still stands
-    past it, the piece's curves are moved in that much more and made again."""
-    found = _curves(piece, lip, play, fit, 0.0)
+    past it, the piece's curves are moved in that much more and made again. With `by_share`
+    the opening is the pane moved in by the rim at a true distance, as `capture` sizes a rim
+    to a pane's visible share."""
+    found = _curves(piece, lip, play, fit, 0.0, by_share)
     for _ in range(3):
         if found["past_mm"] <= 2.0 * CLOSE:
             break
-        found = _curves(piece, lip, play, fit, found["more_mm"] + found["past_mm"] + CLOSE)
+        more = found["more_mm"] + found["past_mm"] + CLOSE
+        found = _curves(piece, lip, play, fit, more, by_share)
     return found
 
 
-def _curves(piece: Piece, lip: float, play: float, fit: float, more: float) -> dict[str, Any]:
+def _curves(
+    piece: Piece, lip: float, play: float, fit: float, more: float, by_share: bool = False
+) -> dict[str, Any]:
     """One piece's pocket, pane and opening as rings of lines and arcs, its fitted outline
     moved in by `more` past what keeps it inside the piece's.
 
@@ -1018,11 +1105,28 @@ def _curves(piece: Piece, lip: float, play: float, fit: float, more: float) -> d
         for part in _inset(pocket_2d, lip)
         if not under(piecemap.widest(part, 0.02)[0], LEAST_ACROSS)
     ]
+    if by_share:
+        # As `capture` reads a rim sized to the share: the pane, its pocket less the play,
+        # moved in by the rim less the play at a true distance, round at each corner that
+        # points in. So the rim is the rim asked everywhere, to `CLOSE`, and the share is
+        # the share `capture` reckoned it by.
+        seen = pocket_2d.buffer(-play, join_style="mitre").buffer(
+            -(lip - play), quad_segs=ROUND_SEGS
+        )
+        parts = [
+            part
+            for part in piecemap.polygons(seen)
+            if not under(piecemap.widest(part, 0.02)[0], LEAST_ACROSS)
+        ]
     if len(parts) != 1:
-        raise NoOpening(f"piece {piece.id}'s pocket, as built, leaves no one opening", parts)
+        raise NoOpening(
+            f"piece {piece.id}'s pocket, as built, leaves no one opening", parts, pocket_2d
+        )
     opening: list[Any] = [offset_ring(ring, lip) for ring in pocket]
-    opening_exact = _same(opening, parts[0], 0.001 * parts[0].area + 0.01)
-    if not opening_exact:
+    opening_exact = not by_share and _same(opening, parts[0], 0.001 * parts[0].area + 0.01)
+    if by_share:
+        opening = _close(parts[0])
+    elif not opening_exact:
         # An inset half of `fit` deeper, fitted within a quarter of `fit` of its points, which
         # is half of `fit` of the sides between them: so the lip is never narrower than
         # asked, and up to `fit` wider. Fitted within half of `fit` of its points, a side
@@ -1041,8 +1145,10 @@ def _curves(piece: Piece, lip: float, play: float, fit: float, more: float) -> d
         "opening": opening,
         "exact": exact,
         "plain": plain,
-        "opening_exact": opening_exact,
+        # A rim sized to the share is the rim itself, to `CLOSE`: not a lip that may be wider.
+        "opening_exact": opening_exact or by_share,
         "pocket_2d": pocket_2d,
+        "opening_2d": _ring_polygon(opening),
         "pane_2d": _ring_polygon(pane),
         "past_mm": _past(pocket_2d, piece.shape),
         "off_mm": fit_off,
@@ -1078,7 +1184,10 @@ def run_build(args: Any, report: Report) -> None:
             "frame aren't built yet"
         )
     full, least = args.lip
-    if least < full:
+    share = getattr(args, "min_visible", None)
+    if share is not None and not 0 < share < 100:
+        raise NoAnswer("--min-visible is the share of each pane to stay visible, in percent")
+    if least < full and share is None:
         report.note(
             f"every piece takes the lip asked, {full:g} mm: --lip's second figure, {least:g}, "
             "isn't stepped down to. A piece whose opening that lip closes over is named, with "
@@ -1097,7 +1206,7 @@ def run_build(args: Any, report: Report) -> None:
     border = args.border if args.border is not None else 2.0 * found.lead_mm
     if not border > 0:
         raise NoAnswer("--border is the frame round the panel's edge, in mm, over 0")
-    rows, wrong = plan(found, (full, least), args.play, args.fit)
+    rows, wrong = plan(found, (full, least), args.play, args.fit, share)
     report.numbers["unbuildable"] = wrong
     if wrong:
         for line in wrong[:12]:
@@ -1233,7 +1342,7 @@ def run_build(args: Any, report: Report) -> None:
         "least_lip_before_play_mm", lips[0], "mm",
         f"{len(rows) - len(narrow)} piece(s) at the full {full:g} mm"
         + (
-            "; narrower so each keeps one opening: "
+            f"; narrower, so each keeps {share:g}% of its pane visible: "
             + ", ".join(f"piece {r['piece'].id} at {r['lip_mm']:g}" for r in narrow[:12])
             + (f", and {len(narrow) - 12} more" if len(narrow) > 12 else "")
             if narrow

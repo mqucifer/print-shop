@@ -39,6 +39,8 @@ is a Sponsor's scene or anything from one (mqucifer/print-shop#152, mqucifer/pri
   over the 2.4 mm a lip of 1.2 on each side closes over.
 - `apart.json`: a small piece 1.6 mm from a large one across a patch of lead, with no line of
   their own between them, and a third piece beside it.
+- `crescent.json`: a thin crescent, 5 mm across at its middle, whose full lip hides more than
+  40% of its pane.
 - `hairs.json`: two cuts two microns wide whose ends face each other, which the
   outline has and no pixel shows.
 """
@@ -592,6 +594,25 @@ def apart() -> dict[str, Any]:
     }
 
 
+def crescent() -> dict[str, Any]:
+    """One piece of a 64 x 26 mm panel: the part of a circle 30 mm in radius that lies above
+    the same circle 5 mm lower, from 60 to 120 degrees round. A crescent 5 mm across at its
+    middle and 4.4 at its ends, 31 mm long. A lip of 1.2 mm on each side leaves about half of
+    its pane visible; one of about 1 mm leaves 60%."""
+
+    def at(deg: float, lower: float) -> list[float]:
+        turn = math.radians(deg)
+        return [round(32 + 30 * math.cos(turn), 4), round(30 * math.sin(turn) - lower - 8, 4)]
+
+    degrees = [60 + k for k in range(61)]
+    outer = [at(d, 0.0) for d in degrees]
+    inner = [at(d, 5.0) for d in reversed(degrees)]
+    found = notched()
+    found["panel"] = {"width_mm": 64, "height_mm": 26}
+    found["pieces"][0]["outline"] = inner + outer
+    return found
+
+
 def rules(slit: bool, depth: float = 8.0) -> dict[str, Any]:
     lead = 1.2
     outlines = cells(lead)
@@ -653,6 +674,7 @@ for name, made in (
     ("close.json", close()),
     ("near.json", near()),
     ("waist.json", waist()),
+    ("crescent.json", crescent()),
     ("apart.json", apart()),
     ("curved_waist.json", curved_waist()),
     ("slanted_waist.json", slanted_waist()),

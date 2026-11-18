@@ -141,6 +141,8 @@ class Limits:
     lip: float | None = None
     play: float = 0.25
     fit: float = 0.1
+    least_lip: float | None = None
+    min_visible: float | None = None
 
     def lead(self, usual: float) -> float:
         return self.max_lead if self.max_lead is not None else MAX_LEAD * usual
@@ -153,7 +155,8 @@ def limits_of(args: Any) -> Limits:
         value = getattr(args, name, None)
         return default if value is None else float(value)
 
-    lip = getattr(args, "lip", None)
+    lips = getattr(args, "lip", None)
+    lip, least = lips if isinstance(lips, tuple) else (lips, lips)
     neck = given("min_neck", MIN_NECK)
     if lip is not None and not lip > 0:
         raise NoAnswer("--lip is the lip a build will be given, in mm, over 0")
@@ -168,6 +171,8 @@ def limits_of(args: Any) -> Limits:
         float(lip) if lip is not None else None,
         given("play", 0.25),
         given("fit", 0.1),
+        float(least) if least is not None else None,
+        getattr(args, "min_visible", None),
     )
 
 
@@ -797,11 +802,14 @@ def build_refuses(found: Map, limits: Limits) -> dict[int, str]:
     from .pieces_build import plan
 
     assert limits.lip is not None
-    _, wrong = plan(found, (limits.lip, limits.lip), limits.play, limits.fit)
+    least = limits.least_lip if limits.least_lip is not None else limits.lip
+    _, wrong = plan(found, (limits.lip, least), limits.play, limits.fit, limits.min_visible)
     found_wrong: dict[int, str] = {}
     for line in wrong:
         named = re.match(r"piece (\d+), ", line)
-        if named and ("no one opening" in line or "has no pane" in line):
+        if named and any(
+            word in line for word in ("no one opening", "has no pane", "of its pane visible")
+        ):
             found_wrong[int(named.group(1))] = line
     return found_wrong
 

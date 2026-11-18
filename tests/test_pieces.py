@@ -1154,6 +1154,51 @@ def test_a_build_names_everything_that_stops_a_piece_together(bench: Any) -> Non
     assert line.count("`pieces drop-line MAP --at ") == 3
 
 
+def test_a_lip_is_sized_to_the_panes_visible_share_as_capture_reads_it(bench: Any) -> None:
+    """mqucifer/print-shop#161: a thin crescent, 5 mm across. At the full lip of 1.2 mm only
+    52% of its pane is visible, and `capture`, asked for 60%, said to set its rim to 1.031 mm:
+    the widest that keeps 60%. With `--min-visible` the build sizes each piece's lip by
+    `capture`'s own function, so the two can't differ on a rim. A piece that can't keep the
+    share at the least lip is refused, with its fix, and `check --lip` reads the same."""
+    lips = ["--thickness", 3, "--pane", 1, "--play", 0.25, "--lip", "1.2,0.6"]
+    rim = [
+        "--pocket-z", 1.3, "--clearance", 0.25, "--pane-thickness", 1, "--full-rim", 1.2,
+        "--least-rim", 0.6, "--min-visible", 60, "--panes", 1,
+    ]  # fmt: skip
+    plain = bench("pieces", "build", "crescent.json", *lips, "--build-out", "crescent-full")
+    assert plain.verdict == "OK", plain.text
+    short = bench("capture", plain.numbers["glass"]["frame"], *rim)
+    assert short.verdict == "FAIL" and "set this pane's rim to 1.031 mm" in short.record["why"]
+    built = bench(
+        "pieces", "build", "crescent.json", *lips, "--min-visible", 60, "--build-out", "crescent"
+    )
+    assert built.verdict == "OK", built.text
+    (row,) = built.numbers["lips"]
+    assert row["lip_mm"] == pytest.approx(1.031, abs=0.002), "the rim `capture` asked for"
+    assert "narrower, so each keeps 60% of its pane visible: piece 1 at 1.031" in built.text
+    held = bench("capture", built.numbers["glass"]["frame"], *rim)
+    assert held.verdict == "OK", held.text
+    # At 90% even the least lip hides too much: refused by the build, and flagged by the check.
+    refused = bench(
+        "pieces", "build", "crescent.json", *lips, "--min-visible", 90, "--build-out", "crescent-90"
+    )
+    assert refused.verdict == "FAIL", refused.text
+    assert "keeps 81.5% of its pane visible at even the least lip, 0.6 mm, where 90% is wanted" in (
+        refused.record["why"]
+    )
+    assert "`pieces merge` it into a neighbour" in refused.record["why"]
+    told = bench(
+        "pieces", "check", "crescent.json", "--max-lead", 99, "--lip", "1.2,0.6",
+        "--min-visible", 90,
+    )  # fmt: skip
+    assert flags_of(told) == {("no-opening", 1)} and "where 90% is wanted" in told.text
+    fine = bench(
+        "pieces", "check", "crescent.json", "--max-lead", 99, "--lip", "1.2,0.6",
+        "--min-visible", 60,
+    )  # fmt: skip
+    assert fine.verdict == "OK", fine.text
+
+
 def test_a_piece_too_thin_for_a_pane_is_named_and_nothing_is_built(
     bench: Any, broken: Answer
 ) -> None:

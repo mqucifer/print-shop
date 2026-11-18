@@ -273,10 +273,10 @@ pieces are the layout, so steps 2, 3 and 5 are these five, in this order:
 
 ```
 - [ ] a. Trace: `pieces trace PICTURE --width MM`
-- [ ] b. Check: `pieces check MAP --lip L`, with the lip you'll build at
+- [ ] b. Check: `pieces check MAP --lip FULL,LEAST --min-visible S`, as you'll build
 - [ ] c. Fix each flagged piece by its own flag: one command for one fix, `pieces fix MAP STEPS` for several
 - [ ] d. Check again, until no flag is left that the request doesn't keep
-- [ ] e. Build: `pieces build MAP --thickness T --pane P --lip L --play C`
+- [ ] e. Build: `pieces build MAP --thickness T --pane P --lip FULL,LEAST --play C --min-visible S`
 ```
 
 `pieces trace` writes a **piece map**: each piece of glass, numbered, with its outline and its
@@ -330,7 +330,12 @@ piece that breaks a rule, with where. Each flag has its fix:
   measure the same way: rays that run a slanted neck's long way, or a notch's end too thin for a
   pixel. The flag and its figure stand. `DISAGREE` is two readings of the same thing on
   opposite sides of a limit: read both figures, and don't pick one.
-- **Every piece takes the lip you give `pieces build`.** A piece with a waist the lip closes
+- **Where the request sizes a rim by the share of a pane that stays visible,** give
+  `pieces build` and `pieces check` the request's three figures: `--lip FULL,LEAST
+  --min-visible S`. Each piece then takes the rim `capture --full-rim FULL --least-rim LEAST
+  --min-visible S` will ask of it: the full one where the pane keeps the share, else the
+  widest that keeps it. A piece that can't keep it at the least is refused, with its fix.
+- **Without a share, every piece takes the lip you give `pieces build`.** A piece with a waist the lip closes
   over is refused, with the line to split it along: split it there, as a glass cutter splits a
   neck. Don't lower the lip for one piece, and don't leave a bar of frame across the glass.
 - **`pieces build` makes `frame.step` and one pane file for each colour,** every curve as a
@@ -357,7 +362,7 @@ def bench(*words):
 
 bench("pieces", "trace", "references/scene.png", "--width", 220, "--to", "map-0.json")
 bench("pieces", "fix", "map-0.json", "fixes.json", "--to", "map-1.json")  # each fix, in order
-bench("pieces", "build", "map-1.json", "--thickness", 3, "--pane", 1, "--lip", 1.2, "--play", 0.25)
+bench("pieces", "build", "map-1.json", "--thickness", 3, "--pane", 1, "--lip", "1.2,0.6", "--play", 0.25, "--min-visible", 60)
 ```
 
 `references/pieces.md` (the skill `reading-a-piece-map`) says what a map holds and how to read
