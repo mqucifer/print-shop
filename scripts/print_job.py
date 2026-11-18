@@ -59,8 +59,10 @@ print follows `docs/runbook-first-print.md`.
 (mqucifer/print-shop#164): its G-code, or the plate's sliced file (`.gcode.3mf`), which also
 carries each object's overrides (`--project` reads them from the Orca project it was sliced
 from, where the sliced file doesn't carry them). Nothing is asked, proposed, turned or sliced
-again, and no lesson is applied. Its bytes are what's sent: their sha256 is kept and checked again just before
-the upload. What's shown before the gate is what the ledger keeps: the settings from the file's
+again, and no lesson is applied. Its bytes are what's sent: their sha256 is kept and checked
+again just before the upload.
+
+What's shown before the gate is what the ledger keeps: the settings from the file's
 own config block, each that differs from the inventory's tuning for the loaded filament, each
 object's overrides, Orca's estimate, and the slice's reading as a report with nothing proposed.
 The arming rule, the approval gate, the watching, the frames and the outcome question are the
