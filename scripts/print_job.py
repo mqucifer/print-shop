@@ -2,6 +2,9 @@
 
     uv run python scripts/print_job.py PART.stl --nozzle 0.4 --filament NAME [--as-laid]
         [--context PATH] [--answers F] [--record]
+    uv run python scripts/print_job.py --sliced FILE [--plate N] [--project P.3mf]
+        [--loaded-ok] [--record]
+    uv run python scripts/print_job.py --again JOB_ID [--loaded-ok] [--record]
     uv run python scripts/print_job.py --serve [--record]
     uv run python scripts/print_job.py --list
     uv run python scripts/print_job.py --filaments
@@ -52,6 +55,20 @@ the outcome is recorded in Home Assistant. Stopping it (Ctrl-C) leaves the
 ledger row open; `--serve` asks about it again later. The first deliberate
 print follows `docs/runbook-first-print.md`.
 
+**A file you sliced by hand in Orca goes through as it is,** with `--sliced FILE`
+(mqucifer/print-shop#164): its G-code, or the plate's sliced file (`.gcode.3mf`), which also
+carries each object's overrides (`--project` reads them from the Orca project it was sliced
+from, where the sliced file doesn't carry them). Nothing is asked, proposed, turned or sliced
+again, and no lesson is applied. Its bytes are what's sent: their sha256 is kept and checked again just before
+the upload. What's shown before the gate is what the ledger keeps: the settings from the file's
+own config block, each that differs from the inventory's tuning for the loaded filament, each
+object's overrides, Orca's estimate, and the slice's reading as a report with nothing proposed.
+The arming rule, the approval gate, the watching, the frames and the outcome question are the
+same as for any job. **`--again JOB_ID` prints a past hand-sliced job's file again,** as a new
+job marked as a reprint of it, refused if the kept file has changed. Either is refused when the
+file names another filament or nozzle than the inventory says is loaded and fitted, unless
+`--loaded-ok` says to print it with what's loaded.
+
 **What a job shows here is also kept in its folder,** as `jobs/<id>/job.log`, with each answer
 typed, so it can be read after it's scrolled past (mqucifer/print-shop#139): by the print desk,
 `scripts/print_desk.py`, and by the operator. No key, token or password is written to it.
@@ -68,15 +85,24 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
+from print_shop import sliced
 from print_shop.arming import ALLOW_HARDWARE_ENV, hardware_allowed
-from print_shop.env import SETTINGS_PATH
+from print_shop.env import SETTINGS_PATH, load_env
 from print_shop.inventory import SETUP, Inventory, InventoryError, Material
 from print_shop.joblog import LOG_NAME, JobLog, secrets
 from print_shop.ledger import Ledger, ledger_path
 from print_shop.orchestrator.daemon import GATE_WAIT_S
 from print_shop.orchestrator.outcome import no_frames
 from print_shop.printer.centauri import FrameRecorder, PrinterClient, live_printer
-from print_shop.runtime import WORK_DIR, build_run, describe, profiles_for, recording_path
+from print_shop.runtime import (
+    WORK_DIR,
+    Run,
+    bed_type,
+    build_run,
+    describe,
+    profiles_for,
+    recording_path,
+)
 from print_shop.setup.context import read_context
 from print_shop.setup.intake import Asker, cli_asker, replay_asker
 from print_shop.setup.review import cli_reviewer
@@ -107,30 +133,134 @@ def main(argv: list[str] | None = None) -> int:
                         help="keep the file's own pose: it's laid for printing")
     parser.add_argument("--context", type=Path,
                         help="the part's context: a sidecar, or its design run's folder")
+    parser.add_argument("--sliced", type=Path, metavar="FILE",
+                        help="a file you sliced by hand in Orca, sent as it is: its G-code, or "
+                             "the plate's sliced file (.gcode.3mf)")
+    parser.add_argument("--again", metavar="JOB_ID",
+                        help="print a past hand-sliced job's file again, as a reprint of it")
+    parser.add_argument("--plate", type=int,
+                        help="which plate, for a sliced plate file that holds several")
+    parser.add_argument("--project", type=Path, metavar="P.3mf",
+                        help="with --sliced: the Orca project the file was sliced from, for "
+                             "each object's overrides, where the file doesn't carry them")
+    parser.add_argument("--loaded-ok", action="store_true",
+                        help="print a hand-sliced file with what's loaded and fitted, though "
+                             "it names another filament or nozzle")
     parser.add_argument(
         "--settings", type=Path, default=SETTINGS_PATH, help="the settings file (a path)"
     )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    if args.stl is None or args.serve or args.list or args.filaments:
+    by_hand = args.sliced is not None or args.again is not None
+    if sum(x is not None for x in (args.stl, args.sliced, args.again)) > 1:
+        parser.error("give one of a part, --sliced FILE, or --again JOB_ID")
+    if by_hand and (args.serve or args.list or args.filaments):
+        parser.error("--sliced and --again send a job; leave out --serve, --list, --filaments")
+    if args.sliced is not None and not args.sliced.is_file():
+        parser.error(f"{args.sliced} is not a file")
+    if by_hand:
+        # Nothing is chosen for a hand-sliced file, so nothing that chooses is taken.
+        for flag in ("nozzle", "filament", "machine", "process", "answers", "context"):
+            if getattr(args, flag) is not None:
+                parser.error(f"--{flag} is for a part: a hand-sliced file is sent as it is")
+        if args.as_laid:
+            parser.error("--as-laid is for a part: a hand-sliced file is sent as it is")
+    elif args.plate is not None or args.loaded_ok:
+        parser.error("--plate and --loaded-ok go with --sliced or --again")
+    if args.project is not None and args.sliced is None:
+        parser.error("--project goes with --sliced: a reprint keeps its original's overrides")
+    if (args.stl is None and not by_hand) or args.serve or args.list or args.filaments:
         return _main(parser, args, None)
     # A job: what it shows is kept in its folder too (mqucifer/print-shop#139).
     job_log = JobLog(secrets(args.settings))
     with job_log.capturing():
         given = sys.argv[1:] if argv is None else argv
-        job_log.write(_header(args.stl, given))
+        job_log.write(_header(args.stl or args.sliced, given))
         try:
             return _main(parser, args, job_log)
         finally:
             job_log.close()
 
 
-def _header(stl: Path, given: list[str]) -> str:
+def _header(part: Path | None, given: list[str]) -> str:
     """The log's first lines: when, the part's full path, and the command as given. The print
-    desk reads the part's path from here, for its "run it again" line."""
-    return (f"print_job.py, {datetime.now(UTC).isoformat(timespec='seconds')}\n"
-            f"part: {stl.resolve()}\n"
+    desk reads the part's path from here, for its "run it again" line. A reprint's part is the
+    file its job kept, named once the ledger has been read."""
+    named = f"part: {part.resolve()}\n" if part is not None else ""
+    return (f"print_job.py, {datetime.now(UTC).isoformat(timespec='seconds')}\n{named}"
             f"command: uv run python scripts/print_job.py {shlex.join(given)}\n")
+
+
+def _hand_sliced(args: argparse.Namespace, job_log: JobLog | None) -> sliced.SlicedJob | int:
+    """The hand-sliced file to send, read and checked, with what's kept of it shown; or the
+    exit code, having said why it isn't sent. Nothing is asked."""
+    store = Store(STORE_DIR)
+    reprint: sliced.Again | None = None
+    try:
+        if args.again is not None:
+            with Ledger(ledger_path(args.settings)) as ledger:
+                reprint = sliced.again(ledger, WORK_DIR, args.again)
+            if job_log is not None:
+                job_log.write(f"part: {reprint.path}\n")
+            file = sliced.read(reprint.path)
+        else:
+            file = sliced.read(args.sliced, args.plate, args.project)
+    except sliced.SlicedError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+    print(f"Sliced by hand: {file.said()}.")
+    print("No questions, no proposal, no lesson applied, nothing sliced again.")
+    if reprint is not None:
+        print(f"A reprint of job {reprint.reprint_of} ({reprint.name}): the file it printed, "
+              "kept in its folder, with the same bytes.")
+    grams = f"{file.filament_g:g} g, " if file.filament_g is not None else ""
+    print(f"  sha256      {file.sha256}")
+    print(f"  Orca        {file.print_time_s // 60} min, {grams}{file.filament_cm3:g} cm3, "
+          f"{file.layer_count} layers")
+
+    material: Material | None = None
+    compared: sliced.Comparison | None = None
+    note = loaded_ok = ""
+    with Inventory(ledger_path(args.settings)) as inventory:
+        if not inventory.printers():
+            # Never skipped silently (the operator, 2026-10-25).
+            note = "the inventory isn't set up"
+            print(f"The inventory isn't set up ({SETUP}), so what's loaded isn't checked "
+                  "against the file, and there's no tuning to compare it with.")
+        else:
+            try:
+                material = inventory.material(args.printer)
+            except InventoryError as exc:
+                print(exc, file=sys.stderr)
+                return 2
+            print(f"From the inventory: {material.line()}.")
+    if material is not None:
+        wrong = sliced.loaded_mismatch(file, material, store)
+        if wrong and not args.loaded_ok:
+            print("Not sent: " + "; ".join(wrong) + ". Load and fit what the file names "
+                  "(`stock load <id>`, `stock fit <mm>`), or add --loaded-ok to print it with "
+                  "what's loaded.", file=sys.stderr)
+            return 2
+        if wrong:
+            loaded_ok = "; ".join(wrong)
+            print(f"{loaded_ok[0].upper()}{loaded_ok[1:]}: printing with what's loaded, as "
+                  "you said (--loaded-ok).")
+        try:
+            compared = sliced.compare(file.config, material, store,
+                                      bed=bed_type(load_env(args.settings)).value)
+        except NoChoice as exc:
+            note = f"the store picks no tuning for what's loaded ({str(exc).splitlines()[0]})"
+    job = sliced.SlicedJob.of(
+        file, material=material, compared=compared, compared_note=note, loaded_ok=loaded_ok,
+        name=reprint.name if reprint else None,
+        reprint_of=reprint.reprint_of if reprint else None,
+        overrides=reprint.overrides if reprint else None,
+        overrides_from=reprint.overrides_from if reprint else "",
+    )
+    for line in job.record(store).lines():
+        if not line.startswith("printed with what was loaded"):
+            print(f"  {line}")
+    return job
 
 
 def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
@@ -149,8 +279,9 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
                 for job in unprinted:
                     print(f"  {job.line()}")
         return 0
-    if not args.serve and args.stl is None:
-        parser.error("give a part to print, or --serve, or --list")
+    by_hand = args.sliced is not None or args.again is not None
+    if not args.serve and args.stl is None and not by_hand:
+        parser.error("give a part to print, --sliced FILE, --again JOB_ID, --serve, or --list")
     if args.stl is not None and not args.stl.is_file():
         parser.error(f"{args.stl} is not a file")
     if args.context is not None and not args.context.exists():
@@ -158,6 +289,12 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
 
     profiles: SlicerProfiles | None = None
     asker: Asker | None = None
+    hand_sliced: sliced.SlicedJob | None = None
+    if by_hand:
+        found = _hand_sliced(args, job_log)
+        if isinstance(found, int):
+            return found
+        hand_sliced = found
     if args.stl is not None:
         material: Material | None = None
         nozzle, filament = args.nozzle, args.filament
@@ -201,10 +338,11 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
 
     recorder = FrameRecorder(recording_path()) if args.record else None
     printer: PrinterClient | None = None
-    if args.stl is not None and hardware_allowed():
+    a_job = args.stl is not None or hand_sliced is not None
+    if a_job and hardware_allowed():
         printer = live_printer(recorder=recorder)
         print(f"ARMED by {ALLOW_HARDWARE_ENV}=1: an approval in Home Assistant starts the print.")
-    elif args.stl is not None:
+    elif a_job:
         print(f"Not armed ({ALLOW_HARDWARE_ENV} is not 1): an approval will NOT start a print.")
     if recorder is not None:
         print(f"Recording the printer's replies to {recorder.path}")
@@ -215,7 +353,10 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
         recorder=recorder,
         settings=args.settings,
         asker=asker,
-        reviewer=cli_reviewer(read=read),
+        # A hand-sliced file is reviewed by nobody here: it's shown, and goes to the gate.
+        reviewer=cli_reviewer(read=read) if hand_sliced is None else None,
+        show=print if hand_sliced is not None else None,
+        store=Store(STORE_DIR) if hand_sliced is not None else None,
     )
     try:
         with run.daemon:
@@ -224,14 +365,20 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
                 while True:
                     time.sleep(1)
 
-            context = read_context(args.stl, args.context)
-            print("The part's context: " + "; ".join(context.lines()[:2]))
-            job_id = run.daemon.submit(args.stl, as_laid=args.as_laid, context=args.context)
+            if hand_sliced is not None:
+                job_id = run.daemon.submit_sliced(hand_sliced)
+            else:
+                context = read_context(args.stl, args.context)
+                print("The part's context: " + "; ".join(context.lines()[:2]))
+                job_id = run.daemon.submit(args.stl, as_laid=args.as_laid, context=args.context)
             if job_log is not None:
                 job_log.open(WORK_DIR / job_id / LOG_NAME)
                 print(f"Job {job_id}'s log: {job_log.path}")
-            how = "kept as laid" if args.as_laid else "orienting"
-            print(f"Job {job_id}: {how}, then a few questions about the part, here.")
+            if hand_sliced is not None:
+                print(f"Job {job_id}: taking the file as it is, then the approval gate.")
+            else:
+                how = "kept as laid" if args.as_laid else "orienting"
+                print(f"Job {job_id}: {how}, then a few questions about the part, here.")
             try:
                 run.daemon.wait_for_gate(job_id, timeout_s=APPROVAL_WAIT_S)
             except TimeoutError as ran_out:
@@ -242,7 +389,8 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
                 print("At the approval gate. Approve or Reject on the dashboard.")
                 print(f"  time        {int(gate.get('print_time_s') or 0) // 60} min")
                 print(f"  plastic     {gate.get('filament_cm3')} cm3")
-                print(f"  turned      {gate.get('orientation_deg')}")
+                if hand_sliced is None:
+                    print(f"  turned      {gate.get('orientation_deg')}")
                 print(f"  because     {gate.get('orientation_rationale')}")
                 if gate.get("pause"):
                     print(f"  SWAP        {gate['pause']}: be at the printer for it")
@@ -265,25 +413,30 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
             if row is None:
                 print("Nothing was started, so the ledger has no row for this job.")
                 return 0 if result is None or not result.error else 1
-            print("Started. Watching the printer read-only; answer in Home Assistant when it ends.")
-            while True:
-                row = run.ledger.get(job_id)
-                if row is not None and row.result is not None:
-                    break
-                time.sleep(5)
-            print("\n" + describe(row))
-            frames = run.ledger.frames(job_id)
-            if frames:
-                print(f"frames         {len(frames)}, the last at {frames[-1].line()}, in"
-                      f" {Path(frames[-1].path).parent}")
-            else:
-                print(f"frames         {no_frames(run.ledger.frames_missed(job_id))}")
-            return 0
+            return _watch(run, job_id)
     except KeyboardInterrupt:
         print("\nStopped. Any print without an answer stays open in the ledger.")
         return 130
     finally:
         run.ledger.close()
+
+
+def _watch(run: Run, job_id: str) -> int:
+    """A started print, watched read-only until its outcome is answered, then shown."""
+    print("Started. Watching the printer read-only; answer in Home Assistant when it ends.")
+    while True:
+        row = run.ledger.get(job_id)
+        if row is not None and row.result is not None:
+            break
+        time.sleep(5)
+    print("\n" + describe(row))
+    frames = run.ledger.frames(job_id)
+    if frames:
+        print(f"frames         {len(frames)}, the last at {frames[-1].line()}, in"
+              f" {Path(frames[-1].path).parent}")
+    else:
+        print(f"frames         {no_frames(run.ledger.frames_missed(job_id))}")
+    return 0
 
 
 def _answer_by(gate: dict[str, object]) -> str:

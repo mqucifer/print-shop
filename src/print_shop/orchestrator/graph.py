@@ -7,13 +7,18 @@ originates at a ``Gate`` node.
 
 Topology::
 
-    START -> ingest
+    START                --cond--> ingest | sliced
+    sliced               --> gate.before_print
     ingest               --cond--> orient | gate.review_proposal
     orient               --cond--> slice  | gate.review_proposal
     gate.review_proposal --cond--> slice  | END
     slice                --> gate.before_print
     gate.before_print    --cond--> print  | END
     print                --> END
+
+**A hand-sliced file takes the short way** (mqucifer/print-shop#164): `sliced` copies its bytes
+into the job's folder and reads them, and goes straight to the same gate. Nothing between is
+run for it: no ingest, orientation, question, proposal, lesson, slice or review.
 
 The graph is the single source of truth for control flow. ``graph_edges``
 exposes the compiled edge list so ``ungated_edges`` (CONTRACTS.md section 4)
@@ -26,6 +31,7 @@ import dataclasses
 import json
 import logging
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -34,6 +40,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
+from print_shop import sliced as hand_sliced
 from print_shop.core.contracts import Gate, GateDecision, Outcome, approved_at, propose_validate
 from print_shop.core.contracts import Proposal as Chosen
 from print_shop.core.state import (
@@ -85,6 +92,7 @@ from print_shop.slicer.orca import (
     parse_config_block,
     slice_model,
 )
+from print_shop.slicer.store import Store
 
 __all__ = ["build_graph", "graph_edges", "new_job"]
 
@@ -123,6 +131,8 @@ def build_graph(
     asker: Asker | None = None,
     reviewer: Reviewer | None = None,
     loop: PrintLoop | None = None,
+    show: Callable[[str], None] | None = None,
+    store: Store | None = None,
 ) -> Any:
     """Build and compile the print pipeline graph.
 
@@ -169,11 +179,48 @@ def build_graph(
             questions, in place of the orientation call and the settings call. The questions
             are asked of the file's own pose. Past its limit the job falls back to the single
             calls, and says so. None keeps the single calls.
+        show: Where a hand-sliced file's report is shown before the gate
+            (mqucifer/print-shop#164): what its slice reads as, with nothing proposed. None
+            shows it nowhere; the ledger keeps the reading either way.
+        store: print-shop's profiles, by which a hand-sliced file's settings are put under the
+            profile each belongs to. None keeps them all under "other".
 
     Returns:
         A compiled LangGraph ``CompiledStateGraph``.
     """
     build_volume = build_volume_mm(profiles.machine) if profiles is not None else None
+
+    def sliced_node(state: PrintJobState) -> dict[str, Any]:
+        """Take a hand-sliced file as it is (mqucifer/print-shop#164).
+
+        Its G-code is copied into the job's folder, the same bytes under a name carrying the
+        job id, and read: Orca's own totals for the gate, and the slice's reading as a report.
+        Nothing is asked, proposed, turned or sliced, and no lesson is looked up: none of the
+        proposer, the asker, the reviewer, the loop or the slicer is touched here.
+
+        Raises:
+            SlicedChanged: If the file isn't the bytes that were read when it was given.
+        """
+        job = state["sliced"]
+        result = hand_sliced.take(job, outdir_root / state["job_id"], state["job_id"])
+        reading = _read(result)
+        # The review's own readings, as a report: what a flag would propose is left out.
+        found = tuple(
+            f.model_copy(update={"change": None, "reading": f.reading.replace(
+                "the intake didn't say which faces are seen",
+                "a hand-sliced job isn't asked which faces are seen")})
+            for f in (flags(reading, None, job.file.config, job.file.config) if reading else ())
+        )
+        if show is not None:
+            show("\n".join(hand_sliced.report(job, reading, found)))
+        return {
+            "gcode_path": str(result.gcode_path),
+            "slice": result,
+            "applied_orientation": AppliedOrientation(rationale=hand_sliced.RATIONALE),
+            "profiles_used": None,
+            "slice_reading": reading,
+            "slice_flags": found,
+        }
 
     def ingest_node(state: PrintJobState) -> dict[str, Any]:
         """Analyze the STL and store the MeshReport in state."""
@@ -555,6 +602,11 @@ def build_graph(
         if not verdict.accepted:
             raise PreflightFailed(verdict)
 
+        taken = state.get("sliced")
+        if taken is not None:
+            # A hand-sliced file is sent as it was read: hashed again, last thing before the
+            # upload (mqucifer/print-shop#164).
+            hand_sliced.verify(gcode, taken.file.sha256)
         remote_name = client.upload(gcode)
         if job_id_from_filename(remote_name) != state["job_id"]:
             raise RuntimeError(
@@ -566,7 +618,8 @@ def build_graph(
         # Written before the printer is told anything, so a start that fails
         # halfway is still on record.
         ledger.record_start_requested(
-            _print_record(state, remote_name, gcode, snapshot.machine, snapshot.firmware)
+            _print_record(state, remote_name, gcode, snapshot.machine, snapshot.firmware,
+                          store)
         )
         try:
             client.start(remote_name)
@@ -580,6 +633,10 @@ def build_graph(
         }
 
     # --- Routing functions ---
+
+    def route_entry(state: PrintJobState) -> str:
+        """A hand-sliced file goes straight to be taken; a part is ingested."""
+        return "sliced" if state.get("sliced") is not None else "ingest"
 
     def route_after_ingest(state: PrintJobState) -> str:
         """Route to orient if manifold, else to the review gate."""
@@ -609,6 +666,7 @@ def build_graph(
 
     graph = StateGraph(PrintJobState)
 
+    graph.add_node("sliced", sliced_node)
     graph.add_node("ingest", ingest_node)
     graph.add_node("orient", orient_node)
     graph.add_node("slice", slice_node)
@@ -616,7 +674,8 @@ def build_graph(
     graph.add_node(Gate.BEFORE_PRINT.value, before_print_node)
     graph.add_node("print", print_node)
 
-    graph.add_edge(START, "ingest")
+    graph.add_conditional_edges(START, route_entry, {"ingest": "ingest", "sliced": "sliced"})
+    graph.add_edge("sliced", Gate.BEFORE_PRINT.value)
     graph.add_conditional_edges(
         "ingest",
         route_after_ingest,
@@ -650,10 +709,35 @@ def _pauses_said(reading: Any) -> str:
 
 
 def _print_record(
-    state: PrintJobState, remote_name: str, gcode: Path, machine: str, firmware: str
+    state: PrintJobState, remote_name: str, gcode: Path, machine: str, firmware: str,
+    store: Store | None = None,
 ) -> PrintRecord:
     """The ledger's row for this job, from state and the G-code Orca wrote."""
     slice_result: SliceResult = state["slice"]
+    job = state.get("sliced")
+    if job is not None:
+        # A hand-sliced file: the part is the file, its hash the hash of what was sent, and
+        # nothing of the loop's is in the row (mqucifer/print-shop#164).
+        return PrintRecord(
+            job_id=state["job_id"],
+            stl_name=job.name,
+            stl_sha256=job.file.sha256,
+            rotation_deg=(0.0, 0.0, 0.0),
+            orientation_source=hand_sliced.SOURCE,
+            orientation_rationale=hand_sliced.RATIONALE,
+            orientation_accepted=True,
+            gcode_name=remote_name,
+            print_time_s=slice_result.print_time_s,
+            filament_cm3=slice_result.filament_cm3,
+            layer_count=slice_result.layer_count,
+            slicer_config=parse_config_block(gcode),
+            printer_machine=machine,
+            printer_firmware=firmware,
+            reading=state.get("slice_reading"),
+            flags=tuple(state.get("slice_flags", ())),
+            sliced=job.record(store),
+            material=job.material,
+        )
     applied = state.get("applied_orientation", AppliedOrientation())
     outcome = state.get("orientation")
     accepted = outcome is not None and outcome.accepted

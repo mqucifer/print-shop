@@ -28,6 +28,12 @@ lesson, keyed to the part's traits (`setup/features.py`), in tables of its own
 `unprinted_jobs`, whose outcome says it timed out (mqucifer/print-shop#125). Nothing was sent to
 the printer, so it's no print, and it never reaches the outcome gate or a lesson.
 
+**A hand-sliced file is kept like any other print** (mqucifer/print-shop#164), with a row of
+`sliced_prints` beside it: marked `sliced: by hand`, with the file's own settings by profile,
+what differs from the inventory's tuning, each object's overrides, Orca's estimate, and the job
+it prints again, if it's a reprint. Nothing in it was chosen by the loop, so it has no intake,
+proposal or corrections, and no lesson is given to it.
+
 The file lives outside every checkout, at `~/print-shop/ledger.sqlite`, and is
 archived nightly by mqucifer/infra#36.
 """
@@ -57,6 +63,7 @@ from print_shop.setup.lessons import SCHEMA as LESSONS_SCHEMA
 from print_shop.setup.lessons import upgrade as upgrade_lessons
 from print_shop.setup.proposal import Change, Proposal
 from print_shop.setup.reading import Flag, SliceReading
+from print_shop.sliced import SlicedRecord
 from print_shop.slicer.store import ProfilesUsed
 
 __all__ = [
@@ -185,6 +192,11 @@ class PrintRecord(BaseModel):
     #: part (mqucifer/print-shop#105), so a lesson can be keyed to it.
     reading: SliceReading | None = None
     flags: tuple[Flag, ...] = ()
+    #: A hand-sliced file's own record (mqucifer/print-shop#164): None for a job the shop sliced.
+    sliced: SlicedRecord | None = None
+    #: The printer, nozzle and spool from the inventory, for a print with no store profiles to
+    #: carry them: a hand-sliced one. Else it's `profiles.material`.
+    material: Material | None = None
 
 
 class Frame(BaseModel):
@@ -256,6 +268,8 @@ class Row(BaseModel):
     #: its G-code couldn't be read.
     reading: SliceReading | None = None
     flags: tuple[Flag, ...] | None = None
+    #: A hand-sliced file's own record (mqucifer/print-shop#164). None: the shop sliced it.
+    sliced: SlicedRecord | None = None
     start_requested_at: str
     started_at: str | None
     start_error: str | None
@@ -270,6 +284,15 @@ class Row(BaseModel):
     def awaiting_answer(self) -> bool:
         """Ended and unanswered: the outcome gate should be asking about it."""
         return self.ended_at is not None and self.result is None
+
+    @property
+    def real_time_s(self) -> int | None:
+        """How long the print took, from when it was seen to start to when it was seen to end:
+        heating and any pause included, to the watcher's poll. None until both are seen."""
+        if self.started_at is None or self.ended_at is None:
+            return None
+        took = datetime.fromisoformat(self.ended_at) - datetime.fromisoformat(self.started_at)
+        return int(took.total_seconds())
 
 
 SCHEMA = """
@@ -369,6 +392,19 @@ CREATE TABLE IF NOT EXISTS unprinted_jobs (
 );
 """
 
+#: A hand-sliced print's own record (mqucifer/print-shop#164), in a table of its own, created if
+#: missing, without moving the schema version: a print the shop sliced has no row here. What a
+#: reprint is found by, and what a reader asks first, are columns; the rest is the record.
+SLICED_SCHEMA = """
+CREATE TABLE IF NOT EXISTS sliced_prints (
+    job_id        TEXT PRIMARY KEY REFERENCES prints(job_id),
+    sliced        TEXT NOT NULL,           -- 'by hand': nothing here was chosen by the loop
+    gcode_sha256  TEXT NOT NULL,           -- of the bytes sent
+    reprint_of    TEXT,                    -- the job this one prints again
+    record        TEXT NOT NULL            -- JSON SlicedRecord: settings, differences, overrides
+);
+"""
+
 #: What each version adds to the one before, applied in order to an older file.
 #: 2: the profiles a print used, by store file, hash and commit (print-shop#6).
 #: A row from before has none: NULL, not a guess.
@@ -451,6 +487,8 @@ class Ledger:
         self._conn.executescript(FRAMES_SCHEMA)
         self._conn.executescript(FRAMES_MISSED_SCHEMA)
         self._conn.executescript(UNPRINTED_SCHEMA)
+        self._conn.executescript(SLICED_SCHEMA)
+        self._has_sliced = True
 
     @classmethod
     def read_only(cls, path: Path) -> Ledger:
@@ -477,6 +515,11 @@ class Ledger:
             raise LedgerError(
                 f"{path} is schema version {version}; this code knows {SCHEMA_VERSION}"
             )
+        # A file last written before mqucifer/print-shop#164 has no `sliced_prints`, and nothing
+        # is made here: its prints read back with no sliced record.
+        self._has_sliced = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sliced_prints'"
+        ).fetchone() is not None
         return self
 
     def close(self) -> None:
@@ -561,7 +604,8 @@ class Ledger:
                 )
             except sqlite3.IntegrityError as exc:
                 raise LedgerError(f"job {record.job_id} is already in the ledger") from exc
-            material = record.profiles.material if record.profiles else None
+            material = record.material or (
+                record.profiles.material if record.profiles else None)
             if material is not None:
                 db.execute(
                     "INSERT INTO print_material (job_id, printer_id, nozzle_mm, spool_id, spool)"
@@ -581,6 +625,13 @@ class Ledger:
                      shortest.time_s if shortest else None,
                      ironing.time_s if ironing else 0.0,
                      reading.seam.stacked, _now()),
+                )
+            if record.sliced is not None:
+                db.execute(
+                    "INSERT INTO sliced_prints (job_id, sliced, gcode_sha256, reprint_of, record)"
+                    " VALUES (?, ?, ?, ?, ?)",
+                    (record.job_id, record.sliced.sliced, record.sliced.gcode_sha256,
+                     record.sliced.reprint_of, record.sliced.model_dump_json()),
                 )
         self._learn(record.job_id)
 
@@ -724,17 +775,35 @@ class Ledger:
             ).fetchall()
         return [Frame.model_validate(dict(r)) for r in found]
 
+    @property
+    def _select(self) -> str:
+        """A print with what's kept beside it; its sliced record where the file has the table."""
+        if self._has_sliced:
+            return _SELECT.format(sliced="s.record", join=_SLICED_JOIN)
+        return _SELECT.format(sliced="NULL", join="")
+
     def get(self, job_id: str) -> Row | None:
         with self._lock:
-            row = self._conn.execute(_SELECT + " WHERE p.job_id = ?", (job_id,)).fetchone()
+            row = self._conn.execute(self._select + " WHERE p.job_id = ?", (job_id,)).fetchone()
         return _row(row) if row is not None else None
 
     def rows(self) -> list[Row]:
         with self._lock:
             found = self._conn.execute(
-                _SELECT + " ORDER BY p.start_requested_at, p.rowid"
+                self._select + " ORDER BY p.start_requested_at, p.rowid"
             ).fetchall()
         return [_row(r) for r in found]
+
+    def reprints(self, job_id: str) -> list[str]:
+        """The jobs that print `job_id`'s file again, oldest first."""
+        if not self._has_sliced:
+            return []
+        with self._lock:
+            found = self._conn.execute(
+                "SELECT s.job_id FROM sliced_prints s JOIN prints p ON p.job_id = s.job_id"
+                " WHERE s.reprint_of = ? ORDER BY p.start_requested_at, p.rowid", (job_id,)
+            ).fetchall()
+        return [str(r["job_id"]) for r in found]
 
     def running(self) -> list[Row]:
         """Started and not yet seen to end: the prints the daemon must watch."""
@@ -753,12 +822,15 @@ class Ledger:
         ]
 
 
-#: A print, and what it used from the inventory if it did.
+#: A print, what it used from the inventory if it did, its slice's reading, and a hand-sliced
+#: file's record (`Ledger._select` fills the last two places).
 _SELECT = (
-    "SELECT p.*, m.spool AS material, r.reading AS reading, r.flags AS flags FROM prints p "
+    "SELECT p.*, m.spool AS material, r.reading AS reading, r.flags AS flags, "
+    "{sliced} AS sliced FROM prints p "
     "LEFT JOIN print_material m ON m.job_id = p.job_id "
-    "LEFT JOIN slice_readings r ON r.job_id = p.job_id"
+    "LEFT JOIN slice_readings r ON r.job_id = p.job_id{join}"
 )
+_SLICED_JOIN = " LEFT JOIN sliced_prints s ON s.job_id = p.job_id"
 
 
 def _row(row: sqlite3.Row) -> Row:
@@ -783,5 +855,7 @@ def _row(row: sqlite3.Row) -> Row:
         data["reading"] = SliceReading.model_validate_json(data["reading"])
     if data["flags"] is not None:
         data["flags"] = tuple(Flag.model_validate(f) for f in json.loads(data["flags"]))
+    if data["sliced"] is not None:
+        data["sliced"] = SlicedRecord.model_validate_json(data["sliced"])
     del data["slicer_config"]
     return Row.model_validate(data)

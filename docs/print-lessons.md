@@ -42,6 +42,15 @@ When the ledger records a print (`Ledger.record_start_requested`) and again when
 - **An outcome with something to say is a candidate:** a failure, or a success with a note. It sets nothing, and the model reads it.
 - Each print's evidence is drawn once, however often it's read. A failure here never stops a print: it's logged, and `draw` does it again.
 
+### A hand-sliced print teaches by its outcome only
+
+A file sliced by hand and sent with `print_job.py --sliced` (mqucifer/print-shop#164) has nothing the loop chose: no questions, no proposal, no corrections. So no lesson is given to it, none is scored on it, and no correction is drawn from it. Its outcome is a candidate like any other. Its evidence is marked `sliced: by hand` and carries the file's own settings in place of a part's shape:
+- the three profile names Orca wrote;
+- each setting that differs from the inventory's tuning for the loaded filament;
+- each object's overrides, where the file was Orca's sliced plate file.
+
+No part was measured, so the candidate is keyed to no trait, and it can't be accepted until a reviewer keys it (`edit --traits`).
+
 ### A pose sent back is a lesson for the orientation step
 
 **A pose sent back at the review is a correction too** (mqucifer/print-shop#128): `orientation`, from the pose the step chose to the one the person chose, with their reason.

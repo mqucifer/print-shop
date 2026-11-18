@@ -287,6 +287,15 @@ class Desk:
         if row is None and unprinted is None and text is None:
             return None
         named = _part(text) if text is not None else None
+        if row is not None and row.sliced is not None:
+            # A hand-sliced job's part is the file it sent, kept in its folder: what `--again`
+            # sends, if it still holds those bytes (mqucifer/print-shop#164).
+            kept = self.jobs_dir / job_id / row.gcode_name
+            same = self._finder.sha256(kept) == row.sliced.gcode_sha256
+            return JobRecord(
+                job_id=job_id, row=row, frames=frames, frames_missed=missed, log=text,
+                part_path=kept, part_found=same, printers=printers,
+            )
         found = (self._finder.find(row.stl_sha256, named,
                                    (self.parts_dir, self.jobs_dir / job_id))
                  if row is not None else None)
