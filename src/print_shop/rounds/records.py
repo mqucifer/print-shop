@@ -204,6 +204,18 @@ class Recorder:
             )
         self.cut = {}
 
+    def _on_over_window(self, event: dict[str, Any]) -> None:
+        """A call refused as over the model's window, which the next is compacted for and made
+        again, or after which the conversation is `context_full` (mqucifer/print-shop#178)."""
+        said = {k: event.get(k) for k in ("status", "said", "limit", "window", "again")}
+        self._row(
+            "over_window",
+            at=event.get("t"),
+            at_call=event.get("n", self.requests),
+            said=_json(said),
+            estimated_before=event.get("estimated"),
+        )
+
     def _on_reasoning_trimmed(self, event: dict[str, Any]) -> None:
         """The reasoning-trim switch's one step, for an eval's arm that turns it on: how many
         turns lost their reasoning, and the estimate either side (mqucifer/print-shop#78)."""

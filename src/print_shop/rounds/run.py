@@ -473,6 +473,7 @@ class Run:
             read(alias) if callable(read) else (UNKNOWN, "its sender doesn't read LiteLLM")
         )
         run.session._record("effort", alias=alias, effort=effort, said=effort_from)
+        run._read_window()
         run.ledger.run_started(
             name,
             request_sha=run.state.request_sha,
@@ -501,6 +502,34 @@ class Run:
         )
         run._skills_given()
         return run
+
+    def _read_window(self) -> None:
+        """The model's window, as LiteLLM's model info says it, so compaction's line is drawn
+        from it (mqucifer/print-shop#178): at the start and on every resume, as each process's
+        own, with a `window` event saying the line and where the window came from. Where LiteLLM
+        doesn't say, the line is `session.WINDOW`'s. A sender that can't read it says nothing."""
+        read = getattr(self.session.send, "window", None)
+        if not callable(read):
+            return
+        window, said = read(self.session.alias)
+        least = self.limits.max_tokens + self.limits.estimate_margin
+        if window is not None and window <= least:
+            said = f"{said} gave {window:,}, no more than the answer and the margin: not used"
+            window = None
+        if window is not None:
+            self.limits = replace(self.limits, window=window)
+            self.session.limits = self.limits
+        else:
+            said = f"{said}; `session.WINDOW` instead"
+        self.session._record(
+            "window",
+            alias=self.session.alias,
+            window=self.limits.window,
+            said=said,
+            answer=self.limits.max_tokens,
+            margin=self.limits.estimate_margin,
+            compact_at=self.limits.line(),
+        )
 
     def _give_lessons(self) -> None:
         """The lessons a reviewer kept for the model, into the first message: its kind's first,
@@ -567,6 +596,7 @@ class Run:
             run.session.limits = run.limits
         run.tools.use(run.toolset)
         run.session.restore()
+        run._read_window()
         # What the ledger hasn't got yet: an older run's, or what a killed process didn't reach.
         run._listen()
         return run
@@ -4978,6 +5008,17 @@ def summarise(folder: Path) -> dict[str, Any]:
             {"effort": UNKNOWN, "from": "not recorded: a run from before mqucifer/print-shop#40"},
         ),
         "call_retries": sum(1 for e in transcript.events_of(events) if e["kind"] == "call_retry"),
+        # Compaction's line as the latest process drew it, and the calls refused as over the
+        # window (mqucifer/print-shop#178): None for a run from before, at crew's 125,000.
+        "compact_at": next(
+            (
+                e.get("compact_at")
+                for e in reversed(list(transcript.events_of(events)))
+                if e["kind"] == "window"
+            ),
+            None,
+        ),
+        "over_window": sum(1 for e in transcript.events_of(events) if e["kind"] == "over_window"),
     }
     (folder / "summary.json").write_text(json.dumps(found, indent=1) + "\n", encoding="utf-8")
     return found

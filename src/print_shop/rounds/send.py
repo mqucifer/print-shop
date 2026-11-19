@@ -24,6 +24,7 @@ The key is read once, in this process, and never shown or recorded. Nothing prob
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any, TextIO
@@ -45,9 +46,19 @@ EFFORT_AT = (
     ("extra_body", "reasoning_effort"),
     ("extra_body", "chat_template_kwargs", "reasoning_effort"),
 )
+#: What in a 400's body says the prompt was over the model's window: LiteLLM's own error name, or
+#: the server's words, which LiteLLM passes on. Only whether it matches is kept, never the body.
+OVER_WINDOW = re.compile(
+    r"ContextWindowExceeded|context (?:length|window)|maximum context|too many tokens",
+    re.IGNORECASE,
+)
 # LiteLLM's headers that say what served a call: never the key's, the spend's or the budget's,
 # nor the address it reached. Rows and records hold no address (`cad_eval`'s second review of #41).
 PRIVATE = ("key", "spend", "cost", "budget", "user", "team", "api-base")
+
+
+class OverWindow(httpx.HTTPStatusError):
+    """A call refused because its prompt and answer were over the model's window."""
 
 
 class Sender:
@@ -92,6 +103,16 @@ class Sender:
             return UNKNOWN, f"LiteLLM's model info didn't answer: {type(exc).__name__}"
         return effort_in(response.status_code, response.content, alias)
 
+    def window(self, alias: str) -> tuple[int | None, str]:
+        """The tokens `alias` is served with, prompt and answer together, as LiteLLM's model info
+        says it (`model_info.max_input_tokens`), and where it was read; or None, and why
+        (mqucifer/print-shop#178). As with `effort`, nothing else is kept from the answer."""
+        try:
+            response = self._client.get("/model/info")
+        except httpx.HTTPError as exc:
+            return None, f"LiteLLM's model info didn't answer: {type(exc).__name__}"
+        return window_in(response.status_code, response.content, alias)
+
     def keep_stream(self, path: Path) -> None:
         """Where the next call's tool-call arguments go as they arrive."""
         self.spool = path
@@ -123,6 +144,14 @@ class Sender:
             self.served = served_headers(response.headers)
             if response.status_code >= 400:
                 # The status only: a body can echo the request, and this text reaches the record.
+                # A 400 is read for whether it says the prompt was over the window, and no more.
+                over = response.status_code == 400 and bool(OVER_WINDOW.search(_text(response)))
+                if over:
+                    raise OverWindow(
+                        "LiteLLM answered 400: over the model's window",
+                        request=response.request,
+                        response=response,
+                    )
                 raise httpx.HTTPStatusError(
                     f"LiteLLM answered {response.status_code}",
                     request=response.request,
@@ -245,6 +274,39 @@ def effort_in(status: int, body: bytes, alias: str) -> tuple[str, str]:
     if found:
         return UNKNOWN, f"`{alias}`'s deployments send {', '.join(sorted(found))}"
     return UNKNOWN, f"LiteLLM's model info for `{alias}` doesn't name an effort"
+
+
+def window_in(status: int, body: bytes, alias: str) -> tuple[int | None, str]:
+    """The window an alias is served with, from LiteLLM's `/model/info` answer: each deployment's
+    `model_info.max_input_tokens`, the least where they differ, so a prompt fits any of them."""
+    if status != 200:
+        return None, f"LiteLLM answered {status} for its model info"
+    try:
+        data = json.loads(body).get("data") or []
+    except (ValueError, AttributeError):
+        return None, "LiteLLM's model info wasn't the JSON it documents"
+    entries = [d for d in data if isinstance(d, dict) and d.get("model_name") == alias]
+    if not entries:
+        return None, f"LiteLLM's model info has no `{alias}` for this key"
+    found = set()
+    for entry in entries:
+        value = (entry.get("model_info") or {}).get("max_input_tokens")
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            found.add(value)
+    if not found:
+        return None, f"LiteLLM's model info for `{alias}` doesn't give `max_input_tokens`"
+    where = f"LiteLLM's /model/info for `{alias}`, model_info.max_input_tokens"
+    if len(found) > 1:
+        where += f", the least of its deployments' {', '.join(map(str, sorted(found)))}"
+    return min(found), where
+
+
+def _text(response: httpx.Response) -> str:
+    """A refused call's body, to match against and drop: it can echo the request."""
+    try:
+        return response.read().decode("utf-8", "replace")
+    except httpx.HTTPError:
+        return ""
 
 
 def served_headers(headers: Any) -> dict[str, str]:
