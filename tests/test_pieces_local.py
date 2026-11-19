@@ -4,7 +4,10 @@
 
 `bench_cases/planted_pieces.py` draws each: `shadow.png`, the clean panel with one dark patch
 that's read as lead; `faint.png`, with half of one line faint; and `band.json`, three pieces
-round a band of lead. Right answers are arithmetic.
+round a band of lead. Right answers are arithmetic. And for a fix's new edges
+(mqucifer/print-shop#174): `meet.png` and `ragged.png`, a patch of lead among four curved
+pieces, and `stalk.json`, a share that hangs off its piece by a stalk. Those are held by
+building: `pieces build` takes the map a fix leaves wherever it took the map before.
 """
 
 from __future__ import annotations
@@ -33,6 +36,17 @@ RED, WHITE, BLUE, GREEN, GOLD = (20, 60), (60, 60), (100, 60), (30, 5), (90, 20)
 SHADOW_MM2 = math.pi * 4.5 * 3.5
 #: A box round it that the line between the green cell and the gold one crosses, at x 60.
 BOX = "20,10,70,30"
+#: A build, as the other pieces' tests give it.
+BUILD = ("--thickness", 3, "--pane", 1, "--lip", "1.2,0.6", "--play", 0.25)
+#: The most points a changed piece's outline may have, as a multiple of its points before, on
+#: a traced map. A share's edge is its border's side, drawn to the detail the trace drew the
+#: rest of the outline at, in place of the stretch of outline that lay along the patch: about
+#: as many points as it had. Twice as many says the edge follows its steps again: on the eval
+#: the four pieces round a filled patch had 2.9 to 4.3 times their points
+#: (mqucifer/print-shop#174), and here they have 1.4 at the most.
+MOST_POINTS = 2.0
+#: A box round the patch in `meet.png`, which its four lines cross.
+MEET_BOX = "38,24,66,46"
 
 
 @pytest.fixture(scope="module")
@@ -59,6 +73,13 @@ def traced(bench: Any, picture: str, to: str, *more: Any) -> Answer:
     answer = bench(
         "pieces", "trace", picture, "--width", 120, "--palette", PALETTE, "--to", to, *more
     )
+    assert answer.verdict == "OK", answer.text
+    return answer  # type: ignore[no-any-return]
+
+
+def traced_wide(bench: Any, picture: str, to: str) -> Answer:
+    """`meet.png` and `ragged.png`, 100 mm wide, at the default darkness."""
+    answer = bench("pieces", "trace", picture, "--width", 100, "--palette", PALETTE, "--to", to)
     assert answer.verdict == "OK", answer.text
     return answer  # type: ignore[no-any-return]
 
@@ -238,16 +259,19 @@ def test_a_patch_between_three_pieces_is_shared_by_which_is_nearest(bench: Any) 
     """A band of lead from y 14 to 26 across a 60 mm panel, piece 1 above it and pieces 2 and
     3 below, with a 1.2 mm line between those two at x 30. It's as near piece 1 as the two
     below along y 20, so a 1.2 mm line is left there from y 19.4 to 20.6, and the line at
-    x 30 runs on up to meet it. By hand: piece 1 takes 60 by 5.4 mm, and pieces 2 and 3 each
-    29.4 by 5.4 mm."""
+    x 30 runs on up to meet it. Where the three lines meet, the band is as near all three
+    0.015 mm under y 20, 0.6² / 24: under the map's detail, so each border is drawn straight
+    from the panel's edge to there (mqucifer/print-shop#174). By hand: piece 1 takes 60 by
+    5.4 mm and two triangles 30 by 0.015, and pieces 2 and 3 each 29.4 by 5.4 mm less one."""
     answer = bench("pieces", "fill", "band.json", "--at", "10,20", "--to", "band1.json")
     assert answer.verdict == "OK" and answer.code == 0, answer.text
     numbers = answer.numbers
     assert not reports.unlike("pieces", numbers)
     shares = {row["piece"]: row["area_mm2"] for row in numbers["patch_shares"]}
-    assert shares[1] == pytest.approx(60 * 5.4, abs=0.1)
-    assert shares[2] == pytest.approx(29.4 * 5.4, abs=0.1)
-    assert shares[3] == pytest.approx(29.4 * 5.4, abs=0.1)
+    dip = 0.6**2 / 24
+    assert shares[1] == pytest.approx(60 * 5.4 + 30 * dip, abs=0.02)
+    assert shares[2] == pytest.approx(29.4 * 5.4 - 29.4 * dip / 2, abs=0.02)
+    assert shares[3] == pytest.approx(29.4 * 5.4 - 29.4 * dip / 2, abs=0.02)
     # The band, and the mouth of the line that leaves it: 60 by 12 mm and under half a mm².
     assert numbers["patch_mm2"] == pytest.approx(720.0, abs=0.5)
     assert numbers["patch_widest_mm"] == pytest.approx(12.0, abs=0.05)
@@ -257,9 +281,12 @@ def test_a_patch_between_three_pieces_is_shared_by_which_is_nearest(bench: Any) 
     assert "100.00% are the piece nearest them in the map before" in answer.text
     assert numbers["lead_widest_after_mm"] < 1.8, "lines, where the three meet"
     after = {p["id"]: p["outline"] for p in saved(bench.work, "band1.json")["pieces"]}
-    # Away from where the three lines meet: there the border dips 0.015 mm toward the two.
-    assert min(y for x, y in after[1] if not 25 < x < 35) == pytest.approx(20.6, abs=0.001)
-    assert min(y for _, y in after[1]) == pytest.approx(20.6 - 0.6**2 / 24, abs=0.005)
+    # Straight from each end at the panel's edge to where the three meet, and no point between.
+    assert sorted((x, y) for x, y in after[1] if y < 25) == [
+        pytest.approx((0, 20.6), abs=0.001),
+        pytest.approx((30, 20.6 - dip), abs=0.001),
+        pytest.approx((60, 20.6), abs=0.001),
+    ]
     assert max(y for _, y in after[2]) == pytest.approx(19.4, abs=0.001)
     # The line between pieces 2 and 3 keeps its path: its two sides are where they were.
     assert max(x for x, _ in after[2]) == 29.4 and min(x for x, _ in after[3]) == 30.6
@@ -294,6 +321,132 @@ def test_a_line_is_no_patch_and_isnt_filled(bench: Any) -> None:
     assert "a patch is lead wider than 1.80 mm" in why and "`pieces drop-line MAP --at X,Y`" in why
     inside = bench("pieces", "fill", "rules.json", "--at", "10,10")
     assert "which is in piece 1's glass" in inside.record["why"]
+
+
+def built(bench: Any, name: str, out: str) -> Answer:
+    return bench("pieces", "build", name, *BUILD, "--build-out", out)  # type: ignore[no-any-return]
+
+
+def short_sides(outline: list[list[float]], under: float = 0.3) -> int:
+    return sum(
+        math.dist(a, b) < under for a, b in zip(outline, outline[1:] + outline[:1], strict=True)
+    )
+
+
+@pytest.mark.parametrize(("picture", "scraps"), [("meet.png", False), ("ragged.png", True)])
+def test_a_patch_among_four_traced_pieces_is_filled_and_the_map_still_builds(
+    bench: Any, picture: str, scraps: bool
+) -> None:
+    """Two curved lines cross, and a dark patch lies where they meet: at the default darkness
+    it's a patch of lead among four pieces. The map builds with the patch as lead. Filled, it
+    builds too, and `pieces check` passes it: each share's edge is its border's side, not the
+    steps the border was found from, and with hairs round the patch's rim, no scrap of lead
+    is left in a piece as a line that ends there."""
+    stem = picture.removesuffix(".png")
+    before = traced_wide(bench, picture, f"{stem}0.json")
+    assert flags_of(before) == {("wide-lead", None)}, before.text
+    assert built(bench, f"{stem}0.json", f"{stem}-before").verdict == "OK"
+    at = "{},{}".format(*before.numbers["lead_widest_at"])
+    answer = bench("pieces", "fill", f"{stem}0.json", "--at", at, "--to", f"{stem}1.json")
+    assert answer.verdict == "OK" and answer.code == 0, answer.text
+    numbers = answer.numbers
+    assert not reports.unlike("pieces", numbers)
+    was = {p["id"]: p for p in saved(bench.work, f"{stem}0.json")["pieces"]}
+    now = {p["id"]: p for p in saved(bench.work, f"{stem}1.json")["pieces"]}
+    assert sorted(row["piece"] for row in numbers["outlines"]) == sorted(was), "all four"
+    for row in numbers["outlines"]:
+        number = row["piece"]
+        assert row["builds"] is True, answer.text
+        assert row["points_before"] == len(was[number]["outline"])
+        assert row["points_after"] == len(now[number]["outline"])
+        assert row["points_after"] <= MOST_POINTS * row["points_before"], row
+        assert f"piece {number}'s outline: {row['points_before']} point(s) before" in answer.text
+        # A step where a border meets a line that leaves the patch, and no stairs.
+        assert short_sides(now[number]["outline"]) <= 6, now[number]["outline"]
+        assert not now[number].get("holes"), "no lead shut in a piece"
+    assert numbers["dead_ends_at_patch_before"] == numbers["dead_ends_at_patch_after"] == 0
+    assert (numbers["patch_scraps_count"] > 0) is scraps, answer.text
+    assert numbers["glass_taken_mm2"] == 0
+    assert ("too short to be a line, are glass too" in answer.text) is scraps
+    again = bench("pieces", "check", f"{stem}1.json")
+    assert again.verdict == "OK" and flags_of(again) == set(), again.text
+    after = built(bench, f"{stem}1.json", f"{stem}-after")
+    assert after.verdict == "OK" and after.code == 0, after.text
+    assert after.numbers["panes_count"] == 4
+
+
+def test_a_share_that_wont_build_is_a_fail_that_names_the_piece(bench: Any) -> None:
+    """Piece 1 has a stalk 0.7 mm wide down between pieces 2 and 3 into a band of lead. The
+    band round the stalk's end is nearer piece 1 than any other, so its share joins the rest
+    of it by the stalk alone: two panes, where a build makes one. The map builds before the
+    fill. The fill says FAIL and names the piece, `pieces check` flags it on the map the fill
+    leaves, and `pieces build` refuses that map in the same words."""
+    assert built(bench, "stalk.json", "stalk-before").verdict == "OK"
+    answer = bench("pieces", "fill", "stalk.json", "--at", "30,6", "--to", "stalk1.json")
+    assert answer.verdict == "FAIL" and answer.code == 1, answer.text
+    why = "has no pane once 0.25 mm of play is taken all round: a narrow place near (10."
+    assert f"piece 1 doesn't build as the fix leaves it: it {why}" in answer.record["why"]
+    rows = {row["piece"]: row for row in answer.numbers["outlines"]}
+    assert (rows[1]["builds"], rows[1]["built_before"]) == (False, True)
+    assert rows[2]["builds"] is rows[3]["builds"] is True
+    assert {(f["flag"], f["piece"]) for f in answer.numbers["flagged"]} >= {("no-pane", 1)}
+    checked = bench("pieces", "check", "stalk1.json")
+    assert checked.verdict == "FAIL" and ("no-pane", 1) in flags_of(checked), checked.text
+    assert f"no-pane: piece 1 {why}" in checked.text, "in the build's words, with where"
+    assert "`pieces split MAP 1 --line` across it" in checked.text
+    assert "by its pixels, 12.0 a mm, it has 2 pane(s)" in checked.text
+    refused = built(bench, "stalk1.json", "stalk-after")
+    assert refused.verdict == "FAIL" and "piece 1, round (10." in refused.text, refused.text
+    assert why in refused.text, "the build's words are the check's and the fill's"
+    # As a step in a file of fixes it isn't made, and no map is written.
+    (bench.work / "stalk-steps.json").write_text(json.dumps([{"fix": "fill", "at": [30, 6]}]))
+    stepped = bench("pieces", "fix", "stalk.json", "stalk-steps.json", "--to", "stalk2.json")
+    assert stepped.verdict == "NO ANSWER" and "piece 1 doesn't build" in stepped.record["why"]
+    assert not (bench.work / "stalk2.json").exists()
+
+
+def test_a_retraced_box_and_a_moved_line_leave_maps_that_build(bench: Any) -> None:
+    """The patch in `meet.png` lies under the lines, so a box round it traced at `--dark 20`
+    reads the four lines through it and no patch. Each piece keeps what it has outside the
+    box and takes what's found inside, joined across the box's edge: with no step in its
+    outline there, where the two sides of a line don't quite agree. Then the line between
+    the two pieces on the right is bent 3 mm down. Each map builds."""
+    traced_wide(bench, "meet.png", "box0.json")
+    answer = bench(
+        "pieces", "retrace", "box0.json", "--box", MEET_BOX, "--dark", 20, "--to", "box1.json"
+    )
+    assert answer.verdict == "OK" and answer.code == 0, answer.text
+    assert not reports.unlike("pieces", answer.numbers)
+    assert answer.numbers["lines_across_box_edge"] == 4
+    assert answer.numbers["lead_widest_after_mm"] < 2.5, "lines, and no patch"
+    assert len(answer.numbers["outlines"]) == 4
+    assert all(row["builds"] for row in answer.numbers["outlines"]), answer.text
+    box = answer.numbers["box_mm"]
+    for piece in saved(bench.work, "box1.json")["pieces"]:
+        ring = piece["outline"]
+        for a, b in zip(ring, ring[1:] + ring[:1], strict=True):
+            on_one_side = any(
+                abs(a[axis] - side) < 1e-3 and abs(b[axis] - side) < 1e-3
+                for axis, side in ((0, box[0]), (1, box[1]), (0, box[2]), (1, box[3]))
+            )
+            assert not on_one_side, f"piece {piece['id']} runs along the box's edge at {a}"
+    first = built(bench, "box1.json", "box-built")
+    assert first.verdict == "OK" and first.numbers["panes_count"] == 4, first.text
+    gold, green = piece_at(bench.work, "box1.json", (80, 50)), piece_at(
+        bench.work, "box1.json", (80, 15)
+    )
+    path = "48.5,33.4,60,28.5,70,27,80,29.5,90,34,100,38.8"
+    moved = bench(
+        "pieces", "move-line", "box1.json", gold, green, "--line", path, "--to", "box2.json"
+    )
+    assert moved.verdict == "OK" and moved.code == 0, moved.text
+    assert not reports.unlike("pieces", moved.numbers)
+    assert [(row["piece"], row["builds"]) for row in moved.numbers["outlines"]] == [
+        (gold, True), (green, True)
+    ]  # fmt: skip
+    assert flags_of(bench("pieces", "check", "box2.json")) == set()
+    second = built(bench, "box2.json", "line-built")
+    assert second.verdict == "OK" and second.numbers["panes_count"] == 4, second.text
 
 
 # A piece's colour
@@ -512,7 +665,9 @@ def test_a_fill_is_a_step_and_a_step_that_cant_be_read_changes_nothing(bench: An
     (bench.work / "fill.json").write_text(json.dumps([{"fix": "fill", "at": [10, 20]}]))
     answer = bench("pieces", "fix", "band.json", "fill.json", "--to", "band2.json")
     assert answer.verdict == "OK", answer.text
-    assert answer.numbers["steps"][0]["patch_shares"][0]["area_mm2"] == pytest.approx(324, abs=0.1)
+    # 60 by 5.4 mm, and two triangles 30 by 0.015 down to where the three lines meet.
+    took = answer.numbers["steps"][0]["patch_shares"][0]["area_mm2"]
+    assert took == pytest.approx(324 + 30 * 0.6**2 / 24, abs=0.02)
     for step, says in (
         ({"fix": "retrace"}, "step 1, a retrace, needs `box`"),
         ({"fix": "retrace", "box": [0, 0, 9, 9], "dark": 300}, "`dark` is a whole number"),

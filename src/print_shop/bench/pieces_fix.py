@@ -109,6 +109,9 @@ class Made:
     lines: list[str] = field(default_factory=list)
     seconds: list[str] = field(default_factory=list)
     differs: list[str] = field(default_factory=list)
+    #: What's wrong with what it made, where both methods agree: a piece it changed that
+    #: built before and doesn't now.
+    fails: list[str] = field(default_factory=list)
 
 
 def next_name(path: str, to: str | None) -> str:
@@ -457,9 +460,19 @@ def _finish(args: Any, report: Report, before: Map, made: Made) -> None:
     )  # fmt: skip
     for text in made.seconds:
         report.second(text)
+    if "outlines" in made.numbers:
+        report.numbers["outlines"] = made.numbers["outlines"]
     differs = more + differs + made.differs
     if differs:
         report.verdict("DISAGREE", "; ".join(differs[:6]))
+        return
+    if made.fails:
+        report.verdict(
+            "FAIL",
+            f"{'; '.join(made.fails[:6])}. The map it leaves is {target}, for looking at: "
+            f"the map given, {args.map}, is as it was, and builds there. Before: "
+            f"{quick_said(was)}. After: {quick_said(now)}",
+        )
         return
     report.verdict(
         "OK",
@@ -993,6 +1006,12 @@ def run_fix(args: Any, report: Report) -> None:
             # The step's own second check differs: it isn't made, and nothing after it is.
             differs = [f"{name}: {one}" for one in differ]
             rows.append({"step": n, "fix": step["fix"], "made": False, "said": "; ".join(differ)})
+            break
+        if made.fails:
+            # It leaves a piece that built before and doesn't now: it isn't made either.
+            said = "; ".join(made.fails)
+            stopped = f"{name}, was refused: {said}"
+            rows.append({"step": n, "fix": step["fix"], "made": False, "said": said})
             break
         # As the next command would read it from its file: a file of steps then writes the map
         # the same commands write one by one, point for point. A map that can't be read back

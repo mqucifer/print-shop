@@ -18,13 +18,22 @@ Most of the map was right, and the only lever changed all of it. So:
   The patch is the lead there wider than a line and a half. Each piece takes the part
   nearer to it than to any other, less half a line along each border between two shares: so
   a line as wide as the map's runs down the middle between each two pieces, where the lines
-  that met the patch run on to each other. Only lead becomes glass.
+  that met the patch run on to each other. Each border is drawn as a line, to the map's own
+  detail, and a share's edge is its side. A scrap of lead beside the patch, too short to be
+  a line, is glass in the piece round it. Only lead becomes glass.
 - **`paint MAP ID COLOUR`**: one piece takes another of the map's colours, or a new one with
   its RGB. Nothing moves.
 - **`move-line MAP A B --line ...`**: the line between two neighbours is drawn again along
   new points, as wide as it was. The two pieces and their line are one shape, and the new
   line cuts it in two from edge to edge, so every line that met the old one still meets
   lead. Each piece keeps its number and its colour, and the glass each side of the new line.
+
+**What a fix made** (mqucifer/print-shop#174). On an eval a fill's shares followed their
+borders point by point, a tenth of a mm apart: one piece went from 62 outline points to 268,
+seven scraps of lead were shut in the pieces, and `pieces build` refused the map the fill had
+called OK. So a retrace, a fill and a moved line each say every changed piece's outline
+points before and after and whether it builds, by the build's own fit
+(`pieces_build.pane_refused`), and a piece that built before and doesn't after is a FAIL.
 
 **Second methods.** A retrace: the new map drawn back as pixels at the picture's scale, over
 the patches found in the box, and the two maps' pixels outside the box, which are the same.
@@ -64,6 +73,7 @@ from .pieces_picture import DEFAULT_DARK, Picture, picture_of
 from .pieces_trace import (
     CORNER_PX,
     HAIR_MM,
+    SIMPLIFY_PX,
     SPECK_PX,
     _nearest,
     _outline,
@@ -90,10 +100,19 @@ PATCH = 1.5
 #: A filled patch's shares are worked out from points this far apart along the pieces round
 #: it, in mm, and never more than an eighth of a lead.
 SHARE_STEP = 0.1
-#: A border between two shares is drawn through its points to this, in mm.
-BORDER_FIT = 0.002
+#: A border's line is drawn round each bend of its path with this many points a quarter turn.
+ROUND = 4
+#: A scrap of lead a fill left in a piece is a gap in it narrower than this share of a line,
+#: of this many mm² or more: smaller is the join's own rounding. And it's glass only where
+#: no other piece is within this share of a line of it.
+SCRAP_REACH = 0.45
+SCRAP_MM2 = 1e-4
+SCRAP_CLEAR = 0.75
 #: A filled patch's new glass is the nearest piece's in this share of its pixels, or more.
 NEAREST_PCT = 98.0
+#: Two points of a share's edge nearer than this, in mm, are one: where a border's round end
+#: meets the patch's edge they come a few ten-thousandths apart, and no curve fits through.
+SAME_POINT = 0.01
 #: The rules a moved line may not break on either piece: a piece under the map's limits.
 UNDER = ("sliver", "small", "neck")
 #: Lines that end at a box's edge said one by one, at most.
@@ -272,6 +291,47 @@ def _edge_read(
     return {"crossing": crossing, "ends": ends, "step_mm": max(steps, default=0.0)}
 
 
+def _unstepped(shape: Any, box: Any, least: float) -> Any:
+    """A piece joined across the box's edge, less the step where its outline crosses it.
+
+    What a piece keeps outside the box and what's found inside meet along the edge, and where
+    the two don't quite agree on where a line's side is, the joined outline runs along the
+    edge for that far, a step under `least` long with a square turn at each end: as short as
+    a ten-thousandth of a mm, which no curve can be fitted through. The point of the step
+    that the outside's side runs to stays, and the inside's goes, so the outline found
+    inside runs to where the outside's crosses the edge. Nothing outside the box moves."""
+    edge = box.exterior
+    within = box.buffer(EDGE_TOUCH)
+    rings = []
+    changed = False
+    for ring in (shape.exterior, *shape.interiors):
+        points = shapely.get_coordinates(ring)[:-1]
+        count = len(points)
+        spots = shapely.points(points)
+        on = shapely.distance(spots, edge) <= EDGE_TOUCH
+        out = ~shapely.covers(within, spots)
+        drop: set[int] = set()
+        for k in range(count):
+            j = (k + 1) % count
+            if not (on[k] and on[j]) or math.dist(points[k], points[j]) >= least:
+                continue
+            before, after = (k - 1) % count, (j + 1) % count
+            if out[before] and not out[after]:
+                drop.add(j)
+            elif out[after] and not out[before]:
+                drop.add(k)
+        if drop and count - len(drop) >= 3:
+            points = points[[k for k in range(count) if k not in drop]]
+            changed = True
+        rings.append(points)
+    if not changed:
+        return shape
+    made = shapely.Polygon(rings[0], rings[1:])
+    if made.is_valid and made.geom_type == "Polygon" and not made.is_empty:
+        return shapely.geometry.polygon.orient(made, 1.0)
+    return shape
+
+
 def _dead_ends_in(found: Map, box: Any) -> int:
     """How many dead ends a map has in a box: those of the pieces that reach into it."""
     least = DEAD_END * found.lead_mm
@@ -343,6 +403,8 @@ def do_retrace(
         joined = _joined([shapes[k] for k in group]) if len(group) > 1 else shapes[group[0]]
         for whole in piecemap.polygons(joined):
             if whole.area > CRUMB_MM2:
+                if len(group) > 1:
+                    whole = _unstepped(whole, zone, LINE_SHARE * found.lead_mm)
                 wholes.append((whole, owners, float(sum(owners.values()))))
     # A piece that reaches out of the box keeps its number, where it's the most of that
     # piece left outside. What's found wholly inside keeps the number of the piece it
@@ -439,7 +501,8 @@ def do_retrace(
         f"{edge['crossing']} line(s) cross the box's edge: each stays where it was outside, "
         "and joins the line found inside"
         + (
-            f", with a step of {edge['step_mm']:.2f} mm at the most where the two meet"
+            f", with a step of {edge['step_mm']:.2f} mm at the most where the two meet, "
+            "which the line found inside takes up: no outline has a step at the edge"
             if edge["step_mm"] >= 0.005
             else ""
         ),
@@ -463,6 +526,8 @@ def do_retrace(
             f"{traced['parted']} piece(s) parted from a neighbour"
         )
     seconds, differs = _laid_over_box(found, after, picture, window, traced["glass"], parts)
+    figures["outlines"], read, fails = outlines_read(found, after, [p.id for p in made])
+    lines += read
     ends = len(edge["ends"])
     return Made(
         after,
@@ -478,6 +543,7 @@ def do_retrace(
         lines,
         seconds,
         differs,
+        fails,
     )
 
 
@@ -578,16 +644,29 @@ def _patch(found: Map, at: Any) -> tuple[Any, Any]:
     return shapely.union_all(parts), lead
 
 
-def _shares(
-    found: Map, zone: Any, near: list[Piece], wide: float
-) -> tuple[dict[int, Any], list[Any]]:
-    """A patch shared among the pieces round it: for each, by its place in `near`, the part
-    of the patch nearer to it than to any other, less half a line along each border; and the
-    borders, where the patch is as near one piece as another. By the cells of points set
-    close along the pieces' edges, each cell the part of the plane nearer its point than
-    any other's, joined by piece. Two shares never touch: a border lies between them."""
-    if len(near) == 1:
-        return {0: zone}, []
+def _detail(found: Map, wide: float) -> float:
+    """The map's own detail, in mm: what a trace takes out of an outline, a pixel of the
+    picture it was traced from (`pieces_trace.SIMPLIFY_PX`), or of the scale the bench reads
+    the map at where it wasn't traced. Never over a quarter of a line."""
+    said = found.source.get("px_per_mm")
+    per_mm = piecemap.usual_px_per_mm(found)
+    if isinstance(said, int | float) and not isinstance(said, bool) and said > 0:
+        per_mm = float(said)
+    return min(SIMPLIFY_PX / per_mm, wide / 4.0)
+
+
+def _borders(found: Map, zone: Any, near: list[Piece], fine: float) -> list[Any]:
+    """Where a patch is as near one of the pieces round it as another: the lines between
+    their shares, each drawn through its points to the map's own detail.
+
+    Points are set close along the pieces' edges, and the plane is cut into each point's
+    cell, the part nearer it than any other. A side between the cells of two pieces' points
+    is a step of a border: it's as near one piece as the other. The steps, end to end, turn
+    at every point, a tenth of a mm apart, so each border is then read as the line they
+    stand for, within `fine` of them, from one end to the other: a meeting of three stays
+    where it is."""
+    from scipy.spatial import Voronoi
+
     step = min(SHARE_STEP, found.lead_mm / 8.0)
     hull = zone.buffer(piecemap.widest(zone)[0] / 2.0 + found.lead_mm)
     points, owners = [], []
@@ -599,35 +678,224 @@ def _shares(
         points.append(along)
         owners += [k] * len(along)
     spots, first = np.unique(np.round(np.vstack(points), 6), axis=0, return_index=True)
-    owner = np.asarray(owners)[first]
-    cells = list(
-        shapely.voronoi_polygons(shapely.MultiPoint(spots), extend_to=hull.envelope).geoms
+    # Four points far outside, no piece's: every cell of a piece's point is then closed,
+    # and a side between two of them has two ends.
+    x0, y0, x1, y1 = hull.bounds
+    far = 8.0 * max(x1 - x0, y1 - y0)
+    low, high = (x0 - far, y0 - far), (x1 + far, y1 + far)
+    guards = [low, (high[0], low[1]), high, (low[0], high[1])]
+    owner = np.concatenate([np.asarray(owners)[first], [-1] * len(guards)])
+    cells = Voronoi(np.vstack([spots, guards]))
+    pairs = np.asarray(cells.ridge_points)
+    ends = np.asarray(cells.ridge_vertices)
+    one, two = owner[pairs[:, 0]], owner[pairs[:, 1]]
+    between = (one != two) & (one >= 0) & (two >= 0) & (ends >= 0).all(axis=1)
+    if not between.any():
+        return []
+    steps = shapely.multilinestrings(cells.vertices[ends[between]])
+    inside = shapely.line_merge(steps).intersection(zone)
+    return [stroke.simplify(fine) for stroke in _strokes(inside)]
+
+
+def _run_on(border: Any, zone: Any, by: float) -> Any:
+    """A border run on by `by` past each end that's on the patch's edge, the way it was
+    going: its line then crosses the edge with its sides, and not with its round end, which
+    meets a straight edge at two points a few ten-thousandths of a mm apart."""
+    points = [np.asarray(p) for p in border.coords]
+    rim = zone.boundary
+
+    def past(end: np.ndarray, back: np.ndarray) -> list[np.ndarray]:
+        way = end - back
+        length = float(np.hypot(*way))
+        if length <= 0 or shapely.Point(end).distance(rim) > EDGE_TOUCH:
+            return []
+        return [end + way / length * by]
+
+    return shapely.LineString(
+        [*past(points[0], points[1]), *points, *past(points[-1], points[-2])]
     )
-    tree = shapely.STRtree(shapely.points(spots))
-    held: dict[int, list[Any]] = {}
-    for cell, spot in tree.query(cells, predicate="contains").T:
-        held.setdefault(int(owner[spot]), []).append(cells[cell])
-    regions = {
-        k: shapely.union_all(mine, grid_size=GRID).intersection(zone) for k, mine in held.items()
-    }
-    lines: list[Any] = []
-    keys = sorted(regions)
-    for n, a in enumerate(keys):
-        for b in keys[n + 1 :]:
-            todo = [regions[a].intersection(regions[b])]
-            while todo:
-                one = todo.pop()
-                if one.geom_type in ("LineString", "LinearRing") and one.length > 0:
-                    lines.append(one)
-                elif one.geom_type == "Polygon":
-                    lines.append(one.exterior)
-                elif hasattr(one, "geoms"):
-                    todo.extend(one.geoms)
-    if not lines:
-        return regions, []
-    borders = _strokes(shapely.line_merge(shapely.union_all(lines)).simplify(BORDER_FIT))
-    strip = shapely.union_all([border.buffer(wide / 2.0) for border in borders])
-    return {k: region.difference(strip) for k, region in regions.items()}, borders
+
+
+def _shares(
+    found: Map, zone: Any, near: list[Piece], wide: float
+) -> tuple[dict[int, list[Any]], list[Any]]:
+    """A patch shared among the pieces round it: for each, by its place in `near`, the parts
+    of the patch on its side of the borders, where the patch is as near one piece as
+    another; and the borders. Each border is a line `wide` across, drawn along its own path
+    and not along the points it was found from, so a share's edge is as smooth as the path.
+    Two shares never touch: a border lies between them. A part no piece lies against, shut
+    in by borders, stays lead."""
+    if len(near) == 1:
+        return {0: [zone]}, []
+    borders = _borders(found, zone, near, _detail(found, wide))
+    if not borders:
+        raise NoAnswer(
+            f"the patch round {piecemap.said_at(piecemap.widest(zone)[1])} has "
+            f"{len(near)} pieces beside it and no place as near one as another: there's no "
+            "line to leave between them"
+        )
+    strip = shapely.union_all(
+        [_run_on(border, zone, wide).buffer(wide / 2.0, quad_segs=ROUND) for border in borders]
+    )
+    rims = [piece.shape.boundary.buffer(EDGE_TOUCH) for piece in near]
+    shares: dict[int, list[Any]] = {}
+    for part in piecemap.polygons(zone.difference(strip)):
+        if part.area <= 1e-6:
+            continue
+        along = [float(part.boundary.intersection(rim).length) for rim in rims]
+        order = sorted(range(len(near)), key=lambda k: -along[k])
+        if along[order[0]] <= EDGE_TOUCH:
+            continue
+        if along[order[1]] > wide / 4.0:
+            raise NoAnswer(
+                f"lines {wide:g} mm wide don't part pieces {near[order[0]].id} and "
+                f"{near[order[1]].id} round the patch: the line between them is wider where "
+                "it leaves it. Give a wider --lead"
+            )
+        shares.setdefault(order[0], []).append(part)
+    return shares, borders
+
+
+def _scraps(found: Map, piece: Piece, shape: Any, zone: Any, wide: float) -> tuple[Any, int]:
+    """A piece with its share, and the scraps of lead the share left in it turned to glass:
+    with how many. A scrap is lead beside the patch that was no part of it, a hair between
+    the patch's edge and the piece's or a nick in the piece's edge narrower than a line,
+    which the share now shuts in or leaves as a line that ends in the piece's glass. It's
+    glass where it's too short to be a line, under a dead end's length (`pieces_check`),
+    it wasn't a gap in the piece before, and no other piece is near it."""
+    longest = DEAD_END * found.lead_mm
+    others = [o.shape for o in found.pieces if o.id != piece.id]
+    tree = shapely.STRtree(others) if others else None
+    beside = zone.buffer(wide)
+
+    def lone(scrap: Any) -> bool:
+        if tree is None:
+            return True
+        return not len(tree.query(scrap, predicate="dwithin", distance=SCRAP_CLEAR * wide))
+
+    def short(scrap: Any) -> bool:
+        corners = shapely.get_coordinates(scrap.minimum_rotated_rectangle)
+        sides = np.hypot(*np.diff(corners, axis=0).T) if len(corners) >= 4 else np.zeros(1)
+        return float(sides.max()) < longest
+
+    count = 0
+    # Shut in: a hole the piece didn't have.
+    was = [shapely.Polygon(ring) for ring in piece.shape.interiors]
+    holes = []
+    for ring in shape.interiors:
+        hole = shapely.Polygon(ring)
+        new = not any(hole.intersection(old).area > 0.5 * hole.area for old in was)
+        if new and hole.intersects(beside) and short(hole) and lone(hole):
+            count += 1
+        else:
+            holes.append(ring)
+    shape = shapely.Polygon(shape.exterior, holes)
+    # Open at one end: a gap narrower than a line that the piece's own edge didn't have.
+    reach = SCRAP_REACH * wide
+    had = piecemap.closed(piece.shape, reach).difference(piece.shape)
+    found_now = []
+    for scrap in piecemap.polygons(piecemap.closed(shape, reach).difference(shape)):
+        if scrap.area < SCRAP_MM2 or not scrap.intersects(beside):
+            continue
+        if scrap.intersection(had).area > 0.5 * scrap.area:
+            continue
+        if short(scrap) and lone(scrap):
+            found_now.append(scrap)
+    if found_now:
+        whole = _joined([shape, *found_now])
+        if whole.geom_type == "Polygon" and whole.is_valid:
+            shape, count = whole, count + len(found_now)
+    return shape, count
+
+
+def _points(shape: Any) -> int:
+    """The points of a piece's outline and its holes'."""
+    return sum(len(ring.coords) - 1 for ring in (shape.exterior, *shape.interiors))
+
+
+def _one_point(shape: Any, was: Any) -> Any:
+    """A piece with its share, less each new point of its outline that's all but on the one
+    before it or after it: the piece's own points, as they were, all stay."""
+    old = {(round(x, 6), round(y, 6)) for x, y in shapely.get_coordinates(was)}
+    rings = []
+    for ring in (shape.exterior, *shape.interiors):
+        points = shapely.get_coordinates(ring)[:-1]
+        kept: list[Any] = []
+        for k, point in enumerate(points):
+            new = (round(point[0], 6), round(point[1], 6)) not in old
+            after = points[(k + 1) % len(points)]
+            near = (kept and math.dist(point, kept[-1]) < SAME_POINT) or (
+                math.dist(point, after) < SAME_POINT
+                and (round(after[0], 6), round(after[1], 6)) in old
+            )
+            if not (new and near):
+                kept.append(point)
+        # Where the ring begins between two such points, the first is the one that goes.
+        first = (round(kept[0][0], 6), round(kept[0][1], 6)) if kept else None
+        if len(kept) > 3 and first not in old and math.dist(kept[0], kept[-1]) < SAME_POINT:
+            kept = kept[1:]
+        rings.append(kept if len(kept) >= 3 else points)
+    made = shapely.Polygon(rings[0], rings[1:])
+    if made.is_valid and made.geom_type == "Polygon" and not made.is_empty:
+        return shapely.geometry.polygon.orient(made, 1.0)
+    return shape
+
+
+def _fits(found: Map, piece: Piece) -> str:
+    """Why a piece can't be built whatever its lip, or nothing: `pieces build`'s own reading
+    of its pane and its outline's fit to lines and arcs, at the build's usual `--fit` and
+    `--play`, as `pieces check` reads it.
+    Whether a lip leaves it an opening is the lip's to say, and `pieces check --lip` reads it."""
+    from .pieces_build import pane_refused
+
+    limits = Limits()
+    return pane_refused(found, piece, limits.play, limits.fit)
+
+
+def outlines_read(
+    before: Map, after: Map, changed: list[int]
+) -> tuple[list[dict[str, Any]], list[str], list[str]]:
+    """What a fix made of each piece it changed: the points of its outline before and after,
+    and whether it builds. As rows, as lines of the reply, and as what's wrong: a piece that
+    built before the fix and doesn't after it."""
+    limits = Limits()
+    old = {p.id: p for p in before.pieces}
+    rows: list[dict[str, Any]] = []
+    lines: list[str] = []
+    fails: list[str] = []
+    for number in changed:
+        piece = after.piece(number)
+        was = old.get(number)
+        why = _fits(after, piece)
+        why_was = _fits(before, was) if was is not None and why else ""
+        row = {
+            "piece": number,
+            "points_before": None if was is None else _points(was.shape),
+            "points_after": _points(piece.shape),
+            "builds": not why,
+            "built_before": None if was is None else not why_was,
+        }
+        rows.append(row)
+        count = (
+            f"{row['points_after']} point(s), new to the map"
+            if was is None
+            else f"{row['points_before']} point(s) before and {row['points_after']} after"
+        )
+        if not why:
+            lines.append(f"piece {number}'s outline: {count}; it builds")
+        elif why_was:
+            lines.append(
+                f"piece {number}'s outline: {count}; it doesn't build, and didn't before: it {why}"
+            )
+        else:
+            lines.append(f"piece {number}'s outline: {count}; it doesn't build: it {why}")
+            fails.append(f"piece {number} doesn't build as the fix leaves it: it {why}")
+    if rows:
+        lines.append(
+            "a piece builds where `pieces build`'s play leaves one pane of it and its outline "
+            f"fits lines and arcs, at its usual --fit {limits.fit:g} and --play {limits.play:g}"
+        )
+    return rows, lines, fails
 
 
 def do_fill(found: Map, at: Any, lead_mm: float | None) -> Made:
@@ -646,19 +914,19 @@ def do_fill(found: Map, at: Any, lead_mm: float | None) -> Made:
     theirs, borders = _shares(found, zone, near, wide)
     made: list[Piece] = []
     shares: list[dict[str, Any]] = []
+    scraps, beside = 0, 0.0
     for k, piece in enumerate(near):
-        # What of its share lies against it: a scrap a border cuts off stays lead.
-        mine = [
-            part
-            for part in piecemap.polygons(theirs.get(k, shapely.Polygon()))
-            if part.area > 1e-6 and part.distance(piece.shape) <= 1e-6
-        ]
+        mine = theirs.get(k)
         if not mine:
             continue
-        shape = _one(_joined([piece.shape, *mine]), f"piece {piece.id} with its share")
+        joined = _one(_joined([piece.shape, *mine]), f"piece {piece.id} with its share")
+        shape, more = _scraps(found, piece, joined, zone, wide)
+        shape = _one_point(shape, piece.shape)
+        scraps += more
         took = float(shape.area - piece.shape.area)
         paint = {"rgb": piece.paint["rgb"]} if piece.paint and "rgb" in piece.paint else None
         made.append(Piece(piece.id, piece.colour, shape, piece.thickness_mm, paint))
+        beside += float(shape.area - joined.area)
         shares.append({"piece": piece.id, "area_mm2": round(took, 3)})
     if not made:
         raise NoAnswer(
@@ -672,25 +940,44 @@ def do_fill(found: Map, at: Any, lead_mm: float | None) -> Made:
     added = float(sum(row["area_mm2"] for row in shares))
     across, where = piecemap.widest(zone)
     seconds, differs = _nearest_by_pixels(found, after)
+    rows, lines, fails = outlines_read(found, after, [p.id for p in made])
+    box = zone.buffer(2.0 * wide)
+    ends = (_dead_ends_in(found, box), _dead_ends_in(after, box))
     said = ", ".join(f"piece {row['piece']} {row['area_mm2']:.1f} mm²" for row in shares)
     return Made(
         after,
         [p.id for p in made],
         f"the patch of lead round {piecemap.said_at(where)}, {zone.area:.1f} mm² and "
         f"{across:.2f} mm at its widest, is glass: {said}; each took the part nearer to it "
-        f"than to any other, and {zone.area - added:.1f} mm² is left as "
-        f"{len(borders)} line(s) {wide:.2f} mm wide between them",
+        f"than to any other, and {zone.area - added + beside:.1f} mm² is left as "
+        f"{len(borders)} line(s) {wide:.2f} mm wide between them"
+        + (
+            f"; {scraps} scrap(s) of lead beside the patch, too short to be a line, are "
+            f"glass too, {beside:.2f} mm²"
+            if scraps
+            else ""
+        ),
         (added, 0.0),
         {
             "patch_mm2": float(zone.area),
             "patch_widest_mm": across,
             "patch_at": where,
             "patch_shares": shares,
-            "patch_left_as_lead_mm2": float(zone.area - added),
+            "patch_left_as_lead_mm2": float(zone.area - added + beside),
+            "patch_scraps_count": scraps,
+            "patch_scraps_mm2": beside,
+            "dead_ends_at_patch_before": ends[0],
+            "dead_ends_at_patch_after": ends[1],
+            "outlines": rows,
         },
-        [f"piece {row['piece']} took {row['area_mm2']:.2f} mm² of the patch" for row in shares],
+        [
+            *[f"piece {r['piece']} took {r['area_mm2']:.2f} mm² of the patch" for r in shares],
+            *lines,
+            f"dead ends at the patch: {ends[0]} before and {ends[1]} after",
+        ],
         seconds,
         differs,
+        fails,
     )
 
 
@@ -732,6 +1019,19 @@ def run_fill(args: Any, report: Report) -> None:
     report.fact(
         "patch_left_as_lead_mm2", made.numbers["patch_left_as_lead_mm2"], "mm²",
         "the lines left between the pieces' shares",
+    )  # fmt: skip
+    report.fact(
+        "patch_scraps_count", made.numbers["patch_scraps_count"],
+        how="scraps of lead beside the patch, too short to be a line, that are glass too",
+    )  # fmt: skip
+    report.numbers["patch_scraps_mm2"] = made.numbers["patch_scraps_mm2"]
+    report.fact(
+        "dead_ends_at_patch_before", made.numbers["dead_ends_at_patch_before"],
+        how="lines that end in glass within two lines of the patch",
+    )  # fmt: skip
+    report.fact(
+        "dead_ends_at_patch_after", made.numbers["dead_ends_at_patch_after"],
+        how="in the new map",
     )  # fmt: skip
     report.numbers["patch_at"] = made.numbers["patch_at"]
     report.numbers["patch_shares"] = made.numbers["patch_shares"]
@@ -1003,6 +1303,7 @@ def do_move_line(found: Map, a_id: int, b_id: int, points: list[Any]) -> Made:
     glass = (float(now_both.difference(both).area), float(both.difference(now_both).area))
     old_line = whole.difference(both)
     moved = float(strip.intersection(whole).hausdorff_distance(old_line)) if old_line.area else 0.0
+    rows, lines, fails = outlines_read(found, after, [a.id, b.id])
     return Made(
         after,
         [a.id, b.id],
@@ -1012,7 +1313,14 @@ def do_move_line(found: Map, a_id: int, b_id: int, points: list[Any]) -> Made:
         f"of glass is the new line; piece {a.id} is {mine.area - a.shape.area:+.1f} mm² and "
         f"piece {b.id} {theirs.area - b.shape.area:+.1f} mm²",
         glass,
-        {"line_width_mm": width, "line_moved_mm": moved, "line_length_mm": float(path.length)},
+        {
+            "line_width_mm": width,
+            "line_moved_mm": moved,
+            "line_length_mm": float(path.length),
+            "outlines": rows,
+        },
+        lines,
+        fails=fails,
     )
 
 
