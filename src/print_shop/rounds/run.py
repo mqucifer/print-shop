@@ -3119,7 +3119,15 @@ class Run:
             encoding="utf-8",
         )
         judgement = judge.check(
-            self.box, self.work, script, wanted, self.state.picks, folder, part, on_bed
+            self.box,
+            self.work,
+            script,
+            wanted,
+            self.state.picks,
+            folder,
+            part,
+            on_bed,
+            asks=self.folder / "asks",
         )
         standing: list[judge.Standing] = []
         panes_read: list[judge.Standing] = []

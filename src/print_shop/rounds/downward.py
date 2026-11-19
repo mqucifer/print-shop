@@ -17,6 +17,12 @@ and `features.overhang_places`: the area that would need support, and each stret
 it's in, turned back into the file's own coordinates. A round or chamfer rising from the plate
 is left out, as the print loop leaves it out, and said.
 
+**Its answer is read whole** (mqucifer/print-shop#181): the bench writes it to a file beside the
+meshes, as a traced frame and 12 panes made it one line of 1,459,288 bytes, and the harness keeps
+the last 256,000 of a container's output. A file that can't be read says why: the answer went
+missing, the bench couldn't lay that file on the bed, or it exited with an error. "can't tell" is
+neither a pass nor a fail, and a run's records then tell a harness fault from a bench one.
+
 **A paused frame's panes are in place** (mqucifer/print-shop#153). A stained-glass frame's top
 lips print over its panes, after the pause. Read alone, each lip is a ceiling over its pocket:
 on the first traced scene, 4,761 mm² at the pocket's ceiling. So a frame that `glass` declares
@@ -44,7 +50,7 @@ import trimesh
 
 from print_shop.bench.refine import MARK, ON_BED
 from print_shop.rounds import judge
-from print_shop.rounds.box import Box
+from print_shop.rounds.box import Box, Unanswered, answered
 from print_shop.rounds.needs import BED, Need
 from print_shop.setup import features
 
@@ -59,6 +65,8 @@ LEAST_MM2 = 0.5
 #: The sides a frame lies flat on, its panes level in their pockets: on any other it isn't
 #: printed with a pause, and is read alone.
 FLAT = ("-z", "+z")
+#: The file the bench's answer is written to, in the scratch folder.
+ANSWER = "laid/answer.json"
 #: The most stretches of height said one by one.
 SHOWN = 4
 #: Words that say a part prints with no supports, read in the request and in a need's own words.
@@ -250,20 +258,23 @@ def read(
                 shutil.copyfile(source, scratch / copy)
                 pane_copies.setdefault(frame, []).append(copy)
                 on_bed[copy] = laid.get(frame, "-z")
+    # The answer is written to a file beside the meshes, and read whole: a frame's panes'
+    # outlines ran it to 1.4 MB, past what the harness keeps of a line (mqucifer/print-shop#181).
     request = {
         "request": "mesh",
         "files": list(on_bed),
         "out": "laid",
         "on_bed": on_bed,
+        "answer": ANSWER,
     }
     answer: dict[str, Any] = {}
     failed = ""
     if copies:
         ran = box.helper("refine", [json.dumps(request)], timeout=600, where=scratch)
-        if MARK in ran.output:
-            answer = json.loads(ran.output.split(MARK, 1)[1].splitlines()[0]).get("files") or {}
-        else:
-            failed = f"the bench didn't lay it on the bed (exit {ran.code})"
+        try:
+            answer = answered(ran, MARK, scratch).get("files") or {}
+        except Unanswered as exc:
+            failed = str(exc)
     found = []
     for name in mine:
         side = laid.get(name, "-z")
@@ -271,8 +282,17 @@ def read(
         stl = scratch / str(row.get("stl") or "")
         if name not in copies:
             found.append(_unread(name, side, "the file isn't there"))
-        elif failed or row.get("unread") or not stl.is_file():
-            found.append(_unread(name, side, failed or str(row.get("unread") or "no mesh came")))
+        elif failed:
+            found.append(_unread(name, side, failed))
+        elif row.get("unread"):
+            found.append(
+                _unread(name, side, f"the bench couldn't lay it on the bed: {row['unread']}")
+            )
+        elif not row:
+            found.append(_unread(name, side, "the bench's answer has no row for it"))
+        elif not stl.is_file():
+            missing = f"the bench's answer names a mesh, {stl.name}, that isn't there"
+            found.append(_unread(name, side, missing))
         else:
             mesh = trimesh.load_mesh(str(stl), force="mesh")
             said = (no_supports or {}).get(name, "")

@@ -15,7 +15,11 @@ own folder, so it's what the script could have written itself: `rounds/run.py` h
 from it, and lets no pass from it clear one.
 
 Output is read as it comes and only its end is kept: a script that prints without end costs
-neither the Mac's memory nor Docker's disk. The container holds no secret.
+neither the Mac's memory nor Docker's disk. The container holds no secret. So a helper whose answer
+can be long writes it to a file in the folder it runs in, and its line says where (`answered`,
+`bench/answers.py`): on a traced suncatcher, the `mesh` answer was one line of 1,459,288 bytes, its
+mark dropped with its start, and each file read "can't tell" though the bench had meshed every one
+(mqucifer/print-shop#181).
 """
 
 from __future__ import annotations
@@ -31,7 +35,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from print_shop.bench import host
+from print_shop.bench import answers, host
 from print_shop.bench.cli import CALLS
 from print_shop.bench.report import EXIT
 from print_shop.rounds import paths
@@ -48,6 +52,11 @@ BENCHED_BYTES = 4_000_000
 
 class Gone(RuntimeError):
     """Docker didn't answer: the infrastructure's failure, and nothing about the part."""
+
+
+class Unanswered(RuntimeError):
+    """A helper gave no answer to read, and why, in words a run's records keep: its answer went
+    missing on the way, or the bench exited with an error."""
 
 
 @dataclass
@@ -163,6 +172,44 @@ class Box:
             )
             code = 2 if command[1:2] == ["-I"] else host.KILLED
         return Ran(code, text, seconds, size[1], timed_out)
+
+
+def answered(ran: Ran, mark: str, where: Path) -> dict[str, Any]:
+    """A helper's answer: its line, `mark` then JSON, or the file that line names in `where`. A
+    reply too long to keep is never taken for the bench failing: it's said as the answer gone
+    missing, apart from an exit that isn't 0."""
+    at = ran.output.find(mark)
+    if at < 0:
+        if ran.code != 0:
+            last = ran.output.strip().splitlines()[-1:] or [""]
+            raise Unanswered(f"the bench exited {ran.code}: {last[0][:300]}")
+        if ran.dropped:
+            raise Unanswered(
+                f"the bench's answer went missing: its output was "
+                f"{ran.dropped + len(ran.output.encode('utf-8')):,} bytes, of which the harness "
+                f"keeps the last {KEEP:,} (exit 0)"
+            )
+        raise Unanswered("the bench's answer went missing: its output has no answer (exit 0)")
+    line = ran.output[at + len(mark) :].split("\n", 1)[0]
+    try:
+        said = json.loads(line)
+    except ValueError as exc:
+        raise Unanswered(f"the bench's answer went missing: its line isn't JSON ({exc})") from exc
+    if not isinstance(said, dict):
+        raise Unanswered("the bench's answer went missing: its line isn't a JSON object")
+    if set(said) != {answers.FILE, "bytes"}:
+        return said
+    name = str(said[answers.FILE])
+    try:
+        found = json.loads(paths.read_inside(where, name))
+    except (OSError, ValueError) as exc:
+        raise Unanswered(
+            f"the bench's answer went missing: it wrote {name}, and that couldn't be read "
+            f"({type(exc).__name__})"
+        ) from exc
+    if not isinstance(found, dict):
+        raise Unanswered(f"the bench's answer went missing: {name} isn't a JSON object")
+    return found
 
 
 def benched(directory: Path, journal: str) -> list[dict[str, Any]]:

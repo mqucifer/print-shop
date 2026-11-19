@@ -1,6 +1,8 @@
 """The refinement pass's geometry, inside the container (mqucifer/print-shop#51).
 
-Two requests, each one JSON argument, each answered by one line, `MARK` then JSON:
+Two requests, each one JSON argument, each answered by one line, `MARK` then JSON, or with
+`answer` naming a file, written there and the line saying where (`answers.py`,
+mqucifer/print-shop#181):
 
 - **`mesh`**: each STEP file as an STL for Orca, whose CLI refuses STEP (exit 250, "Input file
   must have .stl, .obj, .amf(.xml) extension"; `~/print-shop/proofs/m18-refine/cli-probe/`, run
@@ -31,6 +33,8 @@ import shutil
 import sys
 from pathlib import Path
 from typing import Any
+
+from . import answers
 
 MARK = "ROUNDS_REFINE "
 #: A line's kind in `cover`'s request: 1 a wall, 2 gap fill, 0 anything else.
@@ -316,4 +320,4 @@ def main(argv: list[str] | None = None) -> None:
         answer = cover(request)
     else:
         answer = {"error": f"no request {kind!r}: mesh or cover"}
-    print(MARK + json.dumps(answer))
+    answers.say(MARK, answer, request)
