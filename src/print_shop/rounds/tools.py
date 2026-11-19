@@ -100,6 +100,16 @@ def _spec(
     }
 
 
+#: The way taken for each fault a pick's fix-first named (mqucifer/print-shop#175).
+WAYS = {
+    "ways": {
+        "type": "object",
+        "description": "Where a pick named faults to fix first: the way you took for each, by "
+        'its id, in your words: {"F2.1": "merged it into its neighbour"}. Any fix that meets '
+        "every rule will do, whatever was suggested. The person at the next stop reads it "
+        "beside the fault, and `done` waits for it. Optional otherwise.",
+    }
+}
 RUN_AFTER = {
     "run": {
         "type": "boolean",
@@ -536,6 +546,7 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
                     "it and puts it beside the question, and only a pick other than none lets "
                     "that need stand. Optional.",
                 },
+                **WAYS,
                 "end_checks": {
                     "type": "boolean",
                     "description": "true to ask a person about the harness's end checks that "
@@ -568,6 +579,7 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
             {
                 **LOOKS,
                 **_glass(toolset),
+                **WAYS,
                 "on_bed": {
                     "type": "object",
                     "description": "Which side of each file, as your script stores it, lies on "
@@ -1040,6 +1052,7 @@ class WorkTools:
             "looks",
             "why_changed",
             "against_note",
+            "ways",
             "overlap",
             "lessons",
             "scores",
