@@ -166,7 +166,8 @@ def index(ledger: DesignLedger, run: str, upto: int | None = None) -> list[str]:
     after: dict[int, list[str]] = {}
     for t in ledger.rows(
         "SELECT kind, name, at_call, said, estimated_before, prompt_after FROM timeline "
-        "WHERE run=? AND kind IN ('compaction', 'restart', 'stop', 'asked') ORDER BY seq",
+        "WHERE run=? AND kind IN ('compaction', 'restart', 'stop', 'asked', 'over_window') "
+        "ORDER BY seq",
         run,
     ):
         at = int(t["at_call"] or 0)
@@ -187,6 +188,14 @@ def index(ledger: DesignLedger, run: str, upto: int | None = None) -> list[str]:
             )
         elif t["kind"] == "asked":
             after.setdefault(at, []).append(_asked(t["said"]))
+        elif t["kind"] == "over_window":
+            again = json.loads(t["said"] or "{}").get("again")
+            then = "compacted and made again" if again else "a second time: context_full"
+            # The refused call has no answer to show it after: it's said before the next.
+            before.setdefault(at + 1, []).append(
+                f"(before call {at + 1}: call {at} was refused as over the model's window, "
+                f"{then})"
+            )
         elif t["name"] == "context_full":
             after.setdefault(at, []).append("   it wouldn't fit even compacted: context_full")
     for i in ledger.rows(

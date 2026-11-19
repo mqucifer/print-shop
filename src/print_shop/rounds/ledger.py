@@ -213,9 +213,11 @@ CREATE TABLE IF NOT EXISTS timeline (
     seq INTEGER NOT NULL,
     -- start, resume, stop, compaction, restart, after_action, or asked: a call that ended
     -- without a tool call, asked what's missing. reasoning_trimmed: the reasoning-trim
-    -- switch's one step, on an eval's arm that turns it on. A restart's `name` is why the
-    -- conversation started again from the record: context_full, end_checks or send_back, and
-    -- none for a run from before mqucifer/print-shop#150, whose restarts were all context_full.
+    -- switch's one step, on an eval's arm that turns it on. over_window: a call refused as over
+    -- the model's window, compacted and made again (mqucifer/print-shop#178). A restart's
+    -- `name` is why the conversation started again from the record: context_full, end_checks
+    -- or send_back, and none for a run from before mqucifer/print-shop#150, whose restarts
+    -- were all context_full.
     kind TEXT NOT NULL,
     name TEXT,
     at TEXT,

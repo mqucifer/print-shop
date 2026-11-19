@@ -1,8 +1,9 @@
 """One run's conversation: a call at a time, until an ending or a stop.
 
 Ported from mqucifer/model-performance `cad_eval/session.py` at 22ea8b7, its base arm's shape:
-reasoning goes back as it came, compaction at crew's 125k, every request rebuilds from the
-records (`transcript.py`), and each change to an earlier message is a recorded rewrite.
+reasoning goes back as it came, every request rebuilds from the records (`transcript.py`), and
+each change to an earlier message is a recorded rewrite. Compaction's line is drawn from the
+model's window (`compact_line`), no longer crew's 125k (mqucifer/print-shop#178).
 
 What's different here is that the conversation outlives its stops. A `done` the checks refuse
 doesn't end it, so every tool call in a turn gets its reply even after one that stops the turn.
@@ -33,17 +34,40 @@ import httpx
 
 from print_shop.rounds import cut_reasoning
 from print_shop.rounds.box import Gone
+from print_shop.rounds.send import OverWindow
 from print_shop.rounds.transcript import conversation, events_of
 
-# Crew's own line (`crew_org/session/conversation.py`), in a 262,144-token window that keeps
-# 65,536 for the answer.
-COMPACT_AT = 125_000
+#: The tokens the model is served with, prompt and answer together: SGLang's context length, as
+#: LiteLLM's `/model/info` gives it for `crew-code-think` (`model_info.max_input_tokens`, read by
+#: the operator on 2026-11-19). A run reads it again at its start (`send.Sender.window`): this is
+#: the window where LiteLLM doesn't say.
+WINDOW = 262_144
+#: The answer's room each call asks for (`max_tokens`), kept out of the window. It's the harness's
+#: own: LiteLLM sets no cap on the answer.
+MAX_TOKENS = 65_536
+#: Tokens kept below the window less the answer, for the estimate reading low. On the 89 recorded
+#: evals to 2026-11-19, of 6,036 calls between compactions, the most the estimate before a call
+#: read under its measured prompt was 7,667 tokens (p99 2,924; at 100k or more, 7,667 and 3,099):
+#: rounded up (`~/print-shop/proofs/m20-compact-at/estimate_error.json`, mqucifer/print-shop#178).
+ESTIMATE_MARGIN = 8_000
 # Characters a token, for what's come since the last measured prompt, counted as `_chars` counts
 # them. Fitted on the 1,122 recorded prompts of 12 runs (mqucifer/print-shop#47): the median of the
 # prompt's growth against the characters' growth between calls, so the estimate reads as often low
 # as high. 2.7, from `cad_eval.probe`'s one prompt, read the growth about 21% high
 # (`~/print-shop/proofs/m18-ask/fit_chars.json`).
 CHARS_PER_TOKEN = 3.18
+
+
+def compact_line(window: int, answer: int, margin: int) -> int:
+    """Where a conversation is compacted: the window, less the answer's room, less the margin for
+    the estimate. Under it, a prompt the estimate reads low by as much as the margin still leaves
+    the answer all its room."""
+    return window - answer - margin
+
+
+#: 188,608 by default. It was crew's 125,000 (`crew_org/session/conversation.py`) to
+#: mqucifer/print-shop#178: on `eval-table-1` that compacted 13 times in 183 calls.
+COMPACT_AT = compact_line(WINDOW, MAX_TOKENS, ESTIMATE_MARGIN)
 COMPACTED = "(compacted: {what})"
 #: A line that is a compaction's note, which a file's text never is (mqucifer/print-shop#47).
 NOTE_LINE = re.compile(r"^\s*\(compacted: .*\)\s*$", re.MULTILINE)
@@ -187,8 +211,12 @@ class Limits:
     # A run's or a bench command's seconds: the container's own limit.
     command_seconds: int = 600
     work_gb: float = 40.0
-    max_tokens: int = 65536
-    compact_at: int = COMPACT_AT
+    max_tokens: int = MAX_TOKENS
+    # The model's window in tokens, read from LiteLLM at a run's start where it says it, and the
+    # margin for the estimate. `compact_at` is the line they give (`compact_line`), unless it's set.
+    window: int = WINDOW
+    estimate_margin: int = ESTIMATE_MARGIN
+    compact_at: int | None = None
     # A call whose reasoning repeats earlier text past this share gets a row for review. It decides
     # nothing, and nothing cuts a call for it.
     review_repeat_share: float = 0.5
@@ -205,8 +233,14 @@ class Limits:
     # about 16,500 characters, some 485 each, and every run started with all of them.
     start_lessons_chars: int = START_LESSONS_CHARS
 
+    def line(self) -> int:
+        """Where a conversation is compacted: `compact_at` where it's set, or from the window."""
+        if self.compact_at is not None:
+            return self.compact_at
+        return compact_line(self.window, self.max_tokens, self.estimate_margin)
+
     def recorded(self) -> dict[str, Any]:
-        return asdict(self)
+        return {**asdict(self), "compact_at": self.line()}
 
 
 @dataclass
@@ -856,14 +890,18 @@ class Session:
             j += 1
         return i + 1 + k
 
-    def _call(self) -> tuple[dict[str, Any], Ending | None]:
+    def _call(self, over: dict[str, Any] | None = None) -> tuple[dict[str, Any], Ending | None]:
+        """One call, compacted first where the estimate is at the line. `over` is a call the
+        server refused as over the model's window: the estimate read low, so this one is
+        compacted whatever it says, and is made again (mqucifer/print-shop#178)."""
         self._trim_reasoning()
-        if self.last_prompt and self.estimate() >= self.limits.compact_at:
+        line = self.limits.line()
+        if over is not None or (self.last_prompt and self.estimate() >= line):
             before = self.estimate()
             self.compact()
             compacted = self.estimate()
             withheld = 0
-            if compacted >= self.limits.compact_at:
+            if compacted >= line:
                 withheld = self._withhold_newest()
             self._record(
                 "compacted",
@@ -872,6 +910,7 @@ class Session:
                 prompt_before=self.last_prompt,
                 before_call=self.requests + 1,
                 **({"withheld_reasoning": withheld, "compacted_to": compacted} if withheld else {}),
+                **({"over_window": over["n"]} if over is not None else {}),
             )
             restated = self.after_compaction() if self.after_compaction is not None else ""
             if withheld:
@@ -882,10 +921,11 @@ class Session:
                 self.say(restated)
                 self.notes_at.append(len(self.messages) - 1)
                 self._record("compaction_note", index=len(self.messages) - 1)
-            if self.estimate() >= self.limits.compact_at:
-                full = {"estimated": self.estimate(), "limit": self.limits.compact_at}
+            if self.estimate() >= line:
+                full = {"estimated": self.estimate(), "limit": line}
                 return {}, Ending("context_full", full)
         sent_chars = self._chars()
+        estimated = self.estimate()
         body = {
             "model": self.alias,
             "messages": self.messages,
@@ -911,9 +951,20 @@ class Session:
                 if isinstance(exc, httpx.HTTPStatusError):
                     # The status only: the body can echo the request.
                     status = said["status"] = exc.response.status_code
-                    if status == 400 and self.estimate() >= self.limits.compact_at:
-                        said.update(estimated=self.estimate(), limit=self.limits.compact_at)
-                        return {}, Ending("context_full", said)
+                    if isinstance(exc, OverWindow) or (status == 400 and estimated >= line):
+                        # Over the window: compacted and made again once, and a second time
+                        # it's `context_full`, which a run meets with a new conversation.
+                        said.update(
+                            estimated=estimated,
+                            limit=line,
+                            window=self.limits.window,
+                            said="the server" if isinstance(exc, OverWindow) else "the estimate",
+                        )
+                        self.model_s += time.monotonic() - began
+                        self._record("over_window", n=n, again=over is None, **said)
+                        if over is not None:
+                            return {}, Ending("context_full", {**said, "over_window": 2})
+                        return self._call(over={"n": n})
                 passing = status in RETRY_STATUS or isinstance(
                     exc, httpx.TransportError | json.JSONDecodeError
                 )
@@ -950,6 +1001,7 @@ class Session:
             at=at.isoformat(timespec="seconds"),
             seconds=round(took, 1),
             sent_chars=sent_chars,
+            estimated=estimated,
             reasoning_chars=thought,
             served=dict(getattr(self.send, "served", None) or {}),
             finish=finish,
