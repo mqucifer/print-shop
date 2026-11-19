@@ -841,18 +841,43 @@ def plan(
 
 
 def _wire(arcs: list[Arc]) -> Any:
-    import cadquery as cq
+    """A closed ring of lines and arcs as one wire, each joint one vertex that both its edges
+    share, at the joint's own point.
 
-    edges = []
-    for arc in arcs:
-        a = cq.Vector(float(arc.start[0]), float(arc.start[1]), 0.0)
-        b = cq.Vector(float(arc.end[0]), float(arc.end[1]), 0.0)
+    Built edge by edge, as `cq.Edge.makeThreePointArc` and `cq.Wire.assembleEdges` built it,
+    each edge had vertices of its own: a line's at its two points, an arc's where its circle
+    gives them, a few 1e-16 mm off. Joining them kept one of the two at each joint, and which
+    one was down to where each lay in memory, so the same map came out of `pieces build` with
+    another 17th digit in a side face's line from one process to the next, and so other STEP
+    data (mqucifer/print-shop#180). One vertex a joint leaves nothing to choose."""
+    import cadquery as cq
+    from OCP.BRepBuilderAPI import (
+        BRepBuilderAPI_MakeEdge,
+        BRepBuilderAPI_MakeVertex,
+        BRepBuilderAPI_MakeWire,
+    )
+    from OCP.GC import GC_MakeArcOfCircle
+    from OCP.gp import gp_Pnt
+
+    def point(p: np.ndarray) -> Any:
+        return gp_Pnt(float(p[0]), float(p[1]), 0.0)
+
+    joints = [BRepBuilderAPI_MakeVertex(point(arc.start)).Vertex() for arc in arcs]
+    made = BRepBuilderAPI_MakeWire()
+    for i, arc in enumerate(arcs):
+        first, last = joints[i], joints[(i + 1) % len(arcs)]
         if arc.straight:
-            edges.append(cq.Edge.makeLine(a, b))
+            edge = BRepBuilderAPI_MakeEdge(first, last)
         else:
             m = arc.at(0.5)
-            edges.append(cq.Edge.makeThreePointArc(a, cq.Vector(float(m[0]), float(m[1]), 0.0), b))
-    return cq.Wire.assembleEdges(edges)
+            curve = GC_MakeArcOfCircle(point(arc.start), point(m), point(arc.end)).Value()
+            edge = BRepBuilderAPI_MakeEdge(curve, first, last)
+        if not edge.IsDone():
+            raise NoAnswer(f"an edge of a ring couldn't be made, at {piecemap.said_at(arc.start)}")
+        made.Add(edge.Edge())
+    if not made.IsDone():
+        raise NoAnswer(f"a ring's edges don't join, at {piecemap.said_at(arcs[0].start)}")
+    return cq.Wire(made.Wire())
 
 
 def _wire_points(wire: Any, step: float = 0.25) -> np.ndarray:

@@ -43,7 +43,7 @@ from print_shop.refine.approved import Approved, File, Group, pause_inputs
 from print_shop.refine.context import Context, layers_of, wall_lines
 from print_shop.refine.findings import Finding
 from print_shop.rounds import lessons as lessons_module
-from print_shop.rounds.box import Box
+from print_shop.rounds.box import Box, Ran, Unanswered, answered
 from print_shop.rounds.ledger import DesignLedger, now
 from print_shop.rounds.needs import BED
 from print_shop.rounds.paths import content_hash
@@ -103,11 +103,17 @@ def _part_kind(folder: Path) -> str | None:
     return str(kind) if kind else None
 
 
-def _bench_answer(output: str) -> dict[str, Any]:
-    if MARK not in output:
-        raise RuntimeError(f"the bench's refine helper gave no answer: {output[-600:]}")
-    answer: dict[str, Any] = json.loads(output.split(MARK, 1)[1].splitlines()[0])
-    return answer
+#: The file the bench's refine helper writes its answer to, in the folder it runs in: a `mesh`
+#: answer carries each file's outline, and a traced frame's ran past what's kept of a line
+#: (mqucifer/print-shop#181).
+ANSWER = "refine-answer.json"
+
+
+def _bench_answer(ran: Ran, where: Path) -> dict[str, Any]:
+    try:
+        return answered(ran, MARK, where)
+    except Unanswered as exc:
+        raise RuntimeError(f"the bench's refine helper gave no answer: {exc}") from exc
 
 
 class Pass:
@@ -213,13 +219,14 @@ class Pass:
             "out": "meshed",
             "linear": LINEAR,
             "angular": ANGULAR,
+            "answer": ANSWER,
         }
         if on_bed:
             request["on_bed"] = {
                 name: on_bed[self._key(f)] for f, name in zip(files, names, strict=True)
             }
         ran = self.box.helper("refine", [json.dumps(request)], timeout=600, where=work)
-        answer = _bench_answer(ran.output)
+        answer = _bench_answer(ran, work)
         rows: dict[str, Any] = {}
         for f, name in zip(files, names, strict=True):
             row = answer["files"][name]
@@ -979,6 +986,7 @@ class Pass:
                         "stl": stl.name,
                         "offset": list(offset),
                         "lines": "lines.json",
+                        "answer": ANSWER,
                     }
                 )
             ],
@@ -986,7 +994,7 @@ class Pass:
             where=work,
         )
         (work / "lines.json").unlink()
-        answer = _bench_answer(ran.output)
+        answer = _bench_answer(ran, work)
         (work / "cover.json").write_text(json.dumps(answer, indent=1), encoding="utf-8")
         self.found += fnd.bare(answer, plate.name, self._key(f))
         self.found += fnd.overlapping(answer, plate.name, self._key(f))
