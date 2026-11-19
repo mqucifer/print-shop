@@ -50,6 +50,16 @@ sides of a limit, each beyond the other's resolution (`limits.apart`).
   scene 17 pairs of pieces were under 0.4 mm apart, and a run learned it only from `thin` on
   the frame it had built (mqucifer/print-shop#161).
 
+- **`no-pane`**, a piece `pieces build` refuses whatever lip it's given: the play leaves
+  no one pane of it, or its outline can't be fitted to lines and arcs with one pane in them.
+  By the build's own reading of the pane and fit of the outline
+  (`pieces_build.pane_refused`), at its `--fit` and `--play`, in its words, so a map this
+  passes is one a build takes. And by the piece's pixels further than the play and half a
+  nozzle from its edge, which for an outline that can't be fitted say which it is: one lot
+  of them, and it's the outline's own points, a step or two points all but on each other;
+  none or two, and the piece is too thin for a pane or pinched in two. On an eval a filled
+  map passed here and a build refused it (mqucifer/print-shop#174).
+
 - **`no-opening`**, with `--lip`, the lip a build will be given: a piece that lip leaves no
   one opening in. A waist the lip closes over, with the line to split it along; an opening
   pinched in two where an edge comes in; or none two nozzles wide. By `pieces build`'s own
@@ -81,7 +91,7 @@ from .report import NoAnswer, Report
 #: The flags, in the order a reply says them.
 FLAGS = (
     "dead-end", "surrounds", "sliver", "small", "neck", "notch", "gradient", "wide-lead",
-    "thin-lead", "no-opening",
+    "thin-lead", "no-pane", "no-opening",
 )  # fmt: skip
 #: The limits when none is given. A piece under 3 mm across or 25 mm² can't be handled, and a
 #: place under 1.2 mm leaves no pane once its play and lips are taken: the operator's tracer's
@@ -812,11 +822,35 @@ def build_refuses(found: Map, limits: Limits) -> dict[int, str]:
     found_wrong: dict[int, str] = {}
     for line in wrong:
         named = re.match(r"piece (\d+), ", line)
-        if named and any(
-            word in line for word in ("no one opening", "has no pane", "of its pane visible")
-        ):
+        # A piece with no pane whatever the lip is `no-pane`'s, read with or without a lip.
+        if named and any(word in line for word in ("no one opening", "of its pane visible")):
             found_wrong[int(named.group(1))] = line
     return found_wrong
+
+
+def no_pane_said(row: dict[str, Any], refusal: str, panes: int, limits: Limits, mm: float) -> str:
+    """A piece a build refuses whatever its lip, in words: the build's own, and what the
+    piece's pixels say of it. Where the play leaves no pane, the build's words say what cuts
+    it and its fix. Where it's the fit, the pixels say which it is, and so the fix."""
+    seen = (
+        f"by its pixels, {1.0 / mm:.1f} a mm, it has {panes} pane(s), {limits.play:g} mm of "
+        "play and half a nozzle in from its edge"
+    )
+    if "fitted to curves" not in refusal:
+        return f"piece {row['id']} {refusal}; {seen}"
+    if panes == 1:
+        why = (
+            "so it's the outline's points the fit can't take and not a thin place: a step in "
+            "it, or two points all but on each other. `pieces retrace MAP --box X0,Y0,X1,Y1` "
+            "round the place draws that outline again"
+        )
+    else:
+        why = (
+            "so a place too thin for a pane parts it, or it's too thin all over. `pieces "
+            f"split MAP {row['id']} --line x1,y1,x2,y2` cuts it across a thin place, or "
+            "`pieces merge MAP A B` joins a thin piece to a neighbour"
+        )
+    return f"piece {row['id']} {refusal}, at --fit {limits.fit:g}; {seen}, {why}"
 
 
 def openings_by_pixels(drawn: Pixels, far: np.ndarray, number: int, lip: float) -> int:
@@ -1209,9 +1243,30 @@ def read_map(
     by_pixels = dict(zip(ids, np.atleast_1d(ndimage.maximum(far, drawn.ids, ids)), strict=True))
     counted = dict(zip(ids, np.atleast_1d(ndimage.sum(drawn.ids > 0, drawn.ids, ids)), strict=True))
     refused = build_refuses(found, limits) if limits.lip is not None else {}
+    from .pieces_build import NOZZLE, pane_refused
+
     for row in rows:
         row["widest_by_pixels_mm"] = max(0.0, 2.0 * float(by_pixels[row["id"]]) - 1.0) * drawn.mm
         row["area_by_pixels_mm2"] = float(counted[row["id"]]) * drawn.mm**2
+        # The build's own fit of the outline, whatever lip it's given: what it refuses here
+        # it refuses there.
+        unfit = pane_refused(found, found.piece(row["id"]), limits.play, limits.fit)
+        row["builds"] = not unfit
+        if unfit:
+            # As deep as a pane's edge is printed: the play, and half a nozzle that a place
+            # under a nozzle's width loses.
+            panes = openings_by_pixels(drawn, far, row["id"], limits.play + NOZZLE / 2.0)
+            row["no_pane"] = True
+            flags.append(
+                {
+                    "flag": "no-pane",
+                    "piece": row["id"],
+                    "figure": float(panes),
+                    "limit": 1.0,
+                    "at": row["centre"],
+                    "said": no_pane_said(row, unfit, panes, limits, drawn.mm),
+                }
+            )
         if limits.lip is not None:
             refusal = refused.get(row["id"])
             # The pixels of the piece further than the lip from its edge, by true distance:
@@ -1321,6 +1376,8 @@ def read_map(
                 )
         mine = flag_piece(row, limits)
         row["flags"] = sorted({f["flag"] for f in mine}, key=FLAGS.index)
+        if row.pop("no_pane", False):
+            row["flags"].append("no-pane")
         if row.pop("no_opening", False):
             row["flags"].append("no-opening")
         flags += mine
@@ -1510,6 +1567,13 @@ def fixes_said(flags: list[dict[str, Any]]) -> str:
             "lead under a nozzle's width: `pieces widen MAP A B` widens the line there and "
             "keeps it; `pieces merge MAP A B` takes it out, where the two are one colour and "
             "the picture doesn't mean the line"
+        )
+    if "no-pane" in names:
+        ways.append(
+            "a piece a build can't make a pane of: its line says whether it's the outline's "
+            "points, which `pieces retrace MAP --box X0,Y0,X1,Y1` round the place draws again, "
+            "or a thin place, which `pieces split` cuts across or `pieces merge` joins to a "
+            "neighbour"
         )
     if "no-opening" in names:
         ways.append(

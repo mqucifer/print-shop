@@ -48,6 +48,13 @@ is a Sponsor's scene or anything from one (mqucifer/print-shop#152, mqucifer/pri
   (mqucifer/print-shop#172).
 - `faint.png`: the clean panel with the top half of one upright line faint, under `--dark 40`
   and over `--dark 20`: at the lower darkness the line ends in glass.
+- `meet.png`: four pieces between two curved lines that cross, 100 x 70 mm at 6 pixels a mm,
+  with a dark patch of three lobes where the lines meet, read as lead at the default darkness:
+  a patch among four pieces, each with a curved edge on it (mqucifer/print-shop#174)
+- `ragged.png`: that picture with fourteen dark hairs round the patch's rim, each a few pixels
+  wide and 2 mm long: scraps of lead beside the patch that are no part of it
+- `stalk.json`: a band of lead under three pieces, one of them above the other two with a stalk
+  0.7 mm wide down between them into the band, so its share of the band hangs off the stalk
 - `band.json`: three pieces of a 60 x 40 mm panel round a band of lead 12 mm tall, one above it
   and two below with a line between them.
 - `hairs.json`: two cuts two microns wide whose ends face each other, which the
@@ -127,6 +134,68 @@ def faint() -> Any:
     d = ImageDraw.Draw(im)
     d.line([px(40, 60), px(40, 80)], fill=SHADOW, width=LINE)
     return im
+
+
+#: The patch in `meet.png`, as lobes: each one's middle and half-widths, in mm.
+MEET_LOBES = ((52, 34, 6, 4), (47, 38, 3.5, 3), (56, 31, 3, 3.5))
+
+
+def meet(patch: bool = True, ragged: bool = False) -> Any:
+    """100 x 70 mm at 6 pixels a mm: a curved line across and a curved line up, four pieces
+    between them, and where the two cross a patch as dark as `shadow.png`'s."""
+    from PIL import ImageChops
+
+    s, w, h, f, wide = 6, 100, 70, 12, 8
+    im = Image.new("RGB", (w * s + 2 * f, h * s + 2 * f), DARK)
+    d = ImageDraw.Draw(im)
+
+    def at(x: float, y: float) -> tuple[float, float]:
+        return (f + x * s, f + (h - y) * s)
+
+    across = [at(w * k / 300, 35 + 5 * math.sin(w * k / 300 / 14)) for k in range(301)]
+    up = [at(50 + 4 * math.sin(h * k / 300 / 11 + 0.5), h * k / 300) for k in range(301)]
+    above = Image.new("L", im.size, 0)
+    ImageDraw.Draw(above).polygon([*across, at(w, h), at(0, h)], fill=255)
+    right = Image.new("L", im.size, 0)
+    ImageDraw.Draw(right).polygon([*up, at(w, h), at(w, 0)], fill=255)
+    d.rectangle([at(0, h), at(w, 0)], fill=BLUE)
+    im.paste(RED, mask=above)
+    im.paste(GOLD, mask=ImageChops.multiply(right, above))
+    im.paste(GREEN, mask=ImageChops.multiply(right, ImageChops.invert(above)))
+    d = ImageDraw.Draw(im)
+    # The patch lies under the lines, as a shadow a line was drawn over: darker than
+    # `--dark 20`, the lines still cross it.
+    for x, y, a, b in MEET_LOBES if patch else ():
+        d.ellipse([at(x - a, y + b), at(x + a, y - b)], fill=SHADOW)
+    for k in range(14 if ragged else 0):
+        turn = k * 2 * math.pi / 14
+        root = at(52 + 5 * math.cos(turn), 34 + 3.5 * math.sin(turn))
+        tip = at(52 + 7.2 * math.cos(turn), 34 + 5.2 * math.sin(turn))
+        d.line([root, tip], fill=SHADOW, width=3 + k % 3)
+    d.line(across, fill=DARK, width=wide, joint="curve")
+    d.line(up, fill=DARK, width=wide, joint="curve")
+    return im
+
+
+def stalk() -> dict[str, Any]:
+    """A band of lead from y 0 to 12 across a 60 x 40 mm panel. Pieces 2 and 3 stand on it,
+    from y 12 to 20. Piece 1 lies above them, with a stalk 0.7 mm wide down between the two,
+    a 1.2 mm line each side of it, that ends in the band at y 6. The band round the stalk's
+    end is nearer piece 1 than the two beside it, so piece 1's share is 18 mm wide and joins
+    the rest of the piece by the stalk alone: too thin a place for one pane."""
+    stem = [[10, 21.2], [10, 6], [10.7, 6], [10.7, 21.2]]
+    top = [[60, 21.2], [60, 40], [0, 40]]
+    return {
+        "piece_map": 1,
+        "panel": {"width_mm": 60, "height_mm": 40},
+        "lead_mm": 1.2,
+        "colours": {"blue": {"rgb": [40, 90, 220]}},
+        "pieces": [
+            {"id": 1, "colour": "blue", "outline": [[0, 21.2], *stem, *top]},
+            {"id": 2, "colour": "gold", "outline": [[0, 12], [8.8, 12], [8.8, 20], [0, 20]]},
+            {"id": 3, "colour": "green", "outline": [[11.9, 12], [60, 12], [60, 20], [11.9, 20]]},
+        ],
+    }
 
 
 def band() -> dict[str, Any]:
@@ -717,6 +786,8 @@ margin().save("margin.png")
 specks().save("specks.png")
 shadow().save("shadow.png")
 faint().save("faint.png")
+meet().save("meet.png")
+meet(ragged=True).save("ragged.png")
 for name, slit, depth in (
     ("rules.json", False, 0),
     ("slit.json", True, 8),
@@ -746,6 +817,7 @@ for name, made in (
     ("stairs.json", stairs()),
     ("edge.json", edge()),
     ("band.json", band()),
+    ("stalk.json", stalk()),
 ):
     with open(name, "w") as fh:
         json.dump(made, fh)

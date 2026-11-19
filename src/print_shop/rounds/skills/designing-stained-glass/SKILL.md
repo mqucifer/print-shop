@@ -290,6 +290,7 @@ piece that breaks a rule, with where. Each flag has its fix:
 | `sliver`, `small` | a piece too narrow or too small to handle | `pieces merge MAP A B`: it joins a neighbour B, and the line between them goes |
 | `neck` | a thin place with wide glass on both sides of it | `pieces split MAP ID --line x1,y1,x2,y2` cuts the piece there, edge to edge |
 | `no-opening` | with `--lip L`: a piece that lip leaves no one opening in, so `pieces build` would refuse it | as its line says: `pieces split` along the line it gives for a waist; `pieces merge` a piece too small for an opening into a neighbour; or a narrower `--lip` for every piece |
+| `no-pane` | a piece `pieces build` refuses whatever the lip: the play leaves no one pane of it, or its outline can't be fitted to curves. `check` reads it by the build's own fit, so a map it passes builds | as its line says: `pieces split` across the narrow place it names, or `pieces merge` a thin piece into a neighbour. Where it's the outline's points, a step or two points on each other, with one pane by its pixels, `pieces retrace MAP --box X0,Y0,X1,Y1` round the place draws it again |
 | `notch` | a notch deeper than it's wide | `pieces split` from the notch's end to the piece's far edge |
 | `gradient` | a colour that runs across one piece: also two colours a merge joined, read from the picture again | `pieces split MAP ID --line x1,y1,x2,y2` where it changes, or keep it one colour and say so |
 | `wide-lead` | a patch of lead, not a line | `pieces fill MAP --at X,Y` turns it into glass, shared among the pieces round it. Where it's a dark place in the picture, a shadow and not a line, `pieces retrace MAP --box X0,Y0,X1,Y1 --dark N` reads the picture again there |
@@ -309,6 +310,10 @@ piece that breaks a rule, with where. Each flag has its fix:
     line inside. Its reply says any line that ends at the box's edge: make the box larger.
   - `pieces fill MAP --at X,Y` turns a patch of lead into glass, at the point `pieces check`
     gives for it.
+  - A retrace, a fill and a moved line each say every piece they changed: its outline's
+    points before and after, and whether it builds. `FAIL` names a piece that built before
+    and doesn't now: go on from the map you gave it, not the one it wrote, and fix the place
+    another way.
   - `pieces paint MAP ID COLOUR` gives one piece another colour, `NAME=#rrggbb` for a new
     one, and says how far it is from the picture's own colour there.
   - `pieces move-line MAP A B --line x1,y1,x2,y2,...` draws the line between two neighbours

@@ -689,6 +689,41 @@ def _by_share(
         return lip, None, f"can't be built: {exc}"
 
 
+def _no_pane(found: Map, judged: Piece, play: float) -> str:
+    """A piece the play leaves no one pane of, in a build's words: what cuts it, and where."""
+    left = _printable(judged.shape.buffer(-play, join_style="mitre", mitre_limit=5.0))
+    return (
+        f"has no pane once {play:g} mm of play is taken all round: "
+        f"{_why(found, judged, left, 'pane')}"
+    )
+
+
+def pane_refused(found: Map, piece: Piece, play: float, fit: float) -> str:
+    """Why a build refuses a piece whatever lip it's given, in the build's own words, or
+    nothing: the play leaves no one pane of it, or its outline can't be fitted to curves
+    with one pane in them. A line inside the piece that joins no other is another matter,
+    a dead end, and it's judged here with those out, as a build's plan judges it. For
+    `pieces check` and each fix to read, so neither passes a piece a build won't take."""
+    lone = [
+        ring
+        for ring in piece.shape.interiors
+        if not any(
+            o.id != piece.id and o.shape.intersects(shapely.Polygon(ring)) for o in found.pieces
+        )
+    ]
+    judged = piece
+    if lone:
+        kept = [ring for ring in piece.shape.interiors if ring not in lone]
+        judged = Piece(
+            piece.id, piece.colour, shapely.Polygon(piece.shape.exterior, kept),
+            piece.thickness_mm, piece.paint,
+        )  # fmt: skip
+    if pane_of(judged.shape, play) is None:
+        return _no_pane(found, judged, play)
+    unfit = fit_refuses(judged, play, fit)
+    return f"can't be built: {unfit}" if unfit else ""
+
+
 def plan(
     found: Map,
     lips: tuple[float, float],
@@ -762,11 +797,7 @@ def plan(
         lip = full
         pane = pane_of(judged.shape, play)
         if pane is None:
-            left = _printable(judged.shape.buffer(-play, join_style="mitre", mitre_limit=5.0))
-            stops.append(
-                f"{after}has no pane once {play:g} mm of play is taken all round: "
-                f"{_why(found, judged, left, 'pane')}"
-            )
+            stops.append(after + _no_pane(found, judged, play))
         elif min_visible is not None:
             pocket = pane.buffer(play, quad_segs=ROUND_SEGS)
             lip, curves, stop = _by_share(found, judged, (full, least), play, fit, min_visible)
@@ -1039,18 +1070,13 @@ def piece_curves(
     return found
 
 
-def _curves(
-    piece: Piece, lip: float, play: float, fit: float, more: float, by_share: bool = False
-) -> dict[str, Any]:
-    """One piece's pocket, pane and opening as rings of lines and arcs, its fitted outline
-    moved in by `more` past what keeps it inside the piece's.
-
-    The piece's outline is fitted to arcs, within `fit`. The plain way, the pocket is those
-    arcs and the pane the same arcs moved in by the play. Where the pane has a spur or a sharp
-    tip, it's Shapely's inset cut back and rounded (`pane_of`) and fitted again within `CLOSE`,
-    and the pocket is the pane's arcs moved out, or fitted to the pane and its play. The
-    opening is the pocket's arcs moved in by the lip, or where a bend is tighter than the lip,
-    Shapely's inset fitted so the lip is the lip asked for or up to `fit` wider."""
+def _fitted(
+    piece: Piece, play: float, fit: float, more: float
+) -> tuple[list[list[Arc]], Any, Any, float, float]:
+    """A piece's outline fitted to lines and arcs, moved in by `more` past what keeps it
+    inside the piece's: the arcs, their polygon, the pane they leave, how far they were moved
+    in and how far the fit is from the outline. Refused where no share of `fit` gives curves
+    that are one valid outline with one pane in it."""
     # The pocket never stands past the piece's outline into the lead, as a lip is never
     # narrower than asked. The outline is fitted to lines and arcs, within `fit`, and those
     # are then moved in by however far the furthest of them stands past the outline: a line
@@ -1059,7 +1085,7 @@ def _curves(
     # on each side of a line, and a line 0.4 mm wide in the map was a wall 0.21 mm thick in
     # the frame (mqucifer/print-shop#161).
     outline: list[list[Arc]] = []
-    pane_2d = None
+    pane_2d = built = None
     moved_in, fit_off = 0.0, 0.0
     for share in (0.8, 0.4, 0.2, 0.1, 0.05):
         fitted = _rings_of(piece.shape, share * fit)
@@ -1091,6 +1117,32 @@ def _curves(
             break
     if pane_2d is None:
         raise NoAnswer(f"piece {piece.id}'s outline, fitted to curves, leaves no one pane")
+    return outline, built, pane_2d, moved_in, fit_off
+
+
+def fit_refuses(piece: Piece, play: float, fit: float) -> str:
+    """Why a piece's outline can't be fitted to curves with one pane in them, or nothing: the
+    build's own fit, before any lip is tried."""
+    try:
+        _fitted(piece, play, fit, 0.0)
+    except NoAnswer as exc:
+        return str(exc)
+    return ""
+
+
+def _curves(
+    piece: Piece, lip: float, play: float, fit: float, more: float, by_share: bool = False
+) -> dict[str, Any]:
+    """One piece's pocket, pane and opening as rings of lines and arcs, its fitted outline
+    moved in by `more` past what keeps it inside the piece's.
+
+    The piece's outline is fitted to arcs, within `fit`. The plain way, the pocket is those
+    arcs and the pane the same arcs moved in by the play. Where the pane has a spur or a sharp
+    tip, it's Shapely's inset cut back and rounded (`pane_of`) and fitted again within `CLOSE`,
+    and the pocket is the pane's arcs moved out, or fitted to the pane and its play. The
+    opening is the pocket's arcs moved in by the lip, or where a bend is tighter than the lip,
+    Shapely's inset fitted so the lip is the lip asked for or up to `fit` wider."""
+    outline, built, pane_2d, moved_in, fit_off = _fitted(piece, play, fit, more)
     # The plain way, and the fewest arcs: the pocket is the outline's own arcs and the pane
     # those arcs moved in by the play, where that's the inset and no nozzle would lose more
     # of it than a corner's point: no spur, and no tip sharper than about 45 degrees.
