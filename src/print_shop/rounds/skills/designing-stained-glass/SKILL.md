@@ -282,20 +282,31 @@ pieces are the layout, so steps 2, 3 and 5 are these five, in this order:
 `pieces trace` writes a **piece map**: each piece of glass, numbered, with its outline and its
 colour, and the lead between them. Its picture comes to you, each piece numbered and each rule
 break marked. `pieces check` reads the map against what glass cutting allows, and names each
-piece that breaks a rule, with where. Each flag has its fix:
+piece that breaks a rule, with where. Each flag has one way to fix it, the usual one. Any fix
+that leaves no flag the request doesn't keep will do:
 
-| Flag | It is | Its fix |
+| Flag | It is | One way to fix it |
 |---|---|---|
 | `dead-end` | a lead line that ends in mid-glass | `pieces extend MAP --at X,Y` runs it on to the next line or the edge, or `pieces drop-line MAP --at X,Y` takes it out |
-| `sliver`, `small` | a piece too narrow or too small to handle | `pieces merge MAP A B`: it joins a neighbour B, and the line between them goes |
-| `neck` | a thin place with wide glass on both sides of it | `pieces split MAP ID --line x1,y1,x2,y2` cuts the piece there, edge to edge |
+| `sliver`, `small` | a piece too narrow or too small to handle | one way: `pieces merge MAP A B` joins it to a neighbour B, and the line between them goes. A moved line that widens it is another |
+| `neck` | a thin place with wide glass on both sides of it | one way: `pieces split MAP ID --line x1,y1,x2,y2` cuts the piece there, edge to edge. A moved line that widens the neck is another |
 | `no-opening` | with `--lip L`: a piece that lip leaves no one opening in, so `pieces build` would refuse it | as its line says: `pieces split` along the line it gives for a waist; `pieces merge` a piece too small for an opening into a neighbour; or a narrower `--lip` for every piece |
 | `no-pane` | a piece `pieces build` refuses whatever the lip: the play leaves no one pane of it, or its outline can't be fitted to curves. `check` reads it by the build's own fit, so a map it passes builds | as its line says: `pieces split` across the narrow place it names, or `pieces merge` a thin piece into a neighbour. Where it's the outline's points, a step or two points on each other, with one pane by its pixels, `pieces retrace MAP --box X0,Y0,X1,Y1` round the place draws it again |
-| `notch` | a notch deeper than it's wide | `pieces split` from the notch's end to the piece's far edge |
+| `notch` | a notch deeper than it's wide | one way: `pieces split` from the notch's end to the piece's far edge. A merge with the neighbour in the notch, or a moved line that takes the notch out, is another |
 | `gradient` | a colour that runs across one piece: also two colours a merge joined, read from the picture again | `pieces split MAP ID --line x1,y1,x2,y2` where it changes, or keep it one colour and say so |
-| `wide-lead` | a patch of lead, not a line | `pieces fill MAP --at X,Y` turns it into glass, shared among the pieces round it. Where it's a dark place in the picture, a shadow and not a line, `pieces retrace MAP --box X0,Y0,X1,Y1 --dark N` reads the picture again there |
+| `wide-lead` | a patch of lead, not a line | one way: `pieces fill MAP --at X,Y` turns it into glass, shared among the pieces round it. Where it's a dark place in the picture, a shadow and not a line, `pieces retrace MAP --box X0,Y0,X1,Y1 --dark N` reads the picture again there. Moved lines that close the patch are another |
 | `thin-lead` | lead between two pieces under a nozzle's width, 0.4 mm: the frame's wall there wouldn't print, and `thin` would fail on it | `pieces widen MAP A B` widens the line where it's thin and keeps it. `pieces merge` takes the line out: only where the two are one colour and the picture doesn't mean the line |
 
+- **The table's fix is one way, not the only one.** A glass cutter splits a neck or a notch,
+  merges a sliver and fills a patch of lead, and so can you, but the rule is the flag, not
+  the command: any fix after which `pieces check` flags nothing the request doesn't keep
+  will do. In one run a notch was split because "the skill's prescription for a notch is
+  SPLIT, not merge", the split left a 0.31 mm sliver, and about 75 calls went on working
+  round it, though a merge or a moved line met every rule.
+- **A fix that breaks another rule isn't the fix.** A split that leaves a sliver, a fill that
+  leaves dead ends, a merge that erases a line the picture means: take another way for that
+  place, and check again. The same holds for a way a person suggests with a fault: it's a
+  suggestion, the fault is what's held, and you say which way you took.
 - **Each fix is one piece's, and you choose it.** A filter over every piece is not a fix: an
   opening, a closing, a buffer in and out or a simplification run over all of them rounds every
   corner and drops what it cuts into the lead. In one run that turned 15 to 22% of one band's
@@ -362,8 +373,9 @@ piece that breaks a rule, with where. Each flag has its fix:
   --min-visible S` will ask of it: the full one where the pane keeps the share, else the
   widest that keeps it. A piece that can't keep it at the least is refused, with its fix.
 - **Without a share, every piece takes the lip you give `pieces build`.** A piece with a waist the lip closes
-  over is refused, with the line to split it along: split it there, as a glass cutter splits a
-  neck. Don't lower the lip for one piece, and don't leave a bar of frame across the glass.
+  over is refused, with the line to split it along: splitting it there, as a glass cutter
+  splits a neck, is one way, and a merge or a moved line that leaves no waist is another.
+  Don't lower the lip for one piece, and don't leave a bar of frame across the glass.
 - **`pieces build` makes `frame.step` and one pane file for each colour,** every curve as a
   curve, and its reply gives the checks to run and `done`'s `glass`: the pocket's height, the
   play, the pane's thickness, and how many panes there are. A pane file holds every pane of its

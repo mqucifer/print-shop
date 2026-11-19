@@ -2307,7 +2307,15 @@ def test_a_fault_to_fix_first_goes_back_apart_from_the_pick(tmp_path: Path) -> N
     assert run.drive().name == "blocked"
     told = [m["content"] for m in model.bodies[0]["messages"] if m["role"] == "user"][-2:]
     assert told[0] == "The Sponsor picked A. Their reason: It reads."
-    assert told[1] == "Apart from the look, the Sponsor says to fix this first:\n\nSplit pane 9."
+    # A fault in words is relayed as a fault, with the line about suggestions
+    # (mqucifer/print-shop#175).
+    assert told[1] == (
+        "Apart from the look, the Sponsor says to fix this first.\n\nTo fix:\n- `F1.1`: Split "
+        "pane 9. `done` waits for the way you took, and the next stop shows it beside this.\n\n"
+        "Any fix that meets every rule will do. If a suggestion would break a rule, don't use "
+        'it. Say which way you chose. It goes in `ways`, at your next `ask` or `done`, by the '
+        'fault\'s id: {"F1.1": "what you did"}.'
+    )
     assert rows(run, "picks")[0]["fix_first"] == "Split pane 9."
     kinds = [(r["kind"], r["text"]) for r in rows(run, "interventions")]
     assert ("fix_first", "Split pane 9.") in kinds

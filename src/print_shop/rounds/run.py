@@ -46,6 +46,7 @@ from print_shop.rounds import (
     downward,
     end_checks,
     facts,
+    faults,
     figures,
     holding,
     holds,
@@ -109,6 +110,8 @@ SAID_KINDS = {
     "pick": "pick",
     "fix_first": "fix-first",
 }
+#: A round's opening where every need passed and a check of the harness's own didn't.
+OWN_CHECKS_DIDNT = "and the harness's own checks on the files to be printed didn't."
 #: How much of a person's message the compaction note quotes, where it asks nothing.
 SAID_CHARS = 300
 VARIANT = re.compile(r"[A-Za-z0-9_-]{1,24}")
@@ -238,6 +241,10 @@ class State:
     # Each approval a send-back after it withdrew: its stop, its decision's id, who withdrew it,
     # why, when, and the send-back's own decision (mqucifer/print-shop#150).
     withdrawn: list[dict[str, Any]] = field(default_factory=list)
+    # Each fault a pick's `fix_first` named, with the bench check its rule names, its latest
+    # reading and the way the model said it took (`faults.py`, mqucifer/print-shop#175). What
+    # was suggested with it isn't kept.
+    faults: list[dict[str, Any]] = field(default_factory=list)
 
 
 def repository_version() -> tuple[str, bool]:
@@ -585,10 +592,12 @@ class Run:
                 "It takes `--approve` or `--send-back`, with `--by`"
             )
         picked: dict[str, str] | None = None
+        fault_told = ""
         if stop and stop["kind"] == "questions":
             self._take_answers(int(stop["n"]), note_from)
         elif stop and stop["kind"] == "ask":
             picked = self._take_pick(int(stop["n"]), reopening=reopen_needs)
+            fault_told = picked.pop("told")
         self._go_on()
         told: list[str] = []
         if reopen_needs:
@@ -603,6 +612,9 @@ class Run:
         if note.strip():
             self._note(note.strip(), note_from)
         told.append(self._set_beside())
+        # How the run holds each fault of a fix-first's list, and any it took the place of
+        # (mqucifer/print-shop#175).
+        told.append(fault_told)
         self.save()
         return [t for t in told if t]
 
@@ -1033,10 +1045,19 @@ class Run:
             raise Refused(f"{path} isn't JSON: {exc}") from exc
         pick, reason = str(found.get("pick") or ""), str(found.get("reason") or "").strip()
         by = str(found.get("by") or "").strip()
-        fix_first = found.get("fix_first")
-        if fix_first is not None and not isinstance(fix_first, str):
-            raise Refused(f"{path}: `fix_first` is what to fix first, in words")
-        fix_first = (fix_first or "").strip() or None
+        given = found.get("fix_first")
+        try:
+            named, suggested = faults.read(given, n, by, self.toolset)
+        except ValueError as exc:
+            raise Refused(f"{path}: {exc}") from exc
+        # The ledger keeps it as written: words, or the list, suggestions and all.
+        fix_first = (
+            (given.strip() or None)
+            if isinstance(given, str)
+            else json.dumps(given)
+            if given
+            else None
+        )
         unknown = set(found) - {"pick", "reason", "by", "fix_first"}
         if unknown:
             raise Refused(f"{path}: a pick holds pick, reason, by and fix_first: not {unknown}")
@@ -1075,16 +1096,36 @@ class Run:
         said += self._end_picked(asked.get("end_checks"), n, pick, by, reason)
         self.state.said.append(f'On your question "{asked["question"]}": {said}')
         self._relay("pick", by, f"{pick}: {reason}", said)
-        if fix_first:
-            # Apart from the pick, which is about the look: the Sponsor was asked to answer
-            # `none` for a build fault on `cup-1`, which mixed two answers.
-            first = (
-                f"Apart from the look, {who[0].lower()}{who[1:]} says to fix this first:\n\n"
-                f"{fix_first}"
+        # A fix-first is the faults that stand from this pick on: it takes the place of any
+        # before it, and an empty list drops them (mqucifer/print-shop#175).
+        dropped: list[faults.Fault] = []
+        if named or isinstance(given, list):
+            before = self._faults()
+            dropped = [one for one in before if one.stands]
+            self.state.faults = faults.dump([one for one in before if not one.stands] + named)
+        gone = faults.dropped_said(dropped, from_words(by)) if dropped else ""
+        if dropped:
+            self.session._record(
+                "faults_dropped", ask=n, by=by, faults=[one.id for one in dropped], text=gone
             )
-            self.state.said.append(first)
-            self._relay("fix_first", by, fix_first, first)
-        return {"pick": pick, "by": by, "fix_first": fix_first or ""}
+        kept = faults.said(named) if isinstance(given, list) else (fix_first or "")
+        if named:
+            # Apart from the pick, which is about the look: the Sponsor was asked to answer
+            # `none` for a build fault on `cup-1`, which mixed two answers. The faults are kept
+            # as what the person said. A suggestion is said here, once, and kept nowhere: on
+            # `eval-organic-3` each was read as an order, down to its verb.
+            first = faults.relay(who, named, suggested)
+            if gone:
+                first += f"\n\n{gone}"
+            self.state.said.append(
+                f"Apart from the look, {who[0].lower()}{who[1:]} says to fix this first:\n\n{kept}"
+            )
+            self._relay("fix_first", by, kept, first)
+        elif gone:
+            self._relay("fix_first", by, gone)
+        told = [faults.told(named)] if named and isinstance(given, list) else []
+        told += [gone] if gone else []
+        return {"pick": pick, "by": by, "fix_first": kept, "told": " ".join(told)}
 
     def _overlap_picked(
         self, overlap: dict[str, Any] | None, ask: int, pick: str, by: str, reason: str
@@ -1251,6 +1292,9 @@ class Run:
             self._relay(END_CHECKS, end_checks.BY, str(sent["note"]))
         elif sent:
             self.session.say(str(sent["note"]))
+        standing = faults.standing_said(self._faults())
+        if standing:
+            self.session.say(standing)
         for said in after or []:
             self.session.say(said)
         self.save()
@@ -1295,6 +1339,33 @@ class Run:
 
     def save(self) -> None:
         _write_atomic(self.folder / "state.json", json.dumps(asdict(self.state), indent=1))
+
+    def _faults(self) -> list[faults.Fault]:
+        """Each fault a pick's fix-first named, as the run holds it."""
+        return faults.load(self.state.faults)
+
+    def _ways_taken(self, name: str, given: Any) -> Judged | None:
+        """The way the model says it took for a fault, kept beside it for the next stop
+        (mqucifer/print-shop#175). Nothing reads it against what was suggested."""
+        found = self._faults()
+        wrong = faults.took(found, given, self.session.requests)
+        if wrong:
+            return Judged(name, "failed", "\n".join(wrong), "ways_wrong")
+        self.state.faults = faults.dump(found)
+        return None
+
+    def _faults_at_ask(self, n: int) -> list[faults.Fault]:
+        """Each standing fault's check read on the files as they stand, for the question to
+        show. Only a reading at `done` settles one."""
+        found = self._faults()
+        reads = [one for one in found if one.command and not one.passed]
+        if reads:
+            for one, reading in zip(
+                reads, self._read_now([one.need() for one in reads]), strict=True
+            ):
+                faults.took_reading(one, reading, "ask", self.state.round, n)
+            self.state.faults = faults.dump(found)
+        return faults.to_show(found)
 
     def _needs(self) -> list[Need]:
         """The needs as settled."""
@@ -1822,6 +1893,8 @@ class Run:
             self.failing_said() or NOTHING_FAILING,
             # The end checks' send-back, until they pass (mqucifer/print-shop#150).
             str((self.state.end_sent or {}).get("note") or ""),
+            # Each fault that stands, and never a suggestion (mqucifer/print-shop#175).
+            faults.standing_said(self._faults()),
             facts.block(self._facts(), facts.NONE_YET),
             self._open_needs_said(),
             self._stops_said(),
@@ -1856,6 +1929,9 @@ class Run:
         start of it where it asked nothing. It's in the conversation above, whole."""
         last = self.state.last_said
         if not last:
+            return ""
+        if last.get("kind") == "fix_first" and self.state.faults:
+            # Its faults are said above while they stand, and a fixed one isn't said again.
             return ""
         what = SAID_KINDS.get(str(last.get("kind")), "message")
         who = from_words(str(last.get("from") or ""))
@@ -2684,7 +2760,7 @@ class Run:
             with contextlib.suppress(ValueError, OSError):
                 found = json.loads(path.read_text(encoding="utf-8"))
                 if isinstance(found, dict):
-                    said += [str(found.get(k) or "") for k in ("reason", "fix_first")]
+                    said += [str(found.get("reason") or ""), faults.quoted(found.get("fix_first"))]
         return "\n".join(one for one in said if one.strip())
 
     def _fixed_kept(self, found: list[Need]) -> list[str]:
@@ -2969,6 +3045,14 @@ class Run:
         if not fix_shape or not closing:
             reply = "`fix_shape` and `closing` each take your own words, and one is empty."
             return Judged("done", "failed", reply, "empty")
+        # Each fault named to fix first has the way taken said, before anything runs: the next
+        # stop shows it beside the fault (mqucifer/print-shop#175).
+        ways_wrong = self._ways_taken("done", args.get("ways"))
+        if ways_wrong is not None:
+            return ways_wrong
+        waiting = faults.unsaid(self._faults())
+        if waiting:
+            return Judged("done", "failed", faults.unsaid_refused(waiting), "fault_way_unsaid")
         # The frames and panes first: a settled need's files and counts follow them
         # (mqucifer/print-shop#59), so what's off the part is read against the part as it is.
         declared = self._glass_declared(args.get("glass"), part, "done")
@@ -3057,6 +3141,35 @@ class Run:
             and not any(one.failed for one in strips)
             and not any(one.failed for one in faces)
         )
+        # Each fault a fix-first named, where its rule names a bench check: read again on what
+        # the clean run left, whichever way it was fixed, and it stands until that passes
+        # (mqucifer/print-shop#175). Nothing reads whether a suggestion was followed.
+        named_faults = self._faults()
+        faults_read = [one for one in named_faults if one.command and not one.passed]
+        for fault in faults_read:
+            if judgement.code != 0:
+                faults.unread(fault, "the script didn't finish from a clean start", n)
+            else:
+                kept = folder / "faults"
+                reading = judge.read_need(self.box, fault.need(), folder / "judged", kept)
+                faults.took_reading(fault, reading, "done", n)
+        if faults_read:
+            self.state.faults = faults.dump(named_faults)
+            (folder / "faults.json").write_text(
+                json.dumps([one.plain() for one in faults_read], indent=1), encoding="utf-8"
+            )
+            self.session._record(
+                "faults_read",
+                round=n,
+                at_call=self.session.requests,
+                faults=[
+                    {"id": one.id, "command": one.command, **(one.read or {})}
+                    for one in faults_read
+                ],
+            )
+        faults_standing = [one for one in faults_read if not one.passed]
+        only_faults = met and bool(faults_standing)
+        met = met and not faults_standing
         # Once everything else has passed, before the stop for approval is asked: each held
         # part's way on, and what bends on the way (`end_checks.py`, mqucifer/print-shop#150).
         ends: list[end_checks.Checked] = []
@@ -3104,6 +3217,10 @@ class Run:
         # Against the scenario's right answer, if it was started with one: mqucifer/print-shop#67.
         scores.after_round(self.ledger, self.folder)
         reply = self._said_of(judgement, wanted, met, standing, clashes)
+        if only_faults:
+            reply = reply.replace(OWN_CHECKS_DIDNT, "and a fault named to fix first still stands.")
+        if faults_read:
+            reply += "\n" + "\n".join(faults.at_done(faults_read))
         if followed:
             reply += "\n" + "\n".join([FOLLOWED, *followed])
         if panes_read:
@@ -3125,6 +3242,8 @@ class Run:
         self.state.last_files = files
         self._write_record()
         detail: dict[str, Any] = {"round": n, "met": met, "code": judgement.code}
+        if faults_standing:
+            detail["faults_standing"] = [one.id for one in faults_standing]
         if held:
             detail["held"] = holding.plain(held)
         if met:
@@ -3506,6 +3625,10 @@ class Run:
                 *holding.lines(delivered["held"]),
                 "",
             ]
+        named_faults = self._faults()
+        lines += faults.at_stop(faults.to_show(named_faults), pick=False)
+        faults.shown(named_faults, f"approval {n}")
+        self.state.faults = faults.dump(named_faults)
         lines += [
             *self._asides_said(),
             *self._swaps_said(),
@@ -3603,8 +3726,7 @@ class Run:
             opening = f"Round {n}: every need is met."
         elif judgement.met:
             opening = (
-                f"Round {n}: not met yet. Every need passed, and the harness's own checks on the "
-                "files to be printed didn't."
+                f"Round {n}: not met yet. Every need passed, {OWN_CHECKS_DIDNT}"
             )
         else:
             opening = f"Round {n}: not met yet."
@@ -3745,6 +3867,9 @@ class Run:
             )
         if bad is not None:
             return Judged("ask", "failed", bad[1], bad[0])
+        ways_wrong = self._ways_taken("ask", args.get("ways"))
+        if ways_wrong is not None:
+            return ways_wrong
         overlap = self._overlap_asked(args.get("overlap"))
         if isinstance(overlap, Judged):
             return overlap
@@ -3957,6 +4082,14 @@ class Run:
                 + "\n".join(descriptions.lines(stale))
             )
         self.state.draft["stale"] = [one.plain() for one in stale]
+        named_faults = self._faults_at_ask(n)
+        if named_faults:
+            lines.append(
+                "The faults named to fix first go beside the question, each with its check as "
+                "it reads now and the way you said you took (`ways`):\n"
+                + "\n".join(faults.lines(named_faults))
+            )
+        self.state.draft["faults"] = faults.at_stop(named_faults)
         if self.state.needs_refused:
             lines.append(
                 f"Your {len(self.state.needs_refused)} refused `needs` call(s) since the last stop "
@@ -4398,6 +4531,7 @@ class Run:
                 *draft["end_checks"]["lines"],
                 "",
             ]
+        lines += draft.get("faults") or []
         lines += self._needs_refused_said()
         lines += self._asides_said()
         lines += self._swaps_said()
@@ -4408,7 +4542,12 @@ class Run:
             "## Answering",
             "",
             "The pick is about the look. A fault to fix first, such as a check above, goes in "
-            '`"fix_first"` in pick.json, apart from the pick.',
+            '`"fix_first"` in pick.json, apart from the pick: a list of faults, each `{"fault": '
+            'what must change, "at": where, "rule": the request line, need or bench check that '
+            'reads it}`, with `"suggest"`, one way to fix it, if you have one. A bench check '
+            "named in backticks in `rule` is read again at `done`, and the fault stands until "
+            "it passes. A suggestion is said once, as the model's to take or leave: any fix "
+            "that meets every rule will do.",
             "",
         ]
         (folder / "question.md").write_text("\n".join(lines), encoding="utf-8")
@@ -4437,6 +4576,10 @@ class Run:
             self.ledger.stale_found(self.state.name, self.session.requests, f"ask {n}", stale)
         if stop == forms.PLAN:
             self._plan_described(draft.get("plan") or "", n)
+        if draft.get("faults"):
+            named_faults = self._faults()
+            faults.shown(named_faults, f"ask {n}")
+            self.state.faults = faults.dump(named_faults)
         self.state.needs_refused = []
         self.state.draft = None
         self.state.stop = {"kind": "ask", "n": n}
@@ -4669,7 +4812,7 @@ class Run:
                 f"{picked['pick']}: {picked.get('reason') or ''}"
             )
             if picked.get("fix_first"):
-                said += f" Fix first: {picked['fix_first']}"
+                said += f" Fix first: {faults.brief(picked['fix_first'])}"
             return (
                 said + "\nAsking again tells them nothing new. Go on with the work, and show it "
                 "at the next stop once it's changed."
@@ -4922,8 +5065,8 @@ def what_next(run: Run, ending: Ending) -> str:
             f"waiting at {stop}{folder / 'question.md'}. Write {folder / 'pick.json'}, "
             f'{{"pick": "{choice}", "reason": "...", "by": "{SPONSOR}"}}, or "by": '
             f'"{STAND_IN} <who>" if someone stood in for them. The pick is about the look: a '
-            f'fault to fix first goes in "fix_first", apart from it. Then: scripts/rounds.py '
-            f"resume {name}"
+            f'fault to fix first goes in "fix_first", apart from it, as the question\'s '
+            f'"Answering" says. Then: scripts/rounds.py resume {name}'
         )
     if ending.name == MET:
         # What the person is asked for, and the model's closing words: nowhere else reaches them.
