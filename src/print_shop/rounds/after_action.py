@@ -146,6 +146,13 @@ def _asked(said: str | None) -> str:
         if was.get("allowed"):
             once = ", ".join(f"`{name}`" for name in was["allowed"])
             line += f", and once each, to build and read, {once}"
+        if was.get("stage_open"):
+            # The stage's way to a stop, and the kept notes, open under the lock
+            # (mqucifer/print-shop#192).
+            stage = ", ".join(f"`{name}`" for name in was["stage_open"])
+            line += f", with the stage's way to a stop, {stage}"
+        if was.get("notes"):
+            line += ", and `read` of " + ", ".join(f"`{n}`" for n in was["notes"])
     return line
 
 
@@ -312,7 +319,19 @@ def how_it_ended(was: dict[str, Any]) -> str:
         # A run from before approval was a stop ended at `met`, saying its approval.
         return STOPS[name].format(n=said.get("n", said.get("approval", "?")))
     if name == "blocked":
-        return f"It ended `blocked`, with your reason: {said.get('reason', '')}"
+        told = f"It ended `blocked`, with your reason: {said.get('reason', '')}"
+        lock = said.get("lock")
+        if lock:
+            # What the ask-only lock refused, and what the last `ask` lacked
+            # (mqucifer/print-shop#192).
+            hit = ", ".join(
+                f"`{h['tool']}` at call {h['call']} ({h['why']})" for h in lock["refused"]
+            )
+            told += (
+                f". It was under the ask-only lock set at call {lock['set_at']}, which refused "
+                f"{hit or 'nothing'}; the last `ask` lacked: {lock['missing']}"
+            )
+        return told
     shown = f": {json.dumps(said, sort_keys=True)}" if said else ""
     return f"It ended `{name}`{shown}."
 

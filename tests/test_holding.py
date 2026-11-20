@@ -19,7 +19,7 @@ from print_shop.rounds.holding import Aside, Tried
 from print_shop.rounds.needs import Need
 from print_shop.rounds.nudge import Wanted
 from print_shop.rounds.run import Run
-from tests.rounds_fakes import Scripted, laid, tool
+from tests.rounds_fakes import Scripted, flat, laid, tool
 from tests.test_intake import PLAN_ASK, SENT, again, covered, pick, to_the_plan
 
 HELD = holding.HEADING
@@ -302,7 +302,14 @@ def test_done_refuses_a_need_checked_on_a_file_neither_printed_nor_given(tmp_pat
     )
     run = started(
         tmp_path,
-        tool("done", script="make.py", part=["pane.step"], fix_shape="first", closing="Here."),
+        tool(
+            "done",
+            script="make.py",
+            part=["pane.step"],
+            on_bed=flat("pane.step"),
+            fix_shape="first",
+            closing="Here.",
+        ),
     )
     settled(run, fit)
     assert run.drive().name == "blocked"

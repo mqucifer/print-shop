@@ -110,6 +110,8 @@ A check should hold what the need says. "A 0.2 mm margin" asks `pause --min-room
 
 `done` checks it against its `on_bed`, before anything runs, so give that file the same side there, `-z` too. `needs` refuses an eye need whose `look_for` asks which side lies on the bed, and says what to send. An eye need on how a feature looks as printed stays an eye need: its `look_for` names only what the eye judges, and the side goes in a bed need beside it. A bed need checks the side the run states; choosing the side for strength or supports isn't a need (mqucifer/print-shop#9).
 
+`done` names every printed file's side in `on_bed`, need or no need, unless the request leaves it to the refinement pass. Choose it by reading the side first: `slice FILE --at AXIS=AT` a layer in from the face that goes down shows what the first layer lies on and what it bridges. An assembly's part prints on a side square to its `layers`, the one `fit-bed` lays it on. At each stop its downward faces are read lying on that side, and the reading says which side and why.
+
 By default a need passes on exit 0. `verdicts` names which verdicts pass instead, such as `["INTERFERE"]` for a press fit. `number` names a number in the answer's saved JSON (`bench-out/*.json`, under `numbers`), with dots for anything nested (`pairs.0.gap_mm`), and `at_least` or `at_most` its limit. `DISAGREE` and `NO ANSWER` never pass, and a need can't ask for `FAIL`. To see a number's name, run the command yourself first: names differ between commands. Once settled, needs don't change, so send them with `try: true` first: each check is read against your files as they stand, and nothing is settled.
 
 ## A sheet for the Sponsor

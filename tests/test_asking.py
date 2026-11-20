@@ -413,10 +413,34 @@ def test_a_second_cut_while_writing_a_script_doesnt_narrow_the_tools(tmp_path: P
 
 
 def test_a_second_quiet_call_with_no_script_still_narrows_the_tools(tmp_path: Path) -> None:
-    model = Scripted(cut(DRAFTING), [tool("run", path="a.py")], cut(CIRCLING), *ASKED)
-    s = session(tmp_path, model)
+    """Its kept notes stay readable under the lock, and nothing else is (mqucifer/print-shop#192):
+    a leg-joint eval was told to `read` its note, and the read was refused as ask-only."""
+    model = Scripted(
+        cut(DRAFTING),
+        [tool("run", path="a.py")],
+        cut(CIRCLING),
+        [tool("read", path="record/cut-reasoning-3.md")],
+        [tool("read", path="a.py")],
+        *ASKED,
+    )
+    desk = Desk()
+    s = session(tmp_path, model, desk)
     assert s.go().name == "ask"
-    assert offered(model.bodies[3]) == LOCKED
+    assert offered(model.bodies[3]) == ["write", "edit", "read", "run", "bench", *ASKING_TOOLS]
+    locked = str(model.bodies[3]["messages"][-1]["content"])
+    assert locked.endswith(
+        "`read` still opens your cut-reasoning notes: `record/cut-reasoning-1.md` and "
+        "`record/cut-reasoning-3.md`."
+    ), locked
+    assert [name for name, _ in desk.called] == ["run", "read", "ask", "send_ask"]
+    whys = [(e["name"], e["why"]) for e in events(s, "tool") if e["outcome"] == "failed"]
+    assert whys == [("read", "ask_only")]
+    (_, forced) = events(s, "quiet_reply")
+    assert forced["notes"] == ["record/cut-reasoning-1.md", "record/cut-reasoning-3.md"]
+    rebuilds(s, model)
+
+
+ASKING_TOOLS = ["ask", "send_ask", "blocked"]
 
 
 ASKED = (
@@ -642,7 +666,10 @@ def test_the_index_shows_each_quiet_call_and_what_the_next_request_offered(
     model = Scripted(THINKING, THINKING, [tool("blocked", reason="Which side the lip goes.")])
     run = Run.start(tmp_path, "r", "A block.", [], model, sleep=lambda _: None)
     assert run.drive().name == "blocked"
-    assert offered(model.bodies[2]) == LOCKED
+    # At intake the stage's way to a stop stays open too (mqucifer/print-shop#192).
+    assert offered(model.bodies[2]) == [
+        "write", "edit", "run", "bench", "questions", "breakdown", "needs", *ASKING_TOOLS,
+    ]  # fmt: skip
     shown = "\n".join(after_action.index(run.ledger, "r"))
     assert (
         "1: no tool\n"
@@ -650,7 +677,8 @@ def test_the_index_shows_each_quiet_call_and_what_the_next_request_offered(
         "2: no tool\n"
         "   no tool call, after 21,340 tokens of reasoning in 0 s: asked what's missing; the next "
         "request offered only `ask`, `send_ask`, `blocked`, as it was 1 call after the last, and "
-        "once each, to build and read, `write`, `edit`, `run`, `bench`\n"
+        "once each, to build and read, `write`, `edit`, `run`, `bench`, with the stage's way to "
+        "a stop, `questions`, `breakdown`, `needs`\n"
         "3: blocked"
     ) in shown
     rows = run.ledger.rows("SELECT name, at_call, said FROM timeline WHERE kind='asked'")

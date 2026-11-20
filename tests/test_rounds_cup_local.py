@@ -148,7 +148,15 @@ def test_cup_1_read_back_refuses_its_fail_need_and_its_thin_panes_and_delivers_t
     def done(files: list[str]) -> list[dict[str, Any]]:
         words = {"fix_shape": "read back", "closing": "The run's files, read back."}
         return [
-            tool("done", script=script, part=files, groups=groups, looks=looks(files), **words)
+            tool(
+                "done",
+                script=script,
+                part=files,
+                groups=groups,
+                looks=looks(files),
+                on_bed=dict.fromkeys(files, "-z"),
+                **words,
+            )
         ]
 
     def picked(run: Run) -> None:

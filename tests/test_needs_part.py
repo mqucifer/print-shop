@@ -13,7 +13,7 @@ from print_shop.bench import overlap as overlap_module
 from print_shop.rounds.box import Ran
 from print_shop.rounds.needs import Need
 from print_shop.rounds.run import Run
-from tests.rounds_fakes import tool
+from tests.rounds_fakes import flat, tool
 from tests.test_holding import replies, settled, started
 
 DONE = {"script": "make.py", "fix_shape": "first", "closing": "Here."}
@@ -61,7 +61,7 @@ THICK = Need(
 
 
 def test_done_names_each_part_file_no_need_reads_and_checks_nothing(tmp_path: Path) -> None:
-    run = started(tmp_path, tool("done", part=["pane.step"], **DONE))
+    run = started(tmp_path, tool("done", part=["pane.step"], on_bed=flat("pane.step"), **DONE))
     settled(run, FROM_THE_FRAME)
     assert run.drive().name == "blocked"
     refused = replies(run)[0]
@@ -110,13 +110,13 @@ def test_a_part_file_set_aside_with_its_reason_lets_done_on_and_is_shown_at_the_
 ) -> None:
     run = started(
         tmp_path,
-        tool("done", part=["pane.step"], **DONE),
+        tool("done", part=["pane.step"], on_bed=flat("pane.step"), **DONE),
         tool("set_aside", file="frame.step", why="Not mine."),
         tool("set_aside", file="pane.step", why=""),
         tool(
             "set_aside", file="pane.step", why="Cut from the frame's own pocket, which `fit` reads."
         ),
-        tool("done", part=["pane.step"], glass=GLASS, **DONE),
+        tool("done", part=["pane.step"], on_bed=flat("pane.step"), glass=GLASS, **DONE),
     )
     in_rounds(run, FROM_THE_FRAME)
     assert run.drive().name == "met", "set aside, it goes on to the checks, and passes"
@@ -154,7 +154,12 @@ def test_the_question_names_part_files_no_need_reads(tmp_path: Path) -> None:
 
 
 def test_done_refuses_a_need_on_a_reference_the_part_replaces(tmp_path: Path) -> None:
-    run = started(tmp_path, tool("done", part=["frame.step", "pane.step"], **DONE))
+    run = started(tmp_path, tool(
+        "done",
+        part=["frame.step", "pane.step"],
+        on_bed=flat("frame.step", "pane.step"),
+        **DONE,
+    ))
     (run.work / "frame.step").write_text("x")
     settled(run, ON_THE_PANE)
     assert run.drive().name == "blocked"
@@ -203,10 +208,28 @@ PAUSE = "pause references/frame.step --pocket-z 2 --pane-thickness 1.5"
 def test_a_stained_glass_done_names_its_frames_and_panes(tmp_path: Path) -> None:
     run = started(
         tmp_path,
-        tool("done", part=["pane.step"], **DONE),
-        tool("done", part=["pane.step"], glass=[{**GLASS[0], "panes": []}], **DONE),
-        tool("done", part=["pane.step"], glass=[{**GLASS[0], "panes": ["frame.step"]}], **DONE),
-        tool("done", part=["pane.step"], glass=[{**GLASS[0], "clearance": 0}], **DONE),
+        tool("done", part=["pane.step"], on_bed=flat("pane.step"), **DONE),
+        tool(
+            "done",
+            part=["pane.step"],
+            on_bed=flat("pane.step"),
+            glass=[{**GLASS[0], "panes": []}],
+            **DONE,
+        ),
+        tool(
+            "done",
+            part=["pane.step"],
+            on_bed=flat("pane.step"),
+            glass=[{**GLASS[0], "panes": ["frame.step"]}],
+            **DONE,
+        ),
+        tool(
+            "done",
+            part=["pane.step"],
+            on_bed=flat("pane.step"),
+            glass=[{**GLASS[0], "clearance": 0}],
+            **DONE,
+        ),
     )
     in_rounds(run, THICK)
     run.drive()
@@ -224,7 +247,7 @@ def test_done_runs_light_and_capture_on_every_pane_and_isnt_met_while_one_fails(
 ) -> None:
     run = started(
         tmp_path,
-        tool("done", part=["pane.step"], glass=GLASS, **DONE),
+        tool("done", part=["pane.step"], on_bed=flat("pane.step"), glass=GLASS, **DONE),
         tool("set_aside", check="capture references/frame.step", why="It's the given frame."),
         tool("bench", command="info pane.step"),
         answers=(
@@ -269,7 +292,7 @@ def test_done_runs_pause_too_and_a_closing_pause_it_never_ran_cant_pass(tmp_path
     neither run ran, and both were wrong: the nozzle would meet the pane."""
     run = started(
         tmp_path,
-        tool("done", part=["pane.step"], glass=GLASS, **DONE),
+        tool("done", part=["pane.step"], on_bed=flat("pane.step"), glass=GLASS, **DONE),
         tool("set_aside", check="pause references/frame.step", why="The closing words say it."),
         answers=(
             "OK",  # the need
@@ -314,7 +337,7 @@ def test_light_fails_a_pane_with_nothing_open_whatever_its_verdict(tmp_path: Pat
     passes through every pane."""
     run = started(
         tmp_path,
-        tool("done", part=["pane.step"], glass=GLASS, **DONE),
+        tool("done", part=["pane.step"], on_bed=flat("pane.step"), glass=GLASS, **DONE),
         answers=("OK", "OK", ("OK", {"least_open_pct": 0.0, "least_open_file": "pane.step"})),
     )
     in_rounds(run, THICK)
@@ -328,7 +351,13 @@ def test_light_fails_a_pane_with_nothing_open_whatever_its_verdict(tmp_path: Pat
 
 
 def test_at_the_stop_for_approval_each_reading_is_shown(tmp_path: Path) -> None:
-    run = started(tmp_path, tool("done", part=["pane.step"], glass=GLASS, **DONE))
+    run = started(tmp_path, tool(
+        "done",
+        part=["pane.step"],
+        on_bed=flat("pane.step"),
+        glass=GLASS,
+        **DONE,
+    ))
     in_rounds(run, THICK)
     assert run.drive().name == "met"
     stop = (run.folder / "approvals" / "1" / "stop.md").read_text()
@@ -393,7 +422,13 @@ def test_a_need_that_runs_the_check_on_that_frame_is_its_reading_at_the_requests
         "--full-rim 1.1 --least-rim 0.5 --min-visible 55 --panes 1"
     )
     held = Need("held", "held on both faces", "chosen", "bench", command=rims, measures="pane-hold")
-    run = started(tmp_path, tool("done", part=["pane.step"], glass=GLASS, **DONE))
+    run = started(tmp_path, tool(
+        "done",
+        part=["pane.step"],
+        on_bed=flat("pane.step"),
+        glass=GLASS,
+        **DONE,
+    ))
     in_rounds(run, THICK, held)
     assert run.drive().name == "met"
     asked = [" ".join(a[2:]) for a in run.box.asked]  # type: ignore[attr-defined]

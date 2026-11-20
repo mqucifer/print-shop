@@ -17,7 +17,7 @@ from print_shop.rounds.needs import Need
 from print_shop.rounds.run import FOLLOWED, Run
 from print_shop.rounds.standing import Glass
 from tests.refine_fakes import pause_record
-from tests.rounds_fakes import Scripted, tool
+from tests.rounds_fakes import Scripted, flat, tool
 from tests.test_holding import Answers, replies, settled, started
 from tests.test_intake import PLAN_ASK, SENT, again, pick, to_the_plan, told
 from tests.test_needs_part import DONE, THICK, in_rounds
@@ -103,7 +103,13 @@ def test_done_checks_a_fixed_need_on_the_parts_panes_where_their_names_and_count
     names, and four needs failed on the count and the names alone."""
     run = started(
         tmp_path,
-        tool("done", part=["cell_a.step", "cell_b.step"], glass=GLASS_NOW, **DONE),
+        tool(
+            "done",
+            part=["cell_a.step", "cell_b.step"],
+            on_bed=flat("cell_a.step", "cell_b.step"),
+            glass=GLASS_NOW,
+            **DONE,
+        ),
     )
     in_rounds(run, LIGHT, HOLD, SIDES, makes=("cell_a.step", "cell_b.step"))
     assert run.drive().name == "met", "not refused as a need off the part"
@@ -454,10 +460,10 @@ def test_done_isnt_met_on_strips_and_a_set_aside_is_shown_at_the_next_stop(
     run = started(
         tmp_path,
         tool("set_aside", curves="pane.step", why="Not yet."),
-        tool("done", part=["pane.step"], glass=glass, **DONE),
+        tool("done", part=["pane.step"], on_bed=flat("pane.step"), glass=glass, **DONE),
         tool("set_aside", curves="pane.step", why=""),
         tool("set_aside", curves="pane.step", why="Its small faces are the tab's chamfers."),
-        tool("done", part=["pane.step"], glass=glass, **DONE),
+        tool("done", part=["pane.step"], on_bed=flat("pane.step"), glass=glass, **DONE),
         answers=("OK", "OK", "OK", "OK", "OK", strips, "OK", "OK", "OK", "OK", "OK", strips),
     )
     in_rounds(run, THICK)

@@ -24,7 +24,7 @@ from print_shop.rounds import end_checks, holds, lessons, needs, prompt, records
 from print_shop.rounds.box import Ran
 from print_shop.rounds.needs import Need
 from print_shop.rounds.run import Run, summarise
-from tests.rounds_fakes import Scripted, tool
+from tests.rounds_fakes import Scripted, flat, tool
 from tests.test_holding import Answers
 from tests.test_intake import pick
 
@@ -216,7 +216,7 @@ FACT = tool(
     text="The clip's hook stands 0.8 mm out, and the lid's band is 0.2 mm clear of the arm.",
     **{"from": "call 1, my own script"},
 )
-LID_DONE = tool("done", part=["box.step", "lid.step"], **DONE)
+LID_DONE = tool("done", part=["box.step", "lid.step"], on_bed=flat("box.step", "lid.step"), **DONE)
 
 
 # The way on, from the holds
@@ -449,7 +449,8 @@ def test_a_given_strip_pushed_past_a_printed_catch_is_named_for_a_person(tmp_pat
     given.parent.mkdir()
     given.write_text("a strip, made up")
     model = Scripted(
-        [tool("done", part=["channel.step"], **DONE)], [tool("blocked", reason="Out of turns.")]
+        [tool("done", part=["channel.step"], on_bed=flat("channel.step"), **DONE)],
+        [tool("blocked", reason="Out of turns.")],
     )
     run = Run.start(tmp_path / "runs", "r", STRIP_REQUEST, [given], model, sleep=lambda _: None)
     catch = {
@@ -501,7 +502,8 @@ def test_a_printed_clip_over_its_limit_sends_the_run_back_though_a_given_part_pu
     given.parent.mkdir()
     given.write_text("a fan, made up")
     model = Scripted(
-        [tool("done", part=["pocket.step"], **DONE)], [tool("blocked", reason="Out of turns.")]
+        [tool("done", part=["pocket.step"], on_bed=flat("pocket.step"), **DONE)],
+        [tool("blocked", reason="Out of turns.")],
     )
     request = STRIP_REQUEST.replace("LED strip", "fan").replace("strip", "fan")
     run = Run.start(tmp_path / "runs", "r", request, [given], model, sleep=lambda _: None)

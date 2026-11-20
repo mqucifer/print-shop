@@ -178,6 +178,9 @@ def write(path: str, content: str, **more: Any) -> dict[str, Any]:
 def done(script: str = "make.py", part: Any = ("block.step",), **more: Any) -> dict[str, Any]:
     """`done`, with its words: what kind of change it was, and what it says at the end."""
     words = {"fix_shape": "a first try", "closing": "The block is here.", **more}
+    # Every printed file's side is named (mqucifer/print-shop#192): as stored, unless given.
+    files = [f for one in part for f in (one["files"] if isinstance(one, dict) else [one])]
+    words.setdefault("on_bed", {f: "-z" for f in files if str(f).endswith((".step", ".stl"))})
     return tool("done", script=script, part=list(part), **words)
 
 

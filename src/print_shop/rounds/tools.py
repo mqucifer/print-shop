@@ -589,8 +589,10 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
                     "or +y. `-z` is as stored, its underside down; `+z` turns it over, so a lid "
                     "stored lip down prints with its outside on the bed. The refinement pass after "
                     "approval "
-                    "lays each file so, or says why it can't. A file not named prints as stored. "
-                    "A bed need's file is named here, at its need's side. Optional.",
+                    "lays each file so, or says why it can't, and each file's downward faces are "
+                    "read lying on it. Name every printed file, `-z` too: a file not named is "
+                    "refused, unless the request leaves its side to the refinement pass. A bed "
+                    "need's file is named here, at its need's side.",
                 },
                 "groups": {
                     "type": "array",

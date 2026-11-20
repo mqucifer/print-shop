@@ -55,6 +55,7 @@ from print_shop.rounds import (
     needs,
     nudge,
     paths,
+    print_sides,
     prompt,
     records,
     review,
@@ -411,6 +412,9 @@ class Run:
         # replies have had the line after a call that circled.
         self.session.lead = self.lead
         self._circled_at = 0
+        # Under the ask-only lock, the stage's own way to a stop stays open
+        # (mqucifer/print-shop#192).
+        self.session.stage_open = self.stage_open
 
     # Starting and going on
 
@@ -1856,6 +1860,13 @@ class Run:
         if self.state.reopened and (name == "bench" or ran):
             lines.append(stuck.REOPENED)
             said["reopened"] = True
+        if name == "bench" or ran:
+            # `load`'s `layers` against the side `fit-bed` laid each part on
+            # (mqucifer/print-shop#192).
+            crossed = self._layers_against_fit_bed()
+            if crossed:
+                lines.append(print_sides.against_said(crossed))
+                more["layers_against_fit_bed"] = crossed
         n = self.session.requests
         circled = self._circled(n, judged) if self._circled_at != n else None
         if circled is not None:
@@ -1871,6 +1882,18 @@ class Run:
             reply="\n".join(lines) + "\n\n" + reply,
             detail={**judged.detail, **more},
         )
+
+    def stage_open(self) -> tuple[tuple[str, ...], str]:
+        """What the ask-only lock leaves open at this stage, besides the asking tools and its one
+        build, run and check: what an `ask` needs to go through here (mqucifer/print-shop#192).
+        At intake, the breakdown and the needs the plan stop shows, and `questions`, intake's
+        own stop; in the rounds, `done`, and `needs` while a note has reopened them. A lock is
+        there to stop a loop, never to end a run that has a design to show: a leg-joint eval was
+        locked at intake, its plan `ask` refused for no breakdown and `breakdown` refused as
+        ask-only, and it ended `blocked` with a design it said was complete."""
+        if self.state.stage == "intake":
+            return ("questions", "breakdown", "needs"), "at intake"
+        return ("needs", "done") if self.state.reopened else ("done",), "in the rounds"
 
     def _building(self, name: Any) -> tuple[str, dict[str, Any]] | None:
         """What a reply leads with when the run is building at intake: once it has read a part
@@ -3086,6 +3109,12 @@ class Run:
         if not fix_shape or not closing:
             reply = "`fix_shape` and `closing` each take your own words, and one is empty."
             return Judged("done", "failed", reply, "empty")
+        # Every printed file's side is named, unless the request leaves it to the refinement pass
+        # (mqucifer/print-shop#192): a refinement pass printed a lid skirt-down as `done` named
+        # no side for it.
+        unnamed = self._no_bed_side(part, on_bed)
+        if unnamed:
+            return Judged("done", "failed", self._no_bed_side_refused(unnamed), "no_bed_side")
         # Each fault named to fix first has the way taken said, before anything runs: the next
         # stop shows it beside the fault (mqucifer/print-shop#175).
         ways_wrong = self._ways_taken("done", args.get("ways"))
@@ -3428,15 +3457,85 @@ class Run:
         wanted = self._needs_now()
         request = (self.folder / "request.md").read_text(encoding="utf-8")
         plain = downward.unsupported(request, wanted, files)
+        # An assembly's part lies on a side square to its `layers`, the one `fit-bed` laid it on
+        # (mqucifer/print-shop#192); -z only where nothing says, and each reading says which.
+        rows = self._bench_rows()
+        layered = print_sides.layered(self.work, print_sides.named_assemblies(rows))
+        fitted = print_sides.fitted(rows)
+        laid = downward.laid_on(
+            files,
+            wanted,
+            on_bed,
+            {f: (p.layers, p.assembly) for f, p in layered.items()},
+            {f: (one.side, one.at_call) for f, one in fitted.items()},
+        )
         return downward.read(
             self.box,
             files,
-            downward.sides(wanted, on_bed),
+            {name: side for name, (side, _) in laid.items()},
             where,
             kept,
             plain,
             glass_checks.load(self.state.glass),
+            {name: said for name, (_, said) in laid.items()},
         )
+
+    def _no_bed_side(self, part: list[str], on_bed: dict[str, str]) -> list[str]:
+        """Each printed file of `part` that `on_bed` names no side for: none where the request
+        leaves the side to the refinement pass, or the run is from before the request's form."""
+        if self._form() is None:
+            return []
+        request = (self.folder / "request.md").read_text(encoding="utf-8")
+        if print_sides.left_to_the_pass(request):
+            return []
+        return [
+            name
+            for name in part
+            if name not in on_bed
+            and not name.startswith("references/")
+            and Path(name).suffix.lower() in GEOMETRY
+        ]
+
+    def _no_bed_side_refused(self, unnamed: list[str]) -> str:
+        """`done`'s refusal of a printed file with no side: what an assembly and `fit-bed` say of
+        it, and to read what its first layer lies on and bridges before choosing."""
+        rows = self._bench_rows()
+        layered = print_sides.layered(self.work, print_sides.named_assemblies(rows))
+        laid = downward.laid_on(
+            unnamed,
+            [],
+            None,
+            {f: (p.layers, p.assembly) for f, p in layered.items()},
+            {f: (one.side, one.at_call) for f, one in print_sides.fitted(rows).items()},
+        )
+        return print_sides.no_side_said(unnamed, laid)
+
+    def _bench_rows(self) -> list[tuple[int, list[str], dict[str, Any] | None]]:
+        """Every bench call of this run, oldest first: its call, its argv and its numbers."""
+        return [
+            (int(r["at_call"]), json.loads(r["argv"]), json.loads(r["numbers"] or "null"))
+            for r in self.ledger.rows(
+                "SELECT at_call, argv, numbers FROM bench_calls WHERE run=? ORDER BY id",
+                self.state.name,
+            )
+        ]
+
+    def _layers_against_fit_bed(self) -> list[dict[str, Any]]:
+        """Each part of an assembly `load` read at this call whose `layers` aren't the axis
+        `fit-bed` last laid its file on (mqucifer/print-shop#192). A run read every strain
+        against the wrong layers until a stand-in caught it."""
+        rows = self._bench_rows()
+        now = self.session.requests
+        loaded = [
+            arg
+            for at_call, argv, _ in rows
+            if at_call == now and argv and argv[0] == "load"
+            for arg in argv[1:2]
+        ]
+        if not loaded:
+            return []
+        parts = [p for one in loaded for p in print_sides.parts_of(self.work, one)]
+        return print_sides.against(parts, print_sides.fitted(rows))
 
     def _stood(self, one: judge.Standing, stop: str, where: Path, ask: int | None = None) -> None:
         sha = None

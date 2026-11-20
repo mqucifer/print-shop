@@ -18,7 +18,7 @@ from print_shop.bench import overlap as overlap_module
 from print_shop.rounds import descriptions, records, transcript
 from print_shop.rounds.box import Ran
 from print_shop.rounds.run import Refused, Run
-from tests.rounds_fakes import Scripted, tool
+from tests.rounds_fakes import Scripted, flat, tool
 from tests.test_intake import BROKEN_DOWN, Box, picture
 
 REQUEST = """\
@@ -50,6 +50,7 @@ def done(**more: Any) -> dict[str, Any]:
         "done",
         script="make.py",
         part=more.pop("part", ["bracket.step"]),
+        on_bed=more.pop("on_bed", flat("bracket.step")),
         fix_shape="first",
         closing="Here it is.",
         **more,

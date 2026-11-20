@@ -110,6 +110,54 @@ def sides(needs: list[Need], on_bed: dict[str, str] | None = None) -> dict[str, 
     return {**found, **(on_bed or {})}
 
 
+#: Said of a file nothing names a side for.
+NOTHING_NAMES = "as nothing names a side for it, so its -z side as stored"
+
+
+def laid_on(
+    files: list[str],
+    needs: list[Need],
+    on_bed: dict[str, str] | None = None,
+    layers: dict[str, tuple[str, str]] | None = None,
+    fitted: dict[str, tuple[str, int]] | None = None,
+) -> dict[str, tuple[str, str]]:
+    """The side each file lies on, and what says so (mqucifer/print-shop#192): `done`'s `on_bed`;
+    a bed need; for an assembly's part, its `layers` (the axis and the assembly's file, by the
+    part's file) with the side `fit-bed` last laid it on (the side and its call); and -z only
+    where nothing says. A leg piece printed on its side was read lying on -z, flagged for faces
+    that are walls on its side, and its tail's real overhang was missed."""
+    beds = {n.file: n for n in needs if n.by == BED and n.file and n.side}
+    found: dict[str, tuple[str, str]] = {}
+    for name in files:
+        axis, assembly = (layers or {}).get(name, ("", ""))
+        if on_bed and name in on_bed:
+            side, said = on_bed[name], "as `done`'s `on_bed` names it"
+        elif name in beds:
+            side, said = beds[name].side, f"as the bed need `{beds[name].id}` names it"
+        elif axis:
+            side, said = _by_layers(axis, assembly, (fitted or {}).get(name))
+        else:
+            side, said = "-z", NOTHING_NAMES
+        if axis and side[1] != axis and not said.startswith("as its layers"):
+            said += f", though `{assembly}` stacks its layers along {axis}"
+        found[name] = (side, said)
+    return found
+
+
+def _by_layers(axis: str, assembly: str, fitted: tuple[str, int] | None) -> tuple[str, str]:
+    """An assembly part's side: one square to its layers, the one `fit-bed` laid it on where
+    that's one of them, or -axis."""
+    stacked = f"as its layers run along {axis} in `{assembly}`"
+    if fitted is None:
+        return f"-{axis}", f"{stacked}, and no `fit-bed` has said which {axis} side, so -{axis}"
+    side, call = fitted
+    if side[1] == axis:
+        return side, f"{stacked}, and `fit-bed` laid it on {side} at call {call}"
+    return f"-{axis}", (
+        f"{stacked}, so -{axis}; `fit-bed` laid it on {side} at call {call}, across its layers"
+    )
+
+
 def _in_the_file(low: Any, high: Any, side: str) -> list[list[float]]:
     """A box of the laid mesh, turned back to the file as it's stored."""
     axis, degrees = ON_BED[side]
@@ -137,6 +185,7 @@ def reading(
     no_supports: str,
     panes: trimesh.Trimesh | None = None,
     pane_count: int = 0,
+    whence: str = "",
 ) -> judge.Standing:
     """One file's downward faces, from its mesh as it lies on the bed. `panes` are a frame's
     panes where they sit in it, turned as the frame is: they're in place from the pause up, so
@@ -154,12 +203,13 @@ def reading(
     ]
     numbers: dict[str, Any] = {
         "side": side,
+        **({"side_from": whence} if whence else {}),
         "to_support_mm2": round(area, 2),
         "rising_from_the_plate_mm2": round(flare, 2),
         "places": places,
         "no_supports": no_supports,
     }
-    lying = f"lying on its {side} side"
+    lying = f"lying on its {side} side" + (f", {whence}" if whence else "")
     if panes is not None:
         numbers["panes_in_place"] = pane_count
         numbers["without_panes_mm2"] = round(bare, 2)
@@ -220,6 +270,7 @@ def read(
     kept: Path,
     no_supports: dict[str, str] | None = None,
     glass: list[Any] | None = None,
+    whence: dict[str, str] | None = None,
 ) -> list[judge.Standing]:
     """Each printed file's downward faces: laid on its side and meshed by the bench, in a
     container, then read here by the print loop's own function. A given file under `references/`
@@ -297,10 +348,12 @@ def read(
             mesh = trimesh.load_mesh(str(stl), force="mesh")
             said = (no_supports or {}).get(name, "")
             panes = _panes(scratch, answer, pane_copies.get(name, []))
+            why = (whence or {}).get(name, "")
             if name in framed and panes is not None:
-                found.append(reading(name, side, mesh, said, panes, framed[name].count()))
+                count = framed[name].count()
+                found.append(reading(name, side, mesh, said, panes, count, why))
             else:
-                found.append(reading(name, side, mesh, said))
+                found.append(reading(name, side, mesh, said, whence=why))
     return found
 
 

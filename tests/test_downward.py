@@ -240,7 +240,7 @@ def test_a_sloped_ledge_is_met_and_the_approval_stop_shows_the_reading(tmp_path:
     stop = (run.folder / "approvals" / "1" / "stop.md").read_text()
     assert f"## {downward.HEADING}" in stop
     assert (
-        "- tray.step, ok: lying on its -z side, no face looks down past 45° off the plate: "
-        "nothing would need support."
+        "- tray.step, ok: lying on its -z side, as `done`'s `on_bed` names it, no face looks "
+        "down past 45° off the plate: nothing would need support."
     ) in stop
     assert stop.index("by `thin`, whatever the needs say") < stop.index(downward.HEADING)
