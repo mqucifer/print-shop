@@ -33,7 +33,7 @@ socket's floor and the blocks' faces touching round it, the socket's walls 0.15 
 the tail, a slip fit's play. A slender tab hangs from the upper into a pocket in the lower's
 top, its hook in a window in the pocket's wall 0.2 mm under its ledge: near the +x edge, with
 seat beside it all round, or at the middle with the window's sides drawn touching the hook's.
-And the socket 1.5 mm clear, more play than a tilt closes.
+And the socket 1.5 mm clear, more play than a tilt closes, and 2.5 mm clear, more than is read.
 """
 
 from __future__ import annotations
@@ -426,6 +426,8 @@ def dovetails() -> None:
 #: and the upper `UPPER_T` on it, the tail `TAIL_SIDE` square and `TAIL_LONG` long, the socket
 #: `SLIP` wider a side, or `LOOSE`.
 BLOCK, LOWER_T, UPPER_T, TAIL_SIDE, TAIL_LONG, LOOSE = 40.0, 80.0, 20.0, 20.0, 20.0, 1.5
+#: More play than `load` reads as able to close, its `PLAY`, 2 mm.
+WIDE = 2.5
 #: Their latch: a slender tab `SLENDER` thick, `TAB_W` wide, hanging `TAB_L` from the upper's
 #: underside into a pocket in the lower's top, `TAB_CLEAR` off the pocket's -y wall at y
 #: `WALL_AT`, its hook `HOOK_IN` into a window in that wall and `LATCH_PLAY` under its ledge,
@@ -466,6 +468,7 @@ def plays() -> None:
     save(socketed(SLIP, NEAR_EDGE, 1.0), out / "lower-edge.step")
     save(socketed(SLIP, 0.0, 0.0), out / "lower-middle.step")
     save(socketed(LOOSE, NEAR_EDGE, 1.0), out / "lower-loose.step")
+    save(socketed(WIDE, 0.0, 0.0), out / "lower-wide.step")
 
     def latched(at: float) -> Rows:
         latch = {
@@ -482,6 +485,7 @@ def plays() -> None:
         ("edge", "upper-edge.step", "lower-edge.step", NEAR_EDGE),
         ("middle", "upper-middle.step", "lower-middle.step", 0.0),
         ("loose", "upper-edge.step", "lower-loose.step", NEAR_EDGE),
+        ("wide", "upper-middle.step", "lower-wide.step", 0.0),
     ):
         parts = [
             {"name": "upper", "file": upper_file, "layers": "z"},

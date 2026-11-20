@@ -45,9 +45,11 @@ from .report import NoAnswer
 #: `--hold`, past which a part isn't held.
 REACH = 1.0
 #: Flat faces of the two parts that face each other this close, in mm, and no closer than `ON`,
-#: are read as able to close on each other under the load (mqucifer/print-shop#188): a printed
-#: fit's play is a few tenths, and a loose one a mm or so.
-PLAY = 2.0
+#: are read as able to close on each other under the load (mqucifer/print-shop#188). It's a
+#: judgement, not a sourced figure: twice `REACH`, the slide check's `--hold`, so a printed slip
+#: fit's few tenths and a loose fit's mm are both read. Faces further apart aren't counted, so a
+#: load only they could hold is left held by nothing, and the joint opens: `FAIL`, never `OK`.
+PLAY = 2 * REACH
 #: A face with play is read in pieces no wider than this, in mm, and no more than `PIECES` of
 #: them a face, so where it closes along an edge is seen.
 PIECE, PIECES = 0.5, 4000

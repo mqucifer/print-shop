@@ -1130,6 +1130,20 @@ def test_with_more_play_than_the_tilt_closes_the_latch_is_levered_and_fails(cae:
     assert "more than the 2 mm of play read" in answer.text, "it turns far, and says so"
 
 
+def test_with_more_play_than_is_read_a_sideways_push_opens_the_joint(cae: Any) -> None:
+    """The middle latch's push with the socket 2.5 mm clear, more than the 2 mm `load` reads
+    as able to close: no flank is counted, the seats only push down the slide, and the latch's
+    faces are the latch's, so nothing holds the push. It fails, saying it opens and how much
+    play was read: wider play is never read as holding."""
+    answer = cae("load", "play/wide.json", "--weight", "2", *AT_SIDE)
+    assert answer.verdict == "FAIL" and answer.code == 1, answer.text
+    joint = answer.numbers["joints"][JOINT]
+    assert joint["opens"] is True and played(joint) == []
+    why = answer.record["why"]
+    assert "opens" in why and "Faces up to 2 mm apart are counted" in why
+    assert np.linalg.norm(joint["left_n"]) > 10
+
+
 def test_straight_down_a_slip_fit_taper_keeps_its_weight_on_its_seat(cae: Any) -> None:
     """The tapered tail seated on its tip, its socket 0.15 mm clear of its every other face,
     5 kg on the upper bar, 9 mm off the joint's middle. Read with only the faces drawn
