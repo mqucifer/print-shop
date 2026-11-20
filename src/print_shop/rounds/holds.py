@@ -25,8 +25,8 @@ read as spaces, and a trailing digit (`_1`) may be left off where that names one
 one given file is left unmatched by every name in the breakdown, a name still unmatched that says
 it's given, "(reference)", "(given)" or "(bought)" in brackets or at its end, is that file. A
 breakdown's own names have no brackets since mqucifer/print-shop#191, so "box reference" is the
-form a run sends now; the brackets are still read. A name still unmatched is a printed part. A `fixed` or `loose` fact ends the wait wherever the breakdown
-names its part, on either branch.
+form a run sends now; the brackets are still read. A name still unmatched is a printed part. A
+`fixed` or `loose` fact ends the wait wherever the breakdown names its part, on either branch.
 
 **Which of the model's own parts are held** (mqucifer/print-shop#90). On a design run a lid's snap
 onto a base was settled by eye, and the slide, run once, read the lid overlapping the base where it
