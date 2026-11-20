@@ -27,9 +27,12 @@ aren't in it.
 **A nut's pocket** (mqucifer/print-shop#168). Where an assembly's `through` joint states a
 `pocket`, its nut sits in one in the second part, held by its flats. The pocket is read from
 that part's own flat faces (`through.py`): the walls that stand on the hole's end and face
-each other across its axis. It fails where the nut doesn't go in, where it's wide enough for
-the nut to turn, and where its play isn't the file's. Second method: the fine mesh cut square
-to the bolt half way up the pocket, and the nearest that outline comes to the axis.
+each other across its axis. It fails where the nut doesn't go in, by its flats or by its
+corners, where it's wide enough for the nut to turn, and where its play isn't the file's. The
+corners (mqucifer/print-shop#183): the nut as a hexagon at its least size across them must clear
+every wall in some turn, its middle on the bolt's axis or as far off it as the bolt moves in its
+hole. Second method: the fine mesh cut square to the bolt half way up the pocket, the nearest
+that outline comes to the axis, and how far it reaches into the nut's hexagon placed the same.
 """
 
 from __future__ import annotations
@@ -42,7 +45,7 @@ import numpy as np
 from shapely.geometry import MultiPoint
 
 from . import through
-from .assembly import AXES, Assembly, Joint, read
+from .assembly import AXES, DIAMETER, Assembly, Joint, read
 from .faces import _cylinders, _flat_by_mesh, _flats, facing
 from .limits import over, said
 from .report import NoAnswer, Report
@@ -208,21 +211,28 @@ def _in_place(assembly: Assembly, name: str, part: Part) -> dict[str, Any]:
     return {"cylinders": cylinders, "planes": planes, "corners": corners, "triangles": triangles}
 
 
-def _nearest_by_mesh(triangles: np.ndarray, centre: np.ndarray, axis: np.ndarray) -> float | None:
-    """The nearest a part's surface comes to a point, in the plane through it square to
-    `axis`: each triangle's cut by that plane as a segment, and the point's distance to it."""
+def _section(triangles: np.ndarray, centre: np.ndarray, axis: np.ndarray) -> np.ndarray:
+    """A part's surface cut by the plane through `centre` square to `axis`: each triangle's cut
+    as a segment, its two ends from `centre`."""
     height = (triangles - centre) @ axis
     crossing = (height.min(axis=1) < 0) & (height.max(axis=1) > 0)
-    least: float | None = None
+    found = []
     for corners, heights in zip(triangles[crossing], height[crossing], strict=True):
         ends = []
         for i, j in ((0, 1), (1, 2), (2, 0)):
             if (heights[i] < 0) != (heights[j] < 0):
                 share = heights[i] / (heights[i] - heights[j])
                 ends.append(corners[i] + share * (corners[j] - corners[i]) - centre)
-        if len(ends) != 2:
-            continue
-        start, run = ends[0], ends[1] - ends[0]
+        if len(ends) == 2:
+            found.append(ends)
+    return np.asarray(found, dtype=float).reshape(-1, 2, 3)
+
+
+def _nearest_by_mesh(segments: np.ndarray) -> float | None:
+    """The nearest a section's segments come to the point they're measured from."""
+    least: float | None = None
+    for start, end in segments:
+        run = end - start
         length = float(run @ run)
         along_it = 0.0 if length < 1e-18 else min(1.0, max(0.0, float(-start @ run) / length))
         distance = float(np.linalg.norm(start + along_it * run))
@@ -301,11 +311,22 @@ def _pocket(
         return one
     across = found["across_flats_mm"]
     play = (across - nut.flats_mm) / 2
+    # The bolt moves in its hole as far as the narrower of the two holes lets it, and the nut
+    # with it (mqucifer/print-shop#183).
+    assert joint.bolt is not None
+    room = max(0.0, min(h["radius"] for h in holes) - DIAMETER[joint.bolt.thread] / 2)
+    goes = through.nut_goes_in(found, nut, room)
     wrong = through.nut_fits(found, nut, joint.pocket)
+    if not goes["goes_in"]:
+        wrong.insert(0, _corners_said(goes, nut, room))
     nearest = across / 2 - found["off_middle_mm"]
     origin = np.asarray(holes[1]["origin"], dtype=float)
     centre = origin + (seat + found["depth_mm"] / 2 - float(origin @ axis)) * axis
-    by_mesh = _nearest_by_mesh(faces[1]["triangles"], centre, axis)
+    cut = _section(faces[1]["triangles"], centre, axis)
+    by_mesh = _nearest_by_mesh(cut)
+    first, second = (np.asarray(b) for b in goes["basis"])
+    flat = np.stack([cut @ first, cut @ second], axis=2)
+    in_by_mesh = through.deepest_in(flat, nut.corners_mm, goes["turn_deg"], goes["centre"])
     one.update(
         across_flats_mm=across,
         play_mm=play,
@@ -313,6 +334,13 @@ def _pocket(
         walls=found["walls"],
         nearest_wall_mm=nearest,
         nearest_by_mesh_mm=by_mesh,
+        goes_in=goes["goes_in"],
+        turn_deg=goes["turn_deg"],
+        off_axis_mm=goes["off_axis_mm"],
+        room_in_hole_mm=room,
+        corners_met=goes["met"] if not goes["goes_in"] else [],
+        into_nut_mm=goes["deepest_mm"],
+        into_nut_by_mesh_mm=in_by_mesh,
         fits=not wrong,
     )
     proud = nut.height_mm - found["depth_mm"]
@@ -324,6 +352,21 @@ def _pocket(
         f"states {joint.pocket:g}; {found['depth_mm']:.2f} mm deep, so the nut "
         + (f"stands {proud:.2f} mm proud" if proud > 1e-6 else "sits within it")
     )
+    report.line(
+        f"{what}: the nut as a hexagon {nut.corners_mm:g} mm across its corners, its least, "
+        + (
+            f"goes in turned {goes['turn_deg']:.2f}°"
+            + (
+                f" with its middle {goes['off_axis_mm']:.3f} mm off the bolt's axis, of the "
+                f"{room:.3f} mm the bolt has in its hole"
+                if goes["off_axis_mm"] > 0
+                else " on the bolt's axis"
+            )
+            + f", as pockets.{joint.name}.{index}.goes_in"
+            if goes["goes_in"]
+            else f"doesn't go in, in any turn: {_met_said(goes)}"
+        )
+    )
     report.second(
         f"{what}, by the fine mesh cut square to the bolt half way up it: the outline's "
         + (
@@ -332,6 +375,10 @@ def _pocket(
             else f"nearest point is {by_mesh:.4f} mm from the axis, where its walls' planes put "
             f"the nearest at {nearest:.4f}"
         )
+        + "; with the nut's hexagon placed as its walls' reading puts it, the outline "
+        + _into_said(in_by_mesh)
+        + ", and the outline of its walls' planes "
+        + _into_said(goes["deepest_mm"])
     )
     if by_mesh is None or abs(by_mesh - nearest) > POCKET_AGREE:
         apart.append(
@@ -339,9 +386,51 @@ def _pocket(
             + ("not found" if by_mesh is None else f"{by_mesh:.4f} mm")
             + " by the mesh's section"
         )
+    elif abs(max(in_by_mesh, 0.0) - max(goes["deepest_mm"], 0.0)) > POCKET_AGREE:
+        apart.append(
+            f"{what}: with the nut's hexagon turned {goes['turn_deg']:.2f}°, the outline of its "
+            f"walls' planes {_into_said(goes['deepest_mm'])} and the mesh's section "
+            f"{_into_said(in_by_mesh)}"
+        )
     elif wrong:
         fails.append(f"{what}: " + "; and ".join(wrong))
     return one
+
+
+def _into_said(depth: float) -> str:
+    """How far into the nut's outline a pocket's walls reach, as words."""
+    if depth > through.SAME:
+        return f"reaches {depth:.4f} mm into it"
+    return f"is clear of it, {max(-depth, 0.0) + 0.0:.4f} mm at the nearest"
+
+
+def _met_said(goes: dict[str, Any]) -> str:
+    """Which walls a nut's corners pass, with its middle on the bolt's axis, and by how much."""
+    walls = "; ".join(
+        f"the wall {m['distance_mm']:.3f} mm from the axis toward "
+        f"({', '.join(f'{c + 0.0:.3g}' for c in m['toward'])}) by {m['by_mm']:.3f} mm"
+        for m in goes["met"]
+    )
+    return (
+        f"turned its best, {goes['turn_deg']:.2f}°, with its middle on the bolt's axis, its "
+        f"corners pass {walls}"
+    )
+
+
+def _corners_said(goes: dict[str, Any], nut: Any, room: float) -> str:
+    """Why a nut's corners don't go into its pocket."""
+    off = goes["least_off_axis_mm"]
+    return (
+        f"the nut {nut.name} is at least {nut.corners_mm:g} mm across its corners, and in no "
+        f"turn does it go between the pocket's walls: {_met_said(goes)}. "
+        + (
+            f"It would go in only {off:.3f} mm off the bolt's axis, and the bolt has "
+            f"{room:.3f} mm in its hole"
+            if off is not None
+            else f"Nowhere within the {room:.3f} mm the bolt has in its hole does it go in"
+        )
+        + ": the walls hold its flats, and its corners don't fit between them"
+    )
 
 
 def _parts(args: Any) -> list[tuple[str, str, str | None]]:
