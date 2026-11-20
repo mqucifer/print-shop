@@ -961,11 +961,16 @@ SHAPES: dict[str, dict[str, Any]] = {
                         "at": XYZ,
                         "depth_mm": NUMBER,
                         "fits": FLAG,
+                        # Whether the nut's corners go between its walls in some turn
+                        # (mqucifer/print-shop#183), at which turn, and how far off the axis.
+                        "goes_in": FLAG,
                         "nut": TEXT,
                         "nut_flats_mm": NUMBER,
+                        "off_axis_mm": NUMBER,
                         "part": TEXT,
                         "play_mm": NUMBER,
                         "stated_play_mm": NUMBER,
+                        "turn_deg": NUMBER,
                     }
                 )
             )

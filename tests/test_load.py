@@ -7,6 +7,7 @@ on planted parts in `test_bench.py`.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -315,6 +316,82 @@ def test_a_pocket_fits_where_the_nut_goes_in_cant_turn_and_the_play_is_the_file_
     assert len(wrong) == len(said), wrong
     for words, line in zip(said, wrong, strict=True):
         assert words in line
+
+
+def sides(across: float, count: int, turn: float = 0.0) -> list[dict]:  # type: ignore[type-arg]
+    """A pocket of `count` flat walls round the axis through (20, 20), each `across` / 2 from
+    it, the first facing it from `turn` degrees round from x, from z 8 to 12."""
+    found = []
+    for k in range(count):
+        angle = np.radians(turn + k * 360 / count)
+        out = np.array([np.cos(angle), np.sin(angle), 0.0])
+        found.append({"normal": -out, "at": np.array([20.0, 20, 10]) + across / 2 * out,
+                      "low": 8.0, "high": 12.0})  # fmt: skip
+    return found
+
+
+def test_a_nut_goes_in_only_where_its_corners_fit_between_the_walls_in_some_turn() -> None:
+    """mqucifer/print-shop#183: eval-table-1's frame pockets were 8.2 mm squares round M5 nuts,
+    which hold the nut's 8 mm flats with 0.1 mm of play and passed. The nut is at least 8.79 mm
+    across its corners, so in any turn it's at least 8.79 x cos 15° = 8.490 mm wide along one
+    side or the other: its corners pass each wall by 0.145, turned 15°. A hex 8.4 across takes
+    it square on, and an octagon 8.75 across turned 7.5° off a flat, where a corner reaches
+    4.395 x cos 7.5° = 4.357 mm; one 8.6 across doesn't."""
+    nut, hole = assembly.NUTS["m5-nut"], cylinder(2.75, 0, 8)
+    square = through.pocket(sides(8.2, 4), hole, 8.0, Z, 2 * nut.corners_mm)
+    assert isinstance(square, dict) and through.nut_fits(square, nut, 0.1) == []
+    found = through.nut_goes_in(square, nut, 0.25)
+    assert found["goes_in"] is False and found["least_off_axis_mm"] is None
+    assert found["turn_deg"] % 30 == pytest.approx(15, abs=0.01)
+    assert len(found["met"]) == 4
+    for met in found["met"]:
+        assert met["by_mm"] == pytest.approx(8.79 / 2 * math.cos(math.radians(15)) - 4.1, abs=1e-4)
+    for across, count, goes in ((8.4, 6, True), (8.0, 6, True), (8.75, 8, True),
+                                (8.6, 8, False), (8.5, 4, True)):  # fmt: skip
+        walls_ = sides(across, count)
+        pocket = through.pocket(walls_, hole, 8.0, Z, 2 * nut.corners_mm)
+        assert isinstance(pocket, dict)
+        assert through.nut_goes_in(pocket, nut, 0.0)["goes_in"] is goes, (across, count)
+    octagon = through.nut_goes_in(
+        through.pocket(sides(8.75, 8), hole, 8.0, Z, 2 * nut.corners_mm), nut, 0.0  # type: ignore[arg-type]
+    )
+    assert octagon["turn_deg"] % 15 == pytest.approx(7.5, abs=0.01)
+    assert -octagon["deepest_mm"] > 0
+
+
+def test_a_nut_goes_in_off_the_axis_only_as_far_as_the_bolt_moves_in_its_hole() -> None:
+    """A slot 8.4 mm wide whose closed end is 4.2 mm from the axis, as `bed/pocket-slot` is: with
+    its middle on the axis the nut's corners pass all three walls, turned their best, by
+    4.395 x cos 15° - 4.2 = 0.045 mm. Moved 0.085 mm toward the open end, which an M5 bolt in a
+    5.5 mm hole can, it goes in; a bolt with no room in its hole can't take it there."""
+    nut, hole = assembly.NUTS["m5-nut"], cylinder(2.75, 0, 8)
+    slot = [s for k, s in enumerate(sides(8.4, 4)) if k != 0]
+    pocket = through.pocket(slot, hole, 8.0, Z, 2 * nut.corners_mm)
+    assert isinstance(pocket, dict) and pocket["walls"] == 3
+    tight = through.nut_goes_in(pocket, nut, 0.0)
+    assert tight["goes_in"] is False and len(tight["met"]) == 3
+    assert tight["least_off_axis_mm"] == pytest.approx(0.0846, abs=1e-3)
+    assert {round(m["by_mm"], 3) for m in tight["met"]} == {0.045}
+    loose = through.nut_goes_in(pocket, nut, 0.25)
+    assert loose["goes_in"] is True and loose["met"] == []
+    assert loose["off_axis_mm"] == pytest.approx(0.0846, abs=1e-3)
+    assert loose["deepest_mm"] == pytest.approx(0, abs=1e-6)
+    # Toward the open end, +x.
+    first, second = (np.array(b) for b in loose["basis"])
+    centre = loose["centre"][0] * first + loose["centre"][1] * second
+    assert centre[0] == pytest.approx(0.0846, abs=1e-3)
+
+
+def test_how_far_a_wall_reaches_into_the_nut_is_read_the_same_from_any_segments() -> None:
+    """The second method's figure: a straight wall 4.1 mm from the middle of a hexagon 8.79
+    across its corners, turned so a corner points at it, cuts that corner off; the deepest
+    point of the wall inside is on the corner's line, 4.395 - 4.1 = 0.295 mm in from the
+    corner, and cos 30° x that from the sides either side of it."""
+    wall = np.array([[[4.1, -3.0], [4.1, 3.0]]])
+    depth = through.deepest_in(wall, 8.79, 0.0, (0.0, 0.0))
+    assert depth == pytest.approx(0.295 * math.cos(math.radians(30)), abs=1e-9)
+    clear = through.deepest_in(wall + [10.0, 0.0], 8.79, 0.0, (0.0, 0.0))
+    assert clear < 0
 
 
 # A joint's force, shared between its bolts
