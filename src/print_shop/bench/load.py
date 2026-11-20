@@ -49,7 +49,9 @@ neck and the socket's walls, each solved again by itself under the faces' pushes
 anything is solved it's taken apart the way it went together (`way_in.py`, mqucifer/print-shop#184
 and mqucifer/print-shop#185): its tail out of its socket against `slides` past nothing but its
 latch, and its latch's tab read by `bend` pushed as far as it has to go to get on. A joint that
-can't be put together fails whatever the load, and nothing is solved.
+can't be put together fails whatever the load, and nothing is solved. Its play is read as a
+print takes the load (mqucifer/print-shop#188): the faces that face each other across a fit's
+play close as the tail shifts and turns, and the latch's catch has its own.
 
 **Lifted** (`--lift PART`, mqucifer/print-shop#170), the assembly is held by that part's
 highest level and every other part hangs by its own weight: its solid volume at its material's
@@ -997,6 +999,13 @@ def run(args: Any, report: Report) -> None:
         for j in assembly.joints
         if j.kind == "dovetail"
     }
+    # And the faces of each that don't touch, and would close on each other across their play
+    # as the tail shifts and turns (mqucifer/print-shop#188).
+    plays = {
+        j.name: load_dovetail.play(assembly, j, placed)
+        for j in assembly.joints
+        if j.kind == "dovetail"
+    }
     # And each dovetail taken apart the way it went together: its tail out of its socket past
     # nothing but its latch, and its latch's tab bent as far as it has to be to let it in
     # (mqucifer/print-shop#184 and mqucifer/print-shop#185). A joint that can't be put together
@@ -1096,7 +1105,7 @@ def run(args: Any, report: Report) -> None:
     fails: list[str] = []
     apart: list[str] = []
     _parts(report, fine, coarse, fails, apart)
-    _joints(assembly, args, report, fine, coarse, fails, apart, (ways, placed, catches))
+    _joints(assembly, args, report, fine, coarse, fails, apart, (ways, placed, catches, plays))
     unread = [n for n, j in report.numbers["joints"].items() if j.get("insert_unread")]
     glued = [n for n, j in report.numbers["joints"].items() if j.get("glue_unread")]
     report.numbers["loads"] = fine["loads"]
@@ -1263,7 +1272,9 @@ def _joints(
     coarse: dict[str, Any],
     fails: list[str],
     apart: list[str],
-    through: tuple[dict[str, list[dict[str, Any]]], list[Any], dict[str, Any]],
+    through: tuple[
+        dict[str, list[dict[str, Any]]], list[Any], dict[str, Any], dict[str, list[dict[str, Any]]]
+    ],
 ) -> None:
     """Each joint's force, and whether what holds it can."""
     force = report.numbers["force_n"]
@@ -1320,12 +1331,12 @@ def _joints(
         if joint.kind == "bolted":
             _bolted(joint, report, one, read, other, statics, fails, apart)
         elif joint.kind in ("through", "dovetail"):
-            ways, placed, catches = through
+            ways, placed, catches, plays = through
             solids = [placed[[p.name for p in assembly.parts].index(n)] for n in joint.between]
             if joint.kind == "dovetail":
                 _dovetail(
                     assembly, joint, report, one, read, other, statics, fails, apart,
-                    catches[joint.name], solids,
+                    catches[joint.name], solids, plays[joint.name],
                 )  # fmt: skip
                 continue
             _through(
@@ -1625,6 +1636,8 @@ def _through(
 
 #: A dovetail's faces said one by one, the most pushed first: the rest are counted.
 FACES_SAID = 6
+#: A latch that holds more than this many times what draws its tail out is said to be levered.
+LEVER = 1.5
 
 
 def _pressed(parts: list[PartAt], way: np.ndarray) -> tuple[float, str, str]:
@@ -1646,11 +1659,18 @@ def _dovetail(
     apart: list[str],
     caught: dict[str, Any] | None,
     solids: list[Any],
+    played: list[dict[str, Any]],
 ) -> None:
     """A tapered dovetail (mqucifer/print-shop#170): which way the load drives its tail, its
     flanks and its seat as pushes alone, its latch against what's left to hold, and the tail's
     neck and the socket's walls solved again by themselves. The joint's answer is the worst of
-    them, named. Glue is counted nowhere."""
+    them, named. Glue is counted nowhere.
+
+    **Play** (mqucifer/print-shop#188): the faces that don't touch where the file puts them and
+    face each other across a fit's play (`played`, from `load_dovetail.play`) are faces too, a
+    gap apart: the tail shifts and turns as one body until its play closes, and the faces that
+    then touch carry the load. The latch's catch has its own play. The latch's tab is the
+    latch's, and none of its faces bears for the tail."""
     name = joint.name
     tail, socket = joint.between
     parts = [assembly.part(n) for n in joint.between]
@@ -1664,11 +1684,31 @@ def _dovetail(
         tail is the other way."""
         return -float(force @ slides)
 
+    def faced(pieces: Any) -> tuple[Any, ...]:
+        """The joint's faces in pieces: those that touch, less what's in the latch's box, and
+        those with play, each piece with its gap and which face it's on."""
+        centres, normals, areas, of_face = pieces
+        keep = np.ones(len(areas), dtype=bool)
+        if joint.latch is not None:
+            keep = np.array([not load_dovetail._in_box(c, joint.latch.arm) for c in centres],
+                            dtype=bool)  # fmt: skip
+        touching = int(of_face.max()) + 1 if len(of_face) else 0
+        every = [centres[keep]], [normals[keep]], [areas[keep]], [of_face[keep]]
+        gaps = [np.zeros(int(keep.sum()))]
+        for k, patch in enumerate(played):
+            count = len(patch["areas"])
+            for into, more in zip((*every, gaps), (
+                patch["centres"], np.tile(patch["normal"], (count, 1)), patch["areas"],
+                np.full(count, touching + k), np.full(count, patch["gap"]),
+            ), strict=True):  # fmt: skip
+                into.append(more)
+        return (*(np.concatenate(e) for e in every), np.concatenate(gaps))
+
     def bedded(pieces: Any, force: np.ndarray, moment: np.ndarray) -> tuple[Any, bool, Any]:
         """The faces' pushes that balance what the joint carries: by its flanks and its seat
         alone, and with its latch where those leave something over."""
-        centres, normals, areas, _ = pieces
-        plain = dovetail.bed(centres, normals, areas, force, moment, read["at"])
+        centres, normals, areas, _, gaps = pieces
+        plain = dovetail.bed(centres, normals, areas, force, moment, read["at"], gaps, stiff)
         if plain["holds"] or caught is None:
             return plain, False, areas
         more = load_dovetail.catch_patches(caught, slides)
@@ -1677,7 +1717,9 @@ def _dovetail(
             np.vstack([normals, more[1]]),
             np.concatenate([areas, more[2]]),
         )
-        return dovetail.bed(*every, force, moment, read["at"]), True, every[2]
+        clear = np.concatenate([gaps, more[3]])
+        found = dovetail.bed(*every, force, moment, read["at"], clear, stiff)
+        return found, True, every[2]
 
     arms = np.linalg.norm(read["pieces"][0] - read["at"], axis=1).max()
     if max(np.linalg.norm(read["force"]), np.linalg.norm(read["moment"]) / arms) <= (
@@ -1700,9 +1742,13 @@ def _dovetail(
         f"seat: this load drives it {way}, as joints.{name}.drive_n (more than 0 is into its "
         "seat)"
     )
-    seconds = {"on the coarser mesh": (other["pieces"], other["force"], other["moment"])}
+    pieces = faced(read["pieces"])
+    # How hard a face pushes back for each mm the tail presses into it: what decides whether
+    # a face with play closes.
+    stiff = dovetail.stiffness(parts[0].material.modulus_mpa, pieces[0], read["at"])
+    seconds = {"on the coarser mesh": (faced(other["pieces"]), other["force"], other["moment"])}
     if statics is not None:
-        seconds["by statics"] = (read["pieces"], *statics)
+        seconds["by statics"] = (pieces, *statics)
     for how, (_, force, _) in seconds.items():
         again = driven(force)
         if (again < -NOTHING * total) != leaving:
@@ -1711,16 +1757,18 @@ def _dovetail(
                 f"the solve and {again:.2f} N {how}, either side of leaving it"
             )
     # Its faces, pushing only.
-    result, latched, areas = bedded(read["pieces"], read["force"], read["moment"])
-    centres, normals, _, of_face = read["pieces"]
+    result, latched, areas = bedded(pieces, read["force"], read["moment"])
+    centres, normals, _, of_face, gaps = pieces
     count = len(of_face)
     push = result["pressure"] * areas
+    toward = result["pressed_mm"][:count]
     faces: list[dict[str, Any]] = []
     for index in sorted(set(of_face.tolist())):
         mine = of_face == index
         normal = (normals[mine] * areas[:count][mine, None]).sum(axis=0)
         normal = normal / np.linalg.norm(normal)
         limit, pressed, weaker = _pressed(parts, normal)
+        gap = float(gaps[mine].max())
         faces.append(
             {
                 "kind": dovetail.kind(normal, slides),
@@ -1734,38 +1782,77 @@ def _dovetail(
                 "pressure_limit_mpa": limit,
                 "pressed": pressed,
                 "pressed_part": weaker,
+                # Its play as drawn, and how much of it the tail's move closes.
+                "play_mm": gap,
+                "closed_mm": min(max(float(toward[mine].max()), 0.0), gap),
             }
         )  # fmt: skip
     faces.sort(key=lambda f: -f["push_n"])
     latch_n = float(push[count:].sum()) if latched else 0.0
+    turn = result["turn_rad"]
+    moves = result["shift_mm"] + np.cross(turn, centres - read["at"])
     one.update(
         faces=faces,
         opens=not result["holds"],
         latched=latched,
         left_n=_list(result["left_n"]),
         left_nmm=_list(result["left_nmm"]),
+        shift_mm=_list(result["shift_mm"]),
+        turn_deg=_list(np.degrees(turn)),
+        faces_move_mm=float(np.linalg.norm(moves, axis=1).max()),
     )
     pushing = [f for f in faces if f["push_n"] > NOTHING * total]
+    clear = [f for f in faces if f["play_mm"] > 0]
     report.line(
         f"  its {len(faces)} face(s) only push: {sum(f['kind'] == 'seat' for f in faces)} "
         f"seat(s), square to the slide, and {sum(f['kind'] == 'flank' for f in faces)} "
-        f"flank(s), along it. Under this load {len(pushing)} push"
+        f"flank(s), along it"
+        + (f", {len(clear)} of them clear of the socket by a fit's play, up to "
+           f"{max(f['play_mm'] for f in clear):.3f} mm" if clear else "")
+        + f". Under this load {len(pushing)} push"
         + (", and the rest have come away or carry nothing" if len(pushing) < len(faces) else "")
         + f", as joints.{name}.faces, the most pushed first"
-    )
+    )  # fmt: skip
     for face in pushing[:FACES_SAID]:
         report.line(
             f"    a {face['kind']} at {_xyz(face['at'])}, facing {_xyz(face['normal'])} out of "
-            f"{tail}: pushed by {face['push_n']:.2f} N over {face['bears_mm2']:.1f} of its "
+            f"{tail}"
+            + (f", its {face['play_mm']:.3f} mm of play closed" if face["play_mm"] > 0 else "")
+            + f": pushed by {face['push_n']:.2f} N over {face['bears_mm2']:.1f} of its "
             f"{face['area_mm2']:.1f} mm², {face['pressure_mpa']:.3f} MPa at most, against "
             f"{face['pressure_limit_mpa']:g} MPa pressed {face['pressed']} in "
             f"{face['pressed_part']}"
         )
     if len(pushing) > FACES_SAID:
         report.line(f"    and {len(pushing) - FACES_SAID} more, pushed less")
-    for how, (pieces, force, moment) in seconds.items():
-        again, again_latched, again_areas = bedded(pieces, force, moment)
-        held = float((again["pressure"] * again_areas)[len(pieces[3]) :].sum())
+    if clear or latched and caught is not None and caught["gap_mm"] > 0:
+        shut = [f for f in clear if f["push_n"] > NOTHING * total]
+        report.line(
+            "  it's read the way a print takes this load: the tail shifts and turns as one "
+            "body until its play closes, and only the faces that then touch push. It shifts "
+            f"{_xyz(result['shift_mm'])} mm and turns {np.degrees(np.linalg.norm(turn)):.2f}° "
+            f"about the joint's middle, its faces moving {one['faces_move_mm']:.3f} mm at "
+            f"most, as joints.{name}.shift_mm and turn_deg; {len(shut)} of the faces with play "
+            "close"
+            + (
+                ", and of the rest the nearest to closing came "
+                + ", ".join(
+                    f"{f['closed_mm']:.3f} of its {f['play_mm']:.3f} mm"
+                    for f in sorted((f for f in clear if f not in shut),
+                                    key=lambda f: f["closed_mm"] - f["play_mm"])[-2:][::-1]
+                )
+                if len(shut) < len(clear) else ""
+            )  # fmt: skip
+        )
+        if one["faces_move_mm"] > load_dovetail.PLAY:
+            report.line(
+                f"  its faces move {one['faces_move_mm']:.3f} mm at most, more than the "
+                f"{load_dovetail.PLAY:g} mm of play read: faces further apart than that, which "
+                "aren't read, may close first, and the turn is read as a small one"
+            )
+    for how, (again_pieces, force, moment) in seconds.items():
+        again, again_latched, again_areas = bedded(again_pieces, force, moment)
+        held = float((again["pressure"] * again_areas)[len(again_pieces[3]) :].sum())
         report.second(
             f"the dovetail joint {name}'s faces {how}: "
             + ("they balance what it carries" if again["holds"] else "they leave "
@@ -1802,6 +1889,10 @@ def _dovetail(
                     if along > NOTHING * total and caught is None
                     else ": a face there would have to pull"
                 )
+                + (
+                    f". Faces up to {load_dovetail.PLAY:g} mm apart are counted as the tail's "
+                    "play closes them, and none that would hold this does"
+                )
             )
         report.line(
             f"  pushing alone, its faces leave {left:.2f} N, {_xyz(result['left_n'])}, and "
@@ -1828,15 +1919,18 @@ def _dovetail(
             )
     press_source = parts[0].material.press_source
     if caught is not None:
-        _latch(assembly, joint, report, one, caught, latch_n, solids, shares, fails, apart)
+        drawn = -drive if leaving else 0.0
+        _latch(assembly, joint, report, one, caught, (latch_n, drawn), solids, shares, fails,
+               apart)  # fmt: skip
     carried = (read["force"], read["moment"], read["at"])
     for part, solid, role in zip(parts, solids, ("the tail's neck", "the socket's walls"),
                                  strict=True):  # fmt: skip
         with _quiet():
             fine, rough = (
                 load_dovetail.around(
-                    solid, part, joint, read["faces"], carried, caught if latched else None, by
-                )
+                    solid, part, joint, read["faces"], carried, caught if latched else None, by,
+                    played, stiff,
+                )  # fmt: skip
                 for by in (1.0, COARSER)
             )
         key = "neck" if part.name == tail else "walls"
@@ -1873,9 +1967,10 @@ def _dovetail(
     report.note(
         f"the dovetail joint {name} is read with no glue and no friction: each face pushes "
         "square to itself, in proportion to how far the tail is pressed into it, the tail "
-        "taken as stiff, which is a reading of its balance and not a contact solve. It's "
-        "read where the file puts it, seated, with no play: a tail drawn loose in its socket "
-        "meets it on fewer faces than a printed one does. Its way in, and its latch's tab "
+        "taken as stiff, which is a reading of its balance and not a contact solve. Its play "
+        "is read as a print takes it: the tail shifts and turns from where the file puts it "
+        f"until faces up to {load_dovetail.PLAY:g} mm apart close, on its flat faces only; a "
+        "curved face bears only where it's drawn touching. Its way in, and its latch's tab "
         "bent to let the tail by, are read before anything is solved, as ways_in"
     )
 
@@ -1917,15 +2012,16 @@ def _latch(
     report: Report,
     one: dict[str, Any],
     caught: dict[str, Any],
-    holds: float,
+    holding: tuple[float, float],
     solids: list[Any],
     shares: list[tuple[float, str]],
     fails: list[str],
     apart: list[str],
 ) -> None:
-    """A dovetail's latch against what it has to hold: the pressure on its catch, and its tab,
-    solved by itself with that pull on its hook."""
+    """A dovetail's latch against what it has to hold, of what draws the tail out, `holding`:
+    the pressure on its catch, and its tab, solved by itself with that pull on its hook."""
     name = joint.name
+    holds, drawn = holding
     parts = [assembly.part(n) for n in joint.between]
     on = assembly.part(caught["on"])
     solid = solids[joint.between.index(caught["on"])]
@@ -1957,6 +2053,14 @@ def _latch(
         f"the tail out, and what its flanks add as they're pushed. On its catch that's "
         f"{pressure:.3f} MPa, against {most:g} MPa pressed {pressed} in {weaker}"
     )
+    if drawn > 0 and holds > LEVER * drawn:
+        # Why it's more than the pull (mqucifer/print-shop#188): the faces it turns on.
+        report.line(
+            f"  that's {holds / drawn:.1f} times the {drawn:.2f} N that draws the tail out: "
+            "the tail turns on the faces that push beside the latch before any further off "
+            "closes, and the latch and those faces pull against each other, as a lever's "
+            "ends do"
+        )
     if over(pressure, most):
         fails.append(
             f"the dovetail joint {name}'s latch: its catch is pressed by "

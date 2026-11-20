@@ -24,6 +24,16 @@ open at its top. It slides in downward, so a weight on the upper bar seats it. W
 4 mm short of its seat each flank has 0.2 mm of play; with the socket 1 mm deeper than the tail
 it's seated on its flanks alone; mirrored top to bottom, the same weight drives it out; and
 with a tab hanging from the upper bar, its hook 0.6 mm into a window in the lower, it's latched.
+With the socket 0.15 mm clear all round, a slip fit's play, its flanks are clear and its tip
+seated.
+
+`play/` (mqucifer/print-shop#188): a block 40 x 40 x 20 on one 40 x 40 x 80, a square tail
+20 x 20 under the upper going 20 mm down into a square socket in the lower, its tip on the
+socket's floor and the blocks' faces touching round it, the socket's walls 0.15 mm clear of
+the tail, a slip fit's play. A slender tab hangs from the upper into a pocket in the lower's
+top, its hook in a window in the pocket's wall 0.2 mm under its ledge: near the +x edge, with
+seat beside it all round, or at the middle with the window's sides drawn touching the hook's.
+And the socket 1.5 mm clear, more play than a tilt closes.
 """
 
 from __future__ import annotations
@@ -267,6 +277,8 @@ TAIL_DEEP, NECK, FLARE = 6.0, (3.0, 5.0), 2.0
 #: `TAB_CLEAR` off the socket's bar, with a hook `HOOK_IN` into a window there, `HOOK_TALL`
 #: tall, `LATCH_PLAY` under the window's top.
 TAB_W, TAB_T, TAB_L, TAB_CLEAR, HOOK_IN, LATCH_PLAY = 5.0, 1.2, 20.0, 0.4, 0.6, 0.2
+#: A slip fit's play, in mm, each face of a socket clear of its tail's (mqucifer/print-shop#188).
+SLIP = 0.15
 #: The arm on the tail's bar that levers the tail off the lap face: how far out, and how tall.
 ARM_OUT, ARM_TALL = 60.0, 40.0
 
@@ -316,6 +328,12 @@ def dovetails() -> None:
     socket = socket_bar.cut(wedge(low, high, NECK))
     save(tail, out / "tail.step")
     save(socket, out / "socket.step")
+    # A slip fit (mqucifer/print-shop#188): the socket 0.15 mm clear of the tail's every face,
+    # each face moved square to itself, and its floor where it was, so the tail's tip is
+    # seated and its flanks clear.
+    slip = wedge(low, high, NECK).makeOffsetShape(SLIP, 1e-7, join=2)
+    slip = slip.common(box((-BAR_W, -SOCKET_T, low), (BAR_W, SOCKET_T, BAR_TOP)))
+    save(socket_bar.cut(slip), out / "socket-slip.step")
     # The socket 1 mm deeper than the tail is long: the tail's tip is clear, and it's seated on
     # its two flanks alone, as a wedge.
     slope = (NECK[1] - NECK[0]) / (high - low)
@@ -345,6 +363,7 @@ def dovetails() -> None:
     down: Rows = [{"between": ["upper", "lower"], "kind": "dovetail", "slides": "-z"}]
     assembly(out / "seat.json", pair("tail.step", "socket.step"), down, floor)
     assembly(out / "wedge.json", pair("tail.step", "socket-deep.step"), down, floor)
+    assembly(out / "slip.json", pair("tail.step", "socket-slip.step"), down, floor)
     # The file says the tail goes in upward, and its tip's seat faces the other way.
     lied: Rows = [{**down[0], "slides": "+z"}]
     assembly(out / "lied.json", pair("tail.step", "socket.step"), lied, floor)
@@ -403,10 +422,79 @@ def dovetails() -> None:
         assembly(out / f"neck-{name}.json", parts, down, back)
 
 
+#: The blocks with play (mqucifer/print-shop#188): each `BLOCK` square, the lower `LOWER_T` tall
+#: and the upper `UPPER_T` on it, the tail `TAIL_SIDE` square and `TAIL_LONG` long, the socket
+#: `SLIP` wider a side, or `LOOSE`.
+BLOCK, LOWER_T, UPPER_T, TAIL_SIDE, TAIL_LONG, LOOSE = 40.0, 80.0, 20.0, 20.0, 20.0, 1.5
+#: Their latch: a slender tab `SLENDER` thick, `TAB_W` wide, hanging `TAB_L` from the upper's
+#: underside into a pocket in the lower's top, `TAB_CLEAR` off the pocket's -y wall at y
+#: `WALL_AT`, its hook `HOOK_IN` into a window in that wall and `LATCH_PLAY` under its ledge,
+#: with `ROOM` behind it to bend. Near the +x edge it's at x `NEAR_EDGE`, with seat beside it all
+#: round; at the middle, the window's sides touch the hook's.
+SLENDER, WALL_AT, ROOM_BEHIND, NEAR_EDGE = 0.8, -15.0, 1.0, 14.0
+
+
+def plays() -> None:
+    """A square tail in a square socket with play, latched near an edge or at the middle."""
+    out = Path("play")
+    half, side = BLOCK / 2, TAIL_SIDE / 2
+    top = LOWER_T
+    seat = top - TAIL_LONG
+    foot = top - TAB_L
+    lower = box((-half, -half, 0), (half, half, top))
+    upper = box((-half, -half, top), (half, half, top + UPPER_T))
+    tail = box((-side, -side, seat), (side, side, top))
+    face = WALL_AT + TAB_CLEAR
+
+    def tabbed(at: float) -> Part.Shape:
+        arm = box((at - TAB_W / 2, face, foot), (at + TAB_W / 2, face + SLENDER, top))
+        hook = box((at - TAB_W / 2, WALL_AT - HOOK_IN, foot), (at + TAB_W / 2, face, foot + 2))
+        return arm.fuse(hook)
+
+    def socketed(play: float, at: float, wide: float) -> Part.Shape:
+        """The lower with its socket, the latch's pocket, and the window in the pocket's wall,
+        `wide` wider a side than the hook."""
+        socket = box((-side - play, -side - play, seat), (side + play, side + play, top))
+        pocket = box((at - TAB_W / 2 - 1, WALL_AT, foot - 0.5),
+                     (at + TAB_W / 2 + 1, face + SLENDER + ROOM_BEHIND, top))  # fmt: skip
+        window = box((at - TAB_W / 2 - wide, WALL_AT - 2 * HOOK_IN, foot - 0.5),
+                     (at + TAB_W / 2 + wide, WALL_AT, foot + 2 + LATCH_PLAY))  # fmt: skip
+        return lower.cut(socket).cut(pocket).cut(window)
+
+    for name, at in (("edge", NEAR_EDGE), ("middle", 0.0)):
+        save(upper.fuse(tail).fuse(tabbed(at)).removeSplitter(), out / f"upper-{name}.step")
+    save(socketed(SLIP, NEAR_EDGE, 1.0), out / "lower-edge.step")
+    save(socketed(SLIP, 0.0, 0.0), out / "lower-middle.step")
+    save(socketed(LOOSE, NEAR_EDGE, 1.0), out / "lower-loose.step")
+
+    def latched(at: float) -> Rows:
+        latch = {
+            "on": "upper",
+            "arm": [[at - TAB_W / 2 - 0.1, WALL_AT - HOOK_IN - 0.1, foot - 0.1],
+                    [at + TAB_W / 2 + 0.1, face + SLENDER + 0.1, top]],
+            "root": f"z={top:g}",
+        }  # fmt: skip
+        return [{"between": ["upper", "lower"], "kind": "dovetail", "slides": "-z",
+                 "latch": latch}]  # fmt: skip
+
+    floor = [{"plane": "z=0", "how": "fixed"}]
+    for name, upper_file, lower_file, at in (
+        ("edge", "upper-edge.step", "lower-edge.step", NEAR_EDGE),
+        ("middle", "upper-middle.step", "lower-middle.step", 0.0),
+        ("loose", "upper-edge.step", "lower-loose.step", NEAR_EDGE),
+    ):
+        parts = [
+            {"name": "upper", "file": upper_file, "layers": "z"},
+            {"name": "lower", "file": lower_file, "layers": "z"},
+        ]
+        assembly(out / f"{name}.json", parts, latched(at), floor)
+
+
 def main() -> None:
     loads()
     throughs()
     dovetails()
+    plays()
     out = Path("snap")
     seated = WALL_Y + ROOM
     save(base(seated), out / "box.step")
