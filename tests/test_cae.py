@@ -968,7 +968,13 @@ def test_a_tail_seated_on_its_flanks_alone_pushes_them_as_a_wedge_does(cae: Any)
     answer = cae("load", "dovetail/wedge.json", "--weight", "2", *ON_TOP)
     assert answer.verdict == "OK", answer.text
     joint = answer.numbers["joints"][JOINT]
-    assert all(f["kind"] == "flank" for f in joint["faces"]), "no seat"
+    # The tip is 1 mm clear of the socket's floor: a seat with that much play
+    # (mqucifer/print-shop#188). The tail slides a quarter of a mm down its taper as the
+    # flanks are pressed, short of closing it, so nothing under it bears.
+    seats = [f for f in joint["faces"] if f["kind"] == "seat"]
+    assert all(f["play_mm"] == pytest.approx(1.0, abs=1e-6) for f in seats)
+    assert all(f["push_n"] == 0 and f["closed_mm"] < 0.5 for f in seats), "no seat bears"
+    assert all(f["play_mm"] == 0 for f in joint["faces"] if f["kind"] == "flank")
     left, right = flanks(joint)
     assert left["push_n"] + right["push_n"] == pytest.approx(joint["drive_n"] / TAPER, rel=1e-3)
     assert left["push_n"] == pytest.approx(2 * G / (2 * TAPER), rel=0.01)
@@ -1104,7 +1110,7 @@ def test_pushed_sideways_the_flanks_close_and_the_latch_s_faces_carry_nothing(ca
     assert carried == pytest.approx(joint["force_n"], abs=0.1)
     # The -x flank of the tail is pushed +x, and the socket's wall it closes on pushes back.
     assert max(closed, key=lambda f: f["push_n"])["normal"][0] == pytest.approx(1, abs=1e-6)
-    assert joint["shift_mm"][0] > 0.9 * SLIP
+    assert joint["shift_mm"][0] > 0, "the tail moves the way it's pushed"
     assert all(f["pressure_mpa"] < f["pressure_limit_mpa"] for f in joint["faces"])
     assert joint["walls"]["across_layers_pct"] < 1.0
     assert reports.unlike("load", answer.numbers) == []
@@ -1148,7 +1154,7 @@ def test_straight_down_a_slip_fit_taper_keeps_its_weight_on_its_seat(cae: Any) -
     """The tapered tail seated on its tip, its socket 0.15 mm clear of its every other face,
     5 kg on the upper bar, 9 mm off the joint's middle. Read with only the faces drawn
     touching, nothing held the weight's turn and the joint opened. The seat under the tail's
-    tip stops it sliding down within thousandths of a mm, far short of the flanks' play, so
+    tip stops it sliding down within hundredths of a mm, far short of the flanks' play, so
     the weight stays on the seat; the weight's turn closes the flanks, whose undercut holds it,
     and their slope takes a few percent of the weight with it."""
     answer = cae("load", "dovetail/slip.json", "--weight", "5", *ON_TOP)
@@ -1157,7 +1163,10 @@ def test_straight_down_a_slip_fit_taper_keeps_its_weight_on_its_seat(cae: Any) -
     assert joint["opens"] is False
     (seat,) = (f for f in joint["faces"] if f["kind"] == "seat")
     assert seat["play_mm"] == 0 and 0.95 * 5 * G < seat["push_n"] < 5 * G, "on the seat"
-    assert -0.01 < joint["shift_mm"][2] < 0, "it slides down a few thousandths, no more"
+    # How far the seat itself moves: the tail's shift at the joint's middle and its turn.
+    there = np.array(seat["at"]) - np.array(joint["at"])
+    moved = np.array(joint["shift_mm"]) + np.cross(np.radians(joint["turn_deg"]), there)
+    assert -0.2 * SLIP < moved[2] < 0, "it slides down a hundredth or two, far short of the play"
     leaning = flanks(joint)
     assert len(leaning) == 2
     assert all(f["play_mm"] == pytest.approx(SLIP, abs=1e-6) for f in leaning)

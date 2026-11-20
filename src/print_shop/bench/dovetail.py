@@ -28,7 +28,7 @@ the tail has moved that far into it: the tail shifts or turns until its play clo
 faces that then touch carry the load. Read with only the faces drawn touching, an off-centre
 latch and the seat beside it levered against each other for many times the weight they held,
 and a sideways push landed on whatever small faces were drawn touching. A weight down the slide
-stays on the seat: the seat stops the tail within thousandths of a mm, far short of a flank's
+stays on the seat: the seat stops the tail within hundredths of a mm, far short of a flank's
 play. That needs the faces' own stiffness, a block of the plastic as deep as the joint is wide.
 
 **What nothing pushes back against** is left over, and that's how a dovetail fails: a load
@@ -69,7 +69,7 @@ def stiffness(modulus: float, centres: np.ndarray, about: np.ndarray) -> float:
     """How hard a face pushes back for each mm the tail presses into it, in MPa/mm: the
     plastic's stiffness over the joint's own reach from `about`, as a block of it that deep
     pressed square. What it changes is only how far the faces that bear are pressed, a few
-    thousandths of a mm here, which is what decides whether a face with play closes."""
+    hundredths of a mm here, which is what decides whether a face with play closes."""
     arms = np.asarray(centres, dtype=float).reshape(-1, 3) - np.asarray(about, dtype=float)
     reach = float(np.linalg.norm(arms, axis=1).max()) if len(arms) else 1.0
     return float(modulus) / (reach if reach > 0 else 1.0)
