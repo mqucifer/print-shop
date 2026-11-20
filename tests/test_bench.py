@@ -3045,6 +3045,7 @@ def test_fit_bed_holds_a_nut_s_pocket_to_its_nut(bench: Any) -> None:
     one 9.0 lets it turn, a round one has no flats, and a play that isn't the file's is said."""
     good = bench("fit-bed", "bed/pocket.json")
     assert good.verdict == "OK" and good.code == 0, good.text
+    assert good.numbers["pockets"]["lower+upper"][0]["goes_in"] is True
     assert "each of 1 nut's pocket(s) holds its nut by its flats" in good.record["why"]
     pocket = good.numbers["pockets"]["lower+upper"][0]
     assert pocket["across_flats_mm"] == pytest.approx(8.4, abs=1e-6)
@@ -3074,6 +3075,42 @@ def test_fit_bed_holds_a_nut_s_pocket_to_its_nut(bench: Any) -> None:
     # Stood on its side in the assembly, the pocket is read where it's put: the same 8.4 mm.
     turned = bench("fit-bed", "bed/pocket-turned.json").numbers["pockets"]["lower+upper"][0]
     assert turned["across_flats_mm"] == pytest.approx(8.4, abs=1e-6)
+    assert turned["goes_in"] is True
+
+
+def test_fit_bed_fails_a_pocket_the_nut_s_corners_can_t_enter(bench: Any) -> None:
+    """mqucifer/print-shop#183: eval-table-1's frame had 8.2 mm square pockets round M5 nuts,
+    and `fit-bed` passed them, 0.1 mm of play a side on the flats. The nut is at least 8.79 mm
+    across its corners, so turned its best, 15°, a corner passes each wall by 8.79 / 2 x
+    cos 15° - 4.1 = 0.145 mm, and no move of the bolt in its 5.5 mm hole takes it in. The hex
+    goes in square on; the slot only with the bolt 0.085 mm toward its open end, of the
+    0.25 mm the bolt has; and an octagon 8.75 across turned 7.5° off a flat."""
+    square = bench("fit-bed", "bed/pocket-square.json")
+    assert square.verdict == "FAIL" and square.code == 1, square.text
+    why = square.record["why"]
+    assert "is at least 8.79 mm across its corners, and in no turn does it go" in why, why
+    assert "turned its best, 15.00°, with its middle on the bolt's axis" in why
+    assert why.count("by 0.145 mm") == 4, why
+    assert "Nowhere within the 0.250 mm the bolt has in its hole does it go in" in why
+    assert "its play" not in why, "the flats' play is the file's"
+    pocket = square.numbers["pockets"]["lower+upper"][0]
+    assert pocket["goes_in"] is False and pocket["fits"] is False
+    assert pocket["into_nut_mm"] == pytest.approx(pocket["into_nut_by_mesh_mm"], abs=1e-3)
+    assert pocket["into_nut_mm"] > 0.1
+    assert reports.unlike("fit-bed", square.numbers) == []
+    # The turn, as far round from the nearest that's the same: a hex every 60°, and with an
+    # octagon's walls every 45° as well, every 15°.
+    for name, turn, every, off in (("pocket", 0.0, 60, 0.0), ("pocket-slot", None, 60, 0.085),
+                                   ("pocket-octagon", 7.5, 15, 0.0)):  # fmt: skip
+        answer = bench("fit-bed", f"bed/{name}.json")
+        assert answer.verdict == "OK", answer.text
+        read = answer.numbers["pockets"]["lower+upper"][0]
+        assert read["goes_in"] is True and read["room_in_hole_mm"] == pytest.approx(0.25)
+        assert read["off_axis_mm"] == pytest.approx(off, abs=1e-3), name
+        if turn is not None:
+            folded = read["turn_deg"] % every
+            assert min(folded, every - folded) == pytest.approx(turn, abs=0.01), name
+        assert max(read["into_nut_by_mesh_mm"], 0) == pytest.approx(0, abs=1e-3), name
 
 
 def test_fit_bed_holds_a_curved_part_to_the_bed_by_its_exact_solid_too(bench: Any) -> None:

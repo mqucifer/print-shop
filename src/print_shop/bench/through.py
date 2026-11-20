@@ -133,6 +133,8 @@ def pocket(
         distance = float((off - (off @ way) * way) @ normal)
         if 0 < distance <= reach:
             walls.append((distance, normal, high - seat))
+    # Each wall as the way from the axis to it and how far: what the nut's corners meet.
+    facing = [{"toward": (-normal).tolist(), "distance": d} for d, normal, _ in walls]
     pairs = []
     for i, (near, normal, depth) in enumerate(walls):
         for far, other, deep in walls[i + 1 :]:
@@ -151,6 +153,8 @@ def pocket(
         "depth_mm": min(p[2] for p in pairs),
         "walls": len(walls),
         "pairs": len(pairs),
+        "facing": facing,
+        "way": way.tolist(),
     }
 
 
@@ -176,3 +180,182 @@ def nut_fits(found: dict[str, Any], nut: Any, play: float) -> list[str]:
             f"assembly file states {play:g}"
         )
     return wrong
+
+
+# The nut going in (mqucifer/print-shop#183). Walls that hold a nut by its flats in pairs don't
+# say whether its corners get between the others: an 8.2 mm square holds an M5 nut's 8 mm flats
+# with 0.1 mm of play each way, and in no turn does the nut go into it.
+
+#: The turns a nut is read at first, in degrees: a hexagon is the same every 60°.
+TURN_STEP = 0.25
+#: Then round the best of those, this far either side and at this step, in degrees.
+TURN_NEAR, TURN_FINE = 0.5, 0.001
+
+
+def basis(way: Any) -> tuple[np.ndarray, np.ndarray]:
+    """Two directions square to `way` and to each other: the plane a pocket is read in."""
+    axis = np.asarray(way, dtype=float)
+    first = np.cross(axis, np.eye(3)[int(np.argmin(np.abs(axis)))])
+    first /= np.linalg.norm(first)
+    return first, np.cross(axis, first)
+
+
+def hexagon(corners: float, turn: float, centre: Any = (0.0, 0.0)) -> np.ndarray:
+    """A hexagon `corners` mm across its corners, its first corner `turn` degrees round from
+    the plane's first direction, about `centre`: its six corners in the plane."""
+    angles = np.radians(turn + 60.0 * np.arange(6))
+    return np.asarray(centre, dtype=float) + corners / 2 * np.stack(
+        [np.cos(angles), np.sin(angles)], axis=1
+    )
+
+
+def _clip(polygon: np.ndarray, toward: np.ndarray, limit: float) -> np.ndarray:
+    """What of a convex polygon lies where a point's reach `toward` is at most `limit`."""
+    if not len(polygon):
+        return polygon
+    reach = polygon @ toward - limit
+    kept: list[np.ndarray] = []
+    for i in range(len(polygon)):
+        here, there = polygon[i], polygon[(i + 1) % len(polygon)]
+        a, b = reach[i], reach[(i + 1) % len(polygon)]
+        if a <= 0:
+            kept.append(here)
+        if (a < 0 < b) or (b < 0 < a):
+            kept.append(here + a / (a - b) * (there - here))
+    return np.array(kept, dtype=float).reshape(-1, 2)
+
+
+def _region(toward: np.ndarray, limits: np.ndarray, size: float) -> np.ndarray:
+    """The points whose reach along each of `toward` is at most its limit, within a square
+    `size` mm either side of the axis: a convex polygon, empty where there are none."""
+    polygon = size * np.array([[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]])
+    for one, limit in zip(toward, limits, strict=True):
+        polygon = _clip(polygon, one, float(limit))
+    return polygon
+
+
+def _off_axis(polygon: np.ndarray) -> tuple[float, np.ndarray] | None:
+    """How far a convex polygon is from the axis, at the origin, and its nearest point: 0 and
+    the origin where the axis is in it, None where it's empty."""
+    if len(polygon) < 3:
+        return None
+    ends = np.roll(polygon, -1, axis=0)
+    runs = ends - polygon
+    # Inside where the origin is on the same side of every edge.
+    sides = runs[:, 0] * -polygon[:, 1] - runs[:, 1] * -polygon[:, 0]
+    if (sides >= -1e-12).all() or (sides <= 1e-12).all():
+        return 0.0, np.zeros(2)
+    lengths = (runs**2).sum(axis=1)
+    share = np.clip(-(polygon * runs).sum(axis=1) / np.where(lengths > 0, lengths, 1), 0, 1)
+    nearest = polygon + share[:, None] * runs
+    distance = np.linalg.norm(nearest, axis=1)
+    best = int(np.argmin(distance))
+    return float(distance[best]), nearest[best]
+
+
+def _reaches(toward: np.ndarray, corners: float, turns: np.ndarray) -> np.ndarray:
+    """How far a hexagon about the axis reaches toward each wall at each turn: its corner
+    furthest that way. One row per turn, one column per wall."""
+    angles = np.radians(turns[:, None] + 60.0 * np.arange(6)[None, :])
+    points = corners / 2 * np.stack([np.cos(angles), np.sin(angles)], axis=2)
+    return np.asarray((points @ toward.T).max(axis=1))
+
+
+def _best(score: Any, coarse: np.ndarray) -> tuple[float, float]:
+    """The turn at which `score`, a figure for each of an array of turns, is least: over the
+    coarse turns, then near the best of them."""
+    found = np.asarray(score(coarse))
+    start = float(coarse[int(np.argmin(found))])
+    near = np.arange(start - TURN_NEAR, start + TURN_NEAR + TURN_FINE / 2, TURN_FINE)
+    again = np.asarray(score(near))
+    best = int(np.argmin(again))
+    return float(near[best] % 60.0), float(again[best])
+
+
+def deepest_in(segments: np.ndarray, corners: float, turn: float, centre: Any) -> float:
+    """The furthest any point of `segments`, pairs of points in the plane, lies inside a
+    hexagon, from its nearest side: more than 0 where something is in the nut's way, and
+    otherwise how near the nearest comes, as less than 0."""
+    if not len(segments):
+        return -math.inf
+    inside = corners / 2 * math.cos(math.pi / 6)
+    angles = np.radians(turn + 30.0 + 60.0 * np.arange(6))
+    sides = np.stack([np.cos(angles), np.sin(angles)], axis=1)
+    start = np.asarray(segments[:, 0], dtype=float) - np.asarray(centre, dtype=float)
+    run = np.asarray(segments[:, 1], dtype=float) - np.asarray(segments[:, 0], dtype=float)
+    # Along each segment, its depth from each side is a straight line in t; the least of six
+    # is highest at an end or where two of them cross.
+    base = inside - start @ sides.T
+    slope = -(run @ sides.T)
+    candidates = [np.zeros(len(start)), np.ones(len(start))]
+    for i in range(6):
+        for j in range(i + 1, 6):
+            gap = slope[:, i] - slope[:, j]
+            with np.errstate(divide="ignore", invalid="ignore"):
+                t = np.where(np.abs(gap) > 1e-15, (base[:, j] - base[:, i]) / gap, 0.0)
+            candidates.append(np.clip(t, 0.0, 1.0))
+    t = np.stack(candidates, axis=1)
+    depth = (base[:, None, :] + t[:, :, None] * slope[:, None, :]).min(axis=2)
+    return float(depth.max())
+
+
+def nut_goes_in(found: dict[str, Any], nut: Any, room: float) -> dict[str, Any]:
+    """Whether `nut` goes into the pocket `pocket` found: its hexagon, at its least size across
+    its corners, within every wall in some turn, its middle on the bolt's axis or as far off
+    it as the bolt has `room` to move in its hole. Where it does, the turn and how far off the
+    axis; where it doesn't, the turn with its middle on the axis at which its corners pass
+    the walls least, each wall they pass, and by how much; and the walls' outline, for the
+    reading to be checked against."""
+    first, second = basis(found["way"])
+    toward = np.array([[np.dot(f["toward"], first), np.dot(f["toward"], second)]
+                       for f in found["facing"]])  # fmt: skip
+    toward /= np.linalg.norm(toward, axis=1)[:, None]
+    distance = np.array([f["distance"] for f in found["facing"]])
+    corners = nut.corners_mm
+    size = 2 * corners + room + max(distance.max(), 1.0)
+    coarse = np.arange(0.0, 60.0, TURN_STEP)
+    turn, worst = _best(lambda t: (_reaches(toward, corners, t) - distance).max(axis=1), coarse)
+    off, centre, least = 0.0, np.zeros(2), 0.0
+    if worst > SAME:
+
+        def shift(turns: np.ndarray) -> list[float]:
+            out = []
+            for one in turns:
+                limits = distance - _reaches(toward, corners, np.array([one]))[0]
+                at = _off_axis(_region(toward, limits, size))
+                out.append(math.inf if at is None else at[0])
+            return out
+
+        shifted, least = _best(shift, coarse)
+        if least <= room + SAME:
+            turn, off = shifted, least
+            limits = distance - _reaches(toward, corners, np.array([turn]))[0]
+            at = _off_axis(_region(toward, limits, size))
+            assert at is not None
+            centre = at[1]
+    goes_in = worst <= SAME or off > 0
+    reach = _reaches(toward, corners, np.array([turn]))[0] + toward @ centre
+    # A wall split into several faces in one plane is one wall.
+    met: dict[tuple[float, ...], dict[str, Any]] = {}
+    for i in range(len(distance)):
+        if reach[i] - distance[i] > SAME:
+            plane = tuple(np.round([*found["facing"][i]["toward"], distance[i]], 6).tolist())
+            met[plane] = {"toward": [round(c, 6) + 0.0 for c in found["facing"][i]["toward"]],
+                          "distance_mm": float(distance[i]),
+                          "by_mm": float(reach[i] - distance[i])}  # fmt: skip
+    outline = _region(toward, distance, size)
+    edges = (
+        np.stack([outline, np.roll(outline, -1, axis=0)], axis=1)
+        if len(outline)
+        else np.zeros((0, 2, 2))
+    )
+    return {
+        "goes_in": goes_in,
+        "turn_deg": turn,
+        "off_axis_mm": off,
+        "centre": centre.tolist(),
+        "least_off_axis_mm": None if goes_in or least == math.inf else least,
+        "met": sorted(met.values(), key=lambda m: -m["by_mm"]),
+        "deepest_mm": deepest_in(edges, corners, turn, centre),
+        "basis": (first.tolist(), second.tolist()),
+    }

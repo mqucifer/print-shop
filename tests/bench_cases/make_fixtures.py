@@ -1035,14 +1035,25 @@ def nut_pockets() -> None:
     slot = cq.Workplane("XY").rect(30, 8.4).extrude(4).translate((10.8, 0, 0))
     save(cut(slot), "bed/pocket-slot")
     save(cut(cq.Workplane("XY").circle(4.5).extrude(4)), "bed/pocket-round")
+    # The nut's corners (mqucifer/print-shop#183): a square 8.2 mm across holds its flats with
+    # 0.1 mm of play, and its least 8.79 mm across its corners is at least 8.79 x cos 15° =
+    # 8.49 wide along one side or the other in any turn, so it doesn't go in. An octagon 8.75
+    # mm across its flats takes it turned 7.5° off a flat, where it reaches 8.79 / 2 x cos 7.5°
+    # = 4.357 mm toward each wall, and it can't turn, at under 8.79.
+    save(cut(cq.Workplane("XY").rect(8.2, 8.2).extrude(4)), "bed/pocket-square")
+    save(cut(cq.Workplane("XY").polygon(8, 8.75, circumscribed=True).extrude(4)),
+         "bed/pocket-octagon")  # fmt: skip
     joint = {"between": ["lower", "upper"], "kind": "through", "bolt": "m5-8.8", "nut": "m5-nut",
              "washer": "m5-washer", "at": [[20, 20, 8]], "pocket": 0.2}  # fmt: skip
-    for name in ("pocket", "pocket-tight", "pocket-loose", "pocket-slot", "pocket-round"):
+    plays = {"pocket-square": 0.1, "pocket-octagon": 0.375}
+    for name in ("pocket", "pocket-tight", "pocket-loose", "pocket-slot", "pocket-round",
+                 "pocket-square", "pocket-octagon"):  # fmt: skip
         parts = [
             {"name": "lower", "file": "plate.step", "layers": "z"},
             {"name": "upper", "file": f"{name}.step", "at": [0, 0, 8], "layers": "z"},
         ]
-        Path(f"bed/{name}.json").write_text(json.dumps({"parts": parts, "joints": [joint]}))
+        stated = {**joint, "pocket": plays.get(name, 0.2)}
+        Path(f"bed/{name}.json").write_text(json.dumps({"parts": parts, "joints": [stated]}))
     # The same pair stood on its side: turned a quarter about x, so the bolt runs along y.
     parts = [
         {"name": "lower", "file": "plate.step", "turn": [["x", 90]], "layers": "z"},
