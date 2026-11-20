@@ -358,6 +358,36 @@ def dovetails() -> None:
     }  # fmt: skip
     latched: Rows = [{**down[0], "latch": latch}]
     assembly(out / "latch.json", pair("tail-latch.step", "socket-latch.step"), latched, floor)
+    # A latch that can't be fitted (mqucifer/print-shop#184), as eval-table-1's was: a solid
+    # stub, the hook alone, 1 mm long from a stiff post on the tail's bar, named as the latch's
+    # arm rooted on the post's face. It catches the window's ledge as the tab does, and on the
+    # way in it has to move 0.6 mm across y, which is along it: it can't bend that way.
+    post = box((-TAB_W / 2, TAB_CLEAR, foot), (TAB_W / 2, TAB_CLEAR + 2.6, low))
+    hook = box((-TAB_W / 2, -HOOK_IN, foot), (TAB_W / 2, TAB_CLEAR, foot + 2))
+    save(tail.fuse(post).fuse(hook).removeSplitter(), out / "tail-stub.step")
+    stub = {
+        "on": "upper",
+        "arm": [[-TAB_W / 2 - 0.1, -HOOK_IN - 0.1, foot - 0.1],
+                [TAB_W / 2 + 0.1, TAB_CLEAR, foot + 2.1]],
+        "root": f"y={TAB_CLEAR:g}",
+    }  # fmt: skip
+    stubbed: Rows = [{**down[0], "latch": stub}]
+    assembly(out / "stub.json", pair("tail-stub.step", "socket-latch.step"), stubbed, floor)
+    # A way in the file names that the parts can't take (mqucifer/print-shop#185), as
+    # eval-table-1's leg split was: a straight key 8 mm wide in a pocket 1 mm taller than it,
+    # whose mouth at the top of the socket's bar is 6 mm wide, narrower than the key. The file
+    # says it slides in -z, and its tip is seated, but it can't pass the mouth either way along
+    # z: the only way it comes out is +y, off the lap face, so it goes in -y.
+    key = box((-4, -TAIL_DEEP, low), (4, 0, low + 34))
+    save(tail_bar.fuse(key).removeSplitter(), out / "tail-key.step")
+    pocket = box((-4, -TAIL_DEEP, low), (4, 0, low + 35))
+    mouth = box((-3, -TAIL_DEEP, low + 35), (3, 0, high))
+    save(socket_bar.cut(pocket).cut(mouth), out / "socket-mouth.step")
+    assembly(out / "mouth.json", pair("tail-key.step", "socket-mouth.step"), down, floor)
+    # The same pair as it does go together, the file saying so: in -y.
+    sideways: Rows = [{**down[0], "slides": "-y"}]
+    assembly(out / "mouth-sideways.json", pair("tail-key.step", "socket-mouth.step"), sideways,
+             floor)  # fmt: skip
     # The same, the tail's bar printed standing: the tab's length is across its layers.
     standing = pair("tail-latch.step", "socket-latch.step", ("z", "y"))
     assembly(out / "latch-standing.json", standing, latched, floor)

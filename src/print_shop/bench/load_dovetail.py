@@ -19,6 +19,9 @@ latch has to hold put on the catch, pulling the hook the way the other part woul
 neck and the socket's walls** (`around`): each part alone, cut off round the joint and held
 where it's cut, with the faces' pushes on it. CalculiX solves each, linear and static, on
 second-order tetrahedra, and the strains are read as any part's are.
+
+**Whether it goes together** is `way_in.py`'s, read before all of this (mqucifer/print-shop#184
+and mqucifer/print-shop#185): a latch is only credited here once `bend` has read it getting on.
 """
 
 from __future__ import annotations
