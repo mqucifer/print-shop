@@ -22,7 +22,7 @@ from print_shop.rounds import end_checks, holds, lessons, needs, transcript
 from print_shop.rounds.box import Box
 from print_shop.rounds.needs import Need
 from print_shop.rounds.run import Run
-from tests.rounds_fakes import Scripted, tool
+from tests.rounds_fakes import Scripted, flat, tool
 from tests.test_cae import cae  # noqa: F401 - the session's planted parts, made once
 
 #: `cae` alone: CI's bench shards have only the first image, and its `cae` job has both.
@@ -267,6 +267,7 @@ def driven(root: Path, cae: Any, box: str) -> tuple[Run, Scripted]:  # noqa: F81
                 "done",
                 script="make.py",
                 part=["box.step", "lid.step"],
+                on_bed=flat("box.step", "lid.step"),
                 fix_shape="first",
                 closing="A box with a snap clip, and its lid.",
             )
