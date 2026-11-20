@@ -106,16 +106,17 @@ def test_a_join_refused_says_what_a_join_is_with_an_example() -> None:
     assert "with one part there's no join" in said
     _, wrong = breakdown.read(
         {
-            "parts": [{"name": "frame (leading)", "what": "x"}, {"name": "panes", "what": "y"}],
+            "parts": [{"name": "frame leading", "what": "x"}, {"name": "panes", "what": "y"}],
             "joins": [{"parts": ["frame", "panes"], "how": "held by its lips"}],
             "look": ["a"],
         }
     )
     # The part it means is named, once, and isn't also said to be in no join
-    # (mqucifer/print-shop#145).
+    # (mqucifer/print-shop#145). A name with brackets is refused itself since
+    # mqucifer/print-shop#191, so the part here is named without them.
     assert wrong == [
-        "a join names `frame`, and `parts` names it `frame (leading)`: a join names each part "
-        "exactly as `parts` does, so name it `frame (leading)` in the join, or `frame` in `parts`"
+        "a join names `frame`, and `parts` names it `frame leading`: a join names each part "
+        "exactly as `parts` does, so name it `frame leading` in the join, or `frame` in `parts`"
     ]
 
 

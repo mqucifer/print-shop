@@ -1828,6 +1828,29 @@ def test_a_cut_that_cant_be_read_says_so(bench: Any, cut: str, says: str) -> Non
     assert answer.verdict == "NO ANSWER" and says in answer.record["why"], answer.text
 
 
+@pytest.mark.parametrize(
+    ("cut", "either"),
+    [
+        ("z=10", "--cut z=9.95"),
+        ("z=0", "--cut z=0.05"),
+        ("x=10,y=2:8", "--cut x=9.95,y=2:8"),
+    ],
+)
+def test_a_cut_on_a_face_is_said_to_be_degenerate_with_one_to_copy(
+    bench: Any, cut: str, either: str
+) -> None:
+    """On the runs a cut on a face read as passing through no file, or as a FAIL of the mesh
+    against OCCT (mqucifer/print-shop#191). The cube is 0 to 10 mm along each axis, so only the
+    side of each face inside it is offered."""
+    answer = bench("render", "cube.step", "--views", "--cut", cut)
+    assert answer.verdict == "NO ANSWER", answer.text
+    why = answer.record["why"]
+    assert "lies exactly on a face of cube.step: a section on a face is degenerate" in why
+    assert why.endswith(f"Cut a little off it, such as {either}")
+    nearby = either.removeprefix("--cut ")
+    assert bench("render", "cube.step", "--views", "--cut", nearby).verdict == "OK"
+
+
 def test_a_sheet_of_variants_draws_cuts_and_colours_on_each_row(bench: Any) -> None:
     answer = bench(
         "render", "--variant", "A=glass-frame.step,glass-pane-1.step",

@@ -18,9 +18,11 @@ import json
 import re
 from typing import Any
 
-#: The most characters a part's name has.
+#: The most characters a part's name has. No parentheses, slashes or colons: on the runs a part
+#: named `frame (leading)` was named `frame` in its joins, and one named `pane/1` read as a path
+#: (mqucifer/print-shop#191). What a part is goes in its `what`.
 NAME_LENGTH = 48
-NAME = re.compile(rf"[A-Za-z0-9][A-Za-z0-9 ._()/-]{{0,{NAME_LENGTH - 1}}}")
+NAME = re.compile(rf"[A-Za-z0-9][A-Za-z0-9 ._-]{{0,{NAME_LENGTH - 1}}}")
 SHAPE = (
     '{"parts": [{"name": "plate", "what": "what it is and does"}, ...], "joins": [{"parts": '
     '["plate", "arm"], "how": "what holds or connects them"}, ...], "look": ["what the look rests '
@@ -66,17 +68,29 @@ def _kind(value: Any) -> str:
 
 
 def _not_in_a_name(name: str) -> str:
-    """Why a part's name isn't one: what in it isn't a letter, a digit, a space or `. _ ( ) / -`,
-    or that it's empty, starts with something else, or is too long."""
+    """Why a part's name isn't one: what in it isn't a letter, a digit, a space or `. _ -`, or
+    that it's empty, starts with something else, or is too long. A name with brackets, a slash
+    or a colon is said with one to copy, its words kept: `box reference` for `box (reference)`,
+    which still says it's given (`holds.GIVEN_SAID`), and `pane-1` for `pane/1`."""
     if not name:
         return "it's empty"
-    odd = sorted({c for c in name if not re.fullmatch(r"[A-Za-z0-9 ._()/-]", c)})
+    odd = sorted({c for c in name if not re.fullmatch(r"[A-Za-z0-9 ._-]", c)})
     if odd:
         named = ", ".join(f"`{c}`" for c in odd)
+        plain = _copyable(name)
+        if plain:
+            return f"{named} isn't in a name: name it `{plain}`"
         return f"{named} isn't in a name, so say it in words, as `and` for `+`"
     if len(name) > NAME_LENGTH:
         return f"it's {len(name)} characters, over {NAME_LENGTH}: what it is goes in `what`"
     return "it starts with a letter or a digit"
+
+
+def _copyable(name: str) -> str | None:
+    """A name with brackets, a slash or a colon as one that will do, its words kept, or None."""
+    plain = re.sub(r"[():]", " ", re.sub(r"\s*/\s*", "-", name))
+    plain = re.sub(r"\s+", " ", plain).strip()
+    return plain if plain != name and NAME.fullmatch(plain) else None
 
 
 def _meant(name: str, names: list[str]) -> str | None:
@@ -131,8 +145,8 @@ def read(raw: Any) -> tuple[dict[str, Any], list[str]]:
         name, what = str(entry.get("name") or "").strip(), str(entry.get("what") or "").strip()
         if not NAME.fullmatch(name):
             wrong.append(
-                f"a part's `name` is short, of letters, digits and spaces: not {name!r}, as "
-                f"{_not_in_a_name(name)}"
+                f"a part's `name` is short, of letters, digits, spaces, `.`, `_` and `-`, with no "
+                f"parentheses, slashes or colons: not {name!r}, as {_not_in_a_name(name)}"
             )
         elif name in [p["name"] for p in parts]:
             wrong.append(f"two parts are named `{name}`")
@@ -168,7 +182,15 @@ def read(raw: Any) -> tuple[dict[str, Any], list[str]]:
     for name, meant in otherwise.items():
         count = sum(name in join["parts"] for join in joins)
         times = f", in {count} joins" if count > 1 else ""
-        if meant is not None:
+        if meant is not None and not NAME.fullmatch(meant):
+            # The name `parts` gives won't do either, so it isn't offered for the join.
+            plain = _copyable(meant)
+            both = f"`{plain}` in both" if plain else f"`{name}` in `parts`"
+            wrong.append(
+                f"a join names `{name}`{times}, and `parts` names it `{meant}`: a join names "
+                f"each part exactly as `parts` does, so name it {both}"
+            )
+        elif meant is not None:
             wrong.append(
                 f"a join names `{name}`{times}, and `parts` names it `{meant}`: a join names "
                 f"each part exactly as `parts` does, so name it `{meant}` in the join, or "

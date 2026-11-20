@@ -232,7 +232,7 @@ def test_a_fixed_base_is_kept_and_a_fan_without_a_way_in_is_still_refused(tmp_pa
     assert one.plain()["fixed"] is True
     mixed = run.fact({**base, "fixed": True, "way_in": "-z"})
     assert mixed.reply == (
-        "Not kept: `fixed` says it's in place and never fitted, and `way_in` say how it's "
+        "Not kept: `fixed` says it's in place and never fitted, and `way_in` says how it's "
         "fitted. Drop them for a part fixed in place, or drop `fixed` if a part of yours holds it."
     )
     boxless = run.fact({**base, "box": "", "fixed": True})
@@ -843,9 +843,9 @@ def test_a_box_named_as_the_reference_and_fixed_lets_the_lid_plan_go(tmp_path: P
         "breakdown",
         parts=[
             {"name": "lid", "what": "a plate with tabs"},
-            {"name": "box (reference)", "what": "the given box, already printed"},
+            {"name": "box reference", "what": "the given box, already printed"},
         ],
-        joins=[{"parts": ["lid", "box (reference)"], "how": "the lid snaps onto the box"}],
+        joins=[{"parts": ["lid", "box reference"], "how": "the lid snaps onto the box"}],
         look=["flush with the box"],
         **{"from": "the request and references/base.step"},
     )
@@ -904,9 +904,9 @@ def test_a_pane_named_as_given_is_its_file_and_its_slide_reading_counts(tmp_path
         "breakdown",
         parts=[
             {"name": "frame", "what": "a frame with a lip"},
-            {"name": "pane (given)", "what": "the given pane"},
+            {"name": "pane given", "what": "the given pane"},
         ],
-        joins=[{"parts": ["frame", "pane (given)"], "how": "the frame's lip holds the pane"}],
+        joins=[{"parts": ["frame", "pane given"], "how": "the frame's lip holds the pane"}],
         look=["a thin frame"],
         **{"from": "the request and references/pane_1.step"},
     )

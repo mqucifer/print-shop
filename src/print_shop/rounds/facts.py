@@ -140,6 +140,16 @@ FIXED = (
 )
 
 
+def bought_shape(name: str) -> str:
+    """A bought part's fact to copy, named for its file (mqucifer/print-shop#191): on the runs
+    its fields were found one refusal at a time, and `way_in` was sent unsigned."""
+    return (
+        f'{{"name": "{name}", "text": "...", "from": "call N, bench info {name}", "box": "x '
+        '0-30, y 0-30, z 0-10", "way_in": "+z", "held_by": "what `clearance <your part> '
+        f'{name} --slide <the way out>` answers"}}'
+    )
+
+
 #: What a loose part's fact is, as a refusal says it.
 LOOSE = (
     "If it's a loose fit that nothing is meant to hold, give `loose: true` in place of `held_by`, "
@@ -229,8 +239,9 @@ def problem(args: dict[str, Any], references: set[str]) -> str:
     if fixed:
         fitted = [f"`{k}`" for k in ("way_in", "held_by") if k in shape]
         if fitted:
+            says = "says" if len(fitted) == 1 else "say"
             return (
-                f"`fixed` says it's in place and never fitted, and {' and '.join(fitted)} say "
+                f"`fixed` says it's in place and never fitted, and {' and '.join(fitted)} {says} "
                 "how it's fitted. Drop them for a part fixed in place, or drop `fixed` if a part "
                 "of yours holds it."
             )
@@ -250,10 +261,15 @@ def problem(args: dict[str, Any], references: set[str]) -> str:
             f"A bought part's fact gives its box, the way it goes in and what holds it: {named} "
             "missing. `box` is its bounds from `bench info`; `way_in` one of "
             f"{', '.join(WAYS)}; `held_by` the bench's `clearance --slide` answer, or what will "
-            f"hold it until something does. {FIXED} {LOOSE}"
+            f"hold it until something does: {bought_shape(name.strip())}. {FIXED} {LOOSE}"
         )
-    if str(args.get("way_in")).strip() not in WAYS:
-        return f"`way_in` is one of {', '.join(WAYS)}: not {args.get('way_in')!r}. {FIXED}"
+    way = str(args.get("way_in")).strip()
+    if way not in WAYS:
+        signed = f"+{way.lower()}" if way.lower() in ("x", "y", "z") else "+z"
+        return (
+            f"`way_in` is one of {', '.join(WAYS)}, the way it goes in, signed, such as "
+            f'`"way_in": "{signed}"`: not {args.get("way_in")!r}. {FIXED}'
+        )
     return ""
 
 

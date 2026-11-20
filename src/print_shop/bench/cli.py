@@ -24,7 +24,43 @@ class Parser(argparse.ArgumentParser):
 
     def parse_args(self, args: Any = None, namespace: Any = None) -> Any:
         given = sys.argv[1:] if args is None else list(args)
+        split = _label_split(given)
+        if split:
+            self.error(split)
         return super().parse_args(_coordinates_joined(given), namespace)
+
+
+#: What a file the bench reads ends with: a word after a `--look` that ends so is a file.
+FILES = (".step", ".stp", ".stl", ".brep", ".3mf", ".obj", ".json")
+
+
+def _label_split(given: list[str]) -> str:
+    """A `--look` label of several words, unquoted, so the shell split it: `--look
+    pane.step=blue:the cup` left `cup` over, and argparse said only "unrecognized arguments: cup"
+    (mqucifer/print-shop#191). Said with the label as one word."""
+    for k, word in enumerate(given):
+        if word == "--look" and k + 1 < len(given):
+            value, after = given[k + 1], k + 2
+        elif word.startswith("--look="):
+            value, after = word.removeprefix("--look="), k + 1
+        else:
+            continue
+        name, _, look = value.partition("=")
+        colour, colon, label = look.partition(":")
+        rest = []
+        while after < len(given) and not given[after].startswith("-"):
+            if given[after].lower().endswith(FILES):
+                break
+            rest.append(given[after])
+            after += 1
+        if colon and rest:
+            words = " ".join([label, *rest])
+            one = re.sub(r"[^A-Za-z0-9_-]+", "-", words).strip("-") or "label"
+            return (
+                f"render: a --look label is one word: `--look {name}={colour}:{one}`, not "
+                f"`{words}`, which the command line splits"
+            )
+    return ""
 
 
 def _coordinates_joined(given: list[str]) -> list[str]:
@@ -98,6 +134,30 @@ def _named_box(text: str) -> tuple[str, tuple[list[float], list[float]]]:
 def _box(text: str) -> tuple[list[float], list[float]]:
     """`-4,-17,10,4,-15,26`: a box's low and high corners."""
     return _named_box(f"box={text}")[1]
+
+
+def _axis(text: str) -> str:
+    """`z`: an axis, lower case and unsigned. On the runs `rays --axis Z` and `--axis +z` were
+    refused by argparse's choices alone (mqucifer/print-shop#191), so the refusal says the form
+    with one to copy, and that a way, where one is meant, is signed instead."""
+    if text not in AXES:
+        signed = ": a sign is a way's, as `--slide +z` takes it" if text[:1] in "+-" else ""
+        raise argparse.ArgumentTypeError(
+            f"an axis, lower case and unsigned, one of {' '.join(AXES)}, such as `z`: not "
+            f"{text!r}{signed}"
+        )
+    return text
+
+
+def _slide(text: str) -> str:
+    """`+z`: the way a part moves out, signed and lower case. Unsigned, `z` could be either way,
+    and the answer turns on it: a slide the wrong way reads NOT HELD (mqucifer/print-shop#191)."""
+    if text not in FACINGS:
+        raise argparse.ArgumentTypeError(
+            f"the way the last file moves out, signed and lower case, one of {' '.join(FACINGS)}, "
+            f"such as `--slide +z`: not {text!r}"
+        )
+    return text
 
 
 def _way(text: str) -> str:
@@ -181,6 +241,8 @@ def _lips(text: str) -> tuple[float, float]:
     return values[0], values[1]
 
 
+#: An axis, as `rays --axis`, `wall --axis`, `clearance --along` and `bend --layers` take it.
+AXES = ("x", "y", "z")
 #: The ways `edges --facing` takes, as `bench/edges.py` reads them.
 FACINGS = ("+x", "-x", "+y", "-y", "+z", "-z")
 
@@ -217,11 +279,11 @@ def parser() -> Parser:
         "its lip's play, read on the printed lid",
     )
     clearance.add_argument(
-        "--along", choices=("x", "y", "z"), default="z", help="the axis --lift moves it along"
+        "--along", type=_axis, default="z", metavar="AXIS", help="the axis --lift moves it along"
     )
     clearance.add_argument(
         "--slide",
-        choices=("+x", "-x", "+y", "-y", "+z", "-z"),
+        type=_slide,
         metavar="DIR",
         help="slide the last file named along DIR, one of +x -x +y -y +z -z, its way out, until "
         "it's clear of every other part: an overlap where it lies, then the first part it meets "
@@ -270,7 +332,7 @@ def parser() -> Parser:
     rays = sub.add_parser("rays", help="rays from a cut feature's axis, against a section")
     rays.add_argument("file")
     rays.add_argument("--centre", type=_point, required=True, help="x,y,z on the feature's axis")
-    rays.add_argument("--axis", choices=("x", "y", "z"), default="z")
+    rays.add_argument("--axis", type=_axis, default="z", metavar="AXIS")
     rays.add_argument("--d", type=float, help="the diameter wanted, for a round feature")
     rays.add_argument("--depth", type=float, help="how far it goes along the axis, signed")
     rays.add_argument("--tol", type=float, default=0.05, help="tolerance on those, in mm")
@@ -346,7 +408,7 @@ def parser() -> Parser:
     )
     wall.add_argument("file")
     wall.add_argument("--hole", type=_point, required=True, help="x,y,z: any point inside the hole")
-    wall.add_argument("--axis", choices=("x", "y", "z"), default="z", help="the hole's axis")
+    wall.add_argument("--axis", type=_axis, default="z", metavar="AXIS", help="the hole's axis")
     wall.add_argument("--min-wall", type=float, help="the least wall wanted, in mm: under is FAIL")
     wall.add_argument(
         "--z",
@@ -601,7 +663,8 @@ def parser() -> Parser:
     )
     bend.add_argument(
         "--layers",
-        choices=("x", "y", "z"),
+        type=_axis,
+        metavar="AXIS",
         default="z",
         help="the axis the layers are stacked along, as it's printed (z unless given)",
     )
