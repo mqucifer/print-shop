@@ -1,11 +1,13 @@
 """`pieces build --seam`, `pieces came`, `pieces ring` and `pieces seam` on a dome made from
-rules written here, in the bench's image with no network (mqucifer/print-shop#166). Needs
-`scripts/bench.py build`.
+rules written here, in the bench's image with no network (mqucifer/print-shop#166,
+mqucifer/print-shop#190). Needs `scripts/bench.py build`.
 
 A dome's slices join edge to edge: each long edge is bevelled by half the angle between the two
-slices there, a came strip clips over both edges, and a ring at the hem and the top takes every
-slice's edge. Right answers are arithmetic: the angle between two flat rows from their corners
-on the dome, by cross products worked out here in plain Python and not by the bench's code.
+slices there, a came strip inside the dome holds both edges by a rib in a groove in each
+slice's inner face, and a ring at the hem and the top takes every slice's edge. Right answers
+are arithmetic: the angle between two flat rows from their corners on the dome, by cross
+products worked out here in plain Python and not by the bench's code. The controls: today's
+strip, with a flange over each slice's outer face, and strips and grooves that don't fit.
 """
 
 from __future__ import annotations
@@ -30,8 +32,11 @@ BANDS = [
     {"pattern": "strip", "count": 2, "colours": ["red", "gold"]},
 ]
 THICK, PANE, PLAY, LIP = 3.0, 1.0, 0.25, 1.2
-#: The seam's gap, and a strip's play, grip and flange, as the tests state them.
-GAP, CAME_PLAY, GRIP, FLANGE = 0.6, 0.1, 0.05, (1.5, 0.8)
+#: The seam's gap; the Sponsor's PETG snap, a side; a groove in a slice's inner face, wide and
+#: deep; and two lines of a 0.4 mm nozzle, the least a strip may be anywhere.
+GAP, SNAP, GROOVE, LINES = 0.6, 0.10, (0.6, 0.4), 0.8
+#: Today's strip (mqucifer/print-shop#166): its play, its beads' grip and its flange.
+H_PLAY, H_GRIP, FLANGE = 0.1, 0.05, (1.5, 0.8)
 RINGS = ("rings/hem-ring.step", "rings/top-seat.step", "rings/top-cap.step")
 
 
@@ -130,6 +135,15 @@ def came(bench: Any) -> Answer:
 
 
 @pytest.fixture(scope="module")
+def h_came(bench: Any) -> Answer:
+    """Today's strip, an H with a flange over each slice's outer face: made, and named."""
+    return bench(  # type: ignore[no-any-return]
+        "pieces", "came", "lamp.slice-01.pieces.json", "--thickness", THICK, "--lip", LIP,
+        "--hold", "h", "--came-out", "h-came",
+    )  # fmt: skip
+
+
+@pytest.fixture(scope="module")
 def rings(bench: Any) -> Answer:
     made = bench("pieces", "ring", "lamp.slice-01.pieces.json", "--thickness", THICK)
     assert made.verdict == "OK" and made.code == 0, made.text
@@ -156,6 +170,20 @@ def test_each_length_is_bevelled_by_half_the_angle_between_the_two_slices_there(
     # face leans out by the pocket's floor: a nozzle's width of lead is left.
     assert 0.4 <= one.numbers["seam_wall_mm"] < LEAD / 2
     assert one.numbers["frame_solids"] == 1 and "bevel" in one.text
+    # A groove along each length of both edges, in the inner face, with a nozzle's width of
+    # lead between it and the seam's face and between it and the nearest pane's opening.
+    grooves = one.numbers["grooves"]
+    assert len(grooves) == 8 and {g["edge"] for g in grooves} == {"left", "right"}
+    assert one.numbers["groove_mm"] == pytest.approx(list(GROOVE))
+    for groove, join in zip(grooves[4:], joins(bench), strict=True):
+        face = GAP / 2.0 / math.cos(math.radians(join / 2.0))
+        assert groove["near_mm"] == pytest.approx(face + 0.4, abs=1e-4)
+        assert groove["far_mm"] - groove["near_mm"] == pytest.approx(GROOVE[0], abs=1e-4)
+    assert one.numbers["groove_wall_mm"] >= 0.4
+    # The pocket's floor is at 0.8: a groove 0.4 deep leaves two layers of lip over it.
+    assert one.numbers["lip_over_groove_mm"] == pytest.approx(0.4)
+    right, asked = one.numbers["grooves_read"]
+    assert right == asked == 4 * 8, "each groove read back from the frame"
 
 
 def test_two_neighbours_bent_and_placed_stand_face_to_face_a_web_apart(
@@ -206,6 +234,27 @@ def test_a_seam_that_would_cut_a_pocket_is_refused(bench: Any) -> None:
     assert refused.numbers["lead_needed_mm"] > LEAD
 
 
+def test_a_hold_that_would_cut_the_lead_beside_an_opening_is_refused_with_the_lead_it_needs(
+    bench: Any,
+) -> None:
+    """A lip of 0.9 brings each opening 0.3 mm nearer the seam: a groove 1.0 to 1.6 mm from the
+    cut's middle would leave about 0.25 mm of lead beside the opening, under a nozzle."""
+    refused = bench(
+        "pieces", "build", "lamp.slice-01.pieces.json", "--thickness", THICK, "--pane", PANE,
+        "--lip", "0.9,0.8", "--play", PLAY, "--border", LEAD / 2, "--seam",
+        "--build-out", "narrow-lip",
+    )  # fmt: skip
+    assert refused.verdict == "FAIL" and refused.code == 1, refused.text
+    assert "opening" in refused.record["why"] and "groove" in refused.record["why"]
+    assert not (bench.work / "narrow-lip" / "frame.step").exists(), "nothing is built"
+    rows = [r for r in refused.numbers["seam_refused"] if r["what"] == "opening"]
+    assert rows and all(r["wall_mm"] < r["least_mm"] == pytest.approx(0.4) for r in rows)
+    worst = min(r["wall_mm"] for r in rows)
+    # Each mm the lead is wider takes each opening half a mm further from the cut's middle.
+    assert refused.numbers["lead_needed_mm"] >= LEAD + 2 * (0.4 - worst) - 1e-9
+    assert refused.numbers["lead_needed_mm"] < LEAD + 1
+
+
 def test_a_slice_with_seams_still_passes_check_capture_pause_and_thin(
     bench: Any, pair: tuple[Answer, Answer]
 ) -> None:
@@ -230,42 +279,85 @@ def test_a_slice_with_seams_still_passes_check_capture_pause_and_thin(
     assert one.numbers["lips"] == square.numbers["lips"]
 
 
-def test_a_came_strip_for_each_length_has_its_channels_at_the_slices_angle(
+def test_a_came_strip_for_each_length_has_its_ribs_at_the_slices_angle(
     bench: Any, came: Answer
 ) -> None:
     strips = came.numbers["strips"]
     assert came.numbers["strips_count"] == len(strips) == 4
     for strip, join in zip(strips, joins(bench), strict=True):
-        assert strip["channels_deg"] == pytest.approx(join, abs=1e-4)
-        assert strip["channels_read_deg"] == pytest.approx(join, abs=0.01), "from its own faces"
-        assert strip["slot_read_mm"] == pytest.approx(THICK + CAME_PLAY, abs=0.005)
+        assert strip["join_deg"] == pytest.approx(join, abs=1e-4)
+        assert strip["read_deg"] == pytest.approx(join, abs=0.01), "from its own faces"
+        assert strip["read_mm"] == pytest.approx(GROOVE[0] + 2 * SNAP, abs=0.005)
         assert (bench.work / strip["file"]).exists()
-        # Laid on the bed: on two flanges' ends, its web a bridge a slot wide, nothing in the air.
+        # Nothing over the outer face: the rib stands 0.3 mm into the slice, the groove's 0.4
+        # less the room over it.
+        assert strip["over_outer_face_mm"] == 0
+        assert strip["into_slice_mm"] == pytest.approx(GROOVE[1] - 0.1, abs=1e-4)
+    assert came.numbers["rib_mm"] == pytest.approx(GROOVE[0] + 2 * SNAP)
+    assert came.numbers["grip_mm"] == pytest.approx(SNAP)
+    assert came.numbers["over_outer_face_mm"] == 0
+
+
+def test_each_strip_prints_as_laid_on_its_bar_with_nothing_under_two_lines(came: Answer) -> None:
+    """Today's strip stood on two flanges' ends, 0.8 mm each, and its web was a bridge 0.4 mm
+    thick. A strip now lies on its bar's flat underside, and nothing in it is under two
+    lines."""
+    for strip in came.numbers["strips"]:
         prints = strip["prints"]
         assert prints["fits_bed"] and not prints["supports"] and not prints["unsupported"]
-        assert prints["bridges"] == 1 and THICK < prints["bridge_mm"] < THICK + 0.5
-        assert prints["on_bed_mm2"] > 0
-    assert came.numbers["slot_mm"] == pytest.approx(THICK + CAME_PLAY)
-    assert came.numbers["mouth_mm"] == pytest.approx(THICK - 2 * GRIP)
-    assert came.numbers["web_mm"] == pytest.approx(GAP - 2 * CAME_PLAY)
-    assert came.numbers["flange_wide_mm"] > LEAD, "wider than the lead line"
+        assert prints["bridges"] == 0
+        # On more than two lines along its length: its bar, across, by its length.
+        assert prints["on_bed_mm2"] > 2 * LINES * strip["length_mm"]
+        assert prints["on_bed_mm2"] == pytest.approx(
+            strip["underside_mm"] * strip["length_mm"], rel=1e-3
+        )
+        assert strip["least_feature_mm"] >= LINES - 1e-6
+    assert came.numbers["least_feature_mm"] >= LINES - 1e-6
+    assert came.numbers["on_bed_mm2"] > 0
 
 
-def test_a_strip_on_two_placed_slices_grips_both_and_covers_no_opening(
+def test_two_slices_with_their_strips_read_ok_with_nothing_over_either_outer_face(
     bench: Any, frames: list[str], came: Answer
 ) -> None:
     met = seam(bench, frames, "--came", came.numbers["placed"])
     assert met.verdict == "OK" and met.code == 0, met.text
-    assert met.numbers["strips_count"] == met.numbers["strips_gripping"] == 4
-    assert met.numbers["press_mm"] == pytest.approx(GRIP, abs=0.01)
-    assert met.numbers["flanges_over_openings"] == 0
+    assert met.numbers["strips_count"] == met.numbers["strips_holding"] == 4
+    assert met.numbers["over_outer_face"] == 0 and met.numbers["over_outer_face_mm"] == 0
+    for strip in met.numbers["strips"]:
+        assert strip["holds"] == ["a rib in its groove", "a rib in its groove"]
+        assert not strip["in_gap"], "nothing in the gap"
+        for side in strip["sides"]:
+            assert side["outer_probed"] == 0, "and nothing past the outer face by points"
+            assert side["rib"]["in_groove"]
+    # Each rib is 0.10 mm a side wider than its groove.
+    assert met.numbers["press_mm"] == pytest.approx(SNAP, abs=0.005)
+    assert met.numbers["over_inner_face_mm"] >= LINES
+    assert met.numbers["strips_over_openings"] == 0
 
 
-def test_a_flange_that_would_lie_over_a_panes_opening_is_refused_and_found(
+def test_todays_outer_flange_is_found_over_the_outer_face(
+    bench: Any, frames: list[str], h_came: Answer
+) -> None:
+    """The control: mqucifer/print-shop#166's strip, an H with a flange 0.8 mm thick over each
+    slice's outer face, 0.05 mm of play under it. `came` names it, and `seam` finds it there."""
+    assert h_came.verdict == "FAIL" and "outer face" in h_came.record["why"], h_came.text
+    assert h_came.numbers["over_outer_face_mm"] == pytest.approx(H_PLAY / 2 + FLANGE[1], abs=1e-3)
+    # Its web, the gap less the play each side, is one line, and its beads are less.
+    assert h_came.numbers["least_feature_mm"] <= GAP - 2 * H_PLAY + 1e-6
+    met = seam(bench, frames, "--came", h_came.numbers["placed"])
+    assert met.verdict == "FAIL" and "outer face" in met.record["why"], met.text
+    assert met.numbers["over_outer_face"] == 4
+    assert met.numbers["over_outer_face_mm"] == pytest.approx(H_PLAY / 2 + FLANGE[1], abs=0.01)
+    for strip in met.numbers["strips"]:
+        assert strip["holds"] == ["a channel round its edge", "a channel round its edge"]
+        assert strip["over_outer_probed"], "found past the outer face by points too"
+
+
+def test_a_strip_that_would_lie_over_a_panes_opening_is_refused_and_found(
     bench: Any, frames: list[str]
 ) -> None:
     wide = ("pieces", "came", "lamp.slice-01.pieces.json", "--thickness", THICK,
-            "--flange", "3.5,0.8", "--came-out", "wide")  # fmt: skip
+            "--bar", "3.5,0.8", "--came-out", "wide")  # fmt: skip
     refused = bench(*wide, "--lip", LIP)
     assert refused.verdict == "FAIL" and "opening" in refused.record["why"], refused.text
     # Told the lip is wider than it is, `came` makes them, and they're found on the slices.
@@ -273,16 +365,19 @@ def test_a_flange_that_would_lie_over_a_panes_opening_is_refused_and_found(
     assert made.verdict == "OK", made.text
     met = seam(bench, frames, "--came", made.numbers["placed"])
     assert met.verdict == "FAIL" and "opening" in met.record["why"], met.text
-    assert met.numbers["flanges_over_openings"] > 0
+    assert met.numbers["strips_over_openings"] > 0
 
 
-def test_a_strip_made_for_a_thinner_frame_is_found(bench: Any, frames: list[str]) -> None:
-    thin = bench(
-        "pieces", "came", "lamp.slice-01.pieces.json", "--thickness", 2.4, "--lip", LIP,
-        "--came-out", "thin",
+def test_a_strip_made_for_another_gap_is_found(bench: Any, frames: list[str]) -> None:
+    """Made for a gap of 1.0, each rib stands 0.2 mm further from the cut's middle than its
+    groove: it goes 0.3 mm into the groove's far wall. Its bar is held to the reach the
+    openings leave, so it's the rib that's found."""
+    other = bench(
+        "pieces", "came", "lamp.slice-01.pieces.json", "--thickness", THICK, "--lip", LIP,
+        "--gap", 1.0, "--bar", "1.8,0.8", "--came-out", "other-gap",
     )  # fmt: skip
-    assert thin.verdict == "OK", thin.text
-    met = seam(bench, frames, "--came", thin.numbers["placed"])
+    assert other.verdict == "OK", other.text
+    met = seam(bench, frames, "--came", other.numbers["placed"])
     assert met.verdict == "INTERFERE" and "strip" in met.record["why"], met.text
     assert met.numbers["press_mm"] > 0.2
 

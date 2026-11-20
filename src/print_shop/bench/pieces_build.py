@@ -45,9 +45,10 @@ times its height; the built curves' distance from the map's outline, at points a
 each pane's distance from its pocket's wall, at points round it.
 
 **Seams.** With `--seam`, a dome's slice has its two long edges built as seams, each straight
-length bevelled by half the angle between the two slices there and set back half the gap a
-came strip's web takes (`pieces_seam.py`, mqucifer/print-shop#166). The frame's side is then
-set by each cut, and `--border` is the frame at the top and the hem.
+length bevelled by half the angle between the two slices there and set back half the seam's gap
+(`pieces_seam.py`, mqucifer/print-shop#166), with a groove along each in the inner face for a
+came strip's rib, so the seam is held from the inside only (mqucifer/print-shop#190). The
+frame's side is then set by each cut, and `--border` is the frame at the top and the hem.
 """
 
 from __future__ import annotations
@@ -67,6 +68,9 @@ from .piecemap import Map, Piece
 from .pieces_check import gaps
 from .pieces_seam import (
     faces_read,
+    groove_plan,
+    grooves_read,
+    grooves_volume,
     refuse_seams,
     say_seams,
     seam_checks,
@@ -1339,6 +1343,10 @@ def run_build(args: Any, report: Report) -> None:
             + ". Fix each in the map as its line says, and build again",
         )
         return
+    if seam is not None:
+        groove_plan(
+            seam, found, shapely.union_all([row["curves"]["opening_2d"] for row in rows]), z
+        )
     if seam is not None and seam.refused:
         refuse_seams(seam, report)
         return
@@ -1363,7 +1371,7 @@ def run_build(args: Any, report: Report) -> None:
     expected = (
         outline.area * args.thickness
         if seam is None
-        else volume_by_sections(seam, outline)
+        else volume_by_sections(seam, outline) - grooves_volume(seam)
     )
     pocket_tall = z["pocket_top_z"] - z["pocket_floor_z"]
     pane_volumes: list[tuple[int, float, float]] = []
@@ -1589,6 +1597,18 @@ def run_build(args: Any, report: Report) -> None:
             differs.append(
                 f"a seam's face in the frame is {seam_off:.3f}° off its bevel, or isn't there"
             )
+        right, asked = grooves_read(frame, seam)
+        report.numbers["grooves_read"] = [right, asked]
+        report.second(
+            f"each groove read back from the frame at its middle, by points: empty where the "
+            f"rib goes, and solid beside it on both sides and over it: {right} of {asked} "
+            "point(s) read so"
+        )
+        if right != asked:
+            differs.append(
+                f"{asked - right} of {asked} point(s) round the grooves read otherwise in the "
+                "frame than they were cut"
+            )
     if len(solids) != 1:
         differs.append(f"the frame is {len(solids)} solids, not one body")
     if abs(volume - expected) > VOLUME_OFF * expected:
@@ -1621,7 +1641,7 @@ def run_build(args: Any, report: Report) -> None:
         + (
             f"; its two long edges are seams, bevelled at each of "
             f"{len(seam.edges[0].lengths)} length(s), each face {seam.back:g} mm back from the "
-            "cut's middle"
+            "cut's middle, with a groove along each in the inner face for a came strip's rib"
             if seam is not None
             else ""
         ),
