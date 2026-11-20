@@ -22,7 +22,7 @@ import pytest
 from print_shop.bench import cli
 from print_shop.rounds import breakdown, facts, needs, tools, toolsets
 from print_shop.rounds.run import CLOSE_VIEWS, Run
-from tests.rounds_fakes import Scripted, tool
+from tests.rounds_fakes import Scripted, flat, tool
 from tests.test_friction import Drawing
 from tests.test_intake import (
     BRACKET,
@@ -280,7 +280,7 @@ def test_done_as_its_description_says_is_taken_and_checked(tmp_path: Path) -> No
         tool(
             "done",
             part=["shade.step", "ring.step"],
-            on_bed={"ring.step": "-z"},
+            on_bed=flat("shade.step", "ring.step"),
             groups=[{"name": "both", "files": ["shade.step", "ring.step"]}],
             **ENDING,
         ),
