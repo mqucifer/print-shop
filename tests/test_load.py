@@ -580,6 +580,142 @@ def test_a_latch_is_one_more_face_that_pushes_the_tail_home() -> None:
     assert found["pressure"][-1] * 3.0 == pytest.approx(4.9, rel=1e-3)
 
 
+# Play (mqucifer/print-shop#188)
+
+
+def square(
+    play: float, latch_at: tuple[float, float] | None = None, latch_play: float = 0.2
+) -> Any:
+    """A square tail 20 x 20 going 20 mm down into a block 40 x 40, by pieces of 0.25 mm²:
+    its tip on the socket's floor at z 20 and the blocks' faces round it at z 40, touching,
+    and its four flanks `play` clear of the socket's walls. With `latch_at`, a catch of 3 mm²
+    at that x and y, at z 22, that pushes the tail home once its own play has closed. Each
+    piece's centre, its way out of the tail, its area and its play, and where each face's
+    pieces start."""
+    step = 0.5
+    centres: list[np.ndarray] = []
+    normals: list[np.ndarray] = []
+    gaps: list[np.ndarray] = []
+    starts: dict[str, int] = {}
+
+    def face(name: str, corner: Any, u: Any, v: Any, size: tuple[float, float],
+             normal: Any, gap: float, keep: Any = None) -> None:  # fmt: skip
+        a, b = np.meshgrid(np.arange(step / 2, size[0], step), np.arange(step / 2, size[1], step))
+        at = np.asarray(corner) + a.ravel()[:, None] * u + b.ravel()[:, None] * v
+        if keep is not None:
+            at = at[keep(at)]
+        starts[name] = sum(len(c) for c in centres)
+        centres.append(at)
+        normals.append(np.tile(normal, (len(at), 1)))
+        gaps.append(np.full(len(at), gap))
+
+    x, y, z = np.eye(3)
+    face("tip", [-10, -10, 20], x, y, (20, 20), -z, 0.0)
+    face("shoulder", [-20, -20, 40], x, y, (40, 40), -z, 0.0,
+         lambda at: np.abs(at[:, :2]).max(axis=1) > 10 + play)  # fmt: skip
+    for name, corner, along, normal in (
+        ("+x", [10, -10, 20], y, x), ("-x", [-10, -10, 20], y, -x),
+        ("+y", [-10, 10, 20], x, y), ("-y", [-10, -10, 20], x, -y),
+    ):  # fmt: skip
+        face(name, corner, along, z, (20, 20), normal, play)
+    if latch_at is not None:
+        starts["latch"] = sum(len(c) for c in centres)
+        centres.append(np.array([[*latch_at, 22.0]]))
+        normals.append(np.array([[0.0, 0.0, 1.0]]))
+        gaps.append(np.array([latch_play]))
+    areas = np.full(sum(len(c) for c in centres), step**2)
+    if latch_at is not None:
+        areas[-1] = 3.0
+    return np.vstack(centres), np.vstack(normals), areas, np.concatenate(gaps), starts
+
+
+def by_face(push: np.ndarray, starts: dict[str, int]) -> dict[str, float]:
+    ends = [*list(starts.values())[1:], len(push)]
+    return {k: float(push[a:b].sum()) for (k, a), b in zip(starts.items(), ends, strict=True)}
+
+
+ABOUT = np.array([0.0, 0.0, 35.0])
+
+
+def test_a_tail_with_play_shifts_until_a_flank_closes_and_that_flank_takes_the_push() -> None:
+    """Pushed sideways, +x, so the socket pushes back -x, a tail whose flanks are clear by
+    0.15 mm can't be held by its seats: they only push square to themselves. So it shifts
+    0.15 mm, the +x flank closes, and that flank takes the push. Read with no play, nothing
+    along x touches, and it's left over."""
+    centres, normals, areas, gaps, starts = square(0.15)
+    stiff = dovetail.stiffness(1500, centres, ABOUT)
+    found = dovetail.bed(centres, normals, areas, np.array([-20.0, 0, 0]), np.zeros(3), ABOUT,
+                         gaps, stiff)  # fmt: skip
+    push = by_face(found["pressure"] * areas, starts)
+    assert found["holds"]
+    assert push["+x"] == pytest.approx(20.0, rel=1e-3) and push["-x"] == 0
+    assert 0.15 < found["shift_mm"][0] < 0.16, "its play, and a little more as the flank bears"
+    assert found["pressed_mm"][starts["+x"]:starts["-x"]].max() > 0.15
+    drawn_tight = dovetail.bed(centres[:starts["+x"]], normals[:starts["+x"]],
+                               areas[:starts["+x"]], np.array([-20.0, 0, 0]), np.zeros(3),
+                               ABOUT)  # fmt: skip
+    assert not drawn_tight["holds"], "today's reading: the flanks don't touch, so don't count"
+
+
+def test_a_weight_on_a_seat_stays_on_it_and_the_flanks_play_doesnt_close() -> None:
+    """Pushed straight down its slide, the tail's tip and the blocks' faces round it stop it
+    within a few thousandths of a mm, far short of closing 0.15 mm of play: the weight stays on
+    the seats, and the flanks carry nothing."""
+    centres, normals, areas, gaps, starts = square(0.15)
+    stiff = dovetail.stiffness(1500, centres, ABOUT)
+    found = dovetail.bed(centres, normals, areas, np.array([0, 0, 49.0]), np.zeros(3), ABOUT,
+                         gaps, stiff)  # fmt: skip
+    push = by_face(found["pressure"] * areas, starts)
+    assert found["holds"]
+    assert push["tip"] + push["shoulder"] == pytest.approx(49.0, rel=1e-6)
+    assert all(push[k] == 0 for k in ("+x", "-x", "+y", "-y"))
+    assert -0.01 < found["shift_mm"][2] < 0, "down, into its seat"
+    assert found["pressed_mm"][starts["+x"]:].max() < 0.01
+
+
+def test_with_no_play_the_faces_stiffness_changes_nothing() -> None:
+    """Every face drawn touching: the pushes are the same whatever stiffness they're read at,
+    as they always were."""
+    centres, normals, areas = tail(seat=True)
+    about = np.array([0.0, -3.0, 50.0])
+    force, moment = np.array([3.0, -30.0, 49.0]), np.array([100.0, 0, 20.0])
+    plain = dovetail.bed(centres, normals, areas, force, moment, about)
+    for stiff in (1.0, 1e4):
+        again = dovetail.bed(centres, normals, areas, force, moment, about,
+                             np.zeros(len(areas)), stiff)  # fmt: skip
+        assert again["pressure"] == pytest.approx(plain["pressure"], rel=1e-6, abs=1e-9)
+    with pytest.raises(ValueError, match="stiffness"):
+        dovetail.bed(centres, normals, areas, force, moment, about, np.full(len(areas), 0.1))
+
+
+def test_an_off_centre_latch_holds_the_hanging_weight_once_the_tilt_closes_the_flanks() -> None:
+    """mqucifer/print-shop#188's lift: the lower part, 1.5 N, hangs on a latch 14 mm and 15 mm
+    off the joint's middle. Read with every face where it's drawn, the latch's hook touching,
+    the seat beside the latch levers against it and the latch holds several times the weight.
+    Read as a print takes it, the lower drops by the latch's 0.2 mm of play, the seats come
+    away, and it tilts on the latch until its flanks close: the latch holds the weight, the
+    flanks only the turn. With the flanks 1.5 mm clear, the tilt closes the seat beside the
+    latch first, and the lever is back."""
+    weight = np.array([0.0, 0.0, -1.5])
+    for play, latch_play in ((0.15, 0.0), (0.15, 0.2), (1.5, 0.2)):
+        centres, normals, areas, gaps, starts = square(play, (14.0, -15.6), latch_play)
+        stiff = dovetail.stiffness(1500, centres, ABOUT)
+        moment = np.cross(np.array([0, 0, 40.0]) - ABOUT, weight)
+        found = dovetail.bed(centres, normals, areas, weight, moment, ABOUT, gaps, stiff)
+        push = by_face(found["pressure"] * areas, starts)
+        assert found["holds"]
+        flanks = sum(push[k] for k in ("+x", "-x", "+y", "-y"))
+        if play == 0.15 and latch_play == 0.2:
+            assert push["latch"] == pytest.approx(1.5, rel=1e-3)
+            assert push["tip"] == push["shoulder"] == 0, "the seats come away"
+            assert flanks > 0
+            assert all(found["pressed_mm"][starts[k]:starts[k] + 1600].max() >= 0.15
+                       for k in ("+x", "-x", "+y", "-y")), "all four close"  # fmt: skip
+        else:
+            assert push["latch"] > 3 * 1.5, "levered by the seat beside it"
+            assert push["shoulder"] > 2 * 1.5 and flanks < 1e-3 * push["latch"]
+
+
 def test_a_pull_is_shared_between_the_bolts_and_a_push_needs_none() -> None:
     assert pulls([0, 0, 90], [0, 0, 0], [[-5, 0, 0], [5, 0, 0], [0, 3, 0]]) == pytest.approx(
         [30] * 3
@@ -680,9 +816,11 @@ def test_a_dovetail_s_numbers_have_the_shape_a_need_reads() -> None:
            "stretch_at": [0, 0, 0], "stretch_is": "pull", "stretch_pct": 0.5}  # fmt: skip
     face = {"kind": "seat", "at": [0, 0, 0], "normal": [0, 0, -1], "area_mm2": 48.0,
             "push_n": 46.0, "bears_mm2": 48.0, "pressure_mpa": 1.0, "pressure_limit_mpa": 14.0,
-            "pressed": "along its layers", "pressed_part": "lower"}  # fmt: skip
+            "pressed": "along its layers", "pressed_part": "lower", "play_mm": 0.15,
+            "closed_mm": 0.15}  # fmt: skip
     joint = {"kind": "dovetail", "slides": "-z", "drive_n": 49.0, "opens": False,
              "latched": True, "left_n": [0, 0, 0], "left_nmm": [0, 0, 0], "faces": [face],
+             "shift_mm": [0.1, 0, 0], "turn_deg": [0, 0.4, 0], "faces_move_mm": 0.3,
              "latch": {"on": "upper", "catch_mm2": 3.0, "catch_at": [0, 0, 12], "play_mm": 0.2,
                        "holds_n": 5.0, "pressure_mpa": 1.7, "pressure_limit_mpa": 14.0,
                        "tab": tab},
@@ -692,6 +830,7 @@ def test_a_dovetail_s_numbers_have_the_shape_a_need_reads() -> None:
     assert reports.wrong_path("load", "joints.upper+lower.latch.holds_n") is None
     assert reports.wrong_path("load", "joints.upper+lower.drive_n") is None
     assert reports.wrong_path("load", "joints.upper+lower.neck.across_layers_pct") is None
+    assert reports.wrong_path("load", "joints.upper+lower.faces_move_mm") is None
     wrong = {"joints": {"upper+lower": {**joint, "faces": [{**face, "glue_n": 9.0}]}}}
     assert "glue_n" in reports.unlike("load", wrong)[0]
 

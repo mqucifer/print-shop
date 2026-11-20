@@ -14,6 +14,10 @@ parts' own faces (`catch`): a flat face of the tab, in its box, that faces the w
 would leave, with a flat face of the other part over it within `REACH`, and what the two share
 seen along the slide.
 
+**Its play** (`play`, mqucifer/print-shop#188): the flat faces of the two parts that don't touch
+and face each other across a fit's play, `PLAY` mm or less, as small pieces, each with how far
+it has to close. The latch's own faces, in its box, aren't the tail's.
+
 **The latch's tab** (`tab`): the part inside the latch's box, held at its root, with what the
 latch has to hold put on the catch, pulling the hook the way the other part would. **The tail's
 neck and the socket's walls** (`around`): each part alone, cut off round the joint and held
@@ -26,6 +30,7 @@ and mqucifer/print-shop#185): a latch is only credited here once `bend` has read
 
 from __future__ import annotations
 
+import math
 import tempfile
 from collections.abc import Callable
 from typing import Any
@@ -39,6 +44,15 @@ from .report import NoAnswer
 #: A latch's ledge is over its hook within this, in mm, along the slide: the slide check's own
 #: `--hold`, past which a part isn't held.
 REACH = 1.0
+#: Flat faces of the two parts that face each other this close, in mm, and no closer than `ON`,
+#: are read as able to close on each other under the load (mqucifer/print-shop#188). It's a
+#: judgement, not a sourced figure: twice `REACH`, the slide check's `--hold`, so a printed slip
+#: fit's few tenths and a loose fit's mm are both read. Faces further apart aren't counted, so a
+#: load only they could hold is left held by nothing, and the joint opens: `FAIL`, never `OK`.
+PLAY = 2 * REACH
+#: A face with play is read in pieces no wider than this, in mm, and no more than `PIECES` of
+#: them a face, so where it closes along an edge is seen.
+PIECE, PIECES = 0.5, 4000
 #: Two directions are the same, or square, within this.
 SQUARE = 1e-6
 #: A point is on a face, or a face in a plane, within this, in mm.
@@ -200,12 +214,106 @@ def catch(assembly: Assembly, joint: Joint, placed: list[Any]) -> dict[str, Any]
     }
 
 
-def catch_patches(caught: dict[str, Any], slides: np.ndarray) -> tuple[Any, Any, Any]:
+def catch_patches(caught: dict[str, Any], slides: np.ndarray) -> tuple[Any, Any, Any, Any]:
     """A catch as pieces of face for `dovetail.bed`: on the tail's part it's a face that looks
-    back along the way in, whichever part the tab is on, so the latch pushes the tail home."""
-    facets = [f for piece in caught["pieces"] for f in _facets(piece["face"])]
-    centres = np.array([f[0] for f in facets])
-    return centres, np.tile(-slides, (len(facets), 1)), np.array([f[2] for f in facets])
+    back along the way in, whichever part the tab is on, so the latch pushes the tail home. The
+    hook stands clear of its ledge by the catch's own play, and bears once that's closed."""
+    facets = [(f, piece["gap"]) for piece in caught["pieces"] for f in _facets(piece["face"])]
+    centres = np.array([f[0] for f, _ in facets])
+    return (
+        centres,
+        np.tile(-slides, (len(facets), 1)),
+        np.array([f[2] for f, _ in facets]),
+        np.array([gap for _, gap in facets]),
+    )
+
+
+def _small(face: Any, size: float) -> tuple[np.ndarray, np.ndarray]:
+    """A flat face as small pieces: each one's centre and its area. Each of its own triangles
+    is cut into as many smaller ones as leave none longer than `size`."""
+    points, triangles = face.tessellate(0.05)
+    centres: list[np.ndarray] = []
+    areas: list[float] = []
+    for i, j, k in triangles:
+        a, b, c = (np.array([points[n].x, points[n].y, points[n].z]) for n in (i, j, k))
+        area = float(np.linalg.norm(np.cross(b - a, c - a))) / 2
+        if area <= 1e-12:
+            continue
+        longest = max(np.linalg.norm(b - a), np.linalg.norm(c - b), np.linalg.norm(a - c))
+        cuts = max(1, math.ceil(longest / size))
+        u, v = (b - a) / cuts, (c - a) / cuts
+        for m in range(cuts):
+            for n in range(cuts - m):
+                centres.append(a + (m + 1 / 3) * u + (n + 1 / 3) * v)
+                if m + n < cuts - 1:
+                    centres.append(a + (m + 2 / 3) * u + (n + 2 / 3) * v)
+        areas += [area / cuts**2] * (len(centres) - len(areas))
+    return np.array(centres).reshape(-1, 3), np.array(areas)
+
+
+def play(assembly: Assembly, joint: Joint, placed: list[Any]) -> list[dict[str, Any]]:
+    """The faces of a dovetail's two parts that don't touch where the file puts them and face
+    each other across a fit's play (mqucifer/print-shop#188): a flat face of the tail's part
+    and one of the socket's part square to the same way, facing each other, `ON` to `PLAY` mm
+    apart, and what the two share seen along that way. Each is said as the tail's face, the
+    socket's face over it, how far apart they are, the way out of the tail, and the tail's
+    face in small pieces, less what's in the latch's box: the latch's own faces aren't the
+    tail's."""
+    import FreeCAD as App
+
+    names = [p.name for p in assembly.parts]
+    tail, socket = (placed[names.index(n)] for n in joint.between)
+
+    def flats(solid: Any) -> list[tuple[Any, np.ndarray]]:
+        found = []
+        for face in solid.Faces:
+            if type(face.Surface).__name__ != "Plane":
+                continue
+            # A point that's on the face, as a ring's middle isn't, and the way out of its part.
+            pieces = _facets(face)
+            if not pieces:
+                continue
+            centre, normal, _ = max(pieces, key=lambda f: f[2])
+            if solid.isInside(App.Vector(*(centre + 1e-3 * normal)), 1e-6, False):
+                normal = -normal
+            found.append((face, normal))
+        return found
+
+    theirs = flats(socket)
+    patches = []
+    for mine, way in flats(tail):
+        level = float(np.array(mine.CenterOfMass) @ way)
+        for other, facing in theirs:
+            if float(way @ facing) > -1 + SQUARE:
+                continue
+            gap = float(np.array(other.CenterOfMass) @ way) - level
+            if not ON < gap <= PLAY:
+                continue
+            moved = other.copy()
+            moved.translate(App.Vector(*(-gap * way)))
+            for shared in mine.common(moved).Faces:
+                if shared.Area <= 1e-6:
+                    continue
+                size = max(PIECE, math.sqrt(shared.Area / PIECES))
+                centres, areas = _small(shared, size)
+                if joint.latch is not None:
+                    keep = np.array([not _in_box(c, joint.latch.arm) for c in centres], bool)
+                    centres, areas = centres[keep], areas[keep]
+                if not len(areas):
+                    continue
+                across = shared.copy()
+                across.translate(App.Vector(*(gap * way)))
+                patches.append(
+                    {
+                        "tail_face": shared,
+                        "socket_face": across,
+                        "gap": gap,
+                        "normal": way,
+                        "centres": centres,
+                        "areas": areas,
+                    }
+                )
+    return patches
 
 
 def _solve(
@@ -472,18 +580,24 @@ def around(
     carried: tuple[np.ndarray, np.ndarray, np.ndarray],
     caught: dict[str, Any] | None,
     coarser: float = 1.0,
+    played: list[dict[str, Any]] | None = None,
+    stiff: float | None = None,
 ) -> dict[str, Any]:
     """The plastic of one part round a dovetail: the tail's neck, or the socket's walls. The
     part alone is cut off round the joint and held where it's cut. `carried` is what the joint
     carries, the force and the moment, about a point, the socket's part puts on the tail's:
     it's put on this part's own faces of the joint as pushes alone, with what the latch holds
-    on its catch where `caught` is given."""
+    on its catch where `caught` is given. `played` are the faces with play (`play`), each on
+    this part's own side of it, which push once the tail has moved that far, by the faces'
+    stiffness `stiff` (mqucifer/print-shop#188)."""
     import FreeCAD as App
     import Part
 
     is_tail = part.name == joint.between[0]
     what = f"the part {part.name} round the dovetail joint {joint.name}"
-    met = Part.Compound(faces)
+    played = played or []
+    own = [p["tail_face" if is_tail else "socket_face"] for p in played]
+    met = Part.Compound(list(faces) + own)
     piece, planes, reach = _piece(solid, part, joint, met)
     low, high = _span(met.BoundBox)
     least = float(min(e for e in high - low if e > 1e-6))
@@ -494,11 +608,13 @@ def around(
 
     def loads(shape: Any, triangles: Callable[[Any], list[Triangle]]) -> dict[int, np.ndarray]:
         on_joint: list[Triangle] = []
+        gaps: list[float] = []
         for face in shape.Faces:
             if face.distToShape(met)[0] > ON:
                 continue
             for wired, area, centre, normal in triangles(face):
-                if met.distToShape(Part.Vertex(App.Vector(*centre)))[0] > ON:
+                point = Part.Vertex(App.Vector(*centre))
+                if met.distToShape(point)[0] > ON:
                     continue
                 if joint.latch is not None and _in_box(centre, joint.latch.arm):
                     continue
@@ -506,6 +622,10 @@ def around(
                 if not shape.isInside(App.Vector(*(centre - 1e-3 * normal)), 1e-6, False):
                     normal = -normal
                 on_joint.append((wired, area, centre, normal))
+                # Its play: none on a face that touches.
+                gap = next((p["gap"] for p, f in zip(played, own, strict=True)
+                            if f.distToShape(point)[0] <= ON), 0.0)  # fmt: skip
+                gaps.append(gap)
         if not on_joint:
             raise NoAnswer(f"the mesh of {what} has no triangle on the joint's faces")
         centres = np.array([t[2] for t in on_joint])
@@ -514,12 +634,14 @@ def around(
         # `dovetail.bed` takes each face's way out of the tail.
         normals = outward if is_tail else -outward
         count = len(on_joint)
+        clear = np.array(gaps)
         if caught is not None:
             more = catch_patches(caught, slides)
             centres = np.vstack([centres, more[0]])
             normals = np.vstack([normals, more[1]])
             areas = np.concatenate([areas, more[2]])
-        bedded = dovetail.bed(centres, normals, areas, force, moment, about)
+            clear = np.concatenate([clear, more[3]])
+        bedded = dovetail.bed(centres, normals, areas, force, moment, about, clear, stiff)
         push = bedded["pressure"] * areas
         pushes: dict[int, np.ndarray] = {}
         for (wired, _, _, _), out, newtons in zip(on_joint, outward, push[:count], strict=True):

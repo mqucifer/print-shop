@@ -968,7 +968,13 @@ def test_a_tail_seated_on_its_flanks_alone_pushes_them_as_a_wedge_does(cae: Any)
     answer = cae("load", "dovetail/wedge.json", "--weight", "2", *ON_TOP)
     assert answer.verdict == "OK", answer.text
     joint = answer.numbers["joints"][JOINT]
-    assert all(f["kind"] == "flank" for f in joint["faces"]), "no seat"
+    # The tip is 1 mm clear of the socket's floor: a seat with that much play
+    # (mqucifer/print-shop#188). The tail slides a quarter of a mm down its taper as the
+    # flanks are pressed, short of closing it, so nothing under it bears.
+    seats = [f for f in joint["faces"] if f["kind"] == "seat"]
+    assert all(f["play_mm"] == pytest.approx(1.0, abs=1e-6) for f in seats)
+    assert all(f["push_n"] == 0 and f["closed_mm"] < 0.5 for f in seats), "no seat bears"
+    assert all(f["play_mm"] == 0 for f in joint["faces"] if f["kind"] == "flank")
     left, right = flanks(joint)
     assert left["push_n"] + right["push_n"] == pytest.approx(joint["drive_n"] / TAPER, rel=1e-3)
     assert left["push_n"] == pytest.approx(2 * G / (2 * TAPER), rel=0.01)
@@ -1038,6 +1044,135 @@ def test_lifted_by_its_upper_part_the_lower_hangs_by_its_own_weight_on_the_latch
     dropped = cae("load", "dovetail/seat.json", "--lift", "upper")
     assert dropped.verdict == "FAIL" and "it has no latch" in dropped.record["why"]
     assert dropped.numbers["joints"][JOINT]["drive_n"] < 0
+
+
+# A dovetail with play (mqucifer/print-shop#188)
+
+#: The blocks, as `make_fixtures.py` draws them: a square tail 20 x 20 and 20 long under a
+#: block 40 x 40 x 20, in a socket in a block 40 x 40 x 80 whose walls are `SLIP` clear of it,
+#: or `LOOSE`; a slender tab, its hook `LATCH_PLAY` under its ledge, near the +x edge or at the
+#: middle. A push at the upper block's -x side near its top.
+SLIP, LOOSE, LATCH_PLAY = 0.15, 1.5, 0.2
+AT_SIDE = ("--at", "-20,0,98", "--toward", "+x")
+
+
+def played(joint: dict[str, Any]) -> list[dict[str, Any]]:
+    """A dovetail's faces with play, of its faces."""
+    return [f for f in joint["faces"] if f["play_mm"] > 0]
+
+
+def test_lifted_by_a_latch_off_its_middle_the_lower_tilts_till_its_flanks_close(cae: Any) -> None:
+    """mqucifer/print-shop#188's lift. The lower block hangs from a slender latch 14 mm and
+    15 mm off the joint's middle, the tail's flanks 0.15 mm clear of its socket. Read with only
+    the faces drawn touching, the seat beside the latch levered against it and the latch held
+    9.5 N of a 1.5 N block: its tab failed across its layers. Read as a print takes it, the
+    lower drops by the latch's own 0.2 mm of play, its seats come away, and it tilts on the
+    latch until its flanks close: the latch holds the block's weight, and its flanks the turn,
+    each of their 0.15 mm closed."""
+    answer = cae("load", "play/edge.json", "--lift", "upper")
+    assert answer.verdict == "OK" and answer.code == 0, answer.text
+    weight = answer.numbers["force_n"]
+    joint = answer.numbers["joints"][JOINT]
+    assert (joint["latched"], joint["opens"]) == (True, False)
+    assert joint["latch"]["holds_n"] == pytest.approx(weight, rel=0.02)
+    assert joint["latch"]["tab"]["across_layers_pct"] < 0.5
+    clear = played(joint)
+    assert len(clear) == 4 and all(f["kind"] == "flank" for f in clear)
+    assert all(f["play_mm"] == pytest.approx(SLIP, abs=1e-6) for f in clear)
+    closed = [f for f in clear if f["push_n"] > 0]
+    assert closed and all(f["closed_mm"] == pytest.approx(SLIP, abs=1e-6) for f in closed)
+    assert all(f["push_n"] == 0 for f in joint["faces"] if f["kind"] == "seat"), "they come away"
+    assert joint["shift_mm"][2] > LATCH_PLAY, "the lower drops by the latch's play, and more"
+    assert 0 < np.linalg.norm(joint["turn_deg"]) < 2
+    assert "it's read the way a print takes this load" in answer.text
+    assert "of play closed" in answer.text
+    assert "times the" not in answer.text, "no lever"
+    assert "its latch holding" in answer.text, "on the coarser mesh and by statics too"
+    assert reports.unlike("load", answer.numbers) == []
+
+
+def test_pushed_sideways_the_flanks_close_and_the_latch_s_faces_carry_nothing(cae: Any) -> None:
+    """mqucifer/print-shop#188's sideways push: 2 kg at the upper block's side near its top,
+    toward +x, the latch at the middle with the window's sides drawn touching its hook's. Read
+    with only the faces drawn touching, those two small faces, 1.2 mm² each, took the push at
+    over 2000 MPa and the joint opened. The latch's tab is the latch's, and none of its faces
+    bears for the tail: the tail shifts and turns until its flanks close, and they carry it."""
+    answer = cae("load", "play/middle.json", "--weight", "2", *AT_SIDE)
+    assert answer.verdict == "OK" and answer.code == 0, answer.text
+    joint = answer.numbers["joints"][JOINT]
+    assert (joint["latched"], joint["opens"]) == (False, False)
+    assert joint["latch"]["holds_n"] == 0
+    assert all(f["area_mm2"] > 10 for f in joint["faces"]), "no face of the hook's"
+    closed = [f for f in played(joint) if f["push_n"] > 0]
+    assert closed and all(f["closed_mm"] == pytest.approx(SLIP, abs=1e-6) for f in closed)
+    pushing = [f for f in joint["faces"] if f["push_n"] > 0]
+    carried = -np.sum([np.array(f["normal"]) * f["push_n"] for f in pushing], axis=0)
+    assert carried == pytest.approx(joint["force_n"], abs=0.1)
+    # The -x flank of the tail is pushed +x, and the socket's wall it closes on pushes back.
+    assert max(closed, key=lambda f: f["push_n"])["normal"][0] == pytest.approx(1, abs=1e-6)
+    assert joint["shift_mm"][0] > 0, "the tail moves the way it's pushed"
+    assert all(f["pressure_mpa"] < f["pressure_limit_mpa"] for f in joint["faces"])
+    assert joint["walls"]["across_layers_pct"] < 1.0
+    assert reports.unlike("load", answer.numbers) == []
+
+
+def test_with_more_play_than_the_tilt_closes_the_latch_is_levered_and_fails(cae: Any) -> None:
+    """The same lift with the socket 1.5 mm clear of the tail: the tilt on the latch closes
+    the seat beside it before any flank, and the latch and that seat pull against each other,
+    as a lever's ends do. The latch holds several times the block's weight, and its slender
+    tab is pulled past what its layers take: it fails, and says it's levered."""
+    answer = cae("load", "play/loose.json", "--lift", "upper")
+    assert answer.verdict == "FAIL" and answer.code == 1, answer.text
+    weight = answer.numbers["force_n"]
+    joint = answer.numbers["joints"][JOINT]
+    assert joint["latch"]["holds_n"] > 3 * weight
+    assert "'s tab is pulled across its layers by" in answer.record["why"]
+    assert "times the" in answer.text and "as a lever's ends do" in answer.text
+    clear = played(joint)
+    assert clear and all(f["play_mm"] == pytest.approx(LOOSE, abs=1e-6) for f in clear)
+    assert all(f["push_n"] == 0 and f["closed_mm"] < LOOSE for f in clear), "none closes"
+    assert any(f["kind"] == "seat" and f["push_n"] > weight for f in joint["faces"])
+    assert "the nearest to closing came" in answer.text
+    assert "more than the 2 mm of play read" in answer.text, "it turns far, and says so"
+
+
+def test_with_more_play_than_is_read_a_sideways_push_opens_the_joint(cae: Any) -> None:
+    """The middle latch's push with the socket 2.5 mm clear, more than the 2 mm `load` reads
+    as able to close: no flank is counted, the seats only push down the slide, and the latch's
+    faces are the latch's, so nothing holds the push. It fails, saying it opens and how much
+    play was read: wider play is never read as holding."""
+    answer = cae("load", "play/wide.json", "--weight", "2", *AT_SIDE)
+    assert answer.verdict == "FAIL" and answer.code == 1, answer.text
+    joint = answer.numbers["joints"][JOINT]
+    assert joint["opens"] is True and played(joint) == []
+    why = answer.record["why"]
+    assert "opens" in why and "Faces up to 2 mm apart are counted" in why
+    assert np.linalg.norm(joint["left_n"]) > 10
+
+
+def test_straight_down_a_slip_fit_taper_keeps_its_weight_on_its_seat(cae: Any) -> None:
+    """The tapered tail seated on its tip, its socket 0.15 mm clear of its every other face,
+    5 kg on the upper bar, 9 mm off the joint's middle. Read with only the faces drawn
+    touching, nothing held the weight's turn and the joint opened. The seat under the tail's
+    tip stops it sliding down within hundredths of a mm, far short of the flanks' play, so
+    the weight stays on the seat; the weight's turn closes the flanks, whose undercut holds it,
+    and their slope takes a few percent of the weight with it."""
+    answer = cae("load", "dovetail/slip.json", "--weight", "5", *ON_TOP)
+    assert answer.verdict == "OK" and answer.code == 0, answer.text
+    joint = answer.numbers["joints"][JOINT]
+    assert joint["opens"] is False
+    (seat,) = (f for f in joint["faces"] if f["kind"] == "seat")
+    assert seat["play_mm"] == 0 and 0.95 * 5 * G < seat["push_n"] < 5 * G, "on the seat"
+    # How far the seat itself moves: the tail's shift at the joint's middle and its turn.
+    there = np.array(seat["at"]) - np.array(joint["at"])
+    moved = np.array(joint["shift_mm"]) + np.cross(np.radians(joint["turn_deg"]), there)
+    assert -0.2 * SLIP < moved[2] < 0, "it slides down a hundredth or two, far short of the play"
+    leaning = flanks(joint)
+    assert len(leaning) == 2
+    assert all(f["play_mm"] == pytest.approx(SLIP, abs=1e-6) for f in leaning)
+    assert all(f["closed_mm"] == pytest.approx(SLIP, abs=1e-6) for f in leaning), "turned shut"
+    assert abs(joint["turn_deg"][0]) > 0.1, "about x, the weight's turn"
+    assert reports.unlike("load", answer.numbers) == []
 
 
 # Whether a dovetail can be put together (mqucifer/print-shop#184 and mqucifer/print-shop#185)

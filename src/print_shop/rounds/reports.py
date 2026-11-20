@@ -892,10 +892,19 @@ SHAPES: dict[str, dict[str, Any]] = {
                                 "pressure_limit_mpa": NUMBER,
                                 "pressure_mpa": NUMBER,
                                 "push_n": NUMBER,
+                                # Its play as drawn, and how much of it the load closes
+                                # (mqucifer/print-shop#188).
+                                "play_mm": NUMBER,
+                                "closed_mm": NUMBER,
                             },
                             closed=True,
                         )
                     ),
+                    # How the tail shifts and turns as its play closes, and the most any of
+                    # its faces moves (mqucifer/print-shop#188).
+                    "shift_mm": XYZ,
+                    "turn_deg": XYZ,
+                    "faces_move_mm": NUMBER,
                     "latch": Row(
                         {
                             "catch_at": XYZ,
