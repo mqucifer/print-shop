@@ -1040,6 +1040,85 @@ def test_lifted_by_its_upper_part_the_lower_hangs_by_its_own_weight_on_the_latch
     assert dropped.numbers["joints"][JOINT]["drive_n"] < 0
 
 
+# Whether a dovetail can be put together (mqucifer/print-shop#184 and mqucifer/print-shop#185)
+
+
+def test_a_latch_is_bent_as_far_as_it_has_to_go_before_it_s_counted_as_holding(cae: Any) -> None:
+    """Before anything is solved, the latched tail is slid out of its socket the way it came
+    in, +z: it passes nothing but its latch, and the latch's hook passes the lower bar 0.6 mm
+    deep, across y, by the sweep and by rays. `bend` reads the tab pushed that far, away from
+    the bar, +y, at its own layers: within PETG's 1%. Lifted, the latch then holds the lower
+    bar's weight as before."""
+    answer = cae("load", "dovetail/latch.json", "--lift", "upper")
+    assert answer.verdict == "OK" and answer.code == 0, answer.text
+    found = answer.numbers["ways_in"][JOINT]
+    assert (found["slides"], found["out"], found["blocked"]) == ("-z", "+z", False)
+    latch = found["latch"]
+    assert latch["passes"] is True
+    assert latch["depth_mm"] == pytest.approx(HOOK_IN, abs=1e-6)
+    assert latch["depth_rays_mm"] == pytest.approx(HOOK_IN, abs=2 * latch["rays_mm"] + 0.01)
+    assert np.abs(latch["across"]) == pytest.approx([0, 1, 0], abs=1e-6)
+    read = latch["bend"]
+    assert read["verdict"] == "OK" and read["toward"] == "+y", read
+    assert read["push_mm"] == pytest.approx(HOOK_IN, abs=1e-6)
+    assert "--root z=30" in read["command"] and "--layers y" in read["command"]
+    assert 0 < read["across_layers_pct"] < read["limit_pct"] == 1.0
+    assert found["rays"]["blocked"] == []
+    weight = LOWER_MM3 * DENSITY / 1e6 * G
+    assert weight <= answer.numbers["joints"][JOINT]["latch"]["holds_n"] < 1.1 * weight
+    assert "it passes nothing but its latch" in answer.text
+    assert "the arm as a beam" in answer.text, "bend's own second method"
+    assert reports.unlike("load", answer.numbers) == []
+
+
+def test_a_solid_stub_named_as_a_latch_can_t_be_fitted_and_holds_nothing(cae: Any) -> None:
+    """eval-table-1's latch was a solid stub, rooted where it joined its part and named as
+    the latch's arm, and `load --lift` read it as holding though it couldn't get past the
+    socket's wall. Here the hook is the whole arm, on a stiff post, rooted on the post's face:
+    it catches the window's ledge as the tab does, and on the way in it has to move 0.6 mm
+    across y, along itself. `bend` can't push an arm along itself, so the joint can't be put
+    together, the latch is credited with nothing, lifted or pulled, and nothing is solved."""
+    for case in (("--lift", "upper"), ("--weight", "0.5", *UPWARD)):
+        answer = cae("load", "dovetail/stub.json", *case)
+        assert answer.verdict == "FAIL" and answer.code == 1, answer.text
+        why = answer.record["why"]
+        assert "upper+lower's latch, a tab on upper, has to move 0.600 mm +y" in why
+        assert "the tab as the file names it can't bend that way" in why
+        assert "--toward +y is along the arm, square to its root at y=0.4" in why
+        assert "The latch is credited with nothing" in why and "Nothing is solved" in why
+        assert "joints" not in answer.numbers and "loads" not in answer.numbers
+        found = answer.numbers["ways_in"][JOINT]
+        assert found["blocked"] is False and found["latch"]["bend"]["verdict"] == "NO ANSWER"
+        assert answer.record["seconds"] < 30
+
+
+def test_a_dovetail_the_parts_can_t_take_the_way_the_file_says_fails_naming_the_way_in(
+    cae: Any,
+) -> None:
+    """eval-table-1's leg split read `OK` slid in along z, but its socket's mouth was narrower
+    than its tail's tip, and the only way in was sideways. Here a straight key 8 mm wide sits
+    in a pocket whose mouth at the top of the bar is 6 mm wide: slid out +z, the way the file
+    says it went in backwards, it passes through the mouth's two lips, 1 x 6 x 5 mm each. Of
+    the six ways it comes out only +y, off the lap face, so it goes in -y; named so, the same
+    parts go together."""
+    answer = cae("load", "dovetail/mouth.json", "--weight", "5", *ON_TOP)
+    assert answer.verdict == "FAIL" and answer.code == 1, answer.text
+    why = answer.record["why"]
+    assert "can't be put together the way the file says its tail slides in, -z" in why
+    assert "slid out of its socket +z, the tail's part, upper, passes through lower" in why
+    assert "30.0 mm³ from (-4, -6, 65) to (-3, 0, 70), and 1 more piece(s)" in why
+    assert "come apart past nothing only +y, so the tail goes in -y" in why
+    found = answer.numbers["ways_in"][JOINT]
+    assert found["blocked"] is True and found["comes_out"] == ["+y"]
+    assert found["goes_in"] == ["-y"]
+    assert len(found["rays"]["blocked"]) > 0, "the rays find it too"
+    assert "joints" not in answer.numbers, "nothing is solved"
+    assert reports.unlike("load", answer.numbers) == []
+    sideways = cae("load", "dovetail/mouth-sideways.json", "--weight", "5", *ON_TOP)
+    assert sideways.numbers["ways_in"][JOINT]["blocked"] is False, sideways.text
+    assert "joints" in sideways.numbers, "it's solved"
+
+
 @pytest.mark.parametrize(
     ("args", "says"),
     [

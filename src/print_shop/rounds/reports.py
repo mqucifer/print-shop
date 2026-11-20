@@ -374,6 +374,9 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "reaction_n",
         "solve_s",
         "toward",
+        # Each dovetail taken apart the way it went together, before anything is solved
+        # (mqucifer/print-shop#184 and mqucifer/print-shop#185).
+        "ways_in",
         "weight_kg",
     ),
     # `pockets`: each nut's pocket of a through joint that states one (mqucifer/print-shop#168).
@@ -932,6 +935,19 @@ SHAPES: dict[str, dict[str, Any]] = {
         ),
         "reaction_n": XYZ,
         "toward": TEXT,
+        "ways_in": Keyed(
+            Row(
+                {
+                    "blocked": FLAG,
+                    "comes_out": Rows(TEXT),
+                    "goes_in": Rows(TEXT),
+                    "latch": Row({"depth_mm": NUMBER, "passes": FLAG}),
+                    "latched": FLAG,
+                    "out": TEXT,
+                    "slides": TEXT,
+                }
+            )
+        ),
         "weight_kg": NUMBER,
     },
     "fit-bed": {

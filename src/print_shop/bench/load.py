@@ -45,7 +45,11 @@ tied solve says the joint carries is put back on its faces as pushes alone. It's
 worst of: a load that drives the tail out of its seat, which only its latch holds, never
 friction or glue; a load its faces can't balance by pushing, which opens it; the pressure on
 each face; the latch's catch and its tab, solved by itself under what it holds; and the tail's
-neck and the socket's walls, each solved again by itself under the faces' pushes.
+neck and the socket's walls, each solved again by itself under the faces' pushes. Before
+anything is solved it's taken apart the way it went together (`way_in.py`, mqucifer/print-shop#184
+and mqucifer/print-shop#185): its tail out of its socket against `slides` past nothing but its
+latch, and its latch's tab read by `bend` pushed as far as it has to go to get on. A joint that
+can't be put together fails whatever the load, and nothing is solved.
 
 **Lifted** (`--lift PART`, mqucifer/print-shop#170), the assembly is held by that part's
 highest level and every other part hangs by its own weight: its solid volume at its material's
@@ -85,7 +89,7 @@ from typing import Any
 
 import numpy as np
 
-from . import dovetail, load_dovetail, load_through
+from . import dovetail, load_dovetail, load_through, way_in
 from .assembly import AXES, DIAMETER, Assembly, Held, Joint, PartAt, read
 from .cae import freecad
 from .limits import over, said
@@ -993,6 +997,50 @@ def run(args: Any, report: Report) -> None:
         for j in assembly.joints
         if j.kind == "dovetail"
     }
+    # And each dovetail taken apart the way it went together: its tail out of its socket past
+    # nothing but its latch, and its latch's tab bent as far as it has to be to let it in
+    # (mqucifer/print-shop#184 and mqucifer/print-shop#185). A joint that can't be put together
+    # fails whatever the load, and nothing is solved.
+    # The parts are joined first, as the solve joins them, so what the join refuses, as a face
+    # that leans against the way the file says a tail slides in, is said before this.
+    if any(j.kind == "dovetail" for j in assembly.joints):
+        import FreeCAD as App
+
+        doc = App.newDocument("Joined")
+        try:
+            with _quiet():
+                _Model(assembly, placed, args, 1.0).join(doc)
+        finally:
+            App.closeDocument(doc.Name)
+    ways_in = {
+        j.name: way_in.read(assembly, j, placed)
+        for j in assembly.joints
+        if j.kind == "dovetail"
+    }
+    if ways_in:
+        report.numbers["ways_in"] = {
+            name: {k: v for k, v in found.items() if k not in ("fails", "apart")}
+            for name, found in ways_in.items()
+        }
+        for name, found in ways_in.items():
+            for text in way_in.said(found, name):
+                report.line(text)
+            for text in way_in.second(found, name):
+                report.second(text)
+        apart_in = [t for found in ways_in.values() for t in found["apart"]]
+        fails_in = [t for found in ways_in.values() for t in found["fails"]]
+        if apart_in:
+            report.verdict(
+                "DISAGREE", "; and ".join(apart_in) + ": read both, and don't pick one. Nothing "
+                "is solved until the way in has one answer"
+            )
+            return
+        if fails_in:
+            report.verdict(
+                "FAIL", "; and ".join(fails_in) + ". Nothing is solved: a joint that can't be "
+                "put together carries nothing"
+            )
+            return
     size = _mesh_size(placed, args.mesh)
     fine = _solved(assembly, placed, args, size)
     coarse = _solved(assembly, placed, args, round(size * COARSER, 3))
@@ -1827,8 +1875,8 @@ def _dovetail(
         "square to itself, in proportion to how far the tail is pressed into it, the tail "
         "taken as stiff, which is a reading of its balance and not a contact solve. It's "
         "read where the file puts it, seated, with no play: a tail drawn loose in its socket "
-        "meets it on fewer faces than a printed one does. The latch's way on is the "
-        "harness's to read, with `fit-on` and `bend`"
+        "meets it on fewer faces than a printed one does. Its way in, and its latch's tab "
+        "bent to let the tail by, are read before anything is solved, as ways_in"
     )
 
 
