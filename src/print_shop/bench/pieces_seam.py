@@ -1,14 +1,29 @@
 """A dome's slices joined edge to edge: `pieces build --seam`, which builds a slice's two long
 edges as seams, and `pieces seam`, which places two built neighbours round the dome and reads
-how they meet, with the came strips and the rings that hold them (mqucifer/print-shop#166).
+how they meet, with the came strips and the rings that hold them (mqucifer/print-shop#166,
+mqucifer/print-shop#190).
 
 **The seam** (the Sponsor, 2026-11-18: "I'm not a fan of glued seems for 3d prints. It needs
 some mechanical hold"). Two neighbouring slices stand at an angle to each other, a different
 one at each of a slice's flat rows. So each long edge is a row of straight lengths, one a row,
 and each is bevelled by half the angle between the two slices there: the two faces are then
-parallel to the plane through the dome's axis and the cut, and meet flat. A came strip, an H in
-section, clips over both edges (`pieces came`), and its web lies between the two faces. So each
-face stands back from the cut's middle by half the seam's gap, the web and its play.
+parallel to the plane through the dome's axis and the cut, and stand face to face, the seam's
+gap apart.
+
+**The hold is from inside only** (the Sponsor, 2026-11-20: "Should be hidden"). On the outer
+face a seam is the two slices' edges and the gap between them, and nothing over them. Along each
+length the frame has a groove in its inner face, `GROOVE_WIDE` wide and `GROOVE_DEEP` deep,
+`WALL` in from the seam's face, and a came strip (`pieces came`) lies inside the dome over both
+slices' inner faces with a rib pressed into each groove, `SNAP` a side tighter than it. The two
+ribs stand at the slices' angle, so once both slices are on, a strip comes off neither: the
+ribs hold the edges together, and the strip under both inner faces holds them in line.
+
+Why this hold, of those the Sponsor's brief named. A barb into a groove in a seam's face needs
+something in the gap, and a gap of 0.6 mm leaves a web of one line once each side has its
+play; a groove there would come out of the lead beside a pocket, 0.45 mm at a lead of 1.4. A
+flange in a rebate along the inner face needs the rebate's roof printed in the air, as a frame
+prints on its inner face, and a rebate open to the seam doesn't stop the slices parting. A
+groove closed on both sides is a bridge as it prints, and its seam-side wall is what holds.
 
 **Where the faces are.** A slice's rows have their corners on the dome (`pieces flatten`), and
 the frame's inner face is taken to lie on them. A length's face leans out toward the outer face
@@ -19,21 +34,25 @@ is; the border is the frame at the top and the hem.
 **What's refused.** A seam is inside the lead line, half of which is this slice's: `flatten`
 leaves the glass half a lead from the cut's middle. A face that leaves less than `WALL` of
 lead beside a pocket, or stands back past a pane's edge at the inner face, is named, and
-nothing is built.
+nothing is built. So is a groove that leaves less than `WALL` between it and a pane's opening,
+or less than `LIP_OVER` of lip over it under a pocket.
 
 **`pieces seam`** reads two built frames. Each is cut at its folds into its flat rows, and each
 row is set where the slice's map puts it: bent by its folds from the hem up, and turned round
 the dome. Then, at each length: the two faces that meet, the angle between them and how far
 apart they stand, against the gap they were built for; and what the two rows share, by
-OpenCascade's `common`. With `--came`, each strip as `pieces came` placed it: whether it's
-round both edges, how far it presses into a face, and whether a flange lies over a pane's
+OpenCascade's `common`. With `--came`, each strip as `pieces came` placed it: what of it lies
+over each slice's outer face and its inner, how it holds each slice, by a rib in a groove or a
+channel round its edge, how far it presses into a slice, and whether it lies over a pane's
 opening. With `--rings`, whether each slice's hem and top edge is in a ring's groove.
 **Second method:** points, with no boolean. Each face's own corners, moved a little into their
 own row, are asked whether they're inside the other row too, and the nearest the two rows come
-is read by OpenCascade's distance between shapes.
+is read by OpenCascade's distance between shapes. What lies over an outer face is read from a
+strip's corners and again by points past the face.
 
 **What it can't read:** how a heated lead line bends. Each row is placed as a rigid flat piece,
-so a real slice's seam is as true as its folds are bent.
+so a real slice's seam is as true as its folds are bent. Nor how hard a rib is to press home,
+or how much it holds by: that's PETG's, and the snap is the Sponsor's figure for it.
 """
 
 from __future__ import annotations
@@ -53,9 +72,23 @@ from .report import NoAnswer, Report
 
 #: The least lead a seam leaves beside a pocket, in mm: a nozzle's width.
 WALL = 0.4
-#: How far apart two slices' faces stand, in mm, unless given: a came's web of two layers and
-#: its play on each side.
+#: How far apart two slices' faces stand, in mm, unless given. Nothing lies in the gap.
 GAP = 0.6
+#: The Sponsor's PETG snap, in mm a side (2026-11-20): how much tighter a rib is than its
+#: groove. A slide is 0.15.
+SNAP = 0.10
+#: A groove in a slice's inner face for a strip's rib, in mm: how wide and how deep. Its rib is
+#: the groove and the snap on each side, 0.8 mm, two lines.
+GROOVE_WIDE, GROOVE_DEEP = 0.6, 0.4
+#: The least lip left over a groove, under a pocket, in mm: two layers, `pieces build`'s least.
+LIP_OVER = 0.4
+#: How far a groove runs on past each end of its strip, in mm.
+GROOVE_PAST = 0.25
+#: A strip stops this far short of a fold, in mm, and of the hem and the top unless given.
+OFF_FOLD = 0.5
+OFF_END = 5.0
+#: The shortest strip worth making, in mm.
+LEAST_STRIP = 3.0
 #: How far the gap two faces stand apart by may be off the one they were built for, in mm.
 WITHIN = 0.05
 #: Two rows share nothing where their overlap is under this, in mm³.
@@ -68,8 +101,8 @@ PARALLEL_DEG = 0.1
 NUDGE = 0.02
 #: A strip or a ring is round an edge where it's this far past each of the edge's sides, mm.
 PROBE = 0.3
-#: The most a strip may press into a slice's face, in mm, unless given.
-PRESS = 0.1
+#: The most a strip may press into a slice, in mm, unless given: the snap.
+PRESS = SNAP
 #: A flange's end is read against the openings at places this far apart along it, in mm.
 ALONG = 1.0
 #: A join by the corners and by `flatten`'s own figure may differ by this, in degrees.
@@ -145,6 +178,8 @@ class Seam:
     gap: float
     refused: list[dict[str, Any]] = field(default_factory=list)
     lead_needed: float | None = None
+    #: Each length's groove for a strip's rib, where `groove_plan` has placed them.
+    grooves: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def back(self) -> float:
@@ -290,6 +325,102 @@ def seam_plan(found: Map, name: str, args: Any, z: dict[str, float]) -> Seam:
     return seam
 
 
+def groove_across(gap: float, bevel_deg: float) -> tuple[float, float]:
+    """Where a length's groove lies in its slice's inner face, square to the cut, from the cut's
+    middle, in mm: its near side, `WALL` in from the seam's face there, and its far side."""
+    near = gap / 2.0 / math.cos(math.radians(bevel_deg)) + WALL
+    return near, near + GROOVE_WIDE
+
+
+def strip_spans(
+    found: Map, edge: Edge, hem: float | None = None, top: float | None = None
+) -> list[tuple[float, float]]:
+    """Where each length's strip lies along it, from the length's lower end, in mm: short of
+    each fold by `OFF_FOLD`, and of the hem and the top by `hem` and `top`, `OFF_END` unless
+    given, or further where the panel's own corner there is further up or down."""
+    ring, _near, low, high = side_of(found, edge)
+    first, last = edge.lengths[0], edge.lengths[-1]
+    starts = max(OFF_END if hem is None else hem, float((ring[low] - first.a) @ first.way) + 1.0)
+    stops = max(
+        OFF_END if top is None else top,
+        last.length - float((ring[high] - last.a) @ last.way) + 1.0,
+    )
+    spans = []
+    for j, length in enumerate(edge.lengths):
+        start = starts if j == 0 else OFF_FOLD
+        stop = length.length - (stops if j == len(edge.lengths) - 1 else OFF_FOLD)
+        if under(stop - start, LEAST_STRIP):
+            raise NoAnswer(
+                f"the {edge.name} edge's length {length.row} is {length.length:.1f} mm long, and "
+                f"a strip on it from {start:.1f} to {stop:.1f} mm is under {LEAST_STRIP:g} mm: a "
+                "smaller --hem or --top"
+            )
+        spans.append((start, stop))
+    return spans
+
+
+def groove_plan(seam: Seam, found: Map, openings: Any, z: dict[str, float]) -> None:
+    """Each length's groove for a strip's rib, and whether the frame has room for it: `WALL` of
+    lead between it and the nearest pane's opening, and `LIP_OVER` of lip over it, under the
+    pocket. What hasn't room is refused, as a face that would cut a pocket is."""
+    over_it = z["pocket_floor_z"] - GROOVE_DEEP
+    needed = 0.0
+    for edge in seam.edges:
+        for length, (start, stop) in zip(edge.lengths, strip_spans(found, edge), strict=True):
+            near, far = groove_across(seam.gap, length.bevel_deg)
+            begin, end = start - GROOVE_PAST, stop + GROOVE_PAST
+            e, o = length.way, length.out
+            foot = shapely.Polygon(
+                [
+                    length.a + begin * e - near * o,
+                    length.a + end * e - near * o,
+                    length.a + end * e - far * o,
+                    length.a + begin * e - far * o,
+                ]
+            )
+            wall = float(foot.distance(openings)) if not openings.is_empty else math.inf
+            said = f"the {edge.name} edge's length {length.row}"
+            row = {
+                "edge": edge.name,
+                "length": length.row,
+                "at": piecemap.xy((length.a + length.b) / 2.0),
+            }
+            seam.grooves.append(
+                {
+                    **row, "near_mm": near, "far_mm": far, "from_mm": begin, "to_mm": end,
+                    "wall_to_opening_mm": wall, "lip_over_mm": over_it, "foot": foot,
+                    "length_ref": length,
+                }  # fmt: skip
+            )
+            if under(wall, WALL):
+                needed = max(needed, found.lead_mm + 2.0 * (WALL - wall))
+                seam.refused.append(
+                    {
+                        **row, "what": "opening", "wall_mm": wall, "least_mm": WALL,
+                        "why": f"{said}: a groove for the strip's rib, {near:.2f} to {far:.2f} "
+                        "mm from the cut's middle in the inner face, would leave "
+                        + (f"{wall:.2f} mm of" if wall > 0.005 else "no")
+                        + f" lead between it and the nearest pane's opening, where a nozzle "
+                        f"prints {WALL:g} mm",
+                    }  # fmt: skip
+                )
+        if under(over_it, LIP_OVER):
+            seam.refused.append(
+                {
+                    "edge": edge.name, "length": 0, "at": None, "what": "lip over groove",
+                    "wall_mm": over_it, "least_mm": LIP_OVER,
+                    "why": f"a groove {GROOVE_DEEP:g} mm deep in the inner face leaves "
+                    f"{over_it:.2f} mm of lip over it under the pocket, whose floor is at "
+                    f"z={z['pocket_floor_z']:g}, where two layers are {LIP_OVER:g}: a thicker "
+                    "frame, or a thinner pane, puts the floor higher",
+                }  # fmt: skip
+            )
+            break
+    if needed:
+        lead = math.ceil(needed * 10.0 - 1e-9) / 10.0
+        seam.lead_needed = max(seam.lead_needed or 0.0, lead)
+
+
 def _run_on(ring: np.ndarray, near: np.ndarray, corner: int, inside: np.ndarray) -> Any:
     """The half of the plane on the panel's side of an edge run on past a corner: the hem, or
     the top, as it arrives at the panel's side, carried on to the cut and past it."""
@@ -425,7 +556,10 @@ def block(corners: np.ndarray) -> Any:
 
 
 def with_seams(plate: Any, seam: Seam, base: Any) -> Any:
-    """A plate cut to its seams' faces: what's between each row's two faces, a block a row."""
+    """A plate cut to its seams' faces: what's between each row's two faces, a block a row; and
+    each length's groove in the inner face, a block square to the plate."""
+    import cadquery as cq
+
     _x0, y0, _x1, y1 = base.bounds
     heights = (-1.0, seam.thickness + 1.0)
     whole = None
@@ -436,7 +570,58 @@ def with_seams(plate: Any, seam: Seam, base: Any) -> Any:
         ]
         made = block(np.array(ends))
         whole = made if whole is None else whole.fuse(made)
-    return plate.intersect(whole)
+    cut = plate.intersect(whole)
+    if not seam.grooves:
+        return cut
+    blocks = []
+    for groove in seam.grooves:
+        length: Length = groove["length_ref"]
+        e, o = length.way, length.out
+        corners = [
+            [
+                [
+                    [*(length.a + along * e - across * o), z]
+                    for z in (-1.0, GROOVE_DEEP)
+                ]
+                for across in (groove["near_mm"], groove["far_mm"])
+            ]
+            for along in (groove["from_mm"], groove["to_mm"])
+        ]
+        blocks.append(block(np.array(corners)))
+    return cut.cut(cq.Compound.makeCompound(blocks))
+
+
+def grooves_volume(seam: Seam) -> float:
+    """What the grooves take from the frame, in mm³: each a box."""
+    return float(
+        sum(
+            (g["far_mm"] - g["near_mm"]) * GROOVE_DEEP * (g["to_mm"] - g["from_mm"])
+            for g in seam.grooves
+        )
+    )
+
+
+def grooves_read(frame: Any, seam: Seam) -> tuple[int, int]:
+    """Each groove read back from the built frame, at its middle: empty where the rib goes,
+    and solid beside it on the seam's side, beside it on the far side, and over it. How many
+    of those points read as they should, of how many."""
+    right, asked = 0, 0
+    for groove in seam.grooves:
+        length: Length = groove["length_ref"]
+        e, o = length.way, length.out
+        along = (groove["from_mm"] + groove["to_mm"]) / 2.0
+        middle = (groove["near_mm"] + groove["far_mm"]) / 2.0
+        half = GROOVE_DEEP / 2.0
+        for across, z, solid in (
+            (middle, half, False),
+            (groove["near_mm"] - WALL / 2.0, half, True),
+            (groove["far_mm"] + WALL / 2.0, half, True),
+            (middle, GROOVE_DEEP + LIP_OVER / 2.0, True),
+        ):
+            at = np.array([*(length.a + along * e - across * o), z])
+            asked += 1
+            right += inside([frame], at) == solid
+    return right, asked
 
 
 def faces_read(frame: Any, seam: Seam) -> float:
@@ -491,7 +676,7 @@ def say_seams(seam: Seam, report: Report, lead: float) -> None:
     report.fact(
         "seam_gap_mm", seam.gap, "mm",
         "how far apart two neighbours' faces stand: each is half of it back from the plane "
-        "through the dome's axis and the cut, for a came strip's web and its play",
+        "through the dome's axis and the cut. Nothing lies in it",
     )  # fmt: skip
     thin = min(length.wall_mm for edge in seam.edges for length in edge.lengths)
     report.fact(
@@ -499,12 +684,51 @@ def say_seams(seam: Seam, report: Report, lead: float) -> None:
         f"the least lead a seam leaves beside a pocket, at the pocket's floor: the cut's "
         f"middle is half the map's lead, {lead / 2.0:g} mm, from the glass",
     )  # fmt: skip
+    if seam.grooves:
+        say_hold(seam, report)
     report.line(
         "the frame's inner face lies on the slice's rows, and each seam's face leans out "
         "toward the outer face, the one the map is seen from. --border is the frame at the top "
-        "and the hem only. `pieces came` makes the strips that clip over two slices' edges, "
+        "and the hem only. `pieces came` makes the strips whose ribs go in the grooves, "
         "`pieces ring` the rings at the top and the hem, and `pieces seam` places two built "
         "neighbours and reads how they meet"
+    )
+
+
+def say_hold(seam: Seam, report: Report) -> None:
+    """A build's lines about the grooves that hold its seams, from the inside only."""
+    report.numbers["grooves"] = [
+        {
+            k: (round(v, 4) if isinstance(v, float) else v)
+            for k, v in groove.items()
+            if k not in ("foot", "length_ref")
+        }
+        for groove in seam.grooves
+    ]
+    wall = min(float(g["wall_to_opening_mm"]) for g in seam.grooves)
+    report.fact(
+        "groove_mm", [GROOVE_WIDE, GROOVE_DEEP], "mm",
+        f"each length's groove in the inner face, wide and deep, {WALL:g} mm in from the "
+        f"seam's face: a came strip's rib goes in it, {SNAP:g} mm a side tighter",
+    )  # fmt: skip
+    report.fact(
+        "groove_wall_mm", wall, "mm",
+        "the least lead between a groove and the nearest pane's opening, beside it in the "
+        "inner face",
+    )  # fmt: skip
+    report.fact(
+        "lip_over_groove_mm", seam.grooves[0]["lip_over_mm"], "mm",
+        "the lip left over a groove, under the pocket",
+    )  # fmt: skip
+    report.line(
+        "the hold, from the inside only (the Sponsor, 2026-11-20: \"Should be hidden\"): along "
+        f"each length a groove {GROOVE_WIDE:g} mm wide and {GROOVE_DEEP:g} deep in the inner "
+        f"face, {WALL:g} mm in from the seam's face, for a strip's rib. Its roof is a bridge "
+        f"{GROOVE_WIDE:g} mm wide as the frame prints, on its inner face. The outer face is the "
+        "slices' edges and the gap. A barb in a seam's face would need a web in the gap, one "
+        "line wide, and its groove would cut the lead beside a pocket; a flange in a rebate "
+        "along the inner face would print the rebate's roof in the air, and an open rebate "
+        "doesn't stop the slices parting"
     )
 
 
@@ -518,15 +742,21 @@ def refuse_seams(seam: Seam, report: Report) -> None:
         report.line(row["why"])
     report.second(
         f"each of the {len(seam.refused)} place(s) named is read from the pieces' outlines "
-        "against the cut's middle, and from the face's own place at the pocket's floor"
+        "against the cut's middle, from the face's own place at the pocket's floor, and for a "
+        "groove from its outline against the panes' openings as they'd be built, in Shapely"
+    )
+    room = (
+        f". A lead of about {seam.lead_needed:g} mm in the bands file would leave room, or a "
+        "smaller --seam-gap"
+        if seam.lead_needed
+        else ""
     )
     report.verdict(
         "FAIL",
-        f"the seams would cut a pocket or a lip at {len(seam.refused)} place(s), so nothing "
-        f"was built: {seam.refused[0]['why']}"
+        f"the seams would cut a pocket, a lip or the lead beside an opening at "
+        f"{len(seam.refused)} place(s), so nothing was built: {seam.refused[0]['why']}"
         + (f"; and {len(seam.refused) - 1} more" if len(seam.refused) > 1 else "")
-        + f". A lead of about {seam.lead_needed:g} mm in the bands file would leave room, or "
-        "a smaller --seam-gap, for a thinner web",
+        + room,
     )
 
 
@@ -678,14 +908,17 @@ def inside(solids: list[Any], at: np.ndarray) -> bool:
     return any(bool(solid.isInside(point)) for solid in solids)
 
 
-def _deepest(shared: Any, normal: np.ndarray) -> float:
-    """How deep what two shapes share goes along a direction: its thickest piece."""
+def _deepest(shared: Any, normal: np.ndarray, into: np.ndarray) -> float:
+    """How far what two shapes share goes into one: each piece's thinner way, along the slice's
+    normal or across it, and the thickest such piece. A bead pressed into a face is thin along
+    the normal, and a rib pressed into a groove's wall is thin across."""
     most = 0.0
     for lump in shared.Solids():
         if lump.Volume() < 1e-7:
             continue
-        along = np.array([v.toTuple() for v in lump.Vertices()]) @ normal
-        most = max(most, float(along.max() - along.min()))
+        corners = np.array([v.toTuple() for v in lump.Vertices()])
+        spans = [float(np.ptp(corners @ way)) for way in (normal, into)]
+        most = max(most, min(spans))
     return most
 
 
@@ -697,14 +930,18 @@ def _strips_read(
     places: list[list[dict[str, Any]]],
     thickness: float,
 ) -> list[dict[str, Any]]:
-    """Each came strip against the two rows it's on: whether it's round both edges, how far
-    it presses into them, and whether a flange's end lies over a pane's opening.
+    """Each came strip against the two rows it's on: what of it lies over each row's outer face
+    and its inner, how it holds each, how far it presses into them, and whether it lies over a
+    pane's opening.
 
-    A strip is on the length whose stretch of the cut its middle lies nearest. It's round an
-    edge where a point `PROBE` past the row's outer face and one past its inner, each half a
-    mm in from the row's edge there, are both inside it, and a point between the two rows is
-    too. A
-    flange's end is over lead where the row, just under its own face there, is solid."""
+    A strip is on the length whose stretch of the cut its middle lies nearest. Its corners say
+    what lies where, each against the row's own face toward the seam: past the outer face is
+    over it, past the inner face under it, and between the two a rib, whose middle, a little
+    under its top, is inside the strip and outside the row where it's in a groove. So a strip
+    holds a row by a rib in its groove with the strip under the inner face too, or by a channel
+    round its edge, over both faces. Points `PROBE` past the outer face, from the row's edge
+    2 mm in, read the outer face a second way. A strip's end furthest into a row is over lead
+    where the row, just past its own face there, is solid."""
     found = []
     middles = [(cut[k] + cut[k + 1]) / 2.0 for k in range(len(cut) - 1)]
     for strip in strips:
@@ -716,33 +953,78 @@ def _strips_read(
         along = (points - cut[j]) @ way
         start, stop = float(along.min()), float(along.max())
         centre = cut[j] + (start + stop) / 2.0 * way
-        held = 0
         pressed, shared = 0.0, 0.0
         over_opening: list[list[float]] = []
-        for side, mine in ((-1.0, rows[0][j]), (1.0, rows[1][j])):
-            normal = places[0 if side < 0 else 1][j]["normal"]
+        sides: list[dict[str, Any]] = []
+        for k, (side, mine) in enumerate(((-1.0, rows[0][j]), (1.0, rows[1][j]))):
+            normal = places[k][j]["normal"]
             # Into the row from the cut, in the row's own plane, square to the cut.
             into = np.cross(normal, way)
             into = into if float(into @ toward) * side > 0 else -into
             # The row's own face leans, so its outer edge and its inner are at different
-            # places: each is read where the face's plane meets that side of the frame.
+            # places: each is read where the face's plane meets that height of the frame.
             face = _facing(mine, -side * toward)
-            for height, past in ((thickness, PROBE), (0.0, -PROBE)):
-                start_in = 0.0
-                if face is not None:
-                    lean = float(face["normal"] @ normal) / float(face["normal"] @ into)
-                    start_in = float((face["at"] - cut[j]) @ into) - lean * (
-                        height - float((face["at"] - cut[j]) @ normal)
-                    )
-                at = centre + (start_in + 0.5) * into + (height + past) * normal
-                held += inside([strip], at)
-            common = strip.intersect(mine)
+            lean, face_at, face_high = 0.0, 0.0, 0.0
+            if face is not None:
+                lean = float(face["normal"] @ normal) / float(face["normal"] @ into)
+                face_at = float((face["at"] - cut[j]) @ into)
+                face_high = float((face["at"] - cut[j]) @ normal)
+
+            def face_in(height: float, lean: float = lean, at: float = face_at,
+                        high: float = face_high) -> float:  # fmt: skip
+                return at - lean * (min(max(height, 0.0), thickness) - high)
+
+            rel = points - cut[j]
+            high, deep = rel @ normal, rel @ into
+            past = deep > np.array([face_in(h) for h in high]) + 0.01
+            outer = past & (high > thickness + 0.01)
+            inner = past & (high < -0.01)
+            within = past & (high > 0.1) & (high < thickness - 0.1)
+            # The second way: points past the outer face, from the row's edge in.
+            probes = [
+                centre + (face_in(thickness) + r) * into + (thickness + PROBE) * normal
+                for r in np.arange(0.1, 2.0 + 1e-9, 0.1)
+            ]
+            probed = sum(inside([strip], at) for at in probes)
+            rib = None
+            if within.any():
+                top = float(high[within].max())
+                at = points[within & (high > top - 0.01)].mean(axis=0) - 0.05 * normal
+                rib = {
+                    "in_strip": inside([strip], at),
+                    "in_groove": not inside([mine], at),
+                    "at_mm": round(float((at - cut[j]) @ into), 4),
+                    "tall_mm": round(top, 4),
+                }
+            if rib and rib["in_strip"] and rib["in_groove"] and inner.any():
+                holds = "a rib in its groove"
+            elif outer.any() and inner.any():
+                holds = "a channel round its edge"
+            else:
+                holds = ""
+            sides.append(
+                {
+                    "holds": holds,
+                    "rib": rib,
+                    "outer_mm": round(float(high[outer].max()) - thickness, 4)
+                    if outer.any()
+                    else 0.0,
+                    "outer_reach_mm": round(float(deep[outer].max()), 4) if outer.any() else 0.0,
+                    "outer_cover_mm": round(float(deep[outer].max()) - face_in(thickness), 4)
+                    if outer.any()
+                    else 0.0,
+                    "outer_probed": int(probed),
+                    "inner_mm": round(-float(high[inner].min()), 4) if inner.any() else 0.0,
+                    "inner_reach_mm": round(float(deep[inner].max()), 4) if inner.any() else 0.0,
+                }
+            )
+            # Fuzzy by a tenth of a micron: a strip's bar lies on the inner face, and an exact
+            # `common` leaves a fin of no thickness there, joined to what a rib presses into.
+            common = strip.intersect(mine, tol=1e-4)
             shared += float(common.Volume())
-            pressed = max(pressed, _deepest(common, normal))
-            # The strip's own corners furthest into this row, at its near end: each flange's
-            # end, carried along the strip.
-            reach = (points - cut[j]) @ into
-            ends = points[(reach > reach.max() - 0.02) & (along < start + 0.02)]
+            pressed = max(pressed, _deepest(common, normal, into))
+            # The strip's own corners furthest into this row, at its near end, carried along it.
+            ends = points[(deep > deep.max() - 0.02) & (along < start + 0.02)]
             for corner in ends:
                 height = float((corner - cut[j]) @ normal)
                 under_face = thickness - 0.15 if height > thickness / 2.0 else 0.15
@@ -750,15 +1032,18 @@ def _strips_read(
                     at = corner + step * way + (under_face - height) * normal
                     if not inside([mine], at):
                         over_opening.append([round(float(v), 2) for v in at])
-        # Between the two rows: out of the dome along the plane between them, where the web is.
+        # Between the two rows: out of the dome along the plane between them, where a web is.
         out = places[0][j]["normal"] - float(places[0][j]["normal"] @ toward) * toward
-        held += inside([strip], centre + thickness / 2.0 * out / np.linalg.norm(out))
         found.append(
             {
                 "length": j + 1,
                 "length_mm": stop - start,
-                "held": held,
-                "grips": held == 5,
+                "sides": sides,
+                "holds": [s["holds"] for s in sides],
+                "holds_both": all(s["holds"] for s in sides),
+                "over_outer_face": any(s["outer_mm"] > 0 for s in sides),
+                "over_outer_probed": any(s["outer_probed"] for s in sides),
+                "in_gap": inside([strip], centre + thickness / 2.0 * out / np.linalg.norm(out)),
                 "press_mm": pressed,
                 "shared_mm3": shared,
                 "over_opening": over_opening,
@@ -929,45 +1214,112 @@ def run_seam(args: Any, report: Report) -> None:
     )  # fmt: skip
     wrong = []
     clash = []
+    disagree: list[str] = []
     strips: list[dict[str, Any]] = []
     pressed = 0.0
     if args.came:
         solids = solids_of(args.came, "--came takes the strips as `pieces came` placed them")
         strips = _strips_read(solids, [rows_a, rows_b], cut, toward, places, thick_a)
-        gripping = sum(bool(s["grips"]) for s in strips)
+        holding = sum(bool(s["holds_both"]) for s in strips)
         covered = sum(len(s["over_opening"]) for s in strips)
         pressed = max((float(s["press_mm"]) for s in strips), default=0.0)
+        over_outer = [s for s in strips if s["over_outer_face"]]
+        proud = max((float(x["outer_mm"]) for s in strips for x in s["sides"]), default=0.0)
+        under_inner = max((float(x["inner_mm"]) for s in strips for x in s["sides"]), default=0.0)
         report.numbers["strips"] = strips
         report.fact("strips_count", len(strips), how=f"in {args.came}")
         report.fact(
-            "strips_gripping", gripping,
-            how=f"round both slices' edges: each of five points, {PROBE:g} mm past a row's "
-            "outer face and its inner, on both rows, and between the two faces, is inside it",
+            "over_outer_face", len(over_outer),
+            how="strips with anything over either slice's outer face, by their corners past "
+            "it: the seam is to show only the slices' edges and the gap there",
+        )  # fmt: skip
+        report.fact(
+            "over_outer_face_mm", proud, "mm",
+            "how far proud of an outer face a strip stands, at the most",
+        )  # fmt: skip
+        report.fact(
+            "over_inner_face_mm", under_inner, "mm",
+            "how far in from an inner face, inside the dome, a strip stands, at the most",
+        )  # fmt: skip
+        report.fact(
+            "strips_holding", holding,
+            how="those that hold both slices: each by a rib in its groove with the strip under "
+            "its inner face, or by a channel round its edge",
         )  # fmt: skip
         report.fact(
             "press_mm", pressed, "mm",
-            f"the deepest a strip goes into a slice's face, its grip: --press allows {press:g}",
+            f"the deepest a strip goes into a slice, its grip: --press allows {press:g}",
         )  # fmt: skip
         report.fact(
-            "flanges_over_openings", covered,
-            how=f"places along the flanges' ends, {ALONG:g} mm apart, where the row just "
-            "under its own face isn't solid: a pane's opening, or past the frame",
+            "strips_over_openings", covered,
+            how=f"places along each strip's end furthest into a slice, {ALONG:g} mm apart, "
+            "where the slice just past its own face isn't solid: a pane's opening, or past the "
+            "frame",
         )  # fmt: skip
+        numbers_ab = numbers
+
+        def held(s: dict[str, Any]) -> str:
+            pairs = zip(numbers_ab, s["holds"], strict=True)
+            return ", ".join(f"slice {n} by {h or 'nothing'}" for n, h in pairs)
+
+        report.line(
+            "strips, each its length, how it holds each slice, and what lies over the slices' "
+            "faces: "
+            + "; ".join(
+                f"strip {s['length']}, {s['length_mm']:.1f} mm: {held(s)}; under the inner "
+                f"faces {max(x['inner_reach_mm'] for x in s['sides']):.2f} mm in from the cut's "
+                "middle, and "
+                + (
+                    f"over {max(x['outer_cover_mm'] for x in s['sides']):.2f} mm of an outer "
+                    "face from its edge"
+                    if s["over_outer_face"]
+                    else "nothing over the outer faces"
+                )
+                for s in strips
+            )
+        )
         if len(strips) != len(rows_a):
             wrong.append(f"there are {len(strips)} strip(s) for {len(rows_a)} length(s)")
-        if gripping != len(strips):
-            loose = [int(s["length"]) for s in strips if not s["grips"]]
-            wrong.append(f"the strip at length {piecemap.numbered(loose)} isn't round both edges")
+        if over_outer:
+            first = over_outer[0]
+            side = next(x for x in first["sides"] if x["outer_mm"] > 0)
+            wrong.append(
+                f"{len(over_outer)} strip(s) lie over a slice's outer face, the first at length "
+                f"{first['length']}, {side['outer_mm']:.2f} mm proud and over "
+                f"{side['outer_cover_mm']:.2f} mm of it from the slice's edge: the seam is to be "
+                "hidden from outside (the Sponsor, 2026-11-20), so `pieces came` holds it from "
+                "the inside"
+            )
+        if holding != len(strips):
+            loose = [int(s["length"]) for s in strips if not s["holds_both"]]
+            wrong.append(
+                f"the strip at length {piecemap.numbered(loose)} doesn't hold both slices, by a "
+                "rib in a groove or a channel round the edge"
+            )
         if covered:
             first = next(s for s in strips if s["over_opening"])
             wrong.append(
-                f"a flange lies over a pane's opening at {covered} place(s), the first at "
-                f"{first['over_opening'][0]} on length {first['length']}: a narrower --flange"
+                f"a strip lies over a pane's opening at {covered} place(s), the first at "
+                f"{first['over_opening'][0]} on length {first['length']}: a narrower --bar or "
+                "--flange"
             )
         if over(pressed, press):
             clash.append(
-                f"a strip goes {pressed:.3f} mm into a slice's face, over the {press:g} mm "
-                "--press allows: it was made for another thickness or gap"
+                f"a strip goes {pressed:.3f} mm into a slice, over the {press:g} mm --press "
+                "allows: it was made for another thickness or gap"
+            )
+        split = [s for s in strips if s["over_outer_face"] != s["over_outer_probed"]]
+        report.second(
+            "what lies over each outer face, read again by points: "
+            f"{PROBE:g} mm past it, from the slice's edge 2 mm in, 0.1 mm apart, at each "
+            f"strip's middle; {len(strips) - len(split)} of {len(strips)} strip(s) read the same "
+            "both ways"
+        )
+        if split:
+            disagree.append(
+                f"the strip at length {piecemap.numbered([int(s['length']) for s in split])} "
+                "reads over an outer face by its corners and not by points past it, or the "
+                "other way"
             )
     if args.rings:
         rings = [
@@ -1002,7 +1354,7 @@ def run_seam(args: Any, report: Report) -> None:
         f"the two maps' own edges: slice {numbers[0]}'s right, on the dome, is within "
         f"{cuts_off:.5f} mm of slice {numbers[1]}'s left at every fold"
     )
-    differs = []
+    differs = list(disagree)
     if overlap <= SHARED and points_inside:
         differs.append(
             f"the rows share {overlap:.4f} mm³ by `common`, and {points_inside} point(s) just "
@@ -1049,8 +1401,14 @@ def run_seam(args: Any, report: Report) -> None:
         f"to face at all {len(lengths)} length(s), {widest:.4f} mm apart for a gap of "
         f"{gap:g} mm, and share nothing"
         + (
-            f"; all {len(strips)} came strip(s) are round both edges, press {pressed:.3f} mm "
-            "at the most, and none lies over a pane's opening"
+            f"; all {len(strips)} came strip(s) hold both slices, "
+            + (
+                "each by a rib in its groove"
+                if all(h == "a rib in its groove" for s in strips for h in s["holds"])
+                else "by a rib or a channel"
+            )
+            + f", press {pressed:.3f} mm at the most, lie over neither outer face, and none "
+            "lies over a pane's opening"
             if args.came
             else ""
         )

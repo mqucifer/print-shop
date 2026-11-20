@@ -1078,14 +1078,15 @@ def parser() -> Parser:
         "--seam",
         action="store_true",
         help="for a dome's slice: its two long edges as seams, each straight length bevelled "
-        "by half the angle between the two slices there, and set back half of --seam-gap",
+        "by half the angle between the two slices there, set back half of --seam-gap, and "
+        "with a groove in the inner face for a came strip's rib",
     )
     build.add_argument(
         "--seam-gap",
         type=float,
         metavar="MM",
-        help="with --seam: how far apart two neighbours' faces stand, for a came strip's web "
-        "and its play on each side, in mm (0.6 unless given)",
+        help="with --seam: how far apart two neighbours' faces stand, in mm (0.6 unless "
+        "given). Nothing lies in it: a came strip holds from the inside",
     )
     seam = action.add_parser(
         "seam",
@@ -1111,13 +1112,15 @@ def parser() -> Parser:
     seam.add_argument(
         "--came",
         metavar="FILE",
-        help="the strips on this seam, as `pieces came` placed them: read on the two slices",
+        help="the strips on this seam, as `pieces came` placed them: what lies over each "
+        "slice's outer face and its inner, and how each holds both slices",
     )
     seam.add_argument(
         "--press",
         type=float,
         metavar="MM",
-        help="the most a strip may press into a slice's face, in mm (0.1 unless given)",
+        help="the most a strip may press into a slice, in mm (0.1 unless given: a rib's "
+        "snap)",
     )
     seam.add_argument(
         "--rings",
@@ -1128,8 +1131,8 @@ def parser() -> Parser:
     )
     came = action.add_parser(
         "came",
-        help="the came strips for a slice's seams: an H in section, one for each straight "
-        "length, its channels at the angle between the two slices there",
+        help="the came strips for a slice's seams, one for each straight length: a bar inside "
+        "the dome with a rib into each slice's groove, at the angle between the slices there",
     )
     ring = action.add_parser(
         "ring",
@@ -1152,7 +1155,7 @@ def parser() -> Parser:
         type=float,
         required=True,
         metavar="MM",
-        help="the least lip the frames were built with, in mm: a flange that reaches past the "
+        help="the least lip the frames were built with, in mm: a strip that reaches past the "
         "lead and that lip is over a pane's opening, and is refused",
     )
     came.add_argument(
@@ -1162,14 +1165,31 @@ def parser() -> Parser:
         "--grip",
         type=float,
         metavar="MM",
-        help="how far each bead stands into a slice's face, in mm (0.05 unless given)",
+        help="how much tighter a rib is than its groove, a side, in mm (0.1 unless given, "
+        "the Sponsor's PETG snap); with --hold h, how far each bead stands into a slice's face "
+        "(0.05)",
     )
     came.add_argument(
         "--flange",
         type=_xy,
         metavar="REACH,THICK",
-        help="how far a flange reaches from the cut's middle, and how thick it is, in mm "
-        "(1.5,0.8 unless given)",
+        help="with --hold h: how far a flange reaches from the cut's middle, and how thick it "
+        "is, in mm (1.5,0.8 unless given)",
+    )
+    came.add_argument(
+        "--hold",
+        choices=("rib", "h"),
+        default="rib",
+        help="rib: a bar inside the dome with a rib into each slice's groove, nothing over the "
+        "outer face (unless given). h: mqucifer/print-shop#166's H, with a flange over each "
+        "slice's outer face too, kept to read against: FAIL, as it shows on the outside",
+    )
+    came.add_argument(
+        "--bar",
+        type=_xy,
+        metavar="REACH,THICK",
+        help="a rib strip's bar: how far it reaches from the cut's middle, and how thick it is "
+        "at its edge, in mm (past the groove's far wall, and 0.8, unless given)",
     )
     came.add_argument(
         "--hem", type=float, metavar="MM", help="the first strip starts this far up the seam"

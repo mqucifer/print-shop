@@ -3,7 +3,7 @@ against the rules glass cutting follows, fixed as a glass cutter would, and buil
 and panes (mqucifer/print-shop#152, mqucifer/print-shop#153), one place at a time where most of
 it is right (mqucifer/print-shop#172). A dome's map comes from rules, and
 is cut into flat slices (mqucifer/print-shop#154), which join by bevelled seams, came strips
-and rings (mqucifer/print-shop#166).
+held from the inside, and rings (mqucifer/print-shop#166, mqucifer/print-shop#190).
 
     pieces trace IMAGE --width MM       a picture's pieces, as a piece map
     pieces check MAP                    the map against glass-cutting rules, each a figure
@@ -27,10 +27,11 @@ and rings (mqucifer/print-shop#166).
     pieces flatten MAP --slices N       a dome's map cut into flat slices, each its own map,
                                         with the bend at each fold
     pieces build MAP ... --seam         a slice's two long edges as seams: bevelled at each
-                                        straight length, a came's web apart from its neighbour
+                                        straight length, a gap apart from its neighbour, with
+                                        a groove in the inner face for a strip's rib
     pieces came SLICE --thickness T --lip L
-                                        the came strips that clip over two slices' edges, one a
-                                        straight length of a seam
+                                        the came strips that hold two slices' edges from the
+                                        inside, one a straight length of a seam
     pieces ring SLICE --thickness T     the rings whose grooves take every slice's hem and top
     pieces seam A B --frames FA FB [--came FILE] [--rings FILE...]
                                         two built neighbours placed round the dome: how their

@@ -444,15 +444,20 @@ a flat panel. Steps 2, 3 and 5 are these, in this order:
   of the cut line, and two slices meet in one line. Then run step 6's checks on what it built.
 - **Use `--seam` where the request has the slices joined into a shade** (mqucifer/print-shop#166):
   `pieces build SLICE ... --seam` bevels each straight length of a slice's two long edges by
-  half the angle between the slices there, and leaves a came strip's web of room between two
-  neighbours. A slice printed on its own, as a flat panel, has no seam.
-- **A seam that's refused cuts a pocket or a lip.** The reply names each place and the lead
-  that would leave room. Widen `lead_mm` in the bands file and make the dome again, or give a
-  smaller `--seam-gap`.
-- **The slices are held by parts, never by glue:** `pieces came SLICE --thickness T --lip L`
-  makes the strips that clip over each seam, and `pieces ring SLICE --thickness T` the rings
-  at the hem and the top. Each reply says how its parts are laid to print with no support.
+  half the angle between the slices there, leaves a gap between two neighbours, and cuts a
+  groove in the inner face along each for a came strip's rib. A slice printed on its own, as a
+  flat panel, has no seam.
+- **A seam that's refused cuts a pocket, a lip or the lead beside an opening.** The reply
+  names each place and the lead that would leave room. Widen `lead_mm` in the bands file and
+  make the dome again, or give a smaller `--seam-gap`.
+- **The slices are held by parts, never by glue, and from the inside:** the Sponsor wants the
+  seam hidden from outside (mqucifer/print-shop#190). `pieces came SLICE --thickness T --lip L`
+  makes the strips, a bar inside the dome with a rib into each slice's groove, and `pieces
+  ring SLICE --thickness T` the rings at the hem and the top. Each reply says how its parts
+  are laid to print with no support. `--hold h` is the old strip over the outer face, a
+  control only: never offer it.
 - **Check one pair of neighbours:** build slice 1 and slice 2 the same way, then `pieces seam
   SLICE-1 SLICE-2 --frames FRAME-1 FRAME-2 --came PLACED --rings RING...`. `OK` is the faces
-  the gap apart, every strip round both edges with no flange over a pane's opening, and both
-  slices' edges in the rings' grooves. Show its `placed` file with `render`.
+  the gap apart, every strip holding both slices with nothing over either outer face or a
+  pane's opening, and both slices' edges in the rings' grooves. Show its `placed` file with
+  `render`.
