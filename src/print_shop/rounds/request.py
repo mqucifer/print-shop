@@ -220,7 +220,7 @@ def held(found: list[Need], form: Form) -> list[str]:
                 "`fixed`, and quotes its line"
             )
         if need.fixed:
-            wrong += _fixed(need, theirs, name)
+            wrong += _fixed(need, theirs, name, form)
         if need.by == "eye" and covered and not need.no_bench:
             wrong.append(
                 f"{name} covers a line of the request by the Sponsor's eye: a line is covered by "
@@ -243,18 +243,37 @@ def held(found: list[Need], form: Form) -> list[str]:
     return wrong
 
 
-def _fixed(need: Need, theirs: list[Line], name: str) -> list[str]:
+def _quoted_in(quote: str, lines: list[Line]) -> Line | None:
+    """The first line that holds the quote, word for word as `needs` reads it."""
+    return next((one for one in lines if quote.strip() and normal(quote) in normal(one.text)), None)
+
+
+def _fixed(need: Need, theirs: list[Line], name: str, form: Form) -> list[str]:
+    """A fixed need's ties to its non-negotiable, each refusal with what to copy: on the runs a
+    fixed need quoted the requirement it was read with, or left its N-id out of `covers`, and was
+    refused without the line it should have quoted (mqucifer/print-shop#191)."""
     if not theirs:
+        found = _quoted_in(need.quote, form.non_negotiables)
+        if found is not None:
+            return [
+                f"{name} is `fixed`, and quotes `{found.id}`, a non-negotiable: name it in "
+                f'`covers`, as `"covers": ["{found.id}"]`'
+            ]
+        listed = ", ".join(f"`{one.id}`" for one in form.non_negotiables) or "none"
         return [
-            f"{name} is `fixed`, which is for the request's non-negotiables: it covers one in "
-            "`covers`"
+            f"{name} is `fixed`, which is for the request's non-negotiables: it names the one it "
+            f'covers in `covers`, as `"covers": ["N1"]`, and quotes its line. They are: {listed}'
         ]
     wrong: list[str] = []
-    if need.source == "request" and not any(
-        normal(need.quote) in normal(line.text) for line in theirs
-    ):
-        named = ", ".join(f"`{line.id}`" for line in theirs)
-        wrong.append(f'{name} is fixed, and its quote, "{need.quote}", isn\'t from {named}')
+    if need.source == "request" and _quoted_in(need.quote, theirs) is None:
+        line = theirs[0]
+        other = _quoted_in(need.quote, form.requirements)
+        whose = f": that's `{other.id}`'s, a requirement" if other is not None else ""
+        wrong.append(
+            f'{name} is fixed, and its quote, "{need.quote}", isn\'t from `{line.id}`{whose}. A '
+            f"fixed need quotes its non-negotiable's line word for word, as "
+            f'`"quote": "{line.text}"`'
+        )
     elif need.source not in ("request", "note"):
         wrong.append(
             f"{name} is fixed: its `source` is `request`, quoting its line, or `note`, quoting "

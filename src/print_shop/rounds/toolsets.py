@@ -377,9 +377,10 @@ def _figure_in(value: float, quote: str) -> bool:
     return re.search(rf"(?<![\d.]){re.escape(shown)}(?![\d])", quote) is not None
 
 
-def wrong_with(need: Need, toolset: Toolset) -> list[str]:
+def wrong_with(need: Need, toolset: Toolset, said: str = "") -> list[str]:
     """What's wrong with a bench need's check in this toolset: its command, what it says it
-    measures, and its limit. Nothing, for a run from before toolsets."""
+    measures, and its limit. Nothing, for a run from before toolsets. `said` is what a person
+    said, where a limit's figure may be found to quote."""
     if toolset.legacy or need.by != "bench":
         return []
     shown = f"the need {need.id!r}"
@@ -420,11 +421,26 @@ def wrong_with(need: Need, toolset: Toolset) -> list[str]:
     if measure.flag and measure.flag not in given:
         return [f"{shown}: `{measure.name}` is read by `{command}` with `{measure.flag}`"]
     if measure.limited:
-        return _limit_wrong(need, measure, given, shown)
+        return _limit_wrong(need, measure, given, shown, said)
     return []
 
 
-def _limit_wrong(need: Need, measure: Measure, given: nudge.Options, shown: str) -> list[str]:
+#: A sentence, or a line of a list, as a quote is taken from what a person said.
+SENTENCE = re.compile(r"[^.!?\n]+(?:\.(?=\d)[^.!?\n]*)*[.!?]?")
+
+
+def _said_with(figure: float, said: str) -> str:
+    """The first sentence of what a person said that holds the figure, to quote, or nothing."""
+    for found in SENTENCE.findall(said):
+        one = str(found).strip().lstrip("-*#0123456789. )").strip()
+        if one and _figure_in(figure, one):
+            return one
+    return ""
+
+
+def _limit_wrong(
+    need: Need, measure: Measure, given: nudge.Options, shown: str, said: str = ""
+) -> list[str]:
     """A limit from the request, never a default: given, and its figure in the need's quote."""
     figures: list[float] = []
     for option in measure.limits:
@@ -451,8 +467,12 @@ def _limit_wrong(need: Need, measure: Measure, given: nudge.Options, shown: str)
     missing = [f for f in figures if not _figure_in(f, need.quote)]
     if missing:
         named = ", ".join(f"{f:g}" for f in missing)
+        found = _said_with(missing[0], said)
+        # Each figure a check holds is in its quote: one to copy, where a person said it
+        # (mqucifer/print-shop#191).
+        copy = f', such as `"quote": "{found}"`' if found else ""
         return [
             f"{shown}: its limit {named} isn't in its quote. A `{measure.name}` limit is the "
-            "request's: quote the words that give it, or ask for it with `questions`"
+            f"request's: quote the words that give it{copy}, or ask for it with `questions`"
         ]
     return []

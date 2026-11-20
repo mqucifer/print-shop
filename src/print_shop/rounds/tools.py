@@ -130,11 +130,11 @@ PAGE = {
 LOOKS = {
     "looks": {
         "type": "object",
-        "description": 'Each file\'s colour and a short label: {"pane_1.step": {"colour": "blue", '
-        '"label": "cup"}, "frame.step": {"colour": "grey", "label": "frame"}}. A colour is a name '
-        "such as blue, amber or clear, perhaps with light or dark, or #rrggbb. The sheet draws "
-        "each file in its colour, marked by its name, with a legend; a file with none takes a "
-        "colour no other file has. A given file under `references/` may have one too. Optional.",
+        "description": 'Each drawn file\'s colour and a label under 32 characters: '
+        '{"pane_1.step": {"colour": "blue", "label": "cup"}}. A colour is a name such as blue, '
+        "amber or clear, perhaps with light or dark, or #rrggbb; a file with none takes one no "
+        "other has. Only files the sheet draws, a given one too: none for pictures alone. "
+        "Optional.",
     }
 }
 #: What only words can say of a need, beside its fields in the schema (mqucifer/print-shop#93).
@@ -253,7 +253,8 @@ def need_item(toolset: Toolset) -> dict[str, Any]:
             },
             "fixed": {
                 "type": "boolean",
-                "description": "true for a non-negotiable's need, quoting its line.",
+                "description": "true for a non-negotiable's need: `covers` has its N-id, "
+                "`quote` its line word for word.",
             },
             "figure": {
                 **text,
@@ -342,7 +343,7 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
             "`<command> --help` "
             "gives its arguments, and the skills say what each answers.",
             command="The command and its arguments, such as `clearance lid.step cup.step "
-            "--min-gap 0.2` or `render part.step --views iso top`.",
+            "--slide +z`, a way signed, or `rays cup.step --centre 0,0,5 --axis z`, an axis not.",
         ),
         _spec(
             "lookup",
@@ -399,7 +400,8 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
             },
             parts={
                 "type": "array",
-                "description": 'Each part: {"name": "arm", "what": "what it is and does"}.',
+                "description": 'Each part: {"name": "arm", "what": "what it is and does"}, '
+                "its name without ( ) / or :.",
                 "items": {"type": "object"},
             },
             joins={
@@ -465,9 +467,9 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
             {
                 "variants": {
                     "type": "array",
-                    "description": 'Each variant: {"name": "A", "files": ["a.step"], "about": '
-                    '"what sets it apart"}. `files` are what they\'ll take for the part. '
-                    "Optional where there are `pictures` or a `plan`.",
+                    "description": 'Each variant, named by a letter: {"name": "A", "files": '
+                    '["a.step"], "about": "what sets it apart"}. `files` are what they\'ll take '
+                    "for the part. Optional where there are `pictures` or a `plan`.",
                     "items": {"type": "object"},
                 },
                 "options": {
@@ -485,8 +487,8 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
                 },
                 "plan": {
                     "type": "string",
-                    "description": "At the `plan` stop: how you'll go about it, in your words. "
-                    "It goes to them with your breakdown and the needs. Where a part of yours "
+                    "description": "Required at the `plan` stop: how you'll go about it, not in "
+                    "`question`. It goes with your breakdown and the needs. Where a part of yours "
                     "holds a bought part or another of yours, the plan waits for a rough first "
                     "try built and its `clearance --slide` reading, which goes with it whatever "
                     "it says.",
@@ -592,20 +594,20 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
                 },
                 "groups": {
                     "type": "array",
-                    "description": "The ways the part prints, each with its own files: "
-                    '[{"name": "two-parts", "files": ["frame_base.step", "cap.step"], "about": '
-                    '"how it prints"}, {"name": "one-frame", "files": ["frame.step"], "about": '
-                    '"with the pause"}]. Files of `part` in no group print with every group, as '
-                    "panes do. Optional: one group of all of `part`.",
+                    "description": "The ways the part prints, each named without spaces, with "
+                    'files of `part`: [{"name": "two-parts", "files": ["frame_base.step", '
+                    '"cap.step"], "about": "how it prints"}, {"name": "one-frame", "files": '
+                    '["frame.step"], "about": "with the pause"}]. Files of `part` in no group '
+                    "print with every group, as panes do. Optional: one group of all of `part`.",
                     "items": {"type": "object"},
                 },
             },
             script="The script that writes the part.",
             part={
                 "type": "array",
-                "description": 'The files that are the part, such as `["stand.step"]`: it\'s what '
-                "the sheet of the result draws, so a test piece your script writes isn't taken for "
-                "the part. Each entry is one row of that sheet. Files seen together are one entry, "
+                "description": "A flat list of the files you made to print, not the given "
+                'references: `["stand.step"]`. The sheet of the result draws a row of each, so '
+                "a test piece isn't taken for the part. Files seen together are one entry, "
                 '{"name": "wide", "files": ["base.step", "lid.step"]}.',
                 "items": {},
             },
@@ -656,7 +658,7 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
                 "description": 'Each {"of": "breakdown", "holds": "why it still holds"}, {"of": '
                 '"N1", "now": "the need\'s `what` in new words"} or {"of": "plan", "now": "the '
                 'plan, again"}. `of` may name several, ["N1", "N2"], with one reason in `holds`. '
-                "The breakdown is sent again with `breakdown`.",
+                "Words only: the breakdown is sent again with `breakdown`, a check with `needs`.",
                 "items": {"type": "object"},
             },
         ),
@@ -680,8 +682,8 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
                 },
                 "way_in": {
                     "type": "string",
-                    "description": "A bought part's: the way it goes in, one of +x, -x, +y, -y, "
-                    "+z, -z.",
+                    "description": "A bought part's: the way it goes in, signed: +x, -x, +y, "
+                    "-y, +z or -z.",
                 },
                 "held_by": {
                     "type": "string",

@@ -275,6 +275,17 @@ def read(raw: Any) -> tuple[list[dict[str, Any]], list[str]]:
             continue
         named = entry["of"] if isinstance(entry["of"], list) else [entry["of"]]
         named = [str(one).strip() for one in named if str(one).strip()]
+        texts = [k for k in ("holds", "now") if not isinstance(entry.get(k) or "", str)]
+        if texts:
+            # On the runs a whole need went in `now`, and was kept as its `what`
+            # (mqucifer/print-shop#191): only words are restated.
+            wrong.append(
+                f"{', '.join(named) or 'it'}: `{texts[0]}` is words, not {_kind(entry[texts[0]])}. "
+                "`restate` keeps the breakdown's and each need's `what` only, as "
+                '{"of": "N1", "now": "the need\'s `what` in new words"}: a need\'s check or quote '
+                "changes with `needs`, once a person reopens them"
+            )
+            continue
         holds = str(entry.get("holds") or "").strip()
         now = str(entry.get("now") or "").strip()
         if not named:
@@ -289,6 +300,11 @@ def read(raw: Any) -> tuple[list[dict[str, Any]], list[str]]:
         for one in named:
             found.append({"of": one, "holds": holds, "now": now})
     return found, wrong
+
+
+def _kind(value: Any) -> str:
+    kinds = {dict: "an object", list: "a list", bool: "true or false"}
+    return kinds.get(type(value), "a number")
 
 
 def _plain(name: str) -> str:

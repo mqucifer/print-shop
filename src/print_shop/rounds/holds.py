@@ -23,9 +23,10 @@ named given parts in words, "plug body" for `references/plug_body.step`, "box (r
 printed part, so the plan waited for a file that couldn't exist. A stem's underscores and hyphens
 read as spaces, and a trailing digit (`_1`) may be left off where that names one file alone. Where
 one given file is left unmatched by every name in the breakdown, a name still unmatched that says
-it's given, "(reference)", "(given)" or "(bought)" in brackets or at its end, is that file. A name
-still unmatched is a printed part. A `fixed` or `loose` fact ends the wait wherever the breakdown
-names its part, on either branch.
+it's given, "(reference)", "(given)" or "(bought)" in brackets or at its end, is that file. A
+breakdown's own names have no brackets since mqucifer/print-shop#191, so "box reference" is the
+form a run sends now; the brackets are still read. A name still unmatched is a printed part. A
+`fixed` or `loose` fact ends the wait wherever the breakdown names its part, on either branch.
 
 **Which of the model's own parts are held** (mqucifer/print-shop#90). On a design run a lid's snap
 onto a base was settled by eye, and the slide, run once, read the lid overlapping the base where it
@@ -90,7 +91,8 @@ NEGATION = re.compile(r"not|no|nothing|never|\w+n['’]t")
 NEGATED_WITHIN = 3
 #: Where a clause ends, for a negation: punctuation, a dash between words, or a joining word.
 CLAUSE = re.compile(r"[,;:.!?()]|\s[-–—]+\s|\b(?:and|but|or|so|while|yet)\b")
-#: A breakdown's name that says it's a given part: "box (reference)", "pane (given)", "fan bought".
+#: A breakdown's name that says it's a given part: "box reference", "fan bought", or as earlier
+#: runs named them, "box (reference)" and "pane (given)".
 GIVEN_SAID = re.compile(
     r"\(\s*(?:the\s+|a\s+)?(?:references?|given|bought)\b[^()]*\)"
     r"|\b(?:references?|given|bought)\s*$"

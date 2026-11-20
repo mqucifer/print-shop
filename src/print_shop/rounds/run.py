@@ -1644,7 +1644,18 @@ class Run:
         for entry in entries:
             key = _description_key(entry["of"])
             if key not in kept:
-                wrong.append(f"`{entry['of']}` isn't a description kept. They are: {named}.")
+                form = self._form()
+                line = form.line(str(entry["of"]).strip()) if form is not None else None
+                which = (
+                    f" `{line.id}` is a line of the request: name the need that covers it."
+                    if line is not None
+                    else ""
+                )
+                wrong.append(
+                    f"`{entry['of']}` isn't a description kept. They are: {named}.{which} "
+                    "`restate` keeps the breakdown, each need's `what` by the need's id, and the "
+                    "plan."
+                )
                 continue
             if key == descriptions.BREAKDOWN and entry["now"]:
                 wrong.append("The breakdown is sent again with `breakdown`, whole.")
@@ -3470,6 +3481,16 @@ class Run:
             return {}
         if not isinstance(given, dict):
             return Judged(tool, "failed", shape, "not_a_look")
+        if tool == "ask" and not allowed and any(not self._given(str(n)) for n in given):
+            # A sheet of pictures alone draws no file of the part, so it has none to colour
+            # (mqucifer/print-shop#191). A given file is said and let by, as before
+            # (mqucifer/print-shop#54).
+            reply = (
+                "`looks` colours the files a sheet draws, or a given file under `references/`, "
+                "and this one draws none of yours, only your pictures: leave `looks` out, or "
+                "show the files as `variants`."
+            )
+            return Judged(tool, "failed", reply, "not_a_look")
         found: dict[str, dict[str, str]] = {}
         for name, look in given.items():
             if name not in allowed and not self._given(name):
@@ -3490,6 +3511,15 @@ class Run:
             found[name] = {"colour": colour, "label": label}
         return found
 
+    def _made_geometry(self) -> list[str]:
+        """The STEP and STL files the model made, as they stand: what a refusal's example
+        names, so it can be sent as it is."""
+        return sorted(
+            str(name)
+            for name in paths.walk_plain(self.work, skip_made=True)
+            if name.suffix.lower() in GEOMETRY and not str(name).startswith("references/")
+        )
+
     def _given(self, name: str) -> bool:
         """A file the run was given, under `references/`: `looks` may name one (on
         `eval-through-1` a plan's `looks` naming the given frame was refused, and on
@@ -3501,10 +3531,11 @@ class Run:
         """The ways the part is printed, each with its own files. A file of `part` in no group
         is in every group, as the panes are."""
         shape = (
-            '`groups` are the ways to print it, each with its own files: [{"name": "two-parts", '
-            '"files": ["frame_base.step", "cap.step"], "about": "how it prints"}, {"name": '
-            '"one-frame", "files": ["frame.step"], "about": "with a pause at 4.2 mm"}]. Files of '
-            "`part` in no group are printed with every group."
+            '`groups` are the ways to print it, each {"name": <short, no spaces>, "files": [...]} '
+            'with files of `part`: [{"name": "two-parts", "files": ["frame_base.step", '
+            '"cap.step"], "about": "how it prints"}, {"name": "one-frame", "files": '
+            '["frame.step"], "about": "with a pause at 4.2 mm"}]. Files of `part` in no group are '
+            "printed with every group."
         )
         if not given:
             return [{"name": "part", "about": "", "files": list(part)}]
@@ -3520,7 +3551,12 @@ class Run:
                 return Judged("done", "failed", shape, "not_a_group")
             name, files = str(entry["name"]), entry["files"]
             if not VARIANT.fullmatch(name) or name in [g["name"] for g in groups]:
-                reply = f"`{name}` won't do as a group's name. {shape}"
+                plain = NOT_IN_A_NAME.sub("-", name).strip("-")[:24] or "one"
+                why = "two groups have it" if VARIANT.fullmatch(name) else (
+                    f"a group's name is short, of letters, digits, `-` or `_`, with no spaces, "
+                    f"such as `{plain}`"
+                )
+                reply = f"`{name}` won't do as a group's name: {why}. {shape}"
                 return Judged("done", "failed", reply, "not_a_group")
             if not (isinstance(files, list) and files and all(isinstance(f, str) for f in files)):
                 return Judged("done", "failed", shape, "not_a_group")
@@ -3535,12 +3571,27 @@ class Run:
         """The files that are the part, as `done` names them, each entry a row of the sheet. It's
         the model's word, and it's what the people's sheet draws: a test piece a script writes is
         left off it, and two parts in one `part` aren't drawn on top of each other."""
+        made = [f for f in self._made_geometry() if f not in self._references()]
+        example = json.dumps(made[:3] or ["stand.step"])
         shape = (
-            '`part` names the files that are the part: `["stand.step"]`, with files seen together '
-            'as {"name": "wide", "files": ["base.step", "lid.step"]}.'
+            f"`part` is a flat list of the files you made to print, without the given references: "
+            f"`{example}`. Files seen together may be one entry, "
+            '{"name": "wide", "files": ["base.step", "lid.step"]}.'
         )
         if not given:
             return Judged("done", "failed", shape, "no_part")
+        # A given reference isn't printed (mqucifer/print-shop#191): a need may still read it.
+        given_too = [
+            f for e in given for f in (e if isinstance(e, list) else [e])
+            if isinstance(f, str) and _plain_name(f).startswith("references/")
+        ]
+        if given_too:
+            named = ", ".join(f"`{f}`" for f in given_too)
+            reply = (
+                f"`part` names {named}, given to you, which isn't printed: a need's check may "
+                f"still read it. {shape}"
+            )
+            return Judged("done", "failed", reply, "no_part")
         rows: list[dict[str, Any]] = []
         for entry in given:
             if isinstance(entry, str):
@@ -3903,6 +3954,8 @@ class Run:
                 "Show something: `variants` of your files, `pictures` you made, or at the plan "
                 "stop, the `plan`.",
             )
+        if bad is None:
+            bad = _close_problem(args.get("close"))
         if bad is not None:
             return Judged("ask", "failed", bad[1], bad[0])
         ways_wrong = self._ways_taken("ask", args.get("ways"))
@@ -4279,7 +4332,15 @@ class Run:
                     "first."
                 )
             if not plan:
-                return "no_plan", "At the plan stop, `plan` says how you'll go about it."
+                # The method goes in `plan`, and `question` asks: on the runs the method went in
+                # `question`, and was refused with no shape to copy (mqucifer/print-shop#191).
+                return "no_plan", (
+                    "At the plan stop, `plan` says how you'll go about it, in your words, and "
+                    '`question` what they judge: {"stop": "plan", "plan": "Profile in 2D first, '
+                    'then one test piece, then the whole.", "question": "Is this how to go about '
+                    'it?"}. Your method goes in `plan`, which they read beside your breakdown and '
+                    "the needs."
+                )
             # A held part is built and read before its plan (mqucifer/print-shop#87).
             _, missing = self._first_tries()
             if missing:
@@ -4704,7 +4765,11 @@ class Run:
             if not isinstance(variant, dict) or "name" not in variant or "files" not in variant:
                 return "not_a_variant", shape
             if not VARIANT.fullmatch(str(variant["name"])) or variant["name"] in ("none", "yes"):
-                return "not_a_variant", f"`{variant['name']}` won't do as a short name. {shape}"
+                letter = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"[min(len(seen), 25)]
+                return "not_a_variant", (
+                    f"`{variant['name']}` won't do as a variant's name: it's a short name, a "
+                    f"letter such as `{letter}`, and what sets it apart goes in `about`. {shape}"
+                )
             if variant["name"] in seen:
                 return "not_a_variant", f"Two variants are named {variant['name']}."
             seen.add(variant["name"])
@@ -4774,11 +4839,14 @@ class Run:
         if not eyes:
             return None
         if not variants:
+            files = json.dumps(self.state.part or self._made_geometry()[:2] or ["part.step"])
+            named = json.dumps(eyes)
             return "eye_on_picture", (
                 "An eye need passes on a pick of the part's own files, which `done` holds it to, "
                 "so `need` goes with `variants`: a picture you drew isn't the part, and a pick on "
                 "it can't pass the need. Show the files as variants, with your pictures beside "
-                "them if they help."
+                f'them if they help: "variants": [{{"name": "A", "files": {files}}}], "need": '
+                f"{named}."
             )
         if not isinstance(later, dict) or not all(
             isinstance(k, str) and isinstance(v, str) for k, v in later.items()
@@ -5060,6 +5128,39 @@ def _bed_unmet_refused(unmet: list[Reading]) -> str:
         "Send `done` again with `on_bed` giving each file its side, as your script stores it."
     )
     return "\n".join(lines)
+
+
+#: The views a close-up looks along, as `render` names them (`bench/render.py`'s `VIEWS`).
+CLOSE_VIEWS = ("top", "bottom", "front", "side", "iso")
+NUMBER = re.compile(r"-?(?:\d+(?:\.\d*)?|\.\d+)")
+
+
+def _close_problem(given: Any) -> tuple[str, str] | None:
+    """`ask`'s close-ups, each `X,Y,Z,R` or `X,Y,Z,R,VIEW`, read before the sheet is drawn: on
+    the runs one sent as `10,10,5` or `x=10,y=10,z=5,r=4` cost the sheet, with only the bench's
+    usage error to go by (mqucifer/print-shop#191)."""
+    if not given:
+        return None
+    shape = (
+        "`close` is close-ups by spaces, each `X,Y,Z,R` or `X,Y,Z,R,VIEW`: R mm all round the "
+        f"point x,y,z, along a view, one of {', '.join(CLOSE_VIEWS)} (top unless given), such as "
+        '`"close": "12,0,3,4 20,5,3,2,front"`'
+    )
+    if not isinstance(given, str):
+        return "not_a_close", f"{shape}: one string."
+    for one in given.split():
+        words = one.split(",")
+        numbers = words[:4]
+        view = words[4] if len(words) == 5 else "top"
+        if (
+            len(words) not in (4, 5)
+            or not all(NUMBER.fullmatch(w) for w in numbers)
+            or view not in CLOSE_VIEWS
+        ):
+            return "not_a_close", f"`{one}` isn't a close-up. {shape}."
+        if float(numbers[3]) <= 0:
+            return "not_a_close", f"`{one}` reaches over nothing: R is more than 0. {shape}."
+    return None
 
 
 def _on_bed(given: Any, part: list[str]) -> dict[str, str] | str:

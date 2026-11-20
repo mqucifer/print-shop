@@ -133,18 +133,24 @@ MOUNT = {
 def test_a_breakdown_names_every_fault_once_in_one_refusal() -> None:
     """runs14-neon-mount:17. The refusal named `channel` four times and said `channel (the M)`
     was in no join beside it, and the name's fault as "letters, digits and spaces", with
-    parentheses allowed and `+` not. Each fault is now said once, with the part a join means."""
+    parentheses allowed and `+` not. Each fault is now said once, with the part a join means.
+    Since mqucifer/print-shop#191 brackets aren't in a name either: each such name is said with
+    one to copy, and a join isn't told to name a part by a name that won't do."""
     found, wrong = breakdown.read(MOUNT)
     assert found == {}
+    name = (
+        "a part's `name` is short, of letters, digits, spaces, `.`, `_` and `-`, with no "
+        "parentheses, slashes or colons: "
+    )
     assert wrong == [
-        "a part's `name` is short, of letters, digits and spaces: not 'board + LED strip', as "
-        "`+` isn't in a name, so say it in words, as `and` for `+`",
+        f"{name}not 'channel (the M)', as `(`, `)` isn't in a name: name it `channel the M`",
+        f"{name}not 'screw spacers (3)', as `(`, `)` isn't in a name: name it `screw spacers 3`",
+        f"{name}not 'board + LED strip', as `+` isn't in a name, so say it in words, as `and` "
+        "for `+`",
         "a join names `channel`, in 2 joins, and `parts` names it `channel (the M)`: a join "
-        "names each part exactly as `parts` does, so name it `channel (the M)` in the join, or "
-        "`channel` in `parts`",
+        "names each part exactly as `parts` does, so name it `channel the M` in both",
         "a join names `board`, in 2 joins, and `parts` names it `board + LED strip`: a join "
-        "names each part exactly as `parts` does, so name it `board + LED strip` in the join, "
-        "or `board` in `parts`",
+        "names each part exactly as `parts` does, so name it `board` in `parts`",
         "`cap` is in no join: say what holds it to the rest, or, if nothing does, that's for "
         "the design to answer before the needs",
     ]
@@ -177,7 +183,7 @@ def test_a_breakdown_sent_through_the_tool_is_refused_whole(tmp_path: Path) -> N
     assert refused["outcome"] == "failed" and refused["why"] == "misses"
     reply = refused["reply"]
     assert reply.startswith("The breakdown wasn't kept:\n- a part's `name`")
-    assert reply.count("\n- ") == 4 and reply.count("a join names `channel`") == 1, reply
+    assert reply.count("\n- ") == 6 and reply.count("a join names `channel`") == 1, reply
 
 
 # A field sent as a string holding JSON

@@ -328,7 +328,9 @@ def read(
             before = len(wrong)
             _bench_check(need, check, wrong, shown)
             if toolset is not None and len(wrong) == before:
-                wrong += toolsets.wrong_with(need, toolset)
+                wrong += toolsets.wrong_with(
+                    need, toolset, "\n".join([said_by_sponsor, notes, picks])
+                )
         else:
             wrong.append(f"{shown}: `check.by` is bench, eye or bed")
         found.append(need)

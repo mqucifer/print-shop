@@ -44,6 +44,9 @@ AREA_FLOOR = 0.5
 PIXEL_SHARE = 0.03
 #: Two files' sections overlapping by less than this, in mm², are touching, not overlapping.
 OVERLAP_FLOOR = 0.05
+#: A face this near the plane, in mm, lies on it; and how far off it a cut is suggested.
+ON_FACE = 1e-4
+OFF_FACE = 0.05
 NUMBER = re.compile(r"-?\d+(?:\.\d*)?|-?\.\d+")
 
 
@@ -63,6 +66,11 @@ class Cut:
     @property
     def name(self) -> str:
         return self.label.replace(", ", " ").replace("cut ", "cut-")
+
+    def given(self, at: float | None = None) -> str:
+        """As `--cut` takes it, at `at` along its axis if that's given."""
+        span = "".join(f",{a}={lo:g}:{hi:g}" for a, (lo, hi) in self.window.items())
+        return f"{self.axis}={self.at if at is None else at:g}{span}"
 
 
 def parse(text: str) -> Cut:
@@ -139,9 +147,40 @@ def _clip(material: Any, cut: Cut, low: np.ndarray, high: np.ndarray) -> Any:
     return material.intersection(shapely.box(low[0], low[1], high[0], high[1]))
 
 
+def on_face(mesh: trimesh.Trimesh, cut: Cut) -> bool:
+    """Whether a face of the mesh lies on the plane: a triangle whose every corner is on it."""
+    along = np.asarray(mesh.triangles)[:, :, AXES.index(cut.axis)]
+    return bool(np.any(np.all(np.abs(along - cut.at) <= ON_FACE, axis=1)))
+
+
+def on_a_face(cut: Cut, lying: list[str], spans: list[tuple[float, float]]) -> str:
+    """A cut exactly on a file's face, said with one to copy each side of it that passes through
+    a file, by `spans`, each file's extent along the cut's axis. On the runs a cut on a pocket's
+    floor read as nothing by the mesh and as the whole face by OCCT, a FAIL of the picture and
+    not of the part, and one on a top face as passing through no file (mqucifer/print-shop#191)."""
+    sides = [cut.at - OFF_FACE, cut.at + OFF_FACE]
+    inside = [at for at in sides if any(low < at < high for low, high in spans)] or sides
+    either = " or ".join(f"--cut {cut.given(at)}" for at in inside)
+    return (
+        f"{cut.label} lies exactly on a face of {', '.join(lying)}: a section on a face is "
+        f"degenerate, the whole face by one method and nothing by the other. Cut a little off "
+        f"it, such as {either}"
+    )
+
+
 def draw(files: list[tuple[str, list[Part], tuple[int, int, int]]], cut: Cut, size: int) -> Drawn:
-    """Each file's section on the plane, in its colour, with the checks behind the picture."""
+    """Each file's section on the plane, in its colour, with the checks behind the picture. A
+    plane on a file's face has no section to rely on, so it's said, with a plane to cut instead."""
     right, up = TURNS[cut.axis][0]
+    lying = [name for name, parts, _ in files if any(on_face(p.fine(), cut) for p in parts)]
+    if lying:
+        k = AXES.index(cut.axis)
+        spans = [
+            (float(p.fine().bounds[0][k]), float(p.fine().bounds[1][k]))
+            for _, parts, _ in files
+            for p in parts
+        ]
+        raise NoAnswer(on_a_face(cut, lying, spans))
     sections: list[tuple[int, str, Any, list[Part]]] = []
     for k, (name, parts, _) in enumerate(files):
         pieces = [section(p.fine(), cut, p.name) for p in parts]
