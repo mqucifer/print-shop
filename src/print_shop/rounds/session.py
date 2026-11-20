@@ -133,6 +133,18 @@ LEFT = {
     "run": "`run` it",
     "check": "read one check with `bench`",
 }
+#: What the lock keeps open besides the asking tools and its allowance (mqucifer/print-shop#192):
+#: the stage's own way to a stop, and the run's cut-reasoning notes. A leg-joint eval was locked
+#: in intake, told to `read` its note and refused; its `ask` was refused for no breakdown and for
+#: nothing shown, `breakdown` was refused as ask-only, and it ended `blocked` with a design it said
+#: was complete. A lock is there to stop a loop, never to end a run that has a design to show.
+STAGE_OPEN = " {stage}, {tools} {stay} open too, as the way to a stop there."
+NOTES_OPEN = " `read` still opens your cut-reasoning {notes}: {paths}."
+#: After a call refused under the lock, what's open for what it lacks.
+LOCK_REFUSED = (
+    "\n\n(Under the lock: {open}. If the `ask` can't go through, end with `blocked`, saying what "
+    "it lacks.)"
+)
 #: A call the lock's allowance has already had.
 SPENT = (
     "Not carried out: under the lock you've had your one {what}. Now `ask` what's missing, "
@@ -324,6 +336,16 @@ class Session:
     # The run's working directory, where a cut call's settled reasoning is kept for the model to
     # `read` (mqucifer/print-shop#99): `work` beside the events where it's not named.
     work: Path | None = None
+    # Asked, while the lock holds, which tools the run's stage keeps open as its way to a stop,
+    # and where that is, as "at intake": there `questions`, `breakdown` and `needs`
+    # (mqucifer/print-shop#192).
+    stage_open: Callable[[], tuple[tuple[str, ...], str]] | None = None
+    # Each cut call's kept note, as the model names it: `read` opens these under the lock.
+    notes: list[str] = field(default_factory=list)
+    # The call that set the lock, and each call refused while it held: its tool and why, and an
+    # `ask`'s reply, which says what it lacked. An ending under the lock names them.
+    lock_at: int = 0
+    lock_hit: list[dict[str, Any]] = field(default_factory=list)
 
     def begin(self, *start: dict[str, Any]) -> None:
         """A new conversation. An earlier one in the same run stays in the records."""
@@ -376,6 +398,8 @@ class Session:
                 self.replies[int(event["index"])] = event["info"]
                 if self.only and event["outcome"] == "ok" and event.get("name") in ALLOWANCE:
                     self.spent.add(ALLOWANCE[event["name"]])
+                if self.only and event["outcome"] != "ok":
+                    self._hit(event.get("name"), str(event.get("why") or ""), event.get("reply"))
             elif kind == "compacted":
                 self.compactions += 1
             elif kind == "compaction_note":
@@ -384,14 +408,17 @@ class Session:
                 self.views += 1
             elif kind == "quiet_reply":
                 self.quiet_at = int(event["n"])
+                if event.get("kept") and event["kept"] not in self.notes:
+                    self.notes.append(str(event["kept"]))
                 only = tuple(event.get("only") or ())
                 if only and not self.only:
                     self.spent = set()
+                    self.lock_at = self.quiet_at
+                    self.lock_hit = []
                 self.only = only
             elif kind == "ended":
                 # Each stop ends what a quiet call asked for: the model asked, or ended.
-                self.only = ()
-                self.spent = set()
+                self._unlock()
 
     def go(self) -> Ending:
         """Calls until something stops it."""
@@ -502,13 +529,83 @@ class Session:
             return self.tools.specs
         return [s for s in self.tools.specs if self._open(s["function"]["name"])]
 
-    def _open(self, name: Any) -> bool:
-        """Whether a tool works now: any, or under the lock the asking ones and what's left of its
-        allowance."""
-        if not self.only or name in self.only:
+    def _open(self, name: Any, args: dict[str, Any] | None = None) -> bool:
+        """Whether a tool works now: any, or under the lock the asking ones, the stage's way to a
+        stop, a `read` of a cut call's kept note, and what's left of its allowance
+        (mqucifer/print-shop#86, #192). Without `args`, whether it's offered at all."""
+        if not self.only or name in self.only or name in self._stage()[0]:
             return True
+        if name == "read" and self.notes:
+            return args is None or self._a_note(args.get("path"))
         kind = ALLOWANCE.get(name) if isinstance(name, str) else None
         return kind is not None and kind not in self.spent
+
+    def _stage(self) -> tuple[tuple[str, ...], str]:
+        """The tools the run's stage keeps open under the lock, of those this session offers, and
+        the stage's name: none where nothing says."""
+        if self.stage_open is None:
+            return (), ""
+        tools, stage = self.stage_open()
+        offered = {s["function"]["name"] for s in self.tools.specs}
+        return tuple(t for t in tools if t in offered), stage
+
+    def _a_note(self, path: Any) -> bool:
+        """Whether a path is one of the run's kept cut-reasoning notes, as the model may name it."""
+        if not isinstance(path, str):
+            return False
+        named = path.strip().removeprefix("./").removeprefix("work/")
+        return any(named == note or named.endswith("/" + note) for note in self.notes)
+
+    def _open_said(self) -> str:
+        """What the lock keeps open besides the asking tools and its allowance, said after them."""
+        tools, stage = self._stage()
+        said = ""
+        if tools:
+            stay = "stays" if len(tools) == 1 else "stay"
+            where = stage[:1].upper() + stage[1:]
+            said += STAGE_OPEN.format(stage=where, tools=_named(tools), stay=stay)
+        if self.notes:
+            notes = "note" if len(self.notes) == 1 else "notes"
+            said += NOTES_OPEN.format(notes=notes, paths=_named(self.notes))
+        return said
+
+    def _lock_open_said(self) -> str:
+        """What's open under the lock for what a refused call lacked."""
+        tools, stage = self._stage()
+        stay = "stays" if len(tools) == 1 else "stay"
+        said = [f"{_named(tools)} {stay} open {stage}"] if tools else []
+        left = self._left()
+        if left:
+            said.append("you may still " + _and(left))
+        if self.notes:
+            said.append(f"`read` opens {_named(self.notes)}")
+        return "; ".join(said) or "only `ask`, `send_ask` and `blocked` work"
+
+    def _hit(self, name: Any, why: str, reply: Any) -> None:
+        """A call refused while the lock holds, kept for the ending: an `ask`'s reply says what it
+        lacked."""
+        hit: dict[str, Any] = {"call": self.requests, "tool": name, "why": why}
+        if name == "ask":
+            hit["said"] = str(reply or "").split("\n\n(Under the lock:")[0]
+        self.lock_hit.append(hit)
+
+    def _unlock(self) -> None:
+        self.only = ()
+        self.spent = set()
+        self.lock_at = 0
+        self.lock_hit = []
+
+    def lock_said(self) -> dict[str, Any]:
+        """What an ending under the lock names (mqucifer/print-shop#192): the call that set it,
+        what stayed open, each call it refused and why, and what the last refused `ask` lacked,
+        which is what's missing."""
+        asked = [h for h in self.lock_hit if h["tool"] == "ask"]
+        return {
+            "set_at": self.lock_at,
+            "open": [*self.only, *self._stage()[0], *(["read"] if self.notes else [])],
+            "refused": [{k: h[k] for k in ("call", "tool", "why")} for h in self.lock_hit],
+            "missing": asked[-1]["said"] if asked else "no `ask` was tried under the lock",
+        }
 
     def _allowed(self) -> list[str]:
         """The tools the lock's allowance still opens, of those this session offers."""
@@ -560,6 +657,8 @@ class Session:
             kept_at, kept = cut_reasoning.write(self.work_dir(), n, thought)
             script = kept.script is not None
             cut += DESIGN_KEPT.format(path=kept_at)
+            if kept_at not in self.notes:
+                self.notes.append(kept_at)
         if script:
             unfinished = ", unfinished where it was cut," if kept.unfinished else ""
             reply = SCRIPT_KEPT.format(reasoning=reasoning, unfinished=unfinished, path=kept_at)
@@ -570,14 +669,18 @@ class Session:
         if again and not self.only and not script:
             self.only = asking
             self.spent = set()
+            self.lock_at = n
+            self.lock_hit = []
             gap = n - self.quiet_at
             reply += ONLY_ASKING.format(calls=f"{gap} call{'' if gap == 1 else 's'}")
+            reply += self._open_said()
         elif self.only:
             reply += STILL_ONLY
             left = self._left()
             if left:
                 said = left[0] if len(left) == 1 else ", ".join(left[:-1]) + f" and {left[-1]}"
                 reply += STILL_ALLOWED.format(left=said)
+            reply += self._open_said()
         self._record(
             "quiet_reply",
             n=n,
@@ -587,6 +690,10 @@ class Session:
             after=n - self.quiet_at if self.quiet_at else None,
             only=list(self.only) or None,
             allowed=self._allowed() or None,
+            # What else the lock keeps open (mqucifer/print-shop#192): only where it does, so an
+            # older run's events read back the same.
+            **({"stage_open": list(self._stage()[0])} if self.only and self._stage()[0] else {}),
+            **({"notes": list(self.notes)} if self.only and self.notes else {}),
             reply=reply,
             **({"script": script, "kept": kept_at} if kept_at else {}),
         )
@@ -1038,6 +1145,13 @@ class Session:
                 judged.reply = (judged.reply or "ok") + AFTER_ALLOWED.format(
                     left=self._left_said()
                 )
+            elif self.only and judged.outcome != "ok":
+                if name == "ask" or name in self._stage()[0]:
+                    # What it lacks can be made under the lock (mqucifer/print-shop#192).
+                    judged.reply = (judged.reply or "") + LOCK_REFUSED.format(
+                        open=self._lock_open_said()
+                    )
+                self._hit(name, judged.why, judged.reply)
             if self.lead is not None:
                 judged = self.lead(name, judged)
             self.outcomes[judged.outcome] += 1
@@ -1082,12 +1196,12 @@ class Session:
         `write` or `edit` whose text holds a compaction's note. On
         `eval-tip-1` at call 109 the model wrote a file whose whole text was a note, as earlier
         `write` calls looked after compaction (mqucifer/print-shop#47)."""
-        if not self._open(name):
+        if not self._open(name, args):
             kind = ALLOWANCE.get(name) if isinstance(name, str) else None
             if kind is not None:
-                spent = SPENT.format(what=SPENT_WHAT[kind])
+                spent = SPENT.format(what=SPENT_WHAT[kind]) + self._open_said()
                 return Judged(str(name), "failed", spent, "ask_only_spent")
-            return Judged(str(name), "failed", NOT_NOW, "ask_only")
+            return Judged(str(name), "failed", NOT_NOW + self._open_said(), "ask_only")
         if name not in ("write", "edit"):
             return None
         for key in ("content", "new", "old"):
@@ -1141,8 +1255,11 @@ class Session:
             self.logged = len(self.messages)
 
     def _ended(self, ending: Ending) -> Ending:
-        self.only = ()
-        self.spent = set()
+        if self.only:
+            # An ending under the lock names what it refused and what the ask lacked
+            # (mqucifer/print-shop#192).
+            ending.said = {**ending.said, "lock": self.lock_said()}
+        self._unlock()
         self.snapshot()
         self._record("ended", name=ending.name, said=ending.said)
         return ending
@@ -1164,6 +1281,16 @@ def _noted_call(called: dict[str, Any], why: str) -> dict[str, Any]:
     if short == args:
         return called
     return {**called, "function": {**function, "arguments": json.dumps(short)}}
+
+
+def _and(said: list[str]) -> str:
+    """Things in a sentence: `a`, `b` and `c`."""
+    return said[0] if len(said) == 1 else ", ".join(said[:-1]) + f" and {said[-1]}"
+
+
+def _named(names: Any) -> str:
+    """Names in a sentence, each as code."""
+    return _and([f"`{n}`" for n in names])
 
 
 def _cut(line: str) -> str:

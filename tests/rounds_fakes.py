@@ -19,6 +19,12 @@ def tool(name: str, /, **args: Any) -> dict[str, Any]:
     return {"name": name, "arguments": args}
 
 
+def flat(*files: str) -> dict[str, str]:
+    """`done`'s `on_bed` laying each file as stored: every printed file's side is named
+    (mqucifer/print-shop#192)."""
+    return dict.fromkeys(files, "-z")
+
+
 def laid(args: list[str], where: Path | None, meshes: dict[str, Any] | None = None) -> Ran:
     """The bench's `refine` helper answering a `mesh` request, as a fake box gives it: each file
     laid on the bed as an STL, a plain 10 mm cube unless `meshes` gives the file's own by its

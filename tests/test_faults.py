@@ -15,7 +15,7 @@ from print_shop.bench import overlap as overlap_module
 from print_shop.rounds import faults, toolsets
 from print_shop.rounds.box import Ran
 from print_shop.rounds.run import Refused, Run
-from tests.rounds_fakes import Scripted, tool
+from tests.rounds_fakes import Scripted, flat, tool
 from tests.test_holding import Answers, replies, settled, started
 from tests.test_needs_part import DONE, GLASS, THICK
 
@@ -36,7 +36,7 @@ BY = "stand-in: a builder in a test"
 WHO = "a stand-in for the Sponsor (a builder in a test)"
 ASK = tool("ask", question="Right?", variants=[{"name": "A", "files": ["pane.step"]}])
 SENT = tool("send_ask", says="One pane.")
-PANE = {"part": ["pane.step"], "glass": GLASS, **DONE}
+PANE = {"part": ["pane.step"], "glass": GLASS, "on_bed": flat("pane.step"), **DONE}
 MERGED = "Merged piece 28 into piece 27, which takes the notch away"
 
 

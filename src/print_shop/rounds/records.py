@@ -269,6 +269,11 @@ class Recorder:
             # What the lock left room to build and read (mqucifer/print-shop#86): only where it
             # did, so an older run's rows read back the same.
             said["allowed"] = event["allowed"]
+        for key in ("stage_open", "notes"):
+            if event.get(key):
+                # What else the lock kept open: the stage's way to a stop and the run's kept
+                # notes (mqucifer/print-shop#192).
+                said[key] = event[key]
         if event.get("kept"):
             # A cut call's settled reasoning, kept in `record/`, and whether it held a script it
             # was told to write (mqucifer/print-shop#99).
