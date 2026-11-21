@@ -52,6 +52,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from print_shop.inventory import Material
+from print_shop.materials import material_name
 
 __all__ = [
     "STORE_DIR",
@@ -120,7 +121,7 @@ class StoredProfile:
 
     @property
     def filament_type(self) -> str:
-        return self.get("filament_type")
+        return material_name(self.get("filament_type"))
 
     @property
     def manufacturer(self) -> str:

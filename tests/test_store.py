@@ -137,3 +137,12 @@ def test_the_store_is_scoped_to_the_0_4_machine_and_pla_and_petg() -> None:
     with pytest.raises(NoChoice):
         choose(store, nozzle_mm=0.8, filament="Elegoo PLA")
     assert "  \"Elegoo Rapid PETG\"  (Elegoo / PETG)" in describe(store)
+
+
+def test_bambu_pet_presets_read_as_petg() -> None:
+    """Orca's library spells Bambu Lab's PETG presets `PET`; print-shop reads them as PETG."""
+    store = Store(STORE)
+    bambu = [f for f in store.all("filament") if f.manufacturer == "Bambu Lab"]
+    assert bambu, "the Bambu PETG presets are in the store"
+    assert {f.filament_type for f in bambu} == {"PETG"}
+    assert '  "Bambu PETG HF"  (Bambu Lab / PETG)' in describe(store)

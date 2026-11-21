@@ -25,7 +25,9 @@
             "Elegoo PETG @ECC",
             "Elegoo PETG PRO @ECC",
             "Elegoo PETG Translucent @ECC",
-            "Elegoo Rapid PETG @ECC"
+            "Elegoo Rapid PETG @ECC",
+            "Bambu PETG HF @System",
+            "Bambu PETG Translucent @System"
         ]
     },
     "left_out": {
@@ -34,6 +36,7 @@
         "0.30mm Standard @Elegoo CC 0.6 nozzle - TPU": "TPU, reviewed separately later",
         "Elegoo PLA @ECC - .8mm": "tuned for the 0.8 nozzle, by its name; out of scope until the 0.8 is",
         "Elegoo PLA @ECC - Copy .8mm": "tuned for the 0.8 nozzle, by its name; out of scope until the 0.8 is",
-        "Elegoo RAPID PETG @ECC - .8mm": "tuned for the 0.8 nozzle, by its name; out of scope until the 0.8 is"
+        "Elegoo RAPID PETG @ECC - .8mm": "tuned for the 0.8 nozzle, by its name; out of scope until the 0.8 is",
+        "Bambu PETG Translucent @System - .8mm nozzle": "tuned for the 0.8 nozzle, by its name; out of scope until the 0.8 is"
     }
 }

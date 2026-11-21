@@ -50,6 +50,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from print_shop.materials import material_name
 from print_shop.rounds.lessons import (
     ACCEPTED,
     AFTER_SCORE,
@@ -303,7 +304,7 @@ def _part(row: Row) -> dict[str, Any]:
 
 def material_of(settings: dict[str, Any]) -> str | None:
     """A print's filament type, as it was sliced (`filament_type`), or None if it doesn't say."""
-    found = str(settings.get("filament_type") or "").strip().upper()
+    found = material_name(str(settings.get("filament_type") or ""))
     return found or None
 
 
@@ -621,7 +622,7 @@ def for_part(
     listed as withheld, with why, and sets nothing. An orientation lesson is the orientation
     step's (`orienting`), never the settings proposal's."""
     has = set(traits(features))
-    this = filament_type.strip().upper()
+    this = material_name(filament_type)
     given = []
     for row in ledger.query(
         "SELECT l.*, p.stl_name FROM print_lessons l JOIN prints p ON p.job_id = l.job_id"
