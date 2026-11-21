@@ -41,7 +41,9 @@ from typing import Any
 
 import numpy as np
 
+from . import placed as placed_module
 from .cae import freecad
+from .placed import say_placed
 from .report import NoAnswer, Report
 
 AXES = ("x", "y", "z")
@@ -284,8 +286,19 @@ class Way:
         if args.step <= 0 or (not clear and args.start <= 0):
             raise NoAnswer("--from and --step are distances, more than 0")
         self.vector = FreeCAD.Vector
-        self.moving = Part.read(args.moving)
-        self.onto = [Part.read(name) for name in args.onto]
+        # A part built flat is read where it sits among the others (mqucifer/print-shop#201).
+        given = getattr(args, "placed", None)
+        self.placed = placed_module.of([args.moving, *args.onto], given)
+
+        def read(name: str) -> Any:
+            shape = Part.read(name)
+            if name in self.placed:
+                shape = shape.copy()
+                shape.transformShape(placed_module.freecad_matrix(FreeCAD, self.placed[name]))
+            return shape
+
+        self.moving = read(args.moving)
+        self.onto = [read(name) for name in args.onto]
         self.names = list(args.onto)
         self.name = args.moving
         for name, shape in zip([self.name, *self.names], [self.moving, *self.onto], strict=True):
@@ -481,6 +494,7 @@ class Rays:
 
 def run(args: Any, report: Report) -> None:
     way = Way(args)
+    say_placed(report, way.placed, getattr(args, "placed", None), [way.name, *way.names])
     every = [piece for out in way.offsets for piece in way.pieces(out)]
     places = []
     for group in _places(every, way.across):

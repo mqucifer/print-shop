@@ -6,7 +6,7 @@ projected along the view by NumPy, and the painted pixels must cover the same ou
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +19,8 @@ from vtk.util.numpy_support import numpy_to_vtk, numpy_to_vtkIdTypeArray, vtk_to
 
 from . import colours as colours_module
 from . import cut as cut_module
+from . import placed as placed_module
+from .placed import say_placed
 from .report import Report, slug
 from .shapes import NoAnswer, Part, load, slice_at
 
@@ -521,6 +523,42 @@ def _shown(names: list[str], looks: dict[str, colours_module.Look]) -> list[Show
     return found
 
 
+#: How a variant's row is drawn where it holds a placed file (mqucifer/print-shop#201).
+PLACED, FLAT = "placed", "flat"
+ROW_SAID = {
+    PLACED: ", its placed files where they sit",
+    FLAT: ", flat, as built, apart from the others",
+}
+
+
+def _placed(shown: list[Shown], placed: dict[str, placed_module.Placed]) -> dict[str, Shown]:
+    """Each placed file drawn where it sits: the same file, colour and mark, turned and moved
+    (mqucifer/print-shop#201)."""
+    found = {}
+    for one in shown:
+        if one.name in placed:
+            whole = placed_module.place(one.whole, placed[one.name])
+            parts = whole.pieces()
+            found[one.name] = replace(one, whole=whole, parts=parts, anchor=_anchor(parts))
+    return found
+
+
+def _rows(
+    variants: list[tuple[str, list[str]]], placed: dict[str, placed_module.Placed]
+) -> list[tuple[str, list[str], str]]:
+    """Each variant's row, and whether it's drawn placed: a row holding a placed file is drawn
+    with it placed among the others, and again after it with only its placed files, flat, as
+    they're built. Each row's last word says which: `PLACED`, `FLAT` or nothing."""
+    rows: list[tuple[str, list[str], str]] = []
+    for name, files in variants:
+        mine = [f for f in dict.fromkeys(files) if f in placed]
+        if not mine:
+            rows.append((name, files, ""))
+            continue
+        rows += [(name, files, PLACED), (f"{name} flat", mine, FLAT)]
+    return rows
+
+
 def _numbered(pixels: np.ndarray, marks: list[tuple[str, float, float]]) -> np.ndarray:
     """Each file's mark where it is, once the picture's been checked: the check reads none."""
     picture = Image.fromarray(pixels.copy())
@@ -669,21 +707,30 @@ def run_variants(args: Any, report: Report) -> None:
         _not_both(files, args.test_pieces)
     pieces = _test_pieces(args.test_pieces, report)
     looks = _looks(args.looks)
-    everyone = _shown([f for _, files in variants for f in files], looks)
+    every_file = [f for _, files in variants for f in files]
+    everyone = _shown(every_file, looks)
     by_name = {s.name: s for s in everyone}
+    given = getattr(args, "placed", None)
+    placed = placed_module.of(list(dict.fromkeys(every_file)), given)
+    say_placed(report, placed, given, list(dict.fromkeys(every_file)))
+    sitting = _placed(everyone, placed)
+    drawn_rows = _rows(variants, placed)
     marks = (TEST_PIECE_MARK,) if pieces else ()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     size = args.size
-    rows = len(variants)
+    rows = len(drawn_rows)
     columns = len(args.views) + len(closes) + len(cuts)
     sheet = Image.new("RGB", (columns * size, rows * size), "white")
     draw = ImageDraw.Draw(sheet)
     problems = []
     views: dict[str, Any] = {}
     seen_all: dict[str, Any] = {}
-    for row, (name, files) in enumerate(variants):
-        shown = [by_name[f] for f in dict.fromkeys(files)]
+    for row, (name, files, how) in enumerate(drawn_rows):
+        shown = [
+            sitting[f] if how == PLACED and f in sitting else by_name[f]
+            for f in dict.fromkeys(files)
+        ]
         meshes = [m for one in shown for m in one.meshes]
         shades = [one.shade for one in shown for _ in one.meshes]
         points = np.vstack([np.asarray(m.vertices) for m in [*meshes, *pieces]])
@@ -727,7 +774,7 @@ def run_variants(args: Any, report: Report) -> None:
             draw.text((column * size + 8, row * size + 8), f"{name}: {cut.label}", fill=(20,) * 3)
         seen_all[name] = seen
         _say_seen(report, f"{name}: ", seen)
-        report.line(f"variant {name}: {', '.join(files)}")
+        report.line(f"variant {name}: {', '.join(files)}{ROW_SAID.get(how, '')}")
     sheet = _with_legend(sheet, everyone)
     path = out / f"variants-{slug('+'.join(n for n, _ in variants))[:60]}-sheet.png"
     sheet.save(path)
@@ -767,6 +814,12 @@ def run(args: Any, report: Report) -> None:
     closes = [_close(text) for text in args.close]
     cuts = _cuts(args.cuts)
     shown = _shown(args.files, _looks(args.looks))
+    # A part built flat is drawn where it sits among the others (mqucifer/print-shop#201).
+    given = getattr(args, "placed", None)
+    placed = placed_module.of(args.files, given)
+    say_placed(report, placed, given, args.files)
+    sitting = _placed(shown, placed)
+    shown = [sitting.get(one.name, one) for one in shown]
     parts = [one.whole for one in shown]
     for part in parts:
         report.notes += part.notes
