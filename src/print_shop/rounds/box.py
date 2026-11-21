@@ -31,6 +31,7 @@ import threading
 import time
 import uuid
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -80,6 +81,10 @@ class Box:
         self.ran = 0
         #: The images past the first that are known to be here.
         self.built: set[str] = set()
+        #: A bench command as the run has it run, from its words and the folder it runs over:
+        #: a part built flat is placed where it's read against a given part
+        #: (`placing.py`, mqucifer/print-shop#201). None runs each as it's given.
+        self.placing: Callable[[list[str], Path], list[str]] | None = None
 
     def python(self, script: str, where: Path | None = None, timeout: int | None = None) -> Ran:
         """A script, as `run` runs it: it may import what's beside it. Each bench command it
@@ -92,6 +97,8 @@ class Box:
     def bench(self, args: list[str], where: Path | None = None, timeout: int | None = None) -> Ran:
         """A bench command, in its own image: the second for `fit-on` and `bend`
         (mqucifer/print-shop#142). Only the bench's own: `build` and `check` aren't in an image."""
+        if self.placing is not None:
+            args = self.placing(list(args), where or self.work)
         image = host.image_for(args)
         if image != host.IMAGE and image not in self.built:
             if host.image_id(image) is None:

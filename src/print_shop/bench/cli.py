@@ -254,6 +254,14 @@ def _named_facing(text: str) -> tuple[str, str]:
     return name, way
 
 
+#: `--placed`, as `clearance`, `fit-on` and `render` take it (mqucifer/print-shop#201).
+PLACED = (
+    "an assembly file: each file it names, as a part or in a part's `with`, is read where it "
+    "sits, turned by the part's `turn` and moved by its `at`, and every other file where it is. "
+    "A part built flat in its own frame is read so against the parts it meets"
+)
+
+
 def parser() -> Parser:
     top = Parser(prog="bench", description=__doc__)
     top.add_argument("--out", default="bench-out", help="where reports are saved")
@@ -308,6 +316,11 @@ def parser() -> Parser:
         "pairs.N.places.NAME.gap_mm. Put it round the faces whose play it is, such as a pane's "
         "edge and its pocket's wall, and clear of the faces with another play. With a place "
         "named, --min-gap and --max-gap hold each place's gap",
+    )
+    clearance.add_argument(
+        "--placed",
+        metavar="ASSEMBLY",
+        help=PLACED,
     )
     clearance.add_argument(
         "--facing",
@@ -592,6 +605,11 @@ def parser() -> Parser:
         required=True,
         metavar="FILE",
         help="what it goes onto: each STEP file it could meet on its way",
+    )
+    fit.add_argument(
+        "--placed",
+        metavar="ASSEMBLY",
+        help=PLACED,
     )
     fit.add_argument(
         "--along",
@@ -1298,6 +1316,12 @@ def parser() -> Parser:
         default=[],
         metavar="NAME=FILE[,FILE...]",
         help="one of several variants: each gets its own labelled row of views, on one sheet",
+    )
+    render.add_argument(
+        "--placed",
+        metavar="ASSEMBLY",
+        help=PLACED + ". With variants, each row holding a placed file is drawn placed, and again "
+        "after it with those files flat, as built",
     )
     render.add_argument("--views", nargs="*", default=["iso", "top", "front", "side"])
     render.add_argument("--section", nargs="*", type=float, default=[], help="z heights to cut")

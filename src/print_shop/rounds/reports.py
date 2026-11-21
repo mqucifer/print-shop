@@ -43,7 +43,7 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "volume_mesh_mm3",
         "watertight",
     ),
-    "clearance": ("bodies", "lift", "pairs", "places", "slide"),
+    "clearance": ("bodies", "lift", "pairs", "placed", "places", "slide"),
     "readback": (
         "after_mm3",
         "before_mm3",
@@ -134,7 +134,16 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "pieces_moved",
         "pieces_not_moved",
     ),
-    "render": ("close_ups", "cuts", "files", "sections", "seen_px", "test_pieces", "views"),
+    "render": (
+        "close_ups",
+        "cuts",
+        "files",
+        "placed",
+        "sections",
+        "seen_px",
+        "test_pieces",
+        "views",
+    ),
     "faces": ("bosses", "flat_faces", "holes", "partial_cylinders"),
     "slice": ("cuts",),
     "fit-on": (
@@ -144,6 +153,7 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "from_mm",
         "moving",
         "onto",
+        "placed",
         "places",
         "rays",
         "readings",
@@ -610,6 +620,12 @@ SLICE = Rows(
     )
 )
 
+#: Each file `--placed` placed, by its name: the part entry it's from, its turns and its move
+#: (mqucifer/print-shop#201).
+PLACED = Keyed(
+    Row({"part": TEXT, "assembly": TEXT, "turn": Rows(Rows(ANY)), "at": XYZ}, closed=True)
+)
+
 SHAPES: dict[str, dict[str, Any]] = {
     "info": {
         "bodies_mesh": NUMBER,
@@ -630,6 +646,7 @@ SHAPES: dict[str, dict[str, Any]] = {
         "watertight": FLAG,
     },
     "clearance": {
+        "placed": PLACED,
         # The file `--lift` moved, along which axis and how far (mqucifer/print-shop#65).
         "lift": Row({"file": TEXT, "along": TEXT, "mm": NUMBER}, closed=True),
         "pairs": Rows(
@@ -777,7 +794,7 @@ SHAPES: dict[str, dict[str, Any]] = {
         # By the names the need's own `--box NAME=...` and `--facing NAME=...` give.
         "selected": Keyed(LEAST),
     },
-    "render": {"seen_px": Keyed(Keyed(NUMBER)), "views": Keyed(Row())},
+    "render": {"placed": PLACED, "seen_px": Keyed(Keyed(NUMBER)), "views": Keyed(Row())},
     "slice": {"cuts": SLICE},
     # The second image's (mqucifer/print-shop#142). `fit-on`'s places are deepest first, and
     # `bend`'s pushes are by the edge pushed, `far` or `near`.
@@ -788,6 +805,7 @@ SHAPES: dict[str, dict[str, Any]] = {
         "from_mm": NUMBER,
         "moving": TEXT,
         "onto": Rows(TEXT),
+        "placed": PLACED,
         "places": Rows(
             Row(
                 {

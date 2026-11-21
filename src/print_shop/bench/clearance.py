@@ -51,7 +51,9 @@ import shapely
 import trimesh
 from OCP.BRepExtrema import BRepExtrema_DistShapeShape
 
+from . import placed as placed_module
 from .limits import ARITHMETIC, over, said, under
+from .placed import say_placed
 from .report import Report
 from .shapes import (
     FINE,
@@ -60,7 +62,6 @@ from .shapes import (
     NoAnswer,
     Part,
     _tessellated,
-    load,
     slice_at,
 )
 from .slide import summary, what_holds
@@ -545,7 +546,11 @@ def lifted(part: Part, along: str, mm: float) -> Part:
 
 
 def run(args: Any, report: Report) -> None:
-    parts = [load(path) for path in args.files]
+    # A part built flat is read where it sits among the others (mqucifer/print-shop#201).
+    given = getattr(args, "placed", None)
+    placed = placed_module.of(args.files, given)
+    parts = [placed_module.load(path, placed) for path in args.files]
+    say_placed(report, placed, given, args.files)
     lift = getattr(args, "lift", None)
     along = getattr(args, "along", "z")
     if lift is not None:

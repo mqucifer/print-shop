@@ -15,7 +15,10 @@ whoever designs the parts (`docs/bench.md` has it in full):
 
 - **A part** is one solid in a STEP file. `turn` turns it about the origin's axes, in order, in
   degrees, and `at` then moves it: where it sits in the assembly. `layers` is the axis of its own
-  file its layers are stacked along, the way up on the bed: it turns with the part.
+  file its layers are stacked along, the way up on the bed: it turns with the part. `with`
+  names other files placed by its `turn` and `at`, such as a frame's panes, which carry no load
+  (mqucifer/print-shop#201): `clearance`, `fit-on` and `render` read them where the part sits
+  with `--placed` (`placed.py`), and `load` and `fit-bed` read the part alone.
 - **A joint** is between two parts that meet face to face. `bonded` is glued or welded over the
   faces that meet. `bolted` names a bolt and an insert from the tables here, and where each bolt
   is, a point on its axis. `through` (mqucifer/print-shop#168) names a bolt that passes right
@@ -268,6 +271,9 @@ class PartAt:
     material: Material
     #: The axis of its own file its layers are stacked along.
     layers: str
+    #: Other files placed with it by the same `turn` and `at`, such as a frame's panes: each as
+    #: the assembly names it, beside the assembly file.
+    others: tuple[str, ...] = ()
 
     def matrix(self) -> np.ndarray:
         """Its turns as one rotation."""
@@ -414,7 +420,26 @@ def _part(entry: Any, folder: Path) -> PartAt:
         tuple(turns),
         MATERIALS[material],
         str(_one_of(entry["layers"], AXES, f"{name}'s `layers`")),
+        _with(entry.get("with", []), name, folder),
     )
+
+
+def _with(given: Any, name: str, folder: Path) -> tuple[str, ...]:
+    """The files placed with a part by its `turn` and `at`, each a STEP or STL file beside the
+    assembly file."""
+    if not isinstance(given, list) or not all(isinstance(f, str) and f for f in given):
+        raise NoAnswer(
+            f"the part {name}'s `with` is a list of files placed with it, such as its panes: "
+            f"{given!r}"
+        )
+    for file in given:
+        if not file.lower().endswith((".step", ".stp", ".stl")):
+            raise NoAnswer(f"the part {name}'s `with` names {file}, which isn't a STEP or STL file")
+        if not (folder / file).is_file():
+            raise NoAnswer(
+                f"the part {name}'s `with` names {file}, which isn't beside the assembly file"
+            )
+    return tuple(given)
 
 
 def _joint(entry: Any, names: list[str]) -> Joint:

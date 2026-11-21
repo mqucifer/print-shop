@@ -53,7 +53,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from print_shop.bench import arm as arm_module
+from print_shop.bench import placed as placed_module
 from print_shop.rounds import holds, judge
 from print_shop.rounds.box import Box
 from print_shop.rounds.needs import UNSURE, Need
@@ -277,10 +280,44 @@ def _read(box: Box, name: str, command: str, verdicts: list[str], where: Path, k
     return judge.read_need(box, need, where, kept)
 
 
+def own_frame(
+    corners: list[list[float]], across: str, placed: dict[str, Any]
+) -> tuple[list[list[float]], str]:
+    """A place's box and the axis it's pushed across, from where `fit-on` placed a file back
+    into its own file's frame, where `arm` and `bend` read it (mqucifer/print-shop#201): the
+    box round the box's corners turned back, and the axis turned back, or nothing where that's
+    along no axis of the file's."""
+    one = placed_module.Placed(
+        "",
+        str(placed.get("part", "")),
+        tuple((str(a), float(d)) for a, d in placed.get("turn") or []),
+        tuple(float(c) for c in placed.get("at") or (0, 0, 0)),  # type: ignore[arg-type]
+        str(placed.get("assembly", "")),
+    )
+    back = np.linalg.inv(one.matrix())
+    low, high = np.asarray(corners[0], dtype=float), np.asarray(corners[1], dtype=float)
+    every = np.array([[(low, high)[k >> i & 1][i] for i in range(3)] for k in range(8)])
+    moved = every @ back[:3, :3].T + back[:3, 3]
+    box = [[float(v) for v in moved.min(axis=0)], [float(v) for v in moved.max(axis=0)]]
+    if across not in AXES:
+        return box, ""
+    unit = back[:3, :3] @ np.eye(3)[AXES.index(across)]
+    return box, _axis(unit)
+
+
 def _place(
-    box: Box, way: Way, place: Place, on_bed: dict[str, str], where: Path, kept: Path, name: str
+    box: Box,
+    way: Way,
+    place: Place,
+    on_bed: dict[str, str],
+    where: Path,
+    kept: Path,
+    name: str,
+    placed: dict[str, Any] | None = None,
 ) -> None:
-    """What one place comes to: the arm looked for on each printed file of the two, and bent."""
+    """What one place comes to: the arm looked for on each printed file of the two, and bent.
+    `placed` is each file `fit-on` read placed, as its record says: the place is turned back
+    into that file's own frame, where `arm` and `bend` read the file."""
     given = [f for f in (place.file, way.moving) if f.startswith(holds.REFERENCES)]
     place.given = given[0] if given else ""
     if place.seated:
@@ -304,7 +341,16 @@ def _place(
             back = (1 if way.along[0] == "+" else -1) * place.out_mm
             for corner in corners:
                 corner[axis] -= back
-        found = _find_arm(box, file, corners, place.across, where)
+        across = place.across
+        if file in (placed or {}):
+            corners, across = own_frame(corners, across, (placed or {})[file])
+            if not across:
+                place.no_arm.append(
+                    f"on `{file}`: its push isn't along an axis of the file as it's built, "
+                    "and `bend` takes a push along one of them"
+                )
+                continue
+        found = _find_arm(box, file, corners, across, where)
         if not found.get("found"):
             place.no_arm.append(f"on `{file}`: {found.get('why') or 'no arm was found'}")
             continue
@@ -354,7 +400,7 @@ def read(
             )
             one.places.append(place)
             if k < MOST:
-                _place(box, way, place, on_bed, where, kept, f"bend-{n}-{k}")
+                _place(box, way, place, on_bed, where, kept, f"bend-{n}-{k}", numbers.get("placed"))
             else:
                 given = [f for f in (place.file, way.moving) if f.startswith(holds.REFERENCES)]
                 place.given = given[0] if given else ""
