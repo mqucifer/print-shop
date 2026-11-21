@@ -1,0 +1,13 @@
+{
+    "compatible_printers": [
+        "Elegoo Centauri Carbon 0.4 nozzle"
+    ],
+    "filament_extruder_variant": [
+        "Direct Drive Standard"
+    ],
+    "filament_retraction_length": [
+        "nil"
+    ],
+    "inherits": "Bambu PETG Translucent @System",
+    "name": "Bambu PETG Translucent @System - std retraction"
+}

@@ -20,6 +20,7 @@ from typing import Any, Protocol
 from pydantic import BaseModel
 
 from print_shop.core.state import SliceResult
+from print_shop.materials import material_name
 from print_shop.slicer.store import ProfilesUsed
 
 __all__ = [
@@ -206,7 +207,7 @@ def parse_gcode_header(gcode_path: Path) -> SliceResult:
             with contextlib.suppress(ValueError):
                 layer_height_mm = float(_first_value(line.split("=", 1)[1]))
         elif line.startswith("; filament_type ="):
-            material = _first_value(line.split("=", 1)[1]) or None
+            material = material_name(_first_value(line.split("=", 1)[1])) or None
 
     missing = []
     if layer_count is None:
