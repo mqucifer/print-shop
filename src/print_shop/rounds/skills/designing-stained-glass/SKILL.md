@@ -229,6 +229,17 @@ its pocket, `--cut x=X,y=Y0:Y1`. Whether a pocket is blind or runs through, and 
 opening, are on the cut. In one run, six calls of long reasoning went on how its own frame's
 pockets were built, which one cut shows.
 
+### Step 5: a panel that meets given parts on its edge (mqucifer/print-shop#201)
+
+A panel that meets given parts on its edge, such as an apron between a table's legs: build the frame and its panes flat, as step 5 builds them, the glass along z, however the piece stands. Every glass check reads them so. Say where it sits once, in an assembly file's part entry, its turns about the origin's axes and then where it's moved, with its panes in `with`:
+
+```json
+{"parts": [{"name": "apron", "file": "apron.step", "layers": "z", "turn": [["x", 90]],
+            "at": [0, -200, 400], "with": ["pane_1.step", "pane_2.step"]}]}
+```
+
+Each `clearance`, `fit-on` and `render` that names a given file beside it then reads it placed there, and says so, and its file stays flat. Never keep a turned copy of it: two copies drift.
+
 ### Step 4: the play round a pane's edge, read at its edge (mqucifer/print-shop#72)
 
 The play the request gives is round the pane's outline, at its edge. Its faces may have another

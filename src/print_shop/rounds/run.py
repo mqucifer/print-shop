@@ -55,6 +55,7 @@ from print_shop.rounds import (
     needs,
     nudge,
     paths,
+    placing,
     print_sides,
     prompt,
     records,
@@ -391,6 +392,9 @@ class Run:
         self.state: State
         self.ledger = DesignLedger(folder.parent / "ledger.sqlite")
         self.box = Box(self.work, self.limits.command_seconds)
+        # A part built flat is placed wherever the harness reads it against a given part
+        # (mqucifer/print-shop#201).
+        self.box.placing = self._placed_argv
         self.recorder: records.Recorder | None = None
         self.tools = WorkTools(self.work, self.box, self, int(self.limits.work_gb * 10**9))
         self.session = Session(
@@ -3154,6 +3158,7 @@ class Run:
         shutil.rmtree(folder / "judged", ignore_errors=True)
         wanted = self._needs_now(glass)
         followed = self._followed_said(glass)
+        unplaced = self._unplaced(glass)
         (folder / "followed.json").write_text(
             json.dumps({n.id: n.command for n in wanted if n.by == "bench"}, indent=1),
             encoding="utf-8",
@@ -3301,6 +3306,8 @@ class Run:
             reply += "\n" + "\n".join(faults.at_done(faults_read))
         if followed:
             reply += "\n" + "\n".join([FOLLOWED, *followed])
+        if unplaced:
+            reply += "\n" + "\n".join([placing.AT_STOP, *unplaced])
         if panes_read:
             reply += "\n" + "\n".join([glass_checks.HEADING, *glass_checks.said(panes_read)])
         if any(not one.passed for one in strips):
@@ -3336,6 +3343,7 @@ class Run:
                 "overlap": overlap,
                 "held": held,
                 "end": (ends, ends_unread),
+                "unplaced": unplaced,
             }
             self.state.end_sent = None
             return self._stop_for_approval(
@@ -3509,6 +3517,27 @@ class Run:
             {f: (one.side, one.at_call) for f, one in print_sides.fitted(rows).items()},
         )
         return print_sides.no_side_said(unnamed, laid)
+
+    def _unplaced(self, declared: list[glass_checks.Glass]) -> list[str]:
+        """What a stop says of each frame `glass` declares that's read against a given file
+        where no assembly file places it, or places it without its panes
+        (mqucifer/print-shop#201): the bench needs' readings, and the model's own."""
+        if not declared or self.toolset.legacy:
+            return []
+        rows = self._bench_rows()
+        commands: list[str | list[str]] = [
+            n.command for n in self._needs_now(declared) if n.by == "bench"
+        ]
+        commands += [argv for _, argv, _ in rows]
+        frames = [(one.frame, [*one.panes, *one.others]) for one in declared]
+        return placing.unplaced(frames, commands, self.work, placing.of_run(self.work, rows))
+
+    def _placed_argv(self, argv: list[str], where: Path) -> list[str]:
+        """A bench command as the harness runs it: with `--placed` and the run's assembly file
+        where it reads a given file beside a part the assembly places (`placing.py`)."""
+        if not placing.wanted(argv):
+            return argv
+        return placing.of_run(self.work, self._bench_rows()).argv(argv, where)
 
     def _bench_rows(self) -> list[tuple[int, list[str], dict[str, Any] | None]]:
         """Every bench call of this run, oldest first: its call, its argv and its numbers."""
@@ -3801,6 +3830,8 @@ class Run:
             ]
         if delivered.get("downward"):
             lines += [f"## {downward.HEADING}", "", *downward.said(delivered["downward"]), ""]
+        if delivered.get("unplaced"):
+            lines += [f"## {placing.HEADING}", "", placing.AT_STOP, "", *delivered["unplaced"], ""]
         ends, ends_unread = delivered.get("end") or ([], [])
         lines += end_checks.at_stop(ends, ends_unread, self._end_accepted())
         if delivered.get("held"):
@@ -4265,6 +4296,10 @@ class Run:
         if followed:
             lines.append(FOLLOWED + "\n" + "\n".join(followed))
         self.state.draft["followed"] = followed
+        unplaced = self._unplaced(declared or glass_checks.load(self.state.glass))
+        if unplaced:
+            lines.append(placing.AT_STOP + "\n" + "\n".join(unplaced))
+        self.state.draft["unplaced"] = unplaced
         stale = self._stale(printed)
         if stale:
             lines.append(
@@ -4714,6 +4749,8 @@ class Run:
                 *draft["followed"],
                 "",
             ]
+        if draft.get("unplaced"):
+            lines += [f"## {placing.HEADING}", "", placing.AT_STOP, "", *draft["unplaced"], ""]
         if draft.get("overlap"):
             lines += stuck.overlap_at_stop(draft["overlap"])
         if draft.get("end_checks"):
