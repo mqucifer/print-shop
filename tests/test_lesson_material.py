@@ -130,6 +130,19 @@ def test_a_petg_plate_lesson_reaches_petg_and_not_pla_and_a_brim_lesson_reaches_
     assert unknown["textured_plate_temp"].withheld.startswith("learned on PETG; this print is")
 
 
+def test_a_bambu_pet_print_shares_the_petg_lessons_both_ways(ledger: Ledger) -> None:
+    """Orca's library spells Bambu Lab's PETG `PET`: a lesson learned on it is a PETG lesson,
+    and a PETG lesson reaches a print sliced as PET."""
+    ledger.record_start_requested(_record("bambu-1", "PET", _plate()))
+    _kept(ledger)
+    petg = {g.key: g for g in lessons.for_part(ledger, RAIL, "PETG")}
+    assert (petg["textured_plate_temp"].withheld, petg["textured_plate_temp"].material) == (
+        "", "PETG"
+    )
+    pet = {g.key: g for g in lessons.for_part(ledger, RAIL, "PET")}
+    assert pet["textured_plate_temp"].withheld == ""
+
+
 def test_widened_to_any_filament_it_reaches_every_one(ledger: Ledger) -> None:
     ledger.record_start_requested(_record("petg-1", "PETG", _plate(), _brim()))
     _kept(ledger)
