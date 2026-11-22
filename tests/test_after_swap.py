@@ -32,6 +32,7 @@ from print_shop.inventory import Inventory, InventoryError, SpoolUse
 from print_shop.ledger import Ledger, LedgerError, Row
 from print_shop.orchestrator import daemon as daemon_module
 from print_shop.orchestrator import spools as after_print
+from print_shop.orchestrator.graph import why_not_start
 from print_shop.orchestrator.outcome import OutcomeDesk, Watcher
 from print_shop.runtime import describe
 from print_shop.setup import pauses
@@ -1104,6 +1105,7 @@ CHANGES: dict[str, Callable[[Shop], object]] = {
     "said, the same spool": lambda shop: word(shop, WHITE),
     "said, another spool": lambda shop: word(shop, CLEAR),
     "seen, and said the same": lambda shop: seen_and_said(shop, WHITE),
+    "colours corrected": lambda shop: recoloured(shop),
 }
 QUESTIONS = ("on now, y", "on now, a number", "stock.py, y", "stock.py, no",
              "review, y", "review's LOAD FIRST, y", "the pick")
@@ -1116,6 +1118,13 @@ def word(shop: Shop, spool: int) -> None:
 def seen_and_said(shop: Shop, spool: int) -> None:
     swap_started(shop, "seen")
     shop.says(spool)
+
+
+def recoloured(shop: Shop) -> None:
+    """The two were labelled the wrong way round: what was shown as white is black."""
+    with Inventory(shop.path) as stock:
+        stock.edit(WHITE, colour="black")
+        stock.edit(BLACK, colour="white")
 
 
 def emptied(shop: Shop, spool: int) -> None:
@@ -1209,8 +1218,10 @@ def test_the_phone_settles_two_seen_to_end(shop: Shop) -> None:
     ends(shop, swap_started(shop, "a"))
     ends(shop, swap_started(shop, "b"))
     answered_with(shop, ON_BLACK)  # a's card is shown first
-    assert unknown_of(shop) == "b" and ended_with(kept(shop, "a")) == BLACK
+    assert unknown_of(shop) == "b"
+    assert ended_with(kept(shop, "a")) is None, "what's on now isn't what a ended with: b's since"
     answered_with(shop, ON_WHITE)
+    assert ended_with(kept(shop, "b")) == WHITE
     assert not_known(shop) == "" and shop.loaded() == WHITE
 
 
@@ -1220,6 +1231,54 @@ def test_before_preparing_each_of_two_is_asked(shop: Shop) -> None:
     did, _ = asked(shop, "2", "2")
     assert did.count("on now> ") == 2
     assert not_known(shop) == "" and shop.loaded() == BLACK
+
+
+# The fourth read, of d196fb1
+# --------------------------------------------------------------------------
+
+
+def test_the_reviews_question_names_the_colour_as_it_is(
+    shop: Shop, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Prepared as white, corrected to black before it was asked."""
+    swap_started(shop)
+    with Inventory(shop.path) as stock:
+        prepared = stock.material()
+        stock.edit(WHITE, colour="cream")
+        on_hand = tuple(stock.spools())
+        standing = stock.asked("cc1")
+    request = dataclasses.replace(
+        _request(), material=prepared, stock=lambda: on_hand, stands=lambda: standing,
+        record_load=lambda spool, asked: None)
+    said: list[str] = []
+    cli_reviewer(read=lambda prompt: "" if prompt == "loaded> " else "ok", write=said.append,
+                 forget=lambda: None, asks=lambda: True)(request)
+    question = next(line for line in said if "on the printer now?" in line)
+    assert "spool #1, Elegoo PLA, cream" in question
+
+
+def test_the_review_asks_of_each_of_two(shop: Shop, monkeypatch: pytest.MonkeyPatch) -> None:
+    swap_started(shop, "a")
+    swap_started(shop, "b")
+    prompts, _ = reviewed(shop, monkeypatch, lambda: "y", terminal=True)
+    assert prompts.count("loaded> ") == 2 and not_known(shop) == ""
+
+
+def test_a_swap_prepared_with_no_stock_doesnt_start_once_ones_set_up(shop: Shop) -> None:
+    """It could record neither its spools nor that what's on isn't known."""
+    change = Change(key="pause_at", preset="", value="2", reason="a swap", source=Source.SPONSOR,
+                    pause=pauses.Pause(kind=pauses.PauseFor.SWAP))
+    with Ledger(shop.path) as ledger:
+        why = why_not_start({"proposal": Proposal(changes=(change,))}, ledger)  # type: ignore[typeddict-item]
+    assert "set up after this job was prepared" in why and "run the job again" in why
+
+
+def test_with_no_stock_set_up_a_swap_still_starts(tmp_path: Path) -> None:
+    change = Change(key="pause_at", preset="", value="2", reason="a swap", source=Source.SPONSOR,
+                    pause=pauses.Pause(kind=pauses.PauseFor.SWAP))
+    with Ledger(tmp_path / "none.sqlite") as ledger:
+        assert why_not_start(
+            {"proposal": Proposal(changes=(change,))}, ledger) == ""  # type: ignore[typeddict-item]
 
 
 # What the Sponsor was told it costs

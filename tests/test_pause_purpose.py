@@ -280,7 +280,8 @@ def test_a_row_from_before_reads_back_as_it_was(shop: Shop, tmp_path: Path) -> N
     db = sqlite3.connect(shop.path)
     # The file as it was before: no table of spools, and nothing said of what a pause was for.
     db.executescript("DROP TABLE print_spools; DROP TABLE print_swaps; "
-                     "DROP TRIGGER stock_changed_loaded; DROP TABLE swap_not_known; "
+                     "DROP TRIGGER stock_changed_loaded; DROP TRIGGER stock_changed_colour; "
+                     "DROP TABLE swap_not_known; "
                      "DROP TABLE stock_changes;")
     for table, column in (("prints", "proposal"), ("prints", "corrections"),
                           ("slice_readings", "reading")):
@@ -783,8 +784,8 @@ def test_a_record_the_stock_couldnt_take_is_said_and_can_be_pressed_again(shop: 
     assert shop.loaded() == CLEAR and not_known(shop) == ""
 
 
-def test_a_spool_picked_is_kept_though_its_edited_before_record(shop: Shop) -> None:
-    ends(shop, swap_started(shop))  # finding 11
+def test_a_spool_edited_after_its_picked_is_picked_again_by_its_new_colour(shop: Shop) -> None:
+    ends(shop, swap_started(shop))  # finding 11, and the fourth read of d196fb1
     bridge = MemoryBridge()
     with Ledger(shop.path) as ledger:
         desk = OutcomeDesk(ledger=ledger, cfg=CFG,
@@ -799,6 +800,9 @@ def test_a_spool_picked_is_kept_though_its_edited_before_record(shop: Shop) -> N
         shown = bridge.retained_json(outcome_topic(CFG))["spool"]
         assert shown in bridge.retained_json(outcome_spool_select(CFG)[0])["options"]
         bridge.deliver(outcome_symptom_topic(CFG), "none")
+        bridge.deliver(outcome_submit_topic(CFG), "record")
+        assert kept(shop).result is None, "the words it was picked by aren't the spool's now"
+        bridge.deliver(outcome_spool_topic(CFG), over_on("spool #3, Elegoo PETG, natural"))
         bridge.deliver(outcome_submit_topic(CFG), "record")
     ended_with = kept(shop).ended_with
     assert ended_with is not None and (ended_with.spool_id, ended_with.colour) == (CLEAR, "natural")

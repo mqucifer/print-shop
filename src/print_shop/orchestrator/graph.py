@@ -62,7 +62,7 @@ from print_shop.expert.orientation import (
 from print_shop.ingest.analyzer import analyze, verify_unchanged
 from print_shop.ingest.measuring import Measuring
 from print_shop.ingest.orientation import LAID, candidate_in, candidates, write_rotated
-from print_shop.inventory import Asked, Inventory, Material, SpoolUse
+from print_shop.inventory import Asked, Inventory, InventoryError, Material, SpoolUse
 from print_shop.ledger import Ledger, PrintRecord
 from print_shop.orchestrator.fitness import scoring_profiles
 from print_shop.printer.centauri import PreflightFailed, PrinterClient, preflight
@@ -862,8 +862,10 @@ def why_not_start(state: PrintJobState, ledger: Ledger | None) -> str:
     (mqucifer/print-shop#218). The daemon reads it before it resumes the gate; the print node
     refuses the same, as the backstop. A job with no stock set up has none."""
     first, not_on = _first_spool(state)
-    if first is None or ledger is None:
+    if ledger is None:
         return ""
+    if first is None:
+        return _stock_since(state, ledger)
     with Inventory(ledger.path) as inventory:
         held = inventory.why_not_start(
             first, not_on=not_on, prepared=_material_prepared(state),
@@ -881,6 +883,18 @@ def why_not_start(state: PrintJobState, ledger: Ledger | None) -> str:
     return held.at_gate() + needed
 
 
+def _stock_since(state: PrintJobState, ledger: Ledger) -> str:
+    """Why a swap prepared with no stock can't start once there is one: it could record neither
+    its spools nor that what's on isn't known afterwards."""
+    if _swap(state) is None:
+        return ""
+    with Inventory(ledger.path) as inventory:
+        if not inventory.printers():
+            return ""
+    return ("the stock was set up after this job was prepared, and couldn't follow its spools: "
+            "Reject and run the job again")
+
+
 def _as_started(state: PrintJobState, ledger: Ledger, done: str) -> Material | None:
     """The spool the print starts on, as it starts, or None with no stock.
 
@@ -889,6 +903,8 @@ def _as_started(state: PrintJobState, ledger: Ledger, done: str) -> Material | N
     """
     first, not_on = _first_spool(state)
     if first is None:
+        if why := _stock_since(state, ledger):
+            raise InventoryError(f"{why}, so {done}.")
         return None
     with Inventory(ledger.path) as inventory:
         return inventory.at_start(

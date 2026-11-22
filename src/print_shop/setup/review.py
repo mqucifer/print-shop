@@ -575,8 +575,12 @@ def _loaded_first(
         first = pauses.first_to_load(pause, on_hand, unknown.why() if unknown else "")
     else:
         first = request.material if unknown is not None else None
-    if first is None or all(spool.id != first.spool_id for spool in on_hand):
+    if first is None:
         return
+    spool = next((spool for spool in on_hand if spool.id == first.spool_id), None)
+    if spool is None:
+        return
+    first = first.of(spool)  # named as it is now, not as it was when the job was prepared
     if not asks():
         write("  There's no terminal to ask in, so nothing's recorded: `stock.py load "
               f"{first.spool_id}` in one before you approve, as an Approve before starts nothing.")
@@ -603,6 +607,9 @@ def _loaded_first(
         write(f"  Not recorded: {exc}")
         return
     write(f"  Recorded: {first.named()} is loaded.")
+    if unknown is not None:
+        # Saying one's over says nothing of another.
+        _loaded_first(request, read, write, forget, asks)
 
 
 def _before(request: ReviewRequest, value: str) -> tuple[pauses.Pause, str] | None:

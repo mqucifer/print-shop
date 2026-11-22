@@ -27,9 +27,10 @@ ledger's schema version.
   Only a person's word that says both halves does, that print is over and this spool is on now
   (`load`'s `over`, and the pick at that print's outcome). A load alone records, and doesn't clear.
 - **An answer counts only while nothing has changed since it was asked** (`stock_changes`): every
-  write to what's loaded, and to what isn't known, is a change, counted by the file's own triggers
-  so that no writer can miss it. An answer or a pick from before the latest writes nothing, a no
-  included. Each print with a swap is marked by itself: saying one's over says nothing of another.
+  write to what a question shows (what's loaded, a spool's colour, what isn't known) is a change,
+  counted by the file's own triggers so that no writer can miss it. An answer or a pick from
+  before the latest writes nothing, a no included. Each print with a swap is marked by itself:
+  saying one's over says nothing of another.
 - **So a job starts only on what it was prepared for** (`why_not_start`): what's loaded is
   compared again at Start, for every job, and Start holds while what's on isn't known. Another
   spool of the same variety, colour and tuning will do, and is the one recorded.
@@ -129,6 +130,8 @@ CREATE TABLE IF NOT EXISTS stock_changes (
     n           INTEGER PRIMARY KEY              -- one a change: an answer counts only under it
 );
 CREATE TRIGGER IF NOT EXISTS stock_changed_loaded AFTER UPDATE OF state, printer_id ON spools
+BEGIN INSERT INTO stock_changes (n) VALUES (NULL); END;
+CREATE TRIGGER IF NOT EXISTS stock_changed_colour AFTER UPDATE OF colour ON spools
 BEGIN INSERT INTO stock_changes (n) VALUES (NULL); END;
 CREATE TRIGGER IF NOT EXISTS stock_changed_marked AFTER INSERT ON swap_not_known
 BEGIN INSERT INTO stock_changes (n) VALUES (NULL); END;

@@ -1008,9 +1008,18 @@ def _said_on(db: sqlite3.Connection, job_id: str, pick: Pick) -> None:
     on = Material.model_validate_json(swap["spool"]).model_copy(
         update={"spool_id": spool_id, **dict(now)}
     )
-    db.execute(
-        "UPDATE print_swaps SET ended_with = ? WHERE job_id = ?", (on.model_dump_json(), job_id)
-    )
+    later = db.execute(
+        "SELECT 1 FROM prints me JOIN prints p ON p.start_requested_at > me.start_requested_at"
+        " OR (p.start_requested_at = me.start_requested_at AND p.rowid > me.rowid)"
+        " WHERE me.job_id = ?",
+        (job_id,),
+    ).fetchone()
+    # With a print sent since, what's on now needn't be what this one ended with: not said.
+    if later is None:
+        db.execute(
+            "UPDATE print_swaps SET ended_with = ? WHERE job_id = ?",
+            (on.model_dump_json(), job_id),
+        )
     clear_not_known(db, swap["printer_id"], job_id)
 
 
