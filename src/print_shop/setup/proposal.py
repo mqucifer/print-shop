@@ -59,12 +59,14 @@ __all__ = [
     "PAUSE",
     "PAUSE_NAMES",
     "Change",
+    "Ending",
     "GivenLesson",
     "LoopCall",
     "NotPlaced",
     "PartFacts",
     "Proposal",
     "Source",
+    "Suggested",
     "Used",
     "answered",
     "answered_kept",
@@ -131,6 +133,9 @@ class Change(BaseModel):
     not_applied: str = ""
     #: The past print it was used from, or None (mqucifer/print-shop#211).
     used: Used | None = None
+    #: The model's proposal, taken by the person at the review (mqucifer/print-shop#242). One of
+    #: the model's without it was applied unasked, as they were until then.
+    taken: bool = False
 
 
 class GivenLesson(BaseModel):
@@ -180,6 +185,51 @@ class LoopCall(BaseModel):
     seconds: float
 
 
+class Ending(StrEnum):
+    """How the model's work on a pose's settings ended (mqucifer/print-shop#242)."""
+
+    WORKING = "working"
+    CAME = "came"
+    CUT_OFF = "cut off"
+    TIMED_OUT = "timed out"
+    UNAVAILABLE = "unavailable"
+    #: The person went on without it.
+    WENT_ON = "went on"
+    #: The part was turned to another pose first.
+    TURNED = "turned"
+
+
+class Suggested(BaseModel):
+    """What the model proposed for one pose and what came of it: what the review shows and what
+    the record keeps (mqucifer/print-shop#242, `suggest.py`)."""
+
+    model_config = {"frozen": True}
+
+    #: The pose it was worked out in.
+    pose: tuple[float, float, float]
+    ending: Ending = Ending.WORKING
+    #: How it failed, in the client's words.
+    said: str = ""
+    seconds: float = 0.0
+    #: Its proposals, in the order they're numbered: settings, or a turn of the print loop's
+    #: (`ORIENTATION`). A big change's words are its `reading`.
+    proposed: tuple[Change, ...] = ()
+    #: The settings the loop chose with its turn, which are offered once the part is turned.
+    once_turned: tuple[Change, ...] = ()
+    #: What the person took of them, and what they turned down saying why, by key.
+    taken: tuple[str, ...] = ()
+    declined: tuple[str, ...] = ()
+    reasoning: str = ""
+    design_notes: tuple[str, ...] = ()
+    refused: tuple[str, ...] = ()
+    model: str = ""
+    call: dict[str, Any] = {}
+    skill_groups: tuple[str, ...] = ()
+    skill_sha256: str = ""
+    loop: tuple[LoopCall, ...] = ()
+    loop_ending: str = ""
+
+
 class Proposal(BaseModel):
     """The changes for one print, the reasoning behind them, and what wasn't done."""
 
@@ -214,6 +264,10 @@ class Proposal(BaseModel):
     #: for a proposal from the single calls.
     loop: tuple[LoopCall, ...] = ()
     loop_ending: str = ""
+    #: What the model proposed at this job's reviews, a pose at a time, with what was taken and
+    #: how each ended (mqucifer/print-shop#242). () in a row from before, whose model's changes
+    #: were applied unasked.
+    suggested: tuple[Suggested, ...] = ()
     #: The part's context as it was read, from its design run or a sidecar, in lines
     #: (mqucifer/print-shop#130), or why there was none.
     context: tuple[str, ...] = ()

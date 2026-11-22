@@ -165,7 +165,8 @@ def build_run(
         # One loop with tools decides the pose and the settings after the questions, and asks
         # the person on the command line only before a big change (mqucifer/print-shop#129).
         loop=PrintLoop(chat=llm_chat(setup_llm(llm, env)), person=cli_person(),
-                       model=setup_llm(llm, env).model),
+                       model=setup_llm(llm, env).model,
+                       stoppable=lambda stop: llm_chat(setup_llm(llm, env), stop)),
         ledger=ledger,
         # Read-only: watching needs a snapshot and nothing else.
         watch_printer=CentauriClient(printer_config, recorder=recorder),

@@ -14,7 +14,8 @@ skill group it relies on. Each value is checked against its setting's bound
 refused, saying why, and never clamped. A failed call is a proposal without
 the model's part, saying so: the guards still hold, and the Sponsor reviews.
 A reply cut off at the output limit is one such failure, never retried: its
-finish reason and tokens go in the proposal, and so in the ledger.
+finish reason and tokens go in the proposal, and so in the ledger. It's streamed
+with the questions' cuts (mqucifer/print-shop#242), and a timeout says so.
 """
 
 from __future__ import annotations
@@ -23,14 +24,14 @@ import threading
 from collections.abc import Callable
 from typing import Any
 
-from print_shop.expert.client import CutOff, LLMConfig, complete_json_call, stream_json_call
+from print_shop.expert.client import CutOff, LLMConfig, TimedOut, stream_json_call
 from print_shop.setup.bounds import SETTINGS, check
 from print_shop.setup.proposal import Change, PartFacts, Proposal, Source
 from print_shop.setup.reading import carried
 from print_shop.setup.skill import Skill
 
-__all__ = ["Ask", "context_lines", "llm_ask", "llm_ask_streamed", "propose_by_model", "schema",
-           "setup_llm"]
+__all__ = ["SETTINGS_ANSWER_CHARS", "Ask", "context_lines", "llm_ask", "llm_ask_streamed",
+           "propose_by_model", "schema", "setup_llm"]
 
 #: Settings keys: the alias the proposal reasons with, and its output limit,
 #: thinking included (the operator, 2026-10-25: a setting, not a constant).
@@ -49,6 +50,10 @@ DEFAULT_MAX_TOKENS = 16000
 #: What a model is told where only part of the walls is seen (mqucifer/print-shop#248).
 LEAVE_THE_SEAM = ("leave seam_position as it is there: where a seam would land against the wall "
                   "that's seen can't be told")
+#: The most characters a settings answer may be (mqucifer/print-shop#242). One at every cap of
+#: its schema is about 11,000; the largest recorded answer was 3,741.
+SETTINGS_ANSWER_CHARS = 16_000
+
 #: How the model is called: `complete_json`, or a test's recorded reply.
 Ask = Callable[[str, str, dict[str, Any]], dict[str, Any]]
 
@@ -132,6 +137,12 @@ def propose_by_model(facts: PartFacts, skill: Skill, ask: Ask, model: str) -> Pr
     except CutOff as exc:
         # Recorded, never retried: every cut-off is a signal for tuning the limit.
         return read.model_copy(update={"model": f"cut off: {exc}", "call": exc.info.model_dump()})
+    except TimedOut as exc:
+        return read.model_copy(update={
+            "model": f"timed out: {exc}",
+            "call": {"finish_reason": "timed out", "seconds": exc.seconds,
+                     "timeout_s": exc.limit_s},
+        })
     except (RuntimeError, OSError, KeyError, TypeError) as exc:
         return read.model_copy(update={"model": f"unavailable: {exc}"[:600]})
 
@@ -189,19 +200,16 @@ def setup_llm(base: LLMConfig, env: dict[str, str]) -> LLMConfig:
     })
 
 
-def llm_ask(config: LLMConfig) -> Ask:
-    """The real call: one structured completion through LiteLLM (`setup_llm`).
+def llm_ask(config: LLMConfig, stop: threading.Event | None = None) -> Ask:
+    """The real call: one structured completion through LiteLLM (`setup_llm`), streamed so that
+    a runaway is cut and `stop` ends it (mqucifer/print-shop#242).
 
     The reply carries `_call`: its finish reason and tokens, reasoning
     included, so a proposal records what its judgement cost and whether it
     was cut off.
     """
 
-    def ask(system: str, user: str, shape: dict[str, Any]) -> dict[str, Any]:
-        reply, info = complete_json_call(config, system, user, shape)
-        return {**reply, "_call": info.model_dump()}
-
-    return ask
+    return llm_ask_streamed(config, SETTINGS_ANSWER_CHARS, stop)
 
 
 def llm_ask_streamed(
