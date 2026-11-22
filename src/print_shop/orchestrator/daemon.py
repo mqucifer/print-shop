@@ -835,11 +835,11 @@ class Daemon:
             return why_not_start(state, self._ledger)
         except Exception as exc:  # noqa: BLE001 - never started on a check that wasn't made
             logger.exception("the spool couldn't be checked before the start")
-            return f"what's loaded couldn't be checked ({exc})"
+            return f"what's loaded couldn't be checked ({exc}): approve again"
 
     def _hold(self, job_id: str, gate_payload: dict[str, Any], why: str) -> None:
         """An Approve held: the gate stays open, saying why, on the card and in the terminal."""
-        said = f"Not started: {why}, then approve again"
+        said = f"Not started: {why}"
         if self._pending_gate is not None:
             self._pending_gate = {**self._pending_gate, "held": said}
         self._bridge_publish(

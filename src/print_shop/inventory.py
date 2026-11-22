@@ -221,6 +221,11 @@ class NotYet(NamedTuple):
     why: str
     do: str  # at the gate, before approving again
     again: str  # once refused at Start, where the job has ended
+    instead: str = ""  # the way out, for a change of mind: what Reject and a new run gives
+
+    def at_gate(self) -> str:
+        out = f"; or, {self.instead}, Reject and run the job again" if self.instead else ""
+        return f"{self.why}. {self.do}, then approve again{out}"
 
 
 class SpoolUse(BaseModel):
@@ -583,9 +588,9 @@ class Inventory:
             return NotYet(
                 f"spool #{spool.id}'s tuning was changed from {was} to {is_now} after this job "
                 "was prepared",
-                f"Set it back (`stock.py edit {spool.id} {back}`), or Reject and run the job "
-                "again",
+                f"Set it back (`stock.py edit {spool.id} {back}`)",
                 "Run the job again to prepare it with the spool as it is now",
+                "to print with it as it is",
             )
         if now is not None and first.takes(now, not_on):
             return None
@@ -599,9 +604,15 @@ class Inventory:
                     f"{first.colour}, and record it (`stock.py load <id>`)")
         else:
             load = f"Load {first.named()}, and record it (`stock.py load {first.spool_id}`)"
+        instead = ""
+        if not_on is not None:
+            instead = "for other spools"
+        elif now is not None:
+            same = first.of(now).same_filament(first)
+            instead = f"to print in {now.colour}" if same else f"to print with {now.named()}"
         return NotYet(
             f"{what} {first.named()}, and the stock has {has} loaded on {first.printer_id}",
-            load, f"{load}, and run the job again",
+            load, f"{load}, and run the job again", instead,
         )
 
     def at_start(

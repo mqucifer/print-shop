@@ -146,7 +146,7 @@ Finish that job, or stop it with Ctrl-C in its terminal (which doesn't stop the 
    **A job starts on what it was prepared for** (mqucifer/print-shop#218), with or without a pause, hand-sliced and `--again` too. As a swap's end moves the stock by itself, the loaded spool is compared again when you approve:
    - the same spool starts, with a colour you've corrected on it since recorded;
    - another spool of the same variety, colour and tuning starts, and is the one recorded (never the spool a swap is to, as its first);
-   - anything else starts nothing: `Not started`, with what to load. Press Approve again once it's loaded and recorded. A press from before is never kept, and the hour isn't extended.
+   - anything else starts nothing: `Not started`, with what to load, and the way out if you've changed your mind ("to print in black, Reject and run the job again"). Press Approve again once it's loaded and recorded. A press from before is never kept, and the hour isn't extended.
 
    An answer at the questions is a decision, even one that keeps your preset's value. "Bridge it — no support" over a preset with supports off sets nothing, and the review says `kept enable_support at 0: you chose 'Bridge it — no support' … [your answer: overhang]`; the guard that switches tree supports on for an overhang only does so when nothing decided otherwise (mqucifer/print-shop#124). An option that says no support always carries `enable_support=0`. Your corrections go in the ledger: they are what print-shop learns from. Each one is a candidate lesson, keyed to the part's shape; once a reviewer keeps it, a later part with the same shape gets that setting by itself, and the review says which lesson set it (`docs/print-lessons.md`).
 
@@ -332,7 +332,7 @@ Then open <http://127.0.0.1:8719/> in a browser on the Mac. `--port` picks anoth
 | `Not sent: the file is sliced for …` | the hand-sliced file names another filament or nozzle than the inventory says is loaded | load or fit what it names, fix the inventory, or add `--loaded-ok` |
 | `… has changed since it was taken … nothing was uploaded` | the job's copy of a hand-sliced file was changed after the gate opened | send the file again with `--sliced` |
 | `LOAD FIRST: it starts on spool #…` | the swap starts on a spool the stock doesn't have loaded | `y` at `ok` if it's on the printer, or load it and `stock load <id>` before you approve |
-| `Not started: …` | you approved, and what's loaded in the stock isn't what the job was prepared for | do what it says (`stock load <id>`), then press Approve again; nothing was sent |
+| `Not started: …` | you approved, and what's loaded in the stock isn't what the job was prepared for | do what it says (`stock load <id>`), then press Approve again; or, to print with what's loaded, Reject and run the job again; nothing was sent |
 | `… has a swap and hasn't been seen to end` | an earlier print's swap decides what's loaded, and its end hasn't been seen | wait for it to end, then approve again |
 | `… loaded on cc1, so nothing was uploaded or printed` | the stock changed between your Approve and the start | nothing was started; `stock load <id>`, then run the job again |
 | `the job is sliced for …, and spool #… is …` | a swap was to start on another filament than the slice's | load that spool and run the job again, or start on one of the sliced filament |

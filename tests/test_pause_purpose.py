@@ -1077,7 +1077,7 @@ def test_an_approve_with_the_first_not_loaded_starts_nothing_and_waits(shop: Sho
     assert seen["gate"]["pending"] is True and seen["state"]["status"] == "awaiting_approval"
     assert seen["state"]["held"] == why
     assert why.startswith("Not started: this print starts on spool #2, Elegoo PLA, black")
-    assert "`stock.py load 2`" in why and why.endswith("then approve again")
+    assert "`stock.py load 2`), then approve again" in why
     assert shop.told == [why], "the terminal says it too"
     assert ran.result.printed and starts(shop) == 1
     assert spools(ran.row) == [(BLACK, 1), (WHITE, 11)]
@@ -1315,6 +1315,34 @@ def test_a_spool_that_would_print_otherwise_holds_a_job_with_no_swap(
 
 def void(_: object) -> None:
     return None
+
+
+@pytest.mark.parametrize(("colour", "variety", "kind", "instead"), [
+    ("black", "Elegoo PLA", "PLA", "to print in black"),
+    ("clear", "Elegoo PETG", "PETG", "to print with spool #4, Elegoo PETG, clear"),
+])
+def test_a_held_job_says_the_way_out_too(
+    shop: Shop, colour: str, variety: str, kind: str, instead: str
+) -> None:
+    """print-shop-ux, on b34a39b: a change of mind was only told to put the old colour back."""
+    shop.run("ok", held=reject, at_gate=lambda: void(add_spool(shop, colour, variety, kind)))
+    assert shop.told[0].endswith(
+        f"(`stock.py load 1`), then approve again; or, {instead}, Reject and run the job again")
+
+
+def test_a_held_swap_and_an_edited_tuning_say_their_way_out(shop: Shop) -> None:
+    shop.run(*UNLOADED, held=reject)
+    assert shop.told[0].endswith(
+        "then approve again; or, for other spools, Reject and run the job again")
+
+    def retune() -> None:
+        with Inventory(shop.path) as stock:
+            stock.edit(WHITE, tuning="another tuning")
+
+    shop.run("ok", at_gate=retune, held=reject)
+    assert shop.told[0].endswith(
+        "--tuning none`), then approve again; or, to print with it as it is, Reject and run the "
+        "job again")
 
 
 def test_a_spool_of_the_same_variety_colour_and_tuning_starts_and_is_recorded(shop: Shop) -> None:

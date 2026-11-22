@@ -828,10 +828,10 @@ def why_not_start(state: PrintJobState, ledger: Ledger | None) -> str:
         return ""
     if row := _unseen_swap(ledger, first.printer_id):
         return (f"{row.stl_name}'s print has a swap and hasn't been seen to end, so what's "
-                "loaded isn't known. Wait for it to end")
+                "loaded isn't known. Wait for it to end, then approve again")
     with Inventory(ledger.path) as inventory:
         held = inventory.why_not_start(first, not_on=not_on, prepared=_material_prepared(state))
-    return f"{held.why}. {held.do}" if held is not None else ""
+    return held.at_gate() if held is not None else ""
 
 
 def _as_started(state: PrintJobState, ledger: Ledger, done: str) -> Material | None:
