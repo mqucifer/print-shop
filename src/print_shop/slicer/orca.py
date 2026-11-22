@@ -473,8 +473,10 @@ def slice_plate(
     cmd: list[str] = [
         str(binary_path), "--datadir", scratch.name, "--debug", "3", "--logfile", str(log),
         "--load-settings", f"{machine};{process}",
-        "--load-filaments", ";".join(str(f) for f in filaments),
-        "--load-filament-ids", ",".join(str(o.filament) for o in objects),
+        *([
+            "--load-filaments", ";".join(str(f) for f in filaments),
+            "--load-filament-ids", ",".join(str(o.filament) for o in objects),
+        ] if filaments else []),
         # Orca's CLI arranges with rotation on unless told (`allow_rotations = true`, v2.4.2):
         # on the probe it turned a 40 x 47.5 mm frame a quarter turn. Off, each object keeps
         # the design's own turn, so its lines are read against the file as it is.

@@ -22,6 +22,9 @@ approval gate, a press is scoped to the print on show by time: only one print
 is shown at once, the draft resets whenever the print on show changes, and the
 part's name is on the card beside the buttons.
 
+A plate of several parts (mqucifer/print-shop#109) is watched as one print and
+asked about part by part, each named by its number and its place on the plate.
+
 With frames (mqucifer/print-shop#110), the desk also shows the last, and
 pages through the rest with Earlier and Later, beside the answer: evidence,
 never the answer. A print with no frame at all says why, in a sentence
@@ -264,7 +267,8 @@ class OutcomeDesk:
                 "pending": True,
                 "waiting": len(waiting),
                 "job_id": row.job_id,
-                "stl_name": row.stl_name,
+                # Two parts of a plate can be alike, so one says where it is on it.
+                "stl_name": row.plate.label() if row.plate is not None else row.stl_name,
                 "gcode_name": row.gcode_name,
                 "started_at": row.started_at,
                 "ended_at": row.ended_at,

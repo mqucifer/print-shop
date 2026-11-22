@@ -22,6 +22,7 @@ from typing import NotRequired, TypedDict
 from pydantic import BaseModel
 
 from print_shop.core.contracts import Gate, GateDecision, Outcome
+from print_shop.plate import PlateLayout
 from print_shop.setup.context import PartContext
 from print_shop.setup.features import Feature
 from print_shop.setup.intake import Intake
@@ -34,6 +35,7 @@ __all__ = [
     "EntryPath",
     "MeshReport",
     "Orientation",
+    "PlatePart",
     "PrintJobState",
     "PrintStatus",
     "SliceResult",
@@ -189,6 +191,31 @@ class AppliedOrientation(BaseModel):
                 f"{self.bed_contact_area_mm2:g} mm2 on the plate")
 
 
+class PlatePart(BaseModel):
+    """One part of a job of several (mqucifer/print-shop#109), as far as the job has taken it.
+
+    Not a decision: each part's orientation is an `Outcome` in `PrintJobState.orientations`.
+    """
+
+    model_config = {"frozen": True}
+
+    n: int  # from 1, as given
+    name: str
+    given: str  # the path it was given at, which its context is read beside
+    stl: str  # the job's own copy, which is all that's read after it's taken
+    sha256: str
+    mesh: MeshReport
+    candidates: tuple[Orientation, ...] = ()
+    laid_traits: tuple[str, ...] = ()
+    context: PartContext | None = None
+    #: The orientation lessons it was given.
+    lessons: tuple[GivenLesson, ...] = ()
+    applied: AppliedOrientation | None = None
+    features: tuple[Feature, ...] = ()
+    #: The times its pose was sent back at the review. A correction doesn't name a part.
+    sent_back: tuple[Change, ...] = ()
+
+
 # --------------------------------------------------------------------------
 # Job state
 # --------------------------------------------------------------------------
@@ -212,6 +239,14 @@ class PrintJobState(TypedDict):
     #: A hand-sliced file, sent as it is (mqucifer/print-shop#164). With it the job has no STL,
     #: and nothing is ingested, oriented, asked, proposed, sliced or reviewed.
     sliced: NotRequired[SlicedJob]
+
+    #: A job of several STLs (mqucifer/print-shop#109) has these in place of one `stl_path`: the
+    #: paths as given, each part, each part's orientation in the same order, and the plate as
+    #: it's sliced. A job of one part has none of them.
+    stl_paths: NotRequired[tuple[str, ...]]
+    parts: NotRequired[tuple[PlatePart, ...]]
+    orientations: NotRequired[tuple[Outcome[Orientation], ...]]
+    plate: NotRequired[PlateLayout]
 
     # Artifacts. Local paths; the pipeline is one process (see CONTRACTS.md §1).
     stl_path: NotRequired[str]

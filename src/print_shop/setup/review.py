@@ -20,6 +20,10 @@ flagged, each with the change it proposes, its reason and the reading it rests
 on. `take` takes them, or `take 2` one of them; nothing from a reading is
 applied otherwise.
 
+**A plate of several parts is one review** (mqucifer/print-shop#109): how it prints, by object or
+by layer and why, where each part is, and each part's pose, which is sent back by the part. A
+pause on a plate printing by object is refused, as Orca writes none.
+
 **The orientation can be sent back** (mqucifer/print-shop#128), in a short conversation
 (`send_back`): the step says why it turned the part, the person names the pose it should print
 in and says why the turn was wrong, or meets the step's concern by settings instead, each priced
@@ -32,10 +36,11 @@ from __future__ import annotations
 import re
 import textwrap
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
 from print_shop.core.state import AppliedOrientation, Orientation, SliceResult
+from print_shop.plate import BY_LAYER, BY_OBJECT, SEQUENCE, SEQUENCES, PlateLayout
 from print_shop.setup.concerns import concern_in, ways
 from print_shop.setup.intake import Estimate
 from print_shop.setup.proposal import (
@@ -53,7 +58,8 @@ from print_shop.setup.reading import Flag, SliceReading
 from print_shop.slicer.orca import SlicerProfiles
 
 __all__ = [
-    "Review", "Reviewer", "ReviewRequest", "cli_reviewer", "parse_answer", "render", "send_back",
+    "Review", "ReviewPart", "Reviewer", "ReviewRequest", "cli_reviewer", "parse_answer", "render",
+    "send_back",
 ]
 
 #: `key=value`, then an optional reason after "because" or a dash. A value may have spaces,
@@ -66,6 +72,18 @@ _SEND_BACK = re.compile(r"^\s*orientation\b(?:\s*=\s*(\d+))?\s*(?:(?:because|-|â
                         re.I)
 #: `take`, or `take 1 3`: the changes the slice's reading proposed.
 _TAKE = re.compile(r"^\s*take\b\s*([\d ,]*)$", re.I)
+
+
+@dataclass(frozen=True)
+class ReviewPart:
+    """One part of a plate at its review: its pose, and what sending that back needs."""
+
+    n: int
+    name: str
+    orientation: AppliedOrientation
+    candidates: tuple[Orientation, ...] = ()
+    laid_traits: tuple[str, ...] = ()
+    lessons_for: Callable[[Orientation], tuple[GivenLesson, ...]] | None = None
 
 
 @dataclass(frozen=True)
@@ -96,6 +114,10 @@ class ReviewRequest:
     #: The part's context from its design run or a sidecar, and placed in this pose, in lines
     #: (mqucifer/print-shop#130): what was read, or that there was none.
     context: tuple[str, ...] = ()
+    #: A job of several parts (mqucifer/print-shop#109): the plate as sliced, and each part.
+    #: `candidates` and `laid_traits` are then each part's own.
+    plate: PlateLayout | None = None
+    parts: tuple[ReviewPart, ...] = ()
 
     @property
     def proposed(self) -> tuple[Flag, ...]:
@@ -113,6 +135,8 @@ class Review:
     stop: bool = False
     #: The changes the reading proposed that the Sponsor took (`take`).
     taken: tuple[Change, ...] = ()
+    #: Whose pose was sent back, by the part's number, on a plate of several.
+    part: int | None = None
 
 
 class Reviewer(Protocol):
@@ -136,6 +160,8 @@ def render(request: ReviewRequest) -> str:
         f"  filament  {filament}",
         "",
     ]
+    if request.plate is not None:
+        lines += [*request.plate.lines(), ""]
     proposal = request.proposal
     if proposal.reasoning:
         lines += ["How the part was read:", *_wrap(proposal.reasoning), ""]
@@ -197,26 +223,45 @@ def render(request: ReviewRequest) -> str:
         "",
         f"Orca's estimate: {s.print_time_s // 60} min {s.print_time_s % 60} s, "
         f"{s.filament_cm3} cm3" + (f", {s.filament_g} g" if s.filament_g else "")
-        + f", {s.layer_count} layers",
-        f"Orientation: {request.orientation.rotation_deg}, {request.orientation.rationale}",
-        # The pose the features, and the lessons keyed to them, were read in
-        # (mqucifer/print-shop#128).
-        f"  the part's features were read in this pose: {request.orientation.pose()}",
-        *_poses(request),
+        + f", {s.layer_count} layers" + (" for the whole plate" if request.plate else ""),
+        *(_parts(request) if request.parts else _oriented(request)),
     ]
     if request.context:
         lines += ["", "The part's context (its design run, or a sidecar beside it):",
                   *(f"  {line}" for line in request.context)]
     lines += _read(request)
     take = " or take what the slice proposes (take, or take 1)," if request.proposed else ""
-    back = " send the orientation back (orientation)," if request.candidates else ""
+    back = (" send a part's orientation back (orientation)," if request.parts
+            else " send the orientation back (orientation)," if request.candidates else "")
+    pause = "pause_at=12.4 because white to black for a colour change at a height"
+    if request.plate is not None and request.plate.by_object:
+        pause = f"{SEQUENCE}={BY_LAYER} to print them all at once (a pause_at needs that)"
     lines += [
         "",
         f"Type ok to go on to the approval gate,{take}{back} or correct a setting by name, "
         "e.g. wall_loops=3 because it's decorative (several separated by ';'), "
-        "pause_at=12.4 because white to black for a colour change at a height, or stop.",
+        f"{pause}, or stop.",
     ]
     return "\n".join(lines)
+
+
+def _oriented(request: ReviewRequest) -> list[str]:
+    return [
+        f"Orientation: {request.orientation.rotation_deg}, {request.orientation.rationale}",
+        # The pose the features, and the lessons keyed to them, were read in
+        # (mqucifer/print-shop#128).
+        f"  the part's features were read in this pose: {request.orientation.pose()}",
+        *_poses(request),
+    ]
+
+
+def _parts(request: ReviewRequest) -> list[str]:
+    """Each part's pose, as one part's is shown."""
+    lines = []
+    for part in request.parts:
+        own = replace(request, orientation=part.orientation, candidates=part.candidates)
+        lines += ["", f"Part {part.n}, {part.name}:", *(f"  {line}" for line in _oriented(own))]
+    return lines
 
 
 def _by(change: Change) -> str:
@@ -290,6 +335,8 @@ def parse_answer(answer: str, request: ReviewRequest) -> Review | str:
         if match is None:
             return f"'{part}' isn't setting=value"
         key, value, reason = match.group(1), match.group(2), (match.group(3) or "").strip()
+        if request.plate is not None and key == SEQUENCE and value not in SEQUENCES:
+            return f"{SEQUENCE} is {' or '.join(SEQUENCES)}"
         if key in PAUSE_NAMES:
             change = _pause(value, reason, request)
             if isinstance(change, str):
@@ -307,6 +354,9 @@ def parse_answer(answer: str, request: ReviewRequest) -> Review | str:
             Change(key=key, preset=preset, value=value, reason=reason or "your correction",
                    source=Source.SPONSOR, standard=known.standard if known else "")
         )
+    refused = _pause_by_object(corrections, request)
+    if refused:
+        return refused
     keys = {c.key for c in corrections}
     return Review(corrections=tuple(corrections),
                   taken=tuple(c for c in taken if c.key not in keys))
@@ -328,6 +378,25 @@ def _pause(value: str, reason: str, request: ReviewRequest) -> Change | str:
         return f"a colour change is inside the part: above 0 and below its top, {top:g} mm"
     return Change(key=PAUSE, preset=shown.value if shown else "", value=f"{z:g}",
                   reason=reason or "a colour change", source=Source.SPONSOR)
+
+
+def _pause_by_object(corrections: list[Change], request: ReviewRequest) -> str:
+    """Why a plate can't both pause and print by object, or "": Orca writes no pause then, and
+    says nothing (mqucifer/print-shop#109)."""
+    if request.plate is None:
+        return ""
+    typed = {c.key: c for c in corrections}
+    pause = typed.get(PAUSE) or request.proposal.get(PAUSE)
+    if pause is None or pause.value == "none":
+        return ""
+    order = typed[SEQUENCE].value if SEQUENCE in typed else request.plate.sequence
+    if order != BY_OBJECT:
+        return ""
+    return (
+        "Orca writes no pause when it prints by object, so it would never pause: type "
+        f"{SEQUENCE}={BY_LAYER}; {PAUSE}={pause.value} to print every part at once and pause "
+        f"them all at that height, {PAUSE}=none for no pause, or print that part by itself"
+    )
 
 
 def _take(numbers: str, request: ReviewRequest) -> list[Change] | str:
@@ -355,8 +424,9 @@ def cli_reviewer(
         while True:
             answer = read("> ")
             back = _SEND_BACK.match(answer)
-            if back is not None and request.candidates:
-                sent = send_back(request, read, write, back.group(1), back.group(2))
+            if back is not None and (request.candidates or request.parts):
+                send = _send_back_part if request.parts else send_back
+                sent = send(request, read, write, back.group(1), back.group(2))
                 if sent is not None:
                     return sent
                 write("  Back to the review: ok, a correction, orientation, or stop.")
@@ -373,6 +443,29 @@ def _pose(o: Orientation) -> str:
     laid = "  as the file lays it" if o.rotation_deg == (0.0, 0.0, 0.0) else ""
     return (f"{pose_value(o.rotation_deg)}{laid}: {o.overhang_area_mm2:g} mm2 of overhang, "
             f"{o.bed_contact_area_mm2:g} mm2 on the plate, {o.height_mm:g} mm tall")
+
+
+def _send_back_part(
+    request: ReviewRequest, read: Callable[[str], str], write: Callable[[str], None],
+    pose: str | None = None, reason: str | None = None,
+) -> Review | None:
+    """Which part's pose, on a plate of several, then that part's send-back as any part's."""
+    write("Which part's orientation?")
+    write("\n".join(f"  {p.n}) {p.name}, at {pose_value(p.orientation.rotation_deg)}"
+                    for p in request.parts))
+    numbered = {str(p.n): p for p in request.parts}
+    while True:
+        said = read("part> ").strip()
+        if said.lower() in ("", "back"):
+            return None
+        if said in numbered:
+            break
+        write(f"  a number from 1 to {len(request.parts)}, or back")
+    part = numbered[said]
+    own = replace(request, orientation=part.orientation, candidates=part.candidates,
+                  laid_traits=part.laid_traits, lessons_for=part.lessons_for)
+    sent = send_back(own, read, write, pose, reason)
+    return replace(sent, part=part.n) if sent is not None else None
 
 
 def send_back(

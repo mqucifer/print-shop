@@ -51,6 +51,13 @@ A file sliced by hand and sent with `print_job.py --sliced` (mqucifer/print-shop
 
 No part was measured, so the candidate is keyed to no trait, and it can't be accepted until a reviewer keys it (`edit --traits`).
 
+### A plate of several parts is one print
+
+A job of several parts (mqucifer/print-shop#109) has a ledger row for each object, and one review:
+- **What the review taught is drawn once,** at the first part's row: its corrections and what was taken from the slice, keyed to the traits of all the parts together, so never wider than one part's. `print_sequence` is that plate's choice and is never a lesson.
+- **A lesson given to the plate is given and scored once.** Toward promoting or retiring it, a plate counts as one print, and one with any failed part doesn't count toward promoting.
+- **Each part's own:** a pose sent back, keyed to that part's traits, and its outcome, with that part's shape and the plate's order in its evidence (by object or by layer).
+
 ### A pose sent back is a lesson for the orientation step
 
 **A pose sent back at the review is a correction too** (mqucifer/print-shop#128): `orientation`, from the pose the step chose to the one the person chose, with their reason.

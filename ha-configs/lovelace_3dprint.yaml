@@ -69,6 +69,9 @@ views:
 
                 **Turned:** {{ states('sensor.3d_print_agent_orientation') }}
 
+                {% set plate = state_attr('sensor.3d_print_agent_status', 'plate') %}
+                {%- if plate %}**Plate:** {{ plate }}{% endif %}
+
                 {% set swap = state_attr('sensor.3d_print_agent_status', 'pause') %}
                 {%- if swap %}**Filament swap:** {{ swap }}. Be at the printer for it.{% endif %}
 

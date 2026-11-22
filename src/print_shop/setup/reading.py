@@ -12,6 +12,10 @@ from which face is on top: settings depend on the part, not the material. A flag
 change with its reason and the reading it rests on, like every other change. It never applies
 one: the person takes it at the review, or doesn't.
 
+**z doesn't only rise** (mqucifer/print-shop#109). Printed by object, it starts again at each
+object, so nothing here takes the first or last layer's z for the lowest or highest: the seam is
+compared only inside an object, and the reading says where z starts again.
+
 **A part's fits** (mqucifer/print-shop#130, `context.py`), placed as heights in the pose it
 prints in: a part with one never gets a random seam proposed, and the reason names the fit; a fit
 at the plate gets elephant foot compensation proposed, inside its bound. A hold that slides on
@@ -47,6 +51,8 @@ __all__ = [
 
 #: Orca's label for ironing.
 IRONING = "Ironing"
+#: A layer this near a part's height is its top: within half of a 0.28 mm layer.
+TOP_MM = 0.15
 #: Two seams this close, in mm, on neighbouring layers, are one line up the wall.
 SEAM_NEAR_MM = 1.0
 #: The share of seams that sit on the one below them for the seam to read as a line.
@@ -153,6 +159,11 @@ class SliceReading(BaseModel):
     def feature(self, kind: str) -> FeatureReading | None:
         return next((f for f in self.features if f.kind == kind), None)
 
+    def starts_again(self) -> list[int]:
+        """The layers where z starts again from the plate: printed by object, each object's
+        first after the first object's (mqucifer/print-shop#109)."""
+        return [b.n for a, b in zip(self.layers, self.layers[1:], strict=False) if b.z < a.z]
+
     def lines(self) -> list[str]:
         """The reading as the review shows it."""
         out = []
@@ -163,6 +174,12 @@ class SliceReading(BaseModel):
                 f"layers: {len(self.layers)}, {_s(times[0])} to {_s(times[-1])} each, "
                 f"{_s(times[len(times) // 2])} typical; the shortest is layer {shortest.n} "
                 f"at z {shortest.z:g} mm"
+            )
+        again = self.starts_again()
+        if again:
+            out.append(
+                f"by object: z starts again at layer{'s' if len(again) != 1 else ''} "
+                f"{', '.join(map(str, again))}, so a layer's z is up its own object"
             )
         kept = [f for f in self.features if f.kind != gcode.TRAVEL]
         for f in sorted(kept, key=lambda f: -f.time_s):
@@ -235,8 +252,12 @@ def read_slice(path: Path) -> SliceReading:
 def _seam(layers: list[gcode.Layer]) -> SeamReading:
     total = stacked = 0
     below: list[tuple[float, float]] = []
+    below_z = float("-inf")
     spots: Counter[tuple[float, float]] = Counter()
     for layer in layers:
+        if layer.z < below_z:
+            below = []  # the next object's first layer has the plate below it
+        below_z = layer.z
         for x, y in layer.seams:
             total += 1
             if any(abs(x - bx) <= SEAM_NEAR_MM and abs(y - by) <= SEAM_NEAR_MM for bx, by in below):
@@ -275,6 +296,7 @@ def flags(
     filament: dict[str, Any],
     placed: Placed | None = None,
     changes: tuple[Change, ...] = (),
+    tops: tuple[float, ...] = (),
 ) -> tuple[Flag, ...]:
     """What the reading says matters for this part, each with the change it proposes.
 
@@ -283,11 +305,12 @@ def flags(
     its fits keep a random seam off them and propose elephant foot compensation at the plate, a
     hold pulled across the layers is said, and its seen faces stand where the intake didn't say.
     `changes` are the proposal's, which the slice was made with: a value they set, such as a
-    lesson's, is read as the one in effect and named.
+    lesson's, is read as the one in effect and named. `tops` are each part's height on a plate
+    of several: each has a top of its own, none of them inside a part.
     """
     if faces is None and placed is not None:
         faces = placed.seen
-    found = [*_layer_time(reading, filament), *_ironing(reading, faces, process),
+    found = [*_layer_time(reading, filament), *_ironing(reading, faces, process, tops),
              *_seam_flag(reading, faces, process, placed),
              *_elephant_foot(reading, process, placed, changes), *_holds(placed)]
     return tuple(found)
@@ -309,7 +332,7 @@ def _layer_time(reading: SliceReading, filament: dict[str, Any]) -> list[Flag]:
         f"{len(short)} of {len(reading.layers)} layers take under {threshold:g} s, the "
         f"filament's layer time for cooling; the shortest, layer {shortest.n} at z "
         f"{shortest.z:g} mm, takes {_s(shortest.time_s)} (short layers from z "
-        f"{short[0].z:g} to {short[-1].z:g} mm)"
+        f"{min(t.z for t in short):g} to {max(t.z for t in short):g} mm)"
     )
     if s.get("slow_down_for_layer_cooling", "1") != "1":
         change = Change(
@@ -333,7 +356,10 @@ def _layer_time(reading: SliceReading, filament: dict[str, Any]) -> list[Flag]:
     return [Flag(id="layer_time", reading=said, change=change)]
 
 
-def _ironing(reading: SliceReading, faces: Seen | None, process: dict[str, Any]) -> list[Flag]:
+def _ironing(
+    reading: SliceReading, faces: Seen | None, process: dict[str, Any],
+    tops: tuple[float, ...] = (),
+) -> list[Flag]:
     ironing = reading.feature(IRONING)
     if ironing is None or not reading.ironed:
         return []
@@ -354,7 +380,8 @@ def _ironing(reading: SliceReading, faces: Seen | None, process: dict[str, Any])
             feature="seen", knowledge="surface", reading=said,
             reason=f"you said '{faces.said}', so ironing costs {_s(ironing.time_s)} for "
                    "faces nobody sees"))]
-    below = [z for z in heights if z < heights[-1]]
+    below = [z for z in heights
+             if z < heights[-1] and all(abs(z - top) > TOP_MM for top in tops)]
     if below and reading.settings.get("ironing_type") in ("top", "solid"):
         return [Flag(id="ironing_inside", reading=said, change=Change(
             key="ironing_type", preset=preset, value="topmost", source=Source.READING,

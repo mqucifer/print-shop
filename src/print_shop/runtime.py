@@ -173,6 +173,7 @@ def describe(row: Row) -> str:
     lines = [
         f"job            {row.job_id}",
         f"part           {row.stl_name}  (sha256 {row.stl_sha256[:12]}…)",
+        *_plate_lines(row),
         ("orientation    as the file lays it: nothing was turned" if row.sliced is not None
          else f"orientation    {row.rotation_deg} by {row.orientation_source}"
          f"{'' if row.orientation_accepted else ' (not accepted; authored pose)'}"),
@@ -219,6 +220,18 @@ def _store_lines(row: Row) -> list[str]:
         if ref.standard_file:
             lines.append(f"    over {ref.standard_file}  (sha256 {ref.standard_sha256[:12]}…)")
     return lines
+
+
+def _plate_lines(row: Row) -> list[str]:
+    """Which object of which plate, for a job of several parts (mqucifer/print-shop#109)."""
+    if row.plate is None:
+        return []
+    plate = row.plate
+    return [
+        f"on a plate     {plate.label()}, printed {plate.layout.sequence}; job {plate.job_id}. "
+        "The time, plastic and layers below are the whole plate's",
+        f"               {plate.layout.why}",
+    ]
 
 
 def _minutes(seconds: int) -> str:

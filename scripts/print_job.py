@@ -2,6 +2,7 @@
 
     uv run python scripts/print_job.py PART.stl --nozzle 0.4 --filament NAME [--as-laid]
         [--context PATH] [--answers F] [--record]
+    uv run python scripts/print_job.py A.stl B.stl C.stl [--as-laid] [--answers F] [--record]
     uv run python scripts/print_job.py --sliced FILE [--plate N] [--project P.3mf]
         [--loaded-ok] [--record]
     uv run python scripts/print_job.py --again JOB_ID [--loaded-ok] [--record]
@@ -43,6 +44,15 @@ approval gate comes after that, unchanged.
 hour for the slice to reach the approval gate starts when the review is approved; the gate
 then waits an hour for Approve or Reject, and says by when. A wait that runs out ends the job
 in one sentence, with a ledger row saying it timed out, and nothing printed.
+
+**Several parts are one job** (mqucifer/print-shop#109): name their files together, one file
+twice for two of it. They're arranged on one plate and printed by object, one after another,
+where the machine's clearances allow it, read from the head's moves in the G-code. Where they
+don't, the plate prints by layer, and the review and the gate say why. Parts that don't fit one
+plate, or a part whose mesh isn't closed, end the job unsliced. It's one set of questions, one
+review and one gate, and once it has printed the outcome is asked part by part, with a ledger row
+for each. Each part's context is read beside it, so `--context` is for one part. The print loop
+reads one part, so a plate's poses and settings come from the single calls.
 
 **This is the only place that arms the printer,** and only when the invocation
 says so: `PRINT_AGENT_ALLOW_HARDWARE=1` on this command's own line. Without it
@@ -120,7 +130,8 @@ FINISH_WAIT_S = 900.0  # after the press: preflight, upload, and a five-minute s
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("stl", nargs="?", type=Path, help="the part to print")
+    parser.add_argument("stl", nargs="*", type=Path,
+                        help="the part to print, or several for one job, on one plate")
     parser.add_argument("--serve", action="store_true", help="only watch and ask outcomes")
     parser.add_argument("--list", action="store_true", help="print the ledger and exit")
     parser.add_argument("--filaments", action="store_true", help="list profiles/ and exit")
@@ -154,7 +165,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     by_hand = args.sliced is not None or args.again is not None
-    if sum(x is not None for x in (args.stl, args.sliced, args.again)) > 1:
+    if sum((bool(args.stl), args.sliced is not None, args.again is not None)) > 1:
         parser.error("give one of a part, --sliced FILE, or --again JOB_ID")
     if by_hand and (args.serve or args.list or args.filaments):
         parser.error("--sliced and --again send a job; leave out --serve, --list, --filaments")
@@ -171,24 +182,28 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--plate and --loaded-ok go with --sliced or --again")
     if args.project is not None and args.sliced is None:
         parser.error("--project goes with --sliced: a reprint keeps its original's overrides")
-    if (args.stl is None and not by_hand) or args.serve or args.list or args.filaments:
+    if len(args.stl) > 1 and args.context is not None:
+        parser.error("--context is for one part: with several, each part's context is read "
+                     "beside it")
+    if (not args.stl and not by_hand) or args.serve or args.list or args.filaments:
         return _main(parser, args, None)
     # A job: what it shows is kept in its folder too (mqucifer/print-shop#139).
     job_log = JobLog(secrets(args.settings))
     with job_log.capturing():
         given = sys.argv[1:] if argv is None else argv
-        job_log.write(_header(args.stl or args.sliced, given))
+        files = args.stl or ([args.sliced] if args.sliced is not None else [])
+        job_log.write(_header(files, given))
         try:
             return _main(parser, args, job_log)
         finally:
             job_log.close()
 
 
-def _header(part: Path | None, given: list[str]) -> str:
-    """The log's first lines: when, the part's full path, and the command as given. The print
+def _header(parts: list[Path], given: list[str]) -> str:
+    """The log's first lines: when, each part's full path, and the command as given. The print
     desk reads the part's path from here, for its "run it again" line. A reprint's part is the
     file its job kept, named once the ledger has been read."""
-    named = f"part: {part.resolve()}\n" if part is not None else ""
+    named = "".join(f"part: {part.resolve()}\n" for part in parts)
     return (f"print_job.py, {datetime.now(UTC).isoformat(timespec='seconds')}\n{named}"
             f"command: uv run python scripts/print_job.py {shlex.join(given)}\n")
 
@@ -282,10 +297,11 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
                     print(f"  {job.line()}")
         return 0
     by_hand = args.sliced is not None or args.again is not None
-    if not args.serve and args.stl is None and not by_hand:
+    if not args.serve and not args.stl and not by_hand:
         parser.error("give a part to print, --sliced FILE, --again JOB_ID, --serve, or --list")
-    if args.stl is not None and not args.stl.is_file():
-        parser.error(f"{args.stl} is not a file")
+    for part in args.stl:
+        if not part.is_file():
+            parser.error(f"{part} is not a file")
     if args.context is not None and not args.context.exists():
         parser.error(f"{args.context} is neither a sidecar nor a run's folder")
 
@@ -297,7 +313,7 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
         if isinstance(found, int):
             return found
         hand_sliced = found
-    if args.stl is not None:
+    if args.stl:
         material: Material | None = None
         nozzle, filament = args.nozzle, args.filament
         with Inventory(ledger_path(args.settings)) as inventory:
@@ -340,7 +356,7 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
 
     recorder = FrameRecorder(recording_path()) if args.record else None
     printer: PrinterClient | None = None
-    a_job = args.stl is not None or hand_sliced is not None
+    a_job = bool(args.stl) or hand_sliced is not None
     if a_job and hardware_allowed():
         printer = live_printer(recorder=recorder)
         print(f"ARMED by {ALLOW_HARDWARE_ENV}=1: an approval in Home Assistant starts the print.")
@@ -369,15 +385,27 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
 
             if hand_sliced is not None:
                 job_id = run.daemon.submit_sliced(hand_sliced)
+            elif len(args.stl) > 1:
+                print(f"{len(args.stl)} parts, one job, on one plate:")
+                for n, part in enumerate(args.stl, 1):
+                    context = read_context(part)
+                    print(f"  part {n}, {part.name}. Its context: "
+                          + "; ".join(context.lines()[:2]))
+                job_id = run.daemon.submit_several(args.stl, as_laid=args.as_laid)
             else:
-                context = read_context(args.stl, args.context)
+                context = read_context(args.stl[0], args.context)
                 print("The part's context: " + "; ".join(context.lines()[:2]))
-                job_id = run.daemon.submit(args.stl, as_laid=args.as_laid, context=args.context)
+                job_id = run.daemon.submit(args.stl[0], as_laid=args.as_laid,
+                                           context=args.context)
             if job_log is not None:
                 job_log.open(WORK_DIR / job_id / LOG_NAME)
                 print(f"Job {job_id}'s log: {job_log.path}")
             if hand_sliced is not None:
                 print(f"Job {job_id}: taking the file as it is, then the approval gate.")
+            elif len(args.stl) > 1:
+                how = "each kept as laid" if args.as_laid else "orienting each"
+                print(f"Job {job_id}: {how}, then a few questions about the parts together, "
+                      "here.")
             else:
                 how = "kept as laid" if args.as_laid else "orienting"
                 print(f"Job {job_id}: {how}, then a few questions about the part, here.")
@@ -391,7 +419,10 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
                 print("At the approval gate. Approve or Reject on the dashboard.")
                 print(f"  time        {int(gate.get('print_time_s') or 0) // 60} min")
                 print(f"  plastic     {gate.get('filament_cm3')} cm3")
-                if hand_sliced is None:
+                plate = gate.get("plate_lines")
+                for line in plate or ():
+                    print(f"  plate       {line}")
+                if hand_sliced is None and not plate:
                     print(f"  turned      {gate.get('orientation_deg')}")
                 print(f"  because     {gate.get('orientation_rationale')}")
                 if gate.get("pause"):
@@ -424,14 +455,23 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
 
 
 def _watch(run: Run, job_id: str) -> int:
-    """A started print, watched read-only until its outcome is answered, then shown."""
+    """A started print, watched read-only until its outcome is answered, then shown: each
+    part's, for a plate of several (mqucifer/print-shop#109)."""
     print("Started. Watching the printer read-only; answer in Home Assistant when it ends.")
+    rows = run.ledger.job_rows(job_id)
+    if len(rows) > 1:
+        print(f"It asks about each of the {len(rows)} parts in turn, by its number and its "
+              "place on the plate.")
+    shown: set[str] = set()
     while True:
-        row = run.ledger.get(job_id)
-        if row is not None and row.result is not None:
+        rows = run.ledger.job_rows(job_id)
+        for row in rows:
+            if row.result is not None and row.job_id not in shown:
+                shown.add(row.job_id)
+                print("\n" + describe(row))
+        if rows and len(shown) == len(rows):
             break
         time.sleep(5)
-    print("\n" + describe(row))
     frames = run.ledger.frames(job_id)
     if frames:
         print(f"frames         {len(frames)}, the last at {frames[-1].line()}, in"

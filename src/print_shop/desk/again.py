@@ -22,6 +22,9 @@ a lesson.
 file it printed, kept in its folder, as a new job marked as a reprint of it. There's no part to
 find, nothing to answer and nothing to correct, so that one line is all there is.
 
+**A plate of several parts runs again whole** (mqucifer/print-shop#109): from any of its parts'
+rows, the command names every file.
+
 The line doesn't arm the printer. Arming stays on the command's own line, as the runbook says.
 """
 
@@ -87,23 +90,31 @@ def correction_line(row: Row) -> str:
     return "; ".join(parts)
 
 
-def again(row: Row, part_path: Path | None, printers: int = 1, part_found: bool = False) -> Again:
+def again(
+    row: Row, part_path: Path | None, printers: int = 1, part_found: bool = False,
+    plate_parts: tuple[tuple[Path, bool], ...] = (),
+) -> Again:
     """How to run `row`'s job again. `part_path` is the part's file, and `part_found` says it
     has the bytes the job printed (by sha256); else it's the path the log names, if any.
-    `printers` is how many the inventory has (`--printer` is needed with more than one)."""
+    `printers` is how many the inventory has (`--printer` is needed with more than one).
+    `plate_parts` are each of a plate's files the same way, as the whole plate is what's run
+    again (mqucifer/print-shop#109)."""
     if row.sliced is not None:
         return _sliced_again(row, part_path, printers, part_found)
     notes: list[str] = []
-    part = str(part_path) if part_path is not None else row.stl_name
-    if not part_found:
-        where = ("nothing in the parts folder or the job's folder has the bytes it printed "
-                 f"(sha256 {row.stl_sha256[:12]}…)")
-        if part_path is not None and part_path.is_file():
-            notes.append(f"{part_path} has changed since this job, and {where}: check it's "
-                         "the part you mean.")
-        else:
-            notes.append(f"{row.stl_name} wasn't found: {where}. Give its path in its place.")
-    args = [part]
+    if row.plate is not None:
+        args = []
+        files = plate_parts or tuple((Path(p.path), False) for p in row.plate.parts)
+        for given, (path, found) in zip(row.plate.parts, files, strict=True):
+            args.append(str(path))
+            if not found:
+                notes += _not_found(given.name, given.sha256, path)
+        notes.append("It's the whole plate again. Each part's context is read beside its file "
+                     "as given here, with no --context.")
+    else:
+        args = [str(part_path) if part_path is not None else row.stl_name]
+        if not part_found:
+            notes += _not_found(row.stl_name, row.stl_sha256, part_path)
     material = row.material
     if material is not None:
         args += ["--nozzle", f"{material.nozzle_mm:g}",
@@ -122,7 +133,7 @@ def again(row: Row, part_path: Path | None, printers: int = 1, part_found: bool 
         args.append("--as-laid")
     # The part's context is named, as the part may be found elsewhere, away from its sidecar or
     # its design run (mqucifer/print-shop#130).
-    context = row.proposal.context_from if row.proposal is not None else ""
+    context = row.proposal.context_from if row.proposal is not None and row.plate is None else ""
     if context:
         args += ["--context", context]
         if not Path(context).exists():
@@ -152,6 +163,15 @@ def again(row: Row, part_path: Path | None, printers: int = 1, part_found: bool 
                      + "; ".join(f"{c.key}={c.value}" for c in taken) + ".")
     return Again(command=command, corrections=correction_line(row), answers=answers,
                  answers_name=name, notes=tuple(notes))
+
+
+def _not_found(name: str, sha256: str, path: Path | None) -> list[str]:
+    """The note for a part whose bytes weren't found."""
+    where = ("nothing in the parts folder or the job's folder has the bytes it printed "
+             f"(sha256 {sha256[:12]}…)")
+    if path is not None and path.is_file():
+        return [f"{path} has changed since this job, and {where}: check it's the part you mean."]
+    return [f"{name} wasn't found: {where}. Give its path in its place."]
 
 
 def _sliced_again(row: Row, kept: Path | None, printers: int, kept_found: bool) -> Again:

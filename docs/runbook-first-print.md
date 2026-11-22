@@ -183,6 +183,27 @@ A print uses your tuning where there is one, and the standard where you haven't 
 
    The recording replaces the synthetic frames in `tests/data/sdcp/`.
 
+## Several parts in one job
+
+For small parts you'd print one job each, such as caps at several clearances (mqucifer/print-shop#109): name the files together. Name a file twice for two of it.
+
+```
+uv run python scripts/print_job.py cap-tight.stl cap-mid.stl cap-loose.stl --as-laid
+PRINT_AGENT_ALLOW_HARDWARE=1 uv run python scripts/print_job.py cap-tight.stl cap-mid.stl cap-loose.stl --as-laid
+```
+
+It's one job: one set of questions, one review, one gate and one print. Arming is the same as for any job.
+
+- **By object, where the head has the room.** The parts are arranged on one plate and each is finished before the next, so none strings to another. The machine profile says the room: 68 mm round the nozzle (the larger of its two radii), 36 mm up to the rod, 90 mm up to the lid. print-shop reads every move of the head from the G-code against those and spaces the parts wider where they fall short, as Orca doesn't count a brim.
+- **By layer where it hasn't, saying why.** That's parts too many to space, a part over 36 mm with another beside it, two over 90 mm, or a pause. The review says it at its top, and so does the gate. The dashboard's gate card says it on a **Plate** line once you paste `ha-configs/lovelace_3dprint.yaml` again. The command line says it without that.
+- **Refused, with nothing sliced for printing:** parts that don't fit one plate even by layer, and a part whose mesh isn't closed (there's no mesh gate for a job of several: mend it or leave it out).
+- **The review** shows where each part is on the plate (x and y from the front left) and when it prints. `print_sequence` is a change like any: `print_sequence=by layer` prints them all at once. A correction is the whole plate's. `orientation` asks which part, then goes on as for one.
+- **A pause needs by layer.** Orca writes no pause by object and doesn't say so, so `pause_at` is refused there. `print_sequence=by layer; pause_at=3` pauses every part at that height. A part that needs a pause of its own prints by itself.
+- **Each part's pose** is its own: as laid with `--as-laid`, the side its context gives, or one orientation call each. The print loop reads one part, so it isn't run for a plate and the settings come from the single call.
+- **Each part's context is read beside it.** `--context` is for one part only.
+- **The outcome is asked part by part** when the print ends. The card names each by its file, its number and its place on the plate, such as `cap-mid.stl (part 2 of 3), front centre, x 166 y 85`, so answer before you clear the plate. The frames are the whole print's.
+- **In the ledger each object is a row,** with the job's id for the first and the id with `-2`, `-3` for the others. Each has its own pose, features and outcome. The time, plastic and layers in each are the whole plate's. The print desk's "run it again" from any of them is the whole plate.
+
 ## A file you sliced by hand
 
 For a print you set up yourself in Orca (mqucifer/print-shop#164): a test with a different setting on each object, a calibration print, or a job you know is good. print-shop sends it **as it is** and keeps it in the ledger. It asks no questions, proposes nothing, applies no lesson and slices nothing again.

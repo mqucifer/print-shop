@@ -16,6 +16,10 @@ Topology::
     gate.before_print    --cond--> print  | END
     print                --> END
 
+**A job of several parts takes the same way** (mqucifer/print-shop#109): `ingest`, `orient` and
+`slice` each do every part, and it's one review, one gate and one print, with a ledger row for
+each object. It has no mesh gate, as a part whose mesh isn't closed is refused.
+
 **A hand-sliced file takes the short way** (mqucifer/print-shop#164): `sliced` copies its bytes
 into the job's folder and reads them, and goes straight to the same gate. Nothing between is
 run for it: no ingest, orientation, question, proposal, lesson, slice or review.
@@ -61,7 +65,9 @@ from print_shop.expert.orientation import (
 from print_shop.ingest.analyzer import analyze, verify_unchanged
 from print_shop.ingest.orientation import candidates, write_rotated
 from print_shop.ledger import Ledger, PrintRecord
+from print_shop.orchestrator import plate_job
 from print_shop.orchestrator.fitness import scoring_profiles
+from print_shop.plate import PlateLayout
 from print_shop.printer.centauri import PreflightFailed, PrinterClient, preflight
 from print_shop.setup import Proposer
 from print_shop.setup import lessons as print_lessons
@@ -84,9 +90,10 @@ from print_shop.setup.proposal import (
 )
 from print_shop.setup.questions import estimate
 from print_shop.setup.reading import SliceReading, flags, read_slice, seen
-from print_shop.setup.review import Reviewer, ReviewRequest
+from print_shop.setup.review import Reviewer, ReviewPart, ReviewRequest
 from print_shop.setup.skill import groups_for, load
 from print_shop.setup.traits import traits
+from print_shop.slicer.arrange import SlicePlate, ToPlace, slice_parts
 from print_shop.slicer.naming import job_id_from_filename, name_gcode
 from print_shop.slicer.orca import (
     Slicer,
@@ -94,6 +101,7 @@ from print_shop.slicer.orca import (
     SlicerProfiles,
     parse_config_block,
     slice_model,
+    slice_plate,
 )
 from print_shop.slicer.store import Store
 
@@ -136,6 +144,7 @@ def build_graph(
     loop: PrintLoop | None = None,
     show: Callable[[str], None] | None = None,
     store: Store | None = None,
+    plate_slicer: SlicePlate = slice_plate,
 ) -> Any:
     """Build and compile the print pipeline graph.
 
@@ -187,6 +196,8 @@ def build_graph(
             shows it nowhere; the ledger keeps the reading either way.
         store: print-shop's profiles, by which a hand-sliced file's settings are put under the
             profile each belongs to. None keeps them all under "other".
+        plate_slicer: What slices a job of several parts (mqucifer/print-shop#109): the real
+            Orca by default, as `slicer` is.
 
     Returns:
         A compiled LangGraph ``CompiledStateGraph``.
@@ -227,6 +238,9 @@ def build_graph(
 
     def ingest_node(state: PrintJobState) -> dict[str, Any]:
         """Analyze the STL and store the MeshReport in state."""
+        if state.get("stl_paths"):
+            return {"parts": plate_job.take(
+                tuple(state["stl_paths"]), outdir_root / state["job_id"] / "given")}
         report = analyze(state["stl_path"])
         return {"mesh": report, "stl_sha256": report.stl_sha256}
 
@@ -236,6 +250,45 @@ def build_graph(
         The full ``Outcome`` (proposal, verdict history, accepted) is stored in
         state so a gate can show a human what was proposed and what changed.
         """
+        if state.get("parts"):
+            return orient_several(state)
+        return orient_part(state)
+
+    def orient_several(state: PrintJobState) -> dict[str, Any]:
+        """Each part's pose by the single step (mqucifer/print-shop#109): its side from its
+        context, as laid, or one orientation call. The print loop isn't run, as it reads one
+        part.
+
+        Raises:
+            RuntimeError: If a part has no accepted pose: the review gate shows one part.
+        """
+        parts, decided = [], []
+        for part in state["parts"]:
+            own: PrintJobState = {**state, "stl_path": part.stl, "stl_sha256": part.sha256,
+                                  "mesh": part.mesh}
+            found = orient_part(own, came_from=Path(part.given), looped=False)
+            outcome: Outcome[Orientation] = found["orientation"]
+            if not outcome.accepted:
+                said = "; ".join(v.detail for verdict in outcome.history[-1:]
+                                 for v in verdict.blockers if v.detail)
+                raise RuntimeError(
+                    f"no pose of part {part.n}, {part.name}, was accepted"
+                    + (f" ({said})" if said else "") + ": nothing was sliced")
+            decided.append(outcome)
+            parts.append(part.model_copy(update={
+                "candidates": found["orientation_candidates"],
+                "laid_traits": found["laid_traits"],
+                "context": found["part_context"],
+                "lessons": tuple(found.get("orientation_lessons", ())),
+            }))
+        return {"parts": tuple(parts), "orientations": tuple(decided)}
+
+    def orient_part(
+        state: PrintJobState, *, came_from: Path | None = None, looped: bool = True,
+    ) -> dict[str, Any]:
+        """One part's pose. `came_from` is where it was given from, where that isn't the file
+        that's read: its context is beside that. `looped` False never leaves the pose to the
+        loop."""
         verify_unchanged(state["stl_path"], state.get("stl_sha256", ""))
         if build_volume is None:
             raise RuntimeError(
@@ -253,14 +306,15 @@ def build_graph(
         )
         # The part's context, from its design run or a sidecar (mqucifer/print-shop#130).
         given_at = state.get("context_path")
-        context = read_context(Path(state["stl_path"]), Path(given_at) if given_at else None)
+        context = read_context(came_from or Path(state["stl_path"]),
+                               Path(given_at) if given_at else None)
         poses["part_context"] = context
         if state.get("as_laid"):
             return {"orientation": _as_laid(request), **poses}
         given = print_lessons.for_orienting(ledger, laid) if ledger is not None else ()
         request = request.model_copy(update={"lessons": tuple(g.line() for g in given)})
         kept = _kept(context, found, build_volume)
-        if loop is not None and proposer is not None and asker is not None:
+        if looped and loop is not None and proposer is not None and asker is not None:
             # The print loop chooses the pose after the questions, which are asked of the
             # file's own, or of the side its context lays it on (mqucifer/print-shop#129, #130).
             own = kept or next(c for c in found if c.rotation_deg == (0.0, 0.0, 0.0))
@@ -306,6 +360,8 @@ def build_graph(
         from ingest), the part is sliced in its authored pose using the mesh's
         measured overhang area to determine support requirements.
         """
+        if state.get("parts"):
+            return slice_several(state)
         outdir = outdir_root / state["job_id"]
         outcome = state.get("orientation")
         if outcome is not None and outcome.accepted:
@@ -488,6 +544,133 @@ def build_graph(
             **proposed,
         }
 
+    def slice_several(state: PrintJobState) -> dict[str, Any]:
+        """The plate of a job of several parts (mqucifer/print-shop#109): one intake, one
+        proposal and one review for it, arranged, and by object where the head has the room.
+
+        Raises:
+            DoesNotFit: If the parts can't all be sliced on one plate.
+        """
+        assert profiles is not None, "orient refuses a graph without profiles"
+        outdir = outdir_root / state["job_id"]
+        parts = tuple(state["parts"])
+        orientations = list(state["orientations"])
+        turned, to_place = plate_job.posed(parts, tuple(orientations), outdir / "parts")
+        read = plate_job.together(turned)
+        done: dict[str, Any] = {}
+        layouts: list[PlateLayout] = []
+
+        def slicing(placing: tuple[ToPlace, ...]) -> Callable[[SlicerProfiles], SliceResult]:
+            def sliced(at: SlicerProfiles) -> SliceResult:
+                result, layout = slice_parts(placing, at, outdir, plate_slicer)
+                layouts.append(layout)
+                return result
+
+            return sliced
+
+        def estimating(placing: tuple[ToPlace, ...]) -> Slicer:
+            # As the one part's estimates are made, of the plate: it's the plate that's paid for.
+            def plated(
+                stl_path: Path | str, profiles: SlicerProfiles, outdir: Path | str,
+            ) -> SliceResult:
+                return slice_parts(placing, profiles, Path(outdir), plate_slicer)[0]
+
+            return plated
+
+        if proposer is not None and asker is not None:
+            wanted = plate_job.by_object(profiles, outdir / "plate")
+            # Before anything is asked: parts that don't fit one plate end the job here.
+            slicing(to_place)(wanted)
+            first = to_place
+            intake = _ask(
+                proposer.questions(read.features, profiles),
+                asker,
+                lambda settings, n: _estimate(
+                    estimating(first), first[0].stl, wanted, settings, outdir / "options" / str(n)
+                ),
+            )
+            done["intake"] = intake
+            given = tuple({g.id: g for part in parts for g in part.lessons}.values())
+            process, _ = _presets(profiles)
+            earlier: list[Change] = []
+            while True:
+                turned, to_place = plate_job.posed(parts, tuple(orientations), outdir / "parts")
+                read = plate_job.together(turned)
+                proposal = read.proposer(proposer)(intake, read.features, profiles, read.context)
+                proposal = _with_orienting(
+                    plate_job.planned(proposal, process, len(parts),
+                                      without_loop=loop is not None),
+                    given)
+                if earlier:
+                    proposal = proposal.corrected(earlier)
+                plate = _PlateReview(
+                    layout=lambda: layouts[-1],
+                    read=read,
+                    parts=tuple(
+                        ReviewPart(
+                            n=part.n, name=part.name,
+                            orientation=part.applied or AppliedOrientation(),
+                            candidates=part.candidates, laid_traits=part.laid_traits,
+                            lessons_for=_lessons_for(ledger, part.stl, profiles,
+                                                     outdir / "poses" / str(part.n)),
+                        )
+                        for part in turned
+                    ),
+                )
+                try:
+                    result, reviewed = _propose_and_review(
+                        proposal, profiles, slicing(to_place), reviewer,
+                        AppliedOrientation(rationale=plate_job.poses_said(turned)),
+                        outdir / "proposed", intake,
+                        cost=_coster(estimating(to_place), to_place[0].stl, profiles, proposal,
+                                     outdir / "offers"),
+                        earlier=earlier,
+                        plate=plate,
+                    )
+                except _Turned as back:
+                    assert back.part is not None, "a plate's send-back names its part"
+                    earlier = [c for c in back.corrections if c.key != ORIENTATION]
+                    at = back.part - 1
+                    part = parts[at]
+                    chosen = next(c for c in part.candidates
+                                  if pose_value(c.rotation_deg) == back.to.value)
+                    orientations[at] = Outcome(
+                        proposal=Chosen(value=chosen, source="sponsor", rationale=(
+                            f"sent back at the review, by you: {back.to.reason}")),
+                        accepted=True, attempts=0,
+                    )
+                    parts = (*parts[:at],
+                             part.model_copy(update={"sent_back": (*part.sent_back, back.to)}),
+                             *parts[at + 1:])
+                    continue
+                break
+            done.update(reviewed)
+        else:
+            overhangs = any(o.proposal.value.overhang_area_mm2 > 0 for o in orientations)
+            active = plate_job.by_object(
+                scoring_profiles(profiles, outdir) if overhangs else profiles, outdir / "plate")
+            result = slicing(to_place)(active)
+            reading = _read(result)
+            done["slice_reading"] = reading
+            done["slice_flags"] = (
+                flags(reading, None, *_presets(active), read.placed, tops=read.tops)
+                if reading else ()
+            )
+        layout = layouts[-1]
+        result = name_gcode(result, job_id=state["job_id"],
+                            part=f"{len(parts)}parts-{Path(parts[0].name).stem}")
+        return {
+            "gcode_path": str(result.gcode_path),
+            "slice": result,
+            "applied_orientation": AppliedOrientation(
+                rationale=f"printed {layout.sequence}; {plate_job.poses_said(turned)}"),
+            "profiles_used": profiles.used,
+            "parts": turned,
+            "orientations": tuple(orientations),
+            "plate": layout,
+            **done,
+        }
+
     def review_proposal_node(state: PrintJobState) -> dict[str, Any]:
         """Gate for non-manifold meshes: stop for a human decision.
 
@@ -526,6 +709,12 @@ def build_graph(
         """
         slice_result: SliceResult = state["slice"]
         applied_orientation = state.get("applied_orientation", AppliedOrientation())
+        plate = state.get("plate")
+        several: dict[str, Any] = {}
+        if plate is not None:
+            # No one turn is the plate's: each part's is in the rationale.
+            several = {"orientation_deg": None, "plate": plate.headline(),
+                       "plate_lines": plate.lines()}
         decision = interrupt(
             {
                 "gate": Gate.BEFORE_PRINT.value,
@@ -540,6 +729,7 @@ def build_graph(
                 # A colour change the review asked for, where the slice put it, so the person
                 # is at the printer for the swap (mqucifer/print-shop#119).
                 "pause": _pauses_said(state.get("slice_reading")),
+                **several,
             }
         )
         approved = (
@@ -620,10 +810,14 @@ def build_graph(
 
         # Written before the printer is told anything, so a start that fails
         # halfway is still on record.
-        ledger.record_start_requested(
-            _print_record(state, remote_name, gcode, snapshot.machine, snapshot.firmware,
-                          store)
+        rows = (
+            plate_job.records(state, remote_name, parse_config_block(gcode), snapshot.machine,
+                              snapshot.firmware)
+            if state.get("parts")
+            else (_print_record(state, remote_name, gcode, snapshot.machine, snapshot.firmware,
+                                store),)
         )
+        ledger.record_start_requested(*rows)
         try:
             client.start(remote_name)
         except Exception as exc:
@@ -642,14 +836,16 @@ def build_graph(
         return "sliced" if state.get("sliced") is not None else "ingest"
 
     def route_after_ingest(state: PrintJobState) -> str:
-        """Route to orient if manifold, else to the review gate."""
-        if state["mesh"].is_manifold:
+        """Route to orient if manifold, else to the review gate. A job of several parts was
+        refused at ingest if one isn't (mqucifer/print-shop#109)."""
+        if state.get("parts") or state["mesh"].is_manifold:
             return "orient"
         return Gate.REVIEW_PROPOSAL.value
 
     def route_after_orient(state: PrintJobState) -> str:
-        """Route to slice if the orientation was accepted, else to the review gate."""
-        if state["orientation"].accepted:
+        """Route to slice if the orientation was accepted, else to the review gate. A job of
+        several parts ended at orient if one wasn't."""
+        if state.get("parts") or state["orientation"].accepted:
             return "slice"
         return Gate.REVIEW_PROPOSAL.value
 
@@ -868,10 +1064,21 @@ def _estimate(
 class _Turned(Exception):  # noqa: N818 - a signal, not an error
     """The pose was sent back at the review: turn the part to it, and propose and slice again."""
 
-    def __init__(self, to: Change, corrections: list[Change]) -> None:
+    def __init__(self, to: Change, corrections: list[Change], part: int | None = None) -> None:
         super().__init__(f"turned to {to.value}")
         self.to = to
         self.corrections = corrections
+        self.part = part
+
+
+@dataclasses.dataclass(frozen=True)
+class _PlateReview:
+    """What the review of a plate of several has that one part's doesn't
+    (mqucifer/print-shop#109)."""
+
+    layout: Callable[[], PlateLayout]  # the slice on show's
+    read: plate_job.Together
+    parts: tuple[ReviewPart, ...]
 
 
 def _with_orienting(proposal: Proposal, given: tuple[GivenLesson, ...]) -> Proposal:
@@ -938,13 +1145,14 @@ def _propose_and_review(
     earlier: list[Change] | None = None,
     context: PartContext | None = None,
     stl: str | Path | None = None,
+    plate: _PlateReview | None = None,
 ) -> tuple[SliceResult, dict[str, Any]]:
     """Slice with the proposal; with a reviewer, again after each correction until approved.
 
     Each slice is read layer by layer, and flagged for this part from which faces the intake
     says are seen (mqucifer/print-shop#105). A change a flag proposes is only applied when the
     Sponsor takes it at the review. `earlier` are the corrections made before the part was
-    turned, kept with the job's.
+    turned, kept with the job's. `plate` is a job of several parts', reviewed as one.
 
     Each change is read back from each slice (mqucifer/print-shop#206): the review, and then
     the job, have what reached it as changed and the rest as not applied, the corrections
@@ -969,6 +1177,9 @@ def _propose_and_review(
               if context is not None and context.found and stl is not None else None)
     said = tuple([*(context.lines() if context is not None else ()),
                   *(placed.lines() if placed is not None else ())])
+    tops: tuple[float, ...] = ()
+    if plate is not None:
+        placed, said, tops = plate.read.placed, plate.read.said, plate.read.tops
     proposal = proposal.model_copy(update={
         "context": said, "context_from": context.path if context is not None else ""})
     asked = proposal
@@ -979,7 +1190,7 @@ def _propose_and_review(
         config = _config(result)
         proposal = read_back(asked, process, filament, config)
         reading = _read(result)
-        found = (flags(reading, faces, process, filament, placed, proposal.changes)
+        found = (flags(reading, faces, process, filament, placed, proposal.changes, tops)
                  if reading is not None else ())
         if reviewer is None:
             break
@@ -999,6 +1210,8 @@ def _propose_and_review(
                 cost=cost,
                 lessons_for=lessons_for,
                 context=said,
+                plate=plate.layout() if plate is not None else None,
+                parts=plate.parts if plate is not None else (),
             )
         )
         if review.stop:
@@ -1007,7 +1220,7 @@ def _propose_and_review(
             break
         turned = next((c for c in review.corrections if c.key == ORIENTATION), None)
         if turned is not None:
-            raise _Turned(turned, [*corrections, *review.corrections])
+            raise _Turned(turned, [*corrections, *review.corrections], review.part)
         corrections += review.corrections
         asked = asked.corrected([*review.corrections, *review.taken])
     missed = {c.key for c in proposal.not_applied}

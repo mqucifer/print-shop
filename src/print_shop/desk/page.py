@@ -17,6 +17,7 @@ from print_shop.desk.read import JobRecord, JobSummary, OnHand, has_swap, status
 from print_shop.inventory import SETUP
 from print_shop.ledger import Row
 from print_shop.orchestrator.outcome import end_name, no_frames
+from print_shop.plate import row_id
 from print_shop.setup.proposal import PAUSE, Change, Source
 
 __all__ = ["index_page", "job_page", "not_found_page"]
@@ -215,7 +216,7 @@ def job_page(record: JobRecord) -> str:
         ]
         return _page(row.stl_name, "".join(sections))
     sections = [
-        _summary(row, record), _again(row, record), _pose(row), _questions(row),
+        _summary(row, record), _plate(row), _again(row, record), _pose(row), _questions(row),
         _settings(row), _corrections(row), _lessons(row), _reading(row), _swap(row),
         _outcome(row, record), _log(record),
     ]
@@ -237,7 +238,7 @@ def _summary(row: Row, record: JobRecord) -> str:
 
 
 def _again(row: Row, record: JobRecord) -> str:
-    a = again(row, record.part_path, record.printers, record.part_found)
+    a = again(row, record.part_path, record.printers, record.part_found, record.plate_parts)
     parts = ["<section><h2>Run it again</h2>",
              "<h3>The command</h3>", _copy("again-command", a.command)]
     parts.append("<p class=\"muted\">It doesn't arm the printer: that's on the command's own "
@@ -289,6 +290,25 @@ def _sliced(row: Row) -> str:
         parts.append(f"{tag}{escape(line.strip())}</li>")
     parts.append("</ul></section>")
     return "".join(parts)
+
+
+def _plate(row: Row) -> str:
+    """The plate an object was printed on, with a link to each of its parts
+    (mqucifer/print-shop#109)."""
+    plate = row.plate
+    if plate is None:
+        return ""
+    items = []
+    for part in plate.layout.objects:
+        said = escape(part.line())
+        if part.n == plate.n:
+            said = f"<strong>{said}</strong> ← this part"
+        else:
+            said = f"<a href=\"/job/{escape(row_id(plate.job_id, part.n))}\">{said}</a>"
+        items.append(f"<li>{said}</li>")
+    return (f"<section><h2>On a plate with others</h2><p>{escape(plate.layout.headline())}</p>"
+            f"<ul>{''.join(items)}</ul><p class=\"muted\">The time, plastic and layers are the "
+            "whole plate's. The outcome is this part's own.</p></section>")
 
 
 def _pose(row: Row) -> str:
