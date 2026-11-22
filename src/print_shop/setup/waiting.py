@@ -35,7 +35,7 @@ from typing import TextIO
 from print_shop.setup.intake import Added, Answer, AnswersRefused, Asker, Intake, Question, parse
 from print_shop.setup.questions import PURPOSE, STOCK, Asked
 
-__all__ = ["GO_ON", "QuestionsCall", "Waiting", "ask_meanwhile", "cli_waiting", "took"]
+__all__ = ["GO_ON", "Prompted", "QuestionsCall", "Waiting", "ask_meanwhile", "cli_waiting", "took"]
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +50,25 @@ def took(seconds: float) -> str:
     """A wait's length as it's shown: "42 s", "6 min 1 s"."""
     minutes, secs = divmod(int(seconds), 60)
     return f"{minutes} min {secs} s" if minutes else f"{secs} s"
+
+
+class Prompted:
+    """`read`, knowing the prompt that's open, so that whatever lands under it can show it again."""
+
+    def __init__(self, read: Callable[[str], str]) -> None:
+        self._read = read
+        self._prompt = ""
+
+    def __call__(self, prompt: str) -> str:
+        self._prompt = prompt
+        try:
+            return self._read(prompt)
+        finally:
+            self._prompt = ""
+
+    def prompt(self) -> str:
+        """The prompt waiting for an answer, or ""."""
+        return self._prompt
 
 
 class QuestionsCall:
@@ -259,11 +278,13 @@ def cli_waiting(
     write: Callable[[str], None] = print,
     *,
     replayed: bool = False,
+    prompt: Callable[[], str] = lambda: "",
     screen: Callable[[], TextIO | None] = _terminal,
     typed: Callable[[float], bool] = _keys_waiting,
     forget: Callable[[], None] = _drop_typed,
 ) -> Waiting:
-    """The wait on the command line. `replayed` is for recorded answers.
+    """The wait on the command line. `replayed` is for recorded answers. `prompt` is the one
+    that's open (`Prompted.prompt`): it's shown again under anything said while it's open.
 
     Without a terminal nobody can type `go`: the call runs to its own end, as it did.
     """
@@ -291,11 +312,18 @@ def cli_waiting(
                     said += " They follow the answers you're giving."
             else:
                 said = f"The model read the part in {after} and has no other question."
-            if at_prompt.is_set():
-                said = f"\n{said} Keep answering where you were."
-            elif screen() is not None:
-                said = f"\n{said}"  # off the line `go` is typed on
+            out = screen()
+            open_prompt = prompt() if at_prompt.is_set() else ""
+            if open_prompt:
+                said = (f"\n{said}\nKeep answering {open_prompt.rstrip('> ')} "
+                        "(what you've typed is kept):")
+            elif at_prompt.is_set() or out is not None:
+                said = f"\n{said}"  # off the line that's being typed on
             write(said)
+            if open_prompt and out is not None:
+                # On the screen alone: the log gets the prompt with its answer.
+                out.write(open_prompt)
+                out.flush()
 
     def wait(call: QuestionsCall) -> bool:
         at_prompt.clear()

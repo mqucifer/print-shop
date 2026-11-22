@@ -252,10 +252,13 @@ def cli_asker(
         answers = []
         for n, q in enumerate(questions, _numbered_from(questions)):
             while True:
-                parsed = parse(read(f"{n}> "), q)
+                typed = read(f"{n}> ")
+                parsed = parse(typed, q)
                 if isinstance(parsed, Answer):
                     answers.append(parsed)
                     break
+                if typed.strip().lower() == "go" and not isinstance(questions, Added):
+                    parsed += "; go works once these are answered"  # mqucifer/print-shop#208
                 write(f"  {parsed}")
         return tuple(answers)
 

@@ -47,7 +47,7 @@ from print_shop.setup.questions import MAX_QUESTIONS, MAX_SLICES, PURPOSE, STOCK
 from print_shop.setup.review import Review, ReviewRequest
 from print_shop.setup.review import render as render_review
 from print_shop.setup.skill import groups_for
-from print_shop.setup.waiting import Waiting, ask_meanwhile, cli_waiting, took
+from print_shop.setup.waiting import Prompted, Waiting, ask_meanwhile, cli_waiting, took
 from tests.fakes import CI_PROFILES, STORE_PROFILES, FramePrinter, MemoryBridge, RecordedSlicer
 from tests.fixtures import write_stl
 from tests.test_job_e2e import CFG
@@ -413,6 +413,36 @@ def test_a_failed_call_says_so_when_it_fails_and_is_recorded_as_what_it_was(
     assert intake.call["finish_reason"] == finish and "seconds" in intake.call
     assert says in intake.without
     assert intake.note.startswith("only purpose and what's seen asked")
+
+
+def test_what_lands_under_an_open_prompt_shows_the_prompt_again() -> None:
+    release = threading.Event()
+    screen = io.StringIO()
+
+    def fails(stop: threading.Event) -> Asked:
+        release.wait(WAIT_S)
+        raise RuntimeError("down")
+
+    def at_prompt(n: int) -> None:
+        if n == 1:
+            release.set()
+            time.sleep(0.2)
+
+    person = Person("2", "1", before=at_prompt)
+    answering = Prompted(person.read)
+    waiting = cli_waiting(person.read, person.write, prompt=answering.prompt,
+                          screen=lambda: screen, forget=lambda: None)
+    ask_meanwhile(fails, cli_asker(read=answering, write=person.write), waiting, same)
+    said = next(text for text in person.shown if "was unavailable" in text)
+    assert said.endswith("\nKeep answering 1 (what you've typed is kept):")
+    assert screen.getvalue() == "1> ", "the cursor is back at the question's prompt"
+    assert answering.prompt() == ""
+
+
+def test_go_at_a_question_says_when_it_works() -> None:
+    person = Person("go", "2", "1")
+    ask(person, lambda stop: answered(*STOCK), terminal=False)
+    assert "or o and your words; go works once these are answered" in person.text
 
 
 def test_an_error_nobody_expected_is_a_failed_call_and_not_a_hung_job() -> None:

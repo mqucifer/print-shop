@@ -123,7 +123,7 @@ from print_shop.runtime import (
 from print_shop.setup.context import read_context
 from print_shop.setup.intake import Asker, cli_asker, replay_asker
 from print_shop.setup.review import cli_reviewer
-from print_shop.setup.waiting import Waiting, cli_waiting
+from print_shop.setup.waiting import Prompted, Waiting, cli_waiting
 from print_shop.slicer.orca import SlicerProfiles
 from print_shop.slicer.store import STORE_DIR, NoChoice, Store, choose
 from print_shop.slicer.store import describe as describe_store
@@ -369,11 +369,13 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
         print(f"  filament  {choice.filament.name}")
         for note in choice.notes:
             print(f"  ({note})")
+        answering = Prompted(read)
         try:
-            asker = replay_asker(args.answers) if args.answers else cli_asker(read=read)
+            asker = replay_asker(args.answers) if args.answers else cli_asker(read=answering)
         except ValueError as exc:
             parser.error(str(exc))
-        waiting = cli_waiting(read=read, replayed=args.answers is not None)
+        waiting = cli_waiting(read=read, replayed=args.answers is not None,
+                              prompt=answering.prompt)
 
     recorder = FrameRecorder(recording_path()) if args.record else None
     printer: PrinterClient | None = None
