@@ -40,7 +40,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import trimesh
 
-from print_shop.core.state import Orientation
+from print_shop.core.state import Orientation, pose_of, turn_words
 from print_shop.materials import material_name
 from print_shop.outcome_words import outcome_words
 from print_shop.rounds.lessons import REJECTED, RETIRED
@@ -406,9 +406,9 @@ def _against(at: int, row: Row, part: ThisPart) -> _Found:
     then = similar.numbers(row.features or ())
     here = similar.numbers(part.features)
     shapes = [here]
-    if row.rotation_deg != part.rotation_deg:
-        shapes += [similar.posed(here, c) for c in part.candidates
-                   if c.rotation_deg == row.rotation_deg]
+    lay = pose_of(row.rotation_deg)
+    if lay != part.rotation_deg:
+        shapes += [similar.posed(here, c) for c in part.candidates if c.rotation_deg == lay]
     context = part.context or PartContext()
     proposal = row.proposal
     each = [
@@ -464,7 +464,7 @@ def _outcome(row: Row) -> str:
 
 def _past(ledger: Ledger, f: _Found, found: list[_Found], part: ThisPart) -> Past:
     row = f.row
-    then_pose = pose_value(row.rotation_deg)
+    then_pose = pose_value(pose_of(row.rotation_deg))
     decided = dict(f.decided)
     laid = row.orientation_source == "as_laid"  # `graph.AS_LAID`, which imports this
     if laid and ORIENTATION not in decided and then_pose != part.pose:
@@ -505,6 +505,17 @@ def _past(ledger: Ledger, f: _Found, found: list[_Found], part: ThisPart) -> Pas
                 differs.append(said)
     if not f.same_file and f.likeness.context < 1:
         differs.append("its fits, holds or seen faces weren't these")
+    seam = decided.get("seam_position")
+    if seam is not None and seam.value == "back" and row.sliced is None:
+        # Back is the plate's, so it's another side of a part turned on it
+        # (mqucifer/print-shop#257). A row from before doesn't say whether Orca turned it.
+        was = row.reading.turn_deg if row.reading is not None else None
+        if was is None:
+            differs.append("Orca may have turned it on the plate, unsaid then, so its back may "
+                           "have been another side")
+        elif was:
+            differs.append(f"it was turned {turn_words(was)}, to fit, so its back was as it "
+                           "lay so")
     names = part.filament_names
     if names and _filament_name(row) not in names:
         differs.append(f"its filament was {_filament_name(row) or 'not recorded'}, this is "

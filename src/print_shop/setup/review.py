@@ -28,6 +28,10 @@ pre-selected, each with why. `use` takes the selected ones, `use 2 4` those numb
 clears one and `from 2` picks another print. Only `use` applies any. An `ok` with ticked ones
 unused says so once, and the next goes on without them (`cli_reviewer`).
 
+**A part is never turned on the plate unsaid** (mqucifer/print-shop#257). One that doesn't fit as
+posed is shown sliced in a turn that fits, saying so. `turn` takes that turn, and `ok` waits
+for it.
+
 **The orientation can be sent back** (mqucifer/print-shop#128), in a short conversation
 (`send_back`): the step says why it turned the part, the person names the pose it should print
 in and says why the turn was wrong, or meets the step's concern by settings instead, each priced
@@ -44,7 +48,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
 from print_shop.bench.pausing import TOPS_OUT, mm
-from print_shop.core.state import AppliedOrientation, Orientation, SliceResult
+from print_shop.core.state import AppliedOrientation, Orientation, SliceResult, turn_words
 from print_shop.setup.concerns import concern_in, ways
 from print_shop.setup.intake import Estimate
 from print_shop.setup.offer import Item, Offering
@@ -77,6 +81,8 @@ _SEND_BACK = re.compile(r"^\s*orientation\b(?:\s*=\s*(\d+))?\s*(?:(?:because|-|â
                         re.I)
 #: `take`, or `take 1 3`: the changes the slice's reading proposed.
 _TAKE = re.compile(r"^\s*take\b\s*([\d ,]*)$", re.I)
+#: `turn`: the turn on the plate that a part which doesn't fit as posed is offered.
+_TURN = "turn"
 #: `use`, `use 2 4`, `clear 3` or `from 2`: what the most similar past print offers.
 _OFFER = re.compile(r"^\s*(use|clear|from)\b\s*([\d ,]*)$", re.I)
 
@@ -111,6 +117,14 @@ class ReviewRequest:
     context: tuple[str, ...] = ()
     #: What decided the past prints most like this one, to use (mqucifer/print-shop#211).
     offering: Offering | None = None
+    #: The turn this slice needed to fit (`SliceResult.turn_deg`) has been taken
+    #: (mqucifer/print-shop#257).
+    turn_taken: bool = False
+
+    @property
+    def turn_waiting(self) -> bool:
+        """It fits only turned on the plate, and the person hasn't taken the turn."""
+        return bool(self.slice.turn_deg) and not self.turn_taken
 
     @property
     def proposed(self) -> tuple[Flag, ...]:
@@ -130,11 +144,13 @@ class Review:
     taken: tuple[Change, ...] = ()
     #: The offer as the answer left it, where it picked another print or cleared an item.
     offering: Offering | None = None
+    #: The turn offered to fit the plate was taken (`turn`, mqucifer/print-shop#257).
+    turn_taken: bool = False
 
     @property
     def browsing(self) -> bool:
-        """Only the offer was changed: there's nothing to slice again."""
-        return self.offering is not None and not (
+        """Only the offer was changed, or the turn taken: there's nothing to slice again."""
+        return (self.offering is not None or self.turn_taken) and not (
             self.approved or self.stop or self.corrections or self.taken
         )
 
@@ -228,6 +244,7 @@ def render(request: ReviewRequest) -> str:
         # The pose the features, and the lessons keyed to them, were read in
         # (mqucifer/print-shop#128).
         f"  the part's features were read in this pose: {request.orientation.pose()}",
+        *_turn(request),
         *_poses(request),
     ]
     if request.context:
@@ -241,14 +258,35 @@ def render(request: ReviewRequest) -> str:
            if request.offering is not None and request.offering.options else "")
     take = " or take what the slice proposes (take, or take 1)," if request.proposed else ""
     back = " send the orientation back (orientation)," if request.candidates else ""
+    go_on = "Type ok to go on to the approval gate,"
+    if request.turn_waiting:
+        go_on = (f"It doesn't fit as posed. Type turn to take it turned "
+                 f"{turn_words(request.slice.turn_deg)} (ok waits for that),")
     lines += [
         "",
-        f"Type ok to go on to the approval gate,{use}{take}{back} or correct a setting by name, "
+        f"{go_on}{use}{take}{back} or correct a setting by name, "
         "e.g. wall_loops=3 because it's decorative (several separated by ';'), "
         "pause_at=12.4 because white to black (it pauses once the layer topping out at "
         "12.4 mm is done), or stop.",
     ]
     return "\n".join(lines)
+
+
+def _turn(request: ReviewRequest) -> list[str]:
+    """The turn it needs to fit the plate, offered or taken (mqucifer/print-shop#257)."""
+    deg = request.slice.turn_deg
+    if not deg:
+        return []
+    turned = f"turned {turn_words(deg)}"
+    then = 'x, y and the seam\'s "back" are as it lies turned'
+    if request.turn_taken:
+        return [f"  TURNED ON THE PLATE to fit, as you took it: {turned}; {then}"]
+    posed = next((c for c in request.candidates
+                  if c.rotation_deg == request.orientation.rotation_deg), None)
+    size = f" ({posed.bbox_mm[0]:.1f} x {posed.bbox_mm[1]:.1f} mm)" if posed else ""
+    return [f"  DOESN'T FIT AS POSED{size}: Orca has no room for it that way.",
+            f"    It fits {turned}, and this slice is so: {then}.",
+            "    It isn't turned unless you take it: type turn."]
 
 
 def _pauses(request: ReviewRequest) -> list[str]:
@@ -342,7 +380,15 @@ def parse_answer(answer: str, request: ReviewRequest) -> Review | str:
     """The Sponsor's answer as a `Review`, or why it can't be read."""
     text = answer.strip()
     if text.lower() in ("ok", "yes", "y", "approve"):
+        if request.turn_waiting:
+            return ("it doesn't fit as posed: type turn to take it turned "
+                    f"{turn_words(request.slice.turn_deg)}, or stop")
         return Review(approved=True)
+    if text.lower() == _TURN:
+        if not request.slice.turn_deg:
+            return ("it fits as posed, so there's no turn to take: orientation sends the pose "
+                    "back")
+        return Review(turn_taken=True)
     if text.lower() in ("stop", "no", "n"):
         return Review(stop=True)
     corrections = []
@@ -474,6 +520,7 @@ def cli_reviewer(
     def review(request: ReviewRequest) -> Review:
         write(render(request))
         moved: Offering | None = None  # the offer as picked and cleared here
+        took = False  # the turn to fit, taken here
         told = False  # that what's ticked isn't used yet
         while True:
             answer = read("> ")
@@ -481,12 +528,18 @@ def cli_reviewer(
             if back is not None and request.candidates:
                 sent = send_back(request, read, write, back.group(1), back.group(2))
                 if sent is not None:
-                    return replace(sent, offering=moved) if moved is not None else sent
+                    return _as_left(sent, moved, took)
                 write("  Back to the review: ok, a correction, orientation, or stop.")
                 continue
             parsed = parse_answer(answer, request)
             if isinstance(parsed, str):
                 write(f"  {parsed}")
+                continue
+            if parsed.turn_taken:
+                took = True
+                request = replace(request, turn_taken=True)
+                write(f"  Taken: turned {turn_words(request.slice.turn_deg)}. "
+                      "ok goes on to the approval gate.")
                 continue
             if parsed.browsing:
                 # Only the offer moved, so only the offer is shown again.
@@ -506,11 +559,16 @@ def cli_reviewer(
                     write(f"  {left} ticked {aren} used yet: use to take {them}, "
                           "or ok again to go on without")
                     continue
-            if moved is not None and parsed.offering is None:
-                return replace(parsed, offering=moved)
-            return parsed
+            return _as_left(parsed, moved, took)
 
     return review
+
+
+def _as_left(answer: Review, moved: Offering | None, took: bool) -> Review:
+    """The answer, with what was picked or taken before it at the same review."""
+    if moved is not None and answer.offering is None:
+        answer = replace(answer, offering=moved)
+    return replace(answer, turn_taken=True) if took else answer
 
 
 def _pose(o: Orientation) -> str:

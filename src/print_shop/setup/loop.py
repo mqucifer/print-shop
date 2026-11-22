@@ -436,6 +436,9 @@ def _slice(part: Part, state: _State, pose: Orientation, settings: dict[str, str
         return f"Orca couldn't slice it: {exc}"[:400]
     said = [f"Orca: {result.print_time_s // 60} min {result.print_time_s % 60} s, "
             f"{result.filament_cm3} cm3, {result.layer_count} layers"]
+    if result.turn_deg:
+        said.append(f"It doesn't fit as posed: this slice is turned {result.turn_deg:g} degrees "
+                    "about z to fit, so x, y and the back are as it lies turned")
     try:
         said += read_slice(result.gcode_path).lines()
     except (OSError, ValueError) as exc:

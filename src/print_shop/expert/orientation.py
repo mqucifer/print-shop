@@ -161,6 +161,7 @@ def propose_orientation(
         f"Rotation {c.rotation_deg}: overhang {c.overhang_area_mm2:.1f} mm2, "
         f"bed contact {c.bed_contact_area_mm2:.1f} mm2, "
         f"height {c.height_mm:.1f} mm, bbox {c.bbox_mm}"
+        + (", fits the plate turned about z" if c.fits_turned else "")
         for c in request.candidates
     ]
     user = (

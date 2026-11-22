@@ -159,6 +159,10 @@ class SliceReading(BaseModel):
     pauses: tuple[PauseReading, ...] = ()
     #: Each layer that lays `CLOSES_OVER`: its number, and the area of it in mm².
     over_air: tuple[tuple[int, float], ...] = ()
+    #: How far the part was turned on the plate to fit, 0 as posed (mqucifer/print-shop#257).
+    #: None: not known, as in a row from before it, when Orca could turn a part unsaid. Its x
+    #: and y are of the G-code as it was sliced, whichever it was.
+    turn_deg: float | None = None
 
     @property
     def time_s(self) -> float:

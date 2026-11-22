@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from print_shop.core.state import turn_words
 from print_shop.ledger import Row
 from print_shop.orchestrator.graph import AS_LAID
 from print_shop.setup.proposal import ORIENTATION, PAUSE, Change, Source
@@ -190,6 +191,17 @@ def again(row: Row, part_path: Path | None, printers: int = 1, part_found: bool 
             notes.append(f"The pose was sent back at the review, from {c.preset} to {c.value}, "
                          f"because {c.reason}. Type orientation at the review to send it back "
                          "again.")
+    turned = row.reading.turn_deg if row.reading is not None else None
+    if turned:
+        notes.append(f"It was turned {turn_words(turned)}, on the plate to fit. It's offered "
+                     "again only if it still doesn't fit as posed: type turn at the review to "
+                     "take it.")
+    elif (turned is None and row.reading is not None
+          and row.reading.settings.get("seam_position") == "back"):
+        # A row from before, read as it was sliced: back was whichever side Orca turned there.
+        notes.append("Its seam was at the back, and Orca may have turned it on the plate, unsaid "
+                     "then. Again prints it as posed, so the back may be another side than this "
+                     "job's.")
     stood = _standing_pause(row)
     if stood is not None:
         copied = _pause_again(row, stood)
