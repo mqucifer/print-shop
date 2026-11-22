@@ -119,9 +119,6 @@ _TRAIT_RESTS_ON = {"slenderness": ("height", "width"), "footprint_aspect": ("len
 
 #: What's the person's own: their corrections and what they took.
 _PERSONS = (Source.SPONSOR, Source.READING)
-#: Whose an offered item can be that's the person's own: the model's only where they took it
-#: (mqucifer/print-shop#242).
-_OWN = (*_PERSONS, Source.MODEL)
 #: What `review.parse_answer` records for a correction with no reason.
 _NO_REASON = "your correction"
 
@@ -250,11 +247,11 @@ class Offering:
             if _theirs(now):
                 why.append(f"you set it to {now.value} at this review")
             elif now.source is Source.ANSWER and (
-                item.used.by not in _OWN or (item.key, now.value) not in past.answered
+                item.used.by not in _PERSONS or (item.key, now.value) not in past.answered
             ):
                 why.append(f"your answer set it to {now.value} here")
             elif now.source is Source.LESSON and (
-                item.used.by not in _OWN or now.lesson not in past.given
+                item.used.by not in _PERSONS or now.lesson not in past.given
             ):
                 why.append(f"lesson {now.lesson} sets it to {now.value} here")
         if item.pose and item.pose != pose:
@@ -263,7 +260,7 @@ class Offering:
                 why.append(f"it held in the pose {item.pose}, and the turn to it isn't selected")
         if (past.job_id, item.key) in self.cleared:
             why.insert(0, "you cleared it")
-        if item.key != ORIENTATION and (why or item.used.by not in _OWN):
+        if item.key != ORIENTATION and (why or item.used.by not in _PERSONS):
             here = now.value if now is not None else item.preset
             if here and _same(item.key, here, item.value):
                 # There's nothing to choose. The person's own that's ticked stays so, as using
@@ -324,6 +321,14 @@ def _now(proposal: Proposal, key: str) -> Change | None:
     """What sets `key` at this review, or keeps it."""
     changed = (*proposal.changes, *proposal.not_applied)
     return next((c for c in (*changed, *proposal.kept) if c.key == key), None)
+
+
+def _whose(change: Change) -> Source:
+    """Who decided it, as an offered item keeps it: the model's that was taken is the person's
+    taking, `READING`, so that older code reads it (mqucifer/print-shop#242)."""
+    if change.used is not None:
+        return change.used.by
+    return Source.READING if change.taken else change.source
 
 
 def _theirs(change: Change) -> bool:
@@ -518,10 +523,25 @@ def _decided(row: Row) -> dict[str, Change]:
             else:
                 found.pop(c.key, None)
     standing = {c.key for c in (*proposal.changes, *proposal.not_applied)} if proposal else set()
-    for key, c in {c.key: c for c in row.corrections or ()}.items():
+    # A no to the model's sets nothing, so it isn't offered as a value: a pose kept is.
+    said = [c for c in row.corrections or () if not c.said_no_to or c.key == ORIENTATION]
+    for key, c in {c.key: c for c in said}.items():
         if key not in standing:  # a pose sent back, or a row from before the proposal was kept
             found[key] = c
+    turn = _turn_taken(row)
+    if turn is not None and ORIENTATION not in found:
+        found[ORIENTATION] = turn
     return found
+
+
+def _turn_taken(row: Row) -> Change | None:
+    """The model's turn, where the person took it and the print was in that pose."""
+    pose = pose_value(row.rotation_deg)
+    for found in reversed(row.proposal.suggested if row.proposal else ()):
+        for c in found.proposed:
+            if c.key == ORIENTATION and ORIENTATION in found.taken and c.value == pose:
+                return c.model_copy(update={"taken": True, "reason": c.reason or "the model's"})
+    return None
 
 
 def _never_started(row: Row) -> bool:
@@ -613,8 +633,7 @@ def _past(ledger: Ledger, f: _Found, found: list[_Found], part: ThisPart) -> Pas
 def _order(change: Change) -> int:
     if change.key in (ORIENTATION, PAUSE):
         return (ORIENTATION, PAUSE).index(change.key)
-    by = change.used.by if change.used else change.source
-    return 2 + (*_OWN, Source.LESSON, Source.ANSWER).index(by)
+    return 2 + (*_PERSONS, Source.LESSON, Source.ANSWER).index(_whose(change))
 
 
 def _pose(part: ThisPart, value: str) -> Orientation | None:
@@ -678,10 +697,11 @@ class _Items:
     def item(self, change: Change) -> Item:
         row, part, key = self.f.row, self.part, change.key
         origin = change.used
-        by = origin.by if origin else change.source
+        by = _whose(change)
         lesson = origin.lesson if origin else change.lesson
         used = Used(
             job_id=row.job_id, stl_name=row.stl_name, by=by, lesson=lesson,
+            of_model=origin.of_model if origin else change.taken,
             first_job_id=(origin.first_job_id or origin.job_id) if origin else "",
             first_stl_name=(origin.first_stl_name or origin.stl_name) if origin else "",
         )
@@ -1023,7 +1043,7 @@ def render(offer: Offering, proposal: Proposal, pose: str) -> list[str]:
 
 #: The items' groups, by whose each was.
 _GROUPS: tuple[tuple[str, tuple[Source, ...]], ...] = (
-    ("YOUR OVERRIDES", _OWN),
+    ("YOUR OVERRIDES", _PERSONS),
     ("LESSONS IT HAD", (Source.LESSON,)),
     ("YOUR ANSWERS THEN", (Source.ANSWER,)),
 )
@@ -1125,9 +1145,7 @@ def _tags(item: Item) -> list[str]:
     u = item.used
     tags = [item.fits] if item.fits else []
     if u.by is Source.READING:
-        tags.append("you took the slice's")
-    elif u.by is Source.MODEL:
-        tags.append("you took the model's")
+        tags.append("you took the model's" if u.of_model else "you took the slice's")
     if u.first_job_id and u.first_job_id != u.job_id:
         tags.append(f"first on {u.first_stl_name}, job {u.first_job_id[:8]}")
     return tags
@@ -1184,7 +1202,7 @@ def _gives(past: Past) -> str:
     """What another print would give, in a few words."""
     words = []
     for item in past.items:
-        if item.used.by in _OWN:
+        if item.used.by in _PERSONS:
             if item.key == PAUSE:
                 words.append(f"your pause at {item.value}")
             elif item.key == ORIENTATION:

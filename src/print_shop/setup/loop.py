@@ -323,10 +323,13 @@ class _State:
     slices: int = 0
 
 
-def run(loop: PrintLoop, part: Part, stop: threading.Event | None = None) -> LoopResult:
+def run(
+    loop: PrintLoop, part: Part, stop: threading.Event | None = None,
+    kept: list[LoopCall] | None = None,
+) -> LoopResult:
     """The loop, to `propose`, a limit or `stop`. It never raises for the model: a failure is an
-    ending, and the caller falls back."""
-    state = _State()
+    ending, and the caller falls back. `kept` is where its calls are kept as it makes them."""
+    state = _State(calls=kept if kept is not None else [])
     started = time.monotonic()
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": _SYSTEM + symptom_map() + "\n\n" + part.skill.text},
@@ -653,7 +656,10 @@ def _big_words(
         if what.startswith("pose"):
             on = ["orientation"]
         elif what == "supports":
-            on = ["enable_support"]
+            # On the setting where it proposes it, else on its turn; else it's the guard's in
+            # the pose shown, and its words are said by themselves.
+            on = (["enable_support"] if "enable_support" in settings
+                  else ["orientation"] if pose.rotation_deg != part.kept else [""])
         elif what.startswith("setting "):
             on = [what.removeprefix("setting ")]
         else:

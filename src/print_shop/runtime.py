@@ -293,12 +293,15 @@ def _setup_lines(row: Row) -> list[str]:
         said = ", ".join(
             f"{c.key}={c.value}" + (f" ({c.used.line()})" if c.used else "")
             + (f" (not applied: {c.not_applied})" if c.not_applied else "")
+            + (f" (saying no to the model's {c.said_no_to})" if c.said_no_to else "")
             for c in row.corrections
         )
         lines.append(f"corrected      {said}")
     for found in row.proposal.suggested if row.proposal else ():
         offered = ", ".join(
-            f"{c.key}={c.value}" + (" (taken)" if c.key in found.taken
+            f"{c.key}={c.value}" + (" (taken, then left behind by a turn)"
+                                    if c.key in found.dropped
+                                    else " (taken)" if c.key in found.taken
                                     else " (turned down)" if c.key in found.declined else "")
             for c in found.proposed
         )

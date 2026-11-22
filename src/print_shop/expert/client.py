@@ -136,6 +136,10 @@ class TimedOut(RuntimeError):
         self.limit_s = limit_s
 
 
+#: The thread a streamed call is read on.
+STREAM_THREAD = "llm-stream"
+
+
 class Stopped(RuntimeError):
     """The caller ended the call before it answered."""
 
@@ -262,8 +266,10 @@ def _streamed(
         except Exception as exc:  # noqa: BLE001 - raised again below, in the caller's thread
             ended.put(exc)
 
+    if stop is not None and stop.is_set():
+        raise Stopped("stopped before it was sent")
     started = time.monotonic()
-    threading.Thread(target=read, daemon=True, name="llm-stream").start()
+    threading.Thread(target=read, daemon=True, name=STREAM_THREAD).start()
     try:
         while True:
             try:

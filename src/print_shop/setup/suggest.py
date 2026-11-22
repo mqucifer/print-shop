@@ -31,16 +31,22 @@ from print_shop.setup.proposal import (
     ORIENTATION,
     Change,
     Ending,
+    LoopCall,
     Proposal,
     Source,
     Suggested,
+    pose_value,
 )
 
 __all__ = [
     "Beside", "Finding", "Listed", "Suggesting", "by_number", "didnt_come", "fell_back",
     "listed", "looked_up", "once_turned", "recorded", "suggested", "turning", "waited",
-    "went_on",
+    "went_on", "THREAD",
 ]
+
+#: The thread the model works on beside the review, whose log lines the terminal leaves to the
+#: job's log: they'd land on the open prompt.
+THREAD = "model-settings"
 
 logger = logging.getLogger(__name__)
 
@@ -59,12 +65,15 @@ def suggested(
     the guards: the model's changes, and what it would keep at the preset's value, which differs
     where a guard set it. With `turn`, those settings are for the pose it turns the part to."""
     ending = _failed(made.model)
+    words = dict(big or {})
     theirs: tuple[Change, ...] = ()
     if ending is None:
         theirs = tuple(
-            c.model_copy(update={"reading": (big or {}).get(c.key, "")})
+            c.model_copy(update={"reading": words.pop(c.key, "")})
             for c in (*made.changes, *made.kept) if c.source is Source.MODEL
         )
+    if turn is not None:
+        words.pop(ORIENTATION, None)
     return Suggested(
         pose=pose,
         ending=ending or Ending.CAME,
@@ -80,6 +89,8 @@ def suggested(
         skill_sha256=made.skill_sha256,
         loop=made.loop,
         loop_ending=made.loop_ending,
+        # What it would have asked that no proposal carries, as the guard set it already.
+        asked=" ".join(dict.fromkeys(words.values())),
     )
 
 
@@ -221,15 +232,19 @@ Finding = Callable[[threading.Event], Suggested]
 class Suggesting:
     """The model at work on one pose's proposals, on a thread of its own, beside the review."""
 
-    def __init__(self, find: Finding, pose: tuple[float, float, float]) -> None:
+    def __init__(
+        self, find: Finding, pose: tuple[float, float, float],
+        calls: list[LoopCall] | None = None,
+    ) -> None:
         self._find = find
+        self._calls = calls
         self._stop = threading.Event()
         self._done = threading.Event()
         self._lock = threading.Lock()
         self._started = time.monotonic()
         self._found = Suggested(pose=pose)
         self._heard: Callable[[Suggested], None] | None = None
-        self._thread = threading.Thread(target=self._run, daemon=True, name="model-settings")
+        self._thread = threading.Thread(target=self._run, daemon=True, name=THREAD)
         self._thread.start()
 
     @classmethod
@@ -238,6 +253,7 @@ class Suggesting:
         the pose it chose them for."""
         made = cls.__new__(cls)
         made._find = lambda stop: found
+        made._calls = None
         made._stop, made._done = threading.Event(), threading.Event()
         made._done.set()
         made._lock = threading.Lock()
@@ -268,8 +284,13 @@ class Suggesting:
         which is what it came to where it already had."""
         with self._lock:
             if self._found.ending is Ending.WORKING:
+                calls = tuple(self._calls or ())
+                # The loop's calls so far are kept, as every call it makes is.
+                kept = {"loop": calls, "loop_ending": (
+                    f"stopped as you {'turned the part' if why is Ending.TURNED else 'went on'},"
+                    f" after {len(calls)} calls")} if self._calls is not None else {}
                 self._found = self._found.model_copy(update={
-                    "ending": why, "seconds": self._seconds(),
+                    "ending": why, "seconds": self._seconds(), **kept,
                 })
             self._heard = None
             found = self._found
@@ -327,8 +348,13 @@ class Beside:
         self.work: Suggesting | None = None
         self._ended: list[Suggested] = []
 
-    def begin(self, find: Finding, pose: tuple[float, float, float]) -> None:
-        self.work = Suggesting(find, pose)
+    def begin(
+        self, find: Finding, pose: tuple[float, float, float],
+        calls: list[LoopCall] | None = None,
+    ) -> None:
+        """`calls` is the print loop's, as it makes them, so that they're kept however it
+        ends."""
+        self.work = Suggesting(find, pose, calls)
 
     def carry(self, found: Suggested) -> None:
         """Proposals that are in already: the loop's, for the pose it's now turned to."""
@@ -341,14 +367,19 @@ class Beside:
         now = self.work.now()
         self.work.changed({"taken": (*now.taken, *taken), "declined": (*now.declined, *declined)})
 
-    def end(self, why: Ending, saw: Suggested | None = None) -> Suggested | None:
+    def end(
+        self, why: Ending, saw: Suggested | None = None, dropped: tuple[str, ...] = (),
+    ) -> Suggested | None:
         """The work under way ended, as `why` where it hadn't ended by itself, and kept for the
-        record. `saw` is the last screen's: proposals that came after it weren't seen."""
+        record. `saw` is the last screen's: proposals that came after it weren't seen.
+        `dropped` is what was taken of it and left behind by a turn."""
         if self.work is None:
             return None
         found = self.work.stop(why)
         if saw is not None and saw.ending is Ending.WORKING and found.proposed:
             found = found.model_copy(update={"unseen": True})
+        if dropped:
+            found = found.model_copy(update={"dropped": dropped})
         self._ended.append(found)
         self.work = None
         return found
@@ -371,10 +402,13 @@ def recorded(proposal: Proposal, found: tuple[Suggested, ...]) -> Proposal:
     looped = next((each for each in found if each.loop or each.loop_ending), None)
     notes = list(proposal.notes)
     for each in found:
+        here = each is last
         if stopped := fell_back(each):
-            notes.append(stopped)
+            notes.append(stopped if here else f"For the pose {pose_value(each.pose)}: {stopped}")
         if each.ending is not Ending.TURNED and (said := didnt_come(each)):
-            notes.append(said)
+            # Only the last pose's is this print's: an earlier one's is said as that pose's.
+            notes.append(said if here else f"For the pose {pose_value(each.pose)}: "
+                         + said.replace(" These are the settings without it.", ""))
         if said := went_on(each):
             notes.append(said)
     return proposal.model_copy(update={

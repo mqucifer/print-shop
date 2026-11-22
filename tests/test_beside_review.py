@@ -114,7 +114,7 @@ class Shop:
 
     def run(
         self, stl: Path, reviewer: Reviewer | None, proposer: Proposer | None = None,
-        loop: PrintLoop | None = None, **submit: Any,
+        loop: PrintLoop | None = None, llm: LLMConfig | None = None, **submit: Any,
     ) -> Row | None:
         (self.tmp_path / "work").mkdir(exist_ok=True)
         bridge = MemoryBridge()
@@ -123,7 +123,7 @@ class Shop:
             printer=FramePrinter(), slicer=AnyPart(), bridge=lambda cfg: bridge,
             ledger=self.ledger, proposer=proposer or Proposer(),
             asker=lambda questions: tuple(Answer(choice=0) for _ in questions),
-            reviewer=reviewer, loop=loop,
+            reviewer=reviewer, loop=loop, llm=llm,
         )
         with daemon:
             self.submitted = time.monotonic()
@@ -577,7 +577,9 @@ def test_a_part_that_doesnt_fit_as_it_lies_is_shown_in_a_pose_that_does(
         release.set()
     assert row is not None, shop.error
     assert row.rotation_deg != LAID and row.orientation_source == "geometric"
-    assert "It doesn't fit as the file lays it" in screen.seen[0].orientation.rationale
+    assert screen.seen[0].orientation.rationale.startswith(
+        "it doesn't fit the plate as the file lays it, so it's shown at ")
+    assert "The model had said" not in screen.seen[0].orientation.rationale, "none was asked"
 
 
 # No number moves under an open prompt
@@ -785,3 +787,403 @@ def test_a_turn_is_still_listed_where_the_settings_call_after_it_failed() -> Non
     assert "1) orientation  0,0,0 -> 180,0,0" in said
     assert "the print loop stopped, past its limit of 3 calls" in said
     assert "The model's settings didn't come: unavailable" in said
+
+
+# What the cold review found (mqucifer/print-shop#242)
+# --------------------------------------------------------------------------
+
+
+def number(key: str) -> Callable[[ReviewRequest], str]:
+    def of(request: ReviewRequest) -> str:
+        [n] = [r.number for r in request.by_model if r.change.key == key]
+        return str(n)
+
+    return of
+
+
+class Steps:
+    """A reviewer typing from steps, each text or a function of the screen, or a Review."""
+
+    def __init__(self, *steps: Any) -> None:
+        self.steps = list(steps)
+        self.seen: list[ReviewRequest] = []
+
+    def __call__(self, request: ReviewRequest) -> Review:
+        self.seen.append(request)
+        assert self.steps, "reviewed more often than was scripted"
+        step = self.steps.pop(0)
+        answer = step(request) if callable(step) else step
+        if isinstance(answer, Review):
+            return answer
+        parsed = parse_answer(answer, request)
+        assert isinstance(parsed, Review), parsed
+        return parsed
+
+
+def unused(messages: Any, tools: Any) -> dict[str, Any]:
+    raise AssertionError("the stoppable model is the one called")
+
+
+def sent_to(pose: str) -> Callable[[ReviewRequest], Review]:
+    def send(request: ReviewRequest) -> Review:
+        assert request.measuring is not None
+        request.measuring.all_six()
+        return Review(corrections=(Change(
+            key=ORIENTATION, preset="0,0,0", value=pose, reason="a made-up reason",
+            source=Source.SPONSOR, feature=", ".join(request.laid_traits)),))
+
+    return send
+
+
+def test_supports_of_the_models_used_again_are_still_tree(shop: Shop, tmp_path: Path) -> None:
+    stl = write_stl("cube", tmp_path)
+    first = Steps(lambda r: f"take {number('enable_support')(r)}", "ok")
+    assert shop.run(stl, settled(first), Supporting(ask=proposing()), as_laid=True), shop.error
+    again_ = Steps("use", "ok")
+    row = shop.run(stl, again_, as_laid=True)
+    assert row is not None, shop.error
+    [used] = [c for c in row.corrections or () if c.key == "enable_support"]
+    assert used.used is not None and used.used.of_model
+    assert used.used.by is Source.READING, "read by older code as a take"
+    assert row.slicer_settings["support_type"] == "tree(auto)"
+
+
+def test_a_no_sets_nothing_and_a_guards_setting_stays_the_guards(
+    shop: Shop, tmp_path: Path
+) -> None:
+    off = {"key": "enable_support", "value": "0", "feature": "overhang",
+           "knowledge": "supports", "reason": "bridge it"}
+    steps = Steps(lambda r: f"no {number('enable_support')(r)} because it needs them", "ok")
+    row = shop.run(write_stl("tee", tmp_path), settled(steps), Proposer(ask=proposing(off)),
+                   as_laid=True)
+    assert row is not None, shop.error
+    [no] = row.corrections or ()
+    assert (no.key, no.value, no.said_no_to) == ("enable_support", "1", "0")
+    assert row.slicer_settings["enable_support"] == "1"
+    assert row.slicer_settings["support_type"] == "tree(auto)"
+    supports = row.proposal.get("enable_support") if row.proposal else None
+    assert supports is not None and supports.source is Source.GUARD
+    assert "enable_support stays 1: it needs them [you, saying no to the model's 0]" in (
+        render_review(steps.seen[1]))
+
+
+def test_a_no_is_its_poses_and_isnt_carried_through_a_turn(shop: Shop, tmp_path: Path) -> None:
+    steps = Steps(lambda r: f"no {number('wall_loops')(r)} because two are plenty",
+                  sent_to("90,0,0"), "ok")
+    row = shop.run(write_stl("cube", tmp_path), settled(steps), Proposer(ask=proposing(WALLS)),
+                   as_laid=True)
+    assert row is not None and row.proposal is not None, shop.error
+    assert row.proposal.get("wall_loops") is None, "turned, the no sets nothing either"
+    assert [(c.key, c.said_no_to) for c in row.corrections or ()] == [
+        ("wall_loops", "4"), (ORIENTATION, "")]
+    assert "wall_loops=" not in again(row, None).corrections, "and print again doesn't type it"
+    assert any(n.startswith("You turned down the model's wall_loops=4, because two are plenty")
+               for n in again(row, None).notes)
+
+
+def test_used_and_turned_down_in_one_answer_slices_whats_used(
+    shop: Shop, tmp_path: Path
+) -> None:
+    stl = write_stl("cube", tmp_path)
+    assert shop.run(stl, Steps("wall_loops=3 because I like three", "ok"), as_laid=True)
+    steps = Steps(lambda r: f"use; no {number('wall_loops')(r)} because four is too many", "ok")
+    row = shop.run(stl, settled(steps), Proposer(ask=proposing(WALLS)), as_laid=True)
+    assert row is not None, shop.error
+    assert row.slicer_settings["wall_loops"] == "3"
+    assert [(c.value, c.said_no_to) for c in row.corrections or ()] == [("3", ""), ("3", "4")]
+
+
+def test_whats_taken_and_left_behind_by_a_turn_is_said(shop: Shop, tmp_path: Path) -> None:
+    steps = Steps(lambda r: f"take {number('wall_loops')(r)}", sent_to("90,0,0"), "ok")
+    row = shop.run(write_stl("cube", tmp_path), settled(steps), Proposer(ask=proposing(WALLS)),
+                   as_laid=True)
+    assert row is not None and row.proposal is not None, shop.error
+    said = ("Taken at 0,0,0 and left behind by the turn: wall_loops=4. Take it again if it's "
+            "proposed here, or type it.")
+    assert said in row.proposal.notes
+    assert "note: " + said in render_review(steps.seen[2])
+    assert "wall_loops=4 (taken, then left behind by a turn)" in describe(row)
+
+
+def test_a_turn_taken_is_the_persons_choice_for_this_print_and_the_next(
+    shop: Shop, tmp_path: Path
+) -> None:
+    stl = write_stl("tee", tmp_path)
+    assert shop.run(stl, Steps(sent_to("90,0,0"), "ok"), as_laid=True), shop.error
+    steps = Steps(lambda r: f"take {number(ORIENTATION)(r)}", "ok")
+    row = shop.run(stl, settled(steps), loop=PrintLoop(chat=turning(), person=nobody,
+                                                      model="fake"))
+    assert row is not None and row.rotation_deg == FLIPPED, shop.error
+    after = steps.seen[1]
+    assert after.offering is not None
+    assert after.offering.past is not None
+    [past] = [i for i in after.offering.past.items if i.key == ORIENTATION]
+    standing = after.offering.standing(past, after.proposal, "180,0,0")
+    assert not standing.selected
+    assert standing.why == ("you chose this pose for this print (you took the model's turn at "
+                            "this job)",)
+    assert any(n.startswith("The model's turn to 180,0,0 was taken at the review")
+               for n in again(row, stl).notes)
+    # The next print of it is offered that pose, as the person's taking.
+    third = Steps("ok")
+    assert shop.run(stl, third, as_laid=True), shop.error
+    offered = third.seen[0].offering
+    assert offered is not None and offered.past is not None
+    [turn] = [i for i in offered.past.items if i.key == ORIENTATION]
+    assert (turn.value, turn.used.by, turn.used.of_model) == ("180,0,0", Source.READING, True)
+
+
+@pytest.mark.parametrize(("lesson", "step", "scored"), [
+    ("0,0,0", lambda r: f"no {number(ORIENTATION)(r)} because the top shows", "used"),
+    ("0,0,0", lambda r: f"take {number(ORIENTATION)(r)}", "in_the_way"),
+    ("180,0,0", None, "not_used"),
+])
+def test_a_pose_lesson_is_scored_by_what_was_printed(
+    shop: Shop, tmp_path: Path, lesson: str, step: Any, scored: str
+) -> None:
+    from print_shop.ingest.analyzer import analyze  # noqa: PLC0415
+    from print_shop.setup.features import measure  # noqa: PLC0415
+    from print_shop.setup.traits import traits  # noqa: PLC0415
+    from tests.test_ledger import record  # noqa: PLC0415
+
+    stl = write_stl("tee", tmp_path)
+    shop.ledger.record_start_requested(record("job-0"))
+    keyed = list(traits(measure(stl, analyze(stl).bed_contact_area_mm2)))
+    made = print_lessons.write(shop.ledger, "job-0", "reviewer: test", "a made-up pose lesson",
+                               keyed, f"orientation={lesson}")
+    print_lessons.accept(shop.ledger, made, "reviewer: test")
+    steps = Steps(*([step] if step else []), "ok")
+    row = shop.run(stl, settled(steps), loop=PrintLoop(chat=turning(), person=nobody,
+                                                      model="fake"))
+    assert row is not None, shop.error
+    [found] = shop.ledger.query(
+        "SELECT score FROM print_lesson_scores WHERE job_id=? AND lesson=?", row.job_id, made)
+    assert found["score"] == scored
+
+
+def test_going_on_while_the_fallback_orientation_call_runs_asks_nothing_more(
+    shop: Shop, held: Held, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started, ended = threading.Event(), threading.Event()
+
+    def orientation(request: Any, config: Any) -> Any:
+        started.set()
+        time.sleep(0.5)
+        ended.set()
+        raise RuntimeError("the made-up orientation model is down")
+
+    monkeypatch.setattr(graph, "propose_orientation", orientation)
+
+    def down(messages: Any, tools: Any) -> dict[str, Any]:
+        raise RuntimeError("the made-up loop model is down")
+
+    def goes_on(request: ReviewRequest) -> Review:
+        assert started.wait(WAIT_S)
+        return Review(approved=True)
+
+    row = shop.run(write_stl("tee", tmp_path), goes_on, by_llm(),
+                   PrintLoop(chat=down, person=nobody, model="fake"),
+                   llm=LLMConfig(api_key=SecretStr("not-a-key"), model="fake"))
+    assert row is not None, shop.error
+    assert ended.wait(WAIT_S)
+    time.sleep(0.3)
+    assert held.calls == 0, "no settings call starts once the person went on"
+
+
+def test_the_loops_calls_are_kept_when_the_person_goes_on(shop: Shop, tmp_path: Path) -> None:
+    second = threading.Event()
+    calls = 0
+
+    def stoppable(stop: threading.Event) -> Any:
+        def chat(messages: Any, tools: Any) -> dict[str, Any]:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return {"content": "", "tool_calls": [{"id": "a", "type": "function", "function": {
+                    "name": "orca_setting", "arguments": json.dumps({"key": "wall_loops"})}}]}
+            second.set()
+            assert stop.wait(WAIT_S), "going on ends the call under way"
+            raise Stopped("ended")
+
+        return chat
+
+    def goes_on(request: ReviewRequest) -> Review:
+        assert second.wait(WAIT_S)
+        return Review(approved=True)
+
+    loop = PrintLoop(chat=unused, person=nobody, model="fake", stoppable=stoppable)
+    row = shop.run(write_stl("tee", tmp_path), goes_on, loop=loop)
+    assert row is not None and row.proposal is not None, shop.error
+    assert [c.tool for c in row.proposal.loop] == ["orca_setting"]
+    assert row.proposal.loop_ending == "stopped as you went on, after 1 calls"
+
+
+def test_the_models_log_lines_are_kept_off_the_open_prompt() -> None:
+    import logging  # noqa: PLC0415
+
+    script = Path(__file__).resolve().parent.parent / "scripts" / "print_job.py"
+    spec = importlib.util.spec_from_file_location("print_job", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    def said(thread: str) -> bool:
+        record = logging.LogRecord("httpx", logging.INFO, "", 0, "HTTP Request", (), None)
+        record.threadName = thread
+        return bool(module.on_screen(record))
+
+    assert not said("model-settings") and not said("llm-stream")
+    assert said("MainThread")
+
+
+def test_a_question_on_the_guards_supports_is_still_said(shop: Shop, tmp_path: Path) -> None:
+    model = Model(
+        [("ask", {"question": "Supports under the clip?", "reason": "its hook hangs",
+                  "rotation": [0, 0, 0]})],
+        [("propose", {"rotation": [0, 0, 0], "settings": [WALLS], "reasoning": "as it lies"})],
+    )
+    steps = Steps("ok")
+    row = shop.run(write_stl("snap", tmp_path), settled(steps),
+                   loop=PrintLoop(chat=model, person=nobody, model="fake"))
+    assert row is not None, shop.error
+    said = render_review(steps.seen[0])
+    assert ('It would have asked first: "Supports under the clip?" It\'s a big change: supports '
+            "on, for") in said
+
+
+def test_an_earlier_poses_failure_is_said_as_that_poses() -> None:
+    from print_shop.setup.suggest import recorded  # noqa: PLC0415
+
+    failed = Suggested(pose=LAID, ending=Ending.UNAVAILABLE, said="unavailable: down")
+    came = Suggested(pose=ON_ITS_SIDE, ending=Ending.CAME)
+    notes = recorded(Proposal(), (failed, came)).notes
+    assert notes == ("For the pose 0,0,0: The model's settings didn't come: unavailable after 0 s "
+                     "(down).",)
+
+
+def test_an_end_just_after_the_prompt_looks_is_still_said_under_it() -> None:
+    term = Open()
+    real = term.work.now
+    first = True
+
+    def now() -> Suggested:
+        nonlocal first
+        found = real()
+        if first:
+            first = False
+            term.release.set()  # it ends after it was looked at, before the prompt opens
+            assert term.work.wait(WAIT_S)
+        return found
+
+    term.work.now = now  # type: ignore[method-assign]
+    said: list[bool] = []
+
+    def read(prompt: str) -> str:
+        until = time.monotonic() + WAIT_S
+        while not any("came after" in s for s in term.shown) and time.monotonic() < until:
+            time.sleep(0.01)
+        said.append(any("came after" in s for s in term.shown))
+        return "stop"
+
+    term.review(read)
+    assert said == [True]
+
+
+def test_the_loops_calls_and_the_settings_call_can_be_ended(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from print_shop.setup import loop as loop_module  # noqa: PLC0415
+    from print_shop.setup import model as model_module  # noqa: PLC0415
+
+    stop = threading.Event()
+    config = LLMConfig(api_key=SecretStr("not-a-key"), model="fake")
+    chats: list[Any] = []
+    def chat_with_tools(*args: Any, **kwargs: Any) -> tuple[dict[str, Any], None]:
+        chats.append(kwargs)
+        return {"content": ""}, None
+
+    monkeypatch.setattr(loop_module, "chat_with_tools", chat_with_tools)
+    loop_module.llm_chat(config, stop)([], [])
+    assert chats == [{"answer_chars": loop_module.LOOP_ANSWER_CHARS, "stop": stop}]
+    asks: list[Any] = []
+    monkeypatch.setattr(model_module, "llm_ask_streamed", lambda *a: asks.append(a))
+    model_module.llm_ask(config, stop)
+    assert asks == [(config, 16_000, stop)]
+
+
+def test_the_loop_uses_its_stoppable_model_and_ends_with_stop(tmp_path: Path) -> None:
+    from print_shop.setup.loop import run  # noqa: PLC0415
+    from tests.test_suggest import _part  # noqa: PLC0415
+
+    given: list[threading.Event] = []
+
+    def stoppable(stop: threading.Event) -> Any:
+        given.append(stop)
+
+        def chat(messages: Any, tools: Any) -> dict[str, Any]:
+            stop.set()
+            raise Stopped("ended")
+
+        return chat
+
+    stop = threading.Event()
+    found = run(PrintLoop(chat=unused, person=nobody, stoppable=stoppable), _part(tmp_path), stop)
+    assert given == [stop] and found.ended == "stopped"
+
+
+@pytest.mark.parametrize("part", ["cube", "tee", "snap"])
+def test_with_the_loop_and_no_model_the_settings_are_a_failed_calls_in_the_pose_shown(
+    shop: Shop, tmp_path: Path, part: str
+) -> None:
+    """Not as-laid: the pose shown is the file's own, and its settings are a failed call's
+    there."""
+    stl = write_stl(part, tmp_path)
+
+    def never(stop: threading.Event) -> Any:
+        def chat(messages: Any, tools: Any) -> dict[str, Any]:
+            stop.wait(WAIT_S)
+            raise Stopped("ended")
+
+        return chat
+
+    screen = Script("ok")
+    shown = shop.run(stl, screen, loop=PrintLoop(chat=unused, person=nobody, model="fake",
+                                                stoppable=never))
+    assert shown is not None and shown.proposal is not None, shop.error
+    assert shown.rotation_deg == LAID
+
+    def down(system: str, user: str, schema: dict[str, Any]) -> dict[str, Any]:
+        raise RuntimeError("LiteLLM is down")
+
+    failed = shop.run(stl, None, Proposer(ask=down, ask_questions=lambda *_: {"questions": []}),
+                      as_laid=True)
+    assert failed is not None and failed.proposal is not None, shop.error
+    assert values(shown.proposal) == values(failed.proposal)
+
+
+def test_a_bare_no_asks_which_once_the_models_are_listed() -> None:
+    base = _request(Proposal())
+    request = ReviewRequest(**{
+        **{name: getattr(base, name) for name in base.__dataclass_fields__},
+        "suggested": Suggested(pose=LAID, ending=Ending.CAME, proposed=(Change(
+            key="top_shell_layers", preset="4", value="5", reason="x", source=Source.MODEL),)),
+    })
+    assert parse_answer("no", request) == (
+        "no turns one of the model's down, saying why: no 1 because ... To end the job, type "
+        "stop.")
+    assert parse_answer("stop", request) == Review(stop=True)
+
+
+def test_named_twice_the_models_is_taken() -> None:
+    base = _request(Proposal())
+    model = Change(key="ironing_type", preset="top", value="topmost", reason="x",
+                   source=Source.MODEL)
+    request = ReviewRequest(**{
+        **{name: getattr(base, name) for name in base.__dataclass_fields__},
+        "flags": slices_one(),
+        "suggested": Suggested(pose=LAID, ending=Ending.CAME, proposed=(model,)),
+    })
+    for typed in ("take 1 2", "take 2 1", "take 2; take"):
+        found = parse_answer(typed, request)
+        assert isinstance(found, Review)
+        assert [(c.value, c.taken) for c in found.taken] == [("topmost", True)], typed

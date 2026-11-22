@@ -106,6 +106,9 @@ class Used(BaseModel):
     #: The print it began on, where that print had used it from another.
     first_job_id: str = ""
     first_stl_name: str = ""
+    #: What they took was the model's proposal (mqucifer/print-shop#242). `by` is then
+    #: `READING`, what was taken, so older code reads the row as it reads a slice's take.
+    of_model: bool = False
 
     def line(self) -> str:
         lesson = f", lesson {self.lesson}'s" if self.by is Source.LESSON else ""
@@ -138,7 +141,8 @@ class Change(BaseModel):
     #: The model's proposal, taken by the person at the review (mqucifer/print-shop#242). One of
     #: the model's without it was applied unasked, as they were until then.
     taken: bool = False
-    #: A correction that turned the model's proposal down: the value it had proposed.
+    #: A correction that turned the model's proposal down: the value it had proposed. It
+    #: records the no and what stood, for the lessons, and sets nothing in the slice.
     said_no_to: str = ""
 
 
@@ -225,6 +229,11 @@ class Suggested(BaseModel):
     declined: tuple[str, ...] = ()
     #: The person went on past them once they were in, without having them on screen.
     unseen: bool = False
+    #: What was taken and then left behind when the part was turned, by key.
+    dropped: tuple[str, ...] = ()
+    #: The loop's question before a big change that no proposal carries: the guard's supports
+    #: in the pose shown, which it would have asked about.
+    asked: str = ""
     reasoning: str = ""
     design_notes: tuple[str, ...] = ()
     refused: tuple[str, ...] = ()

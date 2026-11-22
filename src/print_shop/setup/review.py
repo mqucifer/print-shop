@@ -150,6 +150,8 @@ class ReviewRequest:
     suggested: Suggested | None = None
     #: The model at work on them, beside the review: how long, and what it's come to since.
     suggesting: Suggesting | None = None
+    #: The model's proposals turned down at this job so far, each saying why.
+    turned_down: tuple[Change, ...] = ()
 
     @property
     def proposed(self) -> tuple[Flag, ...]:
@@ -164,7 +166,8 @@ class ReviewRequest:
 
     def refreshed(self) -> ReviewRequest:
         """The same review with what the model has come to by now added: a new screen, whose
-        numbers are the ones to type. The phone asks for it as Enter does."""
+        numbers are the ones to type. The phone asks for it as Enter does, and says it in
+        `Review.saw` when it answers, or what came is recorded as unseen."""
         if self.suggesting is None:
             return self
         now = self.suggesting.now()
@@ -448,11 +451,13 @@ def _model_line(found: Suggested) -> list[str]:
 def _by_model(request: ReviewRequest) -> list[str]:
     """The model's proposals, numbered on from the slice's, and those that don't stand."""
     rows = request.by_model
-    if not rows:
-        return []
     found = request.suggested
-    assert found is not None
+    down = [c for c in request.turned_down if found is not None and c.key in found.declined]
+    if found is None or not (rows or down or found.asked):
+        return []
     lines = ["", "Proposed by the model (not applied unless you take it):"]
+    if found.asked:
+        lines.append(f"  It would have asked first: {found.asked}")
     for row in rows:
         c = row.change
         if row.standing == "theirs":
@@ -483,6 +488,9 @@ def _by_model(request: ReviewRequest) -> list[str]:
                 lines.append(f"       Once turned it would also propose: {then}")
             lines += [f"       design, turned so: {note}" for note in found.design_notes]
             lines += [f"       refused from the model, turned so: {each}" for each in found.refused]
+    for c in down:
+        lines.append(f"  -  {c.key} stays {c.value}: {c.reason} [you, saying no to the model's "
+                     f"{c.said_no_to}]")
     return lines
 
 
@@ -507,6 +515,10 @@ def parse_answer(answer: str, request: ReviewRequest) -> Review | str:
     text = answer.strip()
     if text.lower() in ("ok", "yes", "y", "approve"):
         return Review(approved=True)
+    if text.lower() in ("no", "n") and by_number(request.by_model):
+        # The screen teaches `no 2 because ...`: a bare no doesn't end the job here.
+        return ("no turns one of the model's down, saying why: no "
+                f"{min(by_number(request.by_model))} because ... To end the job, type stop.")
     if text.lower() in ("stop", "no", "n"):
         return Review(stop=True)
     corrections = []
@@ -575,6 +587,8 @@ def parse_answer(answer: str, request: ReviewRequest) -> Review | str:
                    source=Source.SPONSOR, standard=known.standard if known else "")
         )
     keys = {c.key for c in corrections}
+    # Named twice, as `take 2; take`, the model's taken by number is the one taken.
+    taken = list({c.key: c for c in sorted(taken, key=lambda c: c.taken)}.values())
     taken = [c for c in taken if c.key not in keys]
     # Typed wins over taken, and both over used.
     over = keys | {c.key for c in taken}
@@ -589,7 +603,10 @@ def parse_answer(answer: str, request: ReviewRequest) -> Review | str:
                 "the rest at the next review")
     if {c.key for c in down} & {c.key for c in taken}:
         return "that's both taken and turned down: one or the other"
-    down = [c for c in down if c.key not in keys]
+    # What's typed is the no's answer, and what's used stands in its place: the no says so.
+    stands = {c.key: c.value for c in used}
+    down = [c.model_copy(update={"value": stands.get(c.key, c.value)}) for c in down
+            if c.key not in keys]
     return Review(corrections=(*used, *down, *corrections), taken=tuple(taken),
                   declined=tuple(c.key for c in down),
                   offering=None if offering == request.offering else offering)
@@ -652,7 +669,7 @@ def _take(
     if any(not 1 <= n <= highest for n in picked):
         return f"take a number from 1 to {highest}"
     taken: list[Change] = []
-    for n in picked:
+    for n in sorted(picked):  # the slice's first, so that the model's stands where both name one
         change = proposed[n - 1].change if n <= len(proposed) else models[n]
         assert change is not None
         taken.append(change if n <= len(proposed) else change.model_copy(update={"taken": True}))
@@ -663,8 +680,9 @@ def _take(
 def _turned_down(
     n: int, why: str, request: ReviewRequest, models: dict[int, Change]
 ) -> Change | str:
-    """`no n because ...`: the person's correction that what's here stands, with why, as a no
-    to the print loop's question was (mqucifer/print-shop#242)."""
+    """`no n because ...`: the person's no, with why, and a lesson candidate as a no to the print
+    loop's question was (mqucifer/print-shop#242). It records what stands here and sets
+    nothing: a guard's setting stays the guard's, and another pose has its own."""
     change = models.get(n)
     if change is None:
         if not models:
@@ -678,7 +696,9 @@ def _turned_down(
         here = pose_value(request.orientation.rotation_deg)
         preset, feature = change.value, ", ".join(request.laid_traits)
     else:
-        now = request.proposal.get(change.key)
+        proposal = request.proposal
+        now = next((c for c in (*proposal.changes, *proposal.not_applied, *proposal.kept)
+                    if c.key == change.key), None)
         here = now.value if now is not None else change.preset
         preset, feature = change.preset, ""
     return Change(key=change.key, preset=preset, value=here, reason=why.strip(),
@@ -736,13 +756,16 @@ def cli_reviewer(
 
         def ask() -> str:
             nonlocal announced
-            if work is not None and not announced:
-                now = work.now()
-                if (request.suggested is not None and now.ending is not Ending.WORKING
-                        and request.suggested.ending is Ending.WORKING):
-                    announced = True
-                    write(f"  {said_in(now)}.")
-            asking.set()
+            # Looked at and marked open together, so that an end between the two is said once,
+            # by one or the other.
+            with lock:
+                if work is not None and not announced:
+                    now = work.now()
+                    if (request.suggested is not None and now.ending is not Ending.WORKING
+                            and request.suggested.ending is Ending.WORKING):
+                        announced = True
+                        write(f"  {said_in(now)}.")
+                asking.set()
             try:
                 return read("> ")
             finally:

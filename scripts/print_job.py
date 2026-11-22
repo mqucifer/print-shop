@@ -114,6 +114,7 @@ from print_shop import sliced
 from print_shop.arming import ALLOW_HARDWARE_ENV, hardware_allowed
 from print_shop.core.contracts import Gate
 from print_shop.env import SETTINGS_PATH, load_env
+from print_shop.expert.client import STREAM_THREAD
 from print_shop.inventory import SETUP, Inventory, InventoryError, Material
 from print_shop.joblog import LOG_NAME, JobLog, secrets
 from print_shop.ledger import Ledger, ledger_path
@@ -133,6 +134,7 @@ from print_shop.runtime import (
 from print_shop.setup.context import read_context
 from print_shop.setup.intake import Asker, cli_asker, replay_asker
 from print_shop.setup.review import cli_reviewer
+from print_shop.setup.suggest import THREAD
 from print_shop.setup.waiting import Prompted, Waiting, cli_waiting
 from print_shop.slicer.orca import SlicerProfiles
 from print_shop.slicer.store import STORE_DIR, NoChoice, Store, choose
@@ -179,6 +181,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(on_screen)
     by_hand = args.sliced is not None or args.again is not None
     if sum(x is not None for x in (args.stl, args.sliced, args.again)) > 1:
         parser.error("give one of a part, --sliced FILE, or --again JOB_ID")
@@ -489,6 +493,12 @@ def _watch(run: Run, job_id: str) -> int:
     else:
         print(f"frames         {no_frames(run.ledger.frames_missed(job_id))}")
     return 0
+
+
+def on_screen(record: logging.LogRecord) -> bool:
+    """Whether a log line shows on the terminal: not one from the model's work beside the review,
+    which would land on the open prompt (mqucifer/print-shop#242). The job's log keeps it."""
+    return record.threadName not in (THREAD, STREAM_THREAD)
 
 
 def _gate_lines(gate: dict[str, object], *, turned: bool) -> list[str]:
