@@ -60,6 +60,7 @@ from print_shop.expert.orientation import (
 )
 from print_shop.ingest.analyzer import analyze, verify_unchanged
 from print_shop.ingest.orientation import candidates, write_rotated
+from print_shop.inventory import Inventory, Material
 from print_shop.ledger import Ledger, PrintRecord
 from print_shop.orchestrator.fitness import scoring_profiles
 from print_shop.printer.centauri import PreflightFailed, PrinterClient, preflight
@@ -565,7 +566,7 @@ def build_graph(
     def print_node(state: PrintJobState) -> dict[str, Any]:
         """Hardware boundary: upload the G-code and start the print.
 
-        Four refusals stand between this being called and the nozzle moving,
+        Five refusals stand between this being called and the nozzle moving,
         and each one raises rather than continuing:
 
         1. **The gate decision is re-checked here.** ``ungated_edges`` proves
@@ -573,13 +574,16 @@ def build_graph(
            which is a property of the topology — not of the decision sitting in
            state. Commit d6374b9 fixed two ways a decision could reach a gate it
            was not made for; this is the same class of bug one node further on.
-        2. **Preflight** — the printer must be free and have room, and the
+        2. **The spool's tuning is the one the job was prepared with**
+           (mqucifer/print-shop#220), read again here, as it can be edited
+           while the job waits. A colour corrected meanwhile is what's recorded.
+        3. **Preflight** — the printer must be free and have room, and the
            G-code must exist. A pure validator over a typed snapshot.
-        3. **The uploaded name must carry this job's id.** ``upload_file``
+        4. **The uploaded name must carry this job's id.** ``upload_file``
            returns the name the *printer* chose, which need not be the name we
            sent. If the round-trip fails we are about to print a file we cannot
            account for, so we do not.
-        4. **The start is confirmed by watching the printer's own status**,
+        5. **The start is confirmed by watching the printer's own status**,
            not by the command being acknowledged.
 
         Never returns a fake success: the previous implementation set
@@ -608,6 +612,11 @@ def build_graph(
                 "one that would not be."
             )
 
+        material = _material_prepared(state)
+        if material is not None:
+            with Inventory(ledger.path) as inventory:
+                material = inventory.at_start(material)
+
         gcode = Path(state["gcode_path"])
         snapshot = client.snapshot()
         verdict = preflight(snapshot, gcode)
@@ -631,7 +640,7 @@ def build_graph(
         # halfway is still on record.
         ledger.record_start_requested(
             _print_record(state, remote_name, gcode, snapshot.machine, snapshot.firmware,
-                          store)
+                          store, material)
         )
         try:
             client.start(remote_name)
@@ -720,11 +729,23 @@ def _pauses_said(reading: Any) -> str:
     return "; ".join(f"this print {p.line()}" for p in pauses)
 
 
+def _material_prepared(state: PrintJobState) -> Material | None:
+    """The spool, nozzle and printer the job was prepared with, if the inventory gave them."""
+    job = state.get("sliced")
+    if job is not None:
+        return job.material
+    used = state.get("profiles_used")
+    return used.material if used is not None else None
+
+
 def _print_record(
     state: PrintJobState, remote_name: str, gcode: Path, machine: str, firmware: str,
-    store: Store | None = None,
+    store: Store | None = None, material: Material | None = None,
 ) -> PrintRecord:
-    """The ledger's row for this job, from state and the G-code Orca wrote."""
+    """The ledger's row for this job, from state and the G-code Orca wrote.
+
+    `material` is the spool as the print starts (`Inventory.at_start`).
+    """
     slice_result: SliceResult = state["slice"]
     job = state.get("sliced")
     if job is not None:
@@ -748,11 +769,15 @@ def _print_record(
             reading=state.get("slice_reading"),
             flags=tuple(state.get("slice_flags", ())),
             sliced=job.record(store),
-            material=job.material,
+            material=material,
         )
     applied = state.get("applied_orientation", AppliedOrientation())
     outcome = state.get("orientation")
     accepted = outcome is not None and outcome.accepted
+    used = state.get("profiles_used")
+    if used is not None:
+        # The row keeps the spool twice, here and beside the print, and they agree.
+        used = used.model_copy(update={"material": material})
     return PrintRecord(
         job_id=state["job_id"],
         stl_name=Path(state["stl_path"]).name,
@@ -768,7 +793,7 @@ def _print_record(
         slicer_config=parse_config_block(gcode),
         printer_machine=machine,
         printer_firmware=firmware,
-        profiles=state.get("profiles_used"),
+        profiles=used,
         intake=state.get("intake"),
         proposal=state.get("proposal"),
         corrections=tuple(state.get("corrections", ())),
