@@ -39,7 +39,14 @@ from print_shop.setup.intake import Estimate, replay_asker
 from print_shop.setup.proposal import ORIENTATION, Change, GivenLesson, Source
 from print_shop.setup.review import ReviewRequest, cli_reviewer, render, send_back
 from print_shop.slicer.orca import SlicerProfiles, parse_gcode_header
-from tests.fakes import CI_PROFILES, DATA, FramePrinter, MemoryBridge, RecordedSlicer
+from tests.fakes import (
+    CI_PROFILES,
+    DATA,
+    FramePrinter,
+    MemoryBridge,
+    RecordedSlicer,
+    echo_settings,
+)
 from tests.fixtures import write_stl
 from tests.test_job_e2e import CFG
 from tests.test_ledger import record
@@ -261,6 +268,7 @@ class AnyPart(RecordedSlicer):
         out = Path(outdir)
         out.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(recorded, out / "plate_1.gcode")
+        echo_settings(out / "plate_1.gcode", profiles)
         return parse_gcode_header(out / "plate_1.gcode")
 
 

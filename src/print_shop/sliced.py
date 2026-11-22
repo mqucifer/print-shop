@@ -61,6 +61,8 @@ if TYPE_CHECKING:
 
 __all__ = [
     "BY_HAND",
+    "NOT_SETTINGS",
+    "PROFILE_IDS",
     "RATIONALE",
     "SOURCE",
     "Again",
@@ -78,6 +80,7 @@ __all__ = [
     "loaded_mismatch",
     "read",
     "report",
+    "same_setting",
     "take",
     "verify",
 ]
@@ -106,7 +109,7 @@ _SLICE_INFO = "Metadata/slice_info.config"
 #: An object's or part's metadata that says what it is, never a setting overridden.
 _NOT_OVERRIDES = frozenset({"name", "extruder", "matrix"})
 #: A profile's keys that aren't settings: Orca writes none of them in a config block as they are.
-_NOT_SETTINGS = frozenset({
+NOT_SETTINGS = frozenset({
     "name", "inherits", "from", "version", "type", "setting_id", "filament_id", "instantiation",
     "is_custom_defined", "compatible_printers", "compatible_printers_condition",
     "compatible_prints", "compatible_prints_condition",
@@ -609,7 +612,8 @@ def _text(value: Any) -> str:
     return text.replace("\\n", "\n").replace('\\"', '"').strip().strip('"').strip()
 
 
-def _same(key: str, tuning: Any, file: str) -> bool:
+def same_setting(key: str, tuning: Any, file: str) -> bool:
+    """Whether a profile's value, or one asked for, is the value a config block has."""
     if key.endswith("_gcode") or "\n" in str(tuning) or "\\n" in file:
         return _text(tuning) == _text(file)
     return _items(tuning) == _items(file)
@@ -648,10 +652,10 @@ def compare(
         if kind == "process" and bed:
             values["curr_bed_type"] = bed
         for key in sorted(values):
-            if (key in _NOT_SETTINGS or key in _NOT_COMPARED or key in PROFILE_IDS.values()
+            if (key in NOT_SETTINGS or key in _NOT_COMPARED or key in PROFILE_IDS.values()
                     or key not in config):
                 continue
-            if not _same(key, values[key], config[key]):
+            if not same_setting(key, values[key], config[key]):
                 differs.append(Difference(kind=kind, key=key, tuning=_shown(values[key]),
                                           file=config[key]))
     stated = {key for profile in tuned.values() for key in profile.composed}
