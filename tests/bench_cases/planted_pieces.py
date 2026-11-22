@@ -359,6 +359,42 @@ def specks() -> Any:
     return im
 
 
+def on_ground(ground: tuple[int, int, int]) -> Any:
+    """A slanting band of glass on a ground, its corners reaching near every edge
+    (mqucifer/print-shop#240): on a dark ground most rows that hold it are mostly dark."""
+    im = Image.new("RGB", (400, 300), ground)
+    d = ImageDraw.Draw(im)
+    edge, lead = [(0, 120), (330, 20), (330, 180), (0, 280)], (10, 10, 10)
+    d.polygon(edge, fill=(200, 150, 70), outline=lead, width=4)
+    lower = [(0, 200), (330, 100), (330, 180), (0, 280)]
+    d.polygon(lower, fill=(80, 140, 70), outline=lead, width=4)
+    for x in (110, 220):
+        d.line([(x, 120 - x * 100 / 330), (x, 280 - x * 100 / 330)], fill=lead, width=4)
+    return im
+
+
+def framed(kind: str = "") -> Any:
+    """A real frame 8 pixels thick, 20 in from the picture's edge. `specked`: specks of dark
+    in its margin and of colour in it. `notched`: thinner from outside over 30% of its top,
+    where the margin comes in. `wavy`: its inner edge wanders 2 pixels."""
+    im = Image.new("RGB", (400, 300), (240, 240, 240))
+    d = ImageDraw.Draw(im)
+    glass, lead = (200, 150, 70), (10, 10, 10)
+    d.rectangle((20, 20, 379, 279), fill=glass, outline=lead, width=8)
+    d.line([(200, 20), (200, 279)], fill=lead, width=4)
+    if kind == "specked":
+        for x, y in ((60, 6), (150, 12), (300, 290)):
+            d.ellipse((x, y, x + 3, y + 3), fill=lead)
+        for x, y in ((80, 22), (260, 23), (22, 140), (374, 90)):
+            d.rectangle((x, y, x + 3, y + 3), fill=(120, 90, 200))
+    elif kind == "notched":
+        d.rectangle((250, 20, 357, 23), fill=(240, 240, 240))
+    elif kind == "wavy":
+        for x in range(30, 370, 60):
+            d.rectangle((x, 26, x + 24, 27), fill=glass)
+    return im
+
+
 def cells(lead: float) -> list[list[list[float]]]:
     """Four cells of a 60 x 40 mm panel, each inset by half the lead: a map from rules."""
     half = lead / 2
@@ -788,6 +824,10 @@ shadow().save("shadow.png")
 faint().save("faint.png")
 meet().save("meet.png")
 meet(ragged=True).save("ragged.png")
+on_ground((10, 10, 10)).save("dark-ground.png")
+on_ground((60, 110, 220)).save("light-ground.png")
+for kind in ("", "specked", "notched", "wavy"):
+    framed(kind).save(f"framed-{kind}.png" if kind else "framed.png")
 for name, slit, depth in (
     ("rules.json", False, 0),
     ("slit.json", True, 8),

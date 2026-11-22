@@ -7,7 +7,12 @@ composes a scene. Its dark pixels are the lead, and each patch of colour between
 1. **The panel** is the picture inside its outer frame on all four sides: on each, the first
    row or column from the picture's edge that's mostly dark, and those after it that are. A
    margin outside the frame, and anything in it, isn't the panel. `--width` is the panel's
-   width in mm, which sets the scale.
+   width in mm, which sets the scale, so the window traced is said first where it isn't the
+   whole picture. What's taken for a frame holds no glass (mqucifer/print-shop#240): a band of
+   glass on a dark ground is mostly dark rows too, and was cut away as frame, with what was
+   left scaled up to the width. Where what would be cut holds a patch that would be a piece,
+   by 2 and 3 below, it can't be told from glass: there's no answer and no map. `--whole`
+   takes the whole picture as the panel, for one already cropped to it.
 2. **The lead** is every pixel with each channel under `--dark`, closed by a square `HAIR_MM`
    across and at least 3 pixels: a hairline gap in a line doesn't join two pieces, and a hair
    of colour beside a line isn't glass. The reply says how much of the panel that was.
@@ -290,6 +295,15 @@ def _parted(pieces: list[Piece], raw: list[Any], mm: float) -> set[int]:
     return changed
 
 
+class FrameHoldsGlass(NoAnswer):
+    """What would be cut away as a picture's frame holds glass (mqucifer/print-shop#240):
+    `cut` is each side's thickness and how much glass is on it, both in pixels."""
+
+    def __init__(self, why: str, cut: dict[str, dict[str, int]]) -> None:
+        super().__init__(why)
+        self.cut = cut
+
+
 def _nearest(rgb: Any, palette: dict[str, tuple[int, int, int]]) -> str:
     return min(palette, key=lambda name: math.dist(rgb, palette[name]))
 
@@ -306,6 +320,59 @@ def lead_of(dark: np.ndarray, mm: float) -> tuple[np.ndarray, int]:
         np.pad(dark, side, constant_values=True), structure=np.ones((side, side))
     )
     return lines[side:-side, side:-side], side
+
+
+def glass_in_frame(
+    dark: np.ndarray, rows: slice, cols: slice, frame: dict[str, int], mm: float
+) -> dict[str, int]:
+    """How much glass, in pixels, is on each side of what would be cut away as the frame: the
+    patches of colour there that would be pieces were they traced, past a hair's width and
+    `SPECK_PX`. A patch that comes in from the margin outside the frame and doesn't reach the
+    panel, as at a frame's thinner stretch, is the margin's, not glass."""
+    from scipy import ndimage
+
+    top, left = rows.start - frame["top"], cols.start - frame["left"]
+    bottom, right = rows.stop + frame["bottom"], cols.stop + frame["right"]
+    band = np.zeros(dark.shape, dtype=bool)
+    band[top:bottom, left:right] = True
+    band[rows, cols] = False
+    glass = np.zeros(dark.shape, dtype=bool)
+    if (band & ~dark).any():
+        # What isn't the band is as dark, so a hair along either edge of it is closed.
+        lead, _ = lead_of(dark | ~band, mm)
+        labels, _ = ndimage.label(~lead)
+        panel, margin = np.zeros_like(band), np.ones_like(band)
+        panel[rows, cols] = ~dark[rows, cols]
+        margin[top:bottom, left:right] = False
+        margin &= ~dark
+        for k, at in enumerate(ndimage.find_objects(labels), start=1):
+            if at is None:
+                continue
+            # A pixel round it, to see what it touches.
+            near = tuple(slice(max(s.start - 1, 0), s.stop + 1) for s in at)
+            patch = labels[near] == k
+            if patch.sum() < SPECK_PX:
+                continue
+            round_it = ndimage.binary_dilation(patch)
+            if (round_it & margin[near]).any() and not (round_it & panel[near]).any():
+                continue
+            glass[near] |= patch
+    sides = {
+        "top": glass[top : rows.start, left:right],
+        "bottom": glass[rows.stop : bottom, left:right],
+        "left": glass[top:bottom, left : cols.start],
+        "right": glass[top:bottom, cols.stop : right],
+    }
+    return {side: int(on.sum()) for side, on in sides.items()}
+
+
+def window_said(size: list[int], of: list[int], mm: float) -> str:
+    """The window traced as a share of its picture, and the scale it gave."""
+    share = 100.0 * size[0] * size[1] / (of[0] * of[1])
+    return (
+        f"{size[0]} x {size[1]} of the picture's {of[0]} x {of[1]} pixels, {share:.1f}% of "
+        f"it, at {mm:.4f} mm a pixel"
+    )
 
 
 def unspecked(pieces: list[Piece], lead_mm: float) -> int:
@@ -345,13 +412,27 @@ def lines_of(found: Map, within: Any = None) -> int:
     return sum(1 for a, b in pairs if a < b)
 
 
-def trace(picture: Any, width_mm: float, dark_under: int, palette: Any) -> dict[str, Any]:
-    """The picture's pieces as a map, with the patches it came from and what was left out."""
+def trace(
+    picture: Any, width_mm: float, dark_under: int, palette: Any, whole: bool = False
+) -> dict[str, Any]:
+    """The picture's pieces as a map, with the patches it came from and what was left out.
+    `whole` takes the whole picture as the panel, with no frame looked for."""
     from scipy import ndimage
 
     rgb = np.asarray(picture.convert("RGB"))
     dark = rgb.max(axis=2) < dark_under
-    rows, cols, frame = panel_of(dark)
+    tall, across = dark.shape
+    rows, cols = slice(0, tall), slice(0, across)
+    frame = dict.fromkeys(("top", "bottom", "left", "right"), 0)
+    if not whole:
+        rows, cols, frame = panel_of(dark)
+        kept = [cols.stop - cols.start, rows.stop - rows.start]
+        if any(frame.values()):
+            glass = glass_in_frame(dark, rows, cols, frame, width_mm / kept[0])
+            if any(glass.values()):
+                _refuse_cut(frame, glass, kept, [across, tall], width_mm)
+    elif not dark.any():
+        raise NoAnswer("the picture has no dark lines: nothing in it is under --dark")
     rgb, dark = rgb[rows, cols], dark[rows, cols]
     height, width = dark.shape
     if width < LEAST_PX:
@@ -441,9 +522,30 @@ def trace(picture: Any, width_mm: float, dark_under: int, palette: Any) -> dict[
         "frame": frame,
         "mm": mm,
         "size_px": [width, height],
+        "picture_px": [across, tall],
         "kept_fine": len(crossed),
         "picture": picture.crop((cols.start, rows.start, cols.stop, rows.stop)),
     }
+
+
+def _refuse_cut(
+    frame: dict[str, int], glass: dict[str, int], kept: list[int], of: list[int], width: float
+) -> None:
+    sides = ", ".join(
+        f"{side} {px} px with {glass[side]} px of glass on it" if glass[side]
+        else f"{side} {px} px with no glass on it"
+        for side, px in frame.items() if px
+    )  # fmt: skip
+    cut = {side: {"px": px, "glass_px": glass[side]} for side, px in frame.items() if px}
+    raise FrameHoldsGlass(
+        f"it would have traced {window_said(kept, of, width / kept[0])}, cutting away as "
+        f"the picture's frame {sides}: a patch that would be a piece isn't frame, so whether "
+        "that's a frame or glass on a dark ground can't be told, and no map is written. If "
+        f"the picture is the panel, trace it with --whole, {of[0]} x {of[1]} pixels at "
+        f"{width / of[0]:.4f} mm a pixel. If it has a frame, crop it to inside that and trace "
+        "it with --whole",
+        cut,
+    )
 
 
 def laid_over(found: Map, traced: dict[str, Any]) -> dict[str, Any]:
@@ -478,6 +580,7 @@ def cost_said(
     width_mm: float,
     palette: Any,
     dark: int,
+    whole: bool = False,
 ) -> None:
     """What a `--dark` other than the default cost (mqucifer/print-shop#172): the pieces, the
     lines and the dead ends it reads, against the default darkness on the same picture. A run
@@ -490,7 +593,7 @@ def cost_said(
     )  # fmt: skip
     report.fact("dead_ends_count", ends, how="lines that end in glass, at this --dark")
     try:
-        usual: Map = trace(picture, width_mm, DEFAULT_DARK, palette)["map"]
+        usual: Map = trace(picture, width_mm, DEFAULT_DARK, palette, whole)["map"]
     except NoAnswer as exc:
         report.note(
             f"at the default --dark {DEFAULT_DARK} this picture has no trace to set these "
@@ -532,7 +635,12 @@ def run_trace(args: Any, report: Report) -> None:
     except Exception as exc:  # noqa: BLE001 - whatever it is, it isn't a picture
         raise NoAnswer(f"{args.image} doesn't read as a picture: {exc}") from exc
     palette = palette_of(args.palette)
-    traced = trace(picture, args.width, args.dark, palette)
+    report.numbers["picture_px"] = [picture.width, picture.height]
+    try:
+        traced = trace(picture, args.width, args.dark, palette, args.whole)
+    except FrameHoldsGlass as exc:
+        report.numbers["frame_cut"] = exc.cut
+        raise
     found: Map = traced["map"]
     limits = limits_of(args)
     reading = read_map(found, limits)
@@ -546,6 +654,7 @@ def run_trace(args: Any, report: Report) -> None:
         "image_path": args.image,
         "px_per_mm": round(1.0 / traced["mm"], 4),
         "dark_under": args.dark,
+        **({"whole_picture": True} if args.whole else {}),
         "pieces": len(found.pieces),
         "glass_share_pct": round(reading.numbers["glass_share_pct"], 4),
         "lead_widest_mm": round(reading.numbers["lead_widest_mm"], 4),
@@ -558,13 +667,22 @@ def run_trace(args: Any, report: Report) -> None:
     width, height = traced["size_px"]
     report.fact(
         "panel_px", [width, height],
-        how="inside the outer frame: "
+        how="the whole picture, as --whole says, with no frame looked for"
+        if args.whole
+        else "inside the outer frame: "
         + (
             ", ".join(f"{side} {px} px" for side, px in frame.items())
             if any(frame.values())
             else "the picture has none, so the whole picture is the panel"
         ),
     )  # fmt: skip
+    of = traced["picture_px"]
+    report.numbers["panel_share_pct"] = 100.0 * width * height / (of[0] * of[1])
+    # The scale is --width over the window traced, so where that isn't the whole picture it's
+    # the verdict's first words.
+    window = ""
+    if [width, height] != of:
+        window = f"traced {window_said([width, height], of, traced['mm'])}: "
     report.fact("px_per_mm", 1.0 / traced["mm"], how="from --width")
     report.fact(
         "specks", traced["specks"],
@@ -591,7 +709,8 @@ def run_trace(args: Any, report: Report) -> None:
     )
     say(found, reading, report, limits)
     if args.dark != DEFAULT_DARK:
-        cost_said(report, found, len(reading.dead_ends), picture, args.width, palette, args.dark)
+        ends = len(reading.dead_ends)
+        cost_said(report, found, ends, picture, args.width, palette, args.dark, args.whole)
     over = laid_over(found, traced)
     report.numbers["laid_over"] = over
     report.second(
@@ -619,7 +738,7 @@ def run_trace(args: Any, report: Report) -> None:
             f"{over['allowed_pct']:.2f}% a pixel's width along every outline allows"
         )
     if differs:
-        report.verdict("DISAGREE", "; ".join(differs[:6]))
+        report.verdict("DISAGREE", window + "; ".join(differs[:6]))
         return
     if reading.flags:
         report.note(
@@ -628,7 +747,7 @@ def run_trace(args: Any, report: Report) -> None:
         )
     report.verdict(
         "OK",
-        f"{len(found.pieces)} piece(s) traced into {target}, {args.width:g} by "
+        f"{window}{len(found.pieces)} piece(s) traced into {target}, {args.width:g} by "
         f"{height * traced['mm']:.1f} mm; glass share {reading.numbers['glass_share_pct']:.2f}%; "
         f"rule breaks: {counts_said(reading.flags)}",
     )

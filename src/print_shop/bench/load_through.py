@@ -19,7 +19,9 @@ that overhangs an edge bears on less.
 diameters of what bears on it, the washer or the nut's face, from the bolt's axis and held where
 it's cut, with the bolt's pull spread over what the washer or the nut bears on, toward the other
 part, and its shear put on the half of the hole's wall the shank leans on, most where it leans
-square. CalculiX solves it, linear and static, on second-order tetrahedra, and the strains are
+square, between where the parts meet and the seat and nowhere else (mqucifer/print-shop#245):
+where the bore carries on past a nut's slot for the bolt's tip, the shank doesn't lean there.
+CalculiX solves it, linear and static, on second-order tetrahedra, and the strains are
 read as any part's are, within three quarters of the cut: the hold itself strains what's beside
 it.
 """
@@ -351,15 +353,22 @@ def round_bolt(
             ]
             put(under, -pull * side["out"], "what the washer or the nut bears on")
         across = float(np.linalg.norm(shear))
+        sheared = 0.0
         if across > 0:
             leans = shear / across
             leant = []
             for face in wall:
-                for wired, area, centre in triangles(face):
+                for wired, _, _ in triangles(face):
+                    # Only what's between the meet and the seat: the bore's own stretch.
+                    corners = [nodes[n] for n in wired[:3]]
+                    area, centre = through.between(corners, axis, ends[0], ends[1])
+                    if area <= 0:
+                        continue
                     away = off_axis(centre)
                     square = float(away @ leans) / float(np.linalg.norm(away))
                     if square > 0:
                         leant.append((wired, area * square))
+                        sheared += area
             put(leant, shear, "the hole's wall")
         fea = ccxtools.FemToolsCcx(analysis, solver)
         fea.update_objects()
@@ -416,6 +425,7 @@ def round_bolt(
             "stretch_is": "pull" if each[most][np.abs(each[most]).argmax()] > 0 else "push",
             "stretch_at": [round(float(v), 3) for v in points[most]],
             "mesh_mm": round(size, 3),
+            "sheared_mm2": sheared,
             "elements": fem.VolumeCount,
             "held_mm": reach,
             "read_mm": READ * reach,
