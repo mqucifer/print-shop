@@ -681,12 +681,15 @@ class Ledger:
         self._learn(record.job_id)
 
     def record_started(self, job_id: str) -> None:
-        """The printer was seen to leave its ready state for this job."""
-        self._update(job_id, "started_at = ?", (_now(),), "started_at IS NULL")
+        """The printer was seen to leave its ready state for this job. The first time seen
+        stands: the watcher can see it before the print node has finished confirming it, and
+        that's no failure of the start (mqucifer/print-shop#218)."""
+        self._update(job_id, "started_at = COALESCE(started_at, ?)", (_now(),), "1 = 1")
 
     def record_start_failed(self, job_id: str, error: str) -> None:
-        """The start raised. The printer may or may not be printing; say so."""
-        self._update(job_id, "start_error = ?", (error[:2000],), "started_at IS NULL")
+        """The start raised. The printer may or may not be printing; say so, and where the
+        watcher has seen it printing, say so all the same."""
+        self._update(job_id, "start_error = ?", (error[:2000],), "1 = 1")
 
     def record_ended(
         self, job_id: str, printer_end_status: int | None,

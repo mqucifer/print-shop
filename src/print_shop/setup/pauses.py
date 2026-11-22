@@ -307,8 +307,9 @@ def ask(
     `before` is what's pre-selected, and where it's from: this review's pause, or the past
     print's ticked on offer. `gone` is why that print's first spool can't start this job.
     A first spool is pre-selected only where it's the one that print started on, never the one
-    loaded: after a swap, Enter on that would be the swap reversed. Nor is one where the spool
-    swapped to was given, or `from ?` typed: the print picked needn't be the one that line is of.
+    loaded: after a swap, Enter on that would be the swap reversed. Neither spool is where either
+    was given, or `from ?` typed: the print picked needn't be the one that line is of. And the
+    second is, only after that print's own first.
     """
     if pause is None:
         kind = _ask_kind(value, before, read, write)
@@ -321,14 +322,17 @@ def ask(
     if stock is None:
         return pause
     earlier = before[0] if before and before[0].kind is pause.kind else None
-    default_from = None if pause.ask_first or pause.to is not None else earlier
+    named = pause.ask_first or pause.start is not None or pause.to is not None
+    default_from = None if named else earlier
     start = pause.start or _ask_start(
         default_from, gone, pause.to, material, stock, read, write)
     if start is None:
         return None
     to = pause.to
     if to is None or to.spool_id == start.spool_id:
-        to = _ask_to(earlier, start, material, stock, read, write)
+        own = default_from is not None and default_from.start is not None and (
+            default_from.start.spool_id == start.spool_id)
+        to = _ask_to(default_from if own else None, start, material, stock, read, write)
         if to is None:
             return None
     return Pause(kind=pause.kind, start=start, to=to)

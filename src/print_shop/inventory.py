@@ -698,6 +698,7 @@ class Inventory:
                 f"Set it back (`stock.py edit {spool.id} {back}`)",
                 "Run the job again to prepare it with the spool as it is now",
                 "to print with it as it is",
+                " (without --filament, if its command named one)",
             )
         if now is not None and first.takes(now, not_on):
             return None

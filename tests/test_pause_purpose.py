@@ -1354,7 +1354,7 @@ def test_a_held_swap_and_an_edited_tuning_say_their_way_out(shop: Shop) -> None:
     shop.run("ok", at_gate=retune, held=reject)
     assert shop.told[0].endswith(
         "--tuning none`), then approve again; or, to print with it as it is, Reject and run the "
-        "job again")
+        "job again (without --filament, if its command named one)")
 
 
 def test_a_spool_of_the_same_variety_colour_and_tuning_starts_and_is_recorded(shop: Shop) -> None:
@@ -2098,3 +2098,83 @@ def test_a_locked_stock_at_the_review_or_the_gate_doesnt_lose_the_job(
     ran = shop.run("colour_change=2 from #1 to #2", "ok")
     assert "couldn't be read" in ran.terminal and "couldn't be read" in ran.gate["spools"]
     assert ran.result.printed, ran.result.error
+
+
+# The fourth cold read, of 1b3888c
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("how", ["printing", "paused", "preheating"])
+def test_a_busy_frame_with_no_file_name_isnt_another_print(shop: Shop, how: str) -> None:
+    """F1: "" read as another file, so the print was over and a load under its swap cleared it."""
+    row = swap_started(shop)
+    ends(shop, row, how, layer=3, named="")
+    assert kept(shop).ended_at is None, "it's still printing"
+    shop.load(WHITE)
+    assert not_known(shop)
+    ends(shop, row, "completed", layer=100)
+    assert not_known(shop), "the load was from under the swap"
+
+
+@pytest.mark.parametrize("killed", [False, True])
+def test_a_busy_frame_with_no_file_name_isnt_an_unconfirmed_one_over(
+    shop: Shop, killed: bool
+) -> None:
+    row = sent_unconfirmed(shop, killed=killed, minutes_ago=45)
+    ends(shop, row, "printing", layer=3, named="")
+    shop.load(WHITE)
+    assert "Wait" in not_known(shop)
+
+
+def test_a_start_the_watcher_saw_first_is_no_error_to_the_print_node(shop: Shop) -> None:
+    row = swap_started(shop)  # F3
+    with Ledger(shop.path) as ledger:
+        seen = kept(shop).started_at
+        ledger.record_started(row.job_id)
+        assert kept(shop).started_at == seen, "the first time seen stands"
+
+
+def test_a_failed_confirm_after_the_watcher_saw_it_keeps_its_own_error(shop: Shop) -> None:
+    row = swap_started(shop)
+    with Ledger(shop.path) as ledger:
+        ledger.record_start_failed(row.job_id, "the watch stream ended")
+    assert kept(shop).start_error == "the watch stream ended"
+
+
+def test_the_print_node_started_by_the_watcher_still_says_printed(
+    shop: Shop, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = FramePrinter.start
+
+    def start(printer: FramePrinter, name: str) -> Any:
+        with Ledger(shop.path) as ledger:
+            ledger.record_started(ledger.rows()[-1].job_id)
+        return real(printer, name)
+
+    monkeypatch.setattr(FramePrinter, "start", start)
+    ran = shop.run("colour_change=2 from #1 to #2", "ok")
+    assert ran.result.printed, ran.result.error
+
+
+def test_the_desks_line_never_takes_its_second_from_the_print_picked(shop: Shop) -> None:
+    """F4: A is white then black, black's used up. C, white then clear, is the one picked."""
+    a = shop.run("colour_change=2 from #1 to #2", "ok")
+    shop.load(WHITE)
+    shop.run("colour_change=2 from #1 to #3", "ok")
+    shop.load(WHITE)
+    with Inventory(shop.path) as stock:
+        stock.empty(BLACK)
+    line = shop.correction_line(a.job_id)
+    assert line.startswith("colour_change=2 from #1") and " to #" not in line
+
+    ran = shop.run(line, "", "back", "stop")
+
+    assert "Enter for" not in ran.terminal
+    assert ran.prompts == ["> ", "spool> ", "spool> ", "> "]
+
+
+def test_the_second_is_preselected_only_after_that_prints_own_first(shop: Shop) -> None:
+    shop.run("colour_change=2 from #1 to #3", "ok")
+    white = add_spool(shop, "white")
+    ran = shop.run("colour_change=2", str(white), "", "back", "stop")
+    assert "Enter for spool #3" not in ran.terminal

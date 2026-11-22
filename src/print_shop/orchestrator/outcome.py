@@ -132,6 +132,12 @@ def _is_ours(snapshot: PrinterSnapshot, row: Row) -> bool:
     return active is not None and active.rsplit("/", 1)[-1] == row.gcode_name
 
 
+def _another_has_it(snapshot: PrinterSnapshot, row: Row) -> bool:
+    """Whether the printer names another file as the one it holds. The firmware names none in
+    some frames, "" (`centauri._confirm_started`), and that's no other file."""
+    return bool(snapshot.active_filename) and not _is_ours(snapshot, row)
+
+
 def _still_shows(snapshot: PrinterSnapshot, row: Row) -> bool:
     """Whether an ended printer still names this print, so that the layer it gives is this
     print's. It holds no file by then, so `_is_ours` can't say."""
@@ -226,8 +232,7 @@ class Watcher:
                 logger.warning("job %s, with a swap, printed after all; watching it", row.job_id)
                 self._ledger.record_started(row.job_id)
                 running.append(row)
-            elif over or (snapshot.active_filename is not None
-                          and not _is_ours(snapshot, row)):
+            elif over or _another_has_it(snapshot, row):
                 self._ledger.record_start_over(row.job_id)
 
         ended_any = False
@@ -242,7 +247,7 @@ class Watcher:
                 # An end that shows another file isn't this print's to read.
                 its_own = status if ours or not snapshot.shown_filename else None
                 self._ledger.record_ended(row.job_id, status, spools.at_end(row, its_own, layer))
-            elif snapshot.active_filename is not None and not _is_ours(snapshot, row):
+            elif _another_has_it(snapshot, row):
                 # Something else holds the printer, so ours ended while nobody
                 # was looking. How it ended is not known, and is not guessed.
                 self._ledger.record_ended(row.job_id, None, spools.at_end(row, None, None))
