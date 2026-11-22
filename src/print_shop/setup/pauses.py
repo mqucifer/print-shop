@@ -258,7 +258,10 @@ def cant_start(
     now = material.of(spool)
     if now.same_filament(material):
         return ""
-    return (f"{was} on {now.named()}, and this job is sliced for {material.filament_said()}: "
+    # No colour beside a number to load: "use these" words this once, and a colour can be
+    # corrected under it. The number and the variety can't change.
+    return (f"{was} on spool #{spool.id}, {now.variety}, and this job is sliced for "
+            f"{material.filament_said()}: "
             f"load it (`stock.py load {spool.id}`) and run the job again")
 
 

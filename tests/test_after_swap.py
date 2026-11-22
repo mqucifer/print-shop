@@ -1358,6 +1358,21 @@ def test_the_desks_note_names_the_first_to_load_as_it_is_now(shop: Shop) -> None
     assert f"It starts on {NOW_BLACK}" in shop.desk(first.job_id)[1]
 
 
+# The sixth read, of 2331301
+# --------------------------------------------------------------------------
+
+
+def test_cant_use_gives_the_load_by_what_cant_change(shop: Shop) -> None:
+    """It's worded once, as the offer's built, and a colour can be corrected under it."""
+    with Inventory(shop.path) as stock:
+        white = stock.material()
+        clear = white.of(stock.spool(CLEAR))
+        why = pauses.cant_start(
+            pauses.Pause(kind=pauses.PauseFor.SWAP, start=white, to=clear), clear, stock.spools())
+    assert why.startswith("that print started on spool #1, Elegoo PLA, and this job is sliced")
+    assert "`stock.py load 1`" in why and "white" not in why
+
+
 # What the Sponsor was told it costs
 # --------------------------------------------------------------------------
 

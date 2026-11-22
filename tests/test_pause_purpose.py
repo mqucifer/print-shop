@@ -461,7 +461,7 @@ def test_a_swap_between_varieties_isnt_offered_reversed(shop: Shop) -> None:
 
     again_ = shop.run("use 1", "stop")
 
-    why = ("that print started on spool #1, Elegoo PLA, white, and this job is sliced for "
+    why = ("that print started on spool #1, Elegoo PLA, and this job is sliced for "
            "Elegoo PETG")
     said = " ".join(again_.terminal.split())
     assert "CAN'T USE 1: " + why in said
@@ -497,7 +497,8 @@ def test_typed_at_that_prints_height_its_start_is_never_defaulted(shop: Shop) ->
     shop.run("colour_change=2 from #1 to #3", "ok")
     shop.says(CLEAR)
     again_ = shop.run("colour_change=2", "", "back", "stop")
-    assert "that print started on spool #1, Elegoo PLA, white" in " ".join(again_.terminal.split())
+    assert "that print started on spool #1, Elegoo PLA, and this job" in " ".join(
+        again_.terminal.split())
     assert again_.prompts == ["> ", "spool> ", "spool> ", "> "], "Enter alone chooses nothing"
     assert "swap to?" not in again_.terminal
 
