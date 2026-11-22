@@ -19,15 +19,16 @@ finish reason and tokens go in the proposal, and so in the ledger.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from typing import Any
 
-from print_shop.expert.client import CutOff, LLMConfig, complete_json_call
+from print_shop.expert.client import CutOff, LLMConfig, complete_json_call, stream_json_call
 from print_shop.setup.bounds import SETTINGS, check
 from print_shop.setup.proposal import Change, PartFacts, Proposal, Source
 from print_shop.setup.skill import Skill
 
-__all__ = ["Ask", "llm_ask", "propose_by_model", "schema", "setup_llm"]
+__all__ = ["Ask", "llm_ask", "llm_ask_streamed", "propose_by_model", "schema", "setup_llm"]
 
 #: Settings keys: the alias the proposal reasons with, and its output limit,
 #: thinking included (the operator, 2026-10-25: a setting, not a constant).
@@ -193,6 +194,21 @@ def llm_ask(config: LLMConfig) -> Ask:
 
     def ask(system: str, user: str, shape: dict[str, Any]) -> dict[str, Any]:
         reply, info = complete_json_call(config, system, user, shape)
+        return {**reply, "_call": info.model_dump()}
+
+    return ask
+
+
+def llm_ask_streamed(
+    config: LLMConfig, answer_chars: int, stop: threading.Event | None = None
+) -> Ask:
+    """`llm_ask`, streamed: its answer bounded, and ended when `stop` is set
+    (mqucifer/print-shop#208)."""
+
+    def ask(system: str, user: str, shape: dict[str, Any]) -> dict[str, Any]:
+        reply, info = stream_json_call(
+            config, system, user, shape, answer_chars=answer_chars, stop=stop
+        )
         return {**reply, "_call": info.model_dump()}
 
     return ask

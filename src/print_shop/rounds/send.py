@@ -33,9 +33,9 @@ import httpx
 
 from print_shop.env import SETTINGS_PATH, load_env
 from print_shop.expert.client import API_KEY, DEFAULT_URL
+from print_shop.expert.client import RUNAWAY_CHARS as RUNAWAY_CHARS
 
 ALIAS = "crew-code-think"
-RUNAWAY_CHARS = 2000
 TIMEOUT_S = 3600.0
 #: What a run's record says when LiteLLM won't say what reasoning effort an alias sends.
 UNKNOWN = "unknown"

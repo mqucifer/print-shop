@@ -59,6 +59,7 @@ from print_shop.setup import Proposer
 from print_shop.setup.intake import Asker
 from print_shop.setup.loop import PrintLoop
 from print_shop.setup.review import Reviewer
+from print_shop.setup.waiting import Waiting
 from print_shop.sliced import SlicedJob
 from print_shop.slicer.orca import Slicer, SlicerProfiles, slice_model
 from print_shop.slicer.store import Store
@@ -216,6 +217,7 @@ class Daemon:
         show: Callable[[str], None] | None = None,
         store: Store | None = None,
         on_step: Callable[[str, str, Step], None] | None = None,
+        waiting: Waiting | None = None,
     ) -> None:
         """`printer` is what the approval gate ultimately commands.
 
@@ -259,6 +261,10 @@ class Daemon:
 
         `on_step` is told each job's id, part and step as it moves, for the live lock to say to
         a second start (mqucifer/print-shop#207).
+
+        `waiting` is the person's side of the wait for the model's questions
+        (mqucifer/print-shop#208). Choosing among its closer choices is their time; the wait
+        for the model is counted, as the call always was.
         """
         self._cfg = cfg
         self._on_step = on_step
@@ -297,6 +303,8 @@ class Daemon:
                   if loop is not None else None),
             show=show,
             store=store,
+            waiting=(dataclasses.replace(waiting, closer=self._persons(waiting.closer))
+                     if waiting is not None and waiting.closer is not None else waiting),
         )
 
         # MQTT bridge.
