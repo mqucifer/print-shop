@@ -22,6 +22,13 @@ __all__ = ["FLARE_MM", "Feature", "Overhang", "measure", "overhang_places", "ove
 #: A face this far from vertical, facing down, needs support (Orca's own
 #: threshold reasoning; the analyzer uses the same 45 degrees).
 _OVERHANG_DEG = 45.0
+#: A face this near the threshold is at it (mqucifer/print-shop#239): a float32 mesh's own
+#: rounding, as arithmetic's noise is for the bench's limits (mqucifer/print-shop#72), and no
+#: band. An STL's coordinate up to 512 mm is off by up to half its step there, 2^-16 mm, along
+#: each axis, so two points' difference is off by up to 2 sqrt(3) 2^-16 = 5.3e-5 mm. Over
+#: `_ENVELOPE_MM` of height along a 45 degree face, 0.4 sqrt(2) = 0.57 mm of it, that turns
+#: it by up to 0.0054 degrees. 45.01 degrees is past it.
+_AT_LIMIT_DEG = 0.0054
 #: Faces within this of horizontal are flat: a bridge below, a top surface above.
 _FLAT = 0.98
 #: The first layer: a face this low prints on the plate, not over the air. Orca
@@ -223,7 +230,10 @@ def _overhang(
 
     Read as the printer lays it: a point on a downward face overhangs when the
     part's outline `_ENVELOPE_MM` lower is further than that away, sideways,
-    so the slope from there to here is past `_OVERHANG_DEG`. A slope drawn in
+    so the slope from there to here is past `_OVERHANG_DEG`, by more than the
+    mesh's own rounding, `_AT_LIMIT_DEG`, 0.0054 degrees: both a face's angle and
+    that slope at 45 degrees to within it are at 45, and need no support, however
+    the part is turned (mqucifer/print-shop#239). A slope drawn in
     0.1 mm steps reads as the slope its steps make, not as the 90 degree
     ceiling each step's underside is, while a real ceiling's underside, which
     nothing reaches from below, still reads as 90 degrees.
@@ -251,8 +261,11 @@ def _overhanging(
     # Facing down past the threshold, not wholly in the first layer, on the plate, and, unless
     # `flares` is False, not a round or chamfer rising from the plate (mqucifer/print-shop#128).
     rising = _from_the_plate(mesh) if flares else np.zeros(len(mesh.faces), dtype=bool)
+    # An angle from vertical is the arcsine of how far the normal points down: a cosine of the
+    # threshold is the same only at 45 degrees exactly.
+    past = _OVERHANG_DEG + _AT_LIMIT_DEG
     candidates = np.flatnonzero(
-        (normals[:, 2] < -np.cos(np.radians(_OVERHANG_DEG))) & (top > _FIRST_LAYER_MM) & ~rising
+        (normals[:, 2] < -np.sin(np.radians(past))) & (top > _FIRST_LAYER_MM) & ~rising
     )
     if not len(candidates):
         return None
@@ -284,7 +297,7 @@ def _overhanging(
     reach = _reach(seated, points, probe)
     depth = _reach(seated, points, points[:, 2] - 0.01)  # its own face's depth
     slope = np.degrees(np.arctan2(reach, _ENVELOPE_MM))
-    over = slope > _OVERHANG_DEG
+    over = slope > past
     if not over.any():
         return None
     read = np.where(depth > _ENVELOPE_MM, own, np.minimum(own, slope))

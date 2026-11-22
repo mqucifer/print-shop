@@ -23,6 +23,11 @@ level and so rising at 47° to a point; the second block's cut by a nut's slot; 
 peaked bore: a slot's end, a half-round groove, a D, a peak that rises at 44°, one cut short of
 its point, and a D cut in two by the slot, whose two arcs add up past a full turn.
 
+`shear/` (mqucifer/print-shop#245): two blocks end to end along x on one M5 bolt lying level,
+the second's bore carrying on past its nut's slot for the bolt's tip; the same with that far
+stretch longer; with the first's bore counterbored at the head's end; and one where the shear
+rules, the bore 4 mm long to a washer's slot and 5.2 mm above the part's bottom.
+
 `dovetail/` (mqucifer/print-shop#170): two bars 30 mm wide that lap over 40 mm, joined by a
 tapered dovetail: a tail 6 mm proud of the upper bar's lap face, 6 mm wide at its neck where
 it's lowest and 10 at its top, each flank undercut by 2 mm, in a socket in the lower bar that's
@@ -329,6 +334,39 @@ def peaks() -> None:
         assembly(out / f"{name}.json", parts, [{**joint, **more}], held)
 
 
+def shears() -> None:
+    """A bolt's shear, and the bore that carries on past its nut's slot."""
+    out = Path("shear")
+    way = App.Vector(1, 0, 0)
+
+    def bored(part: Part.Shape, height: float = 10.0) -> Part.Shape:
+        return part.cut(Part.makeCylinder(HOLE / 2, 64, App.Vector(-2, 15, height), way))
+
+    first = box((0, 0, 0), (20, 30, 20))
+    save(bored(first), out / "one.step")
+    sunk = Part.makeCylinder(5.5, 4, App.Vector(0, 15, 10), way)
+    save(bored(first).cut(sunk), out / "one-sunk.step")
+    save(bored(first, 5.2), out / "one-low.step")
+    slot = box((30, 10.85, 5.2), (34.9, 19.15, 21))
+    for name, end in (("two", 40.0), ("two-longer", 50.0)):
+        save(bored(box((20, 0, 0), (end, 30, 20))).cut(slot), out / f"{name}.step")
+    save(bored(box((20, 0, 0), (40, 30, 20))), out / "two-plain.step")
+    washers = box((24, 9.5, -1), (29, 20.5, 21))
+    save(bored(box((20, 0, 0), (40, 30, 20)), 5.2).cut(washers), out / "two-low.step")
+    for name, one, two, z, end, more in (
+        ("round-slot", "one", "two", 10.0, 40, {"pocket": 0.15}),
+        ("longer", "one", "two-longer", 10.0, 50, {"pocket": 0.15}),
+        ("sunk", "one-sunk", "two-plain", 10.0, 40, {}),
+        ("tears", "one-low", "two-low", 5.2, 40, {}),
+    ):
+        parts: Rows = [
+            {"name": "one", "file": f"{one}.step", "layers": "z"},
+            {"name": "two", "file": f"{two}.step", "layers": "z"},
+        ]
+        joint: dict[str, Any] = {"between": ["one", "two"], **M5, **more, "at": [[20, 15, z]]}
+        assembly(out / f"{name}.json", parts, [joint], [{"plane": f"x={end}", "how": "fixed"}])
+
+
 #: The dovetailed bars (mqucifer/print-shop#170), as the tests' arithmetic reads them. Both are
 #: `BAR_W` wide along x and meet on the plane y 0: the socket's bar behind it, the tail's in
 #: front, lapped from `LAP[0]` up to `LAP[1]`.
@@ -561,6 +599,7 @@ def main() -> None:
     loads()
     throughs()
     peaks()
+    shears()
     dovetails()
     plays()
     out = Path("snap")

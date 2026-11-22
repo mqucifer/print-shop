@@ -382,6 +382,21 @@ def test_two_holes_are_one_way_through_where_they_meet_end_to_end() -> None:
     assert "aren't on one axis" in through.meet(lower, aside)
 
 
+def test_a_triangle_across_the_stretchs_end_is_loaded_over_the_part_between() -> None:
+    """mqucifer/print-shop#245: 12 mm² from z 0 to 6. Between 0 and 6 it's all there, with its
+    own middle; cut at 3, the trapezium of 9 under and the 3 over; past it, none."""
+    corners = [np.array([0.0, 0, 0]), np.array([4.0, 0, 0]), np.array([0.0, 0, 6])]
+    area, middle = through.between(corners, Z, 0, 6)
+    assert area == 12 and middle == pytest.approx([4 / 3, 0, 2])
+    under, low = through.between(corners, Z, -10, 3 - through.SAME)
+    assert under == pytest.approx(9) and low == pytest.approx([14 / 9, 0, 4 / 3])
+    over, high = through.between(corners, Z, 3 + through.SAME, 10)
+    assert over == pytest.approx(3) and high == pytest.approx([2 / 3, 0, 4])
+    assert through.between(corners, Z, 7, 9)[0] == 0
+    assert through.between(corners, Z, -9, -1)[0] == 0
+    assert through.between(corners, -Z, -6, 0)[0] == 12, "the axis the other way"
+
+
 def walls(flats: float, sides: int = 6, floor: float = 8.0, top: float = 12.0) -> list[dict]:  # type: ignore[type-arg]
     """A pocket's flat walls round the axis through (20, 20), as rows: each facing the axis
     from half of `flats` away, standing from `floor` to `top`."""

@@ -1626,6 +1626,19 @@ def _through(
                             f"{said(leans / by_mesh, wall_most, 2)} MPa by the mesh's area, "
                             f"either side of its {wall_most:g} MPa"
                         )
+                if leans > NOTHING * force:
+                    # The wall that took the shear, beside the stretch the pressure is read on
+                    # (mqucifer/print-shop#245).
+                    end["sheared_mm2"] = fine["sheared_mm2"]
+                    report.line(
+                        f"  the solve round it puts the shear on {fine['sheared_mm2']:.2f} mm² "
+                        f"of {part.name}'s round wall, the half leant on"
+                        + (", less the peak," if peaked else "")
+                        + " of the "
+                        f"{side['hole_length_mm']:.2f} mm from where the parts meet to the "
+                        f"seat, and none past them, as "
+                        f"joints.{name}.bolts.{index}.ends.{k}.sheared_mm2"
+                    )
                 report.line(
                     f"  the plastic round it in {part.name}, cut off {fine['held_mm']:.1f} mm "
                     f"from the bolt's axis and held there, under the bolt's pull and shear "
