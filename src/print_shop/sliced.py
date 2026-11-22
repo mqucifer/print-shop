@@ -49,6 +49,7 @@ from xml.etree import ElementTree
 from pydantic import BaseModel
 
 from print_shop.inventory import Material
+from print_shop.materials import material_name
 from print_shop.slicer.store import KINDS, Store, choose
 
 if TYPE_CHECKING:
@@ -682,9 +683,11 @@ def loaded_mismatch(file: SlicedFile, material: Material, store: Store | None) -
     """Where the file names another nozzle or filament than is fitted and loaded, each a
     sentence; [] when it names the same.
 
-    The nozzle is its diameter. The filament is its type, and, where the store knows the
-    file's filament profile by name, its variety too. A profile the store doesn't know is
-    compared by type alone.
+    The nozzle is its diameter. The filament is its type, read on both sides through
+    `material_name`, and, where the store knows the file's filament profile by name, its variety
+    too. A profile the store doesn't know is compared by its type as written: Orca has true PET
+    presets that say `PET` as Bambu's PETG does, so there another spelling isn't taken
+    (mqucifer/print-shop#217).
     """
     found = []
     where = material.printer_id
@@ -693,12 +696,16 @@ def loaded_mismatch(file: SlicedFile, material: Material, store: Store | None) -
                      f"nozzle on {where} is {material.nozzle_mm:g} mm")
     loaded = (f"loaded on {where} is spool #{material.spool_id}, {material.variety} "
               f"({material.type}), {material.colour}")
-    if file.filament_type and file.filament_type.casefold() != material.type.casefold():
-        found.append(f"the file is sliced for {file.filament_type} ('{file.filament}'), and "
-                     f"{loaded}")
+    written = file.filament_type
+    if written and material_name(written) != material_name(material.type):
+        found.append(f"the file is sliced for {written} ('{file.filament}'), and {loaded}")
         return found
     variety = next((p.variety for p in (store.all("filament") if store else ())
                     if p.name == file.filament), None)
+    if variety is None and written and written.casefold() != material.type.casefold():
+        found.append(f"the file is sliced for {written} ('{file.filament}'), a profile "
+                     f"print-shop doesn't know, so it isn't taken to be {material.type}, and "
+                     f"{loaded}")
     if variety is not None and variety.casefold() != material.variety.casefold():
         found.append(f"the file's filament profile, '{file.filament}', is {variety}, and "
                      f"{loaded}")
