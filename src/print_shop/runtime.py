@@ -18,7 +18,9 @@ from print_shop.expert.client import LLMConfig
 from print_shop.inventory import Material
 from print_shop.ledger import Ledger, Row, ledger_path
 from print_shop.orchestrator.daemon import Daemon
+from print_shop.orchestrator.live import Step
 from print_shop.orchestrator.outcome import end_name
+from print_shop.outcome_words import outcome_words
 from print_shop.printer.camera import camera_for_prints
 from print_shop.printer.centauri import (
     CentauriClient,
@@ -102,6 +104,7 @@ def build_run(
     reviewer: Reviewer | None = None,
     show: Callable[[str], None] | None = None,
     store: Store | None = None,
+    on_step: Callable[[str, str, Step], None] | None = None,
 ) -> Run:
     """A daemon wired to the real broker, Orca, LiteLLM, ledger and a read-only watcher.
 
@@ -119,6 +122,8 @@ def build_run(
     A hand-sliced file (`daemon.submit_sliced`, mqucifer/print-shop#164) uses none of those:
     `show` is where its slice's report is shown before the gate, and `store` the profiles its
     settings are sorted by.
+
+    `on_step` is where a job's step goes for a second start to be told (`orchestrator/live.py`).
 
     Raises:
         RuntimeError, FileNotFoundError: On missing settings, before a job starts.
@@ -164,6 +169,7 @@ def build_run(
         camera=camera_for_prints(),
         show=show,
         store=store,
+        on_step=on_step,
     )
     return Run(daemon=daemon, ledger=ledger, recorder=recorder)
 
@@ -196,8 +202,8 @@ def describe(row: Row) -> str:
     lines += [
         f"ended          {row.ended_at or '-'}"
         + (f"  (printer: {end_name(row.printer_end_status)})" if row.ended_at else ""),
-        f"outcome        {row.result or 'open: no answer yet'}"
-        + (f", {row.symptom}" if row.symptom else "")
+        "outcome        "
+        + (outcome_words(row.result, row.symptom) if row.result else "open: no answer yet")
         + (f" — {row.note}" if row.note else ""),
     ]
     return "\n".join(lines)

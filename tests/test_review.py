@@ -17,7 +17,6 @@ from typing import Any
 
 import pytest
 
-from print_shop.core.mqtt import command_topic
 from print_shop.core.state import AppliedOrientation, SliceResult
 from print_shop.ledger import Ledger
 from print_shop.orchestrator.daemon import Daemon
@@ -246,7 +245,7 @@ def setup(tmp_path: Path) -> Iterator[tuple[Daemon, Sponsor, RecordedSlicer, Led
                     printer=FramePrinter(), slicer=slicer, bridge=lambda cfg: bridge,
                     ledger=ledger, proposer=Proposer(ask=_model, ask_questions=_questions),
                     asker=replay_asker(ANSWERS), reviewer=sponsor)
-    daemon.press = lambda d: bridge.deliver(command_topic(CFG), {"decision": d})  # type: ignore[attr-defined]
+    daemon.press = lambda d: bridge.press(CFG, d)  # type: ignore[attr-defined]
     with daemon:
         yield daemon, sponsor, slicer, ledger, write_stl("cube", tmp_path)
 

@@ -18,7 +18,6 @@ from typing import Any
 import pytest
 import trimesh
 
-from print_shop.core.mqtt import command_topic
 from print_shop.core.state import AppliedOrientation, SliceResult
 from print_shop.desk import again
 from print_shop.desk.page import _change_rows
@@ -1083,7 +1082,7 @@ def run(tmp_path: Path, ledger: Ledger, profiles: SlicerProfiles) -> Run:
             job_id = daemon.submit(stl, as_laid=as_laid)
             daemon.wait_for_gate(job_id, timeout_s=30)
             if daemon.pending_gate() is not None:
-                bridge.deliver(command_topic(CFG), {"decision": "approve"})
+                bridge.press(CFG, "approve")  # a press names its job
             daemon.wait_for_finish(job_id, timeout_s=30)
         return ledger.get(job_id), sponsor, slicer
 

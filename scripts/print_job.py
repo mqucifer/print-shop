@@ -44,6 +44,12 @@ hour for the slice to reach the approval gate starts when the review is approved
 then waits an hour for Approve or Reject, and says by when. A wait that runs out ends the job
 in one sentence, with a ledger row saying it timed out, and nothing printed.
 
+**Each gate says which it is** (mqucifer/print-shop#200). A part whose mesh isn't closed stops
+at the mesh gate first, before any question or slice: it's shown with its reason, the mesh's
+facts, and what Approve and Reject each do there. Approved, the job goes on through the questions
+and the review to the approval gate, the only gate that can start a print, and that is shown in
+turn. Today such a job fails when that gate is answered, and nothing prints.
+
 **This is the only place that arms the printer,** and only when the invocation
 says so: `PRINT_AGENT_ALLOW_HARDWARE=1` on this command's own line. Without it
 the job slices, parks at the approval gate in Home Assistant, and an approval
@@ -71,6 +77,11 @@ job marked as a reprint of it, refused if the kept file has changed. Either is r
 file names another filament or nozzle than the inventory says is loaded and fitted, unless
 `--loaded-ok` says to print it with what's loaded.
 
+**One runs at a time** (mqucifer/print-shop#207). A part, `--sliced`, `--again` and `--serve`,
+armed or not, first take a lock that goes when the process does. A second start says in one
+sentence what's running and exits 2, having published and started nothing. `--list`, `--filaments`,
+the print desk and `stock.py` run beside a job.
+
 **What a job shows here is also kept in its folder,** as `jobs/<id>/job.log`, with each answer
 typed, so it can be read after it's scrolled past (mqucifer/print-shop#139): by the print desk,
 `scripts/print_desk.py`, and by the operator. No key, token or password is written to it.
@@ -89,11 +100,13 @@ from pathlib import Path
 
 from print_shop import sliced
 from print_shop.arming import ALLOW_HARDWARE_ENV, hardware_allowed
+from print_shop.core.contracts import Gate
 from print_shop.env import SETTINGS_PATH, load_env
 from print_shop.inventory import SETUP, Inventory, InventoryError, Material
 from print_shop.joblog import LOG_NAME, JobLog, secrets
 from print_shop.ledger import Ledger, ledger_path
 from print_shop.orchestrator.daemon import GATE_WAIT_S
+from print_shop.orchestrator.live import AlreadyLive, Live, only_live
 from print_shop.orchestrator.outcome import no_frames
 from print_shop.printer.centauri import FrameRecorder, PrinterClient, live_printer
 from print_shop.runtime import (
@@ -171,17 +184,36 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--plate and --loaded-ok go with --sliced or --again")
     if args.project is not None and args.sliced is None:
         parser.error("--project goes with --sliced: a reprint keeps its original's overrides")
-    if (args.stl is None and not by_hand) or args.serve or args.list or args.filaments:
-        return _main(parser, args, None)
-    # A job: what it shows is kept in its folder too (mqucifer/print-shop#139).
-    job_log = JobLog(secrets(args.settings))
-    with job_log.capturing():
-        given = sys.argv[1:] if argv is None else argv
-        job_log.write(_header(args.stl or args.sliced, given))
-        try:
-            return _main(parser, args, job_log)
-        finally:
-            job_log.close()
+    a_job = args.stl is not None or by_hand
+    if args.list or args.filaments or not (a_job or args.serve):
+        return _main(parser, args)  # it only reads, or has nothing to do: no lock
+    try:
+        # Before the inventory, the profiles' composing, the arming and the broker: a second
+        # start mustn't write over what the live job slices with, or publish over its gate.
+        with only_live(WORK_DIR, ledger_path(args.settings), _part(args)) as live:
+            if args.serve:
+                return _main(parser, args, live=live)
+            # A job: what it shows is kept in its folder too (mqucifer/print-shop#139).
+            job_log = JobLog(secrets(args.settings))
+            with job_log.capturing():
+                given = sys.argv[1:] if argv is None else argv
+                job_log.write(_header(args.stl or args.sliced, given))
+                try:
+                    return _main(parser, args, job_log, live)
+                finally:
+                    job_log.close()
+    except AlreadyLive as refused:
+        print(refused, file=sys.stderr)
+        return 2
+
+
+def _part(args: argparse.Namespace) -> str | None:
+    """The part as a refused second start is told it, until the job has its own name for it."""
+    if args.serve:
+        return None
+    if args.again is not None:
+        return f"a reprint of job {args.again}"
+    return Path(args.stl or args.sliced).name
 
 
 def _header(part: Path | None, given: list[str]) -> str:
@@ -266,7 +298,7 @@ def _hand_sliced(args: argparse.Namespace, job_log: JobLog | None) -> sliced.Sli
 
 
 def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
-          job_log: JobLog | None) -> int:
+          job_log: JobLog | None = None, live: Live | None = None) -> int:
     read: Callable[[str], str] = job_log.reader(input) if job_log is not None else input
     if args.filaments:
         print(describe_store(Store(STORE_DIR)))
@@ -359,6 +391,7 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
         reviewer=cli_reviewer(read=read) if hand_sliced is None else None,
         show=print if hand_sliced is not None else None,
         store=Store(STORE_DIR) if hand_sliced is not None else None,
+        on_step=live.at if live is not None else None,
     )
     try:
         with run.daemon:
@@ -381,22 +414,21 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
             else:
                 how = "kept as laid" if args.as_laid else "orienting"
                 print(f"Job {job_id}: {how}, then a few questions about the part, here.")
-            try:
-                run.daemon.wait_for_gate(job_id, timeout_s=APPROVAL_WAIT_S)
-            except TimeoutError as ran_out:
-                print(ran_out)  # the sentence, and the ledger's row is written
-                return 1
-            gate = run.daemon.pending_gate()
-            if gate is not None:
-                print("At the approval gate. Approve or Reject on the dashboard.")
-                print(f"  time        {int(gate.get('print_time_s') or 0) // 60} min")
-                print(f"  plastic     {gate.get('filament_cm3')} cm3")
-                if hand_sliced is None:
-                    print(f"  turned      {gate.get('orientation_deg')}")
-                print(f"  because     {gate.get('orientation_rationale')}")
-                if gate.get("pause"):
-                    print(f"  SWAP        {gate['pause']}: be at the printer for it")
+            shown = 0
+            while True:  # a gate at a time, to the one before printing
+                try:
+                    gate = run.daemon.wait_for_gate(job_id, APPROVAL_WAIT_S, shown)
+                except TimeoutError as ran_out:
+                    print(ran_out)  # the sentence, and the ledger's row is written
+                    return 1
+                if gate is None:
+                    break  # it ended first
+                shown += 1
+                for line in _gate_lines(gate, turned=hand_sliced is None):
+                    print(line)
                 print(f"  answer by   {_answer_by(gate)}; after that it ends and nothing prints")
+                if gate.get("gate") == Gate.BEFORE_PRINT:
+                    break
             try:
                 result = run.daemon.wait_for_finish(job_id, timeout_s=GATE_WAIT_S + FINISH_WAIT_S)
             except TimeoutError:
@@ -407,7 +439,7 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
                 result = None
             ended = run.ledger.unprinted(job_id)
             if ended is not None:
-                print(ended.detail)  # the approval gate's own wait ran out
+                print(ended.detail)  # a gate's own wait ran out
                 return 1
             if result is not None and result.error:
                 print(f"The job ended without printing: {result.error}")
@@ -439,6 +471,48 @@ def _watch(run: Run, job_id: str) -> int:
     else:
         print(f"frames         {no_frames(run.ledger.frames_missed(job_id))}")
     return 0
+
+
+def _gate_lines(gate: dict[str, object], *, turned: bool) -> list[str]:
+    """A gate as the terminal, and so the job's log, shows it (mqucifer/print-shop#200).
+
+    `turned` is False for a hand-sliced file, which nothing turns.
+    """
+    lines = [f"At {Gate.named(gate)}. Approve or Reject on the dashboard."]
+    if gate.get("gate") == Gate.BEFORE_PRINT:
+        seconds = gate.get("print_time_s")
+        lines += [f"  time        {int(seconds) // 60 if isinstance(seconds, int | float) else 0}"
+                  " min",
+                  f"  plastic     {gate.get('filament_cm3')} cm3"]
+        if turned:
+            lines.append(f"  turned      {gate.get('orientation_deg')}")
+        lines.append(f"  because     {gate.get('orientation_rationale')}")
+        if gate.get("pause"):
+            lines.append(f"  SWAP        {gate['pause']}: be at the printer for it")
+        return lines
+    lines.append(f"  because     {gate.get('reason') or 'it gave no reason'}")
+    if gate.get("gate") != Gate.REVIEW_PROPOSAL:
+        return lines
+    lines[0] = (f"At {Gate.named(gate)}, before any question or slice. "
+                "Approve or Reject on the dashboard.")
+    closed = gate.get("is_manifold")
+    volume, box = gate.get("volume_mm3"), gate.get("bbox_mm")
+    lines.append(f"  is_manifold {closed}")
+    if isinstance(volume, int | float):
+        lines.append(f"  volume_mm3  {volume:.0f}")
+    elif closed is False:
+        lines.append("  volume_mm3  None: a mesh that isn't closed has no volume")
+    if isinstance(box, list | tuple):
+        lines.append(f"  bbox_mm     {' x '.join(f'{round(side, 1):g}' for side in box)}")
+    stopped = ("a mesh this gate calls untrustworthy" if closed is False
+               else "a part this gate stopped")
+    return [
+        *lines,
+        f"  Approve     goes on to slice {stopped}, as the file lays it: the questions and the "
+        "review follow, then the gate before printing, where today the job fails whatever you "
+        "answer. Nothing prints.",
+        "  Reject      ends the job: nothing is sliced or printed",
+    ]
 
 
 def _answer_by(gate: dict[str, object]) -> str:

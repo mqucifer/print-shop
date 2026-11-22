@@ -35,6 +35,7 @@ belongs to (`reach.profile_of`). Then each is read back from the slice
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -42,6 +43,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
+from print_shop.bench.pausing import TOPS_OUT
 from print_shop.materials import material_name
 from print_shop.setup.context import PartContext, refuses
 from print_shop.setup.features import Feature
@@ -436,9 +438,11 @@ def _notes(f: PartFacts) -> list[str]:
     return notes
 
 
-#: A colour change at a height, asked for at the review (mqucifer/print-shop#119). It's no
-#: preset's setting but Orca's own pause, from the machine's pause G-code (`M600` on the
-#: Centauri Carbon), so `apply` makes it one. Each name here is the same thing; `none` removes it.
+#: A pause at a height, asked for at the review: a colour change (mqucifer/print-shop#119), or
+#: parts dropped in. It comes after the layer that tops out at that height, as the bench's
+#: `pause` gives it (`bench.pausing`, mqucifer/print-shop#203). It's no preset's setting but
+#: Orca's own pause, from the machine's pause G-code (`M600` on the Centauri Carbon), so `apply`
+#: makes it one. Each name here is the same thing; `none` removes it.
 PAUSE = "pause_at"
 PAUSE_NAMES = (PAUSE, "colour_change", "color_change")
 
@@ -455,17 +459,17 @@ def pose_value(rotation_deg: tuple[float, float, float]) -> str:
 
 
 def pause_z(process: dict[str, Any], z: float) -> float:
-    """The top of the first layer at or above `z`, from the process's own layer heights.
+    """What Orca is given to pause after the layer that tops out at `z`: the next layer's top,
+    from the process's own layer heights (mqucifer/print-shop#203).
 
     Orca puts a pause on the layer whose top is nearest the height it's given, a tie going to
-    the lower, and runs it before that layer prints (`PauseAt`). Given a layer's own top, it
-    lands on that layer: the first that reaches `z`, so everything from `z` up is the new colour.
+    the lower, and runs it before that layer prints (`PauseAt`). So it's the first layer topping
+    out above `z`: everything up to `z` is under the pause, and that layer is the first over it.
+    Where no layer tops out at `z`, the review says so from the G-code.
     """
     first = float(_first(process.get("initial_layer_print_height", "0.2")) or 0.2)
     height = float(_first(process.get("layer_height", "0.2")) or 0.2)
-    if z <= first:
-        return round(first, 3)
-    steps = -(-round((z - first) / height, 6) // 1)  # up to the next whole layer
+    steps = max(0, math.floor((z + TOPS_OUT - first) / height) + 1)
     return round(first + steps * height, 3)
 
 
@@ -522,8 +526,8 @@ def apply(profiles: SlicerProfiles, proposal: Proposal, workdir: Path) -> Slicer
     """`profiles` with the changes written into whole copies of the process and filament.
 
     Each is written to the profile it belongs to (`reach.profile_of`). A filament setting is a
-    per-extruder list in Orca's JSON; the CC1 has one. A colour change (`PAUSE`) is Orca's own
-    pause, at the first layer at or above its height.
+    per-extruder list in Orca's JSON; the CC1 has one. A pause (`PAUSE`) is Orca's own, after
+    the layer that tops out at its height, by the layer heights these changes leave.
 
     Raises:
         NotPlaced: If a change's key can't be placed in a profile. Nothing is written: not to
@@ -533,7 +537,7 @@ def apply(profiles: SlicerProfiles, proposal: Proposal, workdir: Path) -> Slicer
 
     process = json.loads(profiles.process.read_text())
     filament = json.loads(profiles.filament.read_text()) if profiles.filament else {}
-    pauses: list[PauseAt] = []
+    asked: list[Change] = []
     # Placed by the presets as they were, before this writes to either.
     tiers = {c.key: profile_of(c.key, process, filament) for c in proposal.changes}
     refused = [f"{c.key}={c.value}: {unplaced(c.key, process, filament)}"
@@ -543,13 +547,14 @@ def apply(profiles: SlicerProfiles, proposal: Proposal, workdir: Path) -> Slicer
     for change in proposal.changes:
         if change.key == PAUSE:
             if change.value != "none":
-                pauses.append(PauseAt(print_z=pause_z(process, float(change.value)),
-                                      message=change.reason))
+                asked.append(change)
             continue
         if tiers[change.key] == "filament":
             filament[change.key] = [change.value]
         else:
             process[change.key] = change.value
+    # Last, as a layer height changed beside a pause moves the layer after it.
+    pauses = [PauseAt(print_z=pause_z(process, float(c.value)), message=c.reason) for c in asked]
     workdir.mkdir(parents=True, exist_ok=True)
     out_process = workdir / "process_proposed.json"
     out_process.write_text(json.dumps(process, indent=2))

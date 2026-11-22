@@ -2,5 +2,6 @@
 
 `docs/bench.md` says what each command returns. `host.py` runs on the machine and holds the
 container's limits. Everything else runs inside the image, where CadQuery, Manifold and
-Shapely are, and is imported only there.
+Shapely are, and is imported only there, but `pausing.py`: what a pause height means, which the
+print side imports too.
 """

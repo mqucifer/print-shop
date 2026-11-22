@@ -96,6 +96,27 @@ def test_describe_says_an_open_print_is_open(tmp_path: Path) -> None:
     assert "(printer: completed)" in describe(row)
 
 
+@pytest.mark.parametrize(
+    ("symptom", "note", "said"),
+    [
+        (Symptom.NONE, "", "success"),
+        (Symptom.STRINGING, "", "success, with stringing"),
+        (Symptom.OTHER, "a scuff", "success, with other — a scuff"),
+    ],
+)
+def test_describe_says_a_success_and_its_flaw(
+    tmp_path: Path, symptom: Symptom, note: str, said: str
+) -> None:
+    with Ledger(tmp_path / "l.sqlite") as ledger:
+        ledger.record_start_requested(record())
+        ledger.record_started("job-1")
+        ledger.record_ended("job-1", 9)
+        ledger.record_answer("job-1", Answer(result=Result.SUCCESS, symptom=symptom, note=note))
+        row = ledger.get("job-1")
+    assert row is not None
+    assert describe(row).splitlines()[-1] == f"outcome        {said}"
+
+
 def _script() -> ModuleType:
     path = Path(__file__).resolve().parents[1] / "scripts" / "print_job.py"
     spec = importlib.util.spec_from_file_location("print_job", path)

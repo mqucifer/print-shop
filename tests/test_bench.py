@@ -1330,6 +1330,10 @@ def test_the_pause_layer_from_the_heights(bench: Any) -> None:
     assert row["pause_top_z"] == pytest.approx(3.0)
     assert row["room_over_pane_mm"] == pytest.approx(0.0)
     assert "Nothing was sliced" in answer.text
+    # In the review's own words (mqucifer/print-shop#203).
+    said = "pause after layer 15, at z=3, before layer 16, at z=3.2"
+    assert answer.text.startswith(f"verdict: OK: {said}:"), answer.text
+    assert f", {said}, pane top" in answer.text, "and each opening's line"
 
 
 def test_a_first_layer_of_a_different_height_shifts_the_count(bench: Any) -> None:

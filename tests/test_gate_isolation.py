@@ -38,8 +38,9 @@ from print_shop.env import SETTINGS_PATH
 from print_shop.orchestrator.daemon import Decision
 from tests.live import broker_config
 
-APPROVE = json.dumps({"decision": "approve"}).encode()
-REJECT = json.dumps({"decision": "reject"}).encode()
+JOB = "job-under-test"
+APPROVE = json.dumps({"decision": "approve", "job_id": JOB}).encode()
+REJECT = json.dumps({"decision": "reject", "job_id": JOB}).encode()
 
 
 def _env_present() -> bool:

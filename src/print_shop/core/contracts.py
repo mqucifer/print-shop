@@ -22,7 +22,7 @@ the corrector has to update fields by name.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from dataclasses import field as dc_field
 from enum import StrEnum
@@ -306,6 +306,20 @@ class Gate(StrEnum):
     BEFORE_PRINT = "gate.before_print"
     AFTER_FAILURE = "gate.after_failure"
     REVIEW_PROPOSAL = "gate.review_proposal"
+
+    @staticmethod
+    def named(payload: Mapping[str, object]) -> str:
+        """A parked gate as a person is told it, from its payload. Only the gate before printing
+        is "the approval gate" (mqucifer/print-shop#200)."""
+        kind = payload.get("gate")
+        if kind == Gate.BEFORE_PRINT:
+            return "the approval gate"
+        if kind == Gate.REVIEW_PROPOSAL:
+            if payload.get("is_manifold") is False:
+                return "the mesh gate"
+            if payload.get("is_manifold") is True:
+                return "the pose gate"
+        return str(kind) if kind else "a gate that doesn't say which it is"
 
 
 #: Nodes that command the printer. Every inbound edge must come from a Gate.
