@@ -49,7 +49,9 @@ class Doubting:
     def start(cls, offer: Offering, ask: Ask | None) -> Doubting | None:
         """Begun for the most similar print, where there are differences to read and a model."""
         past = offer.options[0] if offer.options else None
-        if ask is None or past is None or past.same_file or not past.differs or not past.items:
+        if ask is None or past is None or past.same_file or not past.items:
+            return None
+        if not past.all_differences():
             return None
         return cls(past, ask)
 
@@ -81,7 +83,7 @@ class Doubting:
         user = "\n".join([
             f"The past print: {past.stl_name}, {past.came_out}.",
             "How this part differs from it:",
-            *(f"- {d}" for d in past.differs),
+            *(f"- {d}" for d in past.all_differences()),
             "What's offered:",
             *(f"- {i.key}={i.value}: {i.reason}" for i in past.items),
         ])

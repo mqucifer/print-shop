@@ -205,10 +205,10 @@ def test_then_the_closest_by_its_measures_and_another_can_be_picked(
     found = offering(ledger, this(box(tmp_path, "plinth.stl", 60, 40, 12)))
     assert [p.job_id for p in found.options] == ["near", "far"]
     near = found.options[0]
-    assert "like this part: shape " in near.why
-    assert any("mm long (62 then)" in d for d in near.differs)
+    assert "(shape " in near.why
+    assert ("length", 62.0, 60.0, "") in near.measures
     assert near.came_out == "success"
-    other = found.like(2)
+    other = found.pick(2)
     assert isinstance(other, Offering) and other.past is not None
     assert other.past.job_id == "far"
     assert "the part is unlike it" in why_not(other, "wall_loops")
@@ -244,7 +244,7 @@ def test_a_print_with_nothing_decided_isnt_offered(tmp_path: Path, ledger: Ledge
         key="wall_loops", preset="2", value="3", reason="a model's", source=Source.MODEL),))
     found = offering(ledger, this(here))
     assert found.options == ()
-    assert "Use these: no past print has settings to offer." in render(request_for(found))
+    assert "USE THESE: no past print has settings to offer." in render(request_for(found))
 
 
 # --------------------------------------------------------------------------
@@ -284,13 +284,14 @@ def test_all_that_decided_a_print_is_offered_each_with_whose_it_was_and_why(
     found = offering(ledger, this(here))
     items = standings(found)
     assert list(items) == ["wall_loops", "seam_position", "enable_support", "top_shell_layers"]
+    assert items["top_shell_layers"][0].reason == "you chose 'screws': firmer"
     assert all(standing.selected for _, standing in items.values())
-    text = render(request_for(found))
-    assert "Use these: what decided the most similar past print (not applied unless" in text
-    assert "  [x] 1) wall_loops  2 -> 4" in text
-    assert "you, on plinth.stl: it gets handled (fits: it's the same file)" in text
-    assert "you, taking the slice's, on plinth.stl: the walls are seen" in text
-    assert "your answer, on plinth.stl: you chose 'screws': firmer" in text
+    text = " ".join(render(request_for(found)).split())
+    assert "USE THESE: from plinth.stl," in text and "None is applied until you use it." in text
+    assert "YOUR OVERRIDES now -> use [x] 1 wall_loops 2 -> 4 it gets handled" in text
+    assert "seam_position aligned -> back the walls are seen; you took the slice's" in text
+    assert "YOUR ANSWERS THEN (not asked for this job)" in text
+    assert "you chose 'screws': firmer" in text
     assert "you answered then: Where is it used? -> indoors" in text
     assert "bridge_speed" not in items, "a model's choice isn't the person's"
     assert "use what decided that print (use, or use 1 3)," in text
@@ -316,17 +317,16 @@ def test_a_near_file_just_across_a_traits_threshold_still_gets_the_lessons_setti
     item, standing = standings(found)["brim_type"]
     assert standing.selected
     assert item.notes == (
-        f"lesson {lesson} doesn't reach this part by itself, as it isn't large_bed_contact "
-        "(5000 mm2 or more touches the plate): bed_contact is 4950 here",
+        "doesn't reach this part by itself: it isn't large_bed_contact (bed_contact 4950 here)",
     )
-    assert item.fits == "4950 mm2 on the plate here, 5050 then"
+    assert item.fits == "about the same area on the plate"
     assert found.past is not None
-    assert "this isn't large_bed_contact, as that was (5000 mm2 or more touches the plate)" in (
-        found.past.differs)
+    across = "not large_bed_contact now: 5000 mm2 or more touches the plate"
+    assert ("bed_contact", 5050.0, 4950.0, across) in found.past.measures
     text = " ".join(render(request_for(found)).split())
-    assert "differs: 4950 mm2 on the plate (5050 then)" in text
-    assert f"lesson {lesson}, on slab.stl: learned on slab.stl: a big face lifts" in text
-    assert "note: lesson" in text
+    assert "area on the plate 5050 4950 mm2 not large_bed_contact now: 5000 mm2" in text
+    assert f"lesson {lesson}; learned on slab.stl: a big face lifts" in text
+    assert "doesn't reach this part by itself" in text
 
 
 def test_a_lesson_far_from_its_trait_is_shown_unselected(tmp_path: Path, ledger: Ledger) -> None:
@@ -339,8 +339,7 @@ def test_a_lesson_far_from_its_trait_is_shown_unselected(tmp_path: Path, ledger:
         key="seam_position", preset="aligned", value="back", source=Source.LESSON, lesson=lesson,
         reason="learned on slab.stl: a big face shows its corners"),))
     found = offering(ledger, this(box(tmp_path, "slab.stl", 40, 50, 12)))
-    assert "2000 mm2 on the plate here, and 5050 mm2 on the plate then" in why_not(
-        found, "seam_position")
+    assert "its area on the plate is too far from that part's" in why_not(found, "seam_position")
 
 
 def test_a_lesson_retired_since_is_shown_and_not_selected(tmp_path: Path, ledger: Ledger) -> None:
@@ -430,7 +429,7 @@ def test_supports_decided_for_no_overhang_are_in_doubt_over_one(
 ) -> None:
     printed(ledger, "first", write_stl("cube", tmp_path), (yours("enable_support", "0"),))
     found = offering(ledger, this(write_stl("tee", tmp_path)))
-    assert "mm2 of overhang here, and 0 mm2 of overhang then" in why_not(found, "enable_support")
+    assert why_not(found, "enable_support") == "its overhang is too far from that part's"
 
 
 def test_a_pause_outside_this_part_cant_be_used(
@@ -573,13 +572,13 @@ def test_any_can_be_cleared(two: Offering) -> None:
     every = parse_answer("clear", request_for(two))
     assert isinstance(every, Review) and every.offering is not None
     assert parse_answer("use", request_for(every.offering)) == (
-        "nothing is selected: name one by its number, such as use 1")
+        "nothing is ticked: name one by its number, such as use 1")
 
 
 def test_another_print_is_looked_at_before_its_used(two: Offering) -> None:
-    assert parse_answer("like 2; use", request_for(two)) == (
-        "look at that print's settings first: like picks it, then use")
-    picked = parse_answer("like 2", request_for(two))
+    assert parse_answer("from 2; use", request_for(two)) == (
+        "look at that print's settings first: from picks it, then use")
+    picked = parse_answer("from 2", request_for(two))
     assert isinstance(picked, Review) and picked.browsing and picked.offering is not None
     used = parse_answer("use", request_for(picked.offering))
     assert isinstance(used, Review)
@@ -596,8 +595,8 @@ def test_typed_wins_over_used(two: Offering) -> None:
 @pytest.mark.parametrize(("answer", "why"), [
     ("use 9", "a number from 1 to 3"),
     ("clear 0", "a number from 1 to 3"),
-    ("like 7", "like picks a print from 1 to 2"),
-    ("like", "like picks one print, such as like 2"),
+    ("from 7", "from picks a print from 1 to 2"),
+    ("from", "from picks one print, such as from 2"),
 ])
 def test_an_unreadable_use_says_why(two: Offering, answer: str, why: str) -> None:
     assert parse_answer(answer, request_for(two)) == why
@@ -619,7 +618,7 @@ def test_what_was_used_shows_as_used_and_isnt_used_twice(two: Offering) -> None:
 
 
 def test_on_the_command_picking_shows_only_the_offer_again(two: Offering) -> None:
-    typed = iter(["like 2", "clear 1", "like 1", "use"])
+    typed = iter(["from 2", "clear 1", "from 1", "use"])
     shown: list[str] = []
     review = cli_reviewer(lambda prompt: next(typed), shown.append)(request_for(two))
     assert [c.key for c in review.corrections] == ["wall_loops", "seam_position"]
@@ -637,6 +636,146 @@ def test_the_offers_lines_fit_the_review(tmp_path: Path, ledger: Ledger) -> None
     lines = offer.render(offering(ledger, this(here)), Proposal(), "0,0,0")
     assert all(len(line) <= offer.WIDTH for line in lines)
     assert " ".join(long.split()) in " ".join(" ".join(lines).split())
+
+
+# --------------------------------------------------------------------------
+# The UX read's findings: answers, a plain ok, and laid out to be read
+# --------------------------------------------------------------------------
+
+
+def answered_print(ledger: Ledger, stl: Path) -> None:
+    printed(ledger, "first", stl, (yours("wall_loops", "4"),), changes=(Change(
+        key="top_shell_layers", preset="4", value="9", source=Source.ANSWER,
+        reason="you chose 'screws': firmer"),))
+
+
+def test_another_files_answer_is_never_ticked(tmp_path: Path, ledger: Ledger) -> None:
+    answered_print(ledger, box(tmp_path, "block.stl", 62, 41, 12))
+    found = offering(ledger, this(box(tmp_path, "plinth.stl", 60, 40, 12)))
+    assert why_not(found, "top_shell_layers") == "you're asked again for each job"
+    assert selected(found, "wall_loops")
+    text = render(request_for(found))
+    assert text.count("you're asked again for each job") == 1
+    assert "YOUR ANSWERS THEN (you're asked again for each job)" in text
+
+
+def test_the_same_files_answer_is_ticked_only_where_this_job_didnt_ask(
+    tmp_path: Path, ledger: Ledger
+) -> None:
+    here = box(tmp_path, "plinth.stl", 60, 40, 12)
+    answered_print(ledger, here)
+    assert selected(offering(ledger, this(here)), "top_shell_layers")
+    asked = offering(ledger, this(here, asked=frozenset({"top_shell_layers"})))
+    assert not selected(asked, "top_shell_layers")
+    same = Proposal(changes=(Change(key="top_shell_layers", preset="4", value="9",
+                                    reason="screws", source=Source.ANSWER),))
+    assert standings(asked, same)["top_shell_layers"][1].mark == "="
+
+
+def test_an_ok_with_ticked_ones_unused_says_so_once(two: Offering) -> None:
+    typed = iter(["ok", "ok"])
+    shown: list[str] = []
+    review = cli_reviewer(lambda prompt: next(typed), shown.append)(request_for(two))
+    assert review == Review(approved=True), "and the second carries nothing"
+    assert shown[1:] == [
+        "  2 ticked aren't used yet: use to take them, or ok again to go on without"]
+
+
+def test_an_ok_then_use_takes_them(two: Offering) -> None:
+    typed = iter(["ok", "use"])
+    review = cli_reviewer(lambda prompt: next(typed), lambda text: None)(request_for(two))
+    assert not review.approved
+    assert [c.key for c in review.corrections] == ["wall_loops", "seam_position"]
+
+
+def test_an_ok_with_none_ticked_goes_on(two: Offering) -> None:
+    cleared = two.clear([])
+    assert isinstance(cleared, Offering)
+    review = cli_reviewer(lambda prompt: "ok", lambda text: None)(request_for(cleared))
+    assert review == Review(approved=True)
+
+
+def test_what_several_items_share_is_said_once(tmp_path: Path, ledger: Ledger) -> None:
+    here = box(tmp_path, "plinth.stl", 60, 40, 12)
+    keys = ["wall_loops", "seam_position", "brim_type", "bridge_speed", "top_shell_layers",
+            "enable_support", "nozzle_temperature", "fan_max_speed"]
+    values = ["4", "back", "outer_only", "25", "9", "0", "215", "40"]
+    reason = "it stands in the hall and is knocked by coats"
+    note = "a corner came away when it was lifted by that corner alone, after a day on the shelf"
+    printed(ledger, "first", here,
+            tuple(yours(k, v, reason) for k, v in zip(keys, values, strict=True)),
+            result="failed", symptom="other", note=note)
+    lines = offer.render(offering(ledger, this(here)), Proposal(), "0,0,0")
+    text = " ".join(" ".join(lines).split())
+    assert "Came out FAILED, other" in text
+    assert text.count("a corner came away") == 1
+    assert text.count("which setting that bears on isn't known") == 1
+    assert "None is ticked: that print failed (other)" in text
+    assert text.count(reason) == 1 and f"1-8: {reason}" in text
+    assert len(lines) <= 22 and all(len(line) <= offer.WIDTH for line in lines)
+    assert "use 1 (none is ticked: by number)" in text
+
+
+def test_differences_read_then_now_in_columns(tmp_path: Path, ledger: Ledger) -> None:
+    printed(ledger, "first", box(tmp_path, "block.stl", 80, 41, 12), (yours("wall_loops", "4"),))
+    found = offering(ledger, this(box(tmp_path, "plinth.stl", 60, 40, 12)))
+    lines = offer.render(found, Proposal(), "0,0,0")
+    head = next(line for line in lines if line.startswith("  Differs"))
+    assert head.split() == ["Differs", "then", "now"]
+    length = next(line for line in lines if line.split()[:1] == ["length"])
+    assert length.split() == ["length", "80", "60", "mm"]
+    assert length.index("80") + 2 == head.index("then") + 4, "right under its heading"
+    assert found.past is not None
+    shares = [abs(a - b) / max(a, b) for _, a, b, _ in found.past.measures]
+    assert shares[0] >= shares[-1], "the largest first"
+
+
+def test_the_groups_share_their_columns_and_lessons_their_words(
+    tmp_path: Path, ledger: Ledger
+) -> None:
+    here = box(tmp_path, "slab.stl", 101, 50, 12)
+    printed(ledger, "seed", here)
+    learned = []
+    for key, value in (("brim_type", "outer_only"), ("top_shell_layers", "8")):
+        n = lessons.write(ledger, "seed", "reviewer: test", "a big face lifts",
+                          ["large_bed_contact"], f"{key}={value}")
+        lessons.accept(ledger, n, "reviewer: test")
+        learned.append(Change(key=key, preset="", value=value, source=Source.LESSON, lesson=n,
+                              reason="learned on slab.stl: a big face lifts"))
+    printed(ledger, "first", here, (yours("wall_loops", "4"),), changes=tuple(learned))
+    lines = offer.render(offering(ledger, this(here)), Proposal(), "0,0,0")
+    assert len({line.index(" -> ") for line in lines if " -> " in line}) == 1
+    assert sum("now -> use" in line for line in lines) == 1
+    assert " ".join(lines).count("learned on slab.stl: a big face lifts") == 1
+
+
+def test_after_a_use_it_says_all_used(tmp_path: Path, ledger: Ledger) -> None:
+    here = box(tmp_path, "plinth.stl", 60, 40, 12)
+    printed(ledger, "first", here, (yours("wall_loops", "4"),))
+    found = offering(ledger, this(here))
+    used = parse_answer("use", request_for(found))
+    assert isinstance(used, Review)
+    lines = offer.render(found, Proposal().corrected(list(used.corrections)), "0,0,0")
+    assert "  USED: 1 wall_loops 4" in lines and lines[-1] == "  All used. ok to go on."
+    assert not any("use (the" in line for line in lines)
+
+
+def test_already_set_and_cant_use_are_said_in_words(tmp_path: Path, ledger: Ledger) -> None:
+    here = box(tmp_path, "plinth.stl", 60, 40, 12)
+    printed(ledger, "first", here, (yours("made_up_key", "1", "a try"), yours("wall_loops", "4")))
+    now = Proposal(changes=(Change(key="wall_loops", preset="2", value="4", lesson=3,
+                                   reason="learned", source=Source.LESSON),))
+    text = "\n".join(offer.render(offering(ledger, this(here)), now, "0,0,0"))
+    assert "ALREADY SET HERE: 2 wall_loops 4 (lesson 3)" in text
+    assert "CAN'T USE 1: 'made_up_key' isn't a setting" in text
+    assert "1 made_up_key 1: a try" in text
+    assert "[=]" not in text and "[-]" not in text
+
+
+def test_another_print_says_what_it_would_give(two: Offering) -> None:
+    text = "\n".join(offer.render(two, Proposal(), "0,0,0"))
+    assert "from 2  block.stl," in text and "bridge_speed 25; success" in text
+    assert "from 2 (another print)" in text
 
 
 # --------------------------------------------------------------------------
@@ -758,7 +897,7 @@ def test_an_override_used_again_says_where_it_began(tmp_path: Path, ledger: Ledg
     found = offering(ledger, this(here))
     item, _ = standings(found)["wall_loops"]
     assert (item.used.job_id, item.used.first_job_id) == ("second", "first")
-    assert "you, on plinth.stl (first on plinth-a.stl, job first)" in render(request_for(found))
+    assert "first on plinth-a.stl, job first" in render(request_for(found))
 
 
 # --------------------------------------------------------------------------
@@ -936,8 +1075,8 @@ def test_past_prints_that_cant_be_read_never_stop_a_print(
     monkeypatch.setattr(graph, "offer_past_prints", broken)
     row, sponsor, _ = run(write_stl("cube", tmp_path), "ok")
     assert row is not None
-    assert "the past prints couldn't be read, so none is offered: ValueError" in render(
-        sponsor.shown[0])
+    assert "the past prints couldn't be read, so none is offered: ValueError" in " ".join(
+        render(sponsor.shown[0]).split())
 
 
 def test_a_hundred_past_prints_are_read_within_seconds(tmp_path: Path, ledger: Ledger) -> None:

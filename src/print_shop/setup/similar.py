@@ -20,8 +20,8 @@ from pathlib import Path
 from print_shop.core.state import Orientation
 from print_shop.setup.features import Feature
 
-__all__ = ["MEASURES", "Likeness", "Numbers", "apart", "differences", "likeness", "measured",
-           "numbers", "posed"]
+__all__ = ["MEASURES", "Likeness", "Numbers", "apart", "differences", "figure", "likeness",
+           "measured", "numbers", "posed"]
 
 #: A part's shape as numbers, by `MEASURES`' names.
 Numbers = dict[str, float]
@@ -32,20 +32,23 @@ class Measure:
     """A number two parts are compared by: how it's said, and the difference that's nothing."""
 
     says: str
+    #: Its name in the offer's table, and in a sentence of it, and its unit.
+    label: str
+    unit: str
     #: Added to the larger of two values, so 0 against a sliver isn't wholly different.
     floor: float
 
 
 MEASURES: dict[str, Measure] = {
-    "height": Measure("mm tall", 2.0),
-    "length": Measure("mm long", 2.0),
-    "width": Measure("mm across", 2.0),
-    "bed_contact": Measure("mm2 on the plate", 50.0),
-    "volume": Measure("mm3 of part", 500.0),
-    "section": Measure("mm typical wall", 0.2),
-    "overhang": Measure("mm2 of overhang", 50.0),
-    "bridge": Measure("mm2 of bridge", 50.0),
-    "flat_top": Measure("mm2 of flat top", 50.0),
+    "height": Measure("mm tall", "height", "mm", 2.0),
+    "length": Measure("mm long", "length", "mm", 2.0),
+    "width": Measure("mm across", "width", "mm", 2.0),
+    "bed_contact": Measure("mm2 on the plate", "area on the plate", "mm2", 50.0),
+    "volume": Measure("mm3 of part", "volume", "mm3", 500.0),
+    "section": Measure("mm typical wall", "typical wall", "mm", 0.2),
+    "overhang": Measure("mm2 of overhang", "overhang", "mm2", 50.0),
+    "bridge": Measure("mm2 of bridge", "bridge", "mm2", 50.0),
+    "flat_top": Measure("mm2 of flat top", "flat top", "mm2", 50.0),
 }
 
 #: What closeness is made of: mostly the part, then its context and where it came from.
@@ -146,14 +149,17 @@ def _words(name: str) -> set[str]:
 
 def measured(name: str, value: float) -> str:
     """A measure in words: "4950 mm2 on the plate"."""
-    return f"{round(value, 2):.10g} {MEASURES[name].says}"
+    return f"{figure(value)} {MEASURES[name].says}"
+
+
+def figure(value: float) -> str:
+    return f"{round(value, 2):.10g}"
 
 
 def differences(here: Numbers, then: Numbers) -> list[str]:
-    """What differs, the most different first, each as this part's and that one's."""
+    """The measures that differ, by name, the most different first."""
     found = sorted(
         ((apart(n, here[n], then[n]), n) for n in MEASURES if n in here and n in then),
         reverse=True,
     )
-    return [f"{measured(n, here[n])} ({round(then[n], 2):.10g} then)"
-            for far, n in found if far > SAID]
+    return [n for far, n in found if far > SAID]

@@ -420,7 +420,7 @@ def build_graph(
                     # Before the proposal's call: the offer waits for no model
                     # (mqucifer/print-shop#211).
                     built = _offering(ledger, state, stl_to_slice, features, applied, profiles,
-                                      build_volume, earlier)
+                                      build_volume, earlier, intake)
                     if offer is None:
                         offer, doubting = built, Doubting.start(built, proposer.doubter())
                     else:
@@ -893,7 +893,7 @@ class _Turned(Exception):  # noqa: N818 - a signal, not an error
 def _offering(
     ledger: Ledger, state: PrintJobState, posed: str | Path, features: Any,
     applied: AppliedOrientation, profiles: SlicerProfiles,
-    build_volume: tuple[float, float, float] | None, earlier: list[Change],
+    build_volume: tuple[float, float, float] | None, earlier: list[Change], intake: Intake,
 ) -> Offering:
     """What decided the past prints most like this part, in this pose (mqucifer/print-shop#211).
     Never in a print's way: what fails is said at the review, and nothing is offered."""
@@ -917,6 +917,7 @@ def _offering(
             filament=filament, filament_names=tuple(dict.fromkeys(n for n in names if n)),
             candidates=state.get("orientation_candidates", ()), build_volume_mm=build_volume,
             context=state.get("part_context"), pose_chosen=chosen,
+            asked=frozenset(k for q in intake.questions for o in q.options for k in o.settings),
         ))
     except Exception as exc:  # noqa: BLE001 - a print is never stopped by what it might reuse
         logger.warning("the past prints couldn't be read for the offer: %s", exc)

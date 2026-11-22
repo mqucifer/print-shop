@@ -22,7 +22,8 @@ applied otherwise.
 
 **Use these** (mqucifer/print-shop#211, `offer.py`): what decided the most similar past print,
 pre-selected, each with why. `use` takes the selected ones, `use 2 4` those numbered, `clear 3`
-clears one and `like 2` picks another print. Only `use` applies any.
+clears one and `from 2` picks another print. Only `use` applies any. An `ok` with ticked ones
+unused says so once, and the next goes on without them (`cli_reviewer`).
 
 **The orientation can be sent back** (mqucifer/print-shop#128), in a short conversation
 (`send_back`): the step says why it turned the part, the person names the pose it should print
@@ -72,8 +73,8 @@ _SEND_BACK = re.compile(r"^\s*orientation\b(?:\s*=\s*(\d+))?\s*(?:(?:because|-|â
                         re.I)
 #: `take`, or `take 1 3`: the changes the slice's reading proposed.
 _TAKE = re.compile(r"^\s*take\b\s*([\d ,]*)$", re.I)
-#: `use`, `use 2 4`, `clear 3` or `like 2`: what the most similar past print offers.
-_OFFER = re.compile(r"^\s*(use|clear|like)\b\s*([\d ,]*)$", re.I)
+#: `use`, `use 2 4`, `clear 3` or `from 2`: what the most similar past print offers.
+_OFFER = re.compile(r"^\s*(use|clear|from)\b\s*([\d ,]*)$", re.I)
 
 
 @dataclass(frozen=True)
@@ -323,19 +324,19 @@ def parse_answer(answer: str, request: ReviewRequest) -> Review | str:
             numbers = [int(n) for n in re.findall(r"\d+", offered.group(2))]
             if verb == "use":
                 if picked:
-                    return "look at that print's settings first: like picks it, then use"
+                    return "look at that print's settings first: from picks it, then use"
                 items = offering.use(numbers, request.proposal,
                                      pose_value(request.orientation.rotation_deg))
                 if isinstance(items, str):
                     return items
                 used += [_used_change(item, request) for item in items]
                 continue
-            if verb == "like" and len(numbers) != 1:
-                return "like picks one print, such as like 2"
-            changed = offering.like(numbers[0]) if verb == "like" else offering.clear(numbers)
+            if verb == "from" and len(numbers) != 1:
+                return "from picks one print, such as from 2"
+            changed = offering.pick(numbers[0]) if verb == "from" else offering.clear(numbers)
             if isinstance(changed, str):
                 return changed
-            offering, picked = changed, picked or verb == "like"
+            offering, picked = changed, picked or verb == "from"
             continue
         match = _CORRECTION.match(part)
         if match is None:
@@ -427,6 +428,7 @@ def cli_reviewer(
     def review(request: ReviewRequest) -> Review:
         write(render(request))
         moved: Offering | None = None  # the offer as picked and cleared here
+        told = False  # that what's ticked isn't used yet
         while True:
             answer = read("> ")
             back = _SEND_BACK.match(answer)
@@ -447,7 +449,17 @@ def cli_reviewer(
                 request = replace(request, offering=moved)
                 pose = pose_value(request.orientation.rotation_deg)
                 write("\n".join(render_offer(moved, request.proposal, pose)))
+                told = False
                 continue
+            if parsed.approved and not told and request.offering is not None:
+                pose = pose_value(request.orientation.rotation_deg)
+                left = len(request.offering.ticked(request.proposal, pose))
+                if left:
+                    told = True
+                    aren, them = ("isn't", "it") if left == 1 else ("aren't", "them")
+                    write(f"  {left} ticked {aren} used yet: use to take {them}, "
+                          "or ok again to go on without")
+                    continue
             if moved is not None and parsed.offering is None:
                 return replace(parsed, offering=moved)
             return parsed

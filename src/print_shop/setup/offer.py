@@ -6,14 +6,17 @@ more like learning than me remembering".
 
 - **The past prints most like this part are found without a model** (`similar.py`): the same
   bytes first, then closeness. The most similar is shown, with why, what differs and how it came
-  out, and another can be picked (`like 2`).
+  out, and another can be picked (`from 2`).
 - **What's offered is all that decided that print** (`_decided`): the person's corrections, the
   pause, the pose they sent back, what they took, their answers, and the lessons' settings that
   applied to it.
 - **Each is pre-selected, unless it may not fit, and then it says why** (`_doubts`, and
   `Offering.standing` for what depends on this review): another filament for a temperature or
   fan, a pause off the part's feature, a feature it rests on that's far from that part's, a
-  failed print whose symptom it bears on, a value corrected since.
+  failed print whose symptom it bears on, a value corrected since. A past intake answer isn't
+  pre-selected, as each job asks again, but on the same bytes where this job didn't ask.
+- **It's laid out to be read** (`render`): the print and how it came out once, what differs in
+  columns, the items grouped by whose they were, and a reason several share said once.
 - **Nothing is applied until it's used** (`use`, `review.parse_answer`). What's used is the
   person's correction, carrying the print it came from (`proposal.Used`). Carrying an override
   isn't a lesson accepted: those still go through the reviewer (`lessons.draw`).
@@ -59,12 +62,18 @@ SHOWN = 5
 #: A feature a setting rests on this far from that part's (`similar.apart`) puts it in doubt: one
 #: part has it and the other hasn't, or has over twice as much.
 FAR = 0.5
+#: A feature this near that part's is about the same, and is said as why a setting fits.
+NEAR = 0.2
 #: A part less alike in shape than this, and from no common source, has nothing pre-selected.
 UNLIKE = 0.6
 #: A pause is on a feature when a flat face of the part is this many layers from it, or nearer.
 PAUSE_NEAR_LAYERS = 1.0
 #: Two heights this near are one layer's top.
 SAME_Z = 0.02
+#: A reason goes beside its setting where this much width is left for it, else beneath.
+_REASON_ROOM = 34
+#: Why a past intake answer isn't pre-selected. Its group's heading says it, once.
+ASKED_AGAIN = "you're asked again for each job"
 #: The review's width for the offer's lines, wrapped under their own indent.
 WIDTH = 100
 #: A face this near horizontal is flat.
@@ -98,9 +107,6 @@ BEARS_ON: dict[str, re.Pattern[str]] = {
 #: The measures a trait is read from, where that isn't a measure of its own.
 _TRAIT_RESTS_ON = {"slenderness": ("height", "width"), "footprint_aspect": ("length", "width")}
 
-#: Whose each was, as the offer names them.
-_WHO = {Source.SPONSOR: "you", Source.READING: "you, taking the slice's", Source.ANSWER:
-        "your answer", Source.LESSON: "lesson"}
 #: What's the person's own: their corrections and what they took.
 _PERSONS = (Source.SPONSOR, Source.READING)
 #: What `review.parse_answer` records for a correction with no reason.
@@ -115,7 +121,7 @@ class Item:
     value: str
     preset: str  # this print's preset's value
     reason: str  # the reason given then
-    fits: str  # why it fits this file
+    fits: str  # why it fits this file, where that's particular to this setting
     used: Used  # where it's from, as it's recorded once used
     #: Why it isn't pre-selected. It can still be used by its number.
     doubts: tuple[str, ...] = ()
@@ -148,7 +154,12 @@ class Past:
     stl_name: str
     on: str
     came_out: str
+    #: How it came out without the note, for where the note's been said.
+    outcome: str
     why: str
+    #: The measures that differ, the most first: its name, then, now, and a trait it moves across.
+    measures: tuple[tuple[str, float, float, str], ...]
+    #: What else differs: the pose, a trait, the context, the filament.
     differs: tuple[str, ...]
     items: tuple[Item, ...]
     #: Their answers then that set nothing, to read.
@@ -160,8 +171,11 @@ class Past:
     #: The same bytes: there are no differences for a model to read.
     same_file: bool = False
 
-    def title(self) -> str:
-        return f"{self.stl_name}, job {self.job_id[:8]}, {self.on}: {self.came_out}"
+    def all_differences(self) -> list[str]:
+        """Every difference in a line, as the model is given them."""
+        return [f"{similar.measured(name, now)} now, {similar.figure(then)} then"
+                + (f" ({line})" if line else "")
+                for name, then, now, line in self.measures] + list(self.differs)
 
 
 @dataclass(frozen=True)
@@ -180,9 +194,9 @@ class Offering:
     def past(self) -> Past | None:
         return self.options[self.picked] if self.options else None
 
-    def like(self, n: int) -> Offering | str:
+    def pick(self, n: int) -> Offering | str:
         if not 1 <= n <= len(self.options):
-            return (f"like picks a print from 1 to {len(self.options)}" if self.options
+            return (f"from picks a print from 1 to {len(self.options)}" if self.options
                     else "there's no past print to pick")
         return replace(self, picked=n - 1)
 
@@ -246,7 +260,7 @@ class Offering:
         if not numbers:
             chosen = [i for i in past.items if self.standing(i, proposal, pose).selected]
             if not chosen:
-                return "nothing is selected: name one by its number, such as use 1"
+                return "nothing is ticked: name one by its number, such as use 1"
         else:
             named = self._numbered(numbers)
             if isinstance(named, str):
@@ -268,6 +282,13 @@ class Offering:
                 return (f"{PAUSE}={item.value} is a height in the pose {item.pose}: use it with "
                         "the orientation")
         return chosen
+
+    def ticked(self, proposal: Proposal, pose: str) -> list[Item]:
+        """The items pre-selected and not used: what a plain ok goes on without."""
+        past = self.past
+        if past is None:
+            return []
+        return [i for i in past.items if self.standing(i, proposal, pose).selected]
 
     def _numbered(self, numbers: list[int]) -> list[Item] | str:
         past = self.past
@@ -319,6 +340,8 @@ class ThisPart:
     candidates: tuple[Orientation, ...] = ()
     build_volume_mm: tuple[float, float, float] | None = None
     context: PartContext | None = None
+    #: The settings this job's questions could set: what it asked again.
+    asked: frozenset[str] = frozenset()
     #: The person chose this pose for this print: kept as laid, or sent back at this review.
     pose_chosen: str = ""
 
@@ -420,9 +443,13 @@ def _never_started(row: Row) -> bool:
 
 
 def _came_out(row: Row) -> str:
+    note = " ".join((row.note or "").split()) if row.result is not None else ""
+    return _outcome(row) + (f' ("{note}")' if note else "")
+
+
+def _outcome(row: Row) -> str:
     if row.result is not None:
-        note = " ".join((row.note or "").split())
-        return outcome_words(str(row.result), row.symptom) + (f' ("{note}")' if note else "")
+        return outcome_words(str(row.result), row.symptom)
     if _never_started(row):
         return "its start failed, so it may not have printed"
     return "no outcome yet"
@@ -451,15 +478,24 @@ def _past(ledger: Ledger, f: _Found, found: list[_Found], part: ThisPart) -> Pas
     elif not f.then:
         why = "by its name and context only: that part's shape wasn't kept"
     else:
-        why = (f"{f.likeness.score:.0%} like this part: shape {f.likeness.shape:.0%}, "
-               f"context {f.likeness.context:.0%}, source {f.likeness.source:.0%}")
-    differs = [] if same_part else similar.differences(f.here, f.then)
+        like = f.likeness
+        why = (f"{100 * like.score:.0f}% (shape {100 * like.shape:.0f}, "
+               f"context {100 * like.context:.0f}, source {100 * like.source:.0f})"
+               + (", the same name or run" if like.source == 1 else ""))
+    moved = [] if same_part else similar.differences(f.here, f.then)
+    differs: list[str] = []
+    crossed: dict[str, list[str]] = {}
     if then_pose != part.pose:
         differs.append(f"it printed in the pose {then_pose}, this is {part.pose}")
     if not same_part and row.features:
         had, has = set(traits(row.features)), set(traits(part.features))
-        differs += [f"this isn't {t}, as that was ({TRAITS[t][1]})" for t in sorted(had - has)]
-        differs += [f"this is {t}, and that wasn't ({TRAITS[t][1]})" for t in sorted(has - had)]
+        for trait in sorted(had ^ has):
+            feature, means = TRAITS[trait]
+            said = f"{'not ' if trait in had else ''}{trait} now: {means}"
+            if feature in moved:
+                crossed.setdefault(feature, []).append(said)
+            else:
+                differs.append(said)
     if not f.same_file and f.likeness.context < 1:
         differs.append("its fits, holds or seen faces weren't these")
     names = part.filament_names
@@ -476,7 +512,8 @@ def _past(ledger: Ledger, f: _Found, found: list[_Found], part: ThisPart) -> Pas
                 answers.append(f"{q.text} -> {q.options[a.choice].label}")
     return Past(
         job_id=row.job_id, stl_name=row.stl_name, on=_day(row.start_requested_at),
-        came_out=_came_out(row), why=why, differs=tuple(differs),
+        came_out=_came_out(row), outcome=_outcome(row), why=why, differs=tuple(differs),
+        measures=tuple((m, f.then[m], f.here[m], "; ".join(crossed.get(m, ()))) for m in moved),
         items=tuple(build.item(c) for c in ordered), answers=tuple(answers),
         given=frozenset(g.id for g in row.proposal.lessons if not g.withheld)
         if row.proposal else frozenset(),
@@ -490,7 +527,7 @@ def _order(change: Change) -> int:
     if change.key in (ORIENTATION, PAUSE):
         return (ORIENTATION, PAUSE).index(change.key)
     by = change.used.by if change.used else change.source
-    return 2 + (*_PERSONS, Source.ANSWER, Source.LESSON).index(by)
+    return 2 + (*_PERSONS, Source.LESSON, Source.ANSWER).index(by)
 
 
 def _pose(part: ThisPart, value: str) -> Orientation | None:
@@ -502,7 +539,8 @@ def _pose(part: ThisPart, value: str) -> Orientation | None:
 
 
 def _day(at: str) -> str:
-    return datetime.fromisoformat(at).astimezone().strftime("%Y-%m-%d")
+    when = datetime.fromisoformat(at).astimezone()
+    return f"{when.day} {when:%b %Y}"
 
 
 def _filament_name(row: Row) -> str:
@@ -579,7 +617,8 @@ class _Items:
                 doubts += doubted
         return Item(
             key=key, value=value, preset=preset, reason=" ".join(change.reason.split()),
-            fits=self._fits(key), used=used, doubts=tuple(dict.fromkeys(doubts)),
+            fits="" if blocked or doubts else self._fits(key, value),
+            used=used, doubts=tuple(dict.fromkeys(doubts)),
             blocked=blocked, notes=tuple(notes), reading=change.reading,
             pose="" if key == ORIENTATION else self.turned_to,
         )
@@ -596,6 +635,8 @@ class _Items:
     def _doubts(self, change: Change, value: str, by: Source) -> list[str]:
         row, part, f, key = self.f.row, self.part, self.f, change.key
         why = []
+        if by is Source.ANSWER and (not f.same_file or key in part.asked):
+            why.append(ASKED_AGAIN)
         if not f.related:
             why.append(f"the part is unlike it: its shape is {f.likeness.shape:.0%} alike")
         if key == ORIENTATION:
@@ -611,8 +652,8 @@ class _Items:
             symptom = str(row.symptom or "")
             bears = BEARS_ON.get(symptom)
             if bears is None:
-                why.append(f"that print failed ({_came_out(row)}), and which setting that bears "
-                           "on isn't known")
+                why.append(f"that print failed ({symptom or 'no symptom'}), and which setting "
+                           "that bears on isn't known")
             elif bears.search(key):
                 why.append(f"that print failed with {symptom}, which this bears on")
         since = self._since(key, value)
@@ -661,7 +702,7 @@ class _Items:
 
     def _far(self, measures: tuple[str, ...]) -> list[str]:
         here, then = self.f.here, self.f.then
-        return [f"{similar.measured(m, here[m])} here, and {similar.measured(m, then[m])} then"
+        return [f"its {similar.MEASURES[m].label} is too far from that part's"
                 for m in measures
                 if m in here and m in then and similar.apart(m, here[m], then[m]) > FAR]
 
@@ -704,7 +745,7 @@ class _Items:
             if set_to is None or _same(key, set_to, value):
                 return ""
             return (f"corrected since, to {set_to}, on {other.row.stl_name} "
-                    f"({_came_out(other.row)})")
+                    f"({_outcome(other.row)})")
         return ""
 
     def _lesson(self, lesson: int, key: str, value: str) -> tuple[list[str], list[str]]:
@@ -730,26 +771,29 @@ class _Items:
         notes, doubts = [], []
         values = {x.id: x.value for x in self.part.features}
         for trait in missed:
-            feature, means = TRAITS[trait]
-            here = f": {feature} is {values[feature]:g} here" if feature in values else ""
-            notes.append(f"lesson {lesson} doesn't reach this part by itself, as it isn't "
-                         f"{trait} ({means}){here}")
+            feature, _ = TRAITS[trait]
+            here = f" ({feature} {values[feature]:g} here)" if feature in values else ""
+            notes.append(f"doesn't reach this part by itself: it isn't {trait}{here}")
             default = (feature,) if feature in similar.MEASURES else ()
             doubts += self._far(_TRAIT_RESTS_ON.get(feature, default))
         return notes, doubts
 
-    def _fits(self, key: str) -> str:
-        here, then = self.f.here, self.f.then
-        if self.same_part or (key == ORIENTATION and self.f.same_file):
-            return "it's the same file"
+    def _fits(self, key: str, value: str) -> str:
+        """Why it fits, where that's particular to this setting: the same file, and how alike
+        the part is, are said once above the items."""
+        if self.same_part:
+            return ""
         if key == PAUSE:
-            return f"this part is {self.part.height_mm:g} mm tall"
+            z = float(value)
+            face = min(self._flat_levels(), key=lambda level: abs(level - z), default=None)
+            return f"a flat face is at z {face:g} here too" if face is not None else ""
+        here, then = self.f.here, self.f.then
         for measure in _rests_on(key):
             if measure in here and measure in then:
-                return f"{similar.measured(measure, here[measure])} here, {then[measure]:.10g} then"
-        if self.f.same_file:
-            return "it's the same file, in another pose"
-        return f"the part is {self.f.likeness.score:.0%} like that one"
+                if similar.apart(measure, here[measure], then[measure]) <= NEAR:
+                    return f"about the same {similar.MEASURES[measure].label}"
+                return ""
+        return ""
 
     def _sliced_with(self) -> dict[str, str]:
         if self._config is None:
@@ -779,65 +823,260 @@ def _rests_on(key: str) -> tuple[str, ...]:
 
 
 def render(offer: Offering, proposal: Proposal, pose: str) -> list[str]:
-    """The offer, numbered, each item with its source, its reason and why it fits or may not."""
+    """The offer, laid out to be read: the print and what's shared said once, what differs in
+    columns, then the items by whose they were, numbered as `use` and `clear` take them."""
     if offer.failed:
-        return ["", f"Use these: the past prints couldn't be read, so none is offered: "
-                    f"{offer.failed}"]
+        return ["", *_wrapped("", "USE THESE: the past prints couldn't be read, so none is "
+                                  f"offered: {offer.failed}")]
     past = offer.past
     if past is None:
-        return ["", "Use these: no past print has settings to offer."]
-    which = ("the most similar past print" if offer.picked == 0
-             else f"print {offer.picked + 1}, which you picked")
-    lines = [
-        "",
-        f"Use these: what decided {which} (not applied unless you use it):",
-        *_wrapped("  ", past.title()),
-        *_wrapped("    similar: ", past.why),
-    ]
-    for d in past.differs or ("nothing",):
-        lines += _wrapped("    differs: ", d)
-    for n, item in enumerate(past.items, 1):
-        found = offer.standing(item, proposal, pose)
-        if item.key == ORIENTATION:
-            here = pose
-        else:
-            now = _now(proposal, item.key)
-            here = now.value if now is not None else item.preset
-        moves = (item.value if _same(item.key, here, item.value)
-                 else f"{here or '-'} -> {item.value}")
-        lines.append(f"  [{found.mark}] {n}) {item.key}  {moves}")
-        indent = " " * 9
-        lines += _wrapped(indent, _line(item))
-        for note in item.notes:
-            lines += _wrapped(f"{indent}note: ", note)
-        if found.why:
-            label = {" ": "not selected: ", "-": "can't be used: "}.get(found.mark, "")
-            lines += _wrapped(f"{indent}{label}", "; ".join(found.why))
+        return ["", "USE THESE: no past print has settings to offer."]
+    rows = [(n, item, offer.standing(item, proposal, pose))
+            for n, item in enumerate(past.items, 1)]
+    lines = ["", *_wrapped("", f"USE THESE: from {past.stl_name}, {past.on}, job "
+                               f"{past.job_id[:8]}. None is applied until you use it.")]
+    lines += _about(past)
+
+    # Why one isn't ticked, said once where several share it.
+    unticked = [(n, why) for n, _, found in rows if found.mark == " "
+                for why in found.why if why != ASKED_AGAIN]
+    shared = {why: ns for why, ns in _by_text(unticked).items() if len(ns) > 1}
+    open_rows = [(n, item, found) for n, item, found in rows if found.mark in ("x", " ")]
+    for why, ns in shared.items():
+        which = "None is ticked" if len(ns) == len(open_rows) else f"Not ticked {_listed(ns)}"
+        lines += _wrapped("  ", f"{which}: {why}.")
+
+    # One set of columns for every group, headed once.
+    cells = {n: _cells(n, item, found, proposal, pose, len(str(len(rows))))
+             for n, item, found in open_rows}
+    widths = [max([len(cell[i]) for cell in cells.values()] + [len(least)])
+              for i, least in enumerate(("", "now", ""))]
+    headed = False
+    for heading, sources in _GROUPS:
+        group = [row for row in open_rows if row[1].used.by in sources]
+        if not group:
+            continue
+        if Source.ANSWER in sources:
+            # The same file may hold one this job didn't ask, which is ticked.
+            again = any(ASKED_AGAIN in found.why for _, _, found in group)
+            heading += f" ({ASKED_AGAIN if again else 'not asked for this job'})"
+        lines += _group(heading, group, cells, widths, proposal, set(shared), not headed)
+        headed = True
+    lines += _settled(rows, proposal)
     for answer in past.answers:
         lines += _wrapped("  you answered then: ", answer)
     if offer.model:
-        lines.append(f"  {offer.model}")
+        lines += _wrapped("  ", offer.model)
     others = [(n, p) for n, p in enumerate(offer.options, 1) if n - 1 != offer.picked]
     if others:
-        lines.append("  Other past prints, by how alike:")
-        for n, p in others:
-            lines += _wrapped(f"    like {n}: ", f"{p.title()}; {p.why}")
-    lines += _wrapped("  ", "use takes those marked [x], use 2 4 those numbered, clear 2 clears one"
-                      + (", like 2 picks another print." if len(offer.options) > 1 else "."))
+        lines += ["", "  OTHER PRINTS"]
+        for n, other in others:
+            lines += _wrapped(f"  from {n}  ",
+                              f"{other.stl_name}, {other.on}: {_gives(other)}; {other.outcome}")
+    return [*lines, "", *_wrapped("  ", _next(rows, bool(others)))]
+
+
+#: The items' groups, by whose each was.
+_GROUPS: tuple[tuple[str, tuple[Source, ...]], ...] = (
+    ("YOUR OVERRIDES", _PERSONS),
+    ("LESSONS IT HAD", (Source.LESSON,)),
+    ("YOUR ANSWERS THEN", (Source.ANSWER,)),
+)
+
+
+def _about(past: Past) -> list[str]:
+    """How it came out, why it's alike, and every difference, then and now."""
+    out = past.came_out
+    if out.startswith("failed"):
+        out = "FAILED" + out.removeprefix("failed")
+    lines = [*_wrapped("  Came out  ", out), *_wrapped("  Alike     ", past.why)]
+    if past.measures:
+        table = [("Differs", "then", "now", "", "")] + [
+            (f"  {similar.MEASURES[name].label}", similar.figure(then), similar.figure(now),
+             similar.MEASURES[name].unit, line)
+            for name, then, now, line in past.measures
+        ]
+        first, second, third, fourth = (max(len(row[i]) for row in table) for i in range(4))
+        for name, was, is_now, unit, line in table:
+            lead = f"  {name:<{first}}  {was:>{second}}  {is_now:>{third}} {unit:<{fourth}}"
+            lines += _wrapped(f"{lead}  ", line) if line else [lead.rstrip()]
+    for other in past.differs:
+        lines += _wrapped("    " if past.measures else "  Differs   ", other)
     return lines
+
+
+def _cells(
+    n: int, item: Item, found: Standing, proposal: Proposal, pose: str, digits: int
+) -> tuple[str, str, str]:
+    """An item's columns: its mark, number and key, what it is here, and what use makes it."""
+    if item.key == ORIENTATION:
+        here = pose
+    else:
+        now = _now(proposal, item.key)
+        here = now.value if now is not None else item.preset
+    return f"[{found.mark}] {n:>{digits}} {item.key}", here or "-", item.value
+
+
+def _group(
+    heading: str, group: list[tuple[int, Item, Standing]], cells: dict[int, tuple[str, str, str]],
+    widths: list[int], proposal: Proposal, shared: set[str], first: bool,
+) -> list[str]:
+    """One group's items in columns, each with its reason beside it, and what several of them
+    share said once beneath."""
+    key, was, to = widths
+    said: list[list[str]] = []
+    for _, item, found in group:
+        reason = _reason(item, proposal)
+        parts = reason.split(_AND, 1) if item.used.by is Source.LESSON else [reason]
+        words = [*parts, *_tags(item), *item.notes]
+        if found.mark == " ":
+            words += [f"not ticked: {why}" for why in found.why
+                      if why != ASKED_AGAIN and why not in shared]
+        said.append([word for word in dict.fromkeys(words) if word])
+    common = {text: ns for text, ns in _by_text(
+        [(n, word) for (n, _, _), words in zip(group, said, strict=True) for word in words]
+    ).items() if len(ns) > 1}
+
+    title = f"  {heading}".ljust(key + 4)
+    lines = [""]
+    if not first:
+        lines.append(title.rstrip())
+    elif len(title) == key + 4:
+        lines.append(f"{title}{'now':>{was}} -> use")
+    else:
+        lines += [title, f"{'':<{key + 4}}{'now':>{was}} -> use"]
+    for (n, _, _), words in zip(group, said, strict=True):
+        name, here, value = cells[n]
+        row = f"  {name:<{key}}  {here:>{was}} -> {value:<{to}}"
+        text = "; ".join(word for word in words if word not in common)
+        if not text:
+            lines += _wrapped("  ", row.strip()) if len(row) > WIDTH else [row.rstrip()]
+        elif len(row) + 2 + _REASON_ROOM <= WIDTH:
+            lines += _wrapped(f"{row}  ", text)
+        else:
+            lines += [*_wrapped("  ", row.strip()), *_wrapped("        ", text)]
+    for text, ns in common.items():
+        lines += _wrapped(f"      {_listed(ns)}: ", text)
+    return lines
+
+
+#: Between a lesson's number and its words, which lessons with the same words share.
+_AND = ": "
+
+
+def _reason(item: Item, proposal: Proposal) -> str:
+    """The reason given then. A lesson's words are in the Lessons section when it's there."""
+    u = item.used
+    if u.by is not Source.LESSON:
+        return "no reason given" if item.reason in ("", _NO_REASON) else item.reason
+    if any(g.id == u.lesson for g in proposal.lessons):
+        return f"lesson {u.lesson}, in Lessons above"
+    return f"lesson {u.lesson}{_AND}{item.reason}"
+
+
+def _tags(item: Item) -> list[str]:
+    u = item.used
+    tags = [item.fits] if item.fits else []
+    if u.by is Source.READING:
+        tags.append("you took the slice's")
+    if u.first_job_id and u.first_job_id != u.job_id:
+        tags.append(f"first on {u.first_stl_name}, job {u.first_job_id[:8]}")
+    return tags
+
+
+def _settled(rows: list[tuple[int, Item, Standing]], proposal: Proposal) -> list[str]:
+    """What's so here already, and what can't be used, in words."""
+    used = [f"{n} {item.key} {item.value}" for n, item, found in rows if found.why == ("used",)]
+    lines = ["", *_wrapped("  USED: ", ", ".join(used))] if used else []
+    already = []
+    for n, item, found in rows:
+        if found.mark != "=" or found.why == ("used",):
+            continue
+        now = _now(proposal, item.key)
+        said = f"{n} {item.key} {item.value}"
+        if now is None:
+            said += " (this print's pose)"
+        else:
+            said += f" ({_set_by(now)})"
+            if item.used.by is not Source.LESSON and now.reason != item.reason:
+                said += f": {_reason(item, proposal)}"
+        already.append(said)
+    if already:
+        lines += ["", *_wrapped("  ALREADY SET HERE: ", "; ".join(already))]
+    cant = [(n, item, found) for n, item, found in rows if found.mark == "-"]
+    if cant:
+        lines.append("")
+        for why, ns in _by_text([(n, found.why[0]) for n, _, found in cant]).items():
+            lines += _wrapped("  ", f"CAN'T USE {_listed(ns)}: {why}")
+            for n, item, _ in cant:
+                if n in ns:
+                    lines += _wrapped("      ",
+                                      f"{n} {item.key} {item.value}: {_reason(item, proposal)}")
+    return lines
+
+
+def _gives(past: Past) -> str:
+    """What another print would give, in a few words."""
+    words = []
+    for item in past.items:
+        if item.used.by in _PERSONS:
+            if item.key == PAUSE:
+                words.append(f"your pause at {item.value}")
+            elif item.key == ORIENTATION:
+                words.append("your pose")
+            elif item.key == "enable_support":
+                words.append("supports on" if item.value == "1" else "supports off")
+            else:
+                words.append(f"{item.key} {item.value}")
+    for by, one, many in ((Source.LESSON, "a lesson's setting", "lessons' settings"),
+                          (Source.ANSWER, "an answer's setting", "answers' settings")):
+        count = sum(item.used.by is by for item in past.items)
+        if count:
+            words.append(one if count == 1 else f"{count} {many}")
+    return ", ".join(words)
+
+
+def _next(rows: list[tuple[int, Item, Standing]], others: bool) -> str:
+    """What the prompt takes, for what's left to take."""
+    ticked = [n for n, _, found in rows if found.mark == "x"]
+    unticked = [n for n, _, found in rows if found.mark == " "]
+    used = any(found.why == ("used",) for _, _, found in rows)
+    takes = []
+    if ticked:
+        takes += [f"use (the {len(ticked)} ticked)", f"use {ticked[0]} (by number)",
+                  f"clear {ticked[0]}"]
+    elif used:
+        if not unticked:
+            return "All used. ok to go on."
+        return (f"The ticked are used. ok to go on, or use {unticked[0]} for one that isn't "
+                "ticked.")
+    elif unticked:
+        takes.append(f"use {unticked[0]} (none is ticked: by number)")
+    if others:
+        takes.append("from 2 (another print)")
+    return "   ".join(takes) or "Nothing here is left to use."
+
+
+def _by_text(said: list[tuple[int, str]]) -> dict[str, list[int]]:
+    """Each thing said, with the numbers it's said of, in the order first said."""
+    found: dict[str, list[int]] = {}
+    for n, text in said:
+        found.setdefault(text, []).append(n)
+    return found
+
+
+def _listed(numbers: list[int]) -> str:
+    """Numbers, a run of them as 1-4."""
+    runs: list[list[int]] = []
+    for n in sorted(set(numbers)):
+        if runs and n == runs[-1][-1] + 1:
+            runs[-1].append(n)
+        else:
+            runs.append([n])
+    return ", ".join(f"{r[0]}-{r[-1]}" if len(r) > 2 else ", ".join(map(str, r)) for r in runs)
 
 
 def _wrapped(lead: str, text: str) -> list[str]:
     """One plain line, wrapped under its own start where it's longer than the review's width."""
     return textwrap.wrap(text, WIDTH, initial_indent=lead, subsequent_indent=" " * len(lead),
-                         break_long_words=False, break_on_hyphens=False)
-
-
-def _line(item: Item) -> str:
-    """Whose it was, from which print, the reason given then, and why it fits this file."""
-    u = item.used
-    who = f"lesson {u.lesson}" if u.by is Source.LESSON else _WHO[u.by]
-    first = (f" (first on {u.first_stl_name}, job {u.first_job_id[:8]})"
-             if u.first_job_id and u.first_job_id != u.job_id else "")
-    reason = "no reason given" if item.reason in ("", _NO_REASON) else item.reason
-    return f"{who}, on {u.stl_name}{first}: {reason} (fits: {item.fits})"
+                         break_long_words=False, break_on_hyphens=False) or [lead.rstrip()]
