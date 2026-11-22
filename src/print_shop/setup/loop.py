@@ -91,6 +91,10 @@ __all__ = [
 #: proposal, to lower from what runs show.
 MAX_CALLS = 16
 MAX_SECONDS = 900.0
+#: The most characters one of its answers may be, content and tool calls' arguments together
+#: (mqucifer/print-shop#242). `propose` at every cap is about 12,000; the largest recorded
+#: settings answer was 3,741.
+LOOP_ANSWER_CHARS = 16_000
 #: A proposal that adds more than this share to the print's time, against its slice in the
 #: file's own pose with the intake's answers, is a big change: asked first.
 BIG_TIME_SHARE = 0.25
@@ -231,7 +235,7 @@ def llm_chat(config: LLMConfig) -> Chat:
     """The real model: one chat completion with tools through LiteLLM (`chat_with_tools`)."""
 
     def chat(messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any]:
-        return chat_with_tools(config, messages, tools)[0]
+        return chat_with_tools(config, messages, tools, answer_chars=LOOP_ANSWER_CHARS)[0]
 
     return chat
 

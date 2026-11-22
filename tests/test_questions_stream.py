@@ -25,10 +25,12 @@ from print_shop.expert.client import (
     LLMConfig,
     Stopped,
     TimedOut,
+    chat_with_tools,
     stream_json_call,
 )
 from print_shop.setup import Proposer
 from print_shop.setup.features import measure
+from print_shop.setup.loop import LOOP_ANSWER_CHARS
 from print_shop.setup.questions import ANSWER_CHARS, STOCK
 from tests.fakes import STORE_PROFILES
 from tests.fixtures import write_stl
@@ -238,6 +240,86 @@ def test_an_error_inside_the_stream_says_so(server: Server) -> None:
     server.chunks = lambda: iter([(0.0, {"error": {"message": "made-up failure"}})])
     with pytest.raises(RuntimeError, match="made-up failure"):
         call(server)
+
+
+# --------------------------------------------------------------------------
+# The print loop's calls have the same cuts (mqucifer/print-shop#242)
+# --------------------------------------------------------------------------
+
+
+def called(arguments: str, name: str = "", id: str = "", index: int = 0,
+           pause: float = 0.0) -> tuple[float, dict[str, Any]]:
+    part = {"index": index, "function": {"name": name, "arguments": arguments}}
+    if id:
+        part["id"] = id
+    return pause, {"model": "fake", "choices": [{"delta": {"tool_calls": [part]}}]}
+
+
+def chat(server: Server, timeout_s: float = WAIT_S, stop: threading.Event | None = None) -> Any:
+    return chat_with_tools(
+        server.config(timeout_s), [{"role": "user", "content": "go"}],
+        [{"type": "function", "function": {"name": "propose"}}],
+        answer_chars=LOOP_ANSWER_CHARS, stop=stop)
+
+
+def test_tool_calls_are_assembled_from_their_pieces(server: Server) -> None:
+    server.chunks = lambda: iter([
+        thinking(), content("Slicing it."),
+        called("", "slice", "c1"), called('{"rotation":'), called("[0,0,0]}"),
+        called("{}", "past_prints", "c2", index=1), *finish("tool_calls")])
+    message, info = chat(server)
+    assert message["content"] == "Slicing it."
+    assert message["tool_calls"] == [
+        {"id": "c1", "type": "function",
+         "function": {"name": "slice", "arguments": '{"rotation":[0,0,0]}'}},
+        {"id": "c2", "type": "function", "function": {"name": "past_prints", "arguments": "{}"}},
+    ]
+    assert info.finish_reason == "tool_calls"
+    [sent] = server.asked
+    assert sent["stream"] is True and sent["tool_choice"] == "auto"
+
+
+def test_whitespace_running_on_inside_a_tool_calls_arguments_is_cut(server: Server) -> None:
+    def chunks() -> Iterator[tuple[float, dict[str, Any]]]:
+        yield called('{"settings": [', "propose", "c1")
+        while True:
+            yield called(" \n  " * 40, pause=0.002)
+
+    server.chunks = chunks
+    with pytest.raises(CutOff) as cut:
+        chat(server)
+    assert cut.value.info.finish_reason == "runaway"
+    assert server.hung_up.wait(WAIT_S)
+
+
+def test_a_tool_calls_arguments_are_bounded(server: Server) -> None:
+    def chunks() -> Iterator[tuple[float, dict[str, Any]]]:
+        while True:
+            yield called("words " * 100, pause=0.002)
+
+    server.chunks = chunks
+    with pytest.raises(CutOff) as cut:
+        chat(server)
+    assert cut.value.info.finish_reason == "too long"
+
+
+def test_a_loops_call_at_the_token_limit_is_cut_off(server: Server) -> None:
+    server.chunks = lambda: iter([called('{"rot', "slice", "c1"), *finish("length")])
+    with pytest.raises(CutOff) as cut:
+        chat(server)
+    assert cut.value.info.finish_reason == "length"
+
+
+def test_a_loops_call_times_out_and_stops(server: Server) -> None:
+    server.chunks = lambda: iter([called("{}", "slice", "c1", pause=WAIT_S)])
+    with pytest.raises(TimedOut):
+        chat(server, timeout_s=0.3)
+    stop = threading.Event()
+    threading.Timer(0.2, stop.set).start()
+    started = time.monotonic()
+    with pytest.raises(Stopped):
+        chat(server, stop=stop)
+    assert time.monotonic() - started < 3
 
 
 def test_the_proposers_questions_use_the_bounded_stream(server: Server, tmp_path: Path) -> None:
