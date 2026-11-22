@@ -33,6 +33,10 @@ unused says so once, and the next goes on without them (`cli_reviewer`).
 in and says why the turn was wrong, or meets the step's concern by settings instead, each priced
 by Orca. A reason is required: it's recorded as the correction, and drawn as a lesson the
 orientation step is given next time. The part is then turned and sliced again.
+
+**A pose still being measured says so** (mqucifer/print-shop#235). A kept pose's job doesn't
+wait for the other five, so the table can be drawn before they're in. `orientation` waits for
+them, saying that it is, and then lists them as ever.
 """
 
 from __future__ import annotations
@@ -41,7 +45,7 @@ import re
 import textwrap
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from print_shop.bench.pausing import TOPS_OUT, mm
 from print_shop.core.state import AppliedOrientation, Orientation, SliceResult
@@ -62,6 +66,9 @@ from print_shop.setup.proposal import (
 from print_shop.setup.reach import profile_of, unplaced
 from print_shop.setup.reading import PAUSE_PAST_FIT, Flag, SliceReading
 from print_shop.slicer.orca import SlicerProfiles
+
+if TYPE_CHECKING:
+    from print_shop.ingest.measuring import Measuring
 
 __all__ = [
     "Review", "Reviewer", "ReviewRequest", "cli_reviewer", "parse_answer", "render", "send_back",
@@ -98,6 +105,9 @@ class ReviewRequest:
     #: The poses the orientation step weighed, to send the pose back to one
     #: (mqucifer/print-shop#128).
     candidates: tuple[Orientation, ...] = ()
+    #: Those still being measured beside the job, to say so and to wait for at a send-back
+    #: (mqucifer/print-shop#235). `candidates` are those that were ready when this was made.
+    measuring: Measuring | None = None
     #: The part's traits in the file's own pose, before any turn: what an orientation lesson is
     #: keyed to.
     laid_traits: tuple[str, ...] = ()
@@ -300,7 +310,12 @@ def _poses(request: ReviewRequest) -> list[str]:
     if not request.candidates:
         return []
     lines = ["  the poses it weighed (overhang is what would need support):"]
-    for c in request.candidates:
+    measuring = request.measuring
+    # What's pending is read first: one that lands between the two reads is shown measured.
+    pending = measuring.pending() if measuring is not None else ()
+    failed = measuring.failed() if measuring is not None else {}
+    ready = measuring.ready() if measuring is not None else request.candidates
+    for c in ready:
         here = "  <- this print" if c.rotation_deg == request.orientation.rotation_deg else ""
         flare = (f", {c.flare_area_mm2:g} mm2 rising from the plate left out"
                  if c.flare_area_mm2 else "")
@@ -308,6 +323,10 @@ def _poses(request: ReviewRequest) -> list[str]:
             f"    {pose_value(c.rotation_deg):>9}  {c.overhang_area_mm2:g} mm2 overhang{flare}, "
             f"{c.bed_contact_area_mm2:g} mm2 on the plate, {c.height_mm:g} mm tall{here}"
         )
+    measured = {c.rotation_deg for c in ready}
+    lines += [f"    {pose_value(r):>9}  still being measured: orientation waits for it"
+              for r in pending if r not in measured and r not in failed]
+    lines += [f"    {pose_value(r):>9}  couldn't be measured: {why}" for r, why in failed.items()]
     return lines
 
 
@@ -529,8 +548,22 @@ def send_back(
     why the turn was wrong in their own words, or by number takes a way of meeting the step's
     concern by settings, each priced by Orca. A reason is required. The correction is the pose,
     with that reason and both poses' readings; a way taken adds its settings as corrections.
-    None is the person going back to the review without sending anything.
+    None is the person going back to the review without sending anything. Poses still being
+    measured are waited for first, saying so (mqucifer/print-shop#235).
     """
+    measuring = request.measuring
+    if measuring is not None:
+        waited = measuring.pending()
+        if waited:
+            them = "pose" if len(waited) == 1 else f"{len(waited)} poses"
+            write(f"Waiting for the {them} still being measured: "
+                  f"{'; '.join(map(pose_value, waited))}.")
+        request = replace(request, candidates=measuring.settled())
+        failed = measuring.failed()
+        for rotation, why in failed.items():
+            write(f"  {pose_value(rotation)} couldn't be measured, so it isn't offered: {why}")
+        if failed:
+            pose = None  # a number typed ahead counted it, so the list is shown
     now = request.orientation
     current = next((c for c in request.candidates if c.rotation_deg == now.rotation_deg), None)
     others = [c for c in request.candidates if c.rotation_deg != now.rotation_deg]
@@ -539,6 +572,9 @@ def send_back(
     if pose is not None and pose.isdigit() and 1 <= int(pose) <= len(others):
         chosen = others[int(pose) - 1]
     if chosen is None:
+        if not others:
+            write("  There's no other pose to send it to.")
+            return None
         write("Which pose should it print in?")
         write("\n".join(f"  {n}) {_pose(c)}" for n, c in enumerate(others, 1)))
         while chosen is None:
