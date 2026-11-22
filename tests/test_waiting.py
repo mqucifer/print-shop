@@ -111,7 +111,9 @@ class Person:
                            typed=self._typed, forget=lambda: None)
 
     def _typed(self, timeout_s: float) -> bool:
-        if self.lines and self.lines[0] in ("go", "", "yes"):
+        # A script that goes on types its lines into the wait. Any other line is an answer, and
+        # waits for the question it answers.
+        if "go" in self.lines:
             return True
         time.sleep(min(timeout_s, 0.01))
         return False
@@ -343,16 +345,15 @@ def test_choices_kept_over_are_still_asked_again_to_the_reviews_offer(
 ) -> None:
     """With mqucifer/print-shop#211: a past answer to a setting this job asked about isn't
     pre-selected, and closer choices the person kept their answer over were asked."""
-    from print_shop.orchestrator import graph
+    from print_shop.setup.offer import offering
 
     offers: list[Any] = []
-    offer = graph.offer_past_prints
 
     def watched(ledger: Any, part: Any) -> Any:
         offers.append(part)
-        return offer(ledger, part)
+        return offering(ledger, part)
 
-    monkeypatch.setattr(graph, "offer_past_prints", watched)
+    monkeypatch.setattr("print_shop.orchestrator.graph.offer_past_prints", watched)
 
     def closer(system: str, user: str, schema: dict[str, Any]) -> dict[str, Any]:
         return {"questions": [{"feature": "purpose", "text": CLOSER.text, "options": [
