@@ -787,7 +787,8 @@ class _Items:
 
     def _seam_as_set(self, change: Change) -> bool:
         """The person typed it, on these bytes, in this pose, with the same faces seen, down to
-        which of the walls: where it lands is what they chose it for."""
+        which of the walls: where it lands is what they chose it for. Never from several parts'
+        faces read as one plate's: which of the walls can't be known from those."""
         row, part = self.f.row, self.part
         by = change.used.by if change.used else change.source
         if by is not Source.SPONSOR or not self.f.same_file:
@@ -796,6 +797,7 @@ class _Items:
             return False
         here, then = self._seen_here(), _seen_then(row)
         return (here is not None and then is not None and here.same_as(then)
+                and not here.of_several and not then.of_several
                 and here.wall_sides == then.wall_sides)
 
     def _seen_here(self) -> Seen | None:

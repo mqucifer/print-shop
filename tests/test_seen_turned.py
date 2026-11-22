@@ -22,6 +22,7 @@ from print_shop.orchestrator import graph
 from print_shop.orchestrator.daemon import Daemon
 from print_shop.runtime import describe
 from print_shop.setup import Proposer
+from print_shop.setup import offer as offer_module
 from print_shop.setup.context import (
     SIDECAR,
     Fit,
@@ -693,6 +694,34 @@ def test_a_seam_taken_from_the_slices_proposal_isnt_ticked(tmp_path: Path) -> No
 def test_a_failed_prints_doubts_still_untick_their_own_seam(tmp_path: Path) -> None:
     ticked, why = past_seam(tmp_path, result="failed", symptom="other")
     assert ticked == [] and "that print failed" in " ".join(why)
+
+
+@pytest.mark.parametrize("past_is_a_plate", [False, True])
+def test_a_plates_combined_faces_never_make_a_seam_theirs(
+    past_is_a_plate: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ux-109's pair: the neighbour turned another way, and both plates read the same."""
+
+    def plate(neighbour: tuple[float, float, float]) -> Seen:
+        found = seen_across([carried(top_seen(), None, ON_ITS_SIDE),
+                             carried(top_seen(), None, neighbour)])
+        assert found is not None and found.part_walls
+        return found
+
+    here, then = plate((0.0, 90.0, 0.0)), plate(ON_ITS_SIDE)
+    assert here.same_as(then) and here.wall_sides == then.wall_sides, "nothing tells them apart"
+    if not past_is_a_plate:
+        then = then.model_copy(update={"of_several": False})
+    monkeypatch.setattr(offer_module, "_seen_then", lambda row: then)
+    stl = write_stl("cube", tmp_path)
+    with Ledger(tmp_path / "made-up.sqlite") as ledger:
+        printed_before(ledger, "past-job", stl, (yours("seam_position", "back"),),
+                       rotation=ON_ITS_SIDE)
+        part = ThisPart(stl=stl, stl_name=stl.name, sha256=analyze(str(stl)).stl_sha256,
+                        features=measure(stl, 400.0), rotation_deg=ON_ITS_SIDE, height_mm=20.0,
+                        machine={}, process={"seam_position": "nearest"}, filament={},
+                        seen_in=lambda pose: here)
+        assert offering(ledger, part).ticked(Proposal(), "90,0,0") == []
 
 
 def test_where_the_walls_arent_partly_seen_a_past_seam_is_offered_as_before(
