@@ -887,6 +887,17 @@ SHAPES: dict[str, dict[str, Any]] = {
                     # washers, its nut and its plastic is nearest its limit, and by what share.
                     "gives_first": TEXT,
                     "nearest_share": NUMBER,
+                    # Each end's wall that took the shear, beside the stretch its pressure is
+                    # read on (mqucifer/print-shop#245).
+                    "bolts": Rows(
+                        Row(
+                            {
+                                "ends": Rows(
+                                    Row({"hole_length_mm": NUMBER, "sheared_mm2": NUMBER})
+                                )
+                            }
+                        )
+                    ),
                     # A dovetail's (mqucifer/print-shop#170): the way its tail slides in, how
                     # hard the load drives it that way, each face's push, what its faces leave
                     # held by nothing, its latch, and the tail's neck and the socket's walls.
