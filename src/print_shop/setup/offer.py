@@ -119,6 +119,9 @@ _TRAIT_RESTS_ON = {"slenderness": ("height", "width"), "footprint_aspect": ("len
 
 #: What's the person's own: their corrections and what they took.
 _PERSONS = (Source.SPONSOR, Source.READING)
+#: Whose an offered item can be that's the person's own: the model's only where they took it
+#: (mqucifer/print-shop#242).
+_OWN = (*_PERSONS, Source.MODEL)
 #: What `review.parse_answer` records for a correction with no reason.
 _NO_REASON = "your correction"
 
@@ -236,7 +239,7 @@ class Offering:
             if now is not None and _same(item.key, now.value, item.value):
                 if now.used is not None and now.used.job_id == past.job_id:
                     return Standing("=", ("used",))
-                if now.source in (*_PERSONS, Source.ANSWER, Source.LESSON):
+                if _theirs(now) or now.source in (Source.ANSWER, Source.LESSON):
                     return Standing("=", (f"{_set_by(now)} set it here already",))
         if item.blocked:
             return Standing("-", (item.blocked,))
@@ -244,14 +247,14 @@ class Offering:
         if item.key != ORIENTATION and now is not None and not _same(
             item.key, now.value, item.value
         ):
-            if now.source in _PERSONS:
+            if _theirs(now):
                 why.append(f"you set it to {now.value} at this review")
             elif now.source is Source.ANSWER and (
-                item.used.by not in _PERSONS or (item.key, now.value) not in past.answered
+                item.used.by not in _OWN or (item.key, now.value) not in past.answered
             ):
                 why.append(f"your answer set it to {now.value} here")
             elif now.source is Source.LESSON and (
-                item.used.by not in _PERSONS or now.lesson not in past.given
+                item.used.by not in _OWN or now.lesson not in past.given
             ):
                 why.append(f"lesson {now.lesson} sets it to {now.value} here")
         if item.pose and item.pose != pose:
@@ -260,7 +263,7 @@ class Offering:
                 why.append(f"it held in the pose {item.pose}, and the turn to it isn't selected")
         if (past.job_id, item.key) in self.cleared:
             why.insert(0, "you cleared it")
-        if item.key != ORIENTATION and (why or item.used.by not in _PERSONS):
+        if item.key != ORIENTATION and (why or item.used.by not in _OWN):
             here = now.value if now is not None else item.preset
             if here and _same(item.key, here, item.value):
                 # There's nothing to choose. The person's own that's ticked stays so, as using
@@ -323,9 +326,16 @@ def _now(proposal: Proposal, key: str) -> Change | None:
     return next((c for c in (*changed, *proposal.kept) if c.key == key), None)
 
 
+def _theirs(change: Change) -> bool:
+    """The person's own: a correction, or what they took of the slice's or the model's."""
+    return change.source in _PERSONS or change.taken
+
+
 def _set_by(change: Change) -> str:
     if change.source is Source.LESSON:
         return f"lesson {change.lesson}"
+    if change.taken:
+        return "you"
     others = {Source.ANSWER: "your answer", Source.MODEL: "the model", Source.GUARD: "a guard"}
     return others.get(change.source, "you")
 
@@ -405,7 +415,7 @@ class _Found:
 
     @property
     def persons(self) -> bool:
-        return any(c.source in _PERSONS for c in self.decided.values())
+        return any(_theirs(c) for c in self.decided.values())
 
     def rank(self) -> tuple[bool, float, bool, bool, int]:
         """The same bytes, then closeness; of those alike, one that didn't fail, then one with
@@ -503,7 +513,7 @@ def _decided(row: Row) -> dict[str, Change]:
             if c.source in (Source.ANSWER, Source.LESSON):
                 found[c.key] = c
         for c in (*proposal.changes, *proposal.not_applied):
-            if c.source in (*_PERSONS, Source.ANSWER, Source.LESSON):
+            if _theirs(c) or c.source in (Source.ANSWER, Source.LESSON):
                 found[c.key] = c
             else:
                 found.pop(c.key, None)
@@ -604,7 +614,7 @@ def _order(change: Change) -> int:
     if change.key in (ORIENTATION, PAUSE):
         return (ORIENTATION, PAUSE).index(change.key)
     by = change.used.by if change.used else change.source
-    return 2 + (*_PERSONS, Source.LESSON, Source.ANSWER).index(by)
+    return 2 + (*_OWN, Source.LESSON, Source.ANSWER).index(by)
 
 
 def _pose(part: ThisPart, value: str) -> Orientation | None:
@@ -870,7 +880,7 @@ class _Items:
             if not (other.same_file if shape_bound else other.related):
                 continue
             later = other.decided.get(key)
-            if later is None or later.source not in _PERSONS:
+            if later is None or not _theirs(later):
                 continue
             if key in MATERIAL and _filament_name(other.row) != _filament_name(row):
                 continue
@@ -1013,7 +1023,7 @@ def render(offer: Offering, proposal: Proposal, pose: str) -> list[str]:
 
 #: The items' groups, by whose each was.
 _GROUPS: tuple[tuple[str, tuple[Source, ...]], ...] = (
-    ("YOUR OVERRIDES", _PERSONS),
+    ("YOUR OVERRIDES", _OWN),
     ("LESSONS IT HAD", (Source.LESSON,)),
     ("YOUR ANSWERS THEN", (Source.ANSWER,)),
 )
@@ -1116,6 +1126,8 @@ def _tags(item: Item) -> list[str]:
     tags = [item.fits] if item.fits else []
     if u.by is Source.READING:
         tags.append("you took the slice's")
+    elif u.by is Source.MODEL:
+        tags.append("you took the model's")
     if u.first_job_id and u.first_job_id != u.job_id:
         tags.append(f"first on {u.first_stl_name}, job {u.first_job_id[:8]}")
     return tags
@@ -1172,7 +1184,7 @@ def _gives(past: Past) -> str:
     """What another print would give, in a few words."""
     words = []
     for item in past.items:
-        if item.used.by in _PERSONS:
+        if item.used.by in _OWN:
             if item.key == PAUSE:
                 words.append(f"your pause at {item.value}")
             elif item.key == ORIENTATION:

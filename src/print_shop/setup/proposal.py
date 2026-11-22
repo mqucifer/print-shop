@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -78,6 +79,7 @@ __all__ = [
     "pose_value",
     "read_back",
     "reached",
+    "tree_supports",
 ]
 
 
@@ -219,6 +221,8 @@ class Suggested(BaseModel):
     #: What the person took of them, and what they turned down saying why, by key.
     taken: tuple[str, ...] = ()
     declined: tuple[str, ...] = ()
+    #: The person went on past them once they were in, without having them on screen.
+    unseen: bool = False
     reasoning: str = ""
     design_notes: tuple[str, ...] = ()
     refused: tuple[str, ...] = ()
@@ -433,12 +437,7 @@ def guard(facts: PartFacts, proposal: Proposal) -> Proposal:
             reason=f"the {overhang:g} mm2 overhang would print into the air, and nothing "
                    "decided otherwise",
             source=Source.GUARD, feature="overhang", knowledge="supports"))
-    if value("enable_support") == "1" and value("support_type") != "tree(auto)":
-        changes = [c for c in changes if c.key != "support_type"]
-        changes.append(Change(
-            key="support_type", preset=facts.preset("support_type"), value="tree(auto)",
-            reason="tree supports, as you use them", source=Source.GUARD,
-            feature="overhang", knowledge="supports"))
+    changes = tree_supports(changes, facts.preset)
 
     # A part with a fit never gets a random seam from the model or a lesson
     # (mqucifer/print-shop#130); the person's own answer or correction stands.
@@ -466,6 +465,21 @@ def guard(facts: PartFacts, proposal: Proposal) -> Proposal:
         "notes": proposal.notes + tuple(_notes(facts)),
         "refused": tuple(refused),
     })
+
+
+def tree_supports(changes: list[Change], preset: Callable[[str], str]) -> list[Change]:
+    """The guard that supports are always tree: held over a proposal, and again over what's
+    taken of the model's at the review (mqucifer/print-shop#242)."""
+
+    def value(key: str) -> str:
+        return next((c.value for c in changes if c.key == key), preset(key))
+
+    if value("enable_support") != "1" or value("support_type") == "tree(auto)":
+        return changes
+    return [*(c for c in changes if c.key != "support_type"), Change(
+        key="support_type", preset=preset("support_type"), value="tree(auto)",
+        reason="tree supports, as you use them", source=Source.GUARD,
+        feature="overhang", knowledge="supports")]
 
 
 def _notes(f: PartFacts) -> list[str]:
