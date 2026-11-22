@@ -94,6 +94,16 @@ The setup model's proposal (`setup.Proposer`) is given each kept lesson for the 
 - **Used on two prints that didn't fail, without a correction, it's listed to promote:** a line in the print-settings skill, by PR, then `promote ID --as skill --where owner/repo#n`. Once in the skill it's read there, and isn't given as a lesson.
 - **One that got in the way, or was given twice and not used, is listed to retire.** Code retires nothing. A correction of a lesson's setting is also a candidate of its own.
 
+## Use these, beside lessons
+
+A lesson is for any part with its traits, so a reviewer keeps it first. A person's own overrides on a part like the last one need no reviewer: the review offers them and the person confirms them (mqucifer/print-shop#211, `src/print_shop/setup/offer.py`, and the runbook's "Use these").
+
+- **Closeness is measured, not keyed to traits** (`src/print_shop/setup/similar.py`). The same bytes come first. Then each measure's difference is averaged into a shape score, which counts for 80%, with the context and the source 10% each. A part just across a trait's threshold still gets the offer, with the difference shown.
+- **A lesson that applied to that print and wouldn't to this one is listed,** with the trait it misses, where it would have dropped out in silence. It's pre-selected unless the part is far from that trait's measure, or the lesson has been edited or retired since.
+- **Using one accepts no lesson and draws none.** The person's own override, used again at the same value, is more evidence for the lesson it repeats, marked as used. An answer's, a lesson's or the slice's draws nothing.
+- **A lesson whose setting was used at its own value stood,** and is scored `used`. Used at another value, it was `in_the_way`.
+- **In the ledger,** a used item is a correction with `used`: the print it came from, whose it was, and the print it began on.
+
 ## Tables
 
 In the print ledger, created if missing, without moving its schema version: `print_lessons`, `print_lesson_steps`, `print_lesson_evidence`, `job_lessons` and `print_lesson_scores`, and the columns `prints.features` and `print_lessons.material`, added if missing. Older code still runs against the file: it inserts into `prints` by column name. On a copy of the real ledger every row reads back as it was, and a second open and draw changes nothing.

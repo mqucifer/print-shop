@@ -27,6 +27,9 @@ its statuses, steps, scores and signatures, imported from there, not a second vo
   carries the file's own settings: its profiles, what differs from the inventory's tuning, and
   each object's overrides. No part was measured, so it's keyed to no trait until a reviewer
   keys it.
+- **An override used from a past print isn't a new lesson** (mqucifer/print-shop#211): the
+  person's own is more evidence for the lesson it repeats, and draws none; one that was an
+  answer's, a lesson's or the slice's draws nothing.
 - **Each is scored at the review by what the Sponsor did:** a setting that stood is `used`, one
   they corrected `in_the_way`, and one another lesson or their answer set `not_used`. A lesson only
   read by the model is scored by the reviewer (`score`). Its status follows each job's latest score
@@ -350,6 +353,8 @@ def draw(ledger: Ledger, row: Row) -> list[int]:
             last[c.key] = (READING, c)  # taken from the slice's reading, its own kind
     part = _part(row)
     for key, (kind, c) in last.items():
+        if c.used is not None and c.used.by is not Source.SPONSOR:
+            continue  # confirmed again at the review, and never the person's correction
         if _drawn(ledger, row.job_id, kind, key):
             continue
         detail = {**part, "key": key, "preset": c.preset, "value": c.value, "reason": c.reason}
@@ -381,10 +386,15 @@ def draw(ledger: Ledger, row: Row) -> list[int]:
             said = f"the same {kind} again on {row.stl_name}" + (
                 "" if fits else ", whose part isn't every trait it's keyed to"
             )
+            if c.used is not None:
+                detail["used"] = c.used.model_dump(mode="json")
+                said += f", {c.used.line()}"
             with ledger.writing() as db:
                 _evidence(db, lesson, row.job_id, kind, key, detail)
                 _step_in(db, lesson, one_in(db, lesson), HARNESS, said, job_id=row.job_id)
             continue
+        if c.used is not None:
+            continue  # carrying an override isn't a lesson: the first print drew its candidate
         text = c.reason or ("the Sponsor's correction" if kind == CORRECTION else c.reading)
         made.append(_new(
             ledger, row.job_id, kind, HARNESS, text, keyed, (kind, key, detail), key,
@@ -696,7 +706,10 @@ def _scored_at_review(ledger: Ledger, row: Row) -> None:
             )
         elif not g.applied:
             scored, why = "not_used", g.why
-        elif g.key in corrected:
+        elif g.key in corrected and not (
+            # Used from a past print at the lesson's own value: it stood.
+            corrected[g.key].used is not None and corrected[g.key].value == g.value
+        ):
             c = corrected[g.key]
             scored, why = "in_the_way", f"corrected at the review to {c.value}: {c.reason}"
         elif g.key in stood and stood[g.key].source is Source.READING:

@@ -63,6 +63,7 @@ __all__ = [
     "PartFacts",
     "Proposal",
     "Source",
+    "Used",
     "answered",
     "answered_kept",
     "apply",
@@ -86,6 +87,25 @@ class Source(StrEnum):
     READING = "reading"
 
 
+class Used(BaseModel):
+    """Where a correction came from, when the person used it from a past print
+    (mqucifer/print-shop#211, `offer.py`)."""
+
+    model_config = {"frozen": True}
+
+    job_id: str  # the print it was used from
+    stl_name: str
+    by: Source  # whose it was: the person's correction, what they took, an answer, a lesson
+    lesson: int | None = None
+    #: The print it began on, where that print had used it from another.
+    first_job_id: str = ""
+    first_stl_name: str = ""
+
+    def line(self) -> str:
+        lesson = f", lesson {self.lesson}'s" if self.by is Source.LESSON else ""
+        return f"used from {self.stl_name}, job {self.job_id[:8]}{lesson}"
+
+
 class Change(BaseModel):
     """One setting changed from the preset, and why."""
 
@@ -107,6 +127,8 @@ class Change(BaseModel):
     #: Why it didn't reach the slice, as asked and sliced ("asked 30, sliced 80"), or "" when
     #: it did or hasn't been sliced yet (mqucifer/print-shop#206).
     not_applied: str = ""
+    #: The past print it was used from, or None (mqucifer/print-shop#211).
+    used: Used | None = None
 
 
 class GivenLesson(BaseModel):

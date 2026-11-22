@@ -20,6 +20,10 @@ flagged, each with the change it proposes, its reason and the reading it rests
 on. `take` takes them, or `take 2` one of them; nothing from a reading is
 applied otherwise.
 
+**Use these** (mqucifer/print-shop#211, `offer.py`): what decided the most similar past print,
+pre-selected, each with why. `use` takes the selected ones, `use 2 4` those numbered, `clear 3`
+clears one and `like 2` picks another print. Only `use` applies any.
+
 **The orientation can be sent back** (mqucifer/print-shop#128), in a short conversation
 (`send_back`): the step says why it turned the part, the person names the pose it should print
 in and says why the turn was wrong, or meets the step's concern by settings instead, each priced
@@ -32,12 +36,14 @@ from __future__ import annotations
 import re
 import textwrap
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
 from print_shop.core.state import AppliedOrientation, Orientation, SliceResult
 from print_shop.setup.concerns import concern_in, ways
 from print_shop.setup.intake import Estimate
+from print_shop.setup.offer import Item, Offering
+from print_shop.setup.offer import render as render_offer
 from print_shop.setup.proposal import (
     ORIENTATION,
     PAUSE,
@@ -66,6 +72,8 @@ _SEND_BACK = re.compile(r"^\s*orientation\b(?:\s*=\s*(\d+))?\s*(?:(?:because|-|â
                         re.I)
 #: `take`, or `take 1 3`: the changes the slice's reading proposed.
 _TAKE = re.compile(r"^\s*take\b\s*([\d ,]*)$", re.I)
+#: `use`, `use 2 4`, `clear 3` or `like 2`: what the most similar past print offers.
+_OFFER = re.compile(r"^\s*(use|clear|like)\b\s*([\d ,]*)$", re.I)
 
 
 @dataclass(frozen=True)
@@ -96,6 +104,8 @@ class ReviewRequest:
     #: The part's context from its design run or a sidecar, and placed in this pose, in lines
     #: (mqucifer/print-shop#130): what was read, or that there was none.
     context: tuple[str, ...] = ()
+    #: What decided the past prints most like this one, to use (mqucifer/print-shop#211).
+    offering: Offering | None = None
 
     @property
     def proposed(self) -> tuple[Flag, ...]:
@@ -113,6 +123,15 @@ class Review:
     stop: bool = False
     #: The changes the reading proposed that the Sponsor took (`take`).
     taken: tuple[Change, ...] = ()
+    #: The offer as the answer left it, where it picked another print or cleared an item.
+    offering: Offering | None = None
+
+    @property
+    def browsing(self) -> bool:
+        """Only the offer was changed: there's nothing to slice again."""
+        return self.offering is not None and not (
+            self.approved or self.stop or self.corrections or self.taken
+        )
 
 
 class Reviewer(Protocol):
@@ -208,11 +227,16 @@ def render(request: ReviewRequest) -> str:
         lines += ["", "The part's context (its design run, or a sidecar beside it):",
                   *(f"  {line}" for line in request.context)]
     lines += _read(request)
+    if request.offering is not None:
+        pose = pose_value(request.orientation.rotation_deg)
+        lines += render_offer(request.offering, proposal, pose)
+    use = (" use what decided that print (use, or use 1 3),"
+           if request.offering is not None and request.offering.options else "")
     take = " or take what the slice proposes (take, or take 1)," if request.proposed else ""
     back = " send the orientation back (orientation)," if request.candidates else ""
     lines += [
         "",
-        f"Type ok to go on to the approval gate,{take}{back} or correct a setting by name, "
+        f"Type ok to go on to the approval gate,{use}{take}{back} or correct a setting by name, "
         "e.g. wall_loops=3 because it's decorative (several separated by ';'), "
         "pause_at=12.4 because white to black for a colour change at a height, or stop.",
     ]
@@ -221,6 +245,8 @@ def render(request: ReviewRequest) -> str:
 
 def _by(change: Change) -> str:
     """Who a change is from, as the review names them."""
+    if change.used is not None:
+        return f"{_BY[change.source]}, {change.used.line()}"
     return _BY[change.source] + (f" {change.lesson}" if change.lesson is not None else "")
 
 
@@ -278,6 +304,9 @@ def parse_answer(answer: str, request: ReviewRequest) -> Review | str:
         return Review(stop=True)
     corrections = []
     taken: list[Change] = []
+    used: list[Change] = []
+    offering = request.offering
+    picked = False
     for part in filter(None, (p.strip() for p in text.split(";"))):
         took = _TAKE.match(part)
         if took is not None:
@@ -285,6 +314,28 @@ def parse_answer(answer: str, request: ReviewRequest) -> Review | str:
             if isinstance(found, str):
                 return found
             taken += found
+            continue
+        offered = _OFFER.match(part)
+        if offered is not None:
+            if offering is None:
+                return "there's no past print's settings to use"
+            verb = offered.group(1).lower()
+            numbers = [int(n) for n in re.findall(r"\d+", offered.group(2))]
+            if verb == "use":
+                if picked:
+                    return "look at that print's settings first: like picks it, then use"
+                items = offering.use(numbers, request.proposal,
+                                     pose_value(request.orientation.rotation_deg))
+                if isinstance(items, str):
+                    return items
+                used += [_used_change(item, request) for item in items]
+                continue
+            if verb == "like" and len(numbers) != 1:
+                return "like picks one print, such as like 2"
+            changed = offering.like(numbers[0]) if verb == "like" else offering.clear(numbers)
+            if isinstance(changed, str):
+                return changed
+            offering, picked = changed, picked or verb == "like"
             continue
         match = _CORRECTION.match(part)
         if match is None:
@@ -308,8 +359,31 @@ def parse_answer(answer: str, request: ReviewRequest) -> Review | str:
                    source=Source.SPONSOR, standard=known.standard if known else "")
         )
     keys = {c.key for c in corrections}
-    return Review(corrections=tuple(corrections),
-                  taken=tuple(c for c in taken if c.key not in keys))
+    taken = [c for c in taken if c.key not in keys]
+    # Typed wins over taken, and both over used.
+    over = keys | {c.key for c in taken}
+    used = [c for c in {c.key: c for c in used}.values() if c.key not in over]
+    if taken and any(c.key == ORIENTATION for c in used):
+        return "that turns the part, which slices it afresh: use it, then take at the next review"
+    return Review(corrections=(*used, *corrections), taken=tuple(taken),
+                  offering=None if offering == request.offering else offering)
+
+
+def _used_change(item: Item, request: ReviewRequest) -> Change:
+    """A past print's item as the person's correction, with the print it came from."""
+    if item.key == ORIENTATION:
+        # Keyed as a pose sent back is, by the traits in the file's own pose.
+        return Change(key=ORIENTATION, preset=pose_value(request.orientation.rotation_deg),
+                      value=item.value, reason=item.reason, source=Source.SPONSOR,
+                      feature=", ".join(request.laid_traits), reading=item.reading,
+                      used=item.used)
+    known = request.proposal.get(item.key) or next(
+        (c for c in (*request.proposal.not_applied, *request.proposal.kept) if c.key == item.key),
+        None,
+    )
+    return Change(key=item.key, preset=item.preset, value=item.value, reason=item.reason,
+                  source=Source.SPONSOR, standard=known.standard if known else "",
+                  reading=item.reading, used=item.used)
 
 
 def _pause(value: str, reason: str, request: ReviewRequest) -> Change | str:
@@ -352,19 +426,31 @@ def cli_reviewer(
 
     def review(request: ReviewRequest) -> Review:
         write(render(request))
+        moved: Offering | None = None  # the offer as picked and cleared here
         while True:
             answer = read("> ")
             back = _SEND_BACK.match(answer)
             if back is not None and request.candidates:
                 sent = send_back(request, read, write, back.group(1), back.group(2))
                 if sent is not None:
-                    return sent
+                    return replace(sent, offering=moved) if moved is not None else sent
                 write("  Back to the review: ok, a correction, orientation, or stop.")
                 continue
             parsed = parse_answer(answer, request)
-            if isinstance(parsed, Review):
-                return parsed
-            write(f"  {parsed}")
+            if isinstance(parsed, str):
+                write(f"  {parsed}")
+                continue
+            if parsed.browsing:
+                # Only the offer moved, so only the offer is shown again.
+                moved = parsed.offering
+                assert moved is not None
+                request = replace(request, offering=moved)
+                pose = pose_value(request.orientation.rotation_deg)
+                write("\n".join(render_offer(moved, request.proposal, pose)))
+                continue
+            if moved is not None and parsed.offering is None:
+                return replace(parsed, offering=moved)
+            return parsed
 
     return review
 
