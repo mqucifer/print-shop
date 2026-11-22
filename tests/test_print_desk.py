@@ -39,6 +39,7 @@ from print_shop.setup.intake import Intake, Option, Question, replay_asker
 from print_shop.setup.proposal import ORIENTATION, PAUSE, Change, Proposal, Source
 from print_shop.setup.reading import Flag, PauseReading, read_slice
 from print_shop.setup.review import Review, ReviewRequest, parse_answer
+from print_shop.setup.waiting import Waiting
 from print_shop.slicer.orca import SlicerProfiles
 from print_shop.slicer.store import STORE_DIR, Store, choose
 from tests.fakes import DATA
@@ -559,7 +560,10 @@ def test_print_job_keeps_what_it_shows_in_the_jobs_folder_and_no_secret(
     monkeypatch.setattr("builtins.input", lambda prompt="": "2")
     tokens = ["sk-test", "secret", "eyJhbGciOiJIUzI1NiJ9.ha-token"]  # the settings', the env's
 
+    given: dict[str, object] = {}
+
     def build_run(**kwargs: object) -> SimpleNamespace:
+        given.update(kwargs)
         return SimpleNamespace(daemon=_Daemon(kwargs["asker"], tokens),
                                ledger=SimpleNamespace(close=lambda: None))
 
@@ -569,6 +573,8 @@ def test_print_job_keeps_what_it_shows_in_the_jobs_folder_and_no_secret(
     code = script.main([str(part), "--nozzle", "0.4", "--filament", "Elegoo PLA",
                         "--settings", str(settings)])
     assert code == 1
+    waiting = given["waiting"]
+    assert isinstance(waiting, Waiting) and waiting.stock_first, "the stock questions at once"
     shown = capsys.readouterr()
     assert "the key is sk-test" in shown.out, "the terminal shows what it showed before"
 
