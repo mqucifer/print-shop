@@ -811,7 +811,7 @@ def test_an_unticked_value_thats_this_prints_already_is_set_here(
     found = offering(ledger, this(here))
     assert standings(found)["wall_loops"][1].mark == "="
     text = " ".join(" ".join(offer.render(found, Proposal(), "0,0,0")).split())
-    assert "ALREADY SET HERE: 1 wall_loops 2 (your preset): two is plenty" in text
+    assert "ALREADY SET HERE 1 wall_loops 2 (your preset) 1: two is plenty" in text
     assert "2 -> 2" not in text
 
 
@@ -823,7 +823,33 @@ def test_several_set_here_already_share_their_reason(tmp_path: Path, ledger: Led
             result="failed", symptom="other", note="it rang when tapped")
     lines = offer.render(offering(ledger, this(here)), Proposal(), "0,0,0")
     text = " ".join(" ".join(lines).split())
-    assert f"1 wall_loops 2, 2 bridge_speed 50 (your preset): {why}" in text
+    assert "1 wall_loops 2 (your preset) 2 bridge_speed 50 (your preset)" in text
+    assert text.count(why) == 1 and f"1, 2: {why}" in text
+
+
+def test_a_lesson_set_here_already_is_a_short_row_with_its_words_beneath_once(
+    tmp_path: Path, ledger: Ledger
+) -> None:
+    here = box(tmp_path, "slab.stl", 101, 50, 12)
+    printed(ledger, "seed", here)
+    words = "a big face lifts at its corners when the room is cold and the door is left open"
+    learned, given = [], []
+    for key, value in (("wall_loops", "2"), ("bridge_speed", "50")):
+        n = lessons.write(ledger, "seed", "reviewer: test", words, ["large_bed_contact"],
+                          f"{key}={value}")
+        lessons.accept(ledger, n, "reviewer: test")
+        learned.append(Change(key=key, preset="", value=value, source=Source.LESSON, lesson=n,
+                              reason=f"learned on slab.stl: {words}"))
+        given.append(n)
+    printed(ledger, "first", here, changes=tuple(learned))
+    found = offering(ledger, this(here))
+    lines = offer.render(found, Proposal(), "0,0,0")
+    assert f"  1 wall_loops 2 (your preset; lesson {given[0]})" in lines
+    assert f"  2 bridge_speed 50 (your preset; lesson {given[1]})" in lines
+    assert " ".join(" ".join(lines).split()).count(words) == 1
+    listed = Proposal(lessons=lessons.for_part(ledger, features_of(here), "PLA"))
+    assert "a big face lifts" not in " ".join(offer.render(found, listed, "0,0,0")), (
+        "in the Lessons section, so not said twice")
 
 
 def test_the_persons_ticked_override_stays_theirs_at_the_presets_value(
@@ -864,7 +890,7 @@ def test_already_set_and_cant_use_are_said_in_words(tmp_path: Path, ledger: Ledg
     now = Proposal(changes=(Change(key="wall_loops", preset="2", value="4", lesson=3,
                                    reason="learned", source=Source.LESSON),))
     text = "\n".join(offer.render(offering(ledger, this(here)), now, "0,0,0"))
-    assert "ALREADY SET HERE: 2 wall_loops 4 (lesson 3)" in text
+    assert "ALREADY SET HERE\n  2 wall_loops 4 (lesson 3)" in text
     assert "CAN'T USE 1: 'made_up_key' isn't a setting" in text
     assert "1 made_up_key 1: a try" in text
     assert "[=]" not in text and "[-]" not in text

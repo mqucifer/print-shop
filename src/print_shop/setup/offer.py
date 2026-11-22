@@ -1013,24 +1013,37 @@ def _settled(rows: list[tuple[int, Item, Standing]], proposal: Proposal) -> list
     """What's so here already, and what can't be used, in words."""
     used = [f"{n} {item.key} {item.value}" for n, item, found in rows if found.why == ("used",)]
     lines = ["", *_wrapped("  USED: ", ", ".join(used))] if used else []
-    already: dict[str, list[str]] = {}
+    already: list[str] = []
+    said: list[tuple[int, str]] = []
     for n, item, found in rows:
         if found.mark != "=" or found.why == ("used",):
             continue
         now = _now(proposal, item.key)
         if now is None:
             by = "this print's pose" if item.key == ORIENTATION else "your preset"
-            why = "" if item.key == ORIENTATION else _reason(item, proposal)
         else:
             by = _set_by(now)
-            known = item.used.by is Source.LESSON or now.reason == item.reason
-            why = "" if known else _reason(item, proposal)
-        # Several with one reason say it once.
-        said = f"({by}): {why}" if why else f"({by})"
-        already.setdefault(said, []).append(f"{n} {item.key} {item.value}")
+        u = item.used
+        if u.by is Source.LESSON:
+            if by != f"lesson {u.lesson}":
+                by += f"; lesson {u.lesson}"
+            # Its words are in the Lessons section where it's there, or where it set this.
+            listed = any(g.id == u.lesson for g in proposal.lessons)
+            why = "" if listed or (now is not None and now.lesson == u.lesson) else item.reason
+        elif item.key == ORIENTATION or (now is not None and now.reason == item.reason):
+            why = ""
+        else:
+            why = _reason(item, proposal)
+        already.append(f"{n} {item.key} {item.value} ({by})")
+        if why:
+            said.append((n, why))
     if already:
-        lines += ["", *_wrapped("  ALREADY SET HERE: ", "; ".join(
-            f"{', '.join(items)} {said}" for said, items in already.items()))]
+        lines += ["", "  ALREADY SET HERE"]
+        for row in already:
+            lines += _wrapped("  ", row)
+        # The words beneath, one a row, those that several share once.
+        for text, ns in _by_text(said).items():
+            lines += _wrapped(f"      {_listed(ns)}: ", text)
     cant = [(n, item, found) for n, item, found in rows if found.mark == "-"]
     if cant:
         lines.append("")
