@@ -853,7 +853,7 @@ def _as_started(state: PrintJobState, ledger: Ledger, done: str) -> Material | N
 
 def _recorder(
     ledger: Ledger | None, profiles: SlicerProfiles
-) -> Callable[[int, str | None], None] | None:
+) -> Callable[[int, NotKnown | None], None] | None:
     """Records a load the person says, at the review (`review._loaded_first`), and the print
     they said is over in the same word."""
     material = _material_of(profiles)
@@ -861,7 +861,7 @@ def _recorder(
         return None
     path, printer = ledger.path, material.printer_id
 
-    def record(spool_id: int, over: str | None) -> None:
+    def record(spool_id: int, over: NotKnown | None) -> None:
         with Inventory(path) as inventory:
             inventory.load(spool_id, printer, over=over)
 
@@ -1213,7 +1213,7 @@ def _propose_and_review(
     material: Material | None = None,
     stock: pauses.Stock | None = None,
     not_known: Callable[[], NotKnown | None] | None = None,
-    record_load: Callable[[int, str | None], None] | None = None,
+    record_load: Callable[[int, NotKnown | None], None] | None = None,
 ) -> tuple[SliceResult, dict[str, Any]]:
     """Slice with the proposal; with a reviewer, again after each correction until approved.
 

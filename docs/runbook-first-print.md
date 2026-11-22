@@ -148,9 +148,11 @@ Finish that job, or stop it with Ctrl-C in its terminal (which doesn't stop the 
    - **`uv run python scripts/stock.py load 2`** in a terminal, then `y` to whether that print's over. Without a terminal to ask in, as from a script, the load is recorded and Start still holds;
    - **on that print's own outcome card,** from the phone: pick the spool under "It's over, and on the printer now is", then Record. `as recorded` says neither half, so it doesn't clear it.
 
-   What you typed before a question was shown doesn't count, and nothing is selected for you. Nothing the printer reports clears it or moves the stock: not its end, a layer, an idle or a file's name. Seeing a print start can make it not known again, as when you said a start that failed was over and then it began. The phone can't settle a start that was never confirmed (it has no card) or an outcome you've already recorded: those take the terminal.
+   What you typed before a question was shown doesn't count, nothing is selected for you, and with no terminal to ask in (input piped in) nothing is asked or recorded. An answer counts only for what it was asked about: if a start was seen, or a load or another answer recorded, since, it records nothing and says so. Nothing the printer reports clears it or moves the stock: not its end, a layer, an idle or a file's name.
 
-   **What it can't see:** a swap in a file sliced by hand (the file doesn't say what a pause is for), a spool changed with no pause of print-shop's, and a start never confirmed that begins after you said it was over, where print-shop didn't see it begin. Record what's loaded after those (`stock load <id>`).
+   **A start that was never confirmed may still begin,** so each place that asks says so, and asks whether it's over or cancelled on the printer so it can't begin. print-shop keeps looking for it by its own file, however late, until a later print has started. Seen printing, it makes it not known again, even if you'd said it was over. The phone can't settle such a start (it has no card), or an outcome you've already recorded: those take the terminal.
+
+   **What it can't see:** a swap in a file sliced by hand (the file doesn't say what a pause is for), a spool changed with no pause of print-shop's, and a start you said couldn't begin that began with print-shop not looking. Record what's loaded after those (`stock load <id>`).
 
    **A job starts on what it was prepared for** (mqucifer/print-shop#218), with or without a pause, hand-sliced and `--again` too. The loaded spool is compared again when you approve:
    - the same spool starts, with a colour you've corrected on it since recorded;
@@ -229,7 +231,7 @@ Finish that job, or stop it with Ctrl-C in its terminal (which doesn't stop the 
    - **Result:** success if the part is usable, or failed.
    - **What went wrong:** the closest of adhesion, warping, stringing, layer_shift, spaghetti, under_extrusion, or other. On a success it's a minor flaw on a usable part, read as `success, with stringing` (mqucifer/print-shop#189), or `none` if there was no flaw. A failure always names one. Other needs a note.
    - **Note:** anything worth knowing, such as "corner lifted at layer 3".
-   - **It's over, and on the printer now is,** on the card of a print with a swap, while what's on isn't known since that print (mqucifer/print-shop#218). Each choice says both halves. Pick one and Record loads it in the stock, clears that, and keeps it as the spool the print ended with. `as recorded` leaves it not known and the ending "not said", and once recorded only the terminal can say it. If you said it at the terminal after picking, Record drops the pick, says so, and waits for another press.
+   - **It's over, and on the printer now is,** on the card of a print with a swap, while what's on isn't known since that print (mqucifer/print-shop#218). Each choice says both halves. Pick one and Record loads it in the stock, clears that, and keeps it as the spool the print ended with. `as recorded` leaves it not known and the ending "not said", and once recorded only the terminal can say it. If you loaded or said a spool at the terminal after picking, Record drops the pick, says so, and waits: pick again, or press it without one.
    - Press **Record it**. If it doesn't add up (a failure with `none`, or other without a note), the card says why and nothing is stored. Fix it and press again.
 
    You can answer later. Until you do, the print stays open, and `uv run python scripts/print_job.py --serve` asks about it again.

@@ -59,6 +59,7 @@ from print_shop.core.mqtt import (
     outcome_symptom_topic,
     outcome_topic,
 )
+from print_shop.inventory import Pick
 from print_shop.ledger import Answer, Frame, Ledger, LedgerError, Result, Row, SaidSince, Symptom
 from print_shop.orchestrator import spools
 from print_shop.orchestrator.frames import FrameKeeper
@@ -184,11 +185,14 @@ class Watcher:
             for r in self._ledger.unconfirmed_starts()
             if datetime.fromisoformat(r.start_requested_at) >= cutoff
         ]
-        if not running and not unconfirmed:
+        # A swap's start is looked for however late, and though its process was killed: being
+        # seen to begin can only make what's on not known again (mqucifer/print-shop#218).
+        unseen = self._ledger.swaps_unseen()
+        if not running and not unconfirmed and not unseen:
             return
         snapshot = self._printer.snapshot()
 
-        for row in unconfirmed:
+        for row in {r.job_id: r for r in (*unconfirmed, *unseen)}.values():
             if _is_ours(snapshot, row):
                 logger.warning("job %s is printing after all; watching it", row.job_id)
                 self._ledger.record_started(row.job_id)
@@ -239,9 +243,10 @@ class OutcomeDesk:
         self._draft: dict[str, str] = {}
         self._error: str | None = None
         #: What the print on show can be told is on now, and those last sent as the select's.
-        self._spools: dict[str, int] = {}
-        #: The one picked, by its words and number: kept though the stock changes under it.
-        self._picked: tuple[str, int] | None = None
+        self._spools: dict[str, Pick] = {}
+        #: The one picked, by its words, its number and what it was picked under: Record refuses
+        #: it if that has changed since.
+        self._picked: tuple[str, Pick] | None = None
         self._offered: tuple[str, ...] | None = None
 
     @property
@@ -280,7 +285,8 @@ class OutcomeDesk:
         self._show_frame(shown)
         can_say, spools_said = self._spools_of(row)
         if self._picked is not None:
-            can_say = {**can_say, self._picked[0]: self._picked[1]}
+            # Picked again, it's picked under what's shown now.
+            can_say.setdefault(*self._picked)
         self._offer_spools(can_say)
         paused = row.reading.pauses if row.reading else ()
         self._publish(
@@ -312,16 +318,15 @@ class OutcomeDesk:
             },
         )
 
-    def _spools_of(self, row: Row) -> tuple[dict[str, int], str]:
-        if not row.spools:
-            return {}, ""
+    def _spools_of(self, row: Row) -> tuple[dict[str, Pick], str]:
+        """A swap with no spool that could be recorded takes the pick too."""
         try:
             return spools.choices(self._ledger, row), spools.said(self._ledger, row)
         except Exception:  # noqa: BLE001 - the stock is never in the way of an answer
             logger.exception("the stock couldn't be read for job %s's outcome", row.job_id)
             return {}, ""
 
-    def _offer_spools(self, can_say: dict[str, int]) -> None:
+    def _offer_spools(self, can_say: dict[str, Pick]) -> None:
         """The select's options, sent before any state that's one of them."""
         self._spools = can_say
         if tuple(can_say) != self._offered:

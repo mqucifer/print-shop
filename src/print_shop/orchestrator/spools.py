@@ -10,15 +10,17 @@ in words that say both, with what was typed before dropped:
 - at `stock.py load`, which asks whether it's over (`ask_over`);
 - on that print's own outcome card, whose choices say both (`choices`).
 
-Nothing is pre-selected. With no terminal to ask in, nothing is cleared.
+Nothing is pre-selected. With no terminal to ask in, nothing is asked or cleared. An answer
+counts only for what it was asked of (`NotKnown.mark`): what's seen, loaded or said since stands.
 """
 
 from __future__ import annotations
 
 import re
+import sqlite3
 from collections.abc import Callable
 
-from print_shop.inventory import Inventory, InventoryError, NotKnown, Spool, spool_lines
+from print_shop.inventory import Inventory, InventoryError, NotKnown, Pick, Spool, spool_lines
 from print_shop.ledger import Ledger, Row
 
 __all__ = ["ask_on_now", "ask_over", "choices", "said"]
@@ -53,10 +55,9 @@ def ask_on_now(
     write("\n".join(f"    {spool.id}  {spool.named()}" for spool in on_hand))
     if now is not None:
         write(f"{found.over_and_on(now.named())} y says both. If another is on, its number says "
-              "that print is over and that one's on.")
+              "the same of that print, and that that one's on.")
     else:
-        write(f"Is {found.print_named()} over, and which spool is on the printer now? Its number "
-              "says both.")
+        write(f"{found.over_and_which()} Its number says both.")
     write("Enter for later: nothing's recorded, and Start holds until you say.")
     while True:
         forget()
@@ -75,19 +76,20 @@ def ask_on_now(
             write("  a spool's number from those, " + ("y, " if now else "") + "or Enter for later")
             continue
         try:
-            spool = stock.load(on, printer_id, over=found.job_id)
-        except InventoryError as exc:
+            spool = stock.load(on, printer_id, over=found)
+        except (InventoryError, sqlite3.Error) as exc:
             write(f"  Not recorded: {exc}")
             return
-        write(f"  Recorded: {found.print_named()} is over, and {spool.named()}, is on.")
+        over = "is over" if found.started else "is over or can't begin"
+        write(f"  Recorded: {found.print_named()} {over}, and {spool.named()}, is on.")
         return
 
 
 def ask_over(
     found: NotKnown, spool: Spool, *,
     read: Callable[[str], str], write: Callable[[str], None], forget: Callable[[], None],
-) -> str | None:
-    """At a load: the print that's over, where a y says it is and that `spool` is on now."""
+) -> NotKnown | None:
+    """At a load: what's said over, where a y says it is and that `spool` is on now."""
     write(f"{found.over_and_on(spool.named())} y says both. Anything else records the load "
           "alone, and Start still holds.")
     forget()
@@ -95,10 +97,10 @@ def ask_over(
         typed = read("over> ")
     except EOFError:
         return None
-    return found.job_id if typed.strip().lower() == "y" else None
+    return found if typed.strip().lower() == "y" else None
 
 
-def choices(ledger: Ledger, row: Row) -> dict[str, int]:
+def choices(ledger: Ledger, row: Row) -> dict[str, Pick]:
     """What the outcome can be told is on now, by words that say both halves: only on the card
     of the print since which it isn't known, and only a spool on hand."""
     if row.material is None:
@@ -108,7 +110,8 @@ def choices(ledger: Ledger, row: Row) -> dict[str, int]:
         return {}
     with Inventory(ledger.path) as stock:
         on_hand = _likely_first(found, stock.spools())
-    return {f"{spool.named()} is on now, and that print is over": spool.id for spool in on_hand}
+    return {f"{spool.named()} is on now, and that print is over": Pick(spool.id, found.mark)
+            for spool in on_hand}
 
 
 def said(ledger: Ledger, row: Row) -> str:

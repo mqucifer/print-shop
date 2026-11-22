@@ -192,6 +192,9 @@ def main(argv: list[str] | None = None) -> int:
         except InventoryError as exc:
             print(exc, file=sys.stderr)
             return 2
+        except KeyboardInterrupt:
+            print("\nStopped: nothing was recorded.")
+            return 130
     return 0
 
 

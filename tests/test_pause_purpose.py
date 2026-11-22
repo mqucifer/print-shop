@@ -115,7 +115,7 @@ class Shop:
         with Inventory(self.path) as stock:
             found = stock.unknown("cc1")
             assert found is not None, "there's nothing to say is over"
-            stock.load(spool, over=found.job_id)
+            stock.load(spool, over=found)
 
     def told_so_far(self, bridge: MemoryBridge) -> str:
         return str(bridge.retained_json(gate_topic(CFG))["held"]).removeprefix("Not started: ")
@@ -158,7 +158,7 @@ class Shop:
                 cfg=CFG, profiles=profiles, workdir=self.jobs, printer=printer,
                 slicer=PausingSlicer(), bridge=lambda cfg: bridge, ledger=ledger,
                 proposer=Proposer(), asker=lambda questions: (),
-                reviewer=cli_reviewer(read=read, write=said.append),
+                reviewer=cli_reviewer(read=read, write=said.append, asks=lambda: True),
                 watch_printer=printer, watch_poll_s=0.01, gate_wait_s=gate_wait_s,
             )
             with daemon:
@@ -1120,7 +1120,7 @@ def test_a_held_job_says_the_way_out_too(
 ) -> None:
     """print-shop-ux, on b34a39b: a change of mind was only told to put the old colour back."""
     shop.run("ok", held=reject, at_gate=lambda: void(add_spool(shop, colour, variety, kind)))
-    note = " (without --filament, if its command named one)" if kind == "PETG" else ""  # L5
+    note = " (leaving out any variety or tuning its command named)" if kind == "PETG" else ""
     assert shop.told[0].endswith(
         f"(`stock.py load 1`), then approve again; or, {instead}, Reject and run the job again"
         f"{note}")
@@ -1138,7 +1138,7 @@ def test_a_held_swap_and_an_edited_tuning_say_their_way_out(shop: Shop) -> None:
     shop.run("ok", at_gate=retune, held=reject)
     assert shop.told[0].endswith(
         "--tuning none`), then approve again; or, to print with it as it is, Reject and run the "
-        "job again (without --filament, if its command named one)")
+        "job again (leaving out any variety or tuning its command named)")
 
 
 def test_a_spool_of_the_same_variety_colour_and_tuning_starts_and_is_recorded(shop: Shop) -> None:

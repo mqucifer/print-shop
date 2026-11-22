@@ -66,6 +66,7 @@ from print_shop.inventory import SCHEMA as INVENTORY_SCHEMA
 from print_shop.inventory import (
     Material,
     NotKnown,
+    Pick,
     SpoolUse,
     clear_not_known,
     find_not_known,
@@ -739,7 +740,7 @@ class Ledger:
             "ended_at IS NULL",
         )
 
-    def record_answer(self, job_id: str, answer: Answer, on: int | None = None) -> None:
+    def record_answer(self, job_id: str, answer: Answer, on: Pick | None = None) -> None:
         """The Sponsor's answer. Once: a second answer is refused, not merged.
 
         `on` is the spool they picked at a swap's outcome, in words that say both: that print is
@@ -920,6 +921,23 @@ class Ledger:
         }
         return {job: (planned.get(job, ()), ended.get(job)) for job in planned | ended}
 
+    def swaps_unseen(self) -> list[Row]:
+        """Swaps' prints sent and never seen to start, killed while confirming or however long
+        ago, that could still begin: none once a later print has started. Seen printing by its
+        own file, one is only made not known again (mqucifer/print-shop#218)."""
+        if not self._has_swaps:
+            return []
+        with self._lock:
+            found = {r["job_id"] for r in self._conn.execute(
+                "SELECT p.job_id FROM print_swaps w JOIN prints p ON p.job_id = w.job_id"
+                " WHERE p.started_at IS NULL AND p.ended_at IS NULL AND NOT EXISTS ("
+                "  SELECT 1 FROM prints later WHERE later.started_at IS NOT NULL"
+                "  AND (later.start_requested_at > p.start_requested_at"
+                "       OR (later.start_requested_at = p.start_requested_at"
+                "           AND later.rowid > p.rowid)))"
+            )}
+        return [row for row in self.rows() if row.job_id in found] if found else []
+
     def not_known(self, printer_id: str) -> NotKnown | None:
         """Since which print what's on the printer isn't known, or None."""
         with self._lock:
@@ -964,19 +982,21 @@ _SELECT = (
 _SLICED_JOIN = " LEFT JOIN sliced_prints s ON s.job_id = p.job_id"
 
 
-def _said_on(db: sqlite3.Connection, job_id: str, spool_id: int) -> None:
-    """The person's pick at a swap's outcome, in the answer's transaction. It counts only while
-    it's that print since which what's on isn't known: what's been said since stands."""
+def _said_on(db: sqlite3.Connection, job_id: str, pick: Pick) -> None:
+    """The person's pick at a swap's outcome, in the answer's transaction. It counts only under
+    the mark it was picked under: a load or a word since stands."""
+    spool_id = pick.spool_id
     swap = db.execute(
         "SELECT m.spool, w.printer_id FROM print_swaps w"
         " JOIN swap_not_known k ON k.job_id = w.job_id AND k.printer_id = w.printer_id"
         " JOIN print_material m ON m.job_id = w.job_id"
-        " WHERE w.job_id = ?",
-        (job_id,),
+        " WHERE w.job_id = ? AND k.mark = ?",
+        (job_id, pick.mark),
     ).fetchone()
     if swap is None:
         raise SaidSince(
-            "what's on the printer was said since, so the pick is dropped: press Record again"
+            "what's on the printer was said since, so the pick is dropped: pick again, or press "
+            "Record again without one"
         )
     if not set_loaded(db, swap["printer_id"], spool_id):
         raise LedgerError(f"spool #{spool_id} isn't on hand: pick another")

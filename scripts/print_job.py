@@ -145,6 +145,10 @@ APPROVAL_WAIT_S = 3600.0
 FINISH_WAIT_S = 900.0  # after the press: preflight, upload, and a five-minute start watch
 
 
+#: Ctrl-C at the question before preparing.
+STOPPED_BEFORE = "\nStopped, before anything was prepared or sent."
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("stl", nargs="?", type=Path, help="the part to print")
@@ -294,6 +298,9 @@ def _hand_sliced(
             except InventoryError as exc:
                 print(exc, file=sys.stderr)
                 return 2
+            except KeyboardInterrupt:
+                print(STOPPED_BEFORE)
+                return 130
             print(f"From the inventory: {material.line()}.")
     if material is not None:
         wrong = sliced.loaded_mismatch(file, material, store)
@@ -373,6 +380,9 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
                 except InventoryError as exc:
                     print(exc, file=sys.stderr)
                     return 2
+                except KeyboardInterrupt:
+                    print(STOPPED_BEFORE)
+                    return 130
                 nozzle, filament = material.nozzle_mm, material.tuning or material.variety
                 print(f"From the inventory: {material.line()}.")
         assert nozzle is not None and filament is not None

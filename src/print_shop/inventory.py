@@ -26,6 +26,8 @@ ledger's schema version.
   request, and again if it's seen to start. Nothing print-shop sees clears that or moves a spool.
   Only a person's word that says both halves does, that print is over and this spool is on now
   (`load`'s `over`, and the pick at that print's outcome). A load alone records, and doesn't clear.
+- **An answer counts for what it was asked about** (`swap_not_known.mark`): each time it's marked
+  and each load recorded under it is a new mark, and a word given to an older one writes nothing.
 - **So a job starts only on what it was prepared for** (`why_not_start`): what's loaded is
   compared again at Start, for every job, and Start holds while what's on isn't known. Another
   spool of the same variety, colour and tuning will do, and is the one recorded.
@@ -40,6 +42,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import NamedTuple
+from uuid import uuid4
 
 from pydantic import BaseModel
 
@@ -51,6 +54,7 @@ __all__ = [
     "NotKnown",
     "NotYet",
     "Nozzle",
+    "Pick",
     "Printer",
     "Spool",
     "SpoolState",
@@ -116,9 +120,15 @@ CREATE TABLE IF NOT EXISTS print_swaps (
 );
 CREATE TABLE IF NOT EXISTS swap_not_known (
     printer_id  TEXT PRIMARY KEY REFERENCES printers(id),
-    job_id      TEXT NOT NULL                    -- the swap's print since which it isn't known
+    job_id      TEXT NOT NULL,                   -- the swap's print since which it isn't known
+    mark        TEXT NOT NULL                    -- new at each marking, and each load under it
 );
 """
+
+
+#: How a new run takes the spool that's loaded. An insert's hold can say it, so it doesn't name
+#: the option for it (mqucifer/print-shop#218: never "filament" of an insert).
+OWN_CHOICE = " (leaving out any variety or tuning its command named)"
 
 
 class InventoryError(ValueError):
@@ -269,6 +279,13 @@ def spool_lines(spools: tuple[SpoolUse, ...], ended_with: Material | None = None
     ]
 
 
+class Pick(NamedTuple):
+    """A spool picked as on now at a swap's outcome, and the mark it was picked under."""
+
+    spool_id: int
+    mark: str
+
+
 class NotKnown(NamedTuple):
     """What's on a printer isn't known since `job_id`, a print with a swap, was sent
     (mqucifer/print-shop#218). Said without the word swap: an insert's job can be told it."""
@@ -281,22 +298,39 @@ class NotKnown(NamedTuple):
     could_be: tuple[Material, ...] = ()
     #: Whether its outcome card can take the pick: seen to end, and not answered.
     card: bool = False
+    #: Whether it was seen to start. If not, it may still begin, however sure that it's over.
+    started: bool = True
+    #: What a person's answer is to: it counts only while this is still the mark.
+    mark: str = ""
 
     def print_named(self) -> str:
         sent = datetime.fromisoformat(self.sent_at).astimezone()
         return f"{self.stl_name}'s print (sent {sent:%d %b %H:%M})"
+
+    def _over_asked(self) -> str:
+        if self.started:
+            return f"Is {self.print_named()} over"
+        return (f"The start of {self.print_named()} was never confirmed, so it may still begin. "
+                "Is it over, or cancelled on the printer so it can't begin")
 
     def why(self) -> str:
         return f"print-shop doesn't know what's on {self.printer_id} since {self.print_named()}"
 
     def over_and_on(self, named: str) -> str:
         """The question that says both halves."""
-        return f"Is {self.print_named()} over, and is {named}, on the printer now?"
+        return f"{self._over_asked()}, and is {named}, on the printer now?"
+
+    def over_and_which(self) -> str:
+        """The same, where no spool can be named in it."""
+        return f"{self._over_asked()}, and which spool is on the printer now?"
 
     def hold(self) -> NotYet:
         lines = [f"`stock.py load {used.spool_id}` if it's {used.named()}"
                  for used in self.could_be]
-        do = ("When that print's over, say which spool is on: "
+        when = ("When that print's over" if self.started else
+                "Its start was never confirmed, so it may still begin: when it's over, or "
+                "cancelled on the printer so it can't begin")
+        do = (f"{when}, say which spool is on: "
               + (", ".join(lines) or "`stock.py load <id>`") + " (it asks whether that's over)")
         if self.card:
             do += f", or pick it on {self.stl_name}'s outcome card"
@@ -306,12 +340,13 @@ class NotKnown(NamedTuple):
 def find_not_known(db: sqlite3.Connection, printer_id: str) -> NotKnown | None:
     """Since which print what's on the printer isn't known, or None."""
     marked = db.execute(
-        "SELECT job_id FROM swap_not_known WHERE printer_id = ?", (printer_id,)
+        "SELECT job_id, mark FROM swap_not_known WHERE printer_id = ?", (printer_id,)
     ).fetchone()
     if marked is None:
         return None
     sent = db.execute(
-        "SELECT stl_name, start_requested_at, ended_at, result FROM prints WHERE job_id = ?",
+        "SELECT stl_name, start_requested_at, started_at, ended_at, result FROM prints"
+        " WHERE job_id = ?",
         (marked["job_id"],),
     ).fetchone()
     could_be = tuple(
@@ -325,6 +360,7 @@ def find_not_known(db: sqlite3.Connection, printer_id: str) -> NotKnown | None:
         printer_id=printer_id, job_id=marked["job_id"], stl_name=sent["stl_name"],
         sent_at=sent["start_requested_at"], could_be=could_be,
         card=sent["ended_at"] is not None and sent["result"] is None,
+        started=sent["started_at"] is not None, mark=marked["mark"],
     )
 
 
@@ -332,8 +368,8 @@ def mark_not_known(db: sqlite3.Connection, printer_id: str, job_id: str) -> None
     """What's on the printer isn't known since this print, in the caller's transaction. The
     stock's own word isn't written over."""
     db.execute(
-        "INSERT OR REPLACE INTO swap_not_known (printer_id, job_id) VALUES (?, ?)",
-        (printer_id, job_id),
+        "INSERT OR REPLACE INTO swap_not_known (printer_id, job_id, mark) VALUES (?, ?, ?)",
+        (printer_id, job_id, uuid4().hex),
     )
 
 
@@ -502,15 +538,17 @@ class Inventory:
         return self.spool(int(spool_id or 0))
 
     def load(
-        self, spool_id: int, printer_id: str | None = None, *, over: str | None = None
+        self, spool_id: int, printer_id: str | None = None, *, over: NotKnown | None = None
     ) -> Spool:
         """Load a spool, as a person says; the one loaded before on that printer goes back on
-        hand. `over` is the print they said is over in the same word, and only that clears what
-        isn't known (mqucifer/print-shop#218): a load alone records, and doesn't clear.
+        hand. `over` is what they were asked of and said is over in the same word, and only that
+        clears what isn't known (mqucifer/print-shop#218). A load alone records, and doesn't
+        clear: it's a new mark, so an answer from before it doesn't write over it.
 
         Raises:
-            InventoryError: If it's empty, or if another print with a swap has been sent since
-                they were asked whether `over` is: then nothing's recorded.
+            InventoryError: If it's empty, or if what they were asked of has changed since: a
+                start seen, another print sent, a load or another word recorded. Then nothing's
+                recorded.
         """
         printer = self.printer(printer_id)
         self.spool(spool_id)
@@ -518,15 +556,20 @@ class Inventory:
             # Read in the write's own transaction: a job and stock.py run side by side.
             if over is not None:
                 now = find_not_known(db, printer.id)
-                if now is not None and now.job_id != over:
+                if now is None or now.mark != over.mark:
                     raise InventoryError(
-                        f"{now.print_named()} was sent since that was asked, so nothing's "
-                        "recorded"
+                        f"what's on {printer.id} was said or seen otherwise since that was "
+                        "asked, so nothing's recorded"
                     )
             if not set_loaded(db, printer.id, spool_id):
                 raise InventoryError(f"spool #{spool_id} is empty")
             if over is not None:
-                clear_not_known(db, printer.id, over)
+                clear_not_known(db, printer.id, over.job_id)
+            else:
+                db.execute(
+                    "UPDATE swap_not_known SET mark = ? WHERE printer_id = ?",
+                    (uuid4().hex, printer.id),
+                )
         return self.spool(spool_id)
 
     def edit(
@@ -667,7 +710,7 @@ class Inventory:
                 f"Set it back (`stock.py edit {spool.id} {back}`)",
                 "Run the job again to prepare it with the spool as it is now",
                 "to print with it as it is",
-                " (without --filament, if its command named one)",
+                OWN_CHOICE,
             )
         if now is not None and first.takes(now, not_on):
             return None
@@ -690,7 +733,7 @@ class Inventory:
                 instead = f"to print in {now.colour}"
             elif not by_hand:
                 instead = f"to print with {now.named()}"
-                note = " (without --filament, if its command named one)"
+                note = OWN_CHOICE
         return NotYet(
             f"{what} {first.named()}, and the stock has {has} loaded on {first.printer_id}",
             load, f"{load}, and run the job again", instead, note,

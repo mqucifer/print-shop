@@ -8,8 +8,10 @@ is on the printer now"). All on fakes and a made-up stock, as in `test_pause_pur
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import itertools
 import sqlite3
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -32,9 +34,12 @@ from print_shop.orchestrator import spools as after_print
 from print_shop.orchestrator.outcome import OutcomeDesk
 from print_shop.runtime import describe
 from print_shop.setup import pauses
+from print_shop.setup import review as review_module
 from print_shop.setup.proposal import Change, Proposal, Source
 from print_shop.setup.reading import PauseReading
+from print_shop.setup.review import cli_reviewer
 from tests.fakes import FramePrinter, MemoryBridge
+from tests.test_colour_change import _request
 from tests.test_job_e2e import CFG
 from tests.test_ledger import record
 from tests.test_pause_purpose import (
@@ -302,10 +307,11 @@ def test_nothing_is_asked_where_its_known(shop: Shop) -> None:
 def test_an_answer_about_a_print_that_isnt_the_one_now_writes_nothing(shop: Shop) -> None:
     swap_started(shop, "older")
     with Inventory(shop.path) as stock:
-        stock.load(WHITE, over="older")
+        asked_of = stock.unknown("cc1")
+        stock.load(WHITE, over=asked_of)
     swap_started(shop, "newer")
     with Inventory(shop.path) as stock, pytest.raises(InventoryError, match="since"):
-        stock.load(BLACK, over="older")
+        stock.load(BLACK, over=asked_of)
     assert shop.loaded() == WHITE and unknown_of(shop) == "newer"
 
 
@@ -656,6 +662,310 @@ def test_an_insert_after_a_swap_print_never_says_swap_or_filament(shop: Shop) ->
     assert len(about) > 1
     for text in [*about, ran.gate["spools"], held["held"], shop.told[0]]:
         assert text and not any(word in text.lower() for word in ("swap", "filament")), text
+
+
+# The fifth cold read, of a3a0d23
+# --------------------------------------------------------------------------
+
+
+def reviewed(
+    shop: Shop, monkeypatch: pytest.MonkeyPatch, answer: Callable[[], str], *, terminal: bool,
+    unknown: bool = True,
+) -> tuple[list[str], str]:
+    """The load's question at a review's ok, with the stock's own reads and write."""
+    monkeypatch.setattr(review_module, "can_ask", lambda: terminal, raising=False)
+    with Inventory(shop.path) as stock:
+        material = stock.material()
+        black = material.of(stock.spool(BLACK))
+        on_hand = tuple(stock.spools())
+    change = Change(key="pause_at", preset="", value="2", reason="a swap", source=Source.SPONSOR,
+                    pause=pauses.Pause(kind=pauses.PauseFor.SWAP, start=black, to=material))
+
+    def not_known_now() -> Any:
+        with Inventory(shop.path) as stock:
+            return stock.unknown("cc1")
+
+    def record_load(spool: int, over: Any) -> None:
+        with Inventory(shop.path) as stock:
+            stock.load(spool, "cc1", over=over)
+
+    request = dataclasses.replace(
+        _request(), material=material, stock=lambda: on_hand, not_known=not_known_now,
+        record_load=record_load,
+    )
+    if not unknown:
+        request = dataclasses.replace(request, proposal=Proposal(changes=(change,)))
+    prompts: list[str] = []
+    said: list[str] = []
+
+    def read(prompt: str) -> str:
+        prompts.append(prompt)
+        return answer() if prompt == "loaded> " else "ok"
+
+    cli_reviewer(read=read, write=said.append, forget=lambda: None)(request)
+    return prompts, "\n".join(said)
+
+
+@pytest.mark.parametrize("unknown", [True, False])
+def test_with_no_terminal_the_review_asks_nothing_and_records_nothing(
+    shop: Shop, monkeypatch: pytest.MonkeyPatch, unknown: bool
+) -> None:
+    """H1: a piped y cleared it, and the print started."""
+    if unknown:
+        swap_started(shop)
+    prompts, said = reviewed(shop, monkeypatch, lambda: "y", terminal=False, unknown=unknown)
+    assert "loaded> " not in prompts and "no terminal to ask in" in said
+    assert shop.loaded() == WHITE and bool(not_known(shop)) == unknown
+
+
+def test_the_reviews_y_to_a_question_from_before_the_start_was_seen_writes_nothing(
+    shop: Shop, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """H2: the same job, not known again since it was asked."""
+    row = sent_unconfirmed(shop, killed=False)
+
+    def seen_then_y() -> str:
+        ends(shop, row, "printing", layer=3)
+        return "y"
+
+    _, said = reviewed(shop, monkeypatch, seen_then_y, terminal=True)
+    assert "Not recorded" in said and unknown_of(shop) == "sent"
+
+
+def test_before_preparing_an_answer_from_before_the_start_was_seen_writes_nothing(
+    shop: Shop,
+) -> None:
+    row = sent_unconfirmed(shop, killed=False)
+    said: list[str] = []
+
+    def read(prompt: str) -> str:
+        ends(shop, row, "printing", layer=3)
+        return "3"
+
+    with Inventory(shop.path) as stock:
+        after_print.ask_on_now(stock, "cc1", read=read, write=said.append, forget=lambda: None,
+                               asks=True)
+    assert "Not recorded" in "\n".join(said)
+    assert shop.loaded() == WHITE and unknown_of(shop) == "sent"
+
+
+def test_stock_pys_y_from_before_the_start_was_seen_writes_nothing(
+    shop: Shop, settings: Path, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
+) -> None:
+    row = sent_unconfirmed(shop, killed=False)
+    script = _load("stock")
+    monkeypatch.setattr(script, "ledger_path", lambda at: shop.path)
+    monkeypatch.setattr(script, "can_ask", lambda: True)
+    monkeypatch.setattr(script, "drop_typed", lambda: None)
+
+    def read(prompt: str = "") -> str:
+        ends(shop, row, "printing", layer=3)
+        return "y"
+
+    monkeypatch.setattr("builtins.input", read)
+    assert script.main(["--settings", str(settings), "load", str(CLEAR)]) == 2
+    assert shop.loaded() == WHITE and unknown_of(shop) == "sent"
+
+
+def test_an_answer_after_it_was_said_elsewhere_writes_nothing(shop: Shop) -> None:
+    ends(shop, swap_started(shop))
+    said: list[str] = []
+
+    def read(prompt: str) -> str:
+        answered_with(shop, ON_BLACK)
+        return "1"
+
+    with Inventory(shop.path) as stock:
+        after_print.ask_on_now(stock, "cc1", read=read, write=said.append, forget=lambda: None,
+                               asks=True)
+    assert "Not recorded" in "\n".join(said)
+    assert shop.loaded() == BLACK
+
+
+@pytest.mark.parametrize("loaded_since", [WHITE, CLEAR])
+def test_a_pick_thats_older_than_a_load_never_writes_over_it(
+    shop: Shop, loaded_since: int
+) -> None:
+    """L7: the same spool loaded again is a word since, too."""
+    ends(shop, swap_started(shop))
+    bridge = MemoryBridge()
+    with Ledger(shop.path) as ledger:
+        desk = OutcomeDesk(ledger=ledger, cfg=CFG,
+                           publish=lambda topic, payload: bridge.publish(topic, payload, True))
+        for topic, handler in desk.topics.items():
+            bridge.subscribe(topic, handler)
+        desk.refresh()
+        bridge.deliver(outcome_spool_topic(CFG), ON_BLACK)
+        shop.load(loaded_since)
+        bridge.deliver(outcome_result_topic(CFG), "success")
+        bridge.deliver(outcome_symptom_topic(CFG), "none")
+        bridge.deliver(outcome_submit_topic(CFG), "record")
+        assert "said since" in bridge.retained_json(outcome_topic(CFG))["error"]
+        assert shop.loaded() == loaded_since and not_known(shop)
+        assert kept(shop).result is None
+        bridge.deliver(outcome_spool_topic(CFG), ON_BLACK)  # picked again, since the load
+        bridge.deliver(outcome_submit_topic(CFG), "record")
+    assert shop.loaded() == BLACK and not_known(shop) == ""
+
+
+def test_end_of_input_at_the_load_question_is_later(
+    shop: Shop, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    swap_started(shop)
+
+    def closed() -> str:
+        raise EOFError
+
+    _, said = reviewed(shop, monkeypatch, closed, terminal=True)
+    assert "Nothing recorded" in said and not_known(shop)
+
+
+@pytest.mark.parametrize("change", ["variety", "tuning"])
+def test_a_held_inserts_way_out_never_says_filament(shop: Shop, change: str) -> None:
+    def changed() -> None:
+        if change == "variety":
+            shop.load(CLEAR)
+            return
+        with Inventory(shop.path) as stock:
+            stock.edit(WHITE, tuning="another tuning")
+
+    shop.run("pause_at=2 for insert", "ok", at_gate=changed, held=reject)
+    assert "Reject and run the job again" in shop.told[0]
+    assert not any(word in shop.told[0].lower() for word in ("filament", "swap")), shop.told[0]
+
+
+@pytest.mark.parametrize("by_hand", [False, True])
+def test_ctrl_c_before_preparing_stops_cleanly(
+    shop: Shop, settings: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
+    capsys: pytest.CaptureFixture[str], by_hand: bool,
+) -> None:
+    swap_started(shop)
+    script = _load("print_job")
+
+    def interrupted(*args: Any, **kwargs: Any) -> None:
+        raise KeyboardInterrupt
+
+    work = tmp_path / "composed-jobs"
+    work.mkdir()
+    monkeypatch.setattr(script, "WORK_DIR", work)
+    monkeypatch.setattr(script, "ledger_path", lambda at: shop.path)
+    monkeypatch.setattr(script, "ask_on_now", interrupted)
+    if by_hand:
+        sent = tmp_path / "by-hand.gcode"
+        sent.write_text("; made up")
+        file = SimpleNamespace(said=lambda: "a made-up file", sha256="ab", print_time_s=600,
+                               filament_g=None, filament_cm3=1.0, layer_count=10)
+        monkeypatch.setattr(script.sliced, "read", lambda *args: file)
+        argv = ["--sliced", str(sent)]
+    else:
+        argv = [str(shop.part)]
+    assert script.main([*argv, "--settings", str(settings)]) == 130
+    assert "Stopped" in capsys.readouterr().out
+
+
+def test_ctrl_c_at_stock_pys_question_stops_cleanly(
+    shop: Shop, settings: Path, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
+) -> None:
+    swap_started(shop)
+    script = _load("stock")
+    monkeypatch.setattr(script, "ledger_path", lambda at: shop.path)
+    monkeypatch.setattr(script, "can_ask", lambda: True)
+
+    def interrupted(*args: Any, **kwargs: Any) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(script, "ask_over", interrupted)
+    assert script.main(["--settings", str(settings), "load", str(BLACK)]) == 130
+    assert shop.loaded() == WHITE
+
+
+def test_a_locked_stock_before_preparing_is_said(
+    shop: Shop, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    swap_started(shop)
+
+    def locked(*args: Any, **kwargs: Any) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(Inventory, "load", locked)
+    _, said = asked(shop, "2")
+    assert "Not recorded: database is locked" in "\n".join(said)
+
+
+def test_a_swaps_card_with_no_spools_recorded_offers_the_pick_too(shop: Shop) -> None:
+    change = Change(key="pause_at", preset="", value="2", reason="a swap", source=Source.SPONSOR,
+                    pause=pauses.Pause(kind=pauses.PauseFor.SWAP))
+    with Inventory(shop.path) as stock:
+        first = stock.material()
+    with Ledger(shop.path) as ledger:
+        ledger.record_start_requested(record().model_copy(update={
+            "material": first, "proposal": Proposal(changes=(change,))}))
+        ledger.record_started("job-1")
+    ends(shop, kept(shop))
+    answered_with(shop, ON_BLACK)
+    assert shop.loaded() == BLACK and not_known(shop) == ""
+
+
+# print-shop-ux's histories, on a3a0d23
+# --------------------------------------------------------------------------
+
+MAY_BEGIN = ("never confirmed", "may still begin",
+             "cancelled on the printer so it can't begin")
+
+
+def test_every_place_that_asks_says_a_start_never_confirmed_may_still_begin(
+    shop: Shop, settings: Path, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Over asks for what can't be known of a start that was never seen."""
+    sent_unconfirmed(shop, killed=False)
+    places = {"the hold": not_known(shop)}
+    places["before preparing"] = "\n".join(asked(shop, "")[1])
+    places["the review"] = reviewed(shop, monkeypatch, lambda: "", terminal=True)[1]
+    capsys.readouterr()
+    stock_load(shop, settings, monkeypatch, WHITE, "")
+    places["stock.py load"] = capsys.readouterr().out
+    for place, text in places.items():
+        for words in MAY_BEGIN:
+            assert words in text, f"{place}: {words}: {text}"
+
+
+def test_one_seen_to_start_is_only_asked_whether_its_over(shop: Shop) -> None:
+    swap_started(shop)
+    text = not_known(shop) + "\n".join(asked(shop, "")[1])
+    assert "may still begin" not in text
+
+
+@pytest.mark.parametrize(("killed", "minutes_ago"), [
+    (True, 0), (True, 45), (False, 45), (False, 600), (True, 600),
+])
+def test_however_late_or_killed_one_seen_by_its_own_file_is_not_known_again(
+    shop: Shop, killed: bool, minutes_ago: int
+) -> None:
+    row = sent_unconfirmed(shop, killed=killed, minutes_ago=minutes_ago)
+    shop.says(WHITE)
+    ends(shop, row, "printing", layer=3)
+    assert kept(shop, "sent").started_at is not None, "watched, as any print"
+    assert unknown_of(shop) == "sent" and shop.loaded() == WHITE
+
+
+@pytest.mark.parametrize("named", ["", "another.gcode"])
+def test_only_its_own_file_is_it_seen_to_start(shop: Shop, named: str) -> None:
+    row = sent_unconfirmed(shop, killed=True, minutes_ago=45)
+    shop.says(WHITE)
+    ends(shop, row, "printing", layer=3, named=named)
+    assert kept(shop, "sent").started_at is None and not_known(shop) == ""
+
+
+def test_one_never_seen_isnt_looked_for_once_a_later_print_started(shop: Shop) -> None:
+    """Else the printer's read for it for good."""
+    sent_unconfirmed(shop, killed=True, minutes_ago=45)
+    shop.says(WHITE)
+    with Ledger(shop.path) as ledger:
+        ledger.record_start_requested(record("later"))
+        ledger.record_started("later")
+        ledger.record_ended("later", 9)
+        assert ledger.swaps_unseen() == []
 
 
 # What the Sponsor was told it costs

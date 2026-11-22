@@ -67,7 +67,7 @@ from print_shop.setup.proposal import (
 )
 from print_shop.setup.reach import profile_of, unplaced
 from print_shop.setup.reading import PAUSE_PAST_FIT, Flag, SliceReading
-from print_shop.setup.waiting import drop_typed
+from print_shop.setup.waiting import can_ask, drop_typed
 from print_shop.slicer.orca import SlicerProfiles
 
 __all__ = [
@@ -126,7 +126,7 @@ class ReviewRequest:
     not_known: Callable[[], NotKnown | None] | None = None
     #: Records a spool as loaded, with the print said to be over in the same word or None, on
     #: the person's typed y and only that (`_loaded_first`).
-    record_load: Callable[[int, str | None], None] | None = None
+    record_load: Callable[[int, NotKnown | None], None] | None = None
 
     @property
     def proposed(self) -> tuple[Flag, ...]:
@@ -529,7 +529,7 @@ def _purposed(
 
 def _loaded_first(
     request: ReviewRequest, read: Callable[[str], str], write: Callable[[str], None],
-    forget: Callable[[], None],
+    forget: Callable[[], None], asks: Callable[[], bool],
 ) -> None:
     """On `ok`, whether the spool this print starts on is on the printer now: a swap's first with
     LOAD FIRST, and any job's while what's on isn't known. Then the question says both halves,
@@ -537,7 +537,9 @@ def _loaded_first(
     only that; anything else writes nothing (mqucifer/print-shop#218).
 
     What was typed before the question was shown is dropped first: a doubled y would answer it
-    unseen. A stock that can't be read or written doesn't lose the job, as Start still checks.
+    unseen. With no terminal to ask in (`asks`) it isn't asked, as a piped y would answer it. A
+    stock that can't be read or written, or input that ends, doesn't lose the job, as Start still
+    checks.
     """
     if request.stock is None or request.record_load is None:
         return
@@ -555,6 +557,10 @@ def _loaded_first(
         first = request.material if unknown is not None else None
     if first is None or all(spool.id != first.spool_id for spool in on_hand):
         return
+    if not asks():
+        write("  There's no terminal to ask in, so nothing's recorded: `stock.py load "
+              f"{first.spool_id}` in one before you approve, as an Approve before starts nothing.")
+        return
     if unknown is not None:
         write(f"{unknown.over_and_on(first.named())} y says both, and records it; Enter for "
               "later, and an Approve before you've said starts nothing.")
@@ -563,12 +569,16 @@ def _loaded_first(
               f"{first.spool_id}); Enter for later, and an Approve before it's loaded starts "
               "nothing.")
     forget()
-    if read("loaded> ").strip().lower() != "y":
+    try:
+        typed = read("loaded> ")
+    except EOFError:
+        typed = ""
+    if typed.strip().lower() != "y":
         write(f"  Nothing recorded. Load it and `stock.py load {first.spool_id}` before you "
               "approve.")
         return
     try:
-        request.record_load(first.spool_id, unknown.job_id if unknown is not None else None)
+        request.record_load(first.spool_id, unknown)
     except (InventoryError, sqlite3.Error) as exc:
         write(f"  Not recorded: {exc}")
         return
@@ -638,10 +648,12 @@ def _take(numbers: str, request: ReviewRequest) -> list[Change] | str:
 def cli_reviewer(
     read: Callable[[str], str] = input, write: Callable[[str], None] = print,
     forget: Callable[[], None] = drop_typed,
+    asks: Callable[[], bool] | None = None,
 ) -> Reviewer:
     """Show the review on the command line and read the answer, again until it's readable.
     `orientation` starts the send-back conversation (`send_back`). `forget` drops what was typed
-    before the load's question was shown: a y approves here too, and mustn't answer that."""
+    before the load's question was shown: a y approves here too, and mustn't answer that. `asks`
+    is whether there's a terminal to ask that in (`can_ask`)."""
 
     def review(request: ReviewRequest) -> Review:
         write(render(request))
@@ -688,7 +700,7 @@ def cli_reviewer(
                           "or ok again to go on without")
                     continue
             if parsed.approved:
-                _loaded_first(request, read, write, forget)
+                _loaded_first(request, read, write, forget, asks or can_ask)
             if moved is not None and parsed.offering is None:
                 return replace(parsed, offering=moved)
             return parsed
