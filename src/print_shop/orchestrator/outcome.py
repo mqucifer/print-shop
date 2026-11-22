@@ -102,6 +102,14 @@ UNSET = "unset"
 #: start-confirm window is five minutes; this is generous on purpose.
 UNCONFIRMED_WINDOW = timedelta(minutes=30)
 
+#: How long a start with no error can still be the print node's own, confirming it: longer than
+#: the start-confirm window. After it, a swap's is followed as one never confirmed
+#: (mqucifer/print-shop#218): before, the print node records the start itself.
+CONFIRMING = timedelta(minutes=10)
+
+#: The ends that say a print ran, where the printer still names it.
+_RAN = (SdcpPrintStatus.COMPLETED, SdcpPrintStatus.STOPPED, SdcpPrintStatus.ERROR)
+
 
 def print_ended(snapshot: PrinterSnapshot) -> bool:
     """Whether the printer has reached an end state. Pure."""
@@ -197,15 +205,30 @@ class Watcher:
             for r in self._ledger.unconfirmed_starts()
             if datetime.fromisoformat(r.start_requested_at) >= cutoff
         ]
-        if not running and not unconfirmed:
+        sent = self._swaps_sent()
+        if not running and not unconfirmed and not sent:
             return
         snapshot = self._printer.snapshot()
 
+        adopted: set[str] = set()
         for row in unconfirmed:
             if _is_ours(snapshot, row):
                 logger.warning("job %s is printing after all; watching it", row.job_id)
                 self._ledger.record_started(row.job_id)
                 running.append(row)
+                adopted.add(row.job_id)
+        for row in sent:
+            if row.job_id in adopted:
+                continue
+            over = print_ended(snapshot)
+            ran = over and snapshot.print_status in _RAN and _still_shows(snapshot, row)
+            if _is_ours(snapshot, row) or ran:
+                logger.warning("job %s, with a swap, printed after all; watching it", row.job_id)
+                self._ledger.record_started(row.job_id)
+                running.append(row)
+            elif over or (snapshot.active_filename is not None
+                          and not _is_ours(snapshot, row)):
+                self._ledger.record_start_over(row.job_id)
 
         ended_any = False
         for row in running:
@@ -230,6 +253,19 @@ class Watcher:
             ended_any = True
         if ended_any:
             self._on_ended()
+
+    def _swaps_sent(self) -> list[Row]:
+        """The swaps' prints sent and never confirmed, followed however long that takes: until
+        the printer's seen done with one and a person has recorded what's on it since
+        (mqucifer/print-shop#218)."""
+        now = datetime.now(UTC)
+        return [
+            row for row in self._ledger.rows()
+            if len(row.spools) > 1 and row.started_at is None and row.ended_at is None
+            and (row.start_error is not None
+                 or now - datetime.fromisoformat(row.start_requested_at) >= CONFIRMING)
+            and not self._ledger.start_over(row.job_id)[1]
+        ]
 
 
 class OutcomeDesk:

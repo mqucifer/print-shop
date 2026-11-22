@@ -30,6 +30,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import sqlite3
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -821,7 +822,12 @@ def why_not_start(state: PrintJobState, ledger: Ledger | None) -> str:
     if first is None or ledger is None:
         return ""
     if unknown := swaps.not_known(ledger, first.printer_id):
-        return unknown.at_gate()
+        # What's on may not be what this job needs: said now, not at a second hold.
+        with Inventory(ledger.path) as inventory:
+            needs = any(spool.id == first.spool_id for spool in inventory.spools())
+        return unknown.at_gate() + (
+            f". This job needs {first.named()}: if another's on, put that on first and record "
+            f"it (`stock.py load {first.spool_id}`)" if needs else "")
     with Inventory(ledger.path) as inventory:
         held = inventory.why_not_start(
             first, not_on=not_on, prepared=_material_prepared(state),
@@ -865,9 +871,14 @@ def _starts_said(state: PrintJobState, ledger: Ledger | None) -> str:
     swap = _swap(state)
     if swap is None or swap.start is None or ledger is None:
         return ""
-    unknown = swaps.not_known(ledger, swap.start.printer_id)
-    with Inventory(ledger.path) as inventory:
-        return pauses.starting(swap, inventory.spools(), unknown.why if unknown else "")
+    try:
+        unknown = swaps.not_known(ledger, swap.start.printer_id)
+        with Inventory(ledger.path) as inventory:
+            return pauses.starting(swap, inventory.spools(), unknown.why if unknown else "")
+    except sqlite3.Error as exc:
+        # Only said here: the gate's check and the print node read it again, and refuse unread.
+        logger.warning("the stock couldn't be read for the gate: %s", exc)
+        return f"the stock couldn't be read ({exc}): an Approve checks it again"
 
 
 def _not_known(ledger: Ledger | None, profiles: SlicerProfiles) -> Callable[[], str] | None:

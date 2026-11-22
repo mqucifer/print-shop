@@ -597,7 +597,7 @@ class Ledger:
                     (loaded.printer_id,),
                 ).fetchone()
                 not_known = db.execute(
-                    "SELECT 1 FROM printer_unknown WHERE printer_id = ?", (loaded.printer_id,)
+                    "SELECT 1 FROM printer_not_known WHERE printer_id = ?", (loaded.printer_id,)
                 ).fetchone()
                 if on is None or not_known or (
                     (on["id"], on["tuning"]) != (loaded.spool_id, loaded.tuning)
@@ -887,17 +887,35 @@ class Ledger:
             ))
         return found
 
-    def load_since_start(self, job_id: str) -> bool:
-        """Whether a person has recorded a load since a swap's print was asked to start."""
-        with self._lock:
-            found = self._conn.execute(
-                "SELECT spool, loads FROM print_spools WHERE job_id = ? AND position = 0",
+    def record_start_over(self, job_id: str) -> None:
+        """The printer was seen done with a swap's print whose start was never confirmed. Only a
+        load recorded after this is the person's last word on what it left on the printer
+        (mqucifer/print-shop#218): one before can be from under its swap."""
+        with self._write() as db:
+            found = db.execute(
+                "SELECT spool FROM print_spools"
+                " WHERE job_id = ? AND position = 0 AND loads_over IS NULL",
                 (job_id,),
             ).fetchone()
-            if found is None:
-                return False
+            if found is not None:
+                printer = Material.model_validate_json(found["spool"]).printer_id
+                db.execute(
+                    "UPDATE print_spools SET loads_over = ? WHERE job_id = ? AND position = 0",
+                    (loads_recorded(db, printer), job_id),
+                )
+
+    def start_over(self, job_id: str) -> tuple[bool, bool]:
+        """Of a swap's start never confirmed: whether the printer's been seen done with it, and
+        whether a person has recorded a load since it was."""
+        with self._lock:
+            found = self._conn.execute(
+                "SELECT spool, loads_over FROM print_spools WHERE job_id = ? AND position = 0",
+                (job_id,),
+            ).fetchone()
+            if found is None or found["loads_over"] is None:
+                return False, False
             printer = Material.model_validate_json(found["spool"]).printer_id
-            return bool(loads_recorded(self._conn, printer) != found["loads"])
+            return True, loads_recorded(self._conn, printer) != found["loads_over"]
 
     def reprints(self, job_id: str) -> list[str]:
         """The jobs that print `job_id`'s file again, oldest first."""
@@ -940,17 +958,19 @@ _SLICED_JOIN = " LEFT JOIN sliced_prints s ON s.job_id = p.job_id"
 
 def _insert_spools(
     db: sqlite3.Connection, job_id: str, spools: tuple[SpoolUse, ...], loads: int | None,
-    loads_ended: int | None = None,
+    loads_ended: int | None = None, loads_over: int | None = None,
 ) -> None:
     for position, used in enumerate(spools):
         db.execute(
             "INSERT INTO print_spools (job_id, position, spool_id, from_layer, from_z, spool,"
-            " planned, loads, loads_ended, unsure) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " planned, loads, loads_ended, loads_over, unsure)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (job_id, position, used.material.spool_id, used.from_layer, used.from_z,
              used.material.model_dump_json(),
              used.planned.model_dump_json() if used.planned else None,
              loads if position == 0 else None,
              loads_ended if position == 0 else None,
+             loads_over if position == 0 else None,
              int(used.unsure)),
         )
 
@@ -958,13 +978,15 @@ def _insert_spools(
 def _change_spools(db: sqlite3.Connection, job_id: str, spools: tuple[SpoolUse, ...]) -> None:
     """A swap's spools as they came to be."""
     found = db.execute(
-        "SELECT loads, loads_ended FROM print_spools WHERE job_id = ? AND position = 0",
+        "SELECT loads, loads_ended, loads_over FROM print_spools"
+        " WHERE job_id = ? AND position = 0",
         (job_id,),
     ).fetchone()
     if found is None:
         raise LedgerError(f"job {job_id} has no swap in the ledger")
     db.execute("DELETE FROM print_spools WHERE job_id = ?", (job_id,))
-    _insert_spools(db, job_id, spools, found["loads"], found["loads_ended"])
+    _insert_spools(
+        db, job_id, spools, found["loads"], found["loads_ended"], found["loads_over"])
 
 
 def _swaps_rows(db: sqlite3.Connection, job_id: str) -> list[sqlite3.Row]:
@@ -1030,7 +1052,7 @@ def _stock_at_end(db: sqlite3.Connection, job_id: str) -> None:
             leave_loaded(db, first.printer_id, last.spool_id)
         return
     now = _loaded_now(db, first)
-    if now is not None and now.spool_id == last.spool_id:
+    if now is not None and now.spool_id == last.spool_id and not used[-1]["unsure"]:
         return  # the person recorded the spool it ended with
     mark_unknown(
         db, first.printer_id, job_id,
@@ -1057,6 +1079,11 @@ def _stock_at_pick(db: sqlite3.Connection, job_id: str) -> None:
         return
     now = _loaded_now(db, first)
     if now is not None and now.spool_id == last.spool_id:
+        # Their pick and their load say the same, so it's known.
+        db.execute(
+            "DELETE FROM printer_not_known WHERE printer_id = ? AND job_id = ?",
+            (first.printer_id, job_id),
+        )
         return
     mark_unknown(
         db, first.printer_id, job_id,

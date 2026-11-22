@@ -6,7 +6,8 @@
   pause, so a print stopped in the swap's layer may or may not have swapped. Nor is it known
   where the printer doesn't say how far it got, where a start was never confirmed, or where a
   load was recorded while it printed. Then Start holds (`not_known`) until a person records a
-  load or picks at the outcome.
+  load or picks at that print's outcome. For a start never confirmed, that's a load recorded
+  once the printer has been seen done with it: one before can be from under its swap.
 - **The person can correct it at the outcome,** and the layers a spool printed stay its own: one
   that ran out keeps them, with the spool that finished after it.
 - **The writes are the ledger's,** with the end and with the answer, each one transaction
@@ -28,7 +29,6 @@ from print_shop.inventory import (
     SpoolUse,
     spool_lines,
     swap_made,
-    unknown_said,
 )
 from print_shop.ledger import Ledger, Row
 
@@ -103,10 +103,16 @@ def said(ledger: Ledger, row: Row) -> str:
     printer = row.spools[0].material.printer_id
     with Inventory(ledger.path) as stock:
         now, unknown = stock.loaded(printer), stock.unknown(printer)
+        since = stock.unknown_since(printer)
+    used = "; ".join(spool_lines(row.spools))
     if unknown is not None:
-        return "; ".join(spool_lines(row.spools)) + f". {unknown.why}. {unknown.do}"
+        if since == row.job_id:
+            return f"{used}. {unknown.why}. {unknown.do}"
+        # Another print's: only its own card offers the pick that settles it.
+        return (f"{used}. What's on {printer} isn't known since another print, and this card's "
+                "pick doesn't settle that")
     has = now.named() if now is not None else "none"
-    return "; ".join(spool_lines(row.spools)) + f". The stock has {has} loaded"
+    return f"{used}. The stock has {has} loaded"
 
 
 def not_known(ledger: Ledger, printer_id: str) -> NotYet | None:
@@ -125,14 +131,22 @@ def not_known(ledger: Ledger, printer_id: str) -> NotYet | None:
                 "Wait for it to end (print-shop is looking now)",
                 "Run `print_job.py --serve` until it's seen, then run the job again",
             )
-        # It may have printed all the same. A load recorded since is the person's word on it.
-        if not ledger.load_since_start(row.job_id):
-            return unknown_said(
-                printer_id,
-                f"the start of {row.stl_name}'s print with a swap was never confirmed, so it "
-                "may have printed",
-                [swap, first],
+        # It may have printed all the same, and swapped.
+        seen_over, loaded_since = ledger.start_over(row.job_id)
+        if loaded_since:
+            continue  # the person's word, from after it was over
+        sent = f"the start of {row.stl_name}'s print with a swap was never confirmed"
+        if not seen_over:
+            return NotYet(
+                f"print-shop doesn't know what's on {printer_id}: {sent}, so it may still be "
+                "printing",
+                "Wait until the printer's seen done with it (print-shop looks, with the printer "
+                "on), and record what's on it then",
+                "Run `print_job.py --serve` until it's seen, then run the job again",
             )
+        with Inventory(ledger.path) as stock:
+            return stock.not_known_said(
+                printer_id, f"{sent}, so it may have printed", [swap, first])
     with Inventory(ledger.path) as stock:
         return stock.unknown(printer_id)
 

@@ -19,6 +19,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +51,7 @@ from print_shop.orchestrator.graph import why_not_start
 from print_shop.orchestrator.outcome import OutcomeDesk, Watcher
 from print_shop.runtime import describe
 from print_shop.setup import Proposer
+from print_shop.setup import pauses as pauses_module
 from print_shop.setup.features import measure
 from print_shop.setup.offer import Offering, ThisPart, offering
 from print_shop.setup.proposal import Proposal
@@ -1326,15 +1328,17 @@ def void(_: object) -> None:
 
 @pytest.mark.parametrize(("colour", "variety", "kind", "instead"), [
     ("black", "Elegoo PLA", "PLA", "to print in black"),
-    ("clear", "Elegoo PETG", "PETG", "to print with spool #4, Elegoo PETG, clear"),
+    ("natural", "Elegoo PETG", "PETG", "to print with spool #4, Elegoo PETG, natural"),
 ])
 def test_a_held_job_says_the_way_out_too(
     shop: Shop, colour: str, variety: str, kind: str, instead: str
 ) -> None:
     """print-shop-ux, on b34a39b: a change of mind was only told to put the old colour back."""
     shop.run("ok", held=reject, at_gate=lambda: void(add_spool(shop, colour, variety, kind)))
+    note = " (without --filament, if its command named one)" if kind == "PETG" else ""  # L5
     assert shop.told[0].endswith(
-        f"(`stock.py load 1`), then approve again; or, {instead}, Reject and run the job again")
+        f"(`stock.py load 1`), then approve again; or, {instead}, Reject and run the job again"
+        f"{note}")
 
 
 def test_a_held_swap_and_an_edited_tuning_say_their_way_out(shop: Shop) -> None:
@@ -1437,6 +1441,25 @@ def test_a_spool_changed_during_the_upload_is_never_started(
     ran = shop.run("ok")
     assert not ran.result.printed and ran.row is None and starts(shop) == 0
     assert "uploaded, and not started" in (ran.result.error or "")
+
+
+def test_a_colour_corrected_during_the_upload_is_the_one_recorded(
+    shop: Shop, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What reading again after the upload gives, that the check with the row can't."""
+    real = FramePrinter.upload
+
+    def upload(printer: FramePrinter, path: Path) -> str:
+        stored = real(printer, path)
+        with Inventory(shop.path) as stock:
+            stock.edit(WHITE, colour="cream")
+        return stored
+
+    monkeypatch.setattr(FramePrinter, "upload", upload)
+    ran = shop.run("ok")
+    assert ran.result.printed, ran.result.error
+    assert ran.row is not None and ran.row.material is not None
+    assert ran.row.material.colour == "cream"
 
 
 # The second cold review, of 3bbd4f7
@@ -1716,7 +1739,7 @@ def test_where_it_cant_be_known_whats_on_isnt_guessed(
 
     said = not_known(shop)
     one_step(said, BLACK, WHITE)
-    assert "or pick it at the outcome" in said
+    assert "or pick it at cube.stl's outcome" in said
     assert shop.loaded() == WHITE, "nothing's written over"
     assert "may not have been made" in describe(kept(shop))
 
@@ -1779,6 +1802,11 @@ def test_a_swaps_start_never_confirmed_holds_until_a_person_says(shop: Shop, kil
         }))
         if not killed:
             ledger.record_start_failed("sent", "confirm timed out")
+        else:  # killed while confirming, long enough ago that it can't still be confirming
+            with ledger.writing() as db:
+                db.execute(
+                    "UPDATE prints SET start_requested_at = ? WHERE job_id = 'sent'",
+                    ((datetime.now(UTC) - timedelta(minutes=45)).isoformat(timespec="seconds"),))
 
     ran = shop.run("ok", held=reject)
 
@@ -1857,7 +1885,6 @@ def test_what_isnt_known_is_said_before_the_wait(shop: Shop) -> None:
     ends(shop, swap_started(shop), "stopped", layer=11)
     with Inventory(shop.path) as stock, Ledger(shop.path) as ledger:
         said = after_print.left_said(ledger, stock.material())
-        assert "doesn't know what's on cc1" in stock.listing()
     assert "doesn't know what's on cc1" in said and "`stock.py load 1`" in said
 
 
@@ -1868,3 +1895,205 @@ def test_to_alone_asks_for_the_first_and_marks_the_one_loaded(shop: Shop) -> Non
     assert "spool #1  Elegoo PLA  white  (loaded on cc1)" in ran.terminal
     assert "spool #2  Elegoo PLA  black  (on hand)" in ran.terminal
     assert spools(ran.row) == [(WHITE, 1), (BLACK, 11)]
+
+
+def test_a_hold_for_whats_not_known_says_what_the_job_needs_in_the_same_line(shop: Shop) -> None:
+    """print-shop-ux, on cc4eee7: black recorded as told, then held again for white."""
+    ends(shop, swap_started(shop, "earlier"), "stopped", layer=11)
+    shop.run("ok", held=reject)
+    assert shop.told[0].endswith(
+        "then approve again. This job needs spool #1, Elegoo PLA, white: if another's on, put "
+        "that on first and record it (`stock.py load 1`)")
+
+
+# The third cold review, of cc4eee7
+# --------------------------------------------------------------------------
+
+
+def sent_unconfirmed(shop: Shop, *, killed: bool, minutes_ago: int = 0) -> Row:
+    """A white PLA to clear PETG print, sent and never seen to start."""
+    with Inventory(shop.path) as stock:
+        first = stock.material()
+        to = first.of(stock.spool(CLEAR))
+    with Ledger(shop.path) as ledger:
+        ledger.record_start_requested(record("sent").model_copy(update={
+            "material": first,
+            "spools": (SpoolUse(material=first, from_layer=1),
+                       SpoolUse(material=to, from_layer=11, from_z=2.0)),
+        }))
+        if not killed:
+            ledger.record_start_failed("sent", "confirm timed out")
+        if minutes_ago:
+            at = datetime.now(UTC) - timedelta(minutes=minutes_ago)
+            with ledger.writing() as db:
+                db.execute("UPDATE prints SET start_requested_at = ? WHERE job_id = 'sent'",
+                           (at.isoformat(timespec="seconds"),))
+    return kept(shop, "sent")
+
+
+@pytest.mark.parametrize(("killed", "minutes_ago"), [(False, 0), (False, 45), (True, 45)])
+def test_a_start_never_confirmed_is_followed_while_it_prints(
+    shop: Shop, killed: bool, minutes_ago: int
+) -> None:
+    """M1: a load at layer 3 cleared it, then it swapped to PETG."""
+    row = sent_unconfirmed(shop, killed=killed, minutes_ago=minutes_ago)
+
+    ends(shop, row, "printing", layer=3)
+    assert kept(shop, "sent").started_at is not None, "seen printing, so it's watched"
+    shop.load(WHITE)
+    assert "hasn't been seen to end" in not_known(shop)
+
+    ends(shop, row, "completed", layer=100)
+    assert not_known(shop), "a load while it printed isn't the last word"
+    shop.load(CLEAR)
+    assert not_known(shop) == ""
+
+
+@pytest.mark.parametrize("killed", [False, True])
+def test_a_load_before_the_printers_seen_done_with_it_never_clears_it(
+    shop: Shop, killed: bool
+) -> None:
+    row = sent_unconfirmed(shop, killed=killed, minutes_ago=45 if killed else 0)
+    shop.load(WHITE)
+    waiting = not_known(shop)
+    assert "never confirmed" in waiting and "Wait" in waiting
+
+    ends(shop, row, "idle", named="")
+
+    said = not_known(shop)
+    one_step(said, CLEAR, WHITE)
+    assert "Wait" not in said
+    shop.load(WHITE)
+    assert not_known(shop) == ""
+
+
+def test_a_start_thats_still_being_confirmed_is_left_to_it(shop: Shop) -> None:
+    row = sent_unconfirmed(shop, killed=True)
+    ends(shop, row, "printing", layer=1)
+    assert kept(shop, "sent").started_at is None, "the print node records its own start"
+    assert not_known(shop)
+
+
+def test_one_never_confirmed_thats_seen_completed_printed(shop: Shop) -> None:
+    ends(shop, sent_unconfirmed(shop, killed=False), "completed", layer=100)
+    row = kept(shop, "sent")
+    assert row.started_at is not None and row.ended_at is not None
+    assert shop.loaded() == CLEAR and not_known(shop) == ""
+
+
+def test_the_desks_line_with_another_print_picked_never_takes_its_first(shop: Shop) -> None:
+    """M2: A is white then black, B black then white and the one picked. A's line printed as B."""
+    a = shop.run("colour_change=2 from #1 to #2", "ok")
+    shop.run("colour_change=2 from #2 to #1", "ok")
+    with Inventory(shop.path) as stock:
+        stock.edit(WHITE, tuning="another tuning")
+    shop.load(BLACK)
+    line = shop.correction_line(a.job_id)
+    assert "from ? to #2" in line
+
+    ran = shop.run(line, "", "2", "back", "stop")
+
+    assert ran.prompts == ["> ", "spool> ", "spool> ", "spool> ", "> "]
+    assert "Enter for" not in ran.terminal
+    assert "spool #2 is the one it swaps to" in ran.terminal
+
+
+def test_to_typed_with_another_print_picked_has_no_enter_default(shop: Shop) -> None:
+    shop.run("colour_change=2 from #1 to #2", "ok")
+    shop.load(WHITE)
+    ran = shop.run("colour_change=2 to #2", "", "back", "stop")
+    assert ran.prompts == ["> ", "spool> ", "spool> ", "> "]
+    assert "Enter for" not in ran.terminal
+
+
+def test_from_question_mark_asks_where_a_swap_stands_already(shop: Shop) -> None:
+    ran = shop.run("colour_change=2 from #1 to #2", "colour_change=3 from ? to #2", "", "back",
+                   "stop")  # L7
+    assert ran.prompts == ["> ", "> ", "spool> ", "spool> ", "> "]
+
+
+def test_only_its_own_card_offers_the_pick(shop: Shop) -> None:
+    """M3: the oldest print's card said to pick for the newer one."""
+    ends(shop, swap_started(shop, "older"))
+    shop.load(WHITE)
+    with Inventory(shop.path) as stock:
+        first = stock.material()
+        to = first.of(stock.spool(BLACK))
+    with Ledger(shop.path) as ledger:
+        ledger.record_start_requested(record("newer").model_copy(update={
+            "material": first, "stl_name": "vase.stl",
+            "spools": (SpoolUse(material=first, from_layer=1),
+                       SpoolUse(material=to, from_layer=11, from_z=2.0)),
+        }))
+        ledger.record_started("newer")
+        newer = ledger.get("newer")
+        assert newer is not None
+    ends(shop, newer, "stopped", layer=11)
+
+    with Ledger(shop.path) as ledger:
+        row = ledger.get("older")
+        assert row is not None
+        said = after_print.said(ledger, row)
+        own = after_print.said(ledger, kept(shop, "newer"))
+    assert "pick it" not in said and "isn't known since another print" in said
+    assert "or pick it at vase.stl's outcome" in own
+    assert "or pick it at vase.stl's outcome" in not_known(shop)
+
+
+def test_a_hold_never_names_a_spool_thats_used_up(shop: Shop) -> None:
+    row = sent_unconfirmed(shop, killed=False)  # L1
+    ends(shop, row, "idle", named="")
+    with Inventory(shop.path) as stock:
+        stock.empty(WHITE)
+    assert "`stock.py load 1`" not in not_known(shop)
+    assert "`stock.py load 3`" in not_known(shop)
+
+
+def test_a_stored_hold_doesnt_name_one_used_up_since(shop: Shop) -> None:
+    ends(shop, swap_started(shop), "stopped", layer=11)
+    with Inventory(shop.path) as stock:
+        stock.empty(BLACK)
+    assert "`stock.py load 2`" not in not_known(shop)
+
+
+def test_the_pick_isnt_offered_once_its_answered(shop: Shop) -> None:
+    ends(shop, swap_started(shop), "stopped", layer=11)  # L2
+    assert "pick it" in not_known(shop)
+    answered_with(shop, "as recorded")
+    assert not_known(shop) and "pick it" not in not_known(shop)
+
+
+def test_picking_the_spool_loaded_while_it_printed_clears_the_hold(shop: Shop) -> None:
+    row = swap_started(shop)  # L3
+    new = add_spool(shop, "white")
+    ends(shop, row)
+    assert not_known(shop)
+    answered_with(shop, f"spool #{new}, Elegoo PLA, white")
+    assert not_known(shop) == "" and shop.loaded() == new
+
+
+def test_a_load_of_the_planned_one_doesnt_settle_a_stop_in_the_swaps_layer(shop: Shop) -> None:
+    row = swap_started(shop)  # L11
+    shop.load(BLACK)
+    ends(shop, row, "stopped", layer=11)
+    assert not_known(shop) and shop.loaded() == BLACK
+
+
+def test_stock_py_says_whats_not_known_for_an_unseen_swap_too(
+    shop: Shop, settings: Path, capsys: pytest.CaptureFixture[str],  # noqa: F811
+) -> None:
+    swap_started(shop)  # L6
+    assert _load("stock").main(["--settings", str(settings)]) == 0
+    assert "doesn't know what's on cc1" in capsys.readouterr().out
+
+
+def test_a_locked_stock_at_the_review_or_the_gate_doesnt_lose_the_job(
+    shop: Shop, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def locked(*args: Any, **kwargs: Any) -> str:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(pauses_module, "starting", locked)  # L9: both reads go through it
+    ran = shop.run("colour_change=2 from #1 to #2", "ok")
+    assert "couldn't be read" in ran.terminal and "couldn't be read" in ran.gate["spools"]
+    assert ran.result.printed, ran.result.error

@@ -53,7 +53,7 @@ A print uses your tuning where there is one, and the standard where you haven't 
    - `stock edit <id> --colour grey` or `stock edit <id> --tuning "…"` corrects a spool, keeping its number and whether it's loaded (mqucifer/print-shop#220). `--tuning none` is the variety's default. Prints already made keep the spool as it was. A job still waiting when you edit records the new colour; if the tuning changed, an Approve starts nothing and says so: set it back and approve again, or Reject and run the job again.
    - A variety you've tuned more than once asks which tuning the spool prints with when you add it (`--tuning "…"`).
    - Prints then take the fitted nozzle and the loaded spool by default, and say so.
-   - A print with a swap leaves its last spool loaded in the stock when it's seen to end, where that's known (mqucifer/print-shop#218). A load you record is never written over. Where what's on the printer can't be known, `stock` says so and Start holds until you record what's on it (`stock load <id>`, the same spool again included). To start the next on the other spool, load it and record it.
+   - A print with a swap leaves its last spool loaded in the stock when it's seen to end, where that's known (mqucifer/print-shop#218). A load you record is never written over. Where what's on the printer can't be known, `stock`'s list says so and Start holds until you record what's on it (`stock load <id>`, the same spool again included). To start the next on the other spool, load it and record it.
 
 3. **Nothing from the prototype is running.** Both use the same topics. The prototype has no daemon command of its own, so one would only be running if someone started it by hand, from `~/Documents/git/3d-print-agent`. If one is, stop it.
 
@@ -135,7 +135,7 @@ Finish that job, or stop it with Ctrl-C in its terminal (which doesn't stop the 
 
    **What a pause is for: a swap or an insert** (mqucifer/print-shop#218). The review, the gate, the print desk and the outcome use that word. A pause from before it was said, or in a file sliced by hand, is only "a pause".
    - **`pause_at=2.6 for insert`** is parts dropped in. `pause_at=2.6` alone asks which it is, `1` an insert or `2` a swap, with this review's, or the past print's, pre-selected for Enter. `back` sets no pause.
-   - **`colour_change=12.4 from #1 to #2`** is a swap, by the stock's numbers: it starts on spool #1 and you swap to #2. `colour_change=12.4 to #2` asks for the first, and `colour_change=12.4` for both, from a list by number and colour that marks the one loaded. Type the first's number: Enter gives one only where it's the spool that past print started on, as after a swap the loaded spool would be that print reversed. `from ?` in the desk's line means the review asks for the first.
+   - **`colour_change=12.4 from #1 to #2`** is a swap, by the stock's numbers: it starts on spool #1 and you swap to #2. `colour_change=12.4 to #2` asks for the first, and `colour_change=12.4` for both, from a list by number and colour that marks the one loaded. Type the first's number: for a `colour_change=12.4` that names neither, Enter gives one only where it's the spool the past print you picked started on, and never just the loaded one, as after a swap that would be the print reversed. Where you typed `to #2`, or `from ?` as the desk's line does, Enter gives none: the print picked needn't be the one that line is of.
    - **A swap printed again never starts on another spool by itself.** Where the first it had can't start this job (it's of another filament than the one now loaded and sliced for, or it's used up), "use these" says `CAN'T USE` with why, and nothing is pre-selected: load that spool and run the job again, or type the swap.
    - **The spool it starts on is of the filament it's sliced with.** Another colour of that is fine. For another filament, load it and run the job again.
    - **The spool swapped to can be any on hand.** The slice has one filament's settings, so another variety is noted at the review: the layers after the swap print with the first's.
@@ -144,10 +144,12 @@ Finish that job, or stop it with Ctrl-C in its terminal (which doesn't stop the 
    - **When the print ends, the stock has the last as loaded, where that's known:** it completed, or stopped over the swap's layer. One stopped under that layer ended with the first. A last spool you've marked empty leaves none loaded. A load you've recorded since the print started, or a later print's, is never written over.
 
    **Where it can't be known what's on the printer, Start holds; it's never guessed** (mqucifer/print-shop#218). That's after a print with a swap that stopped in the swap's own layer (paused there, the printer already says that layer), that ended without the printer saying how far it got, whose start was never confirmed, or while which you recorded a load. `Not started` says what isn't known and the line to type, with the likely spool's number in it:
-   - `uv run python scripts/stock.py load 2` for what's really on it, also where that's the spool the stock already has. Or pick it at the outcome, where the hold offers that;
+   - `uv run python scripts/stock.py load 2` for what's really on it, also where that's the spool the stock already has. Or pick it at that print's outcome, where the hold offers that (it names the print: another print's card doesn't settle it);
    - then press Approve again. The job doesn't have to be run again.
 
    A swap's end that just hasn't been seen yet holds too: print-shop looks, and you approve again once it's seen.
+
+   **A start that was never confirmed may still be printing.** So it says to wait: print-shop follows it, with the printer on, until the printer's seen done with it (or printing it, and then it's watched as any print). Only a load recorded after that clears it, as one from while it printed can be from under its swap. One whose process was killed while confirming is followed from ten minutes on.
 
    **A job starts on what it was prepared for** (mqucifer/print-shop#218), with or without a pause, hand-sliced and `--again` too. As a swap's end moves the stock by itself, the loaded spool is compared again when you approve:
    - the same spool starts, with a colour you've corrected on it since recorded;

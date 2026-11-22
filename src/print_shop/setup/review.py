@@ -204,8 +204,11 @@ def render(request: ReviewRequest) -> str:
     paused = proposal.get(PAUSE)
     purpose = paused.pause if paused is not None and paused.value != "none" else None
     if purpose is not None:
-        lines += pauses.for_review(purpose, request.reading, request.material, request.stock,
-                                   request.not_known() if request.not_known else "")
+        try:
+            lines += pauses.for_review(purpose, request.reading, request.material, request.stock,
+                                       request.not_known() if request.not_known else "")
+        except sqlite3.Error as exc:
+            lines.append(f"  the stock couldn't be read ({exc}): an Approve checks it again")
     for c in proposal.kept:
         by = (
             f" [lesson {c.lesson}]" if c.lesson is not None
@@ -639,11 +642,15 @@ def cli_reviewer(
                     return replace(sent, offering=moved) if moved is not None else sent
                 write("  Back to the review: ok, a correction, orientation, or stop.")
                 continue
-            parsed = parse_answer(answer, request)
-            if isinstance(parsed, str):
-                write(f"  {parsed}")
+            try:
+                parsed = parse_answer(answer, request)
+                if isinstance(parsed, str):
+                    write(f"  {parsed}")
+                    continue
+                purposed = _purposed(parsed, request, read, write)
+            except sqlite3.Error as exc:
+                write(f"  The stock couldn't be read ({exc}): type it again.")
                 continue
-            purposed = _purposed(parsed, request, read, write)
             if purposed is None:
                 write("  Back to the review: ok, a correction, or stop.")
                 continue

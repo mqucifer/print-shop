@@ -135,7 +135,7 @@ def _purpose_again(
         on_hand[purpose.start.spool_id] != purpose.start.tuning
     ):
         start = None
-    return purpose.model_copy(update={"start": start, "to": to})
+    return purpose.model_copy(update={"start": start, "to": to, "ask_first": start is None})
 
 
 def correction_line(row: Row, on_hand: dict[int, str | None] | None = None) -> str:

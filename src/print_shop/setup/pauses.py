@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from print_shop.bench.pausing import TOPS_OUT
 from print_shop.inventory import Material, Spool, SpoolUse
@@ -75,6 +75,8 @@ class Pause(BaseModel):
     start: Material | None = None
     #: The spool swapped to.
     to: Material | None = None
+    #: `from ?` was typed: the first is asked, with nothing pre-selected. Not kept.
+    ask_first: bool = Field(default=False, exclude=True)
 
     def complete(self, material: Material | None) -> bool:
         """Whether nothing's left to ask. With no stock there are no spools to ask for."""
@@ -131,6 +133,7 @@ class Typed:
     kind: PauseFor | None = None
     start: int | None = None
     to: int | None = None
+    ask_first: bool = False
 
 
 def read_typed(value: str, *, swap: bool) -> Typed | str:
@@ -154,7 +157,7 @@ def read_typed(value: str, *, swap: bool) -> Typed | str:
             return f"a pause for an insert names no spool: pause_at={z:g} for insert"
     elif swap or start is not None or to is not None or asks_first:
         kind = PauseFor.SWAP
-    return Typed(z=z, kind=kind, start=start, to=to)
+    return Typed(z=z, kind=kind, start=start, to=to, ask_first=asks_first)
 
 
 def planned(
@@ -169,7 +172,7 @@ def planned(
     if typed.kind is None:
         return None
     if typed.start is None and typed.to is None:
-        return Pause(kind=typed.kind)
+        return Pause(kind=typed.kind, ask_first=typed.ask_first)
     if material is None or stock is None:
         return "there's no stock to name a spool from: set it up with stock.py, or leave it out"
     on_hand = stock()
@@ -179,6 +182,8 @@ def planned(
         if isinstance(found, str):
             return found
         start = found
+    elif typed.ask_first:
+        start = None  # asked, where a swap stands already too
     else:
         if why := cant_start(standing, material, on_hand, "it was to start"):
             return why
@@ -192,7 +197,7 @@ def planned(
         if isinstance(found, str):
             return found
         to = found
-    return Pause(kind=typed.kind, start=start, to=to)
+    return Pause(kind=typed.kind, start=start, to=to, ask_first=typed.ask_first)
 
 
 def to_type(value: str, pause: Pause | None) -> tuple[str, str]:
@@ -202,9 +207,9 @@ def to_type(value: str, pause: Pause | None) -> tuple[str, str]:
     if pause.kind is PauseFor.INSERT:
         return "pause_at", f"{value} for insert"
     if pause.start is None:
-        if pause.to is None:
-            return "colour_change", value
-        return "colour_change", f"{value} from ? to #{pause.to.spool_id}"
+        if pause.to is not None:
+            return "colour_change", f"{value} from ? to #{pause.to.spool_id}"
+        return "colour_change", f"{value} from ?" if pause.ask_first else value
     if pause.to is None:
         return "colour_change", f"{value} from #{pause.start.spool_id}"
     return "colour_change", f"{value} from #{pause.start.spool_id} to #{pause.to.spool_id}"
@@ -302,7 +307,8 @@ def ask(
     `before` is what's pre-selected, and where it's from: this review's pause, or the past
     print's ticked on offer. `gone` is why that print's first spool can't start this job.
     A first spool is pre-selected only where it's the one that print started on, never the one
-    loaded: after a swap, Enter on that would be the swap reversed.
+    loaded: after a swap, Enter on that would be the swap reversed. Nor is one where the spool
+    swapped to was given, or `from ?` typed: the print picked needn't be the one that line is of.
     """
     if pause is None:
         kind = _ask_kind(value, before, read, write)
@@ -315,7 +321,9 @@ def ask(
     if stock is None:
         return pause
     earlier = before[0] if before and before[0].kind is pause.kind else None
-    start = pause.start or _ask_start(earlier, gone, material, stock, read, write)
+    default_from = None if pause.ask_first or pause.to is not None else earlier
+    start = pause.start or _ask_start(
+        default_from, gone, pause.to, material, stock, read, write)
     if start is None:
         return None
     to = pause.to
@@ -349,7 +357,7 @@ def _ask_kind(
 
 
 def _ask_start(
-    earlier: Pause | None, gone: str, material: Material, stock: Stock,
+    earlier: Pause | None, gone: str, to: Material | None, material: Material, stock: Stock,
     read: Callable[[str], str], write: Callable[[str], None],
 ) -> Material | None:
     on_hand = stock()
@@ -365,7 +373,13 @@ def _ask_start(
           or f"  None of {material.filament_said()} is on hand: back, or add it with stock.py")
     enter = f"Enter for {default.named()}, " if default else ""
     write(f"Its number, {enter}or back.")
-    return _ask_spool(default, lambda n: _starts_on(n, material, stock()), read, write)
+
+    def first(spool_id: int) -> Material | str:
+        if to is not None and spool_id == to.spool_id:
+            return f"spool #{spool_id} is the one it swaps to: the first is another"
+        return _starts_on(spool_id, material, stock())
+
+    return _ask_spool(default, first, read, write)
 
 
 def _ask_to(

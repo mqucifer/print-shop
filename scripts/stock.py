@@ -23,6 +23,10 @@ spool's number and whether it's loaded. `--tuning none` is the variety's
 default. Prints already made keep the spool as it was; a job prepared with the
 old tuning says so when it's approved, and doesn't print.
 
+Where what's on a printer can't be known after a print with a swap
+(mqucifer/print-shop#218), the list says so and what to type: jobs don't start
+until it's recorded.
+
 The inventory lives in the ledger's file (`PRINT_SHOP_LEDGER`, default
 `~/print-shop/ledger.sqlite`).
 """
@@ -35,7 +39,8 @@ from pathlib import Path
 
 from print_shop.env import SETTINGS_PATH
 from print_shop.inventory import Inventory, InventoryError
-from print_shop.ledger import ledger_path
+from print_shop.ledger import Ledger, ledger_path
+from print_shop.orchestrator.spools import not_known
 from print_shop.slicer.store import STORE_DIR, Store, StoredProfile
 
 
@@ -151,6 +156,10 @@ def main(argv: list[str] | None = None) -> int:
         try:
             if args.command in (None, "list"):
                 print(inventory.listing(with_empty=getattr(args, "all", False)))
+                with Ledger(inventory.path) as ledger:
+                    for owned in inventory.printers():
+                        if found := not_known(ledger, owned.id):
+                            print(f"{found.why}. {found.do}")
             elif args.command == "printer":
                 added = inventory.add_printer(args.id, args.model)
                 print(f"printer {added.id}  {added.model}")
