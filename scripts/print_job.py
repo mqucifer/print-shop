@@ -505,6 +505,8 @@ def _gate_lines(gate: dict[str, object], *, turned: bool) -> list[str]:
         if turned:
             lines.append(f"  turned      {gate.get('orientation_deg')}")
         lines.append(f"  because     {gate.get('orientation_rationale')}")
+        if gate.get("without"):
+            lines.append(f"  model       {gate['without']}")
         if gate.get("pause"):
             lines.append(f"  SWAP        {gate['pause']}: be at the printer for it")
         return lines

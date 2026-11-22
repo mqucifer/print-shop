@@ -8,6 +8,7 @@ that a regression fails and doesn't hang.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import threading
 import time
@@ -18,6 +19,7 @@ from typing import Any
 import pytest
 from pydantic import SecretStr
 
+from print_shop.core.contracts import Gate
 from print_shop.desk.again import again
 from print_shop.expert.client import CallInfo, CutOff, LLMConfig, Stopped, TimedOut
 from print_shop.ledger import Ledger, Row
@@ -108,6 +110,7 @@ class Shop:
         self.ledger = Ledger(tmp_path / "ledger.sqlite")
         self.submitted = 0.0
         self.error = ""
+        self.gate: dict[str, Any] = {}
 
     def run(
         self, stl: Path, reviewer: Reviewer | None, proposer: Proposer | None = None,
@@ -126,7 +129,8 @@ class Shop:
             self.submitted = time.monotonic()
             job_id = daemon.submit(stl, **submit)
             daemon.wait_for_gate(job_id, timeout_s=WAIT_S)
-            if daemon.pending_gate() is not None:
+            if (gate := daemon.pending_gate()) is not None:
+                self.gate = gate
                 bridge.press(CFG, "approve")
             self.error = daemon.wait_for_finish(job_id, timeout_s=WAIT_S).error or ""
         return self.ledger.get(job_id)
@@ -185,8 +189,11 @@ def test_with_a_model_that_never_answers_the_review_shows_in_seconds_and_the_job
     assert held.closed.wait(WAIT_S), "going on closed its call"
     [found] = row.proposal.suggested
     assert (found.ending, found.proposed, found.taken) == (Ending.WENT_ON, (), ())
-    assert any(n.startswith("The model's settings didn't come: you went on without them after")
-               for n in row.proposal.notes)
+    went = "Went on without the model's settings: still working after"
+    assert any(n.startswith(went) for n in row.proposal.notes)
+    assert said.count(went) == 1, "shown as it's done"
+    assert shop.gate["without"].startswith(went), "and at the gate"
+    assert shop.gate["without"].endswith("its call was closed")
     assert "model proposed nothing: went on after" in describe(row)
 
 
@@ -264,8 +271,8 @@ def test_one_that_came_before_ok_but_after_the_screen_is_recorded_as_unseen(
     assert row is not None and row.proposal is not None, shop.error
     [found] = row.proposal.suggested
     assert found.unseen and row.proposal.get("wall_loops") is None
-    assert any("you went on without seeing what the model proposed" in n
-               for n in row.proposal.notes)
+    without = "Went on without the model's settings: its 1 proposal came and wasn't seen"
+    assert without in row.proposal.notes and shop.gate["without"] == without
 
 
 def test_one_taken_is_sliced_and_is_the_persons_taking_everywhere(
@@ -291,6 +298,7 @@ def test_one_taken_is_sliced_and_is_the_persons_taking_everywhere(
     assert "(model, taken by you)" in describe(row)
     assert "Taken from the model's proposals" in "\n".join(again(row, stl).notes)
     assert "wall_loops=4 (taken)" in describe(row)
+    assert "  -  wall_loops 4: taken." in render_review(screen.seen[1])
 
     # The next print of it is offered it as the person's own (mqucifer/print-shop#211).
     second = Script("ok")
@@ -317,6 +325,8 @@ def test_one_turned_down_saying_why_is_a_correction_and_a_lesson_candidate(
     assert (correction.key, correction.value, correction.source, correction.reason) == (
         "wall_loops", "2", Source.SPONSOR, "two walls are plenty here")
     assert row.proposal.suggested[0].declined == ("wall_loops",)
+    assert "two walls are plenty here [you, saying no to the model's 4]" in (
+        render_review(screen.seen[1]))
     assert ") wall_loops" not in render_review(screen.seen[1]), "it isn't asked again"
     print_lessons.draw(shop.ledger, row)
     [lesson] = shop.ledger.query("SELECT * FROM print_lessons WHERE setting='wall_loops'")
@@ -452,7 +462,12 @@ def test_loop_posed_the_review_shows_the_files_pose_and_the_turn_is_a_proposal(
     first = screen.seen[0]
     shown = render_review(first)
     assert first.orientation.rotation_deg == LAID
-    assert "as the file lays it; the print loop only proposes a turn" in shown
+    assert "as the file lays it; the model can only propose a turn" in shown
+    assert ("the check on poses says another pose has less to support: 0 mm2, where this has "
+            "285.9 mm2") in shown
+    assert "How the part was read:" not in shown, "the reading is the turned pose's, until taken"
+    assert row.proposal.reasoning == "", "and in the record it stays with that proposal"
+    assert row.proposal.suggested[0].reasoning == "slab down"
     assert ") orientation  0,0,0 -> 180,0,0" in shown
     assert "It's a big change: turn it to 180,0,0 from the file's own pose." in shown
     assert "Once turned it would also propose: wall_loops 2 -> 4" in shown
@@ -481,6 +496,7 @@ def test_a_turn_taken_brings_the_loops_settings_as_proposals_with_no_second_call
     after = screen.seen[1]
     assert after.orientation.rotation_deg == FLIPPED
     assert ") wall_loops  2 -> 4" in render_review(after)
+    assert "How the part was read:\n  slab down" in render_review(after), "taken, it's this pose's"
     assert row.proposal.get("wall_loops") is None, "turned, they're still only proposed"
     assert (len(model.shown), held.calls) == (1, 0), "no second call"
     assert [found.pose for found in row.proposal.suggested] == [LAID, FLIPPED]
@@ -623,13 +639,15 @@ def test_one_that_arrives_under_the_prompt_moves_no_number_until_enter_adds_it()
     def read(prompt: str) -> str:
         if not screens:
             term.arrive()
-        screens.append(term.said.count("Settings for this print"))
+        screens.append(term.said.count("Proposed by the model ("))
         return next(typed)
 
     found = term.review(read)
     assert "Enter adds it to the list (what you've typed is kept)." in term.said
     assert "take a number from 1 to 1" in term.said, "a 2 typed then names what was on screen"
-    assert screens == [1, 1, 1 + 1], "only Enter drew a new list"
+    assert screens == [0, 0, 1], "only Enter drew a new list"
+    assert term.said.count("Settings for this print") == 1, "and only that block and the prompt"
+    assert term.said.count("Orca's estimate") == 1
     assert term.forgotten == 2, "written, then forgotten, then read: each drawing"
     [taken] = found.taken
     assert (taken.key, taken.taken) == ("top_shell_layers", True)
@@ -668,6 +686,63 @@ def test_ok_before_theyve_been_shown_says_so_once() -> None:
     assert found.approved and not found.taken
     assert term.said.count("are in and you haven't seen") + term.said.count(
         "is in and you haven't seen") == 1
+
+
+def test_an_ok_warned_while_it_worked_warns_again_once_theyre_in_unseen() -> None:
+    term = Open()
+    prompts = 0
+
+    def read(prompt: str) -> str:
+        nonlocal prompts
+        prompts += 1
+        if prompts == 2:
+            term.arrive()
+        return "ok"
+
+    found = term.review(read)
+    assert found.approved and prompts == 3
+    assert term.said.count("ok again to go on without its proposals") == 1
+    assert term.said.count("is in and you haven't seen it") == 1
+    assert "Went on without the model's settings: its 1 proposal came and wasn't seen" in term.said
+
+
+def test_a_failure_enter_adds_is_its_one_line_and_the_prompt() -> None:
+    release = threading.Event()
+
+    def find(stop: threading.Event) -> Suggested:
+        release.wait(WAIT_S)
+        return Suggested(pose=LAID, ending=Ending.TIMED_OUT, said="timed out: made up")
+
+    work = Suggesting(find, LAID)
+    base = _request(Proposal())
+    request = ReviewRequest(**{
+        **{name: getattr(base, name) for name in base.__dataclass_fields__},
+        "suggested": work.now(), "suggesting": work,
+    })
+    shown: list[str] = []
+    typed = iter(["", "ok"])
+
+    def read(prompt: str) -> str:
+        release.set()
+        assert work.wait(WAIT_S)
+        return next(typed)
+
+    assert cli_reviewer(read, shown.append, forget=lambda: None,
+                        screen=lambda: None)(request).approved
+    added = shown[-1].strip().splitlines()
+    assert added[0].startswith("The model's settings didn't come: timed out after")
+    assert added[-1].startswith("Type ok") and len(added) == 3
+
+
+def test_the_gate_on_the_terminal_says_it_went_on(tmp_path: Path) -> None:
+    script = Path(__file__).resolve().parent.parent / "scripts" / "print_job.py"
+    spec = importlib.util.spec_from_file_location("print_job", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    without = "Went on without the model's settings: its 1 proposal came and wasn't seen"
+    lines = module._gate_lines({"gate": Gate.BEFORE_PRINT.value, "without": without}, turned=True)
+    assert f"  model       {without}" in lines
 
 
 def test_ok_while_it_works_says_so_once_and_then_goes_on() -> None:

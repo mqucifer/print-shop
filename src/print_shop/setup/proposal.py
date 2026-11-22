@@ -138,6 +138,8 @@ class Change(BaseModel):
     #: The model's proposal, taken by the person at the review (mqucifer/print-shop#242). One of
     #: the model's without it was applied unasked, as they were until then.
     taken: bool = False
+    #: A correction that turned the model's proposal down: the value it had proposed.
+    said_no_to: str = ""
 
 
 class GivenLesson(BaseModel):

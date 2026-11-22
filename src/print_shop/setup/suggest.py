@@ -38,7 +38,8 @@ from print_shop.setup.proposal import (
 
 __all__ = [
     "Beside", "Finding", "Listed", "Suggesting", "by_number", "didnt_come", "fell_back",
-    "listed", "looked_up", "once_turned", "recorded", "suggested", "waited",
+    "listed", "looked_up", "once_turned", "recorded", "suggested", "turning", "waited",
+    "went_on",
 ]
 
 logger = logging.getLogger(__name__)
@@ -93,9 +94,7 @@ def _failed(model: str) -> Ending | None:
 def didnt_come(found: Suggested) -> str:
     """Why the model's settings aren't here, in the waiting line's place, or ""."""
     after = waited(found.seconds)
-    if found.ending is Ending.WENT_ON:
-        why = f"you went on without them after {after}, and its call was closed"
-    elif found.ending is Ending.TURNED:
+    if found.ending is Ending.TURNED:
         why = f"the part was turned after {after}, and its call for that pose was closed"
     elif found.ending is Ending.TIMED_OUT:
         why = f"timed out after {after}"
@@ -108,6 +107,26 @@ def didnt_come(found: Suggested) -> str:
     else:
         return ""
     return f"The model's settings didn't come: {why}. These are the settings without it."
+
+
+def went_on(found: Suggested) -> str:
+    """That the person went on without the model's settings, as the terminal, the gate and the
+    record say it, or ""."""
+    if found.ending is Ending.WENT_ON:
+        why = f"still working after {waited(found.seconds)}, its call was closed"
+    elif found.unseen:
+        many = len(found.proposed)
+        why = ("its 1 proposal came and wasn't seen" if many == 1
+               else f"its {many} proposals came and weren't seen")
+    else:
+        return ""
+    return f"Went on without the model's settings: {why}"
+
+
+def turning(found: Suggested) -> bool:
+    """Whether it proposes a turn, so that its reading and notes are for that pose and not for
+    the one on screen, until it's taken."""
+    return any(c.key == ORIENTATION for c in found.proposed)
 
 
 def fell_back(found: Suggested) -> str:
@@ -356,17 +375,18 @@ def recorded(proposal: Proposal, found: tuple[Suggested, ...]) -> Proposal:
             notes.append(stopped)
         if each.ending is not Ending.TURNED and (said := didnt_come(each)):
             notes.append(said)
-        if each.unseen:
-            notes.append("you went on without seeing what the model proposed, which came after "
-                         f"{waited(each.seconds)}: none of it is used")
+        if said := went_on(each):
+            notes.append(said)
     return proposal.model_copy(update={
         "suggested": found,
-        "reasoning": last.reasoning,
+        # A reading made for a turn nobody took isn't this print's: it stays with that proposal.
+        "reasoning": "" if turning(last) else last.reasoning,
         "model": last.model or last.ending.value,
         "call": last.call or {"finish_reason": last.ending.value, "seconds": last.seconds},
         "skill_groups": last.skill_groups,
         "skill_sha256": last.skill_sha256,
-        "design_notes": tuple(dict.fromkeys((*proposal.design_notes, *last.design_notes))),
+        "design_notes": tuple(dict.fromkeys(
+            (*proposal.design_notes, *(() if turning(last) else last.design_notes)))),
         "refused": tuple(dict.fromkeys((*proposal.refused, *last.refused))),
         "loop": looped.loop if looped else (),
         "loop_ending": looped.loop_ending if looped else "",

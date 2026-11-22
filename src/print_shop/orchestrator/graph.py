@@ -100,7 +100,14 @@ from print_shop.setup.questions import PURPOSE, SEEN, STOCK, estimate, stock
 from print_shop.setup.reading import SliceReading, carried, flags, read_slice, seen, seen_said
 from print_shop.setup.review import Reviewer, ReviewRequest
 from print_shop.setup.skill import groups_for, load
-from print_shop.setup.suggest import Beside, looked_up, once_turned, recorded, suggested
+from print_shop.setup.suggest import (
+    Beside,
+    looked_up,
+    once_turned,
+    recorded,
+    suggested,
+    went_on,
+)
 from print_shop.setup.traits import traits
 from print_shop.setup.waiting import Waiting, ask_meanwhile
 from print_shop.slicer.naming import job_id_from_filename, name_gcode
@@ -304,7 +311,7 @@ def build_graph(
             if reviewer is not None:
                 # The review doesn't wait for the loop, so this is the pose it shows
                 # (mqucifer/print-shop#242).
-                then = "the print loop only proposes a turn"
+                then = "the model can only propose a turn"
                 if kept is None and not own.fits_in(build_volume):
                     # It can't be sliced as the file lays it: the choice a failed call makes.
                     fitted = _resolved(propose_validate(
@@ -319,7 +326,7 @@ def build_graph(
                         Chosen(value=own, source=AS_FILED, rationale=""), request)
                     if checked.blockers:
                         then += "; the check on poses says " + "; ".join(
-                            v.detail for v in checked.blockers)
+                            _objects(v, own, found) for v in checked.blockers)
             joined = "; " if reviewer is not None else ", "
             pending = Outcome(proposal=Chosen(value=own, source=LOOP_PENDING, rationale=(
                 f"{where}{joined}{then}")), accepted=True, attempts=0)
@@ -796,6 +803,9 @@ def build_graph(
                 # A colour change the review asked for, where the slice put it, so the person
                 # is at the printer for the swap (mqucifer/print-shop#119).
                 "pause": _pauses_said(state.get("slice_reading")),
+                # That the person went on without the model's settings, where they did
+                # (mqucifer/print-shop#242).
+                "without": _without_said(state.get("proposal")),
             }
         )
         approved = (
@@ -967,6 +977,23 @@ def build_graph(
     graph.add_edge("print", END)
 
     return graph.compile(checkpointer=checkpointer)
+
+
+def _without_said(proposal: Any) -> str:
+    """That the review went on without the model's settings, in a sentence, or ""."""
+    found = getattr(proposal, "suggested", ()) or ()
+    return went_on(found[-1]) if found else ""
+
+
+def _objects(violation: Any, own: Orientation, found: tuple[Orientation, ...]) -> str:
+    """What the check on poses has against the file's own, as the review says it."""
+    if violation.rule != "orientation.overhang_regression":
+        return str(violation.detail)
+    less = next((c for c in found if c.rotation_deg == violation.suggested), None)
+    if less is None:
+        return str(violation.detail)
+    return (f"another pose has less to support: {less.overhang_area_mm2:g} mm2, "
+            f"where this has {own.overhang_area_mm2:g} mm2")
 
 
 def _pauses_said(reading: Any) -> str:

@@ -82,7 +82,9 @@ from print_shop.setup.suggest import (
     fell_back,
     listed,
     looked_up,
+    turning,
     waited,
+    went_on,
 )
 from print_shop.setup.waiting import terminal
 from print_shop.slicer.orca import SlicerProfiles
@@ -218,7 +220,9 @@ def render(request: ReviewRequest) -> str:
     ]
     proposal = request.proposal
     found = request.suggested
-    reasoning = found.reasoning if found is not None else proposal.reasoning
+    # A turn's reading, notes and refusals are for that pose, and shown only under it.
+    here = found if found is not None and not turning(found) else None
+    reasoning = proposal.reasoning if found is None else here.reasoning if here else ""
     if reasoning:
         lines += ["How the part was read:", *_wrap(reasoning), ""]
     changes = proposal.changes
@@ -252,12 +256,12 @@ def render(request: ReviewRequest) -> str:
             else ""
         )
         lines.append(f"  kept {c.key} at {c.preset}: {c.reason}{by}")
-    from_model = found.design_notes if found is not None else ()
+    from_model = here.design_notes if here is not None else ()
     for note in dict.fromkeys((*proposal.design_notes, *from_model)):
         lines.append(f"  design: {note}")
     for note in proposal.notes:
         lines.append(f"  note: {note}")
-    for refusal in dict.fromkeys((*proposal.refused, *(found.refused if found else ()))):
+    for refusal in dict.fromkeys((*proposal.refused, *(here.refused if here else ()))):
         lines.append(f"  refused from the model: {refusal}")
     if found is not None:
         lines += _model_line(found)
@@ -299,18 +303,37 @@ def render(request: ReviewRequest) -> str:
     if request.offering is not None:
         pose = pose_value(request.orientation.rotation_deg)
         lines += render_offer(request.offering, proposal, pose)
+    lines += _prompt(request)
+    return "\n".join(lines)
+
+
+def render_arrived(request: ReviewRequest) -> str:
+    """Only what came since the screen above it was drawn: the model's block, or how it failed,
+    and the prompt (mqucifer/print-shop#242). The rest of the review hasn't changed."""
+    found = request.suggested
+    assert found is not None
+    lines = [*_model_line(found), *_by_model(request)]
+    if not turning(found):  # else they're under the turn
+        lines += [f"  design: {note}" for note in found.design_notes
+                  if note not in request.proposal.design_notes]
+        lines += [f"  refused from the model: {refusal}" for refusal in found.refused
+                  if refusal not in request.proposal.refused]
+    return "\n".join([*lines, *_prompt(request)])
+
+
+def _prompt(request: ReviewRequest) -> list[str]:
+    """What can be typed at the review as it's now listed."""
     use = (" use what decided that print (use, or use 1 3),"
            if request.offering is not None and request.offering.options else "")
     take = _take_says(request)
     back = " send the orientation back (orientation)," if request.candidates else ""
-    lines += [
+    return [
         "",
         f"Type ok to go on to the approval gate,{use}{take}{back} or correct a setting by name, "
         "e.g. wall_loops=3 because it's decorative (several separated by ';'), "
         "pause_at=12.4 because white to black (it pauses once the layer topping out at "
         "12.4 mm is done), or stop.",
     ]
-    return "\n".join(lines)
 
 
 def _pauses(request: ReviewRequest) -> list[str]:
@@ -350,6 +373,8 @@ def _pauses(request: ReviewRequest) -> list[str]:
 
 def _by(change: Change) -> str:
     """Who a change is from, as the review names them."""
+    if change.said_no_to:
+        return f"{_BY[change.source]}, saying no to the model's {change.said_no_to}"
     if change.taken and change.used is None:
         return f"{_BY[change.source]}, taken by you"
     if change.used is not None:
@@ -435,7 +460,8 @@ def _by_model(request: ReviewRequest) -> list[str]:
                          f"{c.value}. {'Yours' if row.by == 'you' else 'That'} stands.")
             continue
         if row.standing == "so":
-            lines.append(f"  -  {c.key}: the model's {c.value} is so here already.")
+            lines.append(f"  -  {c.key} {c.value}: taken." if c.key in found.taken
+                         else f"  -  {c.key}: the model's {c.value} is so here already.")
             continue
         if c.key == ORIENTATION:
             here = pose_value(request.orientation.rotation_deg)
@@ -448,9 +474,15 @@ def _by_model(request: ReviewRequest) -> list[str]:
             lines.append(f"       {c.reading}")
         if c.reason:
             lines.append(f"       {c.reason} [model{': ' + cites if cites else ''}]")
-        if c.key == ORIENTATION and found.once_turned:
-            then = ", ".join(f"{t.key} {t.preset or '-'} -> {t.value}" for t in found.once_turned)
-            lines.append(f"       Once turned it would also propose: {then}")
+        if c.key == ORIENTATION:
+            if found.reasoning and not found.reasoning.startswith(c.reason):
+                lines.append(f"       How it read the part turned so: {found.reasoning}")
+            if found.once_turned:
+                then = ", ".join(f"{t.key} {t.preset or '-'} -> {t.value}"
+                                 for t in found.once_turned)
+                lines.append(f"       Once turned it would also propose: {then}")
+            lines += [f"       design, turned so: {note}" for note in found.design_notes]
+            lines += [f"       refused from the model, turned so: {each}" for each in found.refused]
     return lines
 
 
@@ -650,7 +682,8 @@ def _turned_down(
         here = now.value if now is not None else change.preset
         preset, feature = change.preset, ""
     return Change(key=change.key, preset=preset, value=here, reason=why.strip(),
-                  source=Source.SPONSOR, feature=feature, standard=change.standard)
+                  source=Source.SPONSOR, feature=feature, standard=change.standard,
+                  said_no_to=change.value)
 
 
 def cli_reviewer(
@@ -731,7 +764,8 @@ def cli_reviewer(
                     assert newer.suggested is not None
                     if newer.suggested.ending is not request.suggested.ending:
                         request, added = newer, True
-                        show()
+                        write(render_arrived(request))
+                        forget()  # its numbers are only now the ones on screen
                     elif newer.suggested.ending is Ending.WORKING:
                         write("  The model is still working on settings "
                               f"({waited(newer.suggested.seconds)}).")
@@ -777,6 +811,8 @@ def cli_reviewer(
                     if waits:
                         write("\n".join(waits))
                         continue
+                if parsed.approved and (without := _without(request)):
+                    write(f"  {without}.")
                 if moved is not None and parsed.offering is None:
                     parsed = replace(parsed, offering=moved)
                 return replace(parsed, saw=request.suggested) if added else parsed
@@ -803,6 +839,17 @@ def _going_on(request: ReviewRequest) -> tuple[str, str]:
                      else (f"{many} proposals", "are", "them"))
     return "unseen", (f"  The model's {of} {are} in and you haven't seen {them}: Enter adds "
                       f"{them} to the list, ok again goes on without {them}.")
+
+
+def _without(request: ReviewRequest) -> str:
+    """What this approval goes on without, of the model's, said as it's given, or ""."""
+    shown = request.suggested
+    if request.suggesting is None or shown is None or shown.ending is not Ending.WORKING:
+        return ""
+    now = request.suggesting.now()
+    update = ({"ending": Ending.WENT_ON} if now.ending is Ending.WORKING
+              else {"unseen": bool(now.proposed)})
+    return went_on(now.model_copy(update=update))
 
 
 def _pose(o: Orientation) -> str:
