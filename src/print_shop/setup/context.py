@@ -1,5 +1,5 @@
-"""A part's context: its fits, seen faces, the side it's laid on and its holds, from its design run
-or from a sidecar beside it.
+"""A part's context: its fits, seen faces, purpose, the side it's laid on and its holds, from its
+design run or from a sidecar beside it.
 
 mqucifer/print-shop#130. When a part comes from a design run, the run knows things the print side
 had to guess: which faces fit another part and how closely, which side it was laid on, and how
@@ -26,6 +26,12 @@ where this part's box meets its mate's, from the mate's mesh in the run, else fr
 wrong on real parts. A fit whose place can't be derived holds the whole wall as the fit, and says
 so. The review says the band is derived, and from which need.
 
+**What it's for and what's seen are read back at the questions** (mqucifer/print-shop#236): a
+sidecar's `purpose` says what the part is for in words (`for`) and how it's loaded (`loaded`,
+one of `LOADS`), and its `seen` any of the faces. Neither counts as the person's until they
+confirm it. Words alone, and a sidecar's `about`, are shown and never read as a purpose. A
+purpose that can't be read is said and asked, and costs the part none of the rest of its notes.
+
 Placed in a pose (`place`), a fit is a band of heights as it prints, which the slice reading's
 seam rule and elephant foot proposal read (`reading.flags`), and a hold's way on or off is read
 against the layers. Both paths, today's single calls and the print loop, read it the same way.
@@ -37,7 +43,7 @@ import json
 import os
 import re
 import shlex
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +52,8 @@ from pydantic import BaseModel
 
 __all__ = [
     "FIT_MM",
+    "LOADS",
+    "SET_ASIDE",
     "SIDECAR",
     "SIDES",
     "Fit",
@@ -56,6 +64,8 @@ __all__ = [
     "Seen",
     "pose_for",
     "place",
+    "plain_line",
+    "printed",
     "read_context",
     "refuses",
 ]
@@ -67,6 +77,17 @@ SIDECAR = ".part.json"
 FIT_MM = 0.5
 #: The sides a part can lie on, as the design run names them (`rounds.needs.SIDES`).
 SIDES = ("-z", "+z", "-x", "+x", "-y", "+y")
+#: How a part is loaded, as a sidecar's purpose says it: the purpose question's options
+#: (`questions.PURPOSE`, which asserts they're the same).
+LOADS = (
+    "decoration or display",
+    "handled, clipped or lightly loaded",
+    "carries a real load",
+    "a prototype or test fit",
+)
+#: What follows a line of the notes that the person's answer stands in place of
+#: (mqucifer/print-shop#236). Past prints' contexts are compared without it (`similar`).
+SET_ASIDE = " (set aside: you said "
 #: How the bench lays a run's file on a side (`bench.refine.ON_BED`, kept the same here so the
 #: print side never imports the bench's): about an axis through the origin, in degrees.
 ON_BED: dict[str, tuple[tuple[float, float, float], float]] = {
@@ -99,6 +120,24 @@ class Seen(BaseModel):
     top: bool  # the top as it prints
     bottom: bool  # the face on the plate
     said: str  # the answer, in its words
+    noted: bool = False  # from the part's notes, and not the person's own answer
+
+    def whose(self) -> str:
+        """Who said it, as a reason opens."""
+        return "the part's notes say" if self.noted else "you said"
+
+    def faces(self) -> str:
+        """The faces, as a sidecar lists them."""
+        listed = (("walls", self.walls), ("top", self.top), ("bottom", self.bottom))
+        return ", ".join(name for name, shown in listed if shown) or "nothing"
+
+    def in_words(self) -> str:
+        """The same faces as a person reads them: "the top and the bottom"."""
+        names = [f"the {name}" for name in self.faces().split(", ")]
+        if names == ["the nothing"]:
+            return "none of its faces"
+        *most, last = names
+        return f"{', '.join(most)} and {last}" if most else last
 
 
 class Fit(BaseModel):
@@ -158,6 +197,11 @@ class PartContext(BaseModel):
     holds: tuple[Hold, ...] = ()
     #: Which faces are seen, as the file lies. None: not said.
     seen: Seen | None = None
+    #: What it's for, in the notes' words, and how it's loaded, one of `LOADS`. "": not said.
+    purpose: str = ""
+    loaded: str = ""
+    #: A sidecar's free text, which is shown and never read as a purpose.
+    about: str = ""
     #: The side it's laid on, in the STL's own coordinates, and where that was read.
     down: str = ""
     down_from: str = ""
@@ -171,15 +215,29 @@ class PartContext(BaseModel):
     def found(self) -> bool:
         return bool(self.source)
 
-    def lines(self) -> list[str]:
-        """The context as the review, the model and the ledger read it, in the file's own pose."""
+    def lines(self, set_aside: Mapping[str, str] | None = None) -> list[str]:
+        """The context as the review, the model and the ledger read it, in the file's own pose.
+        `set_aside` has the person's answer by what it replaced ("purpose", "seen"): that line
+        says so, so that it doesn't read as what's being judged."""
+        instead = set_aside or {}
+
+        def said(line: str, kind: str) -> str:
+            return f"{line}{SET_ASIDE}'{instead[kind]}')" if kind in instead else line
+
         if not self.found:
             return ["none: no design run above the file and no sidecar beside it, so it's read "
                     "as before", *self.notes]
         out = [f"from {self.source}", *(f"read {r}" for r in self.read)]
         out += [f"fit: {f.line()}" for f in self.fits]
         out += [f"hold: {h.line()}" for h in self.holds]
-        out.append(f"seen: {self.seen.said}" if self.seen is not None
+        if self.loaded:
+            words = f"{self.purpose}; " if self.purpose else ""
+            out.append(said(f"purpose: {words}loaded as '{self.loaded}'", "purpose"))
+        elif self.purpose:
+            out.append(f"purpose, in words only: {self.purpose}")
+        if self.about:
+            out.append(f"about: {self.about}")
+        out.append(said(f"seen: {self.seen.said}", "seen") if self.seen is not None
                    else "seen: not said here, so the intake's answer stands")
         if self.down:
             out.append(f"laid on its {self.down} side ({self.down_from})")
@@ -274,10 +332,12 @@ def run_folder(stl: Path) -> Path | None:
 def _from_sidecar(path: Path) -> PartContext:
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
-        raise ValueError("a sidecar is a JSON object: fits, seen, down, holds")
-    unknown = sorted(set(data) - {"fits", "seen", "down", "holds", "about"})
+        raise ValueError("a sidecar is a JSON object: fits, seen, purpose, down, holds")
+    unknown = sorted(set(data) - {"fits", "seen", "purpose", "down", "holds", "about"})
     if unknown:
-        raise ValueError(f"a sidecar has fits, seen, down, holds and about; not {unknown}")
+        raise ValueError(
+            f"a sidecar has fits, seen, purpose, down, holds and about; not {unknown}")
+    purpose, loaded, unread = _purpose(data.get("purpose"))
     fits = []
     for n, entry in enumerate(data.get("fits") or (), 1):
         name = str(entry.get("name") or f"fit {n}")
@@ -309,8 +369,38 @@ def _from_sidecar(path: Path) -> PartContext:
         fits=tuple(fits),
         holds=tuple(holds), seen=_seen(data.get("seen")), down=down,
         down_from="the sidecar" if down else "",
-        notes=(str(data["about"]),) if data.get("about") else (),
+        purpose=purpose, loaded=loaded,
+        about=plain_line(data.get("about") or ""),
+        notes=(unread,) if unread else (),
     )
+
+
+def _purpose(value: Any) -> tuple[str, str, str]:
+    """The sidecar's purpose: its words, how it's loaded, and why that couldn't be read. Words
+    alone are never read as a load (mqucifer/print-shop#236). One that can't be read raises
+    nothing: the fits and the side beside it hold guards of their own."""
+    if value is None:
+        return "", "", ""
+    if isinstance(value, str):
+        return plain_line(value), "", ""
+    if not isinstance(value, dict):
+        return (plain_line(json.dumps(value)), "",
+                'its purpose isn\'t {"for": ..., "loaded": ...}, so purpose is asked')
+    words, loaded = plain_line(value.get("for") or ""), plain_line(value.get("loaded") or "")
+    known = next((load for load in LOADS if load.casefold() == loaded.casefold()), "")
+    strange = sorted(str(key) for key in set(value) - {"for", "loaded"})
+    if not strange and (known or not loaded):
+        return words, known, ""
+    as_given = "; ".join(f"{plain_line(key)}: {plain_line(said)}" for key, said in value.items())
+    why = (f"a purpose has for and loaded, not {strange}" if strange
+           else f"a purpose's loaded is one of {', '.join(LOADS)}, not {loaded!r}")
+    return as_given, "", f"{why}, so purpose is asked"
+
+
+def plain_line(value: Any) -> str:
+    """A sender's words as one printable line: they're shown where the person confirms, so
+    they can't draw a line of their own there."""
+    return " ".join("".join(c if c.isprintable() else " " for c in str(value)).split())
 
 
 def _play(value: Any) -> tuple[float | None, float | None]:
@@ -332,7 +422,7 @@ def _seen(value: Any) -> Seen | None:
         raise ValueError(f"seen lists walls, top and bottom, not {wrong}")
     said = ", ".join(faces) if faces else "nothing"
     return Seen(walls="walls" in faces, top="top" in faces, bottom="bottom" in faces,
-                said=f"{said}, as the part's context says")
+                said=f"{said}, as the part's context says", noted=True)
 
 
 def _box(value: Any) -> Box:
@@ -681,6 +771,13 @@ def place(
         off = (f"the pose turns it off its {context.down} side, which {context.down_from} lays "
                "it on")
     return Placed(fits=tuple(bands), across=across, seen=_seen_in(context.seen, up), off_side=off)
+
+
+def printed(seen: Seen, rotation_deg: tuple[float, float, float]) -> Seen | None:
+    """The faces seen as they print in that pose, where that's the same faces: as the file lies
+    or turned over. On a side it's None, as a wall there is the top or the plate's in part."""
+    up = _rotation(rotation_deg).T @ np.array([0.0, 0.0, 1.0])
+    return _seen_in(seen, up) if abs(float(up[2])) > 0.99 else None
 
 
 def _seen_in(seen: Seen | None, up: np.ndarray) -> Seen | None:

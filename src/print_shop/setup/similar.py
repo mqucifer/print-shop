@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from print_shop.core.state import Orientation
+from print_shop.setup.context import SET_ASIDE
 from print_shop.setup.features import Feature
 
 __all__ = ["MEASURES", "Likeness", "Numbers", "apart", "differences", "figure", "likeness",
@@ -131,7 +132,7 @@ def _said(lines: tuple[str, ...]) -> set[str]:
         if kind in ("fit", "hold"):
             found |= {f"{kind} {name}" for name in _NAMED.findall(rest)[:1]}
         elif kind == "seen" and not rest.startswith("not said"):
-            found.add(line)
+            found.add(line.partition(SET_ASIDE)[0])  # what the notes said, whatever was answered
     return found
 
 

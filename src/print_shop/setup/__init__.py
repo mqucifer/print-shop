@@ -69,10 +69,12 @@ class Proposer:
     def questions(
         self, features: tuple[Feature, ...], profiles: SlicerProfiles,
         stop: threading.Event | None = None,
+        context: PartContext | None = None,
     ) -> Asked:
         """The intake's questions for this part, before any are answered. `stop` ends the
-        model's call (mqucifer/print-shop#208)."""
-        facts = self._facts(Intake(), features, profiles)
+        model's call (mqucifer/print-shop#208). `context` is the part's notes, so that the model
+        asks only what they leave open (mqucifer/print-shop#236)."""
+        facts = self._facts(Intake(), features, profiles, context)
         if self.ask_questions is not None:
             return propose_questions(facts, self.ask_questions)
         if self.llm is not None:

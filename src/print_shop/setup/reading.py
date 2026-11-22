@@ -7,10 +7,11 @@ on faces nobody sees, and an aligned seam on walls that are the part's whole loo
 
 So each slice is read layer by layer (`slicer/gcode.py`) into a `SliceReading`, kept with the
 job in the ledger, and `flags` says what matters for this part. Which faces are seen comes
-from the intake (`questions.SEEN`), or the part's context where the intake didn't say, never
-from which face is on top: settings depend on the part, not the material. A flag proposes a
-change with its reason and the reading it rests on, like every other change. It never applies
-one: the person takes it at the review, or doesn't.
+from the intake (`questions.SEEN`), or the part's context where the person confirmed it
+(mqucifer/print-shop#236) or the intake didn't say, never from which face is on top: settings
+depend on the part, not the material. A flag proposes a change with its reason and the reading
+it rests on, like every other change. It never applies one: the person takes it at the review,
+or doesn't.
 
 **A part's fits** (mqucifer/print-shop#130, `context.py`), placed as heights in the pose it
 prints in: a part with one never gets a random seam proposed, and the reason names the fit; a fit
@@ -278,13 +279,17 @@ def _seam(layers: list[gcode.Layer]) -> SeamReading:
 
 
 def seen(intake: Intake | None) -> Seen | None:
-    """Which faces the intake's answer says are seen, or None when it wasn't asked or said."""
+    """Which faces the person's own answer says are seen, or None when they didn't say. What
+    they confirmed from the notes is None here: that's read as the context places it in the pose
+    printed (`flags`), so that it follows a turn."""
     from print_shop.setup.questions import SEEN, SEEN_FACES  # noqa: PLC0415 - a cycle otherwise
 
     if intake is None:
         return None
     for question, answer in zip(intake.questions, intake.answers, strict=False):
         if question.feature != SEEN.feature or answer.choice is None:
+            continue
+        if question.confirmed(answer):
             continue
         label = question.options[answer.choice].label
         faces = SEEN_FACES.get(label)
@@ -416,7 +421,7 @@ def _ironing(reading: SliceReading, faces: Seen | None, process: dict[str, Any])
         return [Flag(id="ironing_hidden", reading=said, change=Change(
             key="ironing_type", preset=preset, value="no ironing", source=Source.READING,
             feature="seen", knowledge="surface", reading=said,
-            reason=f"you said '{faces.said}', so ironing costs {_s(ironing.time_s)} for "
+            reason=f"{faces.whose()} '{faces.said}', so ironing costs {_s(ironing.time_s)} for "
                    "faces nobody sees"))]
     below = [z for z in heights if z < heights[-1]]
     if below and reading.settings.get("ironing_type") in ("top", "solid"):
@@ -451,7 +456,7 @@ def _seam_flag(
     return [Flag(id="seam_seen", reading=said, change=Change(
         key="seam_position", preset=_first(process, "seam_position"), value=value,
         source=Source.READING, feature="seen", knowledge="surface", reading=said,
-        reason=f"you said '{faces.said}', so the walls are seen, and the seam is a line on "
+        reason=f"{faces.whose()} '{faces.said}', so the walls are seen, and the seam is a line on "
                f"them: {how}"))]
 
 
@@ -492,9 +497,9 @@ def _seam_on_a_fit(
     return [Flag(id="seam_fit", reading=said, change=Change(
         key="seam_position", preset=_first(process, "seam_position"), value="back",
         source=Source.READING, feature="fit", knowledge="surface", reading=said,
-        reason=f"you said '{faces.said}', so the walls are seen, and the seam is a line on them: "
-               "back puts the line on the part's back (its largest y). Not random: it would "
-               f"scatter seam bumps all round the fit, {named}"))]
+        reason=f"{faces.whose()} '{faces.said}', so the walls are seen, and the seam is a line "
+               "on them: back puts the line on the part's back (its largest y). Not random: it "
+               f"would scatter seam bumps all round the fit, {named}"))]
 
 
 def _elephant_foot(
