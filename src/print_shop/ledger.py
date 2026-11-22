@@ -28,6 +28,10 @@ lesson, keyed to the part's traits (`setup/features.py`), in tables of its own
 `unprinted_jobs`, whose outcome says it timed out (mqucifer/print-shop#125). Nothing was sent to
 the printer, so it's no print, and it never reaches the outcome gate or a lesson.
 
+**A print with a swap keeps each spool in order, with its layer** (mqucifer/print-shop#218), in
+`print_spools` beside its `print_material`, which stays the spool it started on. A row from
+before has none, and reads back as it was.
+
 **A hand-sliced file is kept like any other print** (mqucifer/print-shop#164), with a row of
 `sliced_prints` beside it: marked `sliced: by hand`, with the file's own settings by profile,
 what differs from the inventory's tuning, each object's overrides, Orca's estimate, and the job
@@ -56,7 +60,7 @@ from pydantic import BaseModel
 
 from print_shop.env import SETTINGS_PATH, load_env
 from print_shop.inventory import SCHEMA as INVENTORY_SCHEMA
-from print_shop.inventory import Material
+from print_shop.inventory import Material, SpoolUse
 from print_shop.setup.features import Feature
 from print_shop.setup.intake import Intake
 from print_shop.setup.lessons import SCHEMA as LESSONS_SCHEMA
@@ -196,6 +200,8 @@ class PrintRecord(BaseModel):
     #: The printer, nozzle and spool from the inventory, for a print with no store profiles to
     #: carry them: a hand-sliced one. Else it's `profiles.material`.
     material: Material | None = None
+    #: A swap's spools, in order, each with its layer (mqucifer/print-shop#218).
+    spools: tuple[SpoolUse, ...] = ()
 
 
 class Frame(BaseModel):
@@ -263,6 +269,9 @@ class Row(BaseModel):
     features: tuple[Feature, ...] | None = None
     #: The printer, nozzle and spool from the inventory (mqucifer/print-shop#11).
     material: Material | None = None
+    #: A swap's spools, in order, each with its layer (mqucifer/print-shop#218). (): no swap
+    #: was recorded, as in every row from before.
+    spools: tuple[SpoolUse, ...] = ()
     #: The slice as read, and its flags (mqucifer/print-shop#105). None: from before, or
     #: its G-code couldn't be read.
     reading: SliceReading | None = None
@@ -487,7 +496,7 @@ class Ledger:
         self._conn.executescript(FRAMES_MISSED_SCHEMA)
         self._conn.executescript(UNPRINTED_SCHEMA)
         self._conn.executescript(SLICED_SCHEMA)
-        self._has_sliced = True
+        self._has_sliced = self._has_spools = True
 
     @classmethod
     def read_only(cls, path: Path) -> Ledger:
@@ -518,6 +527,10 @@ class Ledger:
         # is made here: its prints read back with no sliced record.
         self._has_sliced = self._conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sliced_prints'"
+        ).fetchone() is not None
+        # The same for a file from before mqucifer/print-shop#218, which has no `print_spools`.
+        self._has_spools = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'print_spools'"
         ).fetchone() is not None
         return self
 
@@ -612,6 +625,14 @@ class Ledger:
                     (record.job_id, material.printer_id, material.nozzle_mm,
                      material.spool_id, material.model_dump_json()),
                 )
+            for position, used in enumerate(record.spools):
+                db.execute(
+                    "INSERT INTO print_spools (job_id, position, spool_id, from_layer, from_z,"
+                    " spool, planned) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (record.job_id, position, used.material.spool_id, used.from_layer,
+                     used.from_z, used.material.model_dump_json(),
+                     used.planned.model_dump_json() if used.planned else None),
+                )
             if record.reading is not None:
                 reading = record.reading
                 shortest = reading.shortest()
@@ -650,6 +671,20 @@ class Ledger:
             (_now(), printer_end_status),
             "ended_at IS NULL",
         )
+
+    def record_last_spool(self, job_id: str, last: SpoolUse) -> None:
+        """The spool a swap's print ended with, where it isn't the one written at the start: the
+        swap wasn't reached, or the person corrected it (mqucifer/print-shop#218)."""
+        with self._write() as db:
+            changed = db.execute(
+                "UPDATE print_spools SET spool_id = ?, spool = ?, planned = ? WHERE job_id = ?"
+                " AND position > 0 AND position ="
+                " (SELECT max(position) FROM print_spools WHERE job_id = ?)",
+                (last.material.spool_id, last.material.model_dump_json(),
+                 last.planned.model_dump_json() if last.planned else None, job_id, job_id),
+            ).rowcount
+            if changed != 1:
+                raise LedgerError(f"job {job_id} has no swap in the ledger")
 
     def record_answer(self, job_id: str, answer: Answer) -> None:
         """The Sponsor's answer. Once: a second answer is refused, not merged."""
@@ -784,14 +819,33 @@ class Ledger:
     def get(self, job_id: str) -> Row | None:
         with self._lock:
             row = self._conn.execute(self._select + " WHERE p.job_id = ?", (job_id,)).fetchone()
-        return _row(row) if row is not None else None
+            spools = self._spools(job_id)
+        return _row(row, spools.get(job_id, ())) if row is not None else None
 
     def rows(self) -> list[Row]:
         with self._lock:
             found = self._conn.execute(
                 self._select + " ORDER BY p.start_requested_at, p.rowid"
             ).fetchall()
-        return [_row(r) for r in found]
+            spools = self._spools()
+        return [_row(r, spools.get(r["job_id"], ())) for r in found]
+
+    def _spools(self, job_id: str | None = None) -> dict[str, tuple[SpoolUse, ...]]:
+        """Each print's spools where it had a swap, or one print's. The lock is the caller's."""
+        if not self._has_spools:
+            return {}
+        where, args = (" WHERE job_id = ?", (job_id,)) if job_id is not None else ("", ())
+        found: dict[str, tuple[SpoolUse, ...]] = {}
+        for r in self._conn.execute(
+            "SELECT job_id, from_layer, from_z, spool, planned FROM print_spools"
+            f"{where} ORDER BY job_id, position", args,
+        ):
+            found[r["job_id"]] = (*found.get(r["job_id"], ()), SpoolUse(
+                material=Material.model_validate_json(r["spool"]),
+                from_layer=r["from_layer"], from_z=r["from_z"],
+                planned=Material.model_validate_json(r["planned"]) if r["planned"] else None,
+            ))
+        return found
 
     def reprints(self, job_id: str) -> list[str]:
         """The jobs that print `job_id`'s file again, oldest first."""
@@ -832,8 +886,9 @@ _SELECT = (
 _SLICED_JOIN = " LEFT JOIN sliced_prints s ON s.job_id = p.job_id"
 
 
-def _row(row: sqlite3.Row) -> Row:
+def _row(row: sqlite3.Row, spools: tuple[SpoolUse, ...] = ()) -> Row:
     data = dict(row)
+    data["spools"] = spools
     if data["material"] is not None:
         data["material"] = Material.model_validate_json(data["material"])
     data["rotation_deg"] = tuple(json.loads(data["rotation_deg"]))

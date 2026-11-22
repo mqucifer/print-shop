@@ -48,6 +48,7 @@ from print_shop.materials import material_name
 from print_shop.setup.context import PartContext, refuses
 from print_shop.setup.features import Feature
 from print_shop.setup.intake import Intake
+from print_shop.setup.pauses import Pause
 from print_shop.setup.reach import not_sliced, profile_of, unplaced
 from print_shop.setup.skill import WARPS_MM2
 
@@ -131,6 +132,9 @@ class Change(BaseModel):
     not_applied: str = ""
     #: The past print it was used from, or None (mqucifer/print-shop#211).
     used: Used | None = None
+    #: What a pause is for, and a swap's spools (mqucifer/print-shop#218). None for any other
+    #: setting, and for a pause from before it said.
+    pause: Pause | None = None
 
 
 class GivenLesson(BaseModel):
@@ -438,13 +442,15 @@ def _notes(f: PartFacts) -> list[str]:
     return notes
 
 
-#: A pause at a height, asked for at the review: a colour change (mqucifer/print-shop#119), or
-#: parts dropped in. It comes after the layer that tops out at that height, as the bench's
-#: `pause` gives it (`bench.pausing`, mqucifer/print-shop#203). It's no preset's setting but
-#: Orca's own pause, from the machine's pause G-code (`M600` on the Centauri Carbon), so `apply`
-#: makes it one. Each name here is the same thing; `none` removes it.
+#: A pause at a height, asked for at the review: a swap (mqucifer/print-shop#119), or an insert,
+#: and it says which (`pauses`, mqucifer/print-shop#218). It comes after the layer that tops out
+#: at that height, as the bench's `pause` gives it (`bench.pausing`, mqucifer/print-shop#203).
+#: It's no preset's setting but Orca's own pause, from the machine's pause G-code (`M600` on the
+#: Centauri Carbon), so `apply` makes it one. Either name sets it, and a name of `SWAP_NAMES`
+#: says it's a swap; `none` removes it.
 PAUSE = "pause_at"
-PAUSE_NAMES = (PAUSE, "colour_change", "color_change")
+SWAP_NAMES = ("colour_change", "color_change")
+PAUSE_NAMES = (PAUSE, *SWAP_NAMES)
 
 
 #: The pose sent back at the review (mqucifer/print-shop#128): a correction, recorded and drawn
@@ -490,7 +496,7 @@ def reached(
     config: dict[str, str] | None,
 ) -> Change:
     """The change marked with why it didn't reach the slice whose config block is `config`, or
-    with nothing when it did. A colour change isn't a setting: the slice's reading has it."""
+    with nothing when it did. A pause isn't a setting: the slice's reading has it."""
     why = "" if change.key == PAUSE else not_sliced(
         change.key, change.value, process, filament, config
     )

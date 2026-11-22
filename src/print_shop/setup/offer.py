@@ -17,6 +17,8 @@ more like learning than me remembering".
   pre-selected, as each job asks again, but on the same bytes where this job didn't ask.
 - **It's laid out to be read** (`render`): the print and how it came out once, what differs in
   columns, the items grouped by whose they were, and a reason several share said once.
+- **A pause keeps what it was for** (mqucifer/print-shop#218): a swap with the spools that print
+  used, or an insert. One from before doesn't say, and is asked when it's used.
 - **A pause's height is converted, never copied raw** (`_pause_height`): a row from before
   mqucifer/print-shop#228 gives the height that pauses where its own G-code did, and one whose
   G-code doesn't say where it paused can't be used.
@@ -44,7 +46,7 @@ from print_shop.core.state import Orientation
 from print_shop.materials import material_name
 from print_shop.outcome_words import outcome_words
 from print_shop.rounds.lessons import REJECTED, RETIRED
-from print_shop.setup import similar
+from print_shop.setup import pauses, similar
 from print_shop.setup.bounds import MATERIAL, check
 from print_shop.setup.context import PartContext, refuses
 from print_shop.setup.features import Feature
@@ -132,6 +134,8 @@ class Item:
     reading: str = ""
     #: The pose it holds in, where using it goes with turning the part to that pose.
     pose: str = ""
+    #: What a pause was for there, and a swap's spools as it printed.
+    pause: pauses.Pause | None = None
 
 
 @dataclass(frozen=True)
@@ -606,6 +610,10 @@ class _Items:
             first_stl_name=(origin.first_stl_name or origin.stl_name) if origin else "",
         )
         value, blocked, notes = change.value, "", []
+        purpose, reason = None, change.reason
+        if key == PAUSE:
+            purpose = pauses.as_printed(change.pause, row.spools)
+            reason = pauses.carried_reason(change)
         if key == ORIENTATION:
             preset = part.pose
             if value != part.pose and _pose(part, value) is None:
@@ -632,7 +640,7 @@ class _Items:
             if not blocked:
                 doubts += doubted
         return Item(
-            key=key, value=value, preset=preset, reason=" ".join(change.reason.split()),
+            key=key, value=value, preset=preset, reason=" ".join(reason.split()), pause=purpose,
             fits="" if blocked or doubts else self._fits(key, value),
             used=used, doubts=tuple(dict.fromkeys(doubts)),
             blocked=blocked, notes=tuple(notes), reading=change.reading,
@@ -1014,6 +1022,11 @@ def _reason(item: Item, proposal: Proposal) -> str:
 def _tags(item: Item) -> list[str]:
     u = item.used
     tags = [item.fits] if item.fits else []
+    if item.pause is not None:
+        said = pauses.said(item.pause.kind)
+        if item.pause.start is not None and item.pause.to is not None:
+            said += f": {item.pause.start.named()}, then {item.pause.to.named()}"
+        tags.insert(0, said)
     if u.by is Source.READING:
         tags.append("you took the slice's")
     if u.first_job_id and u.first_job_id != u.job_id:

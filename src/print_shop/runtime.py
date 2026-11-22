@@ -28,7 +28,7 @@ from print_shop.printer.centauri import (
     PrinterClient,
     PrinterConfig,
 )
-from print_shop.setup import Proposer, lessons
+from print_shop.setup import Proposer, lessons, pauses
 from print_shop.setup.intake import Asker
 from print_shop.setup.loop import PrintLoop, cli_person, llm_chat
 from print_shop.setup.model import setup_llm
@@ -191,6 +191,8 @@ def describe(row: Row) -> str:
         *_setup_lines(row),
         *_reading_lines(row),
         *([f"material       {row.material.line()}"] if row.material else []),
+        *([f"spools         {row.spools[0].line()}"] if row.spools else []),
+        *[f"               {used.line()}" for used in row.spools[1:]],
         f"plate          {row.slicer_settings.get('curr_bed_type', '?')},"
         f" bed {row.slicer_settings.get('first_layer_bed_temperature', '?')} C",
         f"printer        {row.printer_machine} {row.printer_firmware}",
@@ -274,7 +276,8 @@ def _setup_lines(row: Row) -> list[str]:
         lines.append(f"               ({row.intake.note})")
     changes = row.proposal.changes if row.proposal else ()
     for c in changes:
-        lines.append(f"  {c.key}: {c.preset or '-'} -> {c.value} ({c.source.value}) {c.reason}")
+        lines.append(f"  {c.key}: {c.preset or '-'} -> {c.value} ({c.source.value}) "
+                     f"{pauses.reason_of(c)}")
     for c in row.proposal.not_applied if row.proposal else ():
         lines.append(f"  {c.key}: not applied, {c.not_applied} ({c.source.value}) {c.reason}")
     if row.corrections:
@@ -285,7 +288,7 @@ def _setup_lines(row: Row) -> list[str]:
         )
         lines.append(f"corrected      {said}")
     for pause in row.reading.pauses if row.reading else ():
-        lines.append(f"swap           {pause.line()}")
+        lines.append(f"{pause.kind or 'pause':<15}{pause.line()}")
     for g in row.proposal.lessons if row.proposal else ():
         said = f"set {g.key}={g.value}" if g.applied else (g.why or "read")
         lines.append(f"lesson         {g.id}, from {g.stl_name}: {said}")

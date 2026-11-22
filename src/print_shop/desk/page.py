@@ -13,11 +13,12 @@ from html import escape
 from pathlib import Path
 
 from print_shop.desk.again import again
-from print_shop.desk.read import JobRecord, JobSummary, OnHand, has_swap, status
+from print_shop.desk.read import JobRecord, JobSummary, OnHand, pause_word, status
 from print_shop.inventory import SETUP
 from print_shop.ledger import Row
 from print_shop.orchestrator.outcome import end_name, no_frames
 from print_shop.outcome_words import outcome_words
+from print_shop.setup.pauses import PauseFor, reason_of, said
 from print_shop.setup.proposal import PAUSE, Change, Source
 
 __all__ = ["index_page", "job_page", "not_found_page"]
@@ -182,11 +183,11 @@ def _jobs(jobs: list[JobSummary], ledger: Path) -> str:
             f"<td><a href=\"/job/{escape(j.job_id)}\">{escape(j.part)}</a></td>"
             f"<td{cls}>{escape(j.status)}</td><td>{_minutes(j.print_time_s)}</td>"
             f"<td>{f'{j.filament_cm3:g} cm³' if j.filament_cm3 is not None else '-'}</td>"
-            f"<td>{'colour change' if j.swap else ''}</td>"
+            f"<td>{escape(j.pause)}</td>"
             f"<td>{j.frames or ''}</td></tr>")
     return ("<section><h2>Jobs, newest first</h2><div class=\"scroll\"><table><tr>"
             "<th>When</th><th>Part</th><th>Where it is</th><th>Time</th><th>Plastic</th>"
-            "<th>Swap</th><th>Frames</th></tr>" + "".join(rows) + "</table></div></section>")
+            "<th>Pause</th><th>Frames</th></tr>" + "".join(rows) + "</table></div></section>")
 
 
 # --- one job -----------------------------------------------------------------
@@ -212,12 +213,12 @@ def job_page(record: JobRecord) -> str:
         # Sliced by hand: no pose, question, proposal, correction or lesson to show.
         sections = [
             _summary(row, record), _again(row, record), _sliced(row), _reading(row),
-            _swap(row), _outcome(row, record), _log(record),
+            _pause(row), _outcome(row, record), _log(record),
         ]
         return _page(row.stl_name, "".join(sections))
     sections = [
         _summary(row, record), _again(row, record), _pose(row), _questions(row),
-        _settings(row), _corrections(row), _lessons(row), _reading(row), _swap(row),
+        _settings(row), _corrections(row), _lessons(row), _reading(row), _pause(row),
         _outcome(row, record), _log(record),
     ]
     return _page(row.stl_name, "".join(sections))
@@ -231,9 +232,12 @@ def _summary(row: Row, record: JobRecord) -> str:
         f"{_when(row.start_requested_at)}</p>"
         f"<p><strong>{escape(status(row))}</strong>. Orca's estimate: "
         f"{_minutes(row.print_time_s)}, {row.filament_cm3:g} cm³, {row.layer_count} layers"
-        + ("; with a colour change" if has_swap(row) else "")
+        + (f"; with {_A[pause_word(row)]}" if pause_word(row) else "")
         + ("; sliced by hand" if row.sliced is not None else "") + ".</p>"
-        f"<p>{escape(material)}</p></section>"
+        f"<p>{escape(material)}</p>"
+        + ("<p>Spools, in order: " + escape("; ".join(s.line() for s in row.spools)) + "</p>"
+           if row.spools else "")
+        + "</section>"
     )
 
 
@@ -336,7 +340,7 @@ def _change_rows(changes: tuple[Change, ...]) -> str:
         read = f"<br><span class=\"muted\">read: {escape(c.reading)}</span>" if c.reading else ""
         rows.append(
             f"<tr><td><code>{escape(c.key)}</code></td><td>{was}</td>"
-            f"<td>{_this_print(c)}</td><td>{escape(c.reason)}{read}</td>"
+            f"<td>{_this_print(c)}</td><td>{escape(reason_of(c))}{read}</td>"
             f"<td>{escape(by)}{f'<br><span class=muted>{escape(cites)}</span>' if cites else ''}"
             "</td></tr>")
     return ("<div class=\"scroll\"><table><tr><th>Setting</th><th>Preset</th><th>This print</th>"
@@ -424,15 +428,21 @@ def _reading(row: Row) -> str:
     return "".join(parts)
 
 
-def _swap(row: Row) -> str:
+#: What a pause is for, as it's said (mqucifer/print-shop#218).
+_A = {"swap": said(PauseFor.SWAP), "insert": said(PauseFor.INSERT), "pause": said(None)}
+
+
+def _pause(row: Row) -> str:
+    word = pause_word(row)
+    if not word:
+        return ""
     pauses = row.reading.pauses if row.reading else ()
     change = row.proposal.get(PAUSE) if row.proposal else None
-    if not pauses and (change is None or change.value == "none"):
-        return ""
-    parts = ["<section><h2>Colour change</h2><ul>"]
+    parts = [f"<section><h2>{word.capitalize()}</h2><ul>"]
     if change is not None and change.value != "none":
-        parts.append(f"<li>At {escape(change.value)} mm: {escape(change.reason)}</li>")
+        parts.append(f"<li>At {escape(change.value)} mm: {escape(reason_of(change))}</li>")
     parts += [f"<li>{escape(p.line())}</li>" for p in pauses]
+    parts += [f"<li>{escape(used.line())}</li>" for used in row.spools]
     parts.append("</ul></section>")
     return "".join(parts)
 

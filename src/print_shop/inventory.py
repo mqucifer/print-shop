@@ -20,6 +20,8 @@ ledger's schema version.
   copy of the spool, so one already printed isn't changed by it.
 - **A print takes its defaults from it** (`scripts/print_job.py`): the fitted
   nozzle and the loaded spool. What isn't on hand is refused.
+- **A swap's print keeps each spool in order, with its layer** (`print_spools`,
+  mqucifer/print-shop#218): it starts only with the first loaded, and leaves the last loaded.
 """
 
 from __future__ import annotations
@@ -42,6 +44,7 @@ __all__ = [
     "Printer",
     "Spool",
     "SpoolState",
+    "SpoolUse",
 ]
 
 SCHEMA = """
@@ -81,6 +84,16 @@ CREATE TABLE IF NOT EXISTS print_material (
     nozzle_mm   REAL NOT NULL,
     spool_id    INTEGER REFERENCES spools(id),
     spool       TEXT NOT NULL                    -- JSON Material: the spool as it was
+);
+CREATE TABLE IF NOT EXISTS print_spools (
+    job_id      TEXT NOT NULL REFERENCES prints(job_id),
+    position    INTEGER NOT NULL,                -- 0 is the spool it started on
+    spool_id    INTEGER NOT NULL REFERENCES spools(id),
+    from_layer  INTEGER,                         -- the first layer it printed, if it's known
+    from_z      REAL,                            -- the top of the layer under that one
+    spool       TEXT NOT NULL,                   -- JSON Material: the spool as it was
+    planned     TEXT,                            -- JSON Material: the one planned, if another was
+    PRIMARY KEY (job_id, position)
 );
 """
 
@@ -128,6 +141,9 @@ class Spool(BaseModel):
         """What picks its profile (mqucifer/print-shop#8): the tuning, else the variety."""
         return self.tuning or self.variety
 
+    def named(self) -> str:
+        return f"spool #{self.id}, {self.variety}, {self.colour}"
+
     def line(self) -> str:
         parts = [f"spool #{self.id}", self.variety, self.colour]
         if self.grams_left is not None:
@@ -155,8 +171,46 @@ class Material(BaseModel):
     tuning: str | None = None
 
     def line(self) -> str:
-        return (f"{self.printer_id} with a {self.nozzle_mm:g} mm nozzle; spool #{self.spool_id}, "
-                f"{self.variety}, {self.colour}")
+        return f"{self.printer_id} with a {self.nozzle_mm:g} mm nozzle; {self.named()}"
+
+    def named(self) -> str:
+        return f"spool #{self.spool_id}, {self.variety}, {self.colour}"
+
+    def of(self, spool: Spool) -> Material:
+        """The same printer and nozzle, with `spool` on it."""
+        return self.model_copy(update={
+            "spool_id": spool.id, "manufacturer": spool.manufacturer, "type": spool.type,
+            "variety": spool.variety, "colour": spool.colour, "tuning": spool.tuning,
+        })
+
+    def same_filament(self, other: Material) -> bool:
+        """Whether both are sliced with one filament's settings: the variety and its tuning."""
+        return (self.variety.casefold(), self.tuning) == (other.variety.casefold(), other.tuning)
+
+    def filament_said(self) -> str:
+        return self.variety + (f' tuned "{self.tuning}"' if self.tuning else "")
+
+
+class SpoolUse(BaseModel):
+    """One of the spools a print with a swap used, in order, and from which layer
+    (mqucifer/print-shop#218)."""
+
+    model_config = {"frozen": True}
+
+    material: Material
+    from_layer: int | None = None
+    #: The top of the last layer printed before it.
+    from_z: float | None = None
+    #: The spool planned here, where it ended with another: the swap wasn't reached, or the
+    #: person corrected it at the outcome.
+    planned: Material | None = None
+
+    def line(self) -> str:
+        at = f", from layer {self.from_layer}" if self.from_layer else ""
+        if self.from_z is not None:
+            at += f", over z={self.from_z:g}"
+        was = f" ({self.planned.named()} was planned)" if self.planned else ""
+        return f"{self.material.named()}{at}{was}"
 
 
 def _now() -> str:
@@ -440,6 +494,23 @@ class Inventory:
                 "with the spool as it is now."
             )
         return prepared.model_copy(update={"colour": spool.colour})
+
+    def at_swaps_start(self, start: Material) -> Material:
+        """The spool a print with a swap starts on, as it starts (mqucifer/print-shop#218).
+
+        Raises:
+            InventoryError: If it isn't the one loaded, saying which is, or as `at_start` does.
+        """
+        first = self.at_start(start)
+        now = self.loaded(first.printer_id)
+        if now is None or now.id != first.spool_id:
+            has = now.named() if now is not None else "none"
+            raise InventoryError(
+                f"this print starts on {first.named()}, and the stock has {has} loaded on "
+                f"{first.printer_id}, so nothing was uploaded or printed. Load it "
+                f"(`stock load {first.spool_id}`) and run the job again."
+            )
+        return first
 
     def listing(self, *, with_empty: bool = False) -> str:
         """Everything on hand, loaded and fitted, a line each."""

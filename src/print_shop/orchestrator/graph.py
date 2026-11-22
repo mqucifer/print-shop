@@ -60,11 +60,11 @@ from print_shop.expert.orientation import (
 )
 from print_shop.ingest.analyzer import analyze, verify_unchanged
 from print_shop.ingest.orientation import candidates, write_rotated
-from print_shop.inventory import Inventory, Material
+from print_shop.inventory import Inventory, Material, SpoolUse
 from print_shop.ledger import Ledger, PrintRecord
 from print_shop.orchestrator.fitness import scoring_profiles
 from print_shop.printer.centauri import PreflightFailed, PrinterClient, preflight
-from print_shop.setup import Proposer
+from print_shop.setup import Proposer, pauses
 from print_shop.setup import lessons as print_lessons
 from print_shop.setup.context import PartContext, place, pose_for, read_context
 from print_shop.setup.doubts import Doubting
@@ -76,6 +76,7 @@ from print_shop.setup.offer import Offering, ThisPart
 from print_shop.setup.offer import offering as offer_past_prints
 from print_shop.setup.proposal import (
     ORIENTATION,
+    PAUSE,
     Change,
     GivenLesson,
     Proposal,
@@ -451,6 +452,7 @@ def build_graph(
                         earlier=earlier,
                         context=context, stl=state["stl_path"],
                         offering=offer, doubting=doubting,
+                        material=_material_of(profiles), stock=_stock(ledger, profiles),
                     )
                 except _Turned as turned:
                     # Sent back at the review: turned to the person's pose, and sliced again.
@@ -562,9 +564,12 @@ def build_graph(
                 "max_z_mm": slice_result.max_z_mm,
                 "orientation_deg": list(applied_orientation.rotation_deg),
                 "orientation_rationale": applied_orientation.rationale,
-                # A colour change the review asked for, where the slice put it, so the person
-                # is at the printer for the swap (mqucifer/print-shop#119).
+                # A pause the review asked for, where the slice put it, so the person is at
+                # the printer for it (mqucifer/print-shop#119), what it's for, and the spool a
+                # swap's print starts on (mqucifer/print-shop#218).
                 "pause": _pauses_said(state.get("slice_reading")),
+                "pause_for": _pause_for(state),
+                "spools": _starts_said(state, ledger),
             }
         )
         approved = (
@@ -581,7 +586,7 @@ def build_graph(
     def print_node(state: PrintJobState) -> dict[str, Any]:
         """Hardware boundary: upload the G-code and start the print.
 
-        Five refusals stand between this being called and the nozzle moving,
+        Six refusals stand between this being called and the nozzle moving,
         and each one raises rather than continuing:
 
         1. **The gate decision is re-checked here.** ``ungated_edges`` proves
@@ -592,13 +597,14 @@ def build_graph(
         2. **The spool's tuning is the one the job was prepared with**
            (mqucifer/print-shop#220), read again here, as it can be edited
            while the job waits. A colour corrected meanwhile is what's recorded.
-        3. **Preflight** — the printer must be free and have room, and the
+        3. **A swap's first spool is the one loaded** (mqucifer/print-shop#218).
+        4. **Preflight** — the printer must be free and have room, and the
            G-code must exist. A pure validator over a typed snapshot.
-        4. **The uploaded name must carry this job's id.** ``upload_file``
+        5. **The uploaded name must carry this job's id.** ``upload_file``
            returns the name the *printer* chose, which need not be the name we
            sent. If the round-trip fails we are about to print a file we cannot
            account for, so we do not.
-        5. **The start is confirmed by watching the printer's own status**,
+        6. **The start is confirmed by watching the printer's own status**,
            not by the command being acknowledged.
 
         Never returns a fake success: the previous implementation set
@@ -628,9 +634,16 @@ def build_graph(
             )
 
         material = _material_prepared(state)
+        spools: tuple[SpoolUse, ...] = ()
         if material is not None:
             with Inventory(ledger.path) as inventory:
                 material = inventory.at_start(material)
+                swap = _swap(state)
+                if swap is not None and swap.start is not None and swap.to is not None:
+                    material = inventory.at_swaps_start(swap.start)
+                    to = swap.to.of(inventory.spool(swap.to.spool_id))
+                    spools = pauses.uses(swap.model_copy(update={"start": material, "to": to}),
+                                         state.get("slice_reading"))
 
         gcode = Path(state["gcode_path"])
         snapshot = client.snapshot()
@@ -655,7 +668,7 @@ def build_graph(
         # halfway is still on record.
         ledger.record_start_requested(
             _print_record(state, remote_name, gcode, snapshot.machine, snapshot.firmware,
-                          store, material)
+                          store, material, spools)
         )
         try:
             client.start(remote_name)
@@ -739,9 +752,54 @@ def build_graph(
 
 
 def _pauses_said(reading: Any) -> str:
-    """Where the slice pauses for a filament swap, in a sentence, or ""."""
-    pauses = getattr(reading, "pauses", ()) or ()
-    return "; ".join(f"this print {p.line()}" for p in pauses)
+    """Where the slice pauses and what for, in a sentence, or ""."""
+    found = getattr(reading, "pauses", ()) or ()
+    return "; ".join(f"this print {p.line()}" for p in found)
+
+
+def _standing(state: PrintJobState) -> Change | None:
+    """The pause that stood at the review, or None."""
+    proposal = state.get("proposal")
+    change = proposal.get(PAUSE) if proposal is not None else None
+    return change if change is not None and change.value != "none" else None
+
+
+def _pause_for(state: PrintJobState) -> str:
+    """What the job's pause is for, or "" where it doesn't say (mqucifer/print-shop#218)."""
+    change = _standing(state)
+    return change.pause.kind.value if change is not None and change.pause is not None else ""
+
+
+def _swap(state: PrintJobState) -> pauses.Pause | None:
+    change = _standing(state)
+    pause = change.pause if change is not None else None
+    return pause if pause is not None and pause.kind is pauses.PauseFor.SWAP else None
+
+
+def _starts_said(state: PrintJobState, ledger: Ledger | None) -> str:
+    """The spool a swap's print starts on and whether it's loaded, for the gate, or ""."""
+    swap = _swap(state)
+    if swap is None or swap.start is None or ledger is None:
+        return ""
+    with Inventory(ledger.path) as inventory:
+        return pauses.starting(swap, inventory.spools())
+
+
+def _material_of(profiles: SlicerProfiles) -> Material | None:
+    return profiles.used.material if profiles.used is not None else None
+
+
+def _stock(ledger: Ledger | None, profiles: SlicerProfiles) -> pauses.Stock | None:
+    """The spools on hand, for a swap to name its two, read each time they're needed."""
+    if ledger is None or _material_of(profiles) is None:
+        return None
+    path = ledger.path
+
+    def on_hand() -> tuple[Any, ...]:
+        with Inventory(path) as inventory:
+            return tuple(inventory.spools())
+
+    return on_hand
 
 
 def _material_prepared(state: PrintJobState) -> Material | None:
@@ -756,10 +814,12 @@ def _material_prepared(state: PrintJobState) -> Material | None:
 def _print_record(
     state: PrintJobState, remote_name: str, gcode: Path, machine: str, firmware: str,
     store: Store | None = None, material: Material | None = None,
+    spools: tuple[SpoolUse, ...] = (),
 ) -> PrintRecord:
     """The ledger's row for this job, from state and the G-code Orca wrote.
 
-    `material` is the spool as the print starts (`Inventory.at_start`).
+    `material` is the spool as the print starts (`Inventory.at_start`), and `spools` a swap's,
+    in order (mqucifer/print-shop#218).
     """
     slice_result: SliceResult = state["slice"]
     job = state.get("sliced")
@@ -815,6 +875,7 @@ def _print_record(
         features=tuple(state.get("features", ())),
         reading=state.get("slice_reading"),
         flags=tuple(state.get("slice_flags", ())),
+        spools=spools,
     )
 
 
@@ -1024,6 +1085,8 @@ def _propose_and_review(
     stl: str | Path | None = None,
     offering: Offering | None = None,
     doubting: Doubting | None = None,
+    material: Material | None = None,
+    stock: pauses.Stock | None = None,
 ) -> tuple[SliceResult, dict[str, Any]]:
     """Slice with the proposal; with a reviewer, again after each correction until approved.
 
@@ -1034,6 +1097,10 @@ def _propose_and_review(
 
     `offering` is what decided the past prints most like this one (mqucifer/print-shop#211):
     none of it is applied until it's used, and picking or clearing slices nothing.
+
+    `material` is the spool the job was prepared with and `stock` the spools on hand: what a swap
+    names its two from. Each slice's reading is marked with what its pause is for
+    (mqucifer/print-shop#218).
 
     Each change is read back from each slice (mqucifer/print-shop#206): the review, and then
     the job, have what reached it as changed and the rest as not applied, the corrections
@@ -1067,7 +1134,7 @@ def _propose_and_review(
         )
         config = _config(result)
         proposal = read_back(asked, process, filament, config)
-        reading = _read(result)
+        reading = pauses.marked(_read(result), proposal.get(PAUSE))
         found = (flags(reading, faces, process, filament, placed, proposal.changes)
                  if reading is not None else ())
         if reviewer is None:
@@ -1091,6 +1158,8 @@ def _propose_and_review(
                 lessons_for=lessons_for,
                 context=said,
                 offering=offering,
+                material=material,
+                stock=stock,
             ))
             if review.offering is not None:
                 offering = review.offering

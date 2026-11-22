@@ -47,6 +47,8 @@ __all__ = [
     "outcome_frame_set_topic",
     "outcome_frame_topic",
     "outcome_note_topic",
+    "outcome_spool_select",
+    "outcome_spool_topic",
     "outcome_result_topic",
     "outcome_submit_topic",
     "outcome_symptom_topic",
@@ -127,6 +129,11 @@ def outcome_symptom_topic(cfg: MqttConfig) -> str:
 
 def outcome_note_topic(cfg: MqttConfig) -> str:
     return f"{cfg.topic_prefix}/outcome/set/note"
+
+
+def outcome_spool_topic(cfg: MqttConfig) -> str:
+    """The spool a print with a swap ended with, as corrected (mqucifer/print-shop#218)."""
+    return f"{cfg.topic_prefix}/outcome/set/spool"
 
 
 def outcome_submit_topic(cfg: MqttConfig) -> str:
@@ -211,6 +218,29 @@ def approval_buttons(
         )
         for decision in ("approve", "reject")
     ]
+
+
+def outcome_spool_select(
+    cfg: MqttConfig, spools: Iterable[str] = ()
+) -> tuple[str, dict[str, object]]:
+    """The select that corrects a swap's last spool at the outcome (mqucifer/print-shop#218).
+
+    A select's options are fixed in its discovery, and the stock's spools aren't, so the desk
+    publishes this again with them, as the gate's buttons are (`approval_buttons`).
+    """
+    return (
+        f"{cfg.discovery_prefix}/select/{cfg.node_id}/outcome_spool/config",
+        {
+            "name": "Outcome Spool",
+            "unique_id": f"{cfg.node_id}_outcome_spool",
+            "command_topic": outcome_spool_topic(cfg),
+            "state_topic": outcome_topic(cfg),
+            "value_template": "{{ value_json.spool | default('unset') }}",
+            "options": ["unset", *spools],
+            "availability_topic": availability_topic(cfg),
+            "device": {"identifiers": [cfg.node_id], "name": "3D Print Agent"},
+        },
+    )
 
 
 def discovery_payloads(cfg: MqttConfig) -> Iterable[tuple[str, dict[str, object]]]:
@@ -378,6 +408,7 @@ def discovery_payloads(cfg: MqttConfig) -> Iterable[tuple[str, dict[str, object]
                 "device": device,
             },
         ),
+        outcome_spool_select(cfg),
         # The print's camera frames beside the answer (mqucifer/print-shop#110): the last
         # on show, Earlier and Later to page. Evidence, never the answer.
         (

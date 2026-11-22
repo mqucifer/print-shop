@@ -136,7 +136,8 @@ class JobSummary:
     status: str
     print_time_s: int | None = None
     filament_cm3: float | None = None
-    swap: bool = False
+    #: What it pauses for, in a few words, or "" (mqucifer/print-shop#218).
+    pause: str = ""
     frames: int = 0
     failed: bool = False
 
@@ -172,12 +173,24 @@ def status(row: Row) -> str:
     return "sent, not seen to start"
 
 
-def has_swap(row: Row) -> bool:
-    """A colour change asked for, or written into the slice."""
-    if row.reading is not None and row.reading.pauses:
-        return True
+def pause_word(row: Row) -> str:
+    """What a print pauses for: "swap", "insert", "pause" where it doesn't say, or "" for no
+    pause asked for or written into the slice (mqucifer/print-shop#218)."""
     change = row.proposal.get(PAUSE) if row.proposal is not None else None
-    return change is not None and change.value != "none"
+    if change is not None and change.value != "none":
+        return change.pause.kind.value if change.pause is not None else "pause"
+    return "pause" if row.reading is not None and row.reading.pauses else ""
+
+
+def pause_said(row: Row) -> str:
+    """The same for the list of jobs, with a swap's colours in order."""
+    word = pause_word(row)
+    if word != "swap" or len(row.spools) < 2:
+        return word
+    first, last = row.spools[0].material, row.spools[-1].material
+    if first.spool_id == last.spool_id:
+        return f"swap, not made: {first.colour} throughout"
+    return f"swap: {first.colour}, then {last.colour}"
 
 
 class Desk:
@@ -246,7 +259,7 @@ class Desk:
             found.append(JobSummary(
                 job_id=row.job_id, at=row.start_requested_at, part=row.stl_name,
                 status=status(row), print_time_s=row.print_time_s,
-                filament_cm3=row.filament_cm3, swap=has_swap(row),
+                filament_cm3=row.filament_cm3, pause=pause_said(row),
                 frames=frames.get(row.job_id, 0), failed=row.result == "failed",
             ))
         for job in unprinted:

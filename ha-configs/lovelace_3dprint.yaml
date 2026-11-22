@@ -69,8 +69,13 @@ views:
 
                 **Turned:** {{ states('sensor.3d_print_agent_orientation') }}
 
-                {% set swap = state_attr('sensor.3d_print_agent_status', 'pause') %}
-                {%- if swap %}**Filament swap:** {{ swap }}. Be at the printer for it.{% endif %}
+                {% set pause = state_attr('sensor.3d_print_agent_status', 'pause') %}
+                {%- set what = state_attr('sensor.3d_print_agent_status', 'pause_for') or 'pause' %}
+                {%- if pause %}**{{ what | capitalize }}:** {{ pause }}. Be at the printer for
+                it.{% endif %}
+
+                {% set spools = state_attr('sensor.3d_print_agent_status', 'spools') %}
+                {%- if spools %}**Spool:** {{ spools }}.{% endif %}
 
             - type: horizontal-stack
               cards:
@@ -130,8 +135,14 @@ views:
                 **The printer says:** {{ state_attr('sensor.3d_print_agent_outcome_part',
                 'printer_end') }}
 
-                {% set swap = state_attr('sensor.3d_print_agent_outcome_part', 'swap') %}
-                {%- if swap %}**It {{ swap }}.** Say in the note how the swap went.{% endif %}
+                {% set pause = state_attr('sensor.3d_print_agent_outcome_part', 'pause') %}
+                {%- set what = state_attr('sensor.3d_print_agent_outcome_part', 'pause_for') or 'pause' %}
+                {%- if pause %}**It {{ pause }}.** Say in the note how the {{ what }}
+                went.{% endif %}
+
+                {% set spools = state_attr('sensor.3d_print_agent_outcome_part', 'spools') %}
+                {%- if spools %}**Spools:** {{ spools }}. If another was on at the end, pick it
+                below: Record corrects the print and the stock.{% endif %}
 
                 {% set e = state_attr('sensor.3d_print_agent_outcome_part', 'error') %}
                 {%- if e %}**Not recorded:** {{ e }}{% endif %}
@@ -190,6 +201,20 @@ views:
                   name: What went wrong
                 - entity: text.3d_print_agent_outcome_note
                   name: Note
+
+            # A swap's last spool, to correct (mqucifer/print-shop#218): only for a print
+            # that had one. `unset` leaves it as it's said above.
+            - type: conditional
+              conditions:
+                - condition: numeric_state
+                  entity: sensor.3d_print_agent_outcome_part
+                  attribute: spool_choices
+                  above: 0
+              card:
+                type: entities
+                entities:
+                  - entity: select.3d_print_agent_outcome_spool
+                    name: Spool on at the end
 
             - type: button
               entity: button.3d_print_agent_record_outcome

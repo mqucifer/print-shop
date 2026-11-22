@@ -710,6 +710,8 @@ class Daemon:
                 "print_time_s": gate_payload.get("print_time_s"),
                 "filament_cm3": gate_payload.get("filament_cm3"),
                 "pause": gate_payload.get("pause") or "",
+                "pause_for": gate_payload.get("pause_for") or "",
+                "spools": gate_payload.get("spools") or "",
             }
         )
 

@@ -477,6 +477,8 @@ CONTRACTS_HA = {
     "select.3d_print_agent_outcome_symptom": "select/3dprint_dev/outcome_symptom",
     "text.3d_print_agent_outcome_note": "text/3dprint_dev/outcome_note",
     "button.3d_print_agent_record_outcome": "button/3dprint_dev/record_outcome",
+    # A swap's last spool, corrected at the outcome (mqucifer/print-shop#218).
+    "select.3d_print_agent_outcome_spool": "select/3dprint_dev/outcome_spool",
     # The print's camera frames at the outcome gate (mqucifer/print-shop#110).
     "image.3d_print_agent_outcome_frame": "image/3dprint_dev/outcome_frame",
     "button.3d_print_agent_outcome_frame_earlier": "button/3dprint_dev/outcome_frame_earlier",

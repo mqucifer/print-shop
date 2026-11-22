@@ -11,7 +11,9 @@ and re-copy those". Three things, each copied from the page and never run by it:
   by `review.parse_answer`): the Sponsor's own corrections, in order. Of its pauses only the
   last, which stood, and never copied raw where it could mean another layer now: one from before
   mqucifer/print-shop#203 is given at the height that pauses where it did (`_older_pause`), and
-  one whose G-code doesn't say where it paused is left out, saying so (`_pause_again`);
+  one whose G-code doesn't say where it paused is left out, saying so (`_pause_again`). It's
+  typed with what it was for (mqucifer/print-shop#218): an insert, or a swap with the spools the
+  print used;
 - **the answers file** for `--answers` (`intake.replay_asker`): each question by its text, each
   answer by its option's label or the words given.
 
@@ -38,6 +40,7 @@ from typing import Any
 
 from print_shop.ledger import Row
 from print_shop.orchestrator.graph import AS_LAID
+from print_shop.setup import pauses
 from print_shop.setup.proposal import ORIENTATION, PAUSE, Change, Source
 
 __all__ = ["DOWNLOADS", "Again", "again", "answers_file", "correction_line"]
@@ -121,13 +124,15 @@ def correction_line(row: Row) -> str:
     for c in row.corrections or ():
         if c.key == ORIENTATION or _used_as_anothers(c):
             continue
-        value: str | None = c.value
+        key, value, reason = c.key, c.value, c.reason
         if c.key == PAUSE:
-            value = _pause_again(row, c) if c is stood else None
-            if value is None:
+            height = _pause_again(row, c) if c is stood else None
+            if height is None:
                 continue
-        reason = " ".join(c.reason.replace(";", ",").split())
-        said = f"{c.key}={value}"
+            key, value = pauses.to_type(height, pauses.as_printed(c.pause, row.spools))
+            reason = pauses.carried_reason(c)
+        reason = " ".join(reason.replace(";", ",").split())
+        said = f"{key}={value}"
         if reason and reason != _NO_REASON:
             said += f" because {reason}"
         parts.append(said)
@@ -201,6 +206,14 @@ def again(row: Row, part_path: Path | None, printers: int = 1, part_found: bool 
             notes.append(f"{PAUSE}={stood.value} is copied as {PAUSE}={copied}, to pause where "
                          "this job did: a pause height is now the top of the layer it comes "
                          "after.")
+        if copied not in (None, "none"):
+            purpose = pauses.as_printed(stood.pause, row.spools)
+            if purpose is None:
+                notes.append("This job didn't say what its pause was for, so the review asks.")
+            elif purpose.start is not None and purpose.to is not None:
+                notes.append(f"It starts on {purpose.start.named()}, and swaps to "
+                             f"{purpose.to.named()}: have the first loaded, and recorded "
+                             f"(`stock.py load {purpose.start.spool_id}`), before you approve.")
     taken = [c for c in ((*row.proposal.changes, *row.proposal.not_applied)
                          if row.proposal else ())
              if c.source is Source.READING]

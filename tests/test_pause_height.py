@@ -394,5 +394,6 @@ def test_the_benchs_pause_height_through_print_job_puts_the_m600_after_that_laye
     shown = capsys.readouterr().out
     assert f"pause_at={typed}, read from the G-code: {said}" in shown
     assert "PAUSE MISMATCH" not in shown
-    gate = re.search(r"SWAP +(this print pauses for a filament swap .*)", shown)
+    # What it's for was asked, and the first choice is an insert (mqucifer/print-shop#218).
+    gate = re.search(r"INSERT +(this print pauses for an insert .*)", shown)
     assert gate and said.removeprefix("pause ") in gate.group(1)

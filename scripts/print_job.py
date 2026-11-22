@@ -50,6 +50,11 @@ facts, and what Approve and Reject each do there. Approved, the job goes on thro
 and the review to the approval gate, the only gate that can start a print, and that is shown in
 turn. Today such a job fails when that gate is answered, and nothing prints.
 
+**A pause says what it's for** (mqucifer/print-shop#218): a swap (`colour_change=12.4 from #1 to
+#2`, the stock's numbers) or an insert (`pause_at=2.6 for insert`), and what isn't typed is
+asked. A swap starts only with its first spool loaded in the stock: the gate says when to load
+it. When the print ends the stock has the last one loaded, and the outcome can correct that.
+
 **This is the only place that arms the printer,** and only when the invocation
 says so: `PRINT_AGENT_ALLOW_HARDWARE=1` on this command's own line. Without it
 the job slices, parks at the approval gate in Home Assistant, and an approval
@@ -488,7 +493,10 @@ def _gate_lines(gate: dict[str, object], *, turned: bool) -> list[str]:
             lines.append(f"  turned      {gate.get('orientation_deg')}")
         lines.append(f"  because     {gate.get('orientation_rationale')}")
         if gate.get("pause"):
-            lines.append(f"  SWAP        {gate['pause']}: be at the printer for it")
+            what = str(gate.get("pause_for") or "pause").upper()
+            lines.append(f"  {what:<12}{gate['pause']}: be at the printer for it")
+        if gate.get("spools"):
+            lines.append(f"  SPOOL       {gate['spools']}")
         return lines
     lines.append(f"  because     {gate.get('reason') or 'it gave no reason'}")
     if gate.get("gate") != Gate.REVIEW_PROPOSAL:
