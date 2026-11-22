@@ -82,6 +82,8 @@ NOT_ASKED_AGAIN = "this job didn't wait for the questions that could ask it agai
 #: Why a past seam isn't, where only part of the walls is seen here (mqucifer/print-shop#248).
 SEAM_ON_PART = ("part of the walls is seen here, and whether a seam would land on that part can't "
                 "be told")
+#: Why their own is, all the same: nothing is guessed about where it lands.
+SEAM_AS_SET = "you set it on this file, in this pose, with the same faces seen"
 #: The review's width for the offer's lines, wrapped under their own indent.
 WIDTH = 100
 #: A face this near horizontal is flat.
@@ -701,7 +703,9 @@ class _Items:
                 doubts += doubted
         return Item(
             key=key, value=value, preset=preset, reason=" ".join(change.reason.split()),
-            fits="" if blocked or doubts else self._fits(key, value),
+            fits=("" if blocked or doubts else
+                  SEAM_AS_SET if key == "seam_position" and self._seam_on_part()
+                  else self._fits(key, value)),
             used=used, doubts=tuple(dict.fromkeys(doubts)),
             blocked=blocked, notes=tuple(notes), reading=change.reading,
             pose="" if key == ORIENTATION else self.turned_to,
@@ -768,15 +772,35 @@ class _Items:
             why += self._far(rests)
         # The machine's own limit. The other bounds are the model's, and the person's override
         # of one on the same file isn't in doubt for it.
-        if key == "seam_position" and part.seen_in is not None:
-            faces = part.seen_in(part.rotation_deg)
-            if faces is not None and faces.part_walls:
-                why.append(SEAM_ON_PART)
+        if key == "seam_position" and self._seam_on_part() and not self._seam_as_set(change):
+            why.append(SEAM_ON_PART)
         if key == "layer_height" and (wrong := check(key, value, part.presets)):
             why.append(f"it's past this nozzle's bound: {wrong}")
         if not self.same_part and (refused := refuses(part.context, key, value)):
             why.append(refused)
         return why
+
+    def _seam_on_part(self) -> bool:
+        """Only part of the walls is seen here, so where a seam lands on them can't be told."""
+        faces = self._seen_here()
+        return faces is not None and faces.part_walls
+
+    def _seam_as_set(self, change: Change) -> bool:
+        """The person typed it, on these bytes, in this pose, with the same faces seen, down to
+        which of the walls: where it lands is what they chose it for."""
+        row, part = self.f.row, self.part
+        by = change.used.by if change.used else change.source
+        if by is not Source.SPONSOR or not self.f.same_file:
+            return False
+        if pose_value(row.rotation_deg) != part.pose:
+            return False
+        here, then = self._seen_here(), _seen_then(row)
+        return (here is not None and then is not None and here.same_as(then)
+                and here.wall_sides == then.wall_sides)
+
+    def _seen_here(self) -> Seen | None:
+        part = self.part
+        return part.seen_in(part.rotation_deg) if part.seen_in is not None else None
 
     def _filament(self) -> list[str]:
         row, part = self.f.row, self.part

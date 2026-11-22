@@ -139,6 +139,9 @@ class Seen(BaseModel):
     unsaid: tuple[str, ...] = ()
     #: Part of the walls, and every other wall is one the answer didn't speak of: it may be all.
     may_be_all_round: bool = False
+    #: Where only part of the walls is seen: which of the part's own sides those are. Two such
+    #: readings of one file in one pose can be of different walls.
+    wall_sides: tuple[str, ...] = ()
     #: Several parts' faces, whose `said` already says whose each is.
     of_several: bool = False
 
@@ -866,6 +869,8 @@ def seen_from(
     where = {up: "top", down: "bottom"}
     return Seen(walls=any(walls), top=up in sides, bottom=down in sides, said=said, noted=noted,
                 part_walls=part, called=called,
+                wall_sides=tuple(side for side in SIDES
+                                 if part and side in sides and side not in (up, down)),
                 may_be_all_round=part and all(
                     side in sides or side in unsaid for side in SIDES if side not in (up, down)),
                 unsaid=tuple(dict.fromkeys(where.get(side, "walls") for side in unsaid)))

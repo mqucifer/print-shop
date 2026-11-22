@@ -139,7 +139,7 @@ Finish that job, or stop it with Ctrl-C in its terminal (which doesn't stop the 
    ```
 
    The slice's flags, the model's settings call, the print loop and "Use these" read those faces.
-   - **Where only part of the walls is seen, no seam change is proposed,** and "Use these" ticks no past seam. Whether the line is on that part can't be told: Orca's back takes a corner, which two walls share, and Orca can turn the part on the plate. The review says where the line is, to look at in the slicer. With the walls seen all round it's as before.
+   - **Where only part of the walls is seen, no seam change is proposed,** and "Use these" ticks no past seam, but one you typed yourself on the same file, in the same pose, with the same faces seen. Whether the line is on that part can't be told: Orca's back takes a corner, which two walls share, and Orca can turn the part on the plate. The review says where the line is, to look at in the slicer. With the walls seen all round it's as before.
    - **Only the notes and the answer "only the face on the plate" speak of the face on the plate.** The other three answers can't, so turned to be the top or a wall it's never judged hidden by one.
    - **Where they can't be carried,** as with an answer in your own words, none is judged, and the note opens `TURNED SINCE YOU ANSWERED`.
    - **Only the faces seen are carried:** an answer on the part's shape, or a setting an option set, isn't. An answer from before this has no pose, and is read in the pose it printed in.

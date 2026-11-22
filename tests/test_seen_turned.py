@@ -47,7 +47,7 @@ from print_shop.setup.intake import (
 from print_shop.setup.loop import PrintLoop
 from print_shop.setup.model import prompt as settings_prompt
 from print_shop.setup.offer import ThisPart, offering
-from print_shop.setup.proposal import ORIENTATION, Proposal
+from print_shop.setup.proposal import ORIENTATION, Change, Proposal, Source
 from print_shop.setup.questions import STOCK, stock
 from print_shop.setup.reading import (
     SeamReading,
@@ -620,25 +620,87 @@ def test_part_of_the_walls_differs_from_all_round_unless_the_rest_wasnt_asked_ab
     assert now.same_as(all_round) is (option == 0) and all_round.same_as(now) is (option == 0)
 
 
-@pytest.mark.parametrize("value", ["back", "aligned_back", "random"])
-def test_use_these_never_ticks_a_past_seam_where_part_of_the_walls_is_seen(
+def past_seam(
+    tmp_path: Path, value: str = "back", *,
+    source: Source = Source.SPONSOR, another_file: bool = False,
+    pose: tuple[float, float, float] = ON_ITS_SIDE, answered: Intake | None = None,
+    result: str = "success", symptom: str = "none", here: Intake | None = None,
+) -> tuple[list[str], list[str]]:
+    """What's ticked of a past print's seam_position, and its doubts and reason, for a cube on
+    its side whose seen top is now part of the walls."""
+    stl = write_stl("cube", tmp_path)
+    past = stl
+    if another_file:
+        past = tmp_path / "plinth.stl"
+        past.write_bytes(write_stl("tee", tmp_path).read_bytes())
+    change = Change(key="seam_position", preset="aligned", value=value, reason="a made-up reason",
+                    source=source)
+    typed = source is Source.SPONSOR
+    with Ledger(tmp_path / f"made-up-{value}.sqlite") as ledger:
+        printed_before(ledger, "past-job", past, (change,) if typed else (),
+                       changes=() if typed else (change,), rotation=pose,
+                       intake=answered or top_seen(), result=result, symptom=symptom)
+        now = here or top_seen()
+        part = ThisPart(stl=stl, stl_name=stl.name, sha256=analyze(str(stl)).stl_sha256,
+                        features=measure(stl, 400.0), rotation_deg=ON_ITS_SIDE, height_mm=20.0,
+                        machine={}, process={"seam_position": "nearest"}, filament={},
+                        seen_in=lambda at: carried(now, None, at))
+        found = offering(ledger, part)
+    assert found.past is not None
+    [item] = found.past.items
+    return [i.key for i in found.ticked(Proposal(), "90,0,0")], [*item.doubts, item.fits]
+
+
+@pytest.mark.parametrize("value", ["back", "aligned_back", "random", "aligned"])
+def test_their_own_seam_on_the_same_file_pose_and_faces_is_ticked_saying_why(
     value: str, tmp_path: Path
 ) -> None:
-    stl = write_stl("cube", tmp_path)
-    with Ledger(tmp_path / "made-up.sqlite") as ledger:
-        printed_before(ledger, "past-job", stl, (yours("seam_position", value),),
-                       rotation=ON_ITS_SIDE)
+    ticked, why = past_seam(tmp_path, value)
+    assert ticked == ["seam_position"]
+    assert why == ["you set it on this file, in this pose, with the same faces seen"]
 
-        def ticked(intake: Intake) -> list[str]:
-            part = ThisPart(stl=stl, stl_name=stl.name, sha256=analyze(str(stl)).stl_sha256,
-                            features=measure(stl, 400.0), rotation_deg=ON_ITS_SIDE,
-                            height_mm=20.0, machine={}, process={"seam_position": "aligned"},
-                            filament={}, seen_in=lambda pose: carried(intake, None, pose))
-            found = offering(ledger, part)
-            return [item.key for item in found.ticked(Proposal(), "90,0,0")]
 
-        assert ticked(top_seen()) == [], "part of the walls: use N still takes it"
-        assert ticked(top_seen(ON_ITS_SIDE)) == ["seam_position"], "as it was otherwise"
+def test_a_seam_from_another_file_isnt_ticked(tmp_path: Path) -> None:
+    ticked, why = past_seam(tmp_path, another_file=True)
+    assert ticked == [] and "part of the walls is seen here" in " ".join(why)
+
+
+def test_a_seam_from_another_pose_isnt_ticked(tmp_path: Path) -> None:
+    ticked, why = past_seam(tmp_path, pose=(270.0, 0.0, 0.0))
+    assert ticked == [] and "part of the walls is seen here" in " ".join(why)
+
+
+def test_a_seam_set_for_other_faces_isnt_ticked(tmp_path: Path) -> None:
+    only_plate = Intake(questions=stock(None, LAID), answers=(Answer(choice=1), Answer(choice=1)))
+    ticked, why = past_seam(tmp_path, answered=only_plate)
+    assert ticked == [] and "part of the walls is seen here" in " ".join(why)
+
+
+def test_a_seam_set_for_another_of_the_walls_isnt_ticked(tmp_path: Path) -> None:
+    """The same file and pose, part of the walls both times, and not the same wall."""
+    other_wall = top_seen((0.0, 90.0, 0.0))
+    then, now = seen(other_wall, ON_ITS_SIDE), seen(top_seen(), ON_ITS_SIDE)
+    assert then is not None and now is not None and now.same_as(then)
+    ticked, why = past_seam(tmp_path, answered=other_wall)
+    assert ticked == [] and "part of the walls is seen here" in " ".join(why)
+
+
+def test_a_seam_taken_from_the_slices_proposal_isnt_ticked(tmp_path: Path) -> None:
+    ticked, why = past_seam(tmp_path, source=Source.READING)
+    assert ticked == [] and "part of the walls is seen here" in " ".join(why)
+
+
+def test_a_failed_prints_doubts_still_untick_their_own_seam(tmp_path: Path) -> None:
+    ticked, why = past_seam(tmp_path, result="failed", symptom="other")
+    assert ticked == [] and "that print failed" in " ".join(why)
+
+
+def test_where_the_walls_arent_partly_seen_a_past_seam_is_offered_as_before(
+    tmp_path: Path,
+) -> None:
+    as_asked = top_seen(ON_ITS_SIDE)
+    ticked, why = past_seam(tmp_path, answered=as_asked, here=as_asked)
+    assert ticked == ["seam_position"] and why == [""]
 
 
 def test_use_these_compares_whats_seen_as_each_printed(tmp_path: Path) -> None:
