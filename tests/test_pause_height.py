@@ -13,6 +13,7 @@ import json
 import re
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -26,8 +27,16 @@ from print_shop.core.state import AppliedOrientation, SliceResult
 from print_shop.ledger import Ledger
 from print_shop.orchestrator.daemon import Daemon
 from print_shop.setup import Proposer
+from print_shop.setup.context import Fit, FitBand, Placed
 from print_shop.setup.proposal import PAUSE, Change, Proposal, Source, apply, pause_z
-from print_shop.setup.reading import LayerTime, PauseReading, SeamReading, SliceReading
+from print_shop.setup.reading import (
+    PAUSE_PAST_FIT,
+    LayerTime,
+    PauseReading,
+    SeamReading,
+    SliceReading,
+    flags,
+)
 from print_shop.setup.review import ReviewRequest, parse_answer, render
 from print_shop.slicer.orca import _DEFAULT_BINARY
 from tests.fakes import CI_PROFILES, FramePrinter, MemoryBridge
@@ -118,14 +127,17 @@ def test_the_review_says_where_it_landed_beside_the_height_asked_for() -> None:
     ("2.6", _reading(13), "PAUSE MISMATCH pause_at=2.6: layer 13 tops out at z=2.6, and the "
      "G-code has: pause after layer 12, at z=2.4, before layer 13, at z=2.6"),
     ("2.5", _reading(13), "PAUSE MISMATCH pause_at=2.5: no layer tops out at z=2.5, and the "
-     "G-code has: pause after layer 12, at z=2.4, before layer 13, at z=2.6"),
+     "G-code has: pause after layer 12, at z=2.4, before layer 13, at z=2.6: "
+     "type pause_at=2.4 or pause_at=2.6"),
+    ("5.9", _reading(30), "PAUSE MISMATCH pause_at=5.9: no layer tops out at z=5.9, and the "
+     "G-code has: pause after layer 29, at z=5.8, before layer 30, at z=6: type pause_at=5.8"),
     ("2.6", _reading(), "PAUSE MISMATCH pause_at=2.6: layer 13 tops out at z=2.6, and the "
      "G-code has: no pause"),
     ("2.6", _reading(14, 20), "PAUSE MISMATCH pause_at=2.6: layer 13 tops out at z=2.6, and the "
      "G-code has: pause after layer 13, at z=2.6, before layer 14, at z=2.8; "
      "pause after layer 19, at z=3.8, before layer 20, at z=4"),
     ("0.1", _reading(1), "PAUSE MISMATCH pause_at=0.1: no layer tops out at z=0.1, and the "
-     "G-code has: pause before layer 1, at z=0.2"),
+     "G-code has: pause before layer 1, at z=0.2: type pause_at=0.2"),
     ("none", _reading(14), "PAUSE MISMATCH: none was asked for, and the G-code has: "
      "pause after layer 13, at z=2.6, before layer 14, at z=2.8"),
     ("2.6", None, "PAUSE NOT READ pause_at=2.6: the G-code couldn't be read, so where it pauses "
@@ -157,6 +169,55 @@ def test_a_height_under_the_first_layers_top_has_no_layer_to_pause_after() -> No
     said = parse_answer("pause_at=0.1", _request(None, _reading()))
     assert said == "there's no layer to pause after at 0.1 mm: the first tops out at 0.2 mm"
     assert not isinstance(parse_answer("pause_at=0.2", _request(None, _reading())), str)
+
+
+# A height typed a layer up, as it had to be before
+# --------------------------------------------------------------------------
+
+
+def _fits(*tops: float) -> Placed:
+    return Placed(fits=tuple(
+        FitBand(fit=Fit(name=f"pocket {n}"), z_from=1.0, z_to=top)
+        for n, top in enumerate(tops, 1)
+    ))
+
+
+def test_a_pause_a_layer_past_a_fits_top_is_said_beside_where_it_landed() -> None:
+    """A pocket topping out at 2.6, and 2.8 typed, as it once had to be: the layer over the
+    pocket has printed by the pause. It's a note, never a refusal."""
+    reading = _reading(15)
+    found = flags(reading, None, {}, {}, _fits(2.6, 2.6))
+    [note] = [f for f in found if f.id == PAUSE_PAST_FIT]
+    assert note.change is None
+    said = ("the fit `pocket 1` tops out at z=2.6, and this pauses a layer later, once the "
+            "layer over it has printed: pause_at=2.6 pauses before that layer")
+    assert note.reading == said
+
+    request = replace(_request("2.8", reading), flags=found)
+    lines = render(request).splitlines()
+    at = lines.index(f"  note: {said}")
+    assert lines[at - 1].startswith("  pause_at=2.8, read from the G-code: ")
+    assert lines.count(f"  note: {said}") == 1
+    assert not isinstance(parse_answer("ok", request), str), "it can still be approved"
+
+
+@pytest.mark.parametrize(("before", "top", "said"), [
+    (15, 2.6, True),    # a layer past a top on a layer line
+    (15, 2.65, True),   # under the middle of the layer to 2.8, which closes over it
+    (14, 2.6, False),   # at the top
+    (15, 2.75, False),  # over that layer's middle: it doesn't close over it
+    (14, 2.8, False),   # before the top
+    (20, 2.6, False),   # well above it: a colour change, or another pause
+])
+def test_only_a_pause_a_layer_past_the_top_is_said(before: int, top: float, said: bool) -> None:
+    found = flags(_reading(before), None, {}, {}, _fits(top))
+    assert any(f.id == PAUSE_PAST_FIT for f in found) is said
+
+
+def test_no_fit_and_no_height_to_compare_say_nothing() -> None:
+    raft = _reading(15).model_copy(update={"settings": {"raft_layers": "2"}})
+    for reading, placed in ((_reading(15), None), (_reading(15), Placed()), (raft, _fits(2.6))):
+        assert not any(f.id == PAUSE_PAST_FIT for f in flags(reading, None, {}, {}, placed))
 
 
 # From the bench, through print_job.py, to the G-code

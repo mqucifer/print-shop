@@ -53,7 +53,7 @@ from print_shop.setup.proposal import (
     pose_value,
 )
 from print_shop.setup.reach import profile_of, unplaced
-from print_shop.setup.reading import Flag, SliceReading
+from print_shop.setup.reading import PAUSE_PAST_FIT, Flag, SliceReading
 from print_shop.slicer.orca import SlicerProfiles
 
 __all__ = [
@@ -165,6 +165,7 @@ def render(request: ReviewRequest) -> str:
         lines.append(f"  NOT APPLIED {c.key}: {c.not_applied}")
         lines.append(f"    {c.reason} [{_by(c)}]")
     lines += _pauses(request)
+    lines += [f"  note: {f.reading}" for f in request.flags if f.id == PAUSE_PAST_FIT]
     for c in proposal.kept:
         by = (
             f" [lesson {c.lesson}]" if c.lesson is not None
@@ -219,8 +220,8 @@ def render(request: ReviewRequest) -> str:
         "",
         f"Type ok to go on to the approval gate,{take}{back} or correct a setting by name, "
         "e.g. wall_loops=3 because it's decorative (several separated by ';'), "
-        "pause_at=12.4 because white to black to pause after the layer that tops out at "
-        "12.4 mm, or stop.",
+        "pause_at=12.4 because white to black (it pauses once the layer topping out at "
+        "12.4 mm is done), or stop.",
     ]
     return "\n".join(lines)
 
@@ -248,9 +249,16 @@ def _pauses(request: ReviewRequest) -> list[str]:
     if len(placed) == 1 and (top := placed[0].after_z) is not None and abs(top - z) <= TOPS_OUT:
         return [f"  {PAUSE}={asked}, read from the G-code: {found}"]
     at = next((t.n for t in reading.layers if abs(t.z - z) <= TOPS_OUT), None)
-    wanted = (f"layer {at} tops out at z={mm(z)}" if at is not None
-              else f"no layer tops out at z={mm(z)}")
-    return [f"  PAUSE MISMATCH{name}: {wanted}, and the G-code has: {found}"]
+    if at is not None:
+        return [f"  PAUSE MISMATCH{name}: layer {at} tops out at z={mm(z)}, and the G-code has: "
+                f"{found}"]
+    line = f"  PAUSE MISMATCH{name}: no layer tops out at z={mm(z)}, and the G-code has: {found}"
+    # The layer either side, to type: inside the part, so never the last.
+    inside = [t.z for t in reading.layers[:-1]]
+    near = [*[t for t in inside if t < z][-1:], *[t for t in inside if t > z][:1]]
+    if placed and near:
+        line += ": type " + " or ".join(f"{PAUSE}={mm(t)}" for t in near)
+    return [line]
 
 
 def _by(change: Change) -> str:
@@ -284,7 +292,7 @@ def _read(request: ReviewRequest) -> list[str]:
     lines = ["", "What the slice shows, layer by layer:"]
     lines += [f"  {line}" for line in reading.lines()]
     for flag in request.flags:
-        if flag.change is None:
+        if flag.change is None and flag.id != PAUSE_PAST_FIT:  # that one's beside its pause
             lines.append(f"  note: {flag.reading}")
     for n, flag in enumerate(request.proposed, 1):
         c = flag.change
@@ -359,7 +367,7 @@ def _pause(value: str, reason: str, request: ReviewRequest) -> Change | str:
         return f"'{value}' isn't a height: give one in mm, e.g. pause_at=12.4, or none"
     top = request.slice.max_z_mm
     if not 0 < z < top:
-        return f"a colour change is inside the part: above 0 and below its top, {top:g} mm"
+        return f"a pause is inside the part: above 0 and below its top, {top:g} mm"
     layers = request.reading.layers if request.reading is not None else ()
     if layers and z < layers[0].z - TOPS_OUT:
         return (f"there's no layer to pause after at {z:g} mm: the first tops out at "

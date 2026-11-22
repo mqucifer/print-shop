@@ -34,6 +34,7 @@ from print_shop.setup.proposal import Change, Source
 from print_shop.slicer import gcode
 
 __all__ = [
+    "PAUSE_PAST_FIT",
     "PauseReading",
     "FeatureReading",
     "Flag",
@@ -48,6 +49,10 @@ __all__ = [
 
 #: Orca's label for ironing.
 IRONING = "Ironing"
+#: The flag for a pause a layer past a fit's top, which the review says beside where it landed.
+PAUSE_PAST_FIT = "pause_past_fit"
+#: A fit band's heights are kept to a hundredth of a millimetre (`context.place`).
+BAND_MM = 0.005 + pausing.TOPS_OUT
 #: Two seams this close, in mm, on neighbouring layers, are one line up the wall.
 SEAM_NEAR_MM = 1.0
 #: The share of seams that sit on the one below them for the seam to read as a line.
@@ -292,6 +297,7 @@ def flags(
     them, as every change is. `placed` is the part's context in this pose (mqucifer/print-shop#130):
     its fits keep a random seam off them and propose elephant foot compensation at the plate, a
     hold pulled across the layers is said, and its seen faces stand where the intake didn't say.
+    A pause a layer past a fit's top is said too (mqucifer/print-shop#203).
     `changes` are the proposal's, which the slice was made with: a value they set, such as a
     lesson's, is read as the one in effect and named.
     """
@@ -299,8 +305,32 @@ def flags(
         faces = placed.seen
     found = [*_layer_time(reading, filament), *_ironing(reading, faces, process),
              *_seam_flag(reading, faces, process, placed),
-             *_elephant_foot(reading, process, placed, changes), *_holds(placed)]
+             *_elephant_foot(reading, process, placed, changes), *_holds(placed),
+             *_past_fit(reading, placed)]
     return tuple(found)
+
+
+def _past_fit(reading: SliceReading, placed: Placed | None) -> list[Flag]:
+    """A pause after the layer that closes over a fit, too late to drop parts into it: what a
+    height typed a layer up, as it had to be before mqucifer/print-shop#203, now does. Said,
+    never refused, as a colour change may be meant there."""
+    if placed is None or reading.settings.get("raft_layers", "0") not in ("", "0"):
+        return []
+    found: dict[float, Flag] = {}
+    for pause in reading.pauses:
+        if pause.after_z is None or not 3 <= pause.before_layer <= len(reading.layers):
+            continue
+        under = reading.layers[pause.before_layer - 3].z
+        for band in placed.fits:
+            # As the bench counts it: the layer whose middle is over the fit's top closes it.
+            if under - BAND_MM <= band.z_to < (under + pause.after_z) / 2:
+                found.setdefault(band.z_to, Flag(
+                    id=PAUSE_PAST_FIT,
+                    reading=f"the fit `{band.fit.name}` tops out at z={pausing.mm(band.z_to)}, "
+                            "and this pauses a layer later, once the layer over it has printed: "
+                            f"pause_at={pausing.mm(under)} pauses before that layer",
+                ))
+    return list(found.values())
 
 
 def _layer_time(reading: SliceReading, filament: dict[str, Any]) -> list[Flag]:

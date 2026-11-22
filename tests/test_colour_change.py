@@ -25,7 +25,7 @@ from print_shop.setup import Proposer
 from print_shop.setup.intake import replay_asker
 from print_shop.setup.proposal import PAUSE, Change, Proposal, Source, apply, pause_z
 from print_shop.setup.reading import read_slice
-from print_shop.setup.review import Review, ReviewRequest, parse_answer
+from print_shop.setup.review import Review, ReviewRequest, parse_answer, render
 from print_shop.slicer import gcode
 from print_shop.slicer.orca import PauseAt, SlicerProfiles, slice_model
 from tests.fakes import (
@@ -145,7 +145,7 @@ def test_a_colour_change_is_asked_for_by_its_height(answer: str) -> None:
 
 
 @pytest.mark.parametrize(("answer", "why"), [
-    ("pause_at=25", "below its top, 25 mm"),
+    ("pause_at=25", "a pause is inside the part: above 0 and below its top, 25 mm"),
     ("pause_at=0", "above 0"),
     ("pause_at=high", "isn't a height"),
 ])
@@ -250,6 +250,36 @@ def test_a_colour_change_asked_for_at_the_review_reaches_the_gcode_the_gate_and_
         assert asked["swap"].startswith("pauses for a filament swap after layer 10, at z=2")
 
 
+
+
+def test_a_layer_typed_up_is_noted_from_the_parts_own_context(tmp_path: Path) -> None:
+    """Through the daemon (mqucifer/print-shop#203): a made-up sidecar's fit tops out at 10, and
+    10.2 is typed, as it had to be before."""
+    (tmp_path / "work").mkdir()
+    process = json.loads(CI_PROFILES.process.read_text())
+    (tmp_path / "process.json").write_text(json.dumps({**process, "wall_loops": "2", **LAYERS}))
+    part = write_stl("cube", tmp_path)
+    sidecar = tmp_path / "cube.part.json"
+    sidecar.write_text(json.dumps({"fits": [{"name": "pocket", "play": 0.1, "z": [1, 10]}]}))
+    sponsor = Sponsor("pause_at=10.2 because set the parts in", "pause_at=10", "stop")
+    bridge = MemoryBridge()
+    with Ledger(tmp_path / "ledger.sqlite") as ledger:
+        daemon = Daemon(
+            cfg=CFG, workdir=tmp_path / "work", printer=FramePrinter(), slicer=PausingSlicer(),
+            profiles=CI_PROFILES.model_copy(update={"process": tmp_path / "process.json"}),
+            bridge=lambda cfg: bridge, ledger=ledger,
+            proposer=Proposer(ask=_model, ask_questions=_questions),
+            asker=replay_asker(ANSWERS), reviewer=sponsor,
+        )
+        with daemon:
+            job_id = daemon.submit(part, as_laid=True, context=sidecar)
+            result = daemon.wait_for_finish(job_id, timeout_s=30)
+    assert not result.printed
+    _, typed_up, at_the_top = sponsor.shown
+    note = "  note: the fit `pocket` tops out at z=10, and this pauses a layer later"
+    assert note in render(typed_up)
+    assert note not in render(at_the_top)
+    assert "pause_at=10, read from the G-code: pause after layer 50, at z=10," in render(at_the_top)
 
 
 def test_a_colour_change_draws_no_lesson(tmp_path: Path) -> None:

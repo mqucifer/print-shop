@@ -475,7 +475,24 @@ def test_a_pause_from_before_203_is_copied_at_the_height_that_pauses_where_it_di
                         source=Source.SPONSOR)
     assert row.corrections is not None
     gone = older.model_copy(update={"corrections": (*row.corrections, taken_away)})
-    assert "pause_at=12.4" in correction_line(gone)
+    assert "pause_at=none because one colour after all" in correction_line(gone)
+    assert "pause_at=12.4" not in correction_line(gone), "only the pause that stood"
+
+
+@pytest.mark.parametrize("pauses", [None, 0, 2])
+def test_a_pause_that_cant_be_converted_is_never_copied_raw(
+    shop: Shop, pauses: int | None
+) -> None:
+    """Where the G-code doesn't say where a job paused, its height could mean either layer."""
+    row, part, printers, found = _record(shop, SIGN)
+    assert row.reading is not None
+    reading = None if pauses is None else row.reading.model_copy(update={"pauses": tuple(
+        PauseReading(before_layer=62 + n, z=12.4 + 0.2 * n, after_s=600.0) for n in range(pauses)
+    )})
+    a = again(row.model_copy(update={"reading": reading}), part, printers, found)
+    assert "pause_at" not in a.corrections
+    assert "wall_loops=4 because it carries the load" in a.corrections
+    assert any("pause_at=12.4 isn't copied" in n for n in a.notes)
 
 
 # --- the job's log --------------------------------------------------------------------
