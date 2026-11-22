@@ -229,6 +229,13 @@ def again(row: Row, part_path: Path | None, printers: int = 1, part_found: bool 
         notes.append("Taken from the slice's reading, so take them again at the review (take) "
                      "if it proposes them: "
                      + "; ".join(f"{c.key}={c.value}" for c in taken) + ".")
+    by_model = [c for c in ((*row.proposal.changes, *row.proposal.not_applied)
+                            if row.proposal else ())
+                if c.taken]
+    if by_model:
+        notes.append("Taken from the model's proposals, so take them again at the review, by "
+                     "number, if it proposes them, or type them: "
+                     + "; ".join(f"{c.key}={c.value}" for c in by_model) + ".")
     reused = [c for c in row.corrections or () if _used_as_anothers(c)]
     if reused:
         notes.append("Used from a past print, so use them again at the review (use): "

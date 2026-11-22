@@ -37,8 +37,8 @@ from print_shop.setup.proposal import (
 )
 
 __all__ = [
-    "Finding", "Listed", "Suggesting", "by_number", "didnt_come", "listed", "suggested",
-    "waited",
+    "Beside", "Finding", "Listed", "Suggesting", "by_number", "didnt_come", "fell_back",
+    "listed", "looked_up", "once_turned", "recorded", "suggested", "waited",
 ]
 
 logger = logging.getLogger(__name__)
@@ -110,6 +110,24 @@ def didnt_come(found: Suggested) -> str:
     return f"The model's settings didn't come: {why}. These are the settings without it."
 
 
+def fell_back(found: Suggested) -> str:
+    """That the print loop stopped and what's proposed is the single calls', or ""."""
+    if not found.loop_ending or found.loop_ending.startswith(("proposed", "stopped")):
+        return ""
+    return (f"the print loop stopped, {found.loop_ending}: "
+            "what's proposed came from the single calls")
+
+
+def looked_up(proposal: Proposal, found: Suggested | None) -> Proposal:
+    """The lessons the print loop looked up, marked so the review says it
+    (mqucifer/print-shop#129)."""
+    if found is None or not found.looked_up:
+        return proposal
+    return proposal.model_copy(update={"lessons": tuple(
+        g.model_copy(update={"looked_up": True}) if g.id in found.looked_up else g
+        for g in proposal.lessons)})
+
+
 @dataclass(frozen=True)
 class Listed:
     """One of the model's proposals as a review shows it."""
@@ -127,7 +145,8 @@ class Listed:
 def listed(found: Suggested | None, proposal: Proposal, pose: str, after: int) -> list[Listed]:
     """The model's proposals against what's set at this review, numbered on from `after`, the
     slice's. The numbers are for this screen: one that arrives later moves none of them."""
-    if found is None or found.ending is not Ending.CAME:
+    # A turn can be in though the settings' own call failed, after the loop fell back.
+    if found is None or not found.proposed:
         return []
     rows: list[Listed] = []
     number = after
@@ -266,3 +285,90 @@ class Suggesting:
         self._done.set()
         if heard is not None:
             heard(ended)
+
+
+def once_turned(found: Suggested, to: str) -> Suggested | None:
+    """The print loop's settings for the pose its turn puts the part in, for the review after
+    it's turned there: no second call. None where it proposed no turn to that pose."""
+    turn = next((c for c in found.proposed if c.key == ORIENTATION and c.value == to), None)
+    if turn is None:
+        return None
+    x, y, z = (float(part) for part in to.split(","))
+    return found.model_copy(update={
+        "pose": (x, y, z), "proposed": found.once_turned, "once_turned": (),
+        "taken": (), "declined": (), "unseen": False, "loop": (), "loop_ending": "",
+    })
+
+
+class Beside:
+    """The model's work beside a job's reviews: one at a time, a pose at a time, and what each
+    came to, for the record."""
+
+    def __init__(self) -> None:
+        self.work: Suggesting | None = None
+        self._ended: list[Suggested] = []
+
+    def begin(self, find: Finding, pose: tuple[float, float, float]) -> None:
+        self.work = Suggesting(find, pose)
+
+    def carry(self, found: Suggested) -> None:
+        """Proposals that are in already: the loop's, for the pose it's now turned to."""
+        self.work = Suggesting.of(found)
+
+    def note(self, taken: list[str], declined: list[str]) -> None:
+        """What the person took and turned down of those on screen."""
+        if self.work is None or not (taken or declined):
+            return
+        now = self.work.now()
+        self.work.changed({"taken": (*now.taken, *taken), "declined": (*now.declined, *declined)})
+
+    def end(self, why: Ending, saw: Suggested | None = None) -> Suggested | None:
+        """The work under way ended, as `why` where it hadn't ended by itself, and kept for the
+        record. `saw` is the last screen's: proposals that came after it weren't seen."""
+        if self.work is None:
+            return None
+        found = self.work.stop(why)
+        if saw is not None and saw.ending is Ending.WORKING and found.proposed:
+            found = found.model_copy(update={"unseen": True})
+        self._ended.append(found)
+        self.work = None
+        return found
+
+    def close(self) -> None:
+        """The job is done with it, however it ended: no call is left running for it."""
+        self.end(Ending.WENT_ON)
+
+    @property
+    def ended(self) -> tuple[Suggested, ...]:
+        return tuple(self._ended)
+
+
+def recorded(proposal: Proposal, found: tuple[Suggested, ...]) -> Proposal:
+    """The proposal as the job records it: each pose's, whole, and what the older readers read
+    of the model at the top (its reasoning, call, refusals and the loop's calls)."""
+    if not found:
+        return proposal
+    last = found[-1]
+    looped = next((each for each in found if each.loop or each.loop_ending), None)
+    notes = list(proposal.notes)
+    for each in found:
+        if stopped := fell_back(each):
+            notes.append(stopped)
+        if each.ending is not Ending.TURNED and (said := didnt_come(each)):
+            notes.append(said)
+        if each.unseen:
+            notes.append("you went on without seeing what the model proposed, which came after "
+                         f"{waited(each.seconds)}: none of it is used")
+    return proposal.model_copy(update={
+        "suggested": found,
+        "reasoning": last.reasoning,
+        "model": last.model or last.ending.value,
+        "call": last.call or {"finish_reason": last.ending.value, "seconds": last.seconds},
+        "skill_groups": last.skill_groups,
+        "skill_sha256": last.skill_sha256,
+        "design_notes": tuple(dict.fromkeys((*proposal.design_notes, *last.design_notes))),
+        "refused": tuple(dict.fromkeys((*proposal.refused, *last.refused))),
+        "loop": looped.loop if looped else (),
+        "loop_ending": looped.loop_ending if looped else "",
+        "notes": tuple(dict.fromkeys(notes)),
+    })

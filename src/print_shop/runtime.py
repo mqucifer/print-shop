@@ -285,7 +285,8 @@ def _setup_lines(row: Row) -> list[str]:
             lines.append(f"               {note}")  # the faces as they printed
     changes = row.proposal.changes if row.proposal else ()
     for c in changes:
-        lines.append(f"  {c.key}: {c.preset or '-'} -> {c.value} ({c.source.value}) {c.reason}")
+        by = f"{c.source.value}, taken by you" if c.taken else c.source.value
+        lines.append(f"  {c.key}: {c.preset or '-'} -> {c.value} ({by}) {c.reason}")
     for c in row.proposal.not_applied if row.proposal else ():
         lines.append(f"  {c.key}: not applied, {c.not_applied} ({c.source.value}) {c.reason}")
     if row.corrections:
@@ -295,6 +296,16 @@ def _setup_lines(row: Row) -> list[str]:
             for c in row.corrections
         )
         lines.append(f"corrected      {said}")
+    for found in row.proposal.suggested if row.proposal else ():
+        offered = ", ".join(
+            f"{c.key}={c.value}" + (" (taken)" if c.key in found.taken
+                                    else " (turned down)" if c.key in found.declined else "")
+            for c in found.proposed
+        )
+        said = f"{found.ending.value} after {found.seconds:g} s"
+        if found.unseen:
+            said += ", and you went on without seeing them"
+        lines.append(f"model proposed {offered or 'nothing'}: {said}")
     for pause in row.reading.pauses if row.reading else ():
         lines.append(f"swap           {pause.line()}")
     for g in row.proposal.lessons if row.proposal else ():

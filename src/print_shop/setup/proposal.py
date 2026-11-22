@@ -232,6 +232,8 @@ class Suggested(BaseModel):
     skill_sha256: str = ""
     loop: tuple[LoopCall, ...] = ()
     loop_ending: str = ""
+    #: The lessons the loop looked up, which the review says.
+    looked_up: tuple[int, ...] = ()
 
 
 class Proposal(BaseModel):

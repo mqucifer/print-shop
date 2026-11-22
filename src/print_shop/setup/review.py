@@ -79,7 +79,9 @@ from print_shop.setup.suggest import (
     Suggesting,
     by_number,
     didnt_come,
+    fell_back,
     listed,
+    looked_up,
     waited,
 )
 from print_shop.setup.waiting import terminal
@@ -163,7 +165,8 @@ class ReviewRequest:
         numbers are the ones to type. The phone asks for it as Enter does."""
         if self.suggesting is None:
             return self
-        return replace(self, suggested=self.suggesting.now())
+        now = self.suggesting.now()
+        return replace(self, suggested=now, proposal=looked_up(self.proposal, now))
 
 
 @dataclass(frozen=True)
@@ -409,11 +412,12 @@ def _model_line(found: Suggested) -> list[str]:
     if found.ending is Ending.WORKING:
         return [f"  The model is still working on settings ({waited(found.seconds)}). What it "
                 "proposes is added below, and nothing waits for it."]
-    if found.ending is Ending.CAME:
-        if found.proposed:
-            return []
-        return [f"  The model proposed no change, after {waited(found.seconds)}."]
-    return [f"  {didnt_come(found)}"]
+    lines = [f"  note: {stopped}"] if (stopped := fell_back(found)) else []
+    if found.ending is not Ending.CAME:
+        lines.append(f"  {didnt_come(found)}")
+    elif not found.proposed:
+        lines.append(f"  The model proposed no change, after {waited(found.seconds)}.")
+    return lines
 
 
 def _by_model(request: ReviewRequest) -> list[str]:

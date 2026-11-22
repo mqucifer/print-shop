@@ -339,6 +339,8 @@ def _change_rows(changes: tuple[Change, ...]) -> str:
         was = (f"{escape(c.standard)} → {escape(c.preset or '-')}" if c.standard
                else escape(c.preset or "-"))
         by = _BY[c.source] + (f" {c.lesson}" if c.lesson is not None else "")
+        if c.taken:
+            by += ", taken by you"
         if c.used is not None:
             by += f", {c.used.line()}"
         cites = ", ".join(x for x in (c.feature, c.knowledge) if x)

@@ -64,6 +64,7 @@ from print_shop.setup.review import render as render_review
 from print_shop.setup.skill import groups_for, load
 from tests.fakes import CI_PROFILES, STORE_PROFILES, FramePrinter, MemoryBridge
 from tests.fixtures import write_stl
+from tests.reviewing import takes
 from tests.test_job_e2e import CFG
 from tests.test_print_loop import Model
 from tests.test_reading import FILAMENT, PETG, PROCESS, _read
@@ -174,7 +175,7 @@ class Turned:
             ledger=self.ledger,
             proposer=Proposer(ask=self.settings, ask_questions=lambda *_: {"questions": []}),
             asker=cli_asker(lambda prompt: typed.pop(0), self.shown.append, lambda: None),
-            reviewer=reviewer, loop=loop,
+            reviewer=takes(reviewer), loop=loop,
         )
         with daemon:
             job_id = daemon.submit(stl, as_laid=as_laid)
