@@ -179,6 +179,13 @@ def test_short_layers_with_slow_down_off_propose_slow_down_on(tmp_path: Path) ->
     assert check(c.key, c.value, {"process": PROCESS, "filament": FILAMENT}) == ""
 
 
+def test_short_layers_call_a_filament_orca_spells_pet_petg(tmp_path: Path) -> None:
+    reading = _read(tmp_path, config=PETG | {"filament_type": "PET"})
+    (flag,) = [f for f in flags(reading, None, PROCESS, FILAMENT) if f.id == "layer_time"]
+    assert flag.change is not None and "too short for PETG:" in flag.change.reason
+    assert reading.settings["filament_type"] == "PET", "what's kept is what Orca wrote"
+
+
 def test_short_layers_with_slow_down_on_propose_a_lower_floor(tmp_path: Path) -> None:
     reading = _read(tmp_path, config=PETG | {"slow_down_for_layer_cooling": "1"})
     (flag,) = [f for f in flags(reading, None, PROCESS, FILAMENT) if f.id == "layer_time"]

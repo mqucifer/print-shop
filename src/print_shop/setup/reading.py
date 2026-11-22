@@ -27,6 +27,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from print_shop.bench import pausing
+from print_shop.materials import material_name
 from print_shop.setup.context import FitBand, Placed, Seen
 from print_shop.setup.intake import Intake
 from print_shop.setup.proposal import Change, Source
@@ -313,7 +314,7 @@ def _layer_time(reading: SliceReading, filament: dict[str, Any]) -> list[Flag]:
     shortest = reading.shortest()
     if not short or shortest is None:
         return []
-    material = s.get("filament_type", "the filament")
+    material = material_name(s.get("filament_type", "")) or "the filament"
     said = (
         f"{len(short)} of {len(reading.layers)} layers take under {threshold:g} s, the "
         f"filament's layer time for cooling; the shortest, layer {shortest.n} at z "
