@@ -2617,6 +2617,109 @@ def test_a_slide_takes_two_files_and_no_gap_range(bench: Any) -> None:
 # A hold by a separate body, and a mesh split into bodies (mqucifer/print-shop#122)
 
 #: A block in a channel, its way out up, under a ledge 0.2 mm over it (`bench_cases`).
+def unread(bench: Any, *args: str) -> Answer:
+    """`clearance` over the planted parts it can't read (mqucifer/print-shop#244)."""
+    files = [f"untrusted/{a}" if a.endswith((".step", ".stl")) else a for a in args]
+    answer = bench("clearance", *files)
+    assert reports.unlike("clearance", answer.numbers) == []
+    return answer  # type: ignore[no-any-return]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [("inward.stl", "block.step"),
+     ("inward.stl", "block.step", "--box", "B=-5,-5,38,25,25,50"),
+     ("block.step", "inward.stl", "--slide", "+z"),
+     ("crossed.stl", "in-lobe.step"),
+     ("crossed.stl", "in-lobe.step", "--box", "B=5,17.5,1,8,20.5,9")],
+)  # fmt: skip
+def test_a_negative_overlap_past_its_band_is_never_quiet(bench: Any, args: tuple[str, ...]) -> None:
+    """mqucifer/print-shop#244: a surface facing inward, all of it or where it crosses itself,
+    gave an overlap under nothing, which read `TOUCHING`. It's a disagreement, naming the part
+    and the figure."""
+    answer = unread(bench, *args)
+    assert answer.verdict == "DISAGREE" and answer.code == 2, answer.text
+    culprit = "inward.stl" if "inward.stl" in args else "crossed.stl"
+    assert f"{culprit}'s surface can't be trusted" in answer.record["why"], answer.record["why"]
+    pair = answer.numbers["pairs"][0]
+    assert pair["verdict"] == "DISAGREE" and pair["overlap_mesh_mm3"] < -pair["overlap_band_mm3"]
+    assert f"{pair['overlap_mesh_mm3']:.3f} mm³ by the mesh" in answer.record["why"]
+    if culprit == "inward.stl":
+        assert pair["overlap_mesh_mm3"] == pytest.approx(-3200, abs=0.1)
+        assert pair["overlap_band_mm3"] == pytest.approx(0.032, abs=1e-3), "from its size"
+    for place in pair.get("places", {}).values():
+        assert place["verdict"] == "DISAGREE"
+
+
+def test_a_negative_overlap_along_a_slide_is_never_a_hold(bench: Any) -> None:
+    answer = unread(bench, "crossed.stl", "at-lobe.step", "--slide", "-y", "--hold", "10")
+    assert answer.numbers["pairs"][0]["verdict"] == "CLEAR", "apart where they lie"
+    assert answer.verdict == "DISAGREE", answer.text
+    assert answer.numbers["slide"]["verdict"] == "DISAGREE"
+    assert "less than nothing" in answer.record["why"]
+    assert "crossed.stl's surface can't be trusted" in answer.record["why"]
+
+
+def test_a_part_that_can_t_be_read_gives_no_quiet_verdict(bench: Any) -> None:
+    """By `info`'s rule, in its words. An overlap every method finds is still the answer."""
+    loft = unread(bench, "unclosed-loft.step", "beside.step")
+    assert loft.verdict == "NO ANSWER" and loft.code == 2, loft.text
+    said = bench("info", "untrusted/unclosed-loft.step").record["why"]
+    assert "surface isn't closed" in said and loft.record["why"].startswith(said)
+    assert loft.numbers["pairs"][0]["verdict"] == "NO ANSWER"
+    assert loft.numbers["pairs"][0]["gap_mm"] > 100, "the figures stay beside the refusal"
+    far = unread(bench, "inward.stl", "beside.step")
+    assert far.verdict == "NO ANSWER" and "faces inward" in far.record["why"], far.text
+    boxed = unread(bench, "unclosed-loft.step", "beside.step", "--box", "B=0,0,20,130,130,50")
+    assert boxed.verdict == "NO ANSWER", boxed.text
+    place = boxed.numbers["pairs"][0]["places"]["B"]
+    assert place["verdict"] == "NO ANSWER" and "isn't closed" in place["why"]
+    slid = unread(bench, "beside.step", "inward.stl", "--slide", "+z")
+    assert slid.verdict == "NO ANSWER", slid.text
+    assert slid.numbers["slide"]["verdict"] == "NO ANSWER", "nor NOT HELD"
+    assert "no hold to rely on" in slid.text
+    found = unread(bench, "unclosed-loft.step", "block.step")
+    assert found.verdict == "INTERFERE", found.text
+    assert "found by every one, though a part can't be read" in found.text
+
+
+def test_a_hold_beside_a_part_that_can_t_be_read_isn_t_held(bench: Any) -> None:
+    held = bench("clearance", "bodies/channel-joined.step", *BLOCK)
+    assert held.verdict == "HELD", held.text
+    beside = bench(
+        "clearance", "bodies/channel-joined.step", "untrusted/inward-away.stl", *BLOCK
+    )
+    assert beside.verdict == "NO ANSWER" and "faces inward" in beside.record["why"], beside.text
+    assert beside.numbers["slide"]["verdict"] == "NO ANSWER"
+
+
+def test_a_need_that_takes_touching_or_held_fails_on_a_part_that_can_t_be_read(bench: Any) -> None:
+    for command in (
+        "clearance untrusted/inward.stl untrusted/block.step",
+        "clearance untrusted/block.step untrusted/inward.stl --slide +z",
+        "clearance untrusted/unclosed-loft.step untrusted/beside.step",
+    ):
+        answer = bench(*command.split())
+        quiet = ["CLEAR", "TOUCHING", "HELD"]
+        need = Need("fit", "it fits", "chosen", "bench", command=command, verdicts=quiet)
+        assert not needs.judge(need, answer.code, answer.text, answer.record).passed, command
+
+
+def test_what_can_be_read_reads_as_it_did(bench: Any) -> None:
+    for name in ("good.step", "good-mesh.stl"):
+        answer = unread(bench, name, "block.step")
+        assert answer.verdict == "INTERFERE", answer.text
+        assert answer.numbers["pairs"][0]["overlap_mesh_mm3"] == pytest.approx(3200, abs=0.01)
+        assert answer.numbers["pairs"][0]["untrusted"] == []
+        assert unread(bench, name, "on-top.step").verdict == "TOUCHING"
+    meet = unread(bench, "crossed.stl", "on-lobe.step")
+    pair = meet.numbers["pairs"][0]
+    assert -pair["overlap_band_mm3"] <= pair["overlap_mesh_mm3"] <= 0, meet.text
+    assert meet.verdict == "TOUCHING", "under nothing inside the band: two faces that only meet"
+    # An STL's enclosed hollow splits off as a body that faces inward, and was never quiet.
+    assert unread(bench, "hollow.stl", "beside.step").verdict == "DISAGREE"
+
+
 BLOCK = ("bodies/block.step", "--slide", "+z")
 SEPARATE = "HELD BY A SEPARATE BODY"
 

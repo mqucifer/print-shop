@@ -34,6 +34,57 @@ def along_y(radius: float, y0: float, y1: float, hole: float = 0.0) -> Any:
     return tube.extrude(y1 - y0)
 
 
+def unreadable() -> None:
+    """What `clearance` can't read (mqucifer/print-shop#244): a box turned inside out, a loft
+    whose mesh doesn't close, and a prism that crosses itself, with a lobe facing inward and its
+    whole volume more than nothing. And an STL with an enclosed hollow."""
+    out = Path("untrusted")
+    out.mkdir(exist_ok=True)
+    V, solid = cq.Vector, cq.Solid.makeBox
+
+    def step(name: str, shape: Any) -> None:
+        save(cq.Workplane().add(shape), f"untrusted/{name}")
+
+    step("block", solid(70, 70, 8, V(-25, -25, 40)))
+    step("beside", solid(10, 10, 8, V(120, 120, 40)))
+    step("on-top", solid(20, 20, 5, V(0, 0, 60)))
+    step("good", solid(20, 20, 60))
+    mesh = trimesh.creation.box(extents=(20, 20, 60))
+    mesh.apply_translation((10, 10, 30))
+    mesh.export(out / "good-mesh.stl")
+    hole = trimesh.creation.box(extents=(6, 6, 20))
+    hole.apply_translation((10, 10, 30))
+    hole.faces = hole.faces[:, ::-1]
+    both: Any = trimesh.util.concatenate([mesh, hole])
+    both.export(out / "hollow.stl")
+    mesh.faces = mesh.faces[:, ::-1]
+    mesh.export(out / "inward.stl")
+    away = mesh.copy()
+    away.apply_translation((200, 200, 0))
+    away.export(out / "inward-away.stl")
+
+    def octagon(wide: float, z: float) -> Any:
+        c = 0.3 * wide
+        a, b = wide - c, wide
+        points = [(-a, -b), (a, -b), (b, -a), (b, a), (a, b), (-a, b), (-b, a), (-b, -a)]
+        return cq.Wire.makePolygon([V(10 + x, 10 + y, z) for x, y in points], close=True)
+
+    heights = ((0, 10), (2, 10), (30, 10), (32, 3), (60, 3))
+    step("unclosed-loft", cq.Solid.makeLoft([octagon(w, z) for z, w in heights], ruled=False))
+    # Its outline crosses itself at (8, 16): 320 mm² out, and a lobe of 20 mm² to y 20 inward.
+    outline = [(0, 0), (40, 0), (0, 20), (10, 20)]
+    corners = np.array([(*p, z) for z in (0.0, 10.0) for p in outline])
+    faces = [(0, 2, 1), (0, 3, 2), (4, 5, 6), (4, 6, 7)]
+    for k in range(4):
+        n = (k + 1) % 4
+        faces += [(k, n, n + 4), (k, n + 4, k + 4)]
+    trimesh.Trimesh(corners, np.array(faces), process=False).export(out / "crossed.stl")
+    step("in-lobe", solid(1, 1, 6, V(6, 18.5, 2)))
+    step("at-lobe", solid(1, 1, 6, V(6, 20.3, 2)))
+    # In the lobe by 0.00003 mm: -0.00018 mm³ of overlap, inside the 0.001 band.
+    step("on-lobe", solid(1, 1, 6, V(6, 20 - 3e-5, 2)))
+
+
 def near_touching() -> None:
     """Two leaves of a hinge, one swung over the other with faces all but coincident."""
     a = box(-25, -3.3, -15, 15, -1.5, 1.5)
@@ -1100,6 +1151,7 @@ def nut_rows() -> None:
 
 if __name__ == "__main__":
     beds()
+    unreadable()
     where()
     sections()
     near_touching()

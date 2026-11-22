@@ -70,7 +70,7 @@ import trimesh
 
 from .limits import over
 from .report import Report
-from .shapes import COARSE, FINE, VOLUME_FLOOR, VOLUME_SHARE, Part, polygons
+from .shapes import COARSE, FINE, VOLUME_FLOOR, VOLUME_SHARE, Part, distrusted, polygons
 
 #: How far each step of the slide goes, in mm: a third of a 0.3 mm catch, so none is stepped over.
 STEP = 0.1
@@ -163,7 +163,7 @@ def _band(overlap: Any, a: Part, b: Part) -> float:
     arithmetic's share of it, a floor, and the chords where the parts curve."""
     volume = float(overlap.volume())
     chords = min(FINE[0] * float(overlap.surface_area()), a.chord_band() + b.chord_band())
-    return max(VOLUME_FLOOR, VOLUME_SHARE * volume, chords)
+    return max(VOLUME_FLOOR, VOLUME_SHARE * abs(volume), chords)
 
 
 def _clear_at(a: Any, b: Any, d: np.ndarray) -> float:
@@ -179,16 +179,29 @@ def _corners(low: Any, high: Any) -> list[list[float]]:
     return [[round(float(v), 4) for v in low], [round(float(v), 4) for v in high]]
 
 
-def _meet(a: Any, b: Any, d: np.ndarray, rest: float, band: float, length: float) -> float | None:
+def _meet(
+    a: Any,
+    b: Any,
+    d: np.ndarray,
+    rest: float,
+    band: float,
+    length: float,
+    below: list[tuple[float, float]] | None = None,
+) -> float | None:
     """The least distance a, slid along d, meets b: where their overlap first grows past what it
     is where a lies. Stepped by `STEP` or the gap, halved to `HALVED`, then closed: by the gap
-    where the parts are apart, or where they touch, back to where the overlap began to grow."""
+    where the parts are apart, or where they touch, back to where the overlap began to grow.
+    An overlap of less than nothing on the way is put in `below`, with how far along it was
+    (mqucifer/print-shop#244): it never grows, so it would be met by nothing."""
 
     def moved(t: float) -> Any:
         return a.translate(tuple(map(float, d * t)))
 
     def volume(t: float) -> float:
-        return float((moved(t) ^ b).volume())
+        read = float((moved(t) ^ b).volume())
+        if below is not None and not below and read < -band:
+            below.append((t, read))
+        return read
 
     def grows(t: float) -> bool:
         return volume(t) > rest + band
@@ -290,6 +303,7 @@ def _path(
     band: float,
     start: float,
     length: float,
+    below: list[tuple[float, float]] | None = None,
 ) -> list[tuple[np.ndarray, np.ndarray, Any]]:
     """b's material in a's path, from where a first meets it until a is past it, on the coarse
     mesh: each piece of it, such as each hook a fan passes, as its box and what it covers seen
@@ -301,7 +315,10 @@ def _path(
     t = start + PROBE
     while t <= length + STEP:
         overlap = a.translate(tuple(map(float, d * t))) ^ b
-        if float(overlap.volume()) > rest + band:
+        volume = float(overlap.volume())
+        if below is not None and not below and volume < -band:
+            below.append((t, volume))
+        if volume > rest + band:
             for piece, low, high in _by_place(overlap, d, axis, VOLUME_FLOOR):
                 seen.append((low, high, _shadow(piece, axis)))
         t += STEP
@@ -883,6 +900,7 @@ def what_holds(
     hold: float,
     boxes: list[Any],
     separate: dict[str, dict[str, Any]] | None = None,
+    unread: dict[int, str] | None = None,
 ) -> dict[str, Any]:
     """Slide the moving part along `way` until it's clear of the others, and say what holds it:
     where it lies, its first contact and the hold, then everything on its path. The slide's own
@@ -891,7 +909,10 @@ def what_holds(
     distance differently and also differ on the verdict or on where it is. Two distances that
     differ with the same verdict, at the same places, keep the verdict, and both are given. A hold
     whose first contact is one of `separate`, the bodies of a file of more than one, is
-    `HELD BY A SEPARATE BODY` (mqucifer/print-shop#122)."""
+    `HELD BY A SEPARATE BODY` (mqucifer/print-shop#122). An overlap of less than nothing, where it
+    lies or along the slide, is `DISAGREE`, and with a part in `unread`, by its `id`, there's
+    no hold or way out to rely on: `NO ANSWER`, unless it overlaps where it lies
+    (mqucifer/print-shop#244)."""
     d = np.asarray(WAYS[way], dtype=float)
     axis = way[1]
     a_fine, a_coarse = moving.manifold(True), moving.manifold(False)
@@ -939,7 +960,16 @@ def what_holds(
             found["overlaps"].append(
                 {"part": other.name, "overlap_mm3": round(rest, 4), "box": _corners(low, high)}
             )
-        first = _meet(a_fine, b_fine, d, rest, band, length)
+        below: list[tuple[float, float]] = [(0.0, rest)] if rest < -band else []
+        first = _meet(a_fine, b_fine, d, rest, band, length, below)
+        if below:
+            at, volume = below[0]
+            slid = a_fine.translate(tuple(map(float, d * at)))
+            whose = distrusted([(moving.name, slid), (other.name, b_fine)], slid ^ b_fine)
+            differs.append(
+                f"{other.name}: slid {at:.4f} mm, the overlap reads {volume:.3f} mm³, less "
+                f"than nothing past its ±{band:.3f} band: {whose} surface can't be trusted"
+            )
         rays, on_path, firsts, count, hits = _by_rays(
             moving.fine(), other.fine(), a_fine, b_fine, d, axis, rest > band
         )
@@ -958,12 +988,21 @@ def what_holds(
         coarse_overlap = a_coarse ^ b_coarse
         coarse_rest = float(coarse_overlap.volume())
         coarse_band = _band(coarse_overlap, moving, other)
+        along_it: list[tuple[float, float]] = []
         pieces = [
             (low, high, _reach(covered, shadow))
             for low, high, covered in _path(
-                a_coarse, b_coarse, d, axis, coarse_rest, coarse_band, first, length
+                a_coarse, b_coarse, d, axis, coarse_rest, coarse_band, first, length, along_it
             )
         ]
+        if along_it and not below:
+            at, volume = along_it[0]
+            slid = a_coarse.translate(tuple(map(float, d * at)))
+            whose = distrusted([(moving.name, slid), (other.name, b_coarse)], slid ^ b_coarse)
+            differs.append(
+                f"{other.name}: slid {at:.4f} mm, the overlap reads {volume:.3f} mm³, less "
+                f"than nothing: {whose} surface can't be trusted"
+            )
         pieces.sort(key=lambda p: tuple(p[0]))
         reach = max((p[2] for p in pieces), default=0.0)
         reach_rays = _reach_of_points(on_path, axis, shadow)
@@ -1067,6 +1106,10 @@ def what_holds(
     if figures and not differs:
         found["why"] = _agreed(found)
         figures.insert(0, found["why"])
+    cant = [(unread or {})[id(p)] for p in (moving, *others) if id(p) in (unread or {})]
+    if cant and not found["overlaps"] and found["verdict"] in ("HELD", "NOT HELD"):
+        found["verdict"] = "NO ANSWER"
+        found["why"] = "; ".join(dict.fromkeys(cant))
     _said(report, found, boxes, rays_run, differs or figures)
     report.numbers["slide"] = {k: v for k, v in found.items() if k != "why"}
     return found
@@ -1084,10 +1127,13 @@ def _said(
             "lies, so nothing holds it there. Clear the overlap, then run this again"
         )
     first = found["first_mm"]
+    cant = found["verdict"] == "NO ANSWER"
+    unsure = f": no hold to rely on, as a part can't be read: {found['why']}" if cant else ""
     if first is None:
         hold_line = (
             f"hold: sliding {way}, {name} leaves without meeting anything, clear after "
-            f"{found['clear_mm']:.3f} mm. Nothing is in its way out, so nothing holds it"
+            f"{found['clear_mm']:.3f} mm"
+            + (unsure if cant else ". Nothing is in its way out, so nothing holds it")
         )
     else:
         meets = ", ".join(found["meets"])
@@ -1097,6 +1143,8 @@ def _said(
         )
         if found["overlaps"]:
             hold_line += ": but it overlaps where it lies, so nothing holds it there"
+        elif cant:
+            hold_line += unsure
         elif found["verdict"] == "HELD":
             hold_line += f": {meets} holds it"
         elif found["separate"]:
@@ -1216,6 +1264,8 @@ def summary(found: dict[str, Any]) -> str:
     name, way = found["file"], found["way"]
     if found["verdict"] == "DISAGREE":
         return f"sliding {name} {way}, the two methods differ: {found['why']}"
+    if found["verdict"] == "NO ANSWER":
+        return f"sliding {name} {way}, there's no hold or way out to rely on: a part can't be read"
     lead = ""
     if found["overlaps"]:
         parts = ", ".join(o["part"] for o in found["overlaps"])
