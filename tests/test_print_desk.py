@@ -332,6 +332,17 @@ def test_a_jobs_page_shows_its_whole_record(shop: Shop, served: str) -> None:
     assert "<b>" not in page.replace("<b>hidden", "")
 
 
+def test_a_success_with_a_flaw_reads_as_usable_on_the_desk(shop: Shop, served: str) -> None:
+    with Ledger(shop.ledger) as ledger:
+        ledger.record_ended(CUBE, 9)
+        ledger.record_answer(CUBE, Answer(result=Result.SUCCESS, symptom=Symptom.STRINGING))
+    [cube] = [j for j in Desk(shop.ledger, shop.jobs, shop.parts).jobs() if j.job_id == CUBE]
+    assert (cube.status, cube.failed) == ("success, with stringing", False)
+    assert "success, with stringing" in _get(served + "/")[2].decode()
+    page = _get(served + f"/job/{CUBE}")[2].decode()
+    assert '<li class="good"><strong>success, with stringing</strong>' in page
+
+
 def test_frames_the_log_and_the_answers_are_served(shop: Shop, served: str) -> None:
     code, kind, frame = _get(served + f"/job/{SIGN}/frame/2")
     assert (code, kind, frame) == (200, "image/jpeg", JPEG + b"100")

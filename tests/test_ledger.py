@@ -129,11 +129,22 @@ def test_a_print_still_running_cannot_be_answered(ledger: Ledger) -> None:
     assert [r.job_id for r in ledger.running()] == ["job-1"]
 
 
+@pytest.mark.parametrize("symptom", list(Symptom))
+def test_a_success_may_carry_any_symptom_as_a_minor_flaw(ledger: Ledger, symptom: Symptom) -> None:
+    """mqucifer/print-shop#189: usable, and what was wrong with it, are two answers."""
+    ended(ledger)
+    note = "a scuff on the back" if symptom is Symptom.OTHER else ""
+    ledger.record_answer("job-1", Answer(result=Result.SUCCESS, symptom=symptom, note=note))
+    row = ledger.get("job-1")
+    assert row is not None and (row.result, row.symptom) == (Result.SUCCESS, symptom)
+
+
 @pytest.mark.parametrize(
     ("result", "symptom", "note"),
     [
-        (Result.SUCCESS, Symptom.STRINGING, ""),
+        (Result.SUCCESS, Symptom.OTHER, ""),
         (Result.FAILED, Symptom.NONE, ""),
+        (Result.FAILED, Symptom.NONE, "it broke"),
         (Result.FAILED, Symptom.OTHER, "   "),
     ],
 )

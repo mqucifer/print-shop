@@ -155,10 +155,10 @@ A print uses your tuning where there is one, and the standard where you haven't 
    **For now there are no frames, and the card says why** (mqucifer/print-shop#123): "No camera frame was kept for this print: frames are off: they'll come through Home Assistant, and how is still being chosen". print-shop no longer opens the printer's own camera stream, and how frames reach it through Home Assistant is the Sponsor's choice, still open. When a grab fails, the command line has one line saying why and at which layer, and the card says the last reason.
 
    **The printer's camera slots.** The Centauri Carbon's camera serves only a few connections, and it holds a closed one's slot for a long time afterwards, so each viewer, and each grab that opened a stream, can leave one taken (pycentauri 0.9.1, `mjpeg_broadcast.py`). When they're used up, a viewer gets `200 OK` and then no picture: the Elegoo app, Orca's device tab, Home Assistant's camera, or print-shop's frames. Closing a viewer doesn't free its slot. Restarting the printer's camera service does, and that means power-cycling the printer, between prints, never during one. Keep the viewers on the camera to the ones you use.
-   - **Result:** success or failed.
-   - **What went wrong:** `none` for a success. For a failure, the closest of adhesion, warping, stringing, layer_shift, spaghetti, under_extrusion, or other. Other needs a note.
+   - **Result:** success if the part is usable, or failed.
+   - **What went wrong:** the closest of adhesion, warping, stringing, layer_shift, spaghetti, under_extrusion, or other. On a success it's a minor flaw on a usable part, read as `success, with stringing` (mqucifer/print-shop#189), or `none` if there was no flaw. A failure always names one. Other needs a note.
    - **Note:** anything worth knowing, such as "corner lifted at layer 3".
-   - Press **Record it**. If it doesn't add up (a success with a symptom, or a failure without one), the card says why and nothing is stored. Fix it and press again.
+   - Press **Record it**. If it doesn't add up (a failure with `none`, or other without a note), the card says why and nothing is stored. Fix it and press again.
 
    You can answer later. Until you do, the print stays open, and `uv run python scripts/print_job.py --serve` asks about it again.
 
@@ -215,7 +215,7 @@ For a print you set up yourself in Orca (mqucifer/print-shop#164): a test with a
 
 5. **Then the approval gate, the watching, the frames and the outcome question,** exactly as above. The file is copied into the job's folder when the job starts, under a name carrying the job id, and that copy is what you approve: it's hashed again just before the upload, and a file that has changed isn't sent. Editing the file in Orca after that changes nothing for this job; send it again for a new one.
 
-6. **In the ledger** (`--list`, and the print desk) the job is marked `sliced by hand`, with the settings by profile, what differed, the overrides, Orca's estimate beside the real time from its start to its end, your outcome, your note and the frames. The printer doesn't report the filament it used, so only Orca's estimate is kept for that. An outcome with a note or a failure is a lesson candidate, keyed by the file's own settings (`docs/print-lessons.md`).
+6. **In the ledger** (`--list`, and the print desk) the job is marked `sliced by hand`, with the settings by profile, what differed, the overrides, Orca's estimate beside the real time from its start to its end, your outcome, your note and the frames. The printer doesn't report the filament it used, so only Orca's estimate is kept for that. An outcome with a note, a flaw or a failure is a lesson candidate, keyed by the file's own settings (`docs/print-lessons.md`).
 
 **To print one again,** by its job id (the print desk shows the line to copy):
 

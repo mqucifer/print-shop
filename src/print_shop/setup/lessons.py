@@ -51,6 +51,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from print_shop.materials import material_name
+from print_shop.outcome_words import outcome_words
 from print_shop.rounds.lessons import (
     ACCEPTED,
     AFTER_SCORE,
@@ -391,10 +392,13 @@ def draw(ledger: Ledger, row: Row) -> list[int]:
             c.value, made_of,
         ))
     said = (row.note or "").strip()
-    if row.result is not None and (row.result == "failed" or said) and not _drawn(
+    flawed = row.result == "success" and row.symptom != "none"
+    if row.result is not None and (row.result == "failed" or flawed or said) and not _drawn(
         ledger, row.job_id, OUTCOME, ""
     ):
         text = said or f"it failed: {row.symptom}"
+        if flawed:  # the model is given these words alone, so they say the part was usable
+            text = outcome_words(row.result, row.symptom) + (f": {said}" if said else "")
         detail = {**part, "result": str(row.result), "symptom": str(row.symptom), "note": said}
         if row.symptom is not None and row.symptom != "none":
             # Where a symptom was recorded, the camera's frames show where it began
@@ -769,7 +773,9 @@ def to_promote(ledger: Ledger) -> list[tuple[dict[str, Any], list[str]]]:
         for job, s in latest_scores(ledger, int(row["id"])).items():
             printed = ledger.get(job)
             if s["score"] == "used" and printed is not None and printed.result != "failed":
-                good.append(printed.stl_name + (f" ({printed.result})" if printed.result else ""))
+                good.append(printed.stl_name + (
+                    f" ({outcome_words(printed.result, printed.symptom)})" if printed.result else ""
+                ))
         if len(good) >= USED_TO_PROMOTE:
             shown.append((row, good))
     return shown
@@ -822,7 +828,7 @@ def _evidence_lines(ledger: Ledger, lesson: int) -> list[str]:
         d = json.loads(e["detail"])
         part = f"{e['stl_name']} ({', '.join(d.get('traits') or []) or 'no traits kept'})"
         flagged = ", ".join(f["id"] for f in d.get("flags") or [])
-        outcome = f"{e['result']}, {e['symptom']}" if e["result"] else "no outcome yet"
+        outcome = outcome_words(e["result"], e["symptom"]) if e["result"] else "no outcome yet"
         if e["kind"] == CORRECTION:
             said = f"corrected {d['key']} {d['preset']} -> {d['value']}: {d['reason']}" + (
                 f" (read: {d['reading']})" if d.get("reading") else ""
@@ -830,7 +836,9 @@ def _evidence_lines(ledger: Ledger, lesson: int) -> list[str]:
         elif e["kind"] == READING:
             said = f"took {d['key']} {d['preset']} -> {d['value']} from the slice: {d['reading']}"
         else:
-            said = f"{d['result']}, {d['symptom']}: {d['note']}" + _frames_said(d)
+            said = outcome_words(d["result"], d["symptom"]) + (
+                f": {d['note']}" if d["note"] else ""
+            ) + _frames_said(d)
         lines.append(
             f"    - job {e['job_id']}, {part}, {said} [print: {outcome}"
             + (f"; the slice flagged {flagged}" if flagged else "") + "]"
@@ -843,7 +851,7 @@ def _evidence_lines(ledger: Ledger, lesson: int) -> list[str]:
     ):
         s = latest_scores(ledger, lesson).get(g["job_id"])
         scored = f"{s['score']} ({s['why']})" if s else "not scored"
-        outcome = f"{g['result']}, {g['symptom']}" if g["result"] else "no outcome yet"
+        outcome = outcome_words(g["result"], g["symptom"]) if g["result"] else "no outcome yet"
         lines.append(
             f"    - given to {g['stl_name']}, job {g['job_id']}: {scored} [print: {outcome}]"
         )

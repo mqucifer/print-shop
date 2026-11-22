@@ -19,6 +19,7 @@ from print_shop.inventory import Material
 from print_shop.ledger import Ledger, Row, ledger_path
 from print_shop.orchestrator.daemon import Daemon
 from print_shop.orchestrator.outcome import end_name
+from print_shop.outcome_words import outcome_words
 from print_shop.printer.camera import camera_for_prints
 from print_shop.printer.centauri import (
     CentauriClient,
@@ -196,8 +197,8 @@ def describe(row: Row) -> str:
     lines += [
         f"ended          {row.ended_at or '-'}"
         + (f"  (printer: {end_name(row.printer_end_status)})" if row.ended_at else ""),
-        f"outcome        {row.result or 'open: no answer yet'}"
-        + (f", {row.symptom}" if row.symptom else "")
+        "outcome        "
+        + (outcome_words(row.result, row.symptom) if row.result else "open: no answer yet")
         + (f" — {row.note}" if row.note else ""),
     ]
     return "\n".join(lines)
