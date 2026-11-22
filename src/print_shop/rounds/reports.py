@@ -671,6 +671,8 @@ SHAPES: dict[str, dict[str, Any]] = {
                     "overlap_mesh_mm3": NUMBER,
                     "overlap_occt_common_mm3": NUMBER,
                     "overlap_occt_cut_mm3": NUMBER,
+                    # Why a pair's figures can't be relied on (mqucifer/print-shop#244).
+                    "untrusted": Rows(TEXT),
                     # By the names the need's own `--box NAME=...` and `--facing NAME=...` give.
                     "places": Keyed(PLACE),
                     "verdict": TEXT,
