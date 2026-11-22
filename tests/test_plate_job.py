@@ -619,6 +619,156 @@ def test_the_dashboards_card_says_how_a_plate_prints() -> None:
     assert shown.render(state_attr=lambda *_: None).strip() == "", "one part's card is as it was"
 
 
+# Found by the review of mqucifer/print-shop#234
+# --------------------------------------------------------------------------
+
+
+def test_a_correction_the_plate_cant_be_sliced_with_is_taken_back(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, "top_shell_layers=6 because flat", "wall_loops=99", "ok",
+              orca=PlateOrca(wont=("wall_loops", "99")),
+              use=profiles(tmp_path / "profiles", {"top_shell_layers": "4"}))
+    with rig.daemon:
+        job = rig.gated(_caps(tmp_path))
+        rig.press("approve", job)
+    assert rig.asked == 1, "the answers weren't lost"
+    assert "NOT DONE, your last answer:" in rig.shown[2] and "exit 155" in rig.shown[2]
+    assert "NOT DONE" not in rig.shown[1]
+    row = rig.ledger.rows()[0]
+    assert [(c.key, c.value) for c in row.corrections or ()] == [("top_shell_layers", "6")]
+    assert rig.orca.calls[-1]["process"]["wall_loops"] != "99"
+
+
+def test_a_pose_sent_back_that_doesnt_fit_is_taken_back(tmp_path: Path) -> None:
+    lying = box(tmp_path / "lying.stl", 240, 130, 5)
+    standing = box(tmp_path / "standing.stl", 240, 5, 130)
+    rig = Rig(tmp_path, "wall_loops=4 because it's thin", "orientation", "2", "2",
+              "lay it down", "ok")
+    with rig.daemon:
+        job = rig.gated([lying, standing])
+        rig.press("approve", job)
+    assert "NOT DONE, your last answer:" in rig.shown[-1]
+    assert "don't all fit on one plate" in rig.shown[-1]
+    one, two = rig.ledger.rows()
+    assert two.rotation_deg == (0.0, 0.0, 0.0) and two.orientation_source == "as_laid"
+    assert [c.key for c in two.corrections or ()] == ["wall_loops"], "what stood before it stands"
+    assert one.corrections == two.corrections
+
+
+def test_a_plates_lesson_reaches_the_same_plate_again(tmp_path: Path) -> None:
+    pin = box(tmp_path / "pin.stl", 8, 8, 30)
+    lid = box(tmp_path / "lid.stl", 80, 80, 4)
+    rig = Rig(tmp_path, "wall_loops=3 because it's enough", "ok")
+    with rig.daemon:
+        job = rig.gated([pin, lid])
+        rig.press("approve", job)
+    [lesson] = rig.ledger.query("SELECT id, traits FROM print_lessons")
+    print_lessons.accept(rig.ledger, lesson["id"], "reviewer: test")
+    given = [g.id for row in rig.ledger.rows()
+             for g in print_lessons.for_part(rig.ledger, row.features or ())]
+    assert lesson["id"] in given, "a key no one part has would never be given"
+    [evidence] = rig.ledger.query("SELECT detail FROM print_lesson_evidence")
+    assert len(json.loads(evidence["detail"])["plate"]["traits"]) == 2
+
+
+def test_the_plates_features_dont_make_a_part_thats_neither(tmp_path: Path) -> None:
+    from print_shop.setup.traits import traits
+
+    square = box(tmp_path / "square.stl", 120, 120, 10)
+    bar = box(tmp_path / "bar.stl", 30, 10, 10)
+    rig = Rig(tmp_path)
+    with rig.daemon:
+        job = rig.gated([square, bar])
+        state = rig.daemon._graph.get_state({"configurable": {"thread_id": job}}).values
+        rig.press("reject", job)
+    from print_shop.orchestrator.plate_job import together
+
+    assert "long_and_narrow" not in traits(together(tuple(state["parts"])).features)
+
+
+def test_a_long_and_narrow_part_is_still_the_plates_risk(tmp_path: Path) -> None:
+    from print_shop.orchestrator.plate_job import together
+    from print_shop.setup.traits import traits
+
+    rail = box(tmp_path / "rail.stl", 150, 10, 10)
+    square = box(tmp_path / "square.stl", 160, 100, 10)
+    rig = Rig(tmp_path)
+    with rig.daemon:
+        job = rig.gated([square, rail])
+        state = rig.daemon._graph.get_state({"configurable": {"thread_id": job}}).values
+        rig.press("reject", job)
+    assert "long_and_narrow" in traits(together(tuple(state["parts"])).features)
+
+
+def test_a_plate_again_is_one_recipe_from_any_parts_page(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, "orientation", "1", "2", "the mark goes on the side", "ok")
+    caps = _caps(tmp_path)
+    with rig.daemon:
+        job = rig.gated(caps)
+        rig.press("approve", job)
+    desk = Desk(rig.path, rig.work, tmp_path / "caps")
+    recipes = []
+    for n in (1, 2, 3):
+        found = desk.job(row_id(job, n))
+        assert found is not None and found.row is not None
+        recipes.append(again(found.row, found.part_path, 1, found.part_found, found.plate_parts,
+                             found.plate_rows))
+    assert len({r.command for r in recipes}) == 1 and "--as-laid" in recipes[0].command
+    assert len({r.notes for r in recipes}) == 1
+    assert any("Part 1, cap-tight.stl: the pose was sent back" in n
+               and "then 1 for the part" in n for n in recipes[1].notes)
+
+
+def test_the_jobs_copy_keeps_its_parts_context(tmp_path: Path) -> None:
+    from print_shop.setup.context import read_context
+
+    caps = _caps(tmp_path)
+    sidecar = caps[0].with_name("cap-tight.part.json")
+    sidecar.write_text(json.dumps({"fits": [{"name": "over the post", "play": 0.1}]}))
+    rig = Rig(tmp_path)
+    with rig.daemon:
+        job = rig.gated(caps)
+        rig.press("approve", job)
+    copy = rig.work / job / "given" / "part1_cap-tight.stl"
+    assert [f.name for f in read_context(copy).fits] == ["over the post"]
+
+    caps[0].unlink()
+    desk = Desk(rig.path, rig.work, tmp_path / "caps")
+    found = desk.job(job)
+    assert found is not None and found.row is not None
+    assert found.plate_parts[0] == (copy, True)
+    copy.with_name("part1_cap-tight.part.json").unlink()
+    lost = again(found.row, found.part_path, 1, True, found.plate_parts, found.plate_rows)
+    assert any("its fits, seen faces and side would be lost" in n for n in lost.notes)
+
+
+def test_past_prints_show_a_plate_as_one_print(tmp_path: Path) -> None:
+    from print_shop.setup.features import measure
+    from print_shop.setup.loop import _past_prints
+
+    features = measure(box(tmp_path / "cap.stl", 10, 10, 4), 100)
+    ledger = Ledger(tmp_path / "l.sqlite")
+    ledger.record_start_requested(record().model_copy(update={"features": features}))
+    fixed = Change(key="wall_loops", preset="2", value="3", reason="enough", source=Source.SPONSOR)
+    ledger.record_start_requested(
+        *_plate_records(count=8, features=features, corrections=(fixed,)))
+    part: Any = SimpleNamespace(ledger=ledger, lessons=(),
+                                facts=SimpleNamespace(features=features))
+    state: Any = SimpleNamespace(looked_up=[])
+    said = _past_prints(part, state, None)
+    assert said.count("wall_loops=3") == 1, "one decision isn't eight confirmations"
+    assert "a plate of 8, printed by object" in said and "job job-1" in said
+
+
+def test_the_desks_list_counts_the_plates_frames_for_each_part(tmp_path: Path) -> None:
+    rig = Rig(tmp_path)
+    with rig.daemon:
+        job = rig.gated(_caps(tmp_path))
+        rig.press("approve", job)
+        _until(lambda: all(r.ended_at for r in rig.ledger.rows()), "the end")
+    counts = {j.frames for j in Desk(rig.path, rig.work).jobs()}
+    assert counts == {len(rig.ledger.frames(job))}
+
+
 # The ledger
 # --------------------------------------------------------------------------
 
@@ -626,7 +776,7 @@ def test_the_dashboards_card_says_how_a_plate_prints() -> None:
 def _layout(count: int) -> PlateLayout:
     return PlateLayout(sequence=BY_OBJECT, why="checked", objects=tuple(
         OnPlate(n=n, name=f"cap-{n}.stl", x=50.0 * n, y=60, where="front left", height_mm=8,
-                order=n, layers=(40 * n - 39, 40 * n))
+                top_layer=40 * n, order=n, layers=(40 * n - 39, 40 * n))
         for n in range(1, count + 1)))
 
 

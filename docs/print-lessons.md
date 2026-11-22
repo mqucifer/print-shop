@@ -54,7 +54,7 @@ No part was measured, so the candidate is keyed to no trait, and it can't be acc
 ### A plate of several parts is one print
 
 A job of several parts (mqucifer/print-shop#109) has a ledger row for each object, and one review:
-- **What the review taught is drawn once,** at the first part's row: its corrections and what was taken from the slice, keyed to the traits of all the parts together, so never wider than one part's. `print_sequence` is that plate's choice and is never a lesson.
+- **What the review taught is drawn once,** at the first part's row: its corrections and what was taken from the slice, keyed to the traits of the one part with the most, as lessons are looked up part by part: never wider than that part's alone, and it reaches the same plate again. Every part's traits are in its evidence, for the reviewer to key it otherwise. `print_sequence` is that plate's choice and is never a lesson.
 - **A lesson given to the plate is given and scored once.** Toward promoting or retiring it, a plate counts as one print, and one with any failed part doesn't count toward promoting.
 - **Each part's own:** a pose sent back, keyed to that part's traits, and its outcome, with that part's shape and the plate's order in its evidence (by object or by layer).
 

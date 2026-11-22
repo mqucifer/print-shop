@@ -52,6 +52,8 @@ class OnPlate(BaseModel):
     y: float
     where: str  # that in words: "back left"
     height_mm: float
+    #: The layer its own top is on, counted through the whole print: no other height's is.
+    top_layer: int
     #: When it prints, from 1, and its layers counted through the whole print. None by layer.
     order: int | None = None
     layers: tuple[int, int] | None = None
@@ -94,6 +96,8 @@ class GivenPart(BaseModel):
     name: str
     path: str  # where it was given from
     sha256: str
+    #: The sidecar or design run its context was read from, or "".
+    context: str = ""
 
 
 class PlateRow(BaseModel):
@@ -105,6 +109,8 @@ class PlateRow(BaseModel):
     n: int
     parts: tuple[GivenPart, ...]
     layout: PlateLayout
+    #: The job was given with `--as-laid`, whatever pose a part was then sent back to.
+    as_laid: bool = False
 
     @property
     def first(self) -> bool:

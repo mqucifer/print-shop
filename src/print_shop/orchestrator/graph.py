@@ -51,6 +51,7 @@ from print_shop.core.state import (
     AppliedOrientation,
     EntryPath,
     Orientation,
+    PlatePart,
     PrintJobState,
     PrintStatus,
 )
@@ -93,7 +94,7 @@ from print_shop.setup.reading import SliceReading, flags, read_slice, seen
 from print_shop.setup.review import Reviewer, ReviewPart, ReviewRequest
 from print_shop.setup.skill import groups_for, load
 from print_shop.setup.traits import traits
-from print_shop.slicer.arrange import SlicePlate, ToPlace, slice_parts
+from print_shop.slicer.arrange import DoesNotFit, SlicePlate, ToPlace, slice_parts
 from print_shop.slicer.naming import job_id_from_filename, name_gcode
 from print_shop.slicer.orca import (
     Slicer,
@@ -275,12 +276,14 @@ def build_graph(
                     f"no pose of part {part.n}, {part.name}, was accepted"
                     + (f" ({said})" if said else "") + ": nothing was sliced")
             decided.append(outcome)
-            parts.append(part.model_copy(update={
+            read = part.model_copy(update={
                 "candidates": found["orientation_candidates"],
                 "laid_traits": found["laid_traits"],
                 "context": found["part_context"],
                 "lessons": tuple(found.get("orientation_lessons", ())),
-            }))
+            })
+            plate_job.keep_sidecar(read)
+            parts.append(read)
         return {"parts": tuple(parts), "orientations": tuple(decided)}
 
     def orient_part(
@@ -593,6 +596,10 @@ def build_graph(
             given = tuple({g.id: g for part in parts for g in part.lessons}.values())
             process, _ = _presets(profiles)
             earlier: list[Change] = []
+            #: The plate before the last send-back, for one it can't be sliced with.
+            before: tuple[tuple[PlatePart, ...], list[Outcome[Orientation]], list[Change]] | None
+            before = None
+            undone = ""
             while True:
                 turned, to_place = plate_job.posed(parts, tuple(orientations), outdir / "parts")
                 read = plate_job.together(turned)
@@ -606,6 +613,7 @@ def build_graph(
                 plate = _PlateReview(
                     layout=lambda: layouts[-1],
                     read=read,
+                    undone=undone,
                     parts=tuple(
                         ReviewPart(
                             n=part.n, name=part.name,
@@ -627,8 +635,20 @@ def build_graph(
                         earlier=earlier,
                         plate=plate,
                     )
+                except DoesNotFit as spill:
+                    # Raised only by a pose's first slice: a later one is taken back at the
+                    # review. So what didn't fit is the send-back, and that's taken back.
+                    if before is None:
+                        raise
+                    parts, orientations, earlier = before
+                    before, undone = None, str(spill)
+                    continue
                 except _Turned as back:
                     assert back.part is not None, "a plate's send-back names its part"
+                    # With what was corrected before it, less what came with the send-back.
+                    before = (parts, list(orientations),
+                              [c for c in back.standing if c.key != ORIENTATION])
+                    undone = ""
                     earlier = [c for c in back.corrections if c.key != ORIENTATION]
                     at = back.part - 1
                     part = parts[at]
@@ -653,7 +673,7 @@ def build_graph(
             reading = _read(result)
             done["slice_reading"] = reading
             done["slice_flags"] = (
-                flags(reading, None, *_presets(active), read.placed, tops=read.tops)
+                flags(reading, None, *_presets(active), read.placed, tops=_tops(layouts[-1]))
                 if reading else ()
             )
         layout = layouts[-1]
@@ -1064,11 +1084,21 @@ def _estimate(
 class _Turned(Exception):  # noqa: N818 - a signal, not an error
     """The pose was sent back at the review: turn the part to it, and propose and slice again."""
 
-    def __init__(self, to: Change, corrections: list[Change], part: int | None = None) -> None:
+    def __init__(
+        self, to: Change, corrections: list[Change], part: int | None = None,
+        standing: tuple[Change, ...] = (),
+    ) -> None:
         super().__init__(f"turned to {to.value}")
         self.to = to
         self.corrections = corrections
         self.part = part
+        #: The corrections that stood before the answer that sent it back.
+        self.standing = standing
+
+
+def _tops(plate: PlateLayout) -> tuple[int, ...]:
+    """The layers the plate's parts each have their own top on."""
+    return tuple(o.top_layer for o in plate.objects)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1079,6 +1109,7 @@ class _PlateReview:
     layout: Callable[[], PlateLayout]  # the slice on show's
     read: plate_job.Together
     parts: tuple[ReviewPart, ...]
+    undone: str = ""  # why the send-back before this review was taken back
 
 
 def _with_orienting(proposal: Proposal, given: tuple[GivenLesson, ...]) -> Proposal:
@@ -1177,20 +1208,32 @@ def _propose_and_review(
               if context is not None and context.found and stl is not None else None)
     said = tuple([*(context.lines() if context is not None else ()),
                   *(placed.lines() if placed is not None else ())])
-    tops: tuple[float, ...] = ()
+    undone = ""
     if plate is not None:
-        placed, said, tops = plate.read.placed, plate.read.said, plate.read.tops
+        placed, said, undone = plate.read.placed, plate.read.said, plate.undone
     proposal = proposal.model_copy(update={
         "context": said, "context_from": context.path if context is not None else ""})
     asked = proposal
+    fitted: tuple[Proposal, list[Change]] | None = None
     while True:
-        result: SliceResult = slice_with(
-            apply(profiles, placeable(asked, process, filament), workdir)
-        )
+        try:
+            result: SliceResult = slice_with(
+                apply(profiles, placeable(asked, process, filament), workdir)
+            )
+        except DoesNotFit as spill:
+            # A plate of several's alone (mqucifer/print-shop#109): the answer that left it
+            # unsliceable is taken back, and asked again with the last that fitted.
+            if fitted is None:
+                raise
+            asked, corrections = fitted
+            fitted, undone = None, str(spill)
+            continue
+        fitted = (asked, list(corrections))
         config = _config(result)
         proposal = read_back(asked, process, filament, config)
         reading = _read(result)
-        found = (flags(reading, faces, process, filament, placed, proposal.changes, tops)
+        found = (flags(reading, faces, process, filament, placed, proposal.changes,
+                       _tops(plate.layout()) if plate is not None else ())
                  if reading is not None else ())
         if reviewer is None:
             break
@@ -1212,15 +1255,18 @@ def _propose_and_review(
                 context=said,
                 plate=plate.layout() if plate is not None else None,
                 parts=plate.parts if plate is not None else (),
+                undone=undone,
             )
         )
+        undone = ""
         if review.stop:
             raise RuntimeError("stopped at the settings review; nothing was sent to the printer")
         if review.approved:
             break
         turned = next((c for c in review.corrections if c.key == ORIENTATION), None)
         if turned is not None:
-            raise _Turned(turned, [*corrections, *review.corrections], review.part)
+            raise _Turned(turned, [*corrections, *review.corrections], review.part,
+                          tuple(corrections))
         corrections += review.corrections
         asked = asked.corrected([*review.corrections, *review.taken])
     missed = {c.key for c in proposal.not_applied}

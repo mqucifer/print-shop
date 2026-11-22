@@ -312,7 +312,35 @@ def test_each_parts_own_top_isnt_a_top_inside_a_part() -> None:
         update={"features": (ironing,)})
     seen = Seen(walls=False, top=True, bottom=False, said="the top")
     assert [f.id for f in flags(reading, seen, {}, {})] == ["ironing_inside"], "one part of 10 mm"
-    assert flags(reading, seen, {}, {}, tops=(6, 8, 10)) == (), "three parts' own tops"
+    assert flags(reading, seen, {}, {}, tops=(1, 2, 3)) == (), "three parts' own tops, by layer"
+
+
+def test_a_floor_at_another_parts_height_is_still_a_floor_inside_its_part() -> None:
+    """An 8 mm part's ironed pocket floor at 4 mm, beside a part 4 mm tall: one z, two layers."""
+    from print_shop.setup.context import Seen
+    from print_shop.setup.reading import FeatureReading
+
+    ironing = FeatureReading(kind="Ironing", time_s=9, area_mm2=90, layers=3, from_z=4, to_z=8)
+    reading = _read((0.2, 20), ironed=(4.0, 4.0, 8.0), ironing_type="top").model_copy(
+        update={"features": (ironing,)})
+    seen = Seen(walls=False, top=True, bottom=False, said="the top")
+    [flag] = flags(reading, seen, {}, {}, tops=(1, 3))
+    assert flag.id == "ironing_inside" and "z 4 mm" in (flag.change.reason if flag.change else "")
+
+
+def test_a_part_that_lays_nothing_is_named_not_called_too_many(tmp_path: Path) -> None:
+    with pytest.raises(DoesNotFit, match="lays nothing for part 3, cap-3.stl: too thin"):
+        slice_parts(_parts(tmp_path, *CAPS), profiles(tmp_path / "p"), tmp_path / "out",
+                    PlateOrca(leave_out=1))
+
+
+def test_each_parts_top_layer_is_the_slices(tmp_path: Path) -> None:
+    _, plate = slice_parts(_parts(tmp_path, *CAPS), _wanting(tmp_path), tmp_path / "out",
+                           PlateOrca())
+    assert [o.top_layer for o in plate.objects] == [30, 70, 120]
+    _, plate = slice_parts(_parts(tmp_path, *CAPS), profiles(tmp_path / "p"), tmp_path / "layer",
+                           PlateOrca())
+    assert [o.top_layer for o in plate.objects] == [30, 40, 50]
 
 
 def test_a_process_file_is_left_as_it_was(tmp_path: Path) -> None:

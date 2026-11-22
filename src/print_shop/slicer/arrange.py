@@ -207,10 +207,18 @@ class _Plate:
         laid = sorted({name for layer in sliced.layers
                        for name, length in layer.objects.items() if length > 0})
         numbers = self._numbers(laid)
-        if self._spilled() or numbers is None:
+        if self._spilled():
             raise DoesNotFit(
                 f"the {len(self.parts)} parts don't all fit on one plate, even printed by layer, "
                 "and a job prints one plate: give it fewer"
+            )
+        if numbers is None:
+            there = {int(m.group(1)) for name in laid if (m := _NUMBERED.match(name))}
+            lost = [f"part {p.n}, {p.name}" for p in self.parts.values() if p.n not in there]
+            raise DoesNotFit(
+                f"the slice lays nothing for {'; '.join(lost)}: too thin or small to slice, so "
+                "mend it or leave it out" if lost else
+                "the slice's objects can't be told apart by part, so it isn't sent"
             )
         return parse_gcode_header(done.gcode), self._layout(BY_LAYER, why, sliced, numbers)
 
@@ -226,7 +234,9 @@ class _Plate:
             xs, ys = [p[0] for p in outline], [p[1] for p in outline]
             x, y = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
             at, run = placed.get(name, (None, None))
+            top = max((la.n for la in sliced.layers if la.objects.get(name, 0.0) > 0), default=0)
             objects.append(OnPlate(
+                top_layer=top,
                 n=n, name=self.parts[n].name, x=round(x, 1), y=round(y, 1),
                 where=_where(x / width, y / depth), height_mm=round(self.parts[n].height_mm, 2),
                 order=at, layers=(run.first, run.last) if run is not None else None,

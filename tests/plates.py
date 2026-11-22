@@ -72,6 +72,8 @@ class PlateOrca:
 
     leave_out: int = 0
     another_plate: bool = False
+    #: A setting and the value it won't slice with, whatever the order.
+    wont: tuple[str, str] | None = None
     refuse: tuple[str, ...] = ()  # the sequences it won't slice
     calls: list[dict[str, Any]] = field(default_factory=list)
 
@@ -91,7 +93,9 @@ class PlateOrca:
         sequence = settings.get("print_sequence", "by layer")
         done = PlateSlice(command=["orca"], exit=0, gcode=None, log=outdir / "orca.log",
                           stdout="", stderr="")
-        if sequence in self.refuse:
+        if sequence in self.refuse or (
+            self.wont is not None and str(settings.get(self.wont[0])) == self.wont[1]
+        ):
             return done.model_copy(update={"exit": 155})
         by_object = sequence == BY_OBJECT
         gap = float(head.get("extruder_clearance_radius", 65)) if by_object else 3.0

@@ -23,19 +23,23 @@ from print_shop.ingest.orientation import write_rotated
 from print_shop.ledger import PrintRecord
 from print_shop.plate import BY_OBJECT, SEQUENCE, GivenPart, PlateRow, row_id
 from print_shop.setup import Proposer
-from print_shop.setup.context import PartContext, Placed, Seen, place
+from print_shop.setup.context import SIDECAR, PartContext, Placed, Seen, place
 from print_shop.setup.features import Feature, measure
 from print_shop.setup.proposal import ORIENTATION, Change, GivenLesson, Proposal, Source, pose_value
 from print_shop.setup.skill import WARPS_MM2
+from print_shop.setup.traits import traits
 from print_shop.slicer.arrange import ToPlace, object_file
 from print_shop.slicer.orca import SlicerProfiles
 
 __all__ = [
-    "Together", "by_object", "planned", "poses_said", "posed", "records", "take", "together",
+    "Together", "by_object", "keep_sidecar", "planned", "poses_said", "posed", "records", "take",
+    "together",
 ]
 
 #: The features whose least value is the plate's risk. Every other's is the most.
 _LEAST = frozenset({"bed_contact", "section"})
+#: The features that are only true together: read from one part, or they make a part that isn't.
+_OUTLINE = frozenset({"footprint", "length", "footprint_aspect"})
 
 
 def take(given: tuple[str, ...], folder: Path) -> tuple[PlatePart, ...]:
@@ -60,6 +64,15 @@ def take(given: tuple[str, ...], folder: Path) -> tuple[PlatePart, ...]:
         parts.append(PlatePart(n=n, name=source.name, given=str(source), stl=str(kept),
                                sha256=mesh.stl_sha256, mesh=mesh))
     return tuple(parts)
+
+
+def keep_sidecar(part: PlatePart) -> None:
+    """The part's sidecar, copied beside the job's copy of it, so that copy printed again reads
+    the same context. A design run's isn't a file to copy: the desk says where it was."""
+    context = part.context
+    if context is not None and context.path and Path(context.path).is_file():
+        kept = Path(part.stl)
+        shutil.copyfile(context.path, kept.with_name(kept.stem + SIDECAR))
 
 
 def posed(
@@ -97,8 +110,6 @@ class Together:
     placed: Placed | None
     #: Each part's context, as it was read, in lines.
     said: tuple[str, ...]
-    #: Each part's height: a top of its own.
-    tops: tuple[float, ...]
     parts: tuple[PlatePart, ...]
 
     def proposer(self, proposer: Proposer) -> Proposer:
@@ -119,7 +130,6 @@ def together(parts: tuple[PlatePart, ...]) -> Together:
     contexts: list[tuple[str, PartContext]] = []
     placings: list[tuple[str, Placed]] = []
     said: list[str] = []
-    tops = []
     for part in parts:
         who = f"part {part.n}, {part.name}"
         context = part.context or PartContext()
@@ -131,14 +141,12 @@ def together(parts: tuple[PlatePart, ...]) -> Together:
             placings.append((who, placed))
             lines += placed.lines()
         said += [f"{who}: {line}" for line in lines]
-        tops.append(applied.height_mm or part.mesh.height_mm)
     every = len(contexts) == len(parts)  # faces are only called hidden if every part says so
     return Together(
         features=_features(parts),
         context=_context(contexts, every) if contexts else None,
         placed=_placed(placings, every) if placings else None,
         said=tuple(said),
-        tops=tuple(tops),
         parts=parts,
     )
 
@@ -146,6 +154,7 @@ def together(parts: tuple[PlatePart, ...]) -> Together:
 def _features(parts: tuple[PlatePart, ...]) -> tuple[Feature, ...]:
     """Each feature at the part it's most demanding on, saying every part's."""
     found = []
+    long_one = _longest(parts)
     for at, first in enumerate(parts[0].features):
         each = [(part.name, part.features[at]) for part in parts]
         least = first.id in _LEAST
@@ -154,10 +163,23 @@ def _features(parts: tuple[PlatePart, ...]) -> tuple[Feature, ...]:
         measured = [pair for pair in each if pair[1].value > 0] if least else each
         pick = min if least else max
         name, chosen = pick(measured or each, key=lambda pair: pair[1].value)
+        if first.id in _OUTLINE:
+            name, chosen = long_one.name, long_one.features[at]
         every = ", ".join(f"{part_name} {f.value:g}" for part_name, f in each)
         found.append(chosen.model_copy(update={
             "says": f"{chosen.says}; this is {name}'s, of the plate's parts ({every})"}))
     return tuple(found)
+
+
+def _longest(parts: tuple[PlatePart, ...]) -> PlatePart:
+    """The part the plate's outline is read from: the longest of those long and narrow, if any,
+    else the longest."""
+
+    def length(part: PlatePart) -> float:
+        return next((f.value for f in part.features if f.id == "length"), 0.0)
+
+    narrow = [p for p in parts if "long_and_narrow" in traits(p.features)]
+    return max(narrow or parts, key=length)
 
 
 def _seen(each: list[Seen | None], every: bool) -> Seen | None:
@@ -244,8 +266,14 @@ def records(
     parts = tuple(state["parts"])
     orientations = tuple(state["orientations"])
     sliced = state["slice"]
-    given = tuple(GivenPart(name=p.name, path=str(Path(p.given).resolve()), sha256=p.sha256)
-                  for p in parts)
+    given = tuple(
+        GivenPart(
+            name=p.name, path=str(Path(p.given).resolve()), sha256=p.sha256,
+            context=(str(Path(p.context.path).resolve())
+                     if p.context is not None and p.context.path else ""),
+        )
+        for p in parts
+    )
     reviewed = state.get("proposal")
     rows = []
     for part, outcome in zip(parts, orientations, strict=True):
@@ -277,6 +305,7 @@ def records(
             features=part.features,
             reading=state.get("slice_reading"),
             flags=tuple(state.get("slice_flags", ())),
-            plate=PlateRow(job_id=job, n=part.n, parts=given, layout=state["plate"]),
+            plate=PlateRow(job_id=job, n=part.n, parts=given, layout=state["plate"],
+                           as_laid=bool(state.get("as_laid"))),
         ))
     return tuple(rows)

@@ -118,6 +118,8 @@ class ReviewRequest:
     #: `candidates` and `laid_traits` are then each part's own.
     plate: PlateLayout | None = None
     parts: tuple[ReviewPart, ...] = ()
+    #: Why the last answer was taken back, where the plate couldn't be sliced with it.
+    undone: str = ""
 
     @property
     def proposed(self) -> tuple[Flag, ...]:
@@ -160,6 +162,9 @@ def render(request: ReviewRequest) -> str:
         f"  filament  {filament}",
         "",
     ]
+    if request.undone:
+        lines += [f"NOT DONE, your last answer: {request.undone}. The plate is as it was before "
+                  "it.", ""]
     if request.plate is not None:
         lines += [*request.plate.lines(), ""]
     proposal = request.proposal

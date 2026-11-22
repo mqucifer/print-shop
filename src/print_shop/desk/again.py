@@ -37,6 +37,7 @@ from typing import Any
 
 from print_shop.ledger import Row
 from print_shop.orchestrator.graph import AS_LAID
+from print_shop.setup.context import SIDECAR
 from print_shop.setup.proposal import ORIENTATION, Source
 
 __all__ = ["DOWNLOADS", "Again", "again", "answers_file", "correction_line"]
@@ -93,22 +94,31 @@ def correction_line(row: Row) -> str:
 def again(
     row: Row, part_path: Path | None, printers: int = 1, part_found: bool = False,
     plate_parts: tuple[tuple[Path, bool], ...] = (),
+    plate_rows: tuple[Row, ...] = (),
 ) -> Again:
     """How to run `row`'s job again. `part_path` is the part's file, and `part_found` says it
     has the bytes the job printed (by sha256); else it's the path the log names, if any.
     `printers` is how many the inventory has (`--printer` is needed with more than one).
-    `plate_parts` are each of a plate's files the same way, as the whole plate is what's run
-    again (mqucifer/print-shop#109)."""
+    `plate_parts` are each of a plate's files the same way, and `plate_rows` each of its rows, as
+    the whole plate is what's run again, the same from any part's page
+    (mqucifer/print-shop#109)."""
     if row.sliced is not None:
         return _sliced_again(row, part_path, printers, part_found)
     notes: list[str] = []
     if row.plate is not None:
         args = []
         files = plate_parts or tuple((Path(p.path), False) for p in row.plate.parts)
-        for given, (path, found) in zip(row.plate.parts, files, strict=True):
+        for n, (given, (path, found)) in enumerate(zip(row.plate.parts, files, strict=True), 1):
             args.append(str(path))
             if not found:
                 notes += _not_found(given.name, given.sha256, path)
+            if given.context and not path.with_name(path.stem + SIDECAR).is_file() and (
+                str(path) != given.path or not Path(given.context).exists()
+            ):
+                notes.append(f"Part {n}, {given.name}, was read with the context at "
+                             f"{given.context}, and it won't be found beside {path}: its fits, "
+                             "seen faces and side would be lost. Put it back, or put its sidecar "
+                             f"({path.stem + SIDECAR}) beside the file.")
         notes.append("It's the whole plate again. Each part's context is read beside its file "
                      "as given here, with no --context.")
     else:
@@ -129,7 +139,7 @@ def again(
                      "from its slice.")
     if row.profiles is not None:
         args += ["--machine", row.profiles.machine.name, "--process", row.profiles.process.name]
-    if row.orientation_source == AS_LAID:
+    if row.plate.as_laid if row.plate is not None else row.orientation_source == AS_LAID:
         args.append("--as-laid")
     # The part's context is named, as the part may be found elsewhere, away from its sidecar or
     # its design run (mqucifer/print-shop#130).
@@ -149,11 +159,16 @@ def again(
     elif row.intake is not None and row.intake.questions:
         notes.append("The answers don't match the questions kept, so there's no answers file: "
                      "answer them as they're asked.")
-    for c in row.corrections or ():
-        if c.key == ORIENTATION:
-            notes.append(f"The pose was sent back at the review, from {c.preset} to {c.value}, "
-                         f"because {c.reason}. Type orientation at the review to send it back "
-                         "again.")
+    for each in plate_rows or (row,):
+        whose, which = "The pose", ""
+        if each.plate is not None:
+            whose = f"Part {each.plate.n}, {each.stl_name}: the pose"
+            which = f", then {each.plate.n} for the part,"
+        for c in each.corrections or ():
+            if c.key == ORIENTATION:
+                notes.append(f"{whose} was sent back at the review, from {c.preset} to "
+                             f"{c.value}, because {c.reason}. Type orientation at the review"
+                             f"{which} to send it back again.")
     taken = [c for c in ((*row.proposal.changes, *row.proposal.not_applied)
                          if row.proposal else ())
              if c.source is Source.READING]

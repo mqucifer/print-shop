@@ -387,10 +387,12 @@ def draw(ledger: Ledger, row: Row) -> list[int]:
         # The order is a choice for that plate, as a pause is for that part.
         last.pop(SEQUENCE, None)
         if row.plate.first:
-            # The review was of every part, so what it taught is keyed to the traits of them
-            # all: never wider than one part's alone.
-            everyone = {t for r in ledger.job_rows(row.job_id) for t in traits(r.features or ())}
-            reviewed = [t for t in TRAITS if t in everyone]
+            # Lessons are looked up part by part, so it's keyed to one part's traits: the part
+            # with the most, the narrowest key that still reaches this plate printed again.
+            # The reviewer has every part's beside it, to key it otherwise.
+            each = [list(traits(r.features or ())) for r in ledger.job_rows(row.job_id)]
+            reviewed = max(each, key=len)
+            part["plate"]["traits"] = each
     for key, (kind, c) in last.items():
         if _drawn(ledger, row.job_id, kind, key):
             continue

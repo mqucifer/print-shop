@@ -159,6 +159,8 @@ class JobRecord:
     printers: int = 0
     #: Each file of the plate it's an object of, found the same way (mqucifer/print-shop#109).
     plate_parts: tuple[tuple[Path, bool], ...] = ()
+    #: Each of that plate's rows, as it's run again whole.
+    plate_rows: tuple[Row, ...] = ()
 
 
 def status(row: Row) -> str:
@@ -251,7 +253,7 @@ class Desk:
                 job_id=row.job_id, at=row.start_requested_at, part=row.part_said,
                 status=status(row), print_time_s=row.print_time_s if row.heads_job else None,
                 filament_cm3=row.filament_cm3 if row.heads_job else None, swap=has_swap(row),
-                frames=frames.get(row.job_id, 0), failed=row.result == "failed",
+                frames=frames.get(plate_job(row.job_id), 0), failed=row.result == "failed",
             ))
         for job in unprinted:
             found.append(JobSummary(job_id=job.job_id, at=job.ended_at, part=job.stl_name,
@@ -282,6 +284,9 @@ class Desk:
             return None
         with self._ledger() as ledger:
             row = ledger.get(job_id) if ledger is not None else None
+            plate_rows = (tuple(ledger.job_rows(job_id))
+                          if ledger is not None and row is not None and row.plate is not None
+                          else ())
             unprinted = ledger.unprinted(job_id) if ledger is not None else None
             frames = tuple(ledger.frames(job_id)) if ledger is not None else ()
             missed = ledger.frames_missed(job_id) if ledger is not None else None
@@ -311,7 +316,7 @@ class Desk:
         found = (self._finder.find(row.stl_sha256, named, folders)
                  if row is not None else None)
         return JobRecord(
-            plate_parts=plate_parts,
+            plate_parts=plate_parts, plate_rows=plate_rows,
             job_id=job_id, row=row, unprinted=unprinted, frames=frames, frames_missed=missed,
             log=text, part_path=found or named, part_found=found is not None, printers=printers,
         )

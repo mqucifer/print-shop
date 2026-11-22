@@ -51,8 +51,6 @@ __all__ = [
 
 #: Orca's label for ironing.
 IRONING = "Ironing"
-#: A layer this near a part's height is its top: within half of a 0.28 mm layer.
-TOP_MM = 0.15
 #: Two seams this close, in mm, on neighbouring layers, are one line up the wall.
 SEAM_NEAR_MM = 1.0
 #: The share of seams that sit on the one below them for the seam to read as a line.
@@ -296,7 +294,7 @@ def flags(
     filament: dict[str, Any],
     placed: Placed | None = None,
     changes: tuple[Change, ...] = (),
-    tops: tuple[float, ...] = (),
+    tops: tuple[int, ...] = (),
 ) -> tuple[Flag, ...]:
     """What the reading says matters for this part, each with the change it proposes.
 
@@ -305,8 +303,8 @@ def flags(
     its fits keep a random seam off them and propose elephant foot compensation at the plate, a
     hold pulled across the layers is said, and its seen faces stand where the intake didn't say.
     `changes` are the proposal's, which the slice was made with: a value they set, such as a
-    lesson's, is read as the one in effect and named. `tops` are each part's height on a plate
-    of several: each has a top of its own, none of them inside a part.
+    lesson's, is read as the one in effect and named. `tops` are the layers each part's own top
+    is on, for a plate of several: none of them is inside a part.
     """
     if faces is None and placed is not None:
         faces = placed.seen
@@ -358,7 +356,7 @@ def _layer_time(reading: SliceReading, filament: dict[str, Any]) -> list[Flag]:
 
 def _ironing(
     reading: SliceReading, faces: Seen | None, process: dict[str, Any],
-    tops: tuple[float, ...] = (),
+    tops: tuple[int, ...] = (),
 ) -> list[Flag]:
     ironing = reading.feature(IRONING)
     if ironing is None or not reading.ironed:
@@ -380,8 +378,10 @@ def _ironing(
             feature="seen", knowledge="surface", reading=said,
             reason=f"you said '{faces.said}', so ironing costs {_s(ironing.time_s)} for "
                    "faces nobody sees"))]
-    below = [z for z in heights
-             if z < heights[-1] and all(abs(z - top) > TOP_MM for top in tops)]
+    below = [z for z in heights if z < heights[-1]]
+    if tops:
+        # By its layer's number: by object, one height is a floor in one part and a top in another.
+        below = sorted({layer.z for layer in reading.ironed if layer.n not in tops})
     if below and reading.settings.get("ironing_type") in ("top", "solid"):
         return [Flag(id="ironing_inside", reading=said, change=Change(
             key="ironing_type", preset=preset, value="topmost", source=Source.READING,
