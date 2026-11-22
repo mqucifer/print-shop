@@ -129,6 +129,13 @@ def asked_about(asker: Asker, parts: tuple[PlatePart, ...]) -> Asker:
     return ask
 
 
+def _as_shown(text: str) -> str:
+    """A question's or an option's words as a plate's questions showed them."""
+    for said, theirs in PLATE_WORDS.items():
+        text = text.replace(said, theirs)
+    return text
+
+
 def still_holds(
     intake: Intake, parts: tuple[PlatePart, ...], asked_in: tuple[tuple[float, float, float], ...],
 ) -> tuple[Intake, str]:
@@ -153,10 +160,12 @@ def still_holds(
     dropped: list[str] = []
     for question, answer in zip(intake.questions, intake.answers, strict=True):
         option = question.options[answer.choice] if answer.choice is not None else None
-        label = option.label if option is not None else answer.other
+        # As it was shown: "as it prints" would read as the pose it has been turned to. Their own
+        # words are quoted as typed.
+        label = _as_shown(option.label) if option is not None else answer.other
         if question.feature not in _ANY_POSE:
             what = ("which faces are seen" if question.feature == SEEN.feature
-                    else f"'{question.text}'")
+                    else f"'{_as_shown(question.text)}'")
             dropped.append(f"{what}, you said '{label}'")
             continue
         if option is not None and answer.choice is not None:

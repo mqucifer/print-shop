@@ -243,7 +243,8 @@ def test_what_was_said_seen_isnt_carried_through_a_turn(
         assert rig.press("approve", job).printed
     said = " ".join(rig.shown[0].split())
     assert "TURNED SINCE YOU ANSWERED: part 1, cap-tight.stl, to 180,0,0;" in said
-    assert "which faces are seen, you said 'the top as it prints; the walls are hidden'" in said
+    assert "which faces are seen, you said 'the top as it lies now; the walls are hidden'" in said
+    assert "as it prints; the walls are hidden'" not in said, "quoted as it was shown"
     assert "aren't judged or used now" in said and "orientation" in said
     [request] = rig.reviews
     assert not [f.id for f in request.flags if f.change is not None and f.change.feature == "seen"]
@@ -389,6 +390,20 @@ def test_the_questions_say_a_pose_that_isnt_the_files(
     with rig.daemon:
         rig.press("reject", rig.gated(lying, as_laid=False))
     assert "top and bottom as each lies now (part 1 turned " in person.text
+
+
+def test_the_persons_own_words_are_quoted_as_typed() -> None:
+    from print_shop.core.state import AppliedOrientation, MeshReport, PlatePart
+    from print_shop.orchestrator.plate_job import still_holds
+    from print_shop.setup.intake import Answer, Intake
+
+    mesh = MeshReport(is_manifold=True, volume_mm3=1, surface_area_mm2=1, bbox_mm=(1, 1, 1),
+                      overhang_area_mm2=0)
+    part = PlatePart(n=1, name="cap.stl", given="cap.stl", stl="cap.stl", sha256="0", mesh=mesh,
+                     applied=AppliedOrientation(rotation_deg=(180.0, 0.0, 0.0)))
+    intake = Intake(questions=(SEEN,), answers=(Answer(other="the side as it prints"),))
+    _, note = still_holds(intake, (part,), ((0.0, 0.0, 0.0),))
+    assert "you said 'the side as it prints'" in note
 
 
 def test_seen_walls_arent_judged_through_a_turn(
