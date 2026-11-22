@@ -72,6 +72,9 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "body_volumes_mm3",
         "layers_read",
         "narrower_than_nozzle_mm3",
+        # A one-layer point at a hole's rim, noted and not thin (mqucifer/print-shop#238).
+        "rim_points",
+        "rim_points_at",
         "sharp_points",
         "thin_at",
         "thin_places",
@@ -733,6 +736,19 @@ SHAPES: dict[str, dict[str, Any]] = {
         "bodies": NUMBER,
         "body_volumes_mm3": Rows(NUMBER),
         "narrower_than_nozzle_mm3": NUMBER,
+        "rim_points": NUMBER,
+        "rim_points_at": Rows(
+            Row(
+                {
+                    "box": CORNERS,
+                    "mm2": NUMBER,
+                    "rim": XYZ,
+                    "rim_across_mm": NUMBER,
+                    "wall_mm": NUMBER,
+                    "width_mm": NUMBER,
+                }
+            )
+        ),
         "sharp_points": NUMBER,
         "thin_rays_not_at_a_point": NUMBER,
         "thin_spots": NUMBER,

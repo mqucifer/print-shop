@@ -20,6 +20,7 @@ import trimesh
 from . import pausing
 from .limits import ARITHMETIC, over, said, under
 from .report import Report
+from .rim import Rims
 from .shapes import (
     FINE,
     NoAnswer,
@@ -506,6 +507,35 @@ def _thin_places(
     and the thinnest, the model never opened the record's positions, and it took a note about a
     wedge for where they were. Each place gives its box, how many layers it runs through, and
     the least width across it by rays, thinnest first."""
+    groups = _joined(rows, step)
+    places: list[dict[str, Any]] = []
+    read = 0
+    for group in groups:
+        widths = [width_of[id(r)] for r in group if id(r) in width_of]
+        if not widths and read < PLACES_READ:
+            r = group[0]
+            widths = [_across(built, r["x"], r["y"], r["z"], length)]
+            read += 1
+        width = min((w for w in widths if np.isfinite(w)), default=None)
+        zs = [r["z"] for r in group]
+        lo = [min(r["box"][0] for r in group), min(r["box"][1] for r in group)]
+        hi = [max(r["box"][2] for r in group), max(r["box"][3] for r in group)]
+        places.append(
+            {
+                "width_mm": round(width, 4) if width is not None else None,
+                "box": [
+                    [*lo, round(max(heights[0], min(zs) - step / 2), 3)],
+                    [*hi, round(min(heights[1], max(zs) + step / 2), 3)],
+                ],
+                "layers": len(set(zs)),
+                "mm2": round(sum(r["mm2"] for r in group), 3),
+            }
+        )
+    return sorted(places, key=lambda p: (p["width_mm"] is None, p["width_mm"] or 0.0))
+
+
+def _joined(rows: list[dict[str, Any]], step: float) -> list[list[dict[str, Any]]]:
+    """Thin spots joined into places: one in a layer and one in the next whose boxes meet."""
     by_layer: dict[float, list[int]] = {}
     for i, r in enumerate(rows):
         by_layer.setdefault(r["z"], []).append(i)
@@ -530,30 +560,103 @@ def _thin_places(
     groups: dict[int, list[dict[str, Any]]] = {}
     for i, r in enumerate(rows):
         groups.setdefault(root(i), []).append(r)
-    places: list[dict[str, Any]] = []
+    return list(groups.values())
+
+
+def _rim_points(
+    rows: list[dict[str, Any]],
+    piece_of: dict[int, tuple[float, Any]],
+    width_of: dict[int, float],
+    rims: Rims,
+    built: Any,
+    length: float,
+    step: float,
+    report: Report,
+) -> list[dict[str, Any]]:
+    """The thin spots that are one-layer points at a hole's rim (mqucifer/print-shop#238): in
+    a place one layer tall, at a rim, and with the wall there at least the nozzle square to
+    its surfaces. One at a rim whose wall is under that stays thin, and where is said."""
+    found = []
+    blocked: dict[tuple[float, ...], dict[str, Any]] = {}
     read = 0
-    for group in groups.values():
-        widths = [width_of[id(r)] for r in group if id(r) in width_of]
-        if not widths and read < PLACES_READ:
-            r = group[0]
-            widths = [_across(built, r["x"], r["y"], r["z"], length)]
+    for group in _joined(rows, step):
+        if len(group) != 1:
+            continue
+        row = group[0]
+        width = width_of.get(id(row))
+        if width is None:
+            if read >= PLACES_READ:
+                break
+            width = _across(built, row["x"], row["y"], row["z"], length)
             read += 1
-        width = min((w for w in widths if np.isfinite(w)), default=None)
-        zs = [r["z"] for r in group]
-        lo = [min(r["box"][0] for r in group), min(r["box"][1] for r in group)]
-        hi = [max(r["box"][2] for r in group), max(r["box"][3] for r in group)]
-        places.append(
+        # One the rays don't find thin is the two methods' to settle, not a point.
+        if not (np.isfinite(width) and width < rims.nozzle + 2 * FINE[0]):
+            continue
+        z, piece = piece_of[id(row)]
+        at = rims.point(piece, z)
+        if at is None:
+            continue
+        if at["thin"] is None:
+            found.append({**at, "row": row, "width_mm": width})
+        else:
+            blocked[tuple(at["rim"])] = at
+    for at in list(blocked.values())[:PLACES_SAID]:
+        report.line(
+            f"a one-layer point at the rim round {_at(at['rim'])} stays thin: read square to "
+            f"the surfaces, that hole's wall is {said(at['thin']['wall_mm'], rims.nozzle)} mm "
+            f"at {_at(at['thin']['at'])}, under the {rims.nozzle:g} mm nozzle"
+        )
+    return found
+
+
+def _rim_points_said(
+    report: Report,
+    points: list[dict[str, Any]],
+    step: float,
+    heights: tuple[float, float],
+    nozzle: float,
+) -> None:
+    """The points at holes' rims: how many and where, noted, and kept in the numbers."""
+    saved = []
+    for p in points:
+        z, box = p["row"]["z"], p["row"]["box"]
+        saved.append(
             {
-                "width_mm": round(width, 4) if width is not None else None,
+                "width_mm": round(p["width_mm"], 4),
                 "box": [
-                    [*lo, round(max(heights[0], min(zs) - step / 2), 3)],
-                    [*hi, round(min(heights[1], max(zs) + step / 2), 3)],
+                    [*box[:2], round(max(heights[0], z - step / 2), 3)],
+                    [*box[2:], round(min(heights[1], z + step / 2), 3)],
                 ],
-                "layers": len(set(zs)),
-                "mm2": round(sum(r["mm2"] for r in group), 3),
+                "mm2": p["row"]["mm2"],
+                "rim": p["rim"],
+                "rim_across_mm": p["rim_across_mm"],
+                "wall_mm": p["wall_mm"],
             }
         )
-    return sorted(places, key=lambda p: (p["width_mm"] is None, p["width_mm"] or 0.0))
+    report.numbers["rim_points"] = len(saved)
+    report.numbers["rim_points_at"] = saved
+    if not saved:
+        return
+    each = "; ".join(
+        f"{p['width_mm']:.3f} mm across, from {_at(p['box'][0])} to {_at(p['box'][1])}, at the "
+        f"rim {p['rim_across_mm']:.2f} mm across round {_at(p['rim'])}"
+        for p in saved[:PLACES_SAID]
+    )
+    more = len(saved) - PLACES_SAID
+    report.note(
+        f"{len(saved)} one-layer point(s) at a hole's rim, as rim_points_at, not counted as "
+        f"thin walls, as the wall there is at least the {nozzle:g} mm nozzle square to its "
+        f"surfaces: {each}" + (f"; and {more} more in the record" if more > 0 else "")
+    )
+    report.second(
+        f"rays square to the surfaces at {len(saved)} point(s) at a hole's rim: the least wall "
+        f"{min(p['wall_mm'] for p in saved):.3f} mm, and none of those holes has a wall or an "
+        f"end under {nozzle:g} mm"
+    )
+
+
+def _at(point: list[float]) -> str:
+    return "(" + ", ".join(f"{v + 0.0:g}" for v in point) + ")"
 
 
 def _thin_places_said(report: Report, places: list[dict[str, Any]], nozzle: float) -> None:
@@ -604,6 +707,7 @@ def run_thin(args: Any, report: Report) -> None:
     step = float((high - low) / count)
     least = round(nozzle**2 / 2, 4)
     tips_by_layer = []
+    piece_of: dict[int, tuple[float, Any]] = {}
     for z in heights:
         section = slice_at(built, float(z))
         tips_by_layer.append(_tips(section, nozzle))
@@ -635,6 +739,7 @@ def run_thin(args: Any, report: Report) -> None:
                         "box": [round(float(v), 3) for v in piece.bounds],
                     }
                 )
+                piece_of[id(thin_rows[-1])] = (float(z), piece)
     report.fact("layers_read", f"{count} at {step:.3f} mm" + sampled)
     report.fact(
         "narrower_than_nozzle_mm3", round(lost_mm3, 3), how=f"sections opened by {nozzle} mm"
@@ -653,13 +758,25 @@ def run_thin(args: Any, report: Report) -> None:
         )
     width_of = {id(r): w for r, w in zip(thin_rows, measured, strict=False)}
     thin_rows = [r for r in thin_rows if r not in cusps]
+    # A point one layer tall at a hole's rim, with a whole wall round it, isn't a thin wall
+    # (mqucifer/print-shop#238, `rim`). Sampled heights can't say a place is one layer tall.
+    points: list[dict[str, Any]] = []
+    if thin_rows and not sampled:
+        rims = Rims(mesh, built, length, nozzle)
+        points = _rim_points(thin_rows, piece_of, width_of, rims, built, length, step, report)
+    at_rim = {id(p["row"]) for p in points}
+    thin_rows = [r for r in thin_rows if id(r) not in at_rim]
+    _rim_points_said(report, points, step, (low, high), nozzle)
     report.fact("thin_spots", len(thin_rows), how=f"over {least} mm² in a layer")
     report.numbers["thin_at"] = thin_rows[:50]
     places = _thin_places(thin_rows, width_of, built, length, step, (low, high))
     report.numbers["thin_places"] = places
     if places:
         _thin_places_said(report, places, nozzle)
-    widths = [w for w in measured if np.isfinite(w) and w < nozzle + 2 * FINE[0]]
+    # A row past the first 50 isn't measured, and a rim's point is said with its own width.
+    noted = {id(p["row"]): p["width_mm"] for p in points}
+    over_spots = [w for i, w in width_of.items() if i not in noted]
+    widths = [w for w in over_spots if np.isfinite(w) and w < nozzle + 2 * FINE[0]]
     unconfirmed = len(wide) - len(cusps)
     if widths:
         report.fact("thinnest_across_mm", round(min(widths), 4), how="rays across the thin spots")

@@ -374,6 +374,57 @@ def thin_parts() -> None:
     )
 
 
+def rim_points() -> None:
+    """A plate 20 mm thick leant at 45°, and 5.5 mm bores square to it (mqucifer/print-shop#238):
+    at each rim one layer's section leaves a point. And what keeps such a point thin."""
+    out = Path("rim")
+    out.mkdir(exist_ok=True)
+    V = cq.Vector
+    plate = cq.Solid.makeBox(20, 50, 50, V(-10, -25, -25)).rotate(V(), V(0, 1, 0), 45)
+    plain = plate.intersect(cq.Solid.makeBox(200, 200, 28, V(-100, -100, -14)))
+    plain = plain.translate((0, 0, 14))
+
+    def cut(
+        part: Any,
+        start: float = -30.0,
+        end: float = 30.0,
+        y: float = 0.0,
+        radius: float = 2.75,
+        lean: float = 45.0,
+    ) -> Any:
+        way = V(np.cos(np.radians(lean)), 0, -np.sin(np.radians(lean)))
+        at = V(0, y, 14) + way * start
+        return part.cut(cq.Solid.makeCylinder(radius, end - start, at, way))
+
+    bored = cut(plain)
+    made = {
+        "plain": plain,
+        "bored": bored,
+        "turned": bored.rotate(V(), V(0, 0, 1), 17).translate((183.3, 122.2, 5)),
+        "blind": cut(plain, end=0),
+        "counterbore": cut(bored, end=-6, radius=5.2),
+        # What keeps it thin: 0.3 mm to the plate's side, and 0.3 mm over the bore's end.
+        "side": cut(plain, y=25 - 2.75 - 0.3),
+        "skin": cut(plain, end=10 - 0.3),
+        "skin-up": cut(plain, start=-10 + 0.3),
+        # A rim sharper than square, the bore 5° off the face's square.
+        "sharp": cut(plain, lean=50),
+    }
+    eight = plain
+    for y in (-21, -15, -9, -3, 3, 9, 15, 21):
+        eight = cut(eight, y=y)
+    made["eight"] = eight
+    # A rib one layer tall and 0.3 mm wide round an upright bore's rim.
+    slab = cq.Solid.makeBox(20, 20, 5, V(-10, -10, 0))
+    rib = cq.Solid.makeCylinder(3.05, 0.2, V(0, 0, 5))
+    made["rib"] = slab.fuse(rib).cut(cq.Solid.makeCylinder(2.75, 8, V(0, 0, -1)))
+    for name, shape in made.items():
+        save(cq.Workplane().add(shape), f"rim/{name}")
+    cq.exporters.export(
+        cq.Workplane().add(bored), "rim/bored.stl", tolerance=0.01, angularTolerance=0.1
+    )
+
+
 def designs() -> None:
     """Design scripts for the parameter check, as a model would write them."""
     ring = """
@@ -1115,6 +1166,7 @@ if __name__ == "__main__":
     hanging()
     closes()
     thin_parts()
+    rim_points()
     designs()
     sheets()
     glass()
