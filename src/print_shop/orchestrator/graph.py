@@ -68,7 +68,7 @@ from print_shop.setup import Proposer
 from print_shop.setup import lessons as print_lessons
 from print_shop.setup.context import PartContext, place, pose_for, read_context
 from print_shop.setup.features import measure
-from print_shop.setup.intake import Asker, Estimate, Intake
+from print_shop.setup.intake import Asker, Estimate, Intake, Question
 from print_shop.setup.loop import Part, PrintLoop
 from print_shop.setup.loop import run as run_loop
 from print_shop.setup.proposal import (
@@ -88,6 +88,7 @@ from print_shop.setup.reading import SliceReading, flags, read_slice, seen
 from print_shop.setup.review import Reviewer, ReviewRequest
 from print_shop.setup.skill import groups_for, load
 from print_shop.setup.traits import traits
+from print_shop.setup.waiting import Waiting, ask_meanwhile
 from print_shop.slicer.naming import job_id_from_filename, name_gcode
 from print_shop.slicer.orca import (
     Slicer,
@@ -137,6 +138,7 @@ def build_graph(
     loop: PrintLoop | None = None,
     show: Callable[[str], None] | None = None,
     store: Store | None = None,
+    waiting: Waiting | None = None,
 ) -> Any:
     """Build and compile the print pipeline graph.
 
@@ -188,6 +190,10 @@ def build_graph(
             shows it nowhere; the ledger keeps the reading either way.
         store: print-shop's profiles, by which a hand-sliced file's settings are put under the
             profile each belongs to. None keeps them all under "other".
+        waiting: The person's side of the wait for the model's questions
+            (mqucifer/print-shop#208): print-shop's two are asked at once, the model's are
+            added when they arrive, and the person can go on without them. None asks them
+            all together, once the model's call has ended.
 
     Returns:
         A compiled LangGraph ``CompiledStateGraph``.
@@ -335,13 +341,18 @@ def build_graph(
             poses = state.get("orientation_candidates", ())
             features = measure(stl_to_slice, applied.bed_contact_area_mm2 or 0.0)
             first = stl_to_slice
-            intake = _ask(
-                proposer.questions(features, profiles),
-                asker,
-                lambda settings, n: _estimate(
-                    slicer, first, profiles, settings, outdir / "options" / str(n)
-                ),
-            )
+
+            def priced(settings: dict[str, str], n: int) -> Estimate | None:
+                return _estimate(slicer, first, profiles, settings, outdir / "options" / str(n))
+
+            if waiting is not None and proposer.asks_model:
+                measured = features
+                intake = ask_meanwhile(
+                    lambda stop: proposer.questions(measured, profiles, stop),
+                    asker, waiting, lambda questions: _priced(questions, priced),
+                )
+            else:
+                intake = _ask(proposer.questions(features, profiles), asker, priced)
             proposed["intake"] = intake
             context = state.get("part_context")
             earlier: list[Change] = []
@@ -421,6 +432,10 @@ def build_graph(
                             "loop": fell_back["loop"], "loop_ending": fell_back["loop_ending"],
                             "notes": proposal.notes + fell_back["notes"]})
                 proposal = _with_orienting(proposal, state.get("orientation_lessons", ()))
+                if intake.without:
+                    # Said at the review, as well as when it happened (mqucifer/print-shop#208).
+                    proposal = proposal.model_copy(
+                        update={"notes": proposal.notes + (intake.without,)})
                 carried = [c for c in earlier if c.key != ORIENTATION]
                 if carried:
                     # Corrections made before the part was turned stand after it.
@@ -878,10 +893,15 @@ def _ask(
     asked: Any, asker: Asker, slice_with: Any
 ) -> Intake:
     """The questions with Orca's estimate for each option, asked, with the answers."""
-    counter = iter(range(1, 1000))
-    questions = estimate(asked.questions, lambda settings: slice_with(settings, next(counter)))
+    questions = _priced(asked.questions, slice_with)
     return Intake(questions=questions, answers=asker(questions), note=asked.note,
                   call=asked.call)
+
+
+def _priced(questions: tuple[Question, ...], slice_with: Any) -> tuple[Question, ...]:
+    """The questions with Orca's estimate for each option."""
+    counter = iter(range(1, 1000))
+    return estimate(questions, lambda settings: slice_with(settings, next(counter)))
 
 
 def _estimate(

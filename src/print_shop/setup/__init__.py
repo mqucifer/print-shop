@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -18,7 +19,7 @@ from print_shop.expert.client import LLMConfig
 from print_shop.setup.context import PartContext
 from print_shop.setup.features import Feature
 from print_shop.setup.intake import Intake
-from print_shop.setup.model import Ask, llm_ask, propose_by_model
+from print_shop.setup.model import Ask, llm_ask, llm_ask_streamed, propose_by_model
 from print_shop.setup.proposal import (
     GivenLesson,
     PartFacts,
@@ -28,7 +29,7 @@ from print_shop.setup.proposal import (
     from_lessons,
     guard,
 )
-from print_shop.setup.questions import Asked, propose_questions
+from print_shop.setup.questions import ANSWER_CHARS, Asked, propose_questions
 from print_shop.setup.skill import groups_for, load
 from print_shop.slicer.store import STORE_DIR
 
@@ -52,13 +53,22 @@ class Proposer:
     #: Where kept lessons come from (mqucifer/print-shop#106). None gives none.
     lessons: Lessons | None = None
 
-    def questions(self, features: tuple[Feature, ...], profiles: SlicerProfiles) -> Asked:
-        """The intake's questions for this part, before any are answered."""
+    @property
+    def asks_model(self) -> bool:
+        """Whether the questions come from a model, which can be waited for."""
+        return self.ask_questions is not None or self.llm is not None
+
+    def questions(
+        self, features: tuple[Feature, ...], profiles: SlicerProfiles,
+        stop: threading.Event | None = None,
+    ) -> Asked:
+        """The intake's questions for this part, before any are answered. `stop` ends the
+        model's call (mqucifer/print-shop#208)."""
         facts = self._facts(Intake(), features, profiles)
         if self.ask_questions is not None:
             return propose_questions(facts, self.ask_questions)
         if self.llm is not None:
-            return propose_questions(facts, llm_ask(self.llm))
+            return propose_questions(facts, llm_ask_streamed(self.llm, ANSWER_CHARS, stop))
         return Asked((), "no questions: no model was asked")
 
     def __call__(
