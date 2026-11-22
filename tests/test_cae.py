@@ -802,6 +802,67 @@ def test_a_through_bolt_with_no_hole_to_pass_through_is_said_and_nothing_is_solv
     assert answer.record["seconds"] < 10
 
 
+# The shank's shear, on its own stretch of the bore (mqucifer/print-shop#245)
+
+#: Beside where the blocks meet, so the bolt has the shear and little pull.
+NEAR_MEET = ("--weight", "20", "--at", "18,15,20", "--over", "1.5", "--mesh", "6")
+
+
+def half_wall(length: float) -> float:
+    """The half of a hole's round wall a shank leans on."""
+    return math.pi * HOLE / 2 * length
+
+
+def test_a_bolt_s_shear_is_only_on_its_own_stretch_of_the_bore(cae: Any) -> None:
+    """The second block's bore runs x 20 to 30 to the nut's slot and on from 34.9 for the bolt's
+    tip. The shear was on both, and the plastic round it read 0.228% across its layers at the
+    seat. On the stretch alone it's 0.284%, in the stretch, and lengthening what's past the
+    slot doesn't move the wall that takes it."""
+    answer = cae("load", "shear/round-slot.json", *NEAR_MEET)
+    assert answer.verdict == "OK", answer.text
+    one, two = answer.numbers["joints"]["one+two"]["bolts"][0]["ends"]
+    assert two["round"]["across_layers_pct"] == pytest.approx(0.284, rel=0.1)
+    assert two["round"]["across_layers_pct"] > 0.26, "0.228 with the far stretch loaded"
+    assert 20 < two["round"]["across_at"][0] < 30
+    assert two["hole_length_mm"] == pytest.approx(10)
+    assert two["sheared_mm2"] == pytest.approx(half_wall(10), rel=0.06)
+    assert one["sheared_mm2"] == pytest.approx(half_wall(20), rel=0.06)
+    assert two["wall_pressure_mpa"] == pytest.approx(20 * G / (5 * 10), rel=1e-3), "as it was"
+    assert "and none past them, as joints.one+two.bolts.0.ends.1.sheared_mm2" in answer.text
+    assert reports.unlike("load", answer.numbers) == []
+    longer = cae("load", "shear/longer.json", *NEAR_MEET)
+    further = longer.numbers["joints"]["one+two"]["bolts"][0]["ends"][1]
+    assert further["sheared_mm2"] == pytest.approx(two["sheared_mm2"], rel=0.02)
+
+
+def test_where_shear_rules_a_bore_past_the_slot_doesn_t_hide_the_tear(cae: Any) -> None:
+    """4 mm of bore to a washer's slot, 11 mm past it, 5.2 mm above the bottom. With 20 kg the
+    plastic round it was 0.31% across its layers and `OK`, the nearest limit all the same. With
+    the shear on the 4 mm it's 1.19% of 1%: it tears out."""
+    at = ("--at", "19,15,20", "--over", "1.5", "--mesh", "6")
+    answer = cae("load", "shear/tears.json", "--weight", "20", *at)
+    assert answer.verdict == "FAIL", answer.text
+    why = answer.record["why"]
+    assert "in two: the plastic round the hole is pulled across its layers by" in why
+    assert "; and " not in why, "nothing else fails"
+    joint = answer.numbers["joints"]["one+two"]
+    assert "the plastic round the hole in two" in joint["gives_first"]
+    near = joint["bolts"][0]["ends"][1]["round"]
+    assert near["across_layers_pct"] == pytest.approx(1.19, rel=0.1)
+    assert near["coarse"]["across_layers_pct"] > 1.0, "on both meshes"
+    assert 20 < near["across_at"][0] < 24
+
+
+def test_a_counterbore_at_the_head_still_isn_t_wall(cae: Any) -> None:
+    """With no far stretch, and the head sunk 4 mm: 16 mm of bore, and no more."""
+    answer = cae("load", "shear/sunk.json", *NEAR_MEET)
+    assert answer.verdict == "OK", answer.text
+    one, two = answer.numbers["joints"]["one+two"]["bolts"][0]["ends"]
+    assert one["hole_length_mm"] == pytest.approx(16)
+    assert one["sheared_mm2"] == pytest.approx(half_wall(16), rel=0.06)
+    assert two["sheared_mm2"] == pytest.approx(half_wall(20), rel=0.06)
+
+
 # A tapered dovetail, its latch and the lift (mqucifer/print-shop#170)
 
 #: The bars, as `make_fixtures.py` draws them: the lower 30 x 20 x 70 with the socket in it, the

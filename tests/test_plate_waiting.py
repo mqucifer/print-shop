@@ -19,6 +19,7 @@ from pydantic import SecretStr
 from print_shop.core.contracts import Proposal as Chosen
 from print_shop.expert.client import LLMConfig
 from print_shop.expert.orientation import OrientationRequest
+from print_shop.ingest.orientation import AXIS_ALIGNED
 from print_shop.orchestrator import graph
 from print_shop.runtime import describe_all
 from print_shop.setup.intake import replay_asker
@@ -417,3 +418,29 @@ def test_seen_walls_arent_judged_through_a_turn(
         rig.press("reject", rig.gated(_caps(tmp_path), as_laid=False))
     [request] = rig.reviews
     assert "seam_seen" not in [f.id for f in request.flags]
+
+
+@pytest.mark.parametrize(
+    ("as_laid", "on_a_side"),
+    [(True, 0), (False, 3), (False, 1), (False, 0)],
+    ids=["as laid", "each on its context's side", "one on its context's side", "chosen after"],
+)
+def test_every_part_of_a_plate_has_all_six_poses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, never: Callable[..., Any],
+    as_laid: bool, on_a_side: int,
+) -> None:
+    """A kept pose is measured alone for one part (mqucifer/print-shop#235). A plate's part
+    needs all six however its pose is kept: its send-back, its fit and print-again read them."""
+    caps = _caps(tmp_path)
+    for cap in caps[:on_a_side]:
+        (cap.parent / f"{cap.stem}.part.json").write_text('{"down": "+z"}')
+    person, poses = Person("1", "1", "go"), Poses()
+    rig = _rig(tmp_path, person, poses, monkeypatch, never)
+    with rig.daemon:
+        rig.press("reject", rig.gated(caps, as_laid=as_laid))
+    parts = rig.reviews[0].parts
+    assert len(parts) == len(caps)
+    for n, part in enumerate(parts):
+        assert [c.rotation_deg for c in part.candidates] == list(AXIS_ALIGNED), part
+        if n < on_a_side:
+            assert part.orientation.rotation_deg == (180.0, 0.0, 0.0), "its own context was read"

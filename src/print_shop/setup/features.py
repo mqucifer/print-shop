@@ -11,17 +11,33 @@ for a setting is the proposal's job.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import trimesh
 from pydantic import BaseModel
 
-__all__ = ["FLARE_MM", "Feature", "Overhang", "measure", "overhang_places", "overhang_to_support"]
+from print_shop.setup.outline import Outlines, lengths
+
+__all__ = [
+    "FLARE_MM", "Feature", "Overhang", "measure", "overhang_places", "overhang_to_support",
+    "resting_on",
+]
 
 #: A face this far from vertical, facing down, needs support (Orca's own
 #: threshold reasoning; the analyzer uses the same 45 degrees).
 _OVERHANG_DEG = 45.0
+#: A face this near the threshold is at it (mqucifer/print-shop#239): a float32 mesh's own
+#: rounding, as arithmetic's noise is for the bench's limits (mqucifer/print-shop#72), and no
+#: band. An STL's coordinate up to 512 mm is off by up to half its step there, 2^-16 mm, along
+#: each axis, so two points' difference is off by up to 2 sqrt(3) 2^-16 = 5.3e-5 mm. Over
+#: `_ENVELOPE_MM` of height along a 45 degree face, 0.4 sqrt(2) = 0.57 mm of it, that turns
+#: it by up to 0.0054 degrees. 45.01 degrees is past it.
+_AT_LIMIT_DEG = 0.0054
+#: What a face's angle, and the slope read under it, has to pass to overhang.
+_PAST_DEG = _OVERHANG_DEG + _AT_LIMIT_DEG
 #: Faces within this of horizontal are flat: a bridge below, a top surface above.
 _FLAT = 0.98
 #: The first layer: a face this low prints on the plate, not over the air. Orca
@@ -35,6 +51,11 @@ _FIRST_LAYER_MM = 0.2
 _ENVELOPE_MM = 0.4
 #: Each downward face is read at points this far apart at most.
 _SAMPLE_MM = 0.5
+#: The most points read at once: a wide ceiling has millions (mqucifer/print-shop#235).
+_POINTS_AT_ONCE = 1 << 16
+#: The most times a face is halved. A piece's place in the halving fits 64 bits up to this, and
+#: 0.5 mm is reached well before it for anything that fits a printer.
+_HALVINGS = 63
 #: A round or chamfer rising from the plate is carried by the layers under it, each a little
 #: wider than the last, from the plate up: it needs no support (mqucifer/print-shop#128). Orca
 #: sliced the Sponsor's lid lying on its rounded top edge with none, where this measure read
@@ -102,6 +123,15 @@ def measure(stl_path: str | Path, bed_contact_area_mm2: float) -> tuple[Feature,
     )
 
 
+def resting_on(features: tuple[Feature, ...], bed_contact_area_mm2: float) -> tuple[Feature, ...]:
+    """`measure`'s features of the same file, given another figure for its area on the plate:
+    that's the one feature it's handed rather than reads, so nothing is read again
+    (mqucifer/print-shop#235)."""
+    area = float(round(bed_contact_area_mm2))
+    return tuple(f.model_copy(update={"value": area}) if f.id == "bed_contact" else f
+                 for f in features)
+
+
 def _footprint(mesh: trimesh.Trimesh) -> tuple[float, float]:
     """The footprint's length and width: the sides of the smallest box around it on the plate.
 
@@ -129,8 +159,15 @@ def overhang_to_support(
     coordinates, such as the panes put in a frame at its pause: a face with it right under
     is carried, as one with the part's own material under it is (mqucifer/print-shop#153).
     None of `beneath`'s own faces is read."""
-    needs = _overhang(mesh, beneath=beneath)[0]
-    return needs, max(_overhang(mesh, flares=False, beneath=beneath)[0] - needs, 0.0)
+    rising = _from_the_plate(mesh)
+    # Read once, with the round in, and it's then left out: whether a point overhangs doesn't
+    # depend on which other faces are read (mqucifer/print-shop#235).
+    found = [(p.key, p.areas, rising[p.face]) for p in _over(mesh, _downward(mesh), beneath)]
+    if not found:
+        return 0.0, 0.0
+    areas, aside = _in_order([f[0] for f in found], [f[1] for f in found], [f[2] for f in found])
+    needs = float(areas[~aside].sum())
+    return needs, max(float(areas.sum()) - needs, 0.0)
 
 
 class Overhang(BaseModel):
@@ -214,16 +251,17 @@ def _from_the_plate(mesh: trimesh.Trimesh) -> np.ndarray:
     return found
 
 
-def _overhang(
-    mesh: trimesh.Trimesh, flares: bool = True, beneath: trimesh.Trimesh | None = None
-) -> tuple[float, float, float]:
+def _overhang(mesh: trimesh.Trimesh) -> tuple[float, float, float]:
     """The overhang's area, its steepest point, and the flat part of it, a bridge.
 
     In mm2, degrees past vertical, and mm2.
 
     Read as the printer lays it: a point on a downward face overhangs when the
     part's outline `_ENVELOPE_MM` lower is further than that away, sideways,
-    so the slope from there to here is past `_OVERHANG_DEG`. A slope drawn in
+    so the slope from there to here is past `_OVERHANG_DEG`, by more than the
+    mesh's own rounding, `_AT_LIMIT_DEG`, 0.0054 degrees: both a face's angle and
+    that slope at 45 degrees to within it are at 45, and need no support, however
+    the part is turned (mqucifer/print-shop#239). A slope drawn in
     0.1 mm steps reads as the slope its steps make, not as the 90 degree
     ceiling each step's underside is, while a real ceiling's underside, which
     nothing reaches from below, still reads as 90 degrees.
@@ -232,42 +270,81 @@ def _overhang(
     the slope is read over (a step), when it's read at the steps' slope. The
     bridge is the overhang on flat faces deeper than that: a step is no bridge.
     """
-    found = _overhanging(mesh, flares, beneath)
-    if found is None:
+    rising = _from_the_plate(mesh)
+    keys, areas, flats, steepest = [], [], [], []
+    for points in _over(mesh, _downward(mesh) & ~rising):
+        read, flat = points.slope_and_flat()
+        keys.append(points.key)
+        areas.append(points.areas)
+        flats.append(flat)
+        steepest.append(float(read.max()))
+    if not keys:
         return 0.0, 0.0, 0.0
-    _, areas, read, flat = found
-    return float(areas.sum()), float(read.max()), float(areas[flat].sum())
+    area, bridge = _in_order(keys, areas, flats)
+    return float(area.sum()), max(steepest), float(area[bridge].sum())
 
 
 def _overhanging(
-    mesh: trimesh.Trimesh, flares: bool = True, beneath: trimesh.Trimesh | None = None
+    mesh: trimesh.Trimesh, beneath: trimesh.Trimesh | None = None
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
     """Each point of a seated mesh that overhangs, as `_overhang` reads it: where it is, in
     the mesh's own coordinates, the area it stands for, its slope in degrees past vertical, and
     whether it's on a flat face deeper than the slope is read over. None where nothing does."""
+    rising = _from_the_plate(mesh)
+    found = [(p.key, p.at, p.areas, *p.slope_and_flat())
+             for p in _over(mesh, _downward(mesh) & ~rising, beneath)]
+    if not found:
+        return None
+    at, areas, read, flat = _in_order(
+        [f[0] for f in found], *([f[n] for f in found] for n in range(1, 5))
+    )
+    return at + mesh.bounds[0], areas, read, flat
+
+
+def _downward(mesh: trimesh.Trimesh) -> np.ndarray:
+    """Each face that could overhang: facing down past the threshold, and not wholly in the
+    first layer, on the plate."""
+    top = mesh.triangles[:, :, 2].max(axis=1) - mesh.bounds[0][2]
+    # An angle from vertical is the arcsine of how far the normal points down: a cosine of the
+    # threshold is the same only at 45 degrees exactly.
+    down: np.ndarray = (mesh.face_normals[:, 2] < -np.sin(np.radians(_PAST_DEG))) & (
+        top > _FIRST_LAYER_MM
+    )
+    return down
+
+
+@dataclass(frozen=True)
+class _Points:
+    """Some of the points that overhang, with the place of each in the halving (`key`)."""
+
+    key: np.ndarray
+    at: np.ndarray  # from the mesh's lowest corner
+    areas: np.ndarray
+    face: np.ndarray
+    down: np.ndarray
+    slope: np.ndarray
+    outlines: Outlines
+
+    def slope_and_flat(self) -> tuple[np.ndarray, np.ndarray]:
+        """Each point's slope as it's read, and whether it's a bridge: both turn on its own
+        face's depth, which only what overhangs is measured for."""
+        own = np.degrees(np.arcsin(np.clip(self.down, -1, 1)))
+        depth = self.outlines.reach(self.at, self.at[:, 2] - 0.01)  # its own face's depth
+        read = np.where(depth > _ENVELOPE_MM, own, np.minimum(own, self.slope))
+        return read, (self.down > _FLAT) & (depth > _ENVELOPE_MM)
+
+
+def _over(
+    mesh: trimesh.Trimesh, faces: np.ndarray, beneath: trimesh.Trimesh | None = None
+) -> Iterator[_Points]:
+    """The points on `faces` that overhang, some at a time, so that a wide ceiling's millions
+    are never all held with their triangles (mqucifer/print-shop#235). `_in_order` puts what's
+    kept of them back in the halving's order."""
+    chosen = np.flatnonzero(faces)
+    if not len(chosen):
+        return
     lo = mesh.bounds[0]
     normals = mesh.face_normals
-    top = mesh.triangles[:, :, 2].max(axis=1) - lo[2]
-    # Facing down past the threshold, not wholly in the first layer, on the plate, and, unless
-    # `flares` is False, not a round or chamfer rising from the plate (mqucifer/print-shop#128).
-    rising = _from_the_plate(mesh) if flares else np.zeros(len(mesh.faces), dtype=bool)
-    candidates = np.flatnonzero(
-        (normals[:, 2] < -np.cos(np.radians(_OVERHANG_DEG))) & (top > _FIRST_LAYER_MM) & ~rising
-    )
-    if not len(candidates):
-        return None
-    triangles, index = _bisect(mesh.triangles[candidates] - lo, _SAMPLE_MM)
-    points = triangles.mean(axis=1)
-    areas = np.linalg.norm(
-        np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0]), axis=1
-    ) / 2
-    down = -normals[candidates[index], 2]
-    keep = points[:, 2] > _FIRST_LAYER_MM
-    points, areas, down = points[keep], areas[keep], down[keep]
-    if not len(points):
-        return None
-    own = np.degrees(np.arcsin(np.clip(down, -1, 1)))
-
     seated = mesh.copy()
     if beneath is not None:
         # What a point has under it is the part and whatever else stands there by then.
@@ -277,122 +354,75 @@ def _overhanging(
             process=False,
         )
     seated.apply_translation(-lo)
-    # Below the first layer is the plate, which holds the first layer: a point lower than
-    # that over the first layer is read against the first layer's outline, at its middle,
-    # where Orca slices it.
-    probe = np.maximum(points[:, 2] - _ENVELOPE_MM, _FIRST_LAYER_MM / 2)
-    reach = _reach(seated, points, probe)
-    depth = _reach(seated, points, points[:, 2] - 0.01)  # its own face's depth
-    slope = np.degrees(np.arctan2(reach, _ENVELOPE_MM))
-    over = slope > _OVERHANG_DEG
-    if not over.any():
-        return None
-    read = np.where(depth > _ENVELOPE_MM, own, np.minimum(own, slope))
-    flat = (down > _FLAT) & (depth > _ENVELOPE_MM)
-    return points[over] + lo, areas[over], read[over], flat[over]
-
-
-def _bisect(triangles: np.ndarray, longest: float) -> tuple[np.ndarray, np.ndarray]:
-    """The triangles halved across their longest edge until none is longer than `longest`.
-
-    With the index of the triangle each piece came from. A long thin step,
-    150 x 0.1 mm, becomes a few hundred pieces, not the 4^n of quartering.
-    """
-    index = np.arange(len(triangles))
-    for _ in range(64):
-        edges = np.linalg.norm(triangles - np.roll(triangles, -1, axis=1), axis=2)
-        split = edges.max(axis=1) > longest
-        if not split.any():
-            break
-        tri, at = triangles[split], index[split]
-        k = edges[split].argmax(axis=1)  # the edge from corner k to corner k+1
-        rows = np.arange(len(tri))
-        a, b, c = tri[rows, k], tri[rows, (k + 1) % 3], tri[rows, (k + 2) % 3]
-        mid = (a + b) / 2
-        halves = np.concatenate([np.stack([a, mid, c], 1), np.stack([mid, b, c], 1)])
-        triangles = np.concatenate([triangles[~split], halves])
-        index = np.concatenate([index[~split], at, at])
-    return triangles, index
-
-
-def _reach(mesh: trimesh.Trimesh, points: np.ndarray, heights: np.ndarray) -> np.ndarray:
-    """How far each point is, sideways, from the part's outline at its height below.
-
-    0 when the part is right under it, and exact up to `_REACH_MM`; further
-    than that reads as infinite. Heights are read to 0.01 mm, a hair above, so
-    an outline isn't cut along a flat face.
-    """
-    z = mesh.triangles[:, :, 2]
-    z_lo, z_hi = z.min(axis=1), z.max(axis=1)
-    outward = mesh.face_normals[:, :2]
-    levels = np.round(heights, 2) + 1e-3
-    out = np.full(len(points), np.inf)
-    for level in np.unique(levels):
-        at = np.flatnonzero(levels == level)
-        spanning = np.flatnonzero((z_lo <= level) & (z_hi >= level))
-        if not len(spanning):
+    outlines = Outlines(seated)
+    for triangles, index, key in _bisect(np.array(mesh.triangles[chosen] - lo), _SAMPLE_MM):
+        points = (triangles[:, 0] + triangles[:, 1] + triangles[:, 2]) / 3.0
+        keep = points[:, 2] > _FIRST_LAYER_MM
+        if not keep.any():
             continue
-        segments, faces = trimesh.intersections.mesh_plane(  # type: ignore[no-untyped-call]
-            mesh, (0, 0, 1), (0, 0, level), return_faces=True, local_faces=spanning
-        )
-        if len(segments):
-            out[at] = _outside(points[at, :2], segments[:, :, :2], outward[faces])
-    return out
+        areas = lengths(
+            np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
+        ) / 2
+        face = chosen[index[keep]]
+        points, areas, key = points[keep], areas[keep], key[keep]
+        # Below the first layer is the plate, which holds the first layer: a point lower than
+        # that over the first layer is read against the first layer's outline, at its middle,
+        # where Orca slices it.
+        probe = np.maximum(points[:, 2] - _ENVELOPE_MM, _FIRST_LAYER_MM / 2)
+        slope = np.degrees(np.arctan2(outlines.reach(points, probe), _ENVELOPE_MM))
+        over = slope > _PAST_DEG
+        if over.any():
+            yield _Points(key=key[over], at=points[over], areas=areas[over], face=face[over],
+                          down=-normals[face[over], 2], slope=slope[over], outlines=outlines)
 
 
-#: How far `_reach` measures exactly. Past it a point is only inside or outside:
-#: read over `_ENVELOPE_MM`, that's a slope past 84 degrees.
-_REACH_MM = 10 * _ENVELOPE_MM
+def _bisect(
+    triangles: np.ndarray, longest: float
+) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """The triangles halved across their longest edge until none is longer than `longest`,
+    some pieces at a time.
 
-
-def _outside(points: np.ndarray, segments: np.ndarray, outward: np.ndarray) -> np.ndarray:
-    """Each 2D point's distance outside the outline the segments draw: 0 inside it.
-
-    Measured cell by cell against the segments near the cell, and inside or
-    outside by the nearest segment's outward side. A point with none near,
-    or none whose side is clear, is decided by a ray's crossings instead.
+    With the index of the triangle each piece came from, and its place in the halving: a
+    number by which a stable sort (`_in_order`) puts the pieces in the order of halving them
+    all at once, the unsplit first, then each round's first halves and its second. An area is
+    summed in that order whatever the pieces at a time, so it's the same to the last bit. A
+    long thin step, 150 x 0.1 mm, becomes a few hundred pieces, not the 4^n of quartering.
     """
-    out = np.full(len(points), np.inf)
-    undecided = np.zeros(len(points), dtype=bool)
-    seg_lo, seg_hi = segments.min(axis=1), segments.max(axis=1)
-    cells, which = np.unique(np.floor(points / _REACH_MM), axis=0, return_inverse=True)
-    for c, cell in enumerate(cells):
-        mine = np.flatnonzero(which.ravel() == c)
-        lo, hi = (cell - 1) * _REACH_MM, (cell + 2) * _REACH_MM
-        near = np.flatnonzero(((seg_lo <= hi) & (seg_hi >= lo)).all(axis=1))
-        if not len(near):
-            undecided[mine] = True
-            continue
-        p = points[mine][:, None, :]
-        a, b = segments[near, 0][None], segments[near, 1][None]
-        ab = b - a
-        t = np.clip(((p - a) * ab).sum(-1) / np.maximum((ab * ab).sum(-1), 1e-12), 0, 1)
-        gap = p - (a + t[..., None] * ab)
-        dist = np.linalg.norm(gap, axis=-1)
-        k = dist.argmin(axis=1)
-        rows = np.arange(len(mine))
-        nearest = dist[rows, k]
-        side = (gap[rows, k] * outward[near[k]]).sum(-1)
-        clear = (nearest <= _REACH_MM) & (np.abs(side) > 1e-9)
-        out[mine] = np.where(side > 0, nearest, 0.0)
-        undecided[mine] = ~clear & (nearest > 1e-9)
-        out[mine[nearest <= 1e-9]] = 0.0
-    if undecided.any():
-        inside = _inside(points[undecided], segments)
-        out[np.flatnonzero(undecided)] = np.where(inside, 0.0, np.inf)
-    return out
+    waiting = [(triangles, np.arange(len(triangles)), np.ones(len(triangles), np.uint64), 0)]
+    done: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+    held = 0
+    while waiting:
+        tri, index, key, halved = waiting.pop()
+        if len(tri) > _POINTS_AT_ONCE:
+            n = _POINTS_AT_ONCE
+            waiting.append((tri[n:], index[n:], key[n:], halved))
+            tri, index, key = tri[:n], index[:n], key[:n]
+        edges = lengths(tri - tri[:, [1, 2, 0]])
+        long = edges > longest
+        split = (long[:, 0] | long[:, 1] | long[:, 2]) & (halved < _HALVINGS)
+        if not split.all():
+            done.append((tri[~split], index[~split], key[~split]))
+            held += len(done[-1][0])
+        if split.any():
+            tri, index, key = tri[split], index[split], key[split]
+            k = edges[split].argmax(axis=1)  # the edge from corner k to corner k+1
+            rows = np.arange(len(tri))
+            a, b, c = tri[rows, k], tri[rows, (k + 1) % 3], tri[rows, (k + 2) % 3]
+            mid = (a + b) / 2
+            step = np.uint64(1 << halved)
+            waiting.append((
+                np.concatenate([np.stack([a, mid, c], 1), np.stack([mid, b, c], 1)]),
+                np.concatenate([index, index]),
+                np.concatenate([key + step, key + step + step]),
+                halved + 1,
+            ))
+        if done and (held >= _POINTS_AT_ONCE or not waiting):
+            yield (np.concatenate([d[0] for d in done]), np.concatenate([d[1] for d in done]),
+                   np.concatenate([d[2] for d in done]))
+            done, held = [], 0
 
 
-def _inside(points: np.ndarray, segments: np.ndarray) -> np.ndarray:
-    """Whether each 2D point is inside the outline, by the crossings of a ray along +x."""
-    inside = np.zeros(len(points), dtype=bool)
-    for chunk in np.array_split(np.arange(len(points)), max(1, len(points) // 512)):
-        p = points[chunk][:, None, :]
-        a, b = segments[None, :, 0, :], segments[None, :, 1, :]
-        ab = b - a
-        crosses = (a[..., 1] > p[..., 1]) != (b[..., 1] > p[..., 1])
-        x_at = a[..., 0] + (p[..., 1] - a[..., 1]) * ab[..., 0] / np.where(
-            ab[..., 1] == 0, 1, ab[..., 1]
-        )
-        inside[chunk] = ((crosses & (p[..., 0] < x_at)).sum(axis=1) % 2) == 1
-    return inside
+def _in_order(keys: list[np.ndarray], *found: list[np.ndarray]) -> tuple[np.ndarray, ...]:
+    """What was read some at a time, in the halving's order (`_bisect`)."""
+    order = np.argsort(np.concatenate(keys), kind="stable")
+    return tuple(np.concatenate(parts)[order] for parts in found)

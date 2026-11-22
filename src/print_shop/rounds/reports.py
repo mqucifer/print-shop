@@ -72,6 +72,9 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "body_volumes_mm3",
         "layers_read",
         "narrower_than_nozzle_mm3",
+        # A one-layer point at a hole's rim, noted and not thin (mqucifer/print-shop#238).
+        "rim_points",
+        "rim_points_at",
         "sharp_points",
         "thin_at",
         "thin_places",
@@ -231,6 +234,9 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "folds",
         "frame",
         "frame_faces",
+        # What would have been cut as a picture's frame, with the glass on it
+        # (mqucifer/print-shop#240).
+        "frame_cut",
         "frame_px",
         "frame_solids",
         "frame_volume_mm3",
@@ -303,6 +309,8 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "pane_top_z",
         "panel_mm",
         "panel_px",
+        "panel_share_pct",
+        "picture_px",
         "panes_count",
         "patch_at",
         "patch_left_as_lead_mm2",
@@ -663,6 +671,8 @@ SHAPES: dict[str, dict[str, Any]] = {
                     "overlap_mesh_mm3": NUMBER,
                     "overlap_occt_common_mm3": NUMBER,
                     "overlap_occt_cut_mm3": NUMBER,
+                    # Why a pair's figures can't be relied on (mqucifer/print-shop#244).
+                    "untrusted": Rows(TEXT),
                     # By the names the need's own `--box NAME=...` and `--facing NAME=...` give.
                     "places": Keyed(PLACE),
                     "verdict": TEXT,
@@ -733,6 +743,19 @@ SHAPES: dict[str, dict[str, Any]] = {
         "bodies": NUMBER,
         "body_volumes_mm3": Rows(NUMBER),
         "narrower_than_nozzle_mm3": NUMBER,
+        "rim_points": NUMBER,
+        "rim_points_at": Rows(
+            Row(
+                {
+                    "box": CORNERS,
+                    "mm2": NUMBER,
+                    "rim": XYZ,
+                    "rim_across_mm": NUMBER,
+                    "wall_mm": NUMBER,
+                    "width_mm": NUMBER,
+                }
+            )
+        ),
         "sharp_points": NUMBER,
         "thin_rays_not_at_a_point": NUMBER,
         "thin_spots": NUMBER,
@@ -887,6 +910,17 @@ SHAPES: dict[str, dict[str, Any]] = {
                     # washers, its nut and its plastic is nearest its limit, and by what share.
                     "gives_first": TEXT,
                     "nearest_share": NUMBER,
+                    # Each end's wall that took the shear, beside the stretch its pressure is
+                    # read on (mqucifer/print-shop#245).
+                    "bolts": Rows(
+                        Row(
+                            {
+                                "ends": Rows(
+                                    Row({"hole_length_mm": NUMBER, "sheared_mm2": NUMBER})
+                                )
+                            }
+                        )
+                    ),
                     # A dovetail's (mqucifer/print-shop#170): the way its tail slides in, how
                     # hard the load drives it that way, each face's push, what its faces leave
                     # held by nothing, its latch, and the tail's neck and the socket's walls.

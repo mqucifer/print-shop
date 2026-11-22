@@ -259,11 +259,16 @@ class PrintJobState(TypedDict):
 
     # Judgment. Each is a full Outcome — proposal, verdict history, accepted.
     orientation: NotRequired[Outcome[Orientation]]
-    #: The poses the orientation step weighed, the part's traits in the file's own pose, and the
+    #: The poses the orientation step weighed (for a pose kept, as laid or from the part's
+    #: context, that one, then those measured beside the job by the time it was sliced:
+    #: mqucifer/print-shop#235), the part's traits in the file's own pose, and the
     #: kept lessons it was given for them: for the review to send the pose back to one, and for
     #: the lesson drawn from that (mqucifer/print-shop#128).
     orientation_candidates: NotRequired[tuple[Orientation, ...]]
     laid_traits: NotRequired[tuple[str, ...]]
+    #: The part's measured features in the file's own pose, so a job that stays in it isn't
+    #: measured again before its questions (mqucifer/print-shop#235).
+    laid_features: NotRequired[tuple[Feature, ...]]
     orientation_lessons: NotRequired[tuple[GivenLesson, ...]]
     #: The part's context from its design run or a sidecar: its fits, seen faces, the side it's
     #: laid on and its holds (mqucifer/print-shop#130).

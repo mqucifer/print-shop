@@ -29,6 +29,7 @@ from .shapes import (
     load,
     slice_at,
     to_manifold,
+    unclosed,
 )
 
 #: Sections stacked for an STL's second volume.
@@ -46,17 +47,9 @@ def volumes(part: Part) -> dict[str, Any]:
     coarse, fine = part.meshes()
     found: dict[str, Any] = {"watertight": bool(fine.is_watertight)}
     mesh = float(fine.volume)
-    if not fine.is_watertight:
-        said = ""
-        if part.is_brep:
-            said = (
-                f"; OCCT says {float(part.shape.Volume()):.3f} mm³ and valid "
-                f"{bool(part.shape.isValid())}, with no closed mesh behind it"
-            )
-        raise NoAnswer(
-            f"{part.name}'s surface isn't closed ({len(fine.faces)} triangles), so it holds no "
-            f"volume to read: the mesh's arithmetic gives {mesh:.3f} mm³ and means nothing{said}"
-        )
+    refused = unclosed(part)  # `clearance`'s rule too (mqucifer/print-shop#244)
+    if refused:
+        raise NoAnswer(refused)
     found["mesh_mm3"] = round(mesh, 4)
     found["bodies_mesh"] = len(part.manifold().decompose())
     if part.is_brep:

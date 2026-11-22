@@ -23,7 +23,9 @@ from print_shop.core.state import Orientation
 from print_shop.ingest.analyzer import measure_orientation
 from print_shop.setup.features import overhang_to_support
 
-__all__ = ["AXIS_ALIGNED", "candidates", "write_rotated"]
+__all__ = [
+    "AXIS_ALIGNED", "LAID", "candidate_in", "candidates", "read_part", "scored", "write_rotated",
+]
 
 #: The six axis-aligned orientations, in order.
 AXIS_ALIGNED: tuple[tuple[float, float, float], ...] = (
@@ -34,6 +36,8 @@ AXIS_ALIGNED: tuple[tuple[float, float, float], ...] = (
     (0.0, 90.0, 0.0),
     (0.0, 270.0, 0.0),
 )
+#: The file's own pose: the part as it's laid.
+LAID = AXIS_ALIGNED[0]
 
 
 def _rotation_matrix(rotation_deg: tuple[float, float, float]) -> np.ndarray:
@@ -87,6 +91,49 @@ def write_rotated(
     return out
 
 
+def read_part(stl_path: str | Path) -> trimesh.Trimesh:
+    """The part, to be measured in its poses.
+
+    Raises:
+        FileNotFoundError: If there's no such file.
+        ValueError: If it isn't one mesh.
+    """
+    path = Path(stl_path)
+    if not path.exists():
+        raise FileNotFoundError(f"STL file not found: {stl_path}")
+
+    mesh = trimesh.load(path, force="mesh")
+    if not isinstance(mesh, trimesh.Trimesh):
+        raise ValueError(f"Expected a Trimesh, got {type(mesh).__name__}")
+    return mesh
+
+
+def scored(
+    mesh: trimesh.Trimesh, rotation: tuple[float, float, float],
+    overhang_threshold_deg: float = 45.0,
+) -> Orientation:
+    """One pose's figures: the mesh turned by `rotation` and seated on the plate."""
+    rotated = mesh.copy()
+    rotated.apply_transform(_rotation_matrix(rotation))
+    _seated(rotated)
+    _faces, bed_contact_area, height_mm = measure_orientation(rotated, overhang_threshold_deg)
+    overhang_area, flare_area = overhang_to_support(rotated)
+    extents = rotated.bounds[1] - rotated.bounds[0]
+    return Orientation(
+        rotation_deg=rotation,
+        overhang_area_mm2=round(overhang_area, 1),
+        bed_contact_area_mm2=round(bed_contact_area, 1),
+        height_mm=round(height_mm, 2),
+        flare_area_mm2=round(flare_area, 1),
+        bbox_mm=(float(extents[0]), float(extents[1]), float(extents[2])),
+    )
+
+
+def candidate_in(stl_path: str | Path, rotation: tuple[float, float, float]) -> Orientation:
+    """One of the candidates, without measuring the others (mqucifer/print-shop#235)."""
+    return scored(read_part(stl_path), rotation)
+
+
 def candidates(
     stl_path: str | Path, overhang_threshold_deg: float = 45.0
 ) -> list[Orientation]:
@@ -96,32 +143,5 @@ def candidates(
     plate, measured with the same overhang/bed-contact definitions as
     `analyzer.analyze`.
     """
-    path = Path(stl_path)
-    if not path.exists():
-        raise FileNotFoundError(f"STL file not found: {stl_path}")
-
-    mesh = trimesh.load(path, force="mesh")
-    if not isinstance(mesh, trimesh.Trimesh):
-        raise ValueError(f"Expected a Trimesh, got {type(mesh).__name__}")
-
-    result: list[Orientation] = []
-    for rotation in AXIS_ALIGNED:
-        rotated = mesh.copy()
-        rotated.apply_transform(_rotation_matrix(rotation))
-        _seated(rotated)
-        _faces, bed_contact_area, height_mm = measure_orientation(
-            rotated, overhang_threshold_deg
-        )
-        overhang_area, flare_area = overhang_to_support(rotated)
-        extents = rotated.bounds[1] - rotated.bounds[0]
-        result.append(
-            Orientation(
-                rotation_deg=rotation,
-                overhang_area_mm2=round(overhang_area, 1),
-                bed_contact_area_mm2=round(bed_contact_area, 1),
-                height_mm=round(height_mm, 2),
-                flare_area_mm2=round(flare_area, 1),
-                bbox_mm=(float(extents[0]), float(extents[1]), float(extents[2])),
-            )
-        )
-    return result
+    mesh = read_part(stl_path)
+    return [scored(mesh, rotation, overhang_threshold_deg) for rotation in AXIS_ALIGNED]
