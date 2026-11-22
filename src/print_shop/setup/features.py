@@ -19,9 +19,12 @@ import numpy as np
 import trimesh
 from pydantic import BaseModel
 
-from print_shop.setup.outline import Outlines
+from print_shop.setup.outline import Outlines, lengths
 
-__all__ = ["FLARE_MM", "Feature", "Overhang", "measure", "overhang_places", "overhang_to_support"]
+__all__ = [
+    "FLARE_MM", "Feature", "Overhang", "measure", "overhang_places", "overhang_to_support",
+    "resting_on",
+]
 
 #: A face this far from vertical, facing down, needs support (Orca's own
 #: threshold reasoning; the analyzer uses the same 45 degrees).
@@ -109,6 +112,15 @@ def measure(stl_path: str | Path, bed_contact_area_mm2: float) -> tuple[Feature,
                 says="typical wall or section thickness (twice volume over surface)"),
         Feature(id="volume", value=round(volume), unit="mm3", says="solid volume"),
     )
+
+
+def resting_on(features: tuple[Feature, ...], bed_contact_area_mm2: float) -> tuple[Feature, ...]:
+    """`measure`'s features of the same file, given another figure for its area on the plate:
+    that's the one feature it's handed rather than reads, so nothing is read again
+    (mqucifer/print-shop#235)."""
+    area = float(round(bed_contact_area_mm2))
+    return tuple(f.model_copy(update={"value": area}) if f.id == "bed_contact" else f
+                 for f in features)
 
 
 def _footprint(mesh: trimesh.Trimesh) -> tuple[float, float]:
@@ -330,12 +342,12 @@ def _over(
     seated.apply_translation(-lo)
     outlines = Outlines(seated)
     for triangles, index, key in _bisect(np.array(mesh.triangles[chosen] - lo), _SAMPLE_MM):
-        points = triangles.mean(axis=1)
+        points = (triangles[:, 0] + triangles[:, 1] + triangles[:, 2]) / 3.0
         keep = points[:, 2] > _FIRST_LAYER_MM
         if not keep.any():
             continue
-        areas = np.linalg.norm(
-            np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0]), axis=1
+        areas = lengths(
+            np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
         ) / 2
         face = chosen[index[keep]]
         points, areas, key = points[keep], areas[keep], key[keep]
@@ -371,8 +383,9 @@ def _bisect(
             n = _POINTS_AT_ONCE
             waiting.append((tri[n:], index[n:], key[n:], halved))
             tri, index, key = tri[:n], index[:n], key[:n]
-        edges = np.linalg.norm(tri - tri[:, [1, 2, 0]], axis=2)
-        split = (edges.max(axis=1) > longest) & (halved < _HALVINGS)
+        edges = lengths(tri - tri[:, [1, 2, 0]])
+        long = edges > longest
+        split = (long[:, 0] | long[:, 1] | long[:, 2]) & (halved < _HALVINGS)
         if not split.all():
             done.append((tri[~split], index[~split], key[~split]))
             held += len(done[-1][0])

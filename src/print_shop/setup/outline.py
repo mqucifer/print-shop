@@ -22,7 +22,7 @@ import numpy as np
 import trimesh
 from trimesh.constants import tol
 
-__all__ = ["AT_ONCE", "REACH_MM", "Outlines"]
+__all__ = ["AT_ONCE", "REACH_MM", "Outlines", "lengths"]
 
 #: How far a point is measured exactly. Past it, it's only inside or outside the outline.
 REACH_MM = 4.0
@@ -43,6 +43,16 @@ class _Lines:
     a: np.ndarray
     b: np.ndarray
     outward: np.ndarray
+
+
+def lengths(vectors: np.ndarray) -> np.ndarray:
+    """`np.linalg.norm` along the last axis, to the bit: the squares added in the same order.
+    For rows of two or three it's several times quicker."""
+    total = vectors[..., 0] * vectors[..., 0]
+    for n in range(1, vectors.shape[-1]):
+        total += vectors[..., n] * vectors[..., n]
+    found: np.ndarray = np.sqrt(total)
+    return found
 
 
 class Outlines:
@@ -171,10 +181,18 @@ def _outside(points: np.ndarray, level: np.ndarray, levels: int, lines: _Lines) 
     out = np.full(len(points), np.inf)
     if not len(lines.level) or not len(points):
         return out
-    nearest, line = _nearest(points, level, levels, lines)
+    up = np.argsort(points[:, 1])
+    ys = points[up, 1]
+    # Each point's place up y, level ones sharing the first's: what `searchsorted` would give.
+    starts = np.arange(len(ys))
+    starts[1:][ys[1:] == ys[:-1]] = 0
+    place = np.empty(len(ys), dtype=np.int64)
+    place[up] = np.maximum.accumulate(starts)
+    nearest, line = _nearest(points, level, levels, lines, ys, place)
     near = np.flatnonzero(nearest <= REACH_MM)
     gap = _gap(points[near], lines.a[line[near]], lines.b[line[near]])
-    side = (gap * lines.outward[line[near]]).sum(-1)
+    out_at = lines.outward[line[near]]
+    side = gap[:, 0] * out_at[:, 0] + gap[:, 1] * out_at[:, 1]
     touches = nearest[near] <= 1e-9
     clear = (np.abs(side) > 1e-9) | touches
     out[near] = np.where((side > 0) & ~touches, nearest[near], 0.0)
@@ -182,7 +200,7 @@ def _outside(points: np.ndarray, level: np.ndarray, levels: int, lines: _Lines) 
     undecided[near[clear]] = False
     ask = np.flatnonzero(undecided)
     if len(ask):
-        inside = _inside(points[ask], level[ask], levels, lines)
+        inside = _inside(points[ask], level[ask], lines, ys, place[ask])
         out[ask] = np.where(inside, 0.0, np.inf)
     return out
 
@@ -190,26 +208,28 @@ def _outside(points: np.ndarray, level: np.ndarray, levels: int, lines: _Lines) 
 def _gap(p: np.ndarray, a: np.ndarray, b: np.ndarray) -> np.ndarray:
     """From the nearest place on each line to its point."""
     ab = b - a
-    t = np.clip(((p - a) * ab).sum(-1) / np.maximum((ab * ab).sum(-1), 1e-12), 0, 1)
+    along, square = (p - a) * ab, ab * ab
+    t = np.clip((along[:, 0] + along[:, 1]) / np.maximum(square[:, 0] + square[:, 1], 1e-12), 0, 1)
     gap: np.ndarray = p - (a + t[:, None] * ab)
     return gap
 
 
 def _nearest(
-    points: np.ndarray, level: np.ndarray, levels: int, lines: _Lines
+    points: np.ndarray, level: np.ndarray, levels: int, lines: _Lines, ys: np.ndarray,
+    place: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Each point's distance to its nearest line, where that's within reach, and which line:
     the first of those equally near.
 
     The points are sorted by height, by a column `REACH_MM` wide in x, and by y, so a line
-    finds those within reach of its box without reading the others.
+    finds those within reach of its box without reading the others. `ys` are the points' y in
+    order, and `place` each point's place among them.
     """
     column = np.floor(points[:, 0] / REACH_MM).astype(np.int64)
     least = column.min()
     columns = int(column.max() - least) + 1
-    ys = np.sort(points[:, 1])
     places = len(ys) + 1
-    key = (level * columns + column - least) * places + np.searchsorted(ys, points[:, 1])
+    key = (level * columns + column - least) * places + place
     order = np.argsort(key)
     key = key[order]
 
@@ -226,10 +246,10 @@ def _nearest(
         base = (lines.level[which] * columns + at_column) * places
         first = np.searchsorted(key, base + from_y[which])
         after = np.searchsorted(key, base + to_y[which])
-        for pair, place in _ranges(first, after):
-            mine, point = which[pair], order[place]
+        for pair, at in _ranges(first, after):
+            mine, point = which[pair], order[at]
             gap = _gap(points[point], lines.a[mine], lines.b[mine])
-            far = np.linalg.norm(gap, axis=-1)
+            far = lengths(gap)
             before = nearest[point]
             np.minimum.at(nearest, point, far)
             now = nearest[point]
@@ -239,12 +259,13 @@ def _nearest(
     return nearest, line
 
 
-def _inside(points: np.ndarray, level: np.ndarray, levels: int, lines: _Lines) -> np.ndarray:
+def _inside(
+    points: np.ndarray, level: np.ndarray, lines: _Lines, ys: np.ndarray, place: np.ndarray
+) -> np.ndarray:
     """Whether each 2D point is inside its height's outline, by the crossings of a ray along
     +x: each line meets only the points its ends are either side of, in y."""
-    ys = np.sort(points[:, 1])
     places = len(ys) + 1
-    key = level * places + np.searchsorted(ys, points[:, 1])
+    key = level * places + place
     order = np.argsort(key)
     key = key[order]
     a, b = lines.a, lines.b
@@ -253,8 +274,8 @@ def _inside(points: np.ndarray, level: np.ndarray, levels: int, lines: _Lines) -
     after = np.searchsorted(key, base + np.searchsorted(ys, np.maximum(a[:, 1], b[:, 1])))
     crossings = np.zeros(len(points), dtype=np.int64)
     ab = b - a
-    for which, place in _ranges(first, after):
-        point = order[place]
+    for which, at in _ranges(first, after):
+        point = order[at]
         rise = ab[which, 1]
         x_at = a[which, 0] + (points[point, 1] - a[which, 1]) * ab[which, 0] / np.where(
             rise == 0, 1, rise

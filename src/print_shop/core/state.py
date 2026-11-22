@@ -231,6 +231,9 @@ class PrintJobState(TypedDict):
     #: the lesson drawn from that (mqucifer/print-shop#128).
     orientation_candidates: NotRequired[tuple[Orientation, ...]]
     laid_traits: NotRequired[tuple[str, ...]]
+    #: The part's measured features in the file's own pose, so a job that stays in it isn't
+    #: measured again before its questions (mqucifer/print-shop#235).
+    laid_features: NotRequired[tuple[Feature, ...]]
     orientation_lessons: NotRequired[tuple[GivenLesson, ...]]
     #: The part's context from its design run or a sidecar: its fits, seen faces, the side it's
     #: laid on and its holds (mqucifer/print-shop#130).

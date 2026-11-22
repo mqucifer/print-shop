@@ -215,13 +215,33 @@ def test_the_five_begin_only_once_what_the_questions_need_is_measured(
     tmp_path: Path, job: Job, held: Held, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     measured: list[int] = []
+
     def counted(*args: Any) -> Any:
         measured.append(len(held.began))
         return measure(*args)
 
     monkeypatch.setattr(graph, "measure", counted)
-    assert job.run(write_stl("tee", tmp_path), approves, as_laid=True) is not None, job.error
+    # Kept off the file's own pose, so it's measured in both before the questions.
+    assert job.run(down(tmp_path, "tee", "+z"), approves) is not None, job.error
     assert measured[:2] == [0, 0], "they never slow the measuring the questions wait for"
+
+
+def test_a_part_in_the_files_own_pose_is_measured_once(
+    tmp_path: Path, job: Job, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    read: list[Any] = []
+
+    def counted(*args: Any) -> Any:
+        read.append(args)
+        return measure(*args)
+
+    monkeypatch.setattr(graph, "measure", counted)
+    stl = write_stl("rounded_lid", tmp_path)
+    row = job.run(stl, approves, as_laid=True)
+    assert row is not None, job.error
+    assert len(read) == 1
+    laid = candidate_in(stl, LAID)
+    assert row.features == measure(stl, laid.bed_contact_area_mm2), "and reads as it did"
 
 
 def test_a_pose_kept_from_the_context_doesnt_wait_either(

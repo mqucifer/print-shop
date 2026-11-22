@@ -69,7 +69,7 @@ from print_shop.setup import Proposer
 from print_shop.setup import lessons as print_lessons
 from print_shop.setup.context import PartContext, place, pose_for, read_context
 from print_shop.setup.doubts import Doubting
-from print_shop.setup.features import measure
+from print_shop.setup.features import Feature, measure, resting_on
 from print_shop.setup.intake import Asker, Estimate, Intake, Question
 from print_shop.setup.loop import Part, PrintLoop
 from print_shop.setup.loop import run as run_loop
@@ -271,7 +271,7 @@ def build_graph(
         if alone is None or (not as_laid and not found[0].fits_in(build_volume)):
             found = tuple(candidates(state["stl_path"]))  # none is kept, so all six are weighed
         poses: dict[str, Any] = {"orientation_candidates": found, "laid_traits": traits(laid),
-                                 "part_context": context}
+                                 "laid_features": laid, "part_context": context}
         request = OrientationRequest(
             candidates=found, build_volume_mm=build_volume, part_description="",
         )
@@ -363,8 +363,17 @@ def build_graph(
 
         assert profiles is not None, "orient refuses a graph without profiles"
         proposed: dict[str, Any] = {}
+
+        def featured() -> tuple[Feature, ...]:
+            """The features in the pose being sliced. The file's own was read at orient."""
+            contact = applied.bed_contact_area_mm2 or 0.0
+            laid = state.get("laid_features", ())
+            if laid and rotation_deg == LAID:
+                return resting_on(laid, contact)
+            return measure(stl_to_slice, contact)
+
         if proposer is not None and asker is not None:
-            features = measure(stl_to_slice, applied.bed_contact_area_mm2 or 0.0)
+            features = featured()
             if measuring is not None and measuring.pending():
                 # Only now, so the five never slow what the questions wait for.
                 verify_unchanged(state["stl_path"], state.get("stl_sha256", ""))
@@ -443,7 +452,7 @@ def build_graph(
                             state["stl_path"], rotation_deg,
                             outdir / f"rotated-{pose_value(rotation_deg)}.stl")
                 if found_by.proposed:
-                    features = measure(stl_to_slice, applied.bed_contact_area_mm2 or 0.0)
+                    features = featured()
                     reply = found_by.reply
                     made = dataclasses.replace(proposer, ask=lambda *_: reply, llm=None)(
                         intake, features, profiles, context)
@@ -456,7 +465,7 @@ def build_graph(
             offer: Offering | None = None
             doubting: Doubting | None = None
             while True:
-                features = measure(stl_to_slice, applied.bed_contact_area_mm2 or 0.0)
+                features = featured()
                 if reviewer is not None and ledger is not None:
                     # Before the proposal's call: the offer waits for no model
                     # (mqucifer/print-shop#211).
