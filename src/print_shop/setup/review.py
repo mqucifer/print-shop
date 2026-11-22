@@ -650,8 +650,7 @@ def _turned_down(
         here = now.value if now is not None else change.preset
         preset, feature = change.preset, ""
     return Change(key=change.key, preset=preset, value=here, reason=why.strip(),
-                  source=Source.SPONSOR, feature=feature, standard=change.standard,
-                  reading=f"the model proposed {change.value}")
+                  source=Source.SPONSOR, feature=feature, standard=change.standard)
 
 
 def cli_reviewer(
