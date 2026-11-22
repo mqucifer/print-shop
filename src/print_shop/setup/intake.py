@@ -390,8 +390,13 @@ def parse(answer: str, question: Question) -> Answer | str:
 
 
 def drop_typed() -> None:
-    """Forget what was typed before something was shown: it can't have been an answer to it."""
+    """Forget what was typed before something was shown: it can't have been an answer to it.
+
+    Called once it has been written, so that what's typed while it's drawn goes too: what's
+    still buffered is put on the screen first.
+    """
     try:
+        sys.stdout.flush()
         termios.tcflush(sys.stdin, termios.TCIFLUSH)
     except (OSError, ValueError, termios.error):
         logger.debug("couldn't drop what was typed ahead", exc_info=True)
@@ -404,8 +409,9 @@ def cli_asker(
     """Ask on the command line, again until each answer is readable.
 
     What the notes give is read back first, at one prompt, and only what they leave is asked
-    (mqucifer/print-shop#236). What was typed before a read-back, or a question after one, was
-    shown is forgotten: Enter confirms there, and mustn't confirm what nobody saw.
+    (mqucifer/print-shop#236). What was typed before a read-back, or a question after one or
+    added, was shown is forgotten, as each is written and before it's read: Enter confirms
+    there, and mustn't confirm what nobody saw.
     """
 
     def ask(questions: Sequence[Question]) -> tuple[Answer, ...]:
@@ -416,6 +422,8 @@ def cli_asker(
 
         def asked(places: list[int]) -> None:
             write(render(questions, places))
+            if noted or isinstance(questions, Added):
+                forget()  # shown only now, so what was typed while it drew is no answer to it
             for i in places:
                 while True:
                     typed = read(f"{first + i}> ")
@@ -431,8 +439,6 @@ def cli_asker(
         rest = [i for i in range(len(questions)) if i not in noted]
         if noted:
             answers.update(_confirm(questions, noted, read, write, forget))
-            if rest:
-                forget()
         if rest:
             asked(rest)
         return tuple(answers[i] for i in range(len(questions)))
@@ -448,8 +454,8 @@ def _confirm(
     are asked, and what isn't named stands confirmed, so nothing is asked twice."""
     first = _numbered_from(questions)
     by_key = {str(first + i): i for i in noted}
-    forget()
     write(render_read_back([(first + i, questions[i]) for i in noted]))
+    forget()
     while True:
         typed = read(NOTES_PROMPT).strip()
         named = typed.replace(",", " ").split()
@@ -469,8 +475,8 @@ def _changed(
     """One the person changes: asked alone, and an answer that differs names both before it's
     taken, when Enter takes it and `n` keeps the notes'."""
     kept = question.confirm()
-    forget()
     write("\n".join([*_listed(n, question), "   Enter) keep what the notes say"]))
+    forget()
     while True:
         said = read(f"{n}> ")
         if not said.strip():
@@ -481,8 +487,8 @@ def _changed(
         write(f"  {parsed}, or Enter to keep what the notes say")
     if parsed.choice == question.noted:
         return kept  # the option marked as the notes', picked here
-    forget()
     write(f"{question.differs(parsed)}\nEnter takes your answer, or n keeps the notes.")
+    forget()
     while True:
         said = read(DIFFERS_PROMPT).strip().lower()
         if said in ("", "n"):

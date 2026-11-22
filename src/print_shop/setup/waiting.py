@@ -437,6 +437,8 @@ def cli_waiting(
         lines += [f"   {i}) {o.line()}" for i, o in enumerate(question.options, 1)]
         lines.append("   o) other: say it in your own words")
         write("\n".join(lines))
+        if screen() is not None:
+            forget()  # Enter keeps their answer here, so never one typed while this drew
         while True:
             line = read("1> ")
             if not line.strip():
