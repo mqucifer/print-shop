@@ -77,15 +77,15 @@ class Desk:
             proposer=Proposer(ask=_model, ask_questions=_questions),
             asker=replay_asker(ANSWERS), reviewer=self._review, gate_wait_s=self.gate_wait_s,
         )
-        pending = daemon.pending_gate
+        wait = daemon.wait_for_gate
 
-        def shown() -> dict[str, Any] | None:
-            gate = pending()
+        def waited(job_id: str, timeout_s: float, shown: int = 0) -> dict[str, Any] | None:
+            gate = wait(job_id, timeout_s, shown)
             if gate is not None:
                 self._shown.append(gate)
             return gate
 
-        daemon.pending_gate = shown  # type: ignore[method-assign]
+        daemon.wait_for_gate = waited  # type: ignore[method-assign]
         return SimpleNamespace(daemon=daemon, ledger=ledger)
 
     def run(self, part: Path, *presses: str) -> int:
@@ -169,6 +169,26 @@ def test_approved_at_the_mesh_gate_the_approval_gate_is_shown_after_the_review(
         assert REASON not in after
     assert desk.reviewed == 1
     assert desk.printer.calls == []
+
+
+def test_a_gate_answered_before_the_terminal_looked_is_still_shown_and_logged(
+    desk: Desk, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An answer can land as the gate is published, before the command's thread has read it."""
+    publish = desk.bridge.publish
+
+    def answered_at_once(topic: str, payload: Any, retain: bool = False, qos: int = 1) -> None:
+        publish(topic, payload, retain, qos)
+        if topic == gate_topic(CFG) and payload.get("pending"):
+            at_mesh = payload["gate"] == Gate.REVIEW_PROPOSAL.value
+            desk.bridge.deliver(command_topic(CFG), {
+                "decision": "approve" if at_mesh else "reject", "job_id": payload["job_id"],
+            })
+
+    desk.bridge.publish = answered_at_once  # type: ignore[method-assign]
+    desk.run(write_stl("nicked_cube", desk.tmp))
+    for shown in (capsys.readouterr().out, desk.log()):
+        assert shown.index("At the mesh gate") < shown.index("At the approval gate")
 
 
 @pytest.mark.parametrize("last", ["approve", "reject"])

@@ -290,7 +290,8 @@ class Daemon:
         self._active_job_id: str | None = None
         self._worker: threading.Thread | None = None
         self._worker_alive = False
-        self._at_gate = threading.Event()
+        #: Each gate a job has opened, in order, answered or not: what `wait_for_gate` returns.
+        self._opened: dict[str, list[dict[str, Any]]] = {}
 
         # Gate-scoped inbox: the MQTT callback pushes into it, the gate that
         # opened it consumes it. None when no gate is open — a command that
@@ -411,7 +412,6 @@ class Daemon:
             daemon=True,
         )
         self._worker_alive = True
-        self._at_gate.clear()
         self._worker.start()
         return job_id
 
@@ -426,8 +426,15 @@ class Daemon:
         """
         return self._submit(job.name, {"entry": "sliced_file", "sliced": job})
 
-    def wait_for_gate(self, job_id: str, timeout_s: float) -> None:
-        """Block until the job reaches a gate, or ends before one (or a wait runs out).
+    def wait_for_gate(
+        self, job_id: str, timeout_s: float, shown: int = 0
+    ) -> dict[str, Any] | None:
+        """Block until the job has opened a gate past the `shown` it's known to have, and return
+        it, or None if the job ends first (or a wait runs out).
+
+        A job can have two (the mesh gate's Approve goes on to the approval gate). Each is kept,
+        so one answered before the caller looked is still returned, to be shown and logged
+        (mqucifer/print-shop#200).
 
         A job that ended without a gate, refused or stopped before it, returns
         at once, with `pending_gate()` None and its error in `wait_for_finish`,
@@ -436,36 +443,27 @@ class Daemon:
         `timeout_s` counts from when the job last came back from the person:
         its submit, its last intake answer, the review's `ok` or `take`, or
         its last gate's answer, for a job with another gate after it.
-        While the intake or the review is with them it doesn't count, however
-        long they take (mqucifer/print-shop#125).
+        While the intake, the review or an open gate is with them it doesn't
+        count, however long they take (mqucifer/print-shop#125).
 
         Raises:
             TimeoutError: If `timeout_s` runs out first. The job is ended
                 (`abandon`), and the error is the sentence that says so.
         """
-        while not self._at_gate.wait(timeout=0.2):
+        while True:
             with self._job_lock:
+                opened = self._opened.get(job_id, [])
+                if len(opened) > shown:
+                    return dict(opened[shown])
                 if self._active_job_id != job_id:
-                    return
-            if self._with_person.is_set():
-                continue
-            if time.monotonic() - self._back_at >= timeout_s:
+                    return None
+            # An open gate has a wait of its own (`gate_wait_s`).
+            with_person = self._with_person.is_set() or self._pending_gate is not None
+            if not with_person and time.monotonic() - self._back_at >= timeout_s:
                 raise TimeoutError(
                     self.abandon(job_id, "waiting for the approval gate", timeout_s)
                 )
-
-    def wait_for_answer(self, job_id: str, shown: dict[str, Any]) -> None:
-        """Block until `shown`, a gate from `pending_gate`, is answered or its own wait runs out.
-
-        A job can have a gate after this one (the mesh gate's Approve goes on to the approval
-        gate), which `wait_for_gate` then waits for (mqucifer/print-shop#200). It's this gate
-        that's watched, not whether any is open: the next can open between two looks.
-        """
-        while self._pending_gate == shown:
-            with self._job_lock:
-                if self._active_job_id != job_id:
-                    return
-            time.sleep(0.1)
+            time.sleep(0.05)
 
     def abandon(self, job_id: str, what: str, waited_s: float) -> str:
         """End a job a wait ran out on: the sentence that says so, and the ledger's row.
@@ -567,9 +565,8 @@ class Daemon:
     def _left_gate(self) -> None:
         """The gate has its answer, or its wait ran out. Its time was the person's, so the wait
         for the next gate counts from now (mqucifer/print-shop#125)."""
-        self._pending_gate = None
         self._back_at = time.monotonic()
-        self._at_gate.clear()
+        self._pending_gate = None
 
     def _on_command(self, topic: str, payload: bytes, retain: bool) -> None:
         """MQTT callback: parse the command and push it to the queue.
@@ -682,8 +679,9 @@ class Daemon:
             }
         )
 
-        # Signal that we're at a gate.
-        self._at_gate.set()
+        # Signal that we're at a gate, now it's published.
+        with self._job_lock:
+            self._opened.setdefault(job_id, []).append(dict(self._pending_gate))
 
         # Wait for a command from this gate's inbox.
         try:
@@ -757,7 +755,6 @@ class Daemon:
             if self._active_job_id == job_id:
                 self._active_job_id = None
         self._worker_alive = False
-        self._at_gate.clear()
         # Idempotent: a gate that already closed (or never opened) is a no-op.
         self._close_gate()
         if approved and self._watcher is not None:

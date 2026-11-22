@@ -388,21 +388,21 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
             else:
                 how = "kept as laid" if args.as_laid else "orienting"
                 print(f"Job {job_id}: {how}, then a few questions about the part, here.")
+            shown = 0
             while True:  # a gate at a time, to the one before printing
                 try:
-                    run.daemon.wait_for_gate(job_id, timeout_s=APPROVAL_WAIT_S)
+                    gate = run.daemon.wait_for_gate(job_id, APPROVAL_WAIT_S, shown)
                 except TimeoutError as ran_out:
                     print(ran_out)  # the sentence, and the ledger's row is written
                     return 1
-                gate = run.daemon.pending_gate()
                 if gate is None:
-                    break  # it ended, or was answered before it could be shown
+                    break  # it ended first
+                shown += 1
                 for line in _gate_lines(gate, turned=hand_sliced is None):
                     print(line)
                 print(f"  answer by   {_answer_by(gate)}; after that it ends and nothing prints")
                 if gate.get("gate") == Gate.BEFORE_PRINT:
                     break
-                run.daemon.wait_for_answer(job_id, gate)
             try:
                 result = run.daemon.wait_for_finish(job_id, timeout_s=GATE_WAIT_S + FINISH_WAIT_S)
             except TimeoutError:
