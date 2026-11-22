@@ -40,7 +40,7 @@ import sys
 from pathlib import Path
 
 from print_shop.env import SETTINGS_PATH
-from print_shop.inventory import Asked, Inventory, InventoryError, SpoolState
+from print_shop.inventory import Inventory, InventoryError, SpoolState
 from print_shop.ledger import ledger_path
 from print_shop.orchestrator.spools import ask_over
 from print_shop.setup.waiting import can_ask, drop_typed
@@ -118,12 +118,12 @@ def edit(inventory: Inventory, args: argparse.Namespace) -> str:
 
 def load(inventory: Inventory, args: argparse.Namespace) -> str:
     printer = inventory.printer(args.printer)
+    stands = inventory.asked(printer.id)  # before what the question names is read
     spool = inventory.spool(args.spool)
-    found = inventory.unknown(printer.id)
+    found = stands.not_known
     over = asked = None
     if found is not None and spool.state is not SpoolState.EMPTY and can_ask():
-        had = inventory.loaded(printer.id)
-        asked = Asked(had.id if had else None, found)
+        asked = stands
         over = ask_over(found, spool, read=input, write=print, forget=drop_typed)
     # A no too only counts for what was asked: the phone can have said since.
     lines = [inventory.load(spool.id, printer.id, over=over, asked=asked).line()]

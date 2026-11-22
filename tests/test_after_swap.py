@@ -682,16 +682,16 @@ def reviewed(
     change = Change(key="pause_at", preset="", value="2", reason="a swap", source=Source.SPONSOR,
                     pause=pauses.Pause(kind=pauses.PauseFor.SWAP, start=black, to=material))
 
-    def not_known_now() -> Any:
+    def stands() -> Any:
         with Inventory(shop.path) as stock:
-            return stock.unknown("cc1")
+            return stock.asked("cc1")
 
     def record_load(spool: int, asked: Any) -> None:
         with Inventory(shop.path) as stock:
             stock.load(spool, "cc1", over=asked.not_known, asked=asked)
 
     request = dataclasses.replace(
-        _request(), material=material, stock=lambda: on_hand, not_known=not_known_now,
+        _request(), material=material, stock=lambda: on_hand, stands=stands,
         record_load=record_load,
     )
     if not unknown:
@@ -1091,6 +1091,135 @@ def test_the_jobs_own_start_is_left_to_its_confirm(
     monkeypatch.setattr(FramePrinter, "start", confirming)
     assert shop.run(SWAP, "ok").result.printed
     assert "after all" not in caplog.text
+
+
+# The third read, of 23fc523: every question, against every change while it waits
+# --------------------------------------------------------------------------
+
+CHANGES: dict[str, Callable[[Shop], object]] = {
+    "the same spool loaded again": lambda shop: shop.load(shop.loaded() or WHITE),
+    "another loaded": lambda shop: shop.load(CLEAR),
+    "the loaded one used up": lambda shop: emptied(shop, WHITE),
+    "another print marked": lambda shop: swap_started(shop, "another"),
+    "said, the same spool": lambda shop: word(shop, WHITE),
+    "said, another spool": lambda shop: word(shop, CLEAR),
+    "seen, and said the same": lambda shop: seen_and_said(shop, WHITE),
+}
+QUESTIONS = ("on now, y", "on now, a number", "stock.py, y", "stock.py, no",
+             "review, y", "review's LOAD FIRST, y", "the pick")
+
+
+def word(shop: Shop, spool: int) -> None:
+    (shop.says if not_known(shop) else shop.load)(spool)
+
+
+def seen_and_said(shop: Shop, spool: int) -> None:
+    swap_started(shop, "seen")
+    shop.says(spool)
+
+
+def emptied(shop: Shop, spool: int) -> None:
+    with Inventory(shop.path) as stock:
+        stock.empty(spool)
+
+
+def stock_is(shop: Shop) -> tuple[Any, ...]:
+    db = sqlite3.connect(shop.path)
+    found = (db.execute("SELECT id, state, printer_id FROM spools ORDER BY id").fetchall(),
+             db.execute("SELECT printer_id, job_id FROM swap_not_known ORDER BY job_id").fetchall())
+    db.close()
+    return found
+
+
+@pytest.mark.parametrize("change", list(CHANGES))
+@pytest.mark.parametrize("question", QUESTIONS)
+def test_an_answer_never_writes_over_anything_changed_since_it_was_asked(
+    shop: Shop, settings: Path, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
+    question: str, change: str,
+) -> None:
+    known = question == "review's LOAD FIRST, y"
+    if not known:
+        ends(shop, swap_started(shop, "earlier"))
+    after: list[tuple[Any, ...]] = []
+
+    def changed() -> None:
+        CHANGES[change](shop)
+        after.append(stock_is(shop))
+
+    def answer(typed: str) -> Callable[..., str]:
+        def read(prompt: str = "") -> str:
+            if after:
+                return ""  # asked again, of what's so now: later
+            changed()
+            return typed
+
+        return read
+
+    if question.startswith("on now"):
+        with Inventory(shop.path) as stock:
+            after_print.ask_on_now(stock, "cc1",
+                                   read=answer("y" if question.endswith("y") else "2"),
+                                   write=lambda said: None, forget=lambda: None, asks=True)
+    elif question.startswith("stock.py"):
+        script = _load("stock")
+        monkeypatch.setattr(script, "ledger_path", lambda at: shop.path)
+        monkeypatch.setattr(script, "can_ask", lambda: True)
+        monkeypatch.setattr(script, "drop_typed", lambda: None)
+        monkeypatch.setattr("builtins.input", answer("y" if question.endswith("y") else "n"))
+        script.main(["--settings", str(settings), "load", str(BLACK)])
+    elif question.startswith("review"):
+        read = answer("y")
+        reviewed(shop, monkeypatch, read, terminal=True, unknown=not known)
+    else:
+        bridge = MemoryBridge()
+        with Ledger(shop.path) as ledger:
+            desk = OutcomeDesk(ledger=ledger, cfg=CFG,
+                               publish=lambda topic, payload: bridge.publish(topic, payload, True))
+            for topic, handler in desk.topics.items():
+                bridge.subscribe(topic, handler)
+            desk.refresh()
+            bridge.deliver(outcome_spool_topic(CFG), ON_BLACK)
+            changed()
+            bridge.deliver(outcome_result_topic(CFG), "success")
+            bridge.deliver(outcome_symptom_topic(CFG), "none")
+            bridge.deliver(outcome_submit_topic(CFG), "record")
+
+    assert after and stock_is(shop) == after[0], "the answer was to what isn't so now"
+
+
+def test_a_pick_for_one_print_never_writes_over_a_word_about_another(shop: Shop) -> None:
+    ends(shop, swap_started(shop, "a"))
+    swap_started(shop, "b")
+    bridge = MemoryBridge()
+    with Ledger(shop.path) as ledger:
+        desk = OutcomeDesk(ledger=ledger, cfg=CFG,
+                           publish=lambda topic, payload: bridge.publish(topic, payload, True))
+        for topic, handler in desk.topics.items():
+            bridge.subscribe(topic, handler)
+        desk.refresh()
+        bridge.deliver(outcome_spool_topic(CFG), ON_BLACK)
+        shop.says(CLEAR)  # b's over, and clear is on
+        bridge.deliver(outcome_result_topic(CFG), "success")
+        bridge.deliver(outcome_symptom_topic(CFG), "none")
+        bridge.deliver(outcome_submit_topic(CFG), "record")
+    assert shop.loaded() == CLEAR and kept(shop, "a").result is None
+
+
+def test_the_phone_settles_two_seen_to_end(shop: Shop) -> None:
+    ends(shop, swap_started(shop, "a"))
+    ends(shop, swap_started(shop, "b"))
+    answered_with(shop, ON_BLACK)  # a's card is shown first
+    assert unknown_of(shop) == "b" and ended_with(kept(shop, "a")) == BLACK
+    answered_with(shop, ON_WHITE)
+    assert not_known(shop) == "" and shop.loaded() == WHITE
+
+
+def test_before_preparing_each_of_two_is_asked(shop: Shop) -> None:
+    swap_started(shop, "a")
+    swap_started(shop, "b")
+    did, _ = asked(shop, "2", "2")
+    assert did.count("on now> ") == 2
+    assert not_known(shop) == "" and shop.loaded() == BLACK
 
 
 # What the Sponsor was told it costs

@@ -280,7 +280,8 @@ def test_a_row_from_before_reads_back_as_it_was(shop: Shop, tmp_path: Path) -> N
     db = sqlite3.connect(shop.path)
     # The file as it was before: no table of spools, and nothing said of what a pause was for.
     db.executescript("DROP TABLE print_spools; DROP TABLE print_swaps; "
-                     "DROP TABLE swap_not_known;")
+                     "DROP TRIGGER stock_changed_loaded; DROP TABLE swap_not_known; "
+                     "DROP TABLE stock_changes;")
     for table, column in (("prints", "proposal"), ("prints", "corrections"),
                           ("slice_readings", "reading")):
         [(kept,)] = db.execute(f"SELECT {column} FROM {table}").fetchall()
@@ -1287,7 +1288,7 @@ def test_the_check_never_waits_on_the_printer(shop: Shop, monkeypatch: pytest.Mo
 _TYPED_AHEAD = """
 import sys, time
 from pathlib import Path
-from print_shop.inventory import Inventory
+from print_shop.inventory import Asked, Inventory
 from print_shop.setup.proposal import Change, Proposal, Source
 from print_shop.setup.pauses import Pause, PauseFor
 from print_shop.setup.review import cli_reviewer
@@ -1303,6 +1304,7 @@ change = Change(key="pause_at", preset="", value="2", reason="a swap", source=So
                 pause=Pause(kind=PauseFor.SWAP, start=black, to=material))
 request = dataclasses.replace(
     _request(), proposal=Proposal(changes=(change,)), material=material, stock=lambda: spools,
+    stands=lambda: Asked(0, None),
     record_load=lambda spool, over: print("RECORDED", spool, flush=True))
 print("READY", flush=True)
 time.sleep(1)  # slicing, as it's typed

@@ -72,6 +72,7 @@ from print_shop.inventory import (
     find_not_known,
     mark_not_known,
     set_loaded,
+    stock_changes,
 )
 from print_shop.setup.features import Feature
 from print_shop.setup.intake import Intake
@@ -938,10 +939,11 @@ class Ledger:
             )}
         return [row for row in self.rows() if row.job_id in found] if found else []
 
-    def not_known(self, printer_id: str) -> NotKnown | None:
-        """Since which print what's on the printer isn't known, or None."""
+    def not_known(self, printer_id: str, job_id: str | None = None) -> NotKnown | None:
+        """Since which print what's on the printer isn't known, the latest marked or `job_id`'s,
+        or None."""
         with self._lock:
-            return find_not_known(self._conn, printer_id) if self._has_swaps else None
+            return find_not_known(self._conn, printer_id, job_id) if self._has_swaps else None
 
     def reprints(self, job_id: str) -> list[str]:
         """The jobs that print `job_id`'s file again, oldest first."""
@@ -983,17 +985,17 @@ _SLICED_JOIN = " LEFT JOIN sliced_prints s ON s.job_id = p.job_id"
 
 
 def _said_on(db: sqlite3.Connection, job_id: str, pick: Pick) -> None:
-    """The person's pick at a swap's outcome, in the answer's transaction. It counts only under
-    the mark it was picked under: a load or a word since stands."""
+    """The person's pick at a swap's outcome, in the answer's transaction. It counts only while
+    the stock hasn't changed since it was picked: a load, a word or a start seen since stands."""
     spool_id = pick.spool_id
     swap = db.execute(
         "SELECT m.spool, w.printer_id FROM print_swaps w"
         " JOIN swap_not_known k ON k.job_id = w.job_id AND k.printer_id = w.printer_id"
         " JOIN print_material m ON m.job_id = w.job_id"
-        " WHERE w.job_id = ? AND k.mark = ?",
-        (job_id, pick.mark),
+        " WHERE w.job_id = ?",
+        (job_id,),
     ).fetchone()
-    if swap is None:
+    if swap is None or pick.changes != stock_changes(db):
         raise SaidSince(
             "what's on the printer was said since, so the pick is dropped: pick again, or press "
             "Record again without one"

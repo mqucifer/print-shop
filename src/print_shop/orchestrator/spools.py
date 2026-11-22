@@ -11,7 +11,8 @@ in words that say both, with what was typed before dropped:
 - on that print's own outcome card, whose choices say both (`choices`).
 
 Nothing is pre-selected. With no terminal to ask in, nothing is asked or cleared. An answer
-counts only for what it was asked of (`NotKnown.mark`): what's seen, loaded or said since stands.
+counts only while the stock hasn't changed since it was asked (`inventory.stock_changes`): what's
+seen, loaded or said since stands. Each print with a swap is asked of by itself.
 """
 
 from __future__ import annotations
@@ -82,6 +83,8 @@ def ask_on_now(
             return
         over = "is over" if found.started else "is over or can't begin"
         write(f"  Recorded: {found.print_named()} {over}, and {spool.named()}, is on.")
+        # Saying one's over says nothing of another.
+        ask_on_now(stock, printer_id, read=read, write=write, forget=forget, asks=asks)
         return
 
 
@@ -102,15 +105,15 @@ def ask_over(
 
 def choices(ledger: Ledger, row: Row) -> dict[str, Pick]:
     """What the outcome can be told is on now, by words that say both halves: only on the card
-    of the print since which it isn't known, and only a spool on hand."""
+    of a print since which it isn't known, and only a spool on hand."""
     if row.material is None:
         return {}
-    found = ledger.not_known(row.material.printer_id)
-    if found is None or found.job_id != row.job_id:
+    found = ledger.not_known(row.material.printer_id, row.job_id)
+    if found is None:
         return {}
     with Inventory(ledger.path) as stock:
         on_hand = _likely_first(found, stock.spools())
-    return {f"{spool.named()} is on now, and that print is over": Pick(spool.id, found.mark)
+    return {f"{spool.named()} is on now, and that print is over": Pick(spool.id, found.changes)
             for spool in on_hand}
 
 
@@ -121,7 +124,7 @@ def said(ledger: Ledger, row: Row) -> str:
         return used
     printer = row.material.printer_id
     found = ledger.not_known(printer)
-    if found is not None and found.job_id == row.job_id:
+    if found is not None and ledger.not_known(printer, row.job_id) is not None:
         return (f"{used}. " if used else "") + (
             f"print-shop doesn't know what's on {printer} until you say this print is over and "
             "which spool is on")

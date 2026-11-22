@@ -52,7 +52,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from print_shop.bench.pausing import TOPS_OUT, mm
 from print_shop.core.state import AppliedOrientation, Orientation, SliceResult
-from print_shop.inventory import Asked, InventoryError, Material, NotKnown
+from print_shop.inventory import Asked, InventoryError, Material
 from print_shop.setup import pauses
 from print_shop.setup.concerns import concern_in, ways
 from print_shop.setup.intake import Estimate
@@ -132,8 +132,9 @@ class ReviewRequest:
     #: (mqucifer/print-shop#218). None with no stock set up.
     material: Material | None = None
     stock: pauses.Stock | None = None
-    #: Since which print what's on the printer isn't known (mqucifer/print-shop#218).
-    not_known: Callable[[], NotKnown | None] | None = None
+    #: The stock's changes, and since which print what's on isn't known, read as the person is
+    #: about to be asked (mqucifer/print-shop#218).
+    stands: Callable[[], Asked] | None = None
     #: Records a spool as loaded, and the print said to be over in the same word, on the
     #: person's typed y and only that (`_loaded_first`): only while it's as it was when asked.
     record_load: Callable[[int, Asked], None] | None = None
@@ -215,7 +216,7 @@ def render(request: ReviewRequest) -> str:
     paused = proposal.get(PAUSE)
     purpose = paused.pause if paused is not None and paused.value != "none" else None
     try:
-        unknown = request.not_known() if request.not_known else None
+        unknown = request.stands().not_known if request.stands else None
         why = unknown.why() if unknown is not None else ""
         if purpose is not None:
             lines += pauses.for_review(purpose, request.reading, request.material, request.stock,
@@ -560,11 +561,11 @@ def _loaded_first(
     stock that can't be read or written, or input that ends, doesn't lose the job, as Start still
     checks.
     """
-    if request.stock is None or request.record_load is None:
+    if request.stock is None or request.record_load is None or request.stands is None:
         return
     try:
-        on_hand = request.stock()
-        unknown = request.not_known() if request.not_known else None
+        asked = request.stands()  # before what the question names is read
+        on_hand, unknown = request.stock(), asked.not_known
     except sqlite3.Error as exc:
         write(f"  The stock couldn't be read ({exc}): an Approve checks it again.")
         return
@@ -597,8 +598,7 @@ def _loaded_first(
               "approve.")
         return
     try:
-        had = next((spool.id for spool in on_hand if spool.printer_id == first.printer_id), None)
-        request.record_load(first.spool_id, Asked(had, unknown))
+        request.record_load(first.spool_id, asked)
     except (InventoryError, sqlite3.Error) as exc:
         write(f"  Not recorded: {exc}")
         return

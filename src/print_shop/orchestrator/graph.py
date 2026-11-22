@@ -62,7 +62,7 @@ from print_shop.expert.orientation import (
 from print_shop.ingest.analyzer import analyze, verify_unchanged
 from print_shop.ingest.measuring import Measuring
 from print_shop.ingest.orientation import LAID, candidate_in, candidates, write_rotated
-from print_shop.inventory import Asked, Inventory, Material, NotKnown, SpoolUse
+from print_shop.inventory import Asked, Inventory, Material, SpoolUse
 from print_shop.ledger import Ledger, PrintRecord
 from print_shop.orchestrator.fitness import scoring_profiles
 from print_shop.printer.centauri import PreflightFailed, PrinterClient, preflight
@@ -508,7 +508,7 @@ def build_graph(
                         offering=offer, doubting=doubting,
                         material=_material_of(profiles), stock=_stock(ledger, profiles),
                         record_load=_recorder(ledger, profiles),
-                        not_known=_not_known(ledger, profiles),
+                        stands=_stands(ledger, profiles),
                     )
                 except _Turned as turned:
                     # Sent back at the review: turned to the person's pose, and sliced again.
@@ -935,16 +935,18 @@ def _starts_said(state: PrintJobState, ledger: Ledger | None) -> str:
     return f"{unknown.why()}. {unknown.hold().do}: an Approve before that starts nothing"
 
 
-def _not_known(
-    ledger: Ledger | None, profiles: SlicerProfiles
-) -> Callable[[], NotKnown | None] | None:
-    """Since which print what's on the printer isn't known, for the review, read as it's
-    needed."""
+def _stands(ledger: Ledger | None, profiles: SlicerProfiles) -> Callable[[], Asked] | None:
+    """The stock's changes and what isn't known, for the review, read as it's needed."""
     material = _material_of(profiles)
     if ledger is None or material is None:
         return None
-    read, printer = ledger, material.printer_id
-    return lambda: read.not_known(printer)
+    path, printer = ledger.path, material.printer_id
+
+    def stands() -> Asked:
+        with Inventory(path) as inventory:
+            return inventory.asked(printer)
+
+    return stands
 
 
 def _material_of(profiles: SlicerProfiles) -> Material | None:
@@ -1275,7 +1277,7 @@ def _propose_and_review(
     doubting: Doubting | None = None,
     material: Material | None = None,
     stock: pauses.Stock | None = None,
-    not_known: Callable[[], NotKnown | None] | None = None,
+    stands: Callable[[], Asked] | None = None,
     record_load: Callable[[int, Asked], None] | None = None,
 ) -> tuple[SliceResult, dict[str, Any]]:
     """Slice with the proposal; with a reviewer, again after each correction until approved.
@@ -1351,7 +1353,7 @@ def _propose_and_review(
                 offering=offering,
                 material=material,
                 stock=stock,
-                not_known=not_known,
+                stands=stands,
                 record_load=record_load,
             ))
             if review.offering is not None:
