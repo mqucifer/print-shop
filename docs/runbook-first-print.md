@@ -140,6 +140,21 @@ Finish that job, or stop it with Ctrl-C in its terminal (which doesn't stop the 
 
    The PR quotes the correction and its job id (`--list` shows both). A correction for this part only needs nothing more: the ledger has it. Hard limits (a bound, tree supports) are code, in `src/print_shop/setup/bounds.py`, and change by PR too.
 
+   **A mesh that isn't closed stops at the mesh gate first** (mqucifer/print-shop#200), before any question or slice. The command line, and the job's log, say so:
+
+   ```
+   At the mesh gate, before any question or slice. Approve or Reject on the dashboard.
+     because     Mesh is not manifold; cannot be trusted to slice.
+     is_manifold False
+     volume_mm3  None: a mesh that isn't closed has no volume
+     bbox_mm     20 x 20 x 20
+     Approve     goes on to slice a mesh this gate calls untrustworthy, as the file lays it: the questions and the review follow, then the gate before printing, where today the job fails whatever you answer. Nothing prints.
+     Reject      ends the job: nothing is sliced or printed
+     answer by   14:32 (60 min left); after that it ends and nothing prints
+   ```
+
+   The dashboard's card doesn't tell the two gates apart: it asks "Print this?" at the mesh gate too. Read the command line before you press. Reject and mend the file: Orca slices a damaged mesh without complaint and can get it badly wrong, and today a job approved at the mesh gate fails when the approval gate is answered, with nothing sent to the printer (`can only concatenate list`).
+
 2. **Approve at the gate.** The dashboard asks "Print this?". Check the numbers before you press:
    - Time: about 11 minutes (Orca's estimate for your presets is 10 m 54 s; the review shows the estimate with its changes);
    - Plastic: about 2.9 cm³;

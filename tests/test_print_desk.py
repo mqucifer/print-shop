@@ -540,7 +540,7 @@ class _Daemon:
         logging.getLogger("print_shop.test").warning("calling with %s", self._tokens[0])
         return "job-log-1"
 
-    def wait_for_gate(self, job_id: str, timeout_s: float) -> None:
+    def wait_for_gate(self, job_id: str, timeout_s: float, shown: int = 0) -> None:
         assert callable(self._asker)
         self._asker([_intake().questions[0]])
         raise TimeoutError("The slice didn't reach the approval gate within the hour.")
