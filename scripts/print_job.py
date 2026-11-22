@@ -30,10 +30,12 @@ whose folder it sits in. `--context` names a sidecar or a run's folder elsewhere
 seam and elephant foot read its fits, and the review says what was read, or that there was none.
 A sidecar's shape is in `docs/runbook-first-print.md`.
 
-**Then a few questions about the part,** proposed from its shape once it's
-oriented: each with numbered options, what each would cost (Orca's estimate)
-and one recommended. Answer by number, or `o` and your own words. A part
-whose shape leaves nothing open gets none. `--answers file.json` replays
+**Then a few questions about the part,** once it's oriented: each with numbered options, what
+each would cost (Orca's estimate) and one recommended. Answer by number, or `o` and your own
+words. What it's for and what's seen show at once, and need no model (mqucifer/print-shop#208).
+The model's questions, from the part's shape, are added when they arrive. While you wait for
+them the time shows, and `go` goes on without them. If the model has closer choices on what
+it's for, Enter keeps the answer you gave. `--answers file.json` replays
 recorded answers, each naming its question by its text or its feature; a
 file that doesn't answer exactly the questions asked is refused, and the job
 ends saying which. The settings are then proposed and shown here for review:
@@ -134,6 +136,7 @@ from print_shop.runtime import (
 from print_shop.setup.context import read_context
 from print_shop.setup.intake import Asker, cli_asker, replay_asker
 from print_shop.setup.review import cli_reviewer
+from print_shop.setup.waiting import Prompted, Waiting, cli_waiting
 from print_shop.slicer.orca import SlicerProfiles
 from print_shop.slicer.store import STORE_DIR, NoChoice, Store, choose
 from print_shop.slicer.store import describe as describe_store
@@ -344,6 +347,7 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
 
     profiles: SlicerProfiles | None = None
     asker: Asker | None = None
+    waiting: Waiting | None = None
     hand_sliced: sliced.SlicedJob | None = None
     if by_hand:
         found = _hand_sliced(args, job_log)
@@ -386,10 +390,13 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
         print(f"  filament  {choice.filament.name}")
         for note in choice.notes:
             print(f"  ({note})")
+        answering = Prompted(read)
         try:
-            asker = replay_asker(args.answers) if args.answers else cli_asker(read=read)
+            asker = replay_asker(args.answers) if args.answers else cli_asker(read=answering)
         except ValueError as exc:
             parser.error(str(exc))
+        waiting = cli_waiting(read=read, replayed=args.answers is not None,
+                              prompt=answering.prompt)
 
     recorder = FrameRecorder(recording_path()) if args.record else None
     printer: PrinterClient | None = None
@@ -408,6 +415,7 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
         recorder=recorder,
         settings=args.settings,
         asker=asker,
+        waiting=waiting,
         # A hand-sliced file is reviewed by nobody here: it's shown, and goes to the gate.
         reviewer=cli_reviewer(read=read) if hand_sliced is None else None,
         show=print if hand_sliced is not None else None,
@@ -441,9 +449,11 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
             if hand_sliced is not None:
                 print(f"Job {job_id}: taking the file as it is, then the approval gate.")
             elif len(args.stl) > 1:
-                how = "each kept as laid" if args.as_laid else "orienting each"
-                print(f"Job {job_id}: {how}, then a few questions about the parts together, "
-                      "here.")
+                if args.as_laid:
+                    how = "each kept as laid, then a few questions about the parts together, here"
+                else:
+                    how = "a few questions about the parts together, here, then each part's pose"
+                print(f"Job {job_id}: {how}.")
             else:
                 how = "kept as laid" if args.as_laid else "orienting"
                 print(f"Job {job_id}: {how}, then a few questions about the part, here.")

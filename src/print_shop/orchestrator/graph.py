@@ -76,7 +76,7 @@ from print_shop.setup import lessons as print_lessons
 from print_shop.setup.context import PartContext, place, pose_for, read_context
 from print_shop.setup.doubts import Doubting
 from print_shop.setup.features import measure
-from print_shop.setup.intake import Asker, Estimate, Intake
+from print_shop.setup.intake import Asker, Estimate, Intake, Question
 from print_shop.setup.loop import Part, PrintLoop
 from print_shop.setup.loop import run as run_loop
 from print_shop.setup.offer import Offering, ThisPart
@@ -98,6 +98,7 @@ from print_shop.setup.reading import SliceReading, flags, read_slice, seen
 from print_shop.setup.review import Reviewer, ReviewPart, ReviewRequest
 from print_shop.setup.skill import groups_for, load
 from print_shop.setup.traits import traits
+from print_shop.setup.waiting import Waiting, ask_meanwhile
 from print_shop.slicer.arrange import DoesNotFit, SlicePlate, ToPlace, slice_parts
 from print_shop.slicer.naming import job_id_from_filename, name_gcode
 from print_shop.slicer.orca import (
@@ -149,6 +150,7 @@ def build_graph(
     loop: PrintLoop | None = None,
     show: Callable[[str], None] | None = None,
     store: Store | None = None,
+    waiting: Waiting | None = None,
     plate_slicer: SlicePlate = slice_plate,
 ) -> Any:
     """Build and compile the print pipeline graph.
@@ -201,6 +203,10 @@ def build_graph(
             shows it nowhere; the ledger keeps the reading either way.
         store: print-shop's profiles, by which a hand-sliced file's settings are put under the
             profile each belongs to. None keeps them all under "other".
+        waiting: The person's side of the wait for the model's questions
+            (mqucifer/print-shop#208): print-shop's two are asked at once, the model's are
+            added when they arrive, and the person can go on without them. None asks them
+            all together, once the model's call has ended.
         plate_slicer: What slices a job of several parts (mqucifer/print-shop#109): the real
             Orca by default, as `slicer` is.
 
@@ -264,14 +270,19 @@ def build_graph(
         context, as laid, or one orientation call. The print loop isn't run, as it reads one
         part.
 
+        Where the questions show while a model works (mqucifer/print-shop#208), the calls wait
+        till they're answered, as the loop's do for one part: a call a part came before them.
+
         Raises:
             RuntimeError: If a part has no accepted pose: the review gate shows one part.
         """
+        later = (waiting is not None and asker is not None and proposer is not None
+                 and proposer.asks_model)
         parts, decided = [], []
         for part in state["parts"]:
             own: PrintJobState = {**state, "stl_path": part.stl, "stl_sha256": part.sha256,
                                   "mesh": part.mesh}
-            found = orient_part(own, came_from=Path(part.given), looped=False)
+            found = orient_part(own, came_from=Path(part.given), looped=False, later=later)
             outcome: Outcome[Orientation] = found["orientation"]
             if not outcome.accepted:
                 said = "; ".join(v.detail for v in outcome.outstanding if v.detail)
@@ -291,10 +302,12 @@ def build_graph(
 
     def orient_part(
         state: PrintJobState, *, came_from: Path | None = None, looped: bool = True,
+        later: bool = False,
     ) -> dict[str, Any]:
         """One part's pose. `came_from` is where it was given from, where that isn't the file
         that's read: its context is beside that. `looped` False never leaves the pose to the
-        loop."""
+        loop. `later` leaves a plate's part its orientation call for after the questions, which
+        are asked of it as the file lays it, or the first pose that fits where that doesn't."""
         verify_unchanged(state["stl_path"], state.get("stl_sha256", ""))
         if build_volume is None:
             raise RuntimeError(
@@ -338,6 +351,20 @@ def build_graph(
                     f"kept on its {context.down} side, as {context.down_from} lays it: no "
                     "orientation model was asked")), accepted=True, attempts=0),
                 "orientation_lessons": given, **poses}
+        if later:
+            fitting = sorted((c for c in found if c.fits_in(build_volume)),
+                             key=lambda c: any(c.rotation_deg))  # as the file lays it, first
+            if fitting:
+                return {"orientation": Outcome(proposal=Chosen(
+                    value=fitting[0], source=POSE_AFTER_QUESTIONS,
+                    rationale="for the questions: its pose is chosen after them"),
+                    accepted=True, attempts=0), "orientation_lessons": given, **poses}
+            if came_from is not None:
+                # Without asking a model, which the person would wait for to be told this.
+                n = next(p.n for p in state["parts"] if p.stl == state["stl_path"])
+                raise RuntimeError(
+                    f"no pose of part {n}, {came_from.name}, fits the build volume "
+                    f"{build_volume} mm: nothing was sliced")
         return {"orientation": orient_by_call(request), "orientation_lessons": given, **poses}
 
     def orient_by_call(request: OrientationRequest) -> Outcome[Orientation]:
@@ -396,13 +423,18 @@ def build_graph(
             poses = state.get("orientation_candidates", ())
             features = measure(stl_to_slice, applied.bed_contact_area_mm2 or 0.0)
             first = stl_to_slice
-            intake = _ask(
-                proposer.questions(features, profiles),
-                asker,
-                lambda settings, n: _estimate(
-                    slicer, first, profiles, settings, outdir / "options" / str(n)
-                ),
-            )
+
+            def priced(settings: dict[str, str], n: int) -> Estimate | None:
+                return _estimate(slicer, first, profiles, settings, outdir / "options" / str(n))
+
+            if waiting is not None and proposer.asks_model:
+                measured = features
+                intake = ask_meanwhile(
+                    lambda stop: proposer.questions(measured, profiles, stop),
+                    asker, waiting, lambda questions: _priced(questions, priced),
+                )
+            else:
+                intake = _ask(proposer.questions(features, profiles), asker, priced)
             proposed["intake"] = intake
             context = state.get("part_context")
             earlier: list[Change] = []
@@ -493,6 +525,10 @@ def build_graph(
                             "loop": fell_back["loop"], "loop_ending": fell_back["loop_ending"],
                             "notes": proposal.notes + fell_back["notes"]})
                 proposal = _with_orienting(proposal, state.get("orientation_lessons", ()))
+                if intake.without:
+                    # Said at the review, as well as when it happened (mqucifer/print-shop#208).
+                    proposal = proposal.model_copy(
+                        update={"notes": proposal.notes + (intake.without,)})
                 carried = [c for c in earlier if c.key != ORIENTATION]
                 if carried:
                     # Corrections made before the part was turned stand after it.
@@ -562,9 +598,45 @@ def build_graph(
             **proposed,
         }
 
+    def posed_after_questions(
+        parts: tuple[PlatePart, ...], asked_of: list[Outcome[Orientation]],
+        undecided: list[int], fit: Callable[[list[Outcome[Orientation]]], SliceResult],
+    ) -> list[Outcome[Orientation]]:
+        """Each undecided part's orientation call, after the questions. The answers are never
+        lost to it: a part with no accepted pose, or poses that don't fit one plate together,
+        keep the pose the questions were asked of, saying so, to send back at the review."""
+        assert build_volume is not None, "orient refuses a graph without profiles"
+
+        def kept(at: int, why: str) -> Outcome[Orientation]:
+            pose = asked_of[at].proposal.value
+            return Outcome(proposal=Chosen(
+                value=pose, source=POSE_KEPT,
+                rationale=f"kept as the questions had it, {pose_value(pose.rotation_deg)}: {why}",
+            ), accepted=True, attempts=0)
+
+        chosen = list(asked_of)
+        for at in undecided:
+            found = orient_by_call(OrientationRequest(
+                candidates=parts[at].candidates, build_volume_mm=build_volume,
+                part_description="", lessons=tuple(g.line() for g in parts[at].lessons),
+            ))
+            chosen[at] = found if found.accepted else kept(at, "no pose passed its check")
+        try:
+            fit(chosen)
+        except DoesNotFit:
+            for at in undecided:
+                wanted_pose = pose_value(chosen[at].proposal.value.rotation_deg)
+                chosen[at] = kept(at, f"the poses chosen don't fit one plate together (this "
+                                      f"part's was {wanted_pose})")
+        return chosen
+
     def slice_several(state: PrintJobState) -> dict[str, Any]:
         """The plate of a job of several parts (mqucifer/print-shop#109): one intake, one
         proposal and one review for it, arranged, and by object where the head has the room.
+
+        The model's questions are waited for as one part's are, and so are the poses left for
+        after them (`orient_several`): print-shop's two questions wait for no model
+        (mqucifer/print-shop#208).
 
         Raises:
             DoesNotFit: If the parts can't all be sliced on one plate.
@@ -597,17 +669,41 @@ def build_graph(
 
         if proposer is not None and asker is not None:
             wanted = plate_job.by_object(profiles, outdir / "plate")
+            undecided = [n for n, o in enumerate(orientations)
+                         if o.proposal.source == POSE_AFTER_QUESTIONS]
             # Before anything is asked: parts that don't fit one plate end the job here.
-            slicing(to_place)(wanted)
+            try:
+                slicing(to_place)(wanted)
+            except DoesNotFit:
+                if not undecided:
+                    raise
+                # As the files lay them they don't. Each in its smallest pose, they may.
+                assert build_volume is not None, "orient refuses a graph without profiles"
+                orientations = plate_job.smallest(parts, orientations, undecided, build_volume)
+                turned, to_place = plate_job.posed(parts, tuple(orientations), outdir / "parts")
+                read = plate_job.together(turned)
+                slicing(to_place)(wanted)
             first = to_place
-            intake = _ask(
-                proposer.questions(read.features, profiles),
-                asker,
-                lambda settings, n: _estimate(
-                    estimating(first), first[0].stl, wanted, settings, outdir / "options" / str(n)
-                ),
-            )
+            measured = read.features
+
+            def priced(settings: dict[str, str], n: int) -> Estimate | None:
+                return _estimate(estimating(first), first[0].stl, wanted, settings,
+                                 outdir / "options" / str(n))
+
+            if waiting is not None and proposer.asks_model:
+                intake = ask_meanwhile(
+                    lambda stop: proposer.questions(measured, profiles, stop),
+                    asker, waiting, lambda questions: _priced(questions, priced),
+                )
+            else:
+                intake = _ask(proposer.questions(measured, profiles), asker, priced)
             done["intake"] = intake
+            if undecided:
+                orientations = posed_after_questions(
+                    parts, orientations, undecided,
+                    lambda chosen: slicing(
+                        plate_job.posed(parts, tuple(chosen), outdir / "parts")[1])(wanted),
+                )
             given = tuple({g.id: g for part in parts for g in part.lessons}.values())
             process, _ = _presets(profiles)
             earlier: list[Change] = []
@@ -623,6 +719,10 @@ def build_graph(
                     plate_job.planned(proposal, process, len(parts),
                                       without_loop=loop is not None),
                     given)
+                if intake.without:
+                    # Said at the review, as one part's is (mqucifer/print-shop#208).
+                    proposal = proposal.model_copy(
+                        update={"notes": proposal.notes + (intake.without,)})
                 if earlier:
                     proposal = proposal.corrected(earlier)
                 plate = _PlateReview(
@@ -1058,6 +1158,11 @@ def _resolved(
 #: The source of an orientation the print loop will choose after the questions.
 LOOP_PENDING = "loop:pending"
 
+#: The source of a plate's part's pose whose orientation call waits till after the questions
+#: (mqucifer/print-shop#208), and of one that kept the pose they were asked of.
+POSE_AFTER_QUESTIONS = "plate:pending"
+POSE_KEPT = "plate:kept"
+
 #: Where an orientation kept as the person laid it came from, as the ledger keeps it.
 AS_LAID = "as_laid"
 
@@ -1108,10 +1213,15 @@ def _ask(
     asked: Any, asker: Asker, slice_with: Any
 ) -> Intake:
     """The questions with Orca's estimate for each option, asked, with the answers."""
-    counter = iter(range(1, 1000))
-    questions = estimate(asked.questions, lambda settings: slice_with(settings, next(counter)))
+    questions = _priced(asked.questions, slice_with)
     return Intake(questions=questions, answers=asker(questions), note=asked.note,
                   call=asked.call)
+
+
+def _priced(questions: tuple[Question, ...], slice_with: Any) -> tuple[Question, ...]:
+    """The questions with Orca's estimate for each option."""
+    counter = iter(range(1, 1000))
+    return estimate(questions, lambda settings: slice_with(settings, next(counter)))
 
 
 def _estimate(
@@ -1173,7 +1283,7 @@ def _offering(
             filament=filament, filament_names=tuple(dict.fromkeys(n for n in names if n)),
             candidates=state.get("orientation_candidates", ()), build_volume_mm=build_volume,
             context=state.get("part_context"), pose_chosen=chosen,
-            asked=frozenset(k for q in intake.questions for o in q.options for k in o.settings),
+            asked=intake.could_set(),
         ))
     except Exception as exc:  # noqa: BLE001 - a print is never stopped by what it might reuse
         logger.warning("the past prints couldn't be read for the offer: %s", exc)

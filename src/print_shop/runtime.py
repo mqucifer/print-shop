@@ -34,6 +34,7 @@ from print_shop.setup.loop import PrintLoop, cli_person, llm_chat
 from print_shop.setup.model import setup_llm
 from print_shop.setup.proposal import ORIENTATION
 from print_shop.setup.review import Reviewer
+from print_shop.setup.waiting import Waiting
 from print_shop.slicer.orca import BedType, SlicerProfiles, with_bed_type
 from print_shop.slicer.store import Choice, Store
 
@@ -109,6 +110,7 @@ def build_run(
     show: Callable[[str], None] | None = None,
     store: Store | None = None,
     on_step: Callable[[str, str, Step], None] | None = None,
+    waiting: Waiting | None = None,
 ) -> Run:
     """A daemon wired to the real broker, Orca, LiteLLM, ledger and a read-only watcher.
 
@@ -128,6 +130,9 @@ def build_run(
     settings are sorted by.
 
     `on_step` is where a job's step goes for a second start to be told (`orchestrator/live.py`).
+
+    `waiting` is what the person sees and does while the model works on its questions
+    (`cli_waiting`, mqucifer/print-shop#208).
 
     Raises:
         RuntimeError, FileNotFoundError: On missing settings, before a job starts.
@@ -174,6 +179,7 @@ def build_run(
         show=show,
         store=store,
         on_step=on_step,
+        waiting=waiting,
     )
     return Run(daemon=daemon, ledger=ledger, recorder=recorder)
 

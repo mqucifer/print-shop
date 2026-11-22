@@ -5,9 +5,11 @@ The Sponsor prints one part at a time from main, so that flow is held byte for b
 the ledger, the files in the job's folder, and the G-code it sends. Ids, times and temporary
 paths are the only things replaced.
 
-`tests/data/one_part/transcript.txt` was written by this test run on d597bd6, main without that
-change. A change that means to alter one part's flow writes it again, and the diff shows
-what it altered:
+It runs twice: with the questions asked all together (`transcript.txt`), and as `print_job.py`
+asks them, print-shop's two while the model reads (`waiting.txt`, mqucifer/print-shop#208). Both
+files in `tests/data/one_part/` were written by this test run on 8980d66, main without that
+change. A change that means to alter one part's flow writes them again, and the diff shows what
+it altered:
 
     PRINT_SHOP_WRITE_TRANSCRIPT=1 uv run pytest tests/test_one_part_unchanged.py -m "not slicer"
 """
@@ -46,7 +48,7 @@ from tests.test_job_e2e import CFG
 from tests.test_review import _model, _questions
 from tests.test_runtime import settings  # noqa: F401  (the fixture)
 
-TRANSCRIPT = DATA / "one_part" / "transcript.txt"
+TRANSCRIPTS = DATA / "one_part"
 
 
 def _plain(text: str, tmp_path: Path) -> str:
@@ -54,6 +56,7 @@ def _plain(text: str, tmp_path: Path) -> str:
     for path in (tmp_path.resolve(), tmp_path):
         text = text.replace(str(path), "<tmp>")
     text = re.sub(r"[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}", "<job>", text)
+    text = re.sub(r"(after |since \()\d+ s", r"\1<n> s", text)
     text = re.sub(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?(Z|[+-]\d\d:\d\d)?", "<time>", text)
     return re.sub(r"answer by   \d\d:\d\d \(\d+ min left\)", "answer by   <time>", text)
 
@@ -81,7 +84,9 @@ def _ledger(path: Path, tmp_path: Path) -> list[str]:
     return lines
 
 
+@pytest.mark.parametrize("name", ["transcript", "waiting"])
 def test_one_part_is_byte_for_byte_what_it_was(
+    name: str,
     settings: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -97,7 +102,17 @@ def test_one_part_is_byte_for_byte_what_it_was(
     process.write_text(json.dumps({**json.loads(CI_PROFILES.process.read_text()),
                                    "wall_loops": "2"}))
     profiles = CI_PROFILES.model_copy(update={"process": process})
+    asks_meanwhile = name == "waiting"
+    second_shown, come = threading.Event(), threading.Event()
+    prompts: list[str] = []
     bridge = MemoryBridge()
+
+    def questions(system: str, user: str, schema: dict[str, Any]) -> dict[str, Any]:
+        if asks_meanwhile:
+            # The model's land while the second answer is open, every run alike.
+            second_shown.wait(20)
+            come.set()
+        return _questions(system, user, schema)
     printer = FramePrinter(after_start=["printing", "completed"])
 
     def build_run(**given: Any) -> SimpleNamespace:
@@ -105,17 +120,27 @@ def test_one_part_is_byte_for_byte_what_it_was(
         daemon = Daemon(
             cfg=CFG, profiles=profiles, workdir=jobs, printer=printer, watch_printer=printer,
             watch_poll_s=0.05, slicer=RecordedSlicer(), bridge=lambda cfg: bridge, ledger=ledger,
-            proposer=Proposer(ask=_model, ask_questions=_questions),
+            proposer=Proposer(ask=_model, ask_questions=questions),
             asker=given["asker"], reviewer=given["reviewer"],
+            **({"waiting": given["waiting"]} if asks_meanwhile else {}),
         )
         return SimpleNamespace(daemon=daemon, ledger=ledger)
 
-    typed = iter(["1", "1", "ok"])
+    # Asked meanwhile, the model's closer choices on purpose come after the two, and Enter keeps.
+    typed = iter(["1", "1", "", "ok"] if asks_meanwhile else ["1", "1", "ok"])
+
+    def person_types(prompt: str = "") -> str:
+        prompts.append(prompt)
+        if asks_meanwhile and len(prompts) == 2:
+            second_shown.set()
+            come.wait(20)
+            time.sleep(0.3)  # what landed is said under the open prompt
+        return next(typed)
     monkeypatch.delenv("PRINT_AGENT_ALLOW_HARDWARE", raising=False)
     monkeypatch.setattr(script, "WORK_DIR", jobs)
     monkeypatch.setattr(script, "build_run", build_run)
     monkeypatch.setattr(script, "time", SimpleNamespace(sleep=lambda _: time.sleep(0.02)))
-    monkeypatch.setattr("builtins.input", lambda prompt="": next(typed))
+    monkeypatch.setattr("builtins.input", person_types)
 
     gates: list[dict[str, Any]] = []
     done = threading.Event()
@@ -170,6 +195,6 @@ def test_one_part_is_byte_for_byte_what_it_was(
     ]
     text = "\n".join(said) + "\n"
     if os.environ.get("PRINT_SHOP_WRITE_TRANSCRIPT") == "1":
-        TRANSCRIPT.parent.mkdir(exist_ok=True)
-        TRANSCRIPT.write_text(text)
-    assert text == TRANSCRIPT.read_text()
+        TRANSCRIPTS.mkdir(exist_ok=True)
+        (TRANSCRIPTS / f"{name}.txt").write_text(text)
+    assert text == (TRANSCRIPTS / f"{name}.txt").read_text()

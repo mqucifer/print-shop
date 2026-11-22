@@ -89,7 +89,8 @@ class Rig:
     def __init__(
         self, tmp_path: Path, *typed: str, use: SlicerProfiles | None = None,
         orca: Any = None, proposing: bool = True,
-        lessons: Callable[..., Any] | None = None,
+        lessons: Callable[..., Any] | None = None, asking: Any = None, waiting: Any = None,
+        questions: Any = _questions, llm: Any = None,
     ) -> None:
         self.work = tmp_path / "jobs"
         self.work.mkdir(exist_ok=True)
@@ -114,8 +115,9 @@ class Rig:
 
         setup: dict[str, Any] = {}
         if proposing:
-            setup = {"proposer": Proposer(ask=_model, ask_questions=_questions, lessons=lessons),
-                     "asker": asker, "reviewer": reviewer}
+            setup = {"proposer": Proposer(ask=_model, ask_questions=questions, lessons=lessons),
+                     "asker": asking or asker, "waiting": waiting, "llm": llm,
+                     "reviewer": reviewer}
         self.daemon = Daemon(
             cfg=CFG, profiles=use or profiles(tmp_path / "profiles"), workdir=self.work,
             printer=self.printer, watch_printer=self.printer, watch_poll_s=0.05,
@@ -536,6 +538,7 @@ def test_print_job_takes_three_files_and_shows_each_outcome(
     rig: list[Rig] = []
 
     def build_run(**given: Any) -> SimpleNamespace:
+        assert given["waiting"] is not None, "a plate's questions wait as one part's do"
         made = Rig(tmp_path)
         rig.append(made)
         return SimpleNamespace(daemon=made.daemon, ledger=made.ledger)

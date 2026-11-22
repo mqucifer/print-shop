@@ -33,8 +33,8 @@ from print_shop.slicer.arrange import ToPlace, object_file
 from print_shop.slicer.orca import SlicerProfiles
 
 __all__ = [
-    "Together", "by_object", "keep_sidecar", "planned", "poses_said", "posed", "records", "take",
-    "together",
+    "Together", "by_object", "keep_sidecar", "planned", "poses_said", "posed", "records",
+    "smallest", "take", "together",
 ]
 
 #: The features whose least value is the plate's risk. Every other's is the most.
@@ -99,6 +99,22 @@ def posed(
         }))
         files.append(ToPlace(part.n, part.name, out, chosen.height_mm))
     return tuple(turned), tuple(files)
+
+
+def smallest(
+    parts: tuple[PlatePart, ...], orientations: list[Outcome[Orientation]], undecided: list[int],
+    build_volume: tuple[float, float, float],
+) -> list[Outcome[Orientation]]:
+    """The undecided parts each in the pose that takes least of the plate: whether any room can
+    be made for them, before anything is asked."""
+    chosen = list(orientations)
+    for at in undecided:
+        pose = min((c for c in parts[at].candidates if c.fits_in(build_volume)),
+                   key=lambda c: c.bbox_mm[0] * c.bbox_mm[1])
+        was = orientations[at]
+        chosen[at] = dataclasses.replace(
+            was, proposal=dataclasses.replace(was.proposal, value=pose))
+    return chosen
 
 
 @dataclasses.dataclass(frozen=True)
