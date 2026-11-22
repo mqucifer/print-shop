@@ -47,7 +47,7 @@ from typing import Any, Protocol
 
 from print_shop.bench.pausing import TOPS_OUT, mm
 from print_shop.core.state import AppliedOrientation, Orientation, SliceResult
-from print_shop.inventory import Material
+from print_shop.inventory import InventoryError, Material
 from print_shop.setup import pauses
 from print_shop.setup.concerns import concern_in, ways
 from print_shop.setup.intake import Estimate
@@ -122,6 +122,8 @@ class ReviewRequest:
     stock: pauses.Stock | None = None
     #: Whether that spool is the second of the last swap: then Enter never starts a swap on it.
     left_by_swap: bool = False
+    #: Records a spool as loaded, on the person's typed y and only that (`_loaded_first`).
+    record_load: Callable[[int], None] | None = None
 
     @property
     def proposed(self) -> tuple[Flag, ...]:
@@ -515,6 +517,34 @@ def _purposed(
                                         *review.corrections[at + 1:]))
 
 
+def _loaded_first(
+    request: ReviewRequest, read: Callable[[str], str], write: Callable[[str], None]
+) -> None:
+    """On `ok` with LOAD FIRST, whether the first spool's on the printer now. A typed y records
+    the load, as `stock.py load` does; anything else writes nothing (mqucifer/print-shop#218)."""
+    change = request.proposal.get(PAUSE)
+    if change is None or change.value == "none" or change.pause is None:
+        return
+    if request.stock is None or request.record_load is None:
+        return
+    on_hand = request.stock()
+    first = pauses.first_to_load(change.pause, on_hand)
+    if first is None or all(spool.id != first.spool_id for spool in on_hand):
+        return
+    write(f"Is {first.named()}, on the printer now? y records it (stock load {first.spool_id}); "
+          "Enter for later, and an Approve before it's loaded starts nothing.")
+    if read("loaded> ").strip().lower() != "y":
+        write(f"  Nothing recorded. Load it and `stock.py load {first.spool_id}` before you "
+              "approve.")
+        return
+    try:
+        request.record_load(first.spool_id)
+    except InventoryError as exc:
+        write(f"  Not recorded: {exc}")
+        return
+    write(f"  Recorded: {first.named()} is loaded.")
+
+
 def _before(request: ReviewRequest, value: str) -> tuple[pauses.Pause, str] | None:
     """What a pause at `value` is pre-selected to be for, and from where: this review's pause,
     else the picked past print's at that height, while it's ticked. One typed at another height
@@ -621,6 +651,8 @@ def cli_reviewer(
                     write(f"  {left} ticked {aren} used yet: use to take {them}, "
                           "or ok again to go on without")
                     continue
+            if parsed.approved:
+                _loaded_first(request, read, write)
             if moved is not None and parsed.offering is None:
                 return replace(parsed, offering=moved)
             return parsed

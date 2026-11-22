@@ -60,8 +60,8 @@ from print_shop.expert.orientation import (
 )
 from print_shop.ingest.analyzer import analyze, verify_unchanged
 from print_shop.ingest.orientation import candidates, write_rotated
-from print_shop.inventory import Inventory, Material, SpoolUse
-from print_shop.ledger import Ledger, PrintRecord
+from print_shop.inventory import Inventory, InventoryError, Material, SpoolUse
+from print_shop.ledger import Ledger, PrintRecord, Row
 from print_shop.orchestrator import spools as swaps
 from print_shop.orchestrator.fitness import scoring_profiles
 from print_shop.printer.centauri import PreflightFailed, PrinterClient, preflight
@@ -104,7 +104,7 @@ from print_shop.slicer.orca import (
 )
 from print_shop.slicer.store import Store
 
-__all__ = ["build_graph", "graph_edges", "new_job"]
+__all__ = ["build_graph", "graph_edges", "new_job", "why_not_start"]
 
 logger = logging.getLogger(__name__)
 
@@ -469,6 +469,7 @@ def build_graph(
                         context=context, stl=state["stl_path"],
                         offering=offer, doubting=doubting,
                         material=_material_of(profiles), stock=_stock(ledger, profiles),
+                        record_load=_recorder(ledger, profiles),
                         left_by_swap=(ledger is not None and swaps.left_by_swap(
                             ledger, _material_of(profiles)) is not None),
                     )
@@ -615,7 +616,10 @@ def build_graph(
         2. **The spool's tuning is the one the job was prepared with**
            (mqucifer/print-shop#220), read again here, as it can be edited
            while the job waits. A colour corrected meanwhile is what's recorded.
-        3. **A swap's first spool is the one loaded** (mqucifer/print-shop#218).
+        3. **What's loaded is what the job was prepared for, or a swap's first spool**
+           (mqucifer/print-shop#218), and no swap's end is still to be seen. The gate holds an
+           Approve for the same (`why_not_start`); this is the backstop, read again after the
+           upload.
         4. **Preflight** — the printer must be free and have room, and the
            G-code must exist. A pure validator over a typed snapshot.
         5. **The uploaded name must carry this job's id.** ``upload_file``
@@ -651,24 +655,9 @@ def build_graph(
                 "one that would not be."
             )
 
-        material = _material_prepared(state)
+        material = _as_started(state, ledger, "nothing was uploaded or printed")
         spools: tuple[SpoolUse, ...] = ()
         sent: PrintJobState = state
-        if material is not None:
-            with Inventory(ledger.path) as inventory:
-                material = inventory.at_start(material)
-                swap = _swap(state)
-                if swap is not None and swap.start is not None and swap.to is not None:
-                    material = inventory.at_swaps_start(swap.start)
-                    to = swap.to.of(inventory.spool(swap.to.spool_id))
-                    started = swap.model_copy(update={"start": material, "to": to})
-                    change = _standing(state)
-                    assert change is not None
-                    # The reading names the spools as the print starts, as the row's spools do.
-                    reading = pauses.marked(state.get("slice_reading"),
-                                            change.model_copy(update={"pause": started}))
-                    spools = pauses.uses(started, reading)
-                    sent = {**state, "slice_reading": reading}
 
         gcode = Path(state["gcode_path"])
         snapshot = client.snapshot()
@@ -688,6 +677,21 @@ def build_graph(
                 f"carry job {state['job_id']}. Refusing to start a print of a file "
                 f"this job cannot account for."
             )
+
+        # Again, as the upload takes a while and stock.py runs beside it.
+        material = _as_started(state, ledger, "the file was uploaded, and not started")
+        swap = _swap(state)
+        if material is not None and swap is not None and swap.start and swap.to:
+            with Inventory(ledger.path) as inventory:
+                to = swap.to.of(inventory.spool(swap.to.spool_id))
+            change = _standing(state)
+            assert change is not None
+            started = swap.model_copy(update={"start": material, "to": to})
+            # The reading names the spools as the print starts, as the row's spools do.
+            reading = pauses.marked(state.get("slice_reading"),
+                                    change.model_copy(update={"pause": started}))
+            spools = pauses.uses(started, reading)
+            sent = {**state, "slice_reading": reading}
 
         # Written before the printer is told anything, so a start that fails
         # halfway is still on record.
@@ -799,6 +803,69 @@ def _swap(state: PrintJobState) -> pauses.Pause | None:
     change = _standing(state)
     pause = change.pause if change is not None else None
     return pause if pause is not None and pause.kind is pauses.PauseFor.SWAP else None
+
+
+def _first_spool(state: PrintJobState) -> tuple[Material | None, int | None]:
+    """The spool a job starts on, as it was prepared, and the one it mustn't: a swap's second."""
+    swap = _swap(state)
+    if swap is not None and swap.start is not None and swap.to is not None:
+        return swap.start, swap.to.spool_id
+    return _material_prepared(state), None
+
+
+def _unseen_swap(ledger: Ledger, printer_id: str) -> Row | None:
+    """A swap's print that hasn't been seen to end: until it is, what's loaded isn't known."""
+    return next((row for row in ledger.running() if len(row.spools) > 1
+                 and row.spools[0].material.printer_id == printer_id), None)
+
+
+def why_not_start(state: PrintJobState, ledger: Ledger | None) -> str:
+    """Why an Approve mustn't start this job with the stock as it is, and what to do, or ""
+    (mqucifer/print-shop#218). The daemon reads it before it resumes the gate; the print node
+    refuses the same, as the backstop. A job with no stock set up has none."""
+    first, not_on = _first_spool(state)
+    if first is None or ledger is None:
+        return ""
+    if row := _unseen_swap(ledger, first.printer_id):
+        return (f"{row.stl_name}'s print has a swap and hasn't been seen to end, so what's "
+                "loaded isn't known. Wait for it to end")
+    with Inventory(ledger.path) as inventory:
+        held = inventory.why_not_start(first, not_on=not_on, prepared=_material_prepared(state))
+    return f"{held.why}. {held.do}" if held is not None else ""
+
+
+def _as_started(state: PrintJobState, ledger: Ledger, done: str) -> Material | None:
+    """The spool the print starts on, as it starts, or None with no stock.
+
+    Raises:
+        InventoryError: As `why_not_start` says.
+    """
+    first, not_on = _first_spool(state)
+    if first is None:
+        return None
+    if row := _unseen_swap(ledger, first.printer_id):
+        raise InventoryError(
+            f"{row.stl_name}'s print has a swap and hasn't been seen to end, so what's loaded "
+            f"isn't known and {done}. Run `print_job.py --serve` until it's seen, then run the "
+            "job again."
+        )
+    with Inventory(ledger.path) as inventory:
+        return inventory.at_start(
+            first, not_on=not_on, prepared=_material_prepared(state), done=done)
+
+
+def _recorder(ledger: Ledger | None, profiles: SlicerProfiles) -> Callable[[int], None] | None:
+    """Records a load the person says, at the review (`review._loaded_first`)."""
+    material = _material_of(profiles)
+    if ledger is None or material is None:
+        return None
+    path, printer = ledger.path, material.printer_id
+
+    def record(spool_id: int) -> None:
+        with Inventory(path) as inventory:
+            inventory.load(spool_id, printer)
+
+    return record
 
 
 def _starts_said(state: PrintJobState, ledger: Ledger | None) -> str:
@@ -1120,6 +1187,7 @@ def _propose_and_review(
     material: Material | None = None,
     stock: pauses.Stock | None = None,
     left_by_swap: bool = False,
+    record_load: Callable[[int], None] | None = None,
 ) -> tuple[SliceResult, dict[str, Any]]:
     """Slice with the proposal; with a reviewer, again after each correction until approved.
 
@@ -1194,6 +1262,7 @@ def _propose_and_review(
                 material=material,
                 stock=stock,
                 left_by_swap=left_by_swap,
+                record_load=record_load,
             ))
             if review.offering is not None:
                 offering = review.offering

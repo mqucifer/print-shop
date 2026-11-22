@@ -54,8 +54,11 @@ turn. Today such a job fails when that gate is answered, and nothing prints.
 
 **A pause says what it's for** (mqucifer/print-shop#218): a swap (`colour_change=12.4 from #1 to
 #2`, the stock's numbers) or an insert (`pause_at=2.6 for insert`), and what isn't typed is
-asked. A swap starts only with its first spool loaded in the stock: the gate says when to load
-it. When the print ends the stock has the last one loaded, and the outcome can correct that.
+asked. When the print ends the stock has the last one loaded, and the outcome can correct that.
+
+**A job starts only on what it was prepared for** (mqucifer/print-shop#218): the spool it was
+sliced for, a swap's first, or another of the same variety, colour and tuning. An Approve with
+anything else loaded starts nothing: it says what to load, and waits for a new press.
 
 **This is the only place that arms the printer,** and only when the invocation
 says so: `PRINT_AGENT_ALLOW_HARDWARE=1` on this command's own line. Without it
@@ -115,6 +118,7 @@ from print_shop.ledger import Ledger, ledger_path
 from print_shop.orchestrator.daemon import GATE_WAIT_S
 from print_shop.orchestrator.live import AlreadyLive, Live, only_live
 from print_shop.orchestrator.outcome import no_frames
+from print_shop.orchestrator.spools import left_said
 from print_shop.printer.centauri import FrameRecorder, PrinterClient, live_printer
 from print_shop.runtime import (
     WORK_DIR,
@@ -355,6 +359,9 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
                     return 2
                 nozzle, filament = material.nozzle_mm, material.tuning or material.variety
                 print(f"From the inventory: {material.line()}.")
+                with Ledger(inventory.path) as ledger:
+                    if left := left_said(ledger, material):
+                        print(f"  {left}")
         assert nozzle is not None and filament is not None
         try:
             choice = choose(
@@ -443,7 +450,8 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
                 if gate.get("gate") == Gate.BEFORE_PRINT:
                     break
             try:
-                result = run.daemon.wait_for_finish(job_id, timeout_s=GATE_WAIT_S + FINISH_WAIT_S)
+                result = run.daemon.wait_for_finish(
+                    job_id, timeout_s=GATE_WAIT_S + FINISH_WAIT_S, tell=print)
             except TimeoutError:
                 print(run.daemon.abandon(job_id, "waiting for the job to finish",
                                          GATE_WAIT_S + FINISH_WAIT_S))

@@ -50,7 +50,7 @@ A print uses your tuning where there is one, and the standard where you haven't 
 
    - `stock` alone lists what's on hand, loaded and fitted.
    - `stock empty <id>` marks a spool used up.
-   - `stock edit <id> --colour grey` or `stock edit <id> --tuning "…"` corrects a spool, keeping its number and whether it's loaded (mqucifer/print-shop#220). `--tuning none` is the variety's default. Prints already made keep the spool as it was. A job still waiting when you edit records the new colour; if the tuning changed, it says so when you approve it and doesn't print.
+   - `stock edit <id> --colour grey` or `stock edit <id> --tuning "…"` corrects a spool, keeping its number and whether it's loaded (mqucifer/print-shop#220). `--tuning none` is the variety's default. Prints already made keep the spool as it was. A job still waiting when you edit records the new colour; if the tuning changed, an Approve starts nothing and says so: set it back and approve again, or Reject and run the job again.
    - A variety you've tuned more than once asks which tuning the spool prints with when you add it (`--tuning "…"`).
    - Prints then take the fitted nozzle and the loaded spool by default, and say so.
    - A print with a swap leaves its last spool loaded in the stock when it ends (mqucifer/print-shop#218), once it's seen to end. A load you record after it started stands, though it's the same spool again. To start the next on the other spool, load it and record it (`stock load <id>`).
@@ -139,9 +139,14 @@ Finish that job, or stop it with Ctrl-C in its terminal (which doesn't stop the 
    - **A swap printed again never starts on another spool by itself.** Where the first it had can't start this job (it's of another filament than the one now loaded and sliced for, or it's used up), "use these" says `CAN'T USE` with why, and nothing is pre-selected: load that spool and run the job again, or type the swap.
    - **The spool it starts on is of the filament it's sliced with.** Another colour of that is fine. For another filament, load it and run the job again.
    - **The spool swapped to can be any on hand.** The slice has one filament's settings, so another variety is noted at the review: the layers after the swap print with the first's.
-   - **Start checks the first is loaded.** Where the stock has another, the review and the gate say `LOAD FIRST`: load it, and record it with `uv run python scripts/stock.py load 1` in another terminal, before you approve. Approved without, nothing is uploaded or printed, and the job is run again.
+   - **Start checks the first is loaded.** Where the stock has another, the review and the gate say `LOAD FIRST`. At `ok` you're asked "Is spool #1 …, on the printer now?": `y` records the load (it's `stock load 1`), and anything else writes nothing. Later, load it and record it with `uv run python scripts/stock.py load 1` in another terminal. An Approve before that starts nothing: the card and the terminal say `Not started`, why and what to load, and the gate waits for a new press, within its same hour.
    - **The ledger keeps both spools, in order, each with its layer,** and the print desk and a print of it again carry them.
    - **When the print ends, the stock has the last as loaded.** One stopped at the swap's pause or under it ended with the first (paused there, the printer already says the swap's layer). Where the printer doesn't say how far it got, the last is taken: correct it at the outcome, under "Spool on at the end". It never writes over a load you've recorded since the print started, or a later print's.
+
+   **A job starts on what it was prepared for** (mqucifer/print-shop#218), with or without a pause, hand-sliced and `--again` too. As a swap's end moves the stock by itself, the loaded spool is compared again when you approve:
+   - the same spool starts, with a colour you've corrected on it since recorded;
+   - another spool of the same variety, colour and tuning starts, and is the one recorded (never the spool a swap is to, as its first);
+   - anything else starts nothing: `Not started`, with what to load. Press Approve again once it's loaded and recorded. A press from before is never kept, and the hour isn't extended.
 
    An answer at the questions is a decision, even one that keeps your preset's value. "Bridge it — no support" over a preset with supports off sets nothing, and the review says `kept enable_support at 0: you chose 'Bridge it — no support' … [your answer: overhang]`; the guard that switches tree supports on for an overhang only does so when nothing decided otherwise (mqucifer/print-shop#124). An option that says no support always carries `enable_support=0`. Your corrections go in the ledger: they are what print-shop learns from. Each one is a candidate lesson, keyed to the part's shape; once a reviewer keeps it, a later part with the same shape gets that setting by itself, and the review says which lesson set it (`docs/print-lessons.md`).
 
@@ -326,10 +331,12 @@ Then open <http://127.0.0.1:8719/> in a browser on the Mac. `--port` picks anoth
 | `… holds no G-code: it's a project, not a sliced plate` | `--sliced` was given an unsliced Orca project | slice it in Orca and export the plate's sliced file, or its G-code |
 | `Not sent: the file is sliced for …` | the hand-sliced file names another filament or nozzle than the inventory says is loaded | load or fit what it names, fix the inventory, or add `--loaded-ok` |
 | `… has changed since it was taken … nothing was uploaded` | the job's copy of a hand-sliced file was changed after the gate opened | send the file again with `--sliced` |
-| `LOAD FIRST: it starts on spool #…` | the swap starts on a spool the stock doesn't have loaded | load it and `stock load <id>` before you approve |
-| `this print starts on spool #…, and the stock has … loaded` | a swap was approved with another spool loaded | nothing was uploaded or printed; `stock load <id>`, then run the job again |
+| `LOAD FIRST: it starts on spool #…` | the swap starts on a spool the stock doesn't have loaded | `y` at `ok` if it's on the printer, or load it and `stock load <id>` before you approve |
+| `Not started: …` | you approved, and what's loaded in the stock isn't what the job was prepared for | do what it says (`stock load <id>`), then press Approve again; nothing was sent |
+| `… has a swap and hasn't been seen to end` | an earlier print's swap decides what's loaded, and its end hasn't been seen | wait for it to end, then approve again |
+| `… loaded on cc1, so nothing was uploaded or printed` | the stock changed between your Approve and the start | nothing was started; `stock load <id>`, then run the job again |
 | `the job is sliced for …, and spool #… is …` | a swap was to start on another filament than the slice's | load that spool and run the job again, or start on one of the sliced filament |
-| `spool #…'s tuning was changed from …` | the spool's tuning was edited after the job was prepared | nothing was uploaded or printed; run the job again |
+| `spool #…'s tuning was changed from …` | the spool's tuning was edited after the job was prepared | nothing was started; set it back and approve again, or Reject and run the job again |
 | `printer preflight failed — printer.ready` | the printer is busy, paused, or in error | clear it at the machine, then run again |
 | `printer preflight failed — printer.free_space` | the printer's storage is full | delete old files on the printer |
 | The approval card never appears | the broker or the dashboard is wrong | check the broker settings; re-paste the dashboard |

@@ -77,6 +77,9 @@ views:
                 {% set spools = state_attr('sensor.3d_print_agent_status', 'spools') %}
                 {%- if spools %}**Spool:** {{ spools }}.{% endif %}
 
+                {% set held = state_attr('sensor.3d_print_agent_status', 'held') %}
+                {%- if held %}**Not started:** {{ held | replace('Not started: ', '') }}.{% endif %}
+
             - type: horizontal-stack
               cards:
                 - type: button

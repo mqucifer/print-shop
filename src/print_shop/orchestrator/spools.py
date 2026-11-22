@@ -27,7 +27,7 @@ from print_shop.inventory import (
 )
 from print_shop.ledger import Ledger, Row
 
-__all__ = ["at_end", "choices", "correct", "left_by_swap", "said"]
+__all__ = ["at_end", "choices", "correct", "left_by_swap", "left_said", "said"]
 
 #: The ends that can come before the swap, at any layer it says, 0 included.
 _CUT_SHORT = (SdcpPrintStatus.STOPPED, SdcpPrintStatus.ERROR)
@@ -104,3 +104,14 @@ def left_by_swap(ledger: Ledger, material: Material | None) -> Row | None:
     if not swap_made(last.spools) or last.spools[-1].material.spool_id != material.spool_id:
         return None
     return last
+
+
+def left_said(ledger: Ledger, material: Material) -> str:
+    """Said before the wait, where the spool loaded is the last swap's second: which to load to
+    print that again, or ""."""
+    last = left_by_swap(ledger, material)
+    if last is None:
+        return ""
+    first = last.spools[0].material
+    return (f"Loaded since the swap in {last.stl_name}, which started on {first.named()}. "
+            f"Printing that again? Stop now (Ctrl-C) and `stock.py load {first.spool_id}`.")

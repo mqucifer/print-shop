@@ -42,6 +42,7 @@ __all__ = [
     "ask",
     "because",
     "cant_start",
+    "first_to_load",
     "carried_reason",
     "for_review",
     "marked",
@@ -439,18 +440,31 @@ def uses(pause: Pause | None, reading: SliceReading | None) -> tuple[SpoolUse, .
     return first, SpoolUse(material=pause.to, from_layer=at.before_layer, from_z=at.after_z)
 
 
+def first_to_load(pause: Pause, on_hand: Iterable[Spool]) -> Material | None:
+    """A swap's first spool, where what's loaded won't do for it, or None."""
+    start = pause.start
+    if start is None:
+        return None
+    now = next((s for s in on_hand if s.printer_id == start.printer_id), None)
+    not_on = pause.to.spool_id if pause.to is not None else None
+    return None if now is not None and start.takes(now, not_on) else start
+
+
 def starting(pause: Pause, on_hand: Iterable[Spool]) -> str:
     """The spool a swap starts on and, where the stock has another loaded, what to do first."""
     start = pause.start
     if start is None:
         return ""
-    now = next((s for s in on_hand if s.printer_id == start.printer_id), None)
-    if now is not None and now.id == start.spool_id:
-        return f"it starts on {start.named()}, as loaded"
+    spools = tuple(on_hand)
+    now = next((s for s in spools if s.printer_id == start.printer_id), None)
+    if first_to_load(pause, spools) is None:
+        assert now is not None
+        as_loaded = start if now.id == start.spool_id else start.of(now)
+        return f"it starts on {as_loaded.named()}, as loaded"
     has = now.named() if now is not None else "none"
     return (f"LOAD FIRST: it starts on {start.named()}, and the stock has {has} loaded. "
-            f"Load it and record it (`stock.py load {start.spool_id}`) before you approve, "
-            "or nothing prints")
+            f"Load it and record it (`stock.py load {start.spool_id}`) before you approve: "
+            "an Approve before that starts nothing")
 
 
 def for_review(

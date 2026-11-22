@@ -11,6 +11,7 @@ import dataclasses
 import json
 import re
 import sqlite3
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -36,7 +37,10 @@ from print_shop.desk.read import Desk
 from print_shop.ingest.analyzer import analyze
 from print_shop.inventory import Inventory, SpoolUse
 from print_shop.ledger import Ledger, Row
+from print_shop.orchestrator import daemon as daemon_module
+from print_shop.orchestrator import spools as after_print
 from print_shop.orchestrator.daemon import Daemon, JobResult
+from print_shop.orchestrator.graph import why_not_start
 from print_shop.orchestrator.outcome import OutcomeDesk, Watcher
 from print_shop.runtime import describe
 from print_shop.setup import Proposer
@@ -51,6 +55,7 @@ from tests.test_colour_change import LAYERS, PausingSlicer, _request
 from tests.test_job_e2e import CFG
 from tests.test_ledger import record
 from tests.test_outcome import wait_until
+from tests.test_runtime import settings  # noqa: F401  (the fixture)
 from tests.test_stock import _load
 
 WHITE, BLACK, CLEAR = 1, 2, 3
@@ -104,6 +109,7 @@ class Shop:
     def run(
         self, *typed: str, press: str = "approve", ends: str = "completed",
         at_gate: Callable[[], None] | None = None,
+        held: Callable[[MemoryBridge], None] | None = None, gate_wait_s: float = 60.0,
         at_outcome: Callable[[MemoryBridge], None] | None = None,
     ) -> Ran:
         """A job, typed at as at the terminal, pressed at the gate and answered at the end."""
@@ -126,14 +132,15 @@ class Shop:
                 raise AssertionError("asked more than was typed:\n" + "\n".join(said)) from None
 
         bridge = MemoryBridge()
-        printer = FramePrinter(after_start=["printing", ends])
+        printer = self.printer = FramePrinter(after_start=["printing", ends])
+        self.told: list[str] = []
         with Ledger(self.path) as ledger:
             daemon = Daemon(
                 cfg=CFG, profiles=profiles, workdir=self.jobs, printer=printer,
                 slicer=PausingSlicer(), bridge=lambda cfg: bridge, ledger=ledger,
                 proposer=Proposer(), asker=lambda questions: (),
                 reviewer=cli_reviewer(read=read, write=said.append),
-                watch_printer=printer, watch_poll_s=0.01,
+                watch_printer=printer, watch_poll_s=0.01, gate_wait_s=gate_wait_s,
             )
             with daemon:
                 job_id = daemon.submit(self.part, as_laid=True)
@@ -147,7 +154,10 @@ class Shop:
                     if at_gate is not None:
                         at_gate()
                     bridge.press(CFG, press)
-                result = daemon.wait_for_finish(job_id, timeout_s=30)
+                    if held is not None:
+                        wait_until(lambda: bool(bridge.retained_json(gate_topic(CFG)).get("held")))
+                        held(bridge)
+                result = daemon.wait_for_finish(job_id, timeout_s=30, tell=self.told.append)
                 if result.printed:
                     wait_until(lambda: bridge.retained_json(
                         outcome_topic(CFG)).get("job_id") == job_id)
@@ -212,7 +222,8 @@ def test_a_reprint_of_white_then_black_is_white_then_black(shop: Shop, by: str) 
     assert shop.loaded() == BLACK, "what the first left loaded"
     line = shop.correction_line(first.job_id) if by == "typed" else "use"
 
-    second = shop.run(line, "ok", at_gate=lambda: shop.load(WHITE))
+    # LOAD FIRST is asked at `ok`, and Enter is later: it's loaded at the gate.
+    second = shop.run(line, "ok", "", at_gate=lambda: shop.load(WHITE))
 
     assert second.result.printed, second.result.error
     assert spools(second.row) == [(WHITE, 1), (BLACK, 11)]
@@ -525,18 +536,26 @@ def test_the_same_variety_at_a_swap_isnt_noted(shop: Shop) -> None:
     assert "one filament's settings" not in shop.run("colour_change=2 to #2", "ok").terminal
 
 
-def test_start_refuses_a_swap_whose_first_spool_isnt_loaded(shop: Shop) -> None:
-    ran = shop.run("colour_change=2 from #2 to #1", "ok")
+def test_start_refuses_a_swap_whose_first_spool_isnt_loaded(
+    shop: Shop, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The print node's own refusal, with the gate's check bypassed."""
+    monkeypatch.setattr(daemon_module, "why_not_start", lambda state, ledger: "")
+    ran = shop.run("colour_change=2 from #2 to #1", "ok", "")
 
     assert "LOAD FIRST: it starts on spool #2, Elegoo PLA, black" in ran.terminal
     assert ran.gate["spools"].startswith("LOAD FIRST")
+    assert shop.printer.calls == []
     assert not ran.result.printed and ran.row is None
     assert "this print starts on spool #2, Elegoo PLA, black" in (ran.result.error or "")
     assert "nothing was uploaded or printed" in (ran.result.error or "")
     assert shop.loaded() == WHITE
 
 
-def test_start_refuses_when_the_first_was_unloaded_while_the_job_waited(shop: Shop) -> None:
+def test_start_refuses_when_the_first_was_unloaded_while_the_job_waited(
+    shop: Shop, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(daemon_module, "why_not_start", lambda state, ledger: "")
     ran = shop.run("colour_change=2 to #2", "ok", at_gate=lambda: shop.load(CLEAR))
     assert not ran.result.printed and ran.row is None
     assert "has spool #3, Elegoo PETG, clear loaded" in (ran.result.error or "")
@@ -1029,3 +1048,357 @@ def test_the_card_points_at_the_select_only_where_its_shown(shop: Shop) -> None:
     ran = shop.run("pause_at=2 for insert", "ok")
     outcome = {**ran.outcome, "spools": "spool #1, from layer 1", "spool_choices": 0}
     assert "pick it below" not in cards(dataclasses.replace(ran, outcome=outcome))
+
+
+# (a) An Approve with the spool not loaded keeps the gate open
+# --------------------------------------------------------------------------
+
+#: A swap that's to start on black, with white loaded, and "later" at the question on ok.
+UNLOADED = ("colour_change=2 from #2 to #1", "ok", "")
+
+
+def starts(shop: Shop) -> int:
+    return shop.printer.verbs.count("start")
+
+
+def test_an_approve_with_the_first_not_loaded_starts_nothing_and_waits(shop: Shop) -> None:
+    seen: dict[str, Any] = {}
+
+    def held(bridge: MemoryBridge) -> None:
+        seen.update(gate=bridge.retained_json(gate_topic(CFG)),
+                    state=bridge.retained_json(state_topic(CFG)), calls=list(shop.printer.calls))
+        shop.load(BLACK)
+        bridge.press(CFG, "approve")
+
+    ran = shop.run(*UNLOADED, held=held)
+
+    assert seen["calls"] == [], "nothing read, uploaded or started"
+    why = seen["gate"]["held"]
+    assert seen["gate"]["pending"] is True and seen["state"]["status"] == "awaiting_approval"
+    assert seen["state"]["held"] == why
+    assert why.startswith("Not started: this print starts on spool #2, Elegoo PLA, black")
+    assert "`stock.py load 2`" in why and why.endswith("then approve again")
+    assert shop.told == [why], "the terminal says it too"
+    assert ran.result.printed and starts(shop) == 1
+    assert spools(ran.row) == [(BLACK, 1), (WHITE, 11)]
+
+
+def test_a_tap_before_its_loaded_never_starts_it_afterwards(shop: Shop) -> None:
+    def held(bridge: MemoryBridge) -> None:
+        shop.load(BLACK)
+        time.sleep(0.4)
+        assert starts(shop) == 0, "the first tap is spent"
+        assert bridge.retained_json(gate_topic(CFG))["pending"] is True
+        bridge.press(CFG, "reject")
+
+    ran = shop.run(*UNLOADED, held=held)
+    assert not ran.result.printed and ran.row is None and starts(shop) == 0
+
+
+def test_a_tap_queued_during_the_check_is_never_kept(
+    shop: Shop, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = why_not_start
+    queued: list[str] = []
+    bridges: list[MemoryBridge] = []
+    press = MemoryBridge.press
+
+    def pressed(bridge: MemoryBridge, *args: Any, **kwargs: Any) -> None:
+        bridges.append(bridge)
+        press(bridge, *args, **kwargs)
+
+    def check(state: Any, ledger: Any) -> str:
+        why = real(state, ledger)
+        if why and not queued:
+            queued.append(why)
+            press(bridges[0], CFG, "approve")  # the second of a double tap
+            shop.load(BLACK)
+        return why
+
+    monkeypatch.setattr(MemoryBridge, "press", pressed)
+    monkeypatch.setattr(daemon_module, "why_not_start", check)
+
+    def held(bridge: MemoryBridge) -> None:
+        time.sleep(0.4)
+        assert starts(shop) == 0, "loaded by now, and only an earlier tap was queued"
+        bridge.press(CFG, "reject")
+
+    ran = shop.run(*UNLOADED, held=held)
+    assert queued and not ran.result.printed and starts(shop) == 0
+
+
+@pytest.mark.parametrize("typed", [UNLOADED, ("colour_change=2 to #2", "ok")])
+def test_a_reject_during_the_check_is_kept(
+    shop: Shop, monkeypatch: pytest.MonkeyPatch, typed: tuple[str, ...]
+) -> None:
+    bridges: list[MemoryBridge] = []
+    press = MemoryBridge.press
+    real = why_not_start
+
+    def pressed(bridge: MemoryBridge, *args: Any, **kwargs: Any) -> None:
+        bridges.append(bridge)
+        press(bridge, *args, **kwargs)
+
+    def check(state: Any, ledger: Any) -> str:
+        press(bridges[0], CFG, "reject")
+        return real(state, ledger)
+
+    monkeypatch.setattr(MemoryBridge, "press", pressed)
+    monkeypatch.setattr(daemon_module, "why_not_start", check)
+    ran = shop.run(*typed)
+    assert not ran.result.printed and ran.result.error is None and starts(shop) == 0
+
+
+def test_a_double_tap_with_it_loaded_starts_once_at_most(shop: Shop) -> None:
+    def twice(bridge: MemoryBridge) -> None:
+        shop.load(BLACK)
+        bridge.press(CFG, "approve")
+        bridge.press(CFG, "approve")
+
+    ran = shop.run(*UNLOADED, held=twice)
+    assert ran.result.printed and starts(shop) == 1
+
+
+def test_a_double_tap_before_its_loaded_starts_nothing(shop: Shop) -> None:
+    def twice(bridge: MemoryBridge) -> None:
+        bridge.press(CFG, "approve")
+        bridge.press(CFG, "approve")
+        time.sleep(0.4)
+        shop.load(BLACK)
+        time.sleep(0.4)
+        assert starts(shop) == 0
+        bridge.press(CFG, "reject")
+
+    assert not shop.run(*UNLOADED, held=twice).result.printed
+
+
+def test_the_hour_still_ends_a_held_job(shop: Shop) -> None:
+    began: list[float] = []
+
+    def keep_pressing(bridge: MemoryBridge) -> None:
+        while bridge.retained_json(gate_topic(CFG)).get("pending"):
+            assert time.monotonic() - began[0] < 4, "the presses extended the wait"
+            bridge.press(CFG, "approve")
+            time.sleep(0.1)
+
+    ran = shop.run(*UNLOADED, gate_wait_s=1.0, held=keep_pressing,
+                   at_gate=lambda: began.append(time.monotonic()))
+    assert time.monotonic() - began[0] < 4
+    assert not ran.result.printed and "Timed out waiting for Approve" in (ran.result.error or "")
+    with Ledger(shop.path) as ledger:
+        assert ledger.unprinted(ran.job_id) is not None
+    assert starts(shop) == 0
+
+
+def test_a_check_that_cant_be_made_holds(shop: Shop, monkeypatch: pytest.MonkeyPatch) -> None:
+    def broken(state: Any, ledger: Any) -> str:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(daemon_module, "why_not_start", broken)
+    ran = shop.run("colour_change=2 to #2", "ok", held=lambda bridge: bridge.press(CFG, "reject"))
+    assert not ran.result.printed and "couldn't be checked" in shop.told[0]
+
+
+def test_the_held_gate_is_on_the_card(shop: Shop) -> None:
+    state: dict[str, Any] = {}
+
+    def held(bridge: MemoryBridge) -> None:
+        state.update(bridge.retained_json(state_topic(CFG)))
+        bridge.press(CFG, "reject")
+
+    ran = shop.run(*UNLOADED, held=held)
+    shown = " ".join(cards(dataclasses.replace(ran, state=state)).split())
+    assert "**Not started:** this print starts on spool #2, Elegoo PLA, black" in shown
+
+
+# (b) The load is recorded on a typed y, and only that
+# --------------------------------------------------------------------------
+
+
+def test_a_typed_y_at_ok_records_the_load(shop: Shop) -> None:
+    ran = shop.run("colour_change=2 from #2 to #1", "ok", "y")
+    assert "Is spool #2, Elegoo PLA, black, on the printer now?" in ran.terminal
+    assert ran.prompts == ["> ", "> ", "loaded> "]
+    assert ran.result.printed and shop.told == []
+    assert spools(ran.row) == [(BLACK, 1), (WHITE, 11)]
+
+
+@pytest.mark.parametrize("typed", ["", "n", "yes", "ok", "2", "load 2", "y please"])
+def test_anything_but_a_typed_y_writes_nothing(shop: Shop, typed: str) -> None:
+    ran = shop.run("colour_change=2 from #2 to #1", "ok", typed, press="reject")
+    assert ran.prompts[-1] == "loaded> "
+    assert shop.loaded() == WHITE
+    assert sqlite3.connect(shop.path).execute(
+        "SELECT n FROM printer_loads").fetchall() == [(1,)], "only the fixture's load"
+
+
+def test_stop_at_the_review_is_never_asked_and_writes_nothing(shop: Shop) -> None:
+    ran = shop.run("colour_change=2 from #2 to #1", "stop")
+    assert "loaded> " not in ran.prompts and shop.loaded() == WHITE
+
+
+def test_the_first_loaded_already_isnt_asked(shop: Shop) -> None:
+    assert "loaded> " not in shop.run("colour_change=2 to #2", "ok").prompts
+
+
+# (c) Said before the wait
+# --------------------------------------------------------------------------
+
+
+def test_print_job_says_before_the_wait_that_the_loaded_spool_is_the_last_swaps(
+    shop: Shop, settings: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    shop.run("colour_change=2 to #2", "ok")
+    script = _load("print_job")
+    composed = tmp_path / "composed-jobs"
+    composed.mkdir()
+    monkeypatch.setattr(script, "WORK_DIR", composed)
+    monkeypatch.setattr(script, "ledger_path", lambda settings: shop.path)
+
+    def before_the_job(**kwargs: Any) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(script, "build_run", before_the_job)
+    monkeypatch.delenv("PRINT_AGENT_ALLOW_HARDWARE", raising=False)
+    with pytest.raises(KeyboardInterrupt):
+        script.main([str(shop.part), "--settings", str(settings)])
+
+    lines = capsys.readouterr().out.splitlines()
+    at = next(n for n, line in enumerate(lines) if line.startswith("From the inventory:"))
+    assert lines[at + 1] == (
+        "  Loaded since the swap in cube.stl, which started on spool #1, Elegoo PLA, white. "
+        "Printing that again? Stop now (Ctrl-C) and `stock.py load 1`.")
+    assert shop.loaded() == BLACK, "the line only says it"
+
+
+def test_nothing_is_said_where_no_swap_left_it_loaded(shop: Shop) -> None:
+    shop.run("pause_at=2 for insert", "ok")
+    with Inventory(shop.path) as stock, Ledger(shop.path) as ledger:
+        assert after_print.left_said(ledger, stock.material()) == ""
+
+
+# (d) Every job starts on what it was prepared for
+# --------------------------------------------------------------------------
+
+
+def add_spool(shop: Shop, colour: str, variety: str = "Elegoo PLA", kind: str = "PLA",
+              tuning: str | None = None, load: bool = True) -> int:
+    with Inventory(shop.path) as stock:
+        spool = stock.add_spool(manufacturer="Elegoo", type=kind, variety=variety, colour=colour,
+                                tuning=tuning)
+        if load:
+            stock.load(spool.id)
+    return spool.id
+
+
+def reject(bridge: MemoryBridge) -> None:
+    bridge.press(CFG, "reject")
+
+
+@pytest.mark.parametrize(("colour", "variety", "kind", "tuning"), [
+    ("black", "Elegoo PLA", "PLA", None),
+    ("white", "Elegoo PETG", "PETG", None),
+    ("white", "Elegoo PLA", "PLA", "another tuning"),
+])
+def test_a_spool_that_would_print_otherwise_holds_a_job_with_no_swap(
+    shop: Shop, colour: str, variety: str, kind: str, tuning: str | None
+) -> None:
+    ran = shop.run(
+        "ok", held=reject,
+        at_gate=lambda: void(add_spool(shop, colour, variety, kind, tuning)),
+    )
+    assert not ran.result.printed and starts(shop) == 0
+    assert "this job was prepared for spool #1, Elegoo PLA, white" in shop.told[0]
+    assert "`stock.py load 1`" in shop.told[0]
+
+
+def void(_: object) -> None:
+    return None
+
+
+def test_a_spool_of_the_same_variety_colour_and_tuning_starts_and_is_recorded(shop: Shop) -> None:
+    new: list[int] = []
+    ran = shop.run("ok", at_gate=lambda: new.append(add_spool(shop, "White")))
+
+    assert ran.result.printed, ran.result.error
+    assert ran.row is not None and ran.row.material is not None and ran.row.profiles is not None
+    assert ran.row.material.spool_id == new[0]
+    assert ran.row.profiles.material == ran.row.material
+    assert shop.told == []
+
+
+def test_an_equal_spool_starts_a_swap_and_is_recorded_as_its_first(shop: Shop) -> None:
+    new: list[int] = []
+    ran = shop.run("colour_change=2 to #2", "ok",
+                   at_gate=lambda: new.append(add_spool(shop, "white")))
+    assert spools(ran.row) == [(new[0], 1), (BLACK, 11)] and shop.loaded() == BLACK
+
+
+def test_the_spool_swapped_to_is_never_taken_as_the_first(shop: Shop) -> None:
+    other = add_spool(shop, "white", load=False)
+    ran = shop.run(f"colour_change=2 to #{other}", "ok",
+                   at_gate=lambda: shop.load(other), held=reject)
+    assert not ran.result.printed and "this print starts on spool #1" in shop.told[0]
+
+
+def test_a_tuning_edited_since_holds_the_gate(shop: Shop) -> None:
+    def retune() -> None:
+        with Inventory(shop.path) as stock:
+            stock.edit(WHITE, tuning="another tuning")
+
+    ran = shop.run("ok", at_gate=retune, held=reject)
+    assert not ran.result.printed and "spool #1's tuning was changed" in shop.told[0]
+
+
+def test_a_colour_corrected_on_the_same_spool_still_starts(shop: Shop) -> None:
+    def edit() -> None:
+        with Inventory(shop.path) as stock:
+            stock.edit(WHITE, colour="cream")
+
+    ran = shop.run("ok", at_gate=edit)
+    assert ran.result.printed and shop.told == []
+    assert ran.row is not None and ran.row.material is not None
+    assert ran.row.material.colour == "cream"
+
+
+def test_with_the_gates_check_bypassed_start_still_refuses_any_jobs_other_spool(
+    shop: Shop, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(daemon_module, "why_not_start", lambda state, ledger: "")
+    ran = shop.run("ok", at_gate=lambda: shop.load(CLEAR))
+    assert not ran.result.printed and ran.row is None and shop.printer.calls == []
+    assert "nothing was uploaded or printed" in (ran.result.error or "")
+
+
+def test_a_swap_that_ended_unseen_is_seen_before_the_next_job_starts(shop: Shop) -> None:
+    """The review's finding 1: prepared for white, and black's on since a swap ended unseen."""
+    ran = shop.run("ok", at_gate=lambda: void(swap_started(shop, "earlier")), held=reject)
+    assert not ran.result.printed and starts(shop) == 0
+    assert "spool #2, Elegoo PLA, black" in shop.told[0] and shop.loaded() == BLACK
+
+
+def test_start_refuses_while_a_swaps_end_hasnt_been_seen(
+    shop: Shop, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(daemon_module, "why_not_start", lambda state, ledger: "")
+    monkeypatch.setattr(Watcher, "look", lambda self: None)
+    ran = shop.run("ok", at_gate=lambda: void(swap_started(shop, "earlier")))
+    assert not ran.result.printed and shop.printer.calls == []
+    assert "hasn't been seen to end" in (ran.result.error or "")
+
+
+def test_a_spool_changed_during_the_upload_is_never_started(
+    shop: Shop, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = FramePrinter.upload
+
+    def upload(printer: FramePrinter, path: Path) -> str:
+        stored = real(printer, path)
+        shop.load(CLEAR)
+        return stored
+
+    monkeypatch.setattr(FramePrinter, "upload", upload)
+    ran = shop.run("ok")
+    assert not ran.result.printed and ran.row is None and starts(shop) == 0
+    assert "uploaded, and not started" in (ran.result.error or "")

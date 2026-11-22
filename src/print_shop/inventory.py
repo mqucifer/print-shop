@@ -22,6 +22,9 @@ ledger's schema version.
   nozzle and the loaded spool. What isn't on hand is refused.
 - **A swap's print keeps each spool in order, with its layer** (`print_spools`,
   mqucifer/print-shop#218): it starts only with the first loaded, and leaves the last loaded.
+- **So a job starts only on what it was prepared for** (`why_not_start`): as the stock moves by
+  itself at a swap's end, what's loaded is compared again at Start, for every job. Another spool
+  of the same variety, colour and tuning will do, and is the one recorded.
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
+from typing import NamedTuple
 
 from pydantic import BaseModel
 
@@ -40,6 +44,7 @@ __all__ = [
     "Inventory",
     "InventoryError",
     "Material",
+    "NotYet",
     "Nozzle",
     "Printer",
     "Spool",
@@ -198,6 +203,24 @@ class Material(BaseModel):
 
     def filament_said(self) -> str:
         return self.variety + (f' tuned "{self.tuning}"' if self.tuning else "")
+
+    def takes(self, spool: Spool, not_on: int | None = None) -> bool:
+        """Whether a job prepared for this spool starts on `spool`: this one, or another that
+        prints the same, of its variety, colour and tuning. Never `not_on`, the spool a swap is
+        to: starting there is the swap not made, or reversed."""
+        if spool.id == self.spool_id:
+            return True
+        other = self.of(spool)
+        return (spool.id != not_on and other.same_filament(self)
+                and other.colour.casefold() == self.colour.casefold())
+
+
+class NotYet(NamedTuple):
+    """Why a job doesn't start yet, and what to do about it."""
+
+    why: str
+    do: str  # at the gate, before approving again
+    again: str  # once refused at Start, where the job has ended
 
 
 class SpoolUse(BaseModel):
@@ -537,42 +560,72 @@ class Inventory:
                 )
         return material
 
-    def at_start(self, prepared: Material) -> Material:
-        """What a prepared job used, as its print starts (mqucifer/print-shop#220).
+    def why_not_start(
+        self, first: Material, *, not_on: int | None = None, prepared: Material | None = None,
+    ) -> NotYet | None:
+        """Why a job can't start with the stock as it is, or None (mqucifer/print-shop#218).
 
-        A colour corrected since is taken, as nothing was sliced with it. A tuning changed since
-        is refused, as the job was prepared with the old one.
-
-        Raises:
-            InventoryError: If the spool's tuning has changed, saying from what to what.
+        `first` is the spool it was prepared for, or a swap's first, with `not_on` the spool
+        it's swapped to. `prepared` is the job's own where a swap starts on another: its tuning
+        still has to be the one the job was sliced with.
         """
-        spool = self.spool(prepared.spool_id)
-        if spool.tuning != prepared.tuning:
-            was, now = (f'"{t}"' if t else "the variety's default"
-                        for t in (prepared.tuning, spool.tuning))
-            raise InventoryError(
-                f"spool #{spool.id}'s tuning was changed from {was} to {now} after this job was "
-                "prepared, so nothing was uploaded or printed. Run the job again to prepare it "
-                "with the spool as it is now."
-            )
-        return prepared.model_copy(update={"colour": spool.colour})
-
-    def at_swaps_start(self, start: Material) -> Material:
-        """The spool a print with a swap starts on, as it starts (mqucifer/print-shop#218).
-
-        Raises:
-            InventoryError: If it isn't the one loaded, saying which is, or as `at_start` does.
-        """
-        first = self.at_start(start)
         now = self.loaded(first.printer_id)
-        if now is None or now.id != first.spool_id:
-            has = now.named() if now is not None else "none"
-            raise InventoryError(
-                f"this print starts on {first.named()}, and the stock has {has} loaded on "
-                f"{first.printer_id}, so nothing was uploaded or printed. Load it "
-                f"(`stock load {first.spool_id}`) and run the job again."
+        sliced_for = [first] if now is not None and now.id == first.spool_id else []
+        if prepared is not None and prepared.spool_id != first.spool_id:
+            sliced_for.append(prepared)
+        for used in sliced_for:
+            spool = self.spool(used.spool_id)
+            if spool.tuning == used.tuning:
+                continue
+            was, is_now = (f'"{t}"' if t else "the variety's default"
+                           for t in (used.tuning, spool.tuning))
+            back = f'--tuning "{used.tuning}"' if used.tuning else "--tuning none"
+            return NotYet(
+                f"spool #{spool.id}'s tuning was changed from {was} to {is_now} after this job "
+                "was prepared",
+                f"Set it back (`stock.py edit {spool.id} {back}`), or Reject and run the job "
+                "again",
+                "Run the job again to prepare it with the spool as it is now",
             )
-        return first
+        if now is not None and first.takes(now, not_on):
+            return None
+        what = "this print starts on" if not_on is not None else "this job was prepared for"
+        has = now.named() if now is not None else "none"
+        if now is not None and now.tuning != first.tuning:
+            tuned = f'"{now.tuning}"' if now.tuning else "the variety's default"
+            has += f" (tuning {tuned})"
+        if self.spool(first.spool_id).state is SpoolState.EMPTY:
+            load = (f"That spool is marked empty: load one of {first.filament_said()}, "
+                    f"{first.colour}, and record it (`stock.py load <id>`)")
+        else:
+            load = f"Load {first.named()}, and record it (`stock.py load {first.spool_id}`)"
+        return NotYet(
+            f"{what} {first.named()}, and the stock has {has} loaded on {first.printer_id}",
+            load, f"{load}, and run the job again",
+        )
+
+    def at_start(
+        self, first: Material, *, not_on: int | None = None, prepared: Material | None = None,
+        done: str = "nothing was uploaded or printed",
+    ) -> Material:
+        """The spool a job starts on, as it starts (mqucifer/print-shop#220,
+        mqucifer/print-shop#218): the one loaded.
+
+        A colour corrected on the spool is taken, as nothing was sliced with it. `done` is what
+        has happened, for the refusal to say.
+
+        Raises:
+            InventoryError: As `why_not_start` says.
+        """
+        refused = self.why_not_start(first, not_on=not_on, prepared=prepared)
+        if refused is not None:
+            raise InventoryError(f"{refused.why}, so {done}. {refused.again}.")
+        now = self.loaded(first.printer_id)
+        if now is None or not first.takes(now, not_on):
+            raise InventoryError(f"what's loaded changed as it was checked, so {done}.")
+        if now.id != first.spool_id:
+            return first.of(now)
+        return first.model_copy(update={"colour": now.colour})
 
     def listing(self, *, with_empty: bool = False) -> str:
         """Everything on hand, loaded and fitted, a line each."""
