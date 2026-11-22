@@ -11,6 +11,7 @@ Orca puts it.
 from __future__ import annotations
 
 import json
+import re
 import stat
 from pathlib import Path
 
@@ -252,20 +253,35 @@ def test_a_colour_change_asked_for_at_the_review_reaches_the_gcode_the_gate_and_
 
 
 
-def test_a_layer_typed_up_is_noted_from_the_parts_own_context(tmp_path: Path) -> None:
-    """Through the daemon (mqucifer/print-shop#203): a made-up sidecar's fit tops out at 10, and
-    10.2 is typed, as it had to be before."""
+class ClosingSlicer(PausingSlicer):
+    """The same, with layer 51, to 10.2, all bridge: a made-up pocket closing over 10."""
+
+    def __call__(
+        self, stl_path: Path | str, profiles: SlicerProfiles, outdir: Path | str
+    ) -> SliceResult:
+        result = super().__call__(stl_path, profiles, outdir)
+        path = Path(result.gcode_path)
+        layers = path.read_text().split(";LAYER_CHANGE")
+        layers[51] = re.sub(r"(?m)^;TYPE:(?!Custom).*$", ";TYPE:Bridge", layers[51])
+        path.write_text(";LAYER_CHANGE".join(layers))
+        return result
+
+
+def test_a_layer_typed_up_is_noted_and_the_planned_room_over_a_fit_is_not(tmp_path: Path) -> None:
+    """Through the daemon (mqucifer/print-shop#203): a made-up sidecar's band is the dropped
+    part's, to 9.8, with a layer of room over it under a pocket closing over 10. So 10 is the
+    right pause, and 10.2, typed a layer up, is the one that's noted."""
     (tmp_path / "work").mkdir()
     process = json.loads(CI_PROFILES.process.read_text())
     (tmp_path / "process.json").write_text(json.dumps({**process, "wall_loops": "2", **LAYERS}))
     part = write_stl("cube", tmp_path)
     sidecar = tmp_path / "cube.part.json"
-    sidecar.write_text(json.dumps({"fits": [{"name": "pocket", "play": 0.1, "z": [1, 10]}]}))
+    sidecar.write_text(json.dumps({"fits": [{"name": "pocket", "play": 0.1, "z": [1, 9.8]}]}))
     sponsor = Sponsor("pause_at=10.2 because set the parts in", "pause_at=10", "stop")
     bridge = MemoryBridge()
     with Ledger(tmp_path / "ledger.sqlite") as ledger:
         daemon = Daemon(
-            cfg=CFG, workdir=tmp_path / "work", printer=FramePrinter(), slicer=PausingSlicer(),
+            cfg=CFG, workdir=tmp_path / "work", printer=FramePrinter(), slicer=ClosingSlicer(),
             profiles=CI_PROFILES.model_copy(update={"process": tmp_path / "process.json"}),
             bridge=lambda cfg: bridge, ledger=ledger,
             proposer=Proposer(ask=_model, ask_questions=_questions),
@@ -276,10 +292,12 @@ def test_a_layer_typed_up_is_noted_from_the_parts_own_context(tmp_path: Path) ->
             result = daemon.wait_for_finish(job_id, timeout_s=30)
     assert not result.printed
     _, typed_up, at_the_top = sponsor.shown
-    note = "  note: the fit `pocket` tops out at z=10, and this pauses a layer later"
-    assert note in render(typed_up)
-    assert note not in render(at_the_top)
-    assert "pause_at=10, read from the G-code: pause after layer 50, at z=10," in render(at_the_top)
+    assert ("  note: the fit `pocket` tops out at z=9.8, and the layer this pauses after is the "
+            "first to bridge or overhang above it: for parts dropped in, pause_at=10\n"
+            ) in render(typed_up)
+    said = render(at_the_top)
+    assert "note: the fit `pocket`" not in said, "a layer of room over the band, as planned"
+    assert "pause_at=10, read from the G-code: pause after layer 50, at z=10," in said
 
 
 def test_a_colour_change_draws_no_lesson(tmp_path: Path) -> None:

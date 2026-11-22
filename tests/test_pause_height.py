@@ -36,10 +36,11 @@ from print_shop.setup.reading import (
     SeamReading,
     SliceReading,
     flags,
+    read_slice,
 )
 from print_shop.setup.review import ReviewRequest, parse_answer, render
-from print_shop.slicer.orca import _DEFAULT_BINARY
-from tests.fakes import CI_PROFILES, FramePrinter, MemoryBridge
+from print_shop.slicer.orca import _DEFAULT_BINARY, slice_model
+from tests.fakes import CI_PROFILES, STORE_PROFILES, FramePrinter, MemoryBridge
 from tests.test_job_e2e import CFG
 from tests.test_review import _model, _questions
 from tests.test_runtime import settings  # noqa: F401  (the fixture)
@@ -87,8 +88,9 @@ def _change(key: str, value: str) -> Change:
                   source=Source.SPONSOR)
 
 
-def _reading(*before: int) -> SliceReading:
-    """30 layers of 0.2 mm, with a pause before each layer named."""
+def _reading(*before: int, over_air: dict[int, float] | None = None) -> SliceReading:
+    """30 layers of 0.2 mm, with a pause before each layer named, and the area each layer lays
+    over air."""
     layers = tuple(LayerTime(n=n, z=round(0.2 * n, 3), time_s=10.0) for n in range(1, 31))
     pauses = tuple(
         PauseReading(before_layer=n, z=layers[n - 1].z, after_s=10.0 * (n - 1),
@@ -96,7 +98,7 @@ def _reading(*before: int) -> SliceReading:
         for n in before
     )
     return SliceReading(layers=layers, features=(), seam=SeamReading(seams=0, stacked=0.0),
-                        pauses=pauses)
+                        pauses=pauses, over_air=tuple((over_air or {}).items()))
 
 
 def _request(asked: str | None, reading: SliceReading | None) -> ReviewRequest:
@@ -182,15 +184,19 @@ def _fits(*tops: float) -> Placed:
     ))
 
 
-def test_a_pause_a_layer_past_a_fits_top_is_said_beside_where_it_landed() -> None:
-    """A pocket topping out at 2.6, and 2.8 typed, as it once had to be: the layer over the
-    pocket has printed by the pause. It's a note, never a refusal."""
-    reading = _reading(15)
+def _noted(reading: SliceReading, placed: Placed | None) -> list[str]:
+    return [f.reading for f in flags(reading, None, {}, {}, placed) if f.id == PAUSE_PAST_FIT]
+
+
+def test_a_pause_after_the_layer_that_closes_over_a_fit_is_said_beside_where_it_landed() -> None:
+    """A pocket that closes over 2.6, and 2.8 typed, as it once had to be. It's a note, never a
+    refusal, and it doesn't claim to know what the pause is for."""
+    reading = _reading(15, over_air={14: 300.0})
     found = flags(reading, None, {}, {}, _fits(2.6, 2.6))
     [note] = [f for f in found if f.id == PAUSE_PAST_FIT]
     assert note.change is None
-    said = ("the fit `pocket 1` tops out at z=2.6, and this pauses a layer later, once the "
-            "layer over it has printed: pause_at=2.6 pauses before that layer")
+    said = ("the fit `pocket 1` tops out at z=2.6, and the layer this pauses after is the first "
+            "to bridge or overhang above it: for parts dropped in, pause_at=2.6")
     assert note.reading == said
 
     request = replace(_request("2.8", reading), flags=found)
@@ -201,23 +207,62 @@ def test_a_pause_a_layer_past_a_fits_top_is_said_beside_where_it_landed() -> Non
     assert not isinstance(parse_answer("ok", request), str), "it can still be approved"
 
 
-@pytest.mark.parametrize(("before", "top", "said"), [
-    (15, 2.6, True),    # a layer past a top on a layer line
-    (15, 2.65, True),   # under the middle of the layer to 2.8, which closes over it
-    (14, 2.6, False),   # at the top
-    (15, 2.75, False),  # over that layer's middle: it doesn't close over it
-    (14, 2.8, False),   # before the top
-    (20, 2.6, False),   # well above it: a colour change, or another pause
+@pytest.mark.parametrize("top", [2.6, 2.65, 2.4, 2.2])
+def test_only_the_pause_after_the_closing_layer_is_said_whatever_room_is_over_the_band(
+    top: float,
+) -> None:
+    """A band is the pocket's height, or the dropped part's with up to 0.4 mm of room planned
+    over it. Either way the pocket closes with layer 14, so the pause is right after layer 13,
+    and only the one after layer 14 is late."""
+    said = {before - 1: _noted(_reading(before, over_air={14: 300.0}), _fits(top))
+            for before in range(2, 31)}
+    assert [after for after, notes in said.items() if notes] == [14]
+    assert said[14][0].endswith("for parts dropped in, pause_at=2.6")
+
+
+@pytest.mark.parametrize(("over_air", "top", "why"), [
+    ({}, 2.6, "nothing in the slice shows a pocket closing"),
+    ({14: 300.0}, 2.1, "more room than a pocket has over what's dropped in"),
+    ({14: 300.0}, 2.8, "the band reaches through that layer"),
+    ({14: 20.0, 15: 300.0}, 2.6, "a small bridge at the right pause, the pocket closing next"),
+    ({14: 300.0, 15: 300.0}, 2.6, "a slope, as much over air on the next layer"),
+    ({9: 20.0, 14: 300.0}, 2.6, "something under it over air already"),
 ])
-def test_only_a_pause_a_layer_past_the_top_is_said(before: int, top: float, said: bool) -> None:
-    found = flags(_reading(before), None, {}, {}, _fits(top))
-    assert any(f.id == PAUSE_PAST_FIT for f in found) is said
+def test_where_the_slice_cant_tell_it_says_nothing(
+    over_air: dict[int, float], top: float, why: str
+) -> None:
+    assert _noted(_reading(15, over_air=over_air), _fits(top)) == [], why
 
 
 def test_no_fit_and_no_height_to_compare_say_nothing() -> None:
-    raft = _reading(15).model_copy(update={"settings": {"raft_layers": "2"}})
-    for reading, placed in ((_reading(15), None), (_reading(15), Placed()), (raft, _fits(2.6))):
-        assert not any(f.id == PAUSE_PAST_FIT for f in flags(reading, None, {}, {}, placed))
+    late = _reading(15, over_air={14: 300.0})
+    raft = late.model_copy(update={"settings": {"raft_layers": "2"}})
+    for reading, placed in ((late, None), (late, Placed()), (raft, _fits(2.6))):
+        assert _noted(reading, placed) == []
+
+
+@pytest.mark.slicer
+@pytest.mark.skipif(not _DEFAULT_BINARY.exists(), reason="no OrcaSlicer on this machine")
+@pytest.mark.parametrize("room", [0.0, 0.1, 0.2, 0.4])
+def test_real_orcas_slice_says_only_the_pause_that_is_too_late(
+    room: float, tmp_path: Path
+) -> None:
+    """A made-up pocket from 1 to 2.6, its band the dropped part's height, paused after each
+    layer round it: only after the layer that closes it, 2.8, is it said."""
+    part = _plate(tmp_path, 2.6, 5.0)
+    band = Placed(fits=(FitBand(fit=Fit(name="pocket"), z_from=1.0, z_to=round(2.6 - room, 2)),))
+    process = json.loads(STORE_PROFILES.process.read_text())
+    process |= {"initial_layer_print_height": "0.2", "layer_height": "0.2"}
+    (tmp_path / "process.json").write_text(json.dumps(process))
+    profiles = STORE_PROFILES.model_copy(update={"process": tmp_path / "process.json"})
+    late = []
+    for z in ("2.2", "2.4", "2.6", "2.8", "3"):
+        applied = apply(profiles, Proposal(changes=(_change(PAUSE, z),)), tmp_path / z)
+        result = slice_model(part, applied, tmp_path / z / "out")
+        if notes := _noted(read_slice(Path(result.gcode_path)), band):
+            late.append(z)
+            assert notes[0].endswith("pause_at=2.6")
+    assert late == ["2.8"]
 
 
 # From the bench, through print_job.py, to the G-code

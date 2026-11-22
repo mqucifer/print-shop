@@ -53,6 +53,11 @@ IRONING = "Ironing"
 PAUSE_PAST_FIT = "pause_past_fit"
 #: A fit band's heights are kept to a hundredth of a millimetre (`context.place`).
 BAND_MM = 0.005 + pausing.TOPS_OUT
+#: The most room over what's dropped in for a fit's top to say where its pocket closes: the
+#: bench's `pause --max-gap`. A band may be the dropped part's height, not the pocket's.
+ROOM_MM = 0.4
+#: Orca's labels for what it lays over air, as the first layer over a pocket is.
+CLOSES_OVER = ("Bridge", "Overhang wall")
 #: Two seams this close, in mm, on neighbouring layers, are one line up the wall.
 SEAM_NEAR_MM = 1.0
 #: The share of seams that sit on the one below them for the seam to read as a line.
@@ -152,6 +157,8 @@ class SliceReading(BaseModel):
     orca_time_s: int | None = None
     #: Each pause Orca wrote, as asked for at the review or written in a file sliced by hand.
     pauses: tuple[PauseReading, ...] = ()
+    #: Each layer that lays `CLOSES_OVER`: its number, and the area of it in mm².
+    over_air: tuple[tuple[int, float], ...] = ()
 
     @property
     def time_s(self) -> float:
@@ -238,6 +245,10 @@ def read_slice(path: Path) -> SliceReading:
     )
     return SliceReading(
         pauses=pauses,
+        over_air=tuple(
+            (layer.n, round(area, 1)) for layer in sliced.layers
+            if (area := sum(layer.areas.get(kind, 0.0) for kind in CLOSES_OVER)) > 0
+        ),
         layers=layers,
         features=tuple(features),
         seam=_seam(sliced.layers),
@@ -312,24 +323,37 @@ def flags(
 
 def _past_fit(reading: SliceReading, placed: Placed | None) -> list[Flag]:
     """A pause after the layer that closes over a fit, too late to drop parts into it: what a
-    height typed a layer up, as it had to be before mqucifer/print-shop#203, now does. Said,
-    never refused, as a colour change may be meant there."""
+    height typed a layer up, as it had to be before mqucifer/print-shop#203, now does.
+
+    A fit's top isn't where its pocket closes: the band may be the dropped part's, with room
+    planned over it, and then a pause a layer over the band is the right one. So the slice has
+    to show it closing: the layer the pause comes after is the first since the band's foot to
+    bridge or overhang, and lays more of it than the layer after it, within `ROOM_MM` of the
+    band's top. Where it can't tell, it says nothing. Said, never refused, as a colour change
+    may be meant there.
+    """
     if placed is None or reading.settings.get("raft_layers", "0") not in ("", "0"):
         return []
+    area = dict(reading.over_air)
     found: dict[float, Flag] = {}
     for pause in reading.pauses:
-        if pause.after_z is None or not 3 <= pause.before_layer <= len(reading.layers):
+        n = pause.before_layer - 1  # the layer it comes after
+        if pause.after_z is None or not 2 <= n < len(reading.layers):
             continue
-        under = reading.layers[pause.before_layer - 3].z
+        if area.get(n, 0.0) <= area.get(n + 1, 0.0):
+            continue  # it lays no more over air than the layer after: that one may be what closes
+        under = reading.layers[n - 2].z
         for band in placed.fits:
-            # As the bench counts it: the layer whose middle is over the fit's top closes it.
-            if under - BAND_MM <= band.z_to < (under + pause.after_z) / 2:
-                found.setdefault(band.z_to, Flag(
-                    id=PAUSE_PAST_FIT,
-                    reading=f"the fit `{band.fit.name}` tops out at z={pausing.mm(band.z_to)}, "
-                            "and this pauses a layer later, once the layer over it has printed: "
-                            f"pause_at={pausing.mm(under)} pauses before that layer",
-                ))
+            if band.z_to >= (under + pause.after_z) / 2 or under - band.z_to > ROOM_MM + BAND_MM:
+                continue  # under the band's top, or too far over it to be its pocket
+            if any(area.get(la.n, 0.0) for la in reading.layers[:n - 1] if la.z > band.z_from):
+                continue  # something under it is over air already, so which closes it isn't known
+            found.setdefault(band.z_to, Flag(
+                id=PAUSE_PAST_FIT,
+                reading=f"the fit `{band.fit.name}` tops out at z={pausing.mm(band.z_to)}, and "
+                        "the layer this pauses after is the first to bridge or overhang above "
+                        f"it: for parts dropped in, pause_at={pausing.mm(under)}",
+            ))
     return list(found.values())
 
 
