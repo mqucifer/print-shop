@@ -27,8 +27,10 @@ index (SKILL.md), and proposes what those leave undecided:
   that option's settings, and an option Orca couldn't slice says "no
   estimate".
 
-A part whose features leave nothing to decide gets no questions. A failed or
-cut-off call gives no questions, saying so, and the proposal goes on.
+A part whose features leave nothing to decide gets only print-shop's two. A failed, cut-off
+or timed-out call gives those two as well, saying which it was, and the proposal goes on. Those
+two need no model, so the command asks them while the model works (`waiting.py`,
+mqucifer/print-shop#208).
 """
 
 from __future__ import annotations
@@ -37,7 +39,7 @@ import re
 from collections.abc import Callable
 from typing import Any
 
-from print_shop.expert.client import CutOff
+from print_shop.expert.client import CutOff, TimedOut
 from print_shop.setup.bounds import SETTINGS, check
 from print_shop.setup.intake import Estimate, Option, Question
 from print_shop.setup.model import SHORT, TEXT, Ask, setting_item
@@ -45,11 +47,17 @@ from print_shop.setup.proposal import PartFacts
 from print_shop.setup.skill import SKILL_DIR
 
 __all__ = [
-    "MAX_QUESTIONS", "SEEN", "SEEN_FACES", "Asked", "estimate", "propose_questions",
-    "says_no_support", "schema",
+    "ANSWER_CHARS", "MAX_QUESTIONS", "SEEN", "SEEN_FACES", "STOCK", "Asked", "estimate",
+    "propose_questions", "says_no_support", "schema",
 ]
 
 MAX_QUESTIONS = 4
+#: The most characters the model's answer may be: what four questions need, from the recorded
+#: calls of 2026-11-15 to 22 (mqucifer/print-shop#208). The most an option took, its share of
+#: the question and whitespace included, was 865 characters, leaving out one answer padded with
+#: a run of 1,725 spaces; four questions of four options are 13,840. The largest answer that
+#: stopped by itself was 4,221.
+ANSWER_CHARS = 14_000
 #: Slices for the options' estimates, at most, per print: a slice of a small
 #: part takes a second or two, a large one longer.
 MAX_SLICES = 12
@@ -127,15 +135,40 @@ SEEN = Question(
 )
 assert set(SEEN_FACES) == {o.label for o in SEEN.options}
 
+#: The questions that need no model, shown at once (mqucifer/print-shop#208).
+STOCK = (PURPOSE, SEEN)
+
 
 class Asked:
     """What the questions step produced: the questions, and why there are none, if none."""
 
     def __init__(self, questions: tuple[Question, ...], note: str = "",
-                 call: dict[str, Any] | None = None) -> None:
+                 call: dict[str, Any] | None = None, failed: str = "") -> None:
         self.questions = questions
         self.note = note
         self.call = call or {}
+        #: How the model's call failed, in words that a time follows ("timed out"), or "" if it
+        #: answered.
+        self.failed = failed
+
+    @property
+    def closer(self) -> Question | None:
+        """The model's own purpose question: closer choices, once purpose has been answered."""
+        return next((q for q in self.questions if q.feature == "purpose" and q != PURPOSE), None)
+
+    @property
+    def added(self) -> tuple[Question, ...]:
+        """The model's other questions, added after print-shop's two."""
+        return self._others()[: MAX_QUESTIONS - len(STOCK)]
+
+    @property
+    def over(self) -> tuple[Question, ...]:
+        """The model's questions there's no room for, with four at most."""
+        return self._others()[MAX_QUESTIONS - len(STOCK):]
+
+    def _others(self) -> tuple[Question, ...]:
+        closer = self.closer
+        return tuple(q for q in self.questions if q not in STOCK and q is not closer)
 
 
 def schema(feature_ids: list[str]) -> dict[str, Any]:
@@ -177,13 +210,19 @@ def propose_questions(facts: PartFacts, ask: Ask) -> Asked:
                     schema([f.id for f in facts.features]))
         raw = list(reply["questions"])
     except CutOff as exc:
-        return Asked((PURPOSE, SEEN),
+        return Asked(STOCK,
                      f"only purpose and what's seen asked: the model was cut off ({exc})",
-                     exc.info.model_dump())
+                     exc.info.model_dump(), failed=_cut_off(exc))
+    except TimedOut as exc:
+        return Asked(STOCK,
+                     f"only purpose and what's seen asked: the model {exc}",
+                     {"finish_reason": "timed out", "seconds": exc.seconds,
+                      "timeout_s": exc.limit_s}, failed="timed out")
     except (RuntimeError, OSError, KeyError, TypeError) as exc:
-        return Asked((PURPOSE, SEEN),
+        return Asked(STOCK,
                      f"only purpose and what's seen asked: the model was unavailable "
-                     f"({exc})"[:600])
+                     f"({exc})"[:600], {"finish_reason": "unavailable"},
+                     failed=f"was unavailable ({exc})"[:300])
 
     questions = []
     dropped = []
@@ -257,6 +296,16 @@ def estimate(
             options.append(o.model_copy(update={"estimate": found}))
         out.append(q.model_copy(update={"options": tuple(options)}))
     return tuple(out)
+
+
+def _cut_off(exc: CutOff) -> str:
+    """A cut-off in a person's words, with no figure: its time follows, and the note has them."""
+    how = {
+        "runaway": " as its answer ran on as blank space",
+        "too long": " as its answer ran past what four questions need",
+        "length": " at its token limit",
+    }.get(exc.info.finish_reason, "")
+    return f"was cut off{how}"
 
 
 def _one_recommended(options: list[Option]) -> list[Option]:

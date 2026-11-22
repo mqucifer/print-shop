@@ -13,6 +13,9 @@ two to four options. Every option says what it would set, its impact in one
 line, and Orca's estimate of time and filament where a slice gave one. One
 option is recommended, with why. A simple part may get no questions.
 
+print-shop's own two, purpose and what's seen, need no model: the command asks them at once,
+and the model's follow when they arrive (`waiting.py`, mqucifer/print-shop#208).
+
 They're answered on the command line by number, with free text always
 allowed as "other", or replayed from a recorded answers file. The questions,
 every option offered with its impacts, and the answers go in the ledger.
@@ -28,6 +31,7 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 __all__ = [
+    "Added",
     "Answer",
     "AnswersRefused",
     "Asker",
@@ -161,8 +165,16 @@ class Intake(BaseModel):
     answers: tuple[Answer, ...] = ()
     #: Why there are no questions, or which options were dropped out of bounds.
     note: str = ""
-    #: The questions call's finish reason and tokens, reasoning included.
+    #: The questions call's finish reason and tokens, reasoning included. One with no answer
+    #: says why: cut off, "timed out", "unavailable", or "went on" for the person going on
+    #: without it.
     call: dict[str, Any] = {}
+    #: A question that was shown and whose answer isn't the one that stands: the model's closer
+    #: choices on purpose that the person kept their answer over, or print-shop's purpose
+    #: question where they picked one of those (mqucifer/print-shop#208).
+    offered: tuple[Question, ...] = ()
+    #: Why the model's own questions aren't among these, as the review says it, or "".
+    without: str = ""
 
     def chosen(self) -> list[tuple[Question, Option]]:
         """Each question answered with an option, and that option."""
@@ -171,6 +183,12 @@ class Intake(BaseModel):
             for q, a in zip(self.questions, self.answers, strict=True)
             if a.choice is not None
         ]
+
+    def could_set(self) -> frozenset[str]:
+        """The settings this job's questions could set: every question shown, with the model's
+        closer choices whose answer didn't stand (mqucifer/print-shop#208)."""
+        return frozenset(k for q in (*self.questions, *self.offered)
+                         for o in q.options for k in o.settings)
 
     def summary(self) -> str:
         if not self.questions:
@@ -186,9 +204,31 @@ class Intake(BaseModel):
 Asker = Callable[[Sequence[Question]], tuple[Answer, ...]]
 
 
+class Added(tuple[Question, ...]):
+    """Questions added after `before` others were answered (mqucifer/print-shop#208): shown as
+    added, and numbered on from those."""
+
+    before: int
+
+    def __new__(cls, questions: Sequence[Question], before: int) -> Added:
+        made = super().__new__(cls, questions)
+        made.before = before
+        return made
+
+
+def _numbered_from(questions: Sequence[Question]) -> int:
+    return questions.before + 1 if isinstance(questions, Added) else 1
+
+
 def render(questions: Sequence[Question]) -> str:
-    lines = ["A few questions about this part, from its shape:"]
-    for n, q in enumerate(questions, 1):
+    first = _numbered_from(questions)
+    if isinstance(questions, Added):
+        lines = ["Added by the model, from the part's shape:"]
+    elif all(q.feature in ("purpose", "seen") for q in questions):
+        lines = ["A few questions about this part:"]
+    else:
+        lines = ["A few questions about this part, from its shape:"]
+    for n, q in enumerate(questions, first):
         lines.append(f"{n}. {q.text}")
         lines += [f"   {i}) {o.line()}" for i, o in enumerate(q.options, 1)]
         lines.append("   o) other: say it in your own words")
@@ -216,12 +256,15 @@ def cli_asker(
             return ()
         write(render(questions))
         answers = []
-        for n, q in enumerate(questions, 1):
+        for n, q in enumerate(questions, _numbered_from(questions)):
             while True:
-                parsed = parse(read(f"{n}> "), q)
+                typed = read(f"{n}> ")
+                parsed = parse(typed, q)
                 if isinstance(parsed, Answer):
                     answers.append(parsed)
                     break
+                if typed.strip().lower() == "go" and not isinstance(questions, Added):
+                    parsed += "; go works once these are answered"  # mqucifer/print-shop#208
                 write(f"  {parsed}")
         return tuple(answers)
 
