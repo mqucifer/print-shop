@@ -16,6 +16,10 @@ only where all three are true:
   surface, on from the rim as far as it doesn't turn a corner out of the hole; and what lies
   straight down the opening, where a floor has a skin behind it. So a hole with a thin wall
   beside it, or a thin skin over its end, keeps its points as thin.
+
+Where a hole breaks out at a slant, its edge there isn't a wall: a reading of the hole's surface
+within a nozzle of an edge sharper than square, that comes out through the face past that edge,
+is the edge's. One that comes out anywhere else is a wall, however near an edge.
 """
 
 from __future__ import annotations
@@ -260,10 +264,32 @@ class Rims:
                     point = apex + along * (on - apex)
                     cube = np.floor(point / step).astype(int).tolist()
                     read.setdefault((*cube, *way), (point, self.normals[one]))
+        # The edges sharper than square where the surface ends, and the face past each.
+        mine = set(order)
+        wedges = [
+            (one, k, other)
+            for one in order
+            for k, other in enumerate(self.across[one].tolist())
+            if other >= 0
+            and other not in mine
+            and float(self.normals[one] @ self.normals[other]) < -SQUARE
+        ]
+        starts = np.array([self.corners[one, k] for one, k, _ in wedges]).reshape(-1, 3)
+        runs = np.array([self.corners[one, (k + 1) % 3] for one, k, _ in wedges]).reshape(-1, 3)
+        runs -= starts
+        past = np.array([self.normals[other] for _, _, other in wedges]).reshape(-1, 3)
         least: dict[str, Any] | None = None
         for point, normal in read.values():
             wall = self._square(point, normal)
-            if under(wall, self.nozzle) and (least is None or wall < least["wall_mm"]):
+            if not under(wall, self.nozzle):
+                continue
+            out = point - wall * normal
+            share = np.clip(((point - starts) * runs).sum(axis=1) / (runs * runs).sum(axis=1), 0, 1)
+            away = np.linalg.norm(point - starts - share[:, None] * runs, axis=1)
+            on_past = np.abs(((out - starts) * past).sum(axis=1)) <= FINE[0]
+            if bool((on_past & (away <= self.nozzle + FINE[0])).any()):
+                continue  # The edge where the hole breaks out, not a wall.
+            if least is None or wall < least["wall_mm"]:
                 least = {"wall_mm": wall, "at": [round(float(v), 3) for v in point]}
         return least
 

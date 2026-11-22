@@ -410,6 +410,16 @@ def rim_points() -> None:
         # A rim sharper than square, the bore 5° off the face's square.
         "sharp": cut(plain, lean=50),
     }
+    # The far end breaking out at a slant through the top, 0.199 mm square to the bore at its
+    # edge, which is no wall; and with the bore 0.3 mm from the plate's side as well.
+    slant = V(np.cos(np.radians(45)), 0, -np.sin(np.radians(45)))
+    for name, y in (("breakout", 0.0), ("breakout-side", 25 - 2.75 - 0.3)):
+        at = V(0, y, 25.2) - slant * 40
+        made[name] = plain.cut(cq.Solid.makeCylinder(2.75, 80, at, slant))
+    # A hole so short that all of its surface is within a nozzle of an end, 0.3 mm from the side.
+    sheet = cq.Solid.makeBox(0.7, 50, 50, V(-0.35, -25, -25)).rotate(V(), V(0, 1, 0), 45)
+    sheet = sheet.intersect(cq.Solid.makeBox(200, 200, 28, V(-100, -100, -14)))
+    made["short"] = cut(sheet.translate((0, 0, 14)), y=25 - 2.75 - 0.3)
     eight = plain
     for y in (-21, -15, -9, -3, 3, 9, 15, 21):
         eight = cut(eight, y=y)

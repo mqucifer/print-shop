@@ -1334,6 +1334,22 @@ def test_what_isnt_a_whole_wall_at_a_rim_is_still_thin(bench: Any, name: str, pl
         )
 
 
+def test_where_a_bore_breaks_out_at_a_slant_its_edge_is_no_wall(bench: Any) -> None:
+    """The 45° edge of a bore's slanted far end read 0.199 mm square to the bore and kept the
+    square rim's point thin. It's an edge: that point is noted, and the breakout's own still
+    fails. With the side 0.3 mm from the bore it's a wall, however near an end it's read."""
+    answer = bench("thin", "rim/breakout.step", "--one-body")
+    assert answer.verdict == "FAIL", answer.text
+    assert answer.numbers["rim_points"] == 1
+    (place,) = answer.numbers["thin_places"]
+    assert place["box"][0][2] == pytest.approx(24.6, abs=0.01), "the breakout's own"
+    assert "stays thin" not in answer.text
+    for name in ("breakout-side", "short"):
+        walled = bench("thin", f"rim/{name}.step", "--one-body")
+        assert walled.verdict == "FAIL" and walled.numbers["rim_points"] == 0, walled.text
+        assert "that hole's wall is 0.30" in walled.text, walled.text
+
+
 def test_a_point_thin_through_two_layers_at_a_rim_is_still_thin(bench: Any) -> None:
     """The same bore in layers 0.05 mm thick, where the wedge runs through two of them; and
     with the heights sampled, when one layer can't be told from more."""
