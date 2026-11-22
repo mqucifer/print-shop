@@ -876,6 +876,7 @@ def test_a_correction_doesnt_write_over_a_load_since_the_end(shop: Shop) -> None
         stock.load(WHITE)
     answered_with(shop, "spool #3, Elegoo PETG, clear")
     assert shop.loaded() == WHITE
+    assert not_known(shop) == "", "a load since it ended is the last word: nothing to hold"
 
 
 def test_a_later_print_thats_still_starting_keeps_its_stock(shop: Shop) -> None:
