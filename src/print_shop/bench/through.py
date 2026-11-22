@@ -104,6 +104,37 @@ def meet(first: dict[str, Any], second: dict[str, Any]) -> dict[str, Any] | str:
     return f"the two parts' holes there don't meet end to end: they're {gap:.3f} mm apart"
 
 
+def between(corners: Any, axis: Any, low: float, high: float) -> tuple[float, np.ndarray]:
+    """What of a flat triangle lies between two levels along `axis`: its area and its middle
+    (mqucifer/print-shop#245). A shank's shear is on its own stretch of the wall, and a
+    triangle that runs across one of the stretch's ends is loaded over the part between."""
+    kept = np.asarray(corners, dtype=float)
+    way = np.asarray(axis, dtype=float)
+    for toward, limit in ((-way, -(low - SAME)), (way, high + SAME)):
+        reach = kept @ toward - limit
+        if (reach <= 0).all():
+            continue
+        cut = []
+        for i in range(len(kept)):
+            j = (i + 1) % len(kept)
+            if reach[i] <= 0:
+                cut.append(kept[i])
+            if (reach[i] < 0 < reach[j]) or (reach[j] < 0 < reach[i]):
+                cut.append(kept[i] + reach[i] / (reach[i] - reach[j]) * (kept[j] - kept[i]))
+        if len(cut) < 3:
+            return 0.0, np.zeros(3)
+        kept = np.array(cut)
+    fans = list(zip(kept[1:-1], kept[2:], strict=True))
+    areas = [0.5 * float(np.linalg.norm(np.cross(b - kept[0], c - kept[0]))) for b, c in fans]
+    total = sum(areas)
+    if total <= 0:
+        return 0.0, np.zeros(3)
+    if len(fans) == 1:
+        return total, np.asarray((kept[0] + kept[1] + kept[2]) / 3)
+    middle = sum(w * (kept[0] + b + c) / 3 for w, (b, c) in zip(areas, fans, strict=True))
+    return total, np.asarray(middle / total)
+
+
 def along(planes: list[dict[str, Any]], axis: Any, corners: list[np.ndarray]) -> None:
     """Fill in where each plane's face runs along `axis`, from its own corners, and keep them."""
     way = np.asarray(axis, dtype=float)

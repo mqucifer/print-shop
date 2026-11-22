@@ -524,6 +524,64 @@ def test_the_panel_is_inside_the_frame_and_a_margin_outside_it_is_no_piece(bench
     assert sorted(numbers["colours"]) == ["blue", "green", "red", "white", "yellow"]
 
 
+def test_glass_on_a_dark_ground_is_never_cut_away_as_a_frame(bench: Any) -> None:
+    """mqucifer/print-shop#240: a band on a dark ground lost 75, 74 and 73 pixels as frame,
+    was drawn 1.24 times too big, and was `OK`. It has no answer, naming each side it would
+    have cut and the glass there, with the scale it would have given, and writes no map."""
+    answer = bench("pieces", "trace", "dark-ground.png", "--width", 100, "--to", "dark.json")
+    assert answer.verdict == "NO ANSWER", answer.text
+    why = answer.record["why"]
+    assert why.startswith("it would have traced 323 x 151 of the picture's 400 x 300 pixels")
+    assert "40.6% of it, at 0.3096 mm a pixel" in why
+    cut = answer.numbers["frame_cut"]
+    assert {side: c["px"] for side, c in cut.items()} == {
+        "top": 75, "bottom": 74, "left": 4, "right": 73
+    }  # fmt: skip
+    assert cut["top"]["glass_px"] > 1000 and cut["bottom"]["glass_px"] > 1000
+    assert f"top 75 px with {cut['top']['glass_px']} px of glass on it" in why
+    assert f"bottom 74 px with {cut['bottom']['glass_px']} px of glass on it" in why
+    assert "right 73 px" in why and "--whole" in why
+    assert not (bench.work / "dark.json").exists(), "no map to work on"
+    assert reports.unlike("pieces", answer.numbers) == []
+
+
+def test_whole_traces_the_picture_as_its_panel_and_every_reader_after_it_does(bench: Any) -> None:
+    answer = bench(
+        "pieces", "trace", "dark-ground.png", "--width", 100, "--whole", "--to", "whole.json"
+    )
+    assert answer.verdict == "OK", answer.text
+    assert answer.numbers["panel_px"] == answer.numbers["picture_px"] == [400, 300]
+    assert answer.numbers["px_per_mm"] == 4.0 and answer.numbers["panel_share_pct"] == 100.0
+    assert not answer.record["why"].startswith("traced"), "the window is the whole picture"
+    assert json.loads((bench.work / "whole.json").read_text())["source"]["whole_picture"] is True
+    again = bench("pieces", "retrace", "whole.json", "--box", "30,25,55,55", "--to", "again.json")
+    assert again.verdict == "OK", again.text
+
+
+@pytest.mark.parametrize(
+    ("name", "panel"),
+    [("light-ground", [400, 300]), ("framed", [344, 244]), ("framed-specked", [344, 244]),
+     ("framed-notched", None), ("framed-wavy", None)],
+)  # fmt: skip
+def test_a_real_frame_and_a_picture_with_none_trace_as_they_did(
+    bench: Any, name: str, panel: list[int] | None
+) -> None:
+    """A frame with specks in it or its margin, one thinner where the margin comes in, and one
+    whose inner edge wanders by a hair: none holds glass. The window is said first."""
+    answer = bench("pieces", "trace", f"{name}.png", "--width", 100)
+    assert answer.verdict == "OK", answer.text
+    wide, tall = answer.numbers["panel_px"]
+    assert panel is None or [wide, tall] == panel
+    assert "frame_cut" not in answer.numbers
+    if [wide, tall] == [400, 300]:
+        assert not answer.record["why"].startswith("traced")
+    else:
+        assert answer.record["why"].startswith(
+            f"traced {wide} x {tall} of the picture's 400 x 300 pixels, "
+        )
+        assert f"at {100 / wide:.4f} mm a pixel: " in answer.record["why"]
+
+
 def test_specks_in_a_piece_are_filled_and_a_line_that_ends_in_glass_is_one_dead_end(
     bench: Any,
 ) -> None:
