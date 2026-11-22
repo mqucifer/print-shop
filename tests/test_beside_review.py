@@ -534,7 +534,9 @@ def test_a_turn_turned_down_is_a_correction_and_the_settings_are_asked_for_this_
     assert row.rotation_deg == LAID
     assert [(c.key, c.preset, c.value, c.reason) for c in row.corrections or ()] == [
         ("orientation", "180,0,0", "0,0,0", "the slab's top is the face that shows")]
-    assert row.proposal.get(ORIENTATION) is None, "a pose is no setting of the slice"
+    asked_for = (*row.proposal.changes, *row.proposal.not_applied)
+    assert ORIENTATION not in {c.key for c in asked_for}, (
+        "a pose is no setting of the slice, not even one that couldn't be placed")
     assert len(asked) == 1, "its settings were for the turn, so it's asked for this pose"
     assert [r.change.key for r in screen.seen[1].by_model] == ["wall_loops"]
 
