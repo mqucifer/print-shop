@@ -100,7 +100,7 @@ from print_shop.env import SETTINGS_PATH, load_env
 from print_shop.inventory import SETUP, Inventory, InventoryError, Material
 from print_shop.joblog import LOG_NAME, JobLog, secrets
 from print_shop.ledger import Ledger, ledger_path
-from print_shop.orchestrator.daemon import GATE_WAIT_S, gate_name
+from print_shop.orchestrator.daemon import GATE_WAIT_S
 from print_shop.orchestrator.outcome import no_frames
 from print_shop.printer.centauri import FrameRecorder, PrinterClient, live_printer
 from print_shop.runtime import (
@@ -452,7 +452,7 @@ def _gate_lines(gate: dict[str, object], *, turned: bool) -> list[str]:
 
     `turned` is False for a hand-sliced file, which nothing turns.
     """
-    lines = [f"At {gate_name(gate)}. Approve or Reject on the dashboard."]
+    lines = [f"At {Gate.named(gate)}. Approve or Reject on the dashboard."]
     if gate.get("gate") == Gate.BEFORE_PRINT:
         seconds = gate.get("print_time_s")
         lines += [f"  time        {int(seconds) // 60 if isinstance(seconds, int | float) else 0}"
@@ -467,7 +467,7 @@ def _gate_lines(gate: dict[str, object], *, turned: bool) -> list[str]:
     lines.append(f"  because     {gate.get('reason') or 'it gave no reason'}")
     if gate.get("gate") != Gate.REVIEW_PROPOSAL:
         return lines
-    lines[0] = (f"At {gate_name(gate)}, before any question or slice. "
+    lines[0] = (f"At {Gate.named(gate)}, before any question or slice. "
                 "Approve or Reject on the dashboard.")
     closed = gate.get("is_manifold")
     volume, box = gate.get("volume_mm3"), gate.get("bbox_mm")

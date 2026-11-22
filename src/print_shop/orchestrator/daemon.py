@@ -62,7 +62,6 @@ __all__ = [
     "Command",
     "JobRejected",
     "JobResult",
-    "gate_name",
     "parse_command",
     "state_payload",
     "Daemon",
@@ -79,20 +78,6 @@ _R = TypeVar("_R")
 def duration(seconds: float) -> str:
     """A wait's length as a sentence says it: "60 min", "45 s"."""
     return f"{seconds / 60:g} min" if seconds >= 60 else f"{seconds:g} s"
-
-
-def gate_name(gate: dict[str, Any]) -> str:
-    """A gate as a person is told it, from its payload. Only the gate before printing is "the
-    approval gate" (mqucifer/print-shop#200)."""
-    kind = gate.get("gate")
-    if kind == Gate.BEFORE_PRINT:
-        return "the approval gate"
-    if kind == Gate.REVIEW_PROPOSAL:
-        if gate.get("is_manifold") is False:
-            return "the mesh gate"
-        if gate.get("is_manifold") is True:
-            return "the pose gate"
-    return str(kind) if kind else "a gate that doesn't say which it is"
 
 
 # --------------------------------------------------------------------------
@@ -708,7 +693,7 @@ class Daemon:
             self._left_gate()
             self._bridge_publish(gate_topic(self._cfg), {"pending": False})
             sentence = self.abandon(
-                job_id, f"waiting for Approve or Reject at {gate_name(gate_payload)}",
+                job_id, f"waiting for Approve or Reject at {Gate.named(gate_payload)}",
                 self._gate_wait_s,
             )
             self._finish_job(job_id, approved=False, printed=False, error=sentence)
