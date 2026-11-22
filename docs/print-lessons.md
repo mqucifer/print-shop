@@ -35,7 +35,7 @@ The ledger now keeps each print's features (`prints.features`), so a print's tra
 ## Candidates, drawn by code
 
 When the ledger records a print (`Ledger.record_start_requested`) and again when its outcome is answered (`record_answer`), `lessons.after_print` reads the row:
-- **Each correction at the review is a candidate:** its setting and value, the Sponsor's reason as its text, and the part's traits as its keys. If the same key was corrected twice at one review, the one that stood is used.
+- **Each correction at the review is a candidate:** its setting and value, the Sponsor's reason as its text, and the part's traits as its keys. If the same key was corrected twice at one review, the one that stood is used. One that didn't reach the slice is still a candidate, as it's what the Sponsor wanted, and its evidence says it wasn't applied.
 - **The same correction on a later print is more evidence for the lesson it repeats,** not a second lesson. If that print's part doesn't have every trait the lesson is keyed to, the step says so, for the reviewer to widen the keys.
 - **A change the Sponsor took from the slice's reading is a candidate of its own kind** (`reading`, mqucifer/print-shop#105), not a correction: the reading's words are its evidence.
 - **Every lesson's evidence carries what that print's slice flagged,** with its shortest layer, ironing time and how stacked its seams were, where the slice was read.
@@ -82,6 +82,7 @@ uv run python scripts/print_lessons.py write JOB --by WHO --text FILE --traits T
 
 The setup model's proposal (`setup.Proposer`) is given each kept lesson for the part's traits (`lessons.for_part`):
 - **A lesson's setting is set,** as an intake answer is, and the model may not change it: a suggestion for that key is refused, saying which lesson set it. A value that's the preset's own is kept as a decision, so the guard leaves it: supports kept off by a lesson stay off.
+- **Set means sliced** (mqucifer/print-shop#206). The setting is written to the profile it's declared for (`bounds.SETTINGS`, then `bounds.MATERIAL` as the filament's), else to the profile that has the key (`setup/reach.py`), and read back from the sliced G-code's config. One that can't be placed sets nothing and says why. One the slice didn't take is shown as asked and sliced ("asked 30, sliced 80"), and isn't applied.
 - **The intake answer comes first,** as it's the Sponsor's for this part. Of two lessons for one setting, the one keyed to more traits sets it, then the newer.
 - **The model reads every one,** with where it came from and who kept it, in its prompt.
 - **The review shows which lesson set what:** the change says `[lesson N: its traits]`, and a block lists each lesson given, with whether it set its setting or why not. `print_job.py --list` has a `lesson` line for each.
@@ -89,7 +90,7 @@ The setup model's proposal (`setup.Proposer`) is given each kept lesson for the 
 
 ## Scoring, promoting and retiring
 
-- **The review scores a lesson's setting by what the Sponsor did with it:** it stood, `used`; they corrected it, or took the slice's reading instead, `in_the_way`; their answer or a closer lesson set it, `not_used`. A lesson that sets nothing is scored by the reviewer (`score`). A lesson's status follows each print's latest score, as the CAD loop's does: `used` is `held`, `in_the_way` is `broken`.
+- **The review scores a lesson's setting by what the Sponsor did with it:** it stood, `used`; they corrected it, or took the slice's reading instead, `in_the_way`; their answer or a closer lesson set it, or it didn't reach the slice, `not_used`. A lesson that sets nothing is scored by the reviewer (`score`). A lesson's status follows each print's latest score, as the CAD loop's does: `used` is `held`, `in_the_way` is `broken`.
 - **Used on two prints that didn't fail, without a correction, it's listed to promote:** a line in the print-settings skill, by PR, then `promote ID --as skill --where owner/repo#n`. Once in the skill it's read there, and isn't given as a lesson.
 - **One that got in the way, or was given twice and not used, is listed to retire.** Code retires nothing. A correction of a lesson's setting is also a candidate of its own.
 

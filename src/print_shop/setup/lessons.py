@@ -353,6 +353,8 @@ def draw(ledger: Ledger, row: Row) -> list[int]:
         if _drawn(ledger, row.job_id, kind, key):
             continue
         detail = {**part, "key": key, "preset": c.preset, "value": c.value, "reason": c.reason}
+        if c.not_applied:  # asked for, and never printed with (mqucifer/print-shop#206)
+            detail["not_applied"] = c.not_applied
         keyed = list(part["traits"])
         if kind == READING:
             detail["reading"] = c.reading
@@ -677,7 +679,8 @@ def _scored_at_review(ledger: Ledger, row: Row) -> None:
     """Each setting a lesson set here, by what the Sponsor did with it at the review: stood is
     `used`, corrected `in_the_way`. One that set nothing is `not_used`. Once for each print."""
     corrected = {c.key: c for c in row.corrections or ()}
-    stood = {c.key: c for c in row.proposal.changes} if row.proposal else {}
+    stood = {c.key: c for c in (*row.proposal.changes, *row.proposal.not_applied)
+             } if row.proposal else {}
     for g in row.proposal.lessons if row.proposal else ():
         if not g.key or g.withheld or ledger.query(
             "SELECT 1 FROM print_lesson_scores WHERE job_id=? AND lesson=? AND by=?",
@@ -823,7 +826,7 @@ def _evidence_lines(ledger: Ledger, lesson: int) -> list[str]:
         if e["kind"] == CORRECTION:
             said = f"corrected {d['key']} {d['preset']} -> {d['value']}: {d['reason']}" + (
                 f" (read: {d['reading']})" if d.get("reading") else ""
-            )
+            ) + (f" (not applied: {d['not_applied']})" if d.get("not_applied") else "")
         elif e["kind"] == READING:
             said = f"took {d['key']} {d['preset']} -> {d['value']} from the slice: {d['reading']}"
         else:

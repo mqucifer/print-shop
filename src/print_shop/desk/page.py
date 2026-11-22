@@ -333,11 +333,18 @@ def _change_rows(changes: tuple[Change, ...]) -> str:
         read = f"<br><span class=\"muted\">read: {escape(c.reading)}</span>" if c.reading else ""
         rows.append(
             f"<tr><td><code>{escape(c.key)}</code></td><td>{was}</td>"
-            f"<td><strong>{escape(c.value)}</strong></td><td>{escape(c.reason)}{read}</td>"
+            f"<td>{_this_print(c)}</td><td>{escape(c.reason)}{read}</td>"
             f"<td>{escape(by)}{f'<br><span class=muted>{escape(cites)}</span>' if cites else ''}"
             "</td></tr>")
     return ("<div class=\"scroll\"><table><tr><th>Setting</th><th>Preset</th><th>This print</th>"
             "<th>Why</th><th>From</th></tr>" + "".join(rows) + "</table></div>")
+
+
+def _this_print(change: Change) -> str:
+    """The value it printed with, or that it didn't (mqucifer/print-shop#206)."""
+    if change.not_applied:
+        return f"not applied: {escape(change.not_applied)}"
+    return f"<strong>{escape(change.value)}</strong>"
 
 
 def _settings(row: Row) -> str:
@@ -354,7 +361,10 @@ def _settings(row: Row) -> str:
     if proposal.reasoning:
         parts.append(f"<p>{escape(proposal.reasoning)}</p>")
     parts.append(_change_rows(proposal.changes) if proposal.changes
+                 else "<p>No change reached the slice.</p>" if proposal.not_applied
                  else "<p>No changes: the presets as they are.</p>")
+    if proposal.not_applied:
+        parts.append("<h3>Didn't reach the slice</h3>" + _change_rows(proposal.not_applied))
     lists = (
         ("Kept at the preset", [f"{c.key} at {c.preset}: {c.reason}" for c in proposal.kept]),
         ("Notes", list(proposal.notes)),

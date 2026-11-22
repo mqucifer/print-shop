@@ -5,7 +5,8 @@ Each one stands in for a transport and decides nothing. The code under test
 conversion) is the real code.
 
 - `RecordedSlicer` replays a G-code the real Orca wrote, through the real
-  header parser, and refuses any STL it has no recording for.
+  header parser, and refuses any STL it has no recording for. Its config block
+  says the profiles it was given, as Orca's does (`echo_settings`).
 - `MemoryBridge` is a broker in a list: what was published, what is retained,
   and a `deliver` that calls subscribers as a broker would.
 - `FramePrinter` answers from SDCP payloads (`tests/data/sdcp/frames.json`,
@@ -74,6 +75,42 @@ def installed_or_ci(real: SlicerProfiles) -> SlicerProfiles:
 # Slicing
 # --------------------------------------------------------------------------
 
+#: The keys Orca takes from a filament profile only, as the stored filament profiles name them.
+FILAMENT_KEYS = frozenset(
+    key for path in STORE.glob("*/filament/*.json") for key in json.loads(path.read_text())
+)
+
+
+def echo_settings(gcode: Path, profiles: SlicerProfiles) -> None:
+    """The recording's config block with the given profiles' values, as Orca writes it.
+
+    A filament's key counts from the filament profile only: in the process Orca ignores it
+    without a word (mqucifer/print-shop#206, probed in `~/print-shop/proofs/m20-filament-keys/`:
+    asked 30 there, sliced the filament's own 90). Only a setting
+    the recording's block has is rewritten; the moves are the recording's.
+    """
+    given = {key: value for key, value in json.loads(Path(profiles.process).read_text()).items()
+             if key not in FILAMENT_KEYS}
+    if profiles.filament is not None:
+        given |= json.loads(Path(profiles.filament).read_text())
+    lines = gcode.read_text().splitlines(keepends=True)
+    inside = changed = False
+    for n, line in enumerate(lines):
+        if line.startswith("; CONFIG_BLOCK_"):
+            inside = line.startswith("; CONFIG_BLOCK_START")
+        elif inside and line.startswith("; ") and " = " in line:
+            key, _, was = line[2:].rstrip("\n").partition(" = ")
+            if key not in given:
+                continue
+            value = given[key]
+            said = ",".join(map(str, value)) if isinstance(value, list) else str(value)
+            said = said.replace("\n", "\\n")
+            if said != was:
+                lines[n] = f"; {key} = {said}\n"
+                changed = True
+    if changed:
+        gcode.write_text("".join(lines))
+
 
 @dataclass
 class RecordedSlicer:
@@ -107,6 +144,7 @@ class RecordedSlicer:
         out.mkdir(parents=True, exist_ok=True)
         gcode = out / "plate_1.gcode"
         shutil.copyfile(recording, gcode)
+        echo_settings(gcode, profiles)
         return parse_gcode_header(gcode)
 
 

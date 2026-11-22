@@ -10,6 +10,10 @@ A correction is relative to the Sponsor's own tuning, so it is shown and kept
 next to the preset's value. Corrections are the learning signal for
 print-flow stage 9: what the Sponsor would have tuned.
 
+A change is shown as this print's only if it reached the slice
+(mqucifer/print-shop#206, `proposal.read_back`). One that didn't is shown as asked and
+sliced, and a key that can't be placed in a profile is refused when it's typed.
+
 The slice is read too (mqucifer/print-shop#105, `reading.py`): each layer's time,
 each feature's time and area, and the seam. What matters for this part is
 flagged, each with the change it proposes, its reason and the reading it rests
@@ -32,7 +36,6 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from print_shop.core.state import AppliedOrientation, Orientation, SliceResult
-from print_shop.setup.bounds import MATERIAL, SETTINGS
 from print_shop.setup.concerns import concern_in, ways
 from print_shop.setup.intake import Estimate
 from print_shop.setup.proposal import (
@@ -45,6 +48,7 @@ from print_shop.setup.proposal import (
     Source,
     pose_value,
 )
+from print_shop.setup.reach import profile_of, unplaced
 from print_shop.setup.reading import Flag, SliceReading
 from print_shop.slicer.orca import SlicerProfiles
 
@@ -142,15 +146,20 @@ def render(request: ReviewRequest) -> str:
         head = "standard -> your tuning -> this print" if tuned else "your preset -> this print"
         lines.append(f"  {'setting'.ljust(width)}  {head}")
         for c in changes:
-            by = _BY[c.source] + (f" {c.lesson}" if c.lesson is not None else "")
+            by = _by(c)
             cites = ", ".join(x for x in (c.feature, c.knowledge) if x)
             was = f"{c.standard} -> {c.preset or '-'}" if c.standard else (c.preset or "-")
             lines.append(f"  {c.key.ljust(width)}  {was} -> {c.value}")
             lines.append(f"  {''.ljust(width)}    {c.reason} [{by}{': ' + cites if cites else ''}]")
             if c.reading:
                 lines.append(f"  {''.ljust(width)}    read: {c.reading}")
+    elif proposal.not_applied:
+        lines.append("  No change reached the slice.")
     else:
         lines.append("  No changes: your presets as they are.")
+    for c in proposal.not_applied:
+        lines.append(f"  NOT APPLIED {c.key}: {c.not_applied}")
+        lines.append(f"    {c.reason} [{_by(c)}]")
     for c in proposal.kept:
         by = (
             f" [lesson {c.lesson}]" if c.lesson is not None
@@ -208,6 +217,11 @@ def render(request: ReviewRequest) -> str:
         "pause_at=12.4 because white to black for a colour change at a height, or stop.",
     ]
     return "\n".join(lines)
+
+
+def _by(change: Change) -> str:
+    """Who a change is from, as the review names them."""
+    return _BY[change.source] + (f" {change.lesson}" if change.lesson is not None else "")
 
 
 def _poses(request: ReviewRequest) -> list[str]:
@@ -284,9 +298,10 @@ def parse_answer(answer: str, request: ReviewRequest) -> Review | str:
             continue
         preset = _preset_of(request, key)
         if preset is None:
-            return f"'{key}' isn't a setting in the filament or the process preset"
+            return unplaced(key, request.process, request.filament)
         known = request.proposal.get(key) or next(
-            (c for c in request.proposal.kept if c.key == key), None
+            (c for c in (*request.proposal.not_applied, *request.proposal.kept) if c.key == key),
+            None,
         )
         corrections.append(
             Change(key=key, preset=preset, value=value, reason=reason or "your correction",
@@ -441,19 +456,16 @@ def _priced(request: ReviewRequest, settings: dict[str, str]) -> str:
 
 
 def _preset_of(request: ReviewRequest, key: str) -> str | None:
-    """A setting's value in the presets, or None if neither has it. A key the filament decides
-    (`bounds.MATERIAL`, or a bounded filament setting) is looked up there first, then in the
-    process: a correction of a filament setting outside the bounded ones, such as
-    `overhang_fan_speed`, was refused as "not in the process preset" (mqucifer/print-shop#129)."""
-    setting = SETTINGS.get(key)
-    filament_first = key in MATERIAL or (setting is not None and setting.filament)
-    tiers = ((request.filament, request.process) if filament_first
-             else (request.process, request.filament))
-    for data in tiers:
-        if key in data:
-            found = data[key]
-            return str(found[0] if isinstance(found, list) and found else found)
-    return None
+    """A setting's value in the preset it's written to (`reach.profile_of`), "" where that
+    preset doesn't list it (a declared key: shown as "-"), or None if it can't be placed. So a
+    filament setting outside the bounded ones, such as `overhang_fan_speed`, can be corrected
+    (mqucifer/print-shop#129), and is written where it was read (mqucifer/print-shop#206)."""
+    tier = profile_of(key, request.process, request.filament)
+    if tier is None:
+        return None
+    data = request.filament if tier == "filament" else request.process
+    found = data.get(key, "")
+    return str(found[0] if isinstance(found, list) and found else found)
 
 
 def _setting_change(request: ReviewRequest, key: str, value: str, reason: str) -> Change:

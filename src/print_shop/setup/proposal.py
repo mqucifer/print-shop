@@ -26,7 +26,10 @@ goes back to my want for this to understand what it's doing." So:
   model reads them. The review says which lesson set what.
 
 The changes are applied as whole copies of the process and filament
-profiles, the way the plate is (`with_bed_type`).
+profiles, the way the plate is (`with_bed_type`), each in the profile it
+belongs to (`reach.profile_of`). Then each is read back from the slice
+(`read_back`): one that didn't reach it is never shown or kept as applied
+(mqucifer/print-shop#206).
 """
 
 from __future__ import annotations
@@ -39,10 +42,10 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
-from print_shop.setup.bounds import SETTINGS
 from print_shop.setup.context import PartContext, refuses
 from print_shop.setup.features import Feature
 from print_shop.setup.intake import Intake
+from print_shop.setup.reach import not_sliced, profile_of, unplaced
 from print_shop.setup.skill import WARPS_MM2
 
 if TYPE_CHECKING:  # the slicer imports the job state, which imports this
@@ -55,6 +58,7 @@ __all__ = [
     "Change",
     "GivenLesson",
     "LoopCall",
+    "NotPlaced",
     "PartFacts",
     "Proposal",
     "Source",
@@ -64,7 +68,10 @@ __all__ = [
     "from_lessons",
     "guard",
     "pause_z",
+    "placeable",
     "pose_value",
+    "read_back",
+    "reached",
 ]
 
 
@@ -96,6 +103,9 @@ class Change(BaseModel):
     lesson: int | None = None  # the lesson that set it, for a change from one
     #: What the slice showed that the change rests on, with its figures (a `Source.READING`).
     reading: str = ""
+    #: Why it didn't reach the slice, as asked and sliced ("asked 30, sliced 80"), or "" when
+    #: it did or hasn't been sliced yet (mqucifer/print-shop#206).
+    not_applied: str = ""
 
 
 class GivenLesson(BaseModel):
@@ -151,6 +161,9 @@ class Proposal(BaseModel):
     model_config = {"frozen": True}
 
     changes: tuple[Change, ...] = ()
+    #: The changes that didn't reach the slice, each saying why (`read_back`,
+    #: mqucifer/print-shop#206). Once read back, none of them is in `changes`.
+    not_applied: tuple[Change, ...] = ()
     #: Settings the model weighed and left at the preset's value, with why.
     kept: tuple[Change, ...] = ()
     #: How the part was read, in the model's words: what it is, what matters.
@@ -187,10 +200,11 @@ class Proposal(BaseModel):
         return next((c for c in self.changes if c.key == key), None)
 
     def corrected(self, corrections: list[Change]) -> Proposal:
-        """This proposal with the Sponsor's corrections in place of what they correct."""
-        keys = {c.key for c in corrections}
-        kept = tuple(c for c in self.changes if c.key not in keys)
-        return self.model_copy(update={"changes": kept + tuple(corrections)})
+        """This proposal with the Sponsor's corrections in place of what they correct. Of two
+        for one setting the last stands: it's the one written."""
+        last = {c.key: c for c in corrections}
+        kept = tuple(c for c in self.changes if c.key not in last)
+        return self.model_copy(update={"changes": kept + tuple(last.values())})
 
 
 @dataclass(frozen=True)
@@ -214,18 +228,18 @@ class PartFacts:
         return next((f.value for f in self.features if f.id == id), 0.0)
 
     def preset(self, key: str) -> str:
-        setting = SETTINGS.get(key)
-        data = self.filament if setting is not None and setting.filament else self.process
-        return _first(data.get(key, ""))
+        tier = profile_of(key, self.process, self.filament)
+        if tier is None:
+            return ""
+        return _first((self.filament if tier == "filament" else self.process).get(key, ""))
 
     def standard(self, key: str) -> str:
         """The standard's value for `key`, or '' when the preset is the standard itself."""
-        setting = SETTINGS.get(key)
-        data = (
-            self.standard_filament if setting is not None and setting.filament
-            else self.standard_process
-        )
-        return _first(data.get(key, "")) if data else ""
+        tier = profile_of(key, self.process, self.filament)
+        if tier is None:
+            return ""
+        data = self.standard_filament if tier == "filament" else self.standard_process
+        return _first(data.get(key, ""))
 
     @property
     def presets(self) -> dict[str, dict[str, Any]]:
@@ -272,7 +286,8 @@ def from_lessons(
     the same, so the guard leaves it), and each lesson marked with whether it set its setting.
 
     An intake answer comes first, as it's the Sponsor's for this part. Of two lessons for one
-    setting, the one keyed to more traits sets it, then the newer.
+    setting, the one keyed to more traits sets it, then the newer. A setting that can't be
+    placed in a profile sets nothing, and says why (mqucifer/print-shop#206).
     """
     answered_keys = {k for _, o in facts.intake.chosen() for k in o.settings}
     order = sorted(
@@ -293,6 +308,9 @@ def from_lessons(
             continue
         if g.key in answered_keys:
             marked.append(g.model_copy(update={"why": "your intake answer set it"}))
+            continue
+        if why := unplaced(g.key, facts.process, facts.filament):
+            marked.append(g.model_copy(update={"why": f"it set nothing: {why}"}))
             continue
         if setting[g.key].id != g.id:
             marked.append(g.model_copy(
@@ -428,25 +446,84 @@ def pause_z(process: dict[str, Any], z: float) -> float:
     return round(first + steps * height, 3)
 
 
+class NotPlaced(ValueError):  # noqa: N818 - a refusal, said as what happened
+    """A change whose key can't be placed in a profile, so nothing was written."""
+
+
+def placeable(proposal: Proposal, process: dict[str, Any], filament: dict[str, Any]) -> Proposal:
+    """The proposal with only the changes `apply` can write. `read_back` says what was left
+    out, and why."""
+    return proposal.model_copy(update={"changes": tuple(
+        c for c in proposal.changes if c.key == PAUSE or not unplaced(c.key, process, filament)
+    )})
+
+
+def reached(
+    change: Change, process: dict[str, Any], filament: dict[str, Any],
+    config: dict[str, str] | None,
+) -> Change:
+    """The change marked with why it didn't reach the slice whose config block is `config`, or
+    with nothing when it did. A colour change isn't a setting: the slice's reading has it."""
+    why = "" if change.key == PAUSE else not_sliced(
+        change.key, change.value, process, filament, config
+    )
+    return change.model_copy(update={"not_applied": why})
+
+
+def read_back(
+    asked: Proposal, process: dict[str, Any], filament: dict[str, Any],
+    config: dict[str, str] | None,
+) -> Proposal:
+    """`asked` as its slice has it (mqucifer/print-shop#206): the changes that reached it, those
+    that didn't, each saying why, and a lesson whose change didn't marked as having set nothing.
+
+    `asked` is still what's sliced again after a correction: dropping a change Orca took at
+    another value would slice something else than what was reviewed.
+    """
+    read = [reached(c, process, filament, config) for c in asked.changes]
+    missed = tuple(c for c in read if c.not_applied)
+    unset = {c.lesson: c.not_applied for c in missed if c.source is Source.LESSON}
+    return asked.model_copy(update={
+        "changes": tuple(c for c in read if not c.not_applied),
+        "not_applied": missed,
+        "lessons": tuple(
+            g.model_copy(update={"applied": False,
+                                 "why": f"it didn't reach the slice: {unset[g.id]}"})
+            if g.id in unset else g
+            for g in asked.lessons
+        ),
+    })
+
+
 def apply(profiles: SlicerProfiles, proposal: Proposal, workdir: Path) -> SlicerProfiles:
     """`profiles` with the changes written into whole copies of the process and filament.
 
-    A filament setting is a per-extruder list in Orca's JSON; the CC1 has one. A colour change
-    (`PAUSE`) is Orca's own pause, at the first layer at or above its height.
+    Each is written to the profile it belongs to (`reach.profile_of`). A filament setting is a
+    per-extruder list in Orca's JSON; the CC1 has one. A colour change (`PAUSE`) is Orca's own
+    pause, at the first layer at or above its height.
+
+    Raises:
+        NotPlaced: If a change's key can't be placed in a profile. Nothing is written: not to
+            the process by default, and not the changes beside it.
     """
     from print_shop.slicer.orca import PauseAt  # noqa: PLC0415 - the slicer imports this
 
     process = json.loads(profiles.process.read_text())
     filament = json.loads(profiles.filament.read_text()) if profiles.filament else {}
     pauses: list[PauseAt] = []
+    # Placed by the presets as they were, before this writes to either.
+    tiers = {c.key: profile_of(c.key, process, filament) for c in proposal.changes}
+    refused = [f"{c.key}={c.value}: {unplaced(c.key, process, filament)}"
+               for c in proposal.changes if c.key != PAUSE and tiers[c.key] is None]
+    if refused:
+        raise NotPlaced("; ".join(refused))
     for change in proposal.changes:
         if change.key == PAUSE:
             if change.value != "none":
                 pauses.append(PauseAt(print_z=pause_z(process, float(change.value)),
                                       message=change.reason))
             continue
-        setting = SETTINGS.get(change.key)
-        if setting is not None and setting.filament:
+        if tiers[change.key] == "filament":
             filament[change.key] = [change.value]
         else:
             process[change.key] = change.value

@@ -143,7 +143,8 @@ def again(row: Row, part_path: Path | None, printers: int = 1, part_found: bool 
             notes.append(f"The pose was sent back at the review, from {c.preset} to {c.value}, "
                          f"because {c.reason}. Type orientation at the review to send it back "
                          "again.")
-    taken = [c for c in (row.proposal.changes if row.proposal else ())
+    taken = [c for c in ((*row.proposal.changes, *row.proposal.not_applied)
+                         if row.proposal else ())
              if c.source is Source.READING]
     if taken:
         notes.append("Taken from the slice's reading, so take them again at the review (take) "

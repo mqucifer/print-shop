@@ -77,7 +77,10 @@ from print_shop.setup.proposal import (
     Proposal,
     Source,
     apply,
+    placeable,
     pose_value,
+    reached,
+    read_back,
 )
 from print_shop.setup.questions import estimate
 from print_shop.setup.reading import SliceReading, flags, read_slice, seen
@@ -905,11 +908,12 @@ def _coster(
 ) -> Any:
     """Orca's estimate with some changes over the proposal: the price of a way by settings."""
     counter = iter(range(1, 1000))
+    base = placeable(proposal, *_presets(profiles))
 
     def cost(changes: tuple[Change, ...]) -> Estimate | None:
         out = outdir / str(next(counter))
         try:
-            result = slicer(stl, apply(profiles, proposal.corrected(list(changes)), out), out)
+            result = slicer(stl, apply(profiles, base.corrected(list(changes)), out), out)
         except (RuntimeError, OSError, ValueError):
             return None
         return Estimate(print_time_s=result.print_time_s, filament_g=result.filament_g,
@@ -942,6 +946,10 @@ def _propose_and_review(
     Sponsor takes it at the review. `earlier` are the corrections made before the part was
     turned, kept with the job's.
 
+    Each change is read back from each slice (mqucifer/print-shop#206): the review, and then
+    the job, have what reached it as changed and the rest as not applied, the corrections
+    among them.
+
     Raises:
         RuntimeError: If the Sponsor stops at the review. Nothing was sent to
             the printer, and the approval gate was never reached.
@@ -963,8 +971,13 @@ def _propose_and_review(
                   *(placed.lines() if placed is not None else ())])
     proposal = proposal.model_copy(update={
         "context": said, "context_from": context.path if context is not None else ""})
+    asked = proposal
     while True:
-        result: SliceResult = slice_with(apply(profiles, proposal, workdir))
+        result: SliceResult = slice_with(
+            apply(profiles, placeable(asked, process, filament), workdir)
+        )
+        config = _config(result)
+        proposal = read_back(asked, process, filament, config)
         reading = _read(result)
         found = (flags(reading, faces, process, filament, placed, proposal.changes)
                  if reading is not None else ())
@@ -996,8 +1009,11 @@ def _propose_and_review(
         if turned is not None:
             raise _Turned(turned, [*corrections, *review.corrections])
         corrections += review.corrections
-        proposal = proposal.corrected([*review.corrections, *review.taken])
-    return result, {"proposal": proposal, "corrections": tuple(corrections),
+        asked = asked.corrected([*review.corrections, *review.taken])
+    missed = {c.key for c in proposal.not_applied}
+    said_so = tuple(reached(c, process, filament, config) if c.key in missed else c
+                    for c in corrections)
+    return result, {"proposal": proposal, "corrections": said_so,
                     "slice_reading": reading, "slice_flags": found}
 
 
@@ -1014,6 +1030,16 @@ def _read(result: SliceResult) -> SliceReading | None:
         return read_slice(result.gcode_path)
     except (OSError, ValueError) as exc:
         logger.warning("the slice %s couldn't be read: %s", result.gcode_path, exc)
+        return None
+
+
+def _config(result: SliceResult) -> dict[str, str] | None:
+    """What Orca sliced with, from the G-code's config block, or None (logged) if it can't be
+    read: then no change is said to have reached the slice."""
+    try:
+        return parse_config_block(result.gcode_path)
+    except (OSError, ValueError, RuntimeError) as exc:
+        logger.warning("the settings of %s couldn't be read: %s", result.gcode_path, exc)
         return None
 
 

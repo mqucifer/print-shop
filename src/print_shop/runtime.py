@@ -269,8 +269,14 @@ def _setup_lines(row: Row) -> list[str]:
     changes = row.proposal.changes if row.proposal else ()
     for c in changes:
         lines.append(f"  {c.key}: {c.preset or '-'} -> {c.value} ({c.source.value}) {c.reason}")
+    for c in row.proposal.not_applied if row.proposal else ():
+        lines.append(f"  {c.key}: not applied, {c.not_applied} ({c.source.value}) {c.reason}")
     if row.corrections:
-        lines.append(f"corrected      {', '.join(f'{c.key}={c.value}' for c in row.corrections)}")
+        said = ", ".join(
+            f"{c.key}={c.value}" + (f" (not applied: {c.not_applied})" if c.not_applied else "")
+            for c in row.corrections
+        )
+        lines.append(f"corrected      {said}")
     for pause in row.reading.pauses if row.reading else ():
         lines.append(f"swap           {pause.line()}")
     for g in row.proposal.lessons if row.proposal else ():
