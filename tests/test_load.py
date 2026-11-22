@@ -318,6 +318,101 @@ def test_a_pocket_fits_where_the_nut_goes_in_cant_turn_and_the_play_is_the_file_
         assert words in line
 
 
+def wall(
+    start: tuple[float, float], end: tuple[float, float], floor: float = 8.0, top: float = 12.0
+) -> dict:  # type: ignore[type-arg]
+    """An upright wall from `start` to `end` as a row with its face's four corners, the open
+    side on the left of the way from one to the other."""
+    run = np.subtract(end, start)
+    low = [np.array([*p, floor]) for p in (start, end)]
+    high = [np.array([*p, top]) for p in (start, end)]
+    return {"normal": np.array([-run[1], run[0], 0.0]) / np.linalg.norm(run),
+            "at": (low[0] + high[1]) / 2, "low": floor, "high": top,
+            "corners": np.array([*low, *high])}  # fmt: skip
+
+
+def nut_slot(x: float, y: float, wide: float, long: float = 16.0) -> list[dict]:  # type: ignore[type-arg]
+    """A closed slot round (x, y), `long` along x and `wide` along y: its four walls."""
+    a, b, c, d = x - long / 2, x + long / 2, y - wide / 2, y + wide / 2
+    round_it = [(a, c), (b, c), (b, d), (a, d)]
+    return [wall(round_it[k], round_it[(k + 1) % 4]) for k in range(4)]
+
+
+@pytest.mark.parametrize("step", [0.0, 0.5])
+@pytest.mark.parametrize("narrow", [None, 0, 1, 2])
+def test_a_pocket_s_walls_are_only_those_whose_faces_are_at_the_hole(
+    step: float, narrow: int | None
+) -> None:
+    """mqucifer/print-shop#204: three slots 70 mm apart along their walls, each 0.15 mm a side
+    over an M5 nut, in line or each 0.5 mm off the last. Each is its own four walls, whichever
+    way the axis is read, and a slot too narrow is the only one the nut doesn't go into."""
+    nut = assembly.NUTS["m5-nut"]
+    places = [(20.0 + 70 * k, 20 + step * k) for k in range(3)]
+    wide = [7.9 if k == narrow else 8.3 for k in range(3)]
+    planes = [w for p, across in zip(places, wide, strict=True) for w in nut_slot(*p, across)]
+    for k, (x, y) in enumerate(places):
+        hole = {**cylinder(2.75, 0, 8), "origin": np.array([x, y, 0.0])}
+        found = through.pocket(planes, hole, 8.0, Z, 2 * nut.corners_mm, nut.corners_mm / 2)
+        assert isinstance(found, dict)
+        assert found["walls"] == 4 and found["across_flats_mm"] == pytest.approx(wide[k])
+        wrong = through.nut_fits(found, nut, 0.15)
+        assert any("the nut doesn't go in" in w for w in wrong) is (k == narrow), wrong
+        assert (wrong == []) is (k != narrow)
+        assert {tuple(np.round(f["at"][:2], 6)) for f in found["facing"]} == {
+            (x, round(y - wide[k] / 2, 6)), (x, round(y + wide[k] / 2, 6)),
+            (x - 8, y), (x + 8, y),
+        }  # fmt: skip
+        # The same part, the bolt's way out along -z: the seat is its level that way.
+        over = [{**w, "at": w["at"] * [1, 1, -1], "corners": w["corners"] * [1, 1, -1]}
+                for w in planes]
+        back = through.pocket(over, hole, 8.0, -Z, 2 * nut.corners_mm, nut.corners_mm / 2)
+        assert isinstance(back, dict) and back["walls"] == 4
+        assert back["across_flats_mm"] == pytest.approx(wide[k])
+
+
+def test_a_wall_is_at_the_hole_as_far_aside_as_the_nut_reaches() -> None:
+    """The point of a wall's plane nearest the axis is (20, 24.2). A wall cut in two by a notch
+    over it, and a neck that starts short of it, are walls the nut's corners meet, 4.395 mm
+    either side; a neck 4.5 mm aside isn't. With no room given, it's the face's edge itself."""
+    nut, hole = assembly.NUTS["m5-nut"], cylinder(2.75, 0, 8)
+    reach, aside = 2 * nut.corners_mm, nut.corners_mm / 2
+    under = wall((4, 15.8), (36, 15.8))
+    notched = [under, wall((36, 24.2), (21.5, 24.2)), wall((18.5, 24.2), (4, 24.2))]
+    cut = through.pocket(notched, hole, 8.0, Z, reach, aside)
+    assert isinstance(cut, dict) and (cut["walls"], cut["pairs"]) == (3, 2)
+    assert cut["across_flats_mm"] == pytest.approx(8.4)
+
+    for start, across in ((22.0, 7.8), (24.39, 7.8), (24.5, 8.4)):
+        neck = [under, wall((start, 24.2), (4, 24.2)), wall((36, 23.6), (start, 23.6))]
+        found = through.pocket(neck, hole, 8.0, Z, reach, aside)
+        assert isinstance(found, dict)
+        assert found["across_flats_mm"] == pytest.approx(across), start
+        said = any("the nut doesn't go in" in w for w in through.nut_fits(found, nut, 0.2))
+        assert said is (across < nut.flats_mm), start
+    ends = [wall((20, 15.8), (36, 15.8)), wall((36, 24.2), (20, 24.2))]
+    assert isinstance(through.pocket(ends, hole, 8.0, Z, reach), dict)
+    short = [wall((20.01, 15.8), (36, 15.8)), wall((36, 24.2), (20.01, 24.2))]
+    assert "0 flat wall(s)" in through.pocket(short, hole, 8.0, Z, reach)
+
+
+def test_a_face_that_comes_over_the_hole_from_a_far_wall_is_still_in_the_nut_s_way() -> None:
+    """A far slot's wall that runs on over this hole from 3 mm above its seat, 3.65 mm from the
+    axis: one face, with its ends either side of the hole, and the nut doesn't go in past it.
+    The same far wall with nothing over the hole isn't this pocket's, and a hole with no pocket
+    says the walls it did take."""
+    nut, hole = assembly.NUTS["m5-nut"], cylinder(2.75, 0, 8)
+    under, far = wall((4, 15.8), (36, 15.8)), wall((80, 23.65), (40, 23.65))
+    reach, aside = 2 * nut.corners_mm, nut.corners_mm / 2
+    over = [[0.0, 23.65, z] for z in (11.0, 12.0)]
+    joined = {**far, "corners": np.array([*far["corners"], *over])}
+    found = through.pocket([under, joined], hole, 8.0, Z, reach, aside)
+    assert isinstance(found, dict) and found["across_flats_mm"] == pytest.approx(7.85)
+    assert any("the nut doesn't go in" in w for w in through.nut_fits(found, nut, 0.2))
+    none = through.pocket([under, far], hole, 8.0, Z, reach, aside)
+    assert isinstance(none, str) and "1 flat wall(s)" in none
+    assert "4.200 mm from the axis toward (0, -1, 0), its face round (20, 15.8, 10)" in none
+
+
 def sides(across: float, count: int, turn: float = 0.0) -> list[dict]:  # type: ignore[type-arg]
     """A pocket of `count` flat walls round the axis through (20, 20), each `across` / 2 from
     it, the first facing it from `turn` degrees round from x, from z 8 to 12."""
