@@ -12,6 +12,7 @@ it reads each pose's box as it lies.
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,7 @@ from print_shop.expert.orientation import (
 from print_shop.ingest.analyzer import analyze
 from print_shop.ingest.orientation import candidates
 from print_shop.orchestrator import graph
+from print_shop.setup import features
 from print_shop.setup.features import FLARE_MM, measure
 from print_shop.setup.review import ReviewRequest, render
 from tests.fixtures import _profile, write_stl
@@ -163,7 +165,9 @@ def test_the_review_shows_each_poses_figures(tmp_path: Path) -> None:
         candidates=found,
     ))
     assert "  the poses it weighed (overhang is what would need support):" in shown
-    assert ("        0,0,0  0 mm2 overhang, 571.7 mm2 rising from the plate left out, 4968 mm2 "
+    # 571.7 before mqucifer/print-shop#239: 0.2 mm2 of the round read 45.0012 degrees past
+    # vertical, 1.6e-5 mm past the limit's 0.4 mm of reach, which is a tie at it.
+    assert ("        0,0,0  0 mm2 overhang, 571.5 mm2 rising from the plate left out, 4968 mm2 "
             "on the plate, 12 mm tall") in shown
     assert "       0,90,0  0 mm2 overhang, 108.3 mm2 rising from the plate left out, 496 mm2 on " \
            "the plate, 100 mm tall  <- this print" in shown
@@ -269,3 +273,66 @@ def test_a_face_a_tenth_of_a_layer_up_is_not_on_the_plate(tmp_path: Path) -> Non
     on = on_the_plate(both)
     assert PLATE_MM < 0.02
     assert float(both.area_faces[on].sum()) == pytest.approx(100)
+
+
+# A face at exactly the limit (mqucifer/print-shop#239)
+
+
+def _leant_bar(
+    path: Path, degrees: float, turn: float = 0.0, at: float = 0.0, height: float = 20.0
+) -> trimesh.Trimesh:
+    """A bar 60 mm long that widens upward at `degrees` from vertical each side, turned about
+    the vertical and moved, through an STL and back: the float32 points a run's mesh carries."""
+    out = height * math.tan(math.radians(degrees))
+    end = [(-10, 0), (10, 0), (10 + out, height), (-10 - out, height)]
+    points = np.array([(x, y, z) for y in (-20.0, 40.0) for x, z in end])
+    faces = [(0, 2, 1), (0, 3, 2), (4, 5, 6), (4, 6, 7)]
+    for a in range(4):
+        b = (a + 1) % 4
+        faces += [(a, b, b + 4), (a, b + 4, a + 4)]
+    found = np.array(faces)
+    corners = points[found]
+    away = np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0])
+    outward = (away * (corners.mean(axis=1) - points.mean(axis=0))).sum(axis=1) > 0
+    found = np.where(outward[:, None], found, found[:, ::-1])
+    c, s = math.cos(math.radians(turn)), math.sin(math.radians(turn))
+    points = points @ np.array([[c, s, 0], [-s, c, 0], [0, 0, 1]]) + [at, 2 * at / 3, 0]
+    trimesh.Trimesh(points, found, process=False).export(path)
+    mesh = trimesh.load_mesh(str(path), force="mesh")
+    assert isinstance(mesh, trimesh.Trimesh)
+    return mesh
+
+
+@pytest.mark.parametrize(
+    ("turn", "at", "height"),
+    [(0, 0, 20), (17, 183.3, 20), (30, 250.1, 20), (45, 254.56, 20), (71, 250.1, 20),
+     (135, 183.3, 20), (30, 250.1, 5.5), (71, 440.2, 5.5)],
+)  # fmt: skip
+def test_a_face_at_exactly_45_is_at_the_limit_however_the_part_is_turned(
+    tmp_path: Path, turn: float, at: float, height: float
+) -> None:
+    """Turned and moved, the same bar read 0, 340, 698 or 1057 mm2 to support, its faces off
+    45 degrees by the float32 points' rounding. It's at the limit, and at it needs none."""
+    mesh = _leant_bar(tmp_path / "bar.stl", 45.0, turn, at, height)
+    assert features.overhang_to_support(mesh)[0] == 0.0
+    assert features.overhang_places(mesh) == ()
+
+
+@pytest.mark.parametrize(("degrees", "area"), [(44.99, 0.0), (45.01, 1369.4), (46.0, 3370.6)])
+def test_a_face_past_45_counts_as_it_did(tmp_path: Path, degrees: float, area: float) -> None:
+    mesh = _leant_bar(tmp_path / "bar.stl", degrees)
+    assert features.overhang_to_support(mesh)[0] == pytest.approx(area, abs=0.2)
+
+
+@pytest.mark.parametrize(("turn", "at"), [(17, 183.3), (30, 250.1), (45, 254.56), (71, 440.2)])
+def test_45_01_still_counts_however_its_turned(tmp_path: Path, turn: float, at: float) -> None:
+    assert features.overhang_to_support(_leant_bar(tmp_path / "bar.stl", 45.01, turn, at))[0] > 1000
+
+
+def test_the_allowance_is_a_float32_meshs_rounding_and_under_a_hundredth_of_a_degree() -> None:
+    half_step = float(np.spacing(np.float32(511.0))) / 2
+    moved = 2 * math.sqrt(3) * half_step
+    turned = math.degrees(moved / (features._ENVELOPE_MM * math.sqrt(2)))
+    assert turned <= features._AT_LIMIT_DEG < turned + 1e-4
+    assert features._AT_LIMIT_DEG < 0.01
+    assert features._OVERHANG_DEG == 45.0
