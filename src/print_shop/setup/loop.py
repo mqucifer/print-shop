@@ -1,4 +1,7 @@
-"""The print loop: one short conversation with tools decides a part's pose and its settings.
+"""The print loop: one short conversation with tools chooses a part's pose and its settings.
+
+Where there's a review it works beside it and what it chooses is proposed
+(mqucifer/print-shop#242). With none, it decides, and asks first.
 
 mqucifer/print-shop#129, planned with the Sponsor on 2026-11-14: "one loop, only ask on big
 changes. it is asking good questions so far at the initial request". Orientation and the

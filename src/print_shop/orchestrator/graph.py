@@ -20,6 +20,11 @@ Topology::
 into the job's folder and reads them, and goes straight to the same gate. Nothing between is
 run for it: no ingest, orientation, question, proposal, lesson, slice or review.
 
+**The slice node's review waits for no model** (mqucifer/print-shop#242). It starts from the
+settings with the model absent, and the settings call or the print loop works on a thread of its
+own (`setup/suggest.py`), ended with the node: what it comes to is proposed, and only the person
+applies it. With no reviewer there's nobody to take a proposal, so the node waits as it did.
+
 The graph is the single source of truth for control flow. ``graph_edges``
 exposes the compiled edge list so ``ungated_edges`` (CONTRACTS.md section 4)
 can be asserted against the real graph rather than a synthetic list.

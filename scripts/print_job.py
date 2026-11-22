@@ -20,8 +20,10 @@ Their tuning is used where there is one, the standard where there isn't;
 several tunings of one are listed to choose from. `--machine` and
 `--process` name a profile, when the Sponsor picks.
 
-**The part is oriented by the orientation model,** or, with `--as-laid`, kept as the file
-lays it: for a part already laid for printing, no model is asked (mqucifer/print-shop#128).
+**The part is shown as the file lays it, or on the side its context lays it,** and a turn of
+the print loop's is proposed at the review (mqucifer/print-shop#242). With `--as-laid` no turn
+is proposed: for a part already laid for printing, no orientation model is asked
+(mqucifer/print-shop#128).
 
 **The part's context goes with it** (mqucifer/print-shop#130): its fits, seen faces, purpose,
 the side it's laid on and its holds, from a sidecar beside it (`PART.part.json`), or from the
@@ -40,9 +42,14 @@ back instead of asked (mqucifer/print-shop#236): Enter confirms it, a number cha
 with both in the notes nothing waits for the model's questions. `--answers file.json` replays
 recorded answers, each naming its question by its text or its feature; a
 file that doesn't answer exactly the questions asked is refused, and the job
-ends saying which. The settings are then proposed and shown here for review:
-`ok`, or correct a setting by name and it slices again. Home Assistant's
-approval gate comes after that, unchanged.
+ends saying which.
+
+**The review shows at the first slice, and waits for no model** (mqucifer/print-shop#242): the
+answers, the kept lessons, the guards and what the slice proposes. The model's settings are
+proposals, added to the list by Enter once they're in, numbered on from the slice's: `take 2`
+takes one, bare `take` stays the slice's, and `no 2 because ...` turns one down, saying why.
+None is applied by arriving. `ok` goes on, saying once if it's without them; or correct a
+setting by name and it slices again. Home Assistant's approval gate comes after that, unchanged.
 
 **The questions and the review take as long as you take** (mqucifer/print-shop#125). The
 hour for the slice to reach the approval gate starts when the review is approved; the gate
