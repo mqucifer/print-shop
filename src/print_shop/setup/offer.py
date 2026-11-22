@@ -18,7 +18,8 @@ more like learning than me remembering".
 - **It's laid out to be read** (`render`): the print and how it came out once, what differs in
   columns, the items grouped by whose they were, and a reason several share said once.
 - **A pause keeps what it was for** (mqucifer/print-shop#218): a swap with the spools that print
-  used, or an insert. One from before doesn't say, and is asked when it's used.
+  used, or an insert. One from before doesn't say, and is asked when it's used. A swap whose
+  first spool can't start this job can't be used: another in its place would reverse it.
 - **A pause's height is converted, never copied raw** (`_pause_height`): a row from before
   mqucifer/print-shop#228 gives the height that pauses where its own G-code did, and one whose
   G-code doesn't say where it paused can't be used.
@@ -43,6 +44,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import trimesh
 
 from print_shop.core.state import Orientation
+from print_shop.inventory import Material, Spool
 from print_shop.materials import material_name
 from print_shop.outcome_words import outcome_words
 from print_shop.rounds.lessons import REJECTED, RETIRED
@@ -355,6 +357,9 @@ class ThisPart:
     asked: frozenset[str] = frozenset()
     #: The person chose this pose for this print: kept as laid, or sent back at this review.
     pose_chosen: str = ""
+    #: The spool the job was prepared with and those on hand: what a past swap can start on.
+    material: Material | None = None
+    on_hand: tuple[Spool, ...] = ()
 
     @property
     def pose(self) -> str:
@@ -627,7 +632,8 @@ class _Items:
                 value = height
                 if said:
                     notes.append(said)
-                blocked = self._outside(value)
+                blocked = self._outside(value) or pauses.cant_start(
+                    purpose, part.material, part.on_hand)
         else:
             tier = profile_of(key, part.process, part.filament)
             data = part.filament if tier == "filament" else part.process

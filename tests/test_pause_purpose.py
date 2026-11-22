@@ -7,6 +7,7 @@ broker in a list and a printer that answers from frames. Nothing is the Sponsor'
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
 import sqlite3
@@ -32,6 +33,7 @@ from print_shop.core.mqtt import (
 from print_shop.desk.again import again
 from print_shop.desk.page import index_page, job_page
 from print_shop.desk.read import Desk
+from print_shop.ingest.analyzer import analyze
 from print_shop.inventory import Inventory, SpoolUse
 from print_shop.ledger import Ledger, Row
 from print_shop.orchestrator import spools as after_print
@@ -39,6 +41,8 @@ from print_shop.orchestrator.daemon import Daemon, JobResult
 from print_shop.orchestrator.outcome import Watcher
 from print_shop.runtime import describe
 from print_shop.setup import Proposer
+from print_shop.setup.features import measure
+from print_shop.setup.offer import Offering, ThisPart, offering
 from print_shop.setup.proposal import Proposal
 from print_shop.setup.review import Review, cli_reviewer, parse_answer, render
 from print_shop.slicer.store import Store, choose
@@ -323,11 +327,11 @@ def test_colour_change_is_a_swap_and_only_its_spools_are_asked(shop: Shop) -> No
     assert kind_of(ran.row) == "swap" and spools(ran.row) == [(WHITE, 1), (BLACK, 11)]
 
 
-def test_the_only_spool_it_can_start_on_isnt_asked(shop: Shop) -> None:
+def test_the_only_spool_it_can_start_on_is_still_the_persons_to_confirm(shop: Shop) -> None:
     with Inventory(shop.path) as stock:
         stock.empty(BLACK)
-    ran = shop.run("colour_change=2", "3", "ok")
-    assert ran.prompts == ["> ", "spool> ", "> "]
+    ran = shop.run("colour_change=2", "", "3", "ok")
+    assert ran.prompts == ["> ", "spool> ", "spool> ", "> "], "never chosen for them"
     assert spools(ran.row) == [(WHITE, 1), (CLEAR, 11)]
 
 
@@ -417,6 +421,95 @@ def test_with_no_stock_a_swap_is_still_a_swap_and_names_no_spool() -> None:
     assert isinstance(refused, str) and "there's no stock to name a spool from" in refused
 
 
+# A carried swap never comes back reversed
+# --------------------------------------------------------------------------
+
+
+def test_a_swap_between_varieties_isnt_offered_reversed(shop: Shop) -> None:
+    """print-shop-ux, on 4f33d68: white then clear, used again with clear loaded, came back
+    clear then white."""
+    shop.run("colour_change=2 to #3", "ok")
+    assert shop.loaded() == CLEAR
+
+    again_ = shop.run("use 1", "stop")
+
+    why = ("that print started on spool #1, Elegoo PLA, white, and this job is sliced for "
+           "Elegoo PETG")
+    said = " ".join(again_.terminal.split())
+    assert "CAN'T USE 1: " + why in said
+    assert "pause_at can't be used: " + why in said
+    assert "[x] 1" not in again_.terminal and again_.prompts == ["> ", "> "]
+
+
+def test_it_prints_again_under_use_the_right_way_round_after_the_second_was_left_loaded(
+    shop: Shop,
+) -> None:
+    """The operator's case: with the second loaded it's refused, and with the first loaded as
+    that says, `use` prints white then clear, never clear then white."""
+    shop.run("colour_change=2 to #3", "ok")
+    assert shop.loaded() == CLEAR
+    refused = shop.run("use 1", "stop")
+    assert not refused.result.printed
+    shop.load(WHITE)
+
+    again_ = shop.run("use", "ok")
+
+    assert again_.result.printed, again_.result.error
+    assert spools(again_.row) == [(WHITE, 1), (CLEAR, 11)]
+
+
+def test_the_desks_line_for_it_is_refused_too(shop: Shop) -> None:
+    first = shop.run("colour_change=2 to #3", "ok")
+    again_ = shop.run(shop.correction_line(first.job_id), "stop")
+    assert "the job is sliced for Elegoo PETG, and spool #1 is Elegoo PLA" in again_.terminal
+
+
+def test_typed_at_that_prints_height_its_start_is_never_defaulted(shop: Shop) -> None:
+    shop.run("colour_change=2 to #3", "ok")
+    again_ = shop.run("colour_change=2", "", "back", "stop")
+    assert "that print started on spool #1, Elegoo PLA, white" in " ".join(again_.terminal.split())
+    assert again_.prompts == ["> ", "spool> ", "spool> ", "> "], "Enter alone chooses nothing"
+    assert "swap to?" not in again_.terminal
+
+
+def test_a_first_spool_used_up_isnt_swapped_for_the_second(shop: Shop) -> None:
+    shop.run("colour_change=2 to #2", "ok")
+    with Inventory(shop.path) as stock:
+        stock.empty(WHITE)
+    again_ = shop.run("use 1", "stop")
+    assert "that print started on spool #1, Elegoo PLA, white, which isn't on hand now" in (
+        " ".join(again_.terminal.split()))
+    assert "[x] 1" not in again_.terminal and "spool> " not in again_.prompts
+
+
+def test_a_first_spool_used_up_during_the_review_is_refused_at_use(shop: Shop) -> None:
+    shop.run("colour_change=2 to #2", "ok")
+    with Ledger(shop.path) as ledger:
+        offered = offer_for(shop, ledger)
+    with Inventory(shop.path) as stock:
+        material = stock.material()
+        stock.empty(WHITE)
+        on_hand = tuple(stock.spools())
+    request = dataclasses.replace(
+        _request(), offering=offered, material=material, stock=lambda: on_hand)
+    said = parse_answer("use 1", request)
+    assert isinstance(said, str) and "which isn't on hand now" in said
+
+
+def offer_for(shop: Shop, ledger: Ledger) -> Offering:
+    with Inventory(shop.path) as stock:
+        material, on_hand = stock.material(), tuple(stock.spools())
+    report = analyze(str(shop.part))
+    found = offering(ledger, ThisPart(
+        stl=shop.part, stl_name=shop.part.name, sha256=report.stl_sha256,
+        features=measure(shop.part, report.bed_contact_area_mm2), rotation_deg=(0.0, 0.0, 0.0),
+        height_mm=report.bbox_mm[2], machine={}, process=dict(LAYERS), filament={},
+        material=material, on_hand=on_hand,
+    ))
+    assert found.past is not None
+    return found
+
+
 # The review and Start
 # --------------------------------------------------------------------------
 
@@ -501,7 +594,8 @@ def test_stopped_over_the_swap_it_ended_with_the_last(shop: Shop) -> None:
 def test_the_person_corrects_the_last_spool_at_the_outcome(shop: Shop) -> None:
     def correct(bridge: MemoryBridge) -> None:
         offered = bridge.retained_json(outcome_spool_select(CFG)[0])["options"]
-        assert "spool #3, Elegoo PETG, clear" in offered and offered[0] == "unset"
+        assert "spool #3, Elegoo PETG, clear" in offered and offered[0] == "as recorded"
+        assert bridge.retained_json(outcome_topic(CFG))["spool"] == "as recorded"
         bridge.deliver(outcome_spool_topic(CFG), "spool #3, Elegoo PETG, clear")
         assert bridge.retained_json(outcome_topic(CFG))["spool"] in offered
         assert shop.loaded() == BLACK, "nothing until Record"
@@ -534,7 +628,7 @@ def test_a_spool_that_isnt_offered_or_is_replayed_corrects_nothing(shop: Shop) -
     def wrong(bridge: MemoryBridge) -> None:
         bridge.deliver(outcome_spool_topic(CFG), "spool #9, made up")
         bridge.deliver(outcome_spool_topic(CFG), "spool #3, Elegoo PETG, clear", retain=True)
-        assert bridge.retained_json(outcome_topic(CFG))["spool"] == "unset"
+        assert bridge.retained_json(outcome_topic(CFG))["spool"] == "as recorded"
 
     ran = shop.run("colour_change=2 to #2", "ok", at_outcome=wrong)
     assert spools(ran.row) == [(WHITE, 1), (BLACK, 11)] and shop.loaded() == BLACK

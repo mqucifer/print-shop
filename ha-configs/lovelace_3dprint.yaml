@@ -203,7 +203,7 @@ views:
                   name: Note
 
             # A swap's last spool, to correct (mqucifer/print-shop#218): only for a print
-            # that had one. `unset` leaves it as it's said above.
+            # that had one. `as recorded` leaves it as it's said above.
             - type: conditional
               conditions:
                 - condition: numeric_state

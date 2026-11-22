@@ -1004,6 +1004,7 @@ def _offering(
             chosen = "your correction at this job"
         elif state.get("as_laid"):
             chosen = "kept as laid"
+        on_hand = _stock(ledger, profiles)
         return offer_past_prints(ledger, ThisPart(
             stl=Path(posed), stl_name=Path(state["stl_path"]).name,
             sha256=state.get("stl_sha256", ""), features=features,
@@ -1012,6 +1013,7 @@ def _offering(
             filament=filament, filament_names=tuple(dict.fromkeys(n for n in names if n)),
             candidates=state.get("orientation_candidates", ()), build_volume_mm=build_volume,
             context=state.get("part_context"), pose_chosen=chosen,
+            material=_material_of(profiles), on_hand=on_hand() if on_hand else (),
             asked=frozenset(k for q in intake.questions for o in q.options for k in o.settings),
         ))
     except Exception as exc:  # noqa: BLE001 - a print is never stopped by what it might reuse

@@ -44,6 +44,7 @@ from typing import Any
 from pycentauri.models import PrintStatus as SdcpPrintStatus
 
 from print_shop.core.mqtt import (
+    OUTCOME_SPOOL_AS_RECORDED,
     MqttConfig,
     outcome_frame_set_topic,
     outcome_frame_topic,
@@ -308,7 +309,7 @@ class OutcomeDesk:
                 "pause": "; ".join(p.line() for p in paused),
                 "pause_for": next((p.kind.value for p in paused if p.kind), ""),
                 "spools": spools_said,
-                "spool": self._draft.get("spool", UNSET),
+                "spool": self._draft.get("spool", OUTCOME_SPOOL_AS_RECORDED),
                 "spool_choices": len(can_end_with),
                 "result": self._draft.get("result", UNSET),
                 "symptom": self._draft.get("symptom", UNSET),
@@ -387,7 +388,7 @@ class OutcomeDesk:
             with self._lock:
                 if self._shown is None:
                     return  # nothing on show, so nothing to be choosing for
-                if value == UNSET:
+                if value == UNSET or (field == "spool" and value == OUTCOME_SPOOL_AS_RECORDED):
                     self._draft.pop(field, None)
                 else:
                     self._draft[field] = value[:2000]

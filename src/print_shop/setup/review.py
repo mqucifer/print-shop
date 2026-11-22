@@ -390,6 +390,12 @@ def parse_answer(answer: str, request: ReviewRequest) -> Review | str:
                                      pose_value(request.orientation.rotation_deg))
                 if isinstance(items, str):
                     return items
+                for item in items:
+                    # Again here, as the stock can change while the review waits.
+                    if item.key == PAUSE and (why := pauses.cant_start(
+                        item.pause, request.material, request.stock() if request.stock else ()
+                    )):
+                        return f"{PAUSE} can't be used: {why}"
                 used += [_used_change(item, request) for item in items]
                 continue
             if verb == "from" and len(numbers) != 1:

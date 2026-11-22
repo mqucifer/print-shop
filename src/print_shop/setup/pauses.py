@@ -9,6 +9,8 @@ where it's set, and every later step uses that word:
   sliced with, and the one swapped to, of any. Another variety is said at the review, as the slice
   has one filament's settings.
 - **A pause from before this says neither,** and is only "a pause".
+- **A swap carried from a print never comes back reversed.** Where its first spool can't start
+  this job, as with the second left loaded, no other is chosen or pre-selected for it.
 
 What's typed is read here and what isn't typed is asked here. Where a pause lands is
 `bench.pausing`'s and the reading's (mqucifer/print-shop#203).
@@ -39,6 +41,7 @@ __all__ = [
     "as_printed",
     "ask",
     "because",
+    "cant_start",
     "carried_reason",
     "for_review",
     "marked",
@@ -174,6 +177,8 @@ def planned(
             return found
         start = found
     else:
+        if why := cant_start(standing, material, on_hand, "it was to start"):
+            return why
         start = _still(standing.start if standing else None, material, on_hand) or material
     to: Material | None = None
     if typed.to is not None:
@@ -223,6 +228,26 @@ def _still(
         return None
     found = _starts_on(spool.spool_id, material, on_hand)
     return None if isinstance(found, str) else found
+
+
+def cant_start(
+    pause: Pause | None, material: Material | None, on_hand: Iterable[Spool],
+    was: str = "that print started",
+) -> str:
+    """Why a swap's first spool can't start this job, or "". Another is never put in its place:
+    that's the swap reversed, when it's the second that's loaded."""
+    if pause is None or pause.start is None or material is None:
+        return ""
+    start = pause.start
+    spool = next((s for s in on_hand if s.id == start.spool_id), None)
+    if spool is None:
+        return (f"{was} on {start.named()}, which isn't on hand now: type the swap with the "
+                "spool to start on, colour_change=<height> from #N to #M")
+    now = material.of(spool)
+    if now.same_filament(material):
+        return ""
+    return (f"{was} on {now.named()}, and this job is sliced for {material.filament_said()}: "
+            f"load it (`stock.py load {spool.id}`) and run the job again")
 
 
 # --- carried from a past print -------------------------------------------------------------------
@@ -317,14 +342,18 @@ def _ask_start(
 ) -> Material | None:
     on_hand = stock()
     can = [s for s in on_hand if material.of(s).same_filament(material)]
-    if len(can) < 2:
-        only = material.of(can[0]) if can else material
-        write(f"It starts on {only.named()}: the only spool of the filament it's sliced for.")
-        return only
-    default = _still(earlier.start if earlier else None, material, on_hand) or material
+    gone = cant_start(earlier, material, on_hand)
+    default: Material | None = None
+    if gone:
+        write(f"  {gone}")
+    else:
+        default = (_still(earlier.start if earlier else None, material, on_hand)
+                   or _still(material, material, on_hand))
     write("Which spool does it start on?")
-    write("\n".join(f"  {s.line()}" for s in can))
-    write(f"Its number, Enter for {default.named()}, or back.")
+    write("\n".join(f"  {s.line()}" for s in can)
+          or f"  None of {material.filament_said()} is on hand: back, or add it with stock.py")
+    enter = f"Enter for {default.named()}, " if default else ""
+    write(f"Its number, {enter}or back.")
     return _ask_spool(default, lambda n: _starts_on(n, material, stock()), read, write)
 
 

@@ -46,6 +46,7 @@ __all__ = [
     "discovery_payloads",
     "outcome_frame_set_topic",
     "outcome_frame_topic",
+    "OUTCOME_SPOOL_AS_RECORDED",
     "outcome_note_topic",
     "outcome_spool_select",
     "outcome_spool_topic",
@@ -182,6 +183,9 @@ OUTCOME_SYMPTOMS = (
     "other",
 )
 
+#: The spool select's usual answer: Record keeps the spool as the card says it was recorded.
+OUTCOME_SPOOL_AS_RECORDED = "as recorded"
+
 #: The part on show, with any refusal the dashboard should see.
 OUTCOME_PART_TEMPLATE = (
     "{% if value_json.pending %}{{ value_json.stl_name }}"
@@ -235,8 +239,9 @@ def outcome_spool_select(
             "unique_id": f"{cfg.node_id}_outcome_spool",
             "command_topic": outcome_spool_topic(cfg),
             "state_topic": outcome_topic(cfg),
-            "value_template": "{{ value_json.spool | default('unset') }}",
-            "options": ["unset", *spools],
+            "value_template": (
+                f"{{{{ value_json.spool | default('{OUTCOME_SPOOL_AS_RECORDED}') }}}}"),
+            "options": [OUTCOME_SPOOL_AS_RECORDED, *spools],
             "availability_topic": availability_topic(cfg),
             "device": {"identifiers": [cfg.node_id], "name": "3D Print Agent"},
         },
