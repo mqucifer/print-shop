@@ -1633,7 +1633,7 @@ def _through(
                     report.line(
                         f"  the solve round it puts the shear on {fine['sheared_mm2']:.2f} mm² "
                         f"of {part.name}'s round wall, the half leant on"
-                        + (", less the peak," if peaked else "")
+                        + (", less the peak," if share_there < 1 else "")
                         + " of the "
                         f"{side['hole_length_mm']:.2f} mm from where the parts meet to the "
                         f"seat, and none past them, as "

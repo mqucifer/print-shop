@@ -842,6 +842,7 @@ def test_a_peaked_bore_s_washers_and_shank_bear_on_what_s_there(cae: Any) -> Non
     assert head["sheared_mm2"] == pytest.approx(HOLE / 2 * 20 * (math.pi - 2 * RISES), rel=0.08)
     assert nut["sheared_mm2"] == pytest.approx(math.pi * HOLE / 2 * 20, rel=0.06)
     assert "the half leant on, less the peak, of the 20.00 mm" in answer.text
+    assert answer.text.count("less the peak, of the") == 1, "the lean away from it loses nothing"
     assert "peaked, 5.500 mm across" in answer.text
     assert "for a lean 0° from its point" in answer.text
     assert reports.unlike("load", answer.numbers) == []
