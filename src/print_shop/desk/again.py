@@ -39,7 +39,8 @@ from typing import Any
 
 from print_shop.ledger import Row
 from print_shop.orchestrator.graph import AS_LAID
-from print_shop.setup.proposal import ORIENTATION, PAUSE, Change, Source
+from print_shop.setup.intake import Answer, Question
+from print_shop.setup.proposal import ORIENTATION, PAUSE, Change, Source, pose_value
 
 __all__ = ["DOWNLOADS", "Again", "again", "answers_file", "correction_line"]
 
@@ -74,10 +75,21 @@ def answers_file(row: Row) -> dict[str, Any] | None:
         if q.confirmed(a):
             answers.append({"question": q.text, "notes": q.noted_as})
         elif a.choice is not None:
-            answers.append({"question": q.text, "choice": q.options[a.choice].label})
+            answers.append({"question": q.text, "choice": q.options[a.choice].label,
+                            # Faces are named in a pose: in another it's refused, never carried
+                            # by eye (mqucifer/print-shop#248).
+                            **_given_in(row, q, a)})
         else:
             answers.append({"question": q.text, "other": a.other})
     return {"answers": answers}
+
+
+def _given_in(row: Row, question: Question, answer: Answer) -> dict[str, str]:
+    """The pose an answer about faces was given in, which a replay carries it from. A row from
+    before poses were kept is read in the pose it printed in (mqucifer/print-shop#248)."""
+    if question.feature != "seen" or question.confirmed(answer):
+        return {}
+    return {"pose": pose_value(question.answered_in(answer) or row.rotation_deg)}
 
 
 def _used_as_anothers(change: Change) -> bool:

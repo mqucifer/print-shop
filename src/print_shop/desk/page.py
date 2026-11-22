@@ -309,7 +309,7 @@ def _questions(row: Row) -> str:
         parts.append(f"<p class=\"muted\">{escape(intake.note or intake.summary())}</p>")
     for n, q in enumerate(intake.questions):
         answer = intake.answers[n] if n < len(intake.answers) else None
-        parts.append(f"<h3>{n + 1}. {escape(q.text)}</h3>")
+        parts.append(f"<h3>{n + 1}. {escape(q.asked())}</h3>")
         said = q.notes_say() if q.noted is not None else q.beside
         if said:
             parts.append(f"<p class=\"muted\">The notes say: {escape(said)}</p>")
@@ -319,8 +319,10 @@ def _questions(row: Row) -> str:
             mark = " ← the notes" if i == q.noted else ""
             if answer is not None and mine:
                 mark = f" ← {q.whose(answer) or 'your answer'}"
+                if answer.given_in is not None:
+                    mark += f", {q.as_answered(answer)}"
             cls = ' class="chosen"' if mine else ""
-            parts.append(f"<li{cls}>{escape(o.line())}{escape(mark)}</li>")
+            parts.append(f"<li{cls}>{escape(q.then(o.line()))}{escape(mark)}</li>")
         parts.append("</ul>")
         if answer is not None and answer.choice is None:
             whose = f" ({q.whose(answer)})" if q.whose(answer) else ""

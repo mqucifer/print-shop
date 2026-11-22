@@ -52,6 +52,7 @@ from pydantic import BaseModel
 
 __all__ = [
     "FIT_MM",
+    "AS_THE_FILE_LIES",
     "LOADS",
     "SET_ASIDE",
     "SIDECAR",
@@ -62,12 +63,14 @@ __all__ = [
     "PartContext",
     "Placed",
     "Seen",
+    "own_sides",
     "pose_for",
     "place",
     "plain_line",
     "printed",
     "read_context",
     "refuses",
+    "seen_from",
 ]
 
 #: A sidecar beside `PART.stl`: `PART.part.json`.
@@ -77,6 +80,8 @@ SIDECAR = ".part.json"
 FIT_MM = 0.5
 #: The sides a part can lie on, as the design run names them (`rounds.needs.SIDES`).
 SIDES = ("-z", "+z", "-x", "+x", "-y", "+y")
+#: The pose the file lies in, as a rotation.
+AS_THE_FILE_LIES = (0.0, 0.0, 0.0)
 #: How a part is loaded, as a sidecar's purpose says it: the purpose question's options
 #: (`questions.PURPOSE`, which asserts they're the same).
 LOADS = (
@@ -88,6 +93,9 @@ LOADS = (
 #: What follows a line of the notes that the person's answer stands in place of
 #: (mqucifer/print-shop#236). Past prints' contexts are compared without it (`similar`).
 SET_ASIDE = " (set aside: you said "
+#: What follows the notes' seen faces once the part is turned from the file's pose: those faces
+#: as they print (mqucifer/print-shop#248). Compared without it, as `SET_ASIDE` is.
+AS_PRINTED = " (as it prints: "
 #: How the bench lays a run's file on a side (`bench.refine.ON_BED`, kept the same here so the
 #: print side never imports the bench's): about an axis through the origin, in degrees.
 ON_BED: dict[str, tuple[tuple[float, float, float], float]] = {
@@ -121,6 +129,54 @@ class Seen(BaseModel):
     bottom: bool  # the face on the plate
     said: str  # the answer, in its words
     noted: bool = False  # from the part's notes, and not the person's own answer
+    #: Only some of the walls: a side that was the top or the plate's before a turn
+    #: (mqucifer/print-shop#248).
+    part_walls: bool = False
+    #: What they were called, where they're carried from another pose.
+    called: str = ""
+    #: The faces ("walls", "top", "bottom") that take in one the answer didn't speak of: never
+    #: judged hidden, nor different from another print's.
+    unsaid: tuple[str, ...] = ()
+    #: Part of the walls, and every other wall is one the answer didn't speak of: it may be all.
+    may_be_all_round: bool = False
+    #: Where only part of the walls is seen: which of the part's own sides those are. Two such
+    #: readings of one file in one pose can be of different walls.
+    wall_sides: tuple[str, ...] = ()
+    #: Several parts' faces, whose `said` already says whose each is.
+    of_several: bool = False
+
+    @property
+    def top_unsaid(self) -> bool:
+        """The top is a face the answer didn't speak of, and nothing says it's seen."""
+        return "top" in self.unsaid and not self.top
+
+    def unsaid_words(self) -> str:
+        """What the answer didn't speak of that could be read as hidden, or ""."""
+        if self.top_unsaid:
+            return "the top wasn't asked about"
+        return "one of the walls wasn't asked about" if "walls" in self.unsaid else ""
+
+    def same_as(self, other: Seen) -> bool:
+        """The same faces seen, counting none that either didn't speak of as a difference. One
+        that's seen was spoken of: after a turn "walls" can be seen on one side and unsaid on
+        another."""
+        skip = {face for one in (self, other) for face in one.unsaid if not getattr(one, face)}
+        if any(getattr(self, face) != getattr(other, face)
+               for face in ("walls", "top", "bottom") if face not in skip):
+            return False
+        if self.walls and other.walls and self.part_walls != other.part_walls:
+            return (self if self.part_walls else other).may_be_all_round
+        return True
+
+    def because(self) -> str:
+        """Who said it and what, as a reason opens: after a turn, what that is as it prints."""
+        if self.of_several:
+            return self.said
+        if self.called:
+            return f"{self.whose()} {self.called}; as it prints that's {self.as_printed()}"
+        if self.noted:
+            return f"{self.whose()} {self.in_words()}, as the file lays it"
+        return f"{self.whose()} '{self.said}'"
 
     def whose(self) -> str:
         """Who said it, as a reason opens."""
@@ -133,11 +189,17 @@ class Seen(BaseModel):
 
     def in_words(self) -> str:
         """The same faces as a person reads them: "the top and the bottom"."""
-        names = [f"the {name}" for name in self.faces().split(", ")]
+        names = ["part of the walls" if self.part_walls and name == "walls" else f"the {name}"
+                 for name in self.faces().split(", ")]
         if names == ["the nothing"]:
             return "none of its faces"
         *most, last = names
         return f"{', '.join(most)} and {last}" if most else last
+
+    def as_printed(self) -> str:
+        """The same, where the bottom is as the questions name it: "the top and the face on
+        the plate"."""
+        return self.in_words().replace("the bottom", "the face on the plate")
 
 
 class Fit(BaseModel):
@@ -215,10 +277,11 @@ class PartContext(BaseModel):
     def found(self) -> bool:
         return bool(self.source)
 
-    def lines(self, set_aside: Mapping[str, str] | None = None) -> list[str]:
+    def lines(self, set_aside: Mapping[str, str] | None = None, prints: str = "") -> list[str]:
         """The context as the review, the model and the ledger read it, in the file's own pose.
         `set_aside` has the person's answer by what it replaced ("purpose", "seen"): that line
-        says so, so that it doesn't read as what's being judged."""
+        says so, so that it doesn't read as what's being judged. `prints` is the notes' seen
+        faces as they print, for a pose the file doesn't lie in."""
         instead = set_aside or {}
 
         def said(line: str, kind: str) -> str:
@@ -237,7 +300,8 @@ class PartContext(BaseModel):
             out.append(f"purpose, in words only: {self.purpose}")
         if self.about:
             out.append(f"about: {self.about}")
-        out.append(said(f"seen: {self.seen.said}", "seen") if self.seen is not None
+        turned = f"{AS_PRINTED}{prints})" if prints and "seen" not in instead else ""
+        out.append(said(f"seen: {self.seen.said}{turned}", "seen") if self.seen is not None
                    else "seen: not said here, so the intake's answer stands")
         if self.down:
             out.append(f"laid on its {self.down} side ({self.down_from})")
@@ -393,7 +457,8 @@ def _purpose(value: Any) -> tuple[str, str, str]:
         return words, known, ""
     as_given = "; ".join(f"{plain_line(key)}: {plain_line(said)}" for key, said in value.items())
     why = (f"a purpose has for and loaded, not {strange}" if strange
-           else f"a purpose's loaded is one of {', '.join(LOADS)}, not {loaded!r}")
+           else "a purpose's loaded is one of " + "; ".join(f"'{load}'" for load in LOADS)
+                + f": not '{loaded}'")
     return as_given, "", f"{why}, so purpose is asked"
 
 
@@ -770,27 +835,67 @@ def place(
     if kept is not None and not np.allclose(rotation_deg, kept):
         off = (f"the pose turns it off its {context.down} side, which {context.down_from} lays "
                "it on")
-    return Placed(fits=tuple(bands), across=across, seen=_seen_in(context.seen, up), off_side=off)
+    seen = printed(context.seen, rotation_deg) if context.seen is not None else None
+    return Placed(fits=tuple(bands), across=across, seen=seen, off_side=off)
+
+
+def own_sides(seen: Seen, rotation_deg: tuple[float, float, float]) -> tuple[str, ...] | None:
+    """The part's own sides (`SIDES`, in the STL's coordinates) that faces named in that pose
+    are: the top is the one that's up, the bottom the one on the plate, the walls the other four
+    (mqucifer/print-shop#248). None where the pose isn't square on, so they can't be carried."""
+    up = _up_side(rotation_deg)
+    if up is None:
+        return None
+    down = _opposite(up)
+    return tuple(
+        side for side in SIDES
+        if (seen.top if side == up else seen.bottom if side == down else seen.walls)
+    )
+
+
+def seen_from(
+    sides: tuple[str, ...], rotation_deg: tuple[float, float, float], said: str,
+    noted: bool = False, called: str = "", unsaid: tuple[str, ...] = (),
+) -> Seen | None:
+    """Those sides as the faces they are printed in that pose. A wall is seen if any of the four
+    is, and `part_walls` says when it isn't all of them. A side in `unsaid` is never read as
+    hidden. None: the pose isn't square on."""
+    up = _up_side(rotation_deg)
+    if up is None:
+        return None
+    down = _opposite(up)
+    walls = [side in sides for side in SIDES if side not in (up, down)]
+    part = any(walls) and not all(walls)
+    where = {up: "top", down: "bottom"}
+    return Seen(walls=any(walls), top=up in sides, bottom=down in sides, said=said, noted=noted,
+                part_walls=part, called=called,
+                wall_sides=tuple(side for side in SIDES
+                                 if part and side in sides and side not in (up, down)),
+                may_be_all_round=part and all(
+                    side in sides or side in unsaid for side in SIDES if side not in (up, down)),
+                unsaid=tuple(dict.fromkeys(where.get(side, "walls") for side in unsaid)))
 
 
 def printed(seen: Seen, rotation_deg: tuple[float, float, float]) -> Seen | None:
-    """The faces seen as they print in that pose, where that's the same faces: as the file lies
-    or turned over. On a side it's None, as a wall there is the top or the plate's in part."""
-    up = _rotation(rotation_deg).T @ np.array([0.0, 0.0, 1.0])
-    return _seen_in(seen, up) if abs(float(up[2])) > 0.99 else None
-
-
-def _seen_in(seen: Seen | None, up: np.ndarray) -> Seen | None:
-    """The faces seen as the file lies, turned into the pose: upside down swaps the top and the
-    bottom; on a side, the top and bottom are walls, and a seen wall may be the top or the
-    bottom."""
-    if seen is None:
+    """The faces seen as the file lies, carried into the pose by the part's own sides. None: the
+    pose isn't square on, so none is judged."""
+    up = _up_side(rotation_deg)
+    sides = own_sides(seen, AS_THE_FILE_LIES)
+    if up is None or sides is None:
         return None
-    if up[2] > 0.99:
+    if up == "+z":
         return seen
-    if up[2] < -0.99:
-        return seen.model_copy(update={"top": seen.bottom, "bottom": seen.top,
-                                       "said": f"{seen.said} (turned over)"})
-    any_seen = seen.walls or seen.top or seen.bottom
-    return seen.model_copy(update={"walls": any_seen, "top": seen.walls, "bottom": seen.walls,
-                                   "said": f"{seen.said} (on its side)"})
+    how = " (turned over)" if up == "-z" else " (on its side)"
+    return seen_from(sides, rotation_deg, f"{seen.said}{how}", seen.noted,
+                     f"{seen.in_words()}, as the file lays it")
+
+
+def _up_side(rotation_deg: tuple[float, float, float]) -> str | None:
+    """The part's side that's up in that pose, or None where none is square on to the plate."""
+    up = _rotation((rotation_deg[0], rotation_deg[1], rotation_deg[2])).T @ np.array(
+        [0.0, 0.0, 1.0])
+    return _side(up) if float(np.max(np.abs(up))) > 0.999 else None
+
+
+def _opposite(side: str) -> str:
+    return ("-" if side[0] == "+" else "+") + side[1]

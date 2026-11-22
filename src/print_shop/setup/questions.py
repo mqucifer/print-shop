@@ -48,10 +48,18 @@ from typing import Any
 
 from print_shop.expert.client import CutOff, TimedOut
 from print_shop.setup.bounds import SETTINGS, check
-from print_shop.setup.context import LOADS, PartContext, Seen, plain_line, printed
+from print_shop.setup.context import (
+    AS_THE_FILE_LIES,
+    LOADS,
+    PartContext,
+    Seen,
+    plain_line,
+    pose_for,
+    printed,
+)
 from print_shop.setup.intake import Estimate, Option, Question
 from print_shop.setup.model import SHORT, TEXT, Ask, context_lines, setting_item
-from print_shop.setup.proposal import PartFacts
+from print_shop.setup.proposal import PartFacts, pose_value
 from print_shop.setup.skill import SKILL_DIR
 
 __all__ = [
@@ -144,6 +152,10 @@ SEEN = Question(
     ),
 )
 assert set(SEEN_FACES) == {o.label for o in SEEN.options}
+#: The answers that leave the face on the plate unsaid. All but "only the face on the plate"
+#: name two of the three, and none of them can say that face is seen as well. So it's never
+#: judged hidden by one, wherever a turn puts it (mqucifer/print-shop#248).
+PLATE_UNSAID = frozenset(label for label, (_, _, plate) in SEEN_FACES.items() if not plate)
 
 #: The questions that need no model, shown at once (mqucifer/print-shop#208).
 STOCK = (PURPOSE, SEEN)
@@ -153,11 +165,29 @@ def stock(
     context: PartContext | None, rotation_deg: tuple[float, float, float],
 ) -> tuple[Question, Question]:
     """print-shop's two for this part in this pose: each read back where its notes say, asked
-    where they don't (mqucifer/print-shop#236). With no notes they're `STOCK`."""
+    where they don't (mqucifer/print-shop#236). With no notes they're `STOCK`'s. The question
+    of faces always has the pose it's asked in, and names it (mqucifer/print-shop#248)."""
+    posed = {"pose": tuple(rotation_deg), "posed": pose_words(context, rotation_deg)}
     if context is None or not context.found:
-        return STOCK
+        return PURPOSE, SEEN.model_copy(update=posed)
     named = plain_line(Path(context.path).name) if context.path else ""
-    return _purpose_of(context, named), _seen_of(context.seen, rotation_deg, named)
+    faces = _seen_of(context.seen, rotation_deg, named)
+    return _purpose_of(context, named), faces.model_copy(update=posed)
+
+
+#: The side down, as a question names a part laid on it.
+_SIDE_DOWN = {"+z": "top", "-z": "bottom", "-x": "left side", "+x": "right side", "-y": "front",
+              "+y": "back"}
+
+
+def pose_words(context: PartContext | None, rotation_deg: tuple[float, float, float]) -> str:
+    """A pose, as a question of faces names it."""
+    if tuple(rotation_deg) == AS_THE_FILE_LIES:
+        return "as the file lays it"
+    if context is not None and context.down and pose_for(context.down) == tuple(rotation_deg):
+        says = "its notes say" if context.down_from == "the sidecar" else "its design run says"
+        return f"laid {_SIDE_DOWN[context.down]}-down, as {says}"
+    return f"turned {pose_value(rotation_deg)}"
 
 
 def _purpose_of(context: PartContext, named: str) -> Question:
@@ -182,24 +212,26 @@ def _seen_of(
         return SEEN
     beside = f"{seen.in_words()}, as the file lays it"
     now = printed(seen, rotation_deg)
-    label = _faces_label((now.walls, now.top, now.bottom)) if now is not None else beside
+    label = _faces_label(now) if now is not None else beside
     options = SEEN.options
     labels = [o.label for o in options]
     if label not in labels:
         options += (Option(label=label, settings={}, impact="as the part's notes say"),)
         labels.append(label)
     return SEEN.model_copy(update={
-        "options": options, "beside": beside, "pose": rotation_deg,
+        "options": options, "beside": beside,
         "noted": labels.index(label), "noted_as": seen.faces(), "noted_from": named,
     })
 
 
-def _faces_label(faces: tuple[bool, bool, bool]) -> str:
+def _faces_label(seen: Seen) -> str:
     """Faces as they print, in the question's own words where an option says them."""
+    faces = (seen.walls, seen.top, seen.bottom)
     said = next((label for label, each in SEEN_FACES.items() if each == faces), "")
-    if said:
+    if said and not seen.part_walls:
         return said
-    names = ("the walls", "the top as it prints", "the face on the plate")
+    names = ("part of the walls" if seen.part_walls else "the walls",
+             "the top as it prints", "the face on the plate")
     *most, last = [n for n, shown in zip(names, faces, strict=True) if shown] or [
         "none of its faces"]
     return f"{', '.join(most)} and {last}" if most else last
