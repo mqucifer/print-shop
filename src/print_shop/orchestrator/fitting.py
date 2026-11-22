@@ -16,7 +16,7 @@ import numpy as np
 import trimesh
 
 from print_shop.core.state import Orientation, SliceResult
-from print_shop.ingest.orientation import _rotation_matrix, write_rotated
+from print_shop.ingest.orientation import AXIS_ALIGNED, _rotation_matrix, write_rotated
 from print_shop.slicer.orca import DoesntFit, Slicer, SlicerProfiles
 
 __all__ = ["Fitting", "turns", "with_turns"]
@@ -28,17 +28,23 @@ _PLAIN = (90, 270, 180, 45, 315, 135, 225)
 _STEP = 15
 
 
+def _lying(part: str | Path | trimesh.Trimesh, rotation: tuple[float, float, float]) -> np.ndarray:
+    """The part's corners, lying in `rotation`."""
+    mesh = part if isinstance(part, trimesh.Trimesh) else trimesh.load(Path(part), force="mesh")
+    if not isinstance(mesh, trimesh.Trimesh):
+        raise ValueError(f"Expected a Trimesh, got {type(mesh).__name__}")
+    points: np.ndarray = np.asarray(mesh.vertices) @ _rotation_matrix(rotation)[:3, :3].T
+    return points
+
+
 def turns(
-    stl: str | Path, build_volume: tuple[float, float, float],
+    part: str | Path | trimesh.Trimesh, build_volume: tuple[float, float, float],
     rotation: tuple[float, float, float] = (0.0, 0.0, 0.0),
 ) -> tuple[float, ...]:
     """The turns about z that put the part, lying in `rotation`, inside the build volume's box,
     in the order they're tried: the plain ones, the one with most room to spare, to a degree,
     and its opposite, then every `_STEP`. () is that no turn can."""
-    mesh = trimesh.load(Path(stl), force="mesh")
-    if not isinstance(mesh, trimesh.Trimesh):
-        raise ValueError(f"Expected a Trimesh, got {type(mesh).__name__}")
-    points = np.asarray(mesh.vertices) @ _rotation_matrix(rotation)[:3, :3].T
+    points = _lying(part, rotation)
     if np.ptp(points[:, 2]) > build_volume[2]:
         return ()
     spare = []
@@ -52,19 +58,27 @@ def turns(
 
 
 def with_turns(
-    stl: str | Path, found: tuple[Orientation, ...], build_volume: tuple[float, float, float],
+    part: str | Path | trimesh.Trimesh, found: tuple[Orientation, ...],
+    build_volume: tuple[float, float, float],
     kept: tuple[float, float, float] | None,
 ) -> tuple[Orientation, ...]:
     """The poses, marked where one fits only turned on the plate, so that it's offered that turn
     rather than refused. Only `kept`, the pose the person or the part's context lays it in, or,
     where no pose fits as posed, any: a pose that fits as posed is never passed over for one
-    that has to be turned. One that no turn fits is marked too, so it isn't sent back to."""
-    none_fits = not any(c.fits_in(build_volume) for c in found)
+    that has to be turned. One that no turn fits is marked too, so it isn't sent back to.
+
+    `found` may be some of the six, as the others are measured beside the job
+    (mqucifer/print-shop#235), so whether none fits is read off the part, not off `found`."""
+    if all(c.fits_in(build_volume) for c in found):
+        return found
+    none_fits = not any(
+        np.all(np.ptp(_lying(part, r), axis=0) <= build_volume) for r in AXIS_ALIGNED
+    )
 
     def marked(c: Orientation) -> Orientation:
         if c.fits_in(build_volume):
             return c
-        if not turns(stl, build_volume, c.rotation_deg):
+        if not turns(part, build_volume, c.rotation_deg):
             return c.model_copy(update={"fits_no_way": True})
         if none_fits or c.rotation_deg == kept:
             return c.model_copy(update={"fits_turned": True})

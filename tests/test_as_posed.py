@@ -26,8 +26,10 @@ import trimesh
 from print_shop.core.state import AppliedOrientation, Orientation, SliceResult, turn_words
 from print_shop.desk.again import again
 from print_shop.desk.page import _pose
-from print_shop.ingest.orientation import candidates
+from print_shop.ingest.measuring import Measuring
+from print_shop.ingest.orientation import candidate_in, candidates
 from print_shop.ledger import Ledger, PrintRecord, Row
+from print_shop.orchestrator import graph
 from print_shop.orchestrator.daemon import Daemon, JobResult
 from print_shop.orchestrator.fitting import Fitting, turns, with_turns
 from print_shop.runtime import describe
@@ -430,7 +432,6 @@ def test_a_side_no_turn_fits_isnt_offered_to_send_it_back_to(tmp_path: Path) -> 
     assert "180,0,0" in listed and "90,0,0" in listed
     assert "0,90,0" not in listed and "0,270,0" not in listed
     assert "0,90,0; 0,270,0" in left_out
-    assert "(doesn't fit, however it's turned on the plate)" in done.shown
 
 
 def test_with_no_other_side_that_fits_orientation_says_so_and_isnt_pointed_to() -> None:
@@ -444,10 +445,59 @@ def test_with_no_other_side_that_fits_orientation_says_so_and_isnt_pointed_to() 
         orientation=AppliedOrientation(), profiles=CI_PROFILES, candidates=(here, tall),
     )
     assert "For another side down" not in render(request)
+    assert "(doesn't fit, however it's turned on the plate)" in render(request), "once measured"
     assert "orientation for another side" not in str(parse_answer("ok", request))
     said: list[str] = []
     assert send_back(request, lambda prompt: pytest.fail("nothing to pick"), said.append) is None
     assert "No other side down fits the plate" in "\n".join(said)
+
+
+@pytest.mark.parametrize(("wide", "deep"), [(300, 20), (20, 300), (40, 20)])
+def test_a_pose_measured_beside_is_marked_as_it_is_among_all_six(
+    tmp_path: Path, wide: float, deep: float
+) -> None:
+    stl = block(tmp_path, wide, deep)
+    six = with_turns(stl, tuple(candidates(stl)), VOLUME, AS_POSED)
+    beside = Measuring(stl, six[:1], lambda mesh, pose: with_turns(mesh, (pose,), VOLUME, None)[0])
+    assert beside.settled() == six
+
+
+def test_a_kept_pose_that_fits_only_turned_is_still_measured_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def never(*args: Any) -> Any:
+        raise AssertionError("the orient node measured all six")
+
+    monkeypatch.setattr(graph, "candidates", never)
+    done = job(tmp_path, block(tmp_path, 300, 20), "turn", "ok")
+    assert done.result.printed, done.result.error
+
+
+def test_orientation_is_pointed_to_while_the_others_are_still_being_measured(
+    tmp_path: Path,
+) -> None:
+    stl = block(tmp_path, 300, 20)
+    kept = with_turns(stl, (candidate_in(stl, AS_POSED),), VOLUME, AS_POSED)
+    request = ReviewRequest(
+        presets=("machine", "process", "filament"), proposal=Proposal(),
+        slice=SliceResult(gcode_path=Path("x.gcode"), layer_count=25, max_z_mm=5, filament_mm=1,
+                          filament_cm3=1, filament_g=1, print_time_s=60, turn_deg=45.0),
+        orientation=AppliedOrientation(), profiles=CI_PROFILES, candidates=kept,
+        measuring=Measuring(stl, kept),
+    )
+    assert "For another side down, type orientation." in render(request)
+    assert "orientation for another side down" in str(parse_answer("ok", request))
+
+
+def test_a_number_typed_ahead_never_picks_another_side_where_some_are_left_out(
+    tmp_path: Path,
+) -> None:
+    # Standing on end is third and fourth here, so a 3 typed ahead would pick the one after.
+    done = job(tmp_path, block(tmp_path, 20, 300),
+               "orientation=3 because the top is seen", "back", "turn", "ok")
+    assert done.result.printed, done.result.error
+    assert "Which pose should it print in?" in done.shown, "asked, rather than picked"
+    assert done.row is not None and done.row.rotation_deg[:2] == (0.0, 0.0)
 
 
 def test_the_side_its_context_lays_it_on_is_kept_and_offered_the_turn(tmp_path: Path) -> None:

@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import re
 import textwrap
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -346,6 +347,9 @@ class ThisPart:
     #: The filament's preset's name, as the store has it or the preset says.
     filament_names: tuple[str, ...] = ()
     candidates: tuple[Orientation, ...] = ()
+    #: A pose by its value, waited for where it's still being measured
+    #: (mqucifer/print-shop#235). None reads `candidates`.
+    measured: Callable[[str], Orientation | None] | None = None
     build_volume_mm: tuple[float, float, float] | None = None
     context: PartContext | None = None
     #: The settings this job's questions could set: what it asked again.
@@ -356,6 +360,12 @@ class ThisPart:
     @property
     def pose(self) -> str:
         return pose_value(self.rotation_deg)
+
+    def lying(self, value: str) -> Orientation | None:
+        """The part's figures in that pose."""
+        if self.measured is not None:
+            return self.measured(value)
+        return next((c for c in self.candidates if pose_value(c.rotation_deg) == value), None)
 
     @property
     def presets(self) -> dict[str, dict[str, Any]]:
@@ -409,7 +419,8 @@ def _against(at: int, row: Row, part: ThisPart) -> _Found:
     shapes = [here]
     lay = pose_of(row.rotation_deg)
     if lay != part.rotation_deg:
-        shapes += [similar.posed(here, c) for c in part.candidates if c.rotation_deg == lay]
+        there = part.lying(pose_value(lay))
+        shapes += [similar.posed(here, there)] if there is not None else []
     context = part.context or PartContext()
     proposal = row.proposal
     each = [
@@ -551,7 +562,7 @@ def _order(change: Change) -> int:
 
 def _pose(part: ThisPart, value: str) -> Orientation | None:
     """This part's candidate in that pose, if it fits the plate so."""
-    found = next((c for c in part.candidates if pose_value(c.rotation_deg) == value), None)
+    found = part.lying(value)
     if found is None or (part.build_volume_mm and not found.fits_in(part.build_volume_mm)):
         return None
     return found
