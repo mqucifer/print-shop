@@ -15,7 +15,9 @@ ledger's schema version.
   spool per printer, which the database enforces.
 - **A spool is named the Sponsor's way:** manufacturer, type and variety,
   with a colour, and optionally grams left and which of the Sponsor's
-  tunings to print it with, chosen once when it's added.
+  tunings to print it with, chosen when it's added. The colour and the tuning
+  can be corrected (`edit`, mqucifer/print-shop#220); a print keeps its own
+  copy of the spool, so one already printed isn't changed by it.
 - **A print takes its defaults from it** (`scripts/print_job.py`): the fitted
   nozzle and the loaded spool. What isn't on hand is refused.
 """
@@ -315,6 +317,27 @@ class Inventory:
             )
         return self.spool(spool_id)
 
+    def edit(
+        self,
+        spool_id: int,
+        *,
+        colour: str | None = None,
+        tuning: str | None = None,
+        untuned: bool = False,
+    ) -> Spool:
+        """Correct a spool's colour or tuning (mqucifer/print-shop#220), and nothing else of it.
+
+        None leaves that one as it is; `untuned` clears the tuning, for the variety's default.
+        """
+        self.spool(spool_id)
+        with self._write() as db:
+            if colour is not None:
+                db.execute("UPDATE spools SET colour = ? WHERE id = ?", (colour, spool_id))
+            if untuned or tuning is not None:
+                db.execute("UPDATE spools SET tuning = ? WHERE id = ?",
+                           (None if untuned else tuning, spool_id))
+        return self.spool(spool_id)
+
     def empty(self, spool_id: int) -> Spool:
         self.spool(spool_id)
         with self._write() as db:
@@ -397,6 +420,26 @@ class Inventory:
                     f"`stock load <id>` first if you've changed it. On hand:\n{self.listing()}"
                 )
         return material
+
+    def at_start(self, prepared: Material) -> Material:
+        """What a prepared job used, as its print starts (mqucifer/print-shop#220).
+
+        A colour corrected since is taken, as nothing was sliced with it. A tuning changed since
+        is refused, as the job was prepared with the old one.
+
+        Raises:
+            InventoryError: If the spool's tuning has changed, saying from what to what.
+        """
+        spool = self.spool(prepared.spool_id)
+        if spool.tuning != prepared.tuning:
+            was, now = (f'"{t}"' if t else "the variety's default"
+                        for t in (prepared.tuning, spool.tuning))
+            raise InventoryError(
+                f"spool #{spool.id}'s tuning was changed from {was} to {now} after this job was "
+                "prepared, so nothing was uploaded or printed. Run the job again to prepare it "
+                "with the spool as it is now."
+            )
+        return prepared.model_copy(update={"colour": spool.colour})
 
     def listing(self, *, with_empty: bool = False) -> str:
         """Everything on hand, loaded and fitted, a line each."""

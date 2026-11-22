@@ -50,7 +50,8 @@ A print uses your tuning where there is one, and the standard where you haven't 
 
    - `stock` alone lists what's on hand, loaded and fitted.
    - `stock empty <id>` marks a spool used up.
-   - A variety you've tuned more than once asks which tuning the spool prints with, once, when you add it (`--tuning "…"`).
+   - `stock edit <id> --colour grey` or `stock edit <id> --tuning "…"` corrects a spool, keeping its number and whether it's loaded (mqucifer/print-shop#220). `--tuning none` is the variety's default. Prints already made keep the spool as it was. A job still waiting when you edit records the new colour; if the tuning changed, it says so when you approve it and doesn't print.
+   - A variety you've tuned more than once asks which tuning the spool prints with when you add it (`--tuning "…"`).
    - Prints then take the fitted nozzle and the loaded spool by default, and say so.
 
 3. **Nothing from the prototype is running.** Both use the same topics. The prototype has no daemon command of its own, so one would only be running if someone started it by hand, from `~/Documents/git/3d-print-agent`. If one is, stop it.
@@ -265,6 +266,7 @@ Then open <http://127.0.0.1:8719/> in a browser on the Mac. `--port` picks anoth
 | `… holds no G-code: it's a project, not a sliced plate` | `--sliced` was given an unsliced Orca project | slice it in Orca and export the plate's sliced file, or its G-code |
 | `Not sent: the file is sliced for …` | the hand-sliced file names another filament or nozzle than the inventory says is loaded | load or fit what it names, fix the inventory, or add `--loaded-ok` |
 | `… has changed since it was taken … nothing was uploaded` | the job's copy of a hand-sliced file was changed after the gate opened | send the file again with `--sliced` |
+| `spool #…'s tuning was changed from …` | the spool's tuning was edited after the job was prepared | nothing was uploaded or printed; run the job again |
 | `printer preflight failed — printer.ready` | the printer is busy, paused, or in error | clear it at the machine, then run again |
 | `printer preflight failed — printer.free_space` | the printer's storage is full | delete old files on the printer |
 | The approval card never appears | the broker or the dashboard is wrong | check the broker settings; re-paste the dashboard |
