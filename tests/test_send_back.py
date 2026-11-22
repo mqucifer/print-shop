@@ -375,7 +375,10 @@ def test_a_kept_orientation_lesson_reaches_the_next_parts_orientation_by_itself(
     [lesson] = ledger.query("SELECT id FROM print_lessons")
     print_lessons.accept(ledger, lesson["id"], "reviewer: test")
 
-    job_2, person = run("ok")
+    # The model turns it again, so the first print's pose is offered, ticked
+    # (mqucifer/print-shop#211): a plain ok says it isn't used, and the next goes on without it.
+    job_2, person = run("ok", "ok")
+    assert "1 ticked isn't used yet: use to take it, or ok again to go on without" in person.said
     [line] = model.requests[1].lessons
     assert line.startswith(f"Lesson {lesson['id']}, from lid.stl, for a part that's flat_and_wide"
                            ", large_bed_contact")

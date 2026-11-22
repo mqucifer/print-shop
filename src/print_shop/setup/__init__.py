@@ -51,6 +51,14 @@ class Proposer:
     ask_questions: Ask | None = None  # the same, for the intake's questions
     #: Where kept lessons come from (mqucifer/print-shop#106). None gives none.
     lessons: Lessons | None = None
+    ask_doubts: Ask | None = None  # a test's, for what differences put in doubt
+
+    def doubter(self) -> Ask | None:
+        """The model that reads what a past print's differences put in doubt
+        (mqucifer/print-shop#211), or None: the offer doesn't need one."""
+        if self.ask_doubts is not None:
+            return self.ask_doubts
+        return llm_ask(self.llm) if self.llm is not None else None
 
     def questions(self, features: tuple[Feature, ...], profiles: SlicerProfiles) -> Asked:
         """The intake's questions for this part, before any are answered."""
