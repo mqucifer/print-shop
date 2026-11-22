@@ -7,6 +7,7 @@ tried on a real pseudo-terminal.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import pty
@@ -36,6 +37,7 @@ from print_shop.setup.features import measure
 from print_shop.setup.intake import (
     DIFFERS_PROMPT,
     NOTES_PROMPT,
+    Added,
     Answer,
     AnswersRefused,
     Asker,
@@ -53,7 +55,7 @@ from print_shop.setup.review import Review, ReviewRequest, parse_answer
 from print_shop.setup.review import render as render_review
 from print_shop.setup.similar import likeness
 from print_shop.setup.skill import groups_for, load
-from print_shop.setup.waiting import Waiting, ask_meanwhile
+from print_shop.setup.waiting import Waiting, ask_meanwhile, cli_waiting
 from tests.fakes import CI_PROFILES, STORE_PROFILES, FramePrinter, MemoryBridge
 from tests.fixtures import write_stl
 from tests.test_job_e2e import CFG
@@ -968,6 +970,70 @@ def test_a_notes_file_name_cant_draw_lines_on_the_card(tmp_path: Path) -> None:
     sent.write_text(json.dumps(BOTH))
     for question in stock(read_context(noted(tmp_path), sent), LAID):
         assert "\n" not in question.noted_from and "\x1b" not in question.noted_from
+
+
+# --------------------------------------------------------------------------
+# What's typed while something draws is no answer to it
+# --------------------------------------------------------------------------
+
+
+class TypesAsItDraws:
+    """A terminal whose person types `early` as what contains `at` is being written, and
+    `after` only at a prompt with nothing typed ahead."""
+
+    def __init__(self, at: str, early: str, *after: str) -> None:
+        self.at, self.early = at, early
+        self.after = list(after)
+        self.ahead: list[str] = []
+        self.read_at: list[tuple[str, str]] = []
+
+    def write(self, text: str) -> None:
+        if self.at in text:
+            self.ahead.append(self.early)
+
+    def forget(self) -> None:
+        self.ahead.clear()
+
+    def read(self, prompt: str) -> str:
+        assert self.ahead or self.after, f"asked more than was scripted, at {prompt!r}"
+        typed = self.ahead.pop(0) if self.ahead else self.after.pop(0)
+        self.read_at.append((prompt, typed))
+        return typed
+
+    def asker(self) -> Asker:
+        return cli_asker(self.read, self.write, self.forget)
+
+
+@pytest.mark.parametrize(("data", "at", "early", "after"), [
+    (BOTH, "From the part's notes", "", ["1", ""]),
+    (BOTH, "Enter) keep what the notes say", "", ["2", "4", ""]),
+    (BOTH, "That differs from the notes", "", ["2", "4", "n"]),
+    ({"seen": ["top"]}, "A few questions about this part", "4", ["", "2"]),
+])
+def test_what_is_typed_as_it_draws_is_never_taken(
+    data: dict[str, Any], at: str, early: str, after: list[str], tmp_path: Path
+) -> None:
+    term = TypesAsItDraws(at, early, *after)
+    term.asker()(two(tmp_path, data))
+    assert [typed for _, typed in term.read_at] == after
+
+
+def test_an_enter_after_the_read_back_is_shown_still_confirms(tmp_path: Path) -> None:
+    term = TypesAsItDraws("nothing that's written", "", "")
+    questions = two(tmp_path, BOTH)
+    assert term.asker()(questions) == tuple(question.confirm() for question in questions)
+
+
+def test_what_is_typed_as_an_added_question_draws_doesnt_answer_it() -> None:
+    term = TypesAsItDraws("Added by the model", "1", "2")
+    assert term.asker()(Added((TOP,), before=2)) == (Answer(choice=1),)
+
+
+def test_an_enter_typed_as_the_closer_choices_draw_doesnt_keep_the_answer() -> None:
+    term = TypesAsItDraws("closer choices", "", "2")
+    waiting = cli_waiting(term.read, term.write, screen=io.StringIO, forget=term.forget)
+    assert waiting.closer is not None
+    assert waiting.closer(PURPOSE, Answer(choice=0), 1.0) == Answer(choice=1)
 
 
 # --------------------------------------------------------------------------
