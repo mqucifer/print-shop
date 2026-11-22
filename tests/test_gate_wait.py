@@ -77,7 +77,7 @@ class Shop:
         )
 
     def press(self, decision: str) -> None:
-        self.bridge.deliver(command_topic(CFG), {"decision": decision})
+        self.bridge.press(CFG, decision)
 
 
 def test_a_slow_review_doesnt_time_out(tmp_path: Path) -> None:
@@ -134,7 +134,8 @@ def test_a_gate_that_never_answers_ends_with_a_sentence_and_a_row(tmp_path: Path
         assert shop.bridge.retained_json(gate_topic(CFG)) == {"pending": False}, (
             "the dashboard's gate is cleared, not left pending for a job that ended"
         )
-        shop.press("approve")  # too late: there's no gate to press
+        # Too late: there's no gate to press, though it names the job, as a card still open would.
+        shop.bridge.deliver(command_topic(CFG), {"decision": "approve", "job_id": job_id})
     ended = shop.ledger.unprinted(job_id)
     assert ended is not None
     assert (ended.outcome, ended.detail, ended.stl_name) == (JobEnding.TIMED_OUT, sentence,

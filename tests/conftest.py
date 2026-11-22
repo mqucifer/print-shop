@@ -25,6 +25,10 @@ settings' key. So a test marked with one is skipped unless its env var opts in
 - a real MQTT connect is refused unless a test broker is opted in, and a
   bridge is refused under any prefix or node that isn't a test run's;
 - a request to LiteLLM is refused unless `PRINT_SHOP_TEST_LLM=1`.
+
+**And so do the Mac's jobs folder and its live lock** (mqucifer/print-shop#207). The lock is in
+that folder, so a test that ran `print_job.py`'s `main` would take the Sponsor's, and refuse
+their print, or be refused by it. While pytest runs the folder is the session's own.
 """
 
 from __future__ import annotations
@@ -38,6 +42,7 @@ import paho.mqtt.client as paho
 import pytest
 from pycentauri import Printer
 
+from print_shop import runtime
 from print_shop.core.mqtt import MqttBridge
 from print_shop.env import SETTINGS_PATH, load_env
 from print_shop.expert.client import DEFAULT_URL, URL_KEY
@@ -70,6 +75,17 @@ def _disarm_the_printer() -> Iterator[None]:
         return await original_connect(host, enable_control=False, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(Printer, "connect", staticmethod(guarded_connect))
+    try:
+        yield
+    finally:
+        monkeypatch.undo()
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _its_own_jobs_folder(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
+    """`WORK_DIR`, and so the live lock, for a script loaded in any test."""
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(runtime, "WORK_DIR", tmp_path_factory.mktemp("print-shop") / "jobs")
     try:
         yield
     finally:

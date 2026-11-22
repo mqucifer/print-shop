@@ -6,14 +6,22 @@
     uv run python scripts/stock.py add "Elegoo PLA" white --grams 1000
     uv run python scripts/stock.py add "Elegoo Rapid PETG" black --tuning "Elegoo RAPID PETG 270…"
     uv run python scripts/stock.py load 3                           # load spool #3
+    uv run python scripts/stock.py edit 3 --colour grey             # correct #3's colour
+    uv run python scripts/stock.py edit 3 --tuning none             # or its tuning
     uv run python scripts/stock.py empty 3
 
 mqucifer/print-shop#11: there's no AMS to read, so the Sponsor is the only
 source, and keeping it up has to be quicker than not. A spool is named by its
 variety as `scripts/print_job.py --filaments` lists them; its manufacturer and
 type come from the profile. When the Sponsor has tuned that variety more than
-once, the tuning is chosen here, once. A print then takes the fitted nozzle
-and loaded spool as its defaults. `--printer` is needed only with more than one.
+once, the tuning is chosen here, when it's added. A print then takes the
+fitted nozzle and loaded spool as its defaults. `--printer` is needed only with
+more than one.
+
+`edit` corrects a colour or a tuning (mqucifer/print-shop#220), keeping the
+spool's number and whether it's loaded. `--tuning none` is the variety's
+default. Prints already made keep the spool as it was; a job prepared with the
+old tuning says so when it's approved, and doesn't print.
 
 The inventory lives in the ledger's file (`PRINT_SHOP_LEDGER`, default
 `~/print-shop/ledger.sqlite`).
@@ -40,6 +48,22 @@ def _standard(store: Store, variety: str) -> StoredProfile | None:
     )
 
 
+def _check_tuning(store: Store, standard: StoredProfile, tuning: str | None) -> None:
+    """Refuse a tuning that isn't the variety's, or none where it has several to choose from."""
+    tunings = [t.name for t in store.of(standard)]
+    if tuning is not None and tuning not in tunings:
+        raise InventoryError(
+            f"'{tuning}' isn't one of your tunings of {standard.variety}: "
+            + (", ".join(f'"{t}"' for t in tunings) or "you haven't tuned it")
+        )
+    if tuning is None and len(tunings) > 1:
+        listed = "\n".join(f'  --tuning "{t}"' for t in tunings)
+        raise InventoryError(
+            f"You've tuned {standard.variety} more than once; say which this spool prints "
+            f"with:\n{listed}"
+        )
+
+
 def add(inventory: Inventory, args: argparse.Namespace) -> str:
     store = Store(STORE_DIR)
     standard = _standard(store, args.variety)
@@ -56,24 +80,32 @@ def add(inventory: Inventory, args: argparse.Namespace) -> str:
         )
         return f"{spool.line()}\n  (no profile for it: a print won't use it yet)"
 
-    tunings = [t.name for t in store.of(standard)]
-    if args.tuning is not None and args.tuning not in tunings:
-        raise InventoryError(
-            f"'{args.tuning}' isn't one of your tunings of {standard.variety}: "
-            + (", ".join(f'"{t}"' for t in tunings) or "you haven't tuned it")
-        )
-    if args.tuning is None and len(tunings) > 1:
-        listed = "\n".join(f'  --tuning "{t}"' for t in tunings)
-        raise InventoryError(
-            f"You've tuned {standard.variety} more than once; say which this spool prints "
-            f"with:\n{listed}"
-        )
+    _check_tuning(store, standard, args.tuning)
     spool = inventory.add_spool(
         manufacturer=standard.manufacturer, type=standard.filament_type,
         variety=standard.variety, colour=args.colour, grams_left=args.grams,
         tuning=args.tuning,
     )
     return spool.line()
+
+
+def edit(inventory: Inventory, args: argparse.Namespace) -> str:
+    if args.colour is None and args.tuning is None:
+        raise InventoryError("say what to correct: --colour, --tuning, or both")
+    spool = inventory.spool(args.spool)
+    untuned = args.tuning is not None and args.tuning.casefold() == "none"
+    tuning = None if untuned else args.tuning
+    if args.tuning is not None:
+        store = Store(STORE_DIR)
+        standard = _standard(store, spool.variety)
+        if standard is not None:
+            _check_tuning(store, standard, tuning)
+        elif tuning is not None:
+            raise InventoryError(
+                f"'{spool.variety}' has no profile in profiles/, so it has no tunings; "
+                "--tuning none is all it takes"
+            )
+    return inventory.edit(spool.id, colour=args.colour, tuning=tuning, untuned=untuned).line()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -100,6 +132,11 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("spool", type=int, help="the spool's number")
         if name == "load":
             p.add_argument("--printer")
+    correct = sub.add_parser("edit", help="correct a spool's colour or tuning")
+    correct.add_argument("spool", type=int, help="the spool's number")
+    correct.add_argument("--colour", help="the colour it is")
+    correct.add_argument(
+        "--tuning", help="which of your tunings it prints with, or none for the variety's default")
     fit = sub.add_parser("fit", help="fit a nozzle")
     fit.add_argument("diameter", type=float, help="mm, e.g. 0.4")
     fit.add_argument("--printer")
@@ -121,6 +158,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(add(inventory, args))
             elif args.command == "load":
                 print(inventory.load(args.spool, args.printer).line())
+            elif args.command == "edit":
+                print(edit(inventory, args))
             elif args.command == "empty":
                 print(inventory.empty(args.spool).line())
             elif args.command == "fit":

@@ -20,6 +20,7 @@ from print_shop.core.contracts import Outcome
 from print_shop.core.state import AppliedOrientation, Orientation, PlatePart, PrintJobState
 from print_shop.ingest.analyzer import analyze
 from print_shop.ingest.orientation import write_rotated
+from print_shop.inventory import Material
 from print_shop.ledger import PrintRecord
 from print_shop.plate import BY_OBJECT, SEQUENCE, GivenPart, PlateRow, row_id
 from print_shop.setup import Proposer
@@ -259,9 +260,11 @@ def poses_said(parts: tuple[PlatePart, ...]) -> str:
 
 def records(
     state: PrintJobState, remote_name: str, config: dict[str, str], machine: str, firmware: str,
+    material: Material | None = None,
 ) -> tuple[PrintRecord, ...]:
     """The ledger's row for each object, the first's with the job's id. The review is every
-    row's. Each has its own pose, features, send-backs and orientation lessons."""
+    row's. Each has its own pose, features, send-backs and orientation lessons, and the same
+    spool: `material`, as it is when the print starts (`Inventory.at_start`)."""
     job = state["job_id"]
     parts = tuple(state["parts"])
     orientations = tuple(state["orientations"])
@@ -275,6 +278,9 @@ def records(
         for p in parts
     )
     reviewed = state.get("proposal")
+    used = state.get("profiles_used")
+    if used is not None:
+        used = used.model_copy(update={"material": material})
     rows = []
     for part, outcome in zip(parts, orientations, strict=True):
         applied = part.applied or AppliedOrientation()
@@ -298,7 +304,8 @@ def records(
             slicer_config=config,
             printer_machine=machine,
             printer_firmware=firmware,
-            profiles=state.get("profiles_used"),
+            profiles=used,
+            material=material,
             intake=state.get("intake"),
             proposal=proposal,
             corrections=(*part.sent_back, *state.get("corrections", ())),

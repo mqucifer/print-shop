@@ -28,6 +28,7 @@ from print_shop.inventory import Nozzle, Printer, Spool
 from print_shop.joblog import LOG_NAME
 from print_shop.ledger import Frame, Ledger, LedgerError, Row, UnprintedJob
 from print_shop.orchestrator.frames import FRAMES_DIR
+from print_shop.outcome_words import outcome_words
 from print_shop.plate import plate_job
 from print_shop.setup.proposal import PAUSE
 
@@ -166,8 +167,7 @@ class JobRecord:
 def status(row: Row) -> str:
     """Where a print is, in a few words."""
     if row.result is not None:
-        return f"{row.result}" + (f", {row.symptom}" if row.symptom and row.symptom != "none"
-                                  else "")
+        return outcome_words(row.result, row.symptom)
     if row.ended_at is not None:
         return "ended, waiting for your answer"
     if row.started_at is not None:

@@ -17,6 +17,7 @@ from print_shop.desk.read import JobRecord, JobSummary, OnHand, has_swap, status
 from print_shop.inventory import SETUP
 from print_shop.ledger import Row
 from print_shop.orchestrator.outcome import end_name, no_frames
+from print_shop.outcome_words import outcome_words
 from print_shop.plate import row_id
 from print_shop.setup.proposal import PAUSE, Change, Source
 
@@ -465,9 +466,9 @@ def _outcome(row: Row, record: JobRecord) -> str:
                      f"{escape(end_name(row.printer_end_status))})</li>")
     if row.result is not None:
         cls = "good" if row.result == "success" else "bad"
-        symptom = f", {row.symptom}" if row.symptom and row.symptom != "none" else ""
-        parts.append(f"<li class=\"{cls}\"><strong>{escape(str(row.result))}"
-                     f"{escape(str(symptom))}</strong>, answered {_when(row.answered_at)}</li>")
+        said = escape(outcome_words(row.result, row.symptom))
+        parts.append(f"<li class=\"{cls}\"><strong>{said}</strong>, "
+                     f"answered {_when(row.answered_at)}</li>")
         if row.note:
             parts.append(f"<li>Your note: {escape(row.note)}</li>")
     elif row.ended_at:

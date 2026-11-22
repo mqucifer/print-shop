@@ -30,6 +30,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from print_shop.bench import pausing
 from print_shop.materials import material_name
 from print_shop.setup.context import FitBand, Placed, Seen
 from print_shop.setup.intake import Intake
@@ -37,6 +38,7 @@ from print_shop.setup.proposal import Change, Source
 from print_shop.slicer import gcode
 
 __all__ = [
+    "PAUSE_PAST_FIT",
     "PauseReading",
     "FeatureReading",
     "Flag",
@@ -51,6 +53,15 @@ __all__ = [
 
 #: Orca's label for ironing.
 IRONING = "Ironing"
+#: The flag for a pause a layer past a fit's top, which the review says beside where it landed.
+PAUSE_PAST_FIT = "pause_past_fit"
+#: A fit band's heights are kept to a hundredth of a millimetre (`context.place`).
+BAND_MM = 0.005 + pausing.TOPS_OUT
+#: The most room over what's dropped in for a fit's top to say where its pocket closes: the
+#: bench's `pause --max-gap`. A band may be the dropped part's height, not the pocket's.
+ROOM_MM = 0.4
+#: Orca's labels for what it lays over air, as the first layer over a pocket is.
+CLOSES_OVER = ("Bridge", "Overhang wall")
 #: Two seams this close, in mm, on neighbouring layers, are one line up the wall.
 SEAM_NEAR_MM = 1.0
 #: The share of seams that sit on the one below them for the seam to read as a line.
@@ -64,6 +75,7 @@ JUDGED = (
     "ironing_type",
     "seam_position",
     "elefant_foot_compensation",
+    "raft_layers",  # on one, a height in the G-code isn't that height up the part
 )
 #: What a fit at the plate is proposed for elephant foot, in mm: the Sponsor's own profile's
 #: value (the skill's adhesion group), never past its bound.
@@ -111,20 +123,26 @@ class SeamReading(BaseModel):
 
 
 class PauseReading(BaseModel):
-    """A pause Orca wrote into the slice: the layer it comes before, that layer's top, and how
-    far into the print it stops (mqucifer/print-shop#119)."""
+    """A pause Orca wrote into the slice: the layer it comes before and that layer's top, the
+    top of the layer it comes after, which is the pause's height (mqucifer/print-shop#203), and
+    how far into the print it stops (mqucifer/print-shop#119)."""
 
     model_config = {"frozen": True}
 
     before_layer: int
     z: float
     after_s: float
+    #: None before the first layer, and in a row from before mqucifer/print-shop#203.
+    after_z: float | None = None
+
+    def where(self) -> str:
+        """Where it falls, in the words of the bench's `pause`."""
+        if self.after_z is None:
+            return f"before layer {self.before_layer}, at z={pausing.mm(self.z)}"
+        return pausing.where(self.before_layer - 1, self.after_z, self.before_layer, self.z)
 
     def line(self) -> str:
-        return (
-            f"pauses for a filament swap before layer {self.before_layer} (z {self.z:g} mm), "
-            f"about {_s(self.after_s)} in"
-        )
+        return f"pauses for a filament swap {self.where()}, about {_s(self.after_s)} in"
 
 
 class SliceReading(BaseModel):
@@ -141,8 +159,10 @@ class SliceReading(BaseModel):
     settings: dict[str, str] = {}
     #: Orca's own estimate for the whole print, beside the layers' sum.
     orca_time_s: int | None = None
-    #: Each pause Orca wrote, a colour change asked for at the review.
+    #: Each pause Orca wrote, as asked for at the review or written in a file sliced by hand.
     pauses: tuple[PauseReading, ...] = ()
+    #: Each layer that lays `CLOSES_OVER`: its number, and the area of it in mm².
+    over_air: tuple[tuple[int, float], ...] = ()
 
     @property
     def time_s(self) -> float:
@@ -232,12 +252,18 @@ def read_slice(path: Path) -> SliceReading:
     pauses = tuple(
         PauseReading(
             before_layer=int(p["before_layer"]), z=float(p["z"]),
+            # The layer before it as written: a support's layer may stand between two of the part's.
+            after_z=layers[int(p["before_layer"]) - 2].z if int(p["before_layer"]) > 1 else None,
             after_s=round(sum(t.time_s for t in layers if t.n < int(p["before_layer"])), 1),
         )
         for p in sliced.pauses
     )
     return SliceReading(
         pauses=pauses,
+        over_air=tuple(
+            (layer.n, round(area, 1)) for layer in sliced.layers
+            if (area := sum(layer.areas.get(kind, 0.0) for kind in CLOSES_OVER)) > 0
+        ),
         layers=layers,
         features=tuple(features),
         seam=_seam(sliced.layers),
@@ -302,16 +328,56 @@ def flags(
     them, as every change is. `placed` is the part's context in this pose (mqucifer/print-shop#130):
     its fits keep a random seam off them and propose elephant foot compensation at the plate, a
     hold pulled across the layers is said, and its seen faces stand where the intake didn't say.
+    A pause a layer past a fit's top is said too (mqucifer/print-shop#203).
     `changes` are the proposal's, which the slice was made with: a value they set, such as a
     lesson's, is read as the one in effect and named. `tops` are the layers each part's own top
-    is on, for a plate of several: none of them is inside a part.
+    is on, for a plate of several: none of them is inside a part. A plate isn't told of a pause
+    past a fit: what's laid over air is read for the whole layer, so one part's bridge would pass
+    for another's pocket closing, and advise a wrong height.
     """
     if faces is None and placed is not None:
         faces = placed.seen
     found = [*_layer_time(reading, filament), *_ironing(reading, faces, process, tops),
              *_seam_flag(reading, faces, process, placed),
-             *_elephant_foot(reading, process, placed, changes), *_holds(placed)]
+             *_elephant_foot(reading, process, placed, changes), *_holds(placed),
+             *(() if tops else _past_fit(reading, placed))]
     return tuple(found)
+
+
+def _past_fit(reading: SliceReading, placed: Placed | None) -> list[Flag]:
+    """A pause after the layer that closes over a fit, too late to drop parts into it: what a
+    height typed a layer up, as it had to be before mqucifer/print-shop#203, now does.
+
+    A fit's top isn't where its pocket closes: the band may be the dropped part's, with room
+    planned over it, and then a pause a layer over the band is the right one. So the slice has
+    to show it closing: the layer the pause comes after is the first since the band's foot to
+    bridge or overhang, and lays more of it than the layer after it, within `ROOM_MM` of the
+    band's top. Where it can't tell, it says nothing. Said, never refused, as a colour change
+    may be meant there.
+    """
+    if placed is None or reading.settings.get("raft_layers", "0") not in ("", "0"):
+        return []
+    area = dict(reading.over_air)
+    found: dict[float, Flag] = {}
+    for pause in reading.pauses:
+        n = pause.before_layer - 1  # the layer it comes after
+        if pause.after_z is None or not 2 <= n < len(reading.layers):
+            continue
+        if area.get(n, 0.0) <= area.get(n + 1, 0.0):
+            continue  # it lays no more over air than the layer after: that one may be what closes
+        under = reading.layers[n - 2].z
+        for band in placed.fits:
+            if band.z_to >= (under + pause.after_z) / 2 or under - band.z_to > ROOM_MM + BAND_MM:
+                continue  # under the band's top, or too far over it to be its pocket
+            if any(area.get(la.n, 0.0) for la in reading.layers[:n - 1] if la.z > band.z_from):
+                continue  # something under it is over air already, so which closes it isn't known
+            found.setdefault(band.z_to, Flag(
+                id=PAUSE_PAST_FIT,
+                reading=f"the fit `{band.fit.name}` tops out at z={pausing.mm(band.z_to)}, and "
+                        "the layer this pauses after is the first to bridge or overhang above "
+                        f"it: for parts dropped in, pause_at={pausing.mm(under)}",
+            ))
+    return list(found.values())
 
 
 def _layer_time(reading: SliceReading, filament: dict[str, Any]) -> list[Flag]:

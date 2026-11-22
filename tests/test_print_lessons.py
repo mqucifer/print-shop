@@ -20,7 +20,6 @@ from typing import Any
 import pytest
 import trimesh
 
-from print_shop.core.mqtt import command_topic
 from print_shop.ledger import Answer, Ledger, PrintRecord, Result, Symptom
 from print_shop.orchestrator.daemon import Daemon
 from print_shop.rounds.lessons import Refused
@@ -180,6 +179,66 @@ def test_a_quiet_success_teaches_nothing(ledger: Ledger) -> None:
     ledger.record_ended("job-1", 9)
     ledger.record_answer("job-1", Answer(result=Result.SUCCESS, symptom=Symptom.NONE))
     assert ledger.query("SELECT * FROM print_lessons") == []
+
+
+def _answered(ledger: Ledger, job_id: str, result: Result, symptom: Symptom,
+              note: str = "") -> None:
+    ledger.record_started(job_id)
+    ledger.record_ended(job_id, 9)
+    ledger.record_answer(job_id, Answer(result=result, symptom=symptom, note=note))
+
+
+@pytest.mark.parametrize(
+    ("note", "text"),
+    [
+        ("", "success, with stringing"),
+        ("  fine hairs inside ", "success, with stringing: fine hairs inside"),
+    ],
+)
+def test_a_success_with_a_flaw_is_a_candidate_that_says_the_part_was_usable(
+    ledger: Ledger, note: str, text: str
+) -> None:
+    """mqucifer/print-shop#189: the model is given a lesson's words alone, so they say it."""
+    ledger.record_start_requested(_record("job-1", RAIL))
+    _answered(ledger, "job-1", Result.SUCCESS, Symptom.STRINGING, note)
+    [found] = ledger.query("SELECT * FROM print_lessons")
+    assert (found["drawn_from"], found["text"]) == ("outcome", text)
+    listed = lessons.listing(ledger)
+    assert f"{text} [print: success, with stringing]" in listed
+    assert "failed" not in listed
+    lessons.after_print(ledger, "job-1")
+    assert len(ledger.query("SELECT * FROM print_lessons")) == 1, "drawn once"
+    lessons.accept(ledger, found["id"], REVIEWER)
+    [given] = lessons.for_part(ledger, RAIL)
+    assert given.line().endswith(f": {text}"), "as the model reads it"
+
+
+def test_a_failures_candidate_still_says_it_failed(ledger: Ledger) -> None:
+    ledger.record_start_requested(_record("job-1", RAIL))
+    _answered(ledger, "job-1", Result.FAILED, Symptom.STRINGING)
+    [found] = ledger.query("SELECT * FROM print_lessons")
+    assert found["text"] == "it failed: stringing"
+    assert "failed, stringing [print: failed, stringing]" in lessons.listing(ledger)
+
+
+def test_a_lesson_used_on_a_success_with_a_flaw_counts_and_says_the_flaw(ledger: Ledger) -> None:
+    """A usable part doesn't read as a setting that didn't work; a failed one still does."""
+    ledger.record_start_requested(_record("job-0", RAIL, _brim()))
+    [learned] = ledger.query("SELECT id FROM print_lessons")
+    lessons.accept(ledger, learned["id"], REVIEWER)
+    for job_id, result, symptom in (
+        ("job-1", Result.SUCCESS, Symptom.STRINGING),
+        ("job-2", Result.SUCCESS, Symptom.NONE),
+        ("job-3", Result.FAILED, Symptom.WARPING),
+    ):
+        changes, _, given = from_lessons(_facts(), lessons.for_part(ledger, RAIL))
+        proposal = Proposal(changes=tuple(changes), lessons=given)
+        ledger.record_start_requested(_record(job_id, RAIL, proposal=proposal))
+        _answered(ledger, job_id, result, symptom)
+    [(_, parts)] = lessons.to_promote(ledger)
+    assert parts == ["rail.stl (success, with stringing)", "rail.stl (success)"]
+    assert "job job-1: used (brim_type=outer_only stood at the review) " \
+           "[print: success, with stringing]" in lessons.listing(ledger)
 
 
 def _ironing_off() -> Change:
@@ -396,7 +455,7 @@ def shop(tmp_path: Path) -> Iterator[tuple[Daemon, Sponsor, Ledger, Path]]:
         ),
         asker=replay_asker(ANSWERS), reviewer=sponsor,
     )
-    daemon.press = lambda d: bridge.deliver(command_topic(CFG), {"decision": d})  # type: ignore[attr-defined]
+    daemon.press = lambda d: bridge.press(CFG, d)  # type: ignore[attr-defined]
     daemon.idle = printer.idle  # type: ignore[attr-defined]
     with daemon:
         yield daemon, sponsor, ledger, tmp_path

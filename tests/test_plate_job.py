@@ -889,7 +889,9 @@ def _with_a_lesson(tmp_path: Path) -> tuple[Ledger, int]:
     return ledger, lesson
 
 
-def _printed_with(ledger: Ledger, lesson: int, job: str, *results: Result) -> None:
+def _printed_with(
+    ledger: Ledger, lesson: int, job: str, *results: Result, flaw: Symptom = Symptom.NONE,
+) -> None:
     given = GivenLesson(id=lesson, text="four walls on a cap", key="wall_loops", value="4",
                         job_id="job-1", stl_name="cap.stl", traits=("small_bed_contact",),
                         reviewed_by="reviewer: test", applied=True)
@@ -901,7 +903,7 @@ def _printed_with(ledger: Ledger, lesson: int, job: str, *results: Result) -> No
     ledger.record_started(job)
     ledger.record_ended(job, 9)
     for n, result in enumerate(results, 1):
-        symptom = Symptom.NONE if result is Result.SUCCESS else Symptom.STRINGING
+        symptom = flaw if result is Result.SUCCESS else Symptom.STRINGING
         ledger.record_answer(row_id(job, n), Answer(result=result, symptom=symptom))
 
 

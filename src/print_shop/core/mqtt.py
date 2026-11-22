@@ -38,6 +38,7 @@ __all__ = [
     "MessageHandler",
     "MqttConfig",
     "MqttBridge",
+    "approval_buttons",
     "state_topic",
     "gate_topic",
     "command_topic",
@@ -182,6 +183,36 @@ OUTCOME_PART_TEMPLATE = (
 )
 
 
+def approval_buttons(
+    cfg: MqttConfig, job_id: str = ""
+) -> list[tuple[str, dict[str, object]]]:
+    """Approve and Reject's discovery configs, whose press names `job_id`.
+
+    A press names its job (mqucifer/print-shop#207), and a button's payload is a fixed string, so
+    the daemon publishes these again when a gate opens, with that job's id, and when it closes,
+    with none. Home Assistant takes the new `payload_press` on rediscovery and sends what it
+    holds when pressed (2026.8.3, `components/mqtt/button.py` and `entity.py`), so a dashboard
+    needn't change. A template over the gate's state would have needed the entity's id, which
+    isn't this project's to choose.
+    """
+    device = {"identifiers": [cfg.node_id], "name": "3D Print Agent"}
+    named = {"job_id": job_id} if job_id else {}
+    return [
+        (
+            f"{cfg.discovery_prefix}/button/{cfg.node_id}/{decision}/config",
+            {
+                "name": decision.capitalize(),
+                "unique_id": f"{cfg.node_id}_{decision}",
+                "command_topic": command_topic(cfg),
+                "payload_press": json.dumps({"decision": decision, **named}),
+                "availability_topic": availability_topic(cfg),
+                "device": device,
+            },
+        )
+        for decision in ("approve", "reject")
+    ]
+
+
 def discovery_payloads(cfg: MqttConfig) -> Iterable[tuple[str, dict[str, object]]]:
     """Yield ``(topic, payload)`` pairs for every HA entity.
 
@@ -280,28 +311,7 @@ def discovery_payloads(cfg: MqttConfig) -> Iterable[tuple[str, dict[str, object]
                 "device": device,
             },
         ),
-        (
-            f"{cfg.discovery_prefix}/button/{cfg.node_id}/approve/config",
-            {
-                "name": "Approve",
-                "unique_id": f"{cfg.node_id}_approve",
-                "command_topic": command_topic(cfg),
-                "payload_press": json.dumps({"decision": "approve"}),
-                "availability_topic": avail,
-                "device": device,
-            },
-        ),
-        (
-            f"{cfg.discovery_prefix}/button/{cfg.node_id}/reject/config",
-            {
-                "name": "Reject",
-                "unique_id": f"{cfg.node_id}_reject",
-                "command_topic": command_topic(cfg),
-                "payload_press": json.dumps({"decision": "reject"}),
-                "availability_topic": avail,
-                "device": device,
-            },
-        ),
+        *approval_buttons(cfg),
         # The outcome gate (mqucifer/print-shop#2): when a print ends, the
         # Sponsor says how it came out. The daemon holds the draft; Record
         # commits it to the ledger. See `print_shop.orchestrator.outcome`.

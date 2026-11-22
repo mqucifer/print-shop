@@ -5,8 +5,8 @@ The Sponsor prints one part at a time from main, so that flow is held byte for b
 the ledger, the files in the job's folder, and the G-code it sends. Ids, times and temporary
 paths are the only things replaced.
 
-`tests/data/one_part/transcript.txt` was written by this test run on f5c49c3, the main before
-that change. A change that means to alter one part's flow writes it again, and the diff shows
+`tests/data/one_part/transcript.txt` was written by this test run on e6b20e3, main without that
+change. A change that means to alter one part's flow writes it again, and the diff shows
 what it altered:
 
     PRINT_SHOP_WRITE_TRANSCRIPT=1 uv run pytest tests/test_one_part_unchanged.py -m "not slicer"

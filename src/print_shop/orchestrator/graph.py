@@ -65,6 +65,7 @@ from print_shop.expert.orientation import (
 )
 from print_shop.ingest.analyzer import analyze, verify_unchanged
 from print_shop.ingest.orientation import candidates, write_rotated
+from print_shop.inventory import Inventory, Material
 from print_shop.ledger import Ledger, PrintRecord
 from print_shop.orchestrator import plate_job
 from print_shop.orchestrator.fitness import scoring_profiles
@@ -270,8 +271,7 @@ def build_graph(
             found = orient_part(own, came_from=Path(part.given), looped=False)
             outcome: Outcome[Orientation] = found["orientation"]
             if not outcome.accepted:
-                said = "; ".join(v.detail for verdict in outcome.history[-1:]
-                                 for v in verdict.blockers if v.detail)
+                said = "; ".join(v.detail for v in outcome.outstanding if v.detail)
                 raise RuntimeError(
                     f"no pose of part {part.n}, {part.name}, was accepted"
                     + (f" ({said})" if said else "") + ": nothing was sliced")
@@ -692,12 +692,21 @@ def build_graph(
         }
 
     def review_proposal_node(state: PrintJobState) -> dict[str, Any]:
-        """Gate for non-manifold meshes: stop for a human decision.
+        """Gate for a non-manifold mesh, or no pose that passed its check: stop for a human
+        decision.
 
-        The payload carries the mesh facts a human needs to decide whether
+        The payload carries why it stopped and the mesh facts a human needs to decide whether
         to retry (route back to slice) or abandon (END).
         """
         mesh = state["mesh"]
+        reason = "Mesh is not manifold; cannot be trusted to slice."
+        if mesh.is_manifold:
+            # From the orientation's check, which gave the mesh's reason until
+            # mqucifer/print-shop#200.
+            outcome = state.get("orientation")
+            found = outcome.outstanding if outcome is not None else ()
+            why = "; ".join(v.detail for v in found if v.detail)
+            reason = "No pose passed its check, so none was chosen" + (f": {why}" if why else "")
         decision = interrupt(
             {
                 "gate": Gate.REVIEW_PROPOSAL.value,
@@ -707,7 +716,7 @@ def build_graph(
                 "surface_area_mm2": mesh.surface_area_mm2,
                 "bbox_mm": list(mesh.bbox_mm),
                 "overhang_area_mm2": mesh.overhang_area_mm2,
-                "reason": "Mesh is not manifold; cannot be trusted to slice.",
+                "reason": reason,
             }
         )
         approved = (
@@ -766,7 +775,7 @@ def build_graph(
     def print_node(state: PrintJobState) -> dict[str, Any]:
         """Hardware boundary: upload the G-code and start the print.
 
-        Four refusals stand between this being called and the nozzle moving,
+        Five refusals stand between this being called and the nozzle moving,
         and each one raises rather than continuing:
 
         1. **The gate decision is re-checked here.** ``ungated_edges`` proves
@@ -774,13 +783,16 @@ def build_graph(
            which is a property of the topology — not of the decision sitting in
            state. Commit d6374b9 fixed two ways a decision could reach a gate it
            was not made for; this is the same class of bug one node further on.
-        2. **Preflight** — the printer must be free and have room, and the
+        2. **The spool's tuning is the one the job was prepared with**
+           (mqucifer/print-shop#220), read again here, as it can be edited
+           while the job waits. A colour corrected meanwhile is what's recorded.
+        3. **Preflight** — the printer must be free and have room, and the
            G-code must exist. A pure validator over a typed snapshot.
-        3. **The uploaded name must carry this job's id.** ``upload_file``
+        4. **The uploaded name must carry this job's id.** ``upload_file``
            returns the name the *printer* chose, which need not be the name we
            sent. If the round-trip fails we are about to print a file we cannot
            account for, so we do not.
-        4. **The start is confirmed by watching the printer's own status**,
+        5. **The start is confirmed by watching the printer's own status**,
            not by the command being acknowledged.
 
         Never returns a fake success: the previous implementation set
@@ -809,6 +821,11 @@ def build_graph(
                 "one that would not be."
             )
 
+        material = _material_prepared(state)
+        if material is not None:
+            with Inventory(ledger.path) as inventory:
+                material = inventory.at_start(material)
+
         gcode = Path(state["gcode_path"])
         snapshot = client.snapshot()
         verdict = preflight(snapshot, gcode)
@@ -832,10 +849,10 @@ def build_graph(
         # halfway is still on record.
         rows = (
             plate_job.records(state, remote_name, parse_config_block(gcode), snapshot.machine,
-                              snapshot.firmware)
+                              snapshot.firmware, material)
             if state.get("parts")
             else (_print_record(state, remote_name, gcode, snapshot.machine, snapshot.firmware,
-                                store),)
+                                store, material),)
         )
         ledger.record_start_requested(*rows)
         try:
@@ -927,11 +944,23 @@ def _pauses_said(reading: Any) -> str:
     return "; ".join(f"this print {p.line()}" for p in pauses)
 
 
+def _material_prepared(state: PrintJobState) -> Material | None:
+    """The spool, nozzle and printer the job was prepared with, if the inventory gave them."""
+    job = state.get("sliced")
+    if job is not None:
+        return job.material
+    used = state.get("profiles_used")
+    return used.material if used is not None else None
+
+
 def _print_record(
     state: PrintJobState, remote_name: str, gcode: Path, machine: str, firmware: str,
-    store: Store | None = None,
+    store: Store | None = None, material: Material | None = None,
 ) -> PrintRecord:
-    """The ledger's row for this job, from state and the G-code Orca wrote."""
+    """The ledger's row for this job, from state and the G-code Orca wrote.
+
+    `material` is the spool as the print starts (`Inventory.at_start`).
+    """
     slice_result: SliceResult = state["slice"]
     job = state.get("sliced")
     if job is not None:
@@ -955,11 +984,15 @@ def _print_record(
             reading=state.get("slice_reading"),
             flags=tuple(state.get("slice_flags", ())),
             sliced=job.record(store),
-            material=job.material,
+            material=material,
         )
     applied = state.get("applied_orientation", AppliedOrientation())
     outcome = state.get("orientation")
     accepted = outcome is not None and outcome.accepted
+    used = state.get("profiles_used")
+    if used is not None:
+        # The row keeps the spool twice, here and beside the print, and they agree.
+        used = used.model_copy(update={"material": material})
     return PrintRecord(
         job_id=state["job_id"],
         stl_name=Path(state["stl_path"]).name,
@@ -975,7 +1008,7 @@ def _print_record(
         slicer_config=parse_config_block(gcode),
         printer_machine=machine,
         printer_firmware=firmware,
-        profiles=state.get("profiles_used"),
+        profiles=used,
         intake=state.get("intake"),
         proposal=state.get("proposal"),
         corrections=tuple(state.get("corrections", ())),

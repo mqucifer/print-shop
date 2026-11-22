@@ -74,11 +74,12 @@ def parse_duration(text: str) -> int:
 class PauseAt(BaseModel):
     """A pause Orca writes itself, from the machine profile's pause G-code.
 
-    `print_z` is the top of the first layer printed after it. Orca puts a custom G-code item on
-    the nearest layer (a tie goes to the lower) and runs it at the start of that layer, before
-    the layer prints (`ToolOrdering::assign_custom_gcodes`, v2.4.2; tested at 2.6, 2.7 and 2.8 mm
-    in `~/print-shop/proofs/m18-refine/cli-probe/`). So a pause after layer 13 of 0.2 mm layers
-    on a 0.2 mm first layer is `print_z` 2.8.
+    `print_z` is the top of the first layer printed after it: Orca's height, never the pause
+    height a person or the bench gives (`bench.pausing`, mqucifer/print-shop#203). Orca puts a
+    custom G-code item on the nearest layer (a tie goes to the lower) and runs it at the start of
+    that layer, before the layer prints (`ToolOrdering::assign_custom_gcodes`, v2.4.2; tested at
+    2.6, 2.7 and 2.8 mm in `~/print-shop/proofs/m18-refine/cli-probe/`). So a pause after
+    layer 13 of 0.2 mm layers on a 0.2 mm first layer is `print_z` 2.8.
     """
 
     print_z: float
@@ -98,7 +99,7 @@ class SlicerProfiles(BaseModel):
     filament: Path | None = None
     used: ProfilesUsed | None = None
     #: Pauses Orca writes itself, from the machine's pause G-code (`M600` on the Centauri
-    #: Carbon): a colour change asked for at the review (mqucifer/print-shop#119).
+    #: Carbon): a pause asked for at the review (mqucifer/print-shop#119).
     pauses: tuple[PauseAt, ...] = ()
 
 

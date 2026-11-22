@@ -22,7 +22,6 @@ import numpy as np
 import pytest
 import trimesh
 
-from print_shop.core.mqtt import command_topic
 from print_shop.desk.again import again
 from print_shop.ingest.orientation import candidates
 from print_shop.ledger import Ledger
@@ -582,7 +581,7 @@ def job(tmp_path: Path) -> Iterator[Any]:
             with daemon:
                 job_id = daemon.submit(stl, **submit)
                 daemon.wait_for_gate(job_id, timeout_s=60)
-                bridge.deliver(command_topic(CFG), {"decision": "approve"})
+                bridge.press(CFG, "approve")
                 result = daemon.wait_for_finish(job_id, timeout_s=60)
                 assert result.printed, result.error
             row = ledger.get(job_id)

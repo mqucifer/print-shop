@@ -59,6 +59,12 @@ def test_parses_the_button_payloads(raw: bytes, expected: Decision) -> None:
     assert parse_command(raw).decision is expected
 
 
+def test_carries_the_job_it_is_for() -> None:
+    """mqucifer/print-shop#207. None is an empty one, which no gate takes."""
+    assert parse_command(b'{"decision":"approve","job_id":"j1"}').job_id == "j1"
+    assert parse_command(b'{"decision":"approve"}').job_id == ""
+
+
 def test_carries_an_optional_note() -> None:
     assert parse_command(b'{"decision":"reject","note":"wrong part"}').note == "wrong part"
     assert parse_command(b'{"decision":"approve"}').note == ""
@@ -66,7 +72,8 @@ def test_carries_an_optional_note() -> None:
 
 @pytest.mark.parametrize(
     "raw",
-    [b"", b"approve", b"{}", b'{"decision":"maybe"}', b"{not json", b'{"decision":null}'],
+    [b"", b"approve", b"{}", b'{"decision":"maybe"}', b"{not json", b'{"decision":null}',
+     b'{"decision":"approve","job_id":7}', b'{"decision":"approve","job_id":null}'],
 )
 def test_rejects_anything_that_is_not_a_decision(raw: bytes) -> None:
     """A malformed command must never be read as approval.
@@ -230,7 +237,8 @@ def test_pressing_reject_ends_the_job_without_printing(
     daemon.wait_for_gate(job_id, timeout_s=180.0)
 
     with MqttBridge(cfg, client_suffix="presser") as presser:
-        presser.publish(command_topic(cfg), '{"decision": "reject", "note": "no"}')
+        pressed = {"decision": "reject", "job_id": job_id, "note": "no"}
+        presser.publish(command_topic(cfg), json.dumps(pressed))
         presser.wait_for(lambda: True, timeout_s=1.0)
 
     result = daemon.wait_for_finish(job_id, timeout_s=60.0)
@@ -260,7 +268,8 @@ def test_approving_reaches_the_print_node(
     daemon.wait_for_gate(job_id, timeout_s=180.0)
 
     with MqttBridge(cfg, client_suffix="presser2") as presser:
-        presser.publish(command_topic(cfg), '{"decision": "approve"}')
+        pressed = {"decision": "approve", "job_id": job_id}
+        presser.publish(command_topic(cfg), json.dumps(pressed))
         presser.wait_for(lambda: True, timeout_s=1.0)
 
     result = daemon.wait_for_finish(job_id, timeout_s=60.0)

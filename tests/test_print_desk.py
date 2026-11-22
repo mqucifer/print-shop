@@ -36,7 +36,7 @@ from print_shop.inventory import Inventory
 from print_shop.ledger import Answer, JobEnding, Ledger, LedgerError, PrintRecord, Result, Symptom
 from print_shop.setup.intake import Answer as IntakeAnswer
 from print_shop.setup.intake import Intake, Option, Question, replay_asker
-from print_shop.setup.proposal import ORIENTATION, Change, Proposal, Source
+from print_shop.setup.proposal import ORIENTATION, PAUSE, Change, Proposal, Source
 from print_shop.setup.reading import Flag, PauseReading, read_slice
 from print_shop.setup.review import Review, ReviewRequest, parse_answer
 from print_shop.slicer.orca import SlicerProfiles
@@ -146,7 +146,7 @@ def _shop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Shop:
 
     reading = read_slice(DATA / "recorded" / "cube.gcode")
     reading = reading.model_copy(update={"pauses": (
-        PauseReading(before_layer=62, z=12.4, after_s=600.0),)})
+        PauseReading(before_layer=63, z=12.6, after_z=12.4, after_s=600.0),)})
     base = dict(
         orientation_accepted=True, layer_count=100,
         slicer_config={"nozzle_diameter": "0.4", "filament_settings_id": TUNING},
@@ -332,6 +332,17 @@ def test_a_jobs_page_shows_its_whole_record(shop: Shop, served: str) -> None:
     assert "<b>" not in page.replace("<b>hidden", "")
 
 
+def test_a_success_with_a_flaw_reads_as_usable_on_the_desk(shop: Shop, served: str) -> None:
+    with Ledger(shop.ledger) as ledger:
+        ledger.record_ended(CUBE, 9)
+        ledger.record_answer(CUBE, Answer(result=Result.SUCCESS, symptom=Symptom.STRINGING))
+    [cube] = [j for j in Desk(shop.ledger, shop.jobs, shop.parts).jobs() if j.job_id == CUBE]
+    assert (cube.status, cube.failed) == ("success, with stringing", False)
+    assert "success, with stringing" in _get(served + "/")[2].decode()
+    page = _get(served + f"/job/{CUBE}")[2].decode()
+    assert '<li class="good"><strong>success, with stringing</strong>' in page
+
+
 def test_frames_the_log_and_the_answers_are_served(shop: Shop, served: str) -> None:
     code, kind, frame = _get(served + f"/job/{SIGN}/frame/2")
     assert (code, kind, frame) == (200, "image/jpeg", JPEG + b"100")
@@ -451,6 +462,50 @@ def test_a_reason_with_a_semicolon_doesnt_split_the_line(shop: Shop) -> None:
     assert isinstance(review, Review) and len(review.corrections) == 1
 
 
+def test_a_pause_from_before_203_is_copied_at_the_height_that_pauses_where_it_did(
+    shop: Shop,
+) -> None:
+    """mqucifer/print-shop#203: such a row's typed height was the first layer after the pause.
+    Typed again as it was, the print would pause a layer later than it did."""
+    row, part, printers, found = _record(shop, SIGN)
+    assert row.reading is not None and "pause_at=12.4" in correction_line(row)
+    written_then = PauseReading.model_validate({"before_layer": 62, "z": 12.4, "after_s": 600.0})
+    older = row.model_copy(
+        update={"reading": row.reading.model_copy(update={"pauses": (written_then,)})})
+    assert written_then.line().startswith("pauses for a filament swap before layer 62, at z=12.4")
+
+    a = again(older, part, printers, found)
+    assert "pause_at=12.2 because white to black" in a.corrections
+    assert "wall_loops=4 because it carries the load" in a.corrections, "and the rest as typed"
+    [note] = [n for n in a.notes if "copied as" in n]
+    assert "pause_at=12.4 is copied as pause_at=12.2" in note
+
+    # A row from since is copied as typed, and an older one whose pause was taken away too.
+    assert not any("copied as" in n for n in again(row, part, printers, found).notes)
+    taken_away = Change(key=PAUSE, preset="12.4", value="none", reason="one colour after all",
+                        source=Source.SPONSOR)
+    assert row.corrections is not None
+    gone = older.model_copy(update={"corrections": (*row.corrections, taken_away)})
+    assert "pause_at=none because one colour after all" in correction_line(gone)
+    assert "pause_at=12.4" not in correction_line(gone), "only the pause that stood"
+
+
+@pytest.mark.parametrize("pauses", [None, 0, 2])
+def test_a_pause_that_cant_be_converted_is_never_copied_raw(
+    shop: Shop, pauses: int | None
+) -> None:
+    """Where the G-code doesn't say where a job paused, its height could mean either layer."""
+    row, part, printers, found = _record(shop, SIGN)
+    assert row.reading is not None
+    reading = None if pauses is None else row.reading.model_copy(update={"pauses": tuple(
+        PauseReading(before_layer=62 + n, z=12.4 + 0.2 * n, after_s=600.0) for n in range(pauses)
+    )})
+    a = again(row.model_copy(update={"reading": reading}), part, printers, found)
+    assert "pause_at" not in a.corrections
+    assert "wall_loops=4 because it carries the load" in a.corrections
+    assert any("pause_at=12.4 isn't copied" in n for n in a.notes)
+
+
 # --- the job's log --------------------------------------------------------------------
 
 
@@ -485,7 +540,7 @@ class _Daemon:
         logging.getLogger("print_shop.test").warning("calling with %s", self._tokens[0])
         return "job-log-1"
 
-    def wait_for_gate(self, job_id: str, timeout_s: float) -> None:
+    def wait_for_gate(self, job_id: str, timeout_s: float, shown: int = 0) -> None:
         assert callable(self._asker)
         self._asker([_intake().questions[0]])
         raise TimeoutError("The slice didn't reach the approval gate within the hour.")

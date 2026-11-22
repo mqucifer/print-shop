@@ -49,6 +49,7 @@ from print_shop.core.state import Orientation
 from print_shop.expert.client import CutOff, LLMConfig, chat_with_tools
 from print_shop.expert.orientation import OrientationRequest, symptom_map, validate_orientation
 from print_shop.ingest.orientation import write_rotated
+from print_shop.outcome_words import outcome_words
 from print_shop.setup.bounds import SETTINGS, check
 from print_shop.setup.context import refuses
 from print_shop.setup.model import prompt
@@ -466,7 +467,7 @@ def _past_plate(rows: list[Row]) -> str:
     first = rows[0]
     each = "; ".join(
         f"{r.part_said} "
-        + (f"{r.result}, {r.symptom}" if r.result else "no outcome yet")
+        + (outcome_words(r.result, r.symptom) if r.result else "no outcome yet")
         + (f" ({r.note})" if r.note else "")
         for r in rows
     )
@@ -507,7 +508,7 @@ def _past_prints(part: Part, state: _State, wanted: list[str] | None) -> str:
             if shown == 8:
                 break
             continue
-        outcome = f"{row.result}, {row.symptom}" if row.result else "no outcome yet"
+        outcome = outcome_words(row.result, row.symptom) if row.result else "no outcome yet"
         fixed = ", ".join(f"{c.key}={c.value}" for c in row.corrections or ()) or "nothing"
         lines.append(f"- {row.stl_name}, job {row.job_id}: {outcome}"
                      + (f" ({row.note})" if row.note else "") + f"; corrected {fixed}")

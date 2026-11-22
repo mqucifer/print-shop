@@ -26,7 +26,6 @@ import pytest
 from pydantic import SecretStr
 
 from print_shop.core.contracts import Proposal as Chosen
-from print_shop.core.mqtt import command_topic
 from print_shop.core.state import AppliedOrientation, Orientation, SliceResult
 from print_shop.expert.client import LLMConfig
 from print_shop.expert.orientation import OrientationRequest
@@ -317,7 +316,7 @@ def shop(tmp_path: Path) -> Iterator[tuple[Ledger, Any]]:
             with daemon:
                 job_id = daemon.submit(write_stl("lid", tmp_path))
                 daemon.wait_for_gate(job_id, timeout_s=30)
-                bridge.deliver(command_topic(CFG), {"decision": "approve"})
+                bridge.press(CFG, "approve")
                 result = daemon.wait_for_finish(job_id, timeout_s=30)
                 assert result.printed, result.error
             return job_id, person

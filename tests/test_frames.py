@@ -386,6 +386,14 @@ def test_an_outcome_with_a_symptom_names_its_frames_in_the_lesson(desk: Any) -> 
     assert "(4 frames, layers 1 to 3, in " in lessons.listing(ledger)
 
 
+def test_a_success_with_a_flaw_names_its_frames_too(desk: Any) -> None:
+    ledger, _, _ = desk
+    ledger.record_answer("job-1", Answer(result=Result.SUCCESS, symptom=Symptom.STRINGING))
+    [evidence] = ledger.query("SELECT detail FROM print_lesson_evidence WHERE kind='outcome'")
+    assert len(json.loads(evidence["detail"])["frames"]) == 4
+    assert "success, with stringing (4 frames, layers 1 to 3, in " in lessons.listing(ledger)
+
+
 def test_a_success_with_a_note_doesnt_carry_the_frames(desk: Any) -> None:
     ledger, _, _ = desk
     ledger.record_answer("job-1", Answer(result=Result.SUCCESS, symptom=Symptom.NONE,

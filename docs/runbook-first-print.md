@@ -50,7 +50,8 @@ A print uses your tuning where there is one, and the standard where you haven't 
 
    - `stock` alone lists what's on hand, loaded and fitted.
    - `stock empty <id>` marks a spool used up.
-   - A variety you've tuned more than once asks which tuning the spool prints with, once, when you add it (`--tuning "…"`).
+   - `stock edit <id> --colour grey` or `stock edit <id> --tuning "…"` corrects a spool, keeping its number and whether it's loaded (mqucifer/print-shop#220). `--tuning none` is the variety's default. Prints already made keep the spool as it was. A job still waiting when you edit records the new colour; if the tuning changed, it says so when you approve it and doesn't print.
+   - A variety you've tuned more than once asks which tuning the spool prints with when you add it (`--tuning "…"`).
    - Prints then take the fitted nozzle and the loaded spool by default, and say so.
 
 3. **Nothing from the prototype is running.** Both use the same topics. The prototype has no daemon command of its own, so one would only be running if someone started it by hand, from `~/Documents/git/3d-print-agent`. If one is, stop it.
@@ -70,9 +71,17 @@ A print uses your tuning where there is one, and the standard where you haven't 
    - **The plate is the textured PEI plate,** textured side up. The slice is for it: Orca's `Textured PEI Plate`, and your PLA preset heats it to **60 °C** (`M140 S60` in the G-code). An earlier version of this runbook said 45 °C. That came from slicing Orca's system files without their parents, so Orca filled the bed temperature from its own defaults; Elegoo's PLA profile, and your copy of it, say 60. If a different plate is fitted, stop and tell the operator: don't print.
    - You know where Home Assistant's emergency stop is. That is how a print is stopped: not this program, and not Ctrl-C.
 
-7. **A dry run, unarmed.** Run step 1 below without the flag first. It first prints what it was told is fitted and the three profiles it chose: your tuning, or the standard where you haven't tuned. It slices, the approval card appears, and pressing **No, stop** ends it. That proves the settings, the broker and the model without the printer. At the gate the program prints the orientation and why. If it says "Model endpoint was unavailable", orientation fell back to geometry: fine for this print, but tell the operator.
+7. **A dry run, unarmed.** Run step 1 below without the flag first. It first prints what it was told is fitted and the three profiles it chose: your tuning, or the standard where you haven't tuned. It slices, the approval card appears, and pressing **No, stop** ends it. That proves the settings, the broker and the model without the printer. Let it end before the armed run: one runs at a time (below). At the gate the program prints the orientation and why. If it says "Model endpoint was unavailable", orientation fell back to geometry: fine for this print, but tell the operator.
 
 ## The print
+
+**One runs at a time** (mqucifer/print-shop#207). While a job is live, from its start until its outcome is recorded or you stop it, a second `print_job.py` (a part, `--sliced`, `--again` or `--serve`, armed or not) says what's running in one sentence and exits, having published and started nothing:
+
+```
+Not started, as only one runs at a time: job 3f2a… (cube.stl) is at the gate, waiting for Approve or Reject, in process 48213.
+```
+
+Finish that job, or stop it with Ctrl-C in its terminal (which doesn't stop the printer: step 4), and start again. `--serve` is live too, so stop it before you start a job. A process that's killed, or whose terminal closes, holds nothing: there's no file to delete. `--list`, `--filaments`, the print desk and `stock.py` run beside a job.
 
 1. **Arm and run, in one command:**
 
@@ -113,7 +122,7 @@ A print uses your tuning where there is one, and the standard where you haven't 
    - what the slice shows, read layer by layer: each layer's time and the shortest, each feature's time and area (ironing, gap fill, walls, infill), and where the seams fall;
    - what that means for this part, each with a proposed change, its reason and the reading it rests on: layers too short for the filament to cool (slow-down on), ironing on a face you said is hidden (ironing off, or only the topmost), a seam in a line on walls you said are seen (moved to the back). Nothing from the slice is applied unless you take it.
 
-   It reasons with `crew-code-think` (the `PRINT_SHOP_SETUP_MODEL` setting), which usually takes two to three minutes (up to about ten at its 16,000-token limit). If its answer is cut off at that limit, the review says CUT OFF and shows only the guards' changes; that is recorded, and nothing is retried. Type `ok` to go on to the gate. To take what the slice proposes, type `take`, or `take 2` for one of them; it slices again. To correct a setting, type it by name, e.g. `layer_height=0.2 because it's a test cube`, and it slices again and shows the review again. **For a colour change at a height,** type `pause_at=12.4 because white walls, a black top` (or `colour_change=12.4`; `pause_at=none` takes it away): the print pauses for a filament swap at the start of the first layer at or above that height, through the printer's own pause (`M600`). The review shows the layer, its height and how far into the print it falls; the approval gate says it, so you can be at the printer; and at the outcome, say in the note how the swap went (mqucifer/print-shop#119). Or type `stop`. **The questions and the review take as long as you take** (mqucifer/print-shop#125): nothing counts down while they wait for you.
+   It reasons with `crew-code-think` (the `PRINT_SHOP_SETUP_MODEL` setting), which usually takes two to three minutes (up to about ten at its 16,000-token limit). If its answer is cut off at that limit, the review says CUT OFF and shows only the guards' changes; that is recorded, and nothing is retried. Type `ok` to go on to the gate. To take what the slice proposes, type `take`, or `take 2` for one of them; it slices again. To correct a setting, type it by name, e.g. `layer_height=0.2 because it's a test cube`, and it slices again and shows the review again. **For a pause at a height,** a colour change or parts to drop in, type `pause_at=12.4 because white walls, a black top` (or `colour_change=12.4`, the same thing; `pause_at=none` takes it away). **A pause height is the top of the last layer printed before the pause** (mqucifer/print-shop#203, [the bench](bench.md)): the print pauses after the layer that tops out at 12.4 mm, through the printer's own pause (`M600`), so everything up to 12.4 is the first colour and everything above it the second. For parts dropped in, it's the z the bench's `pause` says. The review reads the sliced G-code and shows where the pause landed, beside the height asked for ("pause after layer 62, at z=12.4, before layer 63, at z=12.6"), with how far into the print it falls in the slice's reading. If it says `PAUSE MISMATCH`, the pause isn't where you asked: correct the height, or the layer heights, before `ok`. **Don't add a layer:** before mqucifer/print-shop#203 you had to type 2.8 to drop parts into pockets topping out at 2.6, and 2.8 now pauses once the layer over them has printed, too late. Type 2.6, and change any sidecar note that says to add one. The review notes it where the part's context has that fit's height and the slice shows the layer before the pause closing over it; elsewhere it can't tell, and says nothing; the approval gate says it, so you can be at the printer; and at the outcome, say in the note how the swap went (mqucifer/print-shop#119). Or type `stop`. **The questions and the review take as long as you take** (mqucifer/print-shop#125): nothing counts down while they wait for you.
 
    An answer at the questions is a decision, even one that keeps your preset's value. "Bridge it — no support" over a preset with supports off sets nothing, and the review says `kept enable_support at 0: you chose 'Bridge it — no support' … [your answer: overhang]`; the guard that switches tree supports on for an overhang only does so when nothing decided otherwise (mqucifer/print-shop#124). An option that says no support always carries `enable_support=0`. Your corrections go in the ledger: they are what print-shop learns from. Each one is a candidate lesson, keyed to the part's shape; once a reviewer keeps it, a later part with the same shape gets that setting by itself, and the review says which lesson set it (`docs/print-lessons.md`).
 
@@ -132,12 +141,29 @@ A print uses your tuning where there is one, and the standard where you haven't 
 
    The PR quotes the correction and its job id (`--list` shows both). A correction for this part only needs nothing more: the ledger has it. Hard limits (a bound, tree supports) are code, in `src/print_shop/setup/bounds.py`, and change by PR too.
 
+   **A mesh that isn't closed stops at the mesh gate first** (mqucifer/print-shop#200), before any question or slice. The command line, and the job's log, say so:
+
+   ```
+   At the mesh gate, before any question or slice. Approve or Reject on the dashboard.
+     because     Mesh is not manifold; cannot be trusted to slice.
+     is_manifold False
+     volume_mm3  None: a mesh that isn't closed has no volume
+     bbox_mm     20 x 20 x 20
+     Approve     goes on to slice a mesh this gate calls untrustworthy, as the file lays it: the questions and the review follow, then the gate before printing, where today the job fails whatever you answer. Nothing prints.
+     Reject      ends the job: nothing is sliced or printed
+     answer by   14:32 (60 min left); after that it ends and nothing prints
+   ```
+
+   The dashboard's card doesn't tell the two gates apart: it asks "Print this?" at the mesh gate too. Read the command line before you press. Reject and mend the file: Orca slices a damaged mesh without complaint and can get it badly wrong, and today a job approved at the mesh gate fails when the approval gate is answered, with nothing sent to the printer (`can only concatenate list`).
+
 2. **Approve at the gate.** The dashboard asks "Print this?". Check the numbers before you press:
    - Time: about 11 minutes (Orca's estimate for your presets is 10 m 54 s; the review shows the estimate with its changes);
    - Plastic: about 2.9 cm³;
    - Turned: a multiple of 90° on each axis. A cube sits flat on every face.
 
    Press **Yes, print it**. Anything else wrong: press **No, stop**.
+
+   A press names the job it's for: print-shop puts the job's id in the two buttons when its gate opens, so the dashboard needs no change. A gate ignores a press that names another job or none, and its command line says `ignored approve for …`. So an automation or script that publishes to the command topic itself has to send the `job_id` the gate topic shows.
 
    The command line says by when, `answer by 14:32 (60 min left)`. The gate waits an hour from when it opens; the hour before it, for the slice to reach the gate, starts when you type `ok` at the review. If either runs out, the job ends in one sentence, such as "Timed out waiting for Approve or Reject at the approval gate after 60 min, so nothing printed.", nothing goes to the printer, and the ledger keeps the job as timed out (`--list` shows it under "Ended without printing"). Submit it again to print it.
 
@@ -155,10 +181,10 @@ A print uses your tuning where there is one, and the standard where you haven't 
    **For now there are no frames, and the card says why** (mqucifer/print-shop#123): "No camera frame was kept for this print: frames are off: they'll come through Home Assistant, and how is still being chosen". print-shop no longer opens the printer's own camera stream, and how frames reach it through Home Assistant is the Sponsor's choice, still open. When a grab fails, the command line has one line saying why and at which layer, and the card says the last reason.
 
    **The printer's camera slots.** The Centauri Carbon's camera serves only a few connections, and it holds a closed one's slot for a long time afterwards, so each viewer, and each grab that opened a stream, can leave one taken (pycentauri 0.9.1, `mjpeg_broadcast.py`). When they're used up, a viewer gets `200 OK` and then no picture: the Elegoo app, Orca's device tab, Home Assistant's camera, or print-shop's frames. Closing a viewer doesn't free its slot. Restarting the printer's camera service does, and that means power-cycling the printer, between prints, never during one. Keep the viewers on the camera to the ones you use.
-   - **Result:** success or failed.
-   - **What went wrong:** `none` for a success. For a failure, the closest of adhesion, warping, stringing, layer_shift, spaghetti, under_extrusion, or other. Other needs a note.
+   - **Result:** success if the part is usable, or failed.
+   - **What went wrong:** the closest of adhesion, warping, stringing, layer_shift, spaghetti, under_extrusion, or other. On a success it's a minor flaw on a usable part, read as `success, with stringing` (mqucifer/print-shop#189), or `none` if there was no flaw. A failure always names one. Other needs a note.
    - **Note:** anything worth knowing, such as "corner lifted at layer 3".
-   - Press **Record it**. If it doesn't add up (a success with a symptom, or a failure without one), the card says why and nothing is stored. Fix it and press again.
+   - Press **Record it**. If it doesn't add up (a failure with `none`, or other without a note), the card says why and nothing is stored. Fix it and press again.
 
    You can answer later. Until you do, the print stays open, and `uv run python scripts/print_job.py --serve` asks about it again.
 
@@ -198,7 +224,7 @@ It's one job: one set of questions, one review, one gate and one print. Arming i
 - **By layer where it hasn't, saying why.** That's parts too many to space, a part over 36 mm with another beside it, two over 90 mm, or a pause. The review says it at its top, and so does the gate. The dashboard's gate card says it on a **Plate** line once you paste `ha-configs/lovelace_3dprint.yaml` again. The command line says it without that.
 - **Refused, with nothing sliced for printing:** parts that don't fit one plate even by layer, and a part whose mesh isn't closed (there's no mesh gate for a job of several: mend it or leave it out).
 - **The review** shows where each part is on the plate (x and y from the front left) and when it prints. `print_sequence` is a change like any: `print_sequence=by layer` prints them all at once. A correction is the whole plate's. One the plate can't be sliced with, or a pose sent back that doesn't fit, is taken back, and the review says why. `orientation` asks which part, then goes on as for one.
-- **A pause needs by layer.** Orca writes no pause by object and doesn't say so, so `pause_at` is refused there. `print_sequence=by layer; pause_at=3` pauses every part at that height. A part that needs a pause of its own prints by itself.
+- **A pause needs by layer.** Orca writes no pause by object and doesn't say so, so `pause_at` is refused there. `print_sequence=by layer; pause_at=3` pauses every part once the layer topping out at 3 mm is done. The note of a pause typed a layer past a fit isn't given for a plate, as one part's bridge would pass for another's pocket closing: read the pause's line at the review. A part that needs a pause of its own prints by itself.
 - **Each part's pose** is its own: as laid with `--as-laid`, the side its context gives, or one orientation call each. The print loop reads one part, so it isn't run for a plate and the settings come from the single call.
 - **Each part's context is read beside it.** `--context` is for one part only.
 - **The outcome is asked part by part** when the print ends. The card names each by its file, its number and its place on the plate, such as `cap-mid.stl (part 2 of 3), front centre, x 166 y 85`, so answer before you clear the plate. The frames are the whole print's.
@@ -236,7 +262,7 @@ For a print you set up yourself in Orca (mqucifer/print-shop#164): a test with a
 
 5. **Then the approval gate, the watching, the frames and the outcome question,** exactly as above. The file is copied into the job's folder when the job starts, under a name carrying the job id, and that copy is what you approve: it's hashed again just before the upload, and a file that has changed isn't sent. Editing the file in Orca after that changes nothing for this job; send it again for a new one.
 
-6. **In the ledger** (`--list`, and the print desk) the job is marked `sliced by hand`, with the settings by profile, what differed, the overrides, Orca's estimate beside the real time from its start to its end, your outcome, your note and the frames. The printer doesn't report the filament it used, so only Orca's estimate is kept for that. An outcome with a note or a failure is a lesson candidate, keyed by the file's own settings (`docs/print-lessons.md`).
+6. **In the ledger** (`--list`, and the print desk) the job is marked `sliced by hand`, with the settings by profile, what differed, the overrides, Orca's estimate beside the real time from its start to its end, your outcome, your note and the frames. The printer doesn't report the filament it used, so only Orca's estimate is kept for that. An outcome with a note, a flaw or a failure is a lesson candidate, keyed by the file's own settings (`docs/print-lessons.md`).
 
 **To print one again,** by its job id (the print desk shows the line to copy):
 
@@ -274,6 +300,8 @@ Then open <http://127.0.0.1:8719/> in a browser on the Mac. `--port` picks anoth
 
 | What you see | What it means | What to do |
 |---|---|---|
+| `Not started, as only one runs at a time` | another `print_job.py` is live, and the sentence says at what | finish it, or Ctrl-C in its terminal; nothing was started |
+| `ignored approve for job …` | a press named another job, or none, so this gate didn't take it | press again on the dashboard, which names the job at its gate |
 | `MQTT_USER is not set` or `CREW_LLM_API_KEY is not set` | the settings file is missing a key | add it; nothing was started |
 | `say what's fitted: --nozzle (mm) and --filament` | the nozzle or filament wasn't given | add both; nothing was started |
 | `The inventory isn't set up` | no printer in the inventory yet | do step 2 of Before, or give `--nozzle` and `--filament` |
@@ -286,6 +314,7 @@ Then open <http://127.0.0.1:8719/> in a browser on the Mac. `--port` picks anoth
 | `… holds no G-code: it's a project, not a sliced plate` | `--sliced` was given an unsliced Orca project | slice it in Orca and export the plate's sliced file, or its G-code |
 | `Not sent: the file is sliced for …` | the hand-sliced file names another filament or nozzle than the inventory says is loaded | load or fit what it names, fix the inventory, or add `--loaded-ok` |
 | `… has changed since it was taken … nothing was uploaded` | the job's copy of a hand-sliced file was changed after the gate opened | send the file again with `--sliced` |
+| `spool #…'s tuning was changed from …` | the spool's tuning was edited after the job was prepared | nothing was uploaded or printed; run the job again |
 | `printer preflight failed — printer.ready` | the printer is busy, paused, or in error | clear it at the machine, then run again |
 | `printer preflight failed — printer.free_space` | the printer's storage is full | delete old files on the printer |
 | The approval card never appears | the broker or the dashboard is wrong | check the broker settings; re-paste the dashboard |

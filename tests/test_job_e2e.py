@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 from pydantic import SecretStr
 
-from print_shop.core.mqtt import MqttConfig, command_topic, gate_topic, state_topic
+from print_shop.core.mqtt import MqttConfig, gate_topic, state_topic
 from print_shop.ledger import Ledger
 from print_shop.orchestrator.daemon import Daemon
 from print_shop.slicer.naming import job_id_from_filename
@@ -53,7 +53,7 @@ class Rig:
         )
 
     def press(self, decision: str, *, retain: bool = False) -> None:
-        self.bridge.deliver(command_topic(CFG), {"decision": decision}, retain=retain)
+        self.bridge.press(CFG, decision, retain=retain)
 
 
 @pytest.fixture
@@ -185,7 +185,7 @@ def test_without_a_ledger_nothing_is_started(tmp_path: Path) -> None:
     with daemon:
         job_id = daemon.submit(write_stl("cube", tmp_path))
         daemon.wait_for_gate(job_id, timeout_s=30)
-        bridge.deliver(command_topic(CFG), {"decision": "approve"})
+        bridge.press(CFG, "approve")
         result = daemon.wait_for_finish(job_id, timeout_s=30)
 
     assert result.printed is False
