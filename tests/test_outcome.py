@@ -258,9 +258,20 @@ def test_an_answer_that_does_not_add_up_is_shown_not_stored(desk_rig: Any) -> No
     ledger, bridge, desk = desk_rig
     ended(ledger)
     desk.refresh()
-    answer(bridge, "success", "warping")
+    answer(bridge, "failed", "none")
     assert ledger.awaiting_answer() != []
-    assert "a success has no symptom" in shown(bridge)["error"]
+    assert "a failure needs a symptom" in shown(bridge)["error"]
+
+
+def test_a_usable_part_with_a_flaw_is_recorded_a_success_with_it(desk_rig: Any) -> None:
+    ledger, bridge, desk = desk_rig
+    ended(ledger)
+    desk.refresh()
+    answer(bridge, "success", "stringing")
+    row = ledger.get("job-1")
+    assert row is not None
+    assert (row.result, row.symptom) == (Result.SUCCESS, Symptom.STRINGING)
+    assert shown(bridge) == {"pending": False, "waiting": 0}
 
 
 def test_a_retained_choice_or_record_is_not_an_answer(desk_rig: Any) -> None:

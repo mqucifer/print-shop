@@ -20,7 +20,7 @@ import pytest
 from print_shop.core.state import Orientation
 from print_shop.ingest.analyzer import analyze
 from print_shop.ingest.orientation import candidates
-from print_shop.ledger import Ledger
+from print_shop.ledger import Answer, Ledger, Result, Symptom
 from print_shop.orchestrator.daemon import Daemon
 from print_shop.setup import Proposer
 from print_shop.setup import lessons as print_lessons
@@ -208,6 +208,23 @@ def test_a_turn_the_person_says_no_to_is_their_correction_and_a_lesson(shop: Any
         ("orientation", "180,0,0", "0,0,0", no)]
     [lesson] = ledger.query("SELECT * FROM print_lessons WHERE setting='orientation'")
     assert (lesson["value"], lesson["text"]) == ("0,0,0", no)
+
+
+def test_past_prints_says_a_success_with_its_flaw(shop: Any, tmp_path: Path) -> None:
+    ledger, run = shop
+    lid = write_stl("lid", tmp_path)
+    ledger.record_start_requested(record("job-0").model_copy(update={
+        "stl_name": "tray.stl", "features": measure(lid, analyze(lid).bed_contact_area_mm2)}))
+    ledger.record_started("job-0")
+    ledger.record_ended("job-0", 9)
+    ledger.record_answer("job-0", Answer(result=Result.SUCCESS, symptom=Symptom.STRINGING))
+    model = Model(
+        [("past_prints", {})],
+        [("propose", {"rotation": [0, 0, 0], "settings": [], "reasoning": "flat"})],
+    )
+    _, row = run("lid", model, Person())
+    assert "- tray.stl, job job-0: success, with stringing; corrected nothing" \
+           in row.proposal.loop[0].result
 
 
 def test_a_part_like_an_earlier_one_gets_its_kept_lessons_and_the_review_says_which(

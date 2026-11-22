@@ -111,7 +111,7 @@ KEY_SETTINGS = (
 
 
 class Result(StrEnum):
-    """How the print came out, in the Sponsor's words."""
+    """How the print came out, in the Sponsor's words: whether the part is usable."""
 
     SUCCESS = "success"
     FAILED = "failed"
@@ -120,7 +120,8 @@ class Result(StrEnum):
 class Symptom(StrEnum):
     """What went wrong, from a fixed list, so a repeat can be counted.
 
-    `NONE` goes with a success. `OTHER` needs a note.
+    On a success it's a minor flaw on a usable part (mqucifer/print-shop#189). `NONE` goes
+    only with a success. `OTHER` needs a note, whatever the result.
     """
 
     NONE = "none"
@@ -149,8 +150,6 @@ class Answer(BaseModel):
     def problems(self) -> list[str]:
         """Why this answer cannot be recorded as given, if it cannot."""
         found = []
-        if self.result is Result.SUCCESS and self.symptom is not Symptom.NONE:
-            found.append("a success has no symptom; a flaw worth naming is a failure")
         if self.result is Result.FAILED and self.symptom is Symptom.NONE:
             found.append("a failure needs a symptom")
         if self.symptom is Symptom.OTHER and not self.note.strip():

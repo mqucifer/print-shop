@@ -39,7 +39,7 @@ When the ledger records a print (`Ledger.record_start_requested`) and again when
 - **The same correction on a later print is more evidence for the lesson it repeats,** not a second lesson. If that print's part doesn't have every trait the lesson is keyed to, the step says so, for the reviewer to widen the keys.
 - **A change the Sponsor took from the slice's reading is a candidate of its own kind** (`reading`, mqucifer/print-shop#105), not a correction: the reading's words are its evidence.
 - **Every lesson's evidence carries what that print's slice flagged,** with its shortest layer, ironing time and how stacked its seams were, where the slice was read.
-- **An outcome with something to say is a candidate:** a failure, or a success with a note. It sets nothing, and the model reads it.
+- **An outcome with something to say is a candidate:** a failure, a success with a minor flaw, or a success with a note. It sets nothing, and the model reads it. A flawed success's text starts with `success, with stringing` (or whichever symptom it was), then the note, so the model reads that the part was usable (mqucifer/print-shop#189). A lesson used on such a print counts as used on one that didn't fail, and the list to promote shows the flaw.
 - Each print's evidence is drawn once, however often it's read. A failure here never stops a print: it's logged, and `draw` does it again.
 
 ### A hand-sliced print teaches by its outcome only
