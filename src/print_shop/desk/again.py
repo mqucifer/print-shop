@@ -19,7 +19,8 @@ What these can't carry is said beside them, never dropped silently: a pose sent 
 review is chosen at the review again (`orientation`), and a change taken from the slice's
 reading is taken again (`take`) when the slice proposes it. Neither is put in the correction
 line, which would record them as the Sponsor's own corrections, and each correction is drawn as
-a lesson.
+a lesson. For the same reason, what was used from a past print and was an answer's, a lesson's or
+the slice's there (mqucifer/print-shop#211) is used again (`use`), not typed.
 
 **A hand-sliced job runs again by its id** (mqucifer/print-shop#164): `--again JOB_ID` sends the
 file it printed, kept in its folder, as a new job marked as a reprint of it. There's no part to
@@ -76,6 +77,11 @@ def answers_file(row: Row) -> dict[str, Any] | None:
     return {"answers": answers}
 
 
+def _used_as_anothers(change: Change) -> bool:
+    """Used from a past print, and not the Sponsor's own correction there."""
+    return change.used is not None and change.used.by is not Source.SPONSOR
+
+
 def _older_pause(row: Row) -> tuple[Change, str] | None:
     """The pause that stood in a job from before mqucifer/print-shop#203, and the height that
     pauses where its own G-code did: the top of the layer before the pause. Such a row's
@@ -113,7 +119,7 @@ def correction_line(row: Row) -> str:
     parts = []
     stood = _standing_pause(row)
     for c in row.corrections or ():
-        if c.key == ORIENTATION:
+        if c.key == ORIENTATION or _used_as_anothers(c):
             continue
         value: str | None = c.value
         if c.key == PAUSE:
@@ -202,6 +208,10 @@ def again(row: Row, part_path: Path | None, printers: int = 1, part_found: bool 
         notes.append("Taken from the slice's reading, so take them again at the review (take) "
                      "if it proposes them: "
                      + "; ".join(f"{c.key}={c.value}" for c in taken) + ".")
+    reused = [c for c in row.corrections or () if _used_as_anothers(c)]
+    if reused:
+        notes.append("Used from a past print, so use them again at the review (use): "
+                     + "; ".join(f"{c.key}={c.value}" for c in reused) + ".")
     return Again(command=command, corrections=correction_line(row), answers=answers,
                  answers_name=name, notes=tuple(notes))
 

@@ -285,7 +285,8 @@ def _setup_lines(row: Row) -> list[str]:
         lines.append(f"  {c.key}: not applied, {c.not_applied} ({c.source.value}) {c.reason}")
     if row.corrections:
         said = ", ".join(
-            f"{c.key}={c.value}" + (f" (not applied: {c.not_applied})" if c.not_applied else "")
+            f"{c.key}={c.value}" + (f" ({c.used.line()})" if c.used else "")
+            + (f" (not applied: {c.not_applied})" if c.not_applied else "")
             for c in row.corrections
         )
         lines.append(f"corrected      {said}")
