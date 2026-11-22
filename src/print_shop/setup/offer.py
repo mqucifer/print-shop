@@ -66,12 +66,9 @@ FAR = 0.5
 NEAR = 0.2
 #: A part less alike in shape than this, and from no common source, has nothing pre-selected.
 UNLIKE = 0.6
-#: A pause is on a feature when a flat face of the part is this many layers from it, or nearer.
-PAUSE_NEAR_LAYERS = 1.0
-#: Two heights this near are one layer's top.
+#: Two heights this near are one layer's top. A pause is on another file's feature only where a
+#: flat face is at its height: a layer off is mqucifer/print-shop#203's fault again.
 SAME_Z = 0.02
-#: A reason goes beside its setting where this much width is left for it, else beneath.
-_REASON_ROOM = 34
 #: Why a past intake answer isn't pre-selected. Its group's heading says it, once.
 ASKED_AGAIN = "you're asked again for each job"
 #: The review's width for the offer's lines, wrapped under their own indent.
@@ -87,7 +84,7 @@ RESTS_ON: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
                 r"initial_layer|first_layer"), ("bed_contact", "length")),
     (re.compile(r"^top_|ironing"), ("flat_top",)),
     (re.compile(r"^bottom_"), ("bed_contact",)),
-    (re.compile(r"wall|infill"), ("section",)),
+    (re.compile(r"^(wall_loops|sparse_infill_density|sparse_infill_pattern)$"), ("section",)),
 )
 
 #: The keys each recorded symptom bears on (`ledger.Symptom`). Adhesion and warping are the
@@ -250,6 +247,12 @@ class Offering:
                 why.append(f"it held in the pose {item.pose}, and the turn to it isn't selected")
         if (past.job_id, item.key) in self.cleared:
             why.insert(0, "you cleared it")
+        if item.key != ORIENTATION and (why or item.used.by not in _PERSONS):
+            here = now.value if now is not None else item.preset
+            if here and _same(item.key, here, item.value):
+                # There's nothing to choose. The person's own that's ticked stays so, as using
+                # it keeps it theirs for the print after.
+                return Standing("=", (f"it's {here} here already",))
         return Standing(" " if why else "x", tuple(why))
 
     def use(self, numbers: list[int], proposal: Proposal, pose: str) -> list[Item] | str:
@@ -310,7 +313,8 @@ def _now(proposal: Proposal, key: str) -> Change | None:
 def _set_by(change: Change) -> str:
     if change.source is Source.LESSON:
         return f"lesson {change.lesson}"
-    return "your answer" if change.source is Source.ANSWER else "you"
+    others = {Source.ANSWER: "your answer", Source.MODEL: "the model", Source.GUARD: "a guard"}
+    return others.get(change.source, "you")
 
 
 def _same(key: str, a: str, b: str) -> bool:
@@ -720,10 +724,29 @@ class _Items:
         if off_grid and then and not same_setting("layer_height", then, f"{layer:g}"):
             why.append(f"no layer tops out at {z:g} mm in {layer:g} mm layers (it was {then})")
         if not self.same_part:
-            near = PAUSE_NEAR_LAYERS * layer + SAME_Z
-            if not any(abs(level - z) <= near for level in self._flat_levels()):
-                why.append(f"it's off this part's features: nothing starts or ends at {z:g} mm")
+            why += self._off_feature(z, first, layer)
         return why
+
+    def _off_feature(self, z: float, first: float, layer: float) -> list[str]:
+        """Why a pause isn't at a flat face of this part. A face within a layer of it is named
+        with the height to type, and the value is left as it was: choosing it is the person's."""
+        levels = self._flat_levels()
+        if any(abs(level - z) <= SAME_Z for level in levels):
+            return []
+        near = sorted(
+            (level for level in levels
+             if abs(level - z) <= layer + SAME_Z and level < self.part.height_mm - SAME_Z),
+            key=lambda level: (abs(level - z), -level),
+        )
+        if not near:
+            return [f"it's off this part's features: nothing starts or ends at {z:g} mm"]
+        face = near[0]
+        steps = (face - first) / layer if layer else 0.0
+        if steps >= 0 and abs(steps - round(steps)) * layer <= SAME_Z:
+            how = f"{PAUSE}={face:g} pauses there"
+        else:
+            how = f"no layer tops out at {face:g}, so check where it's to pause"
+        return [f"this part's face is at z {face:g}, not {z:g}: {how}"]
 
     def _since(self, key: str, value: str) -> str:
         """A later value of the person's on a print like this one."""
@@ -785,8 +808,8 @@ class _Items:
             return ""
         if key == PAUSE:
             z = float(value)
-            face = min(self._flat_levels(), key=lambda level: abs(level - z), default=None)
-            return f"a flat face is at z {face:g} here too" if face is not None else ""
+            at = any(abs(level - z) <= SAME_Z for level in self._flat_levels())
+            return f"a flat face is at z {z:g} here too" if at else ""
         here, then = self.f.here, self.f.then
         for measure in _rests_on(key):
             if measure in here and measure in then:
@@ -951,10 +974,12 @@ def _group(
         text = "; ".join(word for word in words if word not in common)
         if not text:
             lines += _wrapped("  ", row.strip()) if len(row) > WIDTH else [row.rstrip()]
-        elif len(row) + 2 + _REASON_ROOM <= WIDTH:
-            lines += _wrapped(f"{row}  ", text)
+        elif len(row) + 2 + len(text) <= WIDTH:
+            lines.append(f"{row}  {text}")
         else:
-            lines += [*_wrapped("  ", row.strip()), *_wrapped("        ", text)]
+            # Longer than its column: beneath, at full width.
+            lines += [*(_wrapped("  ", row.strip()) if len(row) > WIDTH else [row.rstrip()]),
+                      *_wrapped("      ", text)]
     for text, ns in common.items():
         lines += _wrapped(f"      {_listed(ns)}: ", text)
     return lines
@@ -988,21 +1013,24 @@ def _settled(rows: list[tuple[int, Item, Standing]], proposal: Proposal) -> list
     """What's so here already, and what can't be used, in words."""
     used = [f"{n} {item.key} {item.value}" for n, item, found in rows if found.why == ("used",)]
     lines = ["", *_wrapped("  USED: ", ", ".join(used))] if used else []
-    already = []
+    already: dict[str, list[str]] = {}
     for n, item, found in rows:
         if found.mark != "=" or found.why == ("used",):
             continue
         now = _now(proposal, item.key)
-        said = f"{n} {item.key} {item.value}"
         if now is None:
-            said += " (this print's pose)"
+            by = "this print's pose" if item.key == ORIENTATION else "your preset"
+            why = "" if item.key == ORIENTATION else _reason(item, proposal)
         else:
-            said += f" ({_set_by(now)})"
-            if item.used.by is not Source.LESSON and now.reason != item.reason:
-                said += f": {_reason(item, proposal)}"
-        already.append(said)
+            by = _set_by(now)
+            known = item.used.by is Source.LESSON or now.reason == item.reason
+            why = "" if known else _reason(item, proposal)
+        # Several with one reason say it once.
+        said = f"({by}): {why}" if why else f"({by})"
+        already.setdefault(said, []).append(f"{n} {item.key} {item.value}")
     if already:
-        lines += ["", *_wrapped("  ALREADY SET HERE: ", "; ".join(already))]
+        lines += ["", *_wrapped("  ALREADY SET HERE: ", "; ".join(
+            f"{', '.join(items)} {said}" for said, items in already.items()))]
     cant = [(n, item, found) for n, item, found in rows if found.mark == "-"]
     if cant:
         lines.append("")

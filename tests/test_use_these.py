@@ -85,6 +85,17 @@ def stepped(tmp_path: Path, name: str, width: float = 40.0) -> Path:
     return path
 
 
+def pocketed(tmp_path: Path, name: str, tops_out: float) -> Path:
+    """A block with a pocket closed over, whose top is at `tops_out`."""
+    block = trimesh.creation.box(extents=(40, 30, 14))
+    block.apply_translation((0, 0, 7))
+    pocket = trimesh.creation.box(extents=(20, 15, tops_out - 4))
+    pocket.apply_translation((0, 0, (tops_out + 4) / 2))
+    path = tmp_path / name
+    trimesh.boolean.difference([block, pocket]).export(path)
+    return path
+
+
 def features_of(stl: Path) -> tuple[Feature, ...]:
     return measure(stl, analyze(str(stl)).bed_contact_area_mm2)
 
@@ -285,7 +296,8 @@ def test_all_that_decided_a_print_is_offered_each_with_whose_it_was_and_why(
     items = standings(found)
     assert list(items) == ["wall_loops", "seam_position", "enable_support", "top_shell_layers"]
     assert items["top_shell_layers"][0].reason == "you chose 'screws': firmer"
-    assert all(standing.selected for _, standing in items.values())
+    assert items["enable_support"][1].mark == "=", "an answer that's the preset's is so already"
+    assert all(s.selected for key, (_, s) in items.items() if key != "enable_support")
     text = " ".join(render(request_for(found)).split())
     assert "USE THESE: from plinth.stl," in text and "None is applied until you use it." in text
     assert "YOUR OVERRIDES now -> use [x] 1 wall_loops 2 -> 4 it gets handled" in text
@@ -429,7 +441,9 @@ def test_supports_decided_for_no_overhang_are_in_doubt_over_one(
 ) -> None:
     printed(ledger, "first", write_stl("cube", tmp_path), (yours("enable_support", "0"),))
     found = offering(ledger, this(write_stl("tee", tmp_path)))
-    assert why_not(found, "enable_support") == "its overhang is too far from that part's"
+    guarded = Proposal(changes=(Change(key="enable_support", preset="0", value="1",
+                                       reason="it would print into the air", source=Source.GUARD),))
+    assert why_not(found, "enable_support", guarded) == "its overhang is too far from that part's"
 
 
 def test_a_pause_outside_this_part_cant_be_used(
@@ -452,6 +466,45 @@ def test_a_pause_off_this_parts_features_isnt_selected(
     plain = offering(ledger, this(box(tmp_path, "block.stl", 40, 30, 14.4)))
     assert "it's off this part's features: nothing starts or ends at 7.4 mm" in why_not(
         plain, PAUSE)
+
+
+def test_a_pause_a_layer_under_this_parts_pocket_isnt_ticked_and_names_its_height(
+    tmp_path: Path, ledger: Ledger, pauses_carried: None
+) -> None:
+    """Pre-selected, it'd be mqucifer/print-shop#203's fault again: a layer early."""
+    printed(ledger, "first", pocketed(tmp_path, "tray.stl", 7.4), (yours(PAUSE, "7.4"),))
+    found = offering(ledger, this(pocketed(tmp_path, "tray-b.stl", 7.6)))
+    item, standing = standings(found)[PAUSE]
+    assert not standing.selected
+    assert standing.why == ("this part's face is at z 7.6, not 7.4: pause_at=7.6 pauses there",)
+    assert item.value == "7.4", "never changed for them"
+    assert item.fits == "", "and nothing reassuring is said of it"
+
+
+def test_a_pause_a_layer_over_this_parts_pocket_isnt_ticked_either(
+    tmp_path: Path, ledger: Ledger, pauses_carried: None
+) -> None:
+    printed(ledger, "first", pocketed(tmp_path, "tray.stl", 7.4), (yours(PAUSE, "7.4"),))
+    found = offering(ledger, this(pocketed(tmp_path, "tray-b.stl", 7.2)))
+    assert "face is at z 7.2, not 7.4: pause_at=7.2 pauses there" in why_not(found, PAUSE)
+
+
+def test_a_face_between_two_layers_tops_isnt_given_as_a_height_to_type(
+    tmp_path: Path, ledger: Ledger, pauses_carried: None
+) -> None:
+    printed(ledger, "first", pocketed(tmp_path, "tray.stl", 7.4), (yours(PAUSE, "7.4"),))
+    found = offering(ledger, this(pocketed(tmp_path, "tray-b.stl", 7.5)))
+    said = why_not(found, PAUSE)
+    assert "no layer tops out at 7.5" in said and "pauses there" not in said
+
+
+def test_a_pause_at_this_parts_own_face_is_ticked(
+    tmp_path: Path, ledger: Ledger, pauses_carried: None
+) -> None:
+    printed(ledger, "first", pocketed(tmp_path, "tray.stl", 7.4), (yours(PAUSE, "7.4"),))
+    longer = stepped(tmp_path, "tray-b.stl", 42)
+    item, standing = standings(offering(ledger, this(longer)))[PAUSE]
+    assert standing.selected and item.fits == "a flat face is at z 7.4 here too"
 
 
 def test_on_the_same_file_a_pause_needs_no_feature(
@@ -699,7 +752,7 @@ def test_what_several_items_share_is_said_once(tmp_path: Path, ledger: Ledger) -
     here = box(tmp_path, "plinth.stl", 60, 40, 12)
     keys = ["wall_loops", "seam_position", "brim_type", "bridge_speed", "top_shell_layers",
             "enable_support", "nozzle_temperature", "fan_max_speed"]
-    values = ["4", "back", "outer_only", "25", "9", "0", "215", "40"]
+    values = ["4", "back", "outer_only", "25", "9", "1", "215", "40"]
     reason = "it stands in the hall and is knocked by coats"
     note = "a corner came away when it was lifted by that corner alone, after a day on the shelf"
     printed(ledger, "first", here,
@@ -747,6 +800,51 @@ def test_the_groups_share_their_columns_and_lessons_their_words(
     assert len({line.index(" -> ") for line in lines if " -> " in line}) == 1
     assert sum("now -> use" in line for line in lines) == 1
     assert " ".join(lines).count("learned on slab.stl: a big face lifts") == 1
+
+
+def test_an_unticked_value_thats_this_prints_already_is_set_here(
+    tmp_path: Path, ledger: Ledger
+) -> None:
+    here = box(tmp_path, "plinth.stl", 60, 40, 12)
+    printed(ledger, "first", here, (yours("wall_loops", "2", "two is plenty"),),
+            result="failed", symptom="other", note="it rang when tapped")
+    found = offering(ledger, this(here))
+    assert standings(found)["wall_loops"][1].mark == "="
+    text = " ".join(" ".join(offer.render(found, Proposal(), "0,0,0")).split())
+    assert "ALREADY SET HERE: 1 wall_loops 2 (your preset): two is plenty" in text
+    assert "2 -> 2" not in text
+
+
+def test_several_set_here_already_share_their_reason(tmp_path: Path, ledger: Ledger) -> None:
+    here = box(tmp_path, "plinth.stl", 60, 40, 12)
+    why = "the presets do well here"
+    printed(ledger, "first", here,
+            (yours("wall_loops", "2", why), yours("bridge_speed", "50", why)),
+            result="failed", symptom="other", note="it rang when tapped")
+    lines = offer.render(offering(ledger, this(here)), Proposal(), "0,0,0")
+    text = " ".join(" ".join(lines).split())
+    assert f"1 wall_loops 2, 2 bridge_speed 50 (your preset): {why}" in text
+
+
+def test_the_persons_ticked_override_stays_theirs_at_the_presets_value(
+    tmp_path: Path, ledger: Ledger
+) -> None:
+    here = box(tmp_path, "plinth.stl", 60, 40, 12)
+    printed(ledger, "first", here, (yours("wall_loops", "2"),))
+    assert selected(offering(ledger, this(here)), "wall_loops")
+
+
+def test_a_long_reason_goes_beneath_at_full_width(tmp_path: Path, ledger: Ledger) -> None:
+    here = box(tmp_path, "plinth.stl", 60, 40, 12)
+    long = "the front is seen from the door and the side from the window when it is open"
+    printed(ledger, "first", here, (yours("seam_position", "back", long),))
+    lines = offer.render(offering(ledger, this(here)), Proposal(), "0,0,0")
+    assert f"      {long}" in lines
+
+
+def test_a_key_that_only_has_infill_in_its_name_rests_on_no_wall() -> None:
+    assert offer._rests_on("sparse_infill_density") == ("section",)
+    assert offer._rests_on("infill_direction") == ()
 
 
 def test_after_a_use_it_says_all_used(tmp_path: Path, ledger: Ledger) -> None:
