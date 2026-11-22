@@ -7,6 +7,7 @@ from scratch: no Sponsor's design, or anything from one, is in this repository.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,83 @@ def along_y(radius: float, y0: float, y1: float, hole: float = 0.0) -> Any:
     if hole:
         tube = tube.circle(hole)
     return tube.extrude(y1 - y0)
+
+
+def level_bore(kind: str, leaves: float = 43.0, turn: float = 0.0) -> Any:
+    """What's cut for a 5.5 mm bore along x through (y 15, z 10). A peak's flats leave the round
+    `leaves` degrees above level, so rise at 90 less that; `turn` turns the whole cut about it."""
+    radius, way = 2.75, cq.Vector(1, 0, 0)
+    made = cq.Solid.makeCylinder(radius, 44, cq.Vector(-2, 15, 10), way)
+    if kind == "end":
+        over = cq.Solid.makeCylinder(radius, 44, cq.Vector(-2, 15, 13), way)
+        sides = cq.Solid.makeBox(44, 2 * radius, 3, cq.Vector(-2, 15 - radius, 10))
+        made = made.fuse(over).fuse(sides).clean()
+    elif kind == "d":
+        made = made.intersect(cq.Solid.makeBox(44, 30, 11.5, cq.Vector(-2, 0, 0)))
+    elif kind in ("peaked", "short"):
+        angle = np.radians(leaves)
+        y, z = radius * np.cos(angle), 10 + radius * np.sin(angle)
+        corners = ((15 + y, z), (15, 10 + radius / np.sin(angle)), (15 - y, z))
+        roof = cq.Wire.makePolygon([cq.Vector(-2, *p) for p in corners], close=True)
+        prism = cq.Solid.extrudeLinear(cq.Face.makeFromWires(roof), cq.Vector(44, 0, 0))
+        made = made.fuse(prism).clean()
+        if kind == "short":
+            made = made.intersect(cq.Solid.makeBox(44, 30, 13.5, cq.Vector(-2, 0, 0)))
+    return made.rotate(cq.Vector(0, 15, 10), cq.Vector(1, 15, 10), turn) if turn else made
+
+
+def bores() -> None:
+    """A bore lying level on the bed (mqucifer/print-shop#237), round or peaked, and what isn't
+    a peaked bore; and two blocks on one bolt through it, with the nut in a slot or a hex
+    pocket, as drawn and as the assembly turns them."""
+    out = Path("bore")
+    out.mkdir(exist_ok=True)
+    solid = cq.Solid.makeBox
+    one = solid(20, 30, 20)
+    two = solid(20, 30, 20, cq.Vector(20, 0, 0))
+    slot = solid(4.9, 8.3, 15.8, cq.Vector(30, 10.85, 5.2))
+    made = {"one-round": one.cut(level_bore("round")), "one-peaked": one.cut(level_bore("peaked"))}
+    for turn in (90, 180, 270):
+        made[f"one-peaked-{turn}"] = one.cut(level_bore("peaked", turn=turn))
+    made["one-45"] = one.cut(level_bore("peaked", 45.0))
+    made["one-44"] = one.cut(level_bore("peaked", 46.0))
+    for kind in ("end", "d", "short"):
+        made[f"one-{kind}"] = one.cut(level_bore(kind))
+    made["one-groove"] = solid(20, 30, 10).cut(level_bore("round"))
+    made["one-upright"] = made["one-peaked"].rotate(cq.Vector(), cq.Vector(0, 1, 0), -90)
+    made["two-slot"] = two.cut(level_bore("peaked")).cut(slot)
+    made["two-split"] = two.cut(level_bore("d")).cut(slot)
+    made["two-flat"] = two.cut(level_bore("peaked", 46.0)).cut(slot)
+    # A steeper peak, whose point runs on into the flat side of the nut's hex pocket over it.
+    corners = [
+        cq.Vector(30, 15 + 8.3 / 3**0.5 * np.cos(a), 10 + 8.3 / 3**0.5 * np.sin(a))
+        for a in np.arange(6) * np.pi / 3
+    ]
+    hexagon = cq.Face.makeFromWires(cq.Wire.makePolygon(corners, close=True))
+    pocket = cq.Solid.extrudeLinear(hexagon, cq.Vector(10, 0, 0))
+    made["two-hex"] = two.cut(level_bore("peaked", 40.0)).cut(pocket)
+    for name, shape in made.items():
+        save(cq.Workplane().add(shape), f"bore/{name}")
+    for name in ("one-round", "one-peaked"):
+        tolerance = {"tolerance": 0.01, "angularTolerance": 0.1}
+        cq.exporters.export(cq.Workplane().add(made[name]), f"bore/{name}.stl", **tolerance)
+    joint = {"between": ["one", "two"], "kind": "through", "bolt": "m5-8.8", "nut": "m5-nut",
+             "washer": "m5-washer", "pocket": 0.15}  # fmt: skip
+    for name, two_is, turns, at, held in (
+        ("slot", "slot", [], [20, 15, 10], "x=40"),
+        ("split", "split", [], [20, 15, 10], "x=40"),
+        ("flat", "flat", [], [20, 15, 10], "x=40"),
+        ("hex", "hex", [], [20, 15, 10], "x=40"),
+        ("turned", "slot", [["z", 90]], [-15, 20, 10], "y=40"),
+        ("over", "slot", [["x", 180]], [20, -15, -10], "x=40"),
+    ):
+        parts = [
+            {"name": side, "file": f"{side}-{file}.step", "layers": "z", "turn": turns}
+            for side, file in (("one", "round"), ("two", two_is))
+        ]
+        data = {"parts": parts, "joints": [{**joint, "at": [at]}],
+                "held": [{"plane": held, "how": "fixed"}]}  # fmt: skip
+        (out / f"{name}.json").write_text(json.dumps(data))
 
 
 def near_touching() -> None:
@@ -1100,6 +1178,7 @@ def nut_rows() -> None:
 
 if __name__ == "__main__":
     beds()
+    bores()
     where()
     sections()
     near_touching()

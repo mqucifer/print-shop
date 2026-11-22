@@ -18,11 +18,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import trimesh
 
 from print_shop.bench import host
 from print_shop.rounds import downward, needs, reports, skills
 from print_shop.rounds.box import Box
 from print_shop.rounds.needs import Need
+from print_shop.setup import features
 
 pytestmark = pytest.mark.bench
 CASES = Path(__file__).parent / "bench_cases"
@@ -3189,3 +3191,77 @@ def test_fit_bed_refuses_what_it_cant_read(bench: Any) -> None:
     assert both.verdict == "NO ANSWER" and "or one assembly file, not both" in both.record["why"]
     stl = bench("fit-bed", "cube.stl")
     assert stl.verdict == "NO ANSWER" and "an STL has none" in stl.record["why"]
+
+
+# A bore that lies level on the bed (mqucifer/print-shop#237)
+
+LEVEL_BORE = ("--centre", "10,15,10", "--axis", "x", "--d", "5.5")
+
+
+def test_rays_read_a_peaked_bore_by_what_s_there(bench: Any) -> None:
+    """A 5.5 mm bore whose flats rise at 47° to a point 2.75 / cos 47° = 4.032 mm up read
+    `DISAGREE`: rays up to 6.78 mm across and a circle fit of 5.53. It's a bore, whichever way
+    its point is, and it still fails a size it isn't."""
+    answer = bench("rays", "bore/one-peaked.step", *LEVEL_BORE)
+    assert answer.verdict == "OK" and "peaked" in answer.record["why"], answer.text
+    level = answer.numbers["levels"][0]
+    assert level["peak"]["toward"] == pytest.approx([0, 0, 1], abs=1e-6)
+    assert level["peak"]["point_mm"] == pytest.approx(2.75 / math.cos(math.radians(47)), abs=1e-4)
+    for key in ("bore_d_mm", "section_bore_d_mm"):
+        assert (level[key]["min"], level[key]["max"]) == pytest.approx((5.5, 5.5), abs=0.002)
+    assert level["section_fit_d_mm"] == pytest.approx(5.5, abs=0.002)
+    assert level["across_mm"]["max"] > 6.7, "the rays' own figure is still said"
+    assert reports.unlike("rays", answer.numbers) == []
+    for turn, up in ((90, [0, -1, 0]), (180, [0, 0, -1]), (270, [0, 1, 0])):
+        turned = bench("rays", f"bore/one-peaked-{turn}.step", *LEVEL_BORE)
+        assert turned.verdict == "OK", turned.text
+        assert turned.numbers["levels"][0]["peak"]["toward"] == pytest.approx(up, abs=1e-6)
+    upright = bench("rays", "bore/one-upright.step", "--centre=-10,15,10", "--d", "5.5")
+    assert upright.verdict == "OK" and "peaked" in upright.record["why"], upright.text
+    assert bench("rays", "bore/one-45.step", *LEVEL_BORE).verdict == "OK", "45° is a peak"
+    for size in ("5.3", "5.7"):
+        wrong = bench("rays", "bore/one-peaked.step", *LEVEL_BORE[:-1], size)
+        assert wrong.verdict == "FAIL", wrong.text
+
+
+@pytest.mark.parametrize("name", ["one-end", "one-groove", "one-d", "one-44", "one-short"])
+def test_rays_still_refuse_what_is_no_peaked_bore(bench: Any, name: str) -> None:
+    centre = "10,15,9.5" if name == "one-groove" else "10,15,10"
+    answer = bench("rays", f"bore/{name}.step", "--centre", centre, *LEVEL_BORE[2:])
+    assert answer.verdict != "OK", answer.text
+    assert all("peak" not in level for level in answer.numbers.get("levels", []))
+
+
+def test_fit_bed_reads_a_peaked_bore_that_a_nut_s_slot_cuts_in_two(bench: Any) -> None:
+    """`fit-bed` found no hole where `load` summed the two arcs to a round one. Both read the
+    one peaked bore now, as the assembly turns it too, and where its point runs on into a hex
+    pocket. A D cut in two, whose arcs add up past 360°, and a flat peak are refused."""
+    for name, up in (("slot", [0, 0, 1]), ("turned", [0, 0, 1]), ("over", [0, 0, -1])):
+        answer = bench("fit-bed", f"bore/{name}.json")
+        assert answer.verdict == "OK", answer.text
+        one, two = answer.numbers["pockets"]["one+two"][0]["bores"]
+        assert "peak" not in one and two["hole_mm"] == pytest.approx(5.5)
+        assert two["peak"]["toward"] == pytest.approx(up, abs=1e-6)
+        assert "the bore in two is peaked, 5.500 mm across" in answer.text
+        assert "the peak in two, by the fine mesh" in answer.text
+        assert reports.unlike("fit-bed", answer.numbers) == []
+    hexed = bench("fit-bed", "bore/hex.json")
+    assert hexed.verdict == "OK", hexed.text
+    assert hexed.numbers["pockets"]["one+two"][0]["bores"][1]["peak"]["rises_deg"] == (
+        pytest.approx(50, abs=1e-4)
+    )
+    split = bench("fit-bed", "bore/split.json")
+    assert split.verdict == "NO ANSWER" and "in two, the round face" in split.record["why"]
+    flat = bench("fit-bed", "bore/flat.json")
+    assert flat.verdict == "NO ANSWER" and "flatter than 45°" in flat.record["why"]
+
+
+def test_a_round_bore_level_on_the_bed_still_needs_support_and_a_peaked_one_none(
+    bench: Any,
+) -> None:
+    """Nothing in mqucifer/print-shop#237 moves the downward reading."""
+    areas = [
+        features.overhang_to_support(trimesh.load_mesh(bench.work / f"bore/one-{kind}.stl"))[0]
+        for kind in ("round", "peaked")
+    ]
+    assert areas == pytest.approx([75.0, 0.0], abs=0.2)

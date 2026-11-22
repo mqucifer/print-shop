@@ -626,6 +626,28 @@ PLACED = Keyed(
     Row({"part": TEXT, "assembly": TEXT, "turn": Rows(Rows(ANY)), "at": XYZ}, closed=True)
 )
 
+LOW_HIGH = Row({"min": NUMBER, "max": NUMBER}, closed=True)
+#: A peaked bore's point (mqucifer/print-shop#237): which way, how far from the axis, and how
+#: steeply its flat faces rise to it.
+PEAK = Row({"toward": XYZ, "rises_deg": NUMBER, "point_mm": NUMBER}, closed=True)
+#: One end of a through-bolt: what bears on its seat, and on its hole's wall.
+THROUGH_END = Row(
+    {
+        "bears_mm2": NUMBER,
+        "hole_length_mm": NUMBER,
+        "hole_mm": NUMBER,
+        "part": TEXT,
+        "peak": PEAK,
+        "pressure_limit_mpa": NUMBER,
+        "pressure_mpa": NUMBER,
+        "ring_mm2": NUMBER,
+        "seat_mm2": NUMBER,
+        "under": TEXT,
+        "wall_bears_mm2": NUMBER,
+        "wall_pressure_mpa": NUMBER,
+    }
+)
+
 SHAPES: dict[str, dict[str, Any]] = {
     "info": {
         "bodies_mesh": NUMBER,
@@ -691,6 +713,11 @@ SHAPES: dict[str, dict[str, Any]] = {
                 {
                     "across_mm": SPREAD,
                     "at": NUMBER,
+                    # A peaked bore's (mqucifer/print-shop#237): its diameter by every ray and
+                    # by the section's outline, and which way its point is.
+                    "bore_d_mm": LOW_HIGH,
+                    "peak": PEAK,
+                    "section_bore_d_mm": LOW_HIGH,
                     "closed_loop_around_centre": FLAG,
                     "missed": NUMBER,
                     "rays": NUMBER,
@@ -885,6 +912,7 @@ SHAPES: dict[str, dict[str, Any]] = {
                     "twist_nmm": NUMBER,
                     # A through joint's (mqucifer/print-shop#168): which of its bolt, its
                     # washers, its nut and its plastic is nearest its limit, and by what share.
+                    "bolts": Rows(Row({"ends": Rows(THROUGH_END)})),
                     "gives_first": TEXT,
                     "nearest_share": NUMBER,
                     # A dovetail's (mqucifer/print-shop#170): the way its tail slides in, how
@@ -1005,6 +1033,8 @@ SHAPES: dict[str, dict[str, Any]] = {
                         # Whether the nut's corners go between its walls in some turn
                         # (mqucifer/print-shop#183), at which turn, and how far off the axis.
                         "goes_in": FLAG,
+                        # Each part's bore on the bolt, peaked or round (mqucifer/print-shop#237).
+                        "bores": Rows(Row({"hole_mm": NUMBER, "part": TEXT, "peak": PEAK})),
                         "nut": TEXT,
                         "nut_flats_mm": NUMBER,
                         "off_axis_mm": NUMBER,

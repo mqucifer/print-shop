@@ -15,7 +15,7 @@ from typing import Any
 import numpy as np
 import shapely
 
-from . import strips
+from . import strips, through
 from .limits import over, under
 from .report import Report
 from .shapes import (
@@ -355,8 +355,38 @@ def _circle(points: np.ndarray) -> tuple[np.ndarray, float]:
     return solved[:2], float(2 * np.sqrt(solved[2] + (solved[:2] ** 2).sum()))
 
 
+def _peaked_at(
+    faces: tuple[list[dict[str, Any]], list[dict[str, Any]]], point: np.ndarray, axis: int
+) -> dict[str, Any] | None:
+    """The peaked bore a ray's centre is on the axis of (mqucifer/print-shop#237), by the
+    part's own faces, or None: the narrowest round face along `axis` there says which bore."""
+    cylinders, planes = faces
+    level = float(point[axis])
+    along_it, here = [], []
+    for one in cylinders:
+        sign = float(one["axis"][axis])
+        if not one["hole"] or abs(abs(sign) - 1) > through.SQUARE:
+            continue
+        off = np.delete(point - one["origin"], axis)
+        if float(np.linalg.norm(off)) > through.ON_AXIS:
+            continue
+        along_it.append(one)
+        if one["low"] <= sign * level <= one["high"]:
+            here.append(one["radius"])
+    if not here:
+        return None
+    least = min(here)
+    sized = [c for c in along_it if abs(c["radius"] - least) <= through.SAME]
+    found = through.bore(sized, point, planes)
+    if isinstance(found, str) or found["peak"] is None:
+        return None
+    return found if found["low"] <= float(point @ found["axis"]) <= found["high"] else None
+
+
 def run_rays(args: Any, report: Report) -> None:
     """Rays from a cut feature's axis, against a plane section of the same mesh."""
+    from .faces import bore_rows  # `faces` takes its circle fit from here.
+
     part = load(args.file)
     order, names = _frame(args.axis)
     mesh = _turned(part, order)
@@ -365,6 +395,8 @@ def run_rays(args: Any, report: Report) -> None:
     length = 2 * diagonal(mesh)
     tol = args.tol
     levels = [centre[2] + f * args.depth for f in (0.1, 0.5, 0.9)] if args.depth else [centre[2]]
+    faces = bore_rows(part) if part.is_brep else ([], [])
+    peaks: list[dict[str, Any]] = []
     if args.axis != "z":
         report.note(f"each 'at' is a position along {args.axis}, the feature's axis")
     report.numbers["axes"] = names
@@ -405,11 +437,32 @@ def run_rays(args: Any, report: Report) -> None:
         section = slice_at(built, float(z))
         point = shapely.Point(at[0], at[1])
         hole = _void_at(section, point)
+        # A peaked bore's wall is read by what's there: each point of it as the diameter it says.
+        bore = None
+        if not missed and inside <= 0.5 and hole is not None:
+            bore = _peaked_at(faces, at[np.argsort(order)], order[2])
+        if bore is not None and hole is not None:
+            middle, toward = bore["origin"][order][:2], bore["peak"]["toward"][order][:2]
+            turns = np.linspace(0, 2 * np.pi, args.n, endpoint=False)
+            met = at[:2] + first[:, None] * np.c_[np.cos(turns), np.sin(turns)] - middle
+            by_rays = through.as_round(bore["peak"], met, toward)
+            corners = np.asarray(hole.exterior.coords)
+            walls_at = np.concatenate([corners, (corners[:-1] + corners[1:]) / 2]) - middle
+            by_section = through.as_round(bore["peak"], walls_at, toward)
+            level["peak"] = through.peak_saved(bore["peak"])
+            for key, sizes in (("bore_d_mm", by_rays), ("section_bore_d_mm", by_section)):
+                level[key] = {"min": float(sizes.min()), "max": float(sizes.max())}
+            peaks.append(bore)
         level["closed_loop_around_centre"] = hole is not None
         if hole is not None:
             ring = np.asarray(hole.exterior.coords)[:-1]
             level["section_area_mm2"] = round(float(hole.area), 4)
             if args.d:
+                if bore is not None:
+                    # A circle's fit is of the round, so not of the points on the peak's flanks.
+                    ahead = (ring - middle) @ toward
+                    distance = np.linalg.norm(ring - middle, axis=1)
+                    ring = ring[ahead <= distance * np.cos(bore["peak"]["half"]) + through.SAME]
                 fit_centre, fit_d = _circle(ring)
                 level["section_fit_d_mm"] = round(fit_d, 4)
                 level["section_fit_offset_mm"] = round(
@@ -429,6 +482,13 @@ def run_rays(args: Any, report: Report) -> None:
                 differs.append(f"at {z:.3f} rays and the section differ by {worst:.3f} mm")
         levels_found.append(level)
         report.line(_level_line(level))
+        if bore is not None:
+            span = level["bore_d_mm"]
+            report.line(
+                f"at {level['at']} it's a bore, {through.peak_said(bore)}: every ray reads "
+                f"{span['min']:.4f} to {span['max']:.4f} mm across it, on the round and on the "
+                "peak's flat faces, as bore_d_mm"
+            )
         in_material = inside > 0.5
         if in_material:
             problems.append(f"at {z:.3f} the centre is in material: no feature there")
@@ -438,14 +498,25 @@ def run_rays(args: Any, report: Report) -> None:
             differs.append(f"at {z:.3f} {missed} rays missed, closed section: {hole is not None}")
         rays_right = None
         if args.d and "across_mm" in level and not missed and not in_material:
-            span = level["across_mm"]
+            span = level["bore_d_mm" if bore is not None else "across_mm"]
             rays_right = not (under(span["min"], args.d - tol) or over(span["max"], args.d + tol))
             if not rays_right:
                 problems.append(
                     f"at {z:.3f} it measures {span['min']:.3f} to {span['max']:.3f} mm across, "
                     f"against {args.d} ± {tol}"
                 )
-        if args.d and "section_fit_d_mm" in level and not missed:
+        if bore is not None:
+            span = level["section_bore_d_mm"]
+            _peak_section(level, float(z), report)
+            if rays_right is not None:
+                low, high = span["min"], span["max"]
+                section_right = not (under(low, args.d - tol) or over(high, args.d + tol))
+                if rays_right != section_right:
+                    differs.append(
+                        f"at {z:.3f} the rays and the section's outline ({low:.4f} to "
+                        f"{high:.4f} mm) differ"
+                    )
+        elif args.d and "section_fit_d_mm" in level and not missed:
             fit = level["section_fit_d_mm"]
             report.second(f"section at {z:.3f}: a circle fit gives d {fit}")
             if rays_right is not None and rays_right != (not over(abs(fit - args.d), tol)):
@@ -461,6 +532,11 @@ def run_rays(args: Any, report: Report) -> None:
     in_air = [lv for lv in levels_found if lv["start_in_material"] <= 0.5 and "across_mm" in lv]
     if in_air:
         report.note(in_air_said(in_air[0]))
+        if "peak" in in_air[0]:
+            report.note(
+                "across a peaked bore `across` runs up to its point, so it's over the diameter "
+                "there: `bore_d_mm` is the diameter"
+            )
     if args.depth:
         _floor(built, centre, args, length, report, problems)
     if differs:
@@ -468,7 +544,21 @@ def run_rays(args: Any, report: Report) -> None:
     elif problems:
         report.verdict("FAIL", "; ".join(problems))
     else:
-        report.verdict("OK", f"rays met the feature's wall all round at {len(levels)} height(s)")
+        said_peaked = f": a bore, {through.peak_said(peaks[0])}" if peaks else ""
+        report.verdict(
+            "OK",
+            f"rays met the feature's wall all round at {len(levels)} height(s){said_peaked}",
+        )
+
+
+def _peak_section(level: dict[str, Any], z: float, report: Report) -> None:
+    span = level["section_bore_d_mm"]
+    fit = level.get("section_fit_d_mm")
+    report.second(
+        f"section at {z:.3f}: its outline, round and peak, reads {span['min']:.4f} to "
+        f"{span['max']:.4f} mm across the bore"
+        + (f", and a circle fit of its round gives d {fit}" if fit is not None else "")
+    )
 
 
 def in_air_said(level: dict[str, Any]) -> str:

@@ -8,20 +8,21 @@ under a washer or the nut, or the plastic round the hole tearing out toward an e
 joint is while its bolts hold, and that gives what each bolt has to hold: its pull and the
 shear across it (`load.bolt_pulls`). The plastic is then read under exactly that.
 
-**The way through** (`ways`), before anything is solved, from each part's own faces
-(`through.py`): the round hole in each part along the bolt's axis, no narrower than the bolt,
-the two meeting end to end where the parts meet; and each hole's far end, its seat, with the
-flat faces the washer or the nut bears on there. What it bears on is the ring between the hole
-and the washer's outside, or the nut's bearing face, cut to the part's own faces, so a washer
-that overhangs an edge bears on less.
+**The way through** (`ways`), before anything is solved, from each part's own faces (`through.py`):
+the round or peaked hole in each part along the bolt's axis, no narrower than the bolt, the two
+meeting end to end where the parts meet; and each hole's far end, its seat, with the flat faces the
+washer or the nut bears on there. What it bears on is the ring between the hole and the washer's
+outside, or the nut's bearing face, cut to the part's own faces, so a washer that overhangs an edge
+bears on less. At a peaked bore (mqucifer/print-shop#237) its whole seat is that ring less the
+peak's cut, and nothing else.
 
-**Round each bolt** (`round_bolt`), in each of the two parts: the part alone, cut off two
-diameters of what bears on it, the washer or the nut's face, from the bolt's axis and held where
-it's cut, with the bolt's pull spread over what the washer or the nut bears on, toward the other
-part, and its shear put on the half of the hole's wall the shank leans on, most where it leans
-square. CalculiX solves it, linear and static, on second-order tetrahedra, and the strains are
-read as any part's are, within three quarters of the cut: the hold itself strains what's beside
-it.
+**Round each bolt** (`round_bolt`), in each of the two parts: the part alone, cut off two diameters
+of what bears on it, the washer or the nut's face, from the bolt's axis and held where it's cut,
+with the bolt's pull spread over what the washer or the nut bears on, toward the other part, and its
+shear put on the half of the hole's wall the shank leans on, most where it leans square: at a peaked
+bore, on what of that half is still round. CalculiX solves it, linear and static, on second-order
+tetrahedra, and the strains are read as any part's are, within three quarters of the cut: the hold
+itself strains what's beside it.
 """
 
 from __future__ import annotations
@@ -47,8 +48,11 @@ SMALLER, TRIES = 0.75, 3
 ACROSS_HOLE, THROUGH = 3.5, 4.0
 LEAST = 0.5
 ELEMENTS = 6_000
-#: A washer or a nut sits wholly on the part where this share of its ring does.
+#: A washer or a nut sits wholly on the part where this share of its seat does: its ring, less
+#: a peaked bore's cut.
 SEATED = 0.999
+#: A curved edge is this many straight runs in a flat face's outline.
+EDGE_RUNS = 32
 
 
 def _xyz(point: Any) -> str:
@@ -76,6 +80,7 @@ def rows(solid: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
                     "normal": normal,
                     "at": np.array([centre.x, centre.y, centre.z]),
                     "corners": corners,
+                    "outline": _outline(face),
                     "face": face,
                 }
             )
@@ -94,10 +99,23 @@ def rows(solid: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
                 "low": float(reach.min()),
                 "high": float(reach.max()),
                 "turns": float(u1 - u0),
+                "middle": radial / np.linalg.norm(radial),
                 "face": face,
             }
         )
     return cylinders, planes
+
+
+def _outline(face: Any) -> np.ndarray:
+    """A flat face's edges as straight runs, each its two ends: a curved edge as several."""
+    runs = []
+    for edge in face.Edges:
+        if edge.Degenerated:
+            continue
+        straight = type(edge.Curve).__name__.startswith("Line")
+        ends = np.array([[p.x, p.y, p.z] for p in edge.discretize(2 if straight else EDGE_RUNS)])
+        runs.append(np.stack([ends[:-1], ends[1:]], axis=1))
+    return np.concatenate(runs) if runs else np.zeros((0, 2, 3))
 
 
 def _ring(centre: np.ndarray, axis: np.ndarray, inner: float, outer: float) -> Any:
@@ -151,6 +169,7 @@ def _side(
     ring = _ring(centre, axis, inner, outer)
     bears = float(sum(ring.common(f).Area for f in flats)) if flats else 0.0
     whole = math.pi * (outer**2 - inner**2)
+    expected = whole - through.peak_cut(hole, inner, outer)
     if bears <= 1e-6:
         raise NoAnswer(
             f"{what}: {part.name} has no flat face round its hole's end, at {_xyz(centre)}, "
@@ -168,7 +187,8 @@ def _side(
         "outer": outer,
         "bears_mm2": bears,
         "ring_mm2": whole,
-        "seated": bears >= SEATED * whole,
+        "seat_mm2": expected,
+        "seated": bears >= SEATED * expected,
         "hole": hole,
     }
 
@@ -182,17 +202,17 @@ def ways(assembly: Assembly, placed: list[Any]) -> dict[str, list[dict[str, Any]
             continue
         parts = [assembly.part(n) for n in joint.between]
         solids = [placed[names.index(n)] for n in joint.between]
-        round_faces = [rows(s)[0] for s in solids]
+        faces = [rows(s) for s in solids]
         bolts = []
         for point in joint.at:
             what = f"the through joint {joint.name}'s bolt at {_xyz(point)}"
             holes = []
-            for part, cylinders in zip(parts, round_faces, strict=True):
-                hole = through.bore(cylinders, point)
+            for part, (cylinders, planes) in zip(parts, faces, strict=True):
+                hole = through.bore(cylinders, point, planes)
                 if isinstance(hole, str):
                     raise NoAnswer(
                         f"{what}: in {part.name}, {hole}. A through-bolt passes right through "
-                        "both parts, in a round hole in each"
+                        "both parts, in a round or peaked hole in each"
                     )
                 holes.append(hole)
             way = through.meet(holes[0], holes[1])
@@ -351,16 +371,22 @@ def round_bolt(
             ]
             put(under, -pull * side["out"], "what the washer or the nut bears on")
         across = float(np.linalg.norm(shear))
+        by_mesh = None
         if across > 0:
             leans = shear / across
-            leant = []
+            leant, in_stretch = [], 0.0
             for face in wall:
                 for wired, area, centre in triangles(face):
                     away = off_axis(centre)
                     square = float(away @ leans) / float(np.linalg.norm(away))
                     if square > 0:
                         leant.append((wired, area * square))
+                        if ends[0] <= float(centre @ axis) <= ends[1]:
+                            in_stretch += area * square
             put(leant, shear, "the hole's wall")
+            # The second reading of `through.lean_share`: the mesh's triangles on the wall of
+            # the bore's own stretch, whose length is the one the pressure is read over.
+            by_mesh = in_stretch / (2 * radius * side["hole_length_mm"])
         fea = ccxtools.FemToolsCcx(analysis, solver)
         fea.update_objects()
         fea.setup_working_dir(tempfile.mkdtemp(prefix="round-"))
@@ -409,7 +435,7 @@ def round_bolt(
         each = np.linalg.eigvalsh(strain)
         stretch = np.abs(each).max(axis=1)
         worst, most = int(over_layers.argmax()), int(stretch.argmax())
-        return {
+        found = {
             "across_layers_pct": 100 * max(float(over_layers[worst]), 0.0),
             "across_at": [round(float(v), 3) for v in points[worst]],
             "stretch_pct": 100 * float(stretch[most]),
@@ -420,5 +446,8 @@ def round_bolt(
             "held_mm": reach,
             "read_mm": READ * reach,
         }
+        if hole["peak"] is not None and by_mesh is not None:
+            found["wall_share"] = by_mesh
+        return found
     finally:
         App.closeDocument(doc.Name)

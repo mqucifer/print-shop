@@ -9,18 +9,30 @@ each hands its faces here as plain rows and the reading is one, in plain Python 
 
 - a **cylinder** row: `axis`, a unit vector; `origin`, a point on it; `radius`; `hole`, whether
   the material is outside it; `low` and `high`, where the face runs along the axis, as a point's
-  dot product with `axis`; and `turns`, how far round it goes, in radians;
-- a **plane** row: `normal`, out of the material; `at`, a point on it; and, filled in by `along`,
-  `low` and `high`, where the face runs along whatever axis the caller is reading, and `corners`,
-  the face's own, which bound it sideways too. A row with no corners is a plane without end.
+  dot product with `axis`; `turns`, how far round it goes, in radians; and `middle`, the unit way
+  out from the axis to its middle, which says where round the axis a part of a circle is;
+- a **plane** row: `normal`, out of the material; `at`, a point on it; `outline`, its edges as
+  straight runs, each its two ends; and, filled in by `along`, `low` and `high`, where the face
+  runs along whatever axis the caller is reading, and `corners`, the face's own, which bound it
+  sideways too. A row with no corners is a plane without end.
+
+**A peaked bore** (mqucifer/print-shop#237) is how a hole that lies level on the bed is printed
+with nothing to support: one round face about the axis and, where that face is missing, two flat
+faces tangent to it that rise to a point, no flatter than `FLATTEST` degrees, along the whole
+stretch. It's a bore, read by what's there: what bears on its end is the ring less the peak's
+cut, and a shank leaning toward the peak has only what's left of the round to lean on. A round
+face is read stretch by stretch, so two arcs apart along the axis never add up to a hole.
 """
 
 from __future__ import annotations
 
+import itertools
 import math
 from typing import Any
 
 import numpy as np
+
+from .limits import under
 
 #: A bolt's place is on its hole's axis within this, in mm: a point read off a drawing.
 ON_AXIS = 0.05
@@ -28,15 +40,26 @@ ON_AXIS = 0.05
 SAME = 1e-4
 #: Two directions are the same, or square, within this.
 SQUARE = 1e-6
+#: Why an arc that doesn't close is no hole.
+NOT_ROUND = "the round face there doesn't go all the way round: a slot's end, not a hole"
 #: A pocket's play is what the file says within this, in mm.
 PLAY_TOL = 0.005
+#: A peak's flat faces rise to its point no flatter than this, in degrees: the slope past which
+#: the print loop reads a face as needing support.
+FLATTEST = 45.0
+#: Where a flat face meets a round one it's tangent to, the two kernels put the edge within this
+#: of the tangent point, in mm: a circle and its tangent part by only d²/2R, so a place good to
+#: 1e-6 mm is good to some thousandths along them.
+SLIP = 0.005
 
 
-def bore(cylinders: list[dict[str, Any]], point: Any) -> dict[str, Any] | str:
-    """The round hole whose axis passes through `point`: its `axis`, a point on it, its
-    `radius`, and `low` and `high`, where it runs along the axis. Where holes of several sizes
-    share the axis, a counterbore over a hole, it's the narrowest: the one the bolt's shank is
-    in. Or, as words, why there's none."""
+def bore(
+    cylinders: list[dict[str, Any]], point: Any, planes: list[dict[str, Any]] | None = None
+) -> dict[str, Any] | str:
+    """The round or peaked hole whose axis passes through `point`: its `axis`, a point on it,
+    its `radius`, `low` and `high`, where it runs along the axis, and its `peak`, None where
+    it's round. Where holes of several sizes share the axis, a counterbore over a hole, it's
+    the narrowest: the one the bolt's shank is in. Or, as words, why there's none."""
     at = np.asarray(point, dtype=float)
     found = []
     for one in cylinders:
@@ -52,16 +75,15 @@ def bore(cylinders: list[dict[str, Any]], point: Any) -> dict[str, Any] | str:
     if any(abs(abs(float(np.asarray(c["axis"]) @ first)) - 1) > SQUARE for c in found):
         return "round holes cross there, along more than one axis"
     radius = min(c["radius"] for c in found)
-    mine = [c for c in found if c["radius"] <= radius + SAME]
-    if sum(c["turns"] for c in mine) < 2 * math.pi - 1e-3:
-        return "the round face there doesn't go all the way round: a slot's end, not a hole"
-    spans = []
-    for one in mine:
+    arcs = []
+    for one in found:
+        if one["radius"] > radius + SAME:
+            continue
         same_way = float(np.asarray(one["axis"]) @ first) > 0
         low, high = (one["low"], one["high"]) if same_way else (-one["high"], -one["low"])
-        spans.append((low, high))
+        arcs.append((low, high, one))
     stretches: list[list[float]] = []
-    for start, end in sorted(spans):
+    for start, end, _ in sorted(arcs, key=lambda a: a[:2]):
         if stretches and start <= stretches[-1][1] + SAME:
             stretches[-1][1] = max(stretches[-1][1], end)
         else:
@@ -69,8 +91,208 @@ def bore(cylinders: list[dict[str, Any]], point: Any) -> dict[str, Any] | str:
     # Where the axis has more than one stretch of hole, the bolt's place says which: the nearest.
     here = float(at @ first)
     low, high = min(stretches, key=lambda s: abs(here - min(max(here, s[0]), s[1])))
-    origin = np.asarray(mine[0]["origin"], dtype=float)
-    return {"axis": first, "origin": origin, "radius": float(radius), "low": low, "high": high}
+    arcs = [a for a in arcs if a[0] >= low and a[1] <= high]
+    origin = np.asarray(arcs[0][2]["origin"], dtype=float)
+    hole = {
+        "axis": first,
+        "origin": origin,
+        "radius": float(radius),
+        "low": low,
+        "high": high,
+        "peak": None,
+    }
+    # What's missing from the round at each level between two faces' ends.
+    ends = sorted({v for a in arcs for v in a[:2]})
+    levels = [(a, b) for a, b in itertools.pairwise(ends) if b - a > 1e-3] or [(low, high)]
+    missing = [
+        _missing([c for start, end, c in arcs if start <= (a + b) / 2 <= end], first)
+        for a, b in levels
+    ]
+    if not any(missing):
+        return hole
+    if any(len(gaps) != 1 for gaps in missing):
+        return NOT_ROUND
+    middle, half = missing[0][0]
+    for other, wide in (gaps[0] for gaps in missing[1:]):
+        if abs(wide - half) * radius > SLIP or np.linalg.norm(other - middle) * radius > SLIP:
+            return NOT_ROUND
+    for _, _, one in arcs:
+        off = np.asarray(one["origin"], dtype=float) - origin
+        if float(np.linalg.norm(off - (off @ first) * first)) > SAME:
+            return NOT_ROUND
+    peak = _peak(hole, middle, half, planes or [])
+    return peak if isinstance(peak, str) else {**hole, "peak": peak}
+
+
+def _missing(arcs: list[dict[str, Any]], axis: np.ndarray) -> list[tuple[np.ndarray, float]]:
+    """What round faces at one level leave open round the axis: each gap's middle, as the way
+    out from the axis, and half how far round it goes, in radians. None where they close."""
+    if any(c["turns"] >= 2 * math.pi - 1e-3 for c in arcs):
+        return []
+    first, second = basis(axis)
+    spans = []
+    for one in arcs:
+        toward = np.asarray(one["middle"], dtype=float)
+        middle = math.atan2(float(toward @ second), float(toward @ first))
+        start = (middle - one["turns"] / 2) % (2 * math.pi)
+        spans.append((start, start + one["turns"]))
+    if not spans:
+        return [(first, math.pi)]
+    # As far round as the faces before 0 reach past it.
+    reach = max(end for _, end in spans) - 2 * math.pi
+    gaps = []
+    for start, end in sorted(spans):
+        if start > reach + 1e-3:
+            middle = (reach + start) / 2
+            toward = math.cos(middle) * first + math.sin(middle) * second
+            gaps.append((toward, (start - reach) / 2))
+        reach = max(reach, end)
+    return gaps
+
+
+def _peak(
+    hole: dict[str, Any], middle: np.ndarray, half: float, planes: list[dict[str, Any]]
+) -> dict[str, Any] | str:
+    """The peak over a round face's one gap: `toward`, the way its point is; `half`, half the
+    gap in radians, which is also how steeply its flat faces rise to the point; `rises_deg`,
+    the same in degrees; and `point_mm`, how far the point is from the axis. Or why the gap
+    isn't a peak."""
+    axis, origin, radius = hole["axis"], hole["origin"], hole["radius"]
+    if half >= math.pi / 2 - SLIP / radius:
+        return NOT_ROUND  # Flats that never meet: a slot's end, or less of the round than that.
+    side = np.cross(axis, middle)
+    tangents, flanks = [], []
+    for sign in (-1.0, 1.0):
+        out = math.cos(half) * middle + sign * math.sin(half) * side
+        flank = [
+            p
+            for p in planes
+            if np.linalg.norm(np.asarray(p["normal"]) + out) * radius <= SLIP
+            and abs(float(np.asarray(p["normal"]) @ axis)) <= SQUARE
+            and abs(float((origin - np.asarray(p["at"])) @ np.asarray(p["normal"])) - radius)
+            <= SAME
+        ]
+        if not flank:
+            return f"{NOT_ROUND}, and with no flat face tangent to it there, not a peaked bore"
+        tangents.append(-np.asarray(flank[0]["normal"], dtype=float))
+        flanks.append(flank)
+    # From the flat faces' own normals, which are exact where the round face's ends aren't.
+    both, apart = tangents[0] + tangents[1], tangents[0] - tangents[1]
+    toward = both / np.linalg.norm(both)
+    rises = math.atan2(float(np.linalg.norm(apart)), float(np.linalg.norm(both)))
+    if under(math.degrees(rises), FLATTEST):
+        return (
+            "the round face there doesn't go all the way round, and the flat faces over its "
+            f"gap rise at {math.degrees(rises):.3f}°: a peak flatter than {FLATTEST:g}°, "
+            "which isn't a peaked bore"
+        )
+    wide = radius * math.tan(rises)
+    for tangent, flank in zip(tangents, flanks, strict=True):
+        along_it = (toward - math.cos(rises) * tangent) / math.sin(rises)
+        if not _covers(flank, hole, along_it, wide):
+            return (
+                f"{NOT_ROUND}: the two flat faces tangent to it don't rise to a point along "
+                "the whole stretch, as a peaked bore's do"
+            )
+    return {
+        "toward": toward,
+        "half": rises,
+        "rises_deg": math.degrees(rises),
+        "point_mm": radius / math.cos(rises),
+    }
+
+
+def _covers(
+    flank: list[dict[str, Any]], hole: dict[str, Any], along_it: np.ndarray, wide: float
+) -> bool:
+    """Whether the faces in one flank's plane cover it from where it leaves the round to the
+    point, `wide` mm along it, at every level of the hole's stretch: each face's outline is
+    crossed level by level, and between two crossings is face."""
+    runs = [np.reshape(p.get("outline", []), (-1, 2, 3)) for p in flank]
+    segments = np.concatenate(runs)
+    levels = segments @ hole["axis"]
+    across = (segments - hole["origin"]) @ along_it
+    low, high = hole["low"], hole["high"]
+    ends = sorted({low, high, *(float(v) for v in levels.ravel() if low < v < high)})
+    for start, end in itertools.pairwise(ends):
+        if end - start <= 1e-3:
+            continue
+        level = (start + end) / 2
+        cut = (levels[:, 0] < level) != (levels[:, 1] < level)
+        share = (level - levels[cut, 0]) / (levels[cut, 1] - levels[cut, 0])
+        met = np.sort(across[cut, 0] + share * (across[cut, 1] - across[cut, 0]))
+        if len(met) % 2:
+            return False
+        kept = np.clip(met, 0.0, wide)
+        if float((kept[1::2] - kept[0::2]).sum()) < wide - SLIP:
+            return False
+    return True
+
+
+def peak_said(hole: dict[str, Any]) -> str:
+    """A peaked bore, as words: its diameter and which way its point is."""
+    peak = hole["peak"]
+    return (
+        f"peaked, {2 * hole['radius']:.3f} mm across its round, its point "
+        f"{peak['point_mm']:.3f} mm from the axis toward ({_way(peak['toward'])}), its flat "
+        f"faces rising to it at {peak['rises_deg']:.2f}°"
+    )
+
+
+def peak_saved(peak: dict[str, Any]) -> dict[str, Any]:
+    """A peak as a reply's numbers."""
+    return {
+        "toward": [round(float(v), 6) + 0.0 for v in peak["toward"]],
+        "rises_deg": peak["rises_deg"],
+        "point_mm": peak["point_mm"],
+    }
+
+
+def peak_cut(hole: dict[str, Any], inner: float, outer: float) -> float:
+    """The area a hole's peak takes out of the ring between `inner` and `outer` round its axis,
+    `inner` no less than its radius, by arithmetic. At r from the axis the peak is open for
+    h - acos(R/r) either side of its point, h half the gap: that times 2r, summed along r."""
+    if hole["peak"] is None:
+        return 0.0
+    half, radius = float(hole["peak"]["half"]), float(hole["radius"])
+    least, most = max(inner, radius), min(outer, hole["peak"]["point_mm"])
+
+    def taken(r: float) -> float:
+        root = math.sqrt(max(r * r - radius * radius, 0.0))
+        return r * r * (half - math.acos(min(radius / r, 1.0))) + radius * root
+
+    return taken(most) - taken(least) if most > least else 0.0
+
+
+def lean_share(hole: dict[str, Any], leans: Any) -> float:
+    """How much of a round hole's bearing is there for a shank leaning `leans`, square to the
+    axis: 1 in a round hole. A shank bears on the half of the round it leans toward, each bit
+    by how square it is to that, its diameter by its length in all. Of that a peak leaves what
+    of the half is still round, so least toward its point: 1 - sin h."""
+    if hole["peak"] is None:
+        return 1.0
+    half, turn = hole["peak"]["half"], lean_off(hole, leans)
+    low, high = max(-half, turn - math.pi / 2), min(half, turn + math.pi / 2)
+    if high <= low:
+        return 1.0
+    return 1.0 - (math.sin(high - turn) - math.sin(low - turn)) / 2
+
+
+def lean_off(hole: dict[str, Any], leans: Any) -> float:
+    """How far round from a peak's point a shank leans, in radians: 0 is right at it."""
+    toward, way = hole["peak"]["toward"], np.asarray(leans, dtype=float)
+    return math.atan2(float(np.linalg.norm(np.cross(toward, way))), float(toward @ way))
+
+
+def as_round(peak: dict[str, Any], offsets: np.ndarray, toward: np.ndarray) -> np.ndarray:
+    """Points on a peaked bore's wall, `offsets` from its axis in a plane square to it, each as
+    the diameter it says: twice its distance from the axis on the round, and on a flank twice
+    the flank's plane's, which is the same where the flank is tangent."""
+    distance = np.linalg.norm(offsets, axis=1)
+    ahead = offsets @ toward
+    aside = np.abs(offsets[:, 0] * toward[1] - offsets[:, 1] * toward[0])
+    on_flank = np.maximum(peak["half"] - np.arctan2(aside, ahead), 0.0)
+    return np.asarray(2 * distance * np.cos(on_flank))
 
 
 def meet(first: dict[str, Any], second: dict[str, Any]) -> dict[str, Any] | str:
@@ -102,6 +324,10 @@ def meet(first: dict[str, Any], second: dict[str, Any]) -> dict[str, Any] | str:
         }
     gap = min(abs(first["high"] - low), abs(high - first["low"]))
     return f"the two parts' holes there don't meet end to end: they're {gap:.3f} mm apart"
+
+
+def _way(toward: Any) -> str:
+    return ", ".join(f"{round(float(c), 6) + 0.0:.3g}" for c in toward)
 
 
 def along(planes: list[dict[str, Any]], axis: Any, corners: list[np.ndarray]) -> None:

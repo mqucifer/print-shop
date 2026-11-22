@@ -35,6 +35,8 @@ corners (mqucifer/print-shop#183): the nut as a hexagon at its least size across
 every wall in some turn, its middle on the bolt's axis or as far off it as the bolt moves in its
 hole. Second method: the fine mesh cut square to the bolt half way up the pocket, the nearest
 that outline comes to the axis, and how far it reaches into the nut's hexagon placed the same.
+The bolt's bore may be round or peaked (mqucifer/print-shop#237): a peaked one is said, and its
+point is read again from the mesh.
 """
 
 from __future__ import annotations
@@ -48,7 +50,7 @@ from shapely.geometry import MultiPoint
 
 from . import through
 from .assembly import AXES, DIAMETER, Assembly, Joint, read
-from .faces import _cylinders, _flat_by_mesh, _flats, facing
+from .faces import _flat_by_mesh, _flats, bore_rows, facing
 from .limits import over, said
 from .report import NoAnswer, Report
 from .shapes import Part, load
@@ -175,39 +177,33 @@ def _sides(part: Part, bed: list[float], layers: str | None) -> list[dict[str, A
 def _in_place(assembly: Assembly, name: str, part: Part) -> dict[str, Any]:
     """A part's round and flat faces, and its fine mesh's triangles, where the assembly puts
     it, as `through.py` reads them."""
-    from OCP.BRepAdaptor import BRepAdaptor_Surface
-    from OCP.GeomAbs import GeomAbs_Plane
-
     placed = assembly.part(name)
     turn, move = placed.matrix(), np.asarray(placed.at, dtype=float)
+    round_faces, flat_faces = bore_rows(part)
     cylinders = []
-    for one in _cylinders(part)[0]:
+    for one in round_faces:
         axis = turn @ one["axis"]
         shift = float(move @ axis)
         cylinders.append(
             {
+                **one,
                 "axis": axis,
                 "origin": turn @ one["origin"] + move,
-                "radius": one["radius"],
-                "hole": one["hole"],
-                "low": one["along"][0] + shift,
-                "high": one["along"][1] + shift,
-                "turns": one["turns"],
+                "low": one["low"] + shift,
+                "high": one["high"] + shift,
+                "middle": turn @ one["middle"],
             }
         )
     planes, corners = [], []
-    for face in part.shape.Faces():
-        if BRepAdaptor_Surface(face.wrapped).GetType() != GeomAbs_Plane:
-            continue
-        normal = np.asarray(face.normalAt().toTuple(), dtype=float)
+    for one in flat_faces:
         planes.append(
             {
-                "normal": turn @ (normal / np.linalg.norm(normal)),
-                "at": turn @ np.asarray(face.Center().toTuple(), dtype=float) + move,
+                "normal": turn @ one["normal"],
+                "at": turn @ one["at"] + move,
+                "outline": one["outline"] @ turn.T + move,
             }
         )
-        own = np.array([v.toTuple() for v in face.Vertices()], dtype=float)
-        corners.append(own @ turn.T + move)
+        corners.append(one["corners"] @ turn.T + move)
     mesh = part.fine()
     triangles = np.asarray(mesh.triangles, dtype=float) @ turn.T + move
     return {"cylinders": cylinders, "planes": planes, "corners": corners, "triangles": triangles}
@@ -282,11 +278,11 @@ def _pocket(
     what = f"the nut's pocket of the through joint {joint.name}'s bolt at {spot}, in {part}"
     holes = []
     for name, read_faces in zip(joint.between, faces, strict=True):
-        hole = through.bore(read_faces["cylinders"], point)
+        hole = through.bore(read_faces["cylinders"], point, read_faces["planes"])
         if isinstance(hole, str):
             raise NoAnswer(
                 f"the through joint {joint.name}'s bolt at {spot}: in {name}, {hole}. A "
-                "through-bolt passes right through both parts, in a round hole in each"
+                "through-bolt passes right through both parts, in a round or peaked hole in each"
             )
         holes.append(hole)
     way = through.meet(holes[0], holes[1])
@@ -313,6 +309,7 @@ def _pocket(
         "stated_play_mm": joint.pocket,
         "fits": False,
     }
+    one["bores"] = _bores(joint, faces, holes, what, report, apart)
     if isinstance(found, str):
         fails.append(f"{what}: {found}")
         report.line(f"{what}: {found}")
@@ -403,6 +400,63 @@ def _pocket(
         return one
     report.line(f"{what}: {through.walls_said(found['facing'])}")
     return one
+
+
+def _bores(
+    joint: Joint,
+    faces: list[dict[str, Any]],
+    holes: list[dict[str, Any]],
+    what: str,
+    report: Report,
+    apart: list[str],
+) -> list[dict[str, Any]]:
+    """Each part's bore on the pocket's bolt, and where it's peaked (mqucifer/print-shop#237),
+    its point read again from the fine mesh cut square to the bolt half way along it."""
+    saved = []
+    for name, read_faces, hole in zip(joint.between, faces, holes, strict=True):
+        bore: dict[str, Any] = {"part": name, "hole_mm": 2 * hole["radius"]}
+        saved.append(bore)
+        peak = hole["peak"]
+        if peak is None:
+            continue
+        bore["peak"] = through.peak_saved(peak)
+        report.line(f"{what}: the bore in {name} is {through.peak_said(hole)}")
+        axis, origin, toward = hole["axis"], hole["origin"], peak["toward"]
+        middle = origin + ((hole["low"] + hole["high"]) / 2 - float(origin @ axis)) * axis
+        cut = _section(read_faces["triangles"], middle, axis)
+        reach = _along_by_mesh(cut, toward, np.cross(axis, toward))
+        report.second(
+            f"{what}: the peak in {name}, by the fine mesh cut square to the bolt half way along "
+            "it: "
+            + (
+                "nothing toward its point"
+                if reach is None
+                else f"its point is {reach:.4f} mm from the axis, where its faces put it at "
+                f"{peak['point_mm']:.4f}"
+            )
+        )
+        if reach is None or abs(reach - peak["point_mm"]) > POCKET_AGREE:
+            apart.append(
+                f"{what}: the peak's point in {name} is {peak['point_mm']:.4f} mm from the axis "
+                "by its faces and "
+                + ("not found" if reach is None else f"{reach:.4f} mm")
+                + " by the mesh's section"
+            )
+    return saved
+
+
+def _along_by_mesh(segments: np.ndarray, toward: np.ndarray, side: np.ndarray) -> float | None:
+    """The first a section's segments are met going `toward` from the point they're from."""
+    ahead, aside = segments @ toward, segments @ side
+    met = []
+    for (first, last), (left, right) in zip(ahead, aside, strict=True):
+        if left == right or min(left, right) > 1e-6 or max(left, right) < -1e-6:
+            continue
+        share = min(1.0, max(0.0, left / (left - right)))
+        reach = first + share * (last - first)
+        if reach > 0:
+            met.append(float(reach))
+    return min(met, default=None)
 
 
 def _into_said(depth: float) -> str:
