@@ -232,6 +232,58 @@ def test_the_loaded_filament_is_checked_against_the_one_the_file_names(tmp_path:
     assert "0.6" in said and "0.4" in said
 
 
+#: Bambu's PETG HF as Orca writes it in a slice: the preset's name, with `PET` as its type.
+HF = "Bambu PETG HF @System"
+HF_SPOOL = "Bambu PETG HF"
+
+
+def _sliced_for(folder: Path, profile: str, type: str) -> Path:
+    """The fixture G-code, sliced for another filament profile."""
+    return write_gcode(folder, by_hand={"filament_settings_id": f'"{profile}"'},
+                       filament_type=type)
+
+
+@pytest.mark.parametrize("written", ["PET", "PETG"])
+@pytest.mark.parametrize("recorded", ["PET", "PETG", "petg"])
+def test_a_bambu_petg_file_is_petg_against_its_spool_however_either_spells_it(
+    written: str, recorded: str, tmp_path: Path
+) -> None:
+    """mqucifer/print-shop#217: Orca writes `PET` for Bambu's PETG, and the store says `PETG`."""
+    file = sliced.read(_sliced_for(tmp_path, HF, written))
+    spool = _material(tmp_path / "ledger.sqlite", type=recorded, variety=HF_SPOOL)
+    assert sliced.loaded_mismatch(file, spool, Store(STORE)) == []
+
+
+@pytest.mark.parametrize("recorded", ["PET", "PETG"])
+@pytest.mark.parametrize(("profile", "type", "named"), [
+    ("Elegoo PLA @ECC", "PLA", "sliced for PLA"),
+    ("Bambu PETG Translucent @System", "PET", "is Bambu PETG Translucent,"),
+    ("Bambu PETG Translucent @System - std retraction", "PET", "is Bambu PETG Translucent,"),
+    ("Elegoo PETG @ECC", "PETG", "is Elegoo PETG,"),
+])
+def test_pla_and_another_petg_variety_are_still_refused_against_a_bambu_petg_spool(
+    profile: str, type: str, named: str, recorded: str, tmp_path: Path
+) -> None:
+    file = sliced.read(_sliced_for(tmp_path, profile, type))
+    spool = _material(tmp_path / "ledger.sqlite", type=recorded, variety=HF_SPOOL)
+    (said,) = sliced.loaded_mismatch(file, spool, Store(STORE))
+    assert named in said and HF_SPOOL in said
+
+
+@pytest.mark.parametrize(("written", "recorded"), [("PET", "PETG"), ("PETG", "PET")])
+@pytest.mark.parametrize("profile", ["Generic PET @Elegoo Centauri", "my copy of translucent"])
+def test_another_spelling_is_taken_only_from_a_profile_the_store_knows(
+    profile: str, written: str, recorded: str, tmp_path: Path
+) -> None:
+    """Orca has a true PET for the Centauri Carbon, also written `PET`, and a preset the store
+    doesn't know has no variety to check: neither passes as the PETG that's loaded."""
+    file = sliced.read(_sliced_for(tmp_path, profile, written))
+    spool = _material(tmp_path / "ledger.sqlite", type=recorded, variety=HF_SPOOL)
+    for store in (Store(STORE), None):
+        (said,) = sliced.loaded_mismatch(file, spool, store)
+        assert profile in said and "doesn't know" in said
+
+
 # --- the job, end to end against the fakes -----------------------------------------------------
 
 
@@ -629,6 +681,17 @@ def test_print_job_refuses_a_sliced_file_for_another_filament_unless_told(
 
     assert shop.run("--sliced", str(source), "--loaded-ok") == 0
     assert "printing with what's loaded, as you said (--loaded-ok)" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("recorded", ["PET", "PETG"])
+def test_print_job_sends_a_bambu_petg_file_to_its_spool_without_loaded_ok(
+    recorded: str, shop: Shop, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _material(shop.ledger_path, type=recorded, variety=HF_SPOOL)
+
+    assert shop.run("--sliced", str(_sliced_for(tmp_path, HF, "PET"))) == 0
+    out = capsys.readouterr().out
+    assert "At the approval gate" in out and "--loaded-ok" not in out
 
 
 def test_print_job_prints_a_past_sliced_job_again_and_refuses_another_filament(

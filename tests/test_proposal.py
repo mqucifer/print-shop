@@ -107,6 +107,14 @@ def test_the_three_parts_differ_in_the_features_a_setting_reads(tmp_path: Path) 
     assert f["vase"]["overhang"] == f["bracket"]["overhang"] == 0
 
 
+def test_a_filament_orca_spells_pet_is_petg_to_the_proposal() -> None:
+    filament = {"name": "Bambu PETG HF @System", "filament_type": ["PET"]}
+    facts = PartFacts(intake=Intake(), features=(), machine={}, process={}, filament=filament)
+    assert facts.filament_type == "PETG"
+    assert "Filament: Bambu PETG HF @System (PETG)." in prompt(
+        facts, load(groups_for(Intake(), ())))
+
+
 # --------------------------------------------------------------------------
 # The recorded proposals
 # --------------------------------------------------------------------------
