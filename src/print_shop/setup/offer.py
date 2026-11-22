@@ -17,6 +17,9 @@ more like learning than me remembering".
   pre-selected, as each job asks again, but on the same bytes where this job didn't ask.
 - **It's laid out to be read** (`render`): the print and how it came out once, what differs in
   columns, the items grouped by whose they were, and a reason several share said once.
+- **A pause's height is converted, never copied raw** (`_pause_height`): a row from before
+  mqucifer/print-shop#228 gives the height that pauses where its own G-code did, and one whose
+  G-code doesn't say where it paused can't be used.
 - **Nothing is applied until it's used** (`use`, `review.parse_answer`). What's used is the
   person's correction, carrying the print it came from (`proposal.Used`). Carrying an override
   isn't a lesson accepted: those still go through the reviewer (`lessons.draw`).
@@ -563,10 +566,19 @@ def _first(value: Any) -> str:
 
 
 def _pause_height(row: Row, change: Change) -> tuple[str | None, str]:
-    """The height to type for that print's pause, or None and why it isn't carried."""
-    # Until mqucifer/print-shop#228 merges, which changes what a pause's height means: no
-    # height is carried, as one copied raw would replay a layer late after it.
-    return None, "a pause's height isn't carried yet (mqucifer/print-shop#228): type it"
+    """The height to type for that print's pause, with a note where it was converted, or None
+    and why it isn't carried. Never copied raw: a row from before mqucifer/print-shop#228 has
+    another meaning of a height, and replayed raw it pauses a layer late."""
+    from print_shop.desk.again import _pause_again  # noqa: PLC0415 - the desk imports the graph
+
+    height = _pause_again(row, change)
+    if height is None:
+        return None, ("that print's G-code doesn't say where it paused, so its "
+                      f"{change.value} mm isn't carried: type the top of the layer to pause after")
+    if height == change.value:
+        return height, ""
+    return height, (f"{change.value} mm then is {height} mm now, to pause where that print did: "
+                    "a pause's height is now the top of the layer it comes after")
 
 
 @dataclass

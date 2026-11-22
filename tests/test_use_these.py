@@ -42,6 +42,7 @@ from print_shop.setup.proposal import (
     Used,
     pose_value,
 )
+from print_shop.setup.reading import LayerTime, PauseReading, SeamReading, SliceReading
 from print_shop.setup.review import Review, ReviewRequest, cli_reviewer, parse_answer, render
 from print_shop.setup.traits import traits
 from print_shop.slicer.orca import SlicerProfiles
@@ -114,6 +115,17 @@ def yours(key: str, value: str, reason: str = "it gets handled", **other: Any) -
     return Change(key=key, preset="", value=value, reason=reason, source=Source.SPONSOR, **other)
 
 
+def read_pausing(z: float, older: bool = False) -> SliceReading:
+    """A slice in 0.2 mm layers that pauses after the one topping out at `z`. An `older` row's
+    reading doesn't say the layer it paused after (mqucifer/print-shop#228)."""
+    layers = tuple(LayerTime(n=n, z=round(n * 0.2, 2), time_s=10.0) for n in range(1, 151))
+    before = round(z / 0.2) + 1
+    pause = PauseReading(before_layer=before, z=layers[before - 1].z, after_s=60.0,
+                         after_z=None if older else z)
+    return SliceReading(layers=layers, features=(), seam=SeamReading(seams=0, stacked=0.0),
+                        pauses=(pause,))
+
+
 def printed(
     ledger: Ledger, job: str, stl: Path, corrections: tuple[Change, ...] = (), *,
     changes: tuple[Change, ...] = (), kept: tuple[Change, ...] = (),
@@ -122,11 +134,18 @@ def printed(
     rotation: tuple[float, float, float] = LAID, source: str = "geometric",
     config: dict[str, str] | None = None, context_from: str = "",
     intake: Intake | None = None, features: tuple[Feature, ...] | None = None,
+    older: bool = False, unread: bool = False,
 ) -> Row:
     """A made-up print in the ledger, as the review left it and as it was answered."""
     last = {c.key: c for c in corrections if c.key != ORIENTATION}
     made = Proposal(changes=(*(c for c in changes if c.key not in last), *last.values()),
                     kept=kept, lessons=given, context_from=context_from)
+    paused = last.get(PAUSE)
+    reading = None
+    if paused is not None and paused.value != "none" and not unread:
+        # An older row's height was the first layer after the pause.
+        z = round(float(paused.value) - (0.2 if older else 0.0), 2)
+        reading = read_pausing(z, older)
     ledger.record_start_requested(PrintRecord(
         job_id=job, stl_name=stl.name, stl_sha256=analyze(str(stl)).stl_sha256,
         rotation_deg=rotation, orientation_source=source, orientation_rationale="made up",
@@ -135,7 +154,7 @@ def printed(
         slicer_config={"filament_settings_id": filament, "filament_type": kind,
                        "layer_height": "0.2", **(config or {})},
         printer_machine="made up", printer_firmware="0", intake=intake, proposal=made,
-        corrections=corrections,
+        corrections=corrections, reading=reading,
         features=features_of(stl) if features is None else features,
     ))
     ledger.record_started(job)
@@ -183,12 +202,6 @@ def request_for(found: Offering, proposal: Proposal | None = None) -> ReviewRequ
 def ledger(tmp_path: Path) -> Any:
     with Ledger(tmp_path / "ledger.sqlite") as opened:
         yield opened
-
-
-@pytest.fixture
-def pauses_carried(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A pause's height as `_pause_height` gives it for a print made with this code."""
-    monkeypatch.setattr(offer, "_pause_height", lambda row, change: (change.value, ""))
 
 
 # --------------------------------------------------------------------------
@@ -446,7 +459,7 @@ def test_supports_decided_for_no_overhang_are_in_doubt_over_one(
 
 
 def test_a_pause_outside_this_part_cant_be_used(
-    tmp_path: Path, ledger: Ledger, pauses_carried: None
+    tmp_path: Path, ledger: Ledger
 ) -> None:
     printed(ledger, "first", box(tmp_path, "plinth.stl", 60, 40, 12), (yours(PAUSE, "9"),))
     found = offering(ledger, this(box(tmp_path, "plinth-b.stl", 60, 40, 8)))
@@ -458,7 +471,7 @@ def test_a_pause_outside_this_part_cant_be_used(
 
 
 def test_a_pause_off_this_parts_features_isnt_selected(
-    tmp_path: Path, ledger: Ledger, pauses_carried: None
+    tmp_path: Path, ledger: Ledger
 ) -> None:
     printed(ledger, "first", stepped(tmp_path, "step.stl"), (yours(PAUSE, "7.4"),))
     assert selected(offering(ledger, this(stepped(tmp_path, "step-b.stl", 42))), PAUSE)
@@ -468,7 +481,7 @@ def test_a_pause_off_this_parts_features_isnt_selected(
 
 
 def test_a_pause_a_layer_under_this_parts_pocket_isnt_ticked_and_names_its_height(
-    tmp_path: Path, ledger: Ledger, pauses_carried: None
+    tmp_path: Path, ledger: Ledger
 ) -> None:
     """Pre-selected, it'd be mqucifer/print-shop#203's fault again: a layer early."""
     printed(ledger, "first", pocketed(tmp_path, "tray.stl", 7.4), (yours(PAUSE, "7.4"),))
@@ -481,7 +494,7 @@ def test_a_pause_a_layer_under_this_parts_pocket_isnt_ticked_and_names_its_heigh
 
 
 def test_a_pause_a_layer_over_this_parts_pocket_isnt_ticked_either(
-    tmp_path: Path, ledger: Ledger, pauses_carried: None
+    tmp_path: Path, ledger: Ledger
 ) -> None:
     printed(ledger, "first", pocketed(tmp_path, "tray.stl", 7.4), (yours(PAUSE, "7.4"),))
     found = offering(ledger, this(pocketed(tmp_path, "tray-b.stl", 7.2)))
@@ -489,7 +502,7 @@ def test_a_pause_a_layer_over_this_parts_pocket_isnt_ticked_either(
 
 
 def test_a_face_between_two_layers_tops_isnt_given_as_a_height_to_type(
-    tmp_path: Path, ledger: Ledger, pauses_carried: None
+    tmp_path: Path, ledger: Ledger
 ) -> None:
     printed(ledger, "first", pocketed(tmp_path, "tray.stl", 7.4), (yours(PAUSE, "7.4"),))
     found = offering(ledger, this(pocketed(tmp_path, "tray-b.stl", 7.5)))
@@ -498,7 +511,7 @@ def test_a_face_between_two_layers_tops_isnt_given_as_a_height_to_type(
 
 
 def test_a_pause_at_this_parts_own_face_is_ticked(
-    tmp_path: Path, ledger: Ledger, pauses_carried: None
+    tmp_path: Path, ledger: Ledger
 ) -> None:
     printed(ledger, "first", pocketed(tmp_path, "tray.stl", 7.4), (yours(PAUSE, "7.4"),))
     longer = stepped(tmp_path, "tray-b.stl", 42)
@@ -507,11 +520,38 @@ def test_a_pause_at_this_parts_own_face_is_ticked(
 
 
 def test_on_the_same_file_a_pause_needs_no_feature(
-    tmp_path: Path, ledger: Ledger, pauses_carried: None
+    tmp_path: Path, ledger: Ledger
 ) -> None:
     here = box(tmp_path, "block.stl", 40, 30, 14)
     printed(ledger, "first", here, (yours(PAUSE, "6.2"),))
     assert selected(offering(ledger, this(here)), PAUSE)
+
+
+def test_an_older_rows_pause_is_converted_never_copied_raw(
+    tmp_path: Path, ledger: Ledger
+) -> None:
+    here = box(tmp_path, "block.stl", 40, 30, 14)
+    printed(ledger, "first", here, (yours(PAUSE, "6.2"),), older=True)
+    found = offering(ledger, this(here))
+    item, standing = standings(found)[PAUSE]
+    assert standing.selected and item.value == "6"
+    assert item.notes == ("6.2 mm then is 6 mm now, to pause where that print did: a pause's "
+                          "height is now the top of the layer it comes after",)
+    used = parse_answer("use", request_for(found))
+    assert isinstance(used, Review)
+    assert [(c.key, c.value) for c in used.corrections] == [(PAUSE, "6")]
+
+
+def test_a_pause_whose_gcode_doesnt_say_where_isnt_carried(tmp_path: Path, ledger: Ledger) -> None:
+    here = box(tmp_path, "block.stl", 40, 30, 14)
+    printed(ledger, "first", here, (yours(PAUSE, "6.2"), yours("wall_loops", "4")), unread=True)
+    found = offering(ledger, this(here))
+    item, standing = standings(found)[PAUSE]
+    assert standing.mark == "-"
+    assert "doesn't say where it paused" in item.blocked
+    used = parse_answer("use", request_for(found))
+    assert isinstance(used, Review)
+    assert [c.key for c in used.corrections] == ["wall_loops"], "left out, with a note"
 
 
 def test_one_that_didnt_reach_that_prints_slice_says_so(tmp_path: Path, ledger: Ledger) -> None:
@@ -1090,7 +1130,7 @@ def run(tmp_path: Path, ledger: Ledger, profiles: SlicerProfiles) -> Run:
 
 
 def test_the_same_file_twice_one_use_applies_every_override_pause_included(
-    tmp_path: Path, run: Run, ledger: Ledger, pauses_carried: None
+    tmp_path: Path, run: Run, ledger: Ledger
 ) -> None:
     cube = write_stl("cube", tmp_path)
     first, _, _ = run(
@@ -1122,6 +1162,21 @@ def test_the_same_file_twice_one_use_applies_every_override_pause_included(
     assert {c.used.job_id for c in second.corrections if c.used} == {first.job_id}
     assert all(c.used is not None for c in second.corrections)
     assert "I handle it" in render(shown)
+
+
+def test_an_older_rows_pause_replayed_pauses_before_the_same_layer(
+    tmp_path: Path, run: Run, ledger: Ledger
+) -> None:
+    """Copied raw it'd replay a layer late (mqucifer/print-shop#228)."""
+    cube = write_stl("cube", tmp_path)
+    older = printed(ledger, "older", cube, (yours(PAUSE, "10.2", "a band of colour"),), older=True)
+    second, _, _ = run(cube, "use", "ok")
+    assert second is not None and second.reading is not None and older.reading is not None
+    [now], [then] = second.reading.pauses, older.reading.pauses
+    assert (now.before_layer, now.z) == (then.before_layer, then.z)
+    assert second.proposal is not None
+    pause = second.proposal.get(PAUSE)
+    assert pause is not None and pause.value == "10"
 
 
 def test_approved_without_use_nothing_is_carried(tmp_path: Path, run: Run, ledger: Ledger) -> None:
