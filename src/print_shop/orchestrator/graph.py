@@ -489,12 +489,21 @@ def build_graph(
         }
 
     def review_proposal_node(state: PrintJobState) -> dict[str, Any]:
-        """Gate for non-manifold meshes: stop for a human decision.
+        """Gate for a non-manifold mesh, or no pose that passed its check: stop for a human
+        decision.
 
-        The payload carries the mesh facts a human needs to decide whether
+        The payload carries why it stopped and the mesh facts a human needs to decide whether
         to retry (route back to slice) or abandon (END).
         """
         mesh = state["mesh"]
+        reason = "Mesh is not manifold; cannot be trusted to slice."
+        if mesh.is_manifold:
+            # From the orientation's check, which gave the mesh's reason until
+            # mqucifer/print-shop#200.
+            outcome = state.get("orientation")
+            found = outcome.outstanding if outcome is not None else ()
+            why = "; ".join(v.detail for v in found if v.detail)
+            reason = "No pose passed its check, so none was chosen" + (f": {why}" if why else "")
         decision = interrupt(
             {
                 "gate": Gate.REVIEW_PROPOSAL.value,
@@ -504,7 +513,7 @@ def build_graph(
                 "surface_area_mm2": mesh.surface_area_mm2,
                 "bbox_mm": list(mesh.bbox_mm),
                 "overhang_area_mm2": mesh.overhang_area_mm2,
-                "reason": "Mesh is not manifold; cannot be trusted to slice.",
+                "reason": reason,
             }
         )
         approved = (

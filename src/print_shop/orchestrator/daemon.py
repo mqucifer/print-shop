@@ -32,6 +32,7 @@ from langgraph.types import Command as LgCommand
 from pydantic import BaseModel
 
 from print_shop.core.checkpoint import open_checkpointer
+from print_shop.core.contracts import Gate
 from print_shop.core.mqtt import (
     Bridge,
     MqttBridge,
@@ -61,6 +62,7 @@ __all__ = [
     "Command",
     "JobRejected",
     "JobResult",
+    "gate_name",
     "parse_command",
     "state_payload",
     "Daemon",
@@ -77,6 +79,20 @@ _R = TypeVar("_R")
 def duration(seconds: float) -> str:
     """A wait's length as a sentence says it: "60 min", "45 s"."""
     return f"{seconds / 60:g} min" if seconds >= 60 else f"{seconds:g} s"
+
+
+def gate_name(gate: dict[str, Any]) -> str:
+    """A gate as a person is told it, from its payload. Only the gate before printing is "the
+    approval gate" (mqucifer/print-shop#200)."""
+    kind = gate.get("gate")
+    if kind == Gate.BEFORE_PRINT:
+        return "the approval gate"
+    if kind == Gate.REVIEW_PROPOSAL:
+        if gate.get("is_manifold") is False:
+            return "the mesh gate"
+        if gate.get("is_manifold") is True:
+            return "the pose gate"
+    return str(kind) if kind else "a gate that doesn't say which it is"
 
 
 # --------------------------------------------------------------------------
@@ -433,7 +449,8 @@ class Daemon:
         rather than leaving the caller waiting out the timeout.
 
         `timeout_s` counts from when the job last came back from the person:
-        its submit, its last intake answer, or the review's `ok` or `take`.
+        its submit, its last intake answer, the review's `ok` or `take`, or
+        its last gate's answer, for a job with another gate after it.
         While the intake or the review is with them it doesn't count, however
         long they take (mqucifer/print-shop#125).
 
@@ -451,6 +468,19 @@ class Daemon:
                 raise TimeoutError(
                     self.abandon(job_id, "waiting for the approval gate", timeout_s)
                 )
+
+    def wait_for_answer(self, job_id: str, shown: dict[str, Any]) -> None:
+        """Block until `shown`, a gate from `pending_gate`, is answered or its own wait runs out.
+
+        A job can have a gate after this one (the mesh gate's Approve goes on to the approval
+        gate), which `wait_for_gate` then waits for (mqucifer/print-shop#200). It's this gate
+        that's watched, not whether any is open: the next can open between two looks.
+        """
+        while self._pending_gate == shown:
+            with self._job_lock:
+                if self._active_job_id != job_id:
+                    return
+            time.sleep(0.1)
 
     def abandon(self, job_id: str, what: str, waited_s: float) -> str:
         """End a job a wait ran out on: the sentence that says so, and the ledger's row.
@@ -548,6 +578,13 @@ class Daemon:
         """Drop the inbox. Idempotent — may be called on an already-closed gate."""
         with self._job_lock:
             self._gate_inbox = None
+
+    def _left_gate(self) -> None:
+        """The gate has its answer, or its wait ran out. Its time was the person's, so the wait
+        for the next gate counts from now (mqucifer/print-shop#125)."""
+        self._pending_gate = None
+        self._back_at = time.monotonic()
+        self._at_gate.clear()
 
     def _on_command(self, topic: str, payload: bytes, retain: bool) -> None:
         """MQTT callback: parse the command and push it to the queue.
@@ -668,10 +705,11 @@ class Daemon:
             cmd = inbox.get(timeout=self._gate_wait_s)
         except Empty:
             self._close_gate()
-            self._pending_gate = None
+            self._left_gate()
             self._bridge_publish(gate_topic(self._cfg), {"pending": False})
             sentence = self.abandon(
-                job_id, "waiting for Approve or Reject at the approval gate", self._gate_wait_s
+                job_id, f"waiting for Approve or Reject at {gate_name(gate_payload)}",
+                self._gate_wait_s,
             )
             self._finish_job(job_id, approved=False, printed=False, error=sentence)
             return
@@ -682,7 +720,7 @@ class Daemon:
         # We have our answer; close this gate's inbox so a stale press cannot
         # leak into the next gate.
         self._close_gate()
-        self._pending_gate = None
+        self._left_gate()
 
         # Clear the gate.
         self._bridge_publish(gate_topic(self._cfg), {"pending": False})
