@@ -107,6 +107,9 @@ def test_the_same_plate_correction_on_another_filament_is_a_lesson_of_its_own(
     assert [(r["setting"], r["material"]) for r in rows] == [
         ("textured_plate_temp", "PETG"), ("brim_type", None), ("textured_plate_temp", "PLA")
     ], "the brim is the same lesson again; PLA's plate is its own"
+    assert "linked to lesson 1 [candidate], the same setting and value in PETG, for a part" in (
+        lessons.listing(ledger, "pla-1")
+    ), "linked, for a reviewer to widen one to any filament (mqucifer/print-shop#212)"
 
 
 # Given only to its own filament
