@@ -23,9 +23,11 @@ spool's number and whether it's loaded. `--tuning none` is the variety's
 default. Prints already made keep the spool as it was; a job prepared with the
 old tuning says so when it's approved, and doesn't print.
 
-Where what's on a printer can't be known after a print with a swap
-(mqucifer/print-shop#218), the list says so and what to type: jobs don't start
-until it's recorded.
+After a print with a swap (mqucifer/print-shop#218) what's on that printer isn't
+known: the list says so and what to type, and jobs don't start until it's said.
+`load` then asks whether that print is over, and only a y clears it, saying both
+that and that this spool is on now. With no terminal to ask in, as from a script,
+it records the load and doesn't clear.
 
 The inventory lives in the ledger's file (`PRINT_SHOP_LEDGER`, default
 `~/print-shop/ledger.sqlite`).
@@ -38,9 +40,10 @@ import sys
 from pathlib import Path
 
 from print_shop.env import SETTINGS_PATH
-from print_shop.inventory import Inventory, InventoryError
-from print_shop.ledger import Ledger, ledger_path
-from print_shop.orchestrator.spools import not_known
+from print_shop.inventory import Inventory, InventoryError, SpoolState
+from print_shop.ledger import ledger_path
+from print_shop.orchestrator.spools import ask_over
+from print_shop.setup.waiting import can_ask, drop_typed
 from print_shop.slicer.store import STORE_DIR, Store, StoredProfile
 
 
@@ -113,6 +116,21 @@ def edit(inventory: Inventory, args: argparse.Namespace) -> str:
     return inventory.edit(spool.id, colour=args.colour, tuning=tuning, untuned=untuned).line()
 
 
+def load(inventory: Inventory, args: argparse.Namespace) -> str:
+    printer = inventory.printer(args.printer)
+    spool = inventory.spool(args.spool)
+    found = inventory.unknown(printer.id)
+    over = None
+    if found is not None and spool.state is not SpoolState.EMPTY and can_ask():
+        over = ask_over(found, spool, read=input, write=print, forget=drop_typed)
+    lines = [inventory.load(spool.id, printer.id, over=over).line()]
+    if (still := inventory.unknown(printer.id)) is not None:
+        lines.append(f"  print-shop still doesn't know what's on {printer.id}, as nothing said "
+                     f"{still.print_named()} is over: jobs don't start. `stock load {spool.id}` "
+                     "in a terminal asks.")
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--settings", type=Path, default=SETTINGS_PATH,
@@ -156,17 +174,13 @@ def main(argv: list[str] | None = None) -> int:
         try:
             if args.command in (None, "list"):
                 print(inventory.listing(with_empty=getattr(args, "all", False)))
-                with Ledger(inventory.path) as ledger:
-                    for owned in inventory.printers():
-                        if found := not_known(ledger, owned.id):
-                            print(f"{found.why}. {found.do}")
             elif args.command == "printer":
                 added = inventory.add_printer(args.id, args.model)
                 print(f"printer {added.id}  {added.model}")
             elif args.command == "add":
                 print(add(inventory, args))
             elif args.command == "load":
-                print(inventory.load(args.spool, args.printer).line())
+                print(load(inventory, args))
             elif args.command == "edit":
                 print(edit(inventory, args))
             elif args.command == "empty":

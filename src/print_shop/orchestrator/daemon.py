@@ -839,8 +839,6 @@ class Daemon:
         said = f"Not started: {why}"
         # What's held says what to load, so the gate's own line, from when it opened, gives way.
         gate_payload = {**gate_payload, "spools": ""}
-        if self._watcher is not None:
-            self._watcher.poke()  # an end still to be seen is looked for, outside the check
         if self._pending_gate is not None:
             self._pending_gate = {**self._pending_gate, "held": said}
         self._bridge_publish(

@@ -133,7 +133,8 @@ def outcome_note_topic(cfg: MqttConfig) -> str:
 
 
 def outcome_spool_topic(cfg: MqttConfig) -> str:
-    """The spool a print with a swap ended with, as corrected (mqucifer/print-shop#218)."""
+    """The person's pick after a print with a swap: it's over, and this spool is on now
+    (mqucifer/print-shop#218)."""
     return f"{cfg.topic_prefix}/outcome/set/spool"
 
 
@@ -183,7 +184,7 @@ OUTCOME_SYMPTOMS = (
     "other",
 )
 
-#: The spool select's usual answer: Record keeps the spool as the card says it was recorded.
+#: The spool select's usual answer, which says nothing of the spool on: it clears nothing.
 OUTCOME_SPOOL_AS_RECORDED = "as recorded"
 
 #: The part on show, with any refusal the dashboard should see.
@@ -227,7 +228,8 @@ def approval_buttons(
 def outcome_spool_select(
     cfg: MqttConfig, spools: Iterable[str] = ()
 ) -> tuple[str, dict[str, object]]:
-    """The select that corrects a swap's last spool at the outcome (mqucifer/print-shop#218).
+    """The select that says, at a swap's outcome, that it's over and which spool is on now
+    (mqucifer/print-shop#218). Each option says both.
 
     A select's options are fixed in its discovery, and the stock's spools aren't, so the desk
     publishes this again with them, as the gate's buttons are (`approval_buttons`).

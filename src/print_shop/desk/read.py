@@ -24,7 +24,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from print_shop.env import load_env
-from print_shop.inventory import Nozzle, Printer, Spool, swap_made
+from print_shop.inventory import Nozzle, Printer, Spool
 from print_shop.joblog import LOG_NAME
 from print_shop.ledger import Frame, Ledger, LedgerError, Row, UnprintedJob
 from print_shop.orchestrator.frames import FRAMES_DIR
@@ -115,6 +115,8 @@ class PrinterNow:
     printer: Printer
     nozzle: Nozzle | None
     spool: Spool | None
+    #: Why what's on it isn't known, or "" (mqucifer/print-shop#218).
+    not_known: str = ""
 
 
 @dataclass(frozen=True)
@@ -191,12 +193,8 @@ def pause_said(row: Row) -> str:
     if word != "swap" or len(row.spools) < 2:
         return word
     colours = [used.material.colour for used in row.spools]
-    if row.spools[1].unsure:
-        return "swap, perhaps not made: " + ", then ".join(colours)
-    if not swap_made(row.spools):
-        then = "".join(f", then {colour}" for colour in colours[2:]) or " throughout"
-        return f"swap, not made: {colours[0]}{then}"
-    return "swap: " + ", then ".join(colours)
+    last = row.ended_with.colour if row.ended_with is not None else "not said"
+    return f"swap: {', then '.join(colours)}; ended with {last}"
 
 
 class Desk:
@@ -236,12 +234,14 @@ class Desk:
             spools = tuple(Spool(**r) for r in ledger.query(
                 "SELECT id, manufacturer, type, variety, colour, grams_left, tuning, state, "
                 "printer_id FROM spools WHERE state != 'empty' ORDER BY type, variety, id"))
+            unknown = {p.id: found.why() for p in printers if (found := ledger.not_known(p.id))}
         return OnHand(
             printers=tuple(
                 PrinterNow(
                     printer=p,
                     nozzle=next((n for n in nozzles if n.printer_id == p.id), None),
                     spool=next((s for s in spools if s.printer_id == p.id), None),
+                    not_known=unknown.get(p.id, ""),
                 )
                 for p in printers
             ),

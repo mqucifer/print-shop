@@ -13,8 +13,8 @@ and re-copy those". Three things, each copied from the page and never run by it:
   mqucifer/print-shop#203 is given at the height that pauses where it did (`_older_pause`), and
   one whose G-code doesn't say where it paused is left out, saying so (`_pause_again`). It's
   typed with what it was for (mqucifer/print-shop#218): an insert, or a swap with the spools the
-  print used. One of them that can't be named now (used up, or the first's tuning edited) is
-  left to be asked (`from ?`), so the line still reads back;
+  print was planned with. One of them that can't be named now (used up, or the first's tuning
+  edited) is left to be asked (`from ?`), so the line still reads back;
 - **the answers file** for `--answers` (`intake.replay_asker`): each question by its text, each
   answer by its option's label or the words given.
 
@@ -245,6 +245,9 @@ def again(
             if purpose is None:
                 notes.append("This job didn't say what its pause was for, so the review asks.")
             elif purpose.start is not None and purpose.to is not None:
+                if row.ended_with is not None and row.ended_with.spool_id != purpose.to.spool_id:
+                    notes.append(f"You said it ended with {row.ended_with.named()}: the line is "
+                                 "as it was planned.")
                 notes.append(f"It starts on {purpose.start.named()}, and swaps to "
                              f"{purpose.to.named()}: have the first loaded, and recorded "
                              f"(`stock.py load {purpose.start.spool_id}`), before you approve.")

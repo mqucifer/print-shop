@@ -10,7 +10,7 @@ where it's set, and every later step uses that word:
   has one filament's settings.
 - **A pause from before this says neither,** and is only "a pause".
 - **A swap carried from a print never comes back reversed.** Where its first spool can't start
-  this job, as with the second left loaded, no other is chosen or pre-selected for it.
+  this job, as with the second loaded since, no other is chosen or pre-selected for it.
 
 What's typed is read here and what isn't typed is asked here. Where a pause lands is
 `bench.pausing`'s and the reading's (mqucifer/print-shop#203).
@@ -266,15 +266,12 @@ def cant_start(
 
 
 def as_printed(pause: Pause | None, spools: tuple[SpoolUse, ...]) -> Pause | None:
-    """A past print's pause as it's printed again: with the spools that print used, where its
-    swap was made, else with those planned."""
+    """A past print's pause as it's printed again: with the spool it started on and the one it
+    was to swap to. The one it ended with is the person's word, and no plan."""
     if pause is None or pause.kind is not PauseFor.SWAP or not spools:
         return pause
-    first = spools[0].material
-    # The spool swapped to, not one that finished after it ran out.
-    second = spools[1].material if len(spools) > 1 else first
-    to = second if second.spool_id != first.spool_id else pause.to
-    return Pause(kind=pause.kind, start=first, to=to)
+    to = spools[1].material if len(spools) > 1 else pause.to
+    return Pause(kind=pause.kind, start=spools[0].material, to=to)
 
 
 def refreshed(
@@ -447,8 +444,9 @@ def marked(reading: SliceReading | None, change: Change | None) -> SliceReading 
 
 
 def uses(pause: Pause | None, reading: SliceReading | None) -> tuple[SpoolUse, ...]:
-    """Each spool a swap prints with, in order, with its layer. A slice that was read and has no
-    pause written has only the first: the printer never stops for the second."""
+    """Each spool a swap is to print with, in order, with its layer as planned. A slice that was
+    read and has no pause written has only the first: the printer never stops for the second.
+    One with pauses, none of them matched to this, has the second from a layer that isn't known."""
     if pause is None or pause.start is None or pause.to is None:
         return ()
     first = SpoolUse(material=pause.start, from_layer=1)
@@ -456,7 +454,7 @@ def uses(pause: Pause | None, reading: SliceReading | None) -> tuple[SpoolUse, .
         return first, SpoolUse(material=pause.to)
     at = next((p for p in reading.pauses if p.kind is PauseFor.SWAP), None)
     if at is None:
-        return (first,)
+        return (first, SpoolUse(material=pause.to)) if reading.pauses else (first,)
     return first, SpoolUse(material=pause.to, from_layer=at.before_layer, from_z=at.after_z)
 
 

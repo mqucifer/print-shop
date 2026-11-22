@@ -22,9 +22,10 @@ approval gate, a press is scoped to the print on show by time: only one print
 is shown at once, the draft resets whenever the print on show changes, and the
 part's name is on the card beside the buttons.
 
-A print with a swap (mqucifer/print-shop#218) leaves its last spool loaded in the stock when the
-watcher sees it end (`spools.at_end`, `Ledger.record_ended`). The desk says so, and Record takes
-a correction of it.
+After a print with a swap (mqucifer/print-shop#218) what's on the printer isn't known until a
+person says. The watcher never says it: an end, a layer, an idle or a file name moves no stock
+and clears nothing. That print's own card offers the spools in words that say both halves, that
+it's over and which is on now, with none pre-selected, and Record takes the pick.
 
 With frames (mqucifer/print-shop#110), the desk also shows the last, and
 pages through the rest with Earlier and Later, beside the answer: evidence,
@@ -58,8 +59,7 @@ from print_shop.core.mqtt import (
     outcome_symptom_topic,
     outcome_topic,
 )
-from print_shop.inventory import InventoryError
-from print_shop.ledger import Answer, Frame, Ledger, LedgerError, Result, Row, Symptom
+from print_shop.ledger import Answer, Frame, Ledger, LedgerError, Result, Row, SaidSince, Symptom
 from print_shop.orchestrator import spools
 from print_shop.orchestrator.frames import FrameKeeper
 from print_shop.printer.centauri import PrinterClient, PrinterSnapshot
@@ -102,14 +102,6 @@ UNSET = "unset"
 #: start-confirm window is five minutes; this is generous on purpose.
 UNCONFIRMED_WINDOW = timedelta(minutes=30)
 
-#: How long a start with no error can still be the print node's own, confirming it: longer than
-#: the start-confirm window. After it, a swap's is followed as one never confirmed
-#: (mqucifer/print-shop#218): before, the print node records the start itself.
-CONFIRMING = timedelta(minutes=10)
-
-#: The ends that say a print ran, where the printer still names it.
-_RAN = (SdcpPrintStatus.COMPLETED, SdcpPrintStatus.STOPPED, SdcpPrintStatus.ERROR)
-
 
 def print_ended(snapshot: PrinterSnapshot) -> bool:
     """Whether the printer has reached an end state. Pure."""
@@ -130,19 +122,6 @@ def no_frames(why: str | None) -> str:
 def _is_ours(snapshot: PrinterSnapshot, row: Row) -> bool:
     active = snapshot.active_filename
     return active is not None and active.rsplit("/", 1)[-1] == row.gcode_name
-
-
-def _another_has_it(snapshot: PrinterSnapshot, row: Row) -> bool:
-    """Whether the printer names another file as the one it holds. The firmware names none in
-    some frames, "" (`centauri._confirm_started`), and that's no other file."""
-    return bool(snapshot.active_filename) and not _is_ours(snapshot, row)
-
-
-def _still_shows(snapshot: PrinterSnapshot, row: Row) -> bool:
-    """Whether an ended printer still names this print, so that the layer it gives is this
-    print's. It holds no file by then, so `_is_ours` can't say."""
-    shown = snapshot.shown_filename
-    return shown is not None and shown.rsplit("/", 1)[-1] == row.gcode_name
 
 
 class Watcher:
@@ -169,8 +148,6 @@ class Watcher:
         self._poll_s = poll_s
         self._wake = threading.Event()
         self._stop = threading.Event()
-        #: One look at a time: the gate looks too, before a start (mqucifer/print-shop#218).
-        self._looking = threading.Lock()
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
@@ -200,10 +177,6 @@ class Watcher:
 
     def look(self) -> None:
         """One pass: read the printer once if anything is worth reading it for."""
-        with self._looking:
-            self._look()
-
-    def _look(self) -> None:
         running = self._ledger.running()
         cutoff = datetime.now(UTC) - UNCONFIRMED_WINDOW
         unconfirmed = [
@@ -211,29 +184,15 @@ class Watcher:
             for r in self._ledger.unconfirmed_starts()
             if datetime.fromisoformat(r.start_requested_at) >= cutoff
         ]
-        sent = self._swaps_sent()
-        if not running and not unconfirmed and not sent:
+        if not running and not unconfirmed:
             return
         snapshot = self._printer.snapshot()
 
-        adopted: set[str] = set()
         for row in unconfirmed:
             if _is_ours(snapshot, row):
                 logger.warning("job %s is printing after all; watching it", row.job_id)
                 self._ledger.record_started(row.job_id)
                 running.append(row)
-                adopted.add(row.job_id)
-        for row in sent:
-            if row.job_id in adopted:
-                continue
-            over = print_ended(snapshot)
-            ran = over and snapshot.print_status in _RAN and _still_shows(snapshot, row)
-            if _is_ours(snapshot, row) or ran:
-                logger.warning("job %s, with a swap, printed after all; watching it", row.job_id)
-                self._ledger.record_started(row.job_id)
-                running.append(row)
-            elif over or _another_has_it(snapshot, row):
-                self._ledger.record_start_over(row.job_id)
 
         ended_any = False
         for row in running:
@@ -241,16 +200,12 @@ class Watcher:
                 # One printer, one bed: what the agent started is over.
                 if self._frames is not None:
                     self._frames.at_end(row.job_id, snapshot.layer, snapshot.total_layers)
-                status = snapshot.print_status
-                ours = _still_shows(snapshot, row)
-                layer = snapshot.layer if ours else None
-                # An end that shows another file isn't this print's to read.
-                its_own = status if ours or not snapshot.shown_filename else None
-                self._ledger.record_ended(row.job_id, status, spools.at_end(row, its_own, layer))
-            elif _another_has_it(snapshot, row):
+                self._ledger.record_ended(row.job_id, snapshot.print_status)
+            elif snapshot.active_filename and not _is_ours(snapshot, row):
                 # Something else holds the printer, so ours ended while nobody
-                # was looking. How it ended is not known, and is not guessed.
-                self._ledger.record_ended(row.job_id, None, spools.at_end(row, None, None))
+                # was looking. How it ended is not known, and is not guessed. The firmware
+                # names no file in some frames, "" (`centauri._confirm_started`): that's no other.
+                self._ledger.record_ended(row.job_id, None)
             else:
                 if self._frames is not None and _is_ours(snapshot, row):
                     self._frames.at_layer(row.job_id, snapshot.layer, snapshot.total_layers)
@@ -258,19 +213,6 @@ class Watcher:
             ended_any = True
         if ended_any:
             self._on_ended()
-
-    def _swaps_sent(self) -> list[Row]:
-        """The swaps' prints sent and never confirmed, followed however long that takes: until
-        the printer's seen done with one and a person has recorded what's on it since
-        (mqucifer/print-shop#218)."""
-        now = datetime.now(UTC)
-        return [
-            row for row in self._ledger.rows()
-            if len(row.spools) > 1 and row.started_at is None and row.ended_at is None
-            and (row.start_error is not None
-                 or now - datetime.fromisoformat(row.start_requested_at) >= CONFIRMING)
-            and not self._ledger.start_over(row.job_id)[1]
-        ]
 
 
 class OutcomeDesk:
@@ -296,7 +238,7 @@ class OutcomeDesk:
         self._shown: str | None = None
         self._draft: dict[str, str] = {}
         self._error: str | None = None
-        #: The spools the print on show can say it ended with, and those last sent as the select's.
+        #: What the print on show can be told is on now, and those last sent as the select's.
         self._spools: dict[str, int] = {}
         #: The one picked, by its words and number: kept though the stock changes under it.
         self._picked: tuple[str, int] | None = None
@@ -336,10 +278,10 @@ class OutcomeDesk:
         at = min(self._frame, len(frames) - 1) if self._frame is not None else len(frames) - 1
         shown = frames[at] if frames else None
         self._show_frame(shown)
-        can_end_with, spools_said = self._spools_of(row)
+        can_say, spools_said = self._spools_of(row)
         if self._picked is not None:
-            can_end_with = {**can_end_with, self._picked[0]: self._picked[1]}
-        self._offer_spools(can_end_with)
+            can_say = {**can_say, self._picked[0]: self._picked[1]}
+        self._offer_spools(can_say)
         paused = row.reading.pauses if row.reading else ()
         self._publish(
             outcome_topic(self._cfg),
@@ -353,12 +295,12 @@ class OutcomeDesk:
                 "ended_at": row.ended_at,
                 "printer_end": end_name(row.printer_end_status),
                 # What it paused for (mqucifer/print-shop#119, mqucifer/print-shop#218): how
-                # that went goes in the note. A swap's spools, to correct the last.
+                # that went goes in the note. A swap's spools, and the pick of the one on now.
                 "pause": "; ".join(p.line() for p in paused),
                 "pause_for": next((p.kind.value for p in paused if p.kind), ""),
                 "spools": spools_said,
                 "spool": self._picked[0] if self._picked else OUTCOME_SPOOL_AS_RECORDED,
-                "spool_choices": len(can_end_with),
+                "spool_choices": len(can_say),
                 "result": self._draft.get("result", UNSET),
                 "symptom": self._draft.get("symptom", UNSET),
                 "note": self._draft.get("note", ""),
@@ -379,12 +321,12 @@ class OutcomeDesk:
             logger.exception("the stock couldn't be read for job %s's outcome", row.job_id)
             return {}, ""
 
-    def _offer_spools(self, can_end_with: dict[str, int]) -> None:
+    def _offer_spools(self, can_say: dict[str, int]) -> None:
         """The select's options, sent before any state that's one of them."""
-        self._spools = can_end_with
-        if tuple(can_end_with) != self._offered:
-            self._publish(*outcome_spool_select(self._cfg, can_end_with))
-            self._offered = tuple(can_end_with)
+        self._spools = can_say
+        if tuple(can_say) != self._offered:
+            self._publish(*outcome_spool_select(self._cfg, can_say))
+            self._offered = tuple(can_say)
 
     def _show_frame(self, frame: Frame | None) -> None:
         """The frame on show on the image topic, or an empty one, which clears it."""
@@ -474,15 +416,11 @@ class OutcomeDesk:
                     symptom=Symptom(draft.get("symptom", "")),
                     note=draft.get("note", ""),
                 )
-                corrected = None
-                if self._picked is not None:
-                    row = self._ledger.get(job_id)
-                    if row is not None:
-                        corrected = spools.correct(self._ledger, row, self._picked[1])
-                # The answer, the spools and the stock: one write, or none of them.
-                self._ledger.record_answer(job_id, answer, corrected)
-            except InventoryError as exc:
-                self._error = str(exc)
+                # The answer, the pick and the stock: one write, or none of them.
+                on = self._picked[1] if self._picked is not None else None
+                self._ledger.record_answer(job_id, answer, on)
+            except SaidSince as exc:
+                self._error, self._picked = str(exc), None
             except sqlite3.Error as exc:
                 self._error = f"it couldn't be written ({exc}): press Record again"
             except ValueError:

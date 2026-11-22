@@ -153,6 +153,9 @@ def _on_hand(on_hand: OnHand) -> str:
                      + (f", tuning “{escape(s.tuning)}”" if s.tuning else "") + ")</span>")
         else:
             spool = '<span class="bad">no spool loaded</span>'
+        if now.not_known:
+            spool += (f' <span class="bad">{escape(now.not_known, quote=False)}: that was '
+                      "loaded before it</span>")
         parts.append(f"<p><strong>{escape(now.printer.id)}</strong>, "
                      f"{escape(now.printer.model)}: {nozzle}; {spool}</p>")
     parts.append("<h3>Spools on hand</h3><div class=\"scroll\"><table><tr><th>#</th>"
@@ -235,7 +238,8 @@ def _summary(row: Row, record: JobRecord) -> str:
         + (f"; with {_A[pause_word(row)]}" if pause_word(row) else "")
         + ("; sliced by hand" if row.sliced is not None else "") + ".</p>"
         f"<p>{escape(material)}</p>"
-        + ("<p>Spools, in order: " + escape("; ".join(spool_lines(row.spools))) + "</p>"
+        + ("<p>Spools, in order: "
+           + escape("; ".join(spool_lines(row.spools, row.ended_with))) + "</p>"
            if row.spools else "")
         + "</section>"
     )
@@ -442,7 +446,7 @@ def _pause(row: Row) -> str:
     if change is not None and change.value != "none":
         parts.append(f"<li>At {escape(change.value)} mm: {escape(reason_of(change))}</li>")
     parts += [f"<li>{escape(p.line())}</li>" for p in pauses]
-    parts += [f"<li>{escape(line)}</li>" for line in spool_lines(row.spools)]
+    parts += [f"<li>{escape(line)}</li>" for line in spool_lines(row.spools, row.ended_with)]
     parts.append("</ul></section>")
     return "".join(parts)
 

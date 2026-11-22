@@ -197,7 +197,8 @@ def describe(row: Row) -> str:
         *_setup_lines(row),
         *_reading_lines(row),
         *([f"material       {row.material.line()}"] if row.material else []),
-        *[f"{'' if n else 'spools':<15}{line}" for n, line in enumerate(spool_lines(row.spools))],
+        *[f"{'' if n else 'spools':<15}{line}"
+          for n, line in enumerate(spool_lines(row.spools, row.ended_with))],
         f"plate          {row.slicer_settings.get('curr_bed_type', '?')},"
         f" bed {row.slicer_settings.get('first_layer_bed_temperature', '?')} C",
         f"printer        {row.printer_machine} {row.printer_firmware}",

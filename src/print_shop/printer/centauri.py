@@ -148,9 +148,6 @@ class PrinterSnapshot(BaseModel):
     #: nothing. What a frame is taken at (mqucifer/print-shop#110).
     layer: int | None = None
     total_layers: int | None = None
-    #: The file `PrintInfo` names. Once a print has ended it holds no file (`active_filename`),
-    #: and is still named here: whose the layer is (mqucifer/print-shop#218).
-    shown_filename: str | None = None
 
     @property
     def ready_to_start(self) -> bool:
@@ -257,7 +254,6 @@ def snapshot_from(status: Status, attributes: Attributes) -> PrinterSnapshot:
         firmware=attributes.firmware_version or "",
         layer=status.print_info.current_layer if status.print_info else None,
         total_layers=status.print_info.total_layer if status.print_info else None,
-        shown_filename=status.filename or None,
     )
 
 

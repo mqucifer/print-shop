@@ -61,9 +61,8 @@ from print_shop.expert.orientation import (
 )
 from print_shop.ingest.analyzer import analyze, verify_unchanged
 from print_shop.ingest.orientation import candidates, write_rotated
-from print_shop.inventory import Inventory, InventoryError, Material, SpoolUse
+from print_shop.inventory import Inventory, Material, NotKnown, SpoolUse
 from print_shop.ledger import Ledger, PrintRecord
-from print_shop.orchestrator import spools as swaps
 from print_shop.orchestrator.fitness import scoring_profiles
 from print_shop.printer.centauri import PreflightFailed, PrinterClient, preflight
 from print_shop.setup import Proposer, pauses
@@ -617,7 +616,7 @@ def build_graph(
            (mqucifer/print-shop#220), read again here, as it can be edited
            while the job waits. A colour corrected meanwhile is what's recorded.
         3. **What's loaded is what the job was prepared for, or a swap's first spool**
-           (mqucifer/print-shop#218), and no swap's end is still to be seen. The gate holds an
+           (mqucifer/print-shop#218), and what's on is known. The gate holds an
            Approve for the same (`why_not_start`); this is the backstop, read again after the
            upload.
         4. **Preflight** — the printer must be free and have room, and the
@@ -821,19 +820,21 @@ def why_not_start(state: PrintJobState, ledger: Ledger | None) -> str:
     first, not_on = _first_spool(state)
     if first is None or ledger is None:
         return ""
-    if unknown := swaps.not_known(ledger, first.printer_id):
-        # What's on may not be what this job needs: said now, not at a second hold.
-        with Inventory(ledger.path) as inventory:
-            needs = any(spool.id == first.spool_id for spool in inventory.spools())
-        return unknown.at_gate() + (
-            f". This job needs {first.named()}: if another's on, put that on first and record "
-            f"it (`stock.py load {first.spool_id}`)" if needs else "")
     with Inventory(ledger.path) as inventory:
         held = inventory.why_not_start(
             first, not_on=not_on, prepared=_material_prepared(state),
             by_hand=state.get("sliced") is not None,
         )
-    return held.at_gate() if held is not None else ""
+        if held is None:
+            return ""
+        needed = ""
+        if inventory.unknown(first.printer_id) is not None and any(
+            spool.id == first.spool_id for spool in inventory.spools()
+        ):
+            # What's on may not be what this job needs: said now, not at a second hold.
+            needed = (f". This job needs {first.named()}: if another's on, put that on first "
+                      f"and record it (`stock.py load {first.spool_id}`)")
+    return held.at_gate() + needed
 
 
 def _as_started(state: PrintJobState, ledger: Ledger, done: str) -> Material | None:
@@ -845,54 +846,61 @@ def _as_started(state: PrintJobState, ledger: Ledger, done: str) -> Material | N
     first, not_on = _first_spool(state)
     if first is None:
         return None
-    if unknown := swaps.not_known(ledger, first.printer_id):
-        raise InventoryError(f"{unknown.why}, so {done}. {unknown.again}.")
     with Inventory(ledger.path) as inventory:
         return inventory.at_start(
             first, not_on=not_on, prepared=_material_prepared(state), done=done)
 
 
-def _recorder(ledger: Ledger | None, profiles: SlicerProfiles) -> Callable[[int], None] | None:
-    """Records a load the person says, at the review (`review._loaded_first`)."""
+def _recorder(
+    ledger: Ledger | None, profiles: SlicerProfiles
+) -> Callable[[int, str | None], None] | None:
+    """Records a load the person says, at the review (`review._loaded_first`), and the print
+    they said is over in the same word."""
     material = _material_of(profiles)
     if ledger is None or material is None:
         return None
     path, printer = ledger.path, material.printer_id
 
-    def record(spool_id: int) -> None:
+    def record(spool_id: int, over: str | None) -> None:
         with Inventory(path) as inventory:
-            inventory.load(spool_id, printer)
+            inventory.load(spool_id, printer, over=over)
 
     return record
 
 
 def _starts_said(state: PrintJobState, ledger: Ledger | None) -> str:
-    """The spool a swap's print starts on and whether it's loaded, for the gate, or ""."""
-    swap = _swap(state)
-    if swap is None or swap.start is None or ledger is None:
+    """For the gate: the spool a swap's print starts on and whether it's loaded, and for any job
+    that what's on isn't known, or ""."""
+    if ledger is None:
         return ""
+    first, _ = _first_spool(state)
+    if first is None:
+        return ""
+    swap = _swap(state)
     try:
-        unknown = swaps.not_known(ledger, swap.start.printer_id)
         with Inventory(ledger.path) as inventory:
-            return pauses.starting(swap, inventory.spools(), unknown.why if unknown else "")
+            unknown = inventory.unknown(first.printer_id)
+            if swap is not None and swap.start is not None:
+                return pauses.starting(swap, inventory.spools(), unknown.why() if unknown else "")
     except sqlite3.Error as exc:
         # Only said here: the gate's check and the print node read it again, and refuse unread.
         logger.warning("the stock couldn't be read for the gate: %s", exc)
         return f"the stock couldn't be read ({exc}): an Approve checks it again"
+    if unknown is None:
+        return ""
+    return f"{unknown.why()}. {unknown.hold().do}: an Approve before that starts nothing"
 
 
-def _not_known(ledger: Ledger | None, profiles: SlicerProfiles) -> Callable[[], str] | None:
-    """What isn't known of what's on the printer, for the review, read as it's needed."""
+def _not_known(
+    ledger: Ledger | None, profiles: SlicerProfiles
+) -> Callable[[], NotKnown | None] | None:
+    """Since which print what's on the printer isn't known, for the review, read as it's
+    needed."""
     material = _material_of(profiles)
     if ledger is None or material is None:
         return None
     read, printer = ledger, material.printer_id
-
-    def why() -> str:
-        found = swaps.not_known(read, printer)
-        return found.why if found is not None else ""
-
-    return why
+    return lambda: read.not_known(printer)
 
 
 def _material_of(profiles: SlicerProfiles) -> Material | None:
@@ -1204,8 +1212,8 @@ def _propose_and_review(
     doubting: Doubting | None = None,
     material: Material | None = None,
     stock: pauses.Stock | None = None,
-    not_known: Callable[[], str] | None = None,
-    record_load: Callable[[int], None] | None = None,
+    not_known: Callable[[], NotKnown | None] | None = None,
+    record_load: Callable[[int, str | None], None] | None = None,
 ) -> tuple[SliceResult, dict[str, Any]]:
     """Slice with the proposal; with a reviewer, again after each correction until approved.
 

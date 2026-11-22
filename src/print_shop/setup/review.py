@@ -48,7 +48,7 @@ from typing import Any, Protocol
 
 from print_shop.bench.pausing import TOPS_OUT, mm
 from print_shop.core.state import AppliedOrientation, Orientation, SliceResult
-from print_shop.inventory import InventoryError, Material
+from print_shop.inventory import InventoryError, Material, NotKnown
 from print_shop.setup import pauses
 from print_shop.setup.concerns import concern_in, ways
 from print_shop.setup.intake import Estimate
@@ -122,10 +122,11 @@ class ReviewRequest:
     #: (mqucifer/print-shop#218). None with no stock set up.
     material: Material | None = None
     stock: pauses.Stock | None = None
-    #: Why what's on the printer isn't known, or "" (mqucifer/print-shop#218): LOAD FIRST then.
-    not_known: Callable[[], str] | None = None
-    #: Records a spool as loaded, on the person's typed y and only that (`_loaded_first`).
-    record_load: Callable[[int], None] | None = None
+    #: Since which print what's on the printer isn't known (mqucifer/print-shop#218).
+    not_known: Callable[[], NotKnown | None] | None = None
+    #: Records a spool as loaded, with the print said to be over in the same word or None, on
+    #: the person's typed y and only that (`_loaded_first`).
+    record_load: Callable[[int, str | None], None] | None = None
 
     @property
     def proposed(self) -> tuple[Flag, ...]:
@@ -203,12 +204,16 @@ def render(request: ReviewRequest) -> str:
     lines += [f"  note: {f.reading}" for f in request.flags if f.id == PAUSE_PAST_FIT]
     paused = proposal.get(PAUSE)
     purpose = paused.pause if paused is not None and paused.value != "none" else None
-    if purpose is not None:
-        try:
+    try:
+        unknown = request.not_known() if request.not_known else None
+        why = unknown.why() if unknown is not None else ""
+        if purpose is not None:
             lines += pauses.for_review(purpose, request.reading, request.material, request.stock,
-                                       request.not_known() if request.not_known else "")
-        except sqlite3.Error as exc:
-            lines.append(f"  the stock couldn't be read ({exc}): an Approve checks it again")
+                                       why)
+        if why and (purpose is None or purpose.start is None):  # a swap's LOAD FIRST says it
+            lines.append(f"  {why}: at ok you're asked, and Start holds until you say")
+    except sqlite3.Error as exc:
+        lines.append(f"  the stock couldn't be read ({exc}): an Approve checks it again")
     for c in proposal.kept:
         by = (
             f" [lesson {c.lesson}]" if c.lesson is not None
@@ -526,35 +531,44 @@ def _loaded_first(
     request: ReviewRequest, read: Callable[[str], str], write: Callable[[str], None],
     forget: Callable[[], None],
 ) -> None:
-    """On `ok` with LOAD FIRST, whether the first spool's on the printer now. A typed y records
-    the load, as `stock.py load` does; anything else writes nothing (mqucifer/print-shop#218).
+    """On `ok`, whether the spool this print starts on is on the printer now: a swap's first with
+    LOAD FIRST, and any job's while what's on isn't known. Then the question says both halves,
+    that print's being over too. A typed y records the load, and clears what it was asked of and
+    only that; anything else writes nothing (mqucifer/print-shop#218).
 
     What was typed before the question was shown is dropped first: a doubled y would answer it
     unseen. A stock that can't be read or written doesn't lose the job, as Start still checks.
     """
-    change = request.proposal.get(PAUSE)
-    if change is None or change.value == "none" or change.pause is None:
-        return
     if request.stock is None or request.record_load is None:
         return
     try:
         on_hand = request.stock()
-        unknown = request.not_known() if request.not_known else ""
+        unknown = request.not_known() if request.not_known else None
     except sqlite3.Error as exc:
         write(f"  The stock couldn't be read ({exc}): an Approve checks it again.")
         return
-    first = pauses.first_to_load(change.pause, on_hand, unknown)
+    change = request.proposal.get(PAUSE)
+    pause = change.pause if change is not None and change.value != "none" else None
+    if pause is not None and pause.start is not None:
+        first = pauses.first_to_load(pause, on_hand, unknown.why() if unknown else "")
+    else:
+        first = request.material if unknown is not None else None
     if first is None or all(spool.id != first.spool_id for spool in on_hand):
         return
-    write(f"Is {first.named()}, on the printer now? y records it (stock load {first.spool_id}); "
-          "Enter for later, and an Approve before it's loaded starts nothing.")
+    if unknown is not None:
+        write(f"{unknown.over_and_on(first.named())} y says both, and records it; Enter for "
+              "later, and an Approve before you've said starts nothing.")
+    else:
+        write(f"Is {first.named()}, on the printer now? y records it (stock load "
+              f"{first.spool_id}); Enter for later, and an Approve before it's loaded starts "
+              "nothing.")
     forget()
     if read("loaded> ").strip().lower() != "y":
         write(f"  Nothing recorded. Load it and `stock.py load {first.spool_id}` before you "
               "approve.")
         return
     try:
-        request.record_load(first.spool_id)
+        request.record_load(first.spool_id, unknown.job_id if unknown is not None else None)
     except (InventoryError, sqlite3.Error) as exc:
         write(f"  Not recorded: {exc}")
         return
