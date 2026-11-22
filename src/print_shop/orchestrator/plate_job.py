@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 import shutil
 from pathlib import Path
 from typing import Any
@@ -26,15 +27,17 @@ from print_shop.plate import BY_OBJECT, SEQUENCE, GivenPart, PlateRow, row_id
 from print_shop.setup import Proposer
 from print_shop.setup.context import SIDECAR, PartContext, Placed, Seen, place
 from print_shop.setup.features import Feature, measure
+from print_shop.setup.intake import Asker, Intake, OfPlate, Question
 from print_shop.setup.proposal import ORIENTATION, Change, GivenLesson, Proposal, Source, pose_value
+from print_shop.setup.questions import PLATE_WORDS, SEEN
 from print_shop.setup.skill import WARPS_MM2
 from print_shop.setup.traits import traits
 from print_shop.slicer.arrange import ToPlace, object_file
 from print_shop.slicer.orca import SlicerProfiles
 
 __all__ = [
-    "Together", "by_object", "keep_sidecar", "planned", "poses_said", "posed", "records",
-    "smallest", "take", "together",
+    "Together", "asked_about", "by_object", "keep_sidecar", "planned", "poses_said", "posed",
+    "records", "smallest", "still_holds", "take", "together",
 ]
 
 #: The features whose least value is the plate's risk. Every other's is the most.
@@ -99,6 +102,83 @@ def posed(
         }))
         files.append(ToPlace(part.n, part.name, out, chosen.height_mm))
     return tuple(turned), tuple(files)
+
+
+#: The questions an answer to which holds however the part is turned.
+_ANY_POSE = frozenset({"purpose", "volume", "section"})
+#: The settings that are for a pose, whichever question's option set them.
+_FOR_A_POSE = re.compile(
+    r"support|bridge|overhang|ironing|seam|brim|raft|elefant|^top_|^bottom_|initial_layer"
+)
+
+
+def asked_about(asker: Asker, parts: tuple[PlatePart, ...]) -> Asker:
+    """`asker`, showing the questions as about these parts in the poses they lie in now: "top"
+    means that, and a part can still be turned after they're answered."""
+    turns = [(p, p.applied.rotation_deg if p.applied else (0.0, 0.0, 0.0)) for p in parts]
+    if any(any(turn) for _, turn in turns):
+        posed = "top and bottom as each lies now (" + "; ".join(
+            f"part {p.n} " + (f"turned {pose_value(turn)}" if any(turn) else "as in its file")
+            for p, turn in turns) + ")"
+    else:
+        posed = "top and bottom as each part lies in its file"
+
+    def ask(questions: Any) -> Any:
+        return asker(OfPlate(questions, posed, PLATE_WORDS) if questions else questions)
+
+    return ask
+
+
+def still_holds(
+    intake: Intake, parts: tuple[PlatePart, ...], asked_in: tuple[tuple[float, float, float], ...],
+) -> tuple[Intake, str]:
+    """The answers as this plate's reading and settings may use them, and what the review says
+    of those they may not.
+
+    An answer was given of the parts as they lay when it was asked. Where one has been turned
+    since, what's for a pose isn't carried across: which faces are seen, the questions on
+    features a turn moves, and any option's setting that's for a pose, such as no supports. The
+    intake's record keeps every answer as it was given. Turned back, they hold again. Carrying
+    them through a turn, for one part too, is mqucifer/print-shop#248's.
+    """
+    moved = [
+        (part, part.applied.rotation_deg)
+        for part, was in zip(parts, asked_in, strict=True)
+        if part.applied is not None and tuple(part.applied.rotation_deg) != tuple(was)
+    ]
+    if not moved:
+        return intake, ""
+    questions: list[Question] = []
+    answers = []
+    dropped: list[str] = []
+    for question, answer in zip(intake.questions, intake.answers, strict=True):
+        option = question.options[answer.choice] if answer.choice is not None else None
+        label = option.label if option is not None else answer.other
+        if question.feature not in _ANY_POSE:
+            what = ("which faces are seen" if question.feature == SEEN.feature
+                    else f"'{question.text}'")
+            dropped.append(f"{what}, you said '{label}'")
+            continue
+        if option is not None and answer.choice is not None:
+            held = {k: v for k, v in option.settings.items() if not _FOR_A_POSE.search(k)}
+            if held != option.settings:
+                lost = ", ".join(f"{k}={v}" for k, v in option.settings.items() if k not in held)
+                dropped.append(f"{lost}, from '{label}'")
+                options = list(question.options)
+                options[answer.choice] = option.model_copy(update={"settings": held})
+                question = question.model_copy(update={"options": tuple(options)})
+        questions.append(question)
+        answers.append(answer)
+    if not dropped:
+        return intake, ""
+    who = "; ".join(f"part {part.n}, {part.name}, to {pose_value(turn)}" for part, turn in moved)
+    note = (
+        f"TURNED SINCE YOU ANSWERED: {who}. These were said of the parts as they lay when asked, "
+        f"so they aren't judged or used now: {'; '.join(dropped)}. Send a part back with "
+        "orientation, or say what you want with a correction"
+    )
+    held_to = intake.model_copy(update={"questions": tuple(questions), "answers": tuple(answers)})
+    return held_to, note
 
 
 def smallest(

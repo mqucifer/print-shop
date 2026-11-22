@@ -22,7 +22,7 @@ from print_shop.expert.orientation import OrientationRequest
 from print_shop.orchestrator import graph
 from print_shop.runtime import describe_all
 from print_shop.setup.intake import replay_asker
-from print_shop.setup.questions import PURPOSE, SEEN, STOCK
+from print_shop.setup.questions import PLATE_WORDS, PURPOSE, SEEN, STOCK
 from tests.plates import box
 from tests.test_plate_job import Rig, _caps
 from tests.test_waiting import WAIT_S, Person
@@ -64,6 +64,7 @@ def _rig(
 ) -> Rig:
     poses.person = person
     monkeypatch.setattr(graph, "propose_orientation", poses)
+    waiting.setdefault("several", True)  # as print_job.py builds it for a plate
     return Rig(tmp_path, *typed, asking=person.asker(), waiting=person.waiting(**waiting),
                questions=questions, llm=LLM)
 
@@ -78,7 +79,7 @@ def test_a_plates_two_questions_wait_for_no_model_and_go_reaches_the_review(
         job = rig.gated(_caps(tmp_path), as_laid=False)
         assert rig.press("approve", job).printed
     assert poses.asked_after == [3, 3, 3], "no pose's call before the two answers and go"
-    assert PURPOSE.text in person.text and SEEN.text in person.text
+    assert PLATE_WORDS[PURPOSE.text] in person.text and PLATE_WORDS[SEEN.text] in person.text
     assert "Type go and Enter to go on without waiting" in person.text
     said = " ".join(rig.shown[0].split())
     assert "note: you went on without the model's questions after" in said
@@ -224,3 +225,180 @@ def test_recorded_answers_answer_a_plate_whole(
     row = rig.ledger.rows()[0]
     assert row.intake is not None and row.intake.answers[0].choice == 1
     assert len(poses.asked_after) == 3
+
+
+# An answer is of the parts as they lay when it was asked (print-shop-ux's probe)
+# --------------------------------------------------------------------------
+
+
+def test_what_was_said_seen_isnt_carried_through_a_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, never: Callable[..., Any],
+) -> None:
+    """The probe: 'the top; the walls are hidden', of parts then turned 180."""
+    person = Person("1", "3", "go")
+    poses = Poses(lambda c: c.rotation_deg == (180.0, 0.0, 0.0))
+    rig = _rig(tmp_path, person, poses, monkeypatch, never)
+    with rig.daemon:
+        job = rig.gated(_caps(tmp_path), as_laid=False)
+        assert rig.press("approve", job).printed
+    said = " ".join(rig.shown[0].split())
+    assert "TURNED SINCE YOU ANSWERED: part 1, cap-tight.stl, to 180,0,0;" in said
+    assert "which faces are seen, you said 'the top as it prints; the walls are hidden'" in said
+    assert "aren't judged or used now" in said and "orientation" in said
+    [request] = rig.reviews
+    assert not [f.id for f in request.flags if f.change is not None and f.change.feature == "seen"]
+    row = rig.ledger.rows()[0]
+    assert row.intake is not None
+    assert (row.intake.questions, [a.choice for a in row.intake.answers]) == (STOCK, [0, 2]), (
+        "the record is as given"
+    )
+    assert row.proposal is not None and "TURNED SINCE" in row.proposal.notes[0]
+
+
+def test_the_settings_call_isnt_told_what_no_longer_holds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, never: Callable[..., Any],
+) -> None:
+    from print_shop.setup import model
+
+    told: list[str] = []
+    real = model.prompt
+
+    def prompt(facts: Any, skill: Any) -> str:
+        told.append(real(facts, skill))
+        return told[-1]
+
+    monkeypatch.setattr(model, "prompt", prompt)
+    person = Person("1", "3", "go")
+    poses = Poses(lambda c: c.rotation_deg == (180.0, 0.0, 0.0))
+    rig = _rig(tmp_path, person, poses, monkeypatch, never)
+    with rig.daemon:
+        rig.press("reject", rig.gated(_caps(tmp_path), as_laid=False))
+    assert "decoration or display" in told[-1], "what it's for holds in any pose"
+    assert "the walls are hidden" not in told[-1]
+
+
+def test_unturned_the_answer_is_read_as_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, never: Callable[..., Any],
+) -> None:
+    person, poses = Person("1", "1", "go"), Poses()
+    rig = _rig(tmp_path, person, poses, monkeypatch, never)
+    with rig.daemon:
+        rig.press("reject", rig.gated(_caps(tmp_path), as_laid=False))
+    assert "TURNED SINCE" not in rig.shown[0]
+    [request] = rig.reviews
+    assert "seam_seen" in [f.id for f in request.flags], "the walls were said seen"
+
+
+def test_no_supports_isnt_carried_onto_a_new_overhang(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Answered of a part lying on its slab. Turned onto its stalk, the guard decides again."""
+    from print_shop.ingest.orientation import write_rotated
+    from tests.fixtures import write_stl
+    from tests.plates import profiles
+
+    slab = write_rotated(write_stl("tee", tmp_path), (180.0, 0.0, 0.0), tmp_path / "slab.stl")
+    option = {"impact": "made up", "why": ""}
+
+    def questions(system: str, user: str, schema: dict[str, Any]) -> dict[str, Any]:
+        return {"questions": [{"feature": "overhang", "text": "Support the made-up ledge?",
+                               "options": [
+                                   {**option, "label": "no supports", "recommended": True,
+                                    "settings": [{"key": "enable_support", "value": "0"}]},
+                                   {**option, "label": "trees", "recommended": False,
+                                    "settings": [{"key": "enable_support", "value": "1"}]},
+                               ]}]}
+
+    person = Person("1", "1", "1")
+    monkeypatch.setattr(graph, "propose_orientation", Poses())
+    rig = Rig(tmp_path, "orientation", "1", "1", "the slab's top is the face", "ok",
+              asking=person.asker(), waiting=person.waiting(), questions=questions, llm=LLM,
+              use=profiles(tmp_path / "profiles", {"enable_support": "0",
+                                                   "support_type": "normal(auto)"}))
+    with rig.daemon:
+        job = rig.gated([slab, _caps(tmp_path)[0]], as_laid=True)
+        assert rig.press("approve", job).printed
+    first, second = rig.reviews
+    assert "enable_support" in {c.key for c in first.proposal.kept}, "answered, so it stood"
+    supports = second.proposal.get("enable_support")
+    assert supports is not None
+    assert (supports.value, supports.source) == ("1", "guard"), "the new overhang decides again"
+    assert "'Support the made-up ledge?', you said 'no supports'" in " ".join(
+        rig.shown[-1].split())
+
+
+def test_a_purpose_choices_setting_for_a_pose_isnt_carried_either(tmp_path: Path) -> None:
+    from print_shop.core.state import AppliedOrientation, MeshReport, PlatePart
+    from print_shop.orchestrator.plate_job import still_holds
+    from print_shop.setup.intake import Answer, Intake, Option, Question
+
+    closer = Question(feature="purpose", text="A cover or a spacer?", options=(
+        Option(label="a cover", impact="made up",
+               settings={"enable_support": "0", "wall_loops": "3"}),
+        Option(label="a spacer", impact="made up", settings={}),
+    ))
+    intake = Intake(questions=(closer,), answers=(Answer(choice=0),))
+    mesh = MeshReport(is_manifold=True, volume_mm3=1, surface_area_mm2=1, bbox_mm=(1, 1, 1),
+                      overhang_area_mm2=0)
+    part = PlatePart(n=1, name="cap.stl", given="cap.stl", stl="cap.stl", sha256="0", mesh=mesh,
+                     applied=AppliedOrientation(rotation_deg=(180.0, 0.0, 0.0)))
+    judged, note = still_holds(intake, (part,), ((0.0, 0.0, 0.0),))
+    assert judged.questions[0].options[0].settings == {"wall_loops": "3"}
+    assert "enable_support=0, from 'a cover'" in note
+    assert intake.questions[0].options[0].settings["enable_support"] == "0", "the record is whole"
+    assert still_holds(intake, (part,), ((180.0, 0.0, 0.0),)) == (intake, ""), "not turned since"
+
+
+def test_sent_back_to_the_pose_asked_of_the_answer_holds_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, never: Callable[..., Any],
+) -> None:
+    person, poses = Person("1", "1", "go"), Poses(
+        lambda c: c.rotation_deg == ((180.0, 0.0, 0.0) if c.height_mm < 5 else (0.0, 0.0, 0.0)))
+    rig = _rig(tmp_path, person, poses, monkeypatch, never,
+               "orientation", "1", "1", "as it was", "ok")
+    with rig.daemon:
+        rig.press("reject", rig.gated(_caps(tmp_path), as_laid=False))
+    assert "TURNED SINCE" in rig.shown[0]
+    assert "TURNED SINCE" not in rig.shown[-1]
+    assert "seam_seen" in [f.id for f in rig.reviews[-1].flags]
+
+
+def test_a_plates_questions_are_worded_for_its_parts_and_say_how_they_lie(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, never: Callable[..., Any],
+) -> None:
+    person, poses = Person("1", "1", "go"), Poses()
+    rig = _rig(tmp_path, person, poses, monkeypatch, never, several=True)
+    with rig.daemon:
+        rig.press("reject", rig.gated(_caps(tmp_path), as_laid=False))
+    assert ("A few questions about these parts, top and bottom as each part lies in its file:"
+            in person.text)
+    assert "What are these parts for? Their shapes can't say." in person.text
+    assert "Which faces of these parts will be seen once they're in use?" in person.text
+    assert "the top as it lies now" in person.text and "as it prints" not in person.text
+    assert "this part" not in person.text and "reading the part" not in person.text
+    row = rig.ledger.rows()
+    assert row == [], "rejected"
+
+
+def test_the_questions_say_a_pose_that_isnt_the_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, never: Callable[..., Any],
+) -> None:
+    lying = [box(tmp_path / f"panel-{n}.stl", 240, 130, 5) for n in (1, 2)]
+    person, poses = Person("1", "1", "go"), Poses()
+    rig = _rig(tmp_path, person, poses, monkeypatch, never)
+    with rig.daemon:
+        rig.press("reject", rig.gated(lying, as_laid=False))
+    assert "top and bottom as each lies now (part 1 turned " in person.text
+
+
+def test_seen_walls_arent_judged_through_a_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, never: Callable[..., Any],
+) -> None:
+    """The answer that does flag a seam, unturned: turned, the reading mustn't still use it."""
+    person = Person("1", "1", "go")
+    poses = Poses(lambda c: c.rotation_deg == (180.0, 0.0, 0.0))
+    rig = _rig(tmp_path, person, poses, monkeypatch, never)
+    with rig.daemon:
+        rig.press("reject", rig.gated(_caps(tmp_path), as_laid=False))
+    [request] = rig.reviews
+    assert "seam_seen" not in [f.id for f in request.flags]

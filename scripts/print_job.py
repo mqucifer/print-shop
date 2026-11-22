@@ -396,7 +396,7 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
         except ValueError as exc:
             parser.error(str(exc))
         waiting = cli_waiting(read=read, replayed=args.answers is not None,
-                              prompt=answering.prompt)
+                              prompt=answering.prompt, several=len(args.stl) > 1)
 
     recorder = FrameRecorder(recording_path()) if args.record else None
     printer: PrinterClient | None = None

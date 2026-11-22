@@ -685,6 +685,9 @@ def build_graph(
                 slicing(to_place)(wanted)
             first = to_place
             measured = read.features
+            # What the answers are of: the poses the parts lie in as they're asked.
+            asked_in = tuple(o.proposal.value.rotation_deg for o in orientations)
+            about_them = plate_job.asked_about(asker, turned)
 
             def priced(settings: dict[str, str], n: int) -> Estimate | None:
                 return _estimate(estimating(first), first[0].stl, wanted, settings,
@@ -693,10 +696,10 @@ def build_graph(
             if waiting is not None and proposer.asks_model:
                 intake = ask_meanwhile(
                     lambda stop: proposer.questions(measured, profiles, stop),
-                    asker, waiting, lambda questions: _priced(questions, priced),
+                    about_them, waiting, lambda questions: _priced(questions, priced),
                 )
             else:
-                intake = _ask(proposer.questions(measured, profiles), asker, priced)
+                intake = _ask(proposer.questions(measured, profiles), about_them, priced)
             done["intake"] = intake
             if undecided:
                 orientations = posed_after_questions(
@@ -714,7 +717,11 @@ def build_graph(
             while True:
                 turned, to_place = plate_job.posed(parts, tuple(orientations), outdir / "parts")
                 read = plate_job.together(turned)
-                proposal = read.proposer(proposer)(intake, read.features, profiles, read.context)
+                judged, turned_since = plate_job.still_holds(intake, turned, asked_in)
+                proposal = read.proposer(proposer)(judged, read.features, profiles, read.context)
+                if turned_since:
+                    proposal = proposal.model_copy(
+                        update={"notes": (turned_since, *proposal.notes)})
                 proposal = _with_orienting(
                     plate_job.planned(proposal, process, len(parts),
                                       without_loop=loop is not None),
@@ -729,6 +736,7 @@ def build_graph(
                     layout=lambda: layouts[-1],
                     read=read,
                     undone=undone,
+                    turned_since=bool(turned_since),
                     parts=tuple(
                         ReviewPart(
                             n=part.n, name=part.name,
@@ -744,7 +752,7 @@ def build_graph(
                     result, reviewed = _propose_and_review(
                         proposal, profiles, slicing(to_place), reviewer,
                         AppliedOrientation(rationale=plate_job.poses_said(turned)),
-                        outdir / "proposed", intake,
+                        outdir / "proposed", judged,
                         cost=_coster(estimating(to_place), to_place[0].stl, profiles, proposal,
                                      outdir / "offers"),
                         earlier=earlier,
@@ -1304,6 +1312,8 @@ class _PlateReview:
     read: plate_job.Together
     parts: tuple[ReviewPart, ...]
     undone: str = ""  # why the send-back before this review was taken back
+    #: A part was turned after the questions, so what was said of its pose isn't used.
+    turned_since: bool = False
 
 
 def _with_orienting(proposal: Proposal, given: tuple[GivenLesson, ...]) -> Proposal:
@@ -1434,6 +1444,10 @@ def _propose_and_review(
         found = (flags(reading, faces, process, filament, placed, proposal.changes,
                        _tops(plate.layout()) if plate is not None else ())
                  if reading is not None else ())
+        if plate is not None and plate.turned_since:
+            found = tuple(f.model_copy(update={"reading": f.reading.replace(
+                "the intake didn't say which faces are seen",
+                "a part was turned since you said which faces are seen")}) for f in found)
         if reviewer is None:
             break
         while True:

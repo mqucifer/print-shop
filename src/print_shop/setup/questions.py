@@ -138,6 +138,14 @@ assert set(SEEN_FACES) == {o.label for o in SEEN.options}
 #: The questions that need no model, shown at once (mqucifer/print-shop#208).
 STOCK = (PURPOSE, SEEN)
 
+#: print-shop's two as they're shown about a plate of several parts (mqucifer/print-shop#109).
+#: A part can still be turned after they're asked, so "as it prints" is said as how it lies now.
+PLATE_WORDS = {
+    PURPOSE.text: "What are these parts for? Their shapes can't say.",
+    SEEN.text: "Which faces of these parts will be seen once they're in use?",
+    "as it prints": "as it lies now",
+}
+
 
 class Asked:
     """What the questions step produced: the questions, and why there are none, if none."""
