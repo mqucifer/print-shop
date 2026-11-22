@@ -235,3 +235,39 @@ def test_a_job_read_back_at_the_gate_comes_back_whole_and_nothing_is_blocked(
     [fix] = values["corrections"]
     assert isinstance(fix, Change) and fix.source is Source.SPONSOR
     assert values["proposal"].changes[0].source in Source
+
+
+def test_an_intake_with_the_models_closer_choices_loads_back_as_itself(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """mqucifer/print-shop#208: what was offered, and why the model's questions aren't there,
+    are in the checkpoint as the types they were."""
+    from print_shop.orchestrator.graph import build_graph, new_job
+    from print_shop.setup import Proposer
+    from print_shop.setup.intake import Question, replay_asker
+    from print_shop.setup.waiting import cli_waiting
+    from tests.fakes import STORE_PROFILES, RecordedSlicer
+    from tests.fixtures import write_stl
+    from tests.test_review import ANSWERS, Sponsor, _model, _questions
+
+    def graph(saver: Any) -> Any:
+        return build_graph(
+            STORE_PROFILES, outdir_root=tmp_path / "jobs", checkpointer=saver,
+            slicer=RecordedSlicer(), proposer=Proposer(ask=_model, ask_questions=_questions),
+            asker=replay_asker(ANSWERS), reviewer=Sponsor("ok"),
+            waiting=cli_waiting(write=lambda _: None, replayed=True, screen=lambda: None),
+        )
+
+    saver, conn = open_checkpointer(tmp_path / "jobs.sqlite")
+    job = new_job(write_stl("cube", tmp_path), entry=EntryPath.STL_UPLOAD)
+    cfg = {"configurable": {"thread_id": job["job_id"]}}
+    graph(saver).invoke(job, config=cfg)
+    conn.close()
+
+    with caplog.at_level(logging.WARNING):
+        saver2, conn2 = open_checkpointer(tmp_path / "jobs.sqlite")
+        intake = graph(saver2).get_state(cfg).values["intake"]
+        conn2.close()
+    assert [r for r in caplog.records if "deserializ" in r.getMessage().lower()] == []
+    [offered] = intake.offered
+    assert isinstance(offered, Question) and offered.text == "What is the cube for?"
