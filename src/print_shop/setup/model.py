@@ -28,7 +28,8 @@ from print_shop.setup.bounds import SETTINGS, check
 from print_shop.setup.proposal import Change, PartFacts, Proposal, Source
 from print_shop.setup.skill import Skill
 
-__all__ = ["Ask", "llm_ask", "llm_ask_streamed", "propose_by_model", "schema", "setup_llm"]
+__all__ = ["Ask", "context_lines", "llm_ask", "llm_ask_streamed", "propose_by_model", "schema",
+           "setup_llm"]
 
 #: Settings keys: the alias the proposal reasons with, and its output limit,
 #: thinking included (the operator, 2026-10-25: a setting, not a constant).
@@ -227,7 +228,7 @@ def prompt(facts: PartFacts, skill: Skill) -> str:
         *(f"- {f.line()}" for f in facts.features),
         "",
         *_lessons(facts),
-        *_context(facts),
+        *context_lines(facts),
         "Settings you may change: the preset's value, and the bound a value must stay in:",
     ]
     for key in skill.settings:
@@ -253,7 +254,7 @@ def _lessons(facts: PartFacts) -> list[str]:
     ]
 
 
-def _context(facts: PartFacts) -> list[str]:
+def context_lines(facts: PartFacts) -> list[str]:
     """The part's context from its design run or a sidecar (mqucifer/print-shop#130), if any."""
     if facts.context is None or not facts.context.found:
         return []
@@ -280,7 +281,9 @@ def _answers(facts: PartFacts) -> list[str]:
         if a.choice is not None:
             o = q.options[a.choice]
             sets = ", ".join(f"{k}={v}" for k, v in o.settings.items()) or "no setting"
-            lines.append(f"{q.text} -> {o.label} ({sets})")
+            said = f"{q.text} -> {o.label} ({sets})"
         else:
-            lines.append(f"{q.text} -> in their words: {a.other}")
+            said = f"{q.text} -> in their words: {a.other}"
+        whose = q.whose(a)
+        lines.append(said + (f" [{whose}]" if whose else ""))
     return lines

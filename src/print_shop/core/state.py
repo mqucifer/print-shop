@@ -235,8 +235,8 @@ class PrintJobState(TypedDict):
     #: measured again before its questions (mqucifer/print-shop#235).
     laid_features: NotRequired[tuple[Feature, ...]]
     orientation_lessons: NotRequired[tuple[GivenLesson, ...]]
-    #: The part's context from its design run or a sidecar: its fits, seen faces, the side it's
-    #: laid on and its holds (mqucifer/print-shop#130).
+    #: The part's context from its design run or a sidecar: its fits, seen faces, purpose, the
+    #: side it's laid on and its holds (mqucifer/print-shop#130, mqucifer/print-shop#236).
     part_context: NotRequired[PartContext]
 
     #: What the slicer actually did, which is not always what was decided.
