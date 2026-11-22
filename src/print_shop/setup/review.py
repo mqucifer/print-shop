@@ -325,7 +325,7 @@ def _poses(request: ReviewRequest) -> list[str]:
         )
     measured = {c.rotation_deg for c in ready}
     lines += [f"    {pose_value(r):>9}  still being measured: orientation waits for it"
-              for r in pending if r not in measured]
+              for r in pending if r not in measured and r not in failed]
     lines += [f"    {pose_value(r):>9}  couldn't be measured: {why}" for r, why in failed.items()]
     return lines
 

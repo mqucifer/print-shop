@@ -249,7 +249,7 @@ def test_a_kept_pose_under_the_print_loop_asks_first_and_the_loop_has_all_six(
     row = job.run(down(tmp_path, "tee", "+z"), approves, loop)
     assert row is not None, job.error
     assert said[0] == "asked", "the questions came before anything waited"
-    assert said[1].startswith("waiting for 0,0,0; 90,0,0;"), "and the loop's wait says so"
+    assert said[1].startswith("waiting for the 5 poses still being"), "and the loop's wait says so"
     assert all(f"- {pose_value(r)}: " in given[0] for r in AXIS_ALIGNED)
     assert row.rotation_deg == FLIPPED
 
@@ -354,8 +354,8 @@ def test_the_offer_says_when_it_waits(
     printed(ledger, "first", stl, (yours("wall_loops", "4"),), rotation=FLIPPED)
     said = let_go_when_said("a past print was in it")
     assert job.run(stl, approves, as_laid=True) is not None, job.error
-    assert said[0] == ("waiting for 180,0,0, still being measured: a past print was in it, "
-                       "and its offer compares them in it")
+    assert said[0] == ("waiting for the pose still being measured (180,0,0): a past print was "
+                       "in it, and its offer compares them in it")
 
 
 def test_a_pose_that_cant_be_measured_is_said_and_never_offered(

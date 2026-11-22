@@ -972,9 +972,11 @@ def _estimate(
 def _say_waiting(waited: Iterable[tuple[float, float, float]], why: str) -> None:
     """A wait on poses still being measured, said on the terminal and in the job's log as it
     begins (mqucifer/print-shop#235)."""
-    names = "; ".join(map(pose_value, waited))
-    if names:
-        logger.info("waiting for %s, still being measured: %s", names, why)
+    left = list(waited)
+    if left:
+        them = "pose" if len(left) == 1 else f"{len(left)} poses"
+        names = "; ".join(map(pose_value, left))
+        logger.info("waiting for the %s still being measured (%s): %s", them, names, why)
 
 
 class _Turned(Exception):  # noqa: N818 - a signal, not an error
