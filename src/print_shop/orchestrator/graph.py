@@ -62,7 +62,7 @@ from print_shop.expert.orientation import (
 from print_shop.ingest.analyzer import analyze, verify_unchanged
 from print_shop.ingest.measuring import Measuring
 from print_shop.ingest.orientation import LAID, candidate_in, candidates, write_rotated
-from print_shop.inventory import Inventory, Material, NotKnown, SpoolUse
+from print_shop.inventory import Asked, Inventory, Material, NotKnown, SpoolUse
 from print_shop.ledger import Ledger, PrintRecord
 from print_shop.orchestrator.fitness import scoring_profiles
 from print_shop.printer.centauri import PreflightFailed, PrinterClient, preflight
@@ -897,7 +897,7 @@ def _as_started(state: PrintJobState, ledger: Ledger, done: str) -> Material | N
 
 def _recorder(
     ledger: Ledger | None, profiles: SlicerProfiles
-) -> Callable[[int, NotKnown | None], None] | None:
+) -> Callable[[int, Asked], None] | None:
     """Records a load the person says, at the review (`review._loaded_first`), and the print
     they said is over in the same word."""
     material = _material_of(profiles)
@@ -905,9 +905,9 @@ def _recorder(
         return None
     path, printer = ledger.path, material.printer_id
 
-    def record(spool_id: int, over: NotKnown | None) -> None:
+    def record(spool_id: int, asked: Asked) -> None:
         with Inventory(path) as inventory:
-            inventory.load(spool_id, printer, over=over)
+            inventory.load(spool_id, printer, over=asked.not_known, asked=asked)
 
     return record
 
@@ -1276,7 +1276,7 @@ def _propose_and_review(
     material: Material | None = None,
     stock: pauses.Stock | None = None,
     not_known: Callable[[], NotKnown | None] | None = None,
-    record_load: Callable[[int, NotKnown | None], None] | None = None,
+    record_load: Callable[[int, Asked], None] | None = None,
 ) -> tuple[SliceResult, dict[str, Any]]:
     """Slice with the proposal; with a reviewer, again after each correction until approved.
 

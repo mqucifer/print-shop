@@ -396,6 +396,7 @@ class Daemon:
                     printer=self._watch_printer,
                     on_ended=self._desk.refresh,
                     poll_s=self._watch_poll_s,
+                    confirming=lambda: self._active_job_id,
                     frames=(
                         FrameKeeper(camera=self._camera, ledger=self._ledger, jobs=self._workdir)
                         if self._camera is not None

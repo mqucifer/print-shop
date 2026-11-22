@@ -11,6 +11,7 @@ import contextlib
 import dataclasses
 import itertools
 import sqlite3
+import time
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -31,7 +32,7 @@ from print_shop.inventory import Inventory, InventoryError, SpoolUse
 from print_shop.ledger import Ledger, LedgerError, Row
 from print_shop.orchestrator import daemon as daemon_module
 from print_shop.orchestrator import spools as after_print
-from print_shop.orchestrator.outcome import OutcomeDesk
+from print_shop.orchestrator.outcome import OutcomeDesk, Watcher
 from print_shop.runtime import describe
 from print_shop.setup import pauses
 from print_shop.setup import review as review_module
@@ -685,9 +686,9 @@ def reviewed(
         with Inventory(shop.path) as stock:
             return stock.unknown("cc1")
 
-    def record_load(spool: int, over: Any) -> None:
+    def record_load(spool: int, asked: Any) -> None:
         with Inventory(shop.path) as stock:
-            stock.load(spool, "cc1", over=over)
+            stock.load(spool, "cc1", over=asked.not_known, asked=asked)
 
     request = dataclasses.replace(
         _request(), material=material, stock=lambda: on_hand, not_known=not_known_now,
@@ -966,6 +967,130 @@ def test_one_never_seen_isnt_looked_for_once_a_later_print_started(shop: Shop) -
         ledger.record_started("later")
         ledger.record_ended("later", 9)
         assert ledger.swaps_unseen() == []
+
+
+# The cold reader's second read, of fca4461
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("typed", ["", "n", None])
+def test_a_stale_no_at_stock_py_never_writes_over_the_phones_word(
+    shop: Shop, settings: Path, monkeypatch: pytest.MonkeyPatch, typed: str | None,  # noqa: F811
+) -> None:
+    ends(shop, swap_started(shop))
+    script = _load("stock")
+    monkeypatch.setattr(script, "ledger_path", lambda at: shop.path)
+    monkeypatch.setattr(script, "can_ask", lambda: True)
+    monkeypatch.setattr(script, "drop_typed", lambda: None)
+
+    def read(prompt: str = "") -> str:
+        answered_with(shop, ON_BLACK)
+        if typed is None:
+            raise EOFError
+        return typed
+
+    monkeypatch.setattr("builtins.input", read)
+    assert script.main(["--settings", str(settings), "load", str(WHITE)]) == 2
+    assert shop.loaded() == BLACK and not_known(shop) == ""
+
+
+def test_an_older_start_seen_doesnt_lose_a_newer_ones_not_known(shop: Shop) -> None:
+    older = sent_unconfirmed(shop, killed=False)
+    shop.says(WHITE)
+    with Inventory(shop.path) as stock:
+        first = stock.material()
+        to = first.of(stock.spool(BLACK))
+    with Ledger(shop.path) as ledger:
+        ledger.record_start_requested(record("newer").model_copy(update={
+            "material": first, "stl_name": "vase.stl",
+            "spools": (SpoolUse(material=first, from_layer=1), SpoolUse(material=to)),
+        }))
+        ledger.record_start_failed("newer", "confirm timed out")
+    ends(shop, older, "printing", layer=3)
+    assert unknown_of(shop) == "sent"
+    ends(shop, older, "completed")
+
+    answered_with(shop, over_on("spool #3, Elegoo PETG, clear"))
+
+    assert shop.loaded() == CLEAR
+    assert unknown_of(shop) == "newer", "nobody was asked of that one"
+    shop.says(CLEAR)
+    assert not_known(shop) == ""
+
+
+def test_a_pick_made_after_a_load_takes(shop: Shop) -> None:
+    ends(shop, swap_started(shop))
+    bridge = MemoryBridge()
+    with Ledger(shop.path) as ledger:
+        desk = OutcomeDesk(ledger=ledger, cfg=CFG,
+                           publish=lambda topic, payload: bridge.publish(topic, payload, True))
+        for topic, handler in desk.topics.items():
+            bridge.subscribe(topic, handler)
+        desk.refresh()
+        shop.load(WHITE)
+        bridge.deliver(outcome_spool_topic(CFG), ON_BLACK)  # newer than the load
+        bridge.deliver(outcome_result_topic(CFG), "success")
+        bridge.deliver(outcome_symptom_topic(CFG), "none")
+        bridge.deliver(outcome_submit_topic(CFG), "record")
+    assert kept(shop).result == "success"
+    assert shop.loaded() == BLACK and not_known(shop) == ""
+
+
+def test_a_load_first_y_never_writes_over_a_load_since_it_was_asked(
+    shop: Shop, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shop.load(BLACK)
+    real = Inventory.load
+
+    def newer(stock: Inventory, *args: Any, **kwargs: Any) -> Any:
+        monkeypatch.setattr(Inventory, "load", real)
+        real(stock, CLEAR, "cc1")
+        return real(stock, *args, **kwargs)
+
+    monkeypatch.setattr(Inventory, "load", newer)
+    ran = shop.run("colour_change=2 from #1 to #3", "ok", "y", press="reject")
+    assert "Not recorded" in ran.terminal and shop.loaded() == CLEAR
+
+
+def test_looking_only_for_one_unseen_says_the_printers_off_once(
+    shop: Shop, caplog: pytest.LogCaptureFixture
+) -> None:
+    sent_unconfirmed(shop, killed=True, minutes_ago=45)
+    shop.says(WHITE)
+
+    class Off:
+        looks = 0
+
+        def snapshot(self) -> Any:
+            self.looks += 1
+            raise OSError("the printer's off")
+
+    printer = Off()
+    with Ledger(shop.path) as ledger:
+        watcher = Watcher(ledger=ledger, printer=printer,  # type: ignore[arg-type]
+                          on_ended=lambda: None)
+        for _ in range(3):
+            watcher.look()
+    assert printer.looks == 3, "it's still looked for"
+    said = [r for r in caplog.records if "couldn't be read" in r.getMessage()]
+    assert len(said) == 1 and not said[0].exc_info
+
+
+def test_the_jobs_own_start_is_left_to_its_confirm(
+    shop: Shop, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    real = FramePrinter.start
+
+    def confirming(printer: FramePrinter, name: str) -> Any:
+        started = real(printer, name)
+        # Any look in here would see it as this job's.
+        monkeypatch.setattr("print_shop.orchestrator.outcome._is_ours", lambda seen, row: True)
+        time.sleep(0.3)  # the watcher looks every 0.01 s here
+        return started
+
+    monkeypatch.setattr(FramePrinter, "start", confirming)
+    assert shop.run(SWAP, "ok").result.printed
+    assert "after all" not in caplog.text
 
 
 # What the Sponsor was told it costs

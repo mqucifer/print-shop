@@ -27,7 +27,9 @@ ledger's schema version.
   Only a person's word that says both halves does, that print is over and this spool is on now
   (`load`'s `over`, and the pick at that print's outcome). A load alone records, and doesn't clear.
 - **An answer counts for what it was asked about** (`swap_not_known.mark`): each time it's marked
-  and each load recorded under it is a new mark, and a word given to an older one writes nothing.
+  and each load recorded under it is a new mark, and a word given to an older one writes nothing,
+  a no included. Each print with a swap is marked by itself, and the latest marked is asked
+  first: saying one's over says nothing of another that may still begin.
 - **So a job starts only on what it was prepared for** (`why_not_start`): what's loaded is
   compared again at Start, for every job, and Start holds while what's on isn't known. Another
   spool of the same variety, colour and tuning will do, and is the one recorded.
@@ -48,6 +50,7 @@ from pydantic import BaseModel
 
 __all__ = [
     "SCHEMA",
+    "Asked",
     "Inventory",
     "InventoryError",
     "Material",
@@ -119,9 +122,10 @@ CREATE TABLE IF NOT EXISTS print_swaps (
     ended_with  TEXT                             -- JSON Material: as the person said, else NULL
 );
 CREATE TABLE IF NOT EXISTS swap_not_known (
-    printer_id  TEXT PRIMARY KEY REFERENCES printers(id),
+    printer_id  TEXT NOT NULL REFERENCES printers(id),
     job_id      TEXT NOT NULL,                   -- the swap's print since which it isn't known
-    mark        TEXT NOT NULL                    -- new at each marking, and each load under it
+    mark        TEXT NOT NULL,                   -- new at each marking, and each load under it
+    PRIMARY KEY (printer_id, job_id)             -- the latest marked is asked of first
 );
 """
 
@@ -337,10 +341,20 @@ class NotKnown(NamedTuple):
         return NotYet(self.why(), do, f"{do}, and run the job again")
 
 
+class Asked(NamedTuple):
+    """What was so as a person was asked of a load. Their answer counts only while it still
+    is, a no included: what's been loaded, said or seen since stands."""
+
+    loaded: int | None
+    not_known: NotKnown | None
+
+
 def find_not_known(db: sqlite3.Connection, printer_id: str) -> NotKnown | None:
     """Since which print what's on the printer isn't known, or None."""
     marked = db.execute(
-        "SELECT job_id, mark FROM swap_not_known WHERE printer_id = ?", (printer_id,)
+        "SELECT job_id, mark FROM swap_not_known WHERE printer_id = ?"
+        " ORDER BY rowid DESC LIMIT 1",
+        (printer_id,),
     ).fetchone()
     if marked is None:
         return None
@@ -538,12 +552,14 @@ class Inventory:
         return self.spool(int(spool_id or 0))
 
     def load(
-        self, spool_id: int, printer_id: str | None = None, *, over: NotKnown | None = None
+        self, spool_id: int, printer_id: str | None = None, *, over: NotKnown | None = None,
+        asked: Asked | None = None,
     ) -> Spool:
         """Load a spool, as a person says; the one loaded before on that printer goes back on
         hand. `over` is what they were asked of and said is over in the same word, and only that
         clears what isn't known (mqucifer/print-shop#218). A load alone records, and doesn't
-        clear: it's a new mark, so an answer from before it doesn't write over it.
+        clear: it's a new mark, so an answer from before it doesn't write over it. `asked` is
+        what was so as they were asked, where they were, whatever they answered.
 
         Raises:
             InventoryError: If it's empty, or if what they were asked of has changed since: a
@@ -554,9 +570,17 @@ class Inventory:
         self.spool(spool_id)
         with self._write() as db:
             # Read in the write's own transaction: a job and stock.py run side by side.
-            if over is not None:
+            if over is not None or asked is not None:
                 now = find_not_known(db, printer.id)
-                if now is None or now.mark != over.mark:
+                then = asked.not_known if asked is not None else over
+                changed = (now.mark if now else "") != (then.mark if then else "")
+                if asked is not None:
+                    on = db.execute(
+                        "SELECT id FROM spools WHERE printer_id = ? AND state = 'loaded'",
+                        (printer.id,),
+                    ).fetchone()
+                    changed = changed or (on["id"] if on else None) != asked.loaded
+                if changed:
                     raise InventoryError(
                         f"what's on {printer.id} was said or seen otherwise since that was "
                         "asked, so nothing's recorded"
@@ -567,8 +591,9 @@ class Inventory:
                 clear_not_known(db, printer.id, over.job_id)
             else:
                 db.execute(
-                    "UPDATE swap_not_known SET mark = ? WHERE printer_id = ?",
-                    (uuid4().hex, printer.id),
+                    "UPDATE swap_not_known SET mark = lower(hex(randomblob(16)))"
+                    " WHERE printer_id = ?",
+                    (printer.id,),
                 )
         return self.spool(spool_id)
 

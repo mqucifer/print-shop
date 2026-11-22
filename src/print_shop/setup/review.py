@@ -52,7 +52,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from print_shop.bench.pausing import TOPS_OUT, mm
 from print_shop.core.state import AppliedOrientation, Orientation, SliceResult
-from print_shop.inventory import InventoryError, Material, NotKnown
+from print_shop.inventory import Asked, InventoryError, Material, NotKnown
 from print_shop.setup import pauses
 from print_shop.setup.concerns import concern_in, ways
 from print_shop.setup.intake import Estimate
@@ -134,9 +134,9 @@ class ReviewRequest:
     stock: pauses.Stock | None = None
     #: Since which print what's on the printer isn't known (mqucifer/print-shop#218).
     not_known: Callable[[], NotKnown | None] | None = None
-    #: Records a spool as loaded, with the print said to be over in the same word or None, on
-    #: the person's typed y and only that (`_loaded_first`).
-    record_load: Callable[[int, NotKnown | None], None] | None = None
+    #: Records a spool as loaded, and the print said to be over in the same word, on the
+    #: person's typed y and only that (`_loaded_first`): only while it's as it was when asked.
+    record_load: Callable[[int, Asked], None] | None = None
 
     @property
     def proposed(self) -> tuple[Flag, ...]:
@@ -597,7 +597,8 @@ def _loaded_first(
               "approve.")
         return
     try:
-        request.record_load(first.spool_id, unknown)
+        had = next((spool.id for spool in on_hand if spool.printer_id == first.printer_id), None)
+        request.record_load(first.spool_id, Asked(had, unknown))
     except (InventoryError, sqlite3.Error) as exc:
         write(f"  Not recorded: {exc}")
         return

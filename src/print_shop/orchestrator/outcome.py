@@ -141,9 +141,13 @@ class Watcher:
         on_ended: Callable[[], None],
         poll_s: float = 60.0,
         frames: FrameKeeper | None = None,
+        confirming: Callable[[], str | None] | None = None,
     ) -> None:
         self._ledger = ledger
         self._frames = frames
+        #: This process's own job, whose start the print node confirms itself.
+        self._confirming = confirming
+        self._said_unreadable = False
         self._printer = printer
         self._on_ended = on_ended
         self._poll_s = poll_s
@@ -187,10 +191,22 @@ class Watcher:
         ]
         # A swap's start is looked for however late, and though its process was killed: being
         # seen to begin can only make what's on not known again (mqucifer/print-shop#218).
-        unseen = self._ledger.swaps_unseen()
+        own = self._confirming() if self._confirming is not None else None
+        unseen = [r for r in self._ledger.swaps_unseen() if r.job_id != own]
         if not running and not unconfirmed and not unseen:
             return
-        snapshot = self._printer.snapshot()
+        try:
+            snapshot = self._printer.snapshot()
+        except Exception as exc:
+            if running or unconfirmed:
+                raise
+            # Looking only for a start that may never come, for as long as it takes: said once.
+            if not self._said_unreadable:
+                logger.warning("the printer couldn't be read (%s): still looking for whether job "
+                               "%s's start, never confirmed, begins", exc, unseen[-1].job_id)
+                self._said_unreadable = True
+            return
+        self._said_unreadable = False
 
         for row in {r.job_id: r for r in (*unconfirmed, *unseen)}.values():
             if _is_ours(snapshot, row):
@@ -400,8 +416,11 @@ class OutcomeDesk:
         with self._lock:
             if self._shown is None:
                 return
-            if value in self._spools:
-                self._picked = (value, self._spools[value])
+            # Picked now, so under what's so now: a load since the card was shown is older.
+            row = self._ledger.get(self._shown)
+            now = self._spools_of(row)[0] if row is not None else {}
+            if picked := now.get(value, self._spools.get(value)):
+                self._picked = (value, picked)
             elif value in (UNSET, OUTCOME_SPOOL_AS_RECORDED):
                 self._picked = None
             self._error = None
