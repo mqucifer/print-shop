@@ -29,6 +29,15 @@ __all__ = [
 #: A face this far from vertical, facing down, needs support (Orca's own
 #: threshold reasoning; the analyzer uses the same 45 degrees).
 _OVERHANG_DEG = 45.0
+#: A face this near the threshold is at it (mqucifer/print-shop#239): a float32 mesh's own
+#: rounding, as arithmetic's noise is for the bench's limits (mqucifer/print-shop#72), and no
+#: band. An STL's coordinate up to 512 mm is off by up to half its step there, 2^-16 mm, along
+#: each axis, so two points' difference is off by up to 2 sqrt(3) 2^-16 = 5.3e-5 mm. Over
+#: `_ENVELOPE_MM` of height along a 45 degree face, 0.4 sqrt(2) = 0.57 mm of it, that turns
+#: it by up to 0.0054 degrees. 45.01 degrees is past it.
+_AT_LIMIT_DEG = 0.0054
+#: What a face's angle, and the slope read under it, has to pass to overhang.
+_PAST_DEG = _OVERHANG_DEG + _AT_LIMIT_DEG
 #: Faces within this of horizontal are flat: a bridge below, a top surface above.
 _FLAT = 0.98
 #: The first layer: a face this low prints on the plate, not over the air. Orca
@@ -249,7 +258,10 @@ def _overhang(mesh: trimesh.Trimesh) -> tuple[float, float, float]:
 
     Read as the printer lays it: a point on a downward face overhangs when the
     part's outline `_ENVELOPE_MM` lower is further than that away, sideways,
-    so the slope from there to here is past `_OVERHANG_DEG`. A slope drawn in
+    so the slope from there to here is past `_OVERHANG_DEG`, by more than the
+    mesh's own rounding, `_AT_LIMIT_DEG`, 0.0054 degrees: both a face's angle and
+    that slope at 45 degrees to within it are at 45, and need no support, however
+    the part is turned (mqucifer/print-shop#239). A slope drawn in
     0.1 mm steps reads as the slope its steps make, not as the 90 degree
     ceiling each step's underside is, while a real ceiling's underside, which
     nothing reaches from below, still reads as 90 degrees.
@@ -293,7 +305,9 @@ def _downward(mesh: trimesh.Trimesh) -> np.ndarray:
     """Each face that could overhang: facing down past the threshold, and not wholly in the
     first layer, on the plate."""
     top = mesh.triangles[:, :, 2].max(axis=1) - mesh.bounds[0][2]
-    down: np.ndarray = (mesh.face_normals[:, 2] < -np.cos(np.radians(_OVERHANG_DEG))) & (
+    # An angle from vertical is the arcsine of how far the normal points down: a cosine of the
+    # threshold is the same only at 45 degrees exactly.
+    down: np.ndarray = (mesh.face_normals[:, 2] < -np.sin(np.radians(_PAST_DEG))) & (
         top > _FIRST_LAYER_MM
     )
     return down
@@ -356,7 +370,7 @@ def _over(
         # where Orca slices it.
         probe = np.maximum(points[:, 2] - _ENVELOPE_MM, _FIRST_LAYER_MM / 2)
         slope = np.degrees(np.arctan2(outlines.reach(points, probe), _ENVELOPE_MM))
-        over = slope > _OVERHANG_DEG
+        over = slope > _PAST_DEG
         if over.any():
             yield _Points(key=key[over], at=points[over], areas=areas[over], face=face[over],
                           down=-normals[face[over], 2], slope=slope[over], outlines=outlines)
