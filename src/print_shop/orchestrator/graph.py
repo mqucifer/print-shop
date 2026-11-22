@@ -74,10 +74,13 @@ from print_shop.printer.centauri import PreflightFailed, PrinterClient, prefligh
 from print_shop.setup import Proposer
 from print_shop.setup import lessons as print_lessons
 from print_shop.setup.context import PartContext, place, pose_for, read_context
+from print_shop.setup.doubts import Doubting
 from print_shop.setup.features import measure
 from print_shop.setup.intake import Asker, Estimate, Intake
 from print_shop.setup.loop import Part, PrintLoop
 from print_shop.setup.loop import run as run_loop
+from print_shop.setup.offer import Offering, ThisPart
+from print_shop.setup.offer import offering as offer_past_prints
 from print_shop.setup.proposal import (
     ORIENTATION,
     Change,
@@ -468,8 +471,19 @@ def build_graph(
                         "lessons": tuple(g.model_copy(update={"looked_up": g.id in looked})
                                          for g in made.lessons),
                     })
+            offer: Offering | None = None
+            doubting: Doubting | None = None
             while True:
                 features = measure(stl_to_slice, applied.bed_contact_area_mm2 or 0.0)
+                if reviewer is not None and ledger is not None:
+                    # Before the proposal's call: the offer waits for no model
+                    # (mqucifer/print-shop#211).
+                    built = _offering(ledger, state, stl_to_slice, features, applied, profiles,
+                                      build_volume, earlier, intake)
+                    if offer is None:
+                        offer, doubting = built, Doubting.start(built, proposer.doubter())
+                    else:
+                        offer = offer.carried_to(built)
                 if looped is not None:
                     proposal, looped = looped, None
                 else:
@@ -494,10 +508,11 @@ def build_graph(
                                                  outdir / "poses"),
                         earlier=earlier,
                         context=context, stl=state["stl_path"],
+                        offering=offer, doubting=doubting,
                     )
                 except _Turned as turned:
                     # Sent back at the review: turned to the person's pose, and sliced again.
-                    earlier = turned.corrections
+                    earlier, offer = turned.corrections, turned.offering
                     chosen = next(c for c in poses if pose_value(c.rotation_deg) == turned.to.value)
                     rotation_deg = chosen.rotation_deg
                     applied = AppliedOrientation(
@@ -1118,15 +1133,51 @@ class _Turned(Exception):  # noqa: N818 - a signal, not an error
     """The pose was sent back at the review: turn the part to it, and propose and slice again."""
 
     def __init__(
-        self, to: Change, corrections: list[Change], part: int | None = None,
-        standing: tuple[Change, ...] = (),
+        self, to: Change, corrections: list[Change], offering: Offering | None = None,
+        part: int | None = None, standing: tuple[Change, ...] = (),
     ) -> None:
         super().__init__(f"turned to {to.value}")
         self.to = to
         self.corrections = corrections
+        self.offering = offering
+        #: A plate's: whose pose it is (mqucifer/print-shop#109).
         self.part = part
         #: The corrections that stood before the answer that sent it back.
         self.standing = standing
+
+
+def _offering(
+    ledger: Ledger, state: PrintJobState, posed: str | Path, features: Any,
+    applied: AppliedOrientation, profiles: SlicerProfiles,
+    build_volume: tuple[float, float, float] | None, earlier: list[Change], intake: Intake,
+) -> Offering:
+    """What decided the past prints most like this part, in this pose (mqucifer/print-shop#211).
+    Never in a print's way: what fails is said at the review, and nothing is offered."""
+    try:
+        process, filament = _presets(profiles)
+        own = filament.get("filament_settings_id")
+        # As a past print names it: the store's name, the preset's, or the one Orca writes.
+        names = [profiles.used.filament.name if profiles.used is not None else "",
+                 str(filament.get("name") or ""),
+                 str(own[0] if isinstance(own, list) and own else own or "")]
+        chosen = ""
+        if any(c.key == ORIENTATION for c in earlier):
+            chosen = "your correction at this job"
+        elif state.get("as_laid"):
+            chosen = "kept as laid"
+        return offer_past_prints(ledger, ThisPart(
+            stl=Path(posed), stl_name=Path(state["stl_path"]).name,
+            sha256=state.get("stl_sha256", ""), features=features,
+            rotation_deg=applied.rotation_deg, height_mm=applied.height_mm or 0.0,
+            machine=json.loads(profiles.machine.read_text()), process=process,
+            filament=filament, filament_names=tuple(dict.fromkeys(n for n in names if n)),
+            candidates=state.get("orientation_candidates", ()), build_volume_mm=build_volume,
+            context=state.get("part_context"), pose_chosen=chosen,
+            asked=frozenset(k for q in intake.questions for o in q.options for k in o.settings),
+        ))
+    except Exception as exc:  # noqa: BLE001 - a print is never stopped by what it might reuse
+        logger.warning("the past prints couldn't be read for the offer: %s", exc)
+        return Offering(failed=f"{type(exc).__name__}: {exc}"[:300])
 
 
 def _tops(plate: PlateLayout) -> tuple[int, ...]:
@@ -1209,6 +1260,8 @@ def _propose_and_review(
     earlier: list[Change] | None = None,
     context: PartContext | None = None,
     stl: str | Path | None = None,
+    offering: Offering | None = None,
+    doubting: Doubting | None = None,
     plate: _PlateReview | None = None,
 ) -> tuple[SliceResult, dict[str, Any]]:
     """Slice with the proposal; with a reviewer, again after each correction until approved.
@@ -1217,6 +1270,9 @@ def _propose_and_review(
     says are seen (mqucifer/print-shop#105). A change a flag proposes is only applied when the
     Sponsor takes it at the review. `earlier` are the corrections made before the part was
     turned, kept with the job's. `plate` is a job of several parts', reviewed as one.
+
+    `offering` is what decided the past prints most like this one (mqucifer/print-shop#211):
+    none of it is applied until it's used, and picking or clearing slices nothing.
 
     Each change is read back from each slice (mqucifer/print-shop#206): the review, and then
     the job, have what reached it as changed and the rest as not applied, the corrections
@@ -1270,8 +1326,10 @@ def _propose_and_review(
                  if reading is not None else ())
         if reviewer is None:
             break
-        review = reviewer(
-            ReviewRequest(
+        while True:
+            if offering is not None and doubting is not None:
+                offering = doubting.added_to(offering)
+            review = reviewer(ReviewRequest(
                 presets=(presets[0], presets[1], presets[2]),
                 proposal=proposal,
                 slice=result,
@@ -1286,11 +1344,15 @@ def _propose_and_review(
                 cost=cost,
                 lessons_for=lessons_for,
                 context=said,
+                offering=offering,
                 plate=plate.layout() if plate is not None else None,
                 parts=plate.parts if plate is not None else (),
                 undone=undone,
-            )
-        )
+            ))
+            if review.offering is not None:
+                offering = review.offering
+            if not review.browsing:
+                break
         undone = ""
         if review.stop:
             raise RuntimeError("stopped at the settings review; nothing was sent to the printer")
@@ -1298,8 +1360,8 @@ def _propose_and_review(
             break
         turned = next((c for c in review.corrections if c.key == ORIENTATION), None)
         if turned is not None:
-            raise _Turned(turned, [*corrections, *review.corrections], review.part,
-                          tuple(corrections))
+            raise _Turned(turned, [*corrections, *review.corrections], offering,
+                          review.part, tuple(corrections))
         corrections += review.corrections
         asked = asked.corrected([*review.corrections, *review.taken])
     missed = {c.key for c in proposal.not_applied}

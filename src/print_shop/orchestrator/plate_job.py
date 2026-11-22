@@ -287,8 +287,18 @@ def records(
         proposal = reviewed
         if proposal is not None:
             own = {g.id for g in part.lessons}
-            proposal = proposal.model_copy(update={"lessons": tuple(
-                g for g in proposal.lessons if g.key != ORIENTATION or g.id in own)})
+            # And its own context, as one part's row has it: what a later part is matched on
+            # (`similar.py`), where the plate's lines would each be another part's as well.
+            context = part.context or PartContext()
+            lines = context.lines()
+            if context.found:
+                lines += place(context, part.stl, applied.rotation_deg).lines()
+            proposal = proposal.model_copy(update={
+                "context": tuple(lines),
+                "context_from": context.path,
+                "lessons": tuple(
+                    g for g in proposal.lessons if g.key != ORIENTATION or g.id in own),
+            })
         rows.append(PrintRecord(
             job_id=row_id(job, part.n),
             stl_name=part.name,

@@ -26,6 +26,9 @@ BY_OBJECT = "by object"
 BY_LAYER = "by layer"
 SEQUENCES = (BY_OBJECT, BY_LAYER)
 
+#: The map's size, in cells of three characters by a line: near enough square on a terminal.
+_COLS, _ROWS = 10, 7
+
 #: A later object's row: the job's id, a uuid, and the part's number.
 _LATER = re.compile(r"^([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})-(\d+)$")
 
@@ -58,11 +61,15 @@ class OnPlate(BaseModel):
     order: int | None = None
     layers: tuple[int, int] | None = None
 
-    def line(self) -> str:
-        said = f"part {self.n}, {self.name}: at x {self.x:.0f} y {self.y:.0f}, {self.where}"
+    def placed(self) -> str:
+        """Where it is and when it prints."""
+        said = f"at x {self.x:.0f} y {self.y:.0f}, {self.where}"
         if self.order is not None and self.layers is not None:
             said += f"; prints number {self.order}, layers {self.layers[0]} to {self.layers[1]}"
         return f"{said}; {self.height_mm:g} mm tall"
+
+    def line(self) -> str:
+        return f"part {self.n}, {self.name}: {self.placed()}"
 
 
 class PlateLayout(BaseModel):
@@ -74,6 +81,8 @@ class PlateLayout(BaseModel):
     #: By object, what was checked; by layer, why it isn't by object.
     why: str
     objects: tuple[OnPlate, ...]
+    #: The plate's width and depth, in mm, x and y counted from its front left.
+    bed: tuple[float, float]
 
     @property
     def by_object(self) -> bool:
@@ -85,7 +94,42 @@ class PlateLayout(BaseModel):
 
     def lines(self) -> list[str]:
         shown = sorted(self.objects, key=lambda o: (o.order or 0, o.n))
-        return [self.headline(), *(f"  {o.line()}" for o in shown)]
+        return [self.headline(), *(f"  {o.line()}" for o in shown),
+                *(f"    {row}" for row in self.drawn())]
+
+    def drawn(self) -> list[str]:
+        """The parts' numbers where they are, seen from above with the front nearest: nothing
+        is written on the parts. Where two would share a spot it's drawn closer up, saying so;
+        where they still would, there's no map, rather than a wrong one."""
+        back = "back"
+        cells = self._cells(0.0, 0.0, *self.bed)
+        if cells is None:
+            xs, ys = [o.x for o in self.objects], [o.y for o in self.objects]
+            cells = self._cells(min(xs) - 1, min(ys) - 1,
+                                max(xs) - min(xs) + 2, max(ys) - min(ys) + 2)
+            back += " (closer up, not to the plate's edges)"
+        if cells is None:
+            return []
+        edge = "+" + "-" * (3 * _COLS) + "+"
+        rows = [
+            "|" + "".join(f"{cells.get((col, row), ''):^3}" for col in range(_COLS)) + "|"
+            for row in reversed(range(_ROWS))
+        ]
+        return [back, edge, *rows, edge, "front"]
+
+    def _cells(
+        self, left: float, front: float, width: float, depth: float,
+    ) -> dict[tuple[int, int], int] | None:
+        """Each part's number by its cell, or None where two share one."""
+        found: dict[tuple[int, int], int] = {}
+        for o in self.objects:
+            col = int((o.x - left) / width * _COLS)
+            row = int((o.y - front) / depth * _ROWS)
+            at = (min(max(col, 0), _COLS - 1), min(max(row, 0), _ROWS - 1))
+            if at in found:
+                return None
+            found[at] = o.n
+        return found
 
 
 class GivenPart(BaseModel):

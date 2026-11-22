@@ -32,11 +32,15 @@ from print_shop.setup import Proposer, lessons
 from print_shop.setup.intake import Asker
 from print_shop.setup.loop import PrintLoop, cli_person, llm_chat
 from print_shop.setup.model import setup_llm
+from print_shop.setup.proposal import ORIENTATION
 from print_shop.setup.review import Reviewer
 from print_shop.slicer.orca import BedType, SlicerProfiles, with_bed_type
 from print_shop.slicer.store import Choice, Store
 
-__all__ = ["Run", "bed_type", "build_run", "describe", "profiles_for", "recording_path"]
+__all__ = [
+    "Run", "bed_type", "build_run", "describe", "describe_all", "describe_part", "describe_plate",
+    "profiles_for", "recording_path",
+]
 
 #: Where a run's per-job files go (rotated STLs, G-code, the job checkpoint).
 WORK_DIR = Path("~/print-shop/jobs").expanduser()
@@ -175,14 +179,93 @@ def build_run(
 
 
 def describe(row: Row) -> str:
-    """One print as the runbook's last step reads it back."""
-    lines = [
+    """One print as the runbook's last step reads it back: an object of a plate as the plate's
+    block, then its own."""
+    if row.plate is not None:
+        return f"{describe_plate(row)}\n\n{describe_part(row)}"
+    return "\n".join([
         f"job            {row.job_id}",
         f"part           {row.stl_name}  (sha256 {row.stl_sha256[:12]}…)",
-        *_plate_lines(row),
-        ("orientation    as the file lays it: nothing was turned" if row.sliced is not None
-         else f"orientation    {row.rotation_deg} by {row.orientation_source}"
-         f"{'' if row.orientation_accepted else ' (not accepted; authored pose)'}"),
+        _orientation_line(row),
+        *_print_lines(row),
+        _outcome_line(row),
+    ])
+
+
+def describe_all(rows: list[Row]) -> str:
+    """Every print, a plate of several once with a block for each part (`--list`)."""
+    blocks = []
+    plates: set[str] = set()
+    for row in rows:
+        if row.plate is None:
+            blocks.append(describe(row))
+        elif row.plate.job_id not in plates:
+            plates.add(row.plate.job_id)
+            own = [describe_part(r) for r in rows
+                   if r.plate is not None and r.plate.job_id == row.plate.job_id]
+            blocks.append("\n\n".join([describe_plate(row), *own]))
+    return "\n\n".join(blocks)
+
+
+def describe_plate(row: Row) -> str:
+    """What a plate's parts share, said once (mqucifer/print-shop#109): the print, its settings,
+    its slice and the one review, from any of its rows."""
+    plate = row.plate
+    assert plate is not None
+    proposal = row.proposal
+    if proposal is not None:
+        proposal = proposal.model_copy(update={
+            "lessons": tuple(g for g in proposal.lessons if g.key != ORIENTATION)})
+    shared = row.model_copy(update={
+        "proposal": proposal,
+        "corrections": tuple(c for c in row.corrections or () if c.key != ORIENTATION),
+    })
+    return "\n".join([
+        f"job            {plate.job_id}",
+        f"on a plate     {plate.layout.headline()}",
+        *(f"               {line}" for line in plate.layout.drawn()),
+        "               the time, plastic and layers below are the whole plate's",
+        *_print_lines(shared),
+    ])
+
+
+def describe_part(row: Row) -> str:
+    """What's one part's own on its plate: its file, its place, its pose and its outcome."""
+    plate = row.plate
+    assert plate is not None
+    here = next(o for o in plate.layout.objects if o.n == plate.n)
+    which = f"part {plate.n} of {len(plate.parts)}"
+    lines = [
+        f"{which:<15}{row.stl_name}  (sha256 {row.stl_sha256[:12]}…)",
+        f"its row        {row.job_id}",
+        f"place          {here.placed()}",
+        _orientation_line(row),
+    ]
+    for c in row.corrections or ():
+        if c.key == ORIENTATION:
+            lines.append(f"sent back      {c.preset} -> {c.value}, by you: {c.reason}")
+    for g in row.proposal.lessons if row.proposal else ():
+        if g.key == ORIENTATION:
+            lines.append(f"lesson         {g.id}, from {g.stl_name}: {g.why or 'read'}")
+    return "\n".join([*lines, _outcome_line(row)])
+
+
+def _orientation_line(row: Row) -> str:
+    if row.sliced is not None:
+        return "orientation    as the file lays it: nothing was turned"
+    return (f"orientation    {row.rotation_deg} by {row.orientation_source}"
+            f"{'' if row.orientation_accepted else ' (not accepted; authored pose)'}")
+
+
+def _outcome_line(row: Row) -> str:
+    return ("outcome        "
+            + (outcome_words(row.result, row.symptom) if row.result else "open: no answer yet")
+            + (f" — {row.note}" if row.note else ""))
+
+
+def _print_lines(row: Row) -> list[str]:
+    """The print, from its G-code to when it ended."""
+    lines = [
         f"g-code         {row.gcode_name}  ~{row.print_time_s // 60} min,"
         f" {row.filament_cm3} cm3, {row.layer_count} layers",
         *_sliced_lines(row),
@@ -200,14 +283,11 @@ def describe(row: Row) -> str:
     ]
     if row.start_error:
         lines.append(f"start error    {row.start_error}")
-    lines += [
+    lines.append(
         f"ended          {row.ended_at or '-'}"
-        + (f"  (printer: {end_name(row.printer_end_status)})" if row.ended_at else ""),
-        "outcome        "
-        + (outcome_words(row.result, row.symptom) if row.result else "open: no answer yet")
-        + (f" — {row.note}" if row.note else ""),
-    ]
-    return "\n".join(lines)
+        + (f"  (printer: {end_name(row.printer_end_status)})" if row.ended_at else "")
+    )
+    return lines
 
 
 def _store_lines(row: Row) -> list[str]:
@@ -226,18 +306,6 @@ def _store_lines(row: Row) -> list[str]:
         if ref.standard_file:
             lines.append(f"    over {ref.standard_file}  (sha256 {ref.standard_sha256[:12]}…)")
     return lines
-
-
-def _plate_lines(row: Row) -> list[str]:
-    """Which object of which plate, for a job of several parts (mqucifer/print-shop#109)."""
-    if row.plate is None:
-        return []
-    plate = row.plate
-    return [
-        f"on a plate     {plate.label()}, printed {plate.layout.sequence}; job {plate.job_id}. "
-        "The time, plastic and layers below are the whole plate's",
-        f"               {plate.layout.why}",
-    ]
 
 
 def _minutes(seconds: int) -> str:
@@ -292,7 +360,8 @@ def _setup_lines(row: Row) -> list[str]:
         lines.append(f"  {c.key}: not applied, {c.not_applied} ({c.source.value}) {c.reason}")
     if row.corrections:
         said = ", ".join(
-            f"{c.key}={c.value}" + (f" (not applied: {c.not_applied})" if c.not_applied else "")
+            f"{c.key}={c.value}" + (f" ({c.used.line()})" if c.used else "")
+            + (f" (not applied: {c.not_applied})" if c.not_applied else "")
             for c in row.corrections
         )
         lines.append(f"corrected      {said}")

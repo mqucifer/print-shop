@@ -28,6 +28,10 @@ its statuses, steps, scores and signatures, imported from there, not a second vo
   carries the file's own settings: its profiles, what differs from the inventory's tuning, and
   each object's overrides. No part was measured, so it's keyed to no trait until a reviewer
   keys it.
+- **An override used from a past print is never a lesson accepted** (mqucifer/print-shop#211):
+  the person's own is evidence as one typed is, so on a shape no lesson reaches it's a candidate
+  for that shape, unless a reviewer turned it down for that shape. One that was an answer's, a
+  lesson's or the slice's draws nothing.
 - **Each is scored at the review by what the Sponsor did:** a setting that stood is `used`, one
   they corrected `in_the_way`, and one another lesson or their answer set `not_used`. A lesson only
   read by the model is scored by the reviewer (`score`). Its status follows each job's latest score
@@ -75,7 +79,7 @@ from print_shop.rounds.lessons import (
 from print_shop.rounds.lessons import writer as _writer
 from print_shop.setup.bounds import MATERIAL
 from print_shop.setup.features import Feature
-from print_shop.setup.proposal import ORIENTATION, PAUSE, GivenLesson, Source
+from print_shop.setup.proposal import ORIENTATION, PAUSE, GivenLesson, Source, Used
 from print_shop.setup.traits import TRAITS, traits
 
 if TYPE_CHECKING:  # the ledger opens these tables, so it imports this
@@ -401,9 +405,13 @@ def draw(ledger: Ledger, row: Row) -> list[int]:
             reviewed = max(each, key=len)
             part["plate"]["traits"] = each
     for key, (kind, c) in last.items():
+        if c.used is not None and c.used.by is not Source.SPONSOR:
+            continue  # confirmed again at the review, and never the person's correction
         detail = {**part, "key": key, "preset": c.preset, "value": c.value, "reason": c.reason}
         if c.not_applied:  # asked for, and never printed with (mqucifer/print-shop#206)
             detail["not_applied"] = c.not_applied
+        if c.used is not None:
+            detail["used"] = c.used.model_dump(mode="json")
         keyed = list(reviewed)
         if kind == READING:
             detail["reading"] = c.reading
@@ -427,10 +435,14 @@ def draw(ledger: Ledger, row: Row) -> list[int]:
             said = f"the same {kind} again on {row.stl_name}" + (
                 f", until now only evidence for lesson {absorber}" if absorber else ""
             )
+            if c.used is not None:
+                said += f", {c.used.line()}"
             with ledger.writing() as db:
                 _evidence(db, lesson, row.job_id, kind, key, detail)
                 _step_in(db, lesson, one_in(db, lesson), HARNESS, said, job_id=row.job_id)
             continue
+        if c.used is not None and _turned_down(ledger, key, c.value, keyed, made_of):
+            continue  # using it again doesn't ask again what the reviewer turned down for it
         text = c.reason or ("the Sponsor's correction" if kind == CORRECTION else c.reading)
         linked = {int(found["id"]) for found in alike} | ({absorber} if absorber else set())
         made.append(_new(
@@ -493,6 +505,17 @@ def _repeats(found: dict[str, Any], key: str, keyed: list[str], made_of: str | N
         return False
     held = json.loads(found["traits"])
     return _reaches(held, keyed) or (not held and not keyed)
+
+
+def _turned_down(
+    ledger: Ledger, key: str, value: str, keyed: list[str], made_of: str | None
+) -> bool:
+    """Whether a reviewer rejected or retired this setting at this value for a part keyed so:
+    carrying it again by `use` isn't a new candidate (mqucifer/print-shop#211)."""
+    return any(_repeats(found, key, keyed, made_of) for found in ledger.query(
+        "SELECT * FROM print_lessons WHERE setting=? AND value=? AND status IN (?, ?)",
+        key, value, REJECTED, RETIRED,
+    ))
 
 
 def _absorbed(
@@ -799,7 +822,10 @@ def _scored_at_review(ledger: Ledger, row: Row) -> None:
             )
         elif not g.applied:
             scored, why = "not_used", g.why
-        elif g.key in corrected:
+        elif g.key in corrected and not (
+            # Used from a past print at the lesson's own value: it stood.
+            corrected[g.key].used is not None and corrected[g.key].value == g.value
+        ):
             c = corrected[g.key]
             scored, why = "in_the_way", f"corrected at the review to {c.value}: {c.reason}"
         elif g.key in stood and stood[g.key].source is Source.READING:
@@ -960,6 +986,8 @@ def _evidence_lines(ledger: Ledger, lesson: int) -> list[str]:
             said = f"corrected {d['key']} {d['preset']} -> {d['value']}: {d['reason']}" + (
                 f" (read: {d['reading']})" if d.get("reading") else ""
             ) + (f" (not applied: {d['not_applied']})" if d.get("not_applied") else "")
+            if d.get("used"):
+                said += f" ({Used.model_validate(d['used']).line()})"
         elif e["kind"] == READING:
             said = f"took {d['key']} {d['preset']} -> {d['value']} from the slice: {d['reading']}"
         else:

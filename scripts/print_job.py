@@ -125,6 +125,9 @@ from print_shop.runtime import (
     bed_type,
     build_run,
     describe,
+    describe_all,
+    describe_part,
+    describe_plate,
     profiles_for,
     recording_path,
 )
@@ -323,7 +326,7 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
     if args.list:
         with Ledger(ledger_path(args.settings)) as ledger:
             rows = ledger.rows()
-            print("\n\n".join(describe(r) for r in rows) if rows else "the ledger is empty")
+            print(describe_all(rows) if rows else "the ledger is empty")
             unprinted = ledger.unprinted_jobs()
             if unprinted:
                 print("\nEnded without printing:")
@@ -486,8 +489,9 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
 
 
 def _watch(run: Run, job_id: str) -> int:
-    """A started print, watched read-only until its outcome is answered, then shown: each
-    part's, for a plate of several (mqucifer/print-shop#109)."""
+    """A started print, watched read-only until its outcome is answered, then shown. For a plate
+    of several (mqucifer/print-shop#109), what the parts share once, then each part's own as it's
+    answered."""
     print("Started. Watching the printer read-only; answer in Home Assistant when it ends.")
     rows = run.ledger.job_rows(job_id)
     if len(rows) > 1:
@@ -498,8 +502,13 @@ def _watch(run: Run, job_id: str) -> int:
         rows = run.ledger.job_rows(job_id)
         for row in rows:
             if row.result is not None and row.job_id not in shown:
+                if row.plate is None:
+                    print("\n" + describe(row))
+                else:
+                    if not shown:
+                        print("\n" + describe_plate(row))
+                    print("\n" + describe_part(row))
                 shown.add(row.job_id)
-                print("\n" + describe(row))
         if rows and len(shown) == len(rows):
             break
         time.sleep(5)

@@ -5,7 +5,7 @@ The Sponsor prints one part at a time from main, so that flow is held byte for b
 the ledger, the files in the job's folder, and the G-code it sends. Ids, times and temporary
 paths are the only things replaced.
 
-`tests/data/one_part/transcript.txt` was written by this test run on 8af0992, main without that
+`tests/data/one_part/transcript.txt` was written by this test run on d597bd6, main without that
 change. A change that means to alter one part's flow writes it again, and the diff shows
 what it altered:
 

@@ -160,7 +160,9 @@ def test_three_small_parts_print_by_object_in_one_job_each_with_its_own_outcome(
         assert (rig.asked, len(rig.reviews)) == (1, 1), "one set of questions and one review"
         gate = rig.bridge.retained_json(gate_topic(CFG))
         assert gate["job_id"] == job and gate["orientation_deg"] is None
-        assert "printed BY OBJECT" in gate["plate"] and len(gate["plate_lines"]) == 4
+        assert "printed BY OBJECT" in gate["plate"]
+        assert sum(line.startswith("  part ") for line in gate["plate_lines"]) == 3
+        assert "    front" in gate["plate_lines"], "with the map"
         assert rig.bridge.retained_json(state_topic(CFG))["plate"] == gate["plate"]
         assert len(rig.bridge.on(gate_topic(CFG))) == 2, "cleared at the start, then one gate"
 
@@ -468,6 +470,13 @@ def test_one_parts_pose_is_sent_back_and_only_its_row_has_it(tmp_path: Path) -> 
         assert walls is not None and walls.value == "4", "it stood after the turn"
     assert "part2_cap-mid" in " ".join(rig.orca.calls[-1]["objects"])
 
+    from print_shop.runtime import describe_all
+
+    said = describe_all(rig.ledger.rows())
+    assert said.count("corrected      wall_loops=4") == 1, "the plate's, once"
+    (back_line,) = [line for line in said.splitlines() if line.startswith("sent back      ")]
+    assert "the mark goes on the side" in back_line
+    assert said.index("part 2 of 3") < said.index(back_line) < said.index("part 3 of 3")
     drawn = rig.ledger.query("SELECT job_id, setting FROM print_lessons ORDER BY id")
     assert sorted((d["job_id"], d["setting"]) for d in drawn) == [
         (job, "wall_loops"), (f"{job}-2", ORIENTATION)], "the review taught once"
@@ -774,7 +783,7 @@ def test_the_desks_list_counts_the_plates_frames_for_each_part(tmp_path: Path) -
 
 
 def _layout(count: int) -> PlateLayout:
-    return PlateLayout(sequence=BY_OBJECT, why="checked", objects=tuple(
+    return PlateLayout(sequence=BY_OBJECT, why="checked", bed=(256, 256), objects=tuple(
         OnPlate(n=n, name=f"cap-{n}.stl", x=50.0 * n, y=60, where="front left", height_mm=8,
                 top_layer=40 * n, order=n, layers=(40 * n - 39, 40 * n))
         for n in range(1, count + 1)))
@@ -872,7 +881,8 @@ def test_describe_says_the_figures_are_the_whole_plates(tmp_path: Path) -> None:
     row = ledger.get(f"{JOB}-2")
     assert row is not None
     text = describe(row)
-    assert "cap-2.stl (part 2 of 3), front left, x 100 y 60, printed by object" in text
+    assert "part 2 of 3    cap-2.stl" in text and f"its row        {JOB}-2" in text
+    assert "place          at x 100 y 60, front left" in text and "BY OBJECT" in text
     assert "the whole plate's" in text
 
 

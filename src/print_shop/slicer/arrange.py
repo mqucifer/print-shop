@@ -241,7 +241,7 @@ class _Plate:
                 where=_where(x / width, y / depth), height_mm=round(self.parts[n].height_mm, 2),
                 order=at, layers=(run.first, run.last) if run is not None else None,
             ))
-        return PlateLayout(sequence=sequence, why=why,
+        return PlateLayout(sequence=sequence, why=why, bed=(width, depth),
                            objects=tuple(sorted(objects, key=lambda o: o.n)))
 
     def _bed(self) -> tuple[float, float]:
