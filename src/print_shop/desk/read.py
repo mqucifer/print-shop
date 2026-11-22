@@ -158,8 +158,9 @@ class JobRecord:
     #: Whether `part_path` holds the bytes the job printed, by their sha256.
     part_found: bool = False
     printers: int = 0
-    #: The spools on hand by number, for the line to print it again (mqucifer/print-shop#218).
-    on_hand: frozenset[int] | None = None
+    #: The spools on hand by number, each with its tuning, for the line to print it again
+    #: (mqucifer/print-shop#218).
+    on_hand: dict[int, str | None] | None = None
 
 
 def status(row: Row) -> str:
@@ -190,6 +191,8 @@ def pause_said(row: Row) -> str:
     if word != "swap" or len(row.spools) < 2:
         return word
     colours = [used.material.colour for used in row.spools]
+    if row.spools[1].unsure:
+        return "swap, perhaps not made: " + ", then ".join(colours)
     if not swap_made(row.spools):
         then = "".join(f", then {colour}" for colour in colours[2:]) or " throughout"
         return f"swap, not made: {colours[0]}{then}"
@@ -298,8 +301,9 @@ class Desk:
             missed = ledger.frames_missed(job_id) if ledger is not None else None
             printers = (len(ledger.query("SELECT id FROM printers"))
                         if ledger is not None else 0)
-            on_hand = (frozenset(int(r["id"]) for r in ledger.query(
-                "SELECT id FROM spools WHERE state != 'empty'")) if ledger is not None else None)
+            on_hand = ({int(r["id"]): r["tuning"] for r in ledger.query(
+                "SELECT id, tuning FROM spools WHERE state != 'empty'")}
+                       if ledger is not None else None)
         log = self.log_path(job_id)
         text = log.read_text(encoding="utf-8", errors="replace") if log is not None else None
         if row is None and unprinted is None and text is None:

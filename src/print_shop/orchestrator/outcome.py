@@ -214,12 +214,15 @@ class Watcher:
                 if self._frames is not None:
                     self._frames.at_end(row.job_id, snapshot.layer, snapshot.total_layers)
                 status = snapshot.print_status
-                layer = snapshot.layer if _still_shows(snapshot, row) else None
-                self._ledger.record_ended(row.job_id, status, spools.at_end(row, status, layer))
+                ours = _still_shows(snapshot, row)
+                layer = snapshot.layer if ours else None
+                # An end that shows another file isn't this print's to read.
+                its_own = status if ours or not snapshot.shown_filename else None
+                self._ledger.record_ended(row.job_id, status, spools.at_end(row, its_own, layer))
             elif snapshot.active_filename is not None and not _is_ours(snapshot, row):
                 # Something else holds the printer, so ours ended while nobody
                 # was looking. How it ended is not known, and is not guessed.
-                self._ledger.record_ended(row.job_id, None)
+                self._ledger.record_ended(row.job_id, None, spools.at_end(row, None, None))
             else:
                 if self._frames is not None and _is_ours(snapshot, row):
                     self._frames.at_layer(row.job_id, snapshot.layer, snapshot.total_layers)

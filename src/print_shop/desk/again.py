@@ -13,7 +13,8 @@ and re-copy those". Three things, each copied from the page and never run by it:
   mqucifer/print-shop#203 is given at the height that pauses where it did (`_older_pause`), and
   one whose G-code doesn't say where it paused is left out, saying so (`_pause_again`). It's
   typed with what it was for (mqucifer/print-shop#218): an insert, or a swap with the spools the
-  print used. One of them that's used up is left to be asked, so the line still reads back;
+  print used. One of them that can't be named now (used up, or the first's tuning edited) is
+  left to be asked (`from ?`), so the line still reads back;
 - **the answers file** for `--answers` (`intake.replay_asker`): each question by its text, each
   answer by its option's label or the words given.
 
@@ -38,6 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from print_shop.inventory import Material
 from print_shop.ledger import Row
 from print_shop.orchestrator.graph import AS_LAID
 from print_shop.setup import pauses
@@ -118,21 +120,25 @@ def _pause_again(row: Row, stood: Change) -> str | None:
 
 
 def _purpose_again(
-    row: Row, stood: Change, on_hand: frozenset[int] | None
+    row: Row, stood: Change, on_hand: dict[int, str | None] | None
 ) -> pauses.Pause | None:
-    """What the pause was for, as it can be typed again: a spool that's used up is left out,
-    for the review to ask."""
+    """What the pause was for, as it can be typed again: a spool that's used up, or a first
+    whose tuning has been edited, is left for the review to ask. The other is still named."""
     purpose = pauses.as_printed(stood.pause, row.spools)
     if purpose is None or purpose.start is None or on_hand is None:
         return purpose
-    if purpose.start.spool_id not in on_hand:
-        return pauses.Pause(kind=purpose.kind)
-    if purpose.to is not None and purpose.to.spool_id not in on_hand:
-        return purpose.model_copy(update={"to": None})
-    return purpose
+    start: Material | None = purpose.start
+    to = purpose.to
+    if to is not None and to.spool_id not in on_hand:
+        to = None
+    if purpose.start.spool_id not in on_hand or (
+        on_hand[purpose.start.spool_id] != purpose.start.tuning
+    ):
+        start = None
+    return purpose.model_copy(update={"start": start, "to": to})
 
 
-def correction_line(row: Row, on_hand: frozenset[int] | None = None) -> str:
+def correction_line(row: Row, on_hand: dict[int, str | None] | None = None) -> str:
     """The Sponsor's corrections at the review, as they're typed there. `on_hand` is the spools
     that can be named in it, by number."""
     parts = []
@@ -157,7 +163,7 @@ def correction_line(row: Row, on_hand: frozenset[int] | None = None) -> str:
 
 def again(
     row: Row, part_path: Path | None, printers: int = 1, part_found: bool = False,
-    on_hand: frozenset[int] | None = None,
+    on_hand: dict[int, str | None] | None = None,
 ) -> Again:
     """How to run `row`'s job again. `part_path` is the part's file, and `part_found` says it
     has the bytes the job printed (by sha256); else it's the path the log names, if any.
@@ -230,11 +236,12 @@ def again(
             then = pauses.as_printed(stood.pause, row.spools)
             if then is not None and purpose is not None and then.start is not None:
                 for used, kept in ((then.start, purpose.start), (then.to, purpose.to)):
-                    if used is not None and kept is None and (
-                        on_hand is None or used.spool_id not in on_hand
-                    ):
-                        notes.append(f"It printed with {used.named()}, which isn't on hand now, "
-                                     "so the review asks for that spool.")
+                    if used is None or kept is not None:
+                        continue
+                    gone = on_hand is None or used.spool_id not in on_hand
+                    why = "isn't on hand now" if gone else "has had its tuning edited since"
+                    notes.append(f"It printed with {used.named()}, which {why}, so the review "
+                                 "asks for that spool.")
             if purpose is None:
                 notes.append("This job didn't say what its pause was for, so the review asks.")
             elif purpose.start is not None and purpose.to is not None:

@@ -61,7 +61,7 @@ from print_shop.expert.orientation import (
 from print_shop.ingest.analyzer import analyze, verify_unchanged
 from print_shop.ingest.orientation import candidates, write_rotated
 from print_shop.inventory import Inventory, InventoryError, Material, SpoolUse
-from print_shop.ledger import Ledger, PrintRecord, Row
+from print_shop.ledger import Ledger, PrintRecord
 from print_shop.orchestrator import spools as swaps
 from print_shop.orchestrator.fitness import scoring_profiles
 from print_shop.printer.centauri import PreflightFailed, PrinterClient, preflight
@@ -470,8 +470,7 @@ def build_graph(
                         offering=offer, doubting=doubting,
                         material=_material_of(profiles), stock=_stock(ledger, profiles),
                         record_load=_recorder(ledger, profiles),
-                        left_by_swap=(ledger is not None and swaps.left_by_swap(
-                            ledger, _material_of(profiles)) is not None),
+                        not_known=_not_known(ledger, profiles),
                     )
                 except _Turned as turned:
                     # Sent back at the review: turned to the person's pose, and sliced again.
@@ -697,7 +696,8 @@ def build_graph(
         # halfway is still on record.
         ledger.record_start_requested(
             _print_record(sent, remote_name, gcode, snapshot.machine, snapshot.firmware,
-                          store, material, spools)
+                          store, material, spools),
+            loaded=material,
         )
         try:
             client.start(remote_name)
@@ -813,12 +813,6 @@ def _first_spool(state: PrintJobState) -> tuple[Material | None, int | None]:
     return _material_prepared(state), None
 
 
-def _unseen_swap(ledger: Ledger, printer_id: str) -> Row | None:
-    """A swap's print that hasn't been seen to end: until it is, what's loaded isn't known."""
-    return next((row for row in ledger.running() if len(row.spools) > 1
-                 and row.spools[0].material.printer_id == printer_id), None)
-
-
 def why_not_start(state: PrintJobState, ledger: Ledger | None) -> str:
     """Why an Approve mustn't start this job with the stock as it is, and what to do, or ""
     (mqucifer/print-shop#218). The daemon reads it before it resumes the gate; the print node
@@ -826,11 +820,13 @@ def why_not_start(state: PrintJobState, ledger: Ledger | None) -> str:
     first, not_on = _first_spool(state)
     if first is None or ledger is None:
         return ""
-    if row := _unseen_swap(ledger, first.printer_id):
-        return (f"{row.stl_name}'s print has a swap and hasn't been seen to end, so what's "
-                "loaded isn't known. Wait for it to end, then approve again")
+    if unknown := swaps.not_known(ledger, first.printer_id):
+        return unknown.at_gate()
     with Inventory(ledger.path) as inventory:
-        held = inventory.why_not_start(first, not_on=not_on, prepared=_material_prepared(state))
+        held = inventory.why_not_start(
+            first, not_on=not_on, prepared=_material_prepared(state),
+            by_hand=state.get("sliced") is not None,
+        )
     return held.at_gate() if held is not None else ""
 
 
@@ -843,12 +839,8 @@ def _as_started(state: PrintJobState, ledger: Ledger, done: str) -> Material | N
     first, not_on = _first_spool(state)
     if first is None:
         return None
-    if row := _unseen_swap(ledger, first.printer_id):
-        raise InventoryError(
-            f"{row.stl_name}'s print has a swap and hasn't been seen to end, so what's loaded "
-            f"isn't known and {done}. Run `print_job.py --serve` until it's seen, then run the "
-            "job again."
-        )
+    if unknown := swaps.not_known(ledger, first.printer_id):
+        raise InventoryError(f"{unknown.why}, so {done}. {unknown.again}.")
     with Inventory(ledger.path) as inventory:
         return inventory.at_start(
             first, not_on=not_on, prepared=_material_prepared(state), done=done)
@@ -873,8 +865,23 @@ def _starts_said(state: PrintJobState, ledger: Ledger | None) -> str:
     swap = _swap(state)
     if swap is None or swap.start is None or ledger is None:
         return ""
+    unknown = swaps.not_known(ledger, swap.start.printer_id)
     with Inventory(ledger.path) as inventory:
-        return pauses.starting(swap, inventory.spools())
+        return pauses.starting(swap, inventory.spools(), unknown.why if unknown else "")
+
+
+def _not_known(ledger: Ledger | None, profiles: SlicerProfiles) -> Callable[[], str] | None:
+    """What isn't known of what's on the printer, for the review, read as it's needed."""
+    material = _material_of(profiles)
+    if ledger is None or material is None:
+        return None
+    read, printer = ledger, material.printer_id
+
+    def why() -> str:
+        found = swaps.not_known(read, printer)
+        return found.why if found is not None else ""
+
+    return why
 
 
 def _material_of(profiles: SlicerProfiles) -> Material | None:
@@ -1186,7 +1193,7 @@ def _propose_and_review(
     doubting: Doubting | None = None,
     material: Material | None = None,
     stock: pauses.Stock | None = None,
-    left_by_swap: bool = False,
+    not_known: Callable[[], str] | None = None,
     record_load: Callable[[int], None] | None = None,
 ) -> tuple[SliceResult, dict[str, Any]]:
     """Slice with the proposal; with a reviewer, again after each correction until approved.
@@ -1261,7 +1268,7 @@ def _propose_and_review(
                 offering=offering,
                 material=material,
                 stock=stock,
-                left_by_swap=left_by_swap,
+                not_known=not_known,
                 record_load=record_load,
             ))
             if review.offering is not None:

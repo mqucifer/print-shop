@@ -55,6 +55,7 @@ turn. Today such a job fails when that gate is answered, and nothing prints.
 **A pause says what it's for** (mqucifer/print-shop#218): a swap (`colour_change=12.4 from #1 to
 #2`, the stock's numbers) or an insert (`pause_at=2.6 for insert`), and what isn't typed is
 asked. When the print ends the stock has the last one loaded, and the outcome can correct that.
+Where that can't be known, it isn't guessed: Start holds until a load is recorded or picked.
 
 **A job starts only on what it was prepared for** (mqucifer/print-shop#218): the spool it was
 sliced for, a swap's first, or another of the same variety, colour and tuning. An Approve with
@@ -280,6 +281,9 @@ def _hand_sliced(args: argparse.Namespace, job_log: JobLog | None) -> sliced.Sli
                 print(exc, file=sys.stderr)
                 return 2
             print(f"From the inventory: {material.line()}.")
+            with Ledger(inventory.path) as ledger:
+                if left := left_said(ledger, material):
+                    print(f"  {left}")
     if material is not None:
         wrong = sliced.loaded_mismatch(file, material, store)
         if wrong and not args.loaded_ok:

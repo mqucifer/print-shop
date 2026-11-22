@@ -119,7 +119,7 @@ def reason_of(change: Change) -> str:
 _TYPED = re.compile(
     r"^(?P<height>\S+?)(?:\s*mm)?"
     r"(?:\s+(?:for\s+)?(?:an?\s+)?(?P<kind>insert|swap))?"
-    r"(?:\s+from\s+#?(?P<start>\d+))?"
+    r"(?:\s+(?P<named>from)\s+(?:#?(?P<start>\d+)|\?))?"
     r"(?:\s+to\s+#?(?P<to>\d+))?$",
     re.I,
 )
@@ -146,12 +146,13 @@ def read_typed(value: str, *, swap: bool) -> Typed | str:
         return f"'{value}' isn't a height: give one in mm, e.g. {example}, or none"
     kind = PauseFor(found.group("kind").lower()) if found.group("kind") else None
     start, to = (int(n) if n else None for n in found.group("start", "to"))
+    asks_first = bool(found.group("named")) and start is None  # `from ?`
     if kind is PauseFor.INSERT:
         if swap:
             return f"colour_change is a swap: for parts dropped in, pause_at={z:g} for insert"
-        if start is not None or to is not None:
+        if start is not None or to is not None or asks_first:
             return f"a pause for an insert names no spool: pause_at={z:g} for insert"
-    elif swap or start is not None or to is not None:
+    elif swap or start is not None or to is not None or asks_first:
         kind = PauseFor.SWAP
     return Typed(z=z, kind=kind, start=start, to=to)
 
@@ -162,7 +163,8 @@ def planned(
     """What a typed pause is for, as far as it was said, or why a spool named can't be it.
 
     `material` is the spool the job was prepared with. A swap that names only the spool to swap
-    to starts on the one this review has it starting on, else on that.
+    to starts on the one this review has it starting on. Else its first is asked, never taken
+    as the one loaded: after a swap that's the print before reversed.
     """
     if typed.kind is None:
         return None
@@ -180,10 +182,10 @@ def planned(
     else:
         if why := cant_start(standing, material, on_hand, "it was to start"):
             return why
-        start = _still(standing.start if standing else None, material, on_hand) or material
+        start = _still(standing.start if standing else None, material, on_hand)
     to: Material | None = None
     if typed.to is not None:
-        if typed.to == start.spool_id:
+        if start is not None and typed.to == start.spool_id:
             return (f"it starts on {start.named()}, so it swaps to another: to start on another, "
                     f"colour_change={typed.z:g} from #N to #{typed.to}")
         found = _on_hand(typed.to, material, on_hand)
@@ -200,7 +202,9 @@ def to_type(value: str, pause: Pause | None) -> tuple[str, str]:
     if pause.kind is PauseFor.INSERT:
         return "pause_at", f"{value} for insert"
     if pause.start is None:
-        return "colour_change", value
+        if pause.to is None:
+            return "colour_change", value
+        return "colour_change", f"{value} from ? to #{pause.to.spool_id}"
     if pause.to is None:
         return "colour_change", f"{value} from #{pause.start.spool_id}"
     return "colour_change", f"{value} from #{pause.start.spool_id} to #{pause.to.spool_id}"
@@ -291,14 +295,14 @@ def ask(
     value: str, pause: Pause | None, before: tuple[Pause, str] | None,
     material: Material | None, stock: Stock | None,
     read: Callable[[str], str], write: Callable[[str], None],
-    *, gone: str = "", left_by_swap: bool = False,
+    *, gone: str = "",
 ) -> Pause | None:
     """What's left to say of a pause, asked. None is the person going back to the review.
 
     `before` is what's pre-selected, and where it's from: this review's pause, or the past
-    print's ticked on offer. `gone` is why that print's first spool can't start this job, and
-    `left_by_swap` that the spool loaded is the last swap's second: with either, no spool is
-    pre-selected to start on, as Enter would be that swap reversed.
+    print's ticked on offer. `gone` is why that print's first spool can't start this job.
+    A first spool is pre-selected only where it's the one that print started on, never the one
+    loaded: after a swap, Enter on that would be the swap reversed.
     """
     if pause is None:
         kind = _ask_kind(value, before, read, write)
@@ -311,7 +315,7 @@ def ask(
     if stock is None:
         return pause
     earlier = before[0] if before and before[0].kind is pause.kind else None
-    start = pause.start or _ask_start(earlier, gone, left_by_swap, material, stock, read, write)
+    start = pause.start or _ask_start(earlier, gone, material, stock, read, write)
     if start is None:
         return None
     to = pause.to
@@ -345,7 +349,7 @@ def _ask_kind(
 
 
 def _ask_start(
-    earlier: Pause | None, gone: str, left_by_swap: bool, material: Material, stock: Stock,
+    earlier: Pause | None, gone: str, material: Material, stock: Stock,
     read: Callable[[str], str], write: Callable[[str], None],
 ) -> Material | None:
     on_hand = stock()
@@ -356,8 +360,6 @@ def _ask_start(
         write(f"  {gone}")
     else:
         default = _still(earlier.start if earlier else None, material, on_hand)
-        if default is None and not left_by_swap:
-            default = _still(material, material, on_hand)
     write("Which spool does it start on?")
     write("\n".join(f"  {s.line()}" for s in can)
           or f"  None of {material.filament_said()} is on hand: back, or add it with stock.py")
@@ -440,35 +442,39 @@ def uses(pause: Pause | None, reading: SliceReading | None) -> tuple[SpoolUse, .
     return first, SpoolUse(material=pause.to, from_layer=at.before_layer, from_z=at.after_z)
 
 
-def first_to_load(pause: Pause, on_hand: Iterable[Spool]) -> Material | None:
-    """A swap's first spool, where what's loaded won't do for it, or None."""
+def first_to_load(pause: Pause, on_hand: Iterable[Spool], unknown: str = "") -> Material | None:
+    """A swap's first spool, where what's loaded won't do for it or isn't known, or None."""
     start = pause.start
     if start is None:
         return None
+    if unknown:
+        return start
     now = next((s for s in on_hand if s.printer_id == start.printer_id), None)
     not_on = pause.to.spool_id if pause.to is not None else None
     return None if now is not None and start.takes(now, not_on) else start
 
 
-def starting(pause: Pause, on_hand: Iterable[Spool]) -> str:
-    """The spool a swap starts on and, where the stock has another loaded, what to do first."""
+def starting(pause: Pause, on_hand: Iterable[Spool], unknown: str = "") -> str:
+    """The spool a swap starts on and, where the stock has another loaded or what's on isn't
+    known (`unknown` says why), what to do first."""
     start = pause.start
     if start is None:
         return ""
     spools = tuple(on_hand)
     now = next((s for s in spools if s.printer_id == start.printer_id), None)
-    if first_to_load(pause, spools) is None:
+    if first_to_load(pause, spools, unknown) is None:
         assert now is not None
         as_loaded = start if now.id == start.spool_id else start.of(now)
         return f"it starts on {as_loaded.named()}, as loaded"
-    has = now.named() if now is not None else "none"
-    return (f"LOAD FIRST: it starts on {start.named()}, and the stock has {has} loaded. "
+    has = unknown or f"the stock has {now.named() if now is not None else 'none'} loaded"
+    return (f"LOAD FIRST: it starts on {start.named()}, and {has}. "
             f"Load it and record it (`stock.py load {start.spool_id}`) before you approve: "
             "an Approve before that starts nothing")
 
 
 def for_review(
-    pause: Pause, reading: SliceReading | None, material: Material | None, stock: Stock | None
+    pause: Pause, reading: SliceReading | None, material: Material | None, stock: Stock | None,
+    unknown: str = "",
 ) -> list[str]:
     """What the review says a pause is for, beside where it landed."""
     if pause.kind is PauseFor.INSERT:
@@ -481,7 +487,7 @@ def for_review(
     lines = [f"  the pause is a swap: {pause.start.named()}, then {pause.to.named()}"
              + (f", from layer {layer}" if layer else "")]
     if stock is not None:
-        lines.append(f"  {starting(pause, stock())}")
+        lines.append(f"  {starting(pause, stock(), unknown)}")
     if not pause.to.same_filament(pause.start):
         lines.append(
             f"  note: spool #{pause.to.spool_id} is {pause.to.filament_said()}, and the slice has "

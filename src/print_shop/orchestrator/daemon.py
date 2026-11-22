@@ -13,7 +13,8 @@ wait for the gate counts from when the job last came back from them. The gate th
 ledger row whose outcome is that it timed out, and nothing is sent to the printer after it.
 
 **An Approve with the wrong spool loaded starts nothing** (mqucifer/print-shop#218). The press is
-checked before the graph resumes (`graph.why_not_start`). Held, it's spent: the gate says why
+checked before the graph resumes, on the stock and the ledger alone as they are when it's pressed
+(`graph.why_not_start`): the printer is never waited on there. Held, it's spent: the gate says why
 and waits for a new press, with its inbox emptied, so an earlier or doubled tap can't start the
 job once the spool is loaded. A Reject that came while a press was checked wins, held or not. The
 hour runs on from when the gate opened. The print node refuses the same, as the backstop.
@@ -822,14 +823,10 @@ class Daemon:
     def _not_yet(self, thread_config: dict[str, Any]) -> str:
         """Why this Approve mustn't start the job, or "" (mqucifer/print-shop#218).
 
-        The printer is looked at first, read-only, where a print is still to be seen to end: a
-        swap's end moves the stock. A check that can't be made holds.
+        Only the stock and the ledger are read, so that the press is judged on them as they
+        are when it's pressed, and a slow printer can't hold up a Reject or stretch the hour.
+        A check that can't be made holds.
         """
-        if self._watcher is not None:
-            try:
-                self._watcher.look()
-            except Exception:  # noqa: BLE001 - what isn't seen is held below, never guessed
-                logger.exception("the printer couldn't be read before the start")
         try:
             state = self._graph.get_state(thread_config).values
             return why_not_start(state, self._ledger)
@@ -840,6 +837,10 @@ class Daemon:
     def _hold(self, job_id: str, gate_payload: dict[str, Any], why: str) -> None:
         """An Approve held: the gate stays open, saying why, on the card and in the terminal."""
         said = f"Not started: {why}"
+        # What's held says what to load, so the gate's own line, from when it opened, gives way.
+        gate_payload = {**gate_payload, "spools": ""}
+        if self._watcher is not None:
+            self._watcher.poke()  # an end still to be seen is looked for, outside the check
         if self._pending_gate is not None:
             self._pending_gate = {**self._pending_gate, "held": said}
         self._bridge_publish(

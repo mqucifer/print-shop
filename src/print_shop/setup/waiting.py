@@ -256,7 +256,7 @@ def _keys_waiting(timeout_s: float) -> bool:
     return bool(select.select([sys.stdin], [], [], timeout_s)[0])
 
 
-def _drop_typed() -> None:
+def drop_typed() -> None:
     """Forget what was typed before a question was shown: it can't have been an answer to it."""
     try:
         termios.tcflush(sys.stdin, termios.TCIFLUSH)
@@ -281,7 +281,7 @@ def cli_waiting(
     prompt: Callable[[], str] = lambda: "",
     screen: Callable[[], TextIO | None] = _terminal,
     typed: Callable[[float], bool] = _keys_waiting,
-    forget: Callable[[], None] = _drop_typed,
+    forget: Callable[[], None] = drop_typed,
 ) -> Waiting:
     """The wait on the command line. `replayed` is for recorded answers. `prompt` is the one
     that's open (`Prompted.prompt`): it's shown again under anything said while it's open.

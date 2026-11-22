@@ -22,6 +22,9 @@ ledger's schema version.
   nozzle and the loaded spool. What isn't on hand is refused.
 - **A swap's print keeps each spool in order, with its layer** (`print_spools`,
   mqucifer/print-shop#218): it starts only with the first loaded, and leaves the last loaded.
+- **What can't be known isn't guessed** (`printer_unknown`): where a swap's print ended so that
+  what's on the printer can't be known, the stock says so and Start holds, until a person records
+  a load, the same spool again included, or picks it at the outcome.
 - **So a job starts only on what it was prepared for** (`why_not_start`): as the stock moves by
   itself at a swap's end, what's loaded is compared again at Start, for every job. Another spool
   of the same variety, colour and tuning will do, and is the one recorded.
@@ -52,6 +55,9 @@ __all__ = [
     "SpoolUse",
     "leave_loaded",
     "loads_recorded",
+    "mark_unknown",
+    "unknown_said",
+    "upgrade",
     "spool_lines",
     "swap_made",
 ]
@@ -103,7 +109,15 @@ CREATE TABLE IF NOT EXISTS print_spools (
     spool       TEXT NOT NULL,                   -- JSON Material: the spool as it was
     planned     TEXT,                            -- JSON Material: the one planned, if another was
     loads       INTEGER,                         -- at 0: the printer's loads as it started
+    loads_ended INTEGER,                         -- at 0: and as it was seen to end
+    unsure      INTEGER NOT NULL DEFAULT 0,      -- whether the swap to it was made isn't known
     PRIMARY KEY (job_id, position)
+);
+CREATE TABLE IF NOT EXISTS printer_unknown (
+    printer_id  TEXT PRIMARY KEY REFERENCES printers(id),
+    job_id      TEXT NOT NULL,                   -- the print after which what's on isn't known
+    why         TEXT NOT NULL,
+    todo        TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS printer_loads (
     printer_id  TEXT PRIMARY KEY REFERENCES printers(id),
@@ -241,13 +255,17 @@ class SpoolUse(BaseModel):
     #: The spool planned here, where it ended with another: the swap wasn't reached, or the
     #: person corrected it at the outcome.
     planned: Material | None = None
+    #: Whether the swap to it was made isn't known: the print ended in that layer, or without
+    #: the printer saying how far it got. Never guessed either way.
+    unsure: bool = False
 
     def line(self) -> str:
         at = f", from layer {self.from_layer}" if self.from_layer else ""
         if self.from_z is not None:
             at += f", over z={self.from_z:g}"
         was = f" ({self.planned.named()} was planned)" if self.planned else ""
-        return f"{self.material.named()}{at}{was}"
+        may = " (the swap may not have been made)" if self.unsure else ""
+        return f"{self.material.named()}{at}{was}{may}"
 
 
 def swap_made(spools: tuple[SpoolUse, ...]) -> bool:
@@ -282,11 +300,58 @@ def loads_recorded(db: sqlite3.Connection, printer_id: str) -> int:
     return int(found[0]) if found is not None else 0
 
 
-def leave_loaded(db: sqlite3.Connection, printer_id: str, spool_id: int) -> bool:
+def leave_loaded(db: sqlite3.Connection, printer_id: str, spool_id: int) -> None:
     """The spool a print left on the printer, as loaded, in the caller's transaction
-    (mqucifer/print-shop#218). It isn't a person's load, so it isn't counted as one. False for
-    a spool marked empty, which is left so."""
-    return _loaded(db, printer_id, spool_id)
+    (mqucifer/print-shop#218). It isn't a person's load, so it isn't counted as one. One that's
+    marked empty leaves none loaded: what was loaded before it came off at the swap."""
+    if not _loaded(db, printer_id, spool_id):
+        db.execute(
+            "UPDATE spools SET state = 'on_hand', printer_id = NULL "
+            "WHERE printer_id = ? AND state = 'loaded'",
+            (printer_id,),
+        )
+    db.execute("DELETE FROM printer_unknown WHERE printer_id = ?", (printer_id,))
+
+
+def unknown_said(
+    printer_id: str, why: str, could_be: list[Material], *, pick: bool = False
+) -> NotYet:
+    """What isn't known of a printer, and the one step that clears it: the line to type, with
+    the likely spools' numbers in it, or the pick at the outcome where that writes the stock."""
+    lines = [f"`stock.py load {used.spool_id}` if it's {used.named()}"
+             for used in {used.spool_id: used for used in could_be}.values()]
+    todo = "Record what's on it: " + (", ".join(lines) or "`stock.py load <id>`")
+    if pick:
+        todo += ", or pick it at the outcome"
+    return NotYet(f"print-shop doesn't know what's on {printer_id}: {why}", todo,
+                  f"{todo}, and run the job again")
+
+
+def mark_unknown(
+    db: sqlite3.Connection, printer_id: str, job_id: str, why: str, could_be: list[Material],
+    *, pick: bool = False,
+) -> None:
+    """What's on the printer can't be known after this print, in the caller's transaction. The
+    stock's own word isn't written over."""
+    on_hand = [used for used in could_be if db.execute(
+        "SELECT 1 FROM spools WHERE id = ? AND state != 'empty'", (used.spool_id,)
+    ).fetchone()]
+    found = unknown_said(printer_id, why, on_hand, pick=pick)
+    db.execute(
+        "INSERT OR REPLACE INTO printer_unknown (printer_id, job_id, why, todo)"
+        " VALUES (?, ?, ?, ?)",
+        (printer_id, job_id, found.why, found.do),
+    )
+
+
+def upgrade(db: sqlite3.Connection) -> None:
+    """The columns `print_spools` was given after it was first made, added where they're
+    missing."""
+    held = {row[1] for row in db.execute("PRAGMA table_info(print_spools)")}
+    for column, kind in (("loads", "INTEGER"), ("loads_ended", "INTEGER"),
+                         ("unsure", "INTEGER NOT NULL DEFAULT 0")):
+        if held and column not in held:
+            db.execute(f"ALTER TABLE print_spools ADD COLUMN {column} {kind}")
 
 
 def _loaded(db: sqlite3.Connection, printer_id: str, spool_id: int) -> bool:
@@ -323,6 +388,7 @@ class Inventory:
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(SCHEMA)
+        upgrade(self._conn)
 
     def close(self) -> None:
         self._conn.close()
@@ -459,6 +525,8 @@ class Inventory:
                 " ON CONFLICT (printer_id) DO UPDATE SET n = n + 1",
                 (printer.id,),
             )
+            # The person has said what's on it.
+            db.execute("DELETE FROM printer_unknown WHERE printer_id = ?", (printer.id,))
         return self.spool(spool_id)
 
     def edit(
@@ -565,15 +633,28 @@ class Inventory:
                 )
         return material
 
+    def unknown(self, printer_id: str) -> NotYet | None:
+        """What isn't known of what's on the printer, or None."""
+        found = self._conn.execute(
+            "SELECT why, todo FROM printer_unknown WHERE printer_id = ?", (printer_id,)
+        ).fetchone()
+        if found is None:
+            return None
+        return NotYet(found["why"], found["todo"], f"{found['todo']}, and run the job again")
+
     def why_not_start(
         self, first: Material, *, not_on: int | None = None, prepared: Material | None = None,
+        by_hand: bool = False,
     ) -> NotYet | None:
         """Why a job can't start with the stock as it is, or None (mqucifer/print-shop#218).
 
         `first` is the spool it was prepared for, or a swap's first, with `not_on` the spool
         it's swapped to. `prepared` is the job's own where a swap starts on another: its tuning
-        still has to be the one the job was sliced with.
+        still has to be the one the job was sliced with. `by_hand` is a file sliced by hand,
+        which can't be sent again with another filament loaded.
         """
+        if not_known := self.unknown(first.printer_id):
+            return not_known
         now = self.loaded(first.printer_id)
         sliced_for = [first] if now is not None and now.id == first.spool_id else []
         if prepared is not None and prepared.spool_id != first.spool_id:
@@ -609,7 +690,10 @@ class Inventory:
             instead = "for other spools"
         elif now is not None:
             same = first.of(now).same_filament(first)
-            instead = f"to print in {now.colour}" if same else f"to print with {now.named()}"
+            if same:
+                instead = f"to print in {now.colour}"
+            elif not by_hand:
+                instead = f"to print with {now.named()}"
         return NotYet(
             f"{what} {first.named()}, and the stock has {has} loaded on {first.printer_id}",
             load, f"{load}, and run the job again", instead,
@@ -640,7 +724,11 @@ class Inventory:
 
     def listing(self, *, with_empty: bool = False) -> str:
         """Everything on hand, loaded and fitted, a line each."""
-        lines = [f"printer {p.id}  {p.model}" for p in self.printers()]
+        lines = []
+        for p in self.printers():
+            lines.append(f"printer {p.id}  {p.model}")
+            if not_known := self.unknown(p.id):
+                lines.append(f"  {not_known.why}. {not_known.do}")
         lines += [n.line() for n in self.nozzles()]
         lines += [s.line() for s in self.spools(with_empty=with_empty)]
         return "\n".join(lines) if lines else "the inventory is empty"

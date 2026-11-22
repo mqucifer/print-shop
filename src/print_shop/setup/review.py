@@ -40,6 +40,7 @@ orientation step is given next time. The part is then turned and sliced again.
 from __future__ import annotations
 
 import re
+import sqlite3
 import textwrap
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -66,6 +67,7 @@ from print_shop.setup.proposal import (
 )
 from print_shop.setup.reach import profile_of, unplaced
 from print_shop.setup.reading import PAUSE_PAST_FIT, Flag, SliceReading
+from print_shop.setup.waiting import drop_typed
 from print_shop.slicer.orca import SlicerProfiles
 
 __all__ = [
@@ -120,8 +122,8 @@ class ReviewRequest:
     #: (mqucifer/print-shop#218). None with no stock set up.
     material: Material | None = None
     stock: pauses.Stock | None = None
-    #: Whether that spool is the second of the last swap: then Enter never starts a swap on it.
-    left_by_swap: bool = False
+    #: Why what's on the printer isn't known, or "" (mqucifer/print-shop#218): LOAD FIRST then.
+    not_known: Callable[[], str] | None = None
     #: Records a spool as loaded, on the person's typed y and only that (`_loaded_first`).
     record_load: Callable[[int], None] | None = None
 
@@ -202,7 +204,8 @@ def render(request: ReviewRequest) -> str:
     paused = proposal.get(PAUSE)
     purpose = paused.pause if paused is not None and paused.value != "none" else None
     if purpose is not None:
-        lines += pauses.for_review(purpose, request.reading, request.material, request.stock)
+        lines += pauses.for_review(purpose, request.reading, request.material, request.stock,
+                                   request.not_known() if request.not_known else "")
     for c in proposal.kept:
         by = (
             f" [lesson {c.lesson}]" if c.lesson is not None
@@ -507,8 +510,7 @@ def _purposed(
         request = replace(request, offering=review.offering)
     found = pauses.ask(change.value, change.pause, _before(request, change.value),
                        request.material, request.stock, read, write,
-                       gone=_past_cant_start(request, change.value),
-                       left_by_swap=request.left_by_swap)
+                       gone=_past_cant_start(request, change.value))
     if found is None:
         return None
     done = change.model_copy(update={"pause": found,
@@ -518,28 +520,39 @@ def _purposed(
 
 
 def _loaded_first(
-    request: ReviewRequest, read: Callable[[str], str], write: Callable[[str], None]
+    request: ReviewRequest, read: Callable[[str], str], write: Callable[[str], None],
+    forget: Callable[[], None],
 ) -> None:
     """On `ok` with LOAD FIRST, whether the first spool's on the printer now. A typed y records
-    the load, as `stock.py load` does; anything else writes nothing (mqucifer/print-shop#218)."""
+    the load, as `stock.py load` does; anything else writes nothing (mqucifer/print-shop#218).
+
+    What was typed before the question was shown is dropped first: a doubled y would answer it
+    unseen. A stock that can't be read or written doesn't lose the job, as Start still checks.
+    """
     change = request.proposal.get(PAUSE)
     if change is None or change.value == "none" or change.pause is None:
         return
     if request.stock is None or request.record_load is None:
         return
-    on_hand = request.stock()
-    first = pauses.first_to_load(change.pause, on_hand)
+    try:
+        on_hand = request.stock()
+        unknown = request.not_known() if request.not_known else ""
+    except sqlite3.Error as exc:
+        write(f"  The stock couldn't be read ({exc}): an Approve checks it again.")
+        return
+    first = pauses.first_to_load(change.pause, on_hand, unknown)
     if first is None or all(spool.id != first.spool_id for spool in on_hand):
         return
     write(f"Is {first.named()}, on the printer now? y records it (stock load {first.spool_id}); "
           "Enter for later, and an Approve before it's loaded starts nothing.")
+    forget()
     if read("loaded> ").strip().lower() != "y":
         write(f"  Nothing recorded. Load it and `stock.py load {first.spool_id}` before you "
               "approve.")
         return
     try:
         request.record_load(first.spool_id)
-    except InventoryError as exc:
+    except (InventoryError, sqlite3.Error) as exc:
         write(f"  Not recorded: {exc}")
         return
     write(f"  Recorded: {first.named()} is loaded.")
@@ -606,10 +619,12 @@ def _take(numbers: str, request: ReviewRequest) -> list[Change] | str:
 
 
 def cli_reviewer(
-    read: Callable[[str], str] = input, write: Callable[[str], None] = print
+    read: Callable[[str], str] = input, write: Callable[[str], None] = print,
+    forget: Callable[[], None] = drop_typed,
 ) -> Reviewer:
     """Show the review on the command line and read the answer, again until it's readable.
-    `orientation` starts the send-back conversation (`send_back`)."""
+    `orientation` starts the send-back conversation (`send_back`). `forget` drops what was typed
+    before the load's question was shown: a y approves here too, and mustn't answer that."""
 
     def review(request: ReviewRequest) -> Review:
         write(render(request))
@@ -652,7 +667,7 @@ def cli_reviewer(
                           "or ok again to go on without")
                     continue
             if parsed.approved:
-                _loaded_first(request, read, write)
+                _loaded_first(request, read, write, forget)
             if moved is not None and parsed.offering is None:
                 return replace(parsed, offering=moved)
             return parsed
