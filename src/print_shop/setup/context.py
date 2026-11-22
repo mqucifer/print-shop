@@ -29,7 +29,8 @@ so. The review says the band is derived, and from which need.
 **What it's for and what's seen are read back at the questions** (mqucifer/print-shop#236): a
 sidecar's `purpose` says what the part is for in words (`for`) and how it's loaded (`loaded`,
 one of `LOADS`), and its `seen` any of the faces. Neither counts as the person's until they
-confirm it. Words alone, and a sidecar's `about`, are shown and never read as a purpose.
+confirm it. Words alone, and a sidecar's `about`, are shown and never read as a purpose. A
+purpose that can't be read is said and asked, and costs the part none of the rest of its notes.
 
 Placed in a pose (`place`), a fit is a band of heights as it prints, which the slice reading's
 seam rule and elephant foot proposal read (`reading.flags`), and a hold's way on or off is read
@@ -42,7 +43,7 @@ import json
 import os
 import re
 import shlex
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +53,7 @@ from pydantic import BaseModel
 __all__ = [
     "FIT_MM",
     "LOADS",
+    "SET_ASIDE",
     "SIDECAR",
     "SIDES",
     "Fit",
@@ -62,6 +64,7 @@ __all__ = [
     "Seen",
     "pose_for",
     "place",
+    "plain_line",
     "printed",
     "read_context",
     "refuses",
@@ -82,6 +85,9 @@ LOADS = (
     "carries a real load",
     "a prototype or test fit",
 )
+#: What follows a line of the notes that the person's answer stands in place of
+#: (mqucifer/print-shop#236). Past prints' contexts are compared without it (`similar`).
+SET_ASIDE = " (set aside: you said "
 #: How the bench lays a run's file on a side (`bench.refine.ON_BED`, kept the same here so the
 #: print side never imports the bench's): about an axis through the origin, in degrees.
 ON_BED: dict[str, tuple[tuple[float, float, float], float]] = {
@@ -209,8 +215,15 @@ class PartContext(BaseModel):
     def found(self) -> bool:
         return bool(self.source)
 
-    def lines(self) -> list[str]:
-        """The context as the review, the model and the ledger read it, in the file's own pose."""
+    def lines(self, set_aside: Mapping[str, str] | None = None) -> list[str]:
+        """The context as the review, the model and the ledger read it, in the file's own pose.
+        `set_aside` has the person's answer by what it replaced ("purpose", "seen"): that line
+        says so, so that it doesn't read as what's being judged."""
+        instead = set_aside or {}
+
+        def said(line: str, kind: str) -> str:
+            return f"{line}{SET_ASIDE}'{instead[kind]}')" if kind in instead else line
+
         if not self.found:
             return ["none: no design run above the file and no sidecar beside it, so it's read "
                     "as before", *self.notes]
@@ -219,12 +232,12 @@ class PartContext(BaseModel):
         out += [f"hold: {h.line()}" for h in self.holds]
         if self.loaded:
             words = f"{self.purpose}; " if self.purpose else ""
-            out.append(f"purpose: {words}loaded as '{self.loaded}'")
+            out.append(said(f"purpose: {words}loaded as '{self.loaded}'", "purpose"))
         elif self.purpose:
             out.append(f"purpose, in words only: {self.purpose}")
         if self.about:
             out.append(f"about: {self.about}")
-        out.append(f"seen: {self.seen.said}" if self.seen is not None
+        out.append(said(f"seen: {self.seen.said}", "seen") if self.seen is not None
                    else "seen: not said here, so the intake's answer stands")
         if self.down:
             out.append(f"laid on its {self.down} side ({self.down_from})")
@@ -324,7 +337,7 @@ def _from_sidecar(path: Path) -> PartContext:
     if unknown:
         raise ValueError(
             f"a sidecar has fits, seen, purpose, down, holds and about; not {unknown}")
-    purpose, loaded = _purpose(data.get("purpose"))
+    purpose, loaded, unread = _purpose(data.get("purpose"))
     fits = []
     for n, entry in enumerate(data.get("fits") or (), 1):
         name = str(entry.get("name") or f"fit {n}")
@@ -357,27 +370,34 @@ def _from_sidecar(path: Path) -> PartContext:
         holds=tuple(holds), seen=_seen(data.get("seen")), down=down,
         down_from="the sidecar" if down else "",
         purpose=purpose, loaded=loaded,
-        about=_plain_line(data.get("about") or ""),
+        about=plain_line(data.get("about") or ""),
+        notes=(unread,) if unread else (),
     )
 
 
-def _purpose(value: Any) -> tuple[str, str]:
-    """The sidecar's purpose: its words, and how it's loaded. Words alone are never read as a
-    load (mqucifer/print-shop#236)."""
+def _purpose(value: Any) -> tuple[str, str, str]:
+    """The sidecar's purpose: its words, how it's loaded, and why that couldn't be read. Words
+    alone are never read as a load (mqucifer/print-shop#236). One that can't be read raises
+    nothing: the fits and the side beside it hold guards of their own."""
     if value is None:
-        return "", ""
+        return "", "", ""
     if isinstance(value, str):
-        return _plain_line(value), ""
-    if not isinstance(value, dict) or set(value) - {"for", "loaded"}:
-        raise ValueError('a purpose is {"for": what it\'s for, "loaded": how it\'s loaded}')
-    words, loaded = _plain_line(value.get("for") or ""), _plain_line(value.get("loaded") or "")
+        return plain_line(value), "", ""
+    if not isinstance(value, dict):
+        return (plain_line(json.dumps(value)), "",
+                'its purpose isn\'t {"for": ..., "loaded": ...}, so purpose is asked')
+    words, loaded = plain_line(value.get("for") or ""), plain_line(value.get("loaded") or "")
     known = next((load for load in LOADS if load.casefold() == loaded.casefold()), "")
-    if loaded and not known:
-        raise ValueError(f"a purpose's loaded is one of {', '.join(LOADS)}, not {loaded!r}")
-    return words, known
+    strange = sorted(str(key) for key in set(value) - {"for", "loaded"})
+    if not strange and (known or not loaded):
+        return words, known, ""
+    as_given = "; ".join(f"{plain_line(key)}: {plain_line(said)}" for key, said in value.items())
+    why = (f"a purpose has for and loaded, not {strange}" if strange
+           else f"a purpose's loaded is one of {', '.join(LOADS)}, not {loaded!r}")
+    return as_given, "", f"{why}, so purpose is asked"
 
 
-def _plain_line(value: Any) -> str:
+def plain_line(value: Any) -> str:
     """A sender's words as one printable line: they're shown where the person confirms, so
     they can't draw a line of their own there."""
     return " ".join("".join(c if c.isprintable() else " " for c in str(value)).split())

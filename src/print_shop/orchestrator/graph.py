@@ -1050,7 +1050,7 @@ def _offering(
             filament=filament, filament_names=tuple(dict.fromkeys(n for n in names if n)),
             measured=lying, build_volume_mm=build_volume,
             context=state.get("part_context"), pose_chosen=chosen,
-            asked=intake.could_set(),
+            asked=intake.could_set(), unwaited=intake.unwaited,
         ))
     except Exception as exc:  # noqa: BLE001 - a print is never stopped by what it might reuse
         logger.warning("the past prints couldn't be read for the offer: %s", exc)
@@ -1155,16 +1155,13 @@ def _propose_and_review(
     # reading's seam rule and elephant foot, and what the review says was read.
     placed = (place(context, stl, orientation.rotation_deg)
               if context is not None and context.found and stl is not None else None)
-    over = intake.over_notes() if intake is not None else []
-    if placed is not None and any(q.feature == "seen" for q, _ in over):
+    instead = intake.set_aside() if intake is not None else {}
+    if placed is not None and "seen" in instead:
         # The answer replaced the notes', in words too: words name no face, so none is judged
         # rather than the faces the person set aside (mqucifer/print-shop#236).
         placed = placed.model_copy(update={"seen": None})
-    said = tuple([*(context.lines() if context is not None else ()),
-                  *(placed.lines() if placed is not None else ()),
-                  # Never opened "seen: ", which is how past prints' contexts are compared.
-                  *(f"your answer '{q.label(a)}' stands in place of the notes' "
-                    f"'{q.options[q.noted].label}'" for q, a in over if q.noted is not None)])
+    said = tuple([*(context.lines(instead) if context is not None else ()),
+                  *(placed.lines() if placed is not None else ())])
     proposal = proposal.model_copy(update={
         "context": said, "context_from": context.path if context is not None else ""})
     asked = proposal

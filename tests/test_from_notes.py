@@ -17,11 +17,13 @@ import textwrap
 import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from print_shop.core.checkpoint import make_serializer
 from print_shop.desk.again import again, answers_file
 from print_shop.desk.page import _questions as desk_questions
 from print_shop.ledger import Ledger, Row
@@ -29,9 +31,10 @@ from print_shop.orchestrator import graph
 from print_shop.orchestrator.daemon import Daemon
 from print_shop.runtime import describe
 from print_shop.setup import Proposer
-from print_shop.setup.context import LOADS, SIDECAR, PartContext, place, read_context
+from print_shop.setup.context import LOADS, SIDECAR, PartContext, place, read_context, refuses
 from print_shop.setup.features import measure
 from print_shop.setup.intake import (
+    DIFFERS_PROMPT,
     NOTES_PROMPT,
     Answer,
     AnswersRefused,
@@ -42,10 +45,14 @@ from print_shop.setup.intake import (
     render,
     replay_asker,
 )
+from print_shop.setup.model import prompt as settings_prompt
+from print_shop.setup.proposal import Change, Source
 from print_shop.setup.questions import PURPOSE, SEEN, STOCK, Asked, stock
 from print_shop.setup.reading import flags, seen
-from print_shop.setup.review import Review, ReviewRequest
+from print_shop.setup.review import Review, ReviewRequest, parse_answer
 from print_shop.setup.review import render as render_review
+from print_shop.setup.similar import likeness
+from print_shop.setup.skill import groups_for, load
 from print_shop.setup.waiting import Waiting, ask_meanwhile
 from tests.fakes import CI_PROFILES, STORE_PROFILES, FramePrinter, MemoryBridge
 from tests.fixtures import write_stl
@@ -69,6 +76,27 @@ def noted(tmp_path: Path, data: dict[str, Any] | None = None) -> Path:
     if data is not None:
         stl.with_name(stl.stem + SIDECAR).write_text(json.dumps(data))
     return stl
+
+
+def _answers_then(row: Row) -> list[str]:
+    """What the offer lists as that print's answers."""
+    from print_shop.setup.offer import ThisPart, offering
+
+    class One:
+        def rows(self) -> list[Row]:
+            return [row.model_copy(update={"corrections": (Change(
+                key="brim_type", preset="no_brim", value="auto_brim", reason="made up",
+                source=Source.SPONSOR),)})]
+
+        def query(self, sql: str, *args: Any) -> list[dict[str, Any]]:
+            return []
+
+    part = ThisPart(stl=Path(row.stl_name), stl_name=row.stl_name, sha256=row.stl_sha256,
+                    features=tuple(row.features or ()), rotation_deg=LAID, height_mm=20.0,
+                    machine={}, process={"brim_type": "no_brim"}, filament={})
+    past = offering(One(), part).past  # type: ignore[arg-type]
+    assert past is not None
+    return list(past.answers)
 
 
 def two(
@@ -288,7 +316,7 @@ def test_seen_alone_is_read_back_and_purpose_is_asked_and_the_call_waited_for(
     assert "Enter if that's right, or 2 to change it." in person.text
     assert PURPOSE.text in person.text and SEEN.text not in person.text
     assert "still reading" in person.text, "it's waited for, as today"
-    assert intake.answers == (Answer(choice=1), Answer(choice=0))
+    assert intake.answers == (Answer(choice=1), questions[1].confirm())
     assert intake.questions[1].confirmed(intake.answers[1])
     assert not intake.questions[0].whose(intake.answers[0]), "purpose is the person's answer"
 
@@ -340,7 +368,7 @@ def test_a_contradicting_answer_names_both_before_its_taken_and_the_record_has_b
     prompt, shown = person.prompts[2]
     before_taken = "\n".join(person.shown[:shown])
     theirs, yours = "the top as it prints and the face on the plate", SEEN.options[3].label
-    assert prompt == "2> "
+    assert prompt == DIFFERS_PROMPT
     assert f"They say seen: {theirs}. You said: {yours}." in before_taken
     assert "Enter takes your answer, or n keeps the notes." in before_taken
 
@@ -351,8 +379,11 @@ def test_a_contradicting_answer_names_both_before_its_taken_and_the_record_has_b
     assert f"your answer, in place of the notes' '{theirs}'" in describe(row)
     assert "the notes" in desk_questions(row) and yours in desk_questions(row)
     [request] = job.reviews.requests
-    assert f"your answer '{yours}' stands in place of the notes' '{theirs}'" in render_review(
-        request)
+    aside = f"seen: top, bottom, as the part's context says (set aside: you said '{yours}')"
+    assert aside in request.context and f"  {aside}" in render_review(request)
+    assert not [line for line in request.context if line.endswith("context says")], (
+        "none reads as what's being judged")
+    assert aside in job.settings_prompts[0]
     assert f"[your answer, in place of the notes' '{theirs}']" in job.settings_prompts[0]
 
 
@@ -360,15 +391,33 @@ def test_n_keeps_the_notes_and_enter_at_the_question_does_too(tmp_path: Path) ->
     for lines in (("2", "4", "n"), ("2", "")):
         person = Person(*lines)
         answers = cli_asker(person.read, person.write)(two(tmp_path, BOTH))
-        assert answers == (Answer(choice=2), Answer(choice=4))
+        assert answers == tuple(q.confirm() for q in two(tmp_path, BOTH))
 
 
 def test_what_isnt_named_to_change_isnt_asked_again(tmp_path: Path) -> None:
     person = Person("1", "1", "")
     answers = cli_asker(person.read, person.write)(two(tmp_path, BOTH))
-    assert answers == (Answer(choice=0), Answer(choice=4))
-    assert [prompt for prompt, _ in person.prompts] == [NOTES_PROMPT, "1> ", "1> "]
+    assert answers == (Answer(choice=0), two(tmp_path, BOTH)[1].confirm())
+    assert [prompt for prompt, _ in person.prompts] == [NOTES_PROMPT, "1> ", DIFFERS_PROMPT]
     assert SEEN.text not in person.text
+
+
+def test_a_line_set_aside_compares_to_past_prints_as_the_notes_said_it(tmp_path: Path) -> None:
+    context = read_context(noted(tmp_path, BOTH))
+    changed = tuple(context.lines({"seen": "only the face on the plate"}))
+    plain = tuple(context.lines())
+    assert changed != plain
+    assert likeness({}, {}, plain, changed, ("", "a.stl"), ("", "b.stl")).context == 1.0
+
+
+def test_changing_a_line_says_what_the_notes_say_on_it_with_quotes_for_about_alone(
+    tmp_path: Path,
+) -> None:
+    person = Person("1 2", "", "")
+    cli_asker(person.read, person.write)(two(tmp_path, BOTH))
+    assert "The notes say for: a made-up bracket for a shelf. Carries a real load\n" in person.text
+    assert "The notes say seen: the top and the bottom, as the file lays it\n" in person.text
+    assert "Its notes say" not in person.text and "Enter) keep what the notes say" in person.text
 
 
 def test_both_can_be_changed_at_the_one_prompt(tmp_path: Path) -> None:
@@ -449,7 +498,7 @@ def test_every_combination_is_read_back_and_read_as_the_notes_have_it(
     assert question.noted is not None, "read back, never asked"
     assert question.noted_as == (", ".join(faces) or "nothing")
     assert "as the file lays it" in question.read_back()
-    intake = Intake(questions=(question,), answers=(Answer(choice=question.noted),))
+    intake = Intake(questions=(question,), answers=(question.confirm(),))
     assert seen(intake) is None, "read as the notes place it, not by the label in this pose"
     placed = place(context, stl, pose).seen
     assert placed is not None
@@ -531,7 +580,7 @@ def test_the_job_gives_its_questions_call_the_context(
 
     def confirms(asked: Sequence[Question]) -> tuple[Answer, ...]:
         assert told.wait(WAIT_S), "the call is made before anything is confirmed"
-        return tuple(Answer(choice=q.noted) for q in asked)
+        return tuple(q.confirm() for q in asked)
 
     job.run(noted(tmp_path, EVERYTHING), questions, confirms,
             Person().waiting() if meanwhile else None)
@@ -596,7 +645,7 @@ def test_asked_all_together_the_notes_two_are_read_back_on_one_card(
 
     def card(questions: Sequence[Question]) -> tuple[Answer, ...]:
         sets.append(questions)
-        return tuple(Answer(choice=q.noted) for q in questions)
+        return tuple(q.confirm() for q in questions)
 
     row = job.run(noted(tmp_path, BOTH), no_question, card)
     assert len(sets) == 1 and [q.noted is not None for q in sets[0]] == [True, True]
@@ -609,14 +658,20 @@ def test_asked_all_together_the_notes_two_are_read_back_on_one_card(
 
 
 @pytest.mark.parametrize("purpose", [
-    {"loaded": "quite heavily"}, {"for": "x", "load": LOADED}, ["a bracket"],
+    {"loaded": "quite heavily"}, {"for": "x", "load": LOADED}, ["a bracket"], 7,
+    {"for": "x", "loaded": f"{LOADED}."},
 ])
-def test_a_purpose_that_cant_be_read_says_why_and_is_never_guessed(
+def test_a_purpose_that_cant_be_read_says_why_is_asked_and_costs_none_of_the_other_notes(
     purpose: Any, tmp_path: Path
 ) -> None:
-    context = read_context(noted(tmp_path, {"purpose": purpose}))
-    assert not context.found and "purpose" in context.notes[0]
-    assert stock(context, LAID) == STOCK
+    stl = noted(tmp_path, {**EVERYTHING, "purpose": purpose})
+    context = read_context(stl)
+    assert "purpose is asked" in context.notes[0]
+    assert (len(context.fits), context.down, len(context.holds)) == (1, "+z", 1)
+    assert refuses(context, "seam_position", "random"), "the fit's guard still holds"
+    asked, read_back = stock(context, LAID)
+    assert asked.noted is None and read_back.noted is not None
+    assert asked.beside, "what it did say is beside the question"
 
 
 def test_the_loads_are_the_purpose_questions_options() -> None:
@@ -635,11 +690,23 @@ def test_a_row_from_before_reads_as_the_persons_answers() -> None:
     old = json.loads(Intake(questions=STOCK,
                             answers=(Answer(choice=1), Answer(choice=0))).model_dump_json())
     for question in old["questions"]:
-        for field in ("beside", "noted", "noted_as", "noted_from"):
+        for field in ("beside", "noted", "noted_as", "noted_from", "pose"):
             del question[field]
+    for answer in old["answers"]:
+        del answer["from_notes"]
     intake = Intake.model_validate_json(json.dumps(old))
     assert intake.questions == STOCK and not intake.over_notes()
     assert "confirmed" not in intake.summary() and seen(intake) is not None
+
+
+def test_a_confirmation_comes_back_whole_from_a_checkpoint(tmp_path: Path) -> None:
+    questions = two(tmp_path, {**BOTH, "down": "+z"}, FLIPPED)
+    intake = Intake(questions=questions, answers=tuple(q.confirm() for q in questions))
+    serde = make_serializer()
+    back = serde.loads_typed(serde.dumps_typed(intake))
+    assert isinstance(back, Intake) and not back.over_notes()
+    assert back.summary() == intake.summary()
+    assert [q.read_back() for q in back.questions] == [q.read_back() for q in questions]
 
 
 # --------------------------------------------------------------------------
@@ -653,7 +720,7 @@ def recorded(tmp_path: Path, said: list[str], *rows: dict[str, Any]) -> Asker:
     return replay_asker(path, write=said.append)
 
 
-CONFIRMS = ({"question": "purpose", "notes": LOADED},
+CONFIRMS = ({"question": "purpose", "notes": f"{FOR['for']}: {LOADED}"},
             {"question": "seen", "notes": "top, bottom"})
 
 
@@ -686,7 +753,9 @@ def test_a_recorded_answer_over_the_notes_replays_and_names_both(
     ({"purpose": FOR, "seen": ["walls"]}, "they say 'walls' now"),
     ({"purpose": FOR}, "the notes don't give one now"),
     ({"purpose": {"for": "x", "loaded": LOADS[0]}, "seen": ["top", "bottom"]},
-     "they say 'decoration or display' now"),
+     "they say 'x: decoration or display' now"),
+    ({"purpose": {**FOR, "for": "a made-up hook a child hangs from"}, "seen": ["top", "bottom"]},
+     "they say 'a made-up hook a child hangs from: carries a real load' now"),
 ])
 def test_a_confirmation_never_confirms_notes_that_changed(
     notes: dict[str, Any], says: str, tmp_path: Path
@@ -720,7 +789,7 @@ def test_the_desks_answers_file_replays_what_was_confirmed_or_answered(
     row = job.run(stl, no_question, person.asker(), person.waiting())
     content = answers_file(row)
     assert content is not None and row.intake is not None
-    assert content["answers"][0] == {"question": PURPOSE.text, "notes": LOADED}
+    assert content["answers"][0] == {"question": PURPOSE.text, "notes": CONFIRMS[0]["notes"]}
     path = tmp_path / "again.json"
     path.write_text(json.dumps(content))
     replayed = replay_asker(path, write=lambda line: None)(stock(read_context(stl), LAID))
@@ -728,6 +797,167 @@ def test_the_desks_answers_file_replays_what_was_confirmed_or_answered(
 
     stl.with_name(stl.stem + SIDECAR).unlink()
     assert any("refused without them" in note for note in again(row, stl, 1, True).notes)
+
+
+# --------------------------------------------------------------------------
+# Not waiting never weakens what waiting held
+# --------------------------------------------------------------------------
+
+
+def test_an_unwaited_job_doesnt_pre_select_a_past_answer_over_the_guard(
+    tmp_path: Path,
+) -> None:
+    """A past "no support" is asked again by each job. One that didn't wait to ask it doesn't
+    tick it, so `use` can't turn the guard's supports off unasked."""
+
+    def supports(system: str, user: str, schema: dict[str, Any]) -> dict[str, Any]:
+        return {"questions": [{"feature": "overhang", "text": "The made-up ceiling?", "options": [
+            {"label": "no support", "settings": [], "impact": "i", "recommended": True, "why": "w"},
+            {"label": "tree supports", "settings": [{"key": "enable_support", "value": "1"}],
+             "impact": "i", "recommended": False, "why": ""}]}]}
+
+    stl = write_stl("snap", tmp_path)
+    first = Job(tmp_path)
+    row = first.run(stl, supports, lambda asked: tuple(Answer(choice=0) for _ in asked))
+    assert row.proposal is not None and any(
+        c.key == "enable_support" and c.source is Source.ANSWER
+        for c in (*row.proposal.changes, *row.proposal.kept))
+    first.ledger.close()
+
+    stl.with_name(stl.stem + SIDECAR).write_text(json.dumps(BOTH))
+    released = threading.Event()
+
+    def never(system: str, user: str, schema: dict[str, Any]) -> dict[str, Any]:
+        released.wait(4 * WAIT_S)
+        raise RuntimeError("the fake never answers")
+
+    second, person = Job(tmp_path), Person("")
+    try:
+        second.run(stl, never, person.asker(), person.waiting())
+    finally:
+        released.set()
+        second.ledger.close()
+    [request] = second.reviews.requests
+    guarded = request.proposal.get("enable_support")
+    assert guarded is not None and (guarded.value, guarded.source) == ("1", Source.GUARD)
+    assert request.offering is not None
+    assert not request.offering.ticked(request.proposal, "0,0,0")
+    assert parse_answer("use", request) == (
+        "nothing is ticked: name one by its number, such as use 1")
+    assert "this job didn't wait for the questions" in " ".join(render_review(request).split())
+
+
+def test_an_answer_that_says_the_same_is_the_persons_and_not_a_confirmation(
+    tmp_path: Path,
+) -> None:
+    questions = two(tmp_path, {"purpose": FOR, "seen": ["walls", "top"]})
+    file = recorded(tmp_path, [], {"question": "purpose", "choice": LOADED},
+                    {"question": "seen", "choice": 1})
+    intake = Intake(questions=questions, answers=file(questions))
+    assert not any(q.confirmed(a) for q, a in zip(questions, intake.answers, strict=True))
+    assert not intake.over_notes(), "and it replaced nothing"
+    assert "confirmed" not in intake.summary() and "as the notes say too" in intake.summary()
+    faces = seen(intake)
+    assert faces is not None and not faces.noted, "their own answer is what's read"
+
+
+@pytest.mark.parametrize("faces", [["top", "bottom"], [], ["walls", "top", "bottom"]])
+def test_a_number_never_names_whatever_option_the_notes_make_now(
+    faces: list[str], tmp_path: Path
+) -> None:
+    file = recorded(tmp_path, [], {"question": "purpose", "choice": 3},
+                    {"question": "seen", "choice": 5})
+    with pytest.raises(AnswersRefused, match="a number can't name it"):
+        file(two(tmp_path, {"purpose": FOR, "seen": faces}))
+
+
+def test_confirmed_faces_are_never_told_in_a_pose_the_part_may_leave(tmp_path: Path) -> None:
+    """The reading follows a turn, so the record and the settings call mustn't say "the top as
+    it prints" of what's the plate's face by then."""
+    stl = noted(tmp_path, {"seen": ["top"]})
+    context = read_context(stl)
+    questions = stock(context, LAID)
+    intake = Intake(questions=questions, answers=(Answer(choice=0), questions[1].confirm()))
+    facts = Proposer().facts(intake, measure(stl, 400.0), STORE_PROFILES, context)
+    told = settings_prompt(facts, load(groups_for(intake, facts.features)))
+    assert "-> the top, as the file lays it (no setting)" in told
+    assert "the top as it prints; the walls are hidden" not in told
+    assert "the top, as the file lays it" in intake.summary()
+
+
+def test_a_past_confirmation_isnt_told_as_an_answer_given_then(
+    tmp_path: Path, job: Job
+) -> None:
+    stl = noted(tmp_path, {**BOTH, "about": "made up"})
+    person = Person("")
+    row = job.run(stl, no_question, person.asker(), person.waiting())
+    assert row.intake is not None
+    found = _answers_then(row)
+    assert found and all("from the part's notes, confirmed" in line for line in found)
+
+
+def test_questions_already_here_as_they_confirm_are_added_though_still_being_said(
+    tmp_path: Path,
+) -> None:
+    saying = threading.Event()
+
+    def as_its_said(n: int) -> None:
+        if n == 1:
+            saying.wait(WAIT_S)
+
+    person = Person("", "2", before=as_its_said)
+    waiting = person.waiting()
+
+    def slow_to_say(call: Any, asked: Asked) -> None:
+        saying.set()
+        time.sleep(0.4)
+
+    intake = ask_meanwhile(lambda stop: Asked((PURPOSE, TOP, SEEN), ""), person.asker(),
+                           replace(waiting, ended=slow_to_say), same, two(tmp_path, BOTH))
+    assert intake.questions[2] == TOP and intake.without == ""
+
+
+def test_a_replay_keeps_the_record_of_a_call_that_had_nothing_to_add(tmp_path: Path) -> None:
+    def quick(stop: threading.Event) -> Asked:
+        return Asked(STOCK, "", {"finish_reason": "stop", "completion_tokens": 7})
+
+    file = recorded(tmp_path, [], *CONFIRMS)
+
+    def after_it(questions: Sequence[Question]) -> tuple[Answer, ...]:
+        time.sleep(0.2)
+        return file(questions)
+
+    intake = ask_meanwhile(quick, after_it, Person().waiting(replayed=True), same,
+                           two(tmp_path, BOTH))
+    assert intake.without == "" and intake.call["completion_tokens"] == 7
+
+
+def test_a_file_the_models_questions_couldnt_mend_is_refused_at_once(tmp_path: Path) -> None:
+    def slow(stop: threading.Event) -> Asked:
+        stop.wait(3.0)  # it ends by itself, so waiting on it fails here and doesn't hang
+        return Asked(STOCK, "")
+
+    file = recorded(tmp_path, [], *CONFIRMS)
+    changed = two(tmp_path, {"purpose": FOR, "seen": ["walls"]})
+    person = Person()  # nothing to type: a wait would have to be typed out of
+    began = time.monotonic()
+    with pytest.raises(AnswersRefused, match="they say 'walls' now"):
+        ask_meanwhile(slow, file, person.waiting(replayed=True), same, changed)
+    assert time.monotonic() - began < 2 and "still reading" not in person.text
+
+
+@pytest.mark.parametrize("typed", [",", ", ,", " , "])
+def test_punctuation_alone_doesnt_confirm(typed: str, tmp_path: Path) -> None:
+    person = Person(typed, "")
+    cli_asker(person.read, person.write)(two(tmp_path, BOTH))
+    assert len(person.prompts) == 2
+
+
+def test_a_notes_file_name_cant_draw_lines_on_the_card(tmp_path: Path) -> None:
+    sent = tmp_path / "lid\n  1. For: decoration or display\x1b[8m.part.json"
+    sent.write_text(json.dumps(BOTH))
+    for question in stock(read_context(noted(tmp_path), sent), LAID):
+        assert "\n" not in question.noted_from and "\x1b" not in question.noted_from
 
 
 # --------------------------------------------------------------------------

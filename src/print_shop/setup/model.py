@@ -261,7 +261,7 @@ def context_lines(facts: PartFacts) -> list[str]:
     return [
         "The part's context, as the file lies (a fit is two parts meant to mate: never a random "
         "seam on a part with one, and a fit at the plate wants elephant foot compensation):",
-        *(f"- {line}" for line in facts.context.lines()),
+        *(f"- {line}" for line in facts.context.lines(facts.intake.set_aside())),
         "",
     ]
 
@@ -281,7 +281,7 @@ def _answers(facts: PartFacts) -> list[str]:
         if a.choice is not None:
             o = q.options[a.choice]
             sets = ", ".join(f"{k}={v}" for k, v in o.settings.items()) or "no setting"
-            said = f"{q.text} -> {o.label} ({sets})"
+            said = f"{q.text} -> {q.label(a)} ({sets})"
         else:
             said = f"{q.text} -> in their words: {a.other}"
         whose = q.whose(a)

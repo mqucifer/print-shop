@@ -310,8 +310,9 @@ def _questions(row: Row) -> str:
     for n, q in enumerate(intake.questions):
         answer = intake.answers[n] if n < len(intake.answers) else None
         parts.append(f"<h3>{n + 1}. {escape(q.text)}</h3>")
-        if q.beside:
-            parts.append(f"<p class=\"muted\">The notes say: {escape(q.beside)}</p>")
+        said = q.notes_say() if q.noted is not None else q.beside
+        if said:
+            parts.append(f"<p class=\"muted\">The notes say: {escape(said)}</p>")
         parts.append("<ul>")
         for i, o in enumerate(q.options):
             mine = answer is not None and answer.choice == i

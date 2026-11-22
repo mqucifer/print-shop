@@ -14,7 +14,8 @@ more like learning than me remembering".
   `Offering.standing` for what depends on this review): another filament for a temperature or
   fan, a pause off the part's feature, a feature it rests on that's far from that part's, a
   failed print whose symptom it bears on, a value corrected since. A past intake answer isn't
-  pre-selected, as each job asks again, but on the same bytes where this job didn't ask.
+  pre-selected, as each job asks again, but on the same bytes where this job didn't ask. A job
+  whose questions the notes cut short (mqucifer/print-shop#236) didn't get to ask, so none is.
 - **It's laid out to be read** (`render`): the print and how it came out once, what differs in
   columns, the items grouped by whose they were, and a reason several share said once.
 - **A pause's height is converted, never copied raw** (`_pause_height`): a row from before
@@ -75,6 +76,8 @@ UNLIKE = 0.6
 SAME_Z = 0.02
 #: Why a past intake answer isn't pre-selected. Its group's heading says it, once.
 ASKED_AGAIN = "you're asked again for each job"
+#: Why one isn't where the notes gave both and the model's questions weren't waited for.
+NOT_ASKED_AGAIN = "this job didn't wait for the questions that could ask it again"
 #: The review's width for the offer's lines, wrapped under their own indent.
 WIDTH = 100
 #: A face this near horizontal is flat.
@@ -353,6 +356,8 @@ class ThisPart:
     context: PartContext | None = None
     #: The settings this job's questions could set: what it asked again.
     asked: frozenset[str] = frozenset()
+    #: Its questions weren't waited for, so what they'd have asked again isn't known.
+    unwaited: bool = False
     #: The person chose this pose for this print: kept as laid, or sent back at this review.
     pose_chosen: str = ""
 
@@ -526,7 +531,8 @@ def _past(ledger: Ledger, f: _Found, found: list[_Found], part: ThisPart) -> Pas
             if a.choice is None:
                 answers.append(f"{q.text} -> {a.other}")
             elif not q.options[a.choice].settings:
-                answers.append(f"{q.text} -> {q.options[a.choice].label}")
+                confirmed = f" ({q.whose(a)})" if q.confirmed(a) else ""
+                answers.append(f"{q.text} -> {q.label(a)}{confirmed}")
     return Past(
         job_id=row.job_id, stl_name=row.stl_name, on=_day(row.start_requested_at),
         came_out=_came_out(row), outcome=_outcome(row), why=why, differs=tuple(differs),
@@ -663,6 +669,8 @@ class _Items:
         why = []
         if by is Source.ANSWER and (not f.same_file or key in part.asked):
             why.append(ASKED_AGAIN)
+        elif by is Source.ANSWER and part.unwaited:
+            why.append(NOT_ASKED_AGAIN)
         if not f.related:
             why.append(f"the part is unlike it: its shape is {f.likeness.shape:.0%} alike")
         if key == ORIENTATION:

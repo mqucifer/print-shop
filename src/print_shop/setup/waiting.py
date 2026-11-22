@@ -37,6 +37,8 @@ from dataclasses import dataclass
 from typing import TextIO
 
 from print_shop.setup.intake import (
+    DIFFERS_PROMPT,
+    NOT_WAITED,
     NOTES_PROMPT,
     Added,
     Answer,
@@ -58,6 +60,8 @@ logger = logging.getLogger(__name__)
 GO_ON = "go"
 #: How often a wait that can't rewrite its line says how long it has run.
 SAID_EVERY_S = 60.0
+#: The most a call that has its answer is given to say so on the screen.
+SAYING_S = 5.0
 
 
 def took(seconds: float) -> str:
@@ -124,6 +128,10 @@ class QuestionsCall:
     def stop(self) -> None:
         """End it: the model's call is closed, and nothing it says later is used."""
         self._stop.set()
+
+    def arrived(self) -> bool:
+        """Whether its answer is here: it has ended, or is only saying so, which is waited out."""
+        return self.ended() or (self.result is not None and self.ended(SAYING_S))
 
     def ended(self, timeout_s: float = 0.0) -> bool:
         """Whether it has ended, and said so, within `timeout_s`."""
@@ -193,12 +201,20 @@ def ask_meanwhile(
         if call.unwaited and not waiting.stock_first:
             try:
                 first, replayed = tuple(asker(stock)), True
-            except AnswersRefused:
+            except AnswersRefused as refused:
+                if not refused.only_more:
+                    raise  # the model's questions wouldn't mend it, so it isn't kept waiting
                 logger.debug("the answers file has more than the notes': the call is waited for")
         waited = not call.unwaited or not (waiting.stock_first or replayed)
-        # Not waited for, only what's already here is added. A file that answered just the notes'
-        # two takes none, so that it replays the same whenever the model's arrive.
-        came = waiting.wait(call) if waited or (not replayed and call.ended()) else False
+        came = False
+        if waited:
+            came = waiting.wait(call)
+        elif call.arrived():
+            came = waiting.wait(call)
+            if replayed and call.result is not None:
+                # A file that answered just the notes' two takes none, so that it replays the
+                # same whenever the model's arrive.
+                came = not (call.result.added or call.result.closer)
         seconds = call.seconds
         asked = call.result
         without = ""
@@ -208,8 +224,9 @@ def ask_meanwhile(
                        + ("it added no question" if call.from_notes
                           else "of the questions only purpose and what's seen were asked"))
         elif not came or asked is None:
-            late = ("they came as you did, and weren't used" if asked is not None
-                    else "its call was closed and none of them is used")
+            late = ("its call was closed and none of them is used" if asked is None
+                    else "they came, and your answers file doesn't answer them, so none is used"
+                    if replayed else "they came as you did, and weren't used")
             call.stop()
             if not waited:
                 waiting.went_on(call)
@@ -218,7 +235,8 @@ def ask_meanwhile(
                        "the notes gave what it's for and what's seen, so the model's questions "
                        f"weren't waited for: after {took(seconds)}, {late}")
             asked = Asked(STOCK, f"{only_stock(call.from_notes)}: {without}",
-                          {"finish_reason": "went on" if waited else "not waited",
+                          {**(asked.call if asked is not None and not waited else {}),
+                           "finish_reason": "went on" if waited else NOT_WAITED,
                            "seconds": round(seconds, 1)})
     finally:
         call.stop()
@@ -322,8 +340,9 @@ def cli_waiting(
 
     def started(call: QuestionsCall) -> None:
         if replayed:
-            how = ("Your answers file isn't held for them if it answers just what the notes give."
-                   if call.unwaited else "Your answers file is used once they're in.")
+            how = ("If your answers file answers only what the notes give, it doesn't wait for "
+                   "the model's questions." if call.unwaited else
+                   "Your answers file is used once they're in.")
         elif call.unwaited:
             how = "The notes give what it's for and what's seen, so nothing waits for it."
         else:
@@ -351,6 +370,7 @@ def cli_waiting(
             open_prompt = prompt() if at_prompt.is_set() else ""
             if open_prompt:
                 keep = ("Enter still confirms the notes above" if open_prompt == NOTES_PROMPT
+                        else "Enter still takes your answer" if open_prompt == DIFFERS_PROMPT
                         else f"Keep answering {open_prompt.rstrip('> ')}")
                 said = f"\n{said}\n{keep} (what you've typed is kept):"
             elif at_prompt.is_set() or out is not None:

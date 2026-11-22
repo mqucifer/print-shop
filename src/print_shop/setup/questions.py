@@ -48,10 +48,10 @@ from typing import Any
 
 from print_shop.expert.client import CutOff, TimedOut
 from print_shop.setup.bounds import SETTINGS, check
-from print_shop.setup.context import LOADS, PartContext, Seen, printed
+from print_shop.setup.context import LOADS, PartContext, Seen, plain_line, printed
 from print_shop.setup.intake import Estimate, Option, Question
 from print_shop.setup.model import SHORT, TEXT, Ask, context_lines, setting_item
-from print_shop.setup.proposal import PartFacts, pose_value
+from print_shop.setup.proposal import PartFacts
 from print_shop.setup.skill import SKILL_DIR
 
 __all__ = [
@@ -66,8 +66,6 @@ MAX_QUESTIONS = 4
 #: a run of 1,725 spaces; four questions of four options are 13,840. The largest answer that
 #: stopped by itself was 4,221.
 ANSWER_CHARS = 14_000
-#: The pose the file lies in.
-LAID_AS_FILED = (0.0, 0.0, 0.0)
 #: Slices for the options' estimates, at most, per print: a slice of a small
 #: part takes a second or two, a large one longer.
 MAX_SLICES = 12
@@ -158,7 +156,7 @@ def stock(
     where they don't (mqucifer/print-shop#236). With no notes they're `STOCK`."""
     if context is None or not context.found:
         return STOCK
-    named = Path(context.path).name if context.path else ""
+    named = plain_line(Path(context.path).name) if context.path else ""
     return _purpose_of(context, named), _seen_of(context.seen, rotation_deg, named)
 
 
@@ -166,7 +164,9 @@ def _purpose_of(context: PartContext, named: str) -> Question:
     if context.loaded:
         return PURPOSE.model_copy(update={
             "beside": context.purpose, "noted": LOADS.index(context.loaded),
-            "noted_as": context.loaded, "noted_from": named,
+            # Its words as well: a confirmation is of both.
+            "noted_as": ": ".join(w for w in (context.purpose, context.loaded) if w),
+            "noted_from": named,
         })
     # Words alone, and `about`, stand beside the question: nothing is picked from them.
     words = "; ".join(w for w in (context.purpose, context.about) if w)
@@ -183,16 +183,13 @@ def _seen_of(
     beside = f"{seen.in_words()}, as the file lays it"
     now = printed(seen, rotation_deg)
     label = _faces_label((now.walls, now.top, now.bottom)) if now is not None else beside
-    if rotation_deg != LAID_AS_FILED:
-        turned = f"turned {pose_value(rotation_deg)}"
-        beside += f" ({turned}{f', so {label}' if now is not None else ''})"
     options = SEEN.options
     labels = [o.label for o in options]
     if label not in labels:
         options += (Option(label=label, settings={}, impact="as the part's notes say"),)
         labels.append(label)
     return SEEN.model_copy(update={
-        "options": options, "beside": beside,
+        "options": options, "beside": beside, "pose": rotation_deg,
         "noted": labels.index(label), "noted_as": seen.faces(), "noted_from": named,
     })
 

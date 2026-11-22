@@ -19,8 +19,8 @@ and the model's follow when they arrive (`waiting.py`, mqucifer/print-shop#208).
 **What the part's notes say is read back, not asked** (mqucifer/print-shop#236). Such a question
 carries the option the notes give (`Question.noted`), and one prompt confirms all of them: Enter,
 or the numbers to change. An answer that differs names both before it's taken. The notes are
-never a decision until confirmed. Where each answer came from follows from the two, which the
-record keeps (`Question.whose`).
+never a decision until confirmed, and only the confirming marks an answer as theirs
+(`Answer.from_notes`): one that happens to say the same is the person's.
 
 They're answered on the command line by number, with free text always
 allowed as "other", or replayed from a recorded answers file. The questions,
@@ -40,6 +40,7 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 __all__ = [
+    "DIFFERS_PROMPT",
     "NOTES_PROMPT",
     "Added",
     "Answer",
@@ -59,6 +60,12 @@ logger = logging.getLogger(__name__)
 
 #: The one prompt that confirms what was read back from the part's notes.
 NOTES_PROMPT = "notes> "
+#: The prompt after an answer that differs from the notes: not the one that took option numbers.
+DIFFERS_PROMPT = "yours or notes> "
+#: The questions call's finish reason where the notes gave both and it wasn't waited for.
+NOT_WAITED = "not waited"
+#: The most options a question is asked with. One past them is made from the notes.
+ASKED_OPTIONS = 4
 
 
 class Estimate(BaseModel):
@@ -165,6 +172,8 @@ class Question(BaseModel):
     noted_as: str = ""
     #: The notes it was read from, by name, as the read-back heads it.
     noted_from: str = ""
+    #: The pose a read-back of faces was made in, as a rotation.
+    pose: tuple[float, float, float] | None = None
 
     @property
     def recommended(self) -> int:
@@ -175,16 +184,27 @@ class Question(BaseModel):
         """What it's about, as a read-back names it."""
         return {"purpose": "For", "seen": "Seen"}.get(self.feature, self.text)
 
-    def read_back(self) -> str:
-        """What the notes gave, as it's read back to be confirmed: what it's for in their words
-        with the reading that has, and what's seen as the faces they name."""
+    def notes_say(self) -> str:
+        """What the notes gave on it: what it's for in their words, with how it's loaded, and
+        what's seen as the faces they name."""
         assert self.noted is not None
-        option = self.options[self.noted]
+        label = self.options[self.noted].label
         if self.feature != "purpose":
-            return self.beside or option.label
+            return self.beside or label
         words = f"{self.beside.rstrip('.')}. " if self.beside else ""
-        reading = option.impact.split(";")[0]
-        return f"{words}{option.label[:1].upper()}{option.label[1:]}: {reading}"
+        return f"{words}{label[:1].upper()}{label[1:]}"
+
+    def read_back(self) -> str:
+        """The same, as it's read back to be confirmed: a purpose with the reading it has."""
+        assert self.noted is not None
+        if self.feature != "purpose":
+            said = self.notes_say()
+            if not self.pose or not any(self.pose):
+                return said
+            label = self.options[self.noted].label
+            now = f", so {label}" if label != said else ""
+            return f"{said} (turned {','.join(f'{a:g}' for a in self.pose)}{now})"
+        return f"{self.notes_say()}: {self.options[self.noted].impact.split(';')[0]}"
 
     def differs(self, answer: Answer) -> str:
         """An answer and what the notes gave, both named (mqucifer/print-shop#236)."""
@@ -193,12 +213,22 @@ class Question(BaseModel):
                 f"{self.options[self.noted].label}. You said: {self.label(answer)}.")
 
     def label(self, answer: Answer) -> str:
-        """An answer to it, in words."""
-        return self.options[answer.choice].label if answer.choice is not None else answer.other
+        """An answer to it, in words. Faces confirmed from the notes are said as the file lays
+        them: a label in this pose's words would name others once the part is turned."""
+        if answer.choice is None:
+            return answer.other
+        if self.feature == "seen" and self.confirmed(answer) and self.beside:
+            return self.beside
+        return self.options[answer.choice].label
+
+    def confirm(self) -> Answer:
+        """What the notes gave, confirmed: what any asker returns for the person confirming it."""
+        assert self.noted is not None
+        return Answer(choice=self.noted, from_notes=True)
 
     def confirmed(self, answer: Answer) -> bool:
-        """Whether the answer is what the notes gave, confirmed by the person."""
-        return self.noted is not None and answer.choice == self.noted
+        """Whether the person confirmed it from the notes."""
+        return self.noted is not None and answer.from_notes and answer.choice == self.noted
 
     def whose(self, answer: Answer) -> str:
         """Where the answer came from, where the notes gave one: "" is the person's answer to a
@@ -207,6 +237,8 @@ class Question(BaseModel):
             return ""
         if self.confirmed(answer):
             return "from the part's notes, confirmed"
+        if answer.choice == self.noted:
+            return "your answer, as the notes say too"
         return f"your answer, in place of the notes' '{self.options[self.noted].label}'"
 
 
@@ -217,6 +249,8 @@ class Answer(BaseModel):
 
     choice: int | None = None  # index into the question's options
     other: str = ""
+    #: The person confirmed what the part's notes gave (`Question.confirm`). Never inferred.
+    from_notes: bool = False
 
 
 class Intake(BaseModel):
@@ -256,14 +290,24 @@ class Intake(BaseModel):
     def over_notes(self) -> list[tuple[Question, Answer]]:
         """The answers that replaced what the part's notes said (mqucifer/print-shop#236)."""
         return [(q, a) for q, a in zip(self.questions, self.answers, strict=False)
-                if q.noted is not None and not q.confirmed(a)]
+                if q.noted is not None and a.choice != q.noted]
+
+    @property
+    def unwaited(self) -> bool:
+        """The notes gave both, so the model's questions were closed unasked: nothing it could
+        have asked counts as not asked (`offer`)."""
+        return self.call.get("finish_reason") == NOT_WAITED
+
+    def set_aside(self) -> dict[str, str]:
+        """The person's answer, by what of the notes it stands in place of."""
+        return {q.feature: q.label(a) for q, a in self.over_notes()}
 
     def summary(self) -> str:
         if not self.questions:
             return "no questions: the part's features left nothing to ask"
         parts = []
         for q, a in zip(self.questions, self.answers, strict=True):
-            said = q.options[a.choice].label if a.choice is not None else f"other: {a.other}"
+            said = q.label(a) if a.choice is not None else f"other: {a.other}"
             whose = q.whose(a)
             parts.append(f"{q.text} {said}" + (f" ({whose})" if whose else ""))
         return "; ".join(parts)
@@ -306,7 +350,12 @@ def render(questions: Sequence[Question], shown: Sequence[int] | None = None) ->
 
 def _listed(n: int, question: Question) -> list[str]:
     """A question with its options, and above it what the part's notes say on it."""
-    lines = [f'Its notes say: "{question.beside}"'] if question.beside else []
+    if question.noted is not None:
+        lines = [f"The notes say {question.topic.lower()}: {question.notes_say()}"]
+    elif question.beside:
+        lines = [f'Its notes say: "{question.beside}"']  # their free words, so in quotes
+    else:
+        lines = []
     lines.append(f"{n}. {question.text}")
     for i, option in enumerate(question.options):
         theirs = "  <- the notes" if i == question.noted else ""
@@ -402,11 +451,12 @@ def _confirm(
     forget()
     write(render_read_back([(first + i, questions[i]) for i in noted]))
     while True:
-        named = read(NOTES_PROMPT).replace(",", " ").split()
-        if all(key in by_key for key in named):
+        typed = read(NOTES_PROMPT).strip()
+        named = typed.replace(",", " ").split()
+        if not typed or (named and all(key in by_key for key in named)):
             break
         write(f"  {_how_to_confirm([first + i for i in noted])}")
-    answers = {i: Answer(choice=questions[i].noted) for i in noted}
+    answers = {i: questions[i].confirm() for i in noted}
     for i in sorted({by_key[key] for key in named}):
         answers[i] = _changed(first + i, questions[i], read, write, forget)
     return answers
@@ -418,9 +468,9 @@ def _changed(
 ) -> Answer:
     """One the person changes: asked alone, and an answer that differs names both before it's
     taken, when Enter takes it and `n` keeps the notes'."""
-    kept = Answer(choice=question.noted)
+    kept = question.confirm()
     forget()
-    write("\n".join([*_listed(n, question), "   Enter) keep the notes'"]))
+    write("\n".join([*_listed(n, question), "   Enter) keep what the notes say"]))
     while True:
         said = read(f"{n}> ")
         if not said.strip():
@@ -428,20 +478,27 @@ def _changed(
         parsed = parse(said, question)
         if isinstance(parsed, Answer):
             break
-        write(f"  {parsed}, or Enter to keep the notes'")
-    if question.confirmed(parsed):
-        return parsed
+        write(f"  {parsed}, or Enter to keep what the notes say")
+    if parsed.choice == question.noted:
+        return kept  # the option marked as the notes', picked here
     forget()
     write(f"{question.differs(parsed)}\nEnter takes your answer, or n keeps the notes.")
     while True:
-        said = read(f"{n}> ").strip().lower()
+        said = read(DIFFERS_PROMPT).strip().lower()
         if said in ("", "n"):
             return kept if said else parsed
         write("  Enter takes your answer, or n keeps the notes.")
 
 
 class AnswersRefused(ValueError):
-    """A recorded answers file that doesn't answer the questions asked."""
+    """A recorded answers file that doesn't answer the questions asked.
+
+    `only_more`: its one fault is answering questions not among these, which the model's may be.
+    """
+
+    def __init__(self, said: str, only_more: bool = False) -> None:
+        super().__init__(said)
+        self.only_more = only_more
 
 
 def replay_asker(path: Path, write: Callable[[str], None] = print) -> Asker:
@@ -479,9 +536,11 @@ def replay_asker(path: Path, write: Callable[[str], None] = print) -> Asker:
     def ask(questions: Sequence[Question]) -> tuple[Answer, ...]:
         answers: list[Answer | None] = [None] * len(questions)
         problems = []
+        unknown = 0
         for r in recorded:
             matched = r.matches(questions)
             if len(matched) != 1:
+                unknown += not matched
                 problems.append(f"'{r.question}' names {'no' if not matched else 'more than one'} "
                                 "question asked")
                 continue
@@ -504,11 +563,12 @@ def replay_asker(path: Path, write: Callable[[str], None] = print) -> Asker:
                              + "\n".join(f"   {i}) {o.label}" for i, o in enumerate(q.options, 1))
                              + (f'\n   the notes give it: "notes": "{q.noted_as}" confirms that'
                                 if q.noted is not None else "")
-                             for n, q in enumerate(questions, 1))
+                             for n, q in enumerate(questions, 1)),
+                only_more=unknown == len(problems),
             )
         found = tuple(a for a in answers if a is not None)
         for q, a in zip(questions, found, strict=False):
-            if q.noted is not None and not q.confirmed(a):
+            if q.noted is not None and a.choice != q.noted:
                 write(f"{q.differs(a)} That's from {path.name}, and it's used in their place.")
         return found
 
@@ -541,10 +601,13 @@ class _Recorded(BaseModel):
             if _plain(self.notes) != _plain(question.noted_as):
                 return (f"it confirms the notes' '{self.notes}', and they say "
                         f"'{question.noted_as}' now")
-            return Answer(choice=question.noted)
+            return question.confirm()
         if self.choice is None:
             return Answer(other=self.other) if self.other.strip() else "neither a choice nor words"
         if isinstance(self.choice, int):
+            if self.choice > ASKED_OPTIONS and self.choice - 1 == question.noted:
+                return (f"choice {self.choice} is whatever the notes say now, so a number can't "
+                        f'name it: "notes": "{question.noted_as}" confirms it')
             if 1 <= self.choice <= len(question.options):
                 return Answer(choice=self.choice - 1)
             return f"choice {self.choice} isn't one of its {len(question.options)} options"
