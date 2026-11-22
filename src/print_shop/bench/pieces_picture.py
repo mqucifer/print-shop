@@ -8,7 +8,8 @@ has changed, so a merge can't hide a gradient.
 
 The map says which picture: `source.image`, and `source.image_path` as the trace was given it.
 The panel is found as the trace found it, inside the outer frame at the trace's own darkness
-(`source.dark_under`), so a pixel here is the pixel the trace read. A picture whose panel
+(`source.dark_under`), or the whole picture where it was traced `--whole`
+(`source.whole_picture`), so a pixel here is the pixel the trace read. A picture whose panel
 isn't the map's size isn't the one it came from, and has no answer.
 """
 
@@ -194,16 +195,19 @@ def picture_of(found: Map, given: str | None = None) -> Picture:
     rgb = np.asarray(opened.convert("RGB"))
     under = found.source.get("dark_under")
     under = under if isinstance(under, int) and not isinstance(under, bool) else DEFAULT_DARK
-    rows, cols, _ = panel_of(rgb.max(axis=2) < under)
-    rgb = rgb[rows, cols]
+    whole_picture = found.source.get("whole_picture") is True
+    if not whole_picture:
+        rows, cols, _ = panel_of(rgb.max(axis=2) < under)
+        rgb = rgb[rows, cols]
     x0, y0, x1, y1 = found.panel.bounds
     height, width = rgb.shape[:2]
     mm = (x1 - x0) / width
     whole = found.panel.symmetric_difference(shapely.box(0.0, 0.0, x1, y1)).area < 1e-9
     if (x0, y0) != (0.0, 0.0) or not whole or abs((y1 - y0) / mm - height) > SAME_PX:
         raise NoAnswer(
-            f"{name} isn't the picture this map was traced from: inside its frame it's "
-            f"{width} by {height} pixels, and the map's panel is {x1 - x0:g} by {y1 - y0:g} mm, "
+            f"{name} isn't the picture this map was traced from: "
+            + ("the whole picture is " if whole_picture else "inside its frame it's ")
+            + f"{width} by {height} pixels, and the map's panel is {x1 - x0:g} by {y1 - y0:g} mm, "
             f"which at {1.0 / mm:.3f} pixels a mm is {(y1 - y0) / mm:.1f} pixels tall"
         )
     return Picture(rgb, mm, name, under)
