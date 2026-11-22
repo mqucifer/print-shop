@@ -17,6 +17,7 @@ import numpy as np
 import shapely
 import trimesh
 
+from . import pausing
 from .limits import ARITHMETIC, over, said, under
 from .report import Report
 from .shapes import (
@@ -870,7 +871,7 @@ def run_pause(args: Any, report: Report) -> None:
         report.fact("least_room_over_pane_mm", min(rooms), how="the tightest opening")
     alike = {(r["pause_after_layer"], r["pause_after_layer_faces"]) for r in closing}
     for row in closing[:1] if len(alike) == 1 else closing:
-        report.line(_pause_line(row))
+        report.line(_pause_line(row, float(low), height))
     for tie in sorted({r["tie"] for r in rows if "tie" in r}):
         report.note(tie)
     if any("stands_on" in r for r in rows):
@@ -890,7 +891,7 @@ def run_pause(args: Any, report: Report) -> None:
         first_row = closing[0]
         report.verdict(
             "OK",
-            f"pause after layer {first_row['pause_after_layer']}, at z={first_row['pause_top_z']}: "
+            f"{_paused(first_row, float(low), height)}: "
             f"the pane sits {first_row['room_over_pane_mm']:.3f} mm under the next layer",
         )
 
@@ -988,10 +989,20 @@ def _pause_one(
     return row
 
 
-def _pause_line(row: dict[str, Any]) -> str:
+def _paused(row: dict[str, Any], low: float, height: float) -> str:
+    """The pause in the review's words (`pausing.where`). Its heights are above the part's
+    underside, as `pause_at` takes them, and the file's own is said where that differs."""
+    if "pause_top_z" not in row:
+        return "no layer to pause after"
+    after, top = row["pause_after_layer"], row["pause_top_z"] - low
+    said = f"pause {pausing.where(after, top, after + 1, top + height)}"
+    return said + (f" (z={row['pause_top_z']} in the file)" if abs(low) > LEVEL else "")
+
+
+def _pause_line(row: dict[str, Any], low: float, height: float) -> str:
     return (
         f"opening {row['opening']}: floor z={row['pocket_floor_z']}, ceiling "
-        f"z={row['pocket_ceiling_z']}, pause after layer {row['pause_after_layer']} "
-        f"(top z={row.get('pause_top_z')}), pane top z={row.get('pane_top_z')}, room over it "
+        f"z={row['pocket_ceiling_z']}, {_paused(row, low, height)}, "
+        f"pane top z={row.get('pane_top_z')}, room over it "
         + (f"{row['room_over_pane_mm']:.3f} mm" if "room_over_pane_mm" in row else "None mm")
     )

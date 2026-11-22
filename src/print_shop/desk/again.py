@@ -8,7 +8,8 @@ and re-copy those". Three things, each copied from the page and never run by it:
   kept as laid, `--context` naming the sidecar or design run its context was read from
   (mqucifer/print-shop#130), and `--answers` naming the answers file where the browser saves it;
 - **the correction line,** typed at the review as it was then (`key=value because …; …`, read
-  by `review.parse_answer`): the Sponsor's own corrections, in order;
+  by `review.parse_answer`): the Sponsor's own corrections, in order. A pause from before
+  mqucifer/print-shop#203 is given at the height that pauses where it did (`_older_pause`);
 - **the answers file** for `--answers` (`intake.replay_asker`): each question by its text, each
   answer by its option's label or the words given.
 
@@ -34,7 +35,7 @@ from typing import Any
 
 from print_shop.ledger import Row
 from print_shop.orchestrator.graph import AS_LAID
-from print_shop.setup.proposal import ORIENTATION, Source
+from print_shop.setup.proposal import ORIENTATION, PAUSE, Change, Source
 
 __all__ = ["DOWNLOADS", "Again", "again", "answers_file", "correction_line"]
 
@@ -73,14 +74,31 @@ def answers_file(row: Row) -> dict[str, Any] | None:
     return {"answers": answers}
 
 
+def _older_pause(row: Row) -> tuple[Change, str] | None:
+    """The pause that stood in a job from before mqucifer/print-shop#203, and the height that
+    pauses where its own G-code did: the top of the layer before the pause. Such a row's
+    reading has no `after_z`, and its typed height was the first layer after the pause."""
+    asked = [c for c in row.corrections or () if c.key == PAUSE]
+    if not asked or asked[-1].value == "none" or row.reading is None:
+        return None
+    if len(row.reading.pauses) != 1:
+        return None
+    pause = row.reading.pauses[0]
+    if pause.after_z is not None or not 2 <= pause.before_layer <= len(row.reading.layers):
+        return None
+    return asked[-1], f"{row.reading.layers[pause.before_layer - 2].z:g}"
+
+
 def correction_line(row: Row) -> str:
     """The Sponsor's corrections at the review, as they're typed there."""
     parts = []
+    older = _older_pause(row)
     for c in row.corrections or ():
         if c.key == ORIENTATION:
             continue
         reason = " ".join(c.reason.replace(";", ",").split())
-        said = f"{c.key}={c.value}"
+        value = older[1] if older is not None and c is older[0] else c.value
+        said = f"{c.key}={value}"
         if reason and reason != _NO_REASON:
             said += f" because {reason}"
         parts.append(said)
@@ -143,6 +161,10 @@ def again(row: Row, part_path: Path | None, printers: int = 1, part_found: bool 
             notes.append(f"The pose was sent back at the review, from {c.preset} to {c.value}, "
                          f"because {c.reason}. Type orientation at the review to send it back "
                          "again.")
+    older = _older_pause(row)
+    if older is not None and older[1] != older[0].value:
+        notes.append(f"{PAUSE}={older[0].value} is copied as {PAUSE}={older[1]}, to pause where "
+                     "this job did: a pause height is now the top of the layer it comes after.")
     taken = [c for c in ((*row.proposal.changes, *row.proposal.not_applied)
                          if row.proposal else ())
              if c.source is Source.READING]

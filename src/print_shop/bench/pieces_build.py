@@ -14,7 +14,8 @@ either side of it. The reply says how much glass the tips and corners were:
 
 **The heights** stand on layer lines. The pocket is in the middle of the frame: its floor on
 the layer line at or under half of what the pane leaves, and its top on the first layer line
-that leaves the pane `ROOM` or more. The pause is at the pocket's top, as `pause` reads it.
+that leaves the pane `ROOM` or more. The pause comes after the layer
+that tops out at the pocket's top, as `pause` reads it.
 
 **The lip** is `--lip` on every piece. A piece whose opening that lip closes over at a
 waist, or that has no pane once the play is taken, is named, and nothing is built: it's a
@@ -1464,7 +1465,8 @@ def run_build(args: Any, report: Report) -> None:
     report.numbers["upper_lip_mm"] = z["upper_lip_mm"]
     report.fact(
         "pause_z", z["pocket_top_z"], "mm",
-        f"the pocket's top: its floor is at z={z['pocket_floor_z']:g}, a pane's top at "
+        f"the pocket's top, and the pause comes after the layer that tops out there: its floor is "
+        f"at z={z['pocket_floor_z']:g}, a pane's top at "
         f"z={z['pane_top_z']:g}, {z['room_over_pane_mm']:g} mm under it; the lips are "
         f"{z['lower_lip_mm']:g} mm thick below and {z['upper_lip_mm']:g} mm above. `pause` "
         "reads the layer",
@@ -1636,8 +1638,8 @@ def run_build(args: Any, report: Report) -> None:
     report.verdict(
         "OK",
         f"{frame_file} and {len(pane_files)} pane file(s) holding {len(rows)} pane(s), from "
-        f"{len(found.pieces)} piece(s): the frame {args.thickness:g} mm thick, the pause at "
-        f"z={z['pocket_top_z']:g}"
+        f"{len(found.pieces)} piece(s): the frame {args.thickness:g} mm thick, the pause after "
+        f"the layer that tops out at z={z['pocket_top_z']:g}"
         + (
             f"; its two long edges are seams, bevelled at each of "
             f"{len(seam.edges[0].lengths)} length(s), each face {seam.back:g} mm back from the "

@@ -26,6 +26,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from print_shop.bench import pausing
 from print_shop.setup.context import FitBand, Placed, Seen
 from print_shop.setup.intake import Intake
 from print_shop.setup.proposal import Change, Source
@@ -59,6 +60,7 @@ JUDGED = (
     "ironing_type",
     "seam_position",
     "elefant_foot_compensation",
+    "raft_layers",  # on one, a height in the G-code isn't that height up the part
 )
 #: What a fit at the plate is proposed for elephant foot, in mm: the Sponsor's own profile's
 #: value (the skill's adhesion group), never past its bound.
@@ -106,20 +108,26 @@ class SeamReading(BaseModel):
 
 
 class PauseReading(BaseModel):
-    """A pause Orca wrote into the slice: the layer it comes before, that layer's top, and how
-    far into the print it stops (mqucifer/print-shop#119)."""
+    """A pause Orca wrote into the slice: the layer it comes before and that layer's top, the
+    top of the layer it comes after, which is the pause's height (mqucifer/print-shop#203), and
+    how far into the print it stops (mqucifer/print-shop#119)."""
 
     model_config = {"frozen": True}
 
     before_layer: int
     z: float
     after_s: float
+    #: None before the first layer, and in a row from before mqucifer/print-shop#203.
+    after_z: float | None = None
+
+    def where(self) -> str:
+        """Where it falls, in the words of the bench's `pause`."""
+        if self.after_z is None:
+            return f"before layer {self.before_layer}, at z={pausing.mm(self.z)}"
+        return pausing.where(self.before_layer - 1, self.after_z, self.before_layer, self.z)
 
     def line(self) -> str:
-        return (
-            f"pauses for a filament swap before layer {self.before_layer} (z {self.z:g} mm), "
-            f"about {_s(self.after_s)} in"
-        )
+        return f"pauses for a filament swap {self.where()}, about {_s(self.after_s)} in"
 
 
 class SliceReading(BaseModel):
@@ -136,7 +144,7 @@ class SliceReading(BaseModel):
     settings: dict[str, str] = {}
     #: Orca's own estimate for the whole print, beside the layers' sum.
     orca_time_s: int | None = None
-    #: Each pause Orca wrote, a colour change asked for at the review.
+    #: Each pause Orca wrote, as asked for at the review or written in a file sliced by hand.
     pauses: tuple[PauseReading, ...] = ()
 
     @property
@@ -216,6 +224,8 @@ def read_slice(path: Path) -> SliceReading:
     pauses = tuple(
         PauseReading(
             before_layer=int(p["before_layer"]), z=float(p["z"]),
+            # The layer before it as written: a support's layer may stand between two of the part's.
+            after_z=layers[int(p["before_layer"]) - 2].z if int(p["before_layer"]) > 1 else None,
             after_s=round(sum(t.time_s for t in layers if t.n < int(p["before_layer"])), 1),
         )
         for p in sliced.pauses

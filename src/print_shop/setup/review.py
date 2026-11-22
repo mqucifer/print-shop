@@ -10,6 +10,9 @@ A correction is relative to the Sponsor's own tuning, so it is shown and kept
 next to the preset's value. Corrections are the learning signal for
 print-flow stage 9: what the Sponsor would have tuned.
 
+A pause is shown where it landed in the sliced G-code, beside the height asked for, and a
+mismatch is said (mqucifer/print-shop#203, `_pauses`).
+
 A change is shown as this print's only if it reached the slice
 (mqucifer/print-shop#206, `proposal.read_back`). One that didn't is shown as asked and
 sliced, and a key that can't be placed in a profile is refused when it's typed.
@@ -35,6 +38,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from print_shop.bench.pausing import TOPS_OUT, mm
 from print_shop.core.state import AppliedOrientation, Orientation, SliceResult
 from print_shop.setup.concerns import concern_in, ways
 from print_shop.setup.intake import Estimate
@@ -160,6 +164,7 @@ def render(request: ReviewRequest) -> str:
     for c in proposal.not_applied:
         lines.append(f"  NOT APPLIED {c.key}: {c.not_applied}")
         lines.append(f"    {c.reason} [{_by(c)}]")
+    lines += _pauses(request)
     for c in proposal.kept:
         by = (
             f" [lesson {c.lesson}]" if c.lesson is not None
@@ -214,9 +219,38 @@ def render(request: ReviewRequest) -> str:
         "",
         f"Type ok to go on to the approval gate,{take}{back} or correct a setting by name, "
         "e.g. wall_loops=3 because it's decorative (several separated by ';'), "
-        "pause_at=12.4 because white to black for a colour change at a height, or stop.",
+        "pause_at=12.4 because white to black to pause after the layer that tops out at "
+        "12.4 mm, or stop.",
     ]
     return "\n".join(lines)
+
+
+def _pauses(request: ReviewRequest) -> list[str]:
+    """Where the pause landed, read from the sliced G-code, beside the height asked for
+    (mqucifer/print-shop#203). Where they differ that's said, with what the G-code has."""
+    change = request.proposal.get(PAUSE)
+    asked = change.value if change is not None and change.value != "none" else None
+    name = f" {PAUSE}={asked}" if asked else ""
+    reading = request.reading
+    if reading is None:
+        return ([f"  PAUSE NOT READ{name}: the G-code couldn't be read, so where it pauses "
+                 "isn't known"] if asked else [])
+    placed = reading.pauses
+    if not asked and not placed:
+        return []
+    found = "; ".join(f"pause {p.where()}" for p in placed) or "no pause"
+    if not asked:
+        return [f"  PAUSE MISMATCH: none was asked for, and the G-code has: {found}"]
+    z = float(asked)
+    if reading.settings.get("raft_layers", "0") not in ("", "0"):
+        return [f"  PAUSE MISMATCH{name}: the part stands on a raft, so z in the G-code counts "
+                f"the raft too, and the G-code has: {found}"]
+    if len(placed) == 1 and (top := placed[0].after_z) is not None and abs(top - z) <= TOPS_OUT:
+        return [f"  {PAUSE}={asked}, read from the G-code: {found}"]
+    at = next((t.n for t in reading.layers if abs(t.z - z) <= TOPS_OUT), None)
+    wanted = (f"layer {at} tops out at z={mm(z)}" if at is not None
+              else f"no layer tops out at z={mm(z)}")
+    return [f"  PAUSE MISMATCH{name}: {wanted}, and the G-code has: {found}"]
 
 
 def _by(change: Change) -> str:
@@ -313,8 +347,8 @@ def parse_answer(answer: str, request: ReviewRequest) -> Review | str:
 
 
 def _pause(value: str, reason: str, request: ReviewRequest) -> Change | str:
-    """A colour change at a height inside the part (mqucifer/print-shop#119), or why not.
-    `none` takes one away."""
+    """A pause after the layer that tops out at a height inside the part
+    (mqucifer/print-shop#119, mqucifer/print-shop#203), or why not. `none` takes one away."""
     shown = request.proposal.get(PAUSE)
     if value.lower() == "none":
         return Change(key=PAUSE, preset="", value="none", reason=reason or "no colour change",
@@ -326,6 +360,10 @@ def _pause(value: str, reason: str, request: ReviewRequest) -> Change | str:
     top = request.slice.max_z_mm
     if not 0 < z < top:
         return f"a colour change is inside the part: above 0 and below its top, {top:g} mm"
+    layers = request.reading.layers if request.reading is not None else ()
+    if layers and z < layers[0].z - TOPS_OUT:
+        return (f"there's no layer to pause after at {z:g} mm: the first tops out at "
+                f"{layers[0].z:g} mm")
     return Change(key=PAUSE, preset=shown.value if shown else "", value=f"{z:g}",
                   reason=reason or "a colour change", source=Source.SPONSOR)
 

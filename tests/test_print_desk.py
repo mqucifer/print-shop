@@ -36,7 +36,7 @@ from print_shop.inventory import Inventory
 from print_shop.ledger import Answer, JobEnding, Ledger, LedgerError, PrintRecord, Result, Symptom
 from print_shop.setup.intake import Answer as IntakeAnswer
 from print_shop.setup.intake import Intake, Option, Question, replay_asker
-from print_shop.setup.proposal import ORIENTATION, Change, Proposal, Source
+from print_shop.setup.proposal import ORIENTATION, PAUSE, Change, Proposal, Source
 from print_shop.setup.reading import Flag, PauseReading, read_slice
 from print_shop.setup.review import Review, ReviewRequest, parse_answer
 from print_shop.slicer.orca import SlicerProfiles
@@ -146,7 +146,7 @@ def _shop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Shop:
 
     reading = read_slice(DATA / "recorded" / "cube.gcode")
     reading = reading.model_copy(update={"pauses": (
-        PauseReading(before_layer=62, z=12.4, after_s=600.0),)})
+        PauseReading(before_layer=63, z=12.6, after_z=12.4, after_s=600.0),)})
     base = dict(
         orientation_accepted=True, layer_count=100,
         slicer_config={"nozzle_diameter": "0.4", "filament_settings_id": TUNING},
@@ -449,6 +449,33 @@ def test_a_reason_with_a_semicolon_doesnt_split_the_line(shop: Shop) -> None:
     assert line == "wall_loops=4 because strong, it hangs"
     review = parse_answer(line, shop.request)
     assert isinstance(review, Review) and len(review.corrections) == 1
+
+
+def test_a_pause_from_before_203_is_copied_at_the_height_that_pauses_where_it_did(
+    shop: Shop,
+) -> None:
+    """mqucifer/print-shop#203: such a row's typed height was the first layer after the pause.
+    Typed again as it was, the print would pause a layer later than it did."""
+    row, part, printers, found = _record(shop, SIGN)
+    assert row.reading is not None and "pause_at=12.4" in correction_line(row)
+    written_then = PauseReading.model_validate({"before_layer": 62, "z": 12.4, "after_s": 600.0})
+    older = row.model_copy(
+        update={"reading": row.reading.model_copy(update={"pauses": (written_then,)})})
+    assert written_then.line().startswith("pauses for a filament swap before layer 62, at z=12.4")
+
+    a = again(older, part, printers, found)
+    assert "pause_at=12.2 because white to black" in a.corrections
+    assert "wall_loops=4 because it carries the load" in a.corrections, "and the rest as typed"
+    [note] = [n for n in a.notes if "copied as" in n]
+    assert "pause_at=12.4 is copied as pause_at=12.2" in note
+
+    # A row from since is copied as typed, and an older one whose pause was taken away too.
+    assert not any("copied as" in n for n in again(row, part, printers, found).notes)
+    taken_away = Change(key=PAUSE, preset="12.4", value="none", reason="one colour after all",
+                        source=Source.SPONSOR)
+    assert row.corrections is not None
+    gone = older.model_copy(update={"corrections": (*row.corrections, taken_away)})
+    assert "pause_at=12.4" in correction_line(gone)
 
 
 # --- the job's log --------------------------------------------------------------------
