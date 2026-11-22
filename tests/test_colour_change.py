@@ -1,7 +1,8 @@
 """A colour change at a height can be asked for at the review, and the print pauses there.
 
 mqucifer/print-shop#119. `pause_at=Z` (or `colour_change=Z`) at the review is Orca's own pause,
-from the machine's pause G-code, at the first layer at or above Z. The review, the gate and the
+from the machine's pause G-code, after the layer that tops out at Z (mqucifer/print-shop#203,
+`test_pause_height.py`). The review, the gate and the
 ledger say where it fell, and the outcome step asks how the swap went. Without a printer, and,
 but for the one test marked `slicer`, without Orca: a recorded slice has the pause put in where
 Orca puts it.
@@ -10,6 +11,7 @@ Orca puts it.
 from __future__ import annotations
 
 import json
+import re
 import stat
 from pathlib import Path
 
@@ -24,7 +26,7 @@ from print_shop.setup import Proposer
 from print_shop.setup.intake import replay_asker
 from print_shop.setup.proposal import PAUSE, Change, Proposal, Source, apply, pause_z
 from print_shop.setup.reading import read_slice
-from print_shop.setup.review import Review, ReviewRequest, parse_answer
+from print_shop.setup.review import Review, ReviewRequest, parse_answer, render
 from print_shop.slicer import gcode
 from print_shop.slicer.orca import PauseAt, SlicerProfiles, slice_model
 from tests.fakes import (
@@ -76,9 +78,11 @@ class PausingSlicer:
 # --------------------------------------------------------------------------
 
 
-def test_a_height_lands_on_the_first_layer_at_or_above_it() -> None:
-    assert [pause_z(LAYERS, z) for z in (0.1, 2.7, 2.8, 2.81, 12.5)] == [0.2, 2.8, 2.8, 3.0, 12.6]
-    assert pause_z({"initial_layer_print_height": "0.3", "layer_height": "0.2"}, 1.0) == 1.1
+def test_orca_is_given_the_first_layer_topping_out_above_the_height() -> None:
+    asked = (0.1, 0.2, 2.6, 2.7, 2.8, 2.81, 12.5)
+    assert [pause_z(LAYERS, z) for z in asked] == [0.2, 0.4, 2.8, 2.8, 3.0, 3.0, 12.6]
+    thick_first = {"initial_layer_print_height": "0.3", "layer_height": "0.2"}
+    assert [pause_z(thick_first, z) for z in (1.0, 1.1)] == [1.1, 1.3]
 
 
 def test_apply_makes_it_orcas_pause_not_a_process_setting(tmp_path: Path) -> None:
@@ -142,7 +146,7 @@ def test_a_colour_change_is_asked_for_by_its_height(answer: str) -> None:
 
 
 @pytest.mark.parametrize(("answer", "why"), [
-    ("pause_at=25", "below its top, 25 mm"),
+    ("pause_at=25", "a pause is inside the part: above 0 and below its top, 25 mm"),
     ("pause_at=0", "above 0"),
     ("pause_at=high", "isn't a height"),
 ])
@@ -161,16 +165,17 @@ def test_the_reading_says_where_it_paused_and_how_far_in(tmp_path: Path) -> None
     with_pause(sliced, 10.0)
     reading = read_slice(sliced)
     [pause] = reading.pauses
-    assert (pause.before_layer, pause.z) == (50, 10.0)
+    assert (pause.before_layer, pause.z, pause.after_z) == (50, 10.0, 9.8)
     assert pause.after_s == round(sum(t.time_s for t in reading.layers if t.n < 50), 1)
-    assert any(line.startswith("pauses for a filament swap before layer 50 (z 10 mm), about ")
+    assert any(line.startswith("pauses for a filament swap after layer 49, at z=9.8, "
+                               "before layer 50, at z=10, about ")
                for line in reading.lines())
 
 
 @pytest.mark.slicer
 def test_orca_itself_pauses_at_the_layer_asked_for(tmp_path: Path) -> None:
-    """With the real Orca and the store's own profiles, on the Mac: one pause, before the layer
-    whose top is 2 mm, the Sponsor's white floor under black walls."""
+    """With the real Orca and the store's own profiles, on the Mac: one pause, after the layer
+    whose top is 2 mm, so all 2 mm of a white floor is white under black walls."""
     process = tmp_path / "process.json"
     process.write_text(json.dumps({**json.loads(STORE_PROFILES.process.read_text()), **LAYERS}))
     profiles = STORE_PROFILES.model_copy(
@@ -178,7 +183,7 @@ def test_orca_itself_pauses_at_the_layer_asked_for(tmp_path: Path) -> None:
     )
     result = slice_model(write_stl("cube", tmp_path), profiles, tmp_path / "out")
     [pause] = gcode.read(Path(result.gcode_path)).pauses
-    assert (pause["before_layer"], pause["z"]) == (10, 2.0)
+    assert (pause["before_layer"], pause["z"]) == (11, 2.2)
 
 
 # Through the daemon: the review, the gate, the ledger and the outcome step
@@ -210,38 +215,87 @@ def test_a_colour_change_asked_for_at_the_review_reaches_the_gcode_the_gate_and_
         shown = sponsor.shown[-1]
         assert shown.reading is not None
         [pause] = shown.reading.pauses
-        assert (pause.before_layer, pause.z) == (10, 2.0)
+        assert (pause.before_layer, pause.z, pause.after_z) == (11, 2.2, 2.0)
         assert slicer.pauses[-1] == (
-            PauseAt(print_z=2.0, message="a white floor under black walls"),
+            PauseAt(print_z=2.2, message="a white floor under black walls"),
         )
 
         # The gate says it, so the person is at the printer for it.
         gate = daemon.pending_gate() or {}
         assert gate["pause"].startswith(
-            "this print pauses for a filament swap before layer 10 (z 2 mm), about "
+            "this print pauses for a filament swap after layer 10, at z=2, "
+            "before layer 11, at z=2.2, about "
         )
         bridge.press(CFG, "approve")
         assert daemon.wait_for_finish(job_id, timeout_s=30).printed
 
-        # One pause in what went to the printer, before layer 10.
+        # One pause in what went to the printer, before layer 11.
         row = ledger.get(job_id)
         assert row is not None
         sent = Path(tmp_path / "work" / job_id / row.gcode_name)
-        assert [(p["before_layer"], p["z"]) for p in gcode.read(sent).pauses] == [(10, 2.0)]
+        assert [(p["before_layer"], p["z"]) for p in gcode.read(sent).pauses] == [(11, 2.2)]
 
         # The ledger keeps it with the corrections, and in the reading.
         assert [(c.key, c.value) for c in row.corrections or ()] == [(PAUSE, "2")]
-        assert row.reading is not None and row.reading.pauses[0].before_layer == 10
-        assert "swap           pauses for a filament swap before layer 10" in describe(row)
+        assert row.reading is not None and row.reading.pauses[0].before_layer == 11
+        assert row.reading.pauses[0].after_z == 2.0
+        assert "swap           pauses for a filament swap after layer 10, at z=2" in describe(row)
         # A choice for that one part, not a lesson: none is drawn from it.
         assert ledger.query("SELECT * FROM print_lessons WHERE setting=?", PAUSE) == []
 
         # The outcome step asks how the swap went.
         wait_until(lambda: bridge.retained_json(outcome_topic(CFG)).get("pending") is True)
         asked = bridge.retained_json(outcome_topic(CFG))
-        assert asked["swap"].startswith("pauses for a filament swap before layer 10")
+        assert asked["swap"].startswith("pauses for a filament swap after layer 10, at z=2")
 
 
+
+
+class ClosingSlicer(PausingSlicer):
+    """The same, with layer 51, to 10.2, all bridge: a made-up pocket closing over 10."""
+
+    def __call__(
+        self, stl_path: Path | str, profiles: SlicerProfiles, outdir: Path | str
+    ) -> SliceResult:
+        result = super().__call__(stl_path, profiles, outdir)
+        path = Path(result.gcode_path)
+        layers = path.read_text().split(";LAYER_CHANGE")
+        layers[51] = re.sub(r"(?m)^;TYPE:(?!Custom).*$", ";TYPE:Bridge", layers[51])
+        path.write_text(";LAYER_CHANGE".join(layers))
+        return result
+
+
+def test_a_layer_typed_up_is_noted_and_the_planned_room_over_a_fit_is_not(tmp_path: Path) -> None:
+    """Through the daemon (mqucifer/print-shop#203): a made-up sidecar's band is the dropped
+    part's, to 9.8, with a layer of room over it under a pocket closing over 10. So 10 is the
+    right pause, and 10.2, typed a layer up, is the one that's noted."""
+    (tmp_path / "work").mkdir()
+    process = json.loads(CI_PROFILES.process.read_text())
+    (tmp_path / "process.json").write_text(json.dumps({**process, "wall_loops": "2", **LAYERS}))
+    part = write_stl("cube", tmp_path)
+    sidecar = tmp_path / "cube.part.json"
+    sidecar.write_text(json.dumps({"fits": [{"name": "pocket", "play": 0.1, "z": [1, 9.8]}]}))
+    sponsor = Sponsor("pause_at=10.2 because set the parts in", "pause_at=10", "stop")
+    bridge = MemoryBridge()
+    with Ledger(tmp_path / "ledger.sqlite") as ledger:
+        daemon = Daemon(
+            cfg=CFG, workdir=tmp_path / "work", printer=FramePrinter(), slicer=ClosingSlicer(),
+            profiles=CI_PROFILES.model_copy(update={"process": tmp_path / "process.json"}),
+            bridge=lambda cfg: bridge, ledger=ledger,
+            proposer=Proposer(ask=_model, ask_questions=_questions),
+            asker=replay_asker(ANSWERS), reviewer=sponsor,
+        )
+        with daemon:
+            job_id = daemon.submit(part, as_laid=True, context=sidecar)
+            result = daemon.wait_for_finish(job_id, timeout_s=30)
+    assert not result.printed
+    _, typed_up, at_the_top = sponsor.shown
+    assert ("  note: the fit `pocket` tops out at z=9.8, and the layer this pauses after is the "
+            "first to bridge or overhang above it: for parts dropped in, pause_at=10\n"
+            ) in render(typed_up)
+    said = render(at_the_top)
+    assert "note: the fit `pocket`" not in said, "a layer of room over the band, as planned"
+    assert "pause_at=10, read from the G-code: pause after layer 50, at z=10," in said
 
 
 def test_a_colour_change_draws_no_lesson(tmp_path: Path) -> None:

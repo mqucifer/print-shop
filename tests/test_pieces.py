@@ -914,7 +914,8 @@ def test_the_existing_checks_read_a_build_as_any_frame(bench: Any, built: Answer
     )  # fmt: skip
     assert by_files.verdict == "FAIL", "four files aren't four panes"
     pause = bench("pause", frame, "--pocket-z", 1.3, "--pane-thickness", 1)
-    assert pause.verdict == "OK" and "z=2.0" in pause.record["why"], pause.text
+    said = "pause after layer 10, at z=2, before layer 11, at z=2.2:"
+    assert pause.verdict == "OK" and pause.record["why"].startswith(said), pause.text
     assert pause.numbers["least_room_over_pane_mm"] == pytest.approx(0.2, abs=1e-6)
     assert bench("thin", frame, "--one-body").verdict == "OK"
     for pane in panes:

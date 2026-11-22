@@ -8,7 +8,10 @@ and re-copy those". Three things, each copied from the page and never run by it:
   kept as laid, `--context` naming the sidecar or design run its context was read from
   (mqucifer/print-shop#130), and `--answers` naming the answers file where the browser saves it;
 - **the correction line,** typed at the review as it was then (`key=value because …; …`, read
-  by `review.parse_answer`): the Sponsor's own corrections, in order;
+  by `review.parse_answer`): the Sponsor's own corrections, in order. Of its pauses only the
+  last, which stood, and never copied raw where it could mean another layer now: one from before
+  mqucifer/print-shop#203 is given at the height that pauses where it did (`_older_pause`), and
+  one whose G-code doesn't say where it paused is left out, saying so (`_pause_again`);
 - **the answers file** for `--answers` (`intake.replay_asker`): each question by its text, each
   answer by its option's label or the words given.
 
@@ -34,7 +37,7 @@ from typing import Any
 
 from print_shop.ledger import Row
 from print_shop.orchestrator.graph import AS_LAID
-from print_shop.setup.proposal import ORIENTATION, Source
+from print_shop.setup.proposal import ORIENTATION, PAUSE, Change, Source
 
 __all__ = ["DOWNLOADS", "Again", "again", "answers_file", "correction_line"]
 
@@ -73,14 +76,52 @@ def answers_file(row: Row) -> dict[str, Any] | None:
     return {"answers": answers}
 
 
+def _older_pause(row: Row) -> tuple[Change, str] | None:
+    """The pause that stood in a job from before mqucifer/print-shop#203, and the height that
+    pauses where its own G-code did: the top of the layer before the pause. Such a row's
+    reading has no `after_z`, and its typed height was the first layer after the pause."""
+    stood = _standing_pause(row)
+    if stood is None or stood.value == "none" or row.reading is None:
+        return None
+    if len(row.reading.pauses) != 1:
+        return None
+    pause = row.reading.pauses[0]
+    if pause.after_z is not None or not 2 <= pause.before_layer <= len(row.reading.layers):
+        return None
+    return stood, f"{row.reading.layers[pause.before_layer - 2].z:g}"
+
+
+def _standing_pause(row: Row) -> Change | None:
+    """The last pause correction: the one that stood."""
+    return next((c for c in reversed(row.corrections or ()) if c.key == PAUSE), None)
+
+
+def _pause_again(row: Row, stood: Change) -> str | None:
+    """The height to type for the pause that stood, or None where the job's G-code doesn't say
+    where it paused, so neither which layer nor which meaning of a height it was is known."""
+    if stood.value == "none":
+        return stood.value
+    older = _older_pause(row)
+    if older is not None:
+        return older[1]
+    pauses = row.reading.pauses if row.reading is not None else ()
+    return stood.value if len(pauses) == 1 and pauses[0].after_z is not None else None
+
+
 def correction_line(row: Row) -> str:
     """The Sponsor's corrections at the review, as they're typed there."""
     parts = []
+    stood = _standing_pause(row)
     for c in row.corrections or ():
         if c.key == ORIENTATION:
             continue
+        value: str | None = c.value
+        if c.key == PAUSE:
+            value = _pause_again(row, c) if c is stood else None
+            if value is None:
+                continue
         reason = " ".join(c.reason.replace(";", ",").split())
-        said = f"{c.key}={c.value}"
+        said = f"{c.key}={value}"
         if reason and reason != _NO_REASON:
             said += f" because {reason}"
         parts.append(said)
@@ -143,6 +184,17 @@ def again(row: Row, part_path: Path | None, printers: int = 1, part_found: bool 
             notes.append(f"The pose was sent back at the review, from {c.preset} to {c.value}, "
                          f"because {c.reason}. Type orientation at the review to send it back "
                          "again.")
+    stood = _standing_pause(row)
+    if stood is not None:
+        copied = _pause_again(row, stood)
+        if copied is None:
+            notes.append(f"{PAUSE}={stood.value} isn't copied: this job's G-code doesn't say "
+                         "where it paused. If it's to pause, type the top of the layer to pause "
+                         "after.")
+        elif copied != stood.value:
+            notes.append(f"{PAUSE}={stood.value} is copied as {PAUSE}={copied}, to pause where "
+                         "this job did: a pause height is now the top of the layer it comes "
+                         "after.")
     taken = [c for c in ((*row.proposal.changes, *row.proposal.not_applied)
                          if row.proposal else ())
              if c.source is Source.READING]
