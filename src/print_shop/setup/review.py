@@ -120,6 +120,8 @@ class ReviewRequest:
     #: (mqucifer/print-shop#218). None with no stock set up.
     material: Material | None = None
     stock: pauses.Stock | None = None
+    #: Whether that spool is the second of the last swap: then Enter never starts a swap on it.
+    left_by_swap: bool = False
 
     @property
     def proposed(self) -> tuple[Flag, ...]:
@@ -257,7 +259,7 @@ def render(request: ReviewRequest) -> str:
     lands = "it pauses once the layer topping out at 12.4 mm is done"
     example = (
         f"pause_at=12.4 for insert because the nuts go in ({lands})"
-        if purpose is not None and purpose.kind is pauses.PauseFor.INSERT
+        if _insert_stands_or_is_ticked(request)
         else f"pause_at=12.4 because the nuts go in ({lands}, and it asks what the pause is "
              "for), colour_change=12.4 because white to black (a swap)"
     )
@@ -498,8 +500,13 @@ def _purposed(
     change = review.corrections[at]
     if change.pause is not None and change.pause.complete(request.material):
         return review
+    # With the print picked, and what was cleared, in this same answer.
+    if review.offering is not None:
+        request = replace(request, offering=review.offering)
     found = pauses.ask(change.value, change.pause, _before(request, change.value),
-                       request.material, request.stock, read, write)
+                       request.material, request.stock, read, write,
+                       gone=_past_cant_start(request, change.value),
+                       left_by_swap=request.left_by_swap)
     if found is None:
         return None
     done = change.model_copy(update={"pause": found,
@@ -510,16 +517,48 @@ def _purposed(
 
 def _before(request: ReviewRequest, value: str) -> tuple[pauses.Pause, str] | None:
     """What a pause at `value` is pre-selected to be for, and from where: this review's pause,
-    else the past print's on offer at that height. One typed at another height didn't come from
-    that print, so Enter mustn't make it what that one was."""
+    else the picked past print's at that height, while it's ticked. One typed at another height
+    didn't come from that print, and one cleared, in doubt or not usable isn't pre-selected:
+    Enter mustn't make it what that one was."""
     standing = request.proposal.get(PAUSE)
     if standing is not None and standing.pause is not None:
         return standing.pause, "as it is now"
+    item = _past_pause(request, value)
+    if item is None or item.pause is None:
+        return None
+    assert request.offering is not None
+    pose = pose_value(request.orientation.rotation_deg)
+    if not request.offering.standing(item, request.proposal, pose).selected:
+        return None
+    return item.pause, f"as on {item.used.stl_name}"
+
+
+def _past_pause(request: ReviewRequest, value: str) -> Item | None:
     past = request.offering.past if request.offering is not None else None
-    for item in past.items if past is not None else ():
-        if item.key == PAUSE and item.value == value and item.pause is not None:
-            return item.pause, f"as on {item.used.stl_name}"
-    return None
+    items = past.items if past is not None else ()
+    return next((i for i in items if i.key == PAUSE and i.value == value), None)
+
+
+def _past_cant_start(request: ReviewRequest, value: str) -> str:
+    """Why the picked print's swap at that height can't start this job as it did, or ""."""
+    item = _past_pause(request, value)
+    if item is None or request.stock is None:
+        return ""
+    return pauses.cant_start(item.pause, request.material, request.stock())
+
+
+def _insert_stands_or_is_ticked(request: ReviewRequest) -> bool:
+    """Whether the pause here is an insert, or the one ticked to use is: then the review's
+    example doesn't speak of a swap."""
+    standing = request.proposal.get(PAUSE)
+    if standing is not None and standing.value != "none" and standing.pause is not None:
+        return standing.pause.kind is pauses.PauseFor.INSERT
+    if request.offering is None:
+        return False
+    pose = pose_value(request.orientation.rotation_deg)
+    return any(item.key == PAUSE and item.pause is not None
+               and item.pause.kind is pauses.PauseFor.INSERT
+               for item in request.offering.ticked(request.proposal, pose))
 
 
 def _take(numbers: str, request: ReviewRequest) -> list[Change] | str:

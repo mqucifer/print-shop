@@ -30,7 +30,9 @@ the printer, so it's no print, and it never reaches the outcome gate or a lesson
 
 **A print with a swap keeps each spool in order, with its layer** (mqucifer/print-shop#218), in
 `print_spools` beside its `print_material`, which stays the spool it started on. A row from
-before has none, and reads back as it was.
+before has none, and reads back as it was. Its end, and a correction at the outcome, leave the
+last loaded in the stock in the same transaction: never over a load a person recorded since it
+started, nor a later print's (`_leave_last`).
 
 **A hand-sliced file is kept like any other print** (mqucifer/print-shop#164), with a row of
 `sliced_prints` beside it: marked `sliced: by hand`, with the file's own settings by profile,
@@ -60,7 +62,7 @@ from pydantic import BaseModel
 
 from print_shop.env import SETTINGS_PATH, load_env
 from print_shop.inventory import SCHEMA as INVENTORY_SCHEMA
-from print_shop.inventory import Material, SpoolUse
+from print_shop.inventory import Material, SpoolUse, leave_loaded, loads_recorded
 from print_shop.setup.features import Feature
 from print_shop.setup.intake import Intake
 from print_shop.setup.lessons import SCHEMA as LESSONS_SCHEMA
@@ -625,14 +627,9 @@ class Ledger:
                     (record.job_id, material.printer_id, material.nozzle_mm,
                      material.spool_id, material.model_dump_json()),
                 )
-            for position, used in enumerate(record.spools):
-                db.execute(
-                    "INSERT INTO print_spools (job_id, position, spool_id, from_layer, from_z,"
-                    " spool, planned) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (record.job_id, position, used.material.spool_id, used.from_layer,
-                     used.from_z, used.material.model_dump_json(),
-                     used.planned.model_dump_json() if used.planned else None),
-                )
+            if record.spools:
+                printer = record.spools[0].material.printer_id
+                _insert_spools(db, record.job_id, record.spools, loads_recorded(db, printer))
             if record.reading is not None:
                 reading = record.reading
                 shortest = reading.shortest()
@@ -663,40 +660,48 @@ class Ledger:
         """The start raised. The printer may or may not be printing; say so."""
         self._update(job_id, "start_error = ?", (error[:2000],), "started_at IS NULL")
 
-    def record_ended(self, job_id: str, printer_end_status: int | None) -> None:
-        """The printer was seen to finish, one way or another. Not the outcome."""
-        self._update(
-            job_id,
-            "ended_at = ?, printer_end_status = ?",
-            (_now(), printer_end_status),
-            "ended_at IS NULL",
-        )
+    def record_ended(
+        self, job_id: str, printer_end_status: int | None,
+        spools: tuple[SpoolUse, ...] | None = None,
+    ) -> None:
+        """The printer was seen to finish, one way or another. Not the outcome.
 
-    def record_last_spool(self, job_id: str, last: SpoolUse) -> None:
-        """The spool a swap's print ended with, where it isn't the one written at the start: the
-        swap wasn't reached, or the person corrected it (mqucifer/print-shop#218)."""
+        With the end, in one transaction (mqucifer/print-shop#218): `spools`, where a swap's
+        print ended otherwise than was written at its start, and the last left loaded. So an
+        end the stock couldn't take isn't recorded, and is seen again at the next look.
+        """
         with self._write() as db:
-            changed = db.execute(
-                "UPDATE print_spools SET spool_id = ?, spool = ?, planned = ? WHERE job_id = ?"
-                " AND position > 0 AND position ="
-                " (SELECT max(position) FROM print_spools WHERE job_id = ?)",
-                (last.material.spool_id, last.material.model_dump_json(),
-                 last.planned.model_dump_json() if last.planned else None, job_id, job_id),
-            ).rowcount
-            if changed != 1:
-                raise LedgerError(f"job {job_id} has no swap in the ledger")
+            self._updated(
+                db, job_id,
+                "ended_at = ?, printer_end_status = ?",
+                (_now(), printer_end_status),
+                "ended_at IS NULL",
+            )
+            if spools is not None:
+                _change_spools(db, job_id, spools)
+            _leave_last(db, job_id)
 
-    def record_answer(self, job_id: str, answer: Answer) -> None:
-        """The Sponsor's answer. Once: a second answer is refused, not merged."""
+    def record_answer(
+        self, job_id: str, answer: Answer, spools: tuple[SpoolUse, ...] | None = None
+    ) -> None:
+        """The Sponsor's answer. Once: a second answer is refused, not merged.
+
+        `spools` is their correction of a swap's, written with the answer and with the stock, or
+        none of them (mqucifer/print-shop#218).
+        """
         problems = answer.problems()
         if problems:
             raise LedgerError("; ".join(problems))
-        self._update(
-            job_id,
-            "result = ?, symptom = ?, note = ?, answered_at = ?",
-            (answer.result.value, answer.symptom.value, answer.note, _now()),
-            "ended_at IS NOT NULL AND result IS NULL",
-        )
+        with self._write() as db:
+            self._updated(
+                db, job_id,
+                "result = ?, symptom = ?, note = ?, answered_at = ?",
+                (answer.result.value, answer.symptom.value, answer.note, _now()),
+                "ended_at IS NOT NULL AND result IS NULL",
+            )
+            if spools is not None:
+                _change_spools(db, job_id, spools)
+                _leave_last(db, job_id)
         self._learn(job_id)
 
     def _learn(self, job_id: str) -> None:
@@ -725,14 +730,19 @@ class Ledger:
 
     def _update(self, job_id: str, assignments: str, values: tuple[Any, ...], guard: str) -> None:
         with self._write() as db:
-            cursor = db.execute(
-                f"UPDATE prints SET {assignments} WHERE job_id = ? AND {guard}",
-                (*values, job_id),
-            )
-            if cursor.rowcount == 1:
-                return
-            exists = db.execute("SELECT 1 FROM prints WHERE job_id = ?", (job_id,)).fetchone()
-        if not exists:
+            self._updated(db, job_id, assignments, values, guard)
+
+    @staticmethod
+    def _updated(
+        db: sqlite3.Connection, job_id: str, assignments: str, values: tuple[Any, ...], guard: str
+    ) -> None:
+        cursor = db.execute(
+            f"UPDATE prints SET {assignments} WHERE job_id = ? AND {guard}",
+            (*values, job_id),
+        )
+        if cursor.rowcount == 1:
+            return
+        if not db.execute("SELECT 1 FROM prints WHERE job_id = ?", (job_id,)).fetchone():
             raise LedgerError(f"job {job_id} is not in the ledger")
         raise LedgerError(f"job {job_id} is not in a state for that ({guard})")
 
@@ -884,6 +894,57 @@ _SELECT = (
     "LEFT JOIN slice_readings r ON r.job_id = p.job_id{join}"
 )
 _SLICED_JOIN = " LEFT JOIN sliced_prints s ON s.job_id = p.job_id"
+
+
+def _insert_spools(
+    db: sqlite3.Connection, job_id: str, spools: tuple[SpoolUse, ...], loads: int | None
+) -> None:
+    for position, used in enumerate(spools):
+        db.execute(
+            "INSERT INTO print_spools (job_id, position, spool_id, from_layer, from_z, spool,"
+            " planned, loads) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (job_id, position, used.material.spool_id, used.from_layer, used.from_z,
+             used.material.model_dump_json(),
+             used.planned.model_dump_json() if used.planned else None,
+             loads if position == 0 else None),
+        )
+
+
+def _change_spools(db: sqlite3.Connection, job_id: str, spools: tuple[SpoolUse, ...]) -> None:
+    """A swap's spools as they came to be."""
+    found = db.execute(
+        "SELECT loads FROM print_spools WHERE job_id = ? AND position = 0", (job_id,)
+    ).fetchone()
+    if found is None:
+        raise LedgerError(f"job {job_id} has no swap in the ledger")
+    db.execute("DELETE FROM print_spools WHERE job_id = ?", (job_id,))
+    _insert_spools(db, job_id, spools, found["loads"])
+
+
+def _leave_last(db: sqlite3.Connection, job_id: str) -> None:
+    """A swap's last spool left loaded, unless a person has recorded a load since it started, or
+    a later print has the printer: started, or asked to and not seen to fail."""
+    used = db.execute(
+        "SELECT spool_id, spool, loads FROM print_spools WHERE job_id = ? ORDER BY position",
+        (job_id,),
+    ).fetchall()
+    if len(used) < 2:
+        return
+    printer = Material.model_validate_json(used[0]["spool"]).printer_id
+    if loads_recorded(db, printer) != used[0]["loads"]:
+        return
+    later = db.execute(
+        "SELECT 1 FROM prints p JOIN prints me ON me.job_id = ?"
+        " LEFT JOIN print_material m ON m.job_id = p.job_id"
+        " WHERE (p.start_requested_at > me.start_requested_at"
+        "        OR (p.start_requested_at = me.start_requested_at AND p.rowid > me.rowid))"
+        " AND p.gcode_name != me.gcode_name"
+        " AND (p.started_at IS NOT NULL OR p.start_error IS NULL)"
+        " AND (m.printer_id IS NULL OR m.printer_id = ?)",
+        (job_id, printer),
+    ).fetchone()
+    if later is None:
+        leave_loaded(db, printer, used[-1]["spool_id"])
 
 
 def _row(row: sqlite3.Row, spools: tuple[SpoolUse, ...] = ()) -> Row:

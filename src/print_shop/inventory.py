@@ -45,7 +45,10 @@ __all__ = [
     "Spool",
     "SpoolState",
     "SpoolUse",
+    "leave_loaded",
+    "loads_recorded",
     "spool_lines",
+    "swap_made",
 ]
 
 SCHEMA = """
@@ -94,7 +97,12 @@ CREATE TABLE IF NOT EXISTS print_spools (
     from_z      REAL,                            -- the top of the layer under that one
     spool       TEXT NOT NULL,                   -- JSON Material: the spool as it was
     planned     TEXT,                            -- JSON Material: the one planned, if another was
+    loads       INTEGER,                         -- at 0: the printer's loads as it started
     PRIMARY KEY (job_id, position)
+);
+CREATE TABLE IF NOT EXISTS printer_loads (
+    printer_id  TEXT PRIMARY KEY REFERENCES printers(id),
+    n           INTEGER NOT NULL                 -- how many times a person has recorded a load
 );
 """
 
@@ -214,16 +222,58 @@ class SpoolUse(BaseModel):
         return f"{self.material.named()}{at}{was}"
 
 
+def swap_made(spools: tuple[SpoolUse, ...]) -> bool:
+    """Whether a print with a swap got to it."""
+    if len(spools) < 2:
+        return False
+    first, swap = spools[0], spools[1]
+    return not (swap.planned is not None and swap.material.spool_id == first.material.spool_id)
+
+
 def spool_lines(spools: tuple[SpoolUse, ...]) -> list[str]:
-    """A print's spools as they're said, in order. A swap that wasn't reached is said so, never
+    """A print's spools as they're said, in order. A swap that wasn't made is said so, never
     as its first spool from the swap's layer up."""
-    if len(spools) == 2:
-        first, last = spools
-        if last.material.spool_id == first.material.spool_id and last.planned is not None:
-            at = f" at layer {last.from_layer}" if last.from_layer else ""
-            return [f"{first.material.named()}, all the way: the swap to "
-                    f"{last.planned.named()}{at} wasn't made"]
-    return [used.line() for used in spools]
+    lines = [used.line() for used in spools[:2]]
+    if len(spools) > 1 and not swap_made(spools):
+        first, swap = spools[0], spools[1]
+        assert swap.planned is not None
+        at = f" at layer {swap.from_layer}" if swap.from_layer else ""
+        through = "" if len(spools) > 2 else ", all the way"
+        lines = [f"{first.material.named()}{through}: the swap to {swap.planned.named()}{at} "
+                 "wasn't made"]
+    lines += [f"then {used.material.named()}, from a layer that isn't known"
+              for used in spools[2:]]
+    return lines
+
+
+def loads_recorded(db: sqlite3.Connection, printer_id: str) -> int:
+    """How many times a person has recorded a load on the printer: whether they have since."""
+    found = db.execute(
+        "SELECT n FROM printer_loads WHERE printer_id = ?", (printer_id,)
+    ).fetchone()
+    return int(found[0]) if found is not None else 0
+
+
+def leave_loaded(db: sqlite3.Connection, printer_id: str, spool_id: int) -> bool:
+    """The spool a print left on the printer, as loaded, in the caller's transaction
+    (mqucifer/print-shop#218). It isn't a person's load, so it isn't counted as one. False for
+    a spool marked empty, which is left so."""
+    return _loaded(db, printer_id, spool_id)
+
+
+def _loaded(db: sqlite3.Connection, printer_id: str, spool_id: int) -> bool:
+    found = db.execute("SELECT state FROM spools WHERE id = ?", (spool_id,)).fetchone()
+    if found is None or found[0] == SpoolState.EMPTY:
+        return False
+    db.execute(
+        "UPDATE spools SET state = 'on_hand', printer_id = NULL "
+        "WHERE printer_id = ? AND state = 'loaded'",
+        (printer_id,),
+    )
+    db.execute(
+        "UPDATE spools SET state = 'loaded', printer_id = ? WHERE id = ?", (printer_id, spool_id)
+    )
+    return True
 
 
 def _now() -> str:
@@ -367,20 +417,19 @@ class Inventory:
         return self.spool(int(spool_id or 0))
 
     def load(self, spool_id: int, printer_id: str | None = None) -> Spool:
-        """Load a spool; the one loaded before on that printer goes back on hand."""
+        """Load a spool, as a person says; the one loaded before on that printer goes back on
+        hand. It's counted, so that a print's end never writes over it, the same spool again
+        included (`loads_recorded`)."""
         printer = self.printer(printer_id)
-        spool = self.spool(spool_id)
-        if spool.state is SpoolState.EMPTY:
-            raise InventoryError(f"spool #{spool_id} is empty")
+        self.spool(spool_id)
         with self._write() as db:
+            # Read in the write's own transaction: a job's end and stock.py run side by side.
+            if not _loaded(db, printer.id, spool_id):
+                raise InventoryError(f"spool #{spool_id} is empty")
             db.execute(
-                "UPDATE spools SET state = 'on_hand', printer_id = NULL "
-                "WHERE printer_id = ? AND state = 'loaded'",
+                "INSERT INTO printer_loads (printer_id, n) VALUES (?, 1)"
+                " ON CONFLICT (printer_id) DO UPDATE SET n = n + 1",
                 (printer.id,),
-            )
-            db.execute(
-                "UPDATE spools SET state = 'loaded', printer_id = ? WHERE id = ?",
-                (printer.id, spool_id),
             )
         return self.spool(spool_id)
 

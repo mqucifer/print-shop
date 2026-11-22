@@ -242,7 +242,7 @@ def _summary(row: Row, record: JobRecord) -> str:
 
 
 def _again(row: Row, record: JobRecord) -> str:
-    a = again(row, record.part_path, record.printers, record.part_found)
+    a = again(row, record.part_path, record.printers, record.part_found, record.on_hand)
     parts = ["<section><h2>Run it again</h2>",
              "<h3>The command</h3>", _copy("again-command", a.command)]
     parts.append("<p class=\"muted\">It doesn't arm the printer: that's on the command's own "

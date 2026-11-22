@@ -53,7 +53,7 @@ A print uses your tuning where there is one, and the standard where you haven't 
    - `stock edit <id> --colour grey` or `stock edit <id> --tuning "…"` corrects a spool, keeping its number and whether it's loaded (mqucifer/print-shop#220). `--tuning none` is the variety's default. Prints already made keep the spool as it was. A job still waiting when you edit records the new colour; if the tuning changed, it says so when you approve it and doesn't print.
    - A variety you've tuned more than once asks which tuning the spool prints with when you add it (`--tuning "…"`).
    - Prints then take the fitted nozzle and the loaded spool by default, and say so.
-   - A print with a swap leaves its last spool loaded in the stock when it ends (mqucifer/print-shop#218), so there's no `stock load` to type after it. To start the next on the other spool, load it and record it (`stock load <id>`).
+   - A print with a swap leaves its last spool loaded in the stock when it ends (mqucifer/print-shop#218), once it's seen to end. A load you record after it started stands, though it's the same spool again. To start the next on the other spool, load it and record it (`stock load <id>`).
 
 3. **Nothing from the prototype is running.** Both use the same topics. The prototype has no daemon command of its own, so one would only be running if someone started it by hand, from `~/Documents/git/3d-print-agent`. If one is, stop it.
 
@@ -135,13 +135,13 @@ Finish that job, or stop it with Ctrl-C in its terminal (which doesn't stop the 
 
    **What a pause is for: a swap or an insert** (mqucifer/print-shop#218). The review, the gate, the print desk and the outcome use that word. A pause from before it was said, or in a file sliced by hand, is only "a pause".
    - **`pause_at=2.6 for insert`** is parts dropped in. `pause_at=2.6` alone asks which it is, `1` an insert or `2` a swap, with this review's, or the past print's, pre-selected for Enter. `back` sets no pause.
-   - **`colour_change=12.4 from #1 to #2`** is a swap, by the stock's numbers: it starts on spool #1 and you swap to #2. `colour_change=12.4 to #2` starts on the loaded one. `colour_change=12.4` asks for both, with Enter for the one shown.
+   - **`colour_change=12.4 from #1 to #2`** is a swap, by the stock's numbers: it starts on spool #1 and you swap to #2. `colour_change=12.4 to #2` starts on the loaded one. `colour_change=12.4` asks for both, with Enter for the one shown. Enter never starts it on the spool the last swap left loaded, as that would be that print reversed: type its number if you mean it.
    - **A swap printed again never starts on another spool by itself.** Where the first it had can't start this job (it's of another filament than the one now loaded and sliced for, or it's used up), "use these" says `CAN'T USE` with why, and nothing is pre-selected: load that spool and run the job again, or type the swap.
    - **The spool it starts on is of the filament it's sliced with.** Another colour of that is fine. For another filament, load it and run the job again.
    - **The spool swapped to can be any on hand.** The slice has one filament's settings, so another variety is noted at the review: the layers after the swap print with the first's.
    - **Start checks the first is loaded.** Where the stock has another, the review and the gate say `LOAD FIRST`: load it, and record it with `uv run python scripts/stock.py load 1` in another terminal, before you approve. Approved without, nothing is uploaded or printed, and the job is run again.
    - **The ledger keeps both spools, in order, each with its layer,** and the print desk and a print of it again carry them.
-   - **When the print ends, the stock has the last as loaded.** One stopped under the swap's layer ended with the first. Where the printer doesn't say how far it got, the last is taken: correct it at the outcome, under "Spool on at the end". It never writes over a spool you've loaded since, or a later print's.
+   - **When the print ends, the stock has the last as loaded.** One stopped at the swap's pause or under it ended with the first (paused there, the printer already says the swap's layer). Where the printer doesn't say how far it got, the last is taken: correct it at the outcome, under "Spool on at the end". It never writes over a load you've recorded since the print started, or a later print's.
 
    An answer at the questions is a decision, even one that keeps your preset's value. "Bridge it — no support" over a preset with supports off sets nothing, and the review says `kept enable_support at 0: you chose 'Bridge it — no support' … [your answer: overhang]`; the guard that switches tree supports on for an overhang only does so when nothing decided otherwise (mqucifer/print-shop#124). An option that says no support always carries `enable_support=0`. Your corrections go in the ledger: they are what print-shop learns from. Each one is a candidate lesson, keyed to the part's shape; once a reviewer keeps it, a later part with the same shape gets that setting by itself, and the review says which lesson set it (`docs/print-lessons.md`).
 
@@ -215,7 +215,7 @@ Finish that job, or stop it with Ctrl-C in its terminal (which doesn't stop the 
    - **Result:** success if the part is usable, or failed.
    - **What went wrong:** the closest of adhesion, warping, stringing, layer_shift, spaghetti, under_extrusion, or other. On a success it's a minor flaw on a usable part, read as `success, with stringing` (mqucifer/print-shop#189), or `none` if there was no flaw. A failure always names one. Other needs a note.
    - **Note:** anything worth knowing, such as "corner lifted at layer 3".
-   - **Spool on at the end,** for a print with a swap (mqucifer/print-shop#218): the card says each spool and what the stock now has loaded. If another was on at the end, pick it, and Record corrects the print and the stock. `as recorded` leaves it as it's said.
+   - **Spool on at the end,** for a print with a swap (mqucifer/print-shop#218): the card says each spool and what the stock now has loaded. If another was on at the end, pick it, and Record corrects the print and the stock (the stock only where you haven't recorded a load since). A spool that ran out (`stock empty <id>`) keeps the layers it printed, with the one that finished after it. `as recorded` leaves it as it's said.
    - Press **Record it**. If it doesn't add up (a failure with `none`, or other without a note), the card says why and nothing is stored. Fix it and press again.
 
    You can answer later. Until you do, the print stays open, and `uv run python scripts/print_job.py --serve` asks about it again.
@@ -299,7 +299,7 @@ Then open <http://127.0.0.1:8719/> in a browser on the Mac. `--port` picks anoth
 - **The job's log** is what the command showed for it, with each answer you typed, kept as `~/print-shop/jobs/<job>/job.log`. No key, token or password is written to it. Jobs from before the log was kept have none.
 - **Run it again** gives three things, each with a Copy button:
   - the command line: the same part, nozzle, spool and profiles, and `--answers`. The part is found by its bytes, which the ledger keeps the hash of: at the path the job's log names, else anywhere under `~/print-shop/parts/` (or `PRINT_SHOP_PARTS` in the settings), else in the job's folder. Renamed or moved, it's still found. If no file has the same bytes, the page says it wasn't found, and the command names the part by its file name for you to give its path;
-  - the correction line, to paste at the review when it asks, with what a pause was for (`pause_at=2.6 for insert`, or `colour_change=12.4 from #1 to #2` with the spools that print used);
+  - the correction line, to paste at the review when it asks, with what a pause was for (`pause_at=2.6 for insert`, or `colour_change=12.4 from #1 to #2` with the spools that print used; one that's used up since is left out, and asked);
   - the answers file: press **Save** and it goes to `~/Downloads`, where the command line looks for it. If the browser names it differently, change the path in the command to match.
 
   A job you sliced by hand has one line, `--again` and its id, and a "Sliced by hand" section with what was kept of the file.

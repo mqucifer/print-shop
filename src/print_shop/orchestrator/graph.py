@@ -62,6 +62,7 @@ from print_shop.ingest.analyzer import analyze, verify_unchanged
 from print_shop.ingest.orientation import candidates, write_rotated
 from print_shop.inventory import Inventory, Material, SpoolUse
 from print_shop.ledger import Ledger, PrintRecord
+from print_shop.orchestrator import spools as swaps
 from print_shop.orchestrator.fitness import scoring_profiles
 from print_shop.printer.centauri import PreflightFailed, PrinterClient, preflight
 from print_shop.setup import Proposer, pauses
@@ -468,6 +469,8 @@ def build_graph(
                         context=context, stl=state["stl_path"],
                         offering=offer, doubting=doubting,
                         material=_material_of(profiles), stock=_stock(ledger, profiles),
+                        left_by_swap=(ledger is not None and swaps.left_by_swap(
+                            ledger, _material_of(profiles)) is not None),
                     )
                 except _Turned as turned:
                     # Sent back at the review: turned to the person's pose, and sliced again.
@@ -650,6 +653,7 @@ def build_graph(
 
         material = _material_prepared(state)
         spools: tuple[SpoolUse, ...] = ()
+        sent: PrintJobState = state
         if material is not None:
             with Inventory(ledger.path) as inventory:
                 material = inventory.at_start(material)
@@ -657,8 +661,14 @@ def build_graph(
                 if swap is not None and swap.start is not None and swap.to is not None:
                     material = inventory.at_swaps_start(swap.start)
                     to = swap.to.of(inventory.spool(swap.to.spool_id))
-                    spools = pauses.uses(swap.model_copy(update={"start": material, "to": to}),
-                                         state.get("slice_reading"))
+                    started = swap.model_copy(update={"start": material, "to": to})
+                    change = _standing(state)
+                    assert change is not None
+                    # The reading names the spools as the print starts, as the row's spools do.
+                    reading = pauses.marked(state.get("slice_reading"),
+                                            change.model_copy(update={"pause": started}))
+                    spools = pauses.uses(started, reading)
+                    sent = {**state, "slice_reading": reading}
 
         gcode = Path(state["gcode_path"])
         snapshot = client.snapshot()
@@ -682,7 +692,7 @@ def build_graph(
         # Written before the printer is told anything, so a start that fails
         # halfway is still on record.
         ledger.record_start_requested(
-            _print_record(state, remote_name, gcode, snapshot.machine, snapshot.firmware,
+            _print_record(sent, remote_name, gcode, snapshot.machine, snapshot.firmware,
                           store, material, spools)
         )
         try:
@@ -1109,6 +1119,7 @@ def _propose_and_review(
     doubting: Doubting | None = None,
     material: Material | None = None,
     stock: pauses.Stock | None = None,
+    left_by_swap: bool = False,
 ) -> tuple[SliceResult, dict[str, Any]]:
     """Slice with the proposal; with a reviewer, again after each correction until approved.
 
@@ -1182,6 +1193,7 @@ def _propose_and_review(
                 offering=offering,
                 material=material,
                 stock=stock,
+                left_by_swap=left_by_swap,
             ))
             if review.offering is not None:
                 offering = review.offering

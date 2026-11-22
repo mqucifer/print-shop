@@ -141,8 +141,9 @@ views:
                 went.{% endif %}
 
                 {% set spools = state_attr('sensor.3d_print_agent_outcome_part', 'spools') %}
-                {%- if spools %}**Spools:** {{ spools }}. If another was on at the end, pick it
-                below: Record corrects the print and the stock.{% endif %}
+                {%- if spools %}**Spools:** {{ spools }}.{% if (state_attr('sensor.3d_print_agent_outcome_part',
+                'spool_choices') or 0) > 0 %} If another was on at the end, pick it
+                below: Record corrects the print and the stock.{% endif %}{% endif %}
 
                 {% set e = state_attr('sensor.3d_print_agent_outcome_part', 'error') %}
                 {%- if e %}**Not recorded:** {{ e }}{% endif %}

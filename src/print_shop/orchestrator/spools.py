@@ -1,69 +1,85 @@
 """A swap's spools after the print: the last is the one loaded (mqucifer/print-shop#218).
 
-- **When the print ends, the stock has its last spool as loaded.** A print stopped, or failed,
-  under the swap's layer never got to it, so it ended with the first, and the ledger says so.
+- **When the print ends, the stock has its last spool as loaded.** One stopped, or failed, at the
+  swap's pause or under it ended with the first, and the ledger says so. Orca counts a layer
+  before it writes that layer's pause, so paused there the printer says the swap's own layer.
   Where the printer doesn't say how far it got, the last is taken, and the outcome can correct it.
-- **The person can correct it at the outcome:** the ledger keeps the spool it ended with beside
-  the one planned.
-- **What the stock was told since is never written over.** It's moved only while it still has
-  what this print left (or, where that spool ran out and is marked empty, the one before it), and
-  only where no later print has started on that printer.
+- **The person can correct it at the outcome,** and the layers a spool printed stay its own: one
+  that ran out keeps them, with the spool that finished after it.
+- **The writes are the ledger's,** with the end and with the answer, each one transaction
+  (`Ledger.record_ended`, `Ledger.record_answer`): never over a load a person has recorded since
+  the print started, nor a later print's.
+
+This works out what to write, and what to say.
 """
 
 from __future__ import annotations
 
-import logging
-
 from pycentauri.models import PrintStatus as SdcpPrintStatus
 
-from print_shop.inventory import Inventory, Material, SpoolState, spool_lines
+from print_shop.inventory import (
+    Inventory,
+    Material,
+    SpoolState,
+    SpoolUse,
+    spool_lines,
+    swap_made,
+)
 from print_shop.ledger import Ledger, Row
 
-__all__ = ["at_end", "choices", "correct", "said"]
+__all__ = ["at_end", "choices", "correct", "left_by_swap", "said"]
 
-logger = logging.getLogger(__name__)
-
-#: The ends that can come before the swap.
+#: The ends that can come before the swap, at any layer it says, 0 included.
 _CUT_SHORT = (SdcpPrintStatus.STOPPED, SdcpPrintStatus.ERROR)
 
 
-def at_end(ledger: Ledger, row: Row, status: int | None, layer: int | None) -> None:
-    """The stock left as a print with a swap left the printer. `layer` is the one the printer
-    said it was on, if it was still showing this print."""
-    if len(row.spools) < 2:
-        return
-    first, last = row.spools[0].material, row.spools[-1]
-    under = bool(layer and last.from_layer and layer < last.from_layer)
-    if status in _CUT_SHORT and under:
-        ledger.record_last_spool(row.job_id, last.model_copy(update={
-            "material": first, "planned": last.planned or last.material}))
-        return
-    _load(ledger, row, left=(first,), now=last.material)
+def at_end(row: Row, status: int | None, layer: int | None) -> tuple[SpoolUse, ...] | None:
+    """A swap's spools as the print ended, or None where they're as was written at its start.
+    `layer` is the one the printer said, if it was still showing this print."""
+    if len(row.spools) < 2 or layer is None:
+        return None
+    first, swap = row.spools[0], row.spools[1]
+    says = status in _CUT_SHORT or (status == SdcpPrintStatus.IDLE and layer > 0)
+    if not says or swap.from_layer is None or layer > swap.from_layer:
+        return None
+    return first, swap.model_copy(update={"material": first.material, "planned": swap.material})
 
 
 def choices(ledger: Ledger, row: Row) -> dict[str, int]:
-    """The spools the outcome can say it ended with, by the words they're picked by."""
+    """The spools the outcome can say it ended with, by the words they're picked by: those on
+    hand, and the print's own, which may have run out since."""
     if len(row.spools) < 2:
         return {}
     with Inventory(ledger.path) as stock:
-        return {spool.named(): spool.id for spool in stock.spools()}
+        found = {spool.id: spool.named() for spool in stock.spools()}
+    for used in row.spools:
+        for own in (used.material, used.planned):
+            if own is not None:
+                found.setdefault(own.spool_id, own.named())
+    return {named: spool_id for spool_id, named in found.items()}
 
 
-def correct(ledger: Ledger, row: Row, spool_id: int) -> None:
-    """The person says at the outcome which spool it ended with."""
+def correct(ledger: Ledger, row: Row, spool_id: int) -> tuple[SpoolUse, ...] | None:
+    """The spools as the person says it ended, with `spool_id` on at the end."""
     if len(row.spools) < 2:
-        return
-    last = row.spools[-1]
-    was = last.material
-    if was.spool_id == spool_id:
-        return
+        return None
+    if row.spools[-1].material.spool_id == spool_id:
+        return row.spools
+    first, swap = row.spools[0], row.spools[1]
     with Inventory(ledger.path) as stock:
-        now = was.of(stock.spool(spool_id))
-        ran_out = stock.spool(was.spool_id).state is SpoolState.EMPTY
-    planned = last.planned or was
-    ledger.record_last_spool(row.job_id, last.model_copy(update={
-        "material": now, "planned": None if planned.spool_id == spool_id else planned}))
-    _load(ledger, row, left=(was, row.spools[0].material) if ran_out else (was,), now=now)
+        now = first.material.of(stock.spool(spool_id))
+        ran_out = stock.spool(swap.material.spool_id).state is SpoolState.EMPTY
+    after = (first, swap, SpoolUse(material=now))
+    if not swap_made(row.spools):
+        # It never printed over the swap, unless it's the spool planned that they say.
+        if swap.planned is not None and swap.planned.spool_id == spool_id:
+            return first, swap.model_copy(update={"material": now, "planned": None})
+        return after
+    if ran_out:
+        return after  # it printed its layers, and this one finished
+    planned = swap.planned or swap.material
+    return first, swap.model_copy(update={
+        "material": now, "planned": None if planned.spool_id == spool_id else planned})
 
 
 def said(ledger: Ledger, row: Row) -> str:
@@ -76,30 +92,15 @@ def said(ledger: Ledger, row: Row) -> str:
     return "; ".join(spool_lines(row.spools)) + f". The stock has {has} loaded"
 
 
-def _load(ledger: Ledger, row: Row, *, left: tuple[Material, ...], now: Material) -> None:
-    """`now` loaded, where the stock still has one of `left` and this is the printer's latest
-    print."""
-    if not _latest(ledger, row):
-        return
-    with Inventory(ledger.path) as stock:
-        printer = now.printer_id
-        loaded = stock.loaded(printer)
-        if loaded is None or loaded.id not in {spool.spool_id for spool in left}:
-            return  # told otherwise since
-        if stock.spool(now.spool_id).state is SpoolState.EMPTY:
-            logger.warning("job %s ended with %s, which the stock has as empty: not loaded",
-                           row.job_id, now.named())
-            return
-        stock.load(now.spool_id, printer)
-
-
-def _latest(ledger: Ledger, row: Row) -> bool:
-    """Whether no print of another file has started on this one's printer since it did."""
-    rows = ledger.rows()
-    at = next(n for n, r in enumerate(rows) if r.job_id == row.job_id)
-    printer = row.spools[0].material.printer_id
-    return not any(
-        later.started_at is not None and later.gcode_name != row.gcode_name
-        and (later.material is None or later.material.printer_id == printer)
-        for later in rows[at + 1:]
-    )
+def left_by_swap(ledger: Ledger, material: Material | None) -> Row | None:
+    """The print whose swap left `material`'s spool loaded: the printer's latest, or None.
+    Starting on that spool is that print reversed, so it's never pre-selected."""
+    if material is None:
+        return None
+    started = [row for row in ledger.rows() if row.started_at is not None]
+    if not started:
+        return None
+    last = started[-1]
+    if not swap_made(last.spools) or last.spools[-1].material.spool_id != material.spool_id:
+        return None
+    return last

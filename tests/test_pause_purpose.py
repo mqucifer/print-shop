@@ -36,9 +36,8 @@ from print_shop.desk.read import Desk
 from print_shop.ingest.analyzer import analyze
 from print_shop.inventory import Inventory, SpoolUse
 from print_shop.ledger import Ledger, Row
-from print_shop.orchestrator import spools as after_print
 from print_shop.orchestrator.daemon import Daemon, JobResult
-from print_shop.orchestrator.outcome import Watcher
+from print_shop.orchestrator.outcome import OutcomeDesk, Watcher
 from print_shop.runtime import describe
 from print_shop.setup import Proposer
 from print_shop.setup.features import measure
@@ -174,7 +173,8 @@ class Shop:
     def correction_line(self, job_id: str) -> str:
         record = Desk(self.path, self.jobs, self.parts).job(job_id)
         assert record is not None and record.row is not None
-        return again(record.row, record.part_path, record.printers, record.part_found).corrections
+        return again(record.row, record.part_path, record.printers, record.part_found,
+                     record.on_hand).corrections
 
 
 @pytest.fixture
@@ -659,8 +659,7 @@ def swap_started(shop: Shop, job_id: str = "job-1") -> Row:
 def test_the_stock_told_otherwise_since_isnt_written_over(shop: Shop) -> None:
     row = swap_started(shop)
     shop.load(CLEAR)
-    with Ledger(shop.path) as ledger:
-        after_print.at_end(ledger, row, 9, 100)
+    ends(shop, row)
     assert shop.loaded() == CLEAR
 
 
@@ -669,15 +668,12 @@ def test_a_later_print_started_keeps_the_stock_its_own(shop: Shop) -> None:
     with Ledger(shop.path) as ledger:
         ledger.record_start_requested(record("job-2"))
         ledger.record_started("job-2")
-        after_print.at_end(ledger, row, None, None)
+    ends(shop, row)
     assert shop.loaded() == WHITE
 
 
-@pytest.mark.parametrize("layer", [None, 0])
-def test_a_stop_that_doesnt_say_how_far_takes_the_last(shop: Shop, layer: int | None) -> None:
-    row = swap_started(shop)
-    with Ledger(shop.path) as ledger:
-        after_print.at_end(ledger, row, 8, layer)
+def test_a_stop_that_doesnt_say_how_far_takes_the_last(shop: Shop) -> None:
+    ends(shop, swap_started(shop), "stopped", layer=None, named="")
     assert shop.loaded() == BLACK
 
 
@@ -687,10 +683,9 @@ def test_a_last_spool_marked_empty_isnt_loaded_and_the_outcome_can_say_which_was
     row = swap_started(shop)
     with Inventory(shop.path) as stock:
         stock.empty(BLACK)
-    with Ledger(shop.path) as ledger:
-        after_print.at_end(ledger, row, 9, 100)
-        assert shop.loaded() == WHITE
-        after_print.correct(ledger, row, CLEAR)
+    ends(shop, row)
+    assert shop.loaded() == WHITE
+    answered_with(shop, "spool #3, Elegoo PETG, clear")
     assert shop.loaded() == CLEAR
 
 
@@ -774,3 +769,263 @@ def test_the_terminals_gate_and_the_cards_name_a_swaps_spools(shop: Shop) -> Non
     assert "Say in the note how the swap went." in shown
     assert "**Spools:** spool #1, Elegoo PLA, white, from layer 1; spool #2" in shown
     assert "\n**Swap:**" in shown and "\n**Spool:**" in shown, "each on a line of its own"
+
+
+# The cold review of 4f33d68
+# --------------------------------------------------------------------------
+
+
+def ends(
+    shop: Shop, row: Row, how: str = "completed", *, layer: int | None = 100,
+    named: str | None = None, status: int | None = None,
+) -> None:
+    """The watcher sees `row`'s print end, as the printer says it."""
+    seen = frame(how, row.gcode_name if named is None else named, layer=layer)
+    if status is not None:
+        seen = seen.model_copy(update={"print_status": status})
+
+    class Printer:
+        def snapshot(self) -> Any:
+            return seen
+
+    with Ledger(shop.path) as ledger:
+        Watcher(ledger=ledger, printer=Printer(), on_ended=lambda: None).look()  # type: ignore[arg-type]
+
+
+def answered_with(shop: Shop, spool: str) -> dict[str, Any]:
+    """The outcome desk's oldest print answered a success, ended with `spool`."""
+    bridge = MemoryBridge()
+    with Ledger(shop.path) as ledger:
+        desk = OutcomeDesk(ledger=ledger, cfg=CFG,
+                           publish=lambda topic, payload: bridge.publish(topic, payload, True))
+        for topic, handler in desk.topics.items():
+            bridge.subscribe(topic, handler)
+        desk.refresh()
+        bridge.deliver(outcome_spool_topic(CFG), spool)
+        bridge.deliver(outcome_result_topic(CFG), "success")
+        bridge.deliver(outcome_symptom_topic(CFG), "none")
+        bridge.deliver(outcome_submit_topic(CFG), "record")
+    return dict(bridge.retained_json(outcome_topic(CFG)))
+
+
+def kept(shop: Shop, job_id: str = "job-1") -> Row:
+    with Ledger(shop.path) as ledger:
+        row = ledger.get(job_id)
+    assert row is not None
+    return row
+
+
+@pytest.mark.parametrize(("layer", "status"), [(11, None), (0, None), (5, 0)])
+def test_a_print_cancelled_at_or_under_the_swaps_pause_didnt_swap(
+    shop: Shop, layer: int, status: int | None
+) -> None:
+    """Orca counts the layer before it writes that layer's pause, so paused there the printer
+    says the swap's own layer (finding 3)."""
+    ends(shop, swap_started(shop), "stopped", layer=layer, status=status)
+    assert spools(kept(shop)) == [(WHITE, 1), (WHITE, 11)]
+    assert shop.loaded() == WHITE
+
+
+def test_a_layer_over_the_swaps_is_swapped(shop: Shop) -> None:
+    ends(shop, swap_started(shop), "stopped", layer=12)
+    assert spools(kept(shop)) == [(WHITE, 1), (BLACK, 11)] and shop.loaded() == BLACK
+
+
+@pytest.mark.parametrize("loads", [(WHITE,), (BLACK, WHITE)])
+def test_the_first_loaded_again_since_isnt_written_over(
+    shop: Shop, loads: tuple[int, ...]
+) -> None:
+    """Told since is that it was told, though it says what it said before (finding 4)."""
+    row = swap_started(shop)
+    for spool in loads:
+        shop.load(spool)
+    ends(shop, row)
+    assert shop.loaded() == WHITE
+
+
+def test_a_correction_doesnt_write_over_a_load_since_the_end(shop: Shop) -> None:
+    ends(shop, swap_started(shop))  # finding 5
+    with Inventory(shop.path) as stock:
+        stock.empty(BLACK)
+        stock.load(WHITE)
+    answered_with(shop, "spool #3, Elegoo PETG, clear")
+    assert shop.loaded() == WHITE
+
+
+def test_a_later_print_thats_still_starting_keeps_its_stock(shop: Shop) -> None:
+    row = swap_started(shop)
+    with Ledger(shop.path) as ledger:
+        ledger.record_start_requested(record("job-2"))  # finding 2: asked, not yet seen to start
+    ends(shop, row)
+    assert shop.loaded() == WHITE
+
+
+def test_a_later_start_that_failed_doesnt_keep_the_last_from_loading(shop: Shop) -> None:
+    row = swap_started(shop)
+    with Ledger(shop.path) as ledger:
+        ledger.record_start_requested(record("job-2"))
+        ledger.record_start_failed("job-2", "refused")
+    ends(shop, row)
+    assert shop.loaded() == BLACK
+
+
+def test_the_first_used_up_at_the_swap_still_leaves_the_last_loaded(shop: Shop) -> None:
+    row = swap_started(shop)  # finding 7
+    with Inventory(shop.path) as stock:
+        stock.empty(WHITE)
+    ends(shop, row)
+    assert shop.loaded() == BLACK
+
+
+def stock_write_fails(shop: Shop, *, fails: bool) -> None:
+    db = sqlite3.connect(shop.path)
+    db.executescript(
+        "CREATE TRIGGER no_load BEFORE UPDATE OF state ON spools WHEN NEW.state = 'loaded' "
+        "BEGIN SELECT RAISE(ABORT, 'the stock is busy'); END;"
+        if fails else "DROP TRIGGER no_load;")
+    db.commit()
+    db.close()
+
+
+def test_an_end_the_stock_couldnt_take_is_seen_again(shop: Shop) -> None:
+    row = swap_started(shop)  # findings 6 and 10: one write, or none
+    stock_write_fails(shop, fails=True)
+    with pytest.raises(sqlite3.Error):
+        ends(shop, row)
+    assert kept(shop).ended_at is None and shop.loaded() == WHITE
+    stock_write_fails(shop, fails=False)
+    ends(shop, row)
+    assert kept(shop).ended_at is not None and shop.loaded() == BLACK
+
+
+def test_a_record_the_stock_couldnt_take_is_said_and_can_be_pressed_again(shop: Shop) -> None:
+    ends(shop, swap_started(shop))
+    stock_write_fails(shop, fails=True)
+    shown = answered_with(shop, "spool #3, Elegoo PETG, clear")
+    row = kept(shop)
+    assert row.result is None and spools(row) == [(WHITE, 1), (BLACK, 11)], "nothing half done"
+    assert "the stock is busy" in (shown.get("error") or "")
+    stock_write_fails(shop, fails=False)
+    answered_with(shop, "spool #3, Elegoo PETG, clear")
+    assert spools(kept(shop)) == [(WHITE, 1), (CLEAR, 11)] and shop.loaded() == CLEAR
+
+
+def test_a_spool_that_ran_out_keeps_the_layers_it_printed(shop: Shop) -> None:
+    ends(shop, swap_started(shop))  # finding 9
+    with Inventory(shop.path) as stock:
+        stock.empty(BLACK)
+    answered_with(shop, "spool #3, Elegoo PETG, clear")
+    assert spools(kept(shop)) == [(WHITE, 1), (BLACK, 11), (CLEAR, None)]
+    assert shop.loaded() == CLEAR
+
+
+def test_another_spool_on_at_a_stop_under_the_swap_never_printed_over_it(shop: Shop) -> None:
+    ends(shop, swap_started(shop), "stopped", layer=5)
+    answered_with(shop, "spool #3, Elegoo PETG, clear")
+    row = kept(shop)
+    assert spools(row) == [(WHITE, 1), (WHITE, 11), (CLEAR, None)]
+    assert "wasn't made" in describe(row) and "clear, from layer 11" not in describe(row)
+
+
+def test_a_spool_picked_is_kept_though_its_edited_before_record(shop: Shop) -> None:
+    ends(shop, swap_started(shop))  # finding 11
+    bridge = MemoryBridge()
+    with Ledger(shop.path) as ledger:
+        desk = OutcomeDesk(ledger=ledger, cfg=CFG,
+                           publish=lambda topic, payload: bridge.publish(topic, payload, True))
+        for topic, handler in desk.topics.items():
+            bridge.subscribe(topic, handler)
+        desk.refresh()
+        bridge.deliver(outcome_spool_topic(CFG), "spool #3, Elegoo PETG, clear")
+        with Inventory(shop.path) as stock:
+            stock.edit(CLEAR, colour="natural")
+        bridge.deliver(outcome_result_topic(CFG), "success")
+        shown = bridge.retained_json(outcome_topic(CFG))["spool"]
+        assert shown in bridge.retained_json(outcome_spool_select(CFG)[0])["options"]
+        bridge.deliver(outcome_symptom_topic(CFG), "none")
+        bridge.deliver(outcome_submit_topic(CFG), "record")
+    assert spools(kept(shop)) == [(WHITE, 1), (CLEAR, 11)]
+
+
+def test_the_planned_spool_can_be_picked_though_its_marked_empty(shop: Shop) -> None:
+    ends(shop, swap_started(shop), "stopped", layer=11)
+    with Inventory(shop.path) as stock:
+        stock.empty(BLACK)
+    answered_with(shop, "spool #2, Elegoo PLA, black")
+    assert spools(kept(shop)) == [(WHITE, 1), (BLACK, 11)]
+
+
+def test_the_desks_line_parses_back_with_the_first_spool_used_up(shop: Shop) -> None:
+    first = shop.run("wall_loops=3 because strong; colour_change=2 to #2", "ok")  # finding 8
+    with Inventory(shop.path) as stock:
+        stock.empty(WHITE)
+        new = stock.add_spool(manufacturer="Elegoo", type="PLA", variety="Elegoo PLA",
+                              colour="white")
+        stock.load(new.id)
+    line = shop.correction_line(first.job_id)
+    assert "wall_loops=3 because strong" in line and "#1" not in line
+
+    second = shop.run(line, str(new.id), "2", "ok")
+
+    assert second.result.printed, second.result.error
+    assert spools(second.row) == [(new.id, 1), (BLACK, 11)]
+    assert second.row is not None
+    assert "wall_loops" in [c.key for c in second.row.corrections or ()]
+
+
+def test_the_desks_line_parses_back_with_the_second_spool_used_up(shop: Shop) -> None:
+    first = shop.run("colour_change=2 to #2", "ok")
+    shop.load(WHITE)
+    with Inventory(shop.path) as stock:
+        stock.empty(BLACK)
+    second = shop.run(shop.correction_line(first.job_id), "3", "ok")
+    assert spools(second.row) == [(WHITE, 1), (CLEAR, 11)]
+
+
+def test_enter_preselects_from_the_print_picked_in_the_same_answer(shop: Shop) -> None:
+    shop.run("pause_at=2 for insert", "ok")  # finding 13
+    shop.run("colour_change=2 to #2", "ok")
+    shop.load(WHITE)
+    ran = shop.run("from 2; pause_at=2", "", "ok")
+    assert "Enter for an insert" in ran.terminal
+    assert kind_of(ran.row) == "insert"
+
+
+def test_a_cleared_item_isnt_preselected(shop: Shop) -> None:
+    shop.run("pause_at=2 for insert", "ok")
+    ran = shop.run("clear 1; pause_at=2", "", "2", "back", "stop")
+    assert "Enter for an insert" not in ran.terminal
+
+
+def test_enter_never_starts_on_the_spool_the_last_swap_left(shop: Shop) -> None:
+    """Asked afresh with the second left loaded, Enter would be the swap reversed."""
+    shop.run("colour_change=2 to #2", "ok")
+    ran = shop.run("colour_change=4", "", "back", "stop")
+    assert ran.prompts == ["> ", "spool> ", "spool> ", "> "]
+
+
+def test_a_superscript_digit_at_the_spool_prompt_is_asked_again(shop: Shop) -> None:
+    ran = shop.run("colour_change=2", "", "\u00b2", "2", "ok")
+    assert spools(ran.row) == [(WHITE, 1), (BLACK, 11)]
+
+
+def test_the_readings_colour_is_the_spools_as_the_print_started(shop: Shop) -> None:
+    def edit() -> None:
+        with Inventory(shop.path) as stock:
+            stock.edit(BLACK, colour="charcoal")
+
+    ran = shop.run("colour_change=2 to #2", "ok", at_gate=edit)
+    assert ran.row is not None and ran.row.reading is not None
+    assert "charcoal" in ran.row.reading.pauses[0].line()
+
+
+def test_reprinting_an_insert_the_first_review_doesnt_say_swap(shop: Shop) -> None:
+    shop.run("pause_at=2 for insert", "ok")
+    ran = shop.run("use", "ok")
+    assert not re.search("swap", ran.terminal, re.I), ran.terminal
+
+
+def test_the_card_points_at_the_select_only_where_its_shown(shop: Shop) -> None:
+    ran = shop.run("pause_at=2 for insert", "ok")
+    outcome = {**ran.outcome, "spools": "spool #1, from layer 1", "spool_choices": 0}
+    assert "pick it below" not in cards(dataclasses.replace(ran, outcome=outcome))

@@ -49,11 +49,16 @@ LAYERS = {"initial_layer_print_height": "0.2", "layer_height": "0.2"}
 
 def with_pause(path: Path, print_z: float) -> None:
     """Put a pause in a recorded slice where Orca puts its own: at the start of the layer whose
-    top is nearest `print_z`, a tie to the lower, before that layer's lines."""
+    top is nearest `print_z`, a tie to the lower, after the layer is counted and before any of
+    its lines are printed."""
     lines = path.read_text().splitlines(keepends=True)
     tops = [(i, float(line[3:])) for i, line in enumerate(lines) if line.startswith(";Z:")]
     at, _ = min(tops, key=lambda t: (abs(t[1] - print_z), t[1]))
     after = at + 1 if lines[at + 1].startswith(";HEIGHT:") else at
+    next_layer = next((i for i in range(at + 1, len(lines))
+                       if lines[i].startswith(";LAYER_CHANGE")), len(lines))
+    after = next((i for i in range(at + 1, next_layer)
+                  if lines[i].startswith("SET_PRINT_STATS_INFO CURRENT_LAYER")), after)
     lines[after + 1:after + 1] = [";PAUSE_PRINT\n", "M600\n"]
     path.write_text("".join(lines))
 

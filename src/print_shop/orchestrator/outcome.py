@@ -23,7 +23,8 @@ is shown at once, the draft resets whenever the print on show changes, and the
 part's name is on the card beside the buttons.
 
 A print with a swap (mqucifer/print-shop#218) leaves its last spool loaded in the stock when the
-watcher sees it end (`spools.at_end`). The desk says so, and Record takes a correction of it.
+watcher sees it end (`spools.at_end`, `Ledger.record_ended`). The desk says so, and Record takes
+a correction of it.
 
 With frames (mqucifer/print-shop#110), the desk also shows the last, and
 pages through the rest with Earlier and Later, beside the answer: evidence,
@@ -35,6 +36,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 import threading
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -153,6 +155,8 @@ class Watcher:
         self._poll_s = poll_s
         self._wake = threading.Event()
         self._stop = threading.Event()
+        #: One look at a time: the gate looks too, before a start (mqucifer/print-shop#218).
+        self._looking = threading.Lock()
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
@@ -182,6 +186,10 @@ class Watcher:
 
     def look(self) -> None:
         """One pass: read the printer once if anything is worth reading it for."""
+        with self._looking:
+            self._look()
+
+    def _look(self) -> None:
         running = self._ledger.running()
         cutoff = datetime.now(UTC) - UNCONFIRMED_WINDOW
         unconfirmed = [
@@ -205,14 +213,13 @@ class Watcher:
                 # One printer, one bed: what the agent started is over.
                 if self._frames is not None:
                     self._frames.at_end(row.job_id, snapshot.layer, snapshot.total_layers)
-                self._ledger.record_ended(row.job_id, snapshot.print_status)
-                self._left_loaded(row, snapshot.print_status,
-                                  snapshot.layer if _still_shows(snapshot, row) else None)
+                status = snapshot.print_status
+                layer = snapshot.layer if _still_shows(snapshot, row) else None
+                self._ledger.record_ended(row.job_id, status, spools.at_end(row, status, layer))
             elif snapshot.active_filename is not None and not _is_ours(snapshot, row):
                 # Something else holds the printer, so ours ended while nobody
                 # was looking. How it ended is not known, and is not guessed.
                 self._ledger.record_ended(row.job_id, None)
-                self._left_loaded(row, None, None)
             else:
                 if self._frames is not None and _is_ours(snapshot, row):
                     self._frames.at_layer(row.job_id, snapshot.layer, snapshot.total_layers)
@@ -220,13 +227,6 @@ class Watcher:
             ended_any = True
         if ended_any:
             self._on_ended()
-
-    def _left_loaded(self, row: Row, status: int | None, layer: int | None) -> None:
-        try:
-            spools.at_end(self._ledger, row, status, layer)
-        except Exception:  # noqa: BLE001 - the stock is never in the way of seeing a print end
-            logger.exception("job %s ended, and the stock couldn't be left with its last spool",
-                             row.job_id)
 
 
 class OutcomeDesk:
@@ -254,6 +254,8 @@ class OutcomeDesk:
         self._error: str | None = None
         #: The spools the print on show can say it ended with, and those last sent as the select's.
         self._spools: dict[str, int] = {}
+        #: The one picked, by its words and number: kept though the stock changes under it.
+        self._picked: tuple[str, int] | None = None
         self._offered: tuple[str, ...] | None = None
 
     @property
@@ -263,7 +265,7 @@ class OutcomeDesk:
             outcome_result_topic(self._cfg): self._setter("result", {UNSET, *Result}),
             outcome_symptom_topic(self._cfg): self._setter("symptom", {UNSET, *Symptom}),
             outcome_note_topic(self._cfg): self._setter("note", None),
-            outcome_spool_topic(self._cfg): self._setter("spool", None),
+            outcome_spool_topic(self._cfg): self._set_spool,
             outcome_submit_topic(self._cfg): self._on_submit,
             outcome_frame_set_topic(self._cfg): self._on_frame,
         }
@@ -277,6 +279,7 @@ class OutcomeDesk:
         waiting = self._ledger.awaiting_answer()
         if not waiting:
             self._shown, self._draft, self._error, self._frame = None, {}, None, None
+            self._picked = None
             self._offer_spools({})
             self._publish(outcome_topic(self._cfg), {"pending": False, "waiting": 0})
             self._show_frame(None)
@@ -284,14 +287,15 @@ class OutcomeDesk:
         row = waiting[0]
         if row.job_id != self._shown:
             self._shown, self._draft, self._error, self._frame = row.job_id, {}, None, None
+            self._picked = None
         frames = self._ledger.frames(row.job_id)
         at = min(self._frame, len(frames) - 1) if self._frame is not None else len(frames) - 1
         shown = frames[at] if frames else None
         self._show_frame(shown)
         can_end_with, spools_said = self._spools_of(row)
+        if self._picked is not None:
+            can_end_with = {**can_end_with, self._picked[0]: self._picked[1]}
         self._offer_spools(can_end_with)
-        if self._draft.get("spool") not in (None, *can_end_with):
-            del self._draft["spool"]  # not a spool that can be picked
         paused = row.reading.pauses if row.reading else ()
         self._publish(
             outcome_topic(self._cfg),
@@ -309,7 +313,7 @@ class OutcomeDesk:
                 "pause": "; ".join(p.line() for p in paused),
                 "pause_for": next((p.kind.value for p in paused if p.kind), ""),
                 "spools": spools_said,
-                "spool": self._draft.get("spool", OUTCOME_SPOOL_AS_RECORDED),
+                "spool": self._picked[0] if self._picked else OUTCOME_SPOOL_AS_RECORDED,
                 "spool_choices": len(can_end_with),
                 "result": self._draft.get("result", UNSET),
                 "symptom": self._draft.get("symptom", UNSET),
@@ -388,7 +392,7 @@ class OutcomeDesk:
             with self._lock:
                 if self._shown is None:
                     return  # nothing on show, so nothing to be choosing for
-                if value == UNSET or (field == "spool" and value == OUTCOME_SPOOL_AS_RECORDED):
+                if value == UNSET:
                     self._draft.pop(field, None)
                 else:
                     self._draft[field] = value[:2000]
@@ -396,6 +400,21 @@ class OutcomeDesk:
                 self._show_locked()
 
         return handle
+
+    def _set_spool(self, topic: str, payload: bytes, retain: bool) -> None:
+        """The spool on at the end, picked from those offered and kept by its number."""
+        if retain:
+            return
+        value = payload.decode("utf-8", "replace").strip()
+        with self._lock:
+            if self._shown is None:
+                return
+            if value in self._spools:
+                self._picked = (value, self._spools[value])
+            elif value in (UNSET, OUTCOME_SPOOL_AS_RECORDED):
+                self._picked = None
+            self._error = None
+            self._show_locked()
 
     def _on_submit(self, topic: str, payload: bytes, retain: bool) -> None:
         if retain:
@@ -411,15 +430,17 @@ class OutcomeDesk:
                     symptom=Symptom(draft.get("symptom", "")),
                     note=draft.get("note", ""),
                 )
-                ended_with = self._spools.get(draft.get("spool", ""))
-                # Before the answer, which is what the lessons read, and never with a refused one.
-                if ended_with is not None and not answer.problems():
+                corrected = None
+                if self._picked is not None:
                     row = self._ledger.get(job_id)
-                    if row is not None and row.awaiting_answer:
-                        spools.correct(self._ledger, row, ended_with)
-                self._ledger.record_answer(job_id, answer)
+                    if row is not None:
+                        corrected = spools.correct(self._ledger, row, self._picked[1])
+                # The answer, the spools and the stock: one write, or none of them.
+                self._ledger.record_answer(job_id, answer, corrected)
             except InventoryError as exc:
                 self._error = str(exc)
+            except sqlite3.Error as exc:
+                self._error = f"it couldn't be written ({exc}): press Record again"
             except ValueError:
                 self._error = "choose a result and a symptom first"
             except LedgerError as exc:

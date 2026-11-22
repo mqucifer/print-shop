@@ -24,7 +24,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from print_shop.env import load_env
-from print_shop.inventory import Nozzle, Printer, Spool
+from print_shop.inventory import Nozzle, Printer, Spool, swap_made
 from print_shop.joblog import LOG_NAME
 from print_shop.ledger import Frame, Ledger, LedgerError, Row, UnprintedJob
 from print_shop.orchestrator.frames import FRAMES_DIR
@@ -158,6 +158,8 @@ class JobRecord:
     #: Whether `part_path` holds the bytes the job printed, by their sha256.
     part_found: bool = False
     printers: int = 0
+    #: The spools on hand by number, for the line to print it again (mqucifer/print-shop#218).
+    on_hand: frozenset[int] | None = None
 
 
 def status(row: Row) -> str:
@@ -187,10 +189,11 @@ def pause_said(row: Row) -> str:
     word = pause_word(row)
     if word != "swap" or len(row.spools) < 2:
         return word
-    first, last = row.spools[0].material, row.spools[-1].material
-    if first.spool_id == last.spool_id:
-        return f"swap, not made: {first.colour} throughout"
-    return f"swap: {first.colour}, then {last.colour}"
+    colours = [used.material.colour for used in row.spools]
+    if not swap_made(row.spools):
+        then = "".join(f", then {colour}" for colour in colours[2:]) or " throughout"
+        return f"swap, not made: {colours[0]}{then}"
+    return "swap: " + ", then ".join(colours)
 
 
 class Desk:
@@ -295,6 +298,8 @@ class Desk:
             missed = ledger.frames_missed(job_id) if ledger is not None else None
             printers = (len(ledger.query("SELECT id FROM printers"))
                         if ledger is not None else 0)
+            on_hand = (frozenset(int(r["id"]) for r in ledger.query(
+                "SELECT id FROM spools WHERE state != 'empty'")) if ledger is not None else None)
         log = self.log_path(job_id)
         text = log.read_text(encoding="utf-8", errors="replace") if log is not None else None
         if row is None and unprinted is None and text is None:
@@ -315,6 +320,7 @@ class Desk:
         return JobRecord(
             job_id=job_id, row=row, unprinted=unprinted, frames=frames, frames_missed=missed,
             log=text, part_path=found or named, part_found=found is not None, printers=printers,
+            on_hand=on_hand,
         )
 
     def log_path(self, job_id: str) -> Path | None:

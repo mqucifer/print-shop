@@ -198,8 +198,10 @@ def to_type(value: str, pause: Pause | None) -> tuple[str, str]:
         return "pause_at", value
     if pause.kind is PauseFor.INSERT:
         return "pause_at", f"{value} for insert"
-    if pause.start is None or pause.to is None:
+    if pause.start is None:
         return "colour_change", value
+    if pause.to is None:
+        return "colour_change", f"{value} from #{pause.start.spool_id}"
     return "colour_change", f"{value} from #{pause.start.spool_id} to #{pause.to.spool_id}"
 
 
@@ -258,8 +260,10 @@ def as_printed(pause: Pause | None, spools: tuple[SpoolUse, ...]) -> Pause | Non
     swap was made, else with those planned."""
     if pause is None or pause.kind is not PauseFor.SWAP or not spools:
         return pause
-    first, last = spools[0].material, spools[-1].material
-    to = last if last.spool_id != first.spool_id else pause.to
+    first = spools[0].material
+    # The spool swapped to, not one that finished after it ran out.
+    second = spools[1].material if len(spools) > 1 else first
+    to = second if second.spool_id != first.spool_id else pause.to
     return Pause(kind=pause.kind, start=first, to=to)
 
 
@@ -286,11 +290,14 @@ def ask(
     value: str, pause: Pause | None, before: tuple[Pause, str] | None,
     material: Material | None, stock: Stock | None,
     read: Callable[[str], str], write: Callable[[str], None],
+    *, gone: str = "", left_by_swap: bool = False,
 ) -> Pause | None:
     """What's left to say of a pause, asked. None is the person going back to the review.
 
     `before` is what's pre-selected, and where it's from: this review's pause, or the past
-    print's on offer.
+    print's ticked on offer. `gone` is why that print's first spool can't start this job, and
+    `left_by_swap` that the spool loaded is the last swap's second: with either, no spool is
+    pre-selected to start on, as Enter would be that swap reversed.
     """
     if pause is None:
         kind = _ask_kind(value, before, read, write)
@@ -303,7 +310,7 @@ def ask(
     if stock is None:
         return pause
     earlier = before[0] if before and before[0].kind is pause.kind else None
-    start = pause.start or _ask_start(earlier, material, stock, read, write)
+    start = pause.start or _ask_start(earlier, gone, left_by_swap, material, stock, read, write)
     if start is None:
         return None
     to = pause.to
@@ -337,18 +344,19 @@ def _ask_kind(
 
 
 def _ask_start(
-    earlier: Pause | None, material: Material, stock: Stock,
+    earlier: Pause | None, gone: str, left_by_swap: bool, material: Material, stock: Stock,
     read: Callable[[str], str], write: Callable[[str], None],
 ) -> Material | None:
     on_hand = stock()
     can = [s for s in on_hand if material.of(s).same_filament(material)]
-    gone = cant_start(earlier, material, on_hand)
+    gone = gone or cant_start(earlier, material, on_hand)
     default: Material | None = None
     if gone:
         write(f"  {gone}")
     else:
-        default = (_still(earlier.start if earlier else None, material, on_hand)
-                   or _still(material, material, on_hand))
+        default = _still(earlier.start if earlier else None, material, on_hand)
+        if default is None and not left_by_swap:
+            default = _still(material, material, on_hand)
     write("Which spool does it start on?")
     write("\n".join(f"  {s.line()}" for s in can)
           or f"  None of {material.filament_said()} is on hand: back, or add it with stock.py")
@@ -391,7 +399,7 @@ def _ask_spool(
             return None
         if not answer and default is not None:
             return default
-        if not answer.isdigit():
+        if re.fullmatch(r"[0-9]+", answer) is None:
             write("  a spool's number, or back")
             continue
         found = named(int(answer))
