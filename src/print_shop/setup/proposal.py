@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
+from print_shop.materials import material_name
 from print_shop.setup.context import PartContext, refuses
 from print_shop.setup.features import Feature
 from print_shop.setup.intake import Intake
@@ -247,7 +248,7 @@ class PartFacts:
 
     @property
     def filament_type(self) -> str:
-        return _first(self.filament.get("filament_type", ""))
+        return material_name(_first(self.filament.get("filament_type", "")))
 
 
 def answered(facts: PartFacts) -> list[Change]:
