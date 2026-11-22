@@ -319,6 +319,8 @@ def _questions(row: Row) -> str:
             mark = " ← the notes" if i == q.noted else ""
             if answer is not None and mine:
                 mark = f" ← {q.whose(answer) or 'your answer'}"
+                if answer.given_in is not None:
+                    mark += f", {q.as_answered(answer)}"
             cls = ' class="chosen"' if mine else ""
             parts.append(f"<li{cls}>{escape(q.then(o.line()))}{escape(mark)}</li>")
         parts.append("</ul>")

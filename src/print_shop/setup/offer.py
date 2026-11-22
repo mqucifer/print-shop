@@ -458,12 +458,14 @@ def _both(
 def _compared(
     lines: tuple[str, ...], own: Seen | None, other: Seen | None,
 ) -> tuple[str, ...]:
-    """A context's lines as they're compared: what's seen is the faces as they print, whoever
-    said them (mqucifer/print-shop#248). Not known on either side isn't a difference."""
-    rest = tuple(line for line in lines if not line.startswith("seen: "))
+    """A context's lines as they're compared (mqucifer/print-shop#248). Where both prints' faces
+    are known, what's seen is those, as they print and whoever said them, and a face not spoken
+    of is no difference. Where either's aren't, the notes' own lines are compared, as before."""
     if own is None or other is None:
-        return rest
-    return (*rest, f"seen: {own.as_printed()}")
+        return lines
+    rest = tuple(line for line in lines if not line.startswith("seen: "))
+    alike = "the same" if own.same_as(other) else own.as_printed()
+    return (*rest, f"seen: {alike}")
 
 
 def _seen_then(row: Row) -> Seen | None:

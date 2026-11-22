@@ -52,7 +52,7 @@ from print_shop.ingest.orientation import write_rotated
 from print_shop.outcome_words import outcome_words
 from print_shop.setup.bounds import SETTINGS, check
 from print_shop.setup.context import refuses
-from print_shop.setup.model import prompt
+from print_shop.setup.model import NEVER_BACK, prompt
 from print_shop.setup.proposal import (
     Change,
     GivenLesson,
@@ -378,8 +378,11 @@ def _user(part: Part) -> str:
         faces = carried(intake, context, c.rotation_deg)
         shown = f"; seen there: {faces.as_printed()}" if faces is not None else (
             "; seen there: not known" if answered_seen else "")
-        if faces is not None and faces.top_unsaid:
-            shown += " (whether the top is wasn't said)"
+        if faces is not None:
+            if words := faces.unsaid_words():
+                shown += f" ({words}, so it isn't hidden)"
+            if faces.part_walls:
+                shown += f"; {NEVER_BACK}"
         lines.append(f"- {pose_value(c.rotation_deg)}: {c.overhang_area_mm2:g} mm2 overhang, "
                      f"{c.bed_contact_area_mm2:g} mm2 on the plate, {c.height_mm:g} mm tall"
                      f"{shown}")

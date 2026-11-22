@@ -46,6 +46,9 @@ DEFAULT_MODEL = "crew-code-think"
 #: measured on the Spark (2026-10-08), 16,000 is about ten minutes at most.
 DEFAULT_MAX_TOKENS = 16000
 
+#: What a model is told where only part of the walls is seen (mqucifer/print-shop#248).
+NEVER_BACK = ("never set seam_position to back or aligned_back there: the line could land on the "
+              "wall that's seen")
 #: How the model is called: `complete_json`, or a test's recorded reply.
 Ask = Callable[[str, str, dict[str, Any]], dict[str, Any]]
 
@@ -253,19 +256,11 @@ def _seen(facts: PartFacts) -> list[str]:
         answered = any(q.feature == "seen" and q.pose is not None for q in intake.questions)
         return (["Which faces are seen as it lies here isn't known: judge none as seen or "
                  "hidden.", ""] if answered else [])
-    seam = ""
-    if now.part_walls:
-        seam = (" Whether the wall at the back as it sits (its largest y) is seen isn't known, "
-                "so don't put the seam there: not seam_position back or aligned_back."
-                if now.back_seen is None else
-                " The wall at the back as it sits (its largest y) is one that's seen, so never "
-                "put the seam there: not seam_position back or aligned_back." if now.back_seen
-                else " The wall at the back as it sits (its largest y) isn't seen, so a seam "
-                "line may go there, unless the slicer turns the part to fit the plate.")
-    top = (" Whether the top as it lies here is seen wasn't said: don't judge it hidden."
-           if now.top_unsaid else "")
+    words = now.unsaid_words()
+    unsaid = f" Of those, {words}: don't judge that face hidden." if words else ""
+    seam = f" Only part of the walls is seen, so {NEVER_BACK}." if now.part_walls else ""
     return [f"Seen as it lies here, carried from what was said: {now.as_printed()}. Go by this "
-            f"for which faces are seen.{top}{seam}", ""]
+            f"for which faces are seen.{unsaid}{seam}", ""]
 
 
 def _lessons(facts: PartFacts) -> list[str]:

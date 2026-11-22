@@ -123,8 +123,6 @@ class Sliced:
     outlines: dict[str, list[list[float]]]
     #: What the footer says: per-filament use, time, and the settings Orca sliced with.
     footer: dict[str, str]
-    #: How far the outer walls' lines reach along x and along y, or None where there are none.
-    walls_span: tuple[float, float] | None = None
 
     def per_filament(self, key: str) -> list[float]:
         """A footer figure for each filament, as `filament used [g]`."""
@@ -274,8 +272,6 @@ def read(gcode: Path, keep_lines: bool = False) -> Sliced:
     changes: list[dict[str, Any]] = []
     outlines: dict[str, list[list[float]]] = {}
     footer: dict[str, str] = {}
-    wall_xs = [math.inf, -math.inf]
-    wall_ys = [math.inf, -math.inf]
     layer: Layer | None = None
     kind = ""
     width = 0.0
@@ -422,9 +418,6 @@ def read(gcode: Path, keep_lines: bool = False) -> Sliced:
                 qz = z + (nz - z) * k / len(points)
                 moves.move(qx - px, qy - py, qz - pz, feed, accel, here, what)
                 if laying and layer is not None:
-                    if kind == OUTER_WALL:
-                        wall_xs = [min(wall_xs[0], px, qx), max(wall_xs[1], px, qx)]
-                        wall_ys = [min(wall_ys[0], py, qy), max(wall_ys[1], py, qy)]
                     piece = Line(px, py, qx, qy, width, kind, obj)
                     lengths[kind] += piece.length
                     areas[kind] += piece.length * width
@@ -440,9 +433,7 @@ def read(gcode: Path, keep_lines: bool = False) -> Sliced:
             x, y, z = nx, ny, nz
     close()
     _time(layers, moves)
-    span = ((wall_xs[1] - wall_xs[0], wall_ys[1] - wall_ys[0])
-            if wall_xs[0] <= wall_xs[1] else None)
-    return Sliced(layers, pauses, changes, outlines, footer, span)
+    return Sliced(layers, pauses, changes, outlines, footer)
 
 
 def _time(layers: list[Layer], moves: _Moves) -> None:

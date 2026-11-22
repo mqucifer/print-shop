@@ -138,7 +138,11 @@ Finish that job, or stop it with Ctrl-C in its terminal (which doesn't stop the 
      note: Seen as it now prints: the face on the plate. You said the top, as the file lays it; it was turned 180,0,0 since
    ```
 
-   The slice's flags, the model's settings call, the print loop and "Use these" read those faces. A seam at the back is proposed only where the wall there isn't seen and the slice shows the part sitting as posed (Orca can turn a long part to fit the plate). Where they can't be carried, as with an answer in your own words, none is judged, and the note opens `TURNED SINCE YOU ANSWERED`. The recommended answer, the walls and the top, doesn't speak of the face on the plate, so turned to be the top that face is never judged hidden. Only the faces seen are carried: an answer on the part's shape, or a setting an option set, isn't. An answer from before this has no pose, and is read in the pose it printed in.
+   The slice's flags, the model's settings call, the print loop and "Use these" read those faces.
+   - **Where only part of the walls is seen, a seam at the back is never proposed.** Orca's back takes a corner, which two walls share, and Orca can turn the part on the plate. It's random, or with a fit it's to place by hand. With the walls seen all round it's as before.
+   - **The face on the plate is only called hidden by the notes or by "only the face on the plate".** The other three answers can't speak of it, so turned to be the top or a wall it's never judged hidden.
+   - **Where they can't be carried,** as with an answer in your own words, none is judged, and the note opens `TURNED SINCE YOU ANSWERED`.
+   - **Only the faces seen are carried:** an answer on the part's shape, or a setting an option set, isn't. An answer from before this has no pose, and is read in the pose it printed in.
 
    **The model reads the part while you answer those two** (mqucifer/print-shop#208). It's given the part's notes too, and asks only what they leave open. Its call has taken 3 to 19 minutes, so you don't have to wait for it:
    - **Its questions are added when they arrive,** after the answers you're giving and numbered on from them. A list never changes while you're typing an answer to it.

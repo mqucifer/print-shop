@@ -63,7 +63,6 @@ __all__ = [
     "PartContext",
     "Placed",
     "Seen",
-    "footprint",
     "own_sides",
     "pose_for",
     "place",
@@ -133,15 +132,30 @@ class Seen(BaseModel):
     #: Only some of the walls: a side that was the top or the plate's before a turn
     #: (mqucifer/print-shop#248).
     part_walls: bool = False
-    #: Where only part of the walls is seen: whether that takes in the wall at the back, the
-    #: part's largest y, where a `back` seam lands. None: not known.
-    back_seen: bool | None = None
     #: What they were called, where they're carried from another pose.
     called: str = ""
-    #: The top is a face the answer didn't speak of: never judged hidden.
-    top_unsaid: bool = False
+    #: The faces ("walls", "top", "bottom") that take in one the answer didn't speak of: never
+    #: judged hidden, nor different from another print's.
+    unsaid: tuple[str, ...] = ()
     #: Several parts' faces, whose `said` already says whose each is.
     of_several: bool = False
+
+    @property
+    def top_unsaid(self) -> bool:
+        """The top is a face the answer didn't speak of, and nothing says it's seen."""
+        return "top" in self.unsaid and not self.top
+
+    def unsaid_words(self) -> str:
+        """What the answer didn't speak of that could be read as hidden, or ""."""
+        if self.top_unsaid:
+            return "the top wasn't asked about"
+        return "one of the walls wasn't asked about" if "walls" in self.unsaid else ""
+
+    def same_as(self, other: Seen) -> bool:
+        """The same faces seen, counting none that either didn't speak of as a difference."""
+        skip = {*self.unsaid, *other.unsaid}
+        return all(getattr(self, face) == getattr(other, face)
+                   for face in ("walls", "top", "bottom") if face not in skip)
 
     def because(self) -> str:
         """Who said it and what, as a reason opens: after a turn, what that is as it prints."""
@@ -841,11 +855,10 @@ def seen_from(
     down = _opposite(up)
     walls = [side in sides for side in SIDES if side not in (up, down)]
     part = any(walls) and not all(walls)
-    back = _side(_rotation((rotation_deg[0], rotation_deg[1], rotation_deg[2])).T
-                 @ np.array([0.0, 1.0, 0.0]))
-    back_seen = (None if not part or back in unsaid else back in sides)
+    where = {up: "top", down: "bottom"}
     return Seen(walls=any(walls), top=up in sides, bottom=down in sides, said=said, noted=noted,
-                part_walls=part, back_seen=back_seen, called=called, top_unsaid=up in unsaid)
+                part_walls=part, called=called,
+                unsaid=tuple(dict.fromkeys(where.get(side, "walls") for side in unsaid)))
 
 
 def printed(seen: Seen, rotation_deg: tuple[float, float, float]) -> Seen | None:
@@ -860,18 +873,6 @@ def printed(seen: Seen, rotation_deg: tuple[float, float, float]) -> Seen | None
     how = " (turned over)" if up == "-z" else " (on its side)"
     return seen_from(sides, rotation_deg, f"{seen.said}{how}", seen.noted,
                      f"{seen.in_words()}, as the file lays it")
-
-
-def footprint(
-    stl: Path | str, rotation_deg: tuple[float, float, float],
-) -> tuple[float, float] | None:
-    """The part's size along x and y in that pose, before Orca places it on the plate."""
-    box = _mesh_box(Path(stl))
-    if box is None:
-        return None
-    turn = _rotation((rotation_deg[0], rotation_deg[1], rotation_deg[2]))
-    size = np.ptp((_corners(box) @ turn.T)[:, :2], axis=0)
-    return float(size[0]), float(size[1])
 
 
 def _up_side(rotation_deg: tuple[float, float, float]) -> str | None:

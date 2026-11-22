@@ -13,7 +13,6 @@ from typing import Any
 
 import numpy as np
 import pytest
-import trimesh
 
 from print_shop.desk.again import answers_file
 from print_shop.ingest.orientation import AXIS_ALIGNED, LAID, _rotation_matrix
@@ -29,7 +28,6 @@ from print_shop.setup.context import (
     PartContext,
     Placed,
     Seen,
-    footprint,
     own_sides,
     pose_for,
     read_context,
@@ -37,6 +35,7 @@ from print_shop.setup.context import (
 )
 from print_shop.setup.features import measure
 from print_shop.setup.intake import (
+    SQUARE_ON,
     Answer,
     AnswersRefused,
     Intake,
@@ -53,7 +52,6 @@ from print_shop.setup.reading import (
     SliceReading,
     carried,
     flags,
-    read_slice,
     seen,
     seen_across,
     seen_said,
@@ -61,10 +59,8 @@ from print_shop.setup.reading import (
 from print_shop.setup.review import Review, ReviewRequest, cli_reviewer
 from print_shop.setup.review import render as render_review
 from print_shop.setup.skill import groups_for, load
-from print_shop.slicer.orca import BedType, slice_model, with_bed_type
 from tests.fakes import CI_PROFILES, STORE_PROFILES, FramePrinter, MemoryBridge
 from tests.fixtures import write_stl
-from tests.test_graph import needs_orca
 from tests.test_job_e2e import CFG
 from tests.test_print_loop import Model
 from tests.test_reading import FILAMENT, PETG, PROCESS, _read
@@ -229,16 +225,25 @@ def test_a_part_flipped_after_the_top_is_seen_reads_the_plates_face_at_the_revie
     assert row.rotation_deg == FLIPPED
     assert three(job.given[0][0] or job.read_as) == (False, True, False), "before the turn"
     assert three(job.read_as) == PLATE
-    assert ("note: Seen as it now prints: the face on the plate. You said the top, as the file "
-            "lays it; it was turned 180,0,0 since") in job.last_review
+    assert ("note: Seen as it now prints: the face on the plate. The top wasn't asked about, as "
+            "it was on the plate when you answered, so ironing isn't judged. You said the top, "
+            "as the file lays it; it was turned 180,0,0 since") in job.last_review
 
     faces, placed = job.given[-1]
     ironed = _read(tmp_path, layers=20, ironed=(20,), config=PETG)
-    [hidden] = [f for f in flags(ironed, faces, PROCESS, FILAMENT, placed)
+    [ironing] = [f for f in flags(ironed, faces, PROCESS, FILAMENT, placed)
+                 if f.id.startswith("ironing")]
+    assert ironing.id == "ironing_unknown", "its top is no longer taken as seen, nor as hidden"
+
+
+def test_a_flags_reason_follows_the_turn(tmp_path: Path) -> None:
+    intake = Intake(questions=stock(None, LAID), answers=(Answer(choice=1), Answer(choice=3)))
+    ironed = _read(tmp_path, layers=20, ironed=(20,), config=PETG)
+    [hidden] = [f for f in flags(ironed, seen(intake, ON_ITS_SIDE), PROCESS, FILAMENT)
                 if f.id == "ironing_hidden"]
     assert hidden.change is not None
-    assert hidden.change.reason.startswith(
-        "you said the top, as the file lays it; as it prints that's the face on the plate, so")
+    assert hidden.change.reason.startswith("you said the face on the plate, as the file lays it; "
+                                           "as it prints that's part of the walls, so")
 
 
 def test_a_quarter_turn_onto_a_side_is_carried_as_part_of_the_walls(
@@ -246,7 +251,9 @@ def test_a_quarter_turn_onto_a_side_is_carried_as_part_of_the_walls(
 ) -> None:
     job.run(write_stl("cube", tmp_path), TOP_SEEN, sent_to(ON_ITS_SIDE), as_laid=True)
     assert three(job.read_as) == (True, False, False) and job.read_as.part_walls
-    assert "Seen as it now prints: part of the walls. You said the top" in job.last_review
+    assert ("Seen as it now prints: part of the walls. One of the walls wasn't asked about, as "
+            "it was on the plate when you answered, so it isn't judged hidden. You said the top"
+            ) in job.last_review
 
 
 def test_walls_turned_onto_a_side_are_the_top_and_the_plates_face_too(
@@ -281,7 +288,10 @@ def test_the_print_loops_turn_is_carried_and_each_pose_says_whats_seen_there(
     assert three(job.read_as) == PLATE
     assert "Seen as it now prints: the face on the plate." in job.last_review
     weighed = model.shown[0][1]["content"]
-    assert "seen there: the top\n" in weighed and "seen there: the face on the plate" in weighed
+    assert "seen there: the top\n" in weighed
+    assert "seen there: part of the walls" in weighed
+    assert "seen there: the face on the plate" in weighed
+    assert "never set seam_position to back" in weighed
     assert "Seen as it lies here" not in weighed, "one pose's faces aren't given for all six"
     assert "go by the pose you propose" in weighed
 
@@ -414,8 +424,8 @@ def test_the_reviews_line_reads_each_part_from_the_pose_it_was_asked_in() -> Non
     unmoved = seen_said(intake, None, FLIPPED, asked_in=FLIPPED)
     assert unmoved == "Seen as it prints: the top"
     back = seen_said(intake, None, LAID, asked_in=FLIPPED)
-    assert back.startswith("Seen as it now prints: the face on the plate. You said the top, turned "
-                           "180,0,0")
+    assert back.startswith("Seen as it now prints: the face on the plate. ")
+    assert "You said the top, turned 180,0,0;" in back
     assert "turned back to how the file lays it since" in back
 
 
@@ -484,7 +494,7 @@ def test_a_recorded_answer_about_faces_is_carried_from_the_pose_it_was_given_in(
     assert intake.answers[1].given_in == LAID
     now = carried(intake, None, FLIPPED)
     assert now is not None and three(now) == PLATE, "never read as the top it's asked of now"
-    assert "given in the pose 0,0,0" in intake.summary()
+    assert "answered in the pose 0,0,0" in intake.summary()
 
 
 def test_again_of_an_older_row_prints_seen_as_it_printed_then(
@@ -524,16 +534,66 @@ def test_a_recorded_answer_with_no_pose_says_which_its_read_in(tmp_path: Path) -
     assert "names no pose" in said[0] and "as the file lays it" in said[0]
 
 
-def test_beside_the_notes_faces_a_recorded_answer_in_another_pose_is_refused(
+def test_beside_the_notes_faces_an_answer_from_another_pose_is_carried_and_never_theirs(
     tmp_path: Path,
 ) -> None:
+    """The desk writes such files, so one is never refused: its words name other faces here, so
+    it's read by its sides and set beside the notes', both named."""
     stl = write_stl("cube", tmp_path)
     stl.with_name(stl.stem + SIDECAR).write_text(json.dumps({"seen": ["top"]}))
+    context = read_context(stl)
+    questions = stock(context, FLIPPED)
+    assert questions[1].noted == 3
     path = tmp_path / "answers.json"
     path.write_text(json.dumps({"answers": [
-        {"question": "purpose", "choice": 2}, {"question": "seen", "choice": 3, "pose": "0,0,0"}]}))
-    with pytest.raises(AnswersRefused, match="those words name other faces"):
-        replay_asker(path)(stock(read_context(stl), FLIPPED))
+        {"question": "purpose", "choice": 2}, {"question": "seen", "choice": 4, "pose": "0,0,0"}]}))
+    said: list[str] = []
+    intake = Intake(questions=questions, answers=replay_asker(path, write=said.append)(questions))
+    question, answer = questions[1], intake.answers[1]
+    assert not question.agrees(answer) and [q for q, _ in intake.over_notes()] == [question]
+    now = carried(intake, context, FLIPPED)
+    assert now is not None and three(now) == (False, True, False)
+    assert "answered in the pose 0,0,0" in said[0]
+
+
+def test_an_answer_given_in_another_pose_says_so_wherever_its_told(tmp_path: Path) -> None:
+    intake = Intake(questions=stock(None, LAID),
+                    answers=(Answer(choice=1), Answer(choice=2, given_in=FLIPPED)))
+    said = "the top as it lay when answered; the walls are hidden (answered in the pose 180,0,0)"
+    assert intake.questions[1].as_answered(intake.answers[1]) == said
+    assert said in intake.summary()
+    stl = write_stl("cube", tmp_path)
+    facts = Proposer().facts(intake, measure(stl, 400.0), STORE_PROFILES, pose=LAID)
+    assert said in settings_prompt(facts, load(groups_for(intake, facts.features)))
+
+
+def test_use_these_keeps_the_notes_difference_where_an_answer_isnt_known(
+    tmp_path: Path,
+) -> None:
+    """As before: notes here and none there differ, so a past print without them doesn't rise."""
+    stl = write_stl("cube", tmp_path)
+    stl.with_name(stl.stem + SIDECAR).write_text(json.dumps({"seen": ["top"]}))
+    other = tmp_path / "plinth.stl"
+    other.write_bytes(write_stl("tee", tmp_path).read_bytes())
+    context = read_context(stl)
+    with Ledger(tmp_path / "made-up.sqlite") as ledger:
+        printed_before(ledger, "past-job", other, (yours("brim_type", "auto_brim"),))
+        part = ThisPart(stl=stl, stl_name=stl.name, sha256="made-up",
+                        features=measure(stl, 400.0), rotation_deg=LAID, height_mm=20.0,
+                        machine={}, process={"brim_type": "no_brim"}, filament={},
+                        context=context, seen_in=lambda pose: carried(None, context, pose))
+        past = offering(ledger, part).past
+        assert past is not None
+        assert "seen faces weren't these" in " ".join(past.differs)
+        assert "context 0" in past.why
+
+
+def test_a_face_not_spoken_of_is_no_difference() -> None:
+    flipped = seen(Intake(questions=stock(None, LAID),
+                          answers=(Answer(choice=1), Answer(choice=0))), FLIPPED)
+    assert flipped is not None
+    assert flipped.same_as(faces(True, True, True)) and flipped.same_as(faces(True, False, True))
+    assert not flipped.same_as(faces(False, True, True))
 
 
 def test_use_these_compares_whats_seen_as_each_printed(tmp_path: Path) -> None:
@@ -559,99 +619,134 @@ def test_use_these_compares_whats_seen_as_each_printed(tmp_path: Path) -> None:
         assert "seen faces weren't these" in why(faces(False, True, False))
 
 
-def lopsided_gcode(tmp_path: Path, width: float = 10.0, deep: float = 10.0,
-                   position: str = "aligned") -> SliceReading:
-    """A square's slice with its seam a line, read, with its walls' span as given."""
-    found = _read(tmp_path, layers=30, config=PETG | {"seam_position": position})
-    return found.model_copy(update={"walls_span": (width, deep)})
+def line_up_the_wall(tmp_path: Path, position: str = "aligned") -> SliceReading:
+    """A square's slice with its seam a line."""
+    return _read(tmp_path, layers=30, config=PETG | {"seam_position": position})
 
 
-@pytest.mark.parametrize(("pose", "value", "says"), [
-    ((270.0, 0.0, 0.0), "random", "that takes in the wall at the back (its largest y)"),
-    ((90.0, 0.0, 0.0), "back", "and the one at the back isn't"),
-])
-def test_a_seam_never_goes_to_the_back_where_thats_the_seen_wall(
-    pose: tuple[float, float, float], value: str, says: str, tmp_path: Path
+SIDEWAYS = [pose for pose in AXIS_ALIGNED if pose not in (LAID, (180.0, 0.0, 0.0))]
+
+
+@pytest.mark.parametrize("option", [0, 1, 2, 3])
+@pytest.mark.parametrize("pose", SIDEWAYS)
+@pytest.mark.parametrize("position", ["aligned", "back", "aligned_back", "nearest", "random"])
+def test_back_is_never_proposed_where_only_part_of_the_walls_is_seen(
+    option: int, pose: tuple[float, float, float], position: str, tmp_path: Path
 ) -> None:
-    faces_now = seen(top_seen(), pose)
-    assert faces_now is not None
-    found = flags(lopsided_gcode(tmp_path), faces_now, PROCESS, FILAMENT, footprint=(10.0, 10.0))
+    """Orca's back takes a corner two walls share, and it can turn the part on the plate, so it
+    can't be told to miss the wall that's seen."""
+    intake = Intake(questions=stock(None, LAID),
+                    answers=(Answer(choice=1), Answer(choice=option)))
+    faces_now = seen(intake, pose)
+    assert faces_now is not None and faces_now.part_walls
+    found = flags(line_up_the_wall(tmp_path, position), faces_now, PROCESS, FILAMENT)
     [seam] = [f for f in found if f.id == "seam_seen"]
-    assert seam.change is not None and seam.change.value == value and says in seam.change.reason
-    assert seam.change.reason.startswith(
-        "you said the top, as the file lays it; as it prints that's part of the walls, and")
+    if position == "random":
+        assert seam.change is None, "never random to random"
+    else:
+        assert seam.change is not None and seam.change.value == "random"
+        assert "Not back" in seam.change.reason
+    if position in ("back", "aligned_back"):
+        assert seam.change is not None and "at the back now" in seam.change.reason
 
 
-def test_back_already_on_the_hidden_wall_stays(tmp_path: Path) -> None:
-    found = flags(lopsided_gcode(tmp_path, position="back"), seen(top_seen(), ON_ITS_SIDE),
-                  PROCESS, FILAMENT, footprint=(10.0, 10.0))
-    [seam] = [f for f in found if f.id == "seam_seen"]
-    assert seam.change is None and "stays at the back" in seam.reading
-
-
-@pytest.mark.parametrize("position", ["back", "aligned_back"])
-def test_a_line_already_on_the_seen_back_is_moved_off_it(position: str, tmp_path: Path) -> None:
-    found = flags(lopsided_gcode(tmp_path, position=position),
-                  seen(top_seen(), (270.0, 0.0, 0.0)), PROCESS, FILAMENT, footprint=(10.0, 10.0))
-    [seam] = [f for f in found if f.id == "seam_seen"]
-    assert seam.change is not None and seam.change.value == "random"
-
-
-@pytest.mark.parametrize("footprint_now", [(40.0, 10.0), None])
-def test_where_orca_turned_it_to_fit_the_back_isnt_known_and_isnt_proposed(
-    footprint_now: tuple[float, float] | None, tmp_path: Path
-) -> None:
-    found = flags(lopsided_gcode(tmp_path), seen(top_seen(), ON_ITS_SIDE), PROCESS, FILAMENT,
-                  footprint=footprint_now)
-    [seam] = [f for f in found if f.id == "seam_seen"]
-    assert seam.change is not None and seam.change.value == "random"
-    assert "isn't known" in seam.change.reason
-
-
-@pytest.mark.parametrize(("pose", "value"), [
-    ((270.0, 0.0, 0.0), None), ((90.0, 0.0, 0.0), "back"),
-])
-def test_with_a_fit_a_seen_back_gets_no_back_and_no_random_but_by_hand(
-    pose: tuple[float, float, float], value: str | None, tmp_path: Path
+@pytest.mark.parametrize("position", ["aligned", "back", "aligned_back"])
+def test_with_a_fit_part_seen_walls_get_no_back_and_no_random_but_by_hand(
+    position: str, tmp_path: Path
 ) -> None:
     band = FitBand(fit=Fit(name="made-up fit", play_min=0.1, play_max=0.1), z_from=2, z_to=4)
-    found = flags(lopsided_gcode(tmp_path), seen(top_seen(), pose), PROCESS, FILAMENT,
-                  Placed(fits=(band,)), footprint=(10.0, 10.0))
+    found = flags(line_up_the_wall(tmp_path, position), seen(top_seen(), ON_ITS_SIDE), PROCESS,
+                  FILAMENT, Placed(fits=(band,)))
     [seam] = [f for f in found if f.id == "seam_fit"]
-    if value is None:
-        assert seam.change is None and "needs placing by hand" in seam.reading
-    else:
-        assert seam.change is not None and seam.change.value == value
+    assert seam.change is None and "needs placing by hand" in seam.reading
+    assert ("may be on that wall" in seam.reading) is (position != "aligned")
 
 
-def test_a_random_seam_on_a_fit_isnt_sent_to_a_seen_back(tmp_path: Path) -> None:
+def test_a_random_seam_on_a_fit_isnt_sent_back_where_part_of_the_walls_is_seen(
+    tmp_path: Path,
+) -> None:
     band = FitBand(fit=Fit(name="made-up fit", play_min=0.1, play_max=0.1), z_from=2, z_to=4)
     scattered = _read(tmp_path, layers=30, seam_stays=False,
                       config=PETG | {"seam_position": "random"})
     found = flags(scattered, seen(top_seen(), (270.0, 0.0, 0.0)), PROCESS, FILAMENT,
-                  Placed(fits=(band,)), footprint=(10.0, 10.0))
+                  Placed(fits=(band,)))
     [seam] = [f for f in found if f.id == "seam_fit"]
     assert seam.change is not None and seam.change.value == "aligned"
     assert "placing by hand" in seam.change.reason
 
 
-@pytest.mark.parametrize(("pose", "says"), [
-    ((270.0, 0.0, 0.0), "never put the seam there"),
-    ((90.0, 0.0, 0.0), "isn't seen, so a seam line may go there"),
-])
-def test_the_settings_call_is_told_about_the_back(
-    pose: tuple[float, float, float], says: str, tmp_path: Path
+def test_walls_seen_all_round_still_go_back_as_before(tmp_path: Path) -> None:
+    intake = Intake(questions=stock(None, LAID), answers=(Answer(choice=1), Answer(choice=1)))
+    found = flags(line_up_the_wall(tmp_path), seen(intake, FLIPPED), PROCESS, FILAMENT)
+    [seam] = [f for f in found if f.id == "seam_seen"]
+    assert seam.change is not None and seam.change.value == "back"
+
+
+@pytest.mark.parametrize("option", [0, 1])
+@pytest.mark.parametrize("turn", SIDEWAYS)
+def test_a_plate_with_a_part_seen_all_round_never_sends_the_seam_back(
+    option: int, turn: tuple[float, float, float], tmp_path: Path
+) -> None:
+    intake = Intake(questions=stock(None, LAID),
+                    answers=(Answer(choice=1), Answer(choice=option)))
+    all_round, turned = carried(intake, None, LAID), carried(intake, None, turn)
+    for pair in ([all_round, turned], [turned, all_round]):
+        plate = seen_across(pair)
+        assert plate is not None and plate.part_walls
+        for position in ("aligned", "back"):
+            found = flags(line_up_the_wall(tmp_path, position), plate, PROCESS, FILAMENT)
+            [seam] = [f for f in found if f.id == "seam_seen"]
+            assert seam.change is not None and seam.change.value == "random"
+
+
+@pytest.mark.parametrize("pose", SIDEWAYS)
+def test_the_settings_call_and_the_loop_are_told_never_back(
+    pose: tuple[float, float, float], tmp_path: Path
 ) -> None:
     stl = write_stl("cube", tmp_path)
     facts = Proposer().facts(top_seen(), measure(stl, 400.0), STORE_PROFILES, pose=pose)
-    assert says in settings_prompt(facts, load(groups_for(top_seen(), facts.features)))
+    told = settings_prompt(facts, load(groups_for(top_seen(), facts.features)))
+    assert "never set seam_position to back or aligned_back" in told
+    assert "one of the walls wasn't asked about" in told
 
 
-def test_the_gcodes_span_is_the_parts_walls(tmp_path: Path) -> None:
-    found = _read(tmp_path, layers=5, side=12.0)
-    assert found.walls_span == (12.0, 12.0)
-    assert found.sits_as_posed((12.4, 12.4)) and not found.sits_as_posed((40.0, 12.4))
-    assert not found.model_copy(update={"walls_span": None}).sits_as_posed((12.0, 12.0))
+@pytest.mark.parametrize("option", [0, 1, 2])
+@pytest.mark.parametrize("pose", AXIS_ALIGNED)
+def test_three_answers_never_call_the_plates_face_hidden(
+    option: int, pose: tuple[float, float, float], tmp_path: Path
+) -> None:
+    """None of them can say it's seen: only "only the face on the plate" speaks of it."""
+    intake = Intake(questions=stock(None, LAID),
+                    answers=(Answer(choice=1), Answer(choice=option)))
+    now = seen(intake, pose)
+    assert now is not None and lying_as("-z", pose) in now.unsaid
+    if pose == FLIPPED:
+        ironed = _read(tmp_path, layers=20, ironed=(20,), config=PETG)
+        assert "ironing_hidden" not in {f.id for f in flags(ironed, now, PROCESS, FILAMENT)}
+
+
+def test_only_the_plates_face_is_the_whole_list() -> None:
+    intake = Intake(questions=stock(None, LAID), answers=(Answer(choice=1), Answer(choice=3)))
+    for pose in AXIS_ALIGNED:
+        now = seen(intake, pose)
+        assert now is not None and not now.unsaid
+
+
+@pytest.mark.parametrize("written", [
+    "nan,0,0", "1e999,0,0", "inf,0,0", "45,0,0", "0,0,90", "180,0", "flat",
+])
+def test_a_pose_no_part_prints_in_is_refused_before_anything_is_recorded(
+    written: str, tmp_path: Path
+) -> None:
+    path = tmp_path / "answers.json"
+    path.write_text(json.dumps({"answers": [
+        {"question": "purpose", "choice": 2}, {"question": "seen", "choice": 3, "pose": written}]}))
+    with pytest.raises(AnswersRefused, match="its pose"):
+        replay_asker(path)(stock(None, LAID))
+
+
+def test_the_poses_an_answer_takes_are_the_candidates() -> None:
+    assert SQUARE_ON == AXIS_ALIGNED
 
 
 def test_the_options_say_as_it_lies_now_and_the_label_is_unchanged(tmp_path: Path) -> None:
@@ -689,8 +784,11 @@ def test_the_recommended_answer_flipped_never_calls_the_top_hidden(
     """It's the answer for when it can't be said, and never named the face on the plate."""
     job.run(write_stl("cube", tmp_path), ["2", "1"], sent_to(FLIPPED), as_laid=True)
     assert job.read_as.top_unsaid and job.read_as.bottom
-    assert "whether the top is wasn't said" in job.last_review
-    assert "don't judge it hidden" in job.settings_prompts[-1]
+    assert ("note: Seen as it now prints: the walls and the face on the plate. The top wasn't "
+            "asked about, as it was on the plate when you answered, so ironing isn't judged. "
+            "You said the walls and the top, as the file lays it; it was turned 180,0,0 since"
+            ) in job.last_review
+    assert "don't judge that face hidden" in job.settings_prompts[-1]
     faces, placed = job.given[-1]
     ironed = _read(tmp_path, layers=20, ironed=(20,), config=PETG)
     found = {f.id: f for f in flags(ironed, faces, PROCESS, FILAMENT, placed)}
@@ -716,21 +814,6 @@ def test_several_parts_reasons_say_whose_each_is(tmp_path: Path) -> None:
     assert both is not None
     assert both.because() == ("you said 'the top as it prints; the walls are hidden'; the part's "
                               "notes say the top, as the file lays it")
-
-
-@pytest.mark.slicer
-@needs_orca
-@pytest.mark.parametrize(("wide", "deep", "as_posed"), [(60, 20, True), (18, 235, False)])
-def test_orca_turning_a_part_to_fit_is_read_from_its_walls(
-    wide: float, deep: float, as_posed: bool, tmp_path: Path
-) -> None:
-    """Orca's CLI can turn a part on the plate to fit it, and then +y isn't the pose's back."""
-    stl = tmp_path / "bar.stl"
-    trimesh.creation.box(
-        bounds=((-wide / 2, -deep / 2, 0), (wide / 2, deep / 2, 2))).export(stl)
-    pei = with_bed_type(STORE_PROFILES, BedType.TEXTURED_PEI, tmp_path / "profiles")
-    found = read_slice(slice_model(stl, pei, tmp_path / "out").gcode_path)
-    assert found.sits_as_posed(footprint(stl, LAID)) is as_posed
 
 
 def test_an_unreadable_purpose_quotes_each_load_so_one_can_be_copied(tmp_path: Path) -> None:

@@ -68,6 +68,12 @@ NOT_WAITED = "not waited"
 AS_IT_PRINTS = "as it prints"
 #: How an option names the plate's face: told afterwards as the one that was.
 ON_THE_PLATE = "the face on the plate"
+#: The poses faces can be named in: `ingest.orientation.AXIS_ALIGNED`, which imports this
+#: module's importers, so a test holds the two the same.
+SQUARE_ON = (
+    (0.0, 0.0, 0.0), (180.0, 0.0, 0.0), (90.0, 0.0, 0.0), (270.0, 0.0, 0.0), (0.0, 90.0, 0.0),
+    (0.0, 270.0, 0.0),
+)
 #: The most options a question is asked with. One past them is made from the notes.
 ASKED_OPTIONS = 4
 
@@ -217,7 +223,7 @@ class Question(BaseModel):
         assert self.noted is not None
         return (f"That differs from the notes. They say {self.topic.lower()}: "
                 f"{self.shown(self.options[self.noted].label)}. You said: "
-                f"{self.shown(self.label(answer)) if answer.choice is not None else answer.other}.")
+                f"{self._said_now(answer)}.")
 
     def answered_in(self, answer: Answer) -> tuple[float, float, float] | None:
         """The pose an answer about faces was given in. None: from before poses were kept, so
@@ -246,7 +252,12 @@ class Question(BaseModel):
     def as_answered(self, answer: Answer) -> str:
         """An answer as it's told afterwards."""
         said = self.label(answer)
-        return self.then(said) if answer.choice is not None else said
+        if answer.choice is not None:
+            said = self.then(said)
+        if answer.given_in is None:
+            return said
+        given = ",".join(f"{a:g}" for a in answer.given_in)
+        return f"{said.replace('when asked', 'when answered')} (answered in the pose {given})"
 
     def label(self, answer: Answer) -> str:
         """An answer to it, in words. Faces confirmed from the notes are said as the file lays
@@ -257,6 +268,11 @@ class Question(BaseModel):
             return self.beside
         return self.options[answer.choice].label
 
+    def _said_now(self, answer: Answer) -> str:
+        if answer.choice is None:
+            return answer.other
+        return self.as_answered(answer) if answer.given_in else self.shown(self.label(answer))
+
     def confirm(self) -> Answer:
         """What the notes gave, confirmed: what any asker returns for the person confirming it."""
         assert self.noted is not None
@@ -266,6 +282,12 @@ class Question(BaseModel):
         """Whether the person confirmed it from the notes."""
         return self.noted is not None and answer.from_notes and answer.choice == self.noted
 
+    def agrees(self, answer: Answer) -> bool:
+        """Whether an answer is what the notes gave. One given in another pose never is by its
+        words: there they name other faces."""
+        return (self.noted is not None and answer.choice == self.noted
+                and answer.given_in is None)
+
     def whose(self, answer: Answer) -> str:
         """Where the answer came from, where the notes gave one: "" is the person's answer to a
         question asked."""
@@ -273,7 +295,7 @@ class Question(BaseModel):
             return ""
         if self.confirmed(answer):
             return "from the part's notes, confirmed"
-        if answer.choice == self.noted:
+        if self.agrees(answer):
             return "your answer, as the notes say too"
         return f"your answer, in place of the notes' '{self.then(self.options[self.noted].label)}'"
 
@@ -329,7 +351,7 @@ class Intake(BaseModel):
     def over_notes(self) -> list[tuple[Question, Answer]]:
         """The answers that replaced what the part's notes said (mqucifer/print-shop#236)."""
         return [(q, a) for q, a in zip(self.questions, self.answers, strict=False)
-                if q.noted is not None and a.choice != q.noted]
+                if q.noted is not None and not q.agrees(a)]
 
     @property
     def unwaited(self) -> bool:
@@ -348,8 +370,6 @@ class Intake(BaseModel):
         for q, a in zip(self.questions, self.answers, strict=True):
             said = q.as_answered(a) if a.choice is not None else f"other: {a.other}"
             whose = q.whose(a)
-            if a.given_in is not None:
-                said += f" (given in the pose {','.join(f'{v:g}' for v in a.given_in)})"
             parts.append(f"{q.asked()} {said}" + (f" ({whose})" if whose else ""))
         return "; ".join(parts)
 
@@ -557,8 +577,8 @@ def replay_asker(path: Path, write: Callable[[str], None] = print) -> Asker:
     one written for one set of questions answered another wrongly, silently).
 
     An answer about faces may name the pose it was given in (``"pose": "180,0,0"``), and is
-    carried from it into whatever pose it's asked in now (mqucifer/print-shop#248). Beside faces
-    the notes give, it's refused in another, as which it agrees with can't be told by its words.
+    carried from it into whatever pose it's asked in now (mqucifer/print-shop#248). One given in
+    another pose is never taken for the notes' own by its words, which name other faces there.
     Without a pose it's read in the pose it's asked in, and `write` is told which.
 
     What the notes gave replays as ``{"question": "seen", "notes": "top, bottom"}``: confirmed,
@@ -621,7 +641,7 @@ def replay_asker(path: Path, write: Callable[[str], None] = print) -> Asker:
                     write(f"{path.name} names no pose for which faces are seen, so it's read "
                           f"{q.posed}, as it's asked now.")
         for q, a in zip(questions, found, strict=False):
-            if q.noted is not None and a.choice != q.noted:
+            if q.noted is not None and not q.agrees(a):
                 write(f"{q.differs(a)} That's from {path.name}, and it's used in their place.")
         return found
 
@@ -663,12 +683,11 @@ class _Recorded(BaseModel):
                 x, y, z = (float(part) % 360 for part in self.pose.split(","))
             except ValueError:
                 return f"its pose '{self.pose}' isn't three angles, such as 180,0,0"
+            if (x, y, z) not in SQUARE_ON:
+                poses = "; ".join(",".join(f"{a:g}" for a in pose) for pose in SQUARE_ON)
+                return f"its pose '{self.pose}' isn't one a part prints in: {poses}"
             if (x, y, z) != tuple(question.pose):
                 given = (x, y, z)
-                if question.noted is not None:
-                    here = ",".join(f"{a:g}" for a in question.pose)
-                    return (f"it was answered in the pose {self.pose}, and it's read back in "
-                            f"{here} now, where those words name other faces")
         found = self._picked(question)
         if isinstance(found, Answer) and given is not None:
             return found.model_copy(update={"given_in": given})

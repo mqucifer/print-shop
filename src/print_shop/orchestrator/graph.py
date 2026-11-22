@@ -67,7 +67,7 @@ from print_shop.orchestrator.fitness import scoring_profiles
 from print_shop.printer.centauri import PreflightFailed, PrinterClient, preflight
 from print_shop.setup import Proposer
 from print_shop.setup import lessons as print_lessons
-from print_shop.setup.context import PartContext, footprint, place, pose_for, printed, read_context
+from print_shop.setup.context import PartContext, place, pose_for, printed, read_context
 from print_shop.setup.doubts import Doubting
 from print_shop.setup.features import Feature, measure, resting_on
 from print_shop.setup.intake import Asker, Estimate, Intake, Question
@@ -1177,7 +1177,6 @@ def _propose_and_review(
     proposal = proposal.model_copy(update={
         "context": said, "context_from": context.path if context is not None else ""})
     asked = proposal
-    size = footprint(stl, orientation.rotation_deg) if stl is not None else None
     while True:
         result: SliceResult = slice_with(
             apply(profiles, placeable(asked, process, filament), workdir)
@@ -1185,7 +1184,7 @@ def _propose_and_review(
         config = _config(result)
         proposal = read_back(asked, process, filament, config)
         reading = _read(result)
-        found = (flags(reading, faces, process, filament, placed, proposal.changes, size)
+        found = (flags(reading, faces, process, filament, placed, proposal.changes)
                  if reading is not None else ())
         if reviewer is None:
             break
