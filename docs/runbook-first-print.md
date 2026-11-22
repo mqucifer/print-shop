@@ -70,9 +70,17 @@ A print uses your tuning where there is one, and the standard where you haven't 
    - **The plate is the textured PEI plate,** textured side up. The slice is for it: Orca's `Textured PEI Plate`, and your PLA preset heats it to **60 °C** (`M140 S60` in the G-code). An earlier version of this runbook said 45 °C. That came from slicing Orca's system files without their parents, so Orca filled the bed temperature from its own defaults; Elegoo's PLA profile, and your copy of it, say 60. If a different plate is fitted, stop and tell the operator: don't print.
    - You know where Home Assistant's emergency stop is. That is how a print is stopped: not this program, and not Ctrl-C.
 
-7. **A dry run, unarmed.** Run step 1 below without the flag first. It first prints what it was told is fitted and the three profiles it chose: your tuning, or the standard where you haven't tuned. It slices, the approval card appears, and pressing **No, stop** ends it. That proves the settings, the broker and the model without the printer. At the gate the program prints the orientation and why. If it says "Model endpoint was unavailable", orientation fell back to geometry: fine for this print, but tell the operator.
+7. **A dry run, unarmed.** Run step 1 below without the flag first. It first prints what it was told is fitted and the three profiles it chose: your tuning, or the standard where you haven't tuned. It slices, the approval card appears, and pressing **No, stop** ends it. That proves the settings, the broker and the model without the printer. Let it end before the armed run: one runs at a time (below). At the gate the program prints the orientation and why. If it says "Model endpoint was unavailable", orientation fell back to geometry: fine for this print, but tell the operator.
 
 ## The print
+
+**One runs at a time** (mqucifer/print-shop#207). While a job is live, from its start until its outcome is recorded or you stop it, a second `print_job.py` (a part, `--sliced`, `--again` or `--serve`, armed or not) says what's running in one sentence and exits, having published and started nothing:
+
+```
+Not started, as only one runs at a time: job 3f2a… (cube.stl) is at the gate, waiting for Approve or Reject, in process 48213.
+```
+
+Finish that job, or stop it with Ctrl-C in its terminal (which doesn't stop the printer: step 4), and start again. `--serve` is live too, so stop it before you start a job. A process that's killed, or whose terminal closes, holds nothing: there's no file to delete. `--list`, `--filaments`, the print desk and `stock.py` run beside a job.
 
 1. **Arm and run, in one command:**
 
@@ -138,6 +146,8 @@ A print uses your tuning where there is one, and the standard where you haven't 
    - Turned: a multiple of 90° on each axis. A cube sits flat on every face.
 
    Press **Yes, print it**. Anything else wrong: press **No, stop**.
+
+   A press names the job it's for: print-shop puts the job's id in the two buttons when its gate opens, so the dashboard needs no change. A gate ignores a press that names another job or none, and its command line says `ignored approve for …`. So an automation or script that publishes to the command topic itself has to send the `job_id` the gate topic shows.
 
    The command line says by when, `answer by 14:32 (60 min left)`. The gate waits an hour from when it opens; the hour before it, for the slice to reach the gate, starts when you type `ok` at the review. If either runs out, the job ends in one sentence, such as "Timed out waiting for Approve or Reject at the approval gate after 60 min, so nothing printed.", nothing goes to the printer, and the ledger keeps the job as timed out (`--list` shows it under "Ended without printing"). Submit it again to print it.
 
@@ -253,6 +263,8 @@ Then open <http://127.0.0.1:8719/> in a browser on the Mac. `--port` picks anoth
 
 | What you see | What it means | What to do |
 |---|---|---|
+| `Not started, as only one runs at a time` | another `print_job.py` is live, and the sentence says at what | finish it, or Ctrl-C in its terminal; nothing was started |
+| `ignored approve for job …` | a press named another job, or none, so this gate didn't take it | press again on the dashboard, which names the job at its gate |
 | `MQTT_USER is not set` or `CREW_LLM_API_KEY is not set` | the settings file is missing a key | add it; nothing was started |
 | `say what's fitted: --nozzle (mm) and --filament` | the nozzle or filament wasn't given | add both; nothing was started |
 | `The inventory isn't set up` | no printer in the inventory yet | do step 2 of Before, or give `--nozzle` and `--filament` |

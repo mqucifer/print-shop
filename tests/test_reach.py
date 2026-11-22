@@ -17,7 +17,6 @@ from typing import Any
 
 import pytest
 
-from print_shop.core.mqtt import command_topic
 from print_shop.desk import page
 from print_shop.desk.again import again
 from print_shop.desk.read import JobRecord
@@ -448,7 +447,7 @@ def shop(tmp_path: Path) -> Iterator[tuple[Ledger, Job]]:
             with daemon:
                 job_id = daemon.submit(stl)
                 daemon.wait_for_gate(job_id, timeout_s=30)
-                bridge.deliver(command_topic(CFG), {"decision": "approve"})
+                bridge.press(CFG, "approve")
                 assert daemon.wait_for_finish(job_id, timeout_s=30).printed
             return job_id, sponsor
 

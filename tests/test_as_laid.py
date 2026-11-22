@@ -13,7 +13,6 @@ from typing import Any
 
 import pytest
 
-from print_shop.core.mqtt import command_topic
 from print_shop.expert.orientation import OrientationRequest, propose_geometric
 from print_shop.ingest.orientation import candidates
 from print_shop.ledger import Ledger
@@ -86,7 +85,7 @@ def test_as_laid_through_the_daemon_asks_no_model_and_the_review_says_so(
             gate = daemon.pending_gate()
             assert gate is not None and gate["orientation_deg"] == [0.0, 0.0, 0.0]
             assert gate["orientation_rationale"].startswith("kept as laid, by you")
-            bridge.deliver(command_topic(CFG), {"decision": "approve"})
+            bridge.press(CFG, "approve")
             assert daemon.wait_for_finish(job_id, timeout_s=30).printed
         [shown] = sponsor.shown
         review = render(shown)
@@ -123,6 +122,6 @@ def test_without_as_laid_a_pose_is_still_chosen(
         with daemon:
             job_id = daemon.submit(write_stl("cube", tmp_path))
             daemon.wait_for_gate(job_id, timeout_s=30)
-            bridge.deliver(command_topic(CFG), {"decision": "reject"})
+            bridge.press(CFG, "reject")
             daemon.wait_for_finish(job_id, timeout_s=30)
     assert len(asked) == 1

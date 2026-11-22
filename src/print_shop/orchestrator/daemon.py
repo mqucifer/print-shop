@@ -11,12 +11,17 @@ The intake's questions and the settings review take as long as the person takes;
 wait for the gate counts from when the job last came back from them. The gate then waits
 `GATE_WAIT_S` for Approve or Reject. A wait that runs out ends the job in one sentence, with a
 ledger row whose outcome is that it timed out, and nothing is sent to the printer after it.
+
+**A press names its job** (mqucifer/print-shop#207). The buttons carry the job's id while its gate
+is open, and a gate takes only a press that names its own job. That holds across processes, where
+one gate at a time didn't. `live.py` is what keeps there from being a second process.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 import sqlite3
 import threading
 import time
@@ -32,10 +37,12 @@ from langgraph.types import Command as LgCommand
 from pydantic import BaseModel
 
 from print_shop.core.checkpoint import open_checkpointer
+from print_shop.core.contracts import Gate
 from print_shop.core.mqtt import (
     Bridge,
     MqttBridge,
     MqttConfig,
+    approval_buttons,
     command_topic,
     gate_topic,
     state_topic,
@@ -44,6 +51,7 @@ from print_shop.expert.client import LLMConfig
 from print_shop.ledger import JobEnding, Ledger, LedgerError
 from print_shop.orchestrator.frames import FrameKeeper
 from print_shop.orchestrator.graph import build_graph
+from print_shop.orchestrator.live import Step
 from print_shop.orchestrator.outcome import OutcomeDesk, Watcher
 from print_shop.printer.camera import Camera
 from print_shop.printer.centauri import PrinterClient
@@ -54,6 +62,8 @@ from print_shop.setup.review import Reviewer
 from print_shop.sliced import SlicedJob
 from print_shop.slicer.orca import Slicer, SlicerProfiles, slice_model
 from print_shop.slicer.store import Store
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "GATE_WAIT_S",
@@ -93,6 +103,8 @@ class Command(BaseModel):
     """A parsed command from the MQTT command topic."""
 
     decision: Decision
+    #: The job the press is for. A gate takes no other, and none that's empty.
+    job_id: str = ""
     note: str = ""
 
 
@@ -138,7 +150,11 @@ def parse_command(raw: bytes) -> Command:
     if not isinstance(note, str):
         raise ValueError("note must be a string")
 
-    return Command(decision=Decision(decision), note=note)
+    job_id = data.get("job_id", "")
+    if not isinstance(job_id, str):
+        raise ValueError("job_id must be a string")
+
+    return Command(decision=Decision(decision), job_id=job_id, note=note)
 
 
 def state_payload(fields: dict[str, Any]) -> str:
@@ -199,6 +215,7 @@ class Daemon:
         loop: PrintLoop | None = None,
         show: Callable[[str], None] | None = None,
         store: Store | None = None,
+        on_step: Callable[[str, str, Step], None] | None = None,
     ) -> None:
         """`printer` is what the approval gate ultimately commands.
 
@@ -239,8 +256,12 @@ class Daemon:
 
         `show` is where a hand-sliced file's report is shown before the gate, and `store` the
         profiles its settings are sorted by (`submit_sliced`, mqucifer/print-shop#164).
+
+        `on_step` is told each job's id, part and step as it moves, for the live lock to say to
+        a second start (mqucifer/print-shop#207).
         """
         self._cfg = cfg
+        self._on_step = on_step
         self._profiles = profiles
         self._workdir = workdir
 
@@ -360,8 +381,9 @@ class Daemon:
             self._watcher = None
         if self._bridge is not None:
             # Same reasoning as on enter: never leave a retained pending gate
-            # behind after a graceful shutdown.
+            # behind after a graceful shutdown, nor buttons that name its job.
             self._bridge_publish(gate_topic(self._cfg), {"pending": False})
+            self._name_buttons()
             self._bridge.publish_availability(online=False)
             self._bridge.__exit__(*exc)
             self._bridge = None
@@ -402,6 +424,7 @@ class Daemon:
             self._parts[job_id] = part
             self._back_at = time.monotonic()
 
+        self._step(job_id, Step.PREPARING)
         self._publish_state({"status": "analyzing", "job_id": job_id})
 
         self._worker = threading.Thread(
@@ -529,16 +552,12 @@ class Daemon:
         equivalent, because draining is a step someone can forget and a fresh
         object cannot be.
 
-        **This scopes a decision to a gate by time, not by identity**, and that
-        is only sound because at most one gate is ever open: `submit` refuses a
-        second job while one is active, and a single job's gates are strictly
-        sequential. `Command` carries no job_id, so nothing here would notice
-        a decision arriving for a different gate.
-
-        If concurrent jobs ever become a thing, this is the assumption that
-        breaks, and it breaks silently — a press delivered to the wrong gate,
-        which is AGENTS.md rule 5 again. Put the job_id on `Command` and match
-        it before that happens, not after.
+        **A decision is scoped to a job by identity, and to that job's gate by
+        time.** `_on_command` delivers only a press naming the active job
+        (mqucifer/print-shop#207), so another process's press can't land here.
+        A press doesn't say which of its job's gates it's for: those are
+        strictly sequential, and the fresh inbox is what keeps one's press
+        from the next.
         """
         with self._job_lock:
             self._gate_inbox = Queue()
@@ -556,7 +575,8 @@ class Daemon:
         messages are replayed by the broker to late subscribers; a stale
         approval must never apply to a job a person has not seen, so retained
         commands are ignored. Commands arriving while no gate is pending are
-        also ignored rather than buffered for the next job.
+        also ignored rather than buffered for the next job. So is a command
+        that names another job, or none (mqucifer/print-shop#207).
 
         ``retain`` had a ``= False`` default here, and `MqttBridge` called the
         handler with two arguments, so this guard never fired. A reconnect
@@ -583,6 +603,14 @@ class Daemon:
                 # This press is about nothing — the numbers a human would
                 # approve do not exist yet. Drop it rather than buffering it
                 # for the next gate.
+                return
+            if cmd.job_id != self._active_job_id:
+                logger.warning(
+                    "ignored %s for %s: this gate is job %s's",
+                    cmd.decision,
+                    f"job {cmd.job_id[:80]!r}" if cmd.job_id else "no named job",
+                    self._active_job_id,
+                )
                 return
             # Check and put under the same lock: the gate can close between a
             # read of the inbox and a put, which would re-open the race this
@@ -643,6 +671,9 @@ class Daemon:
         # the moment the dashboard updates has somewhere to go. It is scoped to
         # this gate and closed once we have our answer (or time out).
         inbox = self._open_gate()
+        self._step(job_id, Step.AT_GATE)
+        # The buttons name the job before the card that shows them does.
+        self._name_buttons(job_id)
 
         # Publish the gate with pending: true.
         gate_msg = {**gate_payload, "pending": True, "job_id": job_id}
@@ -670,6 +701,7 @@ class Daemon:
             self._close_gate()
             self._pending_gate = None
             self._bridge_publish(gate_topic(self._cfg), {"pending": False})
+            self._name_buttons()
             sentence = self.abandon(
                 job_id, "waiting for Approve or Reject at the approval gate", self._gate_wait_s
             )
@@ -686,6 +718,10 @@ class Daemon:
 
         # Clear the gate.
         self._bridge_publish(gate_topic(self._cfg), {"pending": False})
+        self._name_buttons()
+        if approved:
+            before_print = gate_payload.get("gate") == Gate.BEFORE_PRINT
+            self._step(job_id, Step.SENDING if before_print else Step.PREPARING)
 
         # Resume the graph.
         try:
@@ -718,6 +754,7 @@ class Daemon:
         error: str | None = None,
     ) -> None:
         """Finalize a job: publish state, clear the active job."""
+        self._step(job_id, Step.ENDING)
         status = "failed" if error else ("done" if printed else "rejected")
         self._publish_state({"status": status, "job_id": job_id})
 
@@ -740,6 +777,15 @@ class Daemon:
         if approved and self._watcher is not None:
             # A print started, or a start raised and may have taken: look now.
             self._watcher.poke()
+
+    def _step(self, job_id: str, step: Step) -> None:
+        if self._on_step is not None:
+            self._on_step(job_id, self._parts.get(job_id, "?"), step)
+
+    def _name_buttons(self, job_id: str = "") -> None:
+        """Approve and Reject republished, naming `job_id`, or no job (mqucifer/print-shop#207)."""
+        for topic, config in approval_buttons(self._cfg, job_id):
+            self._bridge_publish(topic, config)
 
     def _publish_state(self, fields: dict[str, Any]) -> None:
         """Publish a state update to the state topic.

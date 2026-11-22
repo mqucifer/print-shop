@@ -17,7 +17,6 @@ from typing import Any
 
 import pytest
 
-from print_shop.core.mqtt import command_topic
 from print_shop.core.state import Orientation
 from print_shop.ingest.analyzer import analyze
 from print_shop.ingest.orientation import candidates
@@ -109,7 +108,7 @@ def shop(tmp_path: Path) -> Iterator[Any]:
             with daemon:
                 job_id = daemon.submit(write_stl(part, tmp_path))
                 daemon.wait_for_gate(job_id, timeout_s=30)
-                bridge.deliver(command_topic(CFG), {"decision": "approve"})
+                bridge.press(CFG, "approve")
                 result = daemon.wait_for_finish(job_id, timeout_s=30)
                 assert result.printed, result.error
             row = ledger.get(job_id)

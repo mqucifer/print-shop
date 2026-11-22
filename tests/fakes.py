@@ -8,7 +8,8 @@ conversion) is the real code.
   header parser, and refuses any STL it has no recording for. Its config block
   says the profiles it was given, as Orca's does (`echo_settings`).
 - `MemoryBridge` is a broker in a list: what was published, what is retained,
-  and a `deliver` that calls subscribers as a broker would.
+  and a `deliver` that calls subscribers as a broker would. `press` is Home Assistant's
+  button: it sends the payload the last discovery gave it.
 - `FramePrinter` answers from SDCP payloads (`tests/data/sdcp/frames.json`,
   synthetic until the first real print records some) through the real
   `snapshot_from`.
@@ -28,7 +29,13 @@ from typing import Any
 import paho.mqtt.client as mqtt
 from pycentauri.models import Attributes, Status
 
-from print_shop.core.mqtt import Bridge, MessageHandler
+from print_shop.core.mqtt import (
+    Bridge,
+    MessageHandler,
+    MqttConfig,
+    approval_buttons,
+    command_topic,
+)
 from print_shop.printer.centauri import PrinterSnapshot, snapshot_from
 from print_shop.slicer.orca import SliceResult, SlicerProfiles, parse_gcode_header
 from print_shop.slicer.store import Store, choose
@@ -217,6 +224,19 @@ class MemoryBridge:
             handlers = [h for f, h in self._subscriptions if mqtt.topic_matches_sub(f, topic)]
         for handler in handlers:
             handler(topic, raw, retain)
+
+    def button(self, cfg: MqttConfig, decision: str) -> str:
+        """What Home Assistant's Approve or Reject would send now: the `payload_press` of the
+        last discovery it was given, else of the one `announce` publishes."""
+        topic, config = next(
+            (t, c) for t, c in approval_buttons(cfg) if t.endswith(f"/{decision}/config")
+        )
+        with self._lock:
+            kept = self.retained.get(topic)
+        return str((json.loads(kept) if kept else config)["payload_press"])
+
+    def press(self, cfg: MqttConfig, decision: str, *, retain: bool = False) -> None:
+        self.deliver(command_topic(cfg), self.button(cfg, decision), retain=retain)
 
     def on(self, topic: str) -> list[Any]:
         """Every JSON payload published to `topic`, in order."""
