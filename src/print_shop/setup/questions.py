@@ -152,6 +152,10 @@ SEEN = Question(
     ),
 )
 assert set(SEEN_FACES) == {o.label for o in SEEN.options}
+#: The answers that leave the face on the plate unsaid: the recommended one, for when it can't be
+#: said, which judges every face it names as seen and calls none hidden. Turned to be the top,
+#: that face is never judged hidden by it (mqucifer/print-shop#248).
+PLATE_UNSAID = frozenset({SEEN.options[0].label})
 
 #: The questions that need no model, shown at once (mqucifer/print-shop#208).
 STOCK = (PURPOSE, SEEN)

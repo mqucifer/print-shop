@@ -320,7 +320,7 @@ def _questions(row: Row) -> str:
             if answer is not None and mine:
                 mark = f" ← {q.whose(answer) or 'your answer'}"
             cls = ' class="chosen"' if mine else ""
-            parts.append(f"<li{cls}>{escape(o.line())}{escape(mark)}</li>")
+            parts.append(f"<li{cls}>{escape(q.then(o.line()))}{escape(mark)}</li>")
         parts.append("</ul>")
         if answer is not None and answer.choice is None:
             whose = f" ({q.whose(answer)})" if q.whose(answer) else ""

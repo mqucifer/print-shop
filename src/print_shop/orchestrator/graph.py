@@ -67,7 +67,7 @@ from print_shop.orchestrator.fitness import scoring_profiles
 from print_shop.printer.centauri import PreflightFailed, PrinterClient, preflight
 from print_shop.setup import Proposer
 from print_shop.setup import lessons as print_lessons
-from print_shop.setup.context import PartContext, place, pose_for, printed, read_context
+from print_shop.setup.context import PartContext, footprint, place, pose_for, printed, read_context
 from print_shop.setup.doubts import Doubting
 from print_shop.setup.features import Feature, measure, resting_on
 from print_shop.setup.intake import Asker, Estimate, Intake, Question
@@ -408,7 +408,7 @@ def build_graph(
                 kept = _kept(context, poses, build_volume) if context is not None else None
                 found_by = run_loop(loop, Part(
                     stl=Path(state["stl_path"]),
-                    facts=proposer.facts(intake, features, profiles, context, rotation_deg),
+                    facts=proposer.facts(intake, features, profiles, context),
                     candidates=poses, build_volume_mm=build_volume,
                     skill=load(groups_for(intake, features)), profiles=profiles, slicer=slicer,
                     workdir=outdir / "loop", ledger=ledger,
@@ -1051,7 +1051,7 @@ def _offering(
             measured=lying, build_volume_mm=build_volume,
             context=state.get("part_context"), pose_chosen=chosen,
             asked=intake.could_set(), unwaited=intake.unwaited,
-            seen=carried(intake, state.get("part_context"), applied.rotation_deg),
+            seen_in=lambda pose: carried(intake, state.get("part_context"), pose),
         ))
     except Exception as exc:  # noqa: BLE001 - a print is never stopped by what it might reuse
         logger.warning("the past prints couldn't be read for the offer: %s", exc)
@@ -1157,10 +1157,12 @@ def _propose_and_review(
     placed = (place(context, stl, orientation.rotation_deg)
               if context is not None and context.found and stl is not None else None)
     instead = intake.set_aside() if intake is not None else {}
-    if placed is not None and "seen" in instead:
-        # The answer replaced the notes', in words too: words name no face, so none is judged
-        # rather than the faces the person set aside (mqucifer/print-shop#236).
-        placed = placed.model_copy(update={"seen": None})
+    if placed is not None:
+        # One reading with every other reader's: the notes' faces only where no answer stands in
+        # their place, as words do, naming no face (mqucifer/print-shop#236,
+        # mqucifer/print-shop#248).
+        placed = placed.model_copy(update={
+            "seen": carried(intake, context, orientation.rotation_deg)})
     prints = ""
     if context is not None and context.seen is not None and any(orientation.rotation_deg):
         turned_to = printed(context.seen, orientation.rotation_deg)
@@ -1175,6 +1177,7 @@ def _propose_and_review(
     proposal = proposal.model_copy(update={
         "context": said, "context_from": context.path if context is not None else ""})
     asked = proposal
+    size = footprint(stl, orientation.rotation_deg) if stl is not None else None
     while True:
         result: SliceResult = slice_with(
             apply(profiles, placeable(asked, process, filament), workdir)
@@ -1182,7 +1185,7 @@ def _propose_and_review(
         config = _config(result)
         proposal = read_back(asked, process, filament, config)
         reading = _read(result)
-        found = (flags(reading, faces, process, filament, placed, proposal.changes)
+        found = (flags(reading, faces, process, filament, placed, proposal.changes, size)
                  if reading is not None else ())
         if reviewer is None:
             break

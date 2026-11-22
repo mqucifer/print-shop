@@ -63,6 +63,7 @@ __all__ = [
     "PartContext",
     "Placed",
     "Seen",
+    "footprint",
     "own_sides",
     "pose_for",
     "place",
@@ -132,6 +133,25 @@ class Seen(BaseModel):
     #: Only some of the walls: a side that was the top or the plate's before a turn
     #: (mqucifer/print-shop#248).
     part_walls: bool = False
+    #: Where only part of the walls is seen: whether that takes in the wall at the back, the
+    #: part's largest y, where a `back` seam lands. None: not known.
+    back_seen: bool | None = None
+    #: What they were called, where they're carried from another pose.
+    called: str = ""
+    #: The top is a face the answer didn't speak of: never judged hidden.
+    top_unsaid: bool = False
+    #: Several parts' faces, whose `said` already says whose each is.
+    of_several: bool = False
+
+    def because(self) -> str:
+        """Who said it and what, as a reason opens: after a turn, what that is as it prints."""
+        if self.of_several:
+            return self.said
+        if self.called:
+            return f"{self.whose()} {self.called}; as it prints that's {self.as_printed()}"
+        if self.noted:
+            return f"{self.whose()} {self.in_words()}, as the file lays it"
+        return f"{self.whose()} '{self.said}'"
 
     def whose(self) -> str:
         """Who said it, as a reason opens."""
@@ -152,8 +172,9 @@ class Seen(BaseModel):
         return f"{', '.join(most)} and {last}" if most else last
 
     def as_printed(self) -> str:
-        """The same, where the bottom is the face on the plate: "the top and the plate face"."""
-        return self.in_words().replace("the bottom", "the plate face")
+        """The same, where the bottom is as the questions name it: "the top and the face on
+        the plate"."""
+        return self.in_words().replace("the bottom", "the face on the plate")
 
 
 class Fit(BaseModel):
@@ -809,17 +830,22 @@ def own_sides(seen: Seen, rotation_deg: tuple[float, float, float]) -> tuple[str
 
 def seen_from(
     sides: tuple[str, ...], rotation_deg: tuple[float, float, float], said: str,
-    noted: bool = False,
+    noted: bool = False, called: str = "", unsaid: tuple[str, ...] = (),
 ) -> Seen | None:
     """Those sides as the faces they are printed in that pose. A wall is seen if any of the four
-    is, and `part_walls` says when it isn't all of them. None: the pose isn't square on."""
+    is, and `part_walls` says when it isn't all of them. A side in `unsaid` is never read as
+    hidden. None: the pose isn't square on."""
     up = _up_side(rotation_deg)
     if up is None:
         return None
     down = _opposite(up)
     walls = [side in sides for side in SIDES if side not in (up, down)]
+    part = any(walls) and not all(walls)
+    back = _side(_rotation((rotation_deg[0], rotation_deg[1], rotation_deg[2])).T
+                 @ np.array([0.0, 1.0, 0.0]))
+    back_seen = (None if not part or back in unsaid else back in sides)
     return Seen(walls=any(walls), top=up in sides, bottom=down in sides, said=said, noted=noted,
-                part_walls=any(walls) and not all(walls))
+                part_walls=part, back_seen=back_seen, called=called, top_unsaid=up in unsaid)
 
 
 def printed(seen: Seen, rotation_deg: tuple[float, float, float]) -> Seen | None:
@@ -832,7 +858,20 @@ def printed(seen: Seen, rotation_deg: tuple[float, float, float]) -> Seen | None
     if up == "+z":
         return seen
     how = " (turned over)" if up == "-z" else " (on its side)"
-    return seen_from(sides, rotation_deg, f"{seen.said}{how}", seen.noted)
+    return seen_from(sides, rotation_deg, f"{seen.said}{how}", seen.noted,
+                     f"{seen.in_words()}, as the file lays it")
+
+
+def footprint(
+    stl: Path | str, rotation_deg: tuple[float, float, float],
+) -> tuple[float, float] | None:
+    """The part's size along x and y in that pose, before Orca places it on the plate."""
+    box = _mesh_box(Path(stl))
+    if box is None:
+        return None
+    turn = _rotation((rotation_deg[0], rotation_deg[1], rotation_deg[2]))
+    size = np.ptp((_corners(box) @ turn.T)[:, :2], axis=0)
+    return float(size[0]), float(size[1])
 
 
 def _up_side(rotation_deg: tuple[float, float, float]) -> str | None:

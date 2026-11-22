@@ -359,9 +359,9 @@ class ThisPart:
     asked: frozenset[str] = frozenset()
     #: Its questions weren't waited for, so what they'd have asked again isn't known.
     unwaited: bool = False
-    #: What's seen as it prints in this pose, carried from the answer or the notes
-    #: (mqucifer/print-shop#248): what "seen" is compared on.
-    seen: Seen | None = None
+    #: What's seen as it would print in a pose, carried from the answer or the notes
+    #: (mqucifer/print-shop#248): what "seen" is compared on, in the pose the shape is.
+    seen_in: Callable[[tuple[float, float, float]], Seen | None] | None = None
     #: The person chose this pose for this print: kept as laid, or sent back at this review.
     pose_chosen: str = ""
 
@@ -424,32 +424,46 @@ def offering(ledger: Ledger, part: ThisPart) -> Offering:
 def _against(at: int, row: Row, part: ThisPart) -> _Found:
     then = similar.numbers(row.features or ())
     here = similar.numbers(part.features)
-    shapes = [here]
+    shapes = [(here, part.rotation_deg)]
     if row.rotation_deg != part.rotation_deg:
         there = part.lying(pose_value(row.rotation_deg))
-        shapes += [similar.posed(here, there)] if there is not None else []
+        if there is not None:
+            shapes.append((similar.posed(here, there), row.rotation_deg))
+    was_seen = _seen_then(row)
     context = part.context or PartContext()
     proposal = row.proposal
     each = [
         similar.likeness(
-            shape, then, _compared(tuple(context.lines()), part.seen),
-            _compared(proposal.context if proposal else (), _seen_then(row)),
+            shape, then,
+            _compared(tuple(context.lines()), *_both(part, pose, was_seen)),
+            _compared(proposal.context if proposal else (), *_both(part, pose, was_seen)[::-1]),
             (context.path, part.stl_name),
             (proposal.context_from if proposal else "", row.stl_name),
         )
-        for shape in shapes
+        for shape, pose in shapes
     ]
-    best = max(each, key=lambda found: found.shape)
+    best = max(each, key=lambda found: (round(found.shape, 6), found.context))
     return _Found(at=at, row=row, decided=_decided(row),
                   same_file=bool(part.sha256) and row.stl_sha256 == part.sha256,
                   likeness=best, here=here, then=then)
 
 
-def _compared(lines: tuple[str, ...], faces: Seen | None) -> tuple[str, ...]:
+def _both(
+    part: ThisPart, pose: tuple[float, float, float], was: Seen | None,
+) -> tuple[Seen | None, Seen | None]:
+    """What's seen here, in that pose, and what was on that print."""
+    return (part.seen_in(pose) if part.seen_in is not None else None), was
+
+
+def _compared(
+    lines: tuple[str, ...], own: Seen | None, other: Seen | None,
+) -> tuple[str, ...]:
     """A context's lines as they're compared: what's seen is the faces as they print, whoever
-    said them (mqucifer/print-shop#248)."""
+    said them (mqucifer/print-shop#248). Not known on either side isn't a difference."""
     rest = tuple(line for line in lines if not line.startswith("seen: "))
-    return (*rest, f"seen: {faces.as_printed()}") if faces is not None else rest
+    if own is None or other is None:
+        return rest
+    return (*rest, f"seen: {own.as_printed()}")
 
 
 def _seen_then(row: Row) -> Seen | None:

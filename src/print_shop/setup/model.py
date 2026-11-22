@@ -253,8 +253,19 @@ def _seen(facts: PartFacts) -> list[str]:
         answered = any(q.feature == "seen" and q.pose is not None for q in intake.questions)
         return (["Which faces are seen as it lies here isn't known: judge none as seen or "
                  "hidden.", ""] if answered else [])
+    seam = ""
+    if now.part_walls:
+        seam = (" Whether the wall at the back as it sits (its largest y) is seen isn't known, "
+                "so don't put the seam there: not seam_position back or aligned_back."
+                if now.back_seen is None else
+                " The wall at the back as it sits (its largest y) is one that's seen, so never "
+                "put the seam there: not seam_position back or aligned_back." if now.back_seen
+                else " The wall at the back as it sits (its largest y) isn't seen, so a seam "
+                "line may go there, unless the slicer turns the part to fit the plate.")
+    top = (" Whether the top as it lies here is seen wasn't said: don't judge it hidden."
+           if now.top_unsaid else "")
     return [f"Seen as it lies here, carried from what was said: {now.as_printed()}. Go by this "
-            "for which faces are seen.", ""]
+            f"for which faces are seen.{top}{seam}", ""]
 
 
 def _lessons(facts: PartFacts) -> list[str]:

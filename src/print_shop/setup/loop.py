@@ -369,9 +369,17 @@ def _user(part: Part) -> str:
                      f"{pose_value(part.kept)}, which is kept unless you ask. Overhang is what "
                      "would need support; a round or chamfer rising from the plate is left out "
                      "of it:")
+    intake, context = part.facts.intake, part.facts.context
+    answered_seen = any(q.feature == "seen" for q in intake.questions)
+    if answered_seen:
+        lines[-1] += (" What's seen is said for each pose: go by the pose you propose, never "
+                      "by the pose the questions were asked in.")
     for c in part.candidates:
-        faces = carried(part.facts.intake, part.facts.context, c.rotation_deg)
-        shown = f"; seen there: {faces.as_printed()}" if faces is not None else ""
+        faces = carried(intake, context, c.rotation_deg)
+        shown = f"; seen there: {faces.as_printed()}" if faces is not None else (
+            "; seen there: not known" if answered_seen else "")
+        if faces is not None and faces.top_unsaid:
+            shown += " (whether the top is wasn't said)"
         lines.append(f"- {pose_value(c.rotation_deg)}: {c.overhang_area_mm2:g} mm2 overhang, "
                      f"{c.bed_contact_area_mm2:g} mm2 on the plate, {c.height_mm:g} mm tall"
                      f"{shown}")

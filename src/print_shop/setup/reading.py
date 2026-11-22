@@ -19,6 +19,11 @@ printed (`seen`, `carried`, and `seen_across` for several parts). Where it can't
 is judged, and `seen_said` says so. An answer from before, with no pose, is read in the pose it
 printed in.
 
+**A seam at the back is only proposed on a wall that isn't seen** (mqucifer/print-shop#248).
+"back" was the hidden side while "the walls" meant all round. Carried, only part of them may be
+seen, and the one at the back (the largest y) may be it. It isn't known where Orca turned the
+part on the plate to fit it, as it can, which the outer walls' span shows (`sits_as_posed`).
+
 **A part's fits** (mqucifer/print-shop#130, `context.py`), placed as heights in the pose it
 prints in: a part with one never gets a random seam proposed, and the reason names the fit; a fit
 at the plate gets elephant foot compensation proposed, inside its bound. A hold that slides on
@@ -76,10 +81,17 @@ BAND_MM = 0.005 + pausing.TOPS_OUT
 ROOM_MM = 0.4
 #: Orca's labels for what it lays over air, as the first layer over a pocket is.
 CLOSES_OVER = ("Bridge", "Overhang wall")
+#: How the review's lines on what's seen open, which `runtime.describe` picks out.
+PRINTS = "Seen as it prints"
+NOW_PRINTS = "Seen as it now prints"
+TURNED_SINCE = "TURNED SINCE YOU ANSWERED"
 #: Two seams this close, in mm, on neighbouring layers, are one line up the wall.
 SEAM_NEAR_MM = 1.0
 #: The share of seams that sit on the one below them for the seam to read as a line.
 SEAM_LINE = 0.8
+#: The outer walls' lines reach this much less, or more, than the part at most, where Orca has
+#: only moved it on the plate: a line's width, a thin tip it leaves out, elephant foot.
+AS_POSED_MM = 1.5
 #: The settings a reading judges, as the slice was made with them.
 JUDGED = (
     "filament_type",
@@ -177,6 +189,17 @@ class SliceReading(BaseModel):
     pauses: tuple[PauseReading, ...] = ()
     #: Each layer that lays `CLOSES_OVER`: its number, and the area of it in mm².
     over_air: tuple[tuple[int, float], ...] = ()
+    #: How far the outer walls reach along x and y. None in a row from before
+    #: mqucifer/print-shop#248.
+    walls_span: tuple[float, float] | None = None
+
+    def sits_as_posed(self, footprint: tuple[float, float] | None) -> bool:
+        """Whether the part sits on the plate as it was posed, only moved: so its back is the
+        wall the pose puts there. False where that can't be told."""
+        if footprint is None or self.walls_span is None:
+            return False
+        return all(abs(reach - size) <= AS_POSED_MM
+                   for reach, size in zip(self.walls_span, footprint, strict=True))
 
     @property
     def time_s(self) -> float:
@@ -263,6 +286,7 @@ def read_slice(path: Path) -> SliceReading:
     )
     return SliceReading(
         pauses=pauses,
+        walls_span=sliced.walls_span,
         over_air=tuple(
             (layer.n, round(area, 1)) for layer in sliced.layers
             if (area := sum(layer.areas.get(kind, 0.0) for kind in CLOSES_OVER)) > 0
@@ -310,7 +334,10 @@ def seen(
         asked_in: The pose it was answered in, where that's not the question's: each part of a
             plate has its own.
     """
-    from print_shop.setup.questions import SEEN_FACES  # noqa: PLC0415 - a cycle otherwise
+    from print_shop.setup.questions import (  # noqa: PLC0415 - a cycle otherwise
+        PLATE_UNSAID,
+        SEEN_FACES,
+    )
 
     found = _seen_answer(intake)
     if found is None:
@@ -324,13 +351,18 @@ def seen(
         return None
     walls, top, bottom = faces
     given = Seen(walls=walls, top=top, bottom=bottom, said=label)
-    was = asked_in or question.pose
+    was = asked_in or question.answered_in(answer)
     if was is None or rotation_deg is None or tuple(was) == tuple(rotation_deg):
         return given
     sides = own_sides(given, was)
     if sides is None:
         return None
-    return seen_from(sides, rotation_deg, f"{given.as_printed()}, {_posed(question, was)}")
+    unsaid: tuple[str, ...] = ()
+    if label in PLATE_UNSAID:
+        plate = Seen(walls=False, top=False, bottom=True, said="")
+        unsaid = own_sides(plate, was) or ()
+    called = f"{given.as_printed()}, {_posed(question, was)}"
+    return seen_from(sides, rotation_deg, called, called=called, unsaid=unsaid)
 
 
 def carried(
@@ -350,8 +382,11 @@ def carried(
     mine = seen(intake, rotation_deg, asked_in)
     if mine is not None:
         return mine
-    if intake is not None and "seen" in intake.set_aside():
-        return None
+    found = _seen_answer(intake)
+    if found is not None:
+        question, answer = found
+        if question.noted is None or answer.choice != question.noted:
+            return None  # an answer that names no face judges none, whatever the notes say
     if context is None or context.seen is None:
         return None
     return printed(context.seen, rotation_deg)
@@ -364,49 +399,58 @@ def seen_across(each: list[Seen | None]) -> Seen | None:
     if not known or len(known) != len(each):
         return None
     walls = [one for one in known if one.walls]
+    backs = [one.back_seen for one in walls if one.part_walls]
+    back = True if True in backs else None if None in backs or not backs else False
     return Seen(walls=bool(walls), top=any(one.top for one in known),
                 bottom=any(one.bottom for one in known),
-                said="; ".join(dict.fromkeys(one.said for one in known)),
+                said="; ".join(dict.fromkeys(one.because() for one in known)),
+                of_several=True,
+                top_unsaid=not any(one.top for one in known) and any(
+                    one.top_unsaid for one in known),
                 noted=all(one.noted for one in known),
-                part_walls=bool(walls) and all(one.part_walls for one in walls))
+                part_walls=bool(walls) and all(one.part_walls for one in walls),
+                back_seen=back)
 
 
 def seen_said(
     intake: Intake | None, context: PartContext | None,
     rotation_deg: tuple[float, float, float],
+    asked_in: tuple[float, float, float] | None = None,
 ) -> str:
     """The review's line on what's seen: the faces as they print now and, after a turn, what
     they were called when answered. Where they can't be carried, that none is judged. ""
     where nothing said."""
-    now = carried(intake, context, rotation_deg)
+    now = carried(intake, context, rotation_deg, asked_in)
     found = _seen_answer(intake)
     if found is None:
-        return f"Seen as it prints: {now.as_printed()}" if now is not None else ""
+        return f"{PRINTS}: {now.as_printed()}" if now is not None else ""
     question, answer = found
-    was = question.pose
+    was = asked_in or question.answered_in(answer)  # each part of a plate has its own
     turned = was is not None and tuple(was) != tuple(rotation_deg)
     if not turned:
         if now is not None:
-            return f"Seen as it prints: {now.as_printed()}"
+            return f"{PRINTS}: {now.as_printed()}"
         if answer.choice is None and was is not None:
-            return ("Seen as it prints: none is judged, as your words name no face "
+            return (f"{PRINTS}: none is judged, as your words name no face "
                     f"('{answer.other}')")
         return ""
     assert was is not None
     to = pose_value(rotation_deg)
     posed = _posed(question, was)
     if now is None:
-        return (f"TURNED SINCE YOU ANSWERED: you said '{question.as_answered(answer)}', {posed}. "
+        return (f"{TURNED_SINCE}: you said '{question.as_answered(answer)}', {posed}. "
                 f"That can't be carried to {to}, so no face is judged seen: say what you want "
                 "with a correction")
     if question.confirmed(answer):
         called = f"The notes said {question.beside}, and you confirmed it"
+    elif (mine := seen(intake)) is not None:
+        called = f"You said {mine.as_printed()}, {posed}"
     else:
-        mine = seen(intake)
-        called = (f"You said {mine.as_printed()}, {posed}" if mine is not None
-                  else f"You said {question.beside}, as the notes do")
+        called = f"You said {question.beside}, as the notes do"
+    top = ("; whether the top is wasn't said, as it lay on the plate when you answered"
+           if now.top_unsaid else "")
     since = f"turned {to}" if any(rotation_deg) else "turned back to how the file lays it"
-    return f"Seen as it now prints: {now.as_printed()}. {called}; it was {since} since"
+    return f"{NOW_PRINTS}: {now.as_printed()}{top}. {called}; it was {since} since"
 
 
 def _seen_answer(intake: Intake | None) -> tuple[Question, Answer] | None:
@@ -430,6 +474,7 @@ def flags(
     filament: dict[str, Any],
     placed: Placed | None = None,
     changes: tuple[Change, ...] = (),
+    footprint: tuple[float, float] | None = None,
 ) -> tuple[Flag, ...]:
     """What the reading says matters for this part, each with the change it proposes.
 
@@ -439,10 +484,14 @@ def flags(
     hold pulled across the layers is said, and its seen faces stand where the intake didn't say.
     A pause a layer past a fit's top is said too (mqucifer/print-shop#203).
     `changes` are the proposal's, which the slice was made with: a value they set, such as a
-    lesson's, is read as the one in effect and named.
+    lesson's, is read as the one in effect and named. `footprint` is the part's size along x and
+    y as posed: without it, or where Orca turned it to fit, which wall is at the back isn't
+    known (mqucifer/print-shop#248).
     """
     if faces is None and placed is not None:
         faces = placed.seen
+    if faces is not None and faces.back_seen is not None and not reading.sits_as_posed(footprint):
+        faces = faces.model_copy(update={"back_seen": None})
     found = [*_layer_time(reading, filament), *_ironing(reading, faces, process),
              *_seam_flag(reading, faces, process, placed),
              *_elephant_foot(reading, process, placed, changes), *_holds(placed),
@@ -541,11 +590,15 @@ def _ironing(reading: SliceReading, faces: Seen | None, process: dict[str, Any])
     if faces is None:
         return [Flag(id="ironing_unknown", reading=said + "; the intake didn't say which "
                      "faces are seen, so whether it's worth it isn't judged")]
+    if faces.top_unsaid and not faces.top:
+        return [Flag(id="ironing_unknown", reading=said + "; the top as it prints was on the "
+                     "plate when you answered, and your answer didn't say whether that face is "
+                     "seen, so whether it's worth it isn't judged")]
     if not faces.top:
         return [Flag(id="ironing_hidden", reading=said, change=Change(
             key="ironing_type", preset=preset, value="no ironing", source=Source.READING,
             feature="seen", knowledge="surface", reading=said,
-            reason=f"{faces.whose()} '{faces.said}', so ironing costs {_s(ironing.time_s)} for "
+            reason=f"{faces.because()}, so ironing costs {_s(ironing.time_s)} for "
                    "faces nobody sees"))]
     below = [z for z in heights if z < heights[-1]]
     if below and reading.settings.get("ironing_type") in ("top", "solid"):
@@ -572,6 +625,8 @@ def _seam_flag(
     said = (f"{seam.stacked:.0%} of {seam.seams} wall loops start on the one below: the seam "
             f"is a line up the wall{where}, over {seam.at_layers} layers")
     now = reading.settings.get("seam_position", "")
+    if faces.part_walls:
+        return [_seam_on_part(said, now, faces, process)]
     if now in ("back", "aligned_back"):
         value, how = "random", "random scatters it, spreading the mark over the wall"
     else:
@@ -580,8 +635,44 @@ def _seam_flag(
     return [Flag(id="seam_seen", reading=said, change=Change(
         key="seam_position", preset=_first(process, "seam_position"), value=value,
         source=Source.READING, feature="seen", knowledge="surface", reading=said,
-        reason=f"{faces.whose()} '{faces.said}', so the walls are seen, and the seam is a line on "
-               f"them: {how}"))]
+        reason=f"{faces.because()}, so the walls are seen, and the seam is a line on them: "
+               f"{how}"))]
+
+
+def _seam_on_part(
+    said: str, now: str, faces: Seen, process: dict[str, Any], named: str = "",
+) -> Flag:
+    """A seam line where only part of the walls is seen (mqucifer/print-shop#248): the back is
+    proposed only where it's known not to be seen. `named` is the part's fits, which never get
+    a random seam."""
+    flag = "seam_fit" if named else "seam_seen"
+    feature = "fit" if named else "seen"
+    preset = _first(process, "seam_position")
+    if faces.back_seen is False:
+        if now == "back":
+            return Flag(id=flag, reading=(
+                f"{said}; only part of the walls is seen, and the one at the back isn't, so "
+                "the line stays at the back"))
+        keep = (f". Not random: it would scatter seam bumps all round the fit, {named}"
+                if named else "")
+        return Flag(id=flag, reading=said, change=Change(
+            key="seam_position", preset=preset, value="back", source=Source.READING,
+            feature=feature, knowledge="surface", reading=said,
+            reason=f"{faces.because()}, and the one at the back isn't seen: back puts the line "
+                   f"there (its largest y){keep}"))
+    why = ("that takes in the wall at the back (its largest y)" if faces.back_seen
+           else "whether that takes in the wall at the back isn't known (it wasn't said, or the "
+                "slice doesn't show the part sitting as it was posed)")
+    if named:
+        return Flag(id=flag, reading=(
+            f"{said}; part of the walls is seen, and {why}, so back isn't proposed, and random "
+            f"isn't either: it would scatter seam bumps all round the fit, {named}. The seam "
+            "needs placing by hand, on a wall that isn't seen"))
+    return Flag(id=flag, reading=said, change=Change(
+        key="seam_position", preset=preset, value="random", source=Source.READING,
+        feature=feature, knowledge="surface", reading=said,
+        reason=f"{faces.because()}, and {why}: back could put the line on the seen face, so "
+               "random scatters it"))
 
 
 def fits_said(fits: tuple[FitBand, ...]) -> str:
@@ -599,11 +690,14 @@ def _seam_on_a_fit(
     now = reading.settings.get("seam_position", "")
     named = fits_said(fits)
     if now == "random":
-        value = "back" if faces is not None and faces.walls else "aligned"
+        value = "back" if faces is not None and faces.walls and (
+            not faces.part_walls or faces.back_seen is False) else "aligned"
         said = (f"the seam is {now}: {seam.seams} wall loop starts scattered, "
                 f"{seam.stacked:.0%} on the one below")
         where = ("back puts the line on the part's back (its largest y), as the walls are seen"
-                 if value == "back" else "aligned lines it up at the least seen spots")
+                 if value == "back" else "aligned lines it up at the least seen spots"
+                 + (", which may still be on the wall that's seen: the seam needs placing by hand"
+                    if faces is not None and faces.part_walls else ""))
         return [Flag(id="seam_fit", reading=said, change=Change(
             key="seam_position", preset=_first(process, "seam_position"), value=value,
             source=Source.READING, feature="fit", knowledge="surface", reading=said,
@@ -614,6 +708,8 @@ def _seam_on_a_fit(
     where = f" at x {seam.at[0]:g} y {seam.at[1]:g}" if seam.at else ""
     said = (f"{seam.stacked:.0%} of {seam.seams} wall loops start on the one below: the seam "
             f"is a line up the wall{where}, over {seam.at_layers} layers")
+    if faces.part_walls:
+        return [_seam_on_part(said, now, faces, process, named)]
     if now in ("back", "aligned_back"):
         return [Flag(id="seam_fit", reading=(
             f"{said}; the walls are seen, but random isn't proposed: it would scatter seam bumps "
@@ -621,7 +717,7 @@ def _seam_on_a_fit(
     return [Flag(id="seam_fit", reading=said, change=Change(
         key="seam_position", preset=_first(process, "seam_position"), value="back",
         source=Source.READING, feature="fit", knowledge="surface", reading=said,
-        reason=f"{faces.whose()} '{faces.said}', so the walls are seen, and the seam is a line "
+        reason=f"{faces.because()}, so the walls are seen, and the seam is a line "
                "on them: back puts the line on the part's back (its largest y). Not random: it "
                f"would scatter seam bumps all round the fit, {named}"))]
 

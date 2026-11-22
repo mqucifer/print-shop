@@ -370,22 +370,26 @@ def test_a_contradicting_answer_names_both_before_its_taken_and_the_record_has_b
     before_taken = "\n".join(person.shown[:shown])
     theirs, yours = "the top as it prints and the face on the plate", SEEN.options[3].label
     assert prompt == DIFFERS_PROMPT
-    assert f"They say seen: {theirs}. You said: {yours}." in before_taken
+    assert (f"They say seen: {theirs.replace('as it prints', 'as it lies now')}. "
+            f"You said: {yours}.") in before_taken
     assert "Enter takes your answer, or n keeps the notes." in before_taken
 
     assert row.intake is not None
     question, answer = row.intake.questions[1], row.intake.answers[1]
     assert question.noted is not None and question.options[question.noted].label == theirs
     assert question.label(answer) == yours and question.noted_as == "top, bottom"
-    assert f"your answer, in place of the notes' '{theirs}'" in describe(row)
+    then = theirs.replace("as it prints", "as it lay when asked").replace(
+        "the face on the plate", "the face on the plate when asked")
+    assert f"your answer, in place of the notes' '{then}'" in describe(row)
     assert "the notes" in desk_questions(row) and yours in desk_questions(row)
     [request] = job.reviews.requests
-    aside = f"seen: top, bottom, as the part's context says (set aside: you said '{yours}')"
+    aside = ("seen: top, bottom, as the part's context says "
+             f"(set aside: you said '{yours} when asked')")
     assert aside in request.context and f"  {aside}" in render_review(request)
     assert not [line for line in request.context if line.endswith("context says")], (
         "none reads as what's being judged")
     assert aside in job.settings_prompts[0]
-    assert f"[your answer, in place of the notes' '{theirs}']" in job.settings_prompts[0]
+    assert f"[your answer, in place of the notes' '{then}']" in job.settings_prompts[0]
 
 
 def test_n_keeps_the_notes_and_enter_at_the_question_does_too(tmp_path: Path) -> None:
@@ -482,7 +486,7 @@ def test_the_notes_reason_is_the_notes_and_not_what_you_said(tmp_path: Path) -> 
     found = flags(ironed, None, PROCESS, FILAMENT, place(read_context(stl), stl, LAID))
     [hidden] = [f for f in found if f.id == "ironing_hidden"]
     assert hidden.change is not None
-    assert hidden.change.reason.startswith("the part's notes say 'walls")
+    assert hidden.change.reason.startswith("the part's notes say the walls, as the file lays it")
 
 
 @pytest.mark.parametrize("faces", [
@@ -748,8 +752,9 @@ def test_a_recorded_answer_over_the_notes_replays_and_names_both(
     file = recorded(tmp_path, said, CONFIRMS[0], {"question": "seen", "choice": 4})
     intake = ask_meanwhile(forever, file, Person().waiting(replayed=True), same,
                            two(tmp_path, BOTH))
-    [line] = said
-    assert "the top as it prints and the face on the plate" in line
+    unposed, line = said
+    assert "names no pose" in unposed
+    assert "the top as it lies now and the face on the plate" in line
     assert "You said: only the face on the plate" in line
     assert [q.feature for q, _ in intake.over_notes()] == ["seen"]
 
