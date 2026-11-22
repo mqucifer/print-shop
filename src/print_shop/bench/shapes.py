@@ -65,6 +65,59 @@ def to_manifold(mesh: trimesh.Trimesh, name: str = "the mesh") -> Any:
     return built
 
 
+def unclosed(part: Part) -> str | None:
+    """Why a part's surface holds no volume to read, where it isn't closed: what `info` refuses
+    it by, and what `clearance` won't answer on (mqucifer/print-shop#244)."""
+    fine = part.fine()
+    if fine.is_watertight:
+        return None
+    said = ""
+    if part.is_brep:
+        said = (
+            f"; OCCT says {float(part.shape.Volume()):.3f} mm³ and valid "
+            f"{bool(part.shape.isValid())}, with no closed mesh behind it"
+        )
+    return (
+        f"{part.name}'s surface isn't closed ({len(fine.faces)} triangles), so it holds no "
+        f"volume to read: the mesh's arithmetic gives {float(fine.volume):.3f} mm³ and means "
+        f"nothing{said}"
+    )
+
+
+def cant_read(part: Part) -> str | None:
+    """Why nothing compared with a part can be trusted, or None where it can be read
+    (mqucifer/print-shop#244): its surface isn't closed, or its volume is less than nothing, as
+    a surface that faces inward gives. A part is never repaired or turned to be read."""
+    open_said = unclosed(part)
+    if open_said:
+        return open_said
+    found = {"the mesh's": float(part.fine().volume)}
+    if part.is_brep:
+        found["OCCT's"] = float(part.shape.Volume())
+    for whose, volume in found.items():
+        if volume < -VOLUME_FLOOR:
+            return (
+                f"{part.name}'s surface faces inward, all or some of it: its volume is "
+                f"{volume:.3f} mm³ by {whose} arithmetic, less than nothing, so no overlap or "
+                "gap with it can be trusted"
+            )
+    return None
+
+
+def distrusted(parts: list[tuple[str, Any]], shared: Any) -> str:
+    """Whose surface an overlap of less than nothing is down to, by name: the part whose own
+    material where the overlap is comes to less than nothing, or else either one
+    (mqucifer/print-shop#244). `parts` are each a name and its manifold."""
+    if not shared.is_empty():
+        box = np.asarray(shared.bounding_box(), dtype=float)
+        low, size = box[:3] - 0.01, box[3:] - box[:3] + 0.02
+        cube = m3.Manifold.cube(tuple(map(float, size))).translate(tuple(map(float, low)))
+        inward = [name for name, built in parts if float((built ^ cube).volume()) < 0]
+        if inward:
+            return " and ".join(f"{name}'s" for name in inward)
+    return " or ".join(f"{name}'s" for name, _ in parts)
+
+
 class Part:
     """A file's geometry, or one solid of it."""
 

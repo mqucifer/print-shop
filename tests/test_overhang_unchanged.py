@@ -3,7 +3,8 @@
 It cuts a pose's heights together and reads each point against only the lines near it. Every
 point it finds, with its area and slope, is held to the old reading's (`overhang_as_it_was.py`)
 to the last bit, on whatever platform runs this. Where the old reading is too slow to run here,
-the vase and the plate, its figures at 3a22495 are written down.
+the vase and the plate, its figures at 9406d08 are written down. That's main's reading with
+mqucifer/print-shop#239's allowance at 45 degrees, which is held here face by face too.
 """
 
 from __future__ import annotations
@@ -28,11 +29,12 @@ from print_shop.setup import features, outline
 from tests import overhang_as_it_was as as_it_was
 from tests.fixtures import _BUILDERS, write_stl
 from tests.plate_235 import write_plate
+from tests.test_overhang import _leant_bar
 
 #: Every fixture but the vase, which the old reading takes a minute and a half over.
 PARTS = sorted(set(_BUILDERS) - {"vase"})
 
-#: At 3a22495: overhang, flare and area on the plate in mm2, and height in mm, pose by pose.
+#: At 9406d08: overhang, flare and area on the plate in mm2, and height in mm, pose by pose.
 PLATE_THEN = (
     (0.0, 0.0, 17338.1, 4.0), (0.0, 0.0, 17338.1, 4.0),
     (1276.1, 6.8, 0.0, 175.2), (1236.6, 23.1, 0.0, 175.2),
@@ -40,8 +42,8 @@ PLATE_THEN = (
 )
 VASE_THEN = (
     (0.0, 0.0, 2825.4, 120.0), (2384.9, 0.0, 364.2, 120.0),
-    (9950.8, 0.0, 0.0, 60.0), (9950.8, 0.0, 0.0, 60.0),
-    (9950.8, 0.0, 0.0, 60.0), (9950.8, 0.0, 0.0, 60.0),
+    (9950.3, 0.0, 0.0, 60.0), (9950.3, 0.0, 0.0, 60.0),
+    (9950.3, 0.0, 0.0, 60.0), (9950.3, 0.0, 0.0, 60.0),
 )
 #: Six poses of the plate: the issue's bar.
 SIX_S = 10.0
@@ -73,6 +75,15 @@ def test_each_fixture_reads_as_it_did_in_each_pose(part: str) -> None:
     mesh = _BUILDERS[part]()
     for rotation in AXIS_ALIGNED:
         _read_as_before(_posed(mesh, rotation))
+
+
+@pytest.mark.parametrize("degrees", [44.99, 45.0, 45.003, 45.006, 45.01])
+@pytest.mark.parametrize(("turn", "at"), [(0, 0), (17, 183.3), (45, 254.56), (71, 440.2)])
+def test_a_face_at_the_limit_reads_as_main_reads_it(
+    tmp_path: Path, degrees: float, turn: float, at: float
+) -> None:
+    """Either side of the allowance, turned and moved, through an STL's float32 points."""
+    _read_as_before(_leant_bar(tmp_path / "bar.stl", degrees, turn, at, height=5.5))
 
 
 def test_a_face_with_something_beneath_reads_as_it_did() -> None:

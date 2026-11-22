@@ -35,13 +35,22 @@ the parts' material in it, whose least distance, as a box is convex, is between 
 it, never a section or a copy. `--facing NAME=DIR` reads it between faces facing DIR and faces
 facing back, on a STEP pair. Each place is read by the pair's own two methods, and with a place
 named the gap range holds each place, not the pair's least. Every limit is `limits`' rule.
+
+**A part that can't be read** (mqucifer/print-shop#244). A surface that faces inward gives a
+negative overlap, which fell through `overlap > band` to a gap of 0: `TOUCHING`, through a solid
+the part reached far into. An overlap under nothing by more than its band, whose size the band
+is taken from, is `DISAGREE`, naming whose surface it's down to. And each part is checked before
+it's compared, by `info`'s rule (`shapes.cant_read`): one with a negative volume, or a surface
+that isn't closed, gives no `CLEAR`, `TOUCHING` or `HELD`. Its pair is `NO ANSWER`, with each
+method's figure beside that, or `INTERFERE` where every method still finds the overlap. That
+ranks under `INTERFERE`, so an overlap found is still the answer.
 """
 
 from __future__ import annotations
 
 import math
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import cadquery as cq
@@ -62,6 +71,8 @@ from .shapes import (
     NoAnswer,
     Part,
     _tessellated,
+    cant_read,
+    distrusted,
     slice_at,
 )
 from .slide import summary, what_holds
@@ -74,15 +85,15 @@ SAMPLES = 6000
 #: The unit step along each axis `--along` names.
 AXES = {"x": (1.0, 0.0, 0.0), "y": (0.0, 1.0, 0.0), "z": (0.0, 0.0, 1.0)}
 #: Worst first: the pairs' verdict is the worst of them.
-ORDER = ["DISAGREE", "INTERFERE", "TOO CLOSE", "TOO LOOSE", "TOUCHING", "CLEAR"]
+ORDER = ["DISAGREE", "INTERFERE", "NO ANSWER", "TOO CLOSE", "TOO LOOSE", "TOUCHING", "CLEAR"]
 #: With `--slide`, worst first: the hold, then an overlap of parts that don't move. A pair's own
 #: touch or gap is a reading beside it (mqucifer/print-shop#76). A hold by a body joined to nothing
 #: else in its file is a hold the file doesn't make as one piece (mqucifer/print-shop#122), so it
 #: ranks with `NOT HELD`, over an overlap of parts that don't move: where a loose body also
 #: overlaps the one it belongs to, its being a body of its own is what to fix, and joining the two
 #: clears the overlap. The slide gives one verdict, so it and `NOT HELD` never meet.
-SLIDE_ORDER = ["DISAGREE", "NOT HELD", "HELD BY A SEPARATE BODY", "INTERFERE", "HELD", "TOO CLOSE",
-               "TOO LOOSE", "TOUCHING", "CLEAR"]  # fmt: skip
+SLIDE_ORDER = ["DISAGREE", "NOT HELD", "HELD BY A SEPARATE BODY", "INTERFERE", "NO ANSWER",
+               "HELD", "TOO CLOSE", "TOO LOOSE", "TOUCHING", "CLEAR"]  # fmt: skip
 #: A place that catches no surface of one of a pair: it gives no figure, and judges nothing.
 NOT_CAUGHT = "NOT CAUGHT"
 #: A face is `--facing` a way where its outward normal stays within this of it, in degrees,
@@ -99,6 +110,33 @@ DIRECTIONS = {
     "+z": (0.0, 0.0, 1.0),
     "-z": (0.0, 0.0, -1.0),
 }
+
+
+@dataclass
+class Trust:
+    """What of the parts given can't be read, by each part's `id` (mqucifer/print-shop#244)."""
+
+    unread: dict[int, str] = field(default_factory=dict)
+
+    def why(self, *parts: Part) -> list[str]:
+        return list(dict.fromkeys(self.unread[id(p)] for p in parts if id(p) in self.unread))
+
+
+def trust_of(split: list[tuple[Part, list[Part]]]) -> Trust:
+    """Each part checked before it's compared. A STEP is read solid by solid; an STL as the file
+    is, as `info` reads it, and body by body."""
+    found = Trust()
+    for part, pieces in split:
+        of_file = None if part.is_brep else cant_read(part)
+        said = []
+        for piece in pieces:
+            why = of_file or cant_read(piece)
+            if why:
+                found.unread[id(piece)] = why
+                said.append(why)
+        if said:
+            found.unread[id(part)] = "; ".join(dict.fromkeys(said))
+    return found
 
 
 def _apart(a: Part, b: Part, margin: float = 1e-3) -> bool:
@@ -163,14 +201,20 @@ def _sampled_gap(a: Part, b: Part) -> tuple[float, float]:
 
 
 def measure_pair(
-    a: Part, b: Part, min_gap: float | None, max_gap: float | None = None
+    a: Part,
+    b: Part,
+    min_gap: float | None,
+    max_gap: float | None = None,
+    trust: Trust | None = None,
 ) -> dict[str, Any]:
     """Every figure for a pair, whether the methods agree, and the pair's verdict."""
     fine, coarse = a.manifold(True) ^ b.manifold(True), a.manifold(False) ^ b.manifold(False)
     overlap, overlap_coarse = float(fine.volume()), float(coarse.volume())
     # The chords matter only where the overlap has surface, and at most where the parts curve.
     chords = min(FINE[0] * float(fine.surface_area()), a.chord_band() + b.chord_band())
-    band = max(VOLUME_FLOOR, VOLUME_SHARE * overlap, chords, 2 * abs(overlap_coarse - overlap))
+    trust = trust or Trust()
+    size = abs(overlap)
+    band = max(VOLUME_FLOOR, VOLUME_SHARE * size, chords, 2 * abs(overlap_coarse - overlap))
     gap_band = 2 * FINE[0] + TOUCHING
     pair: dict[str, Any] = {
         "a": a.name,
@@ -207,7 +251,7 @@ def measure_pair(
     else:
         stacked = _sections_overlap(a, b)
         # A stack's error is its steps' outlines: a share of the overlap, and a little at least.
-        stack_band = max(0.02, 0.05 * overlap)
+        stack_band = max(0.02, 0.05 * size)
         pair["overlap_sections_mm3"] = round(stacked, 4)
         volumes[f"{SECTIONS} sections"] = stacked
         tolerance[f"{SECTIONS} sections"] = stack_band
@@ -226,6 +270,24 @@ def measure_pair(
     # The figure the limits judge, as it is: a need on it reads the same (`limits`).
     pair["gap_mm"] = read
     pair["gap_by"] = "occt" if exact is not None else "mesh"
+    under_nothing = {
+        n: v for n, v in volumes.items() if v < -max(band, tolerance.get(n, band))
+    }
+    untrusted = trust.why(a, b)
+    if under_nothing:
+        whose = distrusted([(a.name, a.manifold()), (b.name, b.manifold())], fine)
+        figures = ", ".join(f"{_mm3(v)} mm³ by {n}" for n, v in under_nothing.items())
+        where = ""
+        if not fine.is_empty():
+            x0, y0, z0, x1, y1, z1 = fine.bounding_box()
+            where = f", from {_point(_at((x0, y0, z0)))} to {_point(_at((x1, y1, z1)))}"
+        said_under = (
+            f"{a.name} | {b.name}'s overlap reads {figures}{where}, less than nothing past its "
+            f"±{band:.3f} band: {whose} surface can't be trusted"
+        )
+        differs.append(said_under)
+        untrusted.append(said_under)
+    pair["untrusted"] = untrusted
     overlapping = _overlap_agreed(volumes, tolerance, band, differs)
     pair["overlap_by"] = {name: round(v, 4) for name, v in volumes.items()}
     if overlapping or overlap > band:
@@ -239,6 +301,8 @@ def measure_pair(
         pair["verdict"] = "DISAGREE"
     elif overlapping:
         pair["verdict"] = "INTERFERE"
+    elif untrusted:
+        pair["verdict"] = "NO ANSWER"
     elif min_gap is not None and under(read, min_gap):
         pair["verdict"] = "TOO CLOSE"
     elif max_gap is not None and over(read, max_gap):
@@ -408,6 +472,7 @@ def measure_place(
     band: float,
     min_gap: float | None,
     max_gap: float | None,
+    trust: Trust | None = None,
 ) -> dict[str, Any]:
     """The least gap between a pair's surfaces at one place, by two methods, and its verdict
     against the gap range. A place reads the parts' own surfaces where they lie, never a section
@@ -426,6 +491,8 @@ def measure_place(
     differs: list[str] = []
     gap_band = 2 * FINE[0] + TOUCHING
     overlap = 0.0
+    trust = trust or Trust()
+    untrusted = trust.why(a, b)
     if place.way is not None:
         toward = np.asarray(DIRECTIONS[place.way])
         sides = [
@@ -434,6 +501,9 @@ def measure_place(
         ]
         sides = [(f, g) for f, g in sides if f and g]
         if not sides:
+            if untrusted:
+                found.update(verdict="NO ANSWER", why="; ".join(untrusted))
+                return found
             found["why"] = (
                 f"no face of {a.name} or {b.name} faces {place.way} with a face of the other "
                 "facing back. Name a way one faces the other across the gap, or use --box"
@@ -484,19 +554,39 @@ def measure_place(
                     f"{by_occt} against {by_mesh}",
                 )
                 return found
+        noise = max(VOLUME_FLOOR, VOLUME_SHARE * whole)
+        inward = [
+            f"{one.name}'s material in the box comes to {float(piece.volume()):.3f} mm³, less "
+            f"than nothing: {one.name}'s surface can't be trusted"
+            for one, piece in zip((a, b), clipped, strict=True)
+            if float(piece.volume()) < -noise
+        ]
+        if inward:
+            found.update(verdict="DISAGREE", why="; ".join([*inward, *untrusted]))
+            return found
         where = {"outside": "lies all outside the box", "inside": "fills the box with material"}
         missed = [
             f"{one.name} {where[hit]}"
             for one, hit in zip((a, b), by_mesh, strict=True)
             if hit != "caught"
         ]
+        if missed and untrusted:
+            found.update(verdict="NO ANSWER", why="; ".join(untrusted))
+            return found
         if missed:
             found["why"] = (
                 f"no surface of both is in the box: {' and '.join(missed)}. Move the box so it "
                 "holds the faces on both sides of the gap you're reading"
             )
             return found
-        overlap = float((clipped[0] ^ clipped[1]).volume())
+        in_box = clipped[0] ^ clipped[1]
+        overlap = float(in_box.volume())
+        if overlap < -band:
+            whose = distrusted([(a.name, clipped[0]), (b.name, clipped[1])], in_box)
+            differs.append(
+                f"{overlap:.3f} mm³ of overlap in the box, less than nothing past its "
+                f"±{band:.3f} band: {whose} surface can't be trusted"
+            )
         search = float(np.linalg.norm(place.high - place.low)) + 1.0  # type: ignore[operator]
         by_manifold = float(clipped[0].min_gap(clipped[1], search))
         if a.is_brep and b.is_brep:
@@ -525,6 +615,8 @@ def measure_place(
         found.update(verdict="DISAGREE", why="; ".join(differs))
     elif overlap > band:
         found.update(verdict="INTERFERE", why=f"{overlap:.3f} mm³ of overlap in the box")
+    elif untrusted:
+        found.update(verdict="NO ANSWER", why="; ".join(untrusted))
     elif min_gap is not None and under(read, min_gap):
         found["verdict"] = "TOO CLOSE"
     elif max_gap is not None and over(read, max_gap):
@@ -583,12 +675,13 @@ def run(args: Any, report: Report) -> None:
     # With a place named, the range holds each place's gap, not the pair's least: a range is the
     # play at one place, and a mated pair has several (mqucifer/print-shop#72).
     low, high = (None, None) if named else (args.min_gap, max_gap)
-    results = [measure_pair(a, b, low, high) for a, b in pairs]
+    trust = trust_of(split)
+    results = [measure_pair(a, b, low, high, trust) for a, b in pairs]
     for (a, b), r in zip(pairs, results, strict=True):
         if named:
             band = r["overlap_band_mm3"]
             r["places"] = {
-                p.name: measure_place(a, b, p, band, args.min_gap, max_gap) for p in named
+                p.name: measure_place(a, b, p, band, args.min_gap, max_gap, trust) for p in named
             }
     report.numbers["pairs"] = results
     if named:
@@ -597,7 +690,9 @@ def run(args: Any, report: Report) -> None:
     if way_out:
         others = [piece for part, pieces in split[:-1] for piece in pieces]
         alone = _separate(split, results)
-        slid = what_holds(report, parts[-1], others, way_out, args.hold, boxes, alone)
+        slid = what_holds(
+            report, parts[-1], others, way_out, args.hold, boxes, alone, trust.unread
+        )
     brep = all(a.is_brep and b.is_brep for a, b in pairs)
     # Many pairs with nothing to report are one counted line: on `pi5-case-1` a lid of 5 bodies
     # gave 15 pairs, about 21k characters a reply (mqucifer/print-shop#77). Every pair whose
@@ -606,7 +701,7 @@ def run(args: Any, report: Report) -> None:
     for i, r in enumerate(results):
         if folded and _quiet(r):
             continue
-        _pair_said(report, i, r, named, brep)
+        _pair_said(report, i, r, named)
         for name, place in r.get("places", {}).items():
             if not (folded and place["verdict"] == NOT_CAUGHT):
                 _place_said(report, i, r, name, place, args)
@@ -651,13 +746,24 @@ def run(args: Any, report: Report) -> None:
     if read_at:
         at = {w: sum(p["verdict"] == w for p in read_at) for w in [*ORDER, NOT_CAUGHT]}
         tally += "; at the places: " + ", ".join(f"{n} {w.lower()}" for w, n in at.items() if n)
+    # What can't be read is said first, with its figure, where it's the answer.
+    reasons = list(dict.fromkeys(why for r in results for why in r["untrusted"]))
     if slid is not None:
         # The slide's verdict is the answer's, unless a reading has no answer to rely on, or two
         # parts that don't move overlap: the hold's figures stand beside the pairs'.
         worst = min([*verdicts, slid["verdict"]], key=SLIDE_ORDER.index)
-        report.verdict(worst, f"{summary(slid)}; {lead}{len(results)} pair(s): {tally}")
+        first = _refusal(worst, reasons)
+        report.verdict(worst, f"{first}{summary(slid)}; {lead}{len(results)} pair(s): {tally}")
         return
-    report.verdict(worst, f"{lead}{len(results)} pair(s): {tally}")
+    report.verdict(worst, f"{_refusal(worst, reasons)}{lead}{len(results)} pair(s): {tally}")
+
+
+def _refusal(worst: str, reasons: list[str]) -> str:
+    """The verdict's first words where what can't be read is why there's no answer."""
+    if worst not in ("DISAGREE", "NO ANSWER") or not reasons:
+        return ""
+    more = f"; and {len(reasons) - BODIES_SAID} more" * (len(reasons) > BODIES_SAID)
+    return "; ".join(reasons[:BODIES_SAID]) + more + "; "
 
 
 #: Up to this many pairs, every pair is said whole; past it, those with nothing to report are one
@@ -780,7 +886,7 @@ def _volumes(pair: dict[str, Any]) -> str:
 
 
 def _pair_said(
-    report: Report, index: int, r: dict[str, Any], named: list[Place], brep: bool
+    report: Report, index: int, r: dict[str, Any], named: list[Place]
 ) -> None:
     """One pair whole: its verdict, its figures, where any overlap is, and its second check."""
     by = "OCCT's exact distance" if r["gap_by"] == "occt" else "the mesh, the STL's own surface"
@@ -796,6 +902,14 @@ def _pair_said(
             f". Both methods find an overlap; volumes {_volumes(r)}: they differ only on its "
             "size, so the verdict is INTERFERE, not DISAGREE"
         )
+    if r["untrusted"]:
+        line += f". By each method the overlap is {_volumes(r)}, " + (
+            "found by every one, though a part can't be read"
+            if r["verdict"] == "INTERFERE"
+            else "and none of it, nor the gap, is to rely on"
+        )
+        if r["verdict"] == "INTERFERE":  # Else it's the verdict's first words.
+            line += f": {'; '.join(r['untrusted'])}"
     report.line(line)
     pieces = r.get("overlap_at") or []
     if pieces:
@@ -808,7 +922,8 @@ def _pair_said(
             )
             + (f"; and {len(pieces) - PIECES_SAID} more" if len(pieces) > PIECES_SAID else "")
         )
-    if brep:
+    # By the pair's own methods: STEPs and an STL given together have pairs of both kinds.
+    if "overlap_occt_common_mm3" in r:
         common, cut = r["overlap_occt_common_mm3"], r["overlap_occt_cut_mm3"]
         text = (
             f"{r['a']} | {r['b']}: OCCT common {_shown(common)} mm³, cut {_shown(cut)} mm³; "

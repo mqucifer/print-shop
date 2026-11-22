@@ -812,6 +812,12 @@ def parser() -> Parser:
         metavar="N",
         help="a pixel is lead where every channel is under N, of 255 (40 unless given)",
     )
+    trace.add_argument(
+        "--whole",
+        action="store_true",
+        help="the whole picture is the panel: no frame is looked for or cut away. For a picture "
+        "already cropped to its panel",
+    )
     check = action.add_parser(
         "check", help="a piece map against the rules glass cutting follows, each a figure"
     )

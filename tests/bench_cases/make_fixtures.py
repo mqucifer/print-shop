@@ -34,6 +34,57 @@ def along_y(radius: float, y0: float, y1: float, hole: float = 0.0) -> Any:
     return tube.extrude(y1 - y0)
 
 
+def unreadable() -> None:
+    """What `clearance` can't read (mqucifer/print-shop#244): a box turned inside out, a loft
+    whose mesh doesn't close, and a prism that crosses itself, with a lobe facing inward and its
+    whole volume more than nothing. And an STL with an enclosed hollow."""
+    out = Path("untrusted")
+    out.mkdir(exist_ok=True)
+    V, solid = cq.Vector, cq.Solid.makeBox
+
+    def step(name: str, shape: Any) -> None:
+        save(cq.Workplane().add(shape), f"untrusted/{name}")
+
+    step("block", solid(70, 70, 8, V(-25, -25, 40)))
+    step("beside", solid(10, 10, 8, V(120, 120, 40)))
+    step("on-top", solid(20, 20, 5, V(0, 0, 60)))
+    step("good", solid(20, 20, 60))
+    mesh = trimesh.creation.box(extents=(20, 20, 60))
+    mesh.apply_translation((10, 10, 30))
+    mesh.export(out / "good-mesh.stl")
+    hole = trimesh.creation.box(extents=(6, 6, 20))
+    hole.apply_translation((10, 10, 30))
+    hole.faces = hole.faces[:, ::-1]
+    both: Any = trimesh.util.concatenate([mesh, hole])
+    both.export(out / "hollow.stl")
+    mesh.faces = mesh.faces[:, ::-1]
+    mesh.export(out / "inward.stl")
+    away = mesh.copy()
+    away.apply_translation((200, 200, 0))
+    away.export(out / "inward-away.stl")
+
+    def octagon(wide: float, z: float) -> Any:
+        c = 0.3 * wide
+        a, b = wide - c, wide
+        points = [(-a, -b), (a, -b), (b, -a), (b, a), (a, b), (-a, b), (-b, a), (-b, -a)]
+        return cq.Wire.makePolygon([V(10 + x, 10 + y, z) for x, y in points], close=True)
+
+    heights = ((0, 10), (2, 10), (30, 10), (32, 3), (60, 3))
+    step("unclosed-loft", cq.Solid.makeLoft([octagon(w, z) for z, w in heights], ruled=False))
+    # Its outline crosses itself at (8, 16): 320 mm² out, and a lobe of 20 mm² to y 20 inward.
+    outline = [(0, 0), (40, 0), (0, 20), (10, 20)]
+    corners = np.array([(*p, z) for z in (0.0, 10.0) for p in outline])
+    faces = [(0, 2, 1), (0, 3, 2), (4, 5, 6), (4, 6, 7)]
+    for k in range(4):
+        n = (k + 1) % 4
+        faces += [(k, n, n + 4), (k, n + 4, k + 4)]
+    trimesh.Trimesh(corners, np.array(faces), process=False).export(out / "crossed.stl")
+    step("in-lobe", solid(1, 1, 6, V(6, 18.5, 2)))
+    step("at-lobe", solid(1, 1, 6, V(6, 20.3, 2)))
+    # In the lobe by 0.00003 mm: -0.00018 mm³ of overlap, inside the 0.001 band.
+    step("on-lobe", solid(1, 1, 6, V(6, 20 - 3e-5, 2)))
+
+
 def near_touching() -> None:
     """Two leaves of a hinge, one swung over the other with faces all but coincident."""
     a = box(-25, -3.3, -15, 15, -1.5, 1.5)
@@ -371,6 +422,67 @@ def thin_parts() -> None:
             obj=cq.Compound.makeCompound([base.val(), box(30, 30.5, 0, 0.5, 0, 0.5).val()])
         ),
         "speck",
+    )
+
+
+def rim_points() -> None:
+    """A plate 20 mm thick leant at 45°, and 5.5 mm bores square to it (mqucifer/print-shop#238):
+    at each rim one layer's section leaves a point. And what keeps such a point thin."""
+    out = Path("rim")
+    out.mkdir(exist_ok=True)
+    V = cq.Vector
+    plate = cq.Solid.makeBox(20, 50, 50, V(-10, -25, -25)).rotate(V(), V(0, 1, 0), 45)
+    plain = plate.intersect(cq.Solid.makeBox(200, 200, 28, V(-100, -100, -14)))
+    plain = plain.translate((0, 0, 14))
+
+    def cut(
+        part: Any,
+        start: float = -30.0,
+        end: float = 30.0,
+        y: float = 0.0,
+        radius: float = 2.75,
+        lean: float = 45.0,
+    ) -> Any:
+        way = V(np.cos(np.radians(lean)), 0, -np.sin(np.radians(lean)))
+        at = V(0, y, 14) + way * start
+        return part.cut(cq.Solid.makeCylinder(radius, end - start, at, way))
+
+    bored = cut(plain)
+    made = {
+        "plain": plain,
+        "bored": bored,
+        "turned": bored.rotate(V(), V(0, 0, 1), 17).translate((183.3, 122.2, 5)),
+        "blind": cut(plain, end=0),
+        "counterbore": cut(bored, end=-6, radius=5.2),
+        # What keeps it thin: 0.3 mm to the plate's side, and 0.3 mm over the bore's end.
+        "side": cut(plain, y=25 - 2.75 - 0.3),
+        "skin": cut(plain, end=10 - 0.3),
+        "skin-up": cut(plain, start=-10 + 0.3),
+        # A rim sharper than square, the bore 5° off the face's square.
+        "sharp": cut(plain, lean=50),
+    }
+    # The far end breaking out at a slant through the top, 0.199 mm square to the bore at its
+    # edge, which is no wall; and with the bore 0.3 mm from the plate's side as well.
+    slant = V(np.cos(np.radians(45)), 0, -np.sin(np.radians(45)))
+    for name, y in (("breakout", 0.0), ("breakout-side", 25 - 2.75 - 0.3)):
+        at = V(0, y, 25.2) - slant * 40
+        made[name] = plain.cut(cq.Solid.makeCylinder(2.75, 80, at, slant))
+    # A hole so short that all of its surface is within a nozzle of an end, 0.3 mm from the side.
+    sheet = cq.Solid.makeBox(0.7, 50, 50, V(-0.35, -25, -25)).rotate(V(), V(0, 1, 0), 45)
+    sheet = sheet.intersect(cq.Solid.makeBox(200, 200, 28, V(-100, -100, -14)))
+    made["short"] = cut(sheet.translate((0, 0, 14)), y=25 - 2.75 - 0.3)
+    eight = plain
+    for y in (-21, -15, -9, -3, 3, 9, 15, 21):
+        eight = cut(eight, y=y)
+    made["eight"] = eight
+    # A rib one layer tall and 0.3 mm wide round an upright bore's rim.
+    slab = cq.Solid.makeBox(20, 20, 5, V(-10, -10, 0))
+    rib = cq.Solid.makeCylinder(3.05, 0.2, V(0, 0, 5))
+    made["rib"] = slab.fuse(rib).cut(cq.Solid.makeCylinder(2.75, 8, V(0, 0, -1)))
+    for name, shape in made.items():
+        save(cq.Workplane().add(shape), f"rim/{name}")
+    cq.exporters.export(
+        cq.Workplane().add(bored), "rim/bored.stl", tolerance=0.01, angularTolerance=0.1
     )
 
 
@@ -1100,6 +1212,7 @@ def nut_rows() -> None:
 
 if __name__ == "__main__":
     beds()
+    unreadable()
     where()
     sections()
     near_touching()
@@ -1115,6 +1228,7 @@ if __name__ == "__main__":
     hanging()
     closes()
     thin_parts()
+    rim_points()
     designs()
     sheets()
     glass()

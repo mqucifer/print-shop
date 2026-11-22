@@ -1,8 +1,9 @@
 """The overhang reading as it was before mqucifer/print-shop#235, to hold today's to it.
 
-Copied from `setup/features.py` at 3a22495 and not to be improved: it cuts a height at a time
-and reads every point against every line. `test_overhang_unchanged.py` compares the two to the
-last bit, on whatever platform runs it, which figures written down couldn't.
+Copied from `setup/features.py` at 9406d08, with mqucifer/print-shop#239's allowance at the
+limit, and not to be improved: it cuts a height at a time and reads every point against every
+line. `test_overhang_unchanged.py` compares the two to the last bit, on whatever platform runs
+it, which figures written down couldn't.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import numpy as np
 import trimesh
 
 from print_shop.setup.features import (
+    _AT_LIMIT_DEG,
     _ENVELOPE_MM,
     _FIRST_LAYER_MM,
     _FLAT,
@@ -51,8 +53,11 @@ def overhanging(
     # Facing down past the threshold, not wholly in the first layer, on the plate, and, unless
     # `flares` is False, not a round or chamfer rising from the plate (mqucifer/print-shop#128).
     rising = _from_the_plate(mesh) if flares else np.zeros(len(mesh.faces), dtype=bool)
+    # An angle from vertical is the arcsine of how far the normal points down: a cosine of the
+    # threshold is the same only at 45 degrees exactly.
+    past = _OVERHANG_DEG + _AT_LIMIT_DEG
     candidates = np.flatnonzero(
-        (normals[:, 2] < -np.cos(np.radians(_OVERHANG_DEG))) & (top > _FIRST_LAYER_MM) & ~rising
+        (normals[:, 2] < -np.sin(np.radians(past))) & (top > _FIRST_LAYER_MM) & ~rising
     )
     if not len(candidates):
         return None
@@ -84,7 +89,7 @@ def overhanging(
     reach = _reach(seated, points, probe)
     depth = _reach(seated, points, points[:, 2] - 0.01)  # its own face's depth
     slope = np.degrees(np.arctan2(reach, _ENVELOPE_MM))
-    over = slope > _OVERHANG_DEG
+    over = slope > past
     if not over.any():
         return None
     read = np.where(depth > _ENVELOPE_MM, own, np.minimum(own, slope))
