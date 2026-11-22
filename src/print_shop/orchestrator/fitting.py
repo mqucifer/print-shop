@@ -58,15 +58,19 @@ def with_turns(
     """The poses, marked where one fits only turned on the plate, so that it's offered that turn
     rather than refused. Only `kept`, the pose the person or the part's context lays it in, or,
     where no pose fits as posed, any: a pose that fits as posed is never passed over for one
-    that has to be turned."""
+    that has to be turned. One that no turn fits is marked too, so it isn't sent back to."""
     none_fits = not any(c.fits_in(build_volume) for c in found)
-    return tuple(
-        c.model_copy(update={"fits_turned": True})
-        if not c.fits_in(build_volume) and (none_fits or c.rotation_deg == kept)
-        and turns(stl, build_volume, c.rotation_deg)
-        else c
-        for c in found
-    )
+
+    def marked(c: Orientation) -> Orientation:
+        if c.fits_in(build_volume):
+            return c
+        if not turns(stl, build_volume, c.rotation_deg):
+            return c.model_copy(update={"fits_no_way": True})
+        if none_fits or c.rotation_deg == kept:
+            return c.model_copy(update={"fits_turned": True})
+        return c
+
+    return tuple(marked(c) for c in found)
 
 
 class Fitting:

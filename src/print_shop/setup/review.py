@@ -127,6 +127,13 @@ class ReviewRequest:
         return bool(self.slice.turn_deg) and not self.turn_taken
 
     @property
+    def other_sides(self) -> tuple[Orientation, ...]:
+        """The poses it can be sent back to: the others, save one that fits in no turn on the
+        plate, which couldn't be sliced (mqucifer/print-shop#257)."""
+        return tuple(c for c in self.candidates
+                     if c.rotation_deg != self.orientation.rotation_deg and not c.fits_no_way)
+
+    @property
     def proposed(self) -> tuple[Flag, ...]:
         """The flags that propose a change, numbered from 1 at the review."""
         return tuple(f for f in self.flags if f.change is not None)
@@ -278,15 +285,17 @@ def _turn(request: ReviewRequest) -> list[str]:
     if not deg:
         return []
     turned = f"turned {turn_words(deg)}"
-    then = 'x, y and the seam\'s "back" are as it lies turned'
+    theirs = 'x, y and the seam\'s "back" are the turned part\'s'
     if request.turn_taken:
-        return [f"  TURNED ON THE PLATE to fit, as you took it: {turned}; {then}"]
+        return [f"  TURNED ON THE PLATE to fit, as you took it: {turned}; {theirs}"]
     posed = next((c for c in request.candidates
                   if c.rotation_deg == request.orientation.rotation_deg), None)
     size = f" ({posed.bbox_mm[0]:.1f} x {posed.bbox_mm[1]:.1f} mm)" if posed else ""
+    other = " For another side down, type orientation." if request.other_sides else ""
     return [f"  DOESN'T FIT AS POSED{size}: Orca has no room for it that way.",
-            f"    It fits {turned}, and this slice is so: {then}.",
-            "    It isn't turned unless you take it: type turn."]
+            f"    It fits {turned}, with the same side down.",
+            f"    What's shown here is already sliced that way: the time, {theirs}. "
+            f"Nothing prints that way unless you type turn.{other}"]
 
 
 def _pauses(request: ReviewRequest) -> list[str]:
@@ -340,6 +349,8 @@ def _poses(request: ReviewRequest) -> list[str]:
     lines = ["  the poses it weighed (overhang is what would need support):"]
     for c in request.candidates:
         here = "  <- this print" if c.rotation_deg == request.orientation.rotation_deg else ""
+        if c.fits_no_way:
+            here += "  (doesn't fit, however it's turned on the plate)"
         flare = (f", {c.flare_area_mm2:g} mm2 rising from the plate left out"
                  if c.flare_area_mm2 else "")
         lines.append(
@@ -381,8 +392,9 @@ def parse_answer(answer: str, request: ReviewRequest) -> Review | str:
     text = answer.strip()
     if text.lower() in ("ok", "yes", "y", "approve"):
         if request.turn_waiting:
+            side = " orientation for another side down," if request.other_sides else ""
             return ("it doesn't fit as posed: type turn to take it turned "
-                    f"{turn_words(request.slice.turn_deg)}, or stop")
+                    f"{turn_words(request.slice.turn_deg)},{side} or stop")
         return Review(approved=True)
     if text.lower() == _TURN:
         if not request.slice.turn_deg:
@@ -591,14 +603,21 @@ def send_back(
     """
     now = request.orientation
     current = next((c for c in request.candidates if c.rotation_deg == now.rotation_deg), None)
-    others = [c for c in request.candidates if c.rotation_deg != now.rotation_deg]
+    others = request.other_sides
     write(f"The orientation step printed it at {pose_value(now.rotation_deg)}: {now.rationale}")
+    if not others:
+        write("  No other side down fits the plate, however it's turned on it.")
+        return None
     chosen: Orientation | None = None
     if pose is not None and pose.isdigit() and 1 <= int(pose) <= len(others):
         chosen = others[int(pose) - 1]
     if chosen is None:
         write("Which pose should it print in?")
         write("\n".join(f"  {n}) {_pose(c)}" for n, c in enumerate(others, 1)))
+        if left_out := [c for c in request.candidates
+                        if c.fits_no_way and c.rotation_deg != now.rotation_deg]:
+            write(f"  Left out, as they don't fit however they're turned on the plate: "
+                  f"{'; '.join(pose_value(c.rotation_deg) for c in left_out)}")
         while chosen is None:
             said = read("pose> ").strip()
             if said.lower() in ("", "back"):

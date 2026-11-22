@@ -38,7 +38,14 @@ from print_shop.setup.loop import PrintLoop
 from print_shop.setup.offer import ThisPart, offering
 from print_shop.setup.proposal import Change, Proposal, Source
 from print_shop.setup.reading import SeamReading, SliceReading, read_slice
-from print_shop.setup.review import Review, ReviewRequest, cli_reviewer, parse_answer
+from print_shop.setup.review import (
+    Review,
+    ReviewRequest,
+    cli_reviewer,
+    parse_answer,
+    render,
+    send_back,
+)
 from print_shop.slicer.orca import (
     BedType,
     DoesntFit,
@@ -288,11 +295,14 @@ def test_a_part_that_fits_only_turned_says_so_and_the_turn_taken_is_recorded_and
 
     offered = done.shown
     assert f"DOESN'T FIT AS POSED ({long:.1f} x 20.0 mm)" in offered
-    assert "It fits turned 45° anticlockwise, seen from above, and this slice is so" in offered
-    assert "It isn't turned unless you take it: type turn." in offered
+    assert "It fits turned 45° anticlockwise, seen from above, with the same side down." in offered
+    assert ("What's shown here is already sliced that way: the time, x, y and the seam's \"back\" "
+            "are the turned part's. Nothing prints that way unless you type turn. For another "
+            "side down, type orientation.") in offered
     assert "Type turn to take it turned 45° anticlockwise" in offered
     assert "Type ok to go on" not in offered, "ok isn't offered before the turn is taken"
-    assert "it doesn't fit as posed: type turn to take it" in offered, "and is refused"
+    assert ("it doesn't fit as posed: type turn to take it turned 45° anticlockwise, seen from "
+            "above, orientation for another side down, or stop") in offered, "and is refused"
     assert "Taken: turned 45° anticlockwise" in offered
 
     assert done.gate is not None
@@ -381,6 +391,8 @@ def test_a_correction_that_needs_another_turn_is_offered_that_one(tmp_path: Path
                slicer=Bed(room))
     assert done.result.printed, done.result.error
     assert done.shown.count("DOESN'T FIT AS POSED") == 2, "the new turn is its own offer"
+    assert "TURNED ON THE PLATE" not in done.shown, "45 taken isn't this angle taken"
+    assert "it doesn't fit as posed: type turn" in done.shown, "and ok waits again"
     assert done.row is not None
     assert done.row.rotation_deg[2] not in (0.0, 45.0)
     assert done.row.reading is not None
@@ -403,7 +415,39 @@ def test_a_pose_sent_back_takes_no_turn_with_it(tmp_path: Path) -> None:
                "turn", "orientation=1 because the post is seen", "ok", "turn", "ok")
     assert done.result.printed, done.result.error
     assert done.shown.count("DOESN'T FIT AS POSED") == 2, "the other pose's turn is its own offer"
+    assert "TURNED ON THE PLATE" not in done.shown, "the same angle, but another side down"
+    assert "it doesn't fit as posed: type turn" in done.shown, "and ok waits again"
     assert done.row is not None and done.row.rotation_deg == (180.0, 0.0, 45.0)
+
+
+def test_a_side_no_turn_fits_isnt_offered_to_send_it_back_to(tmp_path: Path) -> None:
+    # The fifth other side stands it 300 mm tall: sliced, it ended the job with the answers lost.
+    done = job(tmp_path, block(tmp_path, 300, 20),
+               "orientation=5 because the top is seen", "back", "turn", "ok")
+    assert done.result.printed, done.result.error
+    asked = done.shown.split("Which pose should it print in?")[1].split("Back to the review")[0]
+    listed, left_out = asked.split("Left out")
+    assert "180,0,0" in listed and "90,0,0" in listed
+    assert "0,90,0" not in listed and "0,270,0" not in listed
+    assert "0,90,0; 0,270,0" in left_out
+    assert "(doesn't fit, however it's turned on the plate)" in done.shown
+
+
+def test_with_no_other_side_that_fits_orientation_says_so_and_isnt_pointed_to() -> None:
+    here = Orientation(overhang_area_mm2=0, bed_contact_area_mm2=1, height_mm=5, fits_turned=True)
+    tall = here.model_copy(update={"rotation_deg": (0.0, 90.0, 0.0), "fits_turned": False,
+                                   "fits_no_way": True})
+    request = ReviewRequest(
+        presets=("machine", "process", "filament"), proposal=Proposal(),
+        slice=SliceResult(gcode_path=Path("x.gcode"), layer_count=25, max_z_mm=5, filament_mm=1,
+                          filament_cm3=1, filament_g=1, print_time_s=60, turn_deg=45.0),
+        orientation=AppliedOrientation(), profiles=CI_PROFILES, candidates=(here, tall),
+    )
+    assert "For another side down" not in render(request)
+    assert "orientation for another side" not in str(parse_answer("ok", request))
+    said: list[str] = []
+    assert send_back(request, lambda prompt: pytest.fail("nothing to pick"), said.append) is None
+    assert "No other side down fits the plate" in "\n".join(said)
 
 
 def test_the_side_its_context_lays_it_on_is_kept_and_offered_the_turn(tmp_path: Path) -> None:
@@ -491,10 +535,11 @@ def test_a_reading_from_before_doesnt_say_it_was_as_posed() -> None:
     assert SliceReading.model_validate(kept).turn_deg is None
 
 
-def test_a_row_from_before_is_read_as_it_was_sliced(tmp_path: Path) -> None:
+@pytest.mark.parametrize("seam", ["back", "aligned_back"])
+def test_a_row_from_before_is_read_as_it_was_sliced(tmp_path: Path, seam: str) -> None:
     stl = block(tmp_path, 40, 20)
     with Ledger(tmp_path / "ledger.sqlite") as ledger:
-        row = _row(ledger, stl, seam="back", turn=None)
+        row = _row(ledger, stl, seam=seam, turn=None)
         assert row.rotation_deg == AS_POSED and row.reading is not None
         assert row.reading.turn_deg is None, "never taken for a part sliced as posed"
         assert "turned " not in describe(row)

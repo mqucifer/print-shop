@@ -178,6 +178,9 @@ class Orientation(BaseModel):
     #: It doesn't fit as posed and does turned on the plate, which the review offers
     #: (mqucifer/print-shop#257, `orchestrator.fitting.with_turns`).
     fits_turned: bool = False
+    #: It fits neither as posed nor in any turn on the plate, so the pose isn't sent back to it
+    #: (mqucifer/print-shop#257).
+    fits_no_way: bool = False
 
     #: Which face the user sees. Free text from the model, never control flow.
     primary_visible_face: str = ""

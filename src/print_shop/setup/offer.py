@@ -51,6 +51,7 @@ from print_shop.setup.features import Feature
 from print_shop.setup.lessons import material_of
 from print_shop.setup.proposal import ORIENTATION, PAUSE, Change, Proposal, Source, Used, pose_value
 from print_shop.setup.reach import not_sliced, profile_of, unplaced
+from print_shop.setup.reading import AT_THE_BACK
 from print_shop.setup.similar import Likeness, Numbers
 from print_shop.setup.traits import TRAITS, traits
 from print_shop.sliced import same_setting
@@ -506,7 +507,7 @@ def _past(ledger: Ledger, f: _Found, found: list[_Found], part: ThisPart) -> Pas
     if not f.same_file and f.likeness.context < 1:
         differs.append("its fits, holds or seen faces weren't these")
     seam = decided.get("seam_position")
-    if seam is not None and seam.value == "back" and row.sliced is None:
+    if seam is not None and seam.value in AT_THE_BACK and row.sliced is None:
         # Back is the plate's, so it's another side of a part turned on it
         # (mqucifer/print-shop#257). A row from before doesn't say whether Orca turned it.
         was = row.reading.turn_deg if row.reading is not None else None

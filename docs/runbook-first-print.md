@@ -151,11 +151,11 @@ Finish that job, or stop it with Ctrl-C in its terminal (which doesn't stop the 
 
    ```
      DOESN'T FIT AS POSED (300.0 x 20.0 mm): Orca has no room for it that way.
-       It fits turned 45° anticlockwise, seen from above, and this slice is so: x, y and the seam's "back" are as it lies turned.
-       It isn't turned unless you take it: type turn.
+       It fits turned 45° anticlockwise, seen from above, with the same side down.
+       What's shown here is already sliced that way: the time, x, y and the seam's "back" are the turned part's. Nothing prints that way unless you type turn. For another side down, type orientation.
    ```
 
-   `turn` takes it, and `ok` waits until you have. A correction keeps the turn taken while the part needs the same one; one that needs another offers that, and one that fits it as posed again turns nothing. The gate, the ledger and the print desk show the turn taken. Where no turn fits either, the job ends saying so, with nothing sent. A print from before mqucifer/print-shop#257 doesn't say whether Orca turned it: its x and y stay as they were sliced, and where its seam was at the back, the print desk and Use these say the back may have been another side.
+   `turn` takes it, and `ok` waits until you have. `orientation` offers only the sides down that fit, as posed or turned. A turn taken is that side down at that angle only: a correction keeps it while the part needs the same one, a pose sent back starts without one; one that needs another offers that, and one that fits it as posed again turns nothing. The gate, the ledger and the print desk show the turn taken. Where no turn fits either, the job ends saying so, with nothing sent. A print from before mqucifer/print-shop#257 doesn't say whether Orca turned it: its x and y stay as they were sliced, and where its seam was at the back (`back` or `aligned_back`), the print desk and Use these say the back may have been another side.
 
    **To send the orientation back,** type `orientation` (mqucifer/print-shop#128). It's a short conversation:
    - the step says why it turned the part, in its own words;

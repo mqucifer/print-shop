@@ -141,6 +141,11 @@ class PauseReading(BaseModel):
         return f"pauses for a filament swap {self.where()}, about {_s(self.after_s)} in"
 
 
+#: The seams that are put by the plate's back, so on whichever side of the part is turned there
+#: (mqucifer/print-shop#257).
+AT_THE_BACK = ("back", "aligned_back")
+
+
 class SliceReading(BaseModel):
     """One slice, read layer by layer."""
 
