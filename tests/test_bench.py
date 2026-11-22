@@ -1287,6 +1287,89 @@ def test_a_cusp_where_a_curve_meets_a_flat_is_noted_and_isnt_thin(bench: Any) ->
     assert answer.numbers["thin_spots"] == 0
 
 
+@pytest.mark.parametrize(
+    ("name", "points"),
+    [("bored.step", 2), ("turned.step", 2), ("bored.stl", 2), ("blind.step", 1),
+     ("counterbore.step", 2)],
+)  # fmt: skip
+def test_a_one_layer_point_at_a_hole_s_rim_is_noted_and_isnt_thin(
+    bench: Any, name: str, points: int
+) -> None:
+    """mqucifer/print-shop#238: a bore at 45° to the layers, square to a plate 20 mm thick,
+    failed for the point one layer's section leaves at each rim, 0.053 mm across."""
+    answer = bench("thin", f"rim/{name}", "--one-body")
+    assert answer.verdict == "OK", answer.text
+    assert answer.numbers["thin_spots"] == 0 and answer.numbers["thin_places"] == []
+    assert answer.numbers["rim_points"] == len(answer.numbers["rim_points_at"]) == points
+    for point in answer.numbers["rim_points_at"]:
+        low, high = point["box"]
+        assert high[2] - low[2] == pytest.approx(0.2, abs=0.01), "one layer"
+        assert point["width_mm"] < 0.4 <= point["wall_mm"]
+    assert f"{points} one-layer point(s) at a hole's rim" in answer.text
+    assert "rays square to the surfaces at" in answer.text
+    assert reports.unlike("thin", answer.numbers) == []
+    if name == "bored.step":
+        first, second = answer.numbers["rim_points_at"]
+        assert first["width_mm"] == pytest.approx(0.053, abs=0.002)
+        assert (first["box"][0][2], first["box"][1][2]) == pytest.approx((8.8, 9.0), abs=1e-3)
+        assert (second["box"][0][2], second["box"][1][2]) == pytest.approx((19, 19.2), abs=1e-3)
+        assert first["rim_across_mm"] == pytest.approx(5.5, abs=0.01)
+        assert first["wall_mm"] == pytest.approx(20, abs=0.01)
+        assert "from (8.684, -1.068, 8.8) to (9.042, 1.068, 9)" in answer.text, "where it is"
+
+
+@pytest.mark.parametrize(
+    ("name", "places"), [("side", 4), ("skin", 1), ("skin-up", 1), ("sharp", 2), ("rib", 1)]
+)
+def test_what_isnt_a_whole_wall_at_a_rim_is_still_thin(bench: Any, name: str, places: int) -> None:
+    """0.3 mm between the bore and the plate's side, or over the bore's end; a rim sharper than
+    square; and a rib one layer tall round a rim. Each fails, with the places it had."""
+    answer = bench("thin", f"rim/{name}.step", "--one-body")
+    assert answer.verdict == "FAIL", answer.text
+    assert len(answer.numbers["thin_places"]) == places
+    assert answer.numbers["rim_points"] == 0 and answer.numbers["rim_points_at"] == []
+    if name in ("side", "skin", "skin-up"):
+        assert "stays thin: read square to the surfaces, that hole's wall is 0.300 mm" in (
+            answer.text
+        )
+
+
+def test_where_a_bore_breaks_out_at_a_slant_its_edge_is_no_wall(bench: Any) -> None:
+    """The 45° edge of a bore's slanted far end read 0.199 mm square to the bore and kept the
+    square rim's point thin. It's an edge: that point is noted, and the breakout's own still
+    fails. With the side 0.3 mm from the bore it's a wall, however near an end it's read."""
+    answer = bench("thin", "rim/breakout.step", "--one-body")
+    assert answer.verdict == "FAIL", answer.text
+    assert answer.numbers["rim_points"] == 1
+    (place,) = answer.numbers["thin_places"]
+    assert place["box"][0][2] == pytest.approx(24.6, abs=0.01), "the breakout's own"
+    assert "stays thin" not in answer.text
+    for name in ("breakout-side", "short"):
+        walled = bench("thin", f"rim/{name}.step", "--one-body")
+        assert walled.verdict == "FAIL" and walled.numbers["rim_points"] == 0, walled.text
+        assert "that hole's wall is 0.30" in walled.text, walled.text
+
+
+def test_a_point_thin_through_two_layers_at_a_rim_is_still_thin(bench: Any) -> None:
+    """The same bore in layers 0.05 mm thick, where the wedge runs through two of them; and
+    with the heights sampled, when one layer can't be told from more."""
+    two = bench("thin", "rim/bored.step", "--layer", "0.05", "--max-layers", "700")
+    assert two.verdict == "FAIL", two.text
+    assert [p["layers"] for p in two.numbers["thin_places"]] == [2, 2]
+    assert two.numbers["rim_points"] == 0
+    sampled = bench("thin", "rim/bored.step", "--layer", "0.05")
+    assert "sampled" in sampled.numbers["layers_read"]
+    assert sampled.verdict == "FAIL" and sampled.numbers["rim_points"] == 0
+
+
+def test_points_at_rims_dont_quiet_the_rays_wall_reading(bench: Any) -> None:
+    answer = bench("thin", "rim/eight.step", "--one-body")
+    assert answer.numbers["rim_points"] == 16
+    assert answer.numbers["thin_rays_not_at_a_point"] >= 5
+    assert answer.verdict == "DISAGREE", answer.text
+    assert "away from any sharp point" in answer.record["why"]
+
+
 def test_a_wall_wider_than_the_nozzle_passes(bench: Any) -> None:
     answer = bench("thin", "wall-0p8.step")
     assert answer.verdict == "OK", answer.text
