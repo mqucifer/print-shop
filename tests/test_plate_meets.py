@@ -2,12 +2,14 @@
 
 Where mqucifer/print-shop#109 crosses the live lock (mqucifer/print-shop#207), what a pause height
 means (mqucifer/print-shop#203), a success with a flaw (mqucifer/print-shop#189), each gate shown
-(mqucifer/print-shop#200) and a spool corrected while a job waits (mqucifer/print-shop#220).
+(mqucifer/print-shop#200), a spool corrected while a job waits (mqucifer/print-shop#220) and
+what repeats a lesson (mqucifer/print-shop#212).
 Everything is made up and runs on fakes.
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +33,7 @@ from print_shop.setup.reading import (
     flags,
 )
 from tests.plates import profiles
+from tests.test_ledger import record
 from tests.test_plate_job import (
     JOB,
     Rig,
@@ -186,3 +189,54 @@ def test_a_flawed_part_doesnt_spoil_a_plate_toward_promoting(tmp_path: Path) -> 
         _printed_with(ledger, lesson, job, Result.SUCCESS, Result.SUCCESS, flaw=Symptom.STRINGING)
     [(_, good)] = print_lessons.to_promote(ledger)
     assert all("(success, with stringing)" in said for said in good), "a usable part, by result"
+
+
+def test_a_plates_correction_typed_again_is_evidence_and_drawing_again_adds_nothing(
+    tmp_path: Path,
+) -> None:
+    """With mqucifer/print-shop#212's rule: a repeat where the lesson reaches the part it's keyed
+    by, the same plate again included."""
+    from tests.plates import box
+
+    pin = box(tmp_path / "pin.stl", 8, 8, 30)
+    lid = box(tmp_path / "lid.stl", 80, 80, 4)
+    rig = Rig(tmp_path, "wall_loops=3 because it's enough", "ok",
+              "wall_loops=3 because it's enough", "ok")
+    with rig.daemon:
+        first = rig.gated([pin, lid])
+        rig.press("approve", first)
+        rig.printer._started = None  # the bed is clear again
+        second = rig.gated([pin, lid])
+        rig.press("approve", second)
+    assert len(rig.ledger.query("SELECT id FROM print_lessons")) == 1
+    evidence = rig.ledger.query("SELECT job_id FROM print_lesson_evidence")
+    assert sorted(e["job_id"] for e in evidence) == sorted([first, second]), "once for each plate"
+
+    for row in rig.ledger.rows():
+        print_lessons.after_print(rig.ledger, row.job_id)
+    assert len(rig.ledger.query("SELECT id FROM print_lessons")) == 1
+    assert rig.ledger.query("SELECT job_id FROM print_lesson_evidence") == evidence
+
+
+def test_a_plates_correction_isnt_absorbed_by_a_lesson_for_another_shape(tmp_path: Path) -> None:
+    from print_shop.setup.features import measure
+    from print_shop.setup.proposal import Change, Source
+    from print_shop.setup.traits import traits
+    from tests.plates import box
+
+    lid = measure(box(tmp_path / "lid.stl", 80, 80, 4), 6400)
+    pin = measure(box(tmp_path / "pin.stl", 8, 8, 30), 64)
+    fixed = Change(key="wall_loops", preset="2", value="3", reason="enough",
+                   source=Source.SPONSOR)
+    ledger = Ledger(tmp_path / "l.sqlite")
+    ledger.record_start_requested(
+        record().model_copy(update={"features": lid, "corrections": (fixed,)}))
+    one, two = _plate_records(count=2, corrections=(fixed,))
+    ledger.record_start_requested(one.model_copy(update={"features": pin}),
+                                  two.model_copy(update={"features": lid}))
+    old, new = ledger.query("SELECT job_id, traits FROM print_lessons ORDER BY id")
+    assert (old["job_id"], new["job_id"]) == ("job-1", JOB)
+    assert set(traits(pin)) == set(json.loads(new["traits"])), (
+        "keyed to the part with the most traits, which the lid's lesson doesn't reach"
+    )
+    assert "linked to lesson 1" in print_lessons.listing(ledger)
