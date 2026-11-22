@@ -234,6 +234,9 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "folds",
         "frame",
         "frame_faces",
+        # What would have been cut as a picture's frame, with the glass on it
+        # (mqucifer/print-shop#240).
+        "frame_cut",
         "frame_px",
         "frame_solids",
         "frame_volume_mm3",
@@ -306,6 +309,8 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "pane_top_z",
         "panel_mm",
         "panel_px",
+        "panel_share_pct",
+        "picture_px",
         "panes_count",
         "patch_at",
         "patch_left_as_lead_mm2",
