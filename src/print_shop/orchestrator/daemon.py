@@ -290,6 +290,7 @@ class Daemon:
         self._active_job_id: str | None = None
         self._worker: threading.Thread | None = None
         self._worker_alive = False
+        self._at_gate = threading.Event()  # wakes `wait_for_gate` as one opens
         #: Each gate a job has opened, in order, answered or not: what `wait_for_gate` returns.
         self._opened: dict[str, list[dict[str, Any]]] = {}
 
@@ -412,6 +413,7 @@ class Daemon:
             daemon=True,
         )
         self._worker_alive = True
+        self._at_gate.clear()
         self._worker.start()
         return job_id
 
@@ -457,13 +459,15 @@ class Daemon:
                     return dict(opened[shown])
                 if self._active_job_id != job_id:
                     return None
+                self._at_gate.clear()
+            if self._at_gate.wait(timeout=0.2):
+                continue
             # An open gate has a wait of its own (`gate_wait_s`).
             with_person = self._with_person.is_set() or self._pending_gate is not None
             if not with_person and time.monotonic() - self._back_at >= timeout_s:
                 raise TimeoutError(
                     self.abandon(job_id, "waiting for the approval gate", timeout_s)
                 )
-            time.sleep(0.05)
 
     def abandon(self, job_id: str, what: str, waited_s: float) -> str:
         """End a job a wait ran out on: the sentence that says so, and the ledger's row.
@@ -682,6 +686,7 @@ class Daemon:
         # Signal that we're at a gate, now it's published.
         with self._job_lock:
             self._opened.setdefault(job_id, []).append(dict(self._pending_gate))
+            self._at_gate.set()
 
         # Wait for a command from this gate's inbox.
         try:
@@ -755,6 +760,7 @@ class Daemon:
             if self._active_job_id == job_id:
                 self._active_job_id = None
         self._worker_alive = False
+        self._at_gate.clear()
         # Idempotent: a gate that already closed (or never opened) is a no-op.
         self._close_gate()
         if approved and self._watcher is not None:
