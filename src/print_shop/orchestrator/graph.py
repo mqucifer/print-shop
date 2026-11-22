@@ -32,7 +32,7 @@ import json
 import logging
 import sqlite3
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -60,7 +60,8 @@ from print_shop.expert.orientation import (
     validate_orientation,
 )
 from print_shop.ingest.analyzer import analyze, verify_unchanged
-from print_shop.ingest.orientation import candidates, write_rotated
+from print_shop.ingest.measuring import Measuring
+from print_shop.ingest.orientation import LAID, candidate_in, candidates, write_rotated
 from print_shop.inventory import Inventory, Material, NotKnown, SpoolUse
 from print_shop.ledger import Ledger, PrintRecord
 from print_shop.orchestrator.fitness import scoring_profiles
@@ -69,7 +70,7 @@ from print_shop.setup import Proposer, pauses
 from print_shop.setup import lessons as print_lessons
 from print_shop.setup.context import PartContext, place, pose_for, read_context
 from print_shop.setup.doubts import Doubting
-from print_shop.setup.features import measure
+from print_shop.setup.features import Feature, measure, resting_on
 from print_shop.setup.intake import Asker, Estimate, Intake, Question
 from print_shop.setup.loop import Part, PrintLoop
 from print_shop.setup.loop import run as run_loop
@@ -258,16 +259,25 @@ def build_graph(
         # The part's traits in the file's own pose, before any turn: what an orientation lesson
         # is keyed to, and looked up by (mqucifer/print-shop#128).
         laid = measure(state["stl_path"], state["mesh"].bed_contact_area_mm2)
-        found = tuple(candidates(state["stl_path"]))
-        poses: dict[str, Any] = {"orientation_candidates": found, "laid_traits": traits(laid)}
-        request = OrientationRequest(
-            candidates=found, build_volume_mm=build_volume, part_description="",
-        )
         # The part's context, from its design run or a sidecar (mqucifer/print-shop#130).
         given_at = state.get("context_path")
         context = read_context(Path(state["stl_path"]), Path(given_at) if given_at else None)
-        poses["part_context"] = context
-        if state.get("as_laid"):
+        # A pose kept as laid, or on the side the context lays it on, is measured alone: the
+        # questions don't wait for five it won't print in (mqucifer/print-shop#235). Those
+        # are measured beside them, from the slice node.
+        as_laid = bool(state.get("as_laid"))
+        alone = LAID if as_laid else pose_for(context.down) if context.down else None
+        found: tuple[Orientation, ...] = ()
+        if alone is not None:
+            found = (candidate_in(state["stl_path"], alone),)
+        if alone is None or (not as_laid and not found[0].fits_in(build_volume)):
+            found = tuple(candidates(state["stl_path"]))  # none is kept, so all six are weighed
+        poses: dict[str, Any] = {"orientation_candidates": found, "laid_traits": traits(laid),
+                                 "laid_features": laid, "part_context": context}
+        request = OrientationRequest(
+            candidates=found, build_volume_mm=build_volume, part_description="",
+        )
+        if as_laid:
             return {"orientation": _as_laid(request), **poses}
         given = print_lessons.for_orienting(ledger, laid) if ledger is not None else ()
         request = request.model_copy(update={"lessons": tuple(g.line() for g in given)})
@@ -307,6 +317,19 @@ def build_graph(
                          request.candidates)
 
     def slice_node(state: PrintJobState) -> dict[str, Any]:
+        """The slice, with the poses orient didn't wait for measured beside it
+        (mqucifer/print-shop#235). They live no longer than this node: what's checkpointed is
+        the poses measured, never the measuring.
+        """
+        found = state.get("orientation_candidates", ())
+        measuring = Measuring(state["stl_path"], found) if found else None
+        try:
+            return sliced_in_pose(state, measuring)
+        finally:
+            if measuring is not None:
+                measuring.stop()
+
+    def sliced_in_pose(state: PrintJobState, measuring: Measuring | None) -> dict[str, Any]:
         """Slice the model in the chosen orientation, writing into outdir_root/job_id.
 
         The STL is rotated to the accepted orientation before slicing. If that
@@ -342,9 +365,21 @@ def build_graph(
 
         assert profiles is not None, "orient refuses a graph without profiles"
         proposed: dict[str, Any] = {}
+
+        def featured() -> tuple[Feature, ...]:
+            """The features in the pose being sliced. The file's own was read at orient."""
+            contact = applied.bed_contact_area_mm2 or 0.0
+            laid = state.get("laid_features", ())
+            if laid and rotation_deg == LAID:
+                return resting_on(laid, contact)
+            return measure(stl_to_slice, contact)
+
         if proposer is not None and asker is not None:
-            poses = state.get("orientation_candidates", ())
-            features = measure(stl_to_slice, applied.bed_contact_area_mm2 or 0.0)
+            features = featured()
+            if measuring is not None and measuring.pending():
+                # Only now, so the five never slow what the questions wait for.
+                verify_unchanged(state["stl_path"], state.get("stl_sha256", ""))
+                measuring.start()
             first = stl_to_slice
 
             def priced(settings: dict[str, str], n: int) -> Estimate | None:
@@ -365,6 +400,9 @@ def build_graph(
             fell_back: dict[str, Any] = {}
             if outcome is not None and outcome.proposal.source == LOOP_PENDING:
                 assert loop is not None and build_volume is not None
+                assert measuring is not None, "a pose left to the print loop was oriented"
+                _say_waiting(measuring.pending(), "the print loop chooses among all six")
+                poses = measuring.all_six()
                 kept = _kept(context, poses, build_volume) if context is not None else None
                 found_by = run_loop(loop, Part(
                     stl=Path(state["stl_path"]),
@@ -416,7 +454,7 @@ def build_graph(
                             state["stl_path"], rotation_deg,
                             outdir / f"rotated-{pose_value(rotation_deg)}.stl")
                 if found_by.proposed:
-                    features = measure(stl_to_slice, applied.bed_contact_area_mm2 or 0.0)
+                    features = featured()
                     reply = found_by.reply
                     made = dataclasses.replace(proposer, ask=lambda *_: reply, llm=None)(
                         intake, features, profiles, context)
@@ -429,12 +467,12 @@ def build_graph(
             offer: Offering | None = None
             doubting: Doubting | None = None
             while True:
-                features = measure(stl_to_slice, applied.bed_contact_area_mm2 or 0.0)
+                features = featured()
                 if reviewer is not None and ledger is not None:
                     # Before the proposal's call: the offer waits for no model
                     # (mqucifer/print-shop#211).
                     built = _offering(ledger, state, stl_to_slice, features, applied, profiles,
-                                      build_volume, earlier, intake)
+                                      build_volume, earlier, intake, measuring)
                     if offer is None:
                         offer, doubting = built, Doubting.start(built, proposer.doubter())
                     else:
@@ -461,7 +499,7 @@ def build_graph(
                         proposal, profiles,
                         lambda p, stl=stl_to_slice: slicer(stl, p, outdir),
                         reviewer, applied, outdir / "proposed", intake,
-                        poses=poses, laid_traits=state.get("laid_traits", ()),
+                        measuring=measuring, laid_traits=state.get("laid_traits", ()),
                         cost=_coster(slicer, stl_to_slice, profiles, proposal, outdir / "offers"),
                         lessons_for=_lessons_for(ledger, state["stl_path"], profiles,
                                                  outdir / "poses"),
@@ -475,7 +513,11 @@ def build_graph(
                 except _Turned as turned:
                     # Sent back at the review: turned to the person's pose, and sliced again.
                     earlier, offer = turned.corrections, turned.offering
-                    chosen = next(c for c in poses if pose_value(c.rotation_deg) == turned.to.value)
+                    to = measuring.lying(turned.to.value) if measuring is not None else None
+                    if to is None:
+                        raise RuntimeError(f"the pose {turned.to.value} it was sent back to "
+                                           "wasn't measured, so it isn't turned to it") from None
+                    chosen = to
                     rotation_deg = chosen.rotation_deg
                     applied = AppliedOrientation(
                         rotation_deg=rotation_deg,
@@ -497,6 +539,8 @@ def build_graph(
                 break
             proposed["features"] = features
             proposed.update(reviewed)
+            if measuring is not None:
+                proposed["orientation_candidates"] = measuring.ready()
         else:
             active_profiles = (
                 scoring_profiles(profiles, outdir) if overhang_area > 0 else profiles
@@ -1098,6 +1142,16 @@ def _estimate(
                     filament_cm3=result.filament_cm3)
 
 
+def _say_waiting(waited: Iterable[tuple[float, float, float]], why: str) -> None:
+    """A wait on poses still being measured, said on the terminal and in the job's log as it
+    begins (mqucifer/print-shop#235)."""
+    left = list(waited)
+    if left:
+        them = "pose" if len(left) == 1 else f"{len(left)} poses"
+        names = "; ".join(map(pose_value, left))
+        logger.info("waiting for the %s still being measured (%s): %s", them, names, why)
+
+
 class _Turned(Exception):  # noqa: N818 - a signal, not an error
     """The pose was sent back at the review: turn the part to it, and propose and slice again."""
 
@@ -1112,6 +1166,7 @@ def _offering(
     ledger: Ledger, state: PrintJobState, posed: str | Path, features: Any,
     applied: AppliedOrientation, profiles: SlicerProfiles,
     build_volume: tuple[float, float, float] | None, earlier: list[Change], intake: Intake,
+    measuring: Measuring | None = None,
 ) -> Offering:
     """What decided the past prints most like this part, in this pose (mqucifer/print-shop#211).
     Never in a print's way: what fails is said at the review, and nothing is offered."""
@@ -1128,13 +1183,21 @@ def _offering(
         elif state.get("as_laid"):
             chosen = "kept as laid"
         on_hand = _stock(ledger, profiles)
+
+        def lying(value: str) -> Orientation | None:
+            if measuring is None:
+                return None
+            waited = [r for r in measuring.pending() if pose_value(r) == value]
+            _say_waiting(waited, "a past print was in it, and its offer compares them in it")
+            return measuring.lying(value)
+
         return offer_past_prints(ledger, ThisPart(
             stl=Path(posed), stl_name=Path(state["stl_path"]).name,
             sha256=state.get("stl_sha256", ""), features=features,
             rotation_deg=applied.rotation_deg, height_mm=applied.height_mm or 0.0,
             machine=json.loads(profiles.machine.read_text()), process=process,
             filament=filament, filament_names=tuple(dict.fromkeys(n for n in names if n)),
-            candidates=state.get("orientation_candidates", ()), build_volume_mm=build_volume,
+            measured=lying, build_volume_mm=build_volume,
             context=state.get("part_context"), pose_chosen=chosen,
             material=_material_of(profiles), on_hand=on_hand() if on_hand else (),
             asked=intake.could_set(),
@@ -1201,7 +1264,7 @@ def _propose_and_review(
     workdir: Path,
     intake: Intake | None = None,
     *,
-    poses: tuple[Orientation, ...] = (),
+    measuring: Measuring | None = None,
     laid_traits: tuple[str, ...] = (),
     cost: Any = None,
     lessons_for: Any = None,
@@ -1279,7 +1342,8 @@ def _propose_and_review(
                 filament=filament,
                 reading=reading,
                 flags=found,
-                candidates=poses,
+                candidates=measuring.ready() if measuring is not None else (),
+                measuring=measuring,
                 laid_traits=laid_traits,
                 cost=cost,
                 lessons_for=lessons_for,
