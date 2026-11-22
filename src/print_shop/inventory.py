@@ -39,7 +39,7 @@ ledger's schema version.
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -230,6 +230,12 @@ class Material(BaseModel):
             "variety": spool.variety, "colour": spool.colour, "tuning": spool.tuning,
         })
 
+    def as_now(self, spools: Iterable[Spool]) -> Material:
+        """This spool as the stock names it now, or as it was where it isn't there. Wherever a
+        number is given to type or to load, it's said so: a colour can have been corrected."""
+        spool = next((spool for spool in spools if spool.id == self.spool_id), None)
+        return self.of(spool) if spool is not None else self
+
     def same_filament(self, other: Material) -> bool:
         """Whether both are sliced with one filament's settings: the variety and its tuning."""
         return (self.variety.casefold(), self.tuning) == (other.variety.casefold(), other.tuning)
@@ -383,8 +389,9 @@ def find_not_known(
         (marked["job_id"],),
     ).fetchone()
     could_be = tuple(
-        Material.model_validate_json(used["spool"]) for used in db.execute(
-            "SELECT u.spool FROM print_spools u JOIN spools s ON s.id = u.spool_id"
+        Material.model_validate_json(used["spool"]).model_copy(update={"colour": used["colour"]})
+        for used in db.execute(
+            "SELECT u.spool, s.colour FROM print_spools u JOIN spools s ON s.id = u.spool_id"
             " WHERE u.job_id = ? AND s.state != 'empty' ORDER BY u.position DESC",
             (marked["job_id"],),
         ).fetchall()
@@ -750,6 +757,7 @@ class Inventory:
             return None
         what = "this print starts on" if not_on is not None else "this job was prepared for"
         has = now.named() if now is not None else "none"
+        named = first.of(self.spool(first.spool_id)).named()  # as it is now, as it's to be loaded
         if now is not None and now.tuning != first.tuning:
             tuned = f'"{now.tuning}"' if now.tuning else "the variety's default"
             has += f" (tuning {tuned})"
@@ -757,7 +765,7 @@ class Inventory:
             load = (f"That spool is marked empty: load one of {first.filament_said()}, "
                     f"{first.colour}, and record it (`stock.py load <id>`)")
         else:
-            load = f"Load {first.named()}, and record it (`stock.py load {first.spool_id}`)"
+            load = f"Load {named}, and record it (`stock.py load {first.spool_id}`)"
         instead = note = ""
         if not_on is not None:
             instead = "for other spools"
@@ -769,7 +777,7 @@ class Inventory:
                 instead = f"to print with {now.named()}"
                 note = OWN_CHOICE
         return NotYet(
-            f"{what} {first.named()}, and the stock has {has} loaded on {first.printer_id}",
+            f"{what} {named}, and the stock has {has} loaded on {first.printer_id}",
             load, f"{load}, and run the job again", instead, note,
         )
 

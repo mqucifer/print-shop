@@ -160,9 +160,9 @@ class JobRecord:
     #: Whether `part_path` holds the bytes the job printed, by their sha256.
     part_found: bool = False
     printers: int = 0
-    #: The spools on hand by number, each with its tuning, for the line to print it again
+    #: The spools on hand by number, as they are now, for the line to print it again
     #: (mqucifer/print-shop#218).
-    on_hand: dict[int, str | None] | None = None
+    on_hand: dict[int, Spool] | None = None
 
 
 def status(row: Row) -> str:
@@ -301,8 +301,9 @@ class Desk:
             missed = ledger.frames_missed(job_id) if ledger is not None else None
             printers = (len(ledger.query("SELECT id FROM printers"))
                         if ledger is not None else 0)
-            on_hand = ({int(r["id"]): r["tuning"] for r in ledger.query(
-                "SELECT id, tuning FROM spools WHERE state != 'empty'")}
+            on_hand = ({int(r["id"]): Spool(**r) for r in ledger.query(
+                "SELECT id, manufacturer, type, variety, colour, grams_left, tuning, state, "
+                "printer_id FROM spools WHERE state != 'empty'")}
                        if ledger is not None else None)
         log = self.log_path(job_id)
         text = log.read_text(encoding="utf-8", errors="replace") if log is not None else None

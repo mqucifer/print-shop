@@ -629,7 +629,7 @@ def build_graph(
                 # A pause the review asked for, where the slice put it, so the person is at
                 # the printer for it (mqucifer/print-shop#119), what it's for, and the spool a
                 # swap's print starts on (mqucifer/print-shop#218).
-                "pause": _pauses_said(state.get("slice_reading")),
+                "pause": _pauses_said(_reading_now(state, ledger)),
                 "pause_for": _pause_for(state),
                 "spools": _starts_said(state, ledger),
             }
@@ -837,6 +837,22 @@ def _standing(state: PrintJobState) -> Change | None:
     return change if change is not None and change.value != "none" else None
 
 
+def _reading_now(state: PrintJobState, ledger: Ledger | None) -> Any:
+    """The slice's reading with the spool a swap is to named as the stock has it now: the person
+    loads by those words."""
+    reading = state.get("slice_reading")
+    change, swap = _standing(state), _swap(state)
+    if ledger is None or change is None or swap is None or swap.to is None:
+        return reading
+    try:
+        with Inventory(ledger.path) as inventory:
+            now = swap.model_copy(update={"to": swap.to.as_now(inventory.spools())})
+    except sqlite3.Error as exc:
+        logger.warning("the stock couldn't be read for the gate's pause: %s", exc)
+        return reading
+    return pauses.marked(reading, change.model_copy(update={"pause": now}))
+
+
 def _pause_for(state: PrintJobState) -> str:
     """What the job's pause is for, or "" where it doesn't say (mqucifer/print-shop#218)."""
     change = _standing(state)
@@ -874,12 +890,13 @@ def why_not_start(state: PrintJobState, ledger: Ledger | None) -> str:
         if held is None:
             return ""
         needed = ""
+        spools = inventory.spools()
         if inventory.unknown(first.printer_id) is not None and any(
-            spool.id == first.spool_id for spool in inventory.spools()
+            spool.id == first.spool_id for spool in spools
         ):
             # What's on may not be what this job needs: said now, not at a second hold.
-            needed = (f". This job needs {first.named()}: if another's on, put that on first "
-                      f"and record it (`stock.py load {first.spool_id}`)")
+            needed = (f". This job needs {first.as_now(spools).named()}: if another's on, put that "
+                      f"on first and record it (`stock.py load {first.spool_id}`)")
     return held.at_gate() + needed
 
 

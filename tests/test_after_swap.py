@@ -1281,6 +1281,83 @@ def test_with_no_stock_set_up_a_swap_still_starts(tmp_path: Path) -> None:
             {"proposal": Proposal(changes=(change,))}, ledger) == ""  # type: ignore[typeddict-item]
 
 
+# The fifth read, of 9c7fd5a: a number to type is named as the stock has it now
+# --------------------------------------------------------------------------
+
+NOW_BLACK = "spool #1, Elegoo PLA, black"
+
+
+@pytest.mark.parametrize("job", ["swap", "plain"])
+def test_a_hold_names_the_spool_to_load_as_it_is_now(shop: Shop, job: str) -> None:
+    def at_gate() -> None:
+        recoloured(shop)
+        if job == "plain":
+            shop.load(CLEAR)
+
+    if job == "swap":
+        shop.load(BLACK)
+    typed = (SWAP, "ok", "") if job == "swap" else ("ok",)
+    shop.run(*typed, at_gate=at_gate, held=reject)
+    assert f"Load {NOW_BLACK}, and record it (`stock.py load 1`)" in shop.told[0]
+    assert "Elegoo PLA, white, and record" not in shop.told[0]
+
+
+def test_the_not_known_hold_names_each_as_it_is_now(shop: Shop) -> None:
+    swap_started(shop)
+    recoloured(shop)
+    said = not_known(shop)
+    assert f"`stock.py load 1` if it's {NOW_BLACK}" in said
+    assert "`stock.py load 2` if it's spool #2, Elegoo PLA, white" in said
+
+
+def test_what_the_job_needs_is_named_as_it_is_now(shop: Shop) -> None:
+    ends(shop, swap_started(shop, "earlier"))
+    shop.run("ok", "", at_gate=lambda: recoloured(shop), held=reject)
+    assert f"This job needs {NOW_BLACK}" in shop.told[0]
+
+
+def test_the_review_and_the_gate_name_both_as_they_are_now(
+    shop: Shop, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shop.load(BLACK)
+
+    def reviewer(**kwargs: Any) -> Any:
+        review = cli_reviewer(**kwargs)
+        shown: list[int] = []
+
+        def then(request: Any) -> Any:
+            shown.append(1)
+            if len(shown) == 2:
+                recoloured(shop)  # before this review is drawn, or the gate
+            return review(request)
+
+        return then
+
+    monkeypatch.setattr("tests.test_pause_purpose.cli_reviewer", reviewer)
+    ran = shop.run(SWAP, "ok", "", press="reject")
+    assert f"LOAD FIRST: it starts on {NOW_BLACK}" in ran.terminal
+    assert f"the pause is a swap: {NOW_BLACK}, then spool #2, Elegoo PLA, white" in ran.terminal
+    assert f"it starts on {NOW_BLACK}" in ran.gate["spools"]
+    assert "a swap to spool #2, Elegoo PLA, white" in ran.gate["pause"]
+
+
+def test_the_gate_says_the_one_loaded_as_it_is_now(shop: Shop) -> None:
+    with Inventory(shop.path) as stock:
+        material = stock.material()
+        to = material.of(stock.spool(BLACK))
+        stock.edit(WHITE, colour="cream")
+        spools_now = stock.spools()
+    pause = pauses.Pause(kind=pauses.PauseFor.SWAP, start=material, to=to)
+    assert pauses.starting(pause, spools_now) == (
+        "it starts on spool #1, Elegoo PLA, cream, as loaded")
+
+
+def test_the_desks_note_names_the_first_to_load_as_it_is_now(shop: Shop) -> None:
+    first = shop.run(SWAP, "ok")
+    recoloured(shop)
+    assert f"It starts on {NOW_BLACK}" in shop.desk(first.job_id)[1]
+
+
 # What the Sponsor was told it costs
 # --------------------------------------------------------------------------
 

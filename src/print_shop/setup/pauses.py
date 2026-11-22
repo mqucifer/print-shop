@@ -480,10 +480,9 @@ def starting(pause: Pause, on_hand: Iterable[Spool], unknown: str = "") -> str:
     now = next((s for s in spools if s.printer_id == start.printer_id), None)
     if first_to_load(pause, spools, unknown) is None:
         assert now is not None
-        as_loaded = start if now.id == start.spool_id else start.of(now)
-        return f"it starts on {as_loaded.named()}, as loaded"
+        return f"it starts on {start.of(now).named()}, as loaded"
     has = unknown or f"the stock has {now.named() if now is not None else 'none'} loaded"
-    return (f"LOAD FIRST: it starts on {start.named()}, and {has}. "
+    return (f"LOAD FIRST: it starts on {start.as_now(spools).named()}, and {has}. "
             f"Load it and record it (`stock.py load {start.spool_id}`) before you approve: "
             "an Approve before that starts nothing")
 
@@ -500,10 +499,12 @@ def for_review(
         return [f"  the pause is a swap{why}"]
     used = uses(pause, reading)
     layer = used[1].from_layer if len(used) > 1 else None
-    lines = [f"  the pause is a swap: {pause.start.named()}, then {pause.to.named()}"
+    spools = stock() if stock is not None else ()
+    first, then = pause.start.as_now(spools), pause.to.as_now(spools)
+    lines = [f"  the pause is a swap: {first.named()}, then {then.named()}"
              + (f", from layer {layer}" if layer else "")]
     if stock is not None:
-        lines.append(f"  {starting(pause, stock(), unknown)}")
+        lines.append(f"  {starting(pause, spools, unknown)}")
     if not pause.to.same_filament(pause.start):
         lines.append(
             f"  note: spool #{pause.to.spool_id} is {pause.to.filament_said()}, and the slice has "

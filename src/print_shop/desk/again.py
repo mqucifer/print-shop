@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from print_shop.inventory import Material
+from print_shop.inventory import Material, Spool
 from print_shop.ledger import Row
 from print_shop.orchestrator.graph import AS_LAID
 from print_shop.setup import pauses
@@ -120,7 +120,7 @@ def _pause_again(row: Row, stood: Change) -> str | None:
 
 
 def _purpose_again(
-    row: Row, stood: Change, on_hand: dict[int, str | None] | None
+    row: Row, stood: Change, on_hand: dict[int, Spool] | None
 ) -> pauses.Pause | None:
     """What the pause was for, as it can be typed again: a spool that's used up, or a first
     whose tuning has been edited, is left for the review to ask. The other is still named."""
@@ -132,13 +132,13 @@ def _purpose_again(
     if to is not None and to.spool_id not in on_hand:
         to = None
     if purpose.start.spool_id not in on_hand or (
-        on_hand[purpose.start.spool_id] != purpose.start.tuning
+        on_hand[purpose.start.spool_id].tuning != purpose.start.tuning
     ):
         start = None
     return purpose.model_copy(update={"start": start, "to": to, "ask_first": start is None})
 
 
-def correction_line(row: Row, on_hand: dict[int, str | None] | None = None) -> str:
+def correction_line(row: Row, on_hand: dict[int, Spool] | None = None) -> str:
     """The Sponsor's corrections at the review, as they're typed there. `on_hand` is the spools
     that can be named in it, by number."""
     parts = []
@@ -163,7 +163,7 @@ def correction_line(row: Row, on_hand: dict[int, str | None] | None = None) -> s
 
 def again(
     row: Row, part_path: Path | None, printers: int = 1, part_found: bool = False,
-    on_hand: dict[int, str | None] | None = None,
+    on_hand: dict[int, Spool] | None = None,
 ) -> Again:
     """How to run `row`'s job again. `part_path` is the part's file, and `part_found` says it
     has the bytes the job printed (by sha256); else it's the path the log names, if any.
@@ -248,8 +248,10 @@ def again(
                 if row.ended_with is not None and row.ended_with.spool_id != purpose.to.spool_id:
                     notes.append(f"You said it ended with {row.ended_with.named()}: the line is "
                                  "as it was planned.")
-                notes.append(f"It starts on {purpose.start.named()}, and swaps to "
-                             f"{purpose.to.named()}: have the first loaded, and recorded "
+                here = on_hand.values() if on_hand else ()
+                notes.append(f"It starts on {purpose.start.as_now(here).named()}, and swaps to "
+                             f"{purpose.to.as_now(here).named()}: have the first loaded, and "
+                             "recorded "
                              f"(`stock.py load {purpose.start.spool_id}`), before you approve.")
     taken = [c for c in ((*row.proposal.changes, *row.proposal.not_applied)
                          if row.proposal else ())
