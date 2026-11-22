@@ -26,8 +26,10 @@ aren't in it.
 
 **A nut's pocket** (mqucifer/print-shop#168). Where an assembly's `through` joint states a
 `pocket`, its nut sits in one in the second part, held by its flats. The pocket is read from
-that part's own flat faces (`through.py`): the walls that stand on the hole's end and face
-each other across its axis. It fails where the nut doesn't go in, by its flats or by its
+that part's own flat faces (`through.py`): the walls that stand on the hole's end, with their
+faces at the hole, and face each other across its axis. A face is at the hole where, along its
+wall, it comes as near as the nut's corners reach (mqucifer/print-shop#204). It fails where the
+nut doesn't go in, by its flats or by its
 corners, where it's wide enough for the nut to turn, and where its play isn't the file's. The
 corners (mqucifer/print-shop#183): the nut as a hexagon at its least size across them must clear
 every wall in some turn, its middle on the bolt's axis or as far off it as the bolt moves in its
@@ -293,7 +295,14 @@ def _pocket(
     axis, seat = way["axis"], way["seats"][1]
     planes = faces[1]["planes"]
     through.along(planes, axis, faces[1]["corners"])
-    found = through.pocket(planes, holes[1], seat, axis, 2 * nut.corners_mm)
+    # The bolt moves in its hole as far as the narrower of the two holes lets it, and the nut
+    # with it (mqucifer/print-shop#183). So its corners reach that far and half its size across
+    # them, and a wall's face further along than that isn't at the hole (mqucifer/print-shop#204).
+    assert joint.bolt is not None
+    room = max(0.0, min(h["radius"] for h in holes) - DIAMETER[joint.bolt.thread] / 2)
+    found = through.pocket(
+        planes, holes[1], seat, axis, 2 * nut.corners_mm, nut.corners_mm / 2 + room
+    )
     one: dict[str, Any] = {
         "at": list(point),
         "part": part,
@@ -311,10 +320,6 @@ def _pocket(
         return one
     across = found["across_flats_mm"]
     play = (across - nut.flats_mm) / 2
-    # The bolt moves in its hole as far as the narrower of the two holes lets it, and the nut
-    # with it (mqucifer/print-shop#183).
-    assert joint.bolt is not None
-    room = max(0.0, min(h["radius"] for h in holes) - DIAMETER[joint.bolt.thread] / 2)
     goes = through.nut_goes_in(found, nut, room)
     wrong = through.nut_fits(found, nut, joint.pocket)
     if not goes["goes_in"]:
@@ -394,6 +399,9 @@ def _pocket(
         )
     elif wrong:
         fails.append(f"{what}: " + "; and ".join(wrong))
+    else:
+        return one
+    report.line(f"{what}: {through.walls_said(found['facing'])}")
     return one
 
 

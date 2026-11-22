@@ -10,8 +10,9 @@ each hands its faces here as plain rows and the reading is one, in plain Python 
 - a **cylinder** row: `axis`, a unit vector; `origin`, a point on it; `radius`; `hole`, whether
   the material is outside it; `low` and `high`, where the face runs along the axis, as a point's
   dot product with `axis`; and `turns`, how far round it goes, in radians;
-- a **plane** row: `normal`, out of the material; `at`, a point on it; and `low` and `high`, where
-  the face runs along whatever axis the caller is reading, filled in by `along`.
+- a **plane** row: `normal`, out of the material; `at`, a point on it; and, filled in by `along`,
+  `low` and `high`, where the face runs along whatever axis the caller is reading, and `corners`,
+  the face's own, which bound it sideways too. A row with no corners is a plane without end.
 """
 
 from __future__ import annotations
@@ -104,24 +105,45 @@ def meet(first: dict[str, Any], second: dict[str, Any]) -> dict[str, Any] | str:
 
 
 def along(planes: list[dict[str, Any]], axis: Any, corners: list[np.ndarray]) -> None:
-    """Fill in where each plane's face runs along `axis`, from its own corners."""
+    """Fill in where each plane's face runs along `axis`, from its own corners, and keep them."""
     way = np.asarray(axis, dtype=float)
     for plane, points in zip(planes, corners, strict=True):
         reach = np.asarray(points, dtype=float) @ way
         plane["low"], plane["high"] = float(reach.min()), float(reach.max())
+        plane["corners"] = np.asarray(points, dtype=float)
+
+
+def _aside(plane: dict[str, Any], origin: np.ndarray, way: np.ndarray) -> float:
+    """How far along a wall its face is from the hole: from the point of the wall's plane nearest
+    the axis to the face's nearer end, square to `way`, and 0 where that point is between its
+    ends. A face is one piece, so where its ends are either side of the hole some of it is at
+    the hole, at the seat or over it."""
+    if "corners" not in plane:
+        return 0.0
+    sideways = np.cross(way, np.asarray(plane["normal"], dtype=float))
+    ends = (np.asarray(plane["corners"], dtype=float) - origin) @ sideways
+    return max(float(ends.min()), -float(ends.max()), 0.0)
 
 
 def pocket(
-    planes: list[dict[str, Any]], hole: dict[str, Any], seat: float, out: Any, reach: float
+    planes: list[dict[str, Any]],
+    hole: dict[str, Any],
+    seat: float,
+    out: Any,
+    reach: float,
+    aside: float = 0.0,
 ) -> dict[str, Any] | str:
     """The pocket a nut sits in at a hole's end: the flat walls that stand on the seat's level,
     `seat` along `out`, the way out of the part there, and face the hole's axis from within
-    `reach` of it. A nut is held from turning by walls in opposite pairs, on its flats: each
-    pair's distance apart is an `across_flats_mm`, the narrowest first, with how deep the
-    pocket is and how far off its middle the axis is. Or why there's no pocket."""
+    `reach` of it, with their faces at the hole: no more than `aside` along the wall from the
+    point of its plane nearest the axis, so a like wall further along a row is another pocket's
+    (mqucifer/print-shop#204). A nut is held from turning by walls in opposite pairs, on its
+    flats: each pair's distance apart is an `across_flats_mm`, the narrowest first, with how deep
+    the pocket is and how far off its middle the axis is. Or why there's no pocket."""
     way = np.asarray(out, dtype=float)
     origin = np.asarray(hole["origin"], dtype=float)
     walls = []
+    facing: list[dict[str, Any]] = []
     for plane in planes:
         normal = np.asarray(plane["normal"], dtype=float)
         if abs(float(normal @ way)) > SQUARE:
@@ -131,10 +153,11 @@ def pocket(
             continue
         off = origin - np.asarray(plane["at"], dtype=float)
         distance = float((off - (off @ way) * way) @ normal)
-        if 0 < distance <= reach:
+        if 0 < distance <= reach and _aside(plane, origin, way) <= aside + SAME:
             walls.append((distance, normal, high - seat))
-    # Each wall as the way from the axis to it and how far: what the nut's corners meet.
-    facing = [{"toward": (-normal).tolist(), "distance": d} for d, normal, _ in walls]
+            # The way from the axis to it and how far, what the nut's corners meet; and where.
+            at = np.asarray(plane["at"], dtype=float).tolist()
+            facing.append({"toward": (-normal).tolist(), "distance": distance, "at": at})
     pairs = []
     for i, (near, normal, depth) in enumerate(walls):
         for far, other, deep in walls[i + 1 :]:
@@ -144,6 +167,7 @@ def pocket(
         return (
             f"no pocket there holds a nut by its flats: {len(walls)} flat wall(s) stand on the "
             "hole's end facing its axis, and none faces another across it"
+            + (f"; {walls_said(facing)}" if facing else "")
         )
     pairs.sort()
     return {
@@ -156,6 +180,18 @@ def pocket(
         "facing": facing,
         "way": way.tolist(),
     }
+
+
+def walls_said(facing: list[dict[str, Any]]) -> str:
+    """The walls a pocket took, as words: each by how far from the axis and which way, and
+    where its face is, so a wall that isn't this pocket's would be seen."""
+    said = "; ".join(
+        f"{f['distance']:.3f} mm from the axis toward "
+        f"({', '.join(f'{round(c, 6) + 0.0:.3g}' for c in f['toward'])}), its face round "
+        f"({', '.join(f'{round(c, 3) + 0.0:g}' for c in f['at'])})"
+        for f in facing
+    )
+    return f"the walls it took: {said}"
 
 
 def nut_fits(found: dict[str, Any], nut: Any, play: float) -> list[str]:

@@ -3101,6 +3101,38 @@ def test_fit_bed_holds_a_nut_s_pocket_to_its_nut(bench: Any) -> None:
     assert turned["goes_in"] is True
 
 
+def test_fit_bed_reads_each_of_a_row_of_nut_slots_by_its_own_walls(bench: Any) -> None:
+    """mqucifer/print-shop#204: three slots 8.3 mm wide, 70 mm apart along their walls and
+    each 0.5 mm off the last across them. With a wall read as a plane without end, the middle
+    one took its neighbours' for a pair 7.3 mm across and the nut didn't go in. Each is read
+    by its own four walls, 0.15 mm a side; and with the middle one 7.9 wide, the nut doesn't
+    go in there, and there only, and the reply says which walls it took."""
+    row = bench("fit-bed", "bed/row.json")
+    assert row.verdict == "OK" and row.code == 0, row.text
+    pockets = row.numbers["pockets"]["lower+upper"]
+    assert len(pockets) == 3
+    for pocket in pockets:
+        assert pocket["fits"] is True and pocket["walls"] == 4, pocket
+        assert pocket["across_flats_mm"] == pytest.approx(8.3, abs=1e-6)
+        assert pocket["play_mm"] == pytest.approx(0.15, abs=1e-6)
+        assert pocket["nearest_by_mesh_mm"] == pytest.approx(4.15, abs=1e-3)
+    assert "the walls it took" not in row.text
+    assert reports.unlike("fit-bed", row.numbers) == []
+
+    narrow = bench("fit-bed", "bed/row-narrow.json")
+    assert narrow.verdict == "FAIL" and narrow.code == 1, narrow.text
+    first, middle, last = narrow.numbers["pockets"]["lower+upper"]
+    assert first["fits"] is True and last["fits"] is True and middle["fits"] is False
+    assert middle["across_flats_mm"] == pytest.approx(7.9, abs=1e-6) and middle["walls"] == 4
+    why = narrow.record["why"]
+    assert why.count("the nut doesn't go in") == 1 and "bolt at (100, 20, 8)" in why, why
+    assert narrow.text.count("the walls it took") == 1, narrow.text
+    assert "3.950 mm from the axis toward (0, 1, 0), its face round (100, 23.95, 18)" in (
+        narrow.text
+    )
+    assert reports.unlike("fit-bed", narrow.numbers) == []
+
+
 def test_fit_bed_fails_a_pocket_the_nut_s_corners_can_t_enter(bench: Any) -> None:
     """mqucifer/print-shop#183: eval-table-1's frame had 8.2 mm square pockets round M5 nuts,
     and `fit-bed` passed them, 0.1 mm of play a side on the flats. The nut is at least 8.79 mm

@@ -1004,6 +1004,7 @@ def beds() -> None:
     parts.append({"name": "disc", "file": "disc.step", "layers": "x"})
     Path("bed/no-side.json").write_text(json.dumps({"parts": parts}))
     nut_pockets()
+    nut_rows()
 
 
 def nut_pockets() -> None:
@@ -1062,6 +1063,39 @@ def nut_pockets() -> None:
     ]  # fmt: skip
     turned = {**joint, "at": [[20, -8, 20]], "pocket": 0.3}
     Path("bed/pocket-turned.json").write_text(json.dumps({"parts": parts, "joints": [turned]}))
+
+
+def nut_rows() -> None:
+    """Three nut slots in a row on one level (mqucifer/print-shop#204): a plate 200 x 40 x 12
+    on one 8 thick, an M5 through-bolt every 70 mm along x, each 0.5 mm further along y than
+    the one before, and round each a closed slot 16 mm long and 8.3 wide, 4 deep: 0.15 mm a
+    side over the nut. Read as planes without end, another slot's wall stands 3.65 or 3.15 mm
+    from a bolt's axis. `row-narrow` has its middle slot 7.9 wide, which the nut doesn't go
+    into."""
+    import json
+
+    places = [(30.0, 19.5), (100.0, 20.0), (170.0, 20.5)]
+
+    def plate(thick: float) -> Any:
+        part = box(0, 200, 0, 40, 0, thick)
+        for x, y in places:
+            part = part.cut(cq.Workplane("XY").center(x, y).circle(2.75).extrude(thick))
+        return part
+
+    save(plate(8), "bed/row-plate")
+    for name, middle in (("row", 8.3), ("row-narrow", 7.9)):
+        part = plate(12)
+        for (x, y), wide in zip(places, (8.3, middle, 8.3), strict=True):
+            part = part.cut(box(x - 8, x + 8, y - wide / 2, y + wide / 2, 8, 12))
+        save(part, f"bed/{name}")
+        parts = [
+            {"name": "lower", "file": "row-plate.step", "layers": "z"},
+            {"name": "upper", "file": f"{name}.step", "at": [0, 0, 8], "layers": "z"},
+        ]
+        joint = {"between": ["lower", "upper"], "kind": "through", "bolt": "m5-8.8",
+                 "nut": "m5-nut", "washer": "m5-washer", "pocket": 0.15,
+                 "at": [[x, y, 8] for x, y in places]}  # fmt: skip
+        Path(f"bed/{name}.json").write_text(json.dumps({"parts": parts, "joints": [joint]}))
 
 
 if __name__ == "__main__":
