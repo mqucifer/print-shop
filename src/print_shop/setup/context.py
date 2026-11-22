@@ -137,6 +137,8 @@ class Seen(BaseModel):
     #: The faces ("walls", "top", "bottom") that take in one the answer didn't speak of: never
     #: judged hidden, nor different from another print's.
     unsaid: tuple[str, ...] = ()
+    #: Part of the walls, and every other wall is one the answer didn't speak of: it may be all.
+    may_be_all_round: bool = False
     #: Several parts' faces, whose `said` already says whose each is.
     of_several: bool = False
 
@@ -152,10 +154,16 @@ class Seen(BaseModel):
         return "one of the walls wasn't asked about" if "walls" in self.unsaid else ""
 
     def same_as(self, other: Seen) -> bool:
-        """The same faces seen, counting none that either didn't speak of as a difference."""
-        skip = {*self.unsaid, *other.unsaid}
-        return all(getattr(self, face) == getattr(other, face)
-                   for face in ("walls", "top", "bottom") if face not in skip)
+        """The same faces seen, counting none that either didn't speak of as a difference. One
+        that's seen was spoken of: after a turn "walls" can be seen on one side and unsaid on
+        another."""
+        skip = {face for one in (self, other) for face in one.unsaid if not getattr(one, face)}
+        if any(getattr(self, face) != getattr(other, face)
+               for face in ("walls", "top", "bottom") if face not in skip):
+            return False
+        if self.walls and other.walls and self.part_walls != other.part_walls:
+            return (self if self.part_walls else other).may_be_all_round
+        return True
 
     def because(self) -> str:
         """Who said it and what, as a reason opens: after a turn, what that is as it prints."""
@@ -858,6 +866,8 @@ def seen_from(
     where = {up: "top", down: "bottom"}
     return Seen(walls=any(walls), top=up in sides, bottom=down in sides, said=said, noted=noted,
                 part_walls=part, called=called,
+                may_be_all_round=part and all(
+                    side in sides or side in unsaid for side in SIDES if side not in (up, down)),
                 unsaid=tuple(dict.fromkeys(where.get(side, "walls") for side in unsaid)))
 
 

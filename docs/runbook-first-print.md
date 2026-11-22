@@ -135,12 +135,12 @@ Finish that job, or stop it with Ctrl-C in its terminal (which doesn't stop the 
    **Your answer on the faces follows the part when it's turned** (mqucifer/print-shop#248), by the print loop, by `orientation`, or to a past print's pose. It's kept as the part's own sides, with the pose you gave it in. A top turned over is the plate's face, and one turned onto its side is part of the walls. The review notes the faces as they print now and, after a turn, what they were called when you answered:
 
    ```
-     note: Seen as it now prints: the face on the plate. You said the top, as the file lays it; it was turned 180,0,0 since
+     note: Seen as it now prints: the face on the plate. The top wasn't asked about, as it was on the plate when you answered, so ironing isn't judged. You said the top, as the file lays it; it was turned 180,0,0 since
    ```
 
    The slice's flags, the model's settings call, the print loop and "Use these" read those faces.
-   - **Where only part of the walls is seen, a seam at the back is never proposed.** Orca's back takes a corner, which two walls share, and Orca can turn the part on the plate. It's random, or with a fit it's to place by hand. With the walls seen all round it's as before.
-   - **The face on the plate is only called hidden by the notes or by "only the face on the plate".** The other three answers can't speak of it, so turned to be the top or a wall it's never judged hidden.
+   - **Where only part of the walls is seen, no seam change is proposed,** and "Use these" ticks no past seam. Whether the line is on that part can't be told: Orca's back takes a corner, which two walls share, and Orca can turn the part on the plate. The review says where the line is, to look at in the slicer. With the walls seen all round it's as before.
+   - **Only the notes and the answer "only the face on the plate" speak of the face on the plate.** The other three answers can't, so turned to be the top or a wall it's never judged hidden by one.
    - **Where they can't be carried,** as with an answer in your own words, none is judged, and the note opens `TURNED SINCE YOU ANSWERED`.
    - **Only the faces seen are carried:** an answer on the part's shape, or a setting an option set, isn't. An answer from before this has no pose, and is read in the pose it printed in.
 

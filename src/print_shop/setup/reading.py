@@ -19,11 +19,12 @@ printed (`seen`, `carried`, and `seen_across` for several parts). Where it can't
 is judged, and `seen_said` says so. An answer from before, with no pose, is read in the pose it
 printed in.
 
-**The back is never proposed where only part of the walls is seen** (mqucifer/print-shop#248).
+**Where only part of the walls is seen no seam change is proposed** (mqucifer/print-shop#248).
 "back" was the hidden side while "the walls" meant all round. Carried, only part of them may be
-seen, and "back" can't be told to miss it: on a flat back Orca's takes a corner, which a side
-wall shares, and its CLI can turn a part about z as it arranges the plate. With the walls seen
-all round it's as it was.
+seen, and where a line lands against that part can't be told: on a flat back Orca's back takes
+a corner, which a side wall shares, and its CLI can turn a part about z as it arranges the
+plate. Scattered, it would be all over that part. So the line is said, to be looked at. With
+the walls seen all round it's as it was.
 
 **A part's fits** (mqucifer/print-shop#130, `context.py`), placed as heights in the pose it
 prints in: a part with one never gets a random seam proposed, and the reason names the fit; a fit
@@ -415,10 +416,13 @@ def seen_said(
     if not turned:
         if now is not None:
             return f"{PRINTS}: {now.as_printed()}"
-        if answer.choice is None and was is not None:
+        if was is None:
+            return ""
+        if answer.choice is None:
             return (f"{PRINTS}: none is judged, as your words name no face "
                     f"('{answer.other}')")
-        return ""
+        return (f"{PRINTS}: none is judged, as '{question.as_answered(answer)}' can't be read "
+                "as faces here")
     assert was is not None
     to = pose_value(rotation_deg)
     posed = _posed(question, was)
@@ -611,7 +615,7 @@ def _seam_flag(
             f"is a line up the wall{where}, over {seam.at_layers} layers")
     now = reading.settings.get("seam_position", "")
     if faces.part_walls:
-        return [_seam_on_part(said, now, faces, process)]
+        return [_seam_on_part(seam, now)]
     if now in ("back", "aligned_back"):
         value, how = "random", "random scatters it, spreading the mark over the wall"
     else:
@@ -624,29 +628,18 @@ def _seam_flag(
                f"{how}"))]
 
 
-def _seam_on_part(
-    said: str, now: str, faces: Seen, process: dict[str, Any], named: str = "",
-) -> Flag:
-    """A seam line where only part of the walls is seen (mqucifer/print-shop#248): never the
-    back, as it can't be told to miss that part. `named` is the part's fits, which never get a
-    random seam."""
-    why = ("back could put the line on it, as Orca's back takes a corner two walls share and "
-           "Orca can turn the part on the plate")
-    at_back = (", and the line is at the back now, so it may be on that wall"
-               if now in ("back", "aligned_back") else "")
-    if named:
-        return Flag(id="seam_fit", reading=(
-            f"{said}; part of the walls is seen{at_back}. Back isn't proposed, as {why}, and "
-            f"random isn't either: it would scatter seam bumps all round the fit, {named}. The "
-            "seam needs placing by hand, on a wall that isn't seen"))
-    if now == "random":
-        return Flag(id="seam_seen", reading=(
-            f"{said}; part of the walls is seen and the seam is random already, so nothing is "
-            "proposed: placed by hand it could go on a wall that isn't seen"))
-    return Flag(id="seam_seen", reading=said, change=Change(
-        key="seam_position", preset=_first(process, "seam_position"), value="random",
-        source=Source.READING, feature="seen", knowledge="surface", reading=said,
-        reason=f"{faces.because()}{at_back}. Not back: {why}, so random scatters it"))
+def _seam_on_part(seam: SeamReading, now: str, named: str = "") -> Flag:
+    """A seam line where only part of the walls is seen (mqucifer/print-shop#248): said, with no
+    change proposed, as it can't be told whether it's on that part. `named` is the part's fits,
+    which never get a random seam."""
+    at = f" at x {seam.at[0]:g} y {seam.at[1]:g}" if seam.at else ""
+    scatter = "" if named or now == "random" else "seam_position=random to scatter it, or "
+    keep_off = (f". Not random: it would scatter seam bumps all round the fit, {named}"
+                if named else "")
+    return Flag(id="seam_fit" if named else "seam_seen", reading=(
+        f"seam ({now or '?'}): a line up the wall{at}, and part of the walls is seen. It can't "
+        f"be told whether the line is on that part, so nothing is proposed: look in the slicer, "
+        f"then {scatter}place it by hand{keep_off}"))
 
 
 def fits_said(fits: tuple[FitBand, ...]) -> str:
@@ -683,7 +676,7 @@ def _seam_on_a_fit(
     said = (f"{seam.stacked:.0%} of {seam.seams} wall loops start on the one below: the seam "
             f"is a line up the wall{where}, over {seam.at_layers} layers")
     if faces.part_walls:
-        return [_seam_on_part(said, now, faces, process, named)]
+        return [_seam_on_part(seam, now, named)]
     if now in ("back", "aligned_back"):
         return [Flag(id="seam_fit", reading=(
             f"{said}; the walls are seen, but random isn't proposed: it would scatter seam bumps "

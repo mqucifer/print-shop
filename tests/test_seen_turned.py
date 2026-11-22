@@ -15,6 +15,7 @@ import numpy as np
 import pytest
 
 from print_shop.desk.again import answers_file
+from print_shop.ingest.analyzer import analyze
 from print_shop.ingest.orientation import AXIS_ALIGNED, LAID, _rotation_matrix
 from print_shop.ledger import Ledger, Row
 from print_shop.orchestrator import graph
@@ -46,9 +47,10 @@ from print_shop.setup.intake import (
 from print_shop.setup.loop import PrintLoop
 from print_shop.setup.model import prompt as settings_prompt
 from print_shop.setup.offer import ThisPart, offering
-from print_shop.setup.proposal import ORIENTATION
+from print_shop.setup.proposal import ORIENTATION, Proposal
 from print_shop.setup.questions import STOCK, stock
 from print_shop.setup.reading import (
+    SeamReading,
     SliceReading,
     carried,
     flags,
@@ -291,7 +293,7 @@ def test_the_print_loops_turn_is_carried_and_each_pose_says_whats_seen_there(
     assert "seen there: the top\n" in weighed
     assert "seen there: part of the walls" in weighed
     assert "seen there: the face on the plate" in weighed
-    assert "never set seam_position to back" in weighed
+    assert "leave seam_position as it is there" in weighed
     assert "Seen as it lies here" not in weighed, "one pose's faces aren't given for all six"
     assert "go by the pose you propose" in weighed
 
@@ -596,6 +598,49 @@ def test_a_face_not_spoken_of_is_no_difference() -> None:
     assert not flipped.same_as(faces(False, True, True))
 
 
+def test_a_wall_thats_seen_differs_from_walls_said_hidden_though_another_wasnt_spoken_of(
+) -> None:
+    here = seen(Intake(questions=stock(None, LAID), answers=(Answer(choice=1), Answer(choice=0))),
+                (0.0, 90.0, 0.0))
+    then = seen(top_seen(), LAID)
+    assert here is not None and then is not None
+    assert here.walls and "walls" in here.unsaid and not then.walls
+    assert not here.same_as(then) and not then.same_as(here)
+    assert not here.same_as(faces(False, True, True))
+
+
+@pytest.mark.parametrize("option", [0, 2, 3])
+def test_part_of_the_walls_differs_from_all_round_unless_the_rest_wasnt_asked_about(
+    option: int,
+) -> None:
+    now = seen(Intake(questions=stock(None, LAID),
+                      answers=(Answer(choice=1), Answer(choice=option))), ON_ITS_SIDE)
+    assert now is not None and now.part_walls
+    all_round = faces(True, now.top, now.bottom)
+    assert now.same_as(all_round) is (option == 0) and all_round.same_as(now) is (option == 0)
+
+
+@pytest.mark.parametrize("value", ["back", "aligned_back", "random"])
+def test_use_these_never_ticks_a_past_seam_where_part_of_the_walls_is_seen(
+    value: str, tmp_path: Path
+) -> None:
+    stl = write_stl("cube", tmp_path)
+    with Ledger(tmp_path / "made-up.sqlite") as ledger:
+        printed_before(ledger, "past-job", stl, (yours("seam_position", value),),
+                       rotation=ON_ITS_SIDE)
+
+        def ticked(intake: Intake) -> list[str]:
+            part = ThisPart(stl=stl, stl_name=stl.name, sha256=analyze(str(stl)).stl_sha256,
+                            features=measure(stl, 400.0), rotation_deg=ON_ITS_SIDE,
+                            height_mm=20.0, machine={}, process={"seam_position": "aligned"},
+                            filament={}, seen_in=lambda pose: carried(intake, None, pose))
+            found = offering(ledger, part)
+            return [item.key for item in found.ticked(Proposal(), "90,0,0")]
+
+        assert ticked(top_seen()) == [], "part of the walls: use N still takes it"
+        assert ticked(top_seen(ON_ITS_SIDE)) == ["seam_position"], "as it was otherwise"
+
+
 def test_use_these_compares_whats_seen_as_each_printed(tmp_path: Path) -> None:
     stl = write_stl("cube", tmp_path)
     other = tmp_path / "plinth.stl"
@@ -630,36 +675,51 @@ SIDEWAYS = [pose for pose in AXIS_ALIGNED if pose not in (LAID, (180.0, 0.0, 0.0
 @pytest.mark.parametrize("option", [0, 1, 2, 3])
 @pytest.mark.parametrize("pose", SIDEWAYS)
 @pytest.mark.parametrize("position", ["aligned", "back", "aligned_back", "nearest", "random"])
-def test_back_is_never_proposed_where_only_part_of_the_walls_is_seen(
+def test_no_seam_change_is_proposed_where_only_part_of_the_walls_is_seen(
     option: int, pose: tuple[float, float, float], position: str, tmp_path: Path
 ) -> None:
-    """Orca's back takes a corner two walls share, and it can turn the part on the plate, so it
-    can't be told to miss the wall that's seen."""
+    """It can't be told where the line is against that part, nor that scattering is better."""
     intake = Intake(questions=stock(None, LAID),
                     answers=(Answer(choice=1), Answer(choice=option)))
     faces_now = seen(intake, pose)
     assert faces_now is not None and faces_now.part_walls
     found = flags(line_up_the_wall(tmp_path, position), faces_now, PROCESS, FILAMENT)
     [seam] = [f for f in found if f.id == "seam_seen"]
-    if position == "random":
-        assert seam.change is None, "never random to random"
-    else:
-        assert seam.change is not None and seam.change.value == "random"
-        assert "Not back" in seam.change.reason
-    if position in ("back", "aligned_back"):
-        assert seam.change is not None and "at the back now" in seam.change.reason
+    assert seam.change is None
+    assert seam.reading.startswith(f"seam ({position}): a line up the wall at x ")
+    assert "can't be told whether the line is on that part" in seam.reading
+    assert ("seam_position=random to scatter it" in seam.reading) is (position != "random")
+
+
+def test_a_line_in_a_us_inside_corner_is_left_where_it_is(tmp_path: Path) -> None:
+    """The re-review's U: the line was on a hidden inside corner, and back put it on the seen
+    wall's outer edge. Random would put it all over that wall."""
+    u_line = line_up_the_wall(tmp_path).model_copy(update={
+        "seam": SeamReading(seams=100, stacked=0.99, at=(4.8, 4.8), at_layers=100)})
+    found = flags(u_line, seen(top_seen(), (0.0, 90.0, 0.0)), PROCESS, FILAMENT)
+    [seam] = [f for f in found if f.id == "seam_seen"]
+    assert seam.change is None and "at x 4.8 y 4.8" in seam.reading
+
+
+@pytest.mark.parametrize("pose", [ON_ITS_SIDE, (270.0, 0.0, 0.0)])
+def test_both_quarter_turns_show_the_line_at_the_review(
+    pose: tuple[float, float, float], tmp_path: Path, job: Turned
+) -> None:
+    job.run(write_stl("cube", tmp_path), TOP_SEEN, sent_to(pose), as_laid=True)
+    assert "note: seam (aligned): a line up the wall at x 138 y 138" in job.last_review
+    assert "seam_position  aligned ->" not in job.last_review
 
 
 @pytest.mark.parametrize("position", ["aligned", "back", "aligned_back"])
-def test_with_a_fit_part_seen_walls_get_no_back_and_no_random_but_by_hand(
+def test_with_a_fit_the_line_is_said_and_random_is_never_offered(
     position: str, tmp_path: Path
 ) -> None:
     band = FitBand(fit=Fit(name="made-up fit", play_min=0.1, play_max=0.1), z_from=2, z_to=4)
     found = flags(line_up_the_wall(tmp_path, position), seen(top_seen(), ON_ITS_SIDE), PROCESS,
                   FILAMENT, Placed(fits=(band,)))
     [seam] = [f for f in found if f.id == "seam_fit"]
-    assert seam.change is None and "needs placing by hand" in seam.reading
-    assert ("may be on that wall" in seam.reading) is (position != "aligned")
+    assert seam.change is None and "then place it by hand" in seam.reading
+    assert "seam_position=random" not in seam.reading
 
 
 def test_a_random_seam_on_a_fit_isnt_sent_back_where_part_of_the_walls_is_seen(
@@ -684,7 +744,7 @@ def test_walls_seen_all_round_still_go_back_as_before(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("option", [0, 1])
 @pytest.mark.parametrize("turn", SIDEWAYS)
-def test_a_plate_with_a_part_seen_all_round_never_sends_the_seam_back(
+def test_a_plate_with_a_part_seen_all_round_has_no_seam_change_proposed(
     option: int, turn: tuple[float, float, float], tmp_path: Path
 ) -> None:
     intake = Intake(questions=stock(None, LAID),
@@ -696,18 +756,18 @@ def test_a_plate_with_a_part_seen_all_round_never_sends_the_seam_back(
         for position in ("aligned", "back"):
             found = flags(line_up_the_wall(tmp_path, position), plate, PROCESS, FILAMENT)
             [seam] = [f for f in found if f.id == "seam_seen"]
-            assert seam.change is not None and seam.change.value == "random"
+            assert seam.change is None
 
 
 @pytest.mark.parametrize("pose", SIDEWAYS)
-def test_the_settings_call_and_the_loop_are_told_never_back(
+def test_the_settings_call_is_told_to_leave_the_seam(
     pose: tuple[float, float, float], tmp_path: Path
 ) -> None:
     stl = write_stl("cube", tmp_path)
     facts = Proposer().facts(top_seen(), measure(stl, 400.0), STORE_PROFILES, pose=pose)
     told = settings_prompt(facts, load(groups_for(top_seen(), facts.features)))
-    assert "never set seam_position to back or aligned_back" in told
-    assert "one of the walls wasn't asked about" in told
+    assert "leave seam_position as it is there" in told
+    assert "One of the walls wasn't asked about: don't judge that face hidden" in told
 
 
 @pytest.mark.parametrize("option", [0, 1, 2])

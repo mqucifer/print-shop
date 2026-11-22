@@ -47,8 +47,8 @@ DEFAULT_MODEL = "crew-code-think"
 DEFAULT_MAX_TOKENS = 16000
 
 #: What a model is told where only part of the walls is seen (mqucifer/print-shop#248).
-NEVER_BACK = ("never set seam_position to back or aligned_back there: the line could land on the "
-              "wall that's seen")
+LEAVE_THE_SEAM = ("leave seam_position as it is there: where a seam would land against the wall "
+                  "that's seen can't be told")
 #: How the model is called: `complete_json`, or a test's recorded reply.
 Ask = Callable[[str, str, dict[str, Any]], dict[str, Any]]
 
@@ -257,8 +257,8 @@ def _seen(facts: PartFacts) -> list[str]:
         return (["Which faces are seen as it lies here isn't known: judge none as seen or "
                  "hidden.", ""] if answered else [])
     words = now.unsaid_words()
-    unsaid = f" Of those, {words}: don't judge that face hidden." if words else ""
-    seam = f" Only part of the walls is seen, so {NEVER_BACK}." if now.part_walls else ""
+    unsaid = f" {words[:1].upper()}{words[1:]}: don't judge that face hidden." if words else ""
+    seam = f" Only part of the walls is seen, so {LEAVE_THE_SEAM}." if now.part_walls else ""
     return [f"Seen as it lies here, carried from what was said: {now.as_printed()}. Go by this "
             f"for which faces are seen.{unsaid}{seam}", ""]
 

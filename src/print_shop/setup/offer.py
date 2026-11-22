@@ -79,6 +79,9 @@ SAME_Z = 0.02
 ASKED_AGAIN = "you're asked again for each job"
 #: Why one isn't where the notes gave both and the model's questions weren't waited for.
 NOT_ASKED_AGAIN = "this job didn't wait for the questions that could ask it again"
+#: Why a past seam isn't, where only part of the walls is seen here (mqucifer/print-shop#248).
+SEAM_ON_PART = ("part of the walls is seen here, and whether a seam would land on that part can't "
+                "be told")
 #: The review's width for the offer's lines, wrapped under their own indent.
 WIDTH = 100
 #: A face this near horizontal is flat.
@@ -765,6 +768,10 @@ class _Items:
             why += self._far(rests)
         # The machine's own limit. The other bounds are the model's, and the person's override
         # of one on the same file isn't in doubt for it.
+        if key == "seam_position" and part.seen_in is not None:
+            faces = part.seen_in(part.rotation_deg)
+            if faces is not None and faces.part_walls:
+                why.append(SEAM_ON_PART)
         if key == "layer_height" and (wrong := check(key, value, part.presets)):
             why.append(f"it's past this nozzle's bound: {wrong}")
         if not self.same_part and (refused := refuses(part.context, key, value)):

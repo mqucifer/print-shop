@@ -52,7 +52,7 @@ from print_shop.ingest.orientation import write_rotated
 from print_shop.outcome_words import outcome_words
 from print_shop.setup.bounds import SETTINGS, check
 from print_shop.setup.context import refuses
-from print_shop.setup.model import NEVER_BACK, prompt
+from print_shop.setup.model import LEAVE_THE_SEAM, prompt
 from print_shop.setup.proposal import (
     Change,
     GivenLesson,
@@ -382,7 +382,7 @@ def _user(part: Part) -> str:
             if words := faces.unsaid_words():
                 shown += f" ({words}, so it isn't hidden)"
             if faces.part_walls:
-                shown += f"; {NEVER_BACK}"
+                shown += f"; {LEAVE_THE_SEAM}"
         lines.append(f"- {pose_value(c.rotation_deg)}: {c.overhang_area_mm2:g} mm2 overhang, "
                      f"{c.bed_contact_area_mm2:g} mm2 on the plate, {c.height_mm:g} mm tall"
                      f"{shown}")
