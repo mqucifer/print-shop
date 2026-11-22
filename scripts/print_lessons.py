@@ -14,7 +14,9 @@
                                            [--setting K=V]
 
 Each correction at the review and each outcome with something to say is drawn as a candidate when
-the ledger records it; `draw` does it again for every print, and for prints from before. A
+the ledger records it; `draw` does it again for every print, and for prints from before. It also
+lists a correction that was only evidence for a lesson not keyed to reach its part, once, as a
+candidate or as evidence for one that reaches it (mqucifer/print-shop#212). A
 reviewer signs `--by "reviewer: <who>"` (or `sponsor`, or `stand-in: <who>`), as for CAD lessons.
 Nothing reaches a proposal until it's accepted or edited. `docs/print-lessons.md` says the rest.
 """

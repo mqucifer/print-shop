@@ -1039,6 +1039,39 @@ def test_carrying_an_override_isnt_a_lesson_accepted(tmp_path: Path, ledger: Led
     assert [e["job_id"] for e in evidence] == ["first", "second"]
 
 
+def test_used_on_a_shape_no_lesson_reaches_its_a_candidate_for_that_shape(
+    tmp_path: Path, ledger: Ledger
+) -> None:
+    """As one typed there is (mqucifer/print-shop#212): using instead of typing loses no shape."""
+    printed(ledger, "first", box(tmp_path, "slab.stl", 101, 50, 12), (yours("wall_loops", "4"),))
+    [first] = ledger.query("SELECT id FROM print_lessons")
+    here = box(tmp_path, "slab-b.stl", 99, 50, 12)
+    used = yours("wall_loops", "4", used=Used(job_id="first", stl_name="slab.stl",
+                                              by=Source.SPONSOR))
+    printed(ledger, "second", here, (used,))
+    printed(ledger, "third", here, (used,))
+    found = ledger.query("SELECT id, status, traits FROM print_lessons ORDER BY id")
+    assert [f["status"] for f in found] == ["candidate", "candidate"], "none is accepted"
+    assert found[0]["id"] == first["id"]
+    assert json.loads(found[1]["traits"]) == list(traits(features_of(here)))
+    evidence = ledger.query(
+        "SELECT job_id FROM print_lesson_evidence WHERE lesson=? ORDER BY job_id", found[1]["id"])
+    assert [e["job_id"] for e in evidence] == ["second", "third"], "the next use is evidence for it"
+    assert "(used from slab.stl, job first)" in lessons.listing(ledger)
+
+
+def test_using_again_what_a_reviewer_turned_down_draws_nothing(
+    tmp_path: Path, ledger: Ledger
+) -> None:
+    here = box(tmp_path, "slab.stl", 101, 50, 12)
+    printed(ledger, "first", here, (yours("wall_loops", "4"),))
+    [first] = ledger.query("SELECT id FROM print_lessons")
+    lessons.reject(ledger, first["id"], "reviewer: test", "only that part's")
+    printed(ledger, "second", here, (yours("wall_loops", "4", used=Used(
+        job_id="first", stl_name="slab.stl", by=Source.SPONSOR)),))
+    assert [f["id"] for f in ledger.query("SELECT id FROM print_lessons")] == [first["id"]]
+
+
 def test_used_at_a_lessons_own_value_the_lesson_stood(tmp_path: Path, ledger: Ledger) -> None:
     here = box(tmp_path, "slab.stl", 101, 50, 12)
     printed(ledger, "seed", here)
