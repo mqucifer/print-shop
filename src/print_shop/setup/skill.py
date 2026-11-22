@@ -120,8 +120,7 @@ def groups_for(intake: Intake, features: tuple[Feature, ...]) -> tuple[Group, ..
     values = {"overhang": 0.0, "bridge": 0.0, "bed_contact": float("inf"), "slenderness": 0.0,
               "length": 0.0, "footprint_aspect": 0.0}
     values |= {f.id: f.value for f in features}
-    offered = {k for q in (*intake.questions, *intake.offered)
-               for o in q.options for k in o.settings}
+    offered = intake.could_set()
     return tuple(g for g in GROUPS if g.needed(values) or offered & set(g.settings))
 
 

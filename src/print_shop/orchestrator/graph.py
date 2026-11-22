@@ -971,7 +971,7 @@ def _offering(
             filament=filament, filament_names=tuple(dict.fromkeys(n for n in names if n)),
             candidates=state.get("orientation_candidates", ()), build_volume_mm=build_volume,
             context=state.get("part_context"), pose_chosen=chosen,
-            asked=frozenset(k for q in intake.questions for o in q.options for k in o.settings),
+            asked=intake.could_set(),
         ))
     except Exception as exc:  # noqa: BLE001 - a print is never stopped by what it might reuse
         logger.warning("the past prints couldn't be read for the offer: %s", exc)

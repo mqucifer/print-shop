@@ -184,6 +184,12 @@ class Intake(BaseModel):
             if a.choice is not None
         ]
 
+    def could_set(self) -> frozenset[str]:
+        """The settings this job's questions could set: every question shown, with the model's
+        closer choices whose answer didn't stand (mqucifer/print-shop#208)."""
+        return frozenset(k for q in (*self.questions, *self.offered)
+                         for o in q.options for k in o.settings)
+
     def summary(self) -> str:
         if not self.questions:
             return "no questions: the part's features left nothing to ask"

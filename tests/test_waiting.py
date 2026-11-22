@@ -338,6 +338,46 @@ def test_a_kept_answers_choices_still_open_their_skill_groups() -> None:
     assert groups_for(kept, ()) == groups_for(then, ())
 
 
+def test_choices_kept_over_are_still_asked_again_to_the_reviews_offer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With mqucifer/print-shop#211: a past answer to a setting this job asked about isn't
+    pre-selected, and closer choices the person kept their answer over were asked."""
+    from print_shop.orchestrator import graph
+
+    offers: list[Any] = []
+    offer = graph.offer_past_prints
+
+    def watched(ledger: Any, part: Any) -> Any:
+        offers.append(part)
+        return offer(ledger, part)
+
+    monkeypatch.setattr(graph, "offer_past_prints", watched)
+
+    def closer(system: str, user: str, schema: dict[str, Any]) -> dict[str, Any]:
+        return {"questions": [{"feature": "purpose", "text": CLOSER.text, "options": [
+            {"label": "a cover", "settings": [{"key": "top_shell_layers", "value": "6"}],
+             "impact": "i", "recommended": True, "why": "w"},
+            {"label": "a spacer", "settings": [], "impact": "i", "recommended": False, "why": ""},
+        ]}]}
+
+    person = Person("2", "1", "")
+    (tmp_path / "work").mkdir()
+    bridge = MemoryBridge()
+    daemon = Daemon(
+        cfg=CFG, profiles=CI_PROFILES, workdir=tmp_path / "work", slicer=RecordedSlicer(),
+        bridge=lambda cfg: bridge, ledger=Ledger(tmp_path / "ledger.sqlite"),
+        proposer=Proposer(ask=_model, ask_questions=closer),
+        asker=person.asker(), waiting=person.waiting(), reviewer=Reviews(),
+    )
+    with daemon:
+        job_id = daemon.submit(write_stl("cube", tmp_path))
+        assert daemon.wait_for_gate(job_id, timeout_s=WAIT_S) is not None
+        bridge.press(CFG, "reject")
+        daemon.wait_for_finish(job_id, timeout_s=WAIT_S)
+    assert offers and "top_shell_layers" in offers[0].asked
+
+
 def test_four_questions_is_still_the_most_and_one_left_out_is_said() -> None:
     person = Person("1", "1", "1", "1")
     intake = ask(person, lambda stop: answered(TOP, EDGE, THIRD, STOCK[1]))
