@@ -16,7 +16,7 @@ import logging
 
 from pycentauri.models import PrintStatus as SdcpPrintStatus
 
-from print_shop.inventory import Inventory, Material, SpoolState, SpoolUse
+from print_shop.inventory import Inventory, Material, SpoolState, spool_lines
 from print_shop.ledger import Ledger, Row
 
 __all__ = ["at_end", "choices", "correct", "said"]
@@ -70,11 +70,10 @@ def said(ledger: Ledger, row: Row) -> str:
     """A print's spools and what the stock has loaded, as the outcome says them, or ""."""
     if not row.spools:
         return ""
-    used: tuple[SpoolUse, ...] = row.spools
     with Inventory(ledger.path) as stock:
-        now = stock.loaded(used[0].material.printer_id)
+        now = stock.loaded(row.spools[0].material.printer_id)
     has = now.named() if now is not None else "none"
-    return "; ".join(s.line() for s in used) + f". The stock has {has} loaded"
+    return "; ".join(spool_lines(row.spools)) + f". The stock has {has} loaded"
 
 
 def _load(ledger: Ledger, row: Row, *, left: tuple[Material, ...], now: Material) -> None:

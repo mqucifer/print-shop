@@ -210,7 +210,7 @@ def _starts_on(spool_id: int, material: Material, on_hand: Iterable[Spool]) -> M
     found = _on_hand(spool_id, material, on_hand)
     if isinstance(found, str) or found.same_filament(material):
         return found
-    return (f"the job is sliced for {material.filament_said()}, and {found.named()} is "
+    return (f"the job is sliced for {material.filament_said()}, and spool #{spool_id} is "
             f"{found.filament_said()}: to start on it, load it (`stock.py load {spool_id}`) and "
             "run the job again")
 

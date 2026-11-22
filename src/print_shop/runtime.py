@@ -15,7 +15,7 @@ from pathlib import Path
 from print_shop.core.mqtt import MqttConfig
 from print_shop.env import SETTINGS_PATH, load_env
 from print_shop.expert.client import LLMConfig
-from print_shop.inventory import Material
+from print_shop.inventory import Material, spool_lines
 from print_shop.ledger import Ledger, Row, ledger_path
 from print_shop.orchestrator.daemon import Daemon
 from print_shop.orchestrator.live import Step
@@ -191,8 +191,7 @@ def describe(row: Row) -> str:
         *_setup_lines(row),
         *_reading_lines(row),
         *([f"material       {row.material.line()}"] if row.material else []),
-        *([f"spools         {row.spools[0].line()}"] if row.spools else []),
-        *[f"               {used.line()}" for used in row.spools[1:]],
+        *[f"{'' if n else 'spools':<15}{line}" for n, line in enumerate(spool_lines(row.spools))],
         f"plate          {row.slicer_settings.get('curr_bed_type', '?')},"
         f" bed {row.slicer_settings.get('first_layer_bed_temperature', '?')} C",
         f"printer        {row.printer_machine} {row.printer_firmware}",

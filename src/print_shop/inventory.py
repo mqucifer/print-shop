@@ -45,6 +45,7 @@ __all__ = [
     "Spool",
     "SpoolState",
     "SpoolUse",
+    "spool_lines",
 ]
 
 SCHEMA = """
@@ -211,6 +212,18 @@ class SpoolUse(BaseModel):
             at += f", over z={self.from_z:g}"
         was = f" ({self.planned.named()} was planned)" if self.planned else ""
         return f"{self.material.named()}{at}{was}"
+
+
+def spool_lines(spools: tuple[SpoolUse, ...]) -> list[str]:
+    """A print's spools as they're said, in order. A swap that wasn't reached is said so, never
+    as its first spool from the swap's layer up."""
+    if len(spools) == 2:
+        first, last = spools
+        if last.material.spool_id == first.material.spool_id and last.planned is not None:
+            at = f" at layer {last.from_layer}" if last.from_layer else ""
+            return [f"{first.material.named()}, all the way: the swap to "
+                    f"{last.planned.named()}{at} wasn't made"]
+    return [used.line() for used in spools]
 
 
 def _now() -> str:

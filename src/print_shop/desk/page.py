@@ -14,7 +14,7 @@ from pathlib import Path
 
 from print_shop.desk.again import again
 from print_shop.desk.read import JobRecord, JobSummary, OnHand, pause_word, status
-from print_shop.inventory import SETUP
+from print_shop.inventory import SETUP, spool_lines
 from print_shop.ledger import Row
 from print_shop.orchestrator.outcome import end_name, no_frames
 from print_shop.outcome_words import outcome_words
@@ -235,7 +235,7 @@ def _summary(row: Row, record: JobRecord) -> str:
         + (f"; with {_A[pause_word(row)]}" if pause_word(row) else "")
         + ("; sliced by hand" if row.sliced is not None else "") + ".</p>"
         f"<p>{escape(material)}</p>"
-        + ("<p>Spools, in order: " + escape("; ".join(s.line() for s in row.spools)) + "</p>"
+        + ("<p>Spools, in order: " + escape("; ".join(spool_lines(row.spools))) + "</p>"
            if row.spools else "")
         + "</section>"
     )
@@ -442,7 +442,7 @@ def _pause(row: Row) -> str:
     if change is not None and change.value != "none":
         parts.append(f"<li>At {escape(change.value)} mm: {escape(reason_of(change))}</li>")
     parts += [f"<li>{escape(p.line())}</li>" for p in pauses]
-    parts += [f"<li>{escape(used.line())}</li>" for used in row.spools]
+    parts += [f"<li>{escape(line)}</li>" for line in spool_lines(row.spools)]
     parts.append("</ul></section>")
     return "".join(parts)
 

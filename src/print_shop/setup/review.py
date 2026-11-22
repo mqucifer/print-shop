@@ -492,8 +492,8 @@ def _purposed(
     change = review.corrections[at]
     if change.pause is not None and change.pause.complete(request.material):
         return review
-    found = pauses.ask(change.value, change.pause, _before(request), request.material,
-                       request.stock, read, write)
+    found = pauses.ask(change.value, change.pause, _before(request, change.value),
+                       request.material, request.stock, read, write)
     if found is None:
         return None
     done = change.model_copy(update={"pause": found,
@@ -502,15 +502,16 @@ def _purposed(
                                         *review.corrections[at + 1:]))
 
 
-def _before(request: ReviewRequest) -> tuple[pauses.Pause, str] | None:
-    """What a pause is pre-selected to be for, and from where: this review's pause, else the
-    past print's on offer."""
+def _before(request: ReviewRequest, value: str) -> tuple[pauses.Pause, str] | None:
+    """What a pause at `value` is pre-selected to be for, and from where: this review's pause,
+    else the past print's on offer at that height. One typed at another height didn't come from
+    that print, so Enter mustn't make it what that one was."""
     standing = request.proposal.get(PAUSE)
     if standing is not None and standing.pause is not None:
         return standing.pause, "as it is now"
     past = request.offering.past if request.offering is not None else None
     for item in past.items if past is not None else ():
-        if item.key == PAUSE and item.pause is not None:
+        if item.key == PAUSE and item.value == value and item.pause is not None:
             return item.pause, f"as on {item.used.stl_name}"
     return None
 

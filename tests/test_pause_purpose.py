@@ -346,8 +346,17 @@ def test_a_height_typed_again_has_this_reviews_purpose_preselected(shop: Shop) -
 
 def test_a_typed_pause_has_the_past_prints_purpose_preselected(shop: Shop) -> None:
     shop.run("pause_at=2 for insert because the nuts go in", "ok")
-    ran = shop.run("pause_at=3", "", "ok")
+    ran = shop.run("pause_at=2", "", "ok")
     assert "Enter for an insert, as on cube.stl" in ran.terminal
+    assert kind_of(ran.row) == "insert"
+
+
+def test_a_pause_at_another_height_doesnt_come_from_the_past_print(shop: Shop) -> None:
+    """Enter would have made an insert the swap of the print before it."""
+    shop.run("colour_change=2 to #2", "ok")
+    ran = shop.run("pause_at=3", "", "1", "ok", "ok")
+    assert ran.prompts.count("pause> ") == 2, "Enter alone chooses nothing"
+    assert "Enter for a swap" not in ran.terminal
     assert kind_of(ran.row) == "insert"
 
 
@@ -374,8 +383,8 @@ def test_a_pause_from_before_is_asked_when_its_used(shop: Shop) -> None:
 
 
 @pytest.mark.parametrize(("typed", "why"), [
-    ("colour_change=2 from #3 to #1", "the job is sliced for Elegoo PLA, and spool #3, "
-     "Elegoo PETG, clear is Elegoo PETG: to start on it, load it"),
+    ("colour_change=2 from #3 to #1", "the job is sliced for Elegoo PLA, and spool #3 is "
+     "Elegoo PETG: to start on it, load it"),
     ("colour_change=2 to #1", "it starts on spool #1, Elegoo PLA, white, so it swaps to another"),
     ("colour_change=2 to #9", "spool #9 isn't on hand"),
     ("colour_change=2 for insert", "colour_change is a swap: for parts dropped in"),
@@ -478,6 +487,10 @@ def test_stopped_under_the_swap_it_ended_with_the_first(shop: Shop) -> None:
     assert ran.row.spools[-1].planned.spool_id == BLACK
     assert "swap, not made: white throughout" in shop.desk(ran.job_id)[0]
     assert "to #2" in shop.correction_line(ran.job_id), "printed again, it's as it was meant"
+    never = "all the way: the swap to spool #2, Elegoo PLA, black at layer 71 wasn't made"
+    assert never in ran.outcome["spools"]
+    assert never in describe(ran.row) and never in re.sub("&#x27;", "'", shop.desk(ran.job_id)[1])
+    assert "white, from layer 71" not in describe(ran.row)
 
 
 def test_stopped_over_the_swap_it_ended_with_the_last(shop: Shop) -> None:
