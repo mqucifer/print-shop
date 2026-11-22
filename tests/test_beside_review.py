@@ -452,7 +452,7 @@ def test_loop_posed_the_review_shows_the_files_pose_and_the_turn_is_a_proposal(
     first = screen.seen[0]
     shown = render_review(first)
     assert first.orientation.rotation_deg == LAID
-    assert "as the file lays it, a turn of the print loop's is proposed at the review" in shown
+    assert "as the file lays it; the print loop only proposes a turn" in shown
     assert ") orientation  0,0,0 -> 180,0,0" in shown
     assert "It's a big change: turn it to 180,0,0 from the file's own pose." in shown
     assert "Once turned it would also propose: wall_loops 2 -> 4" in shown

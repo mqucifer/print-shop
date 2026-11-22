@@ -317,7 +317,7 @@ class _State:
     corrections: list[Change] = field(default_factory=list)
     looked_up: list[int] = field(default_factory=list)
     #: The question and reason the model gave for each big change, when it proposes.
-    words: dict[str, str] = field(default_factory=dict)
+    words: dict[str, tuple[str, str]] = field(default_factory=dict)
     calls: list[LoopCall] = field(default_factory=list)
     baseline_s: int | None = None
     slices: int = 0
@@ -550,7 +550,7 @@ def _ask(part: Part, loop: PrintLoop, state: _State, args: dict[str, Any]) -> st
     if part.proposes:
         state.agreed.update(what for what, _ in big_ones)
         for what, _ in big_ones:
-            state.words[what] = f"{args['question']} (because {args['reason']})"
+            state.words[what] = (str(args["question"]), str(args["reason"]).rstrip("."))
         return (f"nobody is asked now, as the person takes or turns down each change at the "
                 f"review: your question becomes the proposal's words ({asked}). Propose it.")
     question = f"{args['question']}\n  ({asked}; because {args['reason']})\n  yes, or say why not"
@@ -658,9 +658,11 @@ def _big_words(
             on = [what.removeprefix("setting ")]
         else:
             on = ["orientation"] if pose.rotation_deg != part.kept else list(settings)
-        words = f'"{state.words[what]}" ' if what in state.words else ""
+        question, reason = state.words.get(what, ("", ""))
+        words = f'"{question}" ' if question else ""
+        because = f" The model's reason: {reason}." if reason else ""
         for key in on:
-            found.setdefault(key, []).append(f"{words}It's a big change: {said}.")
+            found.setdefault(key, []).append(f"{words}It's a big change: {said}.{because}")
     return {key: " ".join(each) for key, each in found.items()}
 
 

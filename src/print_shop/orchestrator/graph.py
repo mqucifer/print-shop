@@ -304,7 +304,7 @@ def build_graph(
             if reviewer is not None:
                 # The review doesn't wait for the loop, so this is the pose it shows
                 # (mqucifer/print-shop#242).
-                then = "a turn of the print loop's is proposed at the review"
+                then = "the print loop only proposes a turn"
                 if kept is None and not own.fits_in(build_volume):
                     # It can't be sliced as the file lays it: the choice a failed call makes.
                     fitted = _resolved(propose_validate(
@@ -320,8 +320,9 @@ def build_graph(
                     if checked.blockers:
                         then += "; the check on poses says " + "; ".join(
                             v.detail for v in checked.blockers)
+            joined = "; " if reviewer is not None else ", "
             pending = Outcome(proposal=Chosen(value=own, source=LOOP_PENDING, rationale=(
-                f"{where}, {then}")), accepted=True, attempts=0)
+                f"{where}{joined}{then}")), accepted=True, attempts=0)
             return {"orientation": pending, "orientation_lessons": given, **poses}
         if kept is not None:
             # The side its design run or sidecar lays it on is kept, as a pose laid by the

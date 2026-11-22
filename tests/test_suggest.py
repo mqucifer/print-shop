@@ -199,7 +199,8 @@ def test_beside_a_review_the_loop_asks_nobody_and_its_question_is_the_turns_word
     assert found.pose.rotation_deg == (180.0, 0.0, 0.0)
     assert found.corrections == ()
     words = found.big[ORIENTATION]
-    assert words.startswith('"Turn it over? (because no supports that way)"')
+    assert words.startswith('"Turn it over?" It\'s a big change: ')
+    assert words.endswith("The model's reason: no supports that way.")
     assert "It's a big change: turn it to 180,0,0 from the file's own pose." in words
     assert "big" not in found.reply
 
