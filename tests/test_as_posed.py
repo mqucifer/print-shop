@@ -452,13 +452,17 @@ def test_with_no_other_side_that_fits_orientation_says_so_and_isnt_pointed_to() 
     assert "No other side down fits the plate" in "\n".join(said)
 
 
-@pytest.mark.parametrize(("wide", "deep"), [(300, 20), (20, 300), (40, 20)])
+@pytest.mark.parametrize(("wide", "deep", "volume"), [
+    (300, 20, VOLUME), (20, 300, VOLUME), (40, 20, VOLUME),
+    # Stood on its end it fits as posed, so none of the five is passed over it to be turned.
+    (300, 20, (256.0, 256.0, 320.0)),
+])
 def test_a_pose_measured_beside_is_marked_as_it_is_among_all_six(
-    tmp_path: Path, wide: float, deep: float
+    tmp_path: Path, wide: float, deep: float, volume: tuple[float, float, float]
 ) -> None:
     stl = block(tmp_path, wide, deep)
-    six = with_turns(stl, tuple(candidates(stl)), VOLUME, AS_POSED)
-    beside = Measuring(stl, six[:1], lambda mesh, pose: with_turns(mesh, (pose,), VOLUME, None)[0])
+    six = with_turns(stl, tuple(candidates(stl)), volume, AS_POSED)
+    beside = Measuring(stl, six[:1], lambda mesh, pose: with_turns(mesh, (pose,), volume, None)[0])
     assert beside.settled() == six
 
 
