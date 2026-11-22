@@ -71,6 +71,11 @@ job marked as a reprint of it, refused if the kept file has changed. Either is r
 file names another filament or nozzle than the inventory says is loaded and fitted, unless
 `--loaded-ok` says to print it with what's loaded.
 
+**One runs at a time** (mqucifer/print-shop#207). A part, `--sliced`, `--again` and `--serve`,
+armed or not, first take a lock that goes when the process does. A second start says in one
+sentence what's running and exits 2, having published and started nothing. `--list`, `--filaments`,
+the print desk and `stock.py` run beside a job.
+
 **What a job shows here is also kept in its folder,** as `jobs/<id>/job.log`, with each answer
 typed, so it can be read after it's scrolled past (mqucifer/print-shop#139): by the print desk,
 `scripts/print_desk.py`, and by the operator. No key, token or password is written to it.
@@ -94,6 +99,7 @@ from print_shop.inventory import SETUP, Inventory, InventoryError, Material
 from print_shop.joblog import LOG_NAME, JobLog, secrets
 from print_shop.ledger import Ledger, ledger_path
 from print_shop.orchestrator.daemon import GATE_WAIT_S
+from print_shop.orchestrator.live import AlreadyLive, Live, only_live
 from print_shop.orchestrator.outcome import no_frames
 from print_shop.printer.centauri import FrameRecorder, PrinterClient, live_printer
 from print_shop.runtime import (
@@ -171,17 +177,36 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--plate and --loaded-ok go with --sliced or --again")
     if args.project is not None and args.sliced is None:
         parser.error("--project goes with --sliced: a reprint keeps its original's overrides")
-    if (args.stl is None and not by_hand) or args.serve or args.list or args.filaments:
-        return _main(parser, args, None)
-    # A job: what it shows is kept in its folder too (mqucifer/print-shop#139).
-    job_log = JobLog(secrets(args.settings))
-    with job_log.capturing():
-        given = sys.argv[1:] if argv is None else argv
-        job_log.write(_header(args.stl or args.sliced, given))
-        try:
-            return _main(parser, args, job_log)
-        finally:
-            job_log.close()
+    a_job = args.stl is not None or by_hand
+    if args.list or args.filaments or not (a_job or args.serve):
+        return _main(parser, args)  # it only reads, or has nothing to do: no lock
+    try:
+        # Before the inventory, the profiles' composing, the arming and the broker: a second
+        # start mustn't write over what the live job slices with, or publish over its gate.
+        with only_live(WORK_DIR, ledger_path(args.settings), _part(args)) as live:
+            if args.serve:
+                return _main(parser, args, live=live)
+            # A job: what it shows is kept in its folder too (mqucifer/print-shop#139).
+            job_log = JobLog(secrets(args.settings))
+            with job_log.capturing():
+                given = sys.argv[1:] if argv is None else argv
+                job_log.write(_header(args.stl or args.sliced, given))
+                try:
+                    return _main(parser, args, job_log, live)
+                finally:
+                    job_log.close()
+    except AlreadyLive as refused:
+        print(refused, file=sys.stderr)
+        return 2
+
+
+def _part(args: argparse.Namespace) -> str | None:
+    """The part as a refused second start is told it, until the job has its own name for it."""
+    if args.serve:
+        return None
+    if args.again is not None:
+        return f"a reprint of job {args.again}"
+    return Path(args.stl or args.sliced).name
 
 
 def _header(part: Path | None, given: list[str]) -> str:
@@ -266,7 +291,7 @@ def _hand_sliced(args: argparse.Namespace, job_log: JobLog | None) -> sliced.Sli
 
 
 def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
-          job_log: JobLog | None) -> int:
+          job_log: JobLog | None = None, live: Live | None = None) -> int:
     read: Callable[[str], str] = job_log.reader(input) if job_log is not None else input
     if args.filaments:
         print(describe_store(Store(STORE_DIR)))
@@ -359,6 +384,7 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
         reviewer=cli_reviewer(read=read) if hand_sliced is None else None,
         show=print if hand_sliced is not None else None,
         store=Store(STORE_DIR) if hand_sliced is not None else None,
+        on_step=live.at if live is not None else None,
     )
     try:
         with run.daemon:

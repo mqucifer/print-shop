@@ -23,7 +23,7 @@ import pytest
 
 from print_shop import sliced
 from print_shop.core.contracts import ungated_edges
-from print_shop.core.mqtt import command_topic, gate_topic
+from print_shop.core.mqtt import gate_topic
 from print_shop.desk import Desk
 from print_shop.desk.page import job_page
 from print_shop.inventory import Inventory, Material
@@ -272,7 +272,7 @@ class Rig:
         return sliced.SlicedJob.of(file, material=self.material, compared=compared, **kwargs)
 
     def press(self, decision: str) -> None:
-        self.bridge.deliver(command_topic(CFG), {"decision": decision})
+        self.bridge.press(CFG, decision)
 
     def printed(self, job: sliced.SlicedJob) -> str:
         """The job, approved and started; its id."""
@@ -575,7 +575,7 @@ class Shop:
             while not done.is_set():
                 raw = self.bridge.retained.get(gate_topic(CFG))  # absent until the daemon's up
                 if raw is not None and json.loads(raw).get("pending"):
-                    self.bridge.deliver(command_topic(CFG), {"decision": press})
+                    self.bridge.press(CFG, press)
                     return
                 time.sleep(0.05)
 

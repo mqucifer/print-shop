@@ -202,8 +202,6 @@ def test_a_colour_change_asked_for_at_the_review_reaches_the_gcode_the_gate_and_
                     proposer=Proposer(ask=_model, ask_questions=_questions),
                     asker=replay_asker(ANSWERS), reviewer=sponsor,
                     watch_printer=printer, watch_poll_s=0.01)
-    from print_shop.core.mqtt import command_topic  # noqa: PLC0415
-
     with daemon:
         job_id = daemon.submit(write_stl("cube", tmp_path))
         daemon.wait_for_gate(job_id, timeout_s=30)
@@ -222,7 +220,7 @@ def test_a_colour_change_asked_for_at_the_review_reaches_the_gcode_the_gate_and_
         assert gate["pause"].startswith(
             "this print pauses for a filament swap before layer 10 (z 2 mm), about "
         )
-        bridge.deliver(command_topic(CFG), {"decision": "approve"})
+        bridge.press(CFG, "approve")
         assert daemon.wait_for_finish(job_id, timeout_s=30).printed
 
         # One pause in what went to the printer, before layer 10.
