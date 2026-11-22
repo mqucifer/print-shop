@@ -224,6 +224,12 @@ def test_context_and_source_count_in_closeness(tmp_path: Path, ledger: Ledger) -
     assert [p.job_id for p in offering(ledger, here).options] == ["run", "other"]
 
 
+def test_names_alike_arent_a_common_source(tmp_path: Path, ledger: Ledger) -> None:
+    printed(ledger, "tower", box(tmp_path, "part-1.stl", 15, 15, 90), (yours("wall_loops", "5"),))
+    found = offering(ledger, this(box(tmp_path, "part-2.stl", 60, 40, 12)))
+    assert "the part is unlike it" in why_not(found, "wall_loops")
+
+
 def test_of_the_same_file_one_that_didnt_fail_comes_first(tmp_path: Path, ledger: Ledger) -> None:
     here = box(tmp_path, "plinth.stl", 60, 40, 12)
     printed(ledger, "good", here, (yours("wall_loops", "4"),))
@@ -627,6 +633,7 @@ def test_the_offers_lines_fit_the_review(tmp_path: Path, ledger: Ledger) -> None
     here = box(tmp_path, "plinth.stl", 60, 40, 12)
     long = "the front is seen from the door and the side from the window, " * 3
     printed(ledger, "first", here, (yours("seam_position", "back", long.strip()),))
+    printed(ledger, "other", box(tmp_path, "block.stl", 62, 41, 12), (yours("wall_loops", "4"),))
     lines = offer.render(offering(ledger, this(here)), Proposal(), "0,0,0")
     assert all(len(line) <= offer.WIDTH for line in lines)
     assert " ".join(long.split()) in " ".join(" ".join(lines).split())

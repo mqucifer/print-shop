@@ -822,8 +822,8 @@ def render(offer: Offering, proposal: Proposal, pose: str) -> list[str]:
         lines.append("  Other past prints, by how alike:")
         for n, p in others:
             lines += _wrapped(f"    like {n}: ", f"{p.title()}; {p.why}")
-    lines.append("  use takes those marked [x], use 2 4 those numbered, clear 2 clears one"
-                 + (", like 2 picks another print." if len(offer.options) > 1 else "."))
+    lines += _wrapped("  ", "use takes those marked [x], use 2 4 those numbered, clear 2 clears one"
+                      + (", like 2 picks another print." if len(offer.options) > 1 else "."))
     return lines
 
 

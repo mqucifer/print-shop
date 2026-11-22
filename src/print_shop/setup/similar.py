@@ -50,6 +50,9 @@ MEASURES: dict[str, Measure] = {
 
 #: What closeness is made of: mostly the part, then its context and where it came from.
 SHARES = {"shape": 0.8, "context": 0.1, "source": 0.1}
+#: Names with every word in common are this near a common source, and never are one: "part-1" and
+#: "part-2" can be any two parts.
+NAMED_ALIKE = 0.75
 #: A difference smaller than this share isn't listed: one just across a trait's threshold is.
 SAID = 0.005
 
@@ -134,7 +137,7 @@ def _source(here: tuple[str, str], then: tuple[str, str]) -> float:
     if (path and path == past_path) or name == past_name:
         return 1.0
     a, b = _words(name), _words(past_name)
-    return len(a & b) / len(a | b) if a | b else 0.0
+    return NAMED_ALIKE * len(a & b) / len(a | b) if a | b else 0.0
 
 
 def _words(name: str) -> set[str]:
