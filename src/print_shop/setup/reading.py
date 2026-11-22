@@ -13,6 +13,12 @@ depend on the part, not the material. A flag proposes a change with its reason a
 it rests on, like every other change. It never applies one: the person takes it at the review,
 or doesn't.
 
+**What's seen follows the part when it's turned** (mqucifer/print-shop#248). An answer is the
+part's own sides by the pose it was given in, and is read as the faces those are in the pose
+printed (`seen`, `carried`, and `seen_across` for several parts). Where it can't be carried none
+is judged, and `seen_said` says so. An answer from before, with no pose, is read in the pose it
+printed in.
+
 **A part's fits** (mqucifer/print-shop#130, `context.py`), placed as heights in the pose it
 prints in: a part with one never gets a random seam proposed, and the reason names the fit; a fit
 at the plate gets elephant foot compensation proposed, inside its bound. A hold that slides on
@@ -29,9 +35,17 @@ from pydantic import BaseModel
 
 from print_shop.bench import pausing
 from print_shop.materials import material_name
-from print_shop.setup.context import FitBand, Placed, Seen
-from print_shop.setup.intake import Intake
-from print_shop.setup.proposal import Change, Source
+from print_shop.setup.context import (
+    FitBand,
+    PartContext,
+    Placed,
+    Seen,
+    own_sides,
+    printed,
+    seen_from,
+)
+from print_shop.setup.intake import Answer, Intake, Question
+from print_shop.setup.proposal import Change, Source, pose_value
 from print_shop.slicer import gcode
 
 __all__ = [
@@ -43,9 +57,12 @@ __all__ = [
     "SeamReading",
     "Seen",
     "SliceReading",
+    "carried",
     "flags",
     "read_slice",
     "seen",
+    "seen_across",
+    "seen_said",
 ]
 
 #: Orca's label for ironing.
@@ -278,25 +295,132 @@ def _seam(layers: list[gcode.Layer]) -> SeamReading:
                        at=(float(at[0]), float(at[1])), at_layers=count)
 
 
-def seen(intake: Intake | None) -> Seen | None:
-    """Which faces the person's own answer says are seen, or None when they didn't say. What
+def seen(
+    intake: Intake | None,
+    rotation_deg: tuple[float, float, float] | None = None,
+    asked_in: tuple[float, float, float] | None = None,
+) -> Seen | None:
+    """Which faces the person's own answer says are seen, as they print in `rotation_deg`
+    (mqucifer/print-shop#248), or None when they didn't say, or it can't be carried there. What
     they confirmed from the notes is None here: that's read as the context places it in the pose
-    printed (`flags`), so that it follows a turn."""
-    from print_shop.setup.questions import SEEN, SEEN_FACES  # noqa: PLC0415 - a cycle otherwise
+    printed (`flags`), so that it follows a turn.
 
+    Args:
+        rotation_deg: The pose printed. None reads the answer as given.
+        asked_in: The pose it was answered in, where that's not the question's: each part of a
+            plate has its own.
+    """
+    from print_shop.setup.questions import SEEN_FACES  # noqa: PLC0415 - a cycle otherwise
+
+    found = _seen_answer(intake)
+    if found is None:
+        return None
+    question, answer = found
+    if answer.choice is None or question.confirmed(answer):
+        return None
+    label = question.options[answer.choice].label
+    faces = SEEN_FACES.get(label)
+    if faces is None:
+        return None
+    walls, top, bottom = faces
+    given = Seen(walls=walls, top=top, bottom=bottom, said=label)
+    was = asked_in or question.pose
+    if was is None or rotation_deg is None or tuple(was) == tuple(rotation_deg):
+        return given
+    sides = own_sides(given, was)
+    if sides is None:
+        return None
+    return seen_from(sides, rotation_deg, f"{given.as_printed()}, {_posed(question, was)}")
+
+
+def carried(
+    intake: Intake | None, context: PartContext | None,
+    rotation_deg: tuple[float, float, float],
+    asked_in: tuple[float, float, float] | None = None,
+) -> Seen | None:
+    """What's seen as the part prints in that pose: the person's answer carried there, else the
+    notes' faces, where the answer didn't replace them. The one reading of it, for whoever needs
+    the faces and not the slice.
+
+    It carries which faces are seen, and nothing else (mqucifer/print-shop#248). An answer on
+    the part's shape, and an option's setting that's for a pose, such as no supports, are not
+    carried by it: on a plate those are still set aside after a turn (mqucifer/print-shop#234),
+    or an answer given before the turn would hold the support guard off over a new overhang.
+    """
+    mine = seen(intake, rotation_deg, asked_in)
+    if mine is not None:
+        return mine
+    if intake is not None and "seen" in intake.set_aside():
+        return None
+    if context is None or context.seen is None:
+        return None
+    return printed(context.seen, rotation_deg)
+
+
+def seen_across(each: list[Seen | None]) -> Seen | None:
+    """Several parts' faces, read as one plate's: seen on any is seen, and where any part's
+    couldn't be carried, none is judged (mqucifer/print-shop#248)."""
+    known = [one for one in each if one is not None]
+    if not known or len(known) != len(each):
+        return None
+    walls = [one for one in known if one.walls]
+    return Seen(walls=bool(walls), top=any(one.top for one in known),
+                bottom=any(one.bottom for one in known),
+                said="; ".join(dict.fromkeys(one.said for one in known)),
+                noted=all(one.noted for one in known),
+                part_walls=bool(walls) and all(one.part_walls for one in walls))
+
+
+def seen_said(
+    intake: Intake | None, context: PartContext | None,
+    rotation_deg: tuple[float, float, float],
+) -> str:
+    """The review's line on what's seen: the faces as they print now and, after a turn, what
+    they were called when answered. Where they can't be carried, that none is judged. ""
+    where nothing said."""
+    now = carried(intake, context, rotation_deg)
+    found = _seen_answer(intake)
+    if found is None:
+        return f"Seen as it prints: {now.as_printed()}" if now is not None else ""
+    question, answer = found
+    was = question.pose
+    turned = was is not None and tuple(was) != tuple(rotation_deg)
+    if not turned:
+        if now is not None:
+            return f"Seen as it prints: {now.as_printed()}"
+        if answer.choice is None and was is not None:
+            return ("Seen as it prints: none is judged, as your words name no face "
+                    f"('{answer.other}')")
+        return ""
+    assert was is not None
+    to = pose_value(rotation_deg)
+    posed = _posed(question, was)
+    if now is None:
+        return (f"TURNED SINCE YOU ANSWERED: you said '{question.as_answered(answer)}', {posed}. "
+                f"That can't be carried to {to}, so no face is judged seen: say what you want "
+                "with a correction")
+    if question.confirmed(answer):
+        called = f"The notes said {question.beside}, and you confirmed it"
+    else:
+        mine = seen(intake)
+        called = (f"You said {mine.as_printed()}, {posed}" if mine is not None
+                  else f"You said {question.beside}, as the notes do")
+    since = f"turned {to}" if any(rotation_deg) else "turned back to how the file lays it"
+    return f"Seen as it now prints: {now.as_printed()}. {called}; it was {since} since"
+
+
+def _seen_answer(intake: Intake | None) -> tuple[Question, Answer] | None:
     if intake is None:
         return None
-    for question, answer in zip(intake.questions, intake.answers, strict=False):
-        if question.feature != SEEN.feature or answer.choice is None:
-            continue
-        if question.confirmed(answer):
-            continue
-        label = question.options[answer.choice].label
-        faces = SEEN_FACES.get(label)
-        if faces is not None:
-            walls, top, bottom = faces
-            return Seen(walls=walls, top=top, bottom=bottom, said=label)
-    return None
+    return next(((q, a) for q, a in zip(intake.questions, intake.answers, strict=False)
+                 if q.feature == "seen"), None)
+
+
+def _posed(question: Question, was: tuple[float, float, float]) -> str:
+    """The pose an answer was given in, in words."""
+    if question.posed and question.pose is not None and tuple(question.pose) == tuple(was):
+        return question.posed
+    return f"turned {pose_value(was)}" if any(was) else "as the file lays it"
 
 
 def flags(

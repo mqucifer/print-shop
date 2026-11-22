@@ -172,8 +172,10 @@ class Question(BaseModel):
     noted_as: str = ""
     #: The notes it was read from, by name, as the read-back heads it.
     noted_from: str = ""
-    #: The pose a read-back of faces was made in, as a rotation.
+    #: The pose a question of faces was asked, or read back, in, as a rotation, and in words
+    #: (mqucifer/print-shop#248). None: from before, read in the pose it printed in.
     pose: tuple[float, float, float] | None = None
+    posed: str = ""
 
     @property
     def recommended(self) -> int:
@@ -203,7 +205,7 @@ class Question(BaseModel):
                 return said
             label = self.options[self.noted].label
             now = f", so {label}" if label != said else ""
-            return f"{said} (turned {','.join(f'{a:g}' for a in self.pose)}{now})"
+            return f"{said} ({self.posed}{now})"
         return f"{self.notes_say()}: {self.options[self.noted].impact.split(';')[0]}"
 
     def differs(self, answer: Answer) -> str:
@@ -211,6 +213,20 @@ class Question(BaseModel):
         assert self.noted is not None
         return (f"That differs from the notes. They say {self.topic.lower()}: "
                 f"{self.options[self.noted].label}. You said: {self.label(answer)}.")
+
+    def asked(self) -> str:
+        """The question as it's shown: a question of faces names the pose it's asked in."""
+        if not self.posed:
+            return self.text
+        return f"{self.text.rstrip('?')}, {self.posed}?"
+
+    def as_answered(self, answer: Answer) -> str:
+        """An answer as it's told afterwards, when the part may have been turned since: "as it
+        prints" would read as the pose it was turned to."""
+        said = self.label(answer)
+        if self.pose is None or answer.choice is None:
+            return said
+        return said.replace("as it prints", "as it lay when asked")
 
     def label(self, answer: Answer) -> str:
         """An answer to it, in words. Faces confirmed from the notes are said as the file lays
@@ -300,7 +316,7 @@ class Intake(BaseModel):
 
     def set_aside(self) -> dict[str, str]:
         """The person's answer, by what of the notes it stands in place of."""
-        return {q.feature: q.label(a) for q, a in self.over_notes()}
+        return {q.feature: q.as_answered(a) for q, a in self.over_notes()}
 
     def summary(self) -> str:
         if not self.questions:
@@ -309,7 +325,7 @@ class Intake(BaseModel):
         for q, a in zip(self.questions, self.answers, strict=True):
             said = q.label(a) if a.choice is not None else f"other: {a.other}"
             whose = q.whose(a)
-            parts.append(f"{q.text} {said}" + (f" ({whose})" if whose else ""))
+            parts.append(f"{q.asked()} {said}" + (f" ({whose})" if whose else ""))
         return "; ".join(parts)
 
 
@@ -356,7 +372,7 @@ def _listed(n: int, question: Question) -> list[str]:
         lines = [f'Its notes say: "{question.beside}"']  # their free words, so in quotes
     else:
         lines = []
-    lines.append(f"{n}. {question.text}")
+    lines.append(f"{n}. {question.asked()}")
     for i, option in enumerate(question.options):
         theirs = "  <- the notes" if i == question.noted else ""
         lines.append(f"   {i + 1}) {option.line()}{theirs}")
@@ -515,6 +531,9 @@ def replay_asker(path: Path, write: Callable[[str], None] = print) -> Asker:
     is refused, saying which, never replayed by position (mqucifer/print-shop#107:
     one written for one set of questions answered another wrongly, silently).
 
+    An answer about faces may name the pose it was given in (``"pose": "180,0,0"``), and is
+    refused in another, where it would name other faces (mqucifer/print-shop#248).
+
     What the notes gave replays as ``{"question": "seen", "notes": "top, bottom"}``: confirmed,
     if the notes still say it (mqucifer/print-shop#236). Nothing of theirs is confirmed that the
     file doesn't name. An answer in their place replays as any answer does, and `write` is told
@@ -584,10 +603,12 @@ class _Recorded(BaseModel):
     choice: int | str | None = None
     other: str = ""
     notes: str = ""  # what it confirms the notes gave
+    pose: str = ""  # the pose an answer about faces was given in
 
     def matches(self, questions: Sequence[Question]) -> list[int]:
         said = _plain(self.question)
-        by_text = [n for n, q in enumerate(questions) if _plain(q.text) == said]
+        by_text = [n for n, q in enumerate(questions)
+                   if said in (_plain(q.text), _plain(q.asked()))]
         if by_text:
             return by_text
         return [n for n, q in enumerate(questions) if q.feature == self.question.strip()]
@@ -602,6 +623,11 @@ class _Recorded(BaseModel):
                 return (f"it confirms the notes' '{self.notes}', and they say "
                         f"'{question.noted_as}' now")
             return question.confirm()
+        if self.pose and question.pose is not None:
+            here = ",".join(f"{a:g}" for a in question.pose)
+            if self.pose.replace(" ", "") != here:
+                return (f"it was answered in the pose {self.pose}, and it's asked in {here} now, "
+                        "where those words name other faces")
         if self.choice is None:
             return Answer(other=self.other) if self.other.strip() else "neither a choice nor words"
         if isinstance(self.choice, int):

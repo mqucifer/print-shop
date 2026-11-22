@@ -39,7 +39,7 @@ from typing import Any
 
 from print_shop.ledger import Row
 from print_shop.orchestrator.graph import AS_LAID
-from print_shop.setup.proposal import ORIENTATION, PAUSE, Change, Source
+from print_shop.setup.proposal import ORIENTATION, PAUSE, Change, Source, pose_value
 
 __all__ = ["DOWNLOADS", "Again", "again", "answers_file", "correction_line"]
 
@@ -74,7 +74,10 @@ def answers_file(row: Row) -> dict[str, Any] | None:
         if q.confirmed(a):
             answers.append({"question": q.text, "notes": q.noted_as})
         elif a.choice is not None:
-            answers.append({"question": q.text, "choice": q.options[a.choice].label})
+            answers.append({"question": q.text, "choice": q.options[a.choice].label,
+                            # Faces are named in a pose: in another it's refused, never carried
+                            # by eye (mqucifer/print-shop#248).
+                            **({"pose": pose_value(q.pose)} if q.pose is not None else {})})
         else:
             answers.append({"question": q.text, "other": a.other})
     return {"answers": answers}

@@ -64,7 +64,7 @@ from print_shop.setup.proposal import (
     apply,
     pose_value,
 )
-from print_shop.setup.reading import read_slice
+from print_shop.setup.reading import carried, read_slice
 from print_shop.setup.skill import Skill
 from print_shop.setup.traits import TRAITS, traits
 
@@ -370,8 +370,11 @@ def _user(part: Part) -> str:
                      "would need support; a round or chamfer rising from the plate is left out "
                      "of it:")
     for c in part.candidates:
+        faces = carried(part.facts.intake, part.facts.context, c.rotation_deg)
+        shown = f"; seen there: {faces.as_printed()}" if faces is not None else ""
         lines.append(f"- {pose_value(c.rotation_deg)}: {c.overhang_area_mm2:g} mm2 overhang, "
-                     f"{c.bed_contact_area_mm2:g} mm2 on the plate, {c.height_mm:g} mm tall")
+                     f"{c.bed_contact_area_mm2:g} mm2 on the plate, {c.height_mm:g} mm tall"
+                     f"{shown}")
     if part.orienting:
         lines += ["", "Kept lessons on posing parts like this one: a person sent a pose back, "
                       "and why:", *(f"- {g.line()}" for g in part.orienting)]

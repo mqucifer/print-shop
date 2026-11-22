@@ -336,7 +336,8 @@ def test_notes_with_about_alone_ask_purpose_with_that_text_beside_it(tmp_path: P
     context = read_context(noted(tmp_path, {"about": about}))
     purpose, seen_faces = stock(context, LAID)
     assert purpose.noted is None and context.loaded == "", "nothing is inferred from its words"
-    assert seen_faces == SEEN
+    assert seen_faces.noted is None
+    assert (seen_faces.text, seen_faces.options) == (SEEN.text, SEEN.options)
 
     person = Person("2", "1")
     intake = ask_meanwhile(nothing, person.asker(), person.waiting(), same,
@@ -621,7 +622,11 @@ def test_a_load_in_the_notes_is_strengthened_as_the_same_answer_is(tmp_path: Pat
 def test_with_no_notes_the_questions_are_todays(tmp_path: Path) -> None:
     stl = noted(tmp_path)
     context = read_context(stl)
-    assert stock(context, FLIPPED) == STOCK and stock(None, LAID) == STOCK
+    for purpose, faces in (stock(context, FLIPPED), stock(None, LAID)):
+        assert purpose == PURPOSE
+        # Its own words and options: the pose it names is all that's added
+        # (mqucifer/print-shop#248).
+        assert faces.model_copy(update={"pose": None, "posed": ""}) == SEEN
     user, schema, asked = asked_of_model(stl, context)
     assert (user, schema) == asked_of_model(stl, None)[:2]
     assert "context" not in user and "purpose" in subjects(schema)
@@ -629,12 +634,12 @@ def test_with_no_notes_the_questions_are_todays(tmp_path: Path) -> None:
 
     person = Person("2", "1")
     intake = ask_meanwhile(nothing, person.asker(), person.waiting(), same, stock(context, LAID))
-    assert render(STOCK) in person.shown
-    assert intake.questions == STOCK and intake.without == ""
+    assert render(stock(context, LAID)) in person.shown
+    assert intake.questions == stock(None, LAID) and intake.without == ""
 
 
 def test_notes_that_say_neither_leave_the_questions_as_they_are(tmp_path: Path) -> None:
-    assert two(tmp_path, {"holds": [{"name": "snaps on", "way": "+z"}]}) == STOCK
+    assert two(tmp_path, {"holds": [{"name": "snaps on", "way": "+z"}]}) == stock(None, LAID)
 
 
 def test_asked_all_together_the_notes_two_are_read_back_on_one_card(

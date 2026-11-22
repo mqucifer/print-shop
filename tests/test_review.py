@@ -275,7 +275,7 @@ def test_a_correction_slices_again_and_the_ledger_keeps_it(
     # What's seen, asked last by print-shop (print-shop#105), answered in the recording.
     assert row.intake.summary() == (
         "What is the cube for? a gift; Which faces of this part will be seen once it's in "
-        "use? the walls and the top as it prints"
+        "use, as the file lays it? the walls and the top as it prints"
     )
     option = row.intake.questions[0].options[1]
     assert option.estimate is not None, "Orca's estimate, from the recorded slice"

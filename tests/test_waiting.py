@@ -43,7 +43,15 @@ from print_shop.setup.intake import (
     replay_asker,
 )
 from print_shop.setup.proposal import Proposal
-from print_shop.setup.questions import MAX_QUESTIONS, MAX_SLICES, PURPOSE, STOCK, Asked, estimate
+from print_shop.setup.questions import (
+    MAX_QUESTIONS,
+    MAX_SLICES,
+    PURPOSE,
+    STOCK,
+    Asked,
+    estimate,
+    stock,
+)
 from print_shop.setup.review import Review, ReviewRequest
 from print_shop.setup.review import render as render_review
 from print_shop.setup.skill import groups_for
@@ -193,7 +201,8 @@ def test_with_a_model_that_never_answers_the_job_reaches_the_review_and_prints(
 
     row = ledger.get(job_id)
     assert row is not None and row.intake is not None
-    assert row.intake.questions == STOCK
+    # The question of faces has the pose it was asked in (mqucifer/print-shop#248).
+    assert row.intake.questions == stock(None, (0.0, 0.0, 0.0))
     assert row.intake.answers == (Answer(choice=2), Answer(choice=0))
     assert row.intake.call["finish_reason"] == "went on" and "seconds" in row.intake.call
     assert "you went on without the model's questions" in describe(row)

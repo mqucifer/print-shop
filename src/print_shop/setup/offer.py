@@ -48,11 +48,12 @@ from print_shop.outcome_words import outcome_words
 from print_shop.rounds.lessons import REJECTED, RETIRED
 from print_shop.setup import similar
 from print_shop.setup.bounds import MATERIAL, check
-from print_shop.setup.context import PartContext, refuses
+from print_shop.setup.context import AS_PRINTED, SET_ASIDE, PartContext, Seen, printed, refuses
 from print_shop.setup.features import Feature
 from print_shop.setup.lessons import material_of
 from print_shop.setup.proposal import ORIENTATION, PAUSE, Change, Proposal, Source, Used, pose_value
 from print_shop.setup.reach import not_sliced, profile_of, unplaced
+from print_shop.setup.reading import seen
 from print_shop.setup.similar import Likeness, Numbers
 from print_shop.setup.traits import TRAITS, traits
 from print_shop.sliced import same_setting
@@ -358,6 +359,9 @@ class ThisPart:
     asked: frozenset[str] = frozenset()
     #: Its questions weren't waited for, so what they'd have asked again isn't known.
     unwaited: bool = False
+    #: What's seen as it prints in this pose, carried from the answer or the notes
+    #: (mqucifer/print-shop#248): what "seen" is compared on.
+    seen: Seen | None = None
     #: The person chose this pose for this print: kept as laid, or sent back at this review.
     pose_chosen: str = ""
 
@@ -428,7 +432,8 @@ def _against(at: int, row: Row, part: ThisPart) -> _Found:
     proposal = row.proposal
     each = [
         similar.likeness(
-            shape, then, tuple(context.lines()), proposal.context if proposal else (),
+            shape, then, _compared(tuple(context.lines()), part.seen),
+            _compared(proposal.context if proposal else (), _seen_then(row)),
             (context.path, part.stl_name),
             (proposal.context_from if proposal else "", row.stl_name),
         )
@@ -438,6 +443,34 @@ def _against(at: int, row: Row, part: ThisPart) -> _Found:
     return _Found(at=at, row=row, decided=_decided(row),
                   same_file=bool(part.sha256) and row.stl_sha256 == part.sha256,
                   likeness=best, here=here, then=then)
+
+
+def _compared(lines: tuple[str, ...], faces: Seen | None) -> tuple[str, ...]:
+    """A context's lines as they're compared: what's seen is the faces as they print, whoever
+    said them (mqucifer/print-shop#248)."""
+    rest = tuple(line for line in lines if not line.startswith("seen: "))
+    return (*rest, f"seen: {faces.as_printed()}") if faces is not None else rest
+
+
+def _seen_then(row: Row) -> Seen | None:
+    """What was seen on that print, as it printed. A row from before has no pose for its answer,
+    which is read in the pose it printed in, and its notes' faces are read from their line."""
+    mine = seen(row.intake, row.rotation_deg)
+    if mine is not None:
+        return mine
+    if row.intake is not None and "seen" in row.intake.set_aside():
+        return None
+    for line in row.proposal.context if row.proposal else ():
+        if not line.startswith("seen: ") or SET_ASIDE in line:
+            continue
+        listed, says, _ = line.removeprefix("seen: ").partition(AS_PRINTED)[0].partition(
+            ", as the part's context says")
+        if says:
+            names = listed.split(", ")
+            noted = Seen(walls="walls" in names, top="top" in names, bottom="bottom" in names,
+                         said=listed, noted=True)
+            return printed(noted, row.rotation_deg)
+    return None
 
 
 def _decided(row: Row) -> dict[str, Change]:
@@ -529,10 +562,10 @@ def _past(ledger: Ledger, f: _Found, found: list[_Found], part: ThisPart) -> Pas
     if intake is not None:
         for q, a in zip(intake.questions, intake.answers, strict=False):
             if a.choice is None:
-                answers.append(f"{q.text} -> {a.other}")
+                answers.append(f"{q.asked()} -> {a.other}")
             elif not q.options[a.choice].settings:
                 confirmed = f" ({q.whose(a)})" if q.confirmed(a) else ""
-                answers.append(f"{q.text} -> {q.label(a)}{confirmed}")
+                answers.append(f"{q.asked()} -> {q.as_answered(a)}{confirmed}")
     return Past(
         job_id=row.job_id, stl_name=row.stl_name, on=_day(row.start_requested_at),
         came_out=_came_out(row), outcome=_outcome(row), why=why, differs=tuple(differs),

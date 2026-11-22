@@ -309,7 +309,7 @@ def _questions(row: Row) -> str:
         parts.append(f"<p class=\"muted\">{escape(intake.note or intake.summary())}</p>")
     for n, q in enumerate(intake.questions):
         answer = intake.answers[n] if n < len(intake.answers) else None
-        parts.append(f"<h3>{n + 1}. {escape(q.text)}</h3>")
+        parts.append(f"<h3>{n + 1}. {escape(q.asked())}</h3>")
         said = q.notes_say() if q.noted is not None else q.beside
         if said:
             parts.append(f"<p class=\"muted\">The notes say: {escape(said)}</p>")
