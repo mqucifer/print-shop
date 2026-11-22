@@ -69,6 +69,11 @@ RAIL = _features(footprint=150.0, length=150.0, footprint_aspect=7.5, bed_contac
 STRIP = _features(footprint=120.0, length=120.0, footprint_aspect=6.0, height=10.0,
                   bed_contact=1500.0, section=1.6)
 CUBE = _features()
+#: A flat part with an overhang, and another like it: a shape no long thin part's lesson reaches.
+TRAY = _features(footprint=80.0, length=80.0, slenderness=0.1, bed_contact=3600.0, height=8.0,
+                 overhang=400.0)
+LID = _features(footprint=70.0, length=70.0, slenderness=0.2, bed_contact=2500.0, height=14.0,
+                overhang=90.0)
 
 
 def _record(job_id: str, features: tuple[Feature, ...], *corrections: Change,
@@ -141,6 +146,195 @@ def test_the_same_correction_again_is_more_evidence_not_a_second_lesson(ledger: 
     ]
     lessons.after_print(ledger, "job-2")
     assert len(ledger.query("SELECT * FROM print_lesson_evidence")) == 2, "drawn once"
+
+
+def _no_supports(reason: str = "it prints fine without them") -> Change:
+    return Change(key="enable_support", preset="1", value="0", reason=reason,
+                  source=Source.SPONSOR)
+
+
+def _evidence_jobs(ledger: Ledger, lesson: int) -> list[str]:
+    return [e["job_id"] for e in ledger.query(
+        "SELECT job_id FROM print_lesson_evidence WHERE lesson=? ORDER BY job_id", lesson
+    )]
+
+
+def test_a_repeated_correction_reaches_the_shape_it_was_typed_on(ledger: Ledger) -> None:
+    """mqucifer/print-shop#212: accepted on a long part, then typed on three flat ones."""
+    ledger.record_start_requested(_record("bar", RAIL, _no_supports()))
+    lessons.accept(ledger, 1, REVIEWER)
+    for job_id in ("flat-1", "flat-2", "flat-3"):
+        ledger.record_start_requested(_record(job_id, TRAY, _no_supports(), stl="tray.stl"))
+    second = lessons.one(ledger, 2)
+    assert (second["status"], second["setting"], second["value"], second["traits"]) == (
+        "candidate", "enable_support", "0", ["flat_and_wide", "overhangs"]
+    )
+    assert len(ledger.query("SELECT * FROM print_lessons")) == 2, "one for the shape, not three"
+    assert _evidence_jobs(ledger, 1) == ["bar"], "no evidence from a part it doesn't reach"
+    assert _evidence_jobs(ledger, 2) == ["flat-1", "flat-2", "flat-3"]
+    assert lessons.for_part(ledger, LID) == (), "nothing reaches a proposal before a review"
+    lessons.accept(ledger, 2, REVIEWER)
+    [given] = lessons.for_part(ledger, LID)
+    assert (given.id, given.key, given.value) == (2, "enable_support", "0")
+    assert [g.id for g in lessons.for_part(ledger, RAIL)] == [1], "the first is as it was"
+
+
+def test_lessons_that_set_the_same_are_linked_for_the_reviewer(ledger: Ledger) -> None:
+    ledger.record_start_requested(_record("bar", RAIL, _no_supports()))
+    lessons.accept(ledger, 1, REVIEWER)
+    ledger.record_start_requested(_record("flat-1", TRAY, _no_supports()))
+    listed = lessons.listing(ledger)
+    assert "linked to lesson 2 [candidate]" in listed
+    assert ("linked to lesson 1 [accepted], the same setting and value, for a part that's "
+            "long_and_narrow: keep both, or widen one") in lessons.listing(ledger, "flat-1")
+    [made] = ledger.query("SELECT why FROM print_lesson_steps WHERE lesson=2")
+    assert "linked to lesson 1" in made["why"]
+    lessons.reject(ledger, 2, REVIEWER, "lesson 1 is widened instead")
+    assert "linked to" not in lessons.listing(ledger), "only lessons that are live are linked"
+
+
+def test_a_repeat_is_evidence_for_the_lesson_that_reaches_it_of_two(ledger: Ledger) -> None:
+    ledger.record_start_requested(_record("bar", RAIL, _no_supports()))
+    ledger.record_start_requested(_record("flat-1", TRAY, _no_supports()))
+    ledger.record_start_requested(_record("strip", STRIP, _no_supports()))
+    ledger.record_start_requested(_record("flat-2", LID, _no_supports()))
+    assert len(ledger.query("SELECT * FROM print_lessons")) == 2
+    assert _evidence_jobs(ledger, 1) == ["bar", "strip"]
+    assert _evidence_jobs(ledger, 2) == ["flat-1", "flat-2"]
+
+
+def test_a_part_with_fewer_traits_than_the_lesson_is_a_candidate_of_its_own(
+    ledger: Ledger,
+) -> None:
+    ledger.record_start_requested(_record("strip", STRIP, _brim()))
+    ledger.record_start_requested(_record("rail", RAIL, _brim()))
+    assert lessons.one(ledger, 2)["traits"] == ["long_and_narrow"], "a subset isn't reached"
+
+
+def test_parts_with_no_traits_wait_on_one_candidate_to_be_keyed(ledger: Ledger) -> None:
+    ledger.record_start_requested(_record("bar", RAIL, _brim()))
+    ledger.record_start_requested(_record("cube-1", CUBE, _brim()))
+    ledger.record_start_requested(_record("cube-2", CUBE, _brim()))
+    ledger.record_start_requested(_record("tray", TRAY, _brim()))
+    keyed = [json.loads(r["traits"]) for r in ledger.query("SELECT traits FROM print_lessons")]
+    assert keyed == [["long_and_narrow"], [], ["flat_and_wide", "overhangs"]]
+    assert _evidence_jobs(ledger, 2) == ["cube-1", "cube-2"]
+
+
+# Corrections absorbed before mqucifer/print-shop#212
+# --------------------------------------------------------------------------
+
+
+def _absorb(ledger: Ledger, monkeypatch: pytest.MonkeyPatch, *jobs: str) -> None:
+    """A long part's accepted lesson and flat parts' repeats, as the rule before left a ledger:
+    each repeat only evidence for the long part's lesson, with that rule's own step."""
+    ledger.record_start_requested(_record("bar", RAIL, _no_supports()))
+    lessons.accept(ledger, 1, REVIEWER)
+    with monkeypatch.context() as before:
+        before.setattr(lessons, "draw", lambda *args: [])
+        for job_id in jobs:
+            ledger.record_start_requested(_record(job_id, TRAY, _no_supports(), stl="tray.stl"))
+    with ledger.writing() as db:
+        for job_id in jobs:
+            db.execute(
+                "INSERT INTO print_lesson_evidence (lesson, job_id, kind, key, detail, at)"
+                " VALUES (1, ?, 'correction', 'enable_support', ?, 'then')",
+                (job_id, json.dumps({"key": "enable_support", "preset": "1", "value": "0",
+                                     "reason": "it prints fine without them"})),
+            )
+            db.execute(
+                "INSERT INTO print_lesson_steps (lesson, status, by, why, job_id, at)"
+                " VALUES (1, 'accepted', ?, ?, ?, 'then')",
+                # In full, not from `lessons.ABSORBED`: ledgers already have these very words.
+                (lessons.AT_REVIEW, "the same correction again on tray.stl, whose part isn't"
+                 " every trait it's keyed to", job_id),
+            )
+
+
+def _draw_all(ledger: Ledger) -> None:
+    for row in ledger.rows():
+        lessons.after_print(ledger, row.job_id)
+
+
+def _tables(ledger: Ledger) -> list[list[dict[str, Any]]]:
+    return [ledger.query(f"SELECT * FROM {table}") for table in (  # noqa: S608
+        "print_lessons", "print_lesson_steps", "print_lesson_evidence"
+    )]
+
+
+def test_draw_surfaces_absorbed_corrections_once(
+    ledger: Ledger, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _absorb(ledger, monkeypatch, "flat-1", "flat-2", "flat-3")
+    _draw_all(ledger)
+    second = lessons.one(ledger, 2)
+    assert (second["status"], second["traits"]) == ("candidate", ["flat_and_wide", "overhangs"])
+    assert _evidence_jobs(ledger, 2) == ["flat-1", "flat-2", "flat-3"]
+    assert _evidence_jobs(ledger, 1) == ["bar", "flat-1", "flat-2", "flat-3"], "kept as it was"
+    assert lessons.one(ledger, 1)["status"] == "accepted"
+    assert lessons.for_part(ledger, LID) == (), "none is accepted by code"
+    listed = lessons.listing(ledger)
+    assert listed.count("until now only evidence for lesson 1, which didn't reach it") == 3
+    drawn = _tables(ledger)
+    _draw_all(ledger)
+    _draw_all(ledger)
+    assert _tables(ledger) == drawn, "however often it's run"
+
+
+@pytest.mark.parametrize("step", ["accept", "reject", "edit"])
+def test_an_absorbed_correction_isnt_surfaced_again_after_the_review(
+    ledger: Ledger, monkeypatch: pytest.MonkeyPatch, step: str
+) -> None:
+    _absorb(ledger, monkeypatch, "flat-1", "flat-2")
+    _draw_all(ledger)
+    if step == "accept":
+        lessons.accept(ledger, 2, REVIEWER)
+    elif step == "reject":
+        lessons.reject(ledger, 2, REVIEWER, "a one-off")
+    else:
+        lessons.edit(ledger, 2, REVIEWER, keyed=["thin_walls"])
+    reviewed = _tables(ledger)
+    _draw_all(ledger)
+    assert _tables(ledger) == reviewed
+
+
+def test_an_absorbed_correction_joins_a_lesson_that_reaches_it(
+    ledger: Ledger, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _absorb(ledger, monkeypatch, "flat-1")
+    ledger.record_start_requested(_record("flat-9", LID, _no_supports()))
+    lessons.accept(ledger, 2, REVIEWER)
+    _draw_all(ledger)
+    assert len(ledger.query("SELECT * FROM print_lessons")) == 2, "not a third"
+    assert _evidence_jobs(ledger, 2) == ["flat-1", "flat-9"]
+
+
+def test_an_absorbed_correction_outlives_the_lesson_that_absorbed_it(
+    ledger: Ledger, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _absorb(ledger, monkeypatch, "flat-1")
+    lessons.reject(ledger, 1, REVIEWER, "not for long parts after all")
+    _draw_all(ledger)
+    assert lessons.one(ledger, 2)["traits"] == ["flat_and_wide", "overhangs"]
+    [made] = ledger.query("SELECT why FROM print_lesson_steps WHERE lesson=2")
+    assert "linked to lesson 1" in made["why"], "the step keeps where it was"
+
+
+def test_a_lesson_since_widened_to_reach_the_part_absorbed_nothing(
+    ledger: Ledger, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _absorb(ledger, monkeypatch, "flat-1")
+    lessons.edit(ledger, 1, REVIEWER, keyed=["overhangs"])
+    _draw_all(ledger)
+    assert len(ledger.query("SELECT * FROM print_lessons")) == 1
+
+
+def test_evidence_a_reviewer_narrowed_away_from_wasnt_absorbed(ledger: Ledger) -> None:
+    ledger.record_start_requested(_record("bar", RAIL, _brim()))
+    ledger.record_start_requested(_record("rail", RAIL, _brim()))
+    lessons.edit(ledger, 1, REVIEWER, keyed=["long_and_narrow", "thin_walls"])
+    _draw_all(ledger)
+    assert len(ledger.query("SELECT * FROM print_lessons")) == 1
 
 
 def test_a_draw_that_fails_leaves_no_lesson_without_its_evidence(

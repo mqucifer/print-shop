@@ -9,7 +9,8 @@ its statuses, steps, scores and signatures, imported from there, not a second vo
   (`draw`), with the job as its evidence. It's keyed to the part's traits (`traits.py`): long
   and thin, flat and wide, its overhangs, its bed contact. Not the material (the Sponsor,
   2026-11-13). The same correction on a later job is more evidence for the lesson it repeats, not a
-  second lesson.
+  second lesson, where that lesson would reach the part it was typed on. Where it wouldn't, it's
+  a candidate of its own keyed to that part, linked to the other (mqucifer/print-shop#212).
 - **A reviewer checks each** (`accept`, `edit`, `reject`), signed `reviewer: <who>`, as CAD lessons
   are: nothing reaches a proposal without it. A lesson keyed to no trait would reach every part, so
   it's accepted only once it's keyed to some.
@@ -116,6 +117,9 @@ CORRECTION = "correction"
 OUTCOME = "outcome"
 READING = "reading"
 BY_HAND = "by hand"
+#: What a step said when the rule before mqucifer/print-shop#212 took a correction in as evidence
+#: for a lesson that didn't reach its part. No step says it now: `draw` finds those by it.
+ABSORBED = "the same {kind} again on {part}, whose part isn't every trait it's keyed to"
 #: Where a delivery is: `owner/repo#n`, or a path.
 _WHERE = re.compile(r"^([\w.-]+/[\w.-]+#\d+|[\w./-]+)$")
 
@@ -336,8 +340,10 @@ def upgrade(db: sqlite3.Connection) -> list[int]:
 
 
 def draw(ledger: Ledger, row: Row) -> list[int]:
-    """Candidates from a print's corrections and outcome, and the new ones' ids. A correction
-    a live lesson already makes is more evidence for it. Each is drawn once."""
+    """Candidates from a print's corrections and outcome, and the new ones' ids. A correction is
+    more evidence for a live lesson only where that lesson would reach this part (`_repeats`);
+    else it's a candidate of its own, linked to the others. One absorbed before that rule is
+    drawn again by it, once (`_absorbed`). Each is drawn once."""
     made: list[int] = []
     last: dict[str, tuple[str, Any]] = {}
     for c in row.corrections or ():
@@ -351,8 +357,6 @@ def draw(ledger: Ledger, row: Row) -> list[int]:
             last[c.key] = (READING, c)  # taken from the slice's reading, its own kind
     part = _part(row)
     for key, (kind, c) in last.items():
-        if _drawn(ledger, row.job_id, kind, key):
-            continue
         detail = {**part, "key": key, "preset": c.preset, "value": c.value, "reason": c.reason}
         if c.not_applied:  # asked for, and never printed with (mqucifer/print-shop#206)
             detail["not_applied"] = c.not_applied
@@ -366,30 +370,28 @@ def draw(ledger: Ledger, row: Row) -> list[int]:
             keyed = [t for t in c.feature.split(", ") if t]
             detail["laid_traits"] = keyed
         made_of = material_of(row.slicer_settings) if key in MATERIAL else None
-        same = [
-            found for found in ledger.query(
-                "SELECT id, traits, material FROM print_lessons WHERE setting=? AND value=? AND"
-                " status NOT IN (?, ?) ORDER BY id",
-                key, c.value, REJECTED, RETIRED,
-            )
-            # A filament's setting is the same lesson only for the same filament.
-            if key not in MATERIAL or found["material"] in (made_of, ANY)
-        ]
-        if same:
-            lesson = int(same[0]["id"])
-            held = json.loads(same[0]["traits"])
-            fits = set(held) <= set(keyed) and bool(held)
+        absorber = None
+        if _drawn(ledger, row.job_id, kind, key):
+            absorber = _absorbed(ledger, row, kind, key, keyed, made_of)
+            if absorber is None:
+                continue
+            detail["absorbed_by"] = absorber
+        alike = _same_setting(ledger, key, c.value)
+        repeated = [found for found in alike if _repeats(found, key, keyed, made_of)]
+        if repeated:
+            lesson = int(repeated[0]["id"])
             said = f"the same {kind} again on {row.stl_name}" + (
-                "" if fits else ", whose part isn't every trait it's keyed to"
+                f", until now only evidence for lesson {absorber}" if absorber else ""
             )
             with ledger.writing() as db:
                 _evidence(db, lesson, row.job_id, kind, key, detail)
                 _step_in(db, lesson, one_in(db, lesson), HARNESS, said, job_id=row.job_id)
             continue
         text = c.reason or ("the Sponsor's correction" if kind == CORRECTION else c.reading)
+        linked = {int(found["id"]) for found in alike} | ({absorber} if absorber else set())
         made.append(_new(
             ledger, row.job_id, kind, HARNESS, text, keyed, (kind, key, detail), key,
-            c.value, made_of,
+            c.value, made_of, linked=linked,
         ))
     said = (row.note or "").strip()
     flawed = row.result == "success" and row.symptom != "none"
@@ -421,6 +423,56 @@ def _drawn(ledger: Ledger, job_id: str, kind: str, key: str) -> bool:
     ))
 
 
+def _same_setting(ledger: Ledger, key: str, value: str) -> list[dict[str, Any]]:
+    """The live lessons that set `key` to `value`, whatever they're keyed to, oldest first."""
+    return ledger.query(
+        "SELECT * FROM print_lessons WHERE setting=? AND value=? AND status NOT IN (?, ?)"
+        " ORDER BY id",
+        key, value, REJECTED, RETIRED,
+    )
+
+
+def _reaches(held: Iterable[str], has: Iterable[str]) -> bool:
+    """Whether a lesson keyed to `held` reaches a part with the traits `has`: it has every one.
+    Keyed to none, it reaches no part."""
+    held = set(held)
+    return bool(held) and held <= set(has)
+
+
+def _repeats(found: dict[str, Any], key: str, keyed: list[str], made_of: str | None) -> bool:
+    """Whether a correction of `key` on a part keyed so is more evidence for this lesson: once
+    kept, it would reach that part (mqucifer/print-shop#212). Where no lesson could, as the part
+    has no trait or its filament isn't known, it's the lesson that waits in the same way for the
+    reviewer to key it, not one more for each print."""
+    # A filament's setting is the same lesson only for the same filament.
+    if key in MATERIAL and found["material"] not in (made_of, ANY):
+        return False
+    held = json.loads(found["traits"])
+    return _reaches(held, keyed) or (not held and not keyed)
+
+
+def _absorbed(
+    ledger: Ledger, row: Row, kind: str, key: str, keyed: list[str], made_of: str | None
+) -> int | None:
+    """The lesson that absorbed this correction before mqucifer/print-shop#212, or None. It's
+    known by that rule's own step, so a lesson a reviewer has narrowed since isn't one, nor is
+    one widened to reach this part. Drawn again, the correction is evidence for two lessons, and
+    that's how it's drawn again only once, whatever the reviewer then does with the second."""
+    holding = ledger.query(
+        "SELECT l.* FROM print_lesson_evidence e JOIN print_lessons l ON l.id = e.lesson"
+        " WHERE e.job_id=? AND e.kind=? AND e.key=?",
+        row.job_id, kind, key,
+    )
+    if len(holding) != 1 or _repeats(holding[0], key, keyed, made_of):
+        return None
+    lesson = int(holding[0]["id"])
+    taken_in = ledger.query(
+        "SELECT 1 FROM print_lesson_steps WHERE lesson=? AND job_id=? AND by=? AND why=?",
+        lesson, row.job_id, HARNESS, ABSORBED.format(kind=kind, part=row.stl_name),
+    )
+    return lesson if taken_in else None
+
+
 def _evidence(
     db: sqlite3.Connection, lesson: int, job_id: str, kind: str, key: str,
     detail: dict[str, Any],
@@ -441,12 +493,15 @@ def _new(
     ledger: Ledger, job_id: str, drawn_from: str, by: str, text: str, keyed: list[str],
     evidence: tuple[str, str, dict[str, Any]] | None = None,
     setting: str | None = None, value: str | None = None, material: str | None = None,
+    linked: Iterable[int] = (),
 ) -> int:
     """A candidate, with its evidence and its step, in one transaction: a lesson is never left
     without the print it was drawn from, so a draw again never makes it twice."""
     sets = f"{setting}={value}" if setting else "no setting"
     if material:
         sets += f", in {material}"
+    if others := ", ".join(f"lesson {n}" for n in sorted(linked)):
+        sets += f"; linked to {others}, not keyed to reach its part"
     with ledger.writing() as db:
         cursor = db.execute(
             "INSERT INTO print_lessons (job_id, drawn_from, written_by, written_at, text,"
@@ -637,7 +692,7 @@ def for_part(
         *KEPT, PROMOTED,
     ):
         keyed = json.loads(row["traits"])
-        if not keyed or not set(keyed) <= has:
+        if not _reaches(keyed, has):
             continue
         if (row["setting"] == ORIENTATION) != orienting:
             continue
@@ -805,17 +860,37 @@ def to_retire(ledger: Ledger) -> list[tuple[dict[str, Any], str]]:
 def _line(row: dict[str, Any]) -> str:
     keyed = json.loads(row["traits"]) if isinstance(row["traits"], str) else row["traits"]
     sets = f"{row['setting']}={row['value']}" if row["setting"] else "read only"
-    if row["setting"] in MATERIAL:
-        made_of = row.get("material")
-        sets += (
-            " in any filament" if made_of == ANY else f" in {made_of}" if made_of
-            else " in a filament NOT KNOWN (not given until a reviewer names it)"
-        )
+    sets += _filament_said(row)
     where = f" -> {row['became']}: {row['became_where']}" if row["became"] else ""
     return (
         f"- {row['id']}. [{row['status']}{where}] {sets}, for a part that's "
         f"{', '.join(keyed) or 'NOT KEYED (no features kept for its print)'}: {row['text'][:200]}"
     )
+
+
+def _filament_said(row: dict[str, Any]) -> str:
+    """The filament a lesson holds for, where its setting goes by one."""
+    if row["setting"] not in MATERIAL:
+        return ""
+    made_of = row.get("material")
+    return (
+        " in any filament" if made_of == ANY else f" in {made_of}" if made_of
+        else " in a filament NOT KNOWN (not given until a reviewer names it)"
+    )
+
+
+def _linked_lines(ledger: Ledger, row: dict[str, Any]) -> list[str]:
+    """The other live lessons that set the same to the same, for the reviewer to keep both or
+    widen one (mqucifer/print-shop#212). Read as they stand, so an edit or a rejection unlinks."""
+    if not row["setting"] or row["status"] in (REJECTED, RETIRED):
+        return []
+    return [
+        f"    - linked to lesson {other['id']} [{other['status']}], the same setting and value"
+        f"{_filament_said(other)}, for a part that's "
+        f"{', '.join(json.loads(other['traits'])) or 'NOT KEYED'}: keep both, or widen one"
+        for other in _same_setting(ledger, row["setting"], row["value"])
+        if other["id"] != row["id"]
+    ]
 
 
 def _evidence_lines(ledger: Ledger, lesson: int) -> list[str]:
@@ -842,6 +917,8 @@ def _evidence_lines(ledger: Ledger, lesson: int) -> list[str]:
         lines.append(
             f"    - job {e['job_id']}, {part}, {said} [print: {outcome}"
             + (f"; the slice flagged {flagged}" if flagged else "") + "]"
+            + (f" (until now only evidence for lesson {d['absorbed_by']}, which didn't reach it)"
+               if d.get("absorbed_by") else "")
         )
     for g in ledger.query(
         "SELECT j.*, p.stl_name, p.result, p.symptom FROM job_lessons j"
@@ -891,7 +968,7 @@ def listing(ledger: Ledger, job_id: str | None = None) -> str:
             " ON e.lesson = l.id WHERE e.job_id=? ORDER BY l.id", job_id,
         )
         for t in taught:
-            lines += [_line(t), *_evidence_lines(ledger, int(t["id"]))]
+            lines += [_line(t), *_linked_lines(ledger, t), *_evidence_lines(ledger, int(t["id"]))]
         if not taught:
             lines.append("Nothing: no correction, and no outcome with something to say.")
         lines += ["", "## What it was given", ""]
@@ -909,7 +986,9 @@ def listing(ledger: Ledger, job_id: str | None = None) -> str:
         lines += ["# Every print lesson", ""]
         found = ledger.query("SELECT * FROM print_lessons ORDER BY id")
         for row in found:
-            lines += [_line(row), *_evidence_lines(ledger, int(row["id"]))]
+            lines += [
+                _line(row), *_linked_lines(ledger, row), *_evidence_lines(ledger, int(row["id"])),
+            ]
         if not found:
             lines.append("None yet.")
         lines.append("")
