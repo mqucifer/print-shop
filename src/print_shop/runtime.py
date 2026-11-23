@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from print_shop.core.mqtt import MqttConfig
+from print_shop.core.state import turn_words
 from print_shop.env import SETTINGS_PATH, load_env
 from print_shop.expert.client import LLMConfig
 from print_shop.inventory import Material, spool_lines
@@ -189,6 +190,8 @@ def describe(row: Row) -> str:
         ("orientation    as the file lays it: nothing was turned" if row.sliced is not None
          else f"orientation    {row.rotation_deg} by {row.orientation_source}"
          f"{'' if row.orientation_accepted else ' (not accepted; authored pose)'}"),
+        *([f"turned         {turn_words(row.rotation_deg[2])}, on the plate to fit,"
+           " as taken at the review"] if row.rotation_deg[2] else []),
         f"g-code         {row.gcode_name}  ~{row.print_time_s // 60} min,"
         f" {row.filament_cm3} cm3, {row.layer_count} layers",
         *_sliced_lines(row),

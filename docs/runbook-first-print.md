@@ -204,7 +204,17 @@ Finish that job, or stop it with Ctrl-C in its terminal (which doesn't stop the 
 
    What you use is your correction, and the ledger keeps the print it came from (`--list` says `used from`). It isn't a lesson kept: those still go through the reviewer (`docs/print-lessons.md`).
 
-   **The review shows every pose the orientation step weighed** (mqucifer/print-shop#128): what would need support, any round or chamfer rising from the plate that's left out of it (it's carried by the layers under it), the area on the plate and the height, with this print's marked. The step chooses on those, and on fit. It doesn't stand a part up for warping: a pose stood up where a lower one has no more to support and twice as much on the plate is laid back down, saying so, and a part with 5000 mm² or more on the plate gets a `warping risk` note naming the plate's temperature, a brim, the exhaust and the side fan. Elephant foot is `elefant_foot_compensation` (0.1 mm on your profile). A part too big for the plate in every pose is refused before it's sliced. For a kept pose, one of the others may still be being measured when the review is drawn: its line says `still being measured: orientation waits for it` (mqucifer/print-shop#235).
+   **The review shows every pose the orientation step weighed** (mqucifer/print-shop#128): what would need support, any round or chamfer rising from the plate that's left out of it (it's carried by the layers under it), the area on the plate and the height, with this print's marked. The step chooses on those, and on fit. It doesn't stand a part up for warping: a pose stood up where a lower one has no more to support and twice as much on the plate is laid back down, saying so, and a part with 5000 mm² or more on the plate gets a `warping risk` note naming the plate's temperature, a brim, the exhaust and the side fan. Elephant foot is `elefant_foot_compensation` (0.1 mm on your profile). A part too big for the plate in every pose, however it's turned on it, is refused before it's sliced. For a kept pose, one of the others may still be being measured when the review is drawn: its line says `still being measured: orientation waits for it` (mqucifer/print-shop#235).
+
+   **A part prints as it was posed, and is turned on the plate only if you take the turn** (mqucifer/print-shop#257). Orca is never left to turn it: the seam's back, and x and y, are the pose's own. Orca keeps margins on the plate, so it can refuse a part just inside the 256 mm (about 254 mm long, less with a skirt, about 242 mm square for the excluded corner). One that Orca has no room for as posed, and takes turned, says so at the review:
+
+   ```
+     DOESN'T FIT AS POSED (300.0 x 20.0 mm): Orca has no room for it that way.
+       It fits turned 45° anticlockwise, seen from above, with the same side down.
+       What's shown here is already sliced that way: the time, x, y and the seam's "back" are the turned part's. Nothing prints that way unless you type turn. For another side down, type orientation.
+   ```
+
+   `turn` takes it, and `ok` waits until you have. `orientation` offers only the sides down that fit, as posed or turned. A turn taken is that side down at that angle only: a correction keeps it while the part needs the same one, a pose sent back starts without one; one that needs another offers that, and one that fits it as posed again turns nothing. The gate, the ledger and the print desk show the turn taken. Where no turn fits either, the job ends saying so, with nothing sent. A print from before mqucifer/print-shop#257 doesn't say whether Orca turned it: its x and y stay as they were sliced, and where its seam was at the back (`back` or `aligned_back`), the print desk and Use these say the back may have been another side.
 
    **To send the orientation back,** type `orientation` (mqucifer/print-shop#128). It's a short conversation:
    - the step says why it turned the part, in its own words;
@@ -238,7 +248,7 @@ Finish that job, or stop it with Ctrl-C in its terminal (which doesn't stop the 
 2. **Approve at the gate.** The dashboard asks "Print this?". Check the numbers before you press:
    - Time: about 11 minutes (Orca's estimate for your presets is 10 m 54 s; the review shows the estimate with its changes);
    - Plastic: about 2.9 cm³;
-   - Turned: a multiple of 90° on each axis. A cube sits flat on every face.
+   - Turned: a multiple of 90° on each axis, save a turn on the plate you took at the review, which is the last number. A cube sits flat on every face.
 
    Press **Yes, print it**. Anything else wrong: press **No, stop**.
 

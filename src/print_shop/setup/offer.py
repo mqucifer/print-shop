@@ -45,7 +45,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import trimesh
 
-from print_shop.core.state import Orientation
+from print_shop.core.state import Orientation, pose_of, turn_words
 from print_shop.inventory import Material, Spool
 from print_shop.materials import material_name
 from print_shop.outcome_words import outcome_words
@@ -57,7 +57,7 @@ from print_shop.setup.features import Feature
 from print_shop.setup.lessons import material_of
 from print_shop.setup.proposal import ORIENTATION, PAUSE, Change, Proposal, Source, Used, pose_value
 from print_shop.setup.reach import not_sliced, profile_of, unplaced
-from print_shop.setup.reading import seen
+from print_shop.setup.reading import AT_THE_BACK, seen, turned_on_plate
 from print_shop.setup.similar import Likeness, Numbers
 from print_shop.setup.traits import TRAITS, traits
 from print_shop.sliced import same_setting
@@ -439,10 +439,11 @@ def _against(at: int, row: Row, part: ThisPart) -> _Found:
     then = similar.numbers(row.features or ())
     here = similar.numbers(part.features)
     shapes = [(here, part.rotation_deg)]
-    if row.rotation_deg != part.rotation_deg:
-        there = part.lying(pose_value(row.rotation_deg))
+    lay = pose_of(row.rotation_deg)  # a turn on the plate is no other pose
+    if lay != part.rotation_deg:
+        there = part.lying(pose_value(lay))
         if there is not None:
-            shapes.append((similar.posed(here, there), row.rotation_deg))
+            shapes.append((similar.posed(here, there), lay))
     was_seen = _seen_then(row)
     context = part.context or PartContext()
     proposal = row.proposal
@@ -485,7 +486,10 @@ def _compared(
 def _seen_then(row: Row) -> Seen | None:
     """What was seen on that print, as it printed. A row from before has no pose for its answer,
     which is read in the pose it printed in, and its notes' faces are read from their line."""
-    mine = seen(row.intake, row.rotation_deg)
+    # Its faces in the pose it printed in: a turn on the plate turns none to another
+    # (mqucifer/print-shop#257).
+    lay = pose_of(row.rotation_deg)
+    mine = seen(row.intake, lay)
     if mine is not None:
         return mine
     if row.intake is not None and "seen" in row.intake.set_aside():
@@ -499,7 +503,7 @@ def _seen_then(row: Row) -> Seen | None:
             names = listed.split(", ")
             noted = Seen(walls="walls" in names, top="top" in names, bottom="bottom" in names,
                          said=listed, noted=True)
-            return printed(noted, row.rotation_deg)
+            return printed(noted, lay)
     return None
 
 
@@ -542,7 +546,7 @@ def _outcome(row: Row) -> str:
 
 def _past(ledger: Ledger, f: _Found, found: list[_Found], part: ThisPart) -> Past:
     row = f.row
-    then_pose = pose_value(row.rotation_deg)
+    then_pose = pose_value(pose_of(row.rotation_deg))
     decided = dict(f.decided)
     laid = row.orientation_source == "as_laid"  # `graph.AS_LAID`, which imports this
     if laid and ORIENTATION not in decided and then_pose != part.pose:
@@ -583,6 +587,17 @@ def _past(ledger: Ledger, f: _Found, found: list[_Found], part: ThisPart) -> Pas
                 differs.append(said)
     if not f.same_file and f.likeness.context < 1:
         differs.append("its fits, holds or seen faces weren't these")
+    seam = decided.get("seam_position")
+    if seam is not None and seam.value in AT_THE_BACK and row.sliced is None:
+        # Back is the plate's, so it's another side of a part turned on it
+        # (mqucifer/print-shop#257). A row from before doesn't say whether Orca turned it.
+        was = turned_on_plate(row.reading, row.rotation_deg)
+        if was is None:
+            differs.append("Orca may have turned it on the plate, unsaid then, so its back may "
+                           "have been another side")
+        elif was:
+            differs.append(f"it was turned {turn_words(was)}, to fit, so its back was as it "
+                           "lay so")
     names = part.filament_names
     if names and _filament_name(row) not in names:
         differs.append(f"its filament was {_filament_name(row) or 'not recorded'}, this is "
@@ -807,6 +822,7 @@ class _Items:
         by = change.used.by if change.used else change.source
         if by is not Source.SPONSOR or not self.f.same_file:
             return False
+        # The whole rotation: on a print turned on the plate, the back was another side.
         if pose_value(row.rotation_deg) != part.pose:
             return False
         here, then = self._seen_here(), _seen_then(row)

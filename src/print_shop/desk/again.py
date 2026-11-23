@@ -40,12 +40,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from print_shop.core.state import pose_of, turn_words
 from print_shop.inventory import Material, Spool
 from print_shop.ledger import Row
 from print_shop.orchestrator.graph import AS_LAID
 from print_shop.setup import pauses
 from print_shop.setup.intake import Answer, Question
 from print_shop.setup.proposal import ORIENTATION, PAUSE, Change, Source, pose_value
+from print_shop.setup.reading import AT_THE_BACK, turned_on_plate
 
 __all__ = ["DOWNLOADS", "Again", "again", "answers_file", "correction_line"]
 
@@ -91,10 +93,11 @@ def answers_file(row: Row) -> dict[str, Any] | None:
 
 def _given_in(row: Row, question: Question, answer: Answer) -> dict[str, str]:
     """The pose an answer about faces was given in, which a replay carries it from. A row from
-    before poses were kept is read in the pose it printed in (mqucifer/print-shop#248)."""
+    before poses were kept is read in the pose it printed in (mqucifer/print-shop#248), less any
+    turn on the plate, which turns no face to another (mqucifer/print-shop#257)."""
     if question.feature != "seen" or question.confirmed(answer):
         return {}
-    return {"pose": pose_value(question.answered_in(answer) or row.rotation_deg)}
+    return {"pose": pose_value(question.answered_in(answer) or pose_of(row.rotation_deg))}
 
 
 def _used_as_anothers(change: Change) -> bool:
@@ -241,6 +244,17 @@ def again(
             notes.append(f"The pose was sent back at the review, from {c.preset} to {c.value}, "
                          f"because {c.reason}. Type orientation at the review to send it back "
                          "again.")
+    turned = turned_on_plate(row.reading, row.rotation_deg)
+    if turned:
+        notes.append(f"It was turned {turn_words(turned)}, on the plate to fit. It's offered "
+                     "again only if it still doesn't fit as posed: type turn at the review to "
+                     "take it.")
+    elif (turned is None and row.reading is not None
+          and row.reading.settings.get("seam_position") in AT_THE_BACK):
+        # A row from before, read as it was sliced: back was whichever side Orca turned there.
+        notes.append("Its seam was at the back, and Orca may have turned it on the plate, unsaid "
+                     "then. Again prints it as posed, so the back may be another side than this "
+                     "job's.")
     stood = _standing_pause(row)
     if stood is not None:
         copied = _pause_again(row, stood)

@@ -37,6 +37,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import trimesh
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
@@ -50,6 +51,7 @@ from print_shop.core.state import (
     Orientation,
     PrintJobState,
     PrintStatus,
+    turn_words,
 )
 from print_shop.expert.client import LLMConfig
 from print_shop.expert.orientation import (
@@ -65,6 +67,7 @@ from print_shop.ingest.orientation import LAID, candidate_in, candidates, write_
 from print_shop.inventory import Asked, Inventory, InventoryError, Material, SpoolUse
 from print_shop.ledger import Ledger, PrintRecord
 from print_shop.orchestrator.fitness import scoring_profiles
+from print_shop.orchestrator.fitting import Fitting, with_turns
 from print_shop.printer.centauri import PreflightFailed, PrinterClient, preflight
 from print_shop.setup import Proposer, pauses
 from print_shop.setup import lessons as print_lessons
@@ -268,10 +271,14 @@ def build_graph(
         as_laid = bool(state.get("as_laid"))
         alone = LAID if as_laid else pose_for(context.down) if context.down else None
         found: tuple[Orientation, ...] = ()
+        # Each is marked where it fits only turned on the plate, or in no turn: a kept pose that
+        # fits only turned is still kept, and offered the turn (mqucifer/print-shop#257).
+        stl = state["stl_path"]
         if alone is not None:
-            found = (candidate_in(state["stl_path"], alone),)
+            found = with_turns(stl, (candidate_in(stl, alone),), build_volume, alone)
         if alone is None or (not as_laid and not found[0].fits_in(build_volume)):
-            found = tuple(candidates(state["stl_path"]))  # none is kept, so all six are weighed
+            # None is kept, so all six are weighed.
+            found = with_turns(stl, tuple(candidates(stl)), build_volume, alone)
         poses: dict[str, Any] = {"orientation_candidates": found, "laid_traits": traits(laid),
                                  "laid_features": laid, "part_context": context}
         request = OrientationRequest(
@@ -322,7 +329,13 @@ def build_graph(
         the poses measured, never the measuring.
         """
         found = state.get("orientation_candidates", ())
-        measuring = Measuring(state["stl_path"], found) if found else None
+
+        def marked(mesh: trimesh.Trimesh, pose: Orientation) -> Orientation:
+            # The kept pose is among those known, so none measured beside is the kept one.
+            assert build_volume is not None
+            return with_turns(mesh, (pose,), build_volume, None)[0]
+
+        measuring = Measuring(state["stl_path"], found, marked) if found else None
         try:
             return sliced_in_pose(state, measuring)
         finally:
@@ -364,6 +377,10 @@ def build_graph(
             stl_to_slice = write_rotated(state["stl_path"], rotation_deg, outdir / "rotated.stl")
 
         assert profiles is not None, "orient refuses a graph without profiles"
+        assert build_volume is not None
+        # As posed, or, only where that doesn't fit, in the turn the review offers
+        # (mqucifer/print-shop#257).
+        fitting = Fitting(slicer, build_volume)
         proposed: dict[str, Any] = {}
 
         def featured() -> tuple[Feature, ...]:
@@ -383,7 +400,7 @@ def build_graph(
             first = stl_to_slice
 
             def priced(settings: dict[str, str], n: int) -> Estimate | None:
-                return _estimate(slicer, first, profiles, settings, outdir / "options" / str(n))
+                return _estimate(fitting, first, profiles, settings, outdir / "options" / str(n))
 
             context = state.get("part_context")
             # What the notes say is read back in the pose the questions are asked in, and the
@@ -403,7 +420,7 @@ def build_graph(
             looped: Proposal | None = None
             fell_back: dict[str, Any] = {}
             if outcome is not None and outcome.proposal.source == LOOP_PENDING:
-                assert loop is not None and build_volume is not None
+                assert loop is not None
                 assert measuring is not None, "a pose left to the print loop was oriented"
                 _say_waiting(measuring.pending(), "the print loop chooses among all six")
                 poses = measuring.all_six()
@@ -412,7 +429,7 @@ def build_graph(
                     stl=Path(state["stl_path"]),
                     facts=proposer.facts(intake, features, profiles, context),
                     candidates=poses, build_volume_mm=build_volume,
-                    skill=load(groups_for(intake, features)), profiles=profiles, slicer=slicer,
+                    skill=load(groups_for(intake, features)), profiles=profiles, slicer=fitting,
                     workdir=outdir / "loop", ledger=ledger,
                     orienting=state.get("orientation_lessons", ()),
                     lessons=proposer.lessons_for(features, profiles),
@@ -501,10 +518,10 @@ def build_graph(
                 try:
                     result, reviewed = _propose_and_review(
                         proposal, profiles,
-                        lambda p, stl=stl_to_slice: slicer(stl, p, outdir),
+                        lambda p, stl=stl_to_slice: fitting(stl, p, outdir),
                         reviewer, applied, outdir / "proposed", intake,
                         measuring=measuring, laid_traits=state.get("laid_traits", ()),
-                        cost=_coster(slicer, stl_to_slice, profiles, proposal, outdir / "offers"),
+                        cost=_coster(fitting, stl_to_slice, profiles, proposal, outdir / "offers"),
                         lessons_for=_lessons_for(ledger, state["stl_path"], profiles,
                                                  outdir / "poses"),
                         earlier=earlier,
@@ -549,8 +566,10 @@ def build_graph(
             active_profiles = (
                 scoring_profiles(profiles, outdir) if overhang_area > 0 else profiles
             )
-            result = slicer(stl_to_slice, active_profiles, outdir)
-            reading = _read(result)
+            result = fitting(stl_to_slice, active_profiles, outdir)
+            if result.turn_deg:
+                raise _unoffered(result)
+            reading = _read_as_sliced(result)
             proposed["slice_reading"] = reading
             context = state.get("part_context")
             placed = (place(context, state["stl_path"], rotation_deg)
@@ -561,6 +580,13 @@ def build_graph(
         # Orca always writes `plate_1.gcode`. The printer's storage is one flat
         # namespace and `start_print` takes a bare name, so the file is renamed
         # to carry the job id before anything can upload it.
+        if result.turn_deg:
+            # Only a turn taken at the review gets here (mqucifer/print-shop#257).
+            applied = applied.model_copy(update={
+                "turn_deg": result.turn_deg,
+                "rationale": f"{applied.rationale}; turned {turn_words(result.turn_deg)}, on "
+                             "the plate to fit, taken by you at the review",
+            })
         result = name_gcode(
             result, job_id=state["job_id"], part=Path(state["stl_path"]).stem
         )
@@ -628,7 +654,7 @@ def build_graph(
                 "filament_cm3": slice_result.filament_cm3,
                 "layer_count": slice_result.layer_count,
                 "max_z_mm": slice_result.max_z_mm,
-                "orientation_deg": list(applied_orientation.rotation_deg),
+                "orientation_deg": list(applied_orientation.as_printed()),
                 "orientation_rationale": applied_orientation.rationale,
                 # A pause the review asked for, where the slice put it, so the person is at
                 # the printer for it (mqucifer/print-shop#119), what it's for, and the spool a
@@ -1058,7 +1084,7 @@ def _print_record(
         job_id=state["job_id"],
         stl_name=Path(state["stl_path"]).name,
         stl_sha256=state.get("stl_sha256", ""),
-        rotation_deg=applied.rotation_deg,
+        rotation_deg=applied.as_printed(),
         orientation_source=outcome.proposal.source if accepted and outcome else "authored",
         orientation_rationale=applied.rationale,
         orientation_accepted=accepted,
@@ -1344,13 +1370,18 @@ def _propose_and_review(
     names its two from. Each slice's reading is marked with what its pause is for
     (mqucifer/print-shop#218).
 
+    A slice turned to fit is offered as that turn, and isn't approved until it's taken: taken,
+    it stands while each slice after it needs the same turn, and a slice that fits as posed ends
+    it (mqucifer/print-shop#257).
+
     Each change is read back from each slice (mqucifer/print-shop#206): the review, and then
     the job, have what reached it as changed and the rest as not applied, the corrections
     among them.
 
     Raises:
-        RuntimeError: If the Sponsor stops at the review. Nothing was sent to
-            the printer, and the approval gate was never reached.
+        RuntimeError: If the Sponsor stops at the review, or the part fits only turned and the
+            turn wasn't taken. Nothing was sent to the printer, and the approval gate was never
+            reached.
         _Turned: If the pose is sent back (mqucifer/print-shop#128), with every correction so
             far: the caller turns the part and calls again.
     """
@@ -1386,16 +1417,22 @@ def _propose_and_review(
     proposal = proposal.model_copy(update={
         "context": said, "context_from": context.path if context is not None else ""})
     asked = proposal
+    taken_turn = 0.0
     while True:
         result: SliceResult = slice_with(
             apply(profiles, placeable(asked, process, filament), workdir)
         )
         config = _config(result)
         proposal = read_back(asked, process, filament, config)
-        reading = pauses.marked(_read(result), proposal.get(PAUSE))
+        reading = pauses.marked(_read_as_sliced(result), proposal.get(PAUSE))
+        if not result.turn_deg:
+            # It fits as posed now: a turn needed later is asked for again.
+            taken_turn = 0.0
         found = (flags(reading, faces, process, filament, placed, proposal.changes)
                  if reading is not None else ())
         if reviewer is None:
+            if result.turn_deg:
+                raise _unoffered(result)
             break
         while True:
             if offering is not None and doubting is not None:
@@ -1417,11 +1454,14 @@ def _propose_and_review(
                 lessons_for=lessons_for,
                 context=said,
                 offering=offering,
+                turn_taken=bool(result.turn_deg) and taken_turn == result.turn_deg,
                 material=material,
                 stock=stock,
                 stands=stands,
                 record_load=record_load,
             ))
+            if review.turn_taken:
+                taken_turn = result.turn_deg
             if review.offering is not None:
                 offering = review.offering
             if not review.browsing:
@@ -1429,6 +1469,9 @@ def _propose_and_review(
         if review.stop:
             raise RuntimeError("stopped at the settings review; nothing was sent to the printer")
         if review.approved:
+            if result.turn_deg and taken_turn != result.turn_deg:
+                raise RuntimeError("approved without taking the turn it needs to fit the plate; "
+                                   "nothing was sent to the printer")
             break
         turned = next((c for c in review.corrections if c.key == ORIENTATION), None)
         if turned is not None:
@@ -1456,6 +1499,20 @@ def _read(result: SliceResult) -> SliceReading | None:
     except (OSError, ValueError) as exc:
         logger.warning("the slice %s couldn't be read: %s", result.gcode_path, exc)
         return None
+
+
+def _read_as_sliced(result: SliceResult) -> SliceReading | None:
+    """The slice read, with how the part lay on the plate in it (mqucifer/print-shop#257)."""
+    reading = _read(result)
+    return reading.model_copy(update={"turn_deg": result.turn_deg}) if reading else None
+
+
+def _unoffered(result: SliceResult) -> RuntimeError:
+    """A turn with no review to offer it at: the part isn't turned."""
+    return RuntimeError(
+        f"it doesn't fit the plate as posed. It fits turned {turn_words(result.turn_deg)}, "
+        "which is taken at the review, and this job has none; nothing was sent to the printer"
+    )
 
 
 def _config(result: SliceResult) -> dict[str, str] | None:

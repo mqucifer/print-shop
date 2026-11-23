@@ -32,6 +32,7 @@ __all__ = [
     "version",
     "with_colour",
     "BedType",
+    "DoesntFit",
     "SliceResult",
     "Slicer",
     "SlicerProfiles",
@@ -134,6 +135,10 @@ def with_bed_type(profiles: SlicerProfiles, bed: BedType, workdir: Path) -> Slic
     out = workdir / f"process_{bed.name.lower()}.json"
     out.write_text(json.dumps(derived, indent=2))
     return profiles.model_copy(update={"process": out})
+
+
+class DoesntFit(RuntimeError):  # noqa: N818 - a refusal, said as what happened
+    """Orca has no room for the part on the plate as it's posed (mqucifer/print-shop#257)."""
 
 
 class Slicer(Protocol):
@@ -285,7 +290,10 @@ def slice_model(
     binary: Path | str | None = None,
     timeout_s: float = 600.0,
 ) -> SliceResult:
-    """Slice an STL model using OrcaSlicer and return parsed results.
+    """Slice an STL model, as it's posed, using OrcaSlicer and return parsed results.
+
+    Orca centres it and never turns it (mqucifer/print-shop#257). One that doesn't fit so is
+    refused: the turn that would fit it is the person's to take (`orchestrator.fitting`).
 
     Args:
         stl_path: Path to the input STL file.
@@ -300,6 +308,7 @@ def slice_model(
 
     Raises:
         FileNotFoundError: If the OrcaSlicer binary does not exist.
+        DoesntFit: If the part doesn't fit the plate as it's posed.
         RuntimeError: If OrcaSlicer exits non-zero, times out, or does not
             produce a G-code file.
     """
@@ -336,6 +345,9 @@ def slice_model(
         items.write_text(json.dumps(pause_items(list(profiles.pauses)), indent=1))
         cmd += ["--load-custom-gcodes", str(items)]
 
+    # As `slice_plate`: without it Orca turns one part as freely as several. It turned an
+    # 18 x 235 mm part 45 degrees, and small triangles a quarter (mqucifer/print-shop#257).
+    cmd += ["--allow-rotations=0"]
     cmd += ["--slice", "0", "--outputdir", str(out), str(stl)]
 
     # Run in its own process group so a timeout can kill the whole tree,
@@ -366,7 +378,8 @@ def slice_model(
             if result.returncode == 239
             else ""
         )
-        raise RuntimeError(
+        failure = DoesntFit if result.returncode == NO_ROOM else RuntimeError
+        raise failure(
             f"OrcaSlicer exited with code {result.returncode}{hint}:\n"
             f"stdout: {result.stdout}\n"
             f"stderr: {result.stderr}"
@@ -382,12 +395,16 @@ def slice_model(
     return parse_gcode_header(gcode_path)
 
 
+#: Orca's exit where no object lies fully inside the plate (`CLI_NO_SUITABLE_OBJECTS`, -50).
+NO_ROOM = 206
+
 #: Orca's CLI exit codes the refinement pass has met, in Orca's words (`cli_errors` in
 #: `src/OrcaSlicer.cpp` at v2.4.2), or what the run showed.
 EXITS = {
     -11: "Orca crashed (SIGSEGV)",
     155: "G-code paths conflict: two objects take the same space",
     195: "the filament doesn't fit the build plate",
+    NO_ROOM: "no object lies fully inside the plate",
     239: "the process isn't compatible with the machine",
     250: "Orca can't read the file's format",
 }
