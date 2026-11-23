@@ -11,7 +11,10 @@ and re-copy those". Three things, each copied from the page and never run by it:
   by `review.parse_answer`): the Sponsor's own corrections, in order. Of its pauses only the
   last, which stood, and never copied raw where it could mean another layer now: one from before
   mqucifer/print-shop#203 is given at the height that pauses where it did (`_older_pause`), and
-  one whose G-code doesn't say where it paused is left out, saying so (`_pause_again`);
+  one whose G-code doesn't say where it paused is left out, saying so (`_pause_again`). It's
+  typed with what it was for (mqucifer/print-shop#218): an insert, or a swap with the spools the
+  print was planned with. One of them that can't be named now (used up, or the first's tuning
+  edited) is left to be asked (`from ?`), so the line still reads back;
 - **the answers file** for `--answers` (`intake.replay_asker`): each question by its text, each
   answer by its option's label or the words given, and what was confirmed from the part's notes
   by what they gave (mqucifer/print-shop#236), which replays only while they still say it.
@@ -37,8 +40,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from print_shop.inventory import Material, Spool
 from print_shop.ledger import Row
 from print_shop.orchestrator.graph import AS_LAID
+from print_shop.setup import pauses
 from print_shop.setup.intake import Answer, Question
 from print_shop.setup.proposal import ORIENTATION, PAUSE, Change, Source, pose_value
 
@@ -129,27 +134,52 @@ def _pause_again(row: Row, stood: Change) -> str | None:
     return stood.value if len(pauses) == 1 and pauses[0].after_z is not None else None
 
 
-def correction_line(row: Row) -> str:
-    """The Sponsor's corrections at the review, as they're typed there."""
+def _purpose_again(
+    row: Row, stood: Change, on_hand: dict[int, Spool] | None
+) -> pauses.Pause | None:
+    """What the pause was for, as it can be typed again: a spool that's used up, or a first
+    whose tuning has been edited, is left for the review to ask. The other is still named."""
+    purpose = pauses.as_printed(stood.pause, row.spools)
+    if purpose is None or purpose.start is None or on_hand is None:
+        return purpose
+    start: Material | None = purpose.start
+    to = purpose.to
+    if to is not None and to.spool_id not in on_hand:
+        to = None
+    if purpose.start.spool_id not in on_hand or (
+        on_hand[purpose.start.spool_id].tuning != purpose.start.tuning
+    ):
+        start = None
+    return purpose.model_copy(update={"start": start, "to": to, "ask_first": start is None})
+
+
+def correction_line(row: Row, on_hand: dict[int, Spool] | None = None) -> str:
+    """The Sponsor's corrections at the review, as they're typed there. `on_hand` is the spools
+    that can be named in it, by number."""
     parts = []
     stood = _standing_pause(row)
     for c in row.corrections or ():
         if c.key == ORIENTATION or _used_as_anothers(c):
             continue
-        value: str | None = c.value
+        key, value, reason = c.key, c.value, c.reason
         if c.key == PAUSE:
-            value = _pause_again(row, c) if c is stood else None
-            if value is None:
+            height = _pause_again(row, c) if c is stood else None
+            if height is None:
                 continue
-        reason = " ".join(c.reason.replace(";", ",").split())
-        said = f"{c.key}={value}"
+            key, value = pauses.to_type(height, _purpose_again(row, c, on_hand))
+            reason = pauses.carried_reason(c)
+        reason = " ".join(reason.replace(";", ",").split())
+        said = f"{key}={value}"
         if reason and reason != _NO_REASON:
             said += f" because {reason}"
         parts.append(said)
     return "; ".join(parts)
 
 
-def again(row: Row, part_path: Path | None, printers: int = 1, part_found: bool = False) -> Again:
+def again(
+    row: Row, part_path: Path | None, printers: int = 1, part_found: bool = False,
+    on_hand: dict[int, Spool] | None = None,
+) -> Again:
     """How to run `row`'s job again. `part_path` is the part's file, and `part_found` says it
     has the bytes the job printed (by sha256); else it's the path the log names, if any.
     `printers` is how many the inventory has (`--printer` is needed with more than one)."""
@@ -222,6 +252,28 @@ def again(row: Row, part_path: Path | None, printers: int = 1, part_found: bool 
             notes.append(f"{PAUSE}={stood.value} is copied as {PAUSE}={copied}, to pause where "
                          "this job did: a pause height is now the top of the layer it comes "
                          "after.")
+        if copied not in (None, "none"):
+            purpose = _purpose_again(row, stood, on_hand)
+            then = pauses.as_printed(stood.pause, row.spools)
+            if then is not None and purpose is not None and then.start is not None:
+                for used, kept in ((then.start, purpose.start), (then.to, purpose.to)):
+                    if used is None or kept is not None:
+                        continue
+                    gone = on_hand is None or used.spool_id not in on_hand
+                    why = "isn't on hand now" if gone else "has had its tuning edited since"
+                    notes.append(f"It printed with {used.named()}, which {why}, so the review "
+                                 "asks for that spool.")
+            if purpose is None:
+                notes.append("This job didn't say what its pause was for, so the review asks.")
+            elif purpose.start is not None and purpose.to is not None:
+                if row.ended_with is not None and row.ended_with.spool_id != purpose.to.spool_id:
+                    notes.append(f"You said it ended with {row.ended_with.named()}: the line is "
+                                 "as it was planned.")
+                here = on_hand.values() if on_hand else ()
+                notes.append(f"It starts on {purpose.start.as_now(here).named()}, and swaps to "
+                             f"{purpose.to.as_now(here).named()}: have the first loaded, and "
+                             "recorded "
+                             f"(`stock.py load {purpose.start.spool_id}`), before you approve.")
     taken = [c for c in ((*row.proposal.changes, *row.proposal.not_applied)
                          if row.proposal else ())
              if c.source is Source.READING]
@@ -233,7 +285,7 @@ def again(row: Row, part_path: Path | None, printers: int = 1, part_found: bool 
     if reused:
         notes.append("Used from a past print, so use them again at the review (use): "
                      + "; ".join(f"{c.key}={c.value}" for c in reused) + ".")
-    return Again(command=command, corrections=correction_line(row), answers=answers,
+    return Again(command=command, corrections=correction_line(row, on_hand), answers=answers,
                  answers_name=name, notes=tuple(notes))
 
 
