@@ -973,7 +973,8 @@ def cli_reviewer(
     question. `asks` is whether there's a terminal to ask that in (`can_ask`).
 
     The model's proposals are said as they arrive, under the open prompt, and added to the list
-    by Enter (mqucifer/print-shop#242). What's typed is read against the list on screen.
+    by Enter (mqucifer/print-shop#242). What's typed is read against the list on screen. While
+    the model works, a timer ticks on the line above the prompt, on the screen alone.
     """
 
     def review(request: ReviewRequest) -> Review:
@@ -998,11 +999,40 @@ def cli_reviewer(
                 if not asking.is_set():
                     return  # said before the next prompt
                 announced = True
+                out = screen()
+                if out is not None and timed.is_set():
+                    # The timer's line, above what's being typed, cleared: it's said below.
+                    out.write("\0337\033[1A\r\033[2K\0338")
+                    out.flush()
+                    timed.clear()
                 write(f"\n{said_in(found)} (what you've typed is kept).")
                 out = screen()
                 if out is not None:
                     # On the screen alone: the log gets the prompt with its answer.
                     out.write("> ")
+                    out.flush()
+
+        timed = threading.Event()  # the timer's line is drawn above the open prompt
+        done = threading.Event()
+
+        def working() -> bool:
+            return work is not None and work.now().ending is Ending.WORKING
+
+        def timer() -> str:
+            assert work is not None
+            return f"  waiting for the model's settings: {waited(work.now().seconds)}"
+
+        def tick() -> None:
+            """The timer's line, rewritten each second above what's being typed, with the cursor
+            put back: as the questions' wait does (`waiting.cli_waiting`)."""
+            while not done.wait(1.0):
+                with lock:
+                    out = screen()
+                    if out is None or not timed.is_set() or not asking.is_set():
+                        continue
+                    if not working():
+                        continue  # its end is said by `heard`
+                    out.write(f"\0337\033[1A\r\033[2K{timer()}\0338")
                     out.flush()
 
         def show() -> None:
@@ -1021,6 +1051,13 @@ def cli_reviewer(
                             and request.suggested.ending is Ending.WORKING):
                         announced = True
                         write(f"  {said_in(now)}.")
+                out = screen()
+                timed.clear()
+                if out is not None and working():
+                    # On the screen alone, and ticking (`tick`): the log has the review's line.
+                    out.write(f"{timer()}\n")
+                    out.flush()
+                    timed.set()
                 asking.set()
             try:
                 return read("> ")
@@ -1036,6 +1073,8 @@ def cli_reviewer(
 
         if work is not None:
             work.hear(heard)
+            if screen() is not None:
+                threading.Thread(target=tick, daemon=True, name="settings-timer").start()
         try:
             show()
             moved: Offering | None = None  # the offer as picked and cleared here
@@ -1116,6 +1155,7 @@ def cli_reviewer(
                     _loaded_first(request, read, write, forget, asks or can_ask)
                 return left(parsed)
         finally:
+            done.set()
             if work is not None:
                 work.hear(None)
 
