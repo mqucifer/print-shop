@@ -28,8 +28,15 @@ from print_shop.core.mqtt import (
     outcome_symptom_topic,
     outcome_topic,
 )
-from print_shop.inventory import Inventory, InventoryError, SpoolUse
-from print_shop.ledger import Ledger, LedgerError, Row
+from print_shop.inventory import (
+    Inventory,
+    InventoryError,
+    Pick,
+    SpoolUse,
+    clear_not_known,
+    stock_changes,
+)
+from print_shop.ledger import Answer, Ledger, LedgerError, Result, Row, Symptom
 from print_shop.orchestrator import daemon as daemon_module
 from print_shop.orchestrator import spools as after_print
 from print_shop.orchestrator.graph import why_not_start
@@ -1371,6 +1378,31 @@ def test_cant_use_gives_the_load_by_what_cant_change(shop: Shop) -> None:
             pauses.Pause(kind=pauses.PauseFor.SWAP, start=white, to=clear), clear, stock.spools())
     assert why.startswith("that print started on spool #1, Elegoo PLA, and this job is sliced")
     assert "`stock.py load 1`" in why and "white" not in why
+
+
+# The guards' two misses on c066196: second safeguards, tested on their own
+# --------------------------------------------------------------------------
+
+
+def test_a_pick_for_a_print_thats_not_marked_is_refused_though_nothing_changed(
+    shop: Shop,
+) -> None:
+    ends(shop, swap_started(shop))
+    shop.says(WHITE)
+    with Ledger(shop.path) as ledger:
+        now = ledger.query("SELECT COALESCE(MAX(n), 0) AS n FROM stock_changes")[0]["n"]
+        with pytest.raises(LedgerError, match="said since"):
+            ledger.record_answer("job-1", Answer(result=Result.SUCCESS, symptom=Symptom.NONE),
+                                 Pick(BLACK, now))
+    assert shop.loaded() == WHITE and kept(shop).result is None
+
+
+def test_clearing_a_mark_is_a_change_of_its_own(shop: Shop) -> None:
+    swap_started(shop)
+    with Ledger(shop.path) as ledger, ledger.writing() as db:
+        before = stock_changes(db)
+        clear_not_known(db, "cc1", "job-1")
+        assert stock_changes(db) == before + 1
 
 
 # What the Sponsor was told it costs
