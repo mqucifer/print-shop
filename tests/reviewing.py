@@ -7,6 +7,8 @@ uses neither.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from print_shop.setup.proposal import ORIENTATION
 from print_shop.setup.review import Review, Reviewer, ReviewRequest, parse_answer
 from print_shop.setup.suggest import by_number
@@ -19,10 +21,13 @@ def settled(reviewer: Reviewer) -> Reviewer:
     """The reviewer, shown each review once the model's work for it has ended."""
 
     def review(request: ReviewRequest) -> Review:
-        if request.suggesting is not None:
-            assert request.suggesting.wait(WAIT_S), "the scripted model never ended"
-            request = request.refreshed()
-        return reviewer(request)
+        if request.suggesting is None:
+            return reviewer(request)
+        assert request.suggesting.wait(WAIT_S), "the scripted model never ended"
+        request = request.refreshed()
+        answer = reviewer(request)
+        # It was shown what came, so it's said so, as a reviewer that refreshes must.
+        return answer if answer.saw is not None else replace(answer, saw=request.suggested)
 
     return review
 
