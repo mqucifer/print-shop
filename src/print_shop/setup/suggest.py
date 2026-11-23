@@ -421,7 +421,8 @@ def recorded(proposal: Proposal, found: tuple[Suggested, ...]) -> Proposal:
         "skill_sha256": last.skill_sha256,
         "design_notes": tuple(dict.fromkeys(
             (*proposal.design_notes, *(() if turning(last) else last.design_notes)))),
-        "refused": tuple(dict.fromkeys((*proposal.refused, *last.refused))),
+        "refused": tuple(dict.fromkeys(
+            (*proposal.refused, *(() if turning(last) else last.refused)))),
         "loop": looped.loop if looped else (),
         "loop_ending": looped.loop_ending if looped else "",
         "notes": tuple(dict.fromkeys(notes)),

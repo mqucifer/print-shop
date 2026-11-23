@@ -665,9 +665,10 @@ def _big_words(
         else:
             on = ["orientation"] if pose.rotation_deg != part.kept else list(settings)
         question, reason = state.words.get(what, ("", ""))
-        words = f'"{question}" ' if question else ""
-        because = f" The model's reason: {reason}." if reason else ""
         for key in on:
+            said_before = any(question and f'"{question}"' in each for each in found.get(key, ()))
+            words = f'"{question}" ' if question and not said_before else ""
+            because = f" The model's reason: {reason}." if reason and not said_before else ""
             found.setdefault(key, []).append(f"{words}It's a big change: {said}.{because}")
     return {key: " ".join(each) for key, each in found.items()}
 

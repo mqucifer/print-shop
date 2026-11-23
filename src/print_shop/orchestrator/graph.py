@@ -323,8 +323,7 @@ def build_graph(
                         return {"orientation": fitted, "orientation_lessons": given, **poses}
                     own = fitted.proposal.value
                     where = (f"it doesn't fit the plate as the file lays it, so it's shown at "
-                             f"{pose_value(own.rotation_deg)}: the geometric choice, as the "
-                             "check on poses passed it")
+                             f"{pose_value(own.rotation_deg)}: {print_lessons.GEOMETRIC_SHOWN}")
                 elif kept is None:
                     checked = validate_orientation(
                         Chosen(value=own, source=AS_FILED, rationale=""), request)
@@ -345,13 +344,18 @@ def build_graph(
                 "orientation_lessons": given, **poses}
         return {"orientation": orient_by_call(request), "orientation_lessons": given, **poses}
 
-    def orient_by_call(request: OrientationRequest) -> Outcome[Orientation]:
-        """The single orientation call: the model proposes, the validator disposes."""
+    def orient_by_call(
+        request: OrientationRequest, stop: threading.Event | None = None,
+    ) -> Outcome[Orientation]:
+        """The single orientation call: the model proposes, the validator disposes. `stop` ends
+        the call, beside a review."""
 
         def chooses(req: OrientationRequest) -> Any:
             if llm is None:
                 return propose_geometric(req, NO_MODEL_CONFIGURED)
             try:
+                if stop is not None:
+                    return propose_orientation(req, llm, stop)
                 return propose_orientation(req, llm)
             except (RuntimeError, OSError):
                 return propose_geometric(req)
@@ -604,13 +608,11 @@ def build_graph(
                         typed = {c.key for c in earlier}
                         dropped = tuple(dict.fromkeys(
                             c.key for c in turned.taken if c.key not in typed))
-                        if dropped:
-                            # What was taken of the model's is for the pose it was taken in.
-                            left_behind.append(
-                                f"Taken at {pose_value(rotation_deg)} and left behind by the turn: "
-                                + ", ".join(f"{c.key}={c.value}" for c in turned.taken
-                                            if c.key in dropped)
-                                + ". Take it again if it's proposed here, or type it.")
+                        # What was taken of the model's is for the pose it was taken in.
+                        left_behind += [
+                            f"Taken at {pose_value(rotation_deg)} and left behind by the turn: "
+                            f"{c.key}={c.value}. Take it again if it's proposed here, or type it."
+                            for c in {c.key: c for c in turned.taken}.values() if c.key in dropped]
                         if turned.to.taken:
                             chose = "you took the model's turn at this job"
                         if beside is not None and beside.work is not None:
@@ -738,7 +740,7 @@ def build_graph(
             # Past its limit, or the model unreachable: the single orientation call's pose.
             decided = orient_by_call(OrientationRequest(
                 candidates=poses, build_volume_mm=build_volume,
-                lessons=tuple(g.line() for g in given)))
+                lessons=tuple(g.line() for g in given)), stop)
             if stop.is_set():  # went on while it ran: nothing more is asked of the model
                 return Suggested(pose=asked_in, ending=Ending.WENT_ON, **record)
             if decided.accepted:
@@ -1503,6 +1505,10 @@ def _propose_and_review(
         if beside is not None and ORIENTATION in review.declined and ask_again is not None:
             beside.end(Ending.TURNED)  # its settings were for the turn
             ask_again()
+    taken_again = {c.key for c in proposal.changes if c.taken}
+    proposal = proposal.model_copy(update={"notes": tuple(
+        n for n in proposal.notes
+        if not (n.startswith("Taken at ") and any(f": {k}=" in n for k in taken_again)))})
     if beside is not None:
         found_by_model = beside.ended
         proposal = recorded(proposal, found_by_model)

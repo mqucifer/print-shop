@@ -965,12 +965,14 @@ def test_going_on_while_the_fallback_orientation_call_runs_asks_nothing_more(
     shop: Shop, held: Held, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     started, ended = threading.Event(), threading.Event()
+    ended_by: list[bool] = []
 
-    def orientation(request: Any, config: Any) -> Any:
+    def orientation(request: Any, config: Any, stop: threading.Event | None = None) -> Any:
+        assert stop is not None, "beside a review, the call can be ended"
         started.set()
-        time.sleep(0.5)
+        ended_by.append(stop.wait(WAIT_S))
         ended.set()
-        raise RuntimeError("the made-up orientation model is down")
+        raise Stopped("ended")
 
     monkeypatch.setattr(graph, "propose_orientation", orientation)
 
@@ -985,9 +987,41 @@ def test_going_on_while_the_fallback_orientation_call_runs_asks_nothing_more(
                    PrintLoop(chat=down, person=nobody, model="fake"),
                    llm=LLMConfig(api_key=SecretStr("not-a-key"), model="fake"))
     assert row is not None, shop.error
-    assert ended.wait(WAIT_S)
+    assert ended.wait(WAIT_S) and ended_by == [True], "going on ended the orientation call"
     time.sleep(0.3)
     assert held.calls == 0, "no settings call starts once the person went on"
+
+
+def test_going_on_ends_the_fallbacks_settings_call(
+    shop: Shop, held: Held, tmp_path: Path
+) -> None:
+    def down(messages: Any, tools: Any) -> dict[str, Any]:
+        raise RuntimeError("the made-up loop model is down")
+
+    def goes_on(request: ReviewRequest) -> Review:
+        assert held.began.wait(WAIT_S), "the settings call ran, after the loop"
+        return Review(approved=True)
+
+    row = shop.run(write_stl("tee", tmp_path), goes_on, by_llm(),
+                   PrintLoop(chat=down, person=nobody, model="fake"))
+    assert row is not None, shop.error
+    assert held.closed.wait(WAIT_S), "going on ended it"
+
+
+def test_the_runtimes_loop_can_be_ended(monkeypatch: pytest.MonkeyPatch) -> None:
+    from print_shop import runtime  # noqa: PLC0415
+
+    made: list[threading.Event | None] = []
+    def llm_chat(config: LLMConfig, stop: threading.Event | None = None) -> Any:
+        made.append(stop)
+        return unused
+
+    monkeypatch.setattr(runtime, "llm_chat", llm_chat)
+    loop = runtime.print_loop(LLMConfig(api_key=SecretStr("not-a-key"), model="fake"))
+    stop = threading.Event()
+    assert loop.stoppable is not None
+    loop.stoppable(stop)
+    assert made == [None, stop]
 
 
 def test_the_loops_calls_are_kept_when_the_person_goes_on(shop: Shop, tmp_path: Path) -> None:

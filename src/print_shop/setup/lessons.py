@@ -759,6 +759,8 @@ def _given(ledger: Ledger, row: Row) -> None:
 
 #: `graph.AS_FILED`, which imports this: the file's own pose, where the loop only proposed one.
 AS_FILED = "as_filed"
+#: How the graph says a pose it showed because the file's own doesn't fit, which nobody chose.
+GEOMETRIC_SHOWN = "the geometric choice, as the check on poses passed it"
 
 
 def _scored_at_review(ledger: Ledger, row: Row) -> None:
@@ -783,7 +785,9 @@ def _scored_at_review(ledger: Ledger, row: Row) -> None:
                                f"the pose was sent back again, to {sent.value}: {sent.reason}")
             elif "taken by you at the review" in row.orientation_rationale and printed != g.value:
                 scored, why = "in_the_way", f"the model's turn to {printed} was taken instead"
-            elif row.orientation_source == AS_FILED and printed != g.value:
+            elif printed != g.value and (
+                row.orientation_source == AS_FILED or GEOMETRIC_SHOWN in row.orientation_rationale
+            ):
                 # The loop only proposed, and nobody turned the part to the lesson's pose.
                 scored, why = "not_used", f"the print was in {printed}, and nothing turned it"
             else:

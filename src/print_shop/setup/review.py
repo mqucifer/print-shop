@@ -376,8 +376,6 @@ def _pauses(request: ReviewRequest) -> list[str]:
 
 def _by(change: Change) -> str:
     """Who a change is from, as the review names them."""
-    if change.said_no_to:
-        return f"{_BY[change.source]}, saying no to the model's {change.said_no_to}"
     if change.taken and change.used is None:
         return f"{_BY[change.source]}, taken by you"
     if change.used is not None:
