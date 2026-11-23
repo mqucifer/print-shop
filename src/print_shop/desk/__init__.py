@@ -9,7 +9,7 @@ line all the time. See the filaments loaded etc."
 - what's on the printer: the fitted nozzle, the loaded spool, and the spools on hand;
 - each job, newest first: the part, its pose and why, the questions and answers, the settings
   proposed with each one's reason and source, the corrections at the review, the slice's
-  reading and flags, a colour change, the time and plastic, the outcome with its note and
+  reading and flags, a pause and what it's for, the time and plastic, the outcome with its note and
   frames, and the job's log (`print_shop.joblog`);
 - "run it again" (`again.py`): the command line, the correction line and the answers file, each
   to copy.

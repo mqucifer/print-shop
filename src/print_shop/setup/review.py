@@ -11,7 +11,9 @@ next to the preset's value. Corrections are the learning signal for
 print-flow stage 9: what the Sponsor would have tuned.
 
 A pause is shown where it landed in the sliced G-code, beside the height asked for, and a
-mismatch is said (mqucifer/print-shop#203, `_pauses`).
+mismatch is said (mqucifer/print-shop#203, `_pauses`). It says what it's for, a swap or an insert
+(mqucifer/print-shop#218, `pauses`): `colour_change=` is a swap, and what wasn't typed is asked
+(`_purposed`), with this review's or the past print's pre-selected.
 
 A change is shown as this print's only if it reached the slice
 (mqucifer/print-shop#206, `proposal.read_back`). One that didn't is shown as asked and
@@ -46,6 +48,7 @@ them, saying that it is, and then lists them as ever.
 from __future__ import annotations
 
 import re
+import sqlite3
 import textwrap
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -53,14 +56,17 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from print_shop.bench.pausing import TOPS_OUT, mm
 from print_shop.core.state import AppliedOrientation, Orientation, SliceResult, turn_words
+from print_shop.inventory import Asked, InventoryError, Material
+from print_shop.setup import pauses
 from print_shop.setup.concerns import concern_in, ways
-from print_shop.setup.intake import Estimate
+from print_shop.setup.intake import Estimate, drop_typed
 from print_shop.setup.offer import Item, Offering
 from print_shop.setup.offer import render as render_offer
 from print_shop.setup.proposal import (
     ORIENTATION,
     PAUSE,
     PAUSE_NAMES,
+    SWAP_NAMES,
     Change,
     GivenLesson,
     Proposal,
@@ -69,6 +75,7 @@ from print_shop.setup.proposal import (
 )
 from print_shop.setup.reach import profile_of, unplaced
 from print_shop.setup.reading import PAUSE_PAST_FIT, Flag, SliceReading
+from print_shop.setup.waiting import can_ask
 from print_shop.slicer.orca import SlicerProfiles
 
 if TYPE_CHECKING:
@@ -127,6 +134,16 @@ class ReviewRequest:
     context: tuple[str, ...] = ()
     #: What decided the past prints most like this one, to use (mqucifer/print-shop#211).
     offering: Offering | None = None
+    #: The spool the job was prepared with, and the spools on hand, for a swap to name its two
+    #: (mqucifer/print-shop#218). None with no stock set up.
+    material: Material | None = None
+    stock: pauses.Stock | None = None
+    #: The stock's changes, and since which print what's on isn't known, read as the person is
+    #: about to be asked (mqucifer/print-shop#218).
+    stands: Callable[[], Asked] | None = None
+    #: Records a spool as loaded, and the print said to be over in the same word, on the
+    #: person's typed y and only that (`_loaded_first`): only while it's as it was when asked.
+    record_load: Callable[[int, Asked], None] | None = None
     #: The turn this slice needed to fit (`SliceResult.turn_deg`) has been taken
     #: (mqucifer/print-shop#257).
     turn_taken: bool = False
@@ -230,6 +247,18 @@ def render(request: ReviewRequest) -> str:
         lines.append(f"    {c.reason} [{_by(c)}]")
     lines += _pauses(request)
     lines += [f"  note: {f.reading}" for f in request.flags if f.id == PAUSE_PAST_FIT]
+    paused = proposal.get(PAUSE)
+    purpose = paused.pause if paused is not None and paused.value != "none" else None
+    try:
+        unknown = request.stands().not_known if request.stands else None
+        why = unknown.why() if unknown is not None else ""
+        if purpose is not None:
+            lines += pauses.for_review(purpose, request.reading, request.material, request.stock,
+                                       why)
+        if why and (purpose is None or purpose.start is None):  # a swap's LOAD FIRST says it
+            lines.append(f"  {why}: at ok you're asked, and Start holds until you say")
+    except sqlite3.Error as exc:
+        lines.append(f"  the stock couldn't be read ({exc}): an Approve checks it again")
     for c in proposal.kept:
         by = (
             f" [lesson {c.lesson}]" if c.lesson is not None
@@ -290,12 +319,18 @@ def render(request: ReviewRequest) -> str:
     if request.turn_waiting:
         go_on = (f"It doesn't fit as posed. Type turn to take it turned "
                  f"{turn_words(request.slice.turn_deg)} (ok waits for that),")
+    lands = "it pauses once the layer topping out at 12.4 mm is done"
+    example = (
+        f"pause_at=12.4 for insert because the nuts go in ({lands})"
+        if _insert_stands_or_is_ticked(request)
+        else f"pause_at=12.4 because the nuts go in ({lands}, and it asks what the pause is "
+             "for), colour_change=12.4 because white to black (a swap)"
+    )
     lines += [
         "",
         f"{go_on}{use}{take}{back} or correct a setting by name, "
-        "e.g. wall_loops=3 because it's decorative (several separated by ';'), "
-        "pause_at=12.4 because white to black (it pauses once the layer topping out at "
-        "12.4 mm is done), or stop.",
+        f"e.g. wall_loops=3 because it's decorative (several separated by ';'), {example}, "
+        "or stop.",
     ]
     return "\n".join(lines)
 
@@ -459,6 +494,12 @@ def parse_answer(answer: str, request: ReviewRequest) -> Review | str:
                                      pose_value(request.orientation.rotation_deg))
                 if isinstance(items, str):
                     return items
+                for item in items:
+                    # Again here, as the stock can change while the review waits.
+                    if item.key == PAUSE and (why := pauses.cant_start(
+                        item.pause, request.material, request.stock() if request.stock else ()
+                    )):
+                        return f"{PAUSE} can't be used: {why}"
                 used += [_used_change(item, request) for item in items]
                 continue
             if verb == "from" and len(numbers) != 1:
@@ -473,7 +514,7 @@ def parse_answer(answer: str, request: ReviewRequest) -> Review | str:
             return f"'{part}' isn't setting=value"
         key, value, reason = match.group(1), match.group(2), (match.group(3) or "").strip()
         if key in PAUSE_NAMES:
-            change = _pause(value, reason, request)
+            change = _pause(key, value, reason, request)
             if isinstance(change, str):
                 return change
             corrections.append(change)
@@ -512,22 +553,27 @@ def _used_change(item: Item, request: ReviewRequest) -> Change:
         (c for c in (*request.proposal.not_applied, *request.proposal.kept) if c.key == item.key),
         None,
     )
-    return Change(key=item.key, preset=item.preset, value=item.value, reason=item.reason,
+    purpose, reason = None, item.reason
+    if item.key == PAUSE:
+        purpose = pauses.refreshed(item.pause, request.material, request.stock)
+        reason = pauses.because(reason, purpose)
+    return Change(key=item.key, preset=item.preset, value=item.value, reason=reason,
                   source=Source.SPONSOR, standard=known.standard if known else "",
-                  reading=item.reading, used=item.used)
+                  reading=item.reading, used=item.used, pause=purpose)
 
 
-def _pause(value: str, reason: str, request: ReviewRequest) -> Change | str:
+def _pause(key: str, value: str, reason: str, request: ReviewRequest) -> Change | str:
     """A pause after the layer that tops out at a height inside the part
-    (mqucifer/print-shop#119, mqucifer/print-shop#203), or why not. `none` takes one away."""
+    (mqucifer/print-shop#119, mqucifer/print-shop#203), and what it's for as far as that's typed
+    (mqucifer/print-shop#218), or why not. `none` takes one away."""
     shown = request.proposal.get(PAUSE)
     if value.lower() == "none":
-        return Change(key=PAUSE, preset="", value="none", reason=reason or "no colour change",
+        return Change(key=PAUSE, preset="", value="none", reason=reason or "no pause",
                       source=Source.SPONSOR)
-    try:
-        z = float(value.removesuffix("mm"))
-    except ValueError:
-        return f"'{value}' isn't a height: give one in mm, e.g. pause_at=12.4, or none"
+    typed = pauses.read_typed(value, swap=key in SWAP_NAMES)
+    if isinstance(typed, str):
+        return typed
+    z = typed.z
     top = request.slice.max_z_mm
     if not 0 < z < top:
         return f"a pause is inside the part: above 0 and below its top, {top:g} mm"
@@ -535,8 +581,150 @@ def _pause(value: str, reason: str, request: ReviewRequest) -> Change | str:
     if layers and z < layers[0].z - TOPS_OUT:
         return (f"there's no layer to pause after at {z:g} mm: the first tops out at "
                 f"{layers[0].z:g} mm")
+    purpose = pauses.planned(typed, shown.pause if shown else None, request.material,
+                             request.stock)
+    if isinstance(purpose, str):
+        return purpose
     return Change(key=PAUSE, preset=shown.value if shown else "", value=f"{z:g}",
-                  reason=reason or "a colour change", source=Source.SPONSOR)
+                  reason=pauses.because(reason, purpose), source=Source.SPONSOR, pause=purpose)
+
+
+def _purposed(
+    review: Review, request: ReviewRequest, read: Callable[[str], str],
+    write: Callable[[str], None],
+) -> Review | None:
+    """The answer with what its pause is for, asking what wasn't said (mqucifer/print-shop#218).
+    Only the last pause in it stands, so only that's asked. None is the person going back."""
+    at = next((n for n in reversed(range(len(review.corrections)))
+               if review.corrections[n].key == PAUSE), None)
+    if at is None or review.corrections[at].value == "none":
+        return review
+    change = review.corrections[at]
+    if change.pause is not None and change.pause.complete(request.material):
+        return review
+    # With the print picked, and what was cleared, in this same answer.
+    if review.offering is not None:
+        request = replace(request, offering=review.offering)
+    found = pauses.ask(change.value, change.pause, _before(request, change.value),
+                       request.material, request.stock, read, write,
+                       gone=_past_cant_start(request, change.value))
+    if found is None:
+        return None
+    done = change.model_copy(update={"pause": found,
+                                     "reason": pauses.because(change.reason, found)})
+    return replace(review, corrections=(*review.corrections[:at], done,
+                                        *review.corrections[at + 1:]))
+
+
+def _loaded_first(
+    request: ReviewRequest, read: Callable[[str], str], write: Callable[[str], None],
+    forget: Callable[[], None], asks: Callable[[], bool],
+) -> None:
+    """On `ok`, whether the spool this print starts on is on the printer now: a swap's first with
+    LOAD FIRST, and any job's while what's on isn't known. Then the question says both halves,
+    that print's being over too. A typed y records the load, and clears what it was asked of and
+    only that; anything else writes nothing (mqucifer/print-shop#218).
+
+    What was typed before the question was shown is dropped first: a doubled y would answer it
+    unseen. With no terminal to ask in (`asks`) it isn't asked, as a piped y would answer it. A
+    stock that can't be read or written, or input that ends, doesn't lose the job, as Start still
+    checks.
+    """
+    if request.stock is None or request.record_load is None or request.stands is None:
+        return
+    try:
+        asked = request.stands()  # before what the question names is read
+        on_hand, unknown = request.stock(), asked.not_known
+    except sqlite3.Error as exc:
+        write(f"  The stock couldn't be read ({exc}): an Approve checks it again.")
+        return
+    change = request.proposal.get(PAUSE)
+    pause = change.pause if change is not None and change.value != "none" else None
+    if pause is not None and pause.start is not None:
+        first = pauses.first_to_load(pause, on_hand, unknown.why() if unknown else "")
+    else:
+        first = request.material if unknown is not None else None
+    if first is None:
+        return
+    spool = next((spool for spool in on_hand if spool.id == first.spool_id), None)
+    if spool is None:
+        return
+    first = first.of(spool)  # named as it is now, not as it was when the job was prepared
+    if not asks():
+        write("  There's no terminal to ask in, so nothing's recorded: `stock.py load "
+              f"{first.spool_id}` in one before you approve, as an Approve before starts nothing.")
+        return
+    if unknown is not None:
+        write(f"{unknown.over_and_on(first.named())} y says both, and records it; Enter for "
+              "later, and an Approve before you've said starts nothing.")
+    else:
+        write(f"Is {first.named()}, on the printer now? y records it (stock load "
+              f"{first.spool_id}); Enter for later, and an Approve before it's loaded starts "
+              "nothing.")
+    forget()
+    try:
+        typed = read("loaded> ")
+    except EOFError:
+        typed = ""
+    if typed.strip().lower() != "y":
+        write(f"  Nothing recorded. Load it and `stock.py load {first.spool_id}` before you "
+              "approve.")
+        return
+    try:
+        request.record_load(first.spool_id, asked)
+    except (InventoryError, sqlite3.Error) as exc:
+        write(f"  Not recorded: {exc}")
+        return
+    write(f"  Recorded: {first.named()} is loaded.")
+    if unknown is not None:
+        # Saying one's over says nothing of another.
+        _loaded_first(request, read, write, forget, asks)
+
+
+def _before(request: ReviewRequest, value: str) -> tuple[pauses.Pause, str] | None:
+    """What a pause at `value` is pre-selected to be for, and from where: this review's pause,
+    else the picked past print's at that height, while it's ticked. One typed at another height
+    didn't come from that print, and one cleared, in doubt or not usable isn't pre-selected:
+    Enter mustn't make it what that one was."""
+    standing = request.proposal.get(PAUSE)
+    if standing is not None and standing.pause is not None:
+        return standing.pause, "as it is now"
+    item = _past_pause(request, value)
+    if item is None or item.pause is None:
+        return None
+    assert request.offering is not None
+    pose = pose_value(request.orientation.rotation_deg)
+    if not request.offering.standing(item, request.proposal, pose).selected:
+        return None
+    return item.pause, f"as on {item.used.stl_name}"
+
+
+def _past_pause(request: ReviewRequest, value: str) -> Item | None:
+    past = request.offering.past if request.offering is not None else None
+    items = past.items if past is not None else ()
+    return next((i for i in items if i.key == PAUSE and i.value == value), None)
+
+
+def _past_cant_start(request: ReviewRequest, value: str) -> str:
+    """Why the picked print's swap at that height can't start this job as it did, or ""."""
+    item = _past_pause(request, value)
+    if item is None or request.stock is None:
+        return ""
+    return pauses.cant_start(item.pause, request.material, request.stock())
+
+
+def _insert_stands_or_is_ticked(request: ReviewRequest) -> bool:
+    """Whether the pause here is an insert, or the one ticked to use is: then the review's
+    example doesn't speak of a swap."""
+    standing = request.proposal.get(PAUSE)
+    if standing is not None and standing.value != "none" and standing.pause is not None:
+        return standing.pause.kind is pauses.PauseFor.INSERT
+    if request.offering is None:
+        return False
+    pose = pose_value(request.orientation.rotation_deg)
+    return any(item.key == PAUSE and item.pause is not None
+               and item.pause.kind is pauses.PauseFor.INSERT
+               for item in request.offering.ticked(request.proposal, pose))
 
 
 def _take(numbers: str, request: ReviewRequest) -> list[Change] | str:
@@ -554,10 +742,14 @@ def _take(numbers: str, request: ReviewRequest) -> list[Change] | str:
 
 
 def cli_reviewer(
-    read: Callable[[str], str] = input, write: Callable[[str], None] = print
+    read: Callable[[str], str] = input, write: Callable[[str], None] = print,
+    forget: Callable[[], None] = drop_typed,
+    asks: Callable[[], bool] | None = None,
 ) -> Reviewer:
     """Show the review on the command line and read the answer, again until it's readable.
-    `orientation` starts the send-back conversation (`send_back`)."""
+    `orientation` starts the send-back conversation (`send_back`). `forget` drops what was typed
+    before the load's question was shown: a y approves here too, and mustn't answer that. `asks`
+    is whether there's a terminal to ask that in (`can_ask`)."""
 
     def review(request: ReviewRequest) -> Review:
         write(render(request))
@@ -573,10 +765,19 @@ def cli_reviewer(
                     return _as_left(sent, moved, took)
                 write("  Back to the review: ok, a correction, orientation, or stop.")
                 continue
-            parsed = parse_answer(answer, request)
-            if isinstance(parsed, str):
-                write(f"  {parsed}")
+            try:
+                parsed = parse_answer(answer, request)
+                if isinstance(parsed, str):
+                    write(f"  {parsed}")
+                    continue
+                purposed = _purposed(parsed, request, read, write)
+            except sqlite3.Error as exc:
+                write(f"  The stock couldn't be read ({exc}): type it again.")
                 continue
+            if purposed is None:
+                write("  Back to the review: ok, a correction, or stop.")
+                continue
+            parsed = purposed
             if parsed.turn_taken:
                 took = True
                 request = replace(request, turn_taken=True)
@@ -601,6 +802,8 @@ def cli_reviewer(
                     write(f"  {left} ticked {aren} used yet: use to take {them}, "
                           "or ok again to go on without")
                     continue
+            if parsed.approved:
+                _loaded_first(request, read, write, forget, asks or can_ask)
             return _as_left(parsed, moved, took)
 
     return review

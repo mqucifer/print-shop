@@ -3,7 +3,8 @@
 mqucifer/print-shop#119. `pause_at=Z` (or `colour_change=Z`) at the review is Orca's own pause,
 from the machine's pause G-code, after the layer that tops out at Z (mqucifer/print-shop#203,
 `test_pause_height.py`). The review, the gate and the
-ledger say where it fell, and the outcome step asks how the swap went. Without a printer, and,
+ledger say where it fell, and the outcome step asks how the swap went. `colour_change=` is a swap
+(mqucifer/print-shop#218, `test_pause_purpose.py`). Without a printer, and,
 but for the one test marked `slicer`, without Orca: a recorded slice has the pause put in where
 Orca puts it.
 """
@@ -48,11 +49,16 @@ LAYERS = {"initial_layer_print_height": "0.2", "layer_height": "0.2"}
 
 def with_pause(path: Path, print_z: float) -> None:
     """Put a pause in a recorded slice where Orca puts its own: at the start of the layer whose
-    top is nearest `print_z`, a tie to the lower, before that layer's lines."""
+    top is nearest `print_z`, a tie to the lower, after the layer is counted and before any of
+    its lines are printed."""
     lines = path.read_text().splitlines(keepends=True)
     tops = [(i, float(line[3:])) for i, line in enumerate(lines) if line.startswith(";Z:")]
     at, _ = min(tops, key=lambda t: (abs(t[1] - print_z), t[1]))
     after = at + 1 if lines[at + 1].startswith(";HEIGHT:") else at
+    next_layer = next((i for i in range(at + 1, len(lines))
+                       if lines[i].startswith(";LAYER_CHANGE")), len(lines))
+    after = next((i for i in range(at + 1, next_layer)
+                  if lines[i].startswith("SET_PRINT_STATS_INFO CURRENT_LAYER")), after)
     lines[after + 1:after + 1] = [";PAUSE_PRINT\n", "M600\n"]
     path.write_text("".join(lines))
 
@@ -167,7 +173,7 @@ def test_the_reading_says_where_it_paused_and_how_far_in(tmp_path: Path) -> None
     [pause] = reading.pauses
     assert (pause.before_layer, pause.z, pause.after_z) == (50, 10.0, 9.8)
     assert pause.after_s == round(sum(t.time_s for t in reading.layers if t.n < 50), 1)
-    assert any(line.startswith("pauses for a filament swap after layer 49, at z=9.8, "
+    assert any(line.startswith("pauses after layer 49, at z=9.8, "
                                "before layer 50, at z=10, about ")
                for line in reading.lines())
 
@@ -197,7 +203,7 @@ def test_a_colour_change_asked_for_at_the_review_reaches_the_gcode_the_gate_and_
     process = json.loads(CI_PROFILES.process.read_text())
     (tmp_path / "process.json").write_text(json.dumps({**process, "wall_loops": "2", **LAYERS}))
     profiles = CI_PROFILES.model_copy(update={"process": tmp_path / "process.json"})
-    sponsor = Sponsor("pause_at=2.0 because a white floor under black walls", "ok")
+    sponsor = Sponsor("colour_change=2.0 because a white floor under black walls", "ok")
     slicer = PausingSlicer()
     ledger = Ledger(tmp_path / "ledger.sqlite")
     bridge = MemoryBridge()
@@ -223,7 +229,7 @@ def test_a_colour_change_asked_for_at_the_review_reaches_the_gcode_the_gate_and_
         # The gate says it, so the person is at the printer for it.
         gate = daemon.pending_gate() or {}
         assert gate["pause"].startswith(
-            "this print pauses for a filament swap after layer 10, at z=2, "
+            "this print pauses for a swap after layer 10, at z=2, "
             "before layer 11, at z=2.2, about "
         )
         bridge.press(CFG, "approve")
@@ -239,14 +245,15 @@ def test_a_colour_change_asked_for_at_the_review_reaches_the_gcode_the_gate_and_
         assert [(c.key, c.value) for c in row.corrections or ()] == [(PAUSE, "2")]
         assert row.reading is not None and row.reading.pauses[0].before_layer == 11
         assert row.reading.pauses[0].after_z == 2.0
-        assert "swap           pauses for a filament swap after layer 10, at z=2" in describe(row)
+        assert "swap           pauses for a swap after layer 10, at z=2" in describe(row)
         # A choice for that one part, not a lesson: none is drawn from it.
         assert ledger.query("SELECT * FROM print_lessons WHERE setting=?", PAUSE) == []
 
         # The outcome step asks how the swap went.
         wait_until(lambda: bridge.retained_json(outcome_topic(CFG)).get("pending") is True)
         asked = bridge.retained_json(outcome_topic(CFG))
-        assert asked["swap"].startswith("pauses for a filament swap after layer 10, at z=2")
+        assert asked["pause"].startswith("pauses for a swap after layer 10, at z=2")
+        assert asked["pause_for"] == "swap"
 
 
 

@@ -12,14 +12,17 @@ from pathlib import Path
 
 import pytest
 
+from print_shop.core.mqtt import gate_topic
 from print_shop.inventory import Inventory, Material
 from print_shop.ledger import Ledger
+from print_shop.orchestrator import daemon as daemon_module
 from print_shop.runtime import describe, profiles_for
 from print_shop.slicer.store import Store, choose
 from tests.fakes import STORE
 from tests.sliced_fixtures import plate_file
-from tests.test_job_e2e import Rig
+from tests.test_job_e2e import CFG, Rig
 from tests.test_ledger import record
+from tests.test_outcome import wait_until
 from tests.test_runtime import settings  # noqa: F401  (the fixture)
 from tests.test_sliced import Shop, _material
 from tests.test_stock import _stock
@@ -183,8 +186,10 @@ def prepared(env: Path, path: Path, tmp_path: Path) -> Iterator[tuple[Rig, str, 
 
 
 def test_a_job_prepared_with_the_old_tuning_says_so_at_start_and_prints_nothing(
-    env: Path, prepared: tuple[Rig, str, Material]
+    env: Path, prepared: tuple[Rig, str, Material], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The print node's refusal, the backstop to the gate's (mqucifer/print-shop#218)."""
+    monkeypatch.setattr(daemon_module, "why_not_start", lambda state, ledger: "")
     rig, job_id, _ = prepared
     assert _stock(env, "edit", "1", "--tuning", HOTTER) == 0
 
@@ -196,6 +201,23 @@ def test_a_job_prepared_with_the_old_tuning_says_so_at_start_and_prints_nothing(
     assert "Run the job again" in result.error
     assert rig.printer.calls == [], "refused before the printer was reached"
     assert rig.ledger.rows() == []
+
+
+def test_a_tuning_edited_holds_the_gate_and_put_back_it_starts_on_a_new_press(
+    env: Path, prepared: tuple[Rig, str, Material]
+) -> None:
+    rig, job_id, _ = prepared
+    assert _stock(env, "edit", "1", "--tuning", HOTTER) == 0
+
+    rig.press("approve")
+    wait_until(lambda: bool(rig.bridge.retained_json(gate_topic(CFG)).get("held")))
+    held = rig.bridge.retained_json(gate_topic(CFG))["held"]
+    assert f'spool #1\'s tuning was changed from "{COOLER}" to "{HOTTER}"' in held
+    assert rig.printer.calls == [] and rig.ledger.rows() == []
+
+    assert _stock(env, "edit", "1", "--tuning", COOLER) == 0
+    rig.press("approve")
+    assert rig.daemon.wait_for_finish(job_id, timeout_s=30).printed is True
 
 
 def test_a_tuning_put_back_before_start_still_prints(
@@ -244,6 +266,9 @@ def test_the_terminal_says_so_for_a_hand_sliced_job_too(
         press(*given, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(shop.bridge, "deliver", edit_then_press)
+    if not printed:
+        # The gate would hold it: this is the print node's own words, in the terminal and log.
+        monkeypatch.setattr(daemon_module, "why_not_start", lambda state, ledger: "")
     # The file is PETG's, so it's sent with --loaded-ok; what matters here is the spool's edit.
     code = shop.run("--sliced", str(plate_file(tmp_path)), "--loaded-ok", press="approve")
 
@@ -260,3 +285,30 @@ def test_the_terminal_says_so_for_a_hand_sliced_job_too(
                f"variety's default to \"{PLA_TUNING}\"" in out
         (log,) = shop.jobs.glob("*/job.log")
         assert "tuning was changed" in log.read_text(), "kept in the job's log"
+
+
+def test_a_hand_sliced_job_is_held_for_another_colour_too(
+    settings: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """mqucifer/print-shop#218: `--loaded-ok` still means what it did as the job was prepared."""
+    shop = Shop(tmp_path, settings, monkeypatch)
+    _material(shop.ledger_path, type="PLA", variety="Elegoo PLA")
+    press = shop.bridge.deliver
+
+    def load_another_then_press(*given: object, **kwargs: object) -> None:
+        with Inventory(shop.ledger_path) as stock:
+            other = stock.add_spool(manufacturer="Elegoo", type="PLA", variety="Elegoo PLA",
+                                    colour="green")
+            stock.load(other.id)
+        press(*given, **kwargs)  # type: ignore[arg-type]
+        monkeypatch.setattr(shop.bridge, "deliver", press)
+        wait_until(lambda: bool(shop.bridge.retained_json(gate_topic(CFG)).get("held")))
+        shop.bridge.press(CFG, "reject")
+
+    monkeypatch.setattr(shop.bridge, "deliver", load_another_then_press)
+    shop.run("--sliced", str(plate_file(tmp_path)), "--loaded-ok", press="approve")
+
+    assert "Not started: this job was prepared for spool #1" in capsys.readouterr().out
+    with Ledger(shop.ledger_path) as ledger:
+        assert ledger.rows() == [] and shop.printer.calls == []

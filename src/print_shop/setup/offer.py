@@ -18,6 +18,9 @@ more like learning than me remembering".
   whose questions the notes cut short (mqucifer/print-shop#236) didn't get to ask, so none is.
 - **It's laid out to be read** (`render`): the print and how it came out once, what differs in
   columns, the items grouped by whose they were, and a reason several share said once.
+- **A pause keeps what it was for** (mqucifer/print-shop#218): a swap with the spools that print
+  used, or an insert. One from before doesn't say, and is asked when it's used. A swap whose
+  first spool can't start this job can't be used: another in its place would reverse it.
 - **A pause's height is converted, never copied raw** (`_pause_height`): a row from before
   mqucifer/print-shop#228 gives the height that pauses where its own G-code did, and one whose
   G-code doesn't say where it paused can't be used.
@@ -43,10 +46,11 @@ from typing import TYPE_CHECKING, Any, Literal
 import trimesh
 
 from print_shop.core.state import Orientation, pose_of, turn_words
+from print_shop.inventory import Material, Spool
 from print_shop.materials import material_name
 from print_shop.outcome_words import outcome_words
 from print_shop.rounds.lessons import REJECTED, RETIRED
-from print_shop.setup import similar
+from print_shop.setup import pauses, similar
 from print_shop.setup.bounds import MATERIAL, check
 from print_shop.setup.context import AS_PRINTED, SET_ASIDE, PartContext, Seen, printed, refuses
 from print_shop.setup.features import Feature
@@ -142,6 +146,8 @@ class Item:
     reading: str = ""
     #: The pose it holds in, where using it goes with turning the part to that pose.
     pose: str = ""
+    #: What a pause was for there, and a swap's spools as it printed.
+    pause: pauses.Pause | None = None
 
 
 @dataclass(frozen=True)
@@ -369,6 +375,9 @@ class ThisPart:
     seen_in: Callable[[tuple[float, float, float]], Seen | None] | None = None
     #: The person chose this pose for this print: kept as laid, or sent back at this review.
     pose_chosen: str = ""
+    #: The spool the job was prepared with and those on hand: what a past swap can start on.
+    material: Material | None = None
+    on_hand: tuple[Spool, ...] = ()
 
     @property
     def pose(self) -> str:
@@ -691,6 +700,10 @@ class _Items:
             first_stl_name=(origin.first_stl_name or origin.stl_name) if origin else "",
         )
         value, blocked, notes = change.value, "", []
+        purpose, reason = None, change.reason
+        if key == PAUSE:
+            purpose = pauses.as_printed(change.pause, row.spools)
+            reason = pauses.carried_reason(change)
         if key == ORIENTATION:
             preset = part.pose
             if value != part.pose and _pose(part, value) is None:
@@ -704,7 +717,8 @@ class _Items:
                 value = height
                 if said:
                     notes.append(said)
-                blocked = self._outside(value)
+                blocked = self._outside(value) or pauses.cant_start(
+                    purpose, part.material, part.on_hand)
         else:
             tier = profile_of(key, part.process, part.filament)
             data = part.filament if tier == "filament" else part.process
@@ -717,7 +731,7 @@ class _Items:
             if not blocked:
                 doubts += doubted
         return Item(
-            key=key, value=value, preset=preset, reason=" ".join(change.reason.split()),
+            key=key, value=value, preset=preset, reason=" ".join(reason.split()), pause=purpose,
             fits=("" if blocked or doubts else
                   SEAM_AS_SET if key == "seam_position" and self._seam_on_part()
                   else self._fits(key, value)),
@@ -1130,6 +1144,11 @@ def _reason(item: Item, proposal: Proposal) -> str:
 def _tags(item: Item) -> list[str]:
     u = item.used
     tags = [item.fits] if item.fits else []
+    if item.pause is not None:
+        said = pauses.said(item.pause.kind)
+        if item.pause.start is not None and item.pause.to is not None:
+            said += f": {item.pause.start.named()}, then {item.pause.to.named()}"
+        tags.insert(0, said)
     if u.by is Source.READING:
         tags.append("you took the slice's")
     if u.first_job_id and u.first_job_id != u.job_id:

@@ -100,7 +100,7 @@ def gcode_text(
     *, layers: int = 6, pause_before: int | None = 4, by_hand: dict[str, str] | None = None,
     filament_type: str | None = None,
 ) -> str:
-    """The fixture G-code. `pause_before` is the layer a filament swap is written before, or
+    """The fixture G-code. `pause_before` is the layer a pause is written before, or
     None for none. `filament_type` replaces the profile's, for a file sliced for another."""
     settings = config(by_hand)
     if filament_type is not None:

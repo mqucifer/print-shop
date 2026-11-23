@@ -52,6 +52,7 @@ from print_shop.setup.context import (
     seen_from,
 )
 from print_shop.setup.intake import Answer, Intake, Question
+from print_shop.setup.pauses import PauseFor, said
 from print_shop.setup.proposal import Change, Source, pose_value
 from print_shop.slicer import gcode
 
@@ -159,6 +160,10 @@ class PauseReading(BaseModel):
     after_s: float
     #: None before the first layer, and in a row from before mqucifer/print-shop#203.
     after_z: float | None = None
+    #: What it's for, and the spool a swap is to (mqucifer/print-shop#218, `pauses.marked`): the
+    #: G-code doesn't say. None for a file sliced by hand, and in a row from before it was said.
+    kind: PauseFor | None = None
+    to: str = ""
 
     def where(self) -> str:
         """Where it falls, in the words of the bench's `pause`."""
@@ -167,7 +172,11 @@ class PauseReading(BaseModel):
         return pausing.where(self.before_layer - 1, self.after_z, self.before_layer, self.z)
 
     def line(self) -> str:
-        return f"pauses for a filament swap {self.where()}, about {_s(self.after_s)} in"
+        about = f"{self.where()}, about {_s(self.after_s)} in"
+        if self.kind is None:
+            return f"pauses {about}"
+        to = f" to {self.to}," if self.to else ""
+        return f"pauses for {said(self.kind)}{to} {about}"
 
 
 #: The seams that are put by the plate's back, so on whichever side of the part is turned there

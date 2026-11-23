@@ -12,6 +12,13 @@ wait for the gate counts from when the job last came back from them. The gate th
 `GATE_WAIT_S` for Approve or Reject. A wait that runs out ends the job in one sentence, with a
 ledger row whose outcome is that it timed out, and nothing is sent to the printer after it.
 
+**An Approve with the wrong spool loaded starts nothing** (mqucifer/print-shop#218). The press is
+checked before the graph resumes, on the stock and the ledger alone as they are when it's pressed
+(`graph.why_not_start`): the printer is never waited on there. Held, it's spent: the gate says why
+and waits for a new press, with its inbox emptied, so an earlier or doubled tap can't start the
+job once the spool is loaded. A Reject that came while a press was checked wins, held or not. The
+hour runs on from when the gate opened. The print node refuses the same, as the backstop.
+
 **A press names its job** (mqucifer/print-shop#207). The buttons carry the job's id while its gate
 is open, and a gate takes only a press that names its own job. That holds across processes, where
 one gate at a time didn't. `live.py` is what keeps there from being a second process.
@@ -50,7 +57,7 @@ from print_shop.core.mqtt import (
 from print_shop.expert.client import LLMConfig
 from print_shop.ledger import JobEnding, Ledger, LedgerError
 from print_shop.orchestrator.frames import FrameKeeper
-from print_shop.orchestrator.graph import build_graph
+from print_shop.orchestrator.graph import build_graph, why_not_start
 from print_shop.orchestrator.live import Step
 from print_shop.orchestrator.outcome import OutcomeDesk, Watcher
 from print_shop.printer.camera import Camera
@@ -182,6 +189,17 @@ def state_payload(fields: dict[str, Any]) -> str:
 # --------------------------------------------------------------------------
 
 
+def _rejection(inbox: Queue[Command]) -> Command | None:
+    """A Reject among the presses that came while an Approve was checked."""
+    while True:
+        try:
+            cmd = inbox.get_nowait()
+        except Empty:
+            return None
+        if cmd.decision is Decision.REJECT:
+            return cmd
+
+
 class Daemon:
     """Long-running process that manages one print job at a time.
 
@@ -284,6 +302,8 @@ class Daemon:
         self._gate_wait_s = gate_wait_s
         #: Jobs a wait ran out on, with the sentence that ended them: no gate opens for one.
         self._abandoned: dict[str, str] = {}
+        #: Why each Approve that was held started nothing, in order, for the terminal to say.
+        self._held: dict[str, list[str]] = {}
         #: Each job's part, by name, for the ledger's row if it ends unprinted.
         self._parts: dict[str, str] = {}
 
@@ -376,6 +396,7 @@ class Daemon:
                     printer=self._watch_printer,
                     on_ended=self._desk.refresh,
                     poll_s=self._watch_poll_s,
+                    confirming=lambda: self._active_job_id,
                     frames=(
                         FrameKeeper(camera=self._camera, ledger=self._ledger, jobs=self._workdir)
                         if self._camera is not None
@@ -522,16 +543,28 @@ class Daemon:
             self._abandoned[job_id] = sentence
         return sentence
 
-    def wait_for_finish(self, job_id: str, timeout_s: float) -> JobResult:
+    def wait_for_finish(
+        self, job_id: str, timeout_s: float, tell: Callable[[str], None] | None = None
+    ) -> JobResult:
         """Block until the job finishes (or times out).
+
+        `tell` is told each Approve that was held, and why, as it happens
+        (mqucifer/print-shop#218).
 
         Returns the JobResult. Raises TimeoutError on timeout; the caller ends the job with
         `abandon`.
         """
         deadline = time.monotonic() + timeout_s
+        told = 0
         while time.monotonic() < deadline:
             with self._job_lock:
-                if self._active_job_id != job_id:
+                held = list(self._held.get(job_id, ()))
+            if tell is not None:
+                for said in held[told:]:
+                    tell(said)
+            told = len(held)
+            with self._job_lock:
+                if self._active_job_id != job_id and told == len(self._held.get(job_id, ())):
                     # Job finished (or failed) — active_job_id was cleared.
                     # Retrieve the result.
                     result = self._results.pop(job_id, None)
@@ -710,36 +743,46 @@ class Daemon:
         self._bridge_publish(gate_topic(self._cfg), gate_msg)
 
         # Publish state with awaiting_approval.
-        self._publish_state(
-            {
-                "status": "awaiting_approval",
-                "job_id": job_id,
-                "orientation_deg": gate_payload.get("orientation_deg"),
-                "print_time_s": gate_payload.get("print_time_s"),
-                "filament_cm3": gate_payload.get("filament_cm3"),
-                "pause": gate_payload.get("pause") or "",
-            }
-        )
+        self._publish_state(self._waiting_state(job_id, gate_payload))
 
         # Signal that we're at a gate, now it's published.
         with self._job_lock:
             self._opened.setdefault(job_id, []).append(dict(self._pending_gate))
             self._at_gate.set()
 
-        # Wait for a command from this gate's inbox.
-        try:
-            cmd = inbox.get(timeout=self._gate_wait_s)
-        except Empty:
-            self._close_gate()
-            self._left_gate()
-            self._bridge_publish(gate_topic(self._cfg), {"pending": False})
-            self._name_buttons()
-            sentence = self.abandon(
-                job_id, f"waiting for Approve or Reject at {Gate.named(gate_payload)}",
-                self._gate_wait_s,
-            )
-            self._finish_job(job_id, approved=False, printed=False, error=sentence)
-            return
+        # Wait for a command from this gate's inbox. An Approve that's held waits for another,
+        # within the same hour (mqucifer/print-shop#218).
+        deadline = time.monotonic() + self._gate_wait_s
+        before_print = gate_payload.get("gate") == Gate.BEFORE_PRINT
+        while True:
+            try:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise Empty
+                cmd = inbox.get(timeout=left)
+            except Empty:
+                self._close_gate()
+                self._left_gate()
+                self._bridge_publish(gate_topic(self._cfg), {"pending": False})
+                self._name_buttons()
+                sentence = self.abandon(
+                    job_id, f"waiting for Approve or Reject at {Gate.named(gate_payload)}",
+                    self._gate_wait_s,
+                )
+                self._finish_job(job_id, approved=False, printed=False, error=sentence)
+                return
+            if cmd.decision is not Decision.APPROVE or not before_print:
+                break
+            why = self._not_yet(thread_config)
+            # This press is spent, and so is any that came while it was checked: none is kept
+            # to start the job later. A Reject among them still stands, whatever the check said.
+            checked, inbox = inbox, self._open_gate()
+            if rejected := _rejection(checked):
+                cmd = rejected
+                break
+            if not why:
+                break
+            self._hold(job_id, gate_payload, why)
 
         approved = cmd.decision is Decision.APPROVE
         note = cmd.note
@@ -777,6 +820,50 @@ class Daemon:
                 printed=False,
                 error=str(exc),
             )
+
+    def _not_yet(self, thread_config: dict[str, Any]) -> str:
+        """Why this Approve mustn't start the job, or "" (mqucifer/print-shop#218).
+
+        Only the stock and the ledger are read, so that the press is judged on them as they
+        are when it's pressed, and a slow printer can't hold up a Reject or stretch the hour.
+        A check that can't be made holds.
+        """
+        try:
+            state = self._graph.get_state(thread_config).values
+            return why_not_start(state, self._ledger)
+        except Exception as exc:  # noqa: BLE001 - never started on a check that wasn't made
+            logger.exception("the spool couldn't be checked before the start")
+            return f"what's loaded couldn't be checked ({exc}): approve again"
+
+    def _hold(self, job_id: str, gate_payload: dict[str, Any], why: str) -> None:
+        """An Approve held: the gate stays open, saying why, on the card and in the terminal."""
+        said = f"Not started: {why}"
+        # What's held says what to load, so the gate's own line, from when it opened, gives way.
+        gate_payload = {**gate_payload, "spools": ""}
+        if self._pending_gate is not None:
+            self._pending_gate = {**self._pending_gate, "held": said}
+        self._bridge_publish(
+            gate_topic(self._cfg),
+            {**gate_payload, "pending": True, "job_id": job_id, "held": said},
+        )
+        self._publish_state(self._waiting_state(job_id, gate_payload, said))
+        with self._job_lock:
+            self._held.setdefault(job_id, []).append(said)
+
+    def _waiting_state(
+        self, job_id: str, gate_payload: dict[str, Any], held: str = ""
+    ) -> dict[str, Any]:
+        return {
+            "status": "awaiting_approval",
+            "job_id": job_id,
+            "orientation_deg": gate_payload.get("orientation_deg"),
+            "print_time_s": gate_payload.get("print_time_s"),
+            "filament_cm3": gate_payload.get("filament_cm3"),
+            "pause": gate_payload.get("pause") or "",
+            "pause_for": gate_payload.get("pause_for") or "",
+            "spools": gate_payload.get("spools") or "",
+            "held": held,
+        }
 
     def _finish_job(
         self,
