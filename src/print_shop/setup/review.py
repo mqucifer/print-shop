@@ -55,7 +55,7 @@ from print_shop.core.state import AppliedOrientation, Orientation, SliceResult
 from print_shop.inventory import Asked, InventoryError, Material
 from print_shop.setup import pauses
 from print_shop.setup.concerns import concern_in, ways
-from print_shop.setup.intake import Estimate
+from print_shop.setup.intake import Estimate, drop_typed
 from print_shop.setup.offer import Item, Offering
 from print_shop.setup.offer import render as render_offer
 from print_shop.setup.proposal import (
@@ -71,7 +71,7 @@ from print_shop.setup.proposal import (
 )
 from print_shop.setup.reach import profile_of, unplaced
 from print_shop.setup.reading import PAUSE_PAST_FIT, Flag, SliceReading
-from print_shop.setup.waiting import can_ask, drop_typed
+from print_shop.setup.waiting import can_ask
 from print_shop.slicer.orca import SlicerProfiles
 
 if TYPE_CHECKING:

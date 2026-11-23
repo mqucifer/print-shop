@@ -252,6 +252,9 @@ class PartFacts:
     lessons: tuple[GivenLesson, ...] = ()
     #: The part's context from its design run or a sidecar (mqucifer/print-shop#130), or None.
     context: PartContext | None = None
+    #: The pose the features are read in, which what's seen is carried to
+    #: (mqucifer/print-shop#248). None: not known.
+    pose: tuple[float, float, float] | None = None
 
     def feature(self, id: str) -> float:
         return next((f.value for f in self.features if f.id == id), 0.0)

@@ -14,7 +14,8 @@ more like learning than me remembering".
   `Offering.standing` for what depends on this review): another filament for a temperature or
   fan, a pause off the part's feature, a feature it rests on that's far from that part's, a
   failed print whose symptom it bears on, a value corrected since. A past intake answer isn't
-  pre-selected, as each job asks again, but on the same bytes where this job didn't ask.
+  pre-selected, as each job asks again, but on the same bytes where this job didn't ask. A job
+  whose questions the notes cut short (mqucifer/print-shop#236) didn't get to ask, so none is.
 - **It's laid out to be read** (`render`): the print and how it came out once, what differs in
   columns, the items grouped by whose they were, and a reason several share said once.
 - **A pause keeps what it was for** (mqucifer/print-shop#218): a swap with the spools that print
@@ -51,11 +52,12 @@ from print_shop.outcome_words import outcome_words
 from print_shop.rounds.lessons import REJECTED, RETIRED
 from print_shop.setup import pauses, similar
 from print_shop.setup.bounds import MATERIAL, check
-from print_shop.setup.context import PartContext, refuses
+from print_shop.setup.context import AS_PRINTED, SET_ASIDE, PartContext, Seen, printed, refuses
 from print_shop.setup.features import Feature
 from print_shop.setup.lessons import material_of
 from print_shop.setup.proposal import ORIENTATION, PAUSE, Change, Proposal, Source, Used, pose_value
 from print_shop.setup.reach import not_sliced, profile_of, unplaced
+from print_shop.setup.reading import seen
 from print_shop.setup.similar import Likeness, Numbers
 from print_shop.setup.traits import TRAITS, traits
 from print_shop.sliced import same_setting
@@ -79,6 +81,13 @@ UNLIKE = 0.6
 SAME_Z = 0.02
 #: Why a past intake answer isn't pre-selected. Its group's heading says it, once.
 ASKED_AGAIN = "you're asked again for each job"
+#: Why one isn't where the notes gave both and the model's questions weren't waited for.
+NOT_ASKED_AGAIN = "this job didn't wait for the questions that could ask it again"
+#: Why a past seam isn't, where only part of the walls is seen here (mqucifer/print-shop#248).
+SEAM_ON_PART = ("part of the walls is seen here, and whether a seam would land on that part can't "
+                "be told")
+#: Why their own is, all the same: nothing is guessed about where it lands.
+SEAM_AS_SET = "you set it on this file, in this pose, with the same faces seen"
 #: The review's width for the offer's lines, wrapped under their own indent.
 WIDTH = 100
 #: A face this near horizontal is flat.
@@ -359,6 +368,11 @@ class ThisPart:
     context: PartContext | None = None
     #: The settings this job's questions could set: what it asked again.
     asked: frozenset[str] = frozenset()
+    #: Its questions weren't waited for, so what they'd have asked again isn't known.
+    unwaited: bool = False
+    #: What's seen as it would print in a pose, carried from the answer or the notes
+    #: (mqucifer/print-shop#248): what "seen" is compared on, in the pose the shape is.
+    seen_in: Callable[[tuple[float, float, float]], Seen | None] | None = None
     #: The person chose this pose for this print: kept as laid, or sent back at this review.
     pose_chosen: str = ""
     #: The spool the job was prepared with and those on hand: what a past swap can start on.
@@ -424,24 +438,69 @@ def offering(ledger: Ledger, part: ThisPart) -> Offering:
 def _against(at: int, row: Row, part: ThisPart) -> _Found:
     then = similar.numbers(row.features or ())
     here = similar.numbers(part.features)
-    shapes = [here]
+    shapes = [(here, part.rotation_deg)]
     if row.rotation_deg != part.rotation_deg:
         there = part.lying(pose_value(row.rotation_deg))
-        shapes += [similar.posed(here, there)] if there is not None else []
+        if there is not None:
+            shapes.append((similar.posed(here, there), row.rotation_deg))
+    was_seen = _seen_then(row)
     context = part.context or PartContext()
     proposal = row.proposal
     each = [
         similar.likeness(
-            shape, then, tuple(context.lines()), proposal.context if proposal else (),
+            shape, then,
+            _compared(tuple(context.lines()), *_both(part, pose, was_seen)),
+            _compared(proposal.context if proposal else (), *_both(part, pose, was_seen)[::-1]),
             (context.path, part.stl_name),
             (proposal.context_from if proposal else "", row.stl_name),
         )
-        for shape in shapes
+        for shape, pose in shapes
     ]
-    best = max(each, key=lambda found: found.shape)
+    best = max(each, key=lambda found: (round(found.shape, 6), found.context))
     return _Found(at=at, row=row, decided=_decided(row),
                   same_file=bool(part.sha256) and row.stl_sha256 == part.sha256,
                   likeness=best, here=here, then=then)
+
+
+def _both(
+    part: ThisPart, pose: tuple[float, float, float], was: Seen | None,
+) -> tuple[Seen | None, Seen | None]:
+    """What's seen here, in that pose, and what was on that print."""
+    return (part.seen_in(pose) if part.seen_in is not None else None), was
+
+
+def _compared(
+    lines: tuple[str, ...], own: Seen | None, other: Seen | None,
+) -> tuple[str, ...]:
+    """A context's lines as they're compared (mqucifer/print-shop#248). Where both prints' faces
+    are known, what's seen is those, as they print and whoever said them, and a face not spoken
+    of is no difference. Where either's aren't, the notes' own lines are compared, as before."""
+    if own is None or other is None:
+        return lines
+    rest = tuple(line for line in lines if not line.startswith("seen: "))
+    alike = "the same" if own.same_as(other) else own.as_printed()
+    return (*rest, f"seen: {alike}")
+
+
+def _seen_then(row: Row) -> Seen | None:
+    """What was seen on that print, as it printed. A row from before has no pose for its answer,
+    which is read in the pose it printed in, and its notes' faces are read from their line."""
+    mine = seen(row.intake, row.rotation_deg)
+    if mine is not None:
+        return mine
+    if row.intake is not None and "seen" in row.intake.set_aside():
+        return None
+    for line in row.proposal.context if row.proposal else ():
+        if not line.startswith("seen: ") or SET_ASIDE in line:
+            continue
+        listed, says, _ = line.removeprefix("seen: ").partition(AS_PRINTED)[0].partition(
+            ", as the part's context says")
+        if says:
+            names = listed.split(", ")
+            noted = Seen(walls="walls" in names, top="top" in names, bottom="bottom" in names,
+                         said=listed, noted=True)
+            return printed(noted, row.rotation_deg)
+    return None
 
 
 def _decided(row: Row) -> dict[str, Change]:
@@ -533,9 +592,10 @@ def _past(ledger: Ledger, f: _Found, found: list[_Found], part: ThisPart) -> Pas
     if intake is not None:
         for q, a in zip(intake.questions, intake.answers, strict=False):
             if a.choice is None:
-                answers.append(f"{q.text} -> {a.other}")
+                answers.append(f"{q.asked()} -> {a.other}")
             elif not q.options[a.choice].settings:
-                answers.append(f"{q.text} -> {q.options[a.choice].label}")
+                confirmed = f" ({q.whose(a)})" if q.confirmed(a) else ""
+                answers.append(f"{q.asked()} -> {q.as_answered(a)}{confirmed}")
     return Past(
         job_id=row.job_id, stl_name=row.stl_name, on=_day(row.start_requested_at),
         came_out=_came_out(row), outcome=_outcome(row), why=why, differs=tuple(differs),
@@ -657,7 +717,9 @@ class _Items:
                 doubts += doubted
         return Item(
             key=key, value=value, preset=preset, reason=" ".join(reason.split()), pause=purpose,
-            fits="" if blocked or doubts else self._fits(key, value),
+            fits=("" if blocked or doubts else
+                  SEAM_AS_SET if key == "seam_position" and self._seam_on_part()
+                  else self._fits(key, value)),
             used=used, doubts=tuple(dict.fromkeys(doubts)),
             blocked=blocked, notes=tuple(notes), reading=change.reading,
             pose="" if key == ORIENTATION else self.turned_to,
@@ -677,6 +739,8 @@ class _Items:
         why = []
         if by is Source.ANSWER and (not f.same_file or key in part.asked):
             why.append(ASKED_AGAIN)
+        elif by is Source.ANSWER and part.unwaited:
+            why.append(NOT_ASKED_AGAIN)
         if not f.related:
             why.append(f"the part is unlike it: its shape is {f.likeness.shape:.0%} alike")
         if key == ORIENTATION:
@@ -722,11 +786,37 @@ class _Items:
             why += self._far(rests)
         # The machine's own limit. The other bounds are the model's, and the person's override
         # of one on the same file isn't in doubt for it.
+        if key == "seam_position" and self._seam_on_part() and not self._seam_as_set(change):
+            why.append(SEAM_ON_PART)
         if key == "layer_height" and (wrong := check(key, value, part.presets)):
             why.append(f"it's past this nozzle's bound: {wrong}")
         if not self.same_part and (refused := refuses(part.context, key, value)):
             why.append(refused)
         return why
+
+    def _seam_on_part(self) -> bool:
+        """Only part of the walls is seen here, so where a seam lands on them can't be told."""
+        faces = self._seen_here()
+        return faces is not None and faces.part_walls
+
+    def _seam_as_set(self, change: Change) -> bool:
+        """The person typed it, on these bytes, in this pose, with the same faces seen, down to
+        which of the walls: where it lands is what they chose it for. Never from several parts'
+        faces read as one plate's: which of the walls can't be known from those."""
+        row, part = self.f.row, self.part
+        by = change.used.by if change.used else change.source
+        if by is not Source.SPONSOR or not self.f.same_file:
+            return False
+        if pose_value(row.rotation_deg) != part.pose:
+            return False
+        here, then = self._seen_here(), _seen_then(row)
+        return (here is not None and then is not None and here.same_as(then)
+                and not here.of_several and not then.of_several
+                and here.wall_sides == then.wall_sides)
+
+    def _seen_here(self) -> Seen | None:
+        part = self.part
+        return part.seen_in(part.rotation_deg) if part.seen_in is not None else None
 
     def _filament(self) -> list[str]:
         row, part = self.f.row, self.part

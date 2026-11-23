@@ -230,13 +230,135 @@ def test_a_bolt_s_hole_is_the_round_hole_its_place_is_on() -> None:
     assert (hole["radius"], hole["low"], hole["high"]) == (2.75, 0, 8)
     assert "no round hole" in through.bore(faces, [20.2, 20, 8])
     assert "no round hole" in through.bore(faces[2:], [20, 20, 8])
-    half = [cylinder(2.75, 0, 8, turns=np.pi)]
-    assert "doesn't go all the way round" in through.bore(half, [20, 20, 8])
-    # Two halves of one hole are one hole.
-    assert isinstance(through.bore(half * 2, [20, 20, 8]), dict)
+    half, other = (arc(turn, np.pi, 0, 8) for turn in (0.0, np.pi))
+    assert "doesn't go all the way round" in through.bore([half], [20, 20, 8])
+    # Two halves of one hole are one hole, and the same half twice isn't.
+    assert isinstance(through.bore([half, other], [20, 20, 8]), dict)
+    assert "doesn't go all the way round" in through.bore([half, half], [20, 20, 8])
     crossed = [*faces, {**cylinder(2.75, 0, 40), "axis": np.array([1.0, 0, 0]),
                         "origin": np.array([0.0, 20, 8])}]  # fmt: skip
     assert "more than one axis" in through.bore(crossed, [20, 20, 8])
+
+
+def arc(middle: float, turns: float, low: float, high: float) -> dict:  # type: ignore[type-arg]
+    """Part of a round hole's face about the axis through (20, 20), its middle `middle` round."""
+    out = np.array([math.cos(middle), math.sin(middle), 0.0])
+    return cylinder(2.75, low, high, turns=turns, middle=out)
+
+
+def peaked(rises: float, low: float = 0.0, high: float = 8.0, short: float = 1.0) -> tuple:  # type: ignore[type-arg]
+    """A peaked bore's faces as rows, its point toward +y: the round face, and the two flats
+    tangent to it, each `short` of the way to the point."""
+    half, middle = math.radians(rises), math.pi / 2
+    round_ = arc(middle + math.pi, 2 * (math.pi - half), low, high)
+    flanks = []
+    point = np.array([20.0, 20 + 2.75 / math.cos(half), 0.0])
+    for sign in (-1, 1):
+        out = np.array([sign * math.sin(half), math.cos(half), 0.0])
+        near = np.array([20.0, 20, 0]) + 2.75 * out
+        far = near + short * (point - near)
+        corners = [near + low * Z, far + low * Z, far + high * Z, near + high * Z]
+        outline = np.array([[corners[k], corners[(k + 1) % 4]] for k in range(4)])
+        flanks.append({"normal": -out, "at": near, "outline": outline})
+    return [round_], flanks
+
+
+def test_a_peaked_bore_is_one_round_face_and_two_flats_tangent_to_it_up_to_a_point() -> None:
+    """mqucifer/print-shop#237: 5.5 mm, its flats rising at 47°, so its point is
+    2.75 / cos 47° = 4.032 mm from the axis. 45° is a peak and 44.99 is flatter. A slot's end,
+    half a groove, a D, flats short of the point, flats that don't reach along the whole
+    stretch, and no flats at all aren't one."""
+    round_, flanks = peaked(47)
+    found = through.bore(round_, [20, 20, 8], flanks)
+    assert isinstance(found, dict) and found["radius"] == 2.75
+    peak = found["peak"]
+    assert peak["toward"] == pytest.approx([0, 1, 0], abs=1e-9)
+    assert peak["rises_deg"] == pytest.approx(47)
+    assert peak["point_mm"] == pytest.approx(2.75 / math.cos(math.radians(47)))
+    assert "peaked, 5.500 mm across" in through.peak_said(found)
+    assert through.bore([cylinder(2.75, 0, 8)], [20, 20, 8])["peak"] is None  # type: ignore[index]
+    # The round face split in two, or read the other way along the axis, is the same bore.
+    middle, turns = -math.pi / 2, round_[0]["turns"]
+    split = [arc(middle + s * turns / 4, turns / 2, 0, 8) for s in (-1, 1)]
+    assert isinstance(through.bore(split, [20, 20, 8], flanks), dict)
+    over = [{**round_[0], "axis": -Z, "low": -8, "high": 0}]
+    assert isinstance(through.bore(over, [20, 20, 8], flanks), dict)
+
+    def refused(cylinders: list, planes: list) -> str:  # type: ignore[type-arg]
+        why = through.bore(cylinders, [20, 20, 8], planes)
+        assert isinstance(why, str), why
+        assert "doesn't go all the way round" in why
+        return why
+
+    assert isinstance(through.bore(*_at(peaked(45))), dict)
+    assert "flatter than 45°" in refused(*peaked(44.99))
+    assert "slot's end" in refused([arc(-math.pi / 2, math.pi, 0, 8)], flanks)
+    assert "no flat face tangent" in refused(round_, [])
+    assert "no flat face tangent" in refused(round_, flanks[:1])
+    nearer = [{**f, "at": f["at"] + 0.01 * f["normal"]} for f in flanks]
+    assert "no flat face tangent" in refused(round_, nearer)
+    assert "don't rise to a point" in refused(round_, peaked(47, short=0.98)[1])
+    assert "don't rise to a point" in refused(round_, peaked(47, high=7.9)[1])
+    # A hole through one flank, 1 mm square, is a gap in it.
+    flank = flanks[0]
+    up = flank["outline"][0][1] - flank["outline"][0][0]
+    a, b = flank["at"] + 0.3 * up, flank["at"] + 0.6 * up
+    square = [a + 3 * Z, b + 3 * Z, b + 4 * Z, a + 4 * Z]
+    holed = np.concatenate([flank["outline"], [[square[k], square[(k + 1) % 4]] for k in range(4)]])
+    assert "don't rise" in refused(round_, [{**flank, "outline": holed}, flanks[1]])
+    # A flank that runs on past the stretch, into a pocket over it, still covers the stretch.
+    assert isinstance(through.bore(round_, [20, 20, 8], peaked(47, high=9)[1]), dict)
+
+
+def _at(rows: tuple) -> tuple:  # type: ignore[type-arg]
+    return rows[0], [20, 20, 8], rows[1]
+
+
+def test_arcs_apart_along_the_axis_never_add_up_to_a_hole() -> None:
+    """mqucifer/print-shop#237: two arcs of 260° from z 0 to 8 and 12 to 20 summed to 520° and
+    were a round hole. So were opposite halves one after the other. A bore's round is read at
+    each level of the one stretch the bolt's place is at."""
+    middle, turns = -math.pi / 2, math.radians(260)
+    two = [arc(middle, turns, 0, 8), arc(middle, turns, 12, 20)]
+    assert "slot's end" in through.bore(two, [20, 20, 8])
+    stacked = [arc(0, np.pi, 0, 4), arc(np.pi, np.pi, 4, 8)]
+    assert "slot's end" in through.bore(stacked, [20, 20, 8])
+    part_way = [cylinder(2.75, 0, 4), arc(middle, turns, 4, 8)]
+    assert "slot's end" in through.bore(part_way, [20, 20, 8])
+    # A peaked bore cut in two by a slot is one in each stretch, as long as that stretch.
+    below, flanks = peaked(47)
+    above, more = peaked(47, 12, 20)
+    found = through.bore(below + above, [20, 20, 8], flanks + more)
+    assert isinstance(found, dict) and found["peak"] is not None
+    assert (found["low"], found["high"]) == (0, 8)
+
+
+def test_a_peak_takes_from_the_ring_and_from_what_a_shank_leans_on_by_arithmetic() -> None:
+    """The ring less the peak's cut, against a count of points on a fine grid; and the bearing
+    left for a shank, against the cosine summed round the half it leans on."""
+    half = math.radians(47)
+    hole = through.bore(*_at(peaked(47)))
+    assert isinstance(hole, dict)
+    step = 0.005
+    x, y = np.meshgrid(*[np.arange(-5, 5, step) + step / 2] * 2)
+    off = np.hypot(x, y)
+    for inner, outer in ((2.75, 5.0), (2.75, 3.45), (3.0, 3.45)):
+        # Open: within both flanks' planes and above where they leave the round.
+        in_peak = y >= 2.75 * math.cos(half)
+        for sign in (-1, 1):
+            in_peak &= sign * math.sin(half) * x + math.cos(half) * y <= 2.75
+        cut = float(((off >= inner) & (off <= outer) & in_peak).sum()) * step * step
+        assert through.peak_cut(hole, inner, outer) == pytest.approx(cut, abs=0.01)
+    assert through.peak_cut({**hole, "peak": None}, 2.75, 5.0) == 0.0
+
+    round_ = np.linspace(-math.pi, math.pi, 200_001)
+    for lean in (0, 30, 90, 136, 138, 180):
+        toward = np.array([math.sin(math.radians(lean)), math.cos(math.radians(lean)), 0.0])
+        square = np.clip(np.cos(round_ - math.radians(lean)), 0, None)
+        left = square[np.abs(round_) >= half].sum() / square.sum()
+        assert through.lean_share(hole, toward) == pytest.approx(left, abs=1e-3), lean
+    assert through.lean_share(hole, np.array([0, 1.0, 0])) == pytest.approx(1 - math.sin(half))
+    assert through.lean_share({**hole, "peak": None}, Z) == 1.0
 
 
 def test_two_holes_are_one_way_through_where_they_meet_end_to_end() -> None:

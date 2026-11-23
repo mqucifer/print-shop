@@ -68,7 +68,7 @@ from print_shop.orchestrator.fitness import scoring_profiles
 from print_shop.printer.centauri import PreflightFailed, PrinterClient, preflight
 from print_shop.setup import Proposer, pauses
 from print_shop.setup import lessons as print_lessons
-from print_shop.setup.context import PartContext, place, pose_for, read_context
+from print_shop.setup.context import PartContext, place, pose_for, printed, read_context
 from print_shop.setup.doubts import Doubting
 from print_shop.setup.features import Feature, measure, resting_on
 from print_shop.setup.intake import Asker, Estimate, Intake, Question
@@ -89,8 +89,8 @@ from print_shop.setup.proposal import (
     reached,
     read_back,
 )
-from print_shop.setup.questions import estimate
-from print_shop.setup.reading import SliceReading, flags, read_slice, seen
+from print_shop.setup.questions import PURPOSE, SEEN, STOCK, estimate, stock
+from print_shop.setup.reading import SliceReading, carried, flags, read_slice, seen, seen_said
 from print_shop.setup.review import Reviewer, ReviewRequest
 from print_shop.setup.skill import groups_for, load
 from print_shop.setup.traits import traits
@@ -385,16 +385,20 @@ def build_graph(
             def priced(settings: dict[str, str], n: int) -> Estimate | None:
                 return _estimate(slicer, first, profiles, settings, outdir / "options" / str(n))
 
+            context = state.get("part_context")
+            # What the notes say is read back in the pose the questions are asked in, and the
+            # model asks only what they leave open (mqucifer/print-shop#236).
+            two = stock(context, rotation_deg)
             if waiting is not None and proposer.asks_model:
                 measured = features
                 intake = ask_meanwhile(
-                    lambda stop: proposer.questions(measured, profiles, stop),
-                    asker, waiting, lambda questions: _priced(questions, priced),
+                    lambda stop: proposer.questions(measured, profiles, stop, context),
+                    asker, waiting, lambda questions: _priced(questions, priced), two,
                 )
             else:
-                intake = _ask(proposer.questions(features, profiles), asker, priced)
+                intake = _ask(proposer.questions(features, profiles, context=context), asker,
+                              priced, two)
             proposed["intake"] = intake
-            context = state.get("part_context")
             earlier: list[Change] = []
             looped: Proposal | None = None
             fell_back: dict[str, Any] = {}
@@ -457,7 +461,7 @@ def build_graph(
                     features = featured()
                     reply = found_by.reply
                     made = dataclasses.replace(proposer, ask=lambda *_: reply, llm=None)(
-                        intake, features, profiles, context)
+                        intake, features, profiles, context, rotation_deg)
                     looked = set(found_by.looked_up)
                     looped = made.model_copy(update={
                         **record, "model": f"loop:{loop.model}",
@@ -480,7 +484,7 @@ def build_graph(
                 if looped is not None:
                     proposal, looped = looped, None
                 else:
-                    proposal = proposer(intake, features, profiles, context)
+                    proposal = proposer(intake, features, profiles, context, rotation_deg)
                     if fell_back:
                         proposal = proposal.model_copy(update={
                             "loop": fell_back["loop"], "loop_ending": fell_back["loop_ending"],
@@ -1148,10 +1152,22 @@ def _as_laid(request: OrientationRequest) -> Outcome[Orientation]:
 
 
 def _ask(
-    asked: Any, asker: Asker, slice_with: Any
+    asked: Any, asker: Asker, slice_with: Any, two: tuple[Question, Question] = STOCK,
 ) -> Intake:
-    """The questions with Orca's estimate for each option, asked, with the answers."""
-    questions = _priced(asked.questions, slice_with)
+    """The questions with Orca's estimate for each option, asked, with the answers. print-shop's
+    two are as the part's notes leave them (`questions.stock`, mqucifer/print-shop#236)."""
+    purpose, seen_faces = two
+    questions: tuple[Question, ...] = tuple(
+        purpose if q == PURPOSE
+        else seen_faces if q == SEEN
+        # The model's own purpose question has the notes' words beside it as well.
+        else q.model_copy(update={"beside": purpose.beside}) if q.feature == "purpose"
+        else q
+        for q in asked.questions
+    )
+    if not questions and any(q.beside or q.noted is not None for q in two):
+        questions = two
+    questions = _priced(questions, slice_with)
     return Intake(questions=questions, answers=asker(questions), note=asked.note,
                   call=asked.call)
 
@@ -1235,7 +1251,8 @@ def _offering(
             measured=lying, build_volume_mm=build_volume,
             context=state.get("part_context"), pose_chosen=chosen,
             material=_material_of(profiles), on_hand=on_hand() if on_hand else (),
-            asked=intake.could_set(),
+            asked=intake.could_set(), unwaited=intake.unwaited,
+            seen_in=lambda pose: carried(intake, state.get("part_context"), pose),
         ))
     except Exception as exc:  # noqa: BLE001 - a print is never stopped by what it might reuse
         logger.warning("the past prints couldn't be read for the offer: %s", exc)
@@ -1342,13 +1359,29 @@ def _propose_and_review(
         for p in (profiles.machine, profiles.process, profiles.filament)
     )
     process, filament = _presets(profiles)
-    faces = seen(intake)
+    faces = seen(intake, orientation.rotation_deg)
     corrections: list[Change] = list(earlier or ())
     # The part's context in this pose (mqucifer/print-shop#130): its fits as heights, for the
     # reading's seam rule and elephant foot, and what the review says was read.
     placed = (place(context, stl, orientation.rotation_deg)
               if context is not None and context.found and stl is not None else None)
-    said = tuple([*(context.lines() if context is not None else ()),
+    instead = intake.set_aside() if intake is not None else {}
+    if placed is not None:
+        # One reading with every other reader's: the notes' faces only where no answer stands in
+        # their place, as words do, naming no face (mqucifer/print-shop#236,
+        # mqucifer/print-shop#248).
+        placed = placed.model_copy(update={
+            "seen": carried(intake, context, orientation.rotation_deg)})
+    prints = ""
+    if context is not None and context.seen is not None and any(orientation.rotation_deg):
+        turned_to = printed(context.seen, orientation.rotation_deg)
+        prints = turned_to.as_printed() if turned_to is not None else "not judged"
+    # The faces as they print now and, after a turn, what they were called when answered
+    # (mqucifer/print-shop#248). A note, so the review, the desk and the record all have it.
+    seen_now = seen_said(intake, context, orientation.rotation_deg)
+    if seen_now:
+        proposal = proposal.model_copy(update={"notes": (seen_now, *proposal.notes)})
+    said = tuple([*(context.lines(instead, prints) if context is not None else ()),
                   *(placed.lines() if placed is not None else ())])
     proposal = proposal.model_copy(update={
         "context": said, "context_from": context.path if context is not None else ""})

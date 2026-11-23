@@ -16,7 +16,8 @@ and re-copy those". Three things, each copied from the page and never run by it:
   print was planned with. One of them that can't be named now (used up, or the first's tuning
   edited) is left to be asked (`from ?`), so the line still reads back;
 - **the answers file** for `--answers` (`intake.replay_asker`): each question by its text, each
-  answer by its option's label or the words given.
+  answer by its option's label or the words given, and what was confirmed from the part's notes
+  by what they gave (mqucifer/print-shop#236), which replays only while they still say it.
 
 What these can't carry is said beside them, never dropped silently: a pose sent back at the
 review is chosen at the review again (`orientation`), and a change taken from the slice's
@@ -43,7 +44,8 @@ from print_shop.inventory import Material, Spool
 from print_shop.ledger import Row
 from print_shop.orchestrator.graph import AS_LAID
 from print_shop.setup import pauses
-from print_shop.setup.proposal import ORIENTATION, PAUSE, Change, Source
+from print_shop.setup.intake import Answer, Question
+from print_shop.setup.proposal import ORIENTATION, PAUSE, Change, Source, pose_value
 
 __all__ = ["DOWNLOADS", "Again", "again", "answers_file", "correction_line"]
 
@@ -75,11 +77,24 @@ def answers_file(row: Row) -> dict[str, Any] | None:
         return None
     answers: list[dict[str, Any]] = []
     for q, a in zip(intake.questions, intake.answers, strict=True):
-        if a.choice is not None:
-            answers.append({"question": q.text, "choice": q.options[a.choice].label})
+        if q.confirmed(a):
+            answers.append({"question": q.text, "notes": q.noted_as})
+        elif a.choice is not None:
+            answers.append({"question": q.text, "choice": q.options[a.choice].label,
+                            # Faces are named in a pose: in another it's refused, never carried
+                            # by eye (mqucifer/print-shop#248).
+                            **_given_in(row, q, a)})
         else:
             answers.append({"question": q.text, "other": a.other})
     return {"answers": answers}
+
+
+def _given_in(row: Row, question: Question, answer: Answer) -> dict[str, str]:
+    """The pose an answer about faces was given in, which a replay carries it from. A row from
+    before poses were kept is read in the pose it printed in (mqucifer/print-shop#248)."""
+    if question.feature != "seen" or question.confirmed(answer):
+        return {}
+    return {"pose": pose_value(question.answered_in(answer) or row.rotation_deg)}
 
 
 def _used_as_anothers(change: Change) -> bool:
@@ -205,6 +220,12 @@ def again(
         if not Path(context).exists():
             notes.append(f"Its context, {context}, is gone: without it the part prints with no "
                          "fits, side or holds known. Give it again, or leave --context out.")
+            if row.intake is not None and any(
+                q.confirmed(a) for q, a in zip(row.intake.questions, row.intake.answers,
+                                               strict=False)
+            ):
+                notes.append("Its answers file confirms what those notes gave, so it's refused "
+                             "without them: answer the questions as they're asked instead.")
     answers = answers_file(row)
     name = f"answers-{row.job_id[:8]}.json"
     command = "uv run python scripts/print_job.py " + shlex.join(args)

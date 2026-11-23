@@ -23,10 +23,11 @@ several tunings of one are listed to choose from. `--machine` and
 **The part is oriented by the orientation model,** or, with `--as-laid`, kept as the file
 lays it: for a part already laid for printing, no model is asked (mqucifer/print-shop#128).
 
-**The part's context goes with it** (mqucifer/print-shop#130): its fits, seen faces, the side
-it's laid on and its holds, from a sidecar beside it (`PART.part.json`), or from the design run
-whose folder it sits in. `--context` names a sidecar or a run's folder elsewhere. The slice's
-seam and elephant foot read its fits, and the review says what was read, or that there was none.
+**The part's context goes with it** (mqucifer/print-shop#130): its fits, seen faces, purpose,
+the side it's laid on and its holds, from a sidecar beside it (`PART.part.json`), or from the
+design run whose folder it sits in. `--context` names a sidecar or a run's folder elsewhere. The
+slice's seam and elephant foot read its fits, and the review says what was read, or that there
+was none.
 A sidecar's shape is in `docs/runbook-first-print.md`.
 
 **Then a few questions about the part,** once it's oriented: each with numbered options, what
@@ -34,7 +35,9 @@ each would cost (Orca's estimate) and one recommended. Answer by number, or `o` 
 words. What it's for and what's seen show at once, and need no model (mqucifer/print-shop#208).
 The model's questions, from the part's shape, are added when they arrive. While you wait for
 them the time shows, and `go` goes on without them. If the model has closer choices on what
-it's for, Enter keeps the answer you gave. `--answers file.json` replays
+it's for, Enter keeps the answer you gave. What the part's notes say of those two is read
+back instead of asked (mqucifer/print-shop#236): Enter confirms it, a number changes one, and
+with both in the notes nothing waits for the model's questions. `--answers file.json` replays
 recorded answers, each naming its question by its text or its feature; a
 file that doesn't answer exactly the questions asked is refused, and the job
 ends saying which. The settings are then proposed and shown here for review:
@@ -132,9 +135,9 @@ from print_shop.runtime import (
     recording_path,
 )
 from print_shop.setup.context import read_context
-from print_shop.setup.intake import Asker, cli_asker, replay_asker
+from print_shop.setup.intake import Asker, cli_asker, drop_typed, replay_asker
 from print_shop.setup.review import cli_reviewer
-from print_shop.setup.waiting import Prompted, Waiting, can_ask, cli_waiting, drop_typed
+from print_shop.setup.waiting import Prompted, Waiting, can_ask, cli_waiting
 from print_shop.slicer.orca import SlicerProfiles
 from print_shop.slicer.store import STORE_DIR, NoChoice, Store, choose
 from print_shop.slicer.store import describe as describe_store

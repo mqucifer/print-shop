@@ -43,7 +43,8 @@ from print_shop.env import SETTINGS_PATH
 from print_shop.inventory import Inventory, InventoryError, SpoolState
 from print_shop.ledger import ledger_path
 from print_shop.orchestrator.spools import ask_over
-from print_shop.setup.waiting import can_ask, drop_typed
+from print_shop.setup.intake import drop_typed
+from print_shop.setup.waiting import can_ask
 from print_shop.slicer.store import STORE_DIR, Store, StoredProfile
 
 

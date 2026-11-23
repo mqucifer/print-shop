@@ -32,6 +32,7 @@ from print_shop.setup import Proposer, lessons, pauses
 from print_shop.setup.intake import Asker
 from print_shop.setup.loop import PrintLoop, cli_person, llm_chat
 from print_shop.setup.model import setup_llm
+from print_shop.setup.reading import NOW_PRINTS, PRINTS, TURNED_SINCE
 from print_shop.setup.review import Reviewer
 from print_shop.setup.waiting import Waiting
 from print_shop.slicer.orca import BedType, SlicerProfiles, with_bed_type
@@ -280,6 +281,9 @@ def _setup_lines(row: Row) -> list[str]:
     lines = [f"intake         {row.intake.summary()}"]
     if row.intake.note:
         lines.append(f"               ({row.intake.note})")
+    for note in row.proposal.notes if row.proposal else ():
+        if note.startswith((PRINTS, NOW_PRINTS, TURNED_SINCE)):
+            lines.append(f"               {note}")  # the faces as they printed
     changes = row.proposal.changes if row.proposal else ()
     for c in changes:
         lines.append(f"  {c.key}: {c.preset or '-'} -> {c.value} ({c.source.value}) "

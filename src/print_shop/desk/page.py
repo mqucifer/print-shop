@@ -317,15 +317,24 @@ def _questions(row: Row) -> str:
         parts.append(f"<p class=\"muted\">{escape(intake.note or intake.summary())}</p>")
     for n, q in enumerate(intake.questions):
         answer = intake.answers[n] if n < len(intake.answers) else None
-        parts.append(f"<h3>{n + 1}. {escape(q.text)}</h3><ul>")
+        parts.append(f"<h3>{n + 1}. {escape(q.asked())}</h3>")
+        said = q.notes_say() if q.noted is not None else q.beside
+        if said:
+            parts.append(f"<p class=\"muted\">The notes say: {escape(said)}</p>")
+        parts.append("<ul>")
         for i, o in enumerate(q.options):
             mine = answer is not None and answer.choice == i
-            mark = " ← your answer" if mine else ""
+            mark = " ← the notes" if i == q.noted else ""
+            if answer is not None and mine:
+                mark = f" ← {q.whose(answer) or 'your answer'}"
+                if answer.given_in is not None:
+                    mark += f", {q.as_answered(answer)}"
             cls = ' class="chosen"' if mine else ""
-            parts.append(f"<li{cls}>{escape(o.line())}{escape(mark)}</li>")
+            parts.append(f"<li{cls}>{escape(q.then(o.line()))}{escape(mark)}</li>")
         parts.append("</ul>")
         if answer is not None and answer.choice is None:
-            parts.append(f"<p class=\"chosen\">Your own words: {escape(answer.other)}</p>")
+            whose = f" ({q.whose(answer)})" if q.whose(answer) else ""
+            parts.append(f"<p class=\"chosen\">Your own words: {escape(answer.other + whose)}</p>")
     if intake.note and intake.questions:
         parts.append(f"<p class=\"muted\">{escape(intake.note)}</p>")
     parts.append("</section>")
