@@ -16,10 +16,10 @@ A few questions about this part:
    1) a test print (your presets): ; sets nothing itself; the review shows Orca's estimate  [recommended: it's a cube]
    2) a gift (3 walls): sturdier faces; Orca: 16 min, 3.34 cm3
    o) other: say it in your own words
-2. Which faces of this part will be seen once it's in use?
-   1) the walls and the top as it prints (your presets): the review keeps ironing for the top and points out a seam on the walls; sets nothing itself; the review shows Orca's estimate  [recommended: when it can't be said, judging every face as seen costs a little time, while a hidden flaw on a face that shows costs the print]
-   2) the walls; the top as it prints is hidden (your presets): the review points out ironing on the hidden top, and a seam on the walls; sets nothing itself; the review shows Orca's estimate
-   3) the top as it prints; the walls are hidden (your presets): the review keeps ironing for the top and lets the seam be; sets nothing itself; the review shows Orca's estimate
+2. Which faces of this part will be seen once it's in use, as the file lays it?
+   1) the walls and the top as it lies now (your presets): the review keeps ironing for the top and points out a seam on the walls; sets nothing itself; the review shows Orca's estimate  [recommended: when it can't be said, judging every face as seen costs a little time, while a hidden flaw on a face that shows costs the print]
+   2) the walls; the top as it lies now is hidden (your presets): the review points out ironing on the hidden top, and a seam on the walls; sets nothing itself; the review shows Orca's estimate
+   3) the top as it lies now; the walls are hidden (your presets): the review keeps ironing for the top and lets the seam be; sets nothing itself; the review shows Orca's estimate
    4) only the face on the plate (your presets): the review points out any ironing, which smooths only faces that end up hidden; sets nothing itself; the review shows Orca's estimate
    o) other: say it in your own words
 Settings for this print, over your presets:
@@ -33,6 +33,7 @@ How the part was read:
   setting     your preset -> this print
   wall_loops  2 -> 5
                 flat faces show the infill [model: flat_top, walls-shells]
+  note: Seen as it prints: the walls and the top
 
 Orca's estimate: 16 min 49 s, 3.34 cm3, 100 layers
 Orientation: (0.0, 0.0, 0.0), No model was configured for this job; fell back to geometric selection. Chose rotation (0.0, 0.0, 0.0) with the lowest overhang (0.0 mm2) and highest bed contact (400.0 mm2) among the scored candidates.
@@ -67,7 +68,7 @@ Proposed from the slice (not applied unless you take it):
 
 USE THESE: no past print has settings to offer.
 
-Type ok to go on to the approval gate, or take what the slice proposes (take, or take 1), send the orientation back (orientation), or correct a setting by name, e.g. wall_loops=3 because it's decorative (several separated by ';'), pause_at=12.4 because white to black (it pauses once the layer topping out at 12.4 mm is done), or stop.
+Type ok to go on to the approval gate, or take what the slice proposes (take, or take 1), send the orientation back (orientation), or correct a setting by name, e.g. wall_loops=3 because it's decorative (several separated by ';'), pause_at=12.4 because the nuts go in (it pauses once the layer topping out at 12.4 mm is done, and it asks what the pause is for), colour_change=12.4 because white to black (a swap), or stop.
 At the approval gate. Approve or Reject on the dashboard.
   time        16 min
   plastic     3.34 cm3
@@ -82,8 +83,9 @@ orientation    (0.0, 0.0, 0.0) by geometric
 g-code         ECC_0.4_cube_PLA0.2_16m_<job>.gcode  ~16 min, 3.34 cm3, 100 layers
 profiles       Elegoo Centauri Carbon 0.4 nozzle / 0.20mm Standard @Elegoo CC 0.4 nozzle / Elegoo PLA @ECC
 store          - (sliced before print-shop kept its own profiles)
-intake         What is the cube for? a test print; Which faces of this part will be seen once it's in use? the walls and the top as it prints
+intake         What is the cube for? a test print; Which faces of this part will be seen once it's in use, as the file lays it? the walls and the top as it lay when asked
                (what's seen asked by print-shop)
+               Seen as it prints: the walls and the top
   wall_loops: 2 -> 5 (model) flat faces show the infill
 slice read     layers: 100, 8.6 s to 36.9 s each, 8.9 s typical; the shortest is layer 4 at z 0.8 mm
                Sparse infill: 7 min 50 s, 8152 mm2 on 93 layers, z 0.8 to 19.2 mm
@@ -104,14 +106,14 @@ ended          <time>  (printer: completed)
 outcome        success
 frames         No camera frame was kept for this print: nothing was asked of the camera.
 == the gate
-{"gate": "gate.before_print", "job_id": "<job>", "gcode_path": "<tmp>/jobs/<job>/ECC_0.4_cube_PLA0.2_16m_<job>.gcode", "print_time_s": 1009, "filament_cm3": 3.34, "layer_count": 100, "max_z_mm": 20.0, "orientation_deg": [0.0, 0.0, 0.0], "orientation_rationale": "No model was configured for this job; fell back to geometric selection. Chose rotation (0.0, 0.0, 0.0) with the lowest overhang (0.0 mm2) and highest bed contact (400.0 mm2) among the scored candidates.", "pause": "", "pending": true}
+{"gate": "gate.before_print", "job_id": "<job>", "gcode_path": "<tmp>/jobs/<job>/ECC_0.4_cube_PLA0.2_16m_<job>.gcode", "print_time_s": 1009, "filament_cm3": 3.34, "layer_count": 100, "max_z_mm": 20.0, "orientation_deg": [0.0, 0.0, 0.0], "orientation_rationale": "No model was configured for this job; fell back to geometric selection. Chose rotation (0.0, 0.0, 0.0) with the lowest overhang (0.0 mm2) and highest bed contact (400.0 mm2) among the scored candidates.", "pause": "", "pause_for": "", "spools": "", "pending": true}
 == the states
 {"status": "idle", "orientation_deg": null, "print_time_s": null, "filament_cm3": null}
 {"status": "analyzing", "orientation_deg": null, "print_time_s": null, "filament_cm3": null, "job_id": "<job>"}
-{"status": "awaiting_approval", "orientation_deg": [0.0, 0.0, 0.0], "print_time_s": 1009, "filament_cm3": 3.34, "job_id": "<job>", "pause": ""}
+{"status": "awaiting_approval", "orientation_deg": [0.0, 0.0, 0.0], "print_time_s": 1009, "filament_cm3": 3.34, "job_id": "<job>", "pause": "", "pause_for": "", "spools": "", "held": ""}
 {"status": "done", "orientation_deg": null, "print_time_s": null, "filament_cm3": null, "job_id": "<job>"}
 == the outcome's card
-{"pending": true, "waiting": 1, "job_id": "<job>", "stl_name": "cube.stl", "gcode_name": "ECC_0.4_cube_PLA0.2_16m_<job>.gcode", "started_at": "<time>", "ended_at": "<time>", "printer_end": "completed", "swap": "", "result": "unset", "symptom": "unset", "note": "", "error": null, "frames": 0, "frame": 0, "frame_at": "", "frames_why": "No camera frame was kept for this print: nothing was asked of the camera."}
+{"pending": true, "waiting": 1, "job_id": "<job>", "stl_name": "cube.stl", "gcode_name": "ECC_0.4_cube_PLA0.2_16m_<job>.gcode", "started_at": "<time>", "ended_at": "<time>", "printer_end": "completed", "pause": "", "pause_for": "", "spools": "", "spool": "as recorded", "spool_choices": 0, "result": "unset", "symptom": "unset", "note": "", "error": null, "frames": 0, "frame": 0, "frame_at": "", "frames_why": "No camera frame was kept for this print: nothing was asked of the camera."}
 == the ledger
 [prints]
   job_id = <job>
@@ -132,8 +134,8 @@ frames         No camera frame was kept for this print: nothing was asked of the
   printer_firmware = V1.1.46
   filament = Elegoo PLA @ECC
   profiles = None
-  intake = {"questions":[{"feature":"purpose","text":"What is the cube for?","options":[{"label":"a test print","settings":{},"impact":"","recommended":true,"why":"it's a cube","estimate":null},{"label":"a gift","settings":{"wall_loops":"3"},"impact":"sturdier faces","recommended":false,"why":"","estimate":{"print_time_s":1009,"filament_g":null,"filament_cm3":3.34}}]},{"feature":"seen","text":"Which faces of this part will be seen once it's in use?","options":[{"label":"the walls and the top as it prints","settings":{},"impact":"the review keeps ironing for the top and points out a seam on the walls","recommended":true,"why":"when it can't be said, judging every face as seen costs a little time, while a hidden flaw on a face that shows costs the print","estimate":null},{"label":"the walls; the top as it prints is hidden","settings":{},"impact":"the review points out ironing on the hidden top, and a seam on the walls","recommended":false,"why":"","estimate":null},{"label":"the top as it prints; the walls are hidden","settings":{},"impact":"the review keeps ironing for the top and lets the seam be","recommended":false,"why":"","estimate":null},{"label":"only the face on the plate","settings":{},"impact":"the review points out any ironing, which smooths only faces that end up hidden","recommended":false,"why":"","estimate":null}]}],"answers":[{"choice":0,"other":""},{"choice":0,"other":""}],"note":"what's seen asked by print-shop","call":{},"offered":[],"without":""}
-  proposal = {"changes":[{"key":"wall_loops","preset":"2","standard":"","value":"5","reason":"flat faces show the infill","source":"model","feature":"flat_top","knowledge":"walls-shells","lesson":null,"reading":"","not_applied":"","used":null}],"not_applied":[],"kept":[],"reasoning":"a cube for show","design_notes":[],"notes":[],"refused":[],"model":"recorded","call":{},"skill_groups":["walls-shells","infill","surface"],"skill_sha256":"d7f085062665bb9e63c2ca2c76128117e39f66ab51093d615ac16fdb08e7017f","lessons":[],"loop":[],"loop_ending":"","context":["none: no design run above the file and no sidecar beside it, so it's read as before"],"context_from":""}
+  intake = <1731 characters, sha256 3ab890c73233f42e25b244eaed1e6b722d2ac3af06b6255d9ccad3e96227bb20>
+  proposal = {"changes":[{"key":"wall_loops","preset":"2","standard":"","value":"5","reason":"flat faces show the infill","source":"model","feature":"flat_top","knowledge":"walls-shells","lesson":null,"reading":"","not_applied":"","used":null,"pause":null}],"not_applied":[],"kept":[],"reasoning":"a cube for show","design_notes":[],"notes":["Seen as it prints: the walls and the top"],"refused":[],"model":"recorded","call":{},"skill_groups":["walls-shells","infill","surface"],"skill_sha256":"d7f085062665bb9e63c2ca2c76128117e39f66ab51093d615ac16fdb08e7017f","lessons":[],"loop":[],"loop_ending":"","context":["none: no design run above the file and no sidecar beside it, so it's read as before"],"context_from":""}
   corrections = []
   start_requested_at = <time>
   started_at = <time>
@@ -148,7 +150,7 @@ frames         No camera frame was kept for this print: nothing was asked of the
 [slice_readings]
   job_id = <job>
   reading = <4356 characters, sha256 7a3ad37cc3674e0bb9dffe5f8b62b9bad729c63047f8c1a797a86599914495c1>
-  flags = [{"id": "seam_seen", "reading": "99% of 100 wall loops start on the one below: the seam is a line up the wall at x 138 y 138, over 100 layers", "change": {"key": "seam_position", "preset": "", "standard": "", "value": "back", "reason": "you said 'the walls and the top as it prints', so the walls are seen, and the seam is a line on them: back puts the line on the part's back as it sits on the plate (its largest y); random would scatter it instead", "source": "reading", "feature": "seen", "knowledge": "surface", "lesson": null, "reading": "99% of 100 wall loops start on the one below: the seam is a line up the wall at x 138 y 138, over 100 layers", "not_applied": "", "used": null}}]
+  flags = [{"id": "seam_seen", "reading": "99% of 100 wall loops start on the one below: the seam is a line up the wall at x 138 y 138, over 100 layers", "change": {"key": "seam_position", "preset": "", "standard": "", "value": "back", "reason": "you said 'the walls and the top as it prints', so the walls are seen, and the seam is a line on them: back puts the line on the part's back as it sits on the plate (its largest y); random would scatter it instead", "source": "reading", "feature": "seen", "knowledge": "surface", "lesson": null, "reading": "99% of 100 wall loops start on the one below: the seam is a line up the wall at x 138 y 138, over 100 layers", "not_applied": "", "used": null, "pause": null}}]
   shortest_layer_s = 8.56
   ironing_s = 0.0
   seam_stacked = 0.99

@@ -385,7 +385,7 @@ def draw(ledger: Ledger, row: Row) -> list[int]:
     last: dict[str, tuple[str, Any]] = {}
     for c in row.corrections or ():
         if c.key == PAUSE:
-            # A colour change is a choice for that one part, not a lesson: it stays in the
+            # A pause is a choice for that one part, not a lesson: it stays in the
             # job's corrections and its reading (mqucifer/print-shop#119, the operator).
             continue
         last[c.key] = (CORRECTION, c)  # corrected twice at one review: the one that stood

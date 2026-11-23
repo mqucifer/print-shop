@@ -25,6 +25,11 @@ part's name is on the card beside the buttons.
 A plate of several parts (mqucifer/print-shop#109) is watched as one print and
 asked about part by part, each named by its number and its place on the plate.
 
+After a print with a swap (mqucifer/print-shop#218) what's on the printer isn't known until a
+person says. The watcher never says it: an end, a layer, an idle or a file name moves no stock
+and clears nothing. That print's own card offers the spools in words that say both halves, that
+it's over and which is on now, with none pre-selected, and Record takes the pick.
+
 With frames (mqucifer/print-shop#110), the desk also shows the last, and
 pages through the rest with Earlier and Later, beside the answer: evidence,
 never the answer. A print with no frame at all says why, in a sentence
@@ -35,6 +40,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 import threading
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -44,16 +50,21 @@ from typing import Any
 from pycentauri.models import PrintStatus as SdcpPrintStatus
 
 from print_shop.core.mqtt import (
+    OUTCOME_SPOOL_AS_RECORDED,
     MqttConfig,
     outcome_frame_set_topic,
     outcome_frame_topic,
     outcome_note_topic,
     outcome_result_topic,
+    outcome_spool_select,
+    outcome_spool_topic,
     outcome_submit_topic,
     outcome_symptom_topic,
     outcome_topic,
 )
-from print_shop.ledger import Answer, Frame, Ledger, LedgerError, Result, Row, Symptom
+from print_shop.inventory import Pick
+from print_shop.ledger import Answer, Frame, Ledger, LedgerError, Result, Row, SaidSince, Symptom
+from print_shop.orchestrator import spools
 from print_shop.orchestrator.frames import FrameKeeper
 from print_shop.printer.centauri import PrinterClient, PrinterSnapshot
 
@@ -133,9 +144,13 @@ class Watcher:
         on_ended: Callable[[], None],
         poll_s: float = 60.0,
         frames: FrameKeeper | None = None,
+        confirming: Callable[[], str | None] | None = None,
     ) -> None:
         self._ledger = ledger
         self._frames = frames
+        #: This process's own job, whose start the print node confirms itself.
+        self._confirming = confirming
+        self._said_unreadable = False
         self._printer = printer
         self._on_ended = on_ended
         self._poll_s = poll_s
@@ -177,11 +192,26 @@ class Watcher:
             for r in self._ledger.unconfirmed_starts()
             if datetime.fromisoformat(r.start_requested_at) >= cutoff
         ]
-        if not running and not unconfirmed:
+        # A swap's start is looked for however late, and though its process was killed: being
+        # seen to begin can only make what's on not known again (mqucifer/print-shop#218).
+        own = self._confirming() if self._confirming is not None else None
+        unseen = [r for r in self._ledger.swaps_unseen() if r.job_id != own]
+        if not running and not unconfirmed and not unseen:
             return
-        snapshot = self._printer.snapshot()
+        try:
+            snapshot = self._printer.snapshot()
+        except Exception as exc:
+            if running or unconfirmed:
+                raise
+            # Looking only for a start that may never come, for as long as it takes: said once.
+            if not self._said_unreadable:
+                logger.warning("the printer couldn't be read (%s): still looking for whether job "
+                               "%s's start, never confirmed, begins", exc, unseen[-1].job_id)
+                self._said_unreadable = True
+            return
+        self._said_unreadable = False
 
-        for row in unconfirmed:
+        for row in {r.job_id: r for r in (*unconfirmed, *unseen)}.values():
             if _is_ours(snapshot, row):
                 logger.warning("job %s is printing after all; watching it", row.job_id)
                 self._ledger.record_started(row.job_id)
@@ -194,9 +224,10 @@ class Watcher:
                 if self._frames is not None:
                     self._frames.at_end(row.job_id, snapshot.layer, snapshot.total_layers)
                 self._ledger.record_ended(row.job_id, snapshot.print_status)
-            elif snapshot.active_filename is not None and not _is_ours(snapshot, row):
+            elif snapshot.active_filename and not _is_ours(snapshot, row):
                 # Something else holds the printer, so ours ended while nobody
-                # was looking. How it ended is not known, and is not guessed.
+                # was looking. How it ended is not known, and is not guessed. The firmware
+                # names no file in some frames, "" (`centauri._confirm_started`): that's no other.
                 self._ledger.record_ended(row.job_id, None)
             else:
                 if self._frames is not None and _is_ours(snapshot, row):
@@ -230,6 +261,12 @@ class OutcomeDesk:
         self._shown: str | None = None
         self._draft: dict[str, str] = {}
         self._error: str | None = None
+        #: What the print on show can be told is on now, and those last sent as the select's.
+        self._spools: dict[str, Pick] = {}
+        #: The one picked, by its words, its number and what it was picked under: Record refuses
+        #: it if that has changed since.
+        self._picked: tuple[str, Pick] | None = None
+        self._offered: tuple[str, ...] | None = None
 
     @property
     def topics(self) -> dict[str, Callable[[str, bytes, bool], None]]:
@@ -238,6 +275,7 @@ class OutcomeDesk:
             outcome_result_topic(self._cfg): self._setter("result", {UNSET, *Result}),
             outcome_symptom_topic(self._cfg): self._setter("symptom", {UNSET, *Symptom}),
             outcome_note_topic(self._cfg): self._setter("note", None),
+            outcome_spool_topic(self._cfg): self._set_spool,
             outcome_submit_topic(self._cfg): self._on_submit,
             outcome_frame_set_topic(self._cfg): self._on_frame,
         }
@@ -251,16 +289,25 @@ class OutcomeDesk:
         waiting = self._ledger.awaiting_answer()
         if not waiting:
             self._shown, self._draft, self._error, self._frame = None, {}, None, None
+            self._picked = None
+            self._offer_spools({})
             self._publish(outcome_topic(self._cfg), {"pending": False, "waiting": 0})
             self._show_frame(None)
             return
         row = waiting[0]
         if row.job_id != self._shown:
             self._shown, self._draft, self._error, self._frame = row.job_id, {}, None, None
+            self._picked = None
         frames = self._ledger.frames(row.job_id)
         at = min(self._frame, len(frames) - 1) if self._frame is not None else len(frames) - 1
         shown = frames[at] if frames else None
         self._show_frame(shown)
+        can_say, spools_said = self._spools_of(row)
+        if self._picked is not None:
+            # Picked again, it's picked under what's shown now.
+            can_say.setdefault(*self._picked)
+        self._offer_spools(can_say)
+        paused = row.reading.pauses if row.reading else ()
         self._publish(
             outcome_topic(self._cfg),
             {
@@ -273,11 +320,13 @@ class OutcomeDesk:
                 "started_at": row.started_at,
                 "ended_at": row.ended_at,
                 "printer_end": end_name(row.printer_end_status),
-                # A colour change it paused for (mqucifer/print-shop#119): how the swap went
-                # goes in the note.
-                "swap": "; ".join(
-                    p.line() for p in (row.reading.pauses if row.reading else ())
-                ),
+                # What it paused for (mqucifer/print-shop#119, mqucifer/print-shop#218): how
+                # that went goes in the note. A swap's spools, and the pick of the one on now.
+                "pause": "; ".join(p.line() for p in paused),
+                "pause_for": next((p.kind.value for p in paused if p.kind), ""),
+                "spools": spools_said,
+                "spool": self._picked[0] if self._picked else OUTCOME_SPOOL_AS_RECORDED,
+                "spool_choices": len(can_say),
                 "result": self._draft.get("result", UNSET),
                 "symptom": self._draft.get("symptom", UNSET),
                 "note": self._draft.get("note", ""),
@@ -288,6 +337,21 @@ class OutcomeDesk:
                 "frames_why": "" if frames else no_frames(self._ledger.frames_missed(row.job_id)),
             },
         )
+
+    def _spools_of(self, row: Row) -> tuple[dict[str, Pick], str]:
+        """A swap with no spool that could be recorded takes the pick too."""
+        try:
+            return spools.choices(self._ledger, row), spools.said(self._ledger, row)
+        except Exception:  # noqa: BLE001 - the stock is never in the way of an answer
+            logger.exception("the stock couldn't be read for job %s's outcome", row.job_id)
+            return {}, ""
+
+    def _offer_spools(self, can_say: dict[str, Pick]) -> None:
+        """The select's options, sent before any state that's one of them."""
+        self._spools = can_say
+        if tuple(can_say) != self._offered:
+            self._publish(*outcome_spool_select(self._cfg, can_say))
+            self._offered = tuple(can_say)
 
     def _show_frame(self, frame: Frame | None) -> None:
         """The frame on show on the image topic, or an empty one, which clears it."""
@@ -348,6 +412,24 @@ class OutcomeDesk:
 
         return handle
 
+    def _set_spool(self, topic: str, payload: bytes, retain: bool) -> None:
+        """The spool on at the end, picked from those offered and kept by its number."""
+        if retain:
+            return
+        value = payload.decode("utf-8", "replace").strip()
+        with self._lock:
+            if self._shown is None:
+                return
+            # Picked now, so under what's so now: a load since the card was shown is older.
+            row = self._ledger.get(self._shown)
+            now = self._spools_of(row)[0] if row is not None else {}
+            if picked := now.get(value, self._spools.get(value)):
+                self._picked = (value, picked)
+            elif value in (UNSET, OUTCOME_SPOOL_AS_RECORDED):
+                self._picked = None
+            self._error = None
+            self._show_locked()
+
     def _on_submit(self, topic: str, payload: bytes, retain: bool) -> None:
         if retain:
             return
@@ -362,7 +444,13 @@ class OutcomeDesk:
                     symptom=Symptom(draft.get("symptom", "")),
                     note=draft.get("note", ""),
                 )
-                self._ledger.record_answer(job_id, answer)
+                # The answer, the pick and the stock: one write, or none of them.
+                on = self._picked[1] if self._picked is not None else None
+                self._ledger.record_answer(job_id, answer, on)
+            except SaidSince as exc:
+                self._error, self._picked = str(exc), None
+            except sqlite3.Error as exc:
+                self._error = f"it couldn't be written ({exc}): press Record again"
             except ValueError:
                 self._error = "choose a result and a symptom first"
             except LedgerError as exc:

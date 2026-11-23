@@ -659,7 +659,8 @@ def test_print_job_sends_a_sliced_file_unarmed_to_the_gate_and_asks_nothing(
     assert "sparse_infill_density" in out and "15% -> 40%" in out, "what differs from the tuning"
     assert f"{OBJECTS[0]}: layer_height=0.12" in out, "each object's overrides"
     assert "layers: 6" in out and "nothing is proposed" in out, "the slice's report"
-    assert "At the approval gate" in out and "SWAP" in out
+    assert "At the approval gate" in out and "PAUSE       this print pauses after" in out
+    assert "SWAP" not in out, "a file sliced by hand doesn't say what its pause is for"
     (built,) = shop.built
     assert built["printer"] is None and built["profiles"] is None
     assert built["asker"] is None and built["reviewer"] is None

@@ -87,7 +87,9 @@ def test_a_plates_two_questions_wait_for_no_model_and_go_reaches_the_review(
     rows = rig.ledger.job_rows(job)
     assert [r.orientation_source for r in rows] == ["model:made-up"] * 3
     for row in rows:
-        assert row.intake is not None and row.intake.questions == STOCK
+        assert row.intake is not None
+        assert [q.text for q in row.intake.questions] == [q.text for q in STOCK]
+        assert row.intake.questions[1].pose == (0.0, 0.0, 0.0), "the pose it was asked in"
         assert row.intake.call["finish_reason"] == "went on"
     assert describe_all(rig.ledger.rows()).count("you went on without the model's") == 1
 
@@ -232,10 +234,11 @@ def test_recorded_answers_answer_a_plate_whole(
 # --------------------------------------------------------------------------
 
 
-def test_what_was_said_seen_isnt_carried_through_a_turn(
+def test_what_was_said_seen_is_carried_through_a_turn(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, never: Callable[..., Any],
 ) -> None:
-    """The probe: 'the top; the walls are hidden', of parts then turned 180."""
+    """The probe: 'the top; the walls are hidden', of parts then turned 180. The top said is
+    the face on the plate now (mqucifer/print-shop#248)."""
     person = Person("1", "3", "go")
     poses = Poses(lambda c: c.rotation_deg == (180.0, 0.0, 0.0))
     rig = _rig(tmp_path, person, poses, monkeypatch, never)
@@ -243,18 +246,16 @@ def test_what_was_said_seen_isnt_carried_through_a_turn(
         job = rig.gated(_caps(tmp_path), as_laid=False)
         assert rig.press("approve", job).printed
     said = " ".join(rig.shown[0].split())
-    assert "TURNED SINCE YOU ANSWERED: part 1, cap-tight.stl, to 180,0,0;" in said
-    assert "which faces are seen, you said 'the top as it lies now; the walls are hidden'" in said
-    assert "as it prints; the walls are hidden'" not in said, "quoted as it was shown"
-    assert "aren't judged or used now" in said and "orientation" in said
+    assert ("part 1, cap-tight.stl: Seen as it now prints: the face on the plate." in said)
+    assert "You said the top, as the file lays it; it was turned 180,0,0 since" in said
+    assert "TURNED SINCE" not in said, "nothing else was set aside"
     [request] = rig.reviews
     assert not [f.id for f in request.flags if f.change is not None and f.change.feature == "seen"]
     row = rig.ledger.rows()[0]
     assert row.intake is not None
-    assert (row.intake.questions, [a.choice for a in row.intake.answers]) == (STOCK, [0, 2]), (
-        "the record is as given"
-    )
-    assert row.proposal is not None and "TURNED SINCE" in row.proposal.notes[0]
+    assert [a.choice for a in row.intake.answers] == [0, 2], "the record is as given"
+    assert row.intake.questions[1].pose == (0.0, 0.0, 0.0)
+    assert row.proposal is not None and "Seen as it now prints" in row.proposal.notes[0]
 
 
 def test_the_settings_call_isnt_told_what_no_longer_holds(
@@ -276,7 +277,8 @@ def test_the_settings_call_isnt_told_what_no_longer_holds(
     with rig.daemon:
         rig.press("reject", rig.gated(_caps(tmp_path), as_laid=False))
     assert "decoration or display" in told[-1], "what it's for holds in any pose"
-    assert "the walls are hidden" not in told[-1]
+    assert "the walls are hidden" not in told[-1], "the raw answer isn't given"
+    assert "carried from what was said: the face on the plate" in told[-1]
 
 
 def test_unturned_the_answer_is_read_as_given(
@@ -360,8 +362,9 @@ def test_sent_back_to_the_pose_asked_of_the_answer_holds_again(
                "orientation", "1", "1", "as it was", "ok")
     with rig.daemon:
         rig.press("reject", rig.gated(_caps(tmp_path), as_laid=False))
-    assert "TURNED SINCE" in rig.shown[0]
-    assert "TURNED SINCE" not in rig.shown[-1]
+    assert "Seen as it now prints" in rig.shown[0]
+    assert "Seen as it now prints" not in rig.shown[-1]
+    assert "every part: Seen as it prints: the walls and the top" in rig.shown[-1]
     assert "seam_seen" in [f.id for f in rig.reviews[-1].flags]
 
 
@@ -395,29 +398,38 @@ def test_the_questions_say_a_pose_that_isnt_the_files(
 
 def test_the_persons_own_words_are_quoted_as_typed() -> None:
     from print_shop.core.state import AppliedOrientation, MeshReport, PlatePart
-    from print_shop.orchestrator.plate_job import still_holds
+    from print_shop.orchestrator.plate_job import seen_of
     from print_shop.setup.intake import Answer, Intake
+    from print_shop.setup.questions import stock
 
     mesh = MeshReport(is_manifold=True, volume_mm3=1, surface_area_mm2=1, bbox_mm=(1, 1, 1),
                       overhang_area_mm2=0)
     part = PlatePart(n=1, name="cap.stl", given="cap.stl", stl="cap.stl", sha256="0", mesh=mesh,
                      applied=AppliedOrientation(rotation_deg=(180.0, 0.0, 0.0)))
-    intake = Intake(questions=(SEEN,), answers=(Answer(other="the side as it prints"),))
-    _, note = still_holds(intake, (part,), ((0.0, 0.0, 0.0),))
-    assert "you said 'the side as it prints'" in note
+    seen_q = stock(None, (0.0, 0.0, 0.0))[1]
+    intake = Intake(questions=(seen_q,), answers=(Answer(other="the side as it prints"),))
+    faces, lines = seen_of(intake, (part,), ((0.0, 0.0, 0.0),))
+    assert faces is None, "words name no face, so none is judged"
+    assert "TURNED SINCE YOU ANSWERED: you said 'the side as it prints'" in lines[0]
 
 
-def test_seen_walls_arent_judged_through_a_turn(
+def test_walls_turned_onto_a_side_are_part_of_the_walls_and_the_seam_is_left(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, never: Callable[..., Any],
 ) -> None:
-    """The answer that does flag a seam, unturned: turned, the reading mustn't still use it."""
+    """'The walls and the top', of cubes then turned onto a side: the top said is a wall now, so
+    only part of the walls is seen, and no seam change is proposed (mqucifer/print-shop#248)."""
+    cubes = [box(tmp_path / "cubes" / f"cube-{n}.stl", 20, 20, 20) for n in (1, 2)]
     person = Person("1", "1", "go")
-    poses = Poses(lambda c: c.rotation_deg == (180.0, 0.0, 0.0))
+    poses = Poses(lambda c: c.rotation_deg == (0.0, 90.0, 0.0))
     rig = _rig(tmp_path, person, poses, monkeypatch, never)
     with rig.daemon:
-        rig.press("reject", rig.gated(_caps(tmp_path), as_laid=False))
+        rig.press("reject", rig.gated(cubes, as_laid=False))
     [request] = rig.reviews
-    assert "seam_seen" not in [f.id for f in request.flags]
+    assert [p.orientation.rotation_deg for p in request.parts] == [(0.0, 90.0, 0.0)] * 2
+    said = " ".join(rig.shown[0].split())
+    assert "Seen as it now prints: part of the walls" in said
+    seams = [f for f in request.flags if f.id == "seam_seen"]
+    assert all(f.change is None for f in seams), "no seam change on partly seen walls"
 
 
 @pytest.mark.parametrize(
@@ -444,3 +456,60 @@ def test_every_part_of_a_plate_has_all_six_poses(
         assert [c.rotation_deg for c in part.candidates] == list(AXIS_ALIGNED), part
         if n < on_a_side:
             assert part.orientation.rotation_deg == (180.0, 0.0, 0.0), "its own context was read"
+
+
+def test_a_plate_with_one_part_turned_and_one_not_reads_each_from_its_own_pose(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, never: Callable[..., Any],
+) -> None:
+    """mqucifer/print-shop#248's Done when, for a plate: 'the top; the walls are hidden', and only
+    the flattest part flipped after. Its top is on the plate now, the others' still up."""
+    person = Person("1", "3", "go")
+    poses = Poses(lambda c: c.rotation_deg == ((180.0, 0.0, 0.0) if c.height_mm < 5
+                                               else (0.0, 0.0, 0.0)))
+    rig = _rig(tmp_path, person, poses, monkeypatch, never)
+    with rig.daemon:
+        rig.press("reject", rig.gated(_caps(tmp_path), as_laid=False))
+    [request] = rig.reviews
+    assert [p.orientation.rotation_deg for p in request.parts] == [
+        (180.0, 0.0, 0.0), (0.0, 0.0, 0.0), (0.0, 0.0, 0.0)]
+    said = " ".join(rig.shown[0].split())
+    assert "part 1, cap-tight.stl: Seen as it now prints: the face on the plate." in said
+    assert "part 2, cap-mid.stl: Seen as it prints: the top" in said
+    assert "part 3, cap-loose.stl: Seen as it prints: the top" in said
+    assert "ironing_hidden" not in [f.id for f in request.flags], "a top is seen on the plate"
+
+
+def test_the_plates_flags_read_the_faces_carried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, never: Callable[..., Any],
+) -> None:
+    """'The walls; the top is hidden', of caps flipped after: the walls are still seen all
+    round, so the seam is read as on them, from the faces carried and not the answer set aside."""
+    person = Person("1", "2", "go")
+    poses = Poses(lambda c: c.rotation_deg == (180.0, 0.0, 0.0))
+    rig = _rig(tmp_path, person, poses, monkeypatch, never)
+    with rig.daemon:
+        rig.press("reject", rig.gated(_caps(tmp_path), as_laid=False))
+    [request] = rig.reviews
+    assert [f.change.value for f in request.flags if f.id == "seam_seen" and f.change] == ["back"]
+
+
+def test_a_plates_added_questions_drop_what_was_typed_ahead_and_take_no_go() -> None:
+    from print_shop.setup.intake import Added, OfPlate, cli_asker
+
+    forgot: list[str] = []
+    written: list[str] = []
+    typed = iter(["go", "1"])
+    asked = OfPlate(Added((SEEN,), 1), "top and bottom as each part lies in its file", PLATE_WORDS)
+    ask = cli_asker(read=lambda _: next(typed), write=written.append,
+                    forget=lambda: forgot.append("dropped"))
+    ask(asked)
+    assert forgot, "what was typed while it drew is no answer to it"
+    assert not any("go works once these are answered" in w for w in written)
+
+
+def test_a_plates_questions_show_only_those_asked_numbered_as_among_all() -> None:
+    from print_shop.setup.intake import OfPlate, render
+
+    shown = render(OfPlate(STOCK, "top and bottom as each part lies in its file", PLATE_WORDS), [1])
+    assert "2. Which faces of these parts" in shown
+    assert "What are these parts for?" not in shown

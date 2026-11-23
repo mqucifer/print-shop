@@ -481,7 +481,8 @@ def test_the_sidecars_seen_faces_stand_where_the_intake_didnt_say(tmp_path: Path
     (ironing,) = [f for f in flags(reading, None, PROCESS, FILAMENT, placed)
                   if f.id.startswith("ironing")]
     assert ironing.id == "ironing_hidden"
-    assert ironing.change is not None and "as the part's context says" in ironing.change.reason
+    assert ironing.change is not None
+    assert "the part's notes say the bottom, as the file lays it" in ironing.change.reason
 
 
 # --------------------------------------------------------------------------

@@ -303,7 +303,7 @@ def test_the_front_page_shows_whats_loaded_and_every_job_newest_first(
     assert order == sorted(order), "newest first: the log's, the unprinted, then the prints"
     assert "failed, stringing" in page and "printing" in page
     assert "ended unprinted: timed_out" in page and "its log only" in page
-    assert "colour change" in page
+    assert "<td>pause</td>" in page, "a pause that doesn't say what for is only a pause"
     zoned = r"2026-11-1\d \d\d:\d\d (?:[A-Z]{2,5}|[+-]\d{2,4})<"
     assert re.search(zoned, page), "times say their zone"
 
@@ -324,7 +324,7 @@ def test_a_jobs_page_shows_its_whole_record(shop: Shop, served: str) -> None:
     assert "it carries the load" in page and "the face it lay on is seen" in page
     # the reading's flags, the colour change, the time and plastic
     assert "The slice, read layer by layer" in page and "Flagged" in page
-    assert "At 12.4 mm: white to black" in page and "pauses for a filament swap" in page
+    assert "At 12.4 mm: white to black" in page and "pauses after layer 62" in page
     assert "1 h 30 min" in page and "31.5 cm³" in page
     # the outcome, its note and its frames
     assert "failed, stringing" in page and "hairs between the channels &lt;b&gt;" in page
@@ -473,7 +473,7 @@ def test_a_pause_from_before_203_is_copied_at_the_height_that_pauses_where_it_di
     written_then = PauseReading.model_validate({"before_layer": 62, "z": 12.4, "after_s": 600.0})
     older = row.model_copy(
         update={"reading": row.reading.model_copy(update={"pauses": (written_then,)})})
-    assert written_then.line().startswith("pauses for a filament swap before layer 62, at z=12.4")
+    assert written_then.line().startswith("pauses before layer 62, at z=12.4")
 
     a = again(older, part, printers, found)
     assert "pause_at=12.2 because white to black" in a.corrections

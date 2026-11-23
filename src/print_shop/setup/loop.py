@@ -52,7 +52,7 @@ from print_shop.ingest.orientation import write_rotated
 from print_shop.outcome_words import outcome_words
 from print_shop.setup.bounds import SETTINGS, check
 from print_shop.setup.context import refuses
-from print_shop.setup.model import prompt
+from print_shop.setup.model import LEAVE_THE_SEAM, prompt
 from print_shop.setup.proposal import (
     ORIENTATION,
     Change,
@@ -65,7 +65,7 @@ from print_shop.setup.proposal import (
     apply,
     pose_value,
 )
-from print_shop.setup.reading import read_slice
+from print_shop.setup.reading import carried, read_slice
 from print_shop.setup.skill import Skill
 from print_shop.setup.traits import TRAITS, traits
 
@@ -370,9 +370,23 @@ def _user(part: Part) -> str:
                      f"{pose_value(part.kept)}, which is kept unless you ask. Overhang is what "
                      "would need support; a round or chamfer rising from the plate is left out "
                      "of it:")
+    intake, context = part.facts.intake, part.facts.context
+    answered_seen = any(q.feature == "seen" for q in intake.questions)
+    if answered_seen:
+        lines[-1] += (" What's seen is said for each pose: go by the pose you propose, never "
+                      "by the pose the questions were asked in.")
     for c in part.candidates:
+        faces = carried(intake, context, c.rotation_deg)
+        shown = f"; seen there: {faces.as_printed()}" if faces is not None else (
+            "; seen there: not known" if answered_seen else "")
+        if faces is not None:
+            if words := faces.unsaid_words():
+                shown += f" ({words}, so it isn't hidden)"
+            if faces.part_walls:
+                shown += f"; {LEAVE_THE_SEAM}"
         lines.append(f"- {pose_value(c.rotation_deg)}: {c.overhang_area_mm2:g} mm2 overhang, "
-                     f"{c.bed_contact_area_mm2:g} mm2 on the plate, {c.height_mm:g} mm tall")
+                     f"{c.bed_contact_area_mm2:g} mm2 on the plate, {c.height_mm:g} mm tall"
+                     f"{shown}")
     if part.orienting:
         lines += ["", "Kept lessons on posing parts like this one: a person sent a pose back, "
                       "and why:", *(f"- {g.line()}" for g in part.orienting)]

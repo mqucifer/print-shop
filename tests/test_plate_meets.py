@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from print_shop.core.mqtt import command_topic, gate_topic
 from print_shop.desk import Desk
 from print_shop.desk.again import again
 from print_shop.inventory import Inventory
@@ -33,6 +34,7 @@ from print_shop.setup.reading import (
     flags,
 )
 from tests.plates import profiles
+from tests.test_job_e2e import CFG
 from tests.test_ledger import record
 from tests.test_plate_job import (
     JOB,
@@ -41,6 +43,7 @@ from tests.test_plate_job import (
     _plate_records,
     _printed_with,
     _script,
+    _until,
     _with_a_lesson,
 )
 from tests.test_runtime import settings  # noqa: F401  (the fixture)
@@ -77,9 +80,13 @@ def test_a_tuning_changed_while_a_plate_waits_prints_none_of_it(tmp_path: Path) 
         job = rig.gated(_caps(tmp_path))
         with Inventory(rig.path) as inventory:
             inventory.edit(inventory.material().spool_id, tuning="Elegoo PLA @ECC - Copy")
-        result = rig.press("approve", job)
-    assert not result.printed and "tuning was changed" in (result.error or "")
-    assert rig.printer.calls == [] and rig.ledger.rows() == []
+        # An Approve with it changed starts nothing and holds the gate (mqucifer/print-shop#218).
+        rig.bridge.deliver(command_topic(CFG), {"decision": "approve", "job_id": job})
+        _until(lambda: bool(rig.bridge.retained_json(gate_topic(CFG)).get("held")), "the hold")
+        held = str(rig.bridge.retained_json(gate_topic(CFG))["held"])
+        result = rig.press("reject", job)
+    assert "tuning was changed" in held, held
+    assert not result.printed and rig.printer.calls == [] and rig.ledger.rows() == []
 
 
 def test_a_press_for_another_job_doesnt_start_a_plate(tmp_path: Path) -> None:
@@ -155,7 +162,7 @@ def test_one_parts_bridge_isnt_read_as_anothers_pocket_closing() -> None:
 def test_a_plates_pause_is_copied_as_its_g_code_paused_from_any_parts_page(
     tmp_path: Path,
 ) -> None:
-    rig = Rig(tmp_path, "print_sequence=by layer; pause_at=3 because a swap", "ok")
+    rig = Rig(tmp_path, "print_sequence=by layer; colour_change=3 because a swap", "ok")
     caps = _caps(tmp_path)
     with rig.daemon:
         job = rig.gated(caps)
@@ -170,7 +177,7 @@ def test_a_plates_pause_is_copied_as_its_g_code_paused_from_any_parts_page(
         lines.add(runs.corrections)
         assert not any("isn't copied" in note for note in runs.notes)
     (line,) = lines
-    assert "print_sequence=by layer" in line and "pause_at=3" in line
+    assert "print_sequence=by layer" in line and "colour_change=3" in line
 
 
 def test_a_success_with_a_flaw_reads_the_same_on_a_plate(tmp_path: Path) -> None:
@@ -240,3 +247,57 @@ def test_a_plates_correction_isnt_absorbed_by_a_lesson_for_another_shape(tmp_pat
         "keyed to the part with the most traits, which the lid's lesson doesn't reach"
     )
     assert "linked to lesson 1" in print_lessons.listing(ledger)
+
+
+def test_a_plates_swap_is_marked_once_and_its_first_card_takes_the_pick(tmp_path: Path) -> None:
+    """mqucifer/print-shop#218 on a plate: one print, so one mark of what's loaded not being
+    known, by its first row. Each row has the spools, and what it ended with is every row's."""
+    from print_shop.core.mqtt import outcome_spool_topic
+    from print_shop.orchestrator import spools as said_spools
+
+    rig = _spooled(tmp_path)
+    with Inventory(rig.path) as stock:
+        white = stock.material().spool_id
+        black = stock.add_spool(manufacturer="Elegoo", type="PLA", variety="Elegoo PLA",
+                                colour="black").id
+    rig.typed = [f"print_sequence=by layer; colour_change=3 from #{white} to #{black} because "
+                 "white to black", "ok"]
+    with rig.daemon:
+        job = rig.gated(_caps(tmp_path))
+        assert rig.press("approve", job).printed
+        _until(lambda: rig.card().get("job_id") == job, "the first card")
+        marks = rig.ledger.query("SELECT job_id FROM swap_not_known")
+        swaps = rig.ledger.query("SELECT job_id FROM print_swaps")
+        assert marks == swaps == [{"job_id": job}], "once, by the first row"
+        rows = rig.ledger.job_rows(job)
+        assert [[s.material.spool_id for s in r.spools] for r in rows] == [[white, black]] * 3
+        picks = said_spools.choices(rig.ledger, rows[0])
+        assert picks and not said_spools.choices(rig.ledger, rows[1]), "the first card's alone"
+        on_black = next(words for words, pick in picks.items() if pick.spool_id == black)
+        rig.bridge.deliver(outcome_spool_topic(CFG), on_black)
+        rig.answer("success")
+        _until(lambda: rig.card().get("job_id") == row_id(job, 2), "the second card")
+        said = rig.card()["spools"]
+    assert "not this card's" not in said, said
+    assert rig.ledger.query("SELECT job_id FROM swap_not_known") == []
+    assert [r.ended_with and r.ended_with.spool_id for r in rig.ledger.job_rows(job)] == [black] * 3
+
+
+def test_a_plates_later_card_points_to_its_first_while_its_not_said(tmp_path: Path) -> None:
+    from print_shop.orchestrator import spools as said_spools
+
+    rig = _spooled(tmp_path)
+    with Inventory(rig.path) as stock:
+        white = stock.material().spool_id
+        black = stock.add_spool(manufacturer="Elegoo", type="PLA", variety="Elegoo PLA",
+                                colour="black").id
+    rig.typed = [f"print_sequence=by layer; colour_change=3 from #{white} to #{black} because "
+                 "white to black", "ok"]
+    with rig.daemon:
+        job = rig.gated(_caps(tmp_path))
+        assert rig.press("approve", job).printed
+        _until(lambda: rig.card().get("job_id") == job, "the first card")
+        second = rig.ledger.job_rows(job)[1]
+        said = said_spools.said(rig.ledger, second)
+    assert "on the card for cap-tight.stl, this plate's first" in said, said
+    assert "another print" not in said

@@ -34,6 +34,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import sqlite3
 import uuid
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
@@ -66,15 +67,15 @@ from print_shop.expert.orientation import (
 from print_shop.ingest.analyzer import analyze, verify_unchanged
 from print_shop.ingest.measuring import Measuring
 from print_shop.ingest.orientation import LAID, candidate_in, candidates, write_rotated
-from print_shop.inventory import Inventory, Material
+from print_shop.inventory import Asked, Inventory, InventoryError, Material, SpoolUse
 from print_shop.ledger import Ledger, PrintRecord
 from print_shop.orchestrator import plate_job
 from print_shop.orchestrator.fitness import scoring_profiles
 from print_shop.plate import PlateLayout
 from print_shop.printer.centauri import PreflightFailed, PrinterClient, preflight
-from print_shop.setup import Proposer
+from print_shop.setup import Proposer, pauses
 from print_shop.setup import lessons as print_lessons
-from print_shop.setup.context import PartContext, place, pose_for, read_context
+from print_shop.setup.context import PartContext, Seen, place, pose_for, printed, read_context
 from print_shop.setup.doubts import Doubting
 from print_shop.setup.features import Feature, measure, resting_on
 from print_shop.setup.intake import Asker, Estimate, Intake, Question
@@ -84,6 +85,7 @@ from print_shop.setup.offer import Offering, ThisPart
 from print_shop.setup.offer import offering as offer_past_prints
 from print_shop.setup.proposal import (
     ORIENTATION,
+    PAUSE,
     Change,
     GivenLesson,
     Proposal,
@@ -94,8 +96,8 @@ from print_shop.setup.proposal import (
     reached,
     read_back,
 )
-from print_shop.setup.questions import estimate
-from print_shop.setup.reading import SliceReading, flags, read_slice, seen
+from print_shop.setup.questions import PURPOSE, SEEN, STOCK, estimate, stock
+from print_shop.setup.reading import SliceReading, carried, flags, read_slice, seen, seen_said
 from print_shop.setup.review import Reviewer, ReviewPart, ReviewRequest
 from print_shop.setup.skill import groups_for, load
 from print_shop.setup.traits import traits
@@ -112,7 +114,7 @@ from print_shop.slicer.orca import (
 )
 from print_shop.slicer.store import Store
 
-__all__ = ["build_graph", "graph_edges", "new_job"]
+__all__ = ["build_graph", "graph_edges", "new_job", "why_not_start"]
 
 logger = logging.getLogger(__name__)
 
@@ -465,16 +467,20 @@ def build_graph(
             def priced(settings: dict[str, str], n: int) -> Estimate | None:
                 return _estimate(slicer, first, profiles, settings, outdir / "options" / str(n))
 
+            context = state.get("part_context")
+            # What the notes say is read back in the pose the questions are asked in, and the
+            # model asks only what they leave open (mqucifer/print-shop#236).
+            two = stock(context, rotation_deg)
             if waiting is not None and proposer.asks_model:
                 measured = features
                 intake = ask_meanwhile(
-                    lambda stop: proposer.questions(measured, profiles, stop),
-                    asker, waiting, lambda questions: _priced(questions, priced),
+                    lambda stop: proposer.questions(measured, profiles, stop, context),
+                    asker, waiting, lambda questions: _priced(questions, priced), two,
                 )
             else:
-                intake = _ask(proposer.questions(features, profiles), asker, priced)
+                intake = _ask(proposer.questions(features, profiles, context=context), asker,
+                              priced, two)
             proposed["intake"] = intake
-            context = state.get("part_context")
             earlier: list[Change] = []
             looped: Proposal | None = None
             fell_back: dict[str, Any] = {}
@@ -537,7 +543,7 @@ def build_graph(
                     features = featured()
                     reply = found_by.reply
                     made = dataclasses.replace(proposer, ask=lambda *_: reply, llm=None)(
-                        intake, features, profiles, context)
+                        intake, features, profiles, context, rotation_deg)
                     looked = set(found_by.looked_up)
                     looped = made.model_copy(update={
                         **record, "model": f"loop:{loop.model}",
@@ -560,7 +566,7 @@ def build_graph(
                 if looped is not None:
                     proposal, looped = looped, None
                 else:
-                    proposal = proposer(intake, features, profiles, context)
+                    proposal = proposer(intake, features, profiles, context, rotation_deg)
                     if fell_back:
                         proposal = proposal.model_copy(update={
                             "loop": fell_back["loop"], "loop_ending": fell_back["loop_ending"],
@@ -586,6 +592,9 @@ def build_graph(
                         earlier=earlier,
                         context=context, stl=state["stl_path"],
                         offering=offer, doubting=doubting,
+                        material=_material_of(profiles), stock=_stock(ledger, profiles),
+                        record_load=_recorder(ledger, profiles),
+                        stands=_stands(ledger, profiles),
                     )
                 except _Turned as turned:
                     # Sent back at the review: turned to the person's pose, and sliced again.
@@ -748,6 +757,9 @@ def build_graph(
             else:
                 intake = _ask(proposer.questions(measured, profiles), about_them, priced)
             done["intake"] = intake
+            # What each part's answer on faces is of, kept with it (mqucifer/print-shop#248).
+            parts = tuple(p.model_copy(update={"asked_in": tuple(a)})
+                          for p, a in zip(parts, asked_in, strict=True))
             if undecided:
                 orientations = posed_after_questions(
                     parts, orientations, undecided,
@@ -765,7 +777,10 @@ def build_graph(
                 turned, to_place = plate_job.posed(parts, tuple(orientations), outdir / "parts")
                 read = plate_job.together(turned)
                 judged, turned_since = plate_job.still_holds(intake, turned, asked_in)
-                proposal = read.proposer(proposer)(judged, read.features, profiles, read.context)
+                # Carried from the answers as given, each part from the pose it was asked in.
+                faces, seen_lines = plate_job.seen_of(intake, turned, asked_in)
+                proposal = read.proposer(proposer)(judged, read.features, profiles, read.context,
+                                                   seen=faces)
                 if turned_since:
                     proposal = proposal.model_copy(
                         update={"notes": (turned_since, *proposal.notes)})
@@ -783,7 +798,10 @@ def build_graph(
                     layout=lambda: layouts[-1],
                     read=read,
                     undone=undone,
-                    turned_since=bool(turned_since),
+                    seen=faces,
+                    seen_lines=seen_lines,
+                    unjudged=faces is None and any(
+                        q.feature == SEEN.feature for q in intake.questions),
                     parts=tuple(
                         ReviewPart(
                             n=part.n, name=part.name,
@@ -799,11 +817,16 @@ def build_graph(
                     result, reviewed = _propose_and_review(
                         proposal, profiles, slicing(to_place), reviewer,
                         AppliedOrientation(rationale=plate_job.poses_said(turned)),
-                        outdir / "proposed", judged,
+                        outdir / "proposed", intake,  # as given: faces are carried
                         cost=_coster(estimating(to_place), to_place[0].stl, profiles, proposal,
                                      outdir / "offers"),
                         earlier=earlier,
                         plate=plate,
+                        # A plate's pause names its spools as one part's does
+                        # (mqucifer/print-shop#218).
+                        material=_material_of(profiles), stock=_stock(ledger, profiles),
+                        record_load=_recorder(ledger, profiles),
+                        stands=_stands(ledger, profiles),
                     )
                 except DoesNotFit as spill:
                     # Raised only by a pose's first slice: a later one is taken back at the
@@ -925,9 +948,12 @@ def build_graph(
                 "max_z_mm": slice_result.max_z_mm,
                 "orientation_deg": list(applied_orientation.rotation_deg),
                 "orientation_rationale": applied_orientation.rationale,
-                # A colour change the review asked for, where the slice put it, so the person
-                # is at the printer for the swap (mqucifer/print-shop#119).
-                "pause": _pauses_said(state.get("slice_reading")),
+                # A pause the review asked for, where the slice put it, so the person is at
+                # the printer for it (mqucifer/print-shop#119), what it's for, and the spool a
+                # swap's print starts on (mqucifer/print-shop#218).
+                "pause": _pauses_said(_reading_now(state, ledger)),
+                "pause_for": _pause_for(state),
+                "spools": _starts_said(state, ledger),
                 **several,
             }
         )
@@ -945,7 +971,7 @@ def build_graph(
     def print_node(state: PrintJobState) -> dict[str, Any]:
         """Hardware boundary: upload the G-code and start the print.
 
-        Five refusals stand between this being called and the nozzle moving,
+        Six refusals stand between this being called and the nozzle moving,
         and each one raises rather than continuing:
 
         1. **The gate decision is re-checked here.** ``ungated_edges`` proves
@@ -956,13 +982,17 @@ def build_graph(
         2. **The spool's tuning is the one the job was prepared with**
            (mqucifer/print-shop#220), read again here, as it can be edited
            while the job waits. A colour corrected meanwhile is what's recorded.
-        3. **Preflight** — the printer must be free and have room, and the
+        3. **What's loaded is what the job was prepared for, or a swap's first spool**
+           (mqucifer/print-shop#218), and what's on is known. The gate holds an
+           Approve for the same (`why_not_start`); this is the backstop, read again after the
+           upload.
+        4. **Preflight** — the printer must be free and have room, and the
            G-code must exist. A pure validator over a typed snapshot.
-        4. **The uploaded name must carry this job's id.** ``upload_file``
+        5. **The uploaded name must carry this job's id.** ``upload_file``
            returns the name the *printer* chose, which need not be the name we
            sent. If the round-trip fails we are about to print a file we cannot
            account for, so we do not.
-        5. **The start is confirmed by watching the printer's own status**,
+        6. **The start is confirmed by watching the printer's own status**,
            not by the command being acknowledged.
 
         Never returns a fake success: the previous implementation set
@@ -991,10 +1021,9 @@ def build_graph(
                 "one that would not be."
             )
 
-        material = _material_prepared(state)
-        if material is not None:
-            with Inventory(ledger.path) as inventory:
-                material = inventory.at_start(material)
+        material = _as_started(state, ledger, "nothing was uploaded or printed")
+        spools: tuple[SpoolUse, ...] = ()
+        sent: PrintJobState = state
 
         gcode = Path(state["gcode_path"])
         snapshot = client.snapshot()
@@ -1015,16 +1044,31 @@ def build_graph(
                 f"this job cannot account for."
             )
 
+        # Again, as the upload takes a while and stock.py runs beside it.
+        material = _as_started(state, ledger, "the file was uploaded, and not started")
+        swap = _swap(state)
+        if material is not None and swap is not None and swap.start and swap.to:
+            with Inventory(ledger.path) as inventory:
+                to = swap.to.of(inventory.spool(swap.to.spool_id))
+            change = _standing(state)
+            assert change is not None
+            started = swap.model_copy(update={"start": material, "to": to})
+            # The reading names the spools as the print starts, as the row's spools do.
+            reading = pauses.marked(state.get("slice_reading"),
+                                    change.model_copy(update={"pause": started}))
+            spools = pauses.uses(started, reading)
+            sent = {**state, "slice_reading": reading}
+
         # Written before the printer is told anything, so a start that fails
         # halfway is still on record.
         rows = (
-            plate_job.records(state, remote_name, parse_config_block(gcode), snapshot.machine,
-                              snapshot.firmware, material)
+            plate_job.records(sent, remote_name, parse_config_block(gcode), snapshot.machine,
+                              snapshot.firmware, material, spools)
             if state.get("parts")
-            else (_print_record(state, remote_name, gcode, snapshot.machine, snapshot.firmware,
-                                store, material),)
+            else (_print_record(sent, remote_name, gcode, snapshot.machine, snapshot.firmware,
+                                store, material, spools),)
         )
-        ledger.record_start_requested(*rows)
+        ledger.record_start_requested(*rows, loaded=material)
         try:
             client.start(remote_name)
         except Exception as exc:
@@ -1109,9 +1153,178 @@ def build_graph(
 
 
 def _pauses_said(reading: Any) -> str:
-    """Where the slice pauses for a filament swap, in a sentence, or ""."""
-    pauses = getattr(reading, "pauses", ()) or ()
-    return "; ".join(f"this print {p.line()}" for p in pauses)
+    """Where the slice pauses and what for, in a sentence, or ""."""
+    found = getattr(reading, "pauses", ()) or ()
+    return "; ".join(f"this print {p.line()}" for p in found)
+
+
+def _standing(state: PrintJobState) -> Change | None:
+    """The pause that stood at the review, or None."""
+    proposal = state.get("proposal")
+    change = proposal.get(PAUSE) if proposal is not None else None
+    return change if change is not None and change.value != "none" else None
+
+
+def _reading_now(state: PrintJobState, ledger: Ledger | None) -> Any:
+    """The slice's reading with the spool a swap is to named as the stock has it now: the person
+    loads by those words."""
+    reading = state.get("slice_reading")
+    change, swap = _standing(state), _swap(state)
+    if ledger is None or change is None or swap is None or swap.to is None:
+        return reading
+    try:
+        with Inventory(ledger.path) as inventory:
+            now = swap.model_copy(update={"to": swap.to.as_now(inventory.spools())})
+    except sqlite3.Error as exc:
+        logger.warning("the stock couldn't be read for the gate's pause: %s", exc)
+        return reading
+    return pauses.marked(reading, change.model_copy(update={"pause": now}))
+
+
+def _pause_for(state: PrintJobState) -> str:
+    """What the job's pause is for, or "" where it doesn't say (mqucifer/print-shop#218)."""
+    change = _standing(state)
+    return change.pause.kind.value if change is not None and change.pause is not None else ""
+
+
+def _swap(state: PrintJobState) -> pauses.Pause | None:
+    change = _standing(state)
+    pause = change.pause if change is not None else None
+    return pause if pause is not None and pause.kind is pauses.PauseFor.SWAP else None
+
+
+def _first_spool(state: PrintJobState) -> tuple[Material | None, int | None]:
+    """The spool a job starts on, as it was prepared, and the one it mustn't: a swap's second."""
+    swap = _swap(state)
+    if swap is not None and swap.start is not None and swap.to is not None:
+        return swap.start, swap.to.spool_id
+    return _material_prepared(state), None
+
+
+def why_not_start(state: PrintJobState, ledger: Ledger | None) -> str:
+    """Why an Approve mustn't start this job with the stock as it is, and what to do, or ""
+    (mqucifer/print-shop#218). The daemon reads it before it resumes the gate; the print node
+    refuses the same, as the backstop. A job with no stock set up has none."""
+    first, not_on = _first_spool(state)
+    if ledger is None:
+        return ""
+    if first is None:
+        return _stock_since(state, ledger)
+    with Inventory(ledger.path) as inventory:
+        held = inventory.why_not_start(
+            first, not_on=not_on, prepared=_material_prepared(state),
+            by_hand=state.get("sliced") is not None,
+        )
+        if held is None:
+            return ""
+        needed = ""
+        spools = inventory.spools()
+        if inventory.unknown(first.printer_id) is not None and any(
+            spool.id == first.spool_id for spool in spools
+        ):
+            # What's on may not be what this job needs: said now, not at a second hold.
+            needed = (f". This job needs {first.as_now(spools).named()}: if another's on, put that "
+                      f"on first and record it (`stock.py load {first.spool_id}`)")
+    return held.at_gate() + needed
+
+
+def _stock_since(state: PrintJobState, ledger: Ledger) -> str:
+    """Why a swap prepared with no stock can't start once there is one: it could record neither
+    its spools nor that what's on isn't known afterwards."""
+    if _swap(state) is None:
+        return ""
+    with Inventory(ledger.path) as inventory:
+        if not inventory.printers():
+            return ""
+    return ("the stock was set up after this job was prepared, and couldn't follow its spools: "
+            "Reject and run the job again")
+
+
+def _as_started(state: PrintJobState, ledger: Ledger, done: str) -> Material | None:
+    """The spool the print starts on, as it starts, or None with no stock.
+
+    Raises:
+        InventoryError: As `why_not_start` says.
+    """
+    first, not_on = _first_spool(state)
+    if first is None:
+        if why := _stock_since(state, ledger):
+            raise InventoryError(f"{why}, so {done}.")
+        return None
+    with Inventory(ledger.path) as inventory:
+        return inventory.at_start(
+            first, not_on=not_on, prepared=_material_prepared(state), done=done)
+
+
+def _recorder(
+    ledger: Ledger | None, profiles: SlicerProfiles
+) -> Callable[[int, Asked], None] | None:
+    """Records a load the person says, at the review (`review._loaded_first`), and the print
+    they said is over in the same word."""
+    material = _material_of(profiles)
+    if ledger is None or material is None:
+        return None
+    path, printer = ledger.path, material.printer_id
+
+    def record(spool_id: int, asked: Asked) -> None:
+        with Inventory(path) as inventory:
+            inventory.load(spool_id, printer, over=asked.not_known, asked=asked)
+
+    return record
+
+
+def _starts_said(state: PrintJobState, ledger: Ledger | None) -> str:
+    """For the gate: the spool a swap's print starts on and whether it's loaded, and for any job
+    that what's on isn't known, or ""."""
+    if ledger is None:
+        return ""
+    first, _ = _first_spool(state)
+    if first is None:
+        return ""
+    swap = _swap(state)
+    try:
+        with Inventory(ledger.path) as inventory:
+            unknown = inventory.unknown(first.printer_id)
+            if swap is not None and swap.start is not None:
+                return pauses.starting(swap, inventory.spools(), unknown.why() if unknown else "")
+    except sqlite3.Error as exc:
+        # Only said here: the gate's check and the print node read it again, and refuse unread.
+        logger.warning("the stock couldn't be read for the gate: %s", exc)
+        return f"the stock couldn't be read ({exc}): an Approve checks it again"
+    if unknown is None:
+        return ""
+    return f"{unknown.why()}. {unknown.hold().do}: an Approve before that starts nothing"
+
+
+def _stands(ledger: Ledger | None, profiles: SlicerProfiles) -> Callable[[], Asked] | None:
+    """The stock's changes and what isn't known, for the review, read as it's needed."""
+    material = _material_of(profiles)
+    if ledger is None or material is None:
+        return None
+    path, printer = ledger.path, material.printer_id
+
+    def stands() -> Asked:
+        with Inventory(path) as inventory:
+            return inventory.asked(printer)
+
+    return stands
+
+
+def _material_of(profiles: SlicerProfiles) -> Material | None:
+    return profiles.used.material if profiles.used is not None else None
+
+
+def _stock(ledger: Ledger | None, profiles: SlicerProfiles) -> pauses.Stock | None:
+    """The spools on hand, for a swap to name its two, read each time they're needed."""
+    if ledger is None or _material_of(profiles) is None:
+        return None
+    path = ledger.path
+
+    def on_hand() -> tuple[Any, ...]:
+        with Inventory(path) as inventory:
+            return tuple(inventory.spools())
+
+    return on_hand
 
 
 def _material_prepared(state: PrintJobState) -> Material | None:
@@ -1126,10 +1339,12 @@ def _material_prepared(state: PrintJobState) -> Material | None:
 def _print_record(
     state: PrintJobState, remote_name: str, gcode: Path, machine: str, firmware: str,
     store: Store | None = None, material: Material | None = None,
+    spools: tuple[SpoolUse, ...] = (),
 ) -> PrintRecord:
     """The ledger's row for this job, from state and the G-code Orca wrote.
 
-    `material` is the spool as the print starts (`Inventory.at_start`).
+    `material` is the spool as the print starts (`Inventory.at_start`), and `spools` a swap's,
+    in order (mqucifer/print-shop#218).
     """
     slice_result: SliceResult = state["slice"]
     job = state.get("sliced")
@@ -1185,6 +1400,7 @@ def _print_record(
         features=tuple(state.get("features", ())),
         reading=state.get("slice_reading"),
         flags=tuple(state.get("slice_flags", ())),
+        spools=spools,
     )
 
 
@@ -1265,10 +1481,22 @@ def _as_laid(request: OrientationRequest) -> Outcome[Orientation]:
 
 
 def _ask(
-    asked: Any, asker: Asker, slice_with: Any
+    asked: Any, asker: Asker, slice_with: Any, two: tuple[Question, Question] = STOCK,
 ) -> Intake:
-    """The questions with Orca's estimate for each option, asked, with the answers."""
-    questions = _priced(asked.questions, slice_with)
+    """The questions with Orca's estimate for each option, asked, with the answers. print-shop's
+    two are as the part's notes leave them (`questions.stock`, mqucifer/print-shop#236)."""
+    purpose, seen_faces = two
+    questions: tuple[Question, ...] = tuple(
+        purpose if q == PURPOSE
+        else seen_faces if q == SEEN
+        # The model's own purpose question has the notes' words beside it as well.
+        else q.model_copy(update={"beside": purpose.beside}) if q.feature == "purpose"
+        else q
+        for q in asked.questions
+    )
+    if not questions and any(q.beside or q.noted is not None for q in two):
+        questions = two
+    questions = _priced(questions, slice_with)
     return Intake(questions=questions, answers=asker(questions), note=asked.note,
                   call=asked.call)
 
@@ -1341,6 +1569,7 @@ def _offering(
             chosen = "your correction at this job"
         elif state.get("as_laid"):
             chosen = "kept as laid"
+        on_hand = _stock(ledger, profiles)
 
         def lying(value: str) -> Orientation | None:
             if measuring is None:
@@ -1357,7 +1586,9 @@ def _offering(
             filament=filament, filament_names=tuple(dict.fromkeys(n for n in names if n)),
             measured=lying, build_volume_mm=build_volume,
             context=state.get("part_context"), pose_chosen=chosen,
-            asked=intake.could_set(),
+            material=_material_of(profiles), on_hand=on_hand() if on_hand else (),
+            asked=intake.could_set(), unwaited=intake.unwaited,
+            seen_in=lambda pose: carried(intake, state.get("part_context"), pose),
         ))
     except Exception as exc:  # noqa: BLE001 - a print is never stopped by what it might reuse
         logger.warning("the past prints couldn't be read for the offer: %s", exc)
@@ -1378,8 +1609,12 @@ class _PlateReview:
     read: plate_job.Together
     parts: tuple[ReviewPart, ...]
     undone: str = ""  # why the send-back before this review was taken back
-    #: A part was turned after the questions, so what was said of its pose isn't used.
-    turned_since: bool = False
+    #: What's seen, each part's carried from the pose it was asked in and read as one, and the
+    #: review's lines on it (mqucifer/print-shop#248).
+    seen: Seen | None = None
+    seen_lines: tuple[str, ...] = ()
+    #: Which faces are seen was answered and can't be carried to how the parts lie now.
+    unjudged: bool = False
 
 
 def _with_orienting(proposal: Proposal, given: tuple[GivenLesson, ...]) -> Proposal:
@@ -1449,6 +1684,10 @@ def _propose_and_review(
     offering: Offering | None = None,
     doubting: Doubting | None = None,
     plate: _PlateReview | None = None,
+    material: Material | None = None,
+    stock: pauses.Stock | None = None,
+    stands: Callable[[], Asked] | None = None,
+    record_load: Callable[[int, Asked], None] | None = None,
 ) -> tuple[SliceResult, dict[str, Any]]:
     """Slice with the proposal; with a reviewer, again after each correction until approved.
 
@@ -1459,6 +1698,10 @@ def _propose_and_review(
 
     `offering` is what decided the past prints most like this one (mqucifer/print-shop#211):
     none of it is applied until it's used, and picking or clearing slices nothing.
+
+    `material` is the spool the job was prepared with and `stock` the spools on hand: what a swap
+    names its two from. Each slice's reading is marked with what its pause is for
+    (mqucifer/print-shop#218).
 
     Each change is read back from each slice (mqucifer/print-shop#206): the review, and then
     the job, have what reached it as changed and the rest as not applied, the corrections
@@ -1475,17 +1718,38 @@ def _propose_and_review(
         for p in (profiles.machine, profiles.process, profiles.filament)
     )
     process, filament = _presets(profiles)
-    faces = seen(intake)
+    faces = plate.seen if plate is not None else seen(intake, orientation.rotation_deg)
     corrections: list[Change] = list(earlier or ())
     # The part's context in this pose (mqucifer/print-shop#130): its fits as heights, for the
     # reading's seam rule and elephant foot, and what the review says was read.
     placed = (place(context, stl, orientation.rotation_deg)
               if context is not None and context.found and stl is not None else None)
-    said = tuple([*(context.lines() if context is not None else ()),
+    instead = intake.set_aside() if intake is not None else {}
+    if placed is not None:
+        # One reading with every other reader's: the notes' faces only where no answer stands in
+        # their place, as words do, naming no face (mqucifer/print-shop#236,
+        # mqucifer/print-shop#248).
+        placed = placed.model_copy(update={
+            "seen": carried(intake, context, orientation.rotation_deg)})
+    prints = ""
+    if context is not None and context.seen is not None and any(orientation.rotation_deg):
+        turned_to = printed(context.seen, orientation.rotation_deg)
+        prints = turned_to.as_printed() if turned_to is not None else "not judged"
+    # The faces as they print now and, after a turn, what they were called when answered
+    # (mqucifer/print-shop#248). A note, so the review, the desk and the record all have it.
+    seen_now: tuple[str, ...] = (
+        plate.seen_lines if plate is not None
+        else tuple(filter(None, [seen_said(intake, context, orientation.rotation_deg)])))
+    if seen_now:
+        proposal = proposal.model_copy(update={"notes": (*seen_now, *proposal.notes)})
+    said = tuple([*(context.lines(instead, prints) if context is not None else ()),
                   *(placed.lines() if placed is not None else ())])
     undone = ""
     if plate is not None:
         placed, said, undone = plate.read.placed, plate.read.said, plate.undone
+        if placed is not None:
+            # The notes' faces only as carried with the answers, as one part's are.
+            placed = placed.model_copy(update={"seen": plate.seen})
     proposal = proposal.model_copy(update={
         "context": said, "context_from": context.path if context is not None else ""})
     asked = proposal
@@ -1506,14 +1770,15 @@ def _propose_and_review(
         fitted = (asked, list(corrections))
         config = _config(result)
         proposal = read_back(asked, process, filament, config)
-        reading = _read(result)
+        reading = pauses.marked(_read(result), proposal.get(PAUSE))
         found = (flags(reading, faces, process, filament, placed, proposal.changes,
                        _tops(plate.layout()) if plate is not None else ())
                  if reading is not None else ())
-        if plate is not None and plate.turned_since:
+        if plate is not None and plate.unjudged:
             found = tuple(f.model_copy(update={"reading": f.reading.replace(
                 "the intake didn't say which faces are seen",
-                "a part was turned since you said which faces are seen")}) for f in found)
+                "which faces are seen, as you said it, can't be carried to how the parts lie "
+                "now")}) for f in found)
         if reviewer is None:
             break
         while True:
@@ -1539,6 +1804,10 @@ def _propose_and_review(
                 plate=plate.layout() if plate is not None else None,
                 parts=plate.parts if plate is not None else (),
                 undone=undone,
+                material=material,
+                stock=stock,
+                stands=stands,
+                record_load=record_load,
             ))
             if review.offering is not None:
                 offering = review.offering

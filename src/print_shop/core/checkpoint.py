@@ -56,6 +56,7 @@ from print_shop.plate import OnPlate, PlateLayout
 from print_shop.setup.context import Fit, Hold, PartContext, Seen
 from print_shop.setup.features import Feature
 from print_shop.setup.intake import Answer, Estimate, Intake, Option, Question
+from print_shop.setup.pauses import Pause, PauseFor
 from print_shop.setup.proposal import Change, GivenLesson, LoopCall, Source, Used
 from print_shop.setup.proposal import Proposal as SettingsProposal
 from print_shop.setup.reading import (
@@ -105,6 +106,9 @@ PERSISTED_TYPES: tuple[type, ...] = (
     LoopCall,
     Source,
     Used,
+    # What a pause is for, and a swap's spools (mqucifer/print-shop#218).
+    Pause,
+    PauseFor,
     Feature,
     SliceReading,
     LayerTime,

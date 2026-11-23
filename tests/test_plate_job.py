@@ -438,13 +438,14 @@ def test_an_order_that_isnt_one_is_refused(tmp_path: Path) -> None:
 
 
 def test_by_layer_and_a_pause_corrected_at_the_review_pause_the_plate(tmp_path: Path) -> None:
-    rig = Rig(tmp_path, "pause_at=3", "print_sequence=by layer; pause_at=3 because a swap", "ok")
+    rig = Rig(tmp_path, "pause_at=3",
+              "print_sequence=by layer; colour_change=3 because a swap", "ok")
     with rig.daemon:
         job = rig.gated(_caps(tmp_path))
         gate = rig.bridge.retained_json(gate_topic(CFG))
         rig.press("reject", job)
     assert any("would never pause" in s for s in rig.shown)
-    assert "printed BY LAYER" in gate["plate"] and "pauses for a filament swap" in gate["pause"]
+    assert "printed BY LAYER" in gate["plate"] and "pauses for a swap" in gate["pause"]
     assert rig.orca.calls[-1]["pauses"], "Orca was given it"
 
 

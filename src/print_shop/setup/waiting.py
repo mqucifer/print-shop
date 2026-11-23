@@ -15,9 +15,14 @@ had waited 6 to 13 minutes for `PURPOSE` and `SEEN`, which need no model. So:
 Going on is a call without an answer, as a failed one is: the intake records which, the review
 says it, and the proposal, its bounds and the guards are the same.
 
+**What the part's notes give is read back** in the place of the question (mqucifer/print-shop#236).
+Where they give both, nothing waits for the model: after the confirmation a question that's
+already here is added as above, and a call still running is closed, saying so.
+
 With recorded answers (`--answers`) nothing is asked early: the file answers the whole set once
 the model's questions are known or the person goes on, and the answer it has on purpose stands
-over any closer choices.
+over any closer choices. Where the notes give both and the file answers just those, it's used
+without waiting.
 """
 
 from __future__ import annotations
@@ -25,15 +30,26 @@ from __future__ import annotations
 import logging
 import select
 import sys
-import termios
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TextIO
 
-from print_shop.setup.intake import Added, Answer, AnswersRefused, Asker, Intake, Question, parse
-from print_shop.setup.questions import PLATE_WORDS, PURPOSE, STOCK, Asked
+from print_shop.setup.intake import (
+    DIFFERS_PROMPT,
+    NOT_WAITED,
+    NOTES_PROMPT,
+    Added,
+    Answer,
+    AnswersRefused,
+    Asker,
+    Intake,
+    Question,
+    drop_typed,
+    parse,
+)
+from print_shop.setup.questions import PLATE_WORDS, PURPOSE, STOCK, Asked, only_stock
 
 __all__ = ["GO_ON", "Prompted", "QuestionsCall", "Waiting", "ask_meanwhile", "cli_waiting", "took"]
 
@@ -44,6 +60,8 @@ logger = logging.getLogger(__name__)
 GO_ON = "go"
 #: How often a wait that can't rewrite its line says how long it has run.
 SAID_EVERY_S = 60.0
+#: The most a call that has its answer is given to say so on the screen.
+SAYING_S = 5.0
 
 
 def took(seconds: float) -> str:
@@ -78,7 +96,12 @@ class QuestionsCall:
         self,
         propose: Callable[[threading.Event], Asked],
         on_end: Callable[[QuestionsCall, Asked], None],
+        stock: tuple[Question, ...] = STOCK,
     ) -> None:
+        #: Whether the notes give either of print-shop's two, and both, so nothing waits for
+        #: this call (mqucifer/print-shop#236).
+        self.from_notes = any(q.noted is not None for q in stock)
+        self.unwaited = all(q.noted is not None for q in stock)
         self._propose = propose
         self._on_end = on_end
         self._started = time.monotonic()
@@ -106,6 +129,10 @@ class QuestionsCall:
         """End it: the model's call is closed, and nothing it says later is used."""
         self._stop.set()
 
+    def arrived(self) -> bool:
+        """Whether its answer is here: it has ended, or is only saying so, which is waited out."""
+        return self.ended() or (self.result is not None and self.ended(SAYING_S))
+
     def ended(self, timeout_s: float = 0.0) -> bool:
         """Whether it has ended, and said so, within `timeout_s`."""
         return self._done.wait(timeout_s)
@@ -116,7 +143,7 @@ class QuestionsCall:
         except Exception as exc:  # the thread's: the job goes on as for any failed call
             logger.exception("the questions call failed")
             why = f"was unavailable ({type(exc).__name__}: {exc})"[:300]
-            found = Asked(STOCK, f"only purpose and what's seen asked: the model {why}",
+            found = Asked(STOCK, f"{only_stock(self.from_notes)}: the model {why}",
                           {"finish_reason": "unavailable"}, failed=why)
         if self.stopped:
             return
@@ -145,6 +172,8 @@ class Waiting:
     closer: Callable[[Question, Answer, float], Answer | None] | None
     #: Ask print-shop's two before the model's are in. False for recorded answers.
     stock_first: bool = True
+    #: The notes gave both, so it goes on with the call still running: said as it does.
+    went_on: Callable[[QuestionsCall], None] = lambda call: None
 
 
 def ask_meanwhile(
@@ -152,6 +181,7 @@ def ask_meanwhile(
     asker: Asker,
     waiting: Waiting,
     price: Callable[[tuple[Question, ...]], tuple[Question, ...]],
+    stock: tuple[Question, ...] = STOCK,
 ) -> Intake:
     """The intake, with print-shop's two asked while the model works on its own.
 
@@ -160,31 +190,60 @@ def ask_meanwhile(
         asker: Answers a set of questions.
         waiting: What the person sees and does meanwhile.
         price: The questions with Orca's estimate on each option.
+        stock: print-shop's two as this part's notes leave them (`questions.stock`).
     """
-    call = QuestionsCall(propose, waiting.ended)
+    call = QuestionsCall(propose, waiting.ended, stock)
     call.start()
     try:
         waiting.started(call)
-        first = tuple(asker(STOCK)) if waiting.stock_first else ()
-        came = waiting.wait(call)
+        first = tuple(asker(stock)) if waiting.stock_first else ()
+        replayed = False
+        if call.unwaited and not waiting.stock_first:
+            try:
+                first, replayed = tuple(asker(stock)), True
+            except AnswersRefused as refused:
+                if not refused.only_more:
+                    raise  # the model's questions wouldn't mend it, so it isn't kept waiting
+                logger.debug("the answers file has more than the notes': the call is waited for")
+        waited = not call.unwaited or not (waiting.stock_first or replayed)
+        came = False
+        if waited:
+            came = waiting.wait(call)
+        elif call.arrived():
+            came = waiting.wait(call)
+            if replayed and call.result is not None:
+                # A file that answered just the notes' two takes none, so that it replays the
+                # same whenever the model's arrive.
+                came = not (call.result.added or call.result.closer)
         seconds = call.seconds
         asked = call.result
         without = ""
         if asked is not None and asked.failed:
             # A failure is recorded as what it was, also when they typed `go` as it failed.
-            without = (f"the model {asked.failed} after {took(seconds)}, so of the questions "
-                       "only purpose and what's seen were asked")
+            without = (f"the model {asked.failed} after {took(seconds)}, so "
+                       + ("it added no question" if call.from_notes
+                          else "of the questions only purpose and what's seen were asked"))
         elif not came or asked is None:
-            late = ("they came as you did, and weren't used" if asked is not None
-                    else "its call was closed and none of them is used")
+            late = ("its call was closed and none of them is used" if asked is None
+                    else "they came, and your answers file doesn't answer them, so none is used"
+                    if replayed else "they came as you did, and weren't used")
             call.stop()
-            without = f"you went on without the model's questions after {took(seconds)}: {late}"
-            asked = Asked(STOCK, f"only purpose and what's seen asked: {without}",
-                          {"finish_reason": "went on", "seconds": round(seconds, 1)})
+            if not waited:
+                waiting.went_on(call)
+            without = (f"you went on without the model's questions after {took(seconds)}: {late}"
+                       if waited else
+                       "the notes gave what it's for and what's seen, so the model's questions "
+                       f"weren't waited for: after {took(seconds)}, {late}")
+            asked = Asked(STOCK, f"{only_stock(call.from_notes)}: {without}",
+                          {**(asked.call if asked is not None and not waited else {}),
+                           "finish_reason": "went on" if waited else NOT_WAITED,
+                           "seconds": round(seconds, 1)})
     finally:
         call.stop()
 
-    closer = asked.closer
+    purpose = stock[0]
+    # What the notes gave was read back: nothing is asked twice.
+    closer = asked.closer if purpose.noted is None else None
     # Priced together, so that the limit on a print's slices is the one it was.
     priced = price(((closer,) if closer else ()) + asked.added)
     closer = priced[0] if closer else None
@@ -194,17 +253,17 @@ def ask_meanwhile(
         left = ", ".join(f"'{q.text}'" for q in asked.over)
         note = "; ".join(x for x in (note, f"left out {left}: four questions at most") if x)
 
-    if not waiting.stock_first:
-        questions, answers, offered = _replayed(asker, closer, added)
+    if not waiting.stock_first and not replayed:
+        questions, answers, offered = _replayed(asker, closer, added, stock)
         if offered:
             said = ("the answers file's purpose answer kept over the model's closer choices"
-                    if questions[0] == PURPOSE
+                    if questions[0] == purpose
                     else "the answers file picked from the model's closer choices on purpose")
             note = "; ".join(x for x in (note, said) if x)
         return Intake(questions=questions, answers=answers, note=note, call=asked.call,
                       offered=offered, without=without)
 
-    purpose, answer = PURPOSE, first[0]
+    answer = first[0]
     offered = ()
     if closer is not None:
         picked = waiting.closer(closer, answer, seconds) if waiting.closer is not None else None
@@ -212,18 +271,19 @@ def ask_meanwhile(
             offered = (closer,)
             said = "kept your purpose answer over the model's closer choices"
         else:
-            offered = (PURPOSE,)
+            offered = (purpose,)
             said = (f"picked from the model's closer choices on purpose, in place of your first "
-                    f"answer, '{answered_with(PURPOSE, answer)}'")
+                    f"answer, '{purpose.label(answer)}'")
             purpose, answer = closer, picked
         note = "; ".join(x for x in (note, said) if x)
     more = tuple(asker(Added(added, before=len(first)))) if added else ()
-    return Intake(questions=(purpose, *STOCK[1:], *added), answers=(answer, *first[1:], *more),
+    return Intake(questions=(purpose, *stock[1:], *added), answers=(answer, *first[1:], *more),
                   note=note, call=asked.call, offered=offered, without=without)
 
 
 def _replayed(
-    asker: Asker, closer: Question | None, added: tuple[Question, ...]
+    asker: Asker, closer: Question | None, added: tuple[Question, ...],
+    stock: tuple[Question, ...],
 ) -> tuple[tuple[Question, ...], tuple[Answer, ...], tuple[Question, ...]]:
     """The whole set, for recorded answers.
 
@@ -233,35 +293,22 @@ def _replayed(
     Raises:
         AnswersRefused: If the file answers neither set, listing the first.
     """
-    questions = (*STOCK, *added)
+    questions = (*stock, *added)
     try:
         return questions, tuple(asker(questions)), ((closer,) if closer else ())
     except AnswersRefused as refused:
         if closer is None:
             raise
-        instead = (closer, *STOCK[1:], *added)
+        instead = (closer, *stock[1:], *added)
         try:
-            return instead, tuple(asker(instead)), (PURPOSE,)
+            return instead, tuple(asker(instead)), (stock[0],)
         except AnswersRefused:
             raise refused from None
-
-
-def answered_with(question: Question, answer: Answer) -> str:
-    """An answer in words."""
-    return question.options[answer.choice].label if answer.choice is not None else answer.other
 
 
 def _keys_waiting(timeout_s: float) -> bool:
     """Whether a typed line is waiting to be read, within `timeout_s`."""
     return bool(select.select([sys.stdin], [], [], timeout_s)[0])
-
-
-def _drop_typed() -> None:
-    """Forget what was typed before a question was shown: it can't have been an answer to it."""
-    try:
-        termios.tcflush(sys.stdin, termios.TCIFLUSH)
-    except (OSError, ValueError, termios.error):
-        logger.debug("couldn't drop what was typed ahead", exc_info=True)
 
 
 def _terminal() -> TextIO | None:
@@ -273,6 +320,11 @@ def _terminal() -> TextIO | None:
     return None
 
 
+def can_ask() -> bool:
+    """Whether there's a person's terminal to ask in."""
+    return _terminal() is not None
+
+
 def cli_waiting(
     read: Callable[[str], str] = input,
     write: Callable[[str], None] = print,
@@ -281,7 +333,7 @@ def cli_waiting(
     prompt: Callable[[], str] = lambda: "",
     screen: Callable[[], TextIO | None] = _terminal,
     typed: Callable[[float], bool] = _keys_waiting,
-    forget: Callable[[], None] = _drop_typed,
+    forget: Callable[[], None] = drop_typed,
     several: bool = False,
 ) -> Waiting:
     """The wait on the command line. `replayed` is for recorded answers. `prompt` is the one
@@ -297,9 +349,15 @@ def cli_waiting(
     at_prompt = threading.Event()  # an answer is being typed
 
     def started(call: QuestionsCall) -> None:
-        write(f"The model is reading {whose} for questions of its own. "
-              + ("Your answers file is used once they're in."
-                 if replayed else "Answer these meanwhile: you won't have to wait for it."))
+        if replayed:
+            how = ("If your answers file answers only what the notes give, it doesn't wait for "
+                   "the model's questions." if call.unwaited else
+                   "Your answers file is used once they're in.")
+        elif call.unwaited:
+            how = "The notes give what it's for and what's seen, so nothing waits for it."
+        else:
+            how = "Answer these meanwhile: you won't have to wait for it."
+        write(f"The model is reading {whose} for questions of its own. {how}")
         if not replayed:
             at_prompt.set()
 
@@ -309,8 +367,9 @@ def cli_waiting(
                 return
             after = took(call.seconds)
             if asked.failed:
-                said = (f"The model {asked.failed} after {after}. "
-                        "Only purpose and what's seen are asked.")
+                said = f"The model {asked.failed} after {after}. " + (
+                    "It adds no question." if call.from_notes
+                    else "Only purpose and what's seen are asked.")
             elif asked.closer or asked.added:
                 said = f"The model's questions came after {after}."
                 if at_prompt.is_set():
@@ -320,8 +379,10 @@ def cli_waiting(
             out = screen()
             open_prompt = prompt() if at_prompt.is_set() else ""
             if open_prompt:
-                said = (f"\n{said}\nKeep answering {open_prompt.rstrip('> ')} "
-                        "(what you've typed is kept):")
+                keep = ("Enter still confirms the notes above" if open_prompt == NOTES_PROMPT
+                        else "Enter still takes your answer" if open_prompt == DIFFERS_PROMPT
+                        else f"Keep answering {open_prompt.rstrip('> ')}")
+                said = f"\n{said}\n{keep} (what you've typed is kept):"
             elif at_prompt.is_set() or out is not None:
                 said = f"\n{said}"  # off the line that's being typed on
             write(said)
@@ -378,7 +439,7 @@ def cli_waiting(
         return True
 
     def closer(question: Question, kept: Answer, seconds: float) -> Answer | None:
-        lines = [f"1. {purpose}  you: {answered_with(PURPOSE, kept)}",
+        lines = [f"1. {purpose}  you: {PURPOSE.label(kept)}",
                  f"   The model has read {whose} since ({took(seconds)}) and has closer choices. "
                  "Each says what it sets:",
                  f"   {question.text}",
@@ -386,6 +447,8 @@ def cli_waiting(
         lines += [f"   {i}) {o.line()}" for i, o in enumerate(question.options, 1)]
         lines.append("   o) other: say it in your own words")
         write("\n".join(lines))
+        if screen() is not None:
+            forget()  # Enter keeps their answer here, so never one typed while this drew
         while True:
             line = read("1> ")
             if not line.strip():
@@ -395,5 +458,10 @@ def cli_waiting(
                 return parsed
             write(f"  {parsed}, or Enter to keep your answer")
 
-    return Waiting(started=started, ended=ended, wait=wait,
+    def went_on(call: QuestionsCall) -> None:
+        with lock:
+            write("Going on without waiting for the model's questions: the notes gave what it's "
+                  "for and what's seen.")
+
+    return Waiting(started=started, ended=ended, wait=wait, went_on=went_on,
                    closer=None if replayed else closer, stock_first=not replayed)

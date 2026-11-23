@@ -214,6 +214,9 @@ class PlatePart(BaseModel):
     features: tuple[Feature, ...] = ()
     #: The times its pose was sent back at the review. A correction doesn't name a part.
     sent_back: tuple[Change, ...] = ()
+    #: The pose it lay in as the plate's questions were asked: what an answer on faces is of
+    #: (mqucifer/print-shop#248). None before they're asked.
+    asked_in: tuple[float, float, float] | None = None
 
 
 # --------------------------------------------------------------------------
@@ -270,8 +273,8 @@ class PrintJobState(TypedDict):
     #: measured again before its questions (mqucifer/print-shop#235).
     laid_features: NotRequired[tuple[Feature, ...]]
     orientation_lessons: NotRequired[tuple[GivenLesson, ...]]
-    #: The part's context from its design run or a sidecar: its fits, seen faces, the side it's
-    #: laid on and its holds (mqucifer/print-shop#130).
+    #: The part's context from its design run or a sidecar: its fits, seen faces, purpose, the
+    #: side it's laid on and its holds (mqucifer/print-shop#130, mqucifer/print-shop#236).
     part_context: NotRequired[PartContext]
 
     #: What the slicer actually did, which is not always what was decided.

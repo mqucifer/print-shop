@@ -21,7 +21,7 @@ from print_shop.core.contracts import Outcome
 from print_shop.core.state import AppliedOrientation, Orientation, PlatePart, PrintJobState
 from print_shop.ingest.analyzer import analyze
 from print_shop.ingest.orientation import write_rotated
-from print_shop.inventory import Material
+from print_shop.inventory import Material, SpoolUse
 from print_shop.ledger import PrintRecord
 from print_shop.plate import BY_OBJECT, SEQUENCE, GivenPart, PlateRow, row_id
 from print_shop.setup import Proposer
@@ -29,15 +29,16 @@ from print_shop.setup.context import SIDECAR, PartContext, Placed, Seen, place
 from print_shop.setup.features import Feature, measure
 from print_shop.setup.intake import Asker, Intake, OfPlate, Question
 from print_shop.setup.proposal import ORIENTATION, Change, GivenLesson, Proposal, Source, pose_value
-from print_shop.setup.questions import PLATE_WORDS, SEEN
+from print_shop.setup.questions import PLATE_WORDS, SEEN, pose_words
+from print_shop.setup.reading import NOW_PRINTS, TURNED_SINCE, carried, seen_across, seen_said
 from print_shop.setup.skill import WARPS_MM2
 from print_shop.setup.traits import traits
 from print_shop.slicer.arrange import ToPlace, object_file
 from print_shop.slicer.orca import SlicerProfiles
 
 __all__ = [
-    "Together", "asked_about", "by_object", "keep_sidecar", "planned", "poses_said", "posed",
-    "records", "smallest", "still_holds", "take", "together",
+    "Together", "asked_about", "asked_of", "by_object", "keep_sidecar", "planned", "poses_said",
+    "posed", "records", "seen_of", "smallest", "still_holds", "take", "together",
 ]
 
 #: The features whose least value is the plate's risk. Every other's is the most.
@@ -139,14 +140,15 @@ def _as_shown(text: str) -> str:
 def still_holds(
     intake: Intake, parts: tuple[PlatePart, ...], asked_in: tuple[tuple[float, float, float], ...],
 ) -> tuple[Intake, str]:
-    """The answers as this plate's reading and settings may use them, and what the review says
-    of those they may not.
+    """The answers as this plate's settings call may use them, and what the review says of
+    those it may not.
 
     An answer was given of the parts as they lay when it was asked. Where one has been turned
-    since, what's for a pose isn't carried across: which faces are seen, the questions on
-    features a turn moves, and any option's setting that's for a pose, such as no supports. The
-    intake's record keeps every answer as it was given. Turned back, they hold again. Carrying
-    them through a turn, for one part too, is mqucifer/print-shop#248's.
+    since, which faces are seen is carried to how it lies now (`seen_of`), and the raw answer
+    is left out of the call. What's for a pose and can't be carried isn't used: the questions on
+    features a turn moves, and any option's setting that's for a pose, such as no supports, or a
+    "no supports" given of a slab would hold the guard off over the overhang it's turned to. The
+    intake's record keeps every answer as it was given. Turned back, they hold again.
     """
     moved = [
         (part, part.applied.rotation_deg)
@@ -163,10 +165,10 @@ def still_holds(
         # As it was shown: "as it prints" would read as the pose it has been turned to. Their own
         # words are quoted as typed.
         label = _as_shown(option.label) if option is not None else answer.other
+        if question.feature == SEEN.feature:
+            continue  # carried part by part, and said so (`seen_of`)
         if question.feature not in _ANY_POSE:
-            what = ("which faces are seen" if question.feature == SEEN.feature
-                    else f"'{_as_shown(question.text)}'")
-            dropped.append(f"{what}, you said '{label}'")
+            dropped.append(f"'{_as_shown(question.text)}', you said '{label}'")
             continue
         if option is not None and answer.choice is not None:
             held = {k: v for k, v in option.settings.items() if not _FOR_A_POSE.search(k)}
@@ -178,16 +180,55 @@ def still_holds(
                 question = question.model_copy(update={"options": tuple(options)})
         questions.append(question)
         answers.append(answer)
+    held_to = intake.model_copy(update={"questions": tuple(questions), "answers": tuple(answers)})
     if not dropped:
-        return intake, ""
+        return held_to, ""
     who = "; ".join(f"part {part.n}, {part.name}, to {pose_value(turn)}" for part, turn in moved)
     note = (
-        f"TURNED SINCE YOU ANSWERED: {who}. These were said of the parts as they lay when asked, "
-        f"so they aren't judged or used now: {'; '.join(dropped)}. Send a part back with "
-        "orientation, or say what you want with a correction"
+        f"{TURNED_SINCE}: {who}. These were said of the parts as they lay when asked, so they "
+        f"aren't used now: {'; '.join(dropped)}. Send a part back with orientation, or say what "
+        "you want with a correction"
     )
-    held_to = intake.model_copy(update={"questions": tuple(questions), "answers": tuple(answers)})
     return held_to, note
+
+
+def seen_of(
+    intake: Intake, parts: tuple[PlatePart, ...], asked_in: tuple[tuple[float, float, float], ...],
+) -> tuple[Seen | None, tuple[str, ...]]:
+    """What's seen on the plate as its parts lie now, and the review's lines on it
+    (mqucifer/print-shop#248).
+
+    `intake` is the answers as given, never as `still_holds` leaves them. Each part's answer is
+    carried from the pose that part was asked in, or its notes' faces stand where the answer
+    agrees with them. Read as one plate's: seen on any part is seen, and where any part's can't
+    be carried, none is judged.
+    """
+    each: list[Seen | None] = []
+    lines: list[str] = []
+    for part, was in zip(parts, asked_in, strict=True):
+        now = part.applied.rotation_deg if part.applied is not None else (0.0, 0.0, 0.0)
+        each.append(carried(intake, part.context, now, asked_in=was))
+        line = seen_said(intake, part.context, now, asked_in=was)
+        if line:
+            lines.append(f"part {part.n}, {part.name}: {line}")
+    bodies = {line.split(": ", 1)[1] for line in lines}
+    if len(lines) == len(parts) and len(bodies) == 1 and not any(
+            TURNED_SINCE in line or NOW_PRINTS in line for line in lines):
+        lines = [f"every part: {bodies.pop()}"]
+    return seen_across(each), tuple(lines)
+
+
+def asked_of(intake: Intake, part: PlatePart) -> Intake:
+    """The intake as this part's row keeps it: its question of faces with the pose this part was
+    asked in, so a later reader carries the answer from there (mqucifer/print-shop#248)."""
+    if part.asked_in is None:
+        return intake
+    return intake.model_copy(update={"questions": tuple(
+        q.model_copy(update={"pose": tuple(part.asked_in),
+                             "posed": pose_words(part.context, part.asked_in)})
+        if q.feature == SEEN.feature else q
+        for q in intake.questions
+    )})
 
 
 def smallest(
@@ -365,11 +406,12 @@ def poses_said(parts: tuple[PlatePart, ...]) -> str:
 
 def records(
     state: PrintJobState, remote_name: str, config: dict[str, str], machine: str, firmware: str,
-    material: Material | None = None,
+    material: Material | None = None, spools: tuple[SpoolUse, ...] = (),
 ) -> tuple[PrintRecord, ...]:
     """The ledger's row for each object, the first's with the job's id. The review is every
     row's. Each has its own pose, features, send-backs and orientation lessons, and the same
-    spool: `material`, as it is when the print starts (`Inventory.at_start`)."""
+    spool: `material`, as it is when the print starts (`Inventory.at_start`), and a swap's
+    `spools`, which are the whole plate's (mqucifer/print-shop#218)."""
     job = state["job_id"]
     parts = tuple(state["parts"])
     orientations = tuple(state["orientations"])
@@ -421,7 +463,9 @@ def records(
             printer_firmware=firmware,
             profiles=used,
             material=material,
-            intake=state.get("intake"),
+            spools=spools,
+            intake=(asked_of(state["intake"], part) if state.get("intake") is not None
+                    else None),
             proposal=proposal,
             corrections=(*part.sent_back, *state.get("corrections", ())),
             features=part.features,

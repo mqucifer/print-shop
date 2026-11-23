@@ -78,7 +78,8 @@ def test_a_plate_with_only_its_order_gives_nothing_to_use(tmp_path: Path) -> Non
 
 
 def test_a_plates_pause_isnt_ticked_and_can_be_used_by_number(tmp_path: Path) -> None:
-    rig, job, caps = _plate(tmp_path, "print_sequence=by layer; pause_at=3 because a swap", "ok")
+    rig, job, caps = _plate(
+        tmp_path, "print_sequence=by layer; colour_change=3 because a swap", "ok")
     _answered(rig.ledger, job)
     found = offering(rig.ledger, this(caps[1]))
     pause = _items(found)[PAUSE]
