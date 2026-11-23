@@ -17,6 +17,12 @@ on four legs 10 x 10 x 60, with an assembly file for each way they're joined, he
 it, on washers and with the nut in a hex pocket; and as a lap pulled along, the upper plate's
 hole 5.5 mm from its end and 20 mm from it.
 
+`peak/` (mqucifer/print-shop#237): two blocks 20 x 30 x 20 end to end along x, an M5 bolt's
+5.5 mm bore lying level through both, round or peaked, its flats leaving the round 43° above
+level and so rising at 47° to a point; the second block's cut by a nut's slot; and what isn't a
+peaked bore: a slot's end, a half-round groove, a D, a peak that rises at 44°, one cut short of
+its point, and a D cut in two by the slot, whose two arcs add up past a full turn.
+
 `shear/` (mqucifer/print-shop#245): two blocks end to end along x on one M5 bolt lying level,
 the second's bore carrying on past its nut's slot for the bolt's tip; the same with that far
 stretch longer; with the first's bore counterbored at the head's end; and one where the shear
@@ -269,6 +275,63 @@ def throughs() -> None:
         ]
         lapped: Rows = [{**joint[0], "at": [[40 + edge, 20, PLATE_T]]}]
         assembly(out / f"lap-{name}.json", parts, lapped, wall)
+
+
+def level_bore(kind: str) -> Part.Shape:
+    """What's cut for a bore along x through (y 15, z 10), by its kind."""
+    radius, way = HOLE / 2, App.Vector(1, 0, 0)
+    round_ = Part.makeCylinder(radius, 44, App.Vector(-2, 15, 10), way)
+    if kind == "round":
+        return round_
+    if kind == "end":  # A slot standing up: each end half a round, its sides parallel.
+        over = Part.makeCylinder(radius, 44, App.Vector(-2, 15, 13), way)
+        sides = box((-2, 15 - radius, 10), (42, 15 + radius, 13))
+        return round_.fuse(over).fuse(sides).removeSplitter()
+    if kind == "d":
+        return round_.common(box((-2, 0, 0), (42, 30, 11.5)))
+    leaves = math.radians({"peaked": 43.0, "short": 43.0, "flat": 46.0}[kind])
+    y, z = radius * math.cos(leaves), 10 + radius * math.sin(leaves)
+    point = 10 + radius / math.sin(leaves)
+    roof = [App.Vector(-2, *p) for p in ((15 + y, z), (15, point), (15 - y, z), (15 + y, z))]
+    made = round_.fuse(Part.Face(Part.makePolygon(roof)).extrude(App.Vector(44, 0, 0)))
+    if kind == "short":
+        made = made.common(box((-2, 0, 0), (42, 30, 13.5)))
+    return made.removeSplitter()
+
+
+def peaks() -> None:
+    """Two blocks on one bolt lying level, and each bore it may be in."""
+    out = Path("peak")
+    first, second = box((0, 0, 0), (20, 30, 20)), box((20, 0, 0), (40, 30, 20))
+    slot = box((30, 10.85, 5.2), (34.9, 19.15, 21))
+    for kind in ("round", "peaked"):
+        save(first.cut(level_bore(kind)), out / f"one-{kind}.step")
+    for kind in ("round", "peaked", "end", "d", "flat", "short"):
+        save(second.cut(level_bore(kind)), out / f"two-{kind}.step")
+    save(second.cut(level_bore("peaked")).cut(slot), out / "two-slot.step")
+    save(second.cut(level_bore("d")).cut(slot), out / "two-split.step")
+    # The bore on the part's top: half a round, open to the air.
+    save(box((20, 0, 0), (40, 30, 10)).cut(level_bore("round")), out / "two-groove.step")
+    # The same peaked bore 4 mm from the part's side, where a washer 10 mm across overhangs it.
+    save(box((20, 0, 0), (40, 19, 20)).cut(level_bore("peaked")), out / "two-edge.step")
+    # And with a 1 mm groove across its seat, under the peaked bore: a cut that isn't the peak's.
+    notch = box((39, 0, 6), (41, 30, 7))
+    save(second.cut(level_bore("peaked")).cut(notch), out / "two-notched.step")
+    held = [{"plane": "x=40", "how": "fixed"}]
+    joint: dict[str, Any] = {"between": ["one", "two"], **M5, "at": [[20, 15, 10]]}
+    for name, one, two, more in (
+        ("peaked", "peaked", "peaked", {}),
+        ("slot", "round", "slot", {"pocket": 0.15}),
+        ("split", "round", "split", {"pocket": 0.15}),
+        *((kind, "round", kind, {}) for kind in ("end", "groove", "d", "flat", "short")),
+        ("edge", "peaked", "edge", {}),
+        ("notched", "peaked", "notched", {}),
+    ):
+        parts: Rows = [
+            {"name": "one", "file": f"one-{one}.step", "layers": "z"},
+            {"name": "two", "file": f"two-{two}.step", "layers": "z"},
+        ]
+        assembly(out / f"{name}.json", parts, [{**joint, **more}], held)
 
 
 def shears() -> None:
@@ -535,6 +598,7 @@ def plays() -> None:
 def main() -> None:
     loads()
     throughs()
+    peaks()
     shears()
     dovetails()
     plays()

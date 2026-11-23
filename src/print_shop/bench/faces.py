@@ -24,6 +24,7 @@ It reads a STEP file: an STL has no faces of its own, and `slice` reads one.
 
 from __future__ import annotations
 
+import itertools
 import math
 from collections import defaultdict
 from typing import Any
@@ -194,6 +195,59 @@ def _cylinders(part: Part) -> tuple[list[dict[str, Any]], int]:
             same["along"] = [min(same["along"][0], along[0]), max(same["along"][1], along[1])]
     full = [c for c in found if c["turns"] >= 2 * math.pi - 1e-3]
     return full, len(found) - len(full)
+
+
+#: A curved edge is this many straight runs in a flat face's outline.
+EDGE_RUNS = 32
+
+
+def bore_rows(part: Part) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Every round and every flat face of the surface, one row a face, as `through.py` reads a
+    bore from them (mqucifer/print-shop#237): a part of a circle too, with where round the
+    axis it is, and each flat face with its corners and its outline as straight runs."""
+    cylinders, planes = [], []
+    for face in part.shape.Faces():
+        surface = BRepAdaptor_Surface(face.wrapped)
+        kind = surface.GetType()
+        if kind == GeomAbs_Plane:
+            normal = np.asarray(face.normalAt().toTuple(), dtype=float)
+            runs: list[Any] = []
+            for edge in face.Edges():
+                count = 2 if edge.geomType() == "LINE" else EDGE_RUNS
+                ends = [edge.positionAt(t).toTuple() for t in np.linspace(0, 1, count)]
+                runs.extend(itertools.pairwise(ends))
+            planes.append(
+                {
+                    "normal": normal / np.linalg.norm(normal),
+                    "at": np.asarray(face.Center().toTuple(), dtype=float),
+                    "corners": np.array([v.toTuple() for v in face.Vertices()], dtype=float),
+                    "outline": np.asarray(runs, dtype=np.float64).reshape(-1, 2, 3),
+                }
+            )
+        elif kind == GeomAbs_Cylinder:
+            cylinder = surface.Cylinder()
+            axis = np.array(_dir(cylinder.Axis()))
+            place = cylinder.Axis().Location()
+            origin = np.array([place.X(), place.Y(), place.Z()])
+            u0, u1 = surface.FirstUParameter(), surface.LastUParameter()
+            v0, v1 = surface.FirstVParameter(), surface.LastVParameter()
+            on = surface.Value((u0 + u1) / 2, (v0 + v1) / 2)
+            point = np.array([on.X(), on.Y(), on.Z()])
+            radial = point - origin - ((point - origin) @ axis) * axis
+            normal = np.asarray(face.normalAt(cq.Vector(*point)).toTuple())
+            cylinders.append(
+                {
+                    "axis": axis,
+                    "origin": origin,
+                    "radius": float(cylinder.Radius()),
+                    "hole": bool(normal @ radial < 0),
+                    "low": float(origin @ axis) + min(v0, v1),
+                    "high": float(origin @ axis) + max(v0, v1),
+                    "turns": float(u1 - u0),
+                    "middle": radial / np.linalg.norm(radial),
+                }
+            )
+    return cylinders, planes
 
 
 def _dir(axis: Any) -> list[float]:
