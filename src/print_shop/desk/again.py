@@ -42,7 +42,7 @@ from print_shop.ledger import Row
 from print_shop.orchestrator.graph import AS_LAID
 from print_shop.setup.intake import Answer, Question
 from print_shop.setup.proposal import ORIENTATION, PAUSE, Change, Source, pose_value
-from print_shop.setup.reading import AT_THE_BACK
+from print_shop.setup.reading import AT_THE_BACK, turned_on_plate
 
 __all__ = ["DOWNLOADS", "Again", "again", "answers_file", "correction_line"]
 
@@ -214,7 +214,7 @@ def again(row: Row, part_path: Path | None, printers: int = 1, part_found: bool 
             notes.append(f"The pose was sent back at the review, from {c.preset} to {c.value}, "
                          f"because {c.reason}. Type orientation at the review to send it back "
                          "again.")
-    turned = row.reading.turn_deg if row.reading is not None else None
+    turned = turned_on_plate(row.reading, row.rotation_deg)
     if turned:
         notes.append(f"It was turned {turn_words(turned)}, on the plate to fit. It's offered "
                      "again only if it still doesn't fit as posed: type turn at the review to "

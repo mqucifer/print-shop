@@ -53,7 +53,7 @@ from print_shop.setup.features import Feature
 from print_shop.setup.lessons import material_of
 from print_shop.setup.proposal import ORIENTATION, PAUSE, Change, Proposal, Source, Used, pose_value
 from print_shop.setup.reach import not_sliced, profile_of, unplaced
-from print_shop.setup.reading import AT_THE_BACK, seen
+from print_shop.setup.reading import AT_THE_BACK, seen, turned_on_plate
 from print_shop.setup.similar import Likeness, Numbers
 from print_shop.setup.traits import TRAITS, traits
 from print_shop.sliced import same_setting
@@ -582,7 +582,7 @@ def _past(ledger: Ledger, f: _Found, found: list[_Found], part: ThisPart) -> Pas
     if seam is not None and seam.value in AT_THE_BACK and row.sliced is None:
         # Back is the plate's, so it's another side of a part turned on it
         # (mqucifer/print-shop#257). A row from before doesn't say whether Orca turned it.
-        was = row.reading.turn_deg if row.reading is not None else None
+        was = turned_on_plate(row.reading, row.rotation_deg)
         if was is None:
             differs.append("Orca may have turned it on the plate, unsaid then, so its back may "
                            "have been another side")

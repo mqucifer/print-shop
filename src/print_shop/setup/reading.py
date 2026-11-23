@@ -175,6 +175,17 @@ class PauseReading(BaseModel):
 AT_THE_BACK = ("back", "aligned_back")
 
 
+def turned_on_plate(
+    reading: SliceReading | None, rotation_deg: tuple[float, float, float],
+) -> float | None:
+    """How far a print was turned on the plate to fit, 0 as posed, or None where it isn't known:
+    a row from before mqucifer/print-shop#257, when Orca could turn a part unsaid. Its reading
+    says, else its rotation, which has a turn in z only from then on."""
+    if reading is not None and reading.turn_deg is not None:
+        return reading.turn_deg
+    return rotation_deg[2] or None
+
+
 class SliceReading(BaseModel):
     """One slice, read layer by layer."""
 

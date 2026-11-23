@@ -1162,7 +1162,8 @@ def _propose_and_review(
     none of it is applied until it's used, and picking or clearing slices nothing.
 
     A slice turned to fit is offered as that turn, and isn't approved until it's taken: taken,
-    it stands while the slices after it need the same turn (mqucifer/print-shop#257).
+    it stands while each slice after it needs the same turn, and a slice that fits as posed ends
+    it (mqucifer/print-shop#257).
 
     Each change is read back from each slice (mqucifer/print-shop#206): the review, and then
     the job, have what reached it as changed and the rest as not applied, the corrections
@@ -1215,6 +1216,9 @@ def _propose_and_review(
         config = _config(result)
         proposal = read_back(asked, process, filament, config)
         reading = _read_as_sliced(result)
+        if not result.turn_deg:
+            # It fits as posed now: a turn needed later is asked for again.
+            taken_turn = 0.0
         found = (flags(reading, faces, process, filament, placed, proposal.changes)
                  if reading is not None else ())
         if reviewer is None:

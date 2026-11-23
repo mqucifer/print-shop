@@ -41,7 +41,7 @@ from print_shop.setup.loop import PrintLoop
 from print_shop.setup.offer import ThisPart, offering
 from print_shop.setup.proposal import Change, Proposal, Source
 from print_shop.setup.questions import stock
-from print_shop.setup.reading import SeamReading, SliceReading, read_slice
+from print_shop.setup.reading import SeamReading, SliceReading, read_slice, turned_on_plate
 from print_shop.setup.review import (
     Review,
     ReviewRequest,
@@ -412,6 +412,30 @@ def test_a_correction_that_makes_room_turns_nothing(tmp_path: Path) -> None:
     assert done.result.printed, done.result.error
     assert done.row is not None and done.row.rotation_deg == AS_POSED
     assert "taken by you" not in done.row.orientation_rationale
+
+
+def test_a_turn_taken_ends_with_a_slice_that_fits_as_posed(tmp_path: Path) -> None:
+    def room(x: float, y: float, z: float, process: dict[str, Any]) -> bool:
+        return process.get("wall_loops") == "7" or _margins(x, y, z, process)
+
+    done = job(tmp_path, block(tmp_path, 255, 20), "turn", "wall_loops=7", "wall_loops=4", "ok",
+               "turn", "ok", slicer=Bed(room))
+    assert done.result.printed, done.result.error
+    assert done.shown.count("DOESN'T FIT AS POSED") == 2, "needed again, it's offered again"
+    assert "TURNED ON THE PLATE" not in done.shown
+    assert done.row is not None and done.row.rotation_deg == (0.0, 0.0, 45.0)
+
+
+def test_a_turn_is_known_where_the_gcode_couldnt_be_read(tmp_path: Path) -> None:
+    stl = block(tmp_path, 40, 20)
+    with Ledger(tmp_path / "ledger.sqlite") as ledger:
+        row = _row(ledger, stl, seam="back", turn=45.0, rotation=(0.0, 0.0, 45.0))
+        unread = row.model_copy(update={"reading": None})
+        notes = " ".join(again(unread, None).notes)
+    assert "It was turned 45° anticlockwise" in notes and "may have turned" not in notes
+    assert turned_on_plate(None, unread.rotation_deg) == 45
+    assert turned_on_plate(row.reading, row.rotation_deg) == 45
+    assert turned_on_plate(None, AS_POSED) is None, "unknown, as a row from before"
 
 
 def test_a_pose_sent_back_takes_no_turn_with_it(tmp_path: Path) -> None:
