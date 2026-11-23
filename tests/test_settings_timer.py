@@ -12,7 +12,7 @@ import os
 import pty
 import re
 import select
-import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -46,11 +46,12 @@ print("RESULT", repr([(c.key, c.value, c.reason) for c in review.corrections]), 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="a pseudo-terminal")
 def test_the_settings_wait_ticks_above_the_prompt_and_what_is_typed_stays_put() -> None:
-    pid, fd = pty.fork()
-    if pid == 0:  # the child: the review, on the terminal
-        os.chdir(ROOT)
-        code = CHILD.format(root=str(ROOT), src=str(ROOT / "src"))
-        os.execv(sys.executable, [sys.executable, "-B", "-c", code])
+    # A terminal of its own, without forking this process by hand: the review runs in a child.
+    fd, side = pty.openpty()
+    code = CHILD.format(root=str(ROOT), src=str(ROOT / "src"))
+    child = subprocess.Popen([sys.executable, "-B", "-c", code], cwd=ROOT, stdin=side,
+                             stdout=side, stderr=side, start_new_session=True)
+    os.close(side)
     seen = ""
     began = time.monotonic()
 
@@ -84,5 +85,6 @@ def test_the_settings_wait_ticks_above_the_prompt_and_what_is_typed_stays_put() 
         assert result.group(1) == "[('wall_loops', '3', \"it's decorative\")]", (
             "what was typed across the ticks and the arrival is read as typed")
     finally:
-        os.kill(pid, signal.SIGKILL)
-        os.waitpid(pid, 0)
+        child.kill()
+        child.wait(timeout=DEADLINE_S)
+        os.close(fd)
