@@ -96,6 +96,7 @@ from .assembly import AXES, DIAMETER, Assembly, Held, Joint, PartAt, read
 from .cae import freecad
 from .limits import over, said
 from .report import NoAnswer, Report
+from .through import lean_off, lean_share, peak_said, peak_saved
 
 #: Standard gravity, in m/s²: a kilogram's weight in newtons.
 G = 9.80665
@@ -1504,12 +1505,18 @@ def _through(
                 "under": "nut" if side["on_nut"] else "washer",
                 "seat": _list(side["seat"], 3),
                 "bears_mm2": side["bears_mm2"],
+                "ring_mm2": side["ring_mm2"],
+                "seat_mm2": side["seat_mm2"],
                 "pressure_mpa": pressure,
                 "pressure_limit_mpa": most,
                 "pressed": pressed,
                 "hole_mm": side["hole_mm"],
                 "hole_length_mm": side["hole_length_mm"],
             }
+            hole = side["hole"]
+            peaked = hole["peak"] is not None
+            if peaked:
+                end["peak"] = peak_saved(hole["peak"])
             shares.append(
                 (pressure / most, f"the pressure under {side['under']} on {part.name}, at "
                  f"{pressure:.2f} MPa of {most:g} MPa")
@@ -1520,10 +1527,28 @@ def _through(
                 f"{pressure:.3f} MPa under the bolt's {bolt['pull_n']:.1f} N, pressed {pressed}, "
                 f"against {most:g} MPa, as joints.{name}.bolts.{index}.ends.{k}.pressure_mpa"
             )
+            if peaked:
+                report.line(
+                    f"  the bore in {part.name} is {peak_said(hole)}, as "
+                    f"joints.{name}.bolts.{index}.ends.{k}.peak: its seat is the ring less the "
+                    f"peak's cut, {side['seat_mm2']:.2f} of {side['ring_mm2']:.2f} mm²"
+                )
+                report.second(
+                    f"the seat at {where}, by arithmetic, the ring less the peak's cut: "
+                    f"{side['seat_mm2']:.3f} mm²; by the part's own faces, "
+                    f"{side['bears_mm2']:.3f}"
+                )
+                if side["bears_mm2"] * load_through.SEATED > side["seat_mm2"]:
+                    apart.append(
+                        f"{where}: {side['under']} bears on {side['bears_mm2']:.3f} mm² by the "
+                        f"part's faces, more than the {side['seat_mm2']:.3f} mm² its ring has "
+                        "less the peak's cut"
+                    )
             if not side["seated"]:
+                less = f", and {side['seat_mm2']:.1f} mm² less the peak's cut" if peaked else ""
                 fails.append(
                     f"{where}: {side['under']} sits on {side['bears_mm2']:.1f} mm² of the part, "
-                    f"of its ring's {side['ring_mm2']:.1f} mm²: it overhangs an edge or a "
+                    f"of its ring's {side['ring_mm2']:.1f} mm²{less}: it overhangs an edge or a "
                     "step. Move the bolt in, or make its seat flat and wide enough"
                 )
             if over(pressure, most):
@@ -1545,9 +1570,14 @@ def _through(
             leans = float(np.linalg.norm(push))
             if leans > NOTHING * force:
                 wall_most, wall_pressed = part.material.press(push / leans, layers)
-                wall = leans / (shank * side["hole_length_mm"])
+                share_there = lean_share(hole, push / leans)
+                on_wall = shank * side["hole_length_mm"] * share_there
+                wall = leans / on_wall
                 end.update(
-                    wall_pressure_mpa=wall, wall_limit_mpa=wall_most, wall_pressed=wall_pressed
+                    wall_pressure_mpa=wall,
+                    wall_bears_mm2=on_wall,
+                    wall_limit_mpa=wall_most,
+                    wall_pressed=wall_pressed,
                 )
                 shares.append(
                     (wall / wall_most, f"the shank on the hole's wall in {part.name}, at "
@@ -1555,8 +1585,15 @@ def _through(
                 )  # fmt: skip
                 report.line(
                     f"  the shank leans on {part.name}'s hole with {leans:.1f} N over its "
-                    f"{shank:g} mm by {side['hole_length_mm']:.2f} mm: {wall:.3f} MPa, pressed "
-                    f"{wall_pressed}, against {wall_most:g} MPa"
+                    f"{shank:g} mm by {side['hole_length_mm']:.2f} mm"
+                    + (
+                        f", of which the peak leaves {100 * share_there:.1f}% for a lean "
+                        f"{math.degrees(lean_off(hole, push)):.0f}° from its point, "
+                        f"{on_wall:.2f} mm² as joints.{name}.bolts.{index}.ends.{k}.wall_bears_mm2"
+                        if peaked
+                        else ""
+                    )
+                    + f": {wall:.3f} MPa, pressed {wall_pressed}, against {wall_most:g} MPa"
                 )
                 if over(wall, wall_most):
                     fails.append(
@@ -1575,13 +1612,29 @@ def _through(
                     ]  # fmt: skip
                 fine, rough = solves
                 end["round"] = {**fine, "coarse": rough}
+                if "wall_share" in fine and leans > NOTHING * force:
+                    by_mesh = shank * side["hole_length_mm"] * fine["wall_share"]
+                    report.second(
+                        f"what the shank leans on at {where}, by the mesh's triangles on what's "
+                        f"left of the round: {by_mesh:.2f} mm², against {on_wall:.2f} by "
+                        "arithmetic"
+                    )
+                    if over(leans / by_mesh, wall_most) != over(wall, wall_most):
+                        apart.append(
+                            f"{where}: the shank presses the hole's wall by "
+                            f"{said(wall, wall_most, 2)} MPa by arithmetic and "
+                            f"{said(leans / by_mesh, wall_most, 2)} MPa by the mesh's area, "
+                            f"either side of its {wall_most:g} MPa"
+                        )
                 if leans > NOTHING * force:
                     # The wall that took the shear, beside the stretch the pressure is read on
                     # (mqucifer/print-shop#245).
                     end["sheared_mm2"] = fine["sheared_mm2"]
                     report.line(
                         f"  the solve round it puts the shear on {fine['sheared_mm2']:.2f} mm² "
-                        f"of {part.name}'s round wall, the half leant on of the "
+                        f"of {part.name}'s round wall, the half leant on"
+                        + (", less the peak," if share_there < 1 else "")
+                        + " of the "
                         f"{side['hole_length_mm']:.2f} mm from where the parts meet to the "
                         f"seat, and none past them, as "
                         f"joints.{name}.bolts.{index}.ends.{k}.sheared_mm2"

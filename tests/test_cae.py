@@ -802,6 +802,90 @@ def test_a_through_bolt_with_no_hole_to_pass_through_is_said_and_nothing_is_solv
     assert answer.record["seconds"] < 10
 
 
+# A bore that lies level on the bed (mqucifer/print-shop#237)
+
+#: Its half gap, 47°, and the peak's point that puts.
+RISES = math.radians(47)
+POINT = HOLE / 2 / math.cos(RISES)
+LEVEL = ("--at", "10,15,20", "--mesh", "6")
+
+
+def peak_takes(outer: float) -> float:
+    """What the peak takes from the ring out to `outer` across, by summing it in thin rings."""
+    edges = np.linspace(HOLE / 2, min(outer / 2, POINT), 20_001)
+    r = (edges[:-1] + edges[1:]) / 2
+    open_either_side = RISES - np.arccos(HOLE / 2 / r)
+    return float((2 * r * open_either_side * np.diff(edges)).sum())
+
+
+def test_a_peaked_bore_s_washers_and_shank_bear_on_what_s_there(cae: Any) -> None:
+    """`load` answered `NO ANSWER`, a slot's end. Each washer's seat is its ring less the peak's
+    cut, and the shank that leans at the peak's point has 1 - sin 47° of the round's bearing."""
+    answer = cae("load", "peak/peaked.json", "--weight", "5", *LEVEL)
+    assert answer.verdict == "OK", answer.text
+    joint = answer.numbers["joints"]["one+two"]
+    seat = RING - peak_takes(WASHER)
+    assert seat < RING - 1
+    head, nut = joint["bolts"][0]["ends"]
+    for end in (head, nut):
+        assert end["bears_mm2"] == pytest.approx(seat, rel=1e-4)
+        assert (end["ring_mm2"], end["seat_mm2"]) == pytest.approx((RING, seat), rel=1e-5)
+        assert end["pressure_mpa"] == pytest.approx(joint["bolt_pull_n"] / seat, rel=1e-4)
+        assert end["pressure_limit_mpa"] == 14.0, "the limit it always had"
+        assert end["peak"]["toward"] == pytest.approx([0, 0, 1], abs=1e-6)
+    toward, away = 5 * 20 * (1 - math.sin(RISES)), 5 * 20
+    assert head["wall_bears_mm2"] == pytest.approx(toward, rel=1e-3)
+    assert nut["wall_bears_mm2"] == pytest.approx(away, rel=1e-3)
+    assert head["wall_pressure_mpa"] == pytest.approx(5 * G / toward, rel=2e-3)
+    assert head["round"]["wall_share"] == pytest.approx(1 - math.sin(RISES), rel=0.08)
+    # The shear is on the stretch's half less the peak (mqucifer/print-shop#245).
+    assert head["sheared_mm2"] == pytest.approx(HOLE / 2 * 20 * (math.pi - 2 * RISES), rel=0.08)
+    assert nut["sheared_mm2"] == pytest.approx(math.pi * HOLE / 2 * 20, rel=0.06)
+    assert "the half leant on, less the peak, of the 20.00 mm" in answer.text
+    assert answer.text.count("less the peak, of the") == 1, "the lean away from it loses nothing"
+    assert "peaked, 5.500 mm across" in answer.text
+    assert "for a lean 0° from its point" in answer.text
+    assert reports.unlike("load", answer.numbers) == []
+
+
+def test_a_nut_s_seat_cut_by_the_peak_is_pressed_over_what_s_left(cae: Any) -> None:
+    """It read round, then failed: the nut on 12.1 of its ring's 13.6 mm². That area is its
+    seat, and its pressure is held to the same 14 MPa: 4.0 under 5 kg, and over under 20."""
+    seat = NUT_RING - peak_takes(NUT_FACE)
+    answer = cae("load", "peak/slot.json", "--weight", "5", *LEVEL)
+    assert answer.verdict == "OK", answer.text
+    head, nut = answer.numbers["joints"]["one+two"]["bolts"][0]["ends"]
+    assert "peak" not in head and head["bears_mm2"] == pytest.approx(RING, rel=1e-3)
+    assert nut["bears_mm2"] == pytest.approx(seat, rel=1e-3)
+    assert seat == pytest.approx(12.1, abs=0.1)
+    assert nut["hole_length_mm"] == pytest.approx(10), "the stretch as far as the slot"
+    assert nut["round"]["wall_share"] == pytest.approx(1, rel=0.05), "the same stretch"
+    assert nut["sheared_mm2"] == pytest.approx(half_wall(10), rel=0.06), "none past the slot"
+    heavy = cae("load", "peak/slot.json", "--weight", "20", *LEVEL)
+    assert heavy.verdict == "FAIL", heavy.text
+    assert "the plastic under the nut m5-nut in its pocket is pressed by" in heavy.record["why"]
+    assert "over its 14 MPa" in heavy.record["why"] and "overhangs" not in heavy.record["why"]
+
+
+@pytest.mark.parametrize("name", ["end", "groove", "d", "flat", "short", "split"])
+def test_what_is_no_peaked_bore_is_still_refused_by_load(cae: Any, name: str) -> None:
+    """A slot's end, a half-round groove, a D, a peak at 44°, one short of its point, and a D
+    cut in two whose arcs add up past 360°."""
+    answer = cae("load", f"peak/{name}.json", "--weight", "5", *LEVEL)
+    assert answer.verdict == "NO ANSWER" and answer.code == 2, answer.text
+    assert "in two, the round face there doesn't go all the way round" in answer.record["why"]
+    if name == "flat":
+        assert "flatter than 45°" in answer.record["why"]
+
+
+@pytest.mark.parametrize("name", ["edge", "notched"])
+def test_a_peaked_bore_s_seat_cut_by_anything_else_still_fails(cae: Any, name: str) -> None:
+    answer = cae("load", f"peak/{name}.json", "--weight", "5", *LEVEL)
+    assert answer.verdict == "FAIL", answer.text
+    assert "in two: the washer m5-washer under the nut sits on" in answer.record["why"]
+    assert "less the peak's cut: it overhangs an edge or a step" in answer.record["why"]
+
+
 # The shank's shear, on its own stretch of the bore (mqucifer/print-shop#245)
 
 #: Beside where the blocks meet, so the bolt has the shear and little pull.

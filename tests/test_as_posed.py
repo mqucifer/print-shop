@@ -24,7 +24,7 @@ import pytest
 import trimesh
 
 from print_shop.core.state import AppliedOrientation, Orientation, SliceResult, turn_words
-from print_shop.desk.again import again
+from print_shop.desk.again import again, answers_file
 from print_shop.desk.page import _pose
 from print_shop.ingest.measuring import Measuring
 from print_shop.ingest.orientation import candidate_in, candidates
@@ -34,11 +34,13 @@ from print_shop.orchestrator.daemon import Daemon, JobResult
 from print_shop.orchestrator.fitting import Fitting, turns, with_turns
 from print_shop.runtime import describe
 from print_shop.setup import Proposer
+from print_shop.setup import offer as offer_module
 from print_shop.setup.features import measure
-from print_shop.setup.intake import replay_asker
+from print_shop.setup.intake import Answer, Intake, replay_asker
 from print_shop.setup.loop import PrintLoop
 from print_shop.setup.offer import ThisPart, offering
 from print_shop.setup.proposal import Change, Proposal, Source
+from print_shop.setup.questions import stock
 from print_shop.setup.reading import SeamReading, SliceReading, read_slice
 from print_shop.setup.review import (
     Review,
@@ -552,22 +554,24 @@ def test_a_candidate_fits_only_by_the_turn_it_was_found() -> None:
 
 def _row(
     ledger: Ledger, stl: Path, *, seam: str, turn: float | None,
-    rotation: tuple[float, float, float] = AS_POSED,
+    rotation: tuple[float, float, float] = AS_POSED, intake: Intake | None = None,
+    job_id: str = "before",
 ) -> Row:
     back = Change(key="seam_position", preset="aligned", value=seam, reason="the front is seen",
                   source=Source.SPONSOR)
     ledger.record_start_requested(PrintRecord(
-        job_id="before", stl_name=stl.name, stl_sha256="ab" * 32, rotation_deg=rotation,
+        job_id=job_id, stl_name=stl.name, stl_sha256="ab" * 32, rotation_deg=rotation,
         orientation_source="as_laid", orientation_rationale="kept as laid",
         orientation_accepted=True, gcode_name="before.gcode", print_time_s=600, filament_cm3=3.0,
         layer_count=100, slicer_config={"filament_type": "PLA"}, printer_machine="made up",
         printer_firmware="0", proposal=Proposal(changes=(back,)), corrections=(back,),
+        intake=intake,
         features=measure(stl, 100.0),
         reading=SliceReading(layers=(), features=(), seam=SeamReading(seams=0, stacked=0.0),
                              settings={"seam_position": seam}, turn_deg=turn),
     ))
-    ledger.record_started("before")
-    row = ledger.get("before")
+    ledger.record_started(job_id)
+    row = ledger.get(job_id)
     assert row is not None
     return row
 
@@ -615,6 +619,19 @@ def test_a_row_sliced_as_posed_has_no_doubt_of_its_back(tmp_path: Path) -> None:
         row = _row(ledger, stl, seam="back", turn=0.0)
         assert "turned" not in " ".join(again(row, None).notes)
         assert "turned" not in _differs(ledger, stl)
+
+
+def test_a_past_print_turned_on_the_plate_reads_its_faces_in_its_pose(tmp_path: Path) -> None:
+    stl = block(tmp_path, 40, 20)
+    top_seen = Intake(questions=stock(None, AS_POSED), answers=(Answer(choice=1), Answer(choice=2)))
+    with Ledger(tmp_path / "ledger.sqlite") as ledger:
+        as_posed = _row(ledger, stl, seam="aligned", turn=0.0, intake=top_seen, job_id="posed")
+        turned = _row(ledger, stl, seam="aligned", turn=45.0, rotation=(0.0, 0.0, 45.0),
+                      intake=top_seen, job_id="turned")
+    read = offer_module._seen_then(turned)
+    assert read is not None, "a turn about z is judged: it turns no face to another"
+    assert read == offer_module._seen_then(as_posed)
+    assert answers_file(turned) == answers_file(as_posed), "replayed from the pose, not 0,0,45"
 
 
 def test_a_turn_on_the_plate_is_no_other_pose_to_use_these(tmp_path: Path) -> None:

@@ -69,10 +69,12 @@ class Proposer:
     def questions(
         self, features: tuple[Feature, ...], profiles: SlicerProfiles,
         stop: threading.Event | None = None,
+        context: PartContext | None = None,
     ) -> Asked:
         """The intake's questions for this part, before any are answered. `stop` ends the
-        model's call (mqucifer/print-shop#208)."""
-        facts = self._facts(Intake(), features, profiles)
+        model's call (mqucifer/print-shop#208). `context` is the part's notes, so that the model
+        asks only what they leave open (mqucifer/print-shop#236)."""
+        facts = self._facts(Intake(), features, profiles, context)
         if self.ask_questions is not None:
             return propose_questions(facts, self.ask_questions)
         if self.llm is not None:
@@ -81,9 +83,9 @@ class Proposer:
 
     def __call__(
         self, intake: Intake, features: tuple[Feature, ...], profiles: SlicerProfiles,
-        context: PartContext | None = None,
+        context: PartContext | None = None, pose: tuple[float, float, float] | None = None,
     ) -> Proposal:
-        facts = self._facts(intake, features, profiles, context)
+        facts = dataclasses.replace(self._facts(intake, features, profiles, context), pose=pose)
         given = self.lessons(features, facts.filament_type) if self.lessons is not None else ()
         learned, learned_kept, marked = from_lessons(facts, given)
         facts = dataclasses.replace(facts, lessons=marked)
@@ -104,14 +106,14 @@ class Proposer:
 
     def facts(
         self, intake: Intake, features: tuple[Feature, ...], profiles: SlicerProfiles,
-        context: PartContext | None = None,
+        context: PartContext | None = None, pose: tuple[float, float, float] | None = None,
     ) -> PartFacts:
         """What a proposal reads: the intake, the features and the presets, with the kept lessons
         for this part, as the print loop is given them (mqucifer/print-shop#129), and the part's
         context (mqucifer/print-shop#130)."""
         facts = self._facts(intake, features, profiles, context)
         _, _, marked = from_lessons(facts, self.lessons_for(features, profiles))
-        return dataclasses.replace(facts, lessons=marked)
+        return dataclasses.replace(facts, lessons=marked, pose=pose)
 
     def lessons_for(
         self, features: tuple[Feature, ...], profiles: SlicerProfiles

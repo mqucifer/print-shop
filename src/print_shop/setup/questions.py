@@ -27,6 +27,12 @@ index (SKILL.md), and proposes what those leave undecided:
   that option's settings, and an option Orca couldn't slice says "no
   estimate".
 
+**What the part's notes say isn't asked** (mqucifer/print-shop#236, the Sponsor's change to
+their choice on mqucifer/print-shop#10). Purpose is always confirmed: asked when the notes don't
+say, read back when they do, and so is what's seen (`stock`). The model is given the whole
+context and asks only what it leaves open. Free text is shown beside the purpose question and
+never guessed into one.
+
 A part whose features leave nothing to decide gets only print-shop's two. A failed, cut-off
 or timed-out call gives those two as well, saying which it was, and the proposal goes on. Those
 two need no model, so the command asks them while the model works (`waiting.py`,
@@ -37,18 +43,28 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from print_shop.expert.client import CutOff, TimedOut
 from print_shop.setup.bounds import SETTINGS, check
+from print_shop.setup.context import (
+    AS_THE_FILE_LIES,
+    LOADS,
+    PartContext,
+    Seen,
+    plain_line,
+    pose_for,
+    printed,
+)
 from print_shop.setup.intake import Estimate, Option, Question
-from print_shop.setup.model import SHORT, TEXT, Ask, setting_item
-from print_shop.setup.proposal import PartFacts
+from print_shop.setup.model import SHORT, TEXT, Ask, context_lines, setting_item
+from print_shop.setup.proposal import PartFacts, pose_value
 from print_shop.setup.skill import SKILL_DIR
 
 __all__ = [
     "ANSWER_CHARS", "MAX_QUESTIONS", "SEEN", "SEEN_FACES", "STOCK", "Asked", "estimate",
-    "propose_questions", "says_no_support", "schema",
+    "only_stock", "propose_questions", "says_no_support", "schema", "stock",
 ]
 
 MAX_QUESTIONS = 4
@@ -104,6 +120,8 @@ PURPOSE = Question(
 )
 
 
+assert tuple(o.label for o in PURPOSE.options) == LOADS
+
 #: Which faces are seen, by option label: (walls, the top as it prints, the face on the plate).
 SEEN_FACES: dict[str, tuple[bool, bool, bool]] = {
     "the walls and the top as it prints": (True, True, False),
@@ -134,9 +152,95 @@ SEEN = Question(
     ),
 )
 assert set(SEEN_FACES) == {o.label for o in SEEN.options}
+#: The answers that leave the face on the plate unsaid. All but "only the face on the plate"
+#: name two of the three, and none of them can say that face is seen as well. So it's never
+#: judged hidden by one, wherever a turn puts it (mqucifer/print-shop#248).
+PLATE_UNSAID = frozenset(label for label, (_, _, plate) in SEEN_FACES.items() if not plate)
 
 #: The questions that need no model, shown at once (mqucifer/print-shop#208).
 STOCK = (PURPOSE, SEEN)
+
+
+def stock(
+    context: PartContext | None, rotation_deg: tuple[float, float, float],
+) -> tuple[Question, Question]:
+    """print-shop's two for this part in this pose: each read back where its notes say, asked
+    where they don't (mqucifer/print-shop#236). With no notes they're `STOCK`'s. The question
+    of faces always has the pose it's asked in, and names it (mqucifer/print-shop#248)."""
+    posed = {"pose": tuple(rotation_deg), "posed": pose_words(context, rotation_deg)}
+    if context is None or not context.found:
+        return PURPOSE, SEEN.model_copy(update=posed)
+    named = plain_line(Path(context.path).name) if context.path else ""
+    faces = _seen_of(context.seen, rotation_deg, named)
+    return _purpose_of(context, named), faces.model_copy(update=posed)
+
+
+#: The side down, as a question names a part laid on it.
+_SIDE_DOWN = {"+z": "top", "-z": "bottom", "-x": "left side", "+x": "right side", "-y": "front",
+              "+y": "back"}
+
+
+def pose_words(context: PartContext | None, rotation_deg: tuple[float, float, float]) -> str:
+    """A pose, as a question of faces names it."""
+    if tuple(rotation_deg) == AS_THE_FILE_LIES:
+        return "as the file lays it"
+    if context is not None and context.down and pose_for(context.down) == tuple(rotation_deg):
+        says = "its notes say" if context.down_from == "the sidecar" else "its design run says"
+        return f"laid {_SIDE_DOWN[context.down]}-down, as {says}"
+    return f"turned {pose_value(rotation_deg)}"
+
+
+def _purpose_of(context: PartContext, named: str) -> Question:
+    if context.loaded:
+        return PURPOSE.model_copy(update={
+            "beside": context.purpose, "noted": LOADS.index(context.loaded),
+            # Its words as well: a confirmation is of both.
+            "noted_as": ": ".join(w for w in (context.purpose, context.loaded) if w),
+            "noted_from": named,
+        })
+    # Words alone, and `about`, stand beside the question: nothing is picked from them.
+    words = "; ".join(w for w in (context.purpose, context.about) if w)
+    return PURPOSE.model_copy(update={"beside": words}) if words else PURPOSE
+
+
+def _seen_of(
+    seen: Seen | None, rotation_deg: tuple[float, float, float], named: str,
+) -> Question:
+    """What's seen, with the notes' faces as an option: one of `SEEN`'s where they're the same,
+    else one of their own, so that any combination can be read back."""
+    if seen is None:
+        return SEEN
+    beside = f"{seen.in_words()}, as the file lays it"
+    now = printed(seen, rotation_deg)
+    label = _faces_label(now) if now is not None else beside
+    options = SEEN.options
+    labels = [o.label for o in options]
+    if label not in labels:
+        options += (Option(label=label, settings={}, impact="as the part's notes say"),)
+        labels.append(label)
+    return SEEN.model_copy(update={
+        "options": options, "beside": beside,
+        "noted": labels.index(label), "noted_as": seen.faces(), "noted_from": named,
+    })
+
+
+def _faces_label(seen: Seen) -> str:
+    """Faces as they print, in the question's own words where an option says them."""
+    faces = (seen.walls, seen.top, seen.bottom)
+    said = next((label for label, each in SEEN_FACES.items() if each == faces), "")
+    if said and not seen.part_walls:
+        return said
+    names = ("part of the walls" if seen.part_walls else "the walls",
+             "the top as it prints", "the face on the plate")
+    *most, last = [n for n, shown in zip(names, faces, strict=True) if shown] or [
+        "none of its faces"]
+    return f"{', '.join(most)} and {last}" if most else last
+
+
+def only_stock(from_notes: bool) -> str:
+    """What's asked without the model's questions, as the intake's note opens."""
+    return ("none of the model's questions asked" if from_notes
+            else "only purpose and what's seen asked")
 
 
 class Asked:
@@ -171,8 +275,8 @@ class Asked:
         return tuple(q for q in self.questions if q not in STOCK and q is not closer)
 
 
-def schema(feature_ids: list[str]) -> dict[str, Any]:
-    """The reply's shape, enforced by the server."""
+def schema(feature_ids: list[str], purpose: bool = True) -> dict[str, Any]:
+    """The reply's shape, enforced by the server. `purpose` False: the notes give it."""
     option = {
         "type": "object", "additionalProperties": False,
         "required": ["label", "settings", "impact", "recommended", "why"],
@@ -188,7 +292,8 @@ def schema(feature_ids: list[str]) -> dict[str, Any]:
         "type": "object", "additionalProperties": False,
         "required": ["feature", "text", "options"],
         "properties": {
-            "feature": {"type": "string", "enum": [*feature_ids, "purpose"]},
+            "feature": {"type": "string",
+                        "enum": [*feature_ids, *(["purpose"] if purpose else [])]},
             "text": TEXT,
             "options": {"type": "array", "minItems": 2, "maxItems": 4, "items": option},
         },
@@ -205,28 +310,35 @@ def schema(feature_ids: list[str]) -> dict[str, Any]:
 
 def propose_questions(facts: PartFacts, ask: Ask) -> Asked:
     """The questions this part's features leave open, each option inside its bounds."""
+    context = facts.context if facts.context and facts.context.found else None
+    purpose_given = context is not None and bool(context.loaded)
+    seen_given = context is not None and context.seen is not None
+    only = only_stock(purpose_given or seen_given)
     try:
         reply = ask(_SYSTEM + (SKILL_DIR / "SKILL.md").read_text(), _prompt(facts),
-                    schema([f.id for f in facts.features]))
+                    schema([f.id for f in facts.features], purpose=not purpose_given))
         raw = list(reply["questions"])
     except CutOff as exc:
         return Asked(STOCK,
-                     f"only purpose and what's seen asked: the model was cut off ({exc})",
+                     f"{only}: the model was cut off ({exc})",
                      exc.info.model_dump(), failed=_cut_off(exc))
     except TimedOut as exc:
         return Asked(STOCK,
-                     f"only purpose and what's seen asked: the model {exc}",
+                     f"{only}: the model {exc}",
                      {"finish_reason": "timed out", "seconds": exc.seconds,
                       "timeout_s": exc.limit_s}, failed="timed out")
     except (RuntimeError, OSError, KeyError, TypeError) as exc:
         return Asked(STOCK,
-                     f"only purpose and what's seen asked: the model was unavailable "
+                     f"{only}: the model was unavailable "
                      f"({exc})"[:600], {"finish_reason": "unavailable"},
                      failed=f"was unavailable ({exc})"[:300])
 
     questions = []
     dropped = []
     for q in raw[:MAX_QUESTIONS]:
+        if purpose_given and str(q.get("feature")) == "purpose":
+            dropped.append(f"'{q.get('text')}': the part's notes say what it's for")
+            continue
         options = []
         for o in q.get("options", ()):
             settings = {str(s["key"]): str(s["value"]) for s in o.get("settings", ())}
@@ -254,11 +366,14 @@ def propose_questions(facts: PartFacts, ask: Ask) -> Asked:
     if not any(q.feature == "purpose" for q in questions):
         # The Sponsor's choice on mqucifer/print-shop#10: purpose is always asked.
         questions = [PURPOSE, *questions[: MAX_QUESTIONS - 1]]
-        note = "; ".join(x for x in (note, "purpose asked by print-shop: the model didn't") if x)
+        said = ("purpose read back from the part's notes" if purpose_given
+                else "purpose asked by print-shop: the model didn't")
+        note = "; ".join(x for x in (note, said) if x)
     if not any(q.feature == SEEN.feature for q in questions):
         # Last, after what the part's shape raised; in place of the model's last question
         # when four are already asked (print-shop#105).
-        said = "what's seen asked by print-shop"
+        said = ("what's seen read back from the part's notes" if seen_given
+                else "what's seen asked by print-shop")
         if len(questions) >= MAX_QUESTIONS:
             said += f", in place of '{questions[MAX_QUESTIONS - 1].text}'"
         questions = [*questions[: MAX_QUESTIONS - 1], SEEN]
@@ -278,6 +393,16 @@ _NO_SUPPORT = re.compile(
 def says_no_support(label: str) -> bool:
     """Whether an option's label says the part prints without supports."""
     return _NO_SUPPORT.search(label) is not None
+
+
+def _left_open(context: PartContext | None) -> list[str]:
+    """What the model is told of the notes: to ask only what they leave open."""
+    if context is None or not context.found:
+        return []
+    said = "Never ask what that context already says: ask only what it leaves open."
+    if context.loaded:
+        said += " It gives what the part is for, which the person confirms: don't ask that."
+    return [said, ""]
 
 
 def estimate(
@@ -328,6 +453,8 @@ def _prompt(facts: PartFacts) -> str:
         "The part's features, as it will sit on the plate:",
         *(f"- {f.line()}" for f in facts.features),
         "",
+        *context_lines(facts),
+        *_left_open(facts.context),
         "Settings an option may set, the preset's value, and the bound a value must stay in:",
     ]
     for key, setting in SETTINGS.items():

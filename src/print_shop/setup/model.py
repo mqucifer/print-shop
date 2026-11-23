@@ -26,9 +26,11 @@ from typing import Any
 from print_shop.expert.client import CutOff, LLMConfig, complete_json_call, stream_json_call
 from print_shop.setup.bounds import SETTINGS, check
 from print_shop.setup.proposal import Change, PartFacts, Proposal, Source
+from print_shop.setup.reading import carried
 from print_shop.setup.skill import Skill
 
-__all__ = ["Ask", "llm_ask", "llm_ask_streamed", "propose_by_model", "schema", "setup_llm"]
+__all__ = ["Ask", "context_lines", "llm_ask", "llm_ask_streamed", "propose_by_model", "schema",
+           "setup_llm"]
 
 #: Settings keys: the alias the proposal reasons with, and its output limit,
 #: thinking included (the operator, 2026-10-25: a setting, not a constant).
@@ -44,6 +46,9 @@ DEFAULT_MODEL = "crew-code-think"
 #: measured on the Spark (2026-10-08), 16,000 is about ten minutes at most.
 DEFAULT_MAX_TOKENS = 16000
 
+#: What a model is told where only part of the walls is seen (mqucifer/print-shop#248).
+LEAVE_THE_SEAM = ("leave seam_position as it is there: where a seam would land against the wall "
+                  "that's seen can't be told")
 #: How the model is called: `complete_json`, or a test's recorded reply.
 Ask = Callable[[str, str, dict[str, Any]], dict[str, Any]]
 
@@ -226,8 +231,9 @@ def prompt(facts: PartFacts, skill: Skill) -> str:
         "Its features, as it will sit on the plate:",
         *(f"- {f.line()}" for f in facts.features),
         "",
+        *_seen(facts),
         *_lessons(facts),
-        *_context(facts),
+        *context_lines(facts),
         "Settings you may change: the preset's value, and the bound a value must stay in:",
     ]
     for key in skill.settings:
@@ -237,6 +243,24 @@ def prompt(facts: PartFacts, skill: Skill) -> str:
         lines.append(f"- {key}: preset {facts.preset(key) or '(unset)'}; allowed {allowed}")
     lines += ["", f"Skill groups read for this part: {', '.join(skill.ids)}."]
     return "\n".join(lines)
+
+
+def _seen(facts: PartFacts) -> list[str]:
+    """What's seen in the pose the features are read in: an answer, or the notes', carried
+    there (mqucifer/print-shop#248)."""
+    if facts.pose is None:
+        return []
+    intake = facts.intake
+    now = carried(intake, facts.context, facts.pose)
+    if now is None:
+        answered = any(q.feature == "seen" and q.pose is not None for q in intake.questions)
+        return (["Which faces are seen as it lies here isn't known: judge none as seen or "
+                 "hidden.", ""] if answered else [])
+    words = now.unsaid_words()
+    unsaid = f" {words[:1].upper()}{words[1:]}: don't judge that face hidden." if words else ""
+    seam = f" Only part of the walls is seen, so {LEAVE_THE_SEAM}." if now.part_walls else ""
+    return [f"Seen as it lies here, carried from what was said: {now.as_printed()}. Go by this "
+            f"for which faces are seen.{unsaid}{seam}", ""]
 
 
 def _lessons(facts: PartFacts) -> list[str]:
@@ -253,14 +277,14 @@ def _lessons(facts: PartFacts) -> list[str]:
     ]
 
 
-def _context(facts: PartFacts) -> list[str]:
+def context_lines(facts: PartFacts) -> list[str]:
     """The part's context from its design run or a sidecar (mqucifer/print-shop#130), if any."""
     if facts.context is None or not facts.context.found:
         return []
     return [
         "The part's context, as the file lies (a fit is two parts meant to mate: never a random "
         "seam on a part with one, and a fit at the plate wants elephant foot compensation):",
-        *(f"- {line}" for line in facts.context.lines()),
+        *(f"- {line}" for line in facts.context.lines(facts.intake.set_aside())),
         "",
     ]
 
@@ -280,7 +304,9 @@ def _answers(facts: PartFacts) -> list[str]:
         if a.choice is not None:
             o = q.options[a.choice]
             sets = ", ".join(f"{k}={v}" for k, v in o.settings.items()) or "no setting"
-            lines.append(f"{q.text} -> {o.label} ({sets})")
+            said = f"{q.asked()} -> {q.as_answered(a)} ({sets})"
         else:
-            lines.append(f"{q.text} -> in their words: {a.other}")
+            said = f"{q.asked()} -> in their words: {a.other}"
+        whose = q.whose(a)
+        lines.append(said + (f" [{whose}]" if whose else ""))
     return lines
