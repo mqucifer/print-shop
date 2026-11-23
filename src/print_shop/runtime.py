@@ -13,9 +13,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from print_shop.core.mqtt import MqttConfig
+from print_shop.core.state import turn_words
 from print_shop.env import SETTINGS_PATH, load_env
 from print_shop.expert.client import LLMConfig
-from print_shop.inventory import Material
+from print_shop.inventory import Material, spool_lines
 from print_shop.ledger import Ledger, Row, ledger_path
 from print_shop.orchestrator.daemon import Daemon
 from print_shop.orchestrator.live import Step
@@ -28,7 +29,7 @@ from print_shop.printer.centauri import (
     PrinterClient,
     PrinterConfig,
 )
-from print_shop.setup import Proposer, lessons
+from print_shop.setup import Proposer, lessons, pauses
 from print_shop.setup.intake import Asker
 from print_shop.setup.loop import PrintLoop, cli_person, llm_chat
 from print_shop.setup.model import setup_llm
@@ -195,6 +196,8 @@ def describe(row: Row) -> str:
         ("orientation    as the file lays it: nothing was turned" if row.sliced is not None
          else f"orientation    {row.rotation_deg} by {row.orientation_source}"
          f"{'' if row.orientation_accepted else ' (not accepted; authored pose)'}"),
+        *([f"turned         {turn_words(row.rotation_deg[2])}, on the plate to fit,"
+           " as taken at the review"] if row.rotation_deg[2] else []),
         f"g-code         {row.gcode_name}  ~{row.print_time_s // 60} min,"
         f" {row.filament_cm3} cm3, {row.layer_count} layers",
         *_sliced_lines(row),
@@ -204,6 +207,8 @@ def describe(row: Row) -> str:
         *_setup_lines(row),
         *_reading_lines(row),
         *([f"material       {row.material.line()}"] if row.material else []),
+        *[f"{'' if n else 'spools':<15}{line}"
+          for n, line in enumerate(spool_lines(row.spools, row.ended_with))],
         f"plate          {row.slicer_settings.get('curr_bed_type', '?')},"
         f" bed {row.slicer_settings.get('first_layer_bed_temperature', '?')} C",
         f"printer        {row.printer_machine} {row.printer_firmware}",
@@ -291,7 +296,8 @@ def _setup_lines(row: Row) -> list[str]:
     changes = row.proposal.changes if row.proposal else ()
     for c in changes:
         by = f"{c.source.value}, taken by you" if c.taken else c.source.value
-        lines.append(f"  {c.key}: {c.preset or '-'} -> {c.value} ({by}) {c.reason}")
+        lines.append(f"  {c.key}: {c.preset or '-'} -> {c.value} ({by}) "
+                     f"{pauses.reason_of(c)}")
     for c in row.proposal.not_applied if row.proposal else ():
         lines.append(f"  {c.key}: not applied, {c.not_applied} ({c.source.value}) {c.reason}")
     if row.corrections:
@@ -315,7 +321,7 @@ def _setup_lines(row: Row) -> list[str]:
             said += ", and you went on without seeing them"
         lines.append(f"model proposed {offered or 'nothing'}: {said}")
     for pause in row.reading.pauses if row.reading else ():
-        lines.append(f"swap           {pause.line()}")
+        lines.append(f"{pause.kind or 'pause':<15}{pause.line()}")
     for g in row.proposal.lessons if row.proposal else ():
         said = f"set {g.key}={g.value}" if g.applied else (g.why or "read")
         lines.append(f"lesson         {g.id}, from {g.stl_name}: {said}")

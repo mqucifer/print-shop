@@ -22,9 +22,9 @@ printed in.
 **Where only part of the walls is seen no seam change is proposed** (mqucifer/print-shop#248).
 "back" was the hidden side while "the walls" meant all round. Carried, only part of them may be
 seen, and where a line lands against that part can't be told: on a flat back Orca's back takes
-a corner, which a side wall shares, and its CLI can turn a part about z as it arranges the
-plate. Scattered, it would be all over that part. So the line is said, to be looked at. With
-the walls seen all round it's as it was.
+a corner, which a side wall shares, and a part turned on the plate to fit has its back on
+another side (mqucifer/print-shop#257). Scattered, it would be all over that part. So the line
+is said, to be looked at. With the walls seen all round it's as it was.
 
 **A part's fits** (mqucifer/print-shop#130, `context.py`), placed as heights in the pose it
 prints in: a part with one never gets a random seam proposed, and the reason names the fit; a fit
@@ -52,6 +52,7 @@ from print_shop.setup.context import (
     seen_from,
 )
 from print_shop.setup.intake import Answer, Intake, Question
+from print_shop.setup.pauses import PauseFor, said
 from print_shop.setup.proposal import Change, Source, pose_value
 from print_shop.slicer import gcode
 
@@ -159,6 +160,10 @@ class PauseReading(BaseModel):
     after_s: float
     #: None before the first layer, and in a row from before mqucifer/print-shop#203.
     after_z: float | None = None
+    #: What it's for, and the spool a swap is to (mqucifer/print-shop#218, `pauses.marked`): the
+    #: G-code doesn't say. None for a file sliced by hand, and in a row from before it was said.
+    kind: PauseFor | None = None
+    to: str = ""
 
     def where(self) -> str:
         """Where it falls, in the words of the bench's `pause`."""
@@ -167,7 +172,27 @@ class PauseReading(BaseModel):
         return pausing.where(self.before_layer - 1, self.after_z, self.before_layer, self.z)
 
     def line(self) -> str:
-        return f"pauses for a filament swap {self.where()}, about {_s(self.after_s)} in"
+        about = f"{self.where()}, about {_s(self.after_s)} in"
+        if self.kind is None:
+            return f"pauses {about}"
+        to = f" to {self.to}," if self.to else ""
+        return f"pauses for {said(self.kind)}{to} {about}"
+
+
+#: The seams that are put by the plate's back, so on whichever side of the part is turned there
+#: (mqucifer/print-shop#257).
+AT_THE_BACK = ("back", "aligned_back")
+
+
+def turned_on_plate(
+    reading: SliceReading | None, rotation_deg: tuple[float, float, float],
+) -> float | None:
+    """How far a print was turned on the plate to fit, 0 as posed, or None where it isn't known:
+    a row from before mqucifer/print-shop#257, when Orca could turn a part unsaid. Its reading
+    says, else its rotation, which has a turn in z only from then on."""
+    if reading is not None and reading.turn_deg is not None:
+        return reading.turn_deg
+    return rotation_deg[2] or None
 
 
 class SliceReading(BaseModel):
@@ -188,6 +213,10 @@ class SliceReading(BaseModel):
     pauses: tuple[PauseReading, ...] = ()
     #: Each layer that lays `CLOSES_OVER`: its number, and the area of it in mm².
     over_air: tuple[tuple[int, float], ...] = ()
+    #: How far the part was turned on the plate to fit, 0 as posed (mqucifer/print-shop#257).
+    #: None: not known, as in a row from before it, when Orca could turn a part unsaid. Its x
+    #: and y are of the G-code as it was sliced, whichever it was.
+    turn_deg: float | None = None
 
     @property
     def time_s(self) -> float:

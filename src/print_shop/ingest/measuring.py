@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 import trimesh
@@ -29,8 +29,14 @@ Rotation = tuple[float, float, float]
 class Measuring:
     """A part's six poses: those known, and the rest as a thread of its own measures them."""
 
-    def __init__(self, stl: Path | str, known: Iterable[Orientation]) -> None:
+    def __init__(
+        self, stl: Path | str, known: Iterable[Orientation],
+        marked: Callable[[trimesh.Trimesh, Orientation], Orientation] = lambda mesh, pose: pose,
+    ) -> None:
+        """`marked` is put on each pose as it's measured, as those known already have it: whether
+        it fits the plate turned, or not at all (mqucifer/print-shop#257)."""
         self._stl = stl
+        self._marked = marked
         self._found = {pose.rotation_deg: pose for pose in known}
         self._failed: dict[Rotation, str] = {}
         self._changed = threading.Condition()
@@ -107,7 +113,7 @@ class Measuring:
             if self._stopped:
                 return
             try:
-                pose = scored(mesh, rotation)
+                pose = self._marked(mesh, scored(mesh, rotation))
             except Exception as exc:  # the thread's: the job says which pose, and why
                 logger.exception("the pose %s couldn't be measured", pose_value(rotation))
                 why = f"{type(exc).__name__}: {exc}"[:200]

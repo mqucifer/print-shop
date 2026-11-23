@@ -323,6 +323,11 @@ def terminal() -> TextIO | None:
     return None
 
 
+def can_ask() -> bool:
+    """Whether there's a person's terminal to ask in."""
+    return terminal() is not None
+
+
 def cli_waiting(
     read: Callable[[str], str] = input,
     write: Callable[[str], None] = print,

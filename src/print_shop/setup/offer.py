@@ -18,6 +18,9 @@ more like learning than me remembering".
   whose questions the notes cut short (mqucifer/print-shop#236) didn't get to ask, so none is.
 - **It's laid out to be read** (`render`): the print and how it came out once, what differs in
   columns, the items grouped by whose they were, and a reason several share said once.
+- **A pause keeps what it was for** (mqucifer/print-shop#218): a swap with the spools that print
+  used, or an insert. One from before doesn't say, and is asked when it's used. A swap whose
+  first spool can't start this job can't be used: another in its place would reverse it.
 - **A pause's height is converted, never copied raw** (`_pause_height`): a row from before
   mqucifer/print-shop#228 gives the height that pauses where its own G-code did, and one whose
   G-code doesn't say where it paused can't be used.
@@ -42,18 +45,19 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import trimesh
 
-from print_shop.core.state import Orientation
+from print_shop.core.state import Orientation, pose_of, turn_words
+from print_shop.inventory import Material, Spool
 from print_shop.materials import material_name
 from print_shop.outcome_words import outcome_words
 from print_shop.rounds.lessons import REJECTED, RETIRED
-from print_shop.setup import similar
+from print_shop.setup import pauses, similar
 from print_shop.setup.bounds import MATERIAL, check
 from print_shop.setup.context import AS_PRINTED, SET_ASIDE, PartContext, Seen, printed, refuses
 from print_shop.setup.features import Feature
 from print_shop.setup.lessons import material_of
 from print_shop.setup.proposal import ORIENTATION, PAUSE, Change, Proposal, Source, Used, pose_value
 from print_shop.setup.reach import not_sliced, profile_of, unplaced
-from print_shop.setup.reading import seen
+from print_shop.setup.reading import AT_THE_BACK, seen, turned_on_plate
 from print_shop.setup.similar import Likeness, Numbers
 from print_shop.setup.traits import TRAITS, traits
 from print_shop.sliced import same_setting
@@ -142,6 +146,8 @@ class Item:
     reading: str = ""
     #: The pose it holds in, where using it goes with turning the part to that pose.
     pose: str = ""
+    #: What a pause was for there, and a swap's spools as it printed.
+    pause: pauses.Pause | None = None
 
 
 @dataclass(frozen=True)
@@ -384,6 +390,9 @@ class ThisPart:
     seen_in: Callable[[tuple[float, float, float]], Seen | None] | None = None
     #: The person chose this pose for this print: kept as laid, or sent back at this review.
     pose_chosen: str = ""
+    #: The spool the job was prepared with and those on hand: what a past swap can start on.
+    material: Material | None = None
+    on_hand: tuple[Spool, ...] = ()
 
     @property
     def pose(self) -> str:
@@ -445,10 +454,11 @@ def _against(at: int, row: Row, part: ThisPart) -> _Found:
     then = similar.numbers(row.features or ())
     here = similar.numbers(part.features)
     shapes = [(here, part.rotation_deg)]
-    if row.rotation_deg != part.rotation_deg:
-        there = part.lying(pose_value(row.rotation_deg))
+    lay = pose_of(row.rotation_deg)  # a turn on the plate is no other pose
+    if lay != part.rotation_deg:
+        there = part.lying(pose_value(lay))
         if there is not None:
-            shapes.append((similar.posed(here, there), row.rotation_deg))
+            shapes.append((similar.posed(here, there), lay))
     was_seen = _seen_then(row)
     context = part.context or PartContext()
     proposal = row.proposal
@@ -491,7 +501,10 @@ def _compared(
 def _seen_then(row: Row) -> Seen | None:
     """What was seen on that print, as it printed. A row from before has no pose for its answer,
     which is read in the pose it printed in, and its notes' faces are read from their line."""
-    mine = seen(row.intake, row.rotation_deg)
+    # Its faces in the pose it printed in: a turn on the plate turns none to another
+    # (mqucifer/print-shop#257).
+    lay = pose_of(row.rotation_deg)
+    mine = seen(row.intake, lay)
     if mine is not None:
         return mine
     if row.intake is not None and "seen" in row.intake.set_aside():
@@ -505,7 +518,7 @@ def _seen_then(row: Row) -> Seen | None:
             names = listed.split(", ")
             noted = Seen(walls="walls" in names, top="top" in names, bottom="bottom" in names,
                          said=listed, noted=True)
-            return printed(noted, row.rotation_deg)
+            return printed(noted, lay)
     return None
 
 
@@ -563,7 +576,7 @@ def _outcome(row: Row) -> str:
 
 def _past(ledger: Ledger, f: _Found, found: list[_Found], part: ThisPart) -> Past:
     row = f.row
-    then_pose = pose_value(row.rotation_deg)
+    then_pose = pose_value(pose_of(row.rotation_deg))
     decided = dict(f.decided)
     laid = row.orientation_source == "as_laid"  # `graph.AS_LAID`, which imports this
     if laid and ORIENTATION not in decided and then_pose != part.pose:
@@ -604,6 +617,17 @@ def _past(ledger: Ledger, f: _Found, found: list[_Found], part: ThisPart) -> Pas
                 differs.append(said)
     if not f.same_file and f.likeness.context < 1:
         differs.append("its fits, holds or seen faces weren't these")
+    seam = decided.get("seam_position")
+    if seam is not None and seam.value in AT_THE_BACK and row.sliced is None:
+        # Back is the plate's, so it's another side of a part turned on it
+        # (mqucifer/print-shop#257). A row from before doesn't say whether Orca turned it.
+        was = turned_on_plate(row.reading, row.rotation_deg)
+        if was is None:
+            differs.append("Orca may have turned it on the plate, unsaid then, so its back may "
+                           "have been another side")
+        elif was:
+            differs.append(f"it was turned {turn_words(was)}, to fit, so its back was as it "
+                           "lay so")
     names = part.filament_names
     if names and _filament_name(row) not in names:
         differs.append(f"its filament was {_filament_name(row) or 'not recorded'}, this is "
@@ -706,6 +730,10 @@ class _Items:
             first_stl_name=(origin.first_stl_name or origin.stl_name) if origin else "",
         )
         value, blocked, notes = change.value, "", []
+        purpose, reason = None, change.reason
+        if key == PAUSE:
+            purpose = pauses.as_printed(change.pause, row.spools)
+            reason = pauses.carried_reason(change)
         if key == ORIENTATION:
             preset = part.pose
             if value != part.pose and _pose(part, value) is None:
@@ -719,7 +747,8 @@ class _Items:
                 value = height
                 if said:
                     notes.append(said)
-                blocked = self._outside(value)
+                blocked = self._outside(value) or pauses.cant_start(
+                    purpose, part.material, part.on_hand)
         else:
             tier = profile_of(key, part.process, part.filament)
             data = part.filament if tier == "filament" else part.process
@@ -732,7 +761,7 @@ class _Items:
             if not blocked:
                 doubts += doubted
         return Item(
-            key=key, value=value, preset=preset, reason=" ".join(change.reason.split()),
+            key=key, value=value, preset=preset, reason=" ".join(reason.split()), pause=purpose,
             fits=("" if blocked or doubts else
                   SEAM_AS_SET if key == "seam_position" and self._seam_on_part()
                   else self._fits(key, value)),
@@ -823,6 +852,7 @@ class _Items:
         by = change.used.by if change.used else change.source
         if by is not Source.SPONSOR or not self.f.same_file:
             return False
+        # The whole rotation: on a print turned on the plate, the back was another side.
         if pose_value(row.rotation_deg) != part.pose:
             return False
         here, then = self._seen_here(), _seen_then(row)
@@ -1144,6 +1174,11 @@ def _reason(item: Item, proposal: Proposal) -> str:
 def _tags(item: Item) -> list[str]:
     u = item.used
     tags = [item.fits] if item.fits else []
+    if item.pause is not None:
+        said = pauses.said(item.pause.kind)
+        if item.pause.start is not None and item.pause.to is not None:
+            said += f": {item.pause.start.named()}, then {item.pause.to.named()}"
+        tags.insert(0, said)
     if u.by is Source.READING:
         tags.append("you took the model's" if u.of_model else "you took the slice's")
     if u.first_job_id and u.first_job_id != u.job_id:

@@ -183,6 +183,7 @@ def test_the_outcome_controls_appear_only_while_a_print_awaits_an_answer(
         "select.3d_print_agent_outcome_result",
         "select.3d_print_agent_outcome_symptom",
         "text.3d_print_agent_outcome_note",
+        "select.3d_print_agent_outcome_spool",
         "button.3d_print_agent_record_outcome",
         # The camera's frames, beside the answer (mqucifer/print-shop#110).
         "image.3d_print_agent_outcome_frame",

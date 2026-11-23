@@ -46,7 +46,10 @@ __all__ = [
     "discovery_payloads",
     "outcome_frame_set_topic",
     "outcome_frame_topic",
+    "OUTCOME_SPOOL_AS_RECORDED",
     "outcome_note_topic",
+    "outcome_spool_select",
+    "outcome_spool_topic",
     "outcome_result_topic",
     "outcome_submit_topic",
     "outcome_symptom_topic",
@@ -129,6 +132,12 @@ def outcome_note_topic(cfg: MqttConfig) -> str:
     return f"{cfg.topic_prefix}/outcome/set/note"
 
 
+def outcome_spool_topic(cfg: MqttConfig) -> str:
+    """The person's pick after a print with a swap: it's over, and this spool is on now
+    (mqucifer/print-shop#218)."""
+    return f"{cfg.topic_prefix}/outcome/set/spool"
+
+
 def outcome_submit_topic(cfg: MqttConfig) -> str:
     return f"{cfg.topic_prefix}/outcome/submit"
 
@@ -175,6 +184,9 @@ OUTCOME_SYMPTOMS = (
     "other",
 )
 
+#: The spool select's usual answer, which says nothing of the spool on: it clears nothing.
+OUTCOME_SPOOL_AS_RECORDED = "as recorded"
+
 #: The part on show, with any refusal the dashboard should see.
 OUTCOME_PART_TEMPLATE = (
     "{% if value_json.pending %}{{ value_json.stl_name }}"
@@ -211,6 +223,31 @@ def approval_buttons(
         )
         for decision in ("approve", "reject")
     ]
+
+
+def outcome_spool_select(
+    cfg: MqttConfig, spools: Iterable[str] = ()
+) -> tuple[str, dict[str, object]]:
+    """The select that says, at a swap's outcome, that it's over and which spool is on now
+    (mqucifer/print-shop#218). Each option says both.
+
+    A select's options are fixed in its discovery, and the stock's spools aren't, so the desk
+    publishes this again with them, as the gate's buttons are (`approval_buttons`).
+    """
+    return (
+        f"{cfg.discovery_prefix}/select/{cfg.node_id}/outcome_spool/config",
+        {
+            "name": "Outcome Spool",
+            "unique_id": f"{cfg.node_id}_outcome_spool",
+            "command_topic": outcome_spool_topic(cfg),
+            "state_topic": outcome_topic(cfg),
+            "value_template": (
+                f"{{{{ value_json.spool | default('{OUTCOME_SPOOL_AS_RECORDED}') }}}}"),
+            "options": [OUTCOME_SPOOL_AS_RECORDED, *spools],
+            "availability_topic": availability_topic(cfg),
+            "device": {"identifiers": [cfg.node_id], "name": "3D Print Agent"},
+        },
+    )
 
 
 def discovery_payloads(cfg: MqttConfig) -> Iterable[tuple[str, dict[str, object]]]:
@@ -378,6 +415,7 @@ def discovery_payloads(cfg: MqttConfig) -> Iterable[tuple[str, dict[str, object]
                 "device": device,
             },
         ),
+        outcome_spool_select(cfg),
         # The print's camera frames beside the answer (mqucifer/print-shop#110): the last
         # on show, Earlier and Later to page. Evidence, never the answer.
         (

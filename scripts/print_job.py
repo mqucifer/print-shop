@@ -62,6 +62,16 @@ facts, and what Approve and Reject each do there. Approved, the job goes on thro
 and the review to the approval gate, the only gate that can start a print, and that is shown in
 turn. Today such a job fails when that gate is answered, and nothing prints.
 
+**A pause says what it's for** (mqucifer/print-shop#218): a swap (`colour_change=12.4 from #1 to
+#2`, the stock's numbers) or an insert (`pause_at=2.6 for insert`), and what isn't typed is
+asked. After a print with a swap print-shop doesn't know what's on the printer, and never moves
+the stock by itself: before the next job prepares, at "From the inventory", it asks whether that
+print is over and which spool is on, and one answer says both. Start holds until you say.
+
+**A job starts only on what it was prepared for** (mqucifer/print-shop#218): the spool it was
+sliced for, a swap's first, or another of the same variety, colour and tuning. An Approve with
+anything else loaded starts nothing: it says what to load, and waits for a new press.
+
 **This is the only place that arms the printer,** and only when the invocation
 says so: `PRINT_AGENT_ALLOW_HARDWARE=1` on this command's own line. Without it
 the job slices, parks at the approval gate in Home Assistant, and an approval
@@ -121,6 +131,7 @@ from print_shop.ledger import Ledger, ledger_path
 from print_shop.orchestrator.daemon import GATE_WAIT_S
 from print_shop.orchestrator.live import AlreadyLive, Live, only_live
 from print_shop.orchestrator.outcome import no_frames
+from print_shop.orchestrator.spools import ask_on_now
 from print_shop.printer.centauri import FrameRecorder, PrinterClient, live_printer
 from print_shop.runtime import (
     WORK_DIR,
@@ -132,10 +143,10 @@ from print_shop.runtime import (
     recording_path,
 )
 from print_shop.setup.context import read_context
-from print_shop.setup.intake import Asker, cli_asker, replay_asker
+from print_shop.setup.intake import Asker, cli_asker, drop_typed, replay_asker
 from print_shop.setup.review import cli_reviewer
 from print_shop.setup.suggest import THREAD
-from print_shop.setup.waiting import Prompted, Waiting, cli_waiting
+from print_shop.setup.waiting import Prompted, Waiting, can_ask, cli_waiting
 from print_shop.slicer.orca import SlicerProfiles
 from print_shop.slicer.store import STORE_DIR, NoChoice, Store, choose
 from print_shop.slicer.store import describe as describe_store
@@ -144,6 +155,10 @@ from print_shop.slicer.store import describe as describe_store
 #: and its reading. The intake and the review aren't counted (mqucifer/print-shop#125).
 APPROVAL_WAIT_S = 3600.0
 FINISH_WAIT_S = 900.0  # after the press: preflight, upload, and a five-minute start watch
+
+
+#: Ctrl-C at the question before preparing.
+STOPPED_BEFORE = "\nStopped, before anything was prepared or sent."
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -242,9 +257,21 @@ def _header(part: Path | None, given: list[str]) -> str:
             f"command: uv run python scripts/print_job.py {shlex.join(given)}\n")
 
 
-def _hand_sliced(args: argparse.Namespace, job_log: JobLog | None) -> sliced.SlicedJob | int:
+def _said_what_is_on(
+    inventory: Inventory, args: argparse.Namespace, read: Callable[[str], str]
+) -> None:
+    """Before anything's prepared: what's on, where it isn't known since a print with a swap
+    (mqucifer/print-shop#218)."""
+    ask_on_now(inventory, inventory.printer(args.printer).id, read=read, write=print,
+               forget=drop_typed, asks=can_ask())
+
+
+def _hand_sliced(
+    args: argparse.Namespace, job_log: JobLog | None, read: Callable[[str], str]
+) -> sliced.SlicedJob | int:
     """The hand-sliced file to send, read and checked, with what's kept of it shown; or the
-    exit code, having said why it isn't sent. Nothing is asked."""
+    exit code, having said why it isn't sent. Nothing is asked but what's on the printer, where
+    that isn't known (`_said_what_is_on`)."""
     store = Store(STORE_DIR)
     reprint: sliced.Again | None = None
     try:
@@ -280,10 +307,14 @@ def _hand_sliced(args: argparse.Namespace, job_log: JobLog | None) -> sliced.Sli
                   "against the file, and there's no tuning to compare it with.")
         else:
             try:
+                _said_what_is_on(inventory, args, read)
                 material = inventory.material(args.printer)
             except InventoryError as exc:
                 print(exc, file=sys.stderr)
                 return 2
+            except KeyboardInterrupt:
+                print(STOPPED_BEFORE)
+                return 130
             print(f"From the inventory: {material.line()}.")
     if material is not None:
         wrong = sliced.loaded_mismatch(file, material, store)
@@ -343,7 +374,7 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
     waiting: Waiting | None = None
     hand_sliced: sliced.SlicedJob | None = None
     if by_hand:
-        found = _hand_sliced(args, job_log)
+        found = _hand_sliced(args, job_log, read)
         if isinstance(found, int):
             return found
         hand_sliced = found
@@ -358,10 +389,14 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
                     parser.error("say what's fitted: --nozzle (mm) and --filament (a variety)")
             else:
                 try:
+                    _said_what_is_on(inventory, args, read)
                     material = inventory.for_print(nozzle, filament, args.printer)
                 except InventoryError as exc:
                     print(exc, file=sys.stderr)
                     return 2
+                except KeyboardInterrupt:
+                    print(STOPPED_BEFORE)
+                    return 130
                 nozzle, filament = material.nozzle_mm, material.tuning or material.variety
                 print(f"From the inventory: {material.line()}.")
         assert nozzle is not None and filament is not None
@@ -452,7 +487,8 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
                 if gate.get("gate") == Gate.BEFORE_PRINT:
                     break
             try:
-                result = run.daemon.wait_for_finish(job_id, timeout_s=GATE_WAIT_S + FINISH_WAIT_S)
+                result = run.daemon.wait_for_finish(
+                    job_id, timeout_s=GATE_WAIT_S + FINISH_WAIT_S, tell=print)
             except TimeoutError:
                 print(run.daemon.abandon(job_id, "waiting for the job to finish",
                                          GATE_WAIT_S + FINISH_WAIT_S))
@@ -518,7 +554,10 @@ def _gate_lines(gate: dict[str, object], *, turned: bool) -> list[str]:
         if gate.get("without"):
             lines.append(f"  model       {gate['without']}")
         if gate.get("pause"):
-            lines.append(f"  SWAP        {gate['pause']}: be at the printer for it")
+            what = str(gate.get("pause_for") or "pause").upper()
+            lines.append(f"  {what:<12}{gate['pause']}: be at the printer for it")
+        if gate.get("spools"):
+            lines.append(f"  SPOOL       {gate['spools']}")
         return lines
     lines.append(f"  because     {gate.get('reason') or 'it gave no reason'}")
     if gate.get("gate") != Gate.REVIEW_PROPOSAL:

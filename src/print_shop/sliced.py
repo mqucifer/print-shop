@@ -810,6 +810,6 @@ def report(job: SlicedJob, reading: SliceReading | None, flags: tuple[Flag, ...]
         return [*out, "  its G-code couldn't be read layer by layer, so there's no reading"]
     out += [f"  {line}" for line in reading.lines()]
     if not reading.pauses:
-        out.append("  no pause or filament swap is written in it")
+        out.append("  no pause is written in it")
     out += [f"  noted  {f.id}: {f.reading}" for f in flags]
     return out
