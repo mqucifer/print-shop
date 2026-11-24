@@ -317,6 +317,9 @@ def _answers(facts: PartFacts) -> list[str]:
             o = q.options[a.choice]
             sets = ", ".join(f"{k}={v}" for k, v in o.settings.items()) or "no setting"
             said = f"{q.asked()} -> {q.as_answered(a)} ({sets})"
+        elif a.sets:  # read back and confirmed: a decision (mqucifer/print-shop#213)
+            sets = ", ".join(f"{k}={v}" for k, v in a.sets.items())
+            said = f"{q.asked()} -> in their words: {a.other}, read back and confirmed ({sets})"
         else:
             said = f"{q.asked()} -> in their words: {a.other}"
         whose = q.whose(a)

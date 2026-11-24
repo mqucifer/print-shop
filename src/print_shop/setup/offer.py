@@ -844,7 +844,7 @@ def _past(ledger: Ledger, f: _Found, found: list[_Found], part: ThisPart) -> Pas
     if intake is not None:
         for q, a in zip(intake.questions, intake.answers, strict=False):
             if a.choice is None:
-                answers.append(f"{q.asked()} -> {a.other}")
+                answers.append(f"{q.asked()} -> {a.in_words()}")
             elif not q.options[a.choice].settings:
                 confirmed = f" ({q.whose(a)})" if q.confirmed(a) else ""
                 answers.append(f"{q.asked()} -> {q.as_answered(a)}{confirmed}")

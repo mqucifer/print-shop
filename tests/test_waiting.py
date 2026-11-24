@@ -292,12 +292,13 @@ def test_questions_that_come_late_are_added_without_losing_an_answer() -> None:
             release.set()
             time.sleep(0.2)
 
-    person = Person("2", "3", "2", "o it bends", before=arrives)
+    # "it bends" sets nothing the edge's options set; Enter keeps it so (mqucifer/print-shop#213).
+    person = Person("2", "3", "2", "o it bends", "", before=arrives)
     intake = ask(person, slow)
     assert intake.questions == (*STOCK, TOP, EDGE)
     assert intake.answers == (
         Answer(choice=1), Answer(choice=2), Answer(choice=1), Answer(other="it bends"))
-    assert [p for p, _ in person.prompts] == ["1> ", "2> ", "3> ", "4> "]
+    assert [p for p, _ in person.prompts] == ["1> ", "2> ", "3> ", "4> ", "4> "]
 
 
 def test_a_list_never_changes_under_an_open_prompt() -> None:
@@ -341,6 +342,43 @@ def test_picking_a_closer_choice_replaces_the_answer_and_keeps_both_on_record() 
     assert intake.chosen()[0][1].settings == {"sparse_infill_density": "40%"}
     assert intake.offered == (PURPOSE,)
     assert "in place of your first answer, 'handled, clipped or lightly loaded'" in intake.note
+
+
+def test_words_at_closer_choices_are_read_back_as_the_decision_they_make() -> None:
+    """mqucifer/print-shop#213: the closer choices set something, so words there are read back
+    and, confirmed, are a decision as a picked one is."""
+    person = Person("2", "1", "o 40% infill", "y")
+    intake = ask(person, lambda stop: answered(CLOSER, STOCK[1]))
+    assert "So 40% infill? From your words, '40% infill'." in person.text
+    assert intake.answers[0] == Answer(other="40% infill",
+                                       sets={"sparse_infill_density": "40%"})
+    assert intake.chosen()[0][1].settings == {"sparse_infill_density": "40%"}
+
+
+def test_words_at_closer_choices_that_set_nothing_are_a_purpose_with_no_prompt() -> None:
+    """print-shop-ux, on mqucifer/print-shop#213: the closer choices refine a purpose already
+    given, so words there are one. They're kept beside it, nothing is said to be lost, and no
+    Enter is asked for."""
+    release = threading.Event()
+
+    def slow(stop: threading.Event) -> Asked:
+        release.wait(WAIT_S)
+        return answered(CLOSER, TOP, STOCK[1])
+
+    def arrives(prompt: int) -> None:
+        if prompt == 1:
+            release.set()
+            time.sleep(0.2)
+
+    person = Person("2", "1", "o a lid for a box", "1", before=arrives)
+    intake = ask(person, slow)
+    assert [p for p, _ in person.prompts] == ["1> ", "2> ", "1> ", "3> "], "as on main"
+    assert ("Your words are kept as what it's for, beside 'handled, clipped or lightly loaded'. "
+            "They set no walls or infill, so the proposal decides those.") in " ".join(
+                person.text.split())
+    assert "as if this weren't answered" not in person.text
+    assert intake.answers[0] == Answer(other="a lid for a box") and not intake.answers[0].sets
+    assert intake.offered == (PURPOSE,), "the purpose given is kept on record beside them"
 
 
 def test_a_kept_answers_choices_still_open_their_skill_groups() -> None:
