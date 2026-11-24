@@ -59,6 +59,7 @@ from typing import Any, ParamSpec, TypeVar
 from langgraph.types import Command as LgCommand
 from pydantic import BaseModel
 
+from print_shop.arming import ALLOW_HARDWARE_ENV
 from print_shop.core.checkpoint import open_checkpointer
 from print_shop.core.contracts import Gate
 from print_shop.core.mqtt import (
@@ -109,6 +110,11 @@ __all__ = [
 BED_ON_CARD = "on the card's dialog"
 BED_AT_TERMINAL = "at the terminal"
 
+#: What a Start in a run that isn't armed is told: held, so the ready job isn't lost.
+NOT_ARMED = (f"this run isn't armed ({ALLOW_HARDWARE_ENV} is not 1), so nothing can print. Stop "
+             f"it, and take the job up with `{ALLOW_HARDWARE_ENV}=1 uv run python "
+             "scripts/print_job.py --resume <job>`")
+
 #: The most a Start from the terminal waits to be checked: a printer's snapshot, and the stock.
 _CHECKED_WITHIN_S = 60.0
 
@@ -147,6 +153,8 @@ class Command(BaseModel):
     bed: str = ""
     #: Where it was given, as it's said: "on the card" or "here", at the terminal.
     by: str = ""
+    #: A terminal command's own id, to tell it was weighed. Never read from a payload.
+    id: str = ""
 
 
 class JobRejected(Exception):
@@ -332,6 +340,11 @@ class Daemon:
         #: Read once at Start, for a snapshot only: the watcher's read-only client, or else the
         #: printer the print node commands.
         self._reads_printer = watch_printer or printer
+        #: Whether a Start here can reach a printer: without one it's held, and the job waits
+        #: for an armed run to take it up (mqucifer/print-shop#209).
+        self._commands_printer = printer is not None
+        #: The terminal's commands each gate has weighed, by their id.
+        self._weighed: set[str] = set()
         #: The jobs that wait for the person, which a restart takes up again.
         self._waiting = WaitingJobs(workdir / "jobs.sqlite")
 
@@ -495,9 +508,10 @@ class Daemon:
         """
         return self._submit(Path(stl_path).name, {
             "entry": "stl_upload",
-            "stl_path": str(stl_path),
+            # Absolute, so a `--resume` from another folder finds it (mqucifer/print-shop#209).
+            "stl_path": str(Path(stl_path).absolute()),
             "as_laid": as_laid,
-            "context_path": str(context) if context else None,
+            "context_path": str(Path(context).absolute()) if context else None,
         })
 
     def _submit(self, part: str, given: dict[str, Any]) -> str:
@@ -507,7 +521,7 @@ class Daemon:
         try:
             self._waiting.add(WaitingJob(
                 job_id=job_id, part=part, given=given, profiles=self._kept_profiles(job_id)))
-        except (OSError, sqlite3.Error):
+        except Exception:  # noqa: BLE001 - the job runs either way, as it did before
             # A job that couldn't be kept still runs: it just won't survive its process.
             logger.exception("job %s couldn't be kept to survive a restart", job_id)
         self._work(job_id, self._run_job, given)
@@ -614,12 +628,17 @@ class Daemon:
             if cmd.decision is Decision.APPROVE and gate.get("gate") != Gate.BEFORE_PRINT:
                 return "only the gate before printing starts a print"
             word = self._press
-            self._gate_inbox.put(cmd.model_copy(update={"press": word}))
+            cmd = cmd.model_copy(update={"press": word, "id": uuid.uuid4().hex})
+            self._gate_inbox.put(cmd)
         # Back once it's been checked: the gate has a new word for a press, or none.
         end = time.monotonic() + _CHECKED_WITHIN_S
         while self._press == word and time.monotonic() < end:
             time.sleep(0.02)
-        return ""
+        with self._job_lock:
+            if cmd.id in self._weighed:
+                return ""
+        # The card's came first, and this one was spent with it, unweighed.
+        return "the card's came first, and is what's said of the gate now"
 
     def submit_sliced(self, job: SlicedJob) -> str:
         """Submit a hand-sliced file, to be sent as it is (mqucifer/print-shop#164). Returns
@@ -650,7 +669,7 @@ class Daemon:
         its submit, its last intake answer, the review's `ok` or `take`, or
         its last gate's answer, for a job with another gate after it.
         While the intake, the review or an open gate is with them it doesn't
-        count, however long they take (mqucifer/print-shop#125, #209).
+        count, however long they take (mqucifer/print-shop#125, mqucifer/print-shop#209).
 
         Whether the gate opened or the wait ran out is decided once, under the job's lock: a
         gate that opens as it runs out is returned, and a job it ran out on opens none.
@@ -950,8 +969,15 @@ class Daemon:
             return
         if tuple(snapshot.next) == ("print",):
             # Started, and stopped before anything reached the printer: an approval isn't kept,
-            # so it's ready again, from the checkpoint at its gate.
-            snapshot = self._at_its_gate(config) or snapshot
+            # so it's ready again, from the checkpoint at its gate. Without one it ends: the
+            # print node never runs on a Start from before the restart.
+            at_gate = self._at_its_gate(config)
+            if at_gate is None:
+                self._finish_job(job_id, approved=False, printed=False, error=(
+                    "it was started before the restart, and its gate couldn't be found again, "
+                    "so nothing was sent: run the job again"))
+                return
+            snapshot = at_gate
         interrupts = [i for task in snapshot.tasks for i in task.interrupts]
         if interrupts:
             self._ran(job_id, lambda: {"__interrupt__": interrupts}, config)
@@ -1022,6 +1048,7 @@ class Daemon:
         # (mqucifer/print-shop#218).
         while True:
             cmd = inbox.get()
+            self._weigh(cmd)
             if cmd.decision is not Decision.APPROVE or not before_print:
                 break
             why = self._not_yet(thread_config, cmd)
@@ -1030,6 +1057,7 @@ class Daemon:
             checked, inbox = inbox, self._open_gate()
             if rejected := _rejection(checked):
                 cmd = rejected
+                self._weigh(cmd)
                 break
             if not why:
                 break
@@ -1085,6 +1113,12 @@ class Daemon:
                 error=str(exc),
             )
 
+    def _weigh(self, cmd: Command) -> None:
+        """`cmd` is the one the gate weighs, for a terminal's Start to know it was."""
+        if cmd.id:
+            with self._job_lock:
+                self._weighed.add(cmd.id)
+
     def _not_yet(self, thread_config: dict[str, Any], cmd: Command) -> str:
         """Why this Start mustn't start the job, with what to do, or "" (mqucifer/print-shop#218,
         mqucifer/print-shop#209).
@@ -1103,6 +1137,9 @@ class Daemon:
             return f"what Start checks couldn't be checked ({exc}): Start again"
         if not cmd.bed:
             found.append(BED_NOT_SAID)
+        if not self._commands_printer:
+            # Held, so the job keeps waiting: an unarmed run never ends a ready job.
+            found.append(NOT_ARMED)
         return ". Also, ".join(found)
 
     def _hold(self, job_id: str, gate_payload: dict[str, Any], why: str) -> None:
@@ -1181,7 +1218,7 @@ class Daemon:
 
     def _name_buttons(self, job_id: str = "", press: str = "") -> None:
         """Approve and Reject republished, naming `job_id` and the gate's word for a press, or no
-        job (mqucifer/print-shop#207, #209)."""
+        job (mqucifer/print-shop#207, mqucifer/print-shop#209)."""
         for topic, config in approval_buttons(self._cfg, job_id, press):
             self._bridge_publish(topic, config)
 

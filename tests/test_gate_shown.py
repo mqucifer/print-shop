@@ -61,6 +61,9 @@ class Desk:
         monkeypatch.delenv("PRINT_AGENT_ALLOW_HARDWARE", raising=False)
         monkeypatch.setattr(self.script, "WORK_DIR", self.jobs)
         monkeypatch.setattr(self.script, "build_run", self._build_run)
+        # As on the Mac's terminal: the gate says `start` is read here. What's typed isn't, as
+        # stdin is pytest's, so the reader stops at once (mqucifer/print-shop#209).
+        monkeypatch.setattr(self.script, "can_ask", lambda: True)
 
     def _review(self, request: ReviewRequest) -> Review:
         self.reviewed += 1

@@ -764,3 +764,119 @@ def test_a_reject_says_where_it_was_given(ready: tuple[Shop, Daemon, str]) -> No
     assert not daemon.wait_for_finish(job_id, timeout_s=WAIT_S, tell=told.append).printed
     assert told == ["Rejected here: nothing printed, and the job has ended."]
     assert daemon.start(job_id, bed_clear=True) == "it was rejected here"
+
+
+# From the cold read of e91c5e5
+# --------------------------------------------------------------------------
+
+
+def test_a_part_given_by_a_relative_path_is_taken_up_from_another_folder(
+    shop: Shop, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(shop.stl.parent)
+    first = shop.daemon()
+    with first:
+        job_id = first.submit(Path(shop.stl.name))
+        assert first.wait_for_gate(job_id, timeout_s=WAIT_S) is not None
+    monkeypatch.chdir(shop.work)
+    second = shop.daemon()
+    with second:
+        second.resume(job_id)
+        assert second.wait_for_gate(job_id, timeout_s=WAIT_S) is not None
+        shop.press("approve")
+        assert second.wait_for_finish(job_id, timeout_s=WAIT_S).printed
+
+
+def test_a_start_cut_short_with_no_gate_to_go_back_to_ends_and_sends_nothing(
+    shop: Shop, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An approval is never kept: where the gate's checkpoint can't be found, the print node
+    isn't run on the Start from before the restart."""
+    leaving, over = threading.Event(), threading.Event()
+
+    class SlowUpload(FramePrinter):
+        def upload(self, local_path: Path) -> str:
+            leaving.set()
+            over.wait(WAIT_S)
+            raise Gone
+
+    first = shop.daemon(printer=SlowUpload())
+    with first:
+        job_id = first.submit(shop.stl)
+        first.wait_for_gate(job_id, timeout_s=WAIT_S)
+        shop.press("approve")
+        assert leaving.wait(WAIT_S)
+    try:
+        monkeypatch.setattr(Daemon, "_at_its_gate", lambda self, config: None)
+        second = shop.daemon()
+        with second:
+            second.resume(job_id)
+            result = second.wait_for_finish(job_id, timeout_s=WAIT_S)
+    finally:
+        over.set()
+    assert not result.printed and "its gate couldn't be found again" in (result.error or "")
+    assert shop.printer.verbs == [] and shop.waiting() == []
+
+
+def test_a_start_in_a_run_that_isnt_armed_is_held_and_the_job_waits(shop: Shop) -> None:
+    daemon = shop.daemon()
+    daemon._commands_printer = False  # as a daemon built with no printer to command
+    with daemon:
+        job_id = daemon.submit(shop.stl)
+        daemon.wait_for_gate(job_id, timeout_s=WAIT_S)
+        shop.press("approve")
+        said = shop.held()
+        assert "this run isn't armed (PRINT_AGENT_ALLOW_HARDWARE is not 1)" in said
+        assert shop.gate_open() and "upload" not in shop.printer.verbs
+    assert shop.waiting() == [(job_id, Waits.READY)], "it still waits, for an armed run"
+
+
+def test_an_answer_kept_at_the_review_gives_back_what_it_turned_down_and_saw(
+    tmp_path: Path,
+) -> None:
+    from print_shop.orchestrator.kept import Kept  # noqa: PLC0415
+    from print_shop.setup.proposal import Suggested  # noqa: PLC0415
+
+    saw = Suggested(pose=(0.0, 0.0, 0.0))
+    answer = Review(declined=("wall_loops",), saw=saw, corrections=(Change(
+        key="wall_loops", preset="", value="2", reason="no: two are plenty",
+        source=Source.SPONSOR),))
+    Kept(tmp_path).reviewer(lambda request: answer)(None)  # type: ignore[arg-type]
+    again = Kept(tmp_path).reviewer(lambda request: Review(stop=True))(None)  # type: ignore[arg-type]
+    assert (again.declined, again.saw, again.corrections) == (
+        answer.declined, answer.saw, answer.corrections)
+
+
+def test_a_terminal_start_spent_with_the_cards_is_told_so(shop: Shop) -> None:
+    """Typed while the card's Start was being checked: it's spent with it, and says so."""
+
+    class SlowRead(FramePrinter):
+        def snapshot(self) -> PrinterSnapshot:
+            time.sleep(0.6)
+            return super().snapshot()
+
+    printer = SlowRead()
+    daemon = shop.daemon(printer=printer)
+    with daemon:
+        job_id = daemon.submit(shop.stl)
+        daemon.wait_for_gate(job_id, timeout_s=WAIT_S)
+        shop.press("approve")
+        time.sleep(0.2)  # the card's is being checked
+        assert daemon.start(job_id, bed_clear=True) == (
+            "the card's came first, and is what's said of the gate now")
+        assert daemon.wait_for_finish(job_id, timeout_s=WAIT_S).printed
+    assert printer.verbs.count("start") == 1
+
+
+def test_with_nothing_reading_the_terminal_the_gate_points_to_the_card(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    from tests.test_gate_shown import Desk  # noqa: PLC0415 - print_job.py on fakes
+
+    desk = Desk(tmp_path, monkeypatch)
+    monkeypatch.setattr(desk.script, "can_ask", lambda: False)
+    assert desk.run(write_stl("cube", tmp_path), "reject") == 0
+    out = capsys.readouterr().out
+    assert "Ready to print. Start or reject it on the card.\n" in out
+    assert "  It waits until you start or reject it.\n" in out
+    assert "Type start here" not in out

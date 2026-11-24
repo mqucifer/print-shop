@@ -968,7 +968,7 @@ def build_graph(
         sliced_as = taken.file.sha256 if taken is not None else state.get("gcode_sha256")
         if sliced_as:
             # The file is sent as it was sliced, or read for a hand-sliced one: hashed again,
-            # last thing before the upload (mqucifer/print-shop#164, #209).
+            # last thing before the upload (mqucifer/print-shop#164, mqucifer/print-shop#209).
             hand_sliced.verify(gcode, sliced_as)
         remote_name = client.upload(gcode)
         if job_id_from_filename(remote_name) != state["job_id"]:

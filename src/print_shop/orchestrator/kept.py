@@ -147,19 +147,27 @@ class WaitingJobs:
             db.execute("DELETE FROM waiting_jobs WHERE job_id = ?", (job_id,))
 
     def get(self, job_id: str) -> WaitingJob | None:
-        with self._db() as db:
-            row = db.execute("SELECT * FROM waiting_jobs WHERE job_id = ?", (job_id,)).fetchone()
-        return _job(row) if row is not None else None
+        return next((j for j in self.all() if j.job_id == job_id), None)
 
     def all(self) -> list[WaitingJob]:
-        """Every waiting job, the oldest first."""
+        """Every waiting job that can be read, the oldest first. Reading creates nothing, and a
+        row that can't be read is said and left out, never in another job's way."""
+        if not self.path.is_file():
+            return []
         try:
             with self._db() as db:
                 rows = db.execute("SELECT * FROM waiting_jobs ORDER BY added_at, job_id").fetchall()
-        except sqlite3.Error as exc:
+        except (sqlite3.Error, OSError) as exc:
             logger.warning("the waiting jobs couldn't be read: %s", exc)
             return []
-        return [_job(r) for r in rows]
+        found = []
+        for row in rows:
+            try:
+                found.append(_job(row))
+            except ValueError as exc:  # a pydantic ValidationError is one
+                logger.warning("waiting job %s couldn't be read, so it's left out: %s",
+                               row["job_id"], exc)
+        return found
 
 
 def _job(row: sqlite3.Row) -> WaitingJob:
@@ -195,11 +203,14 @@ class _Answered(BaseModel):
 
 
 class _Reviewed(BaseModel):
-    """An answer at the review, less the offer as it was left, which is shown, not used."""
+    """An answer at the review, less the offer as it was left: what it took from the offer is in
+    `taken`, and which print it showed is shown again as the offer is built."""
 
     approved: bool = False
     corrections: tuple[Change, ...] = ()
     taken: tuple[Change, ...] = ()
+    declined: tuple[str, ...] = ()
+    saw: Suggested | None = None
     turn_taken: bool = False
 
 
@@ -335,14 +346,16 @@ class Kept:
                     logger.info("the review's answer from before the restart is kept: %s",
                                 _said(kept))
                     return Review(approved=kept.approved, corrections=kept.corrections,
-                                  taken=kept.taken, turn_taken=kept.turn_taken)
+                                  taken=kept.taken, declined=kept.declined, saw=kept.saw,
+                                  turn_taken=kept.turn_taken)
             answer = reviewer(request)
             if answer.stop or (answer.browsing and not answer.turn_taken):
                 return answer  # an offer only browsed slices nothing, and isn't kept
             with self._lock:
                 self._record.reviews.append(_Reviewed(
                     approved=answer.approved, corrections=answer.corrections,
-                    taken=answer.taken, turn_taken=answer.turn_taken))
+                    taken=answer.taken, declined=answer.declined, saw=answer.saw,
+                    turn_taken=answer.turn_taken))
                 self._replayed += 1
                 self._write()
             return answer

@@ -282,7 +282,7 @@ Finish that job, or stop it with Ctrl-C in its terminal (which doesn't stop the 
    - the printer is free, read once;
    - and the bed, as above.
 
-   Any change is said, on the card and the command line, as `Not started:` with what to do, nothing prints, and the gate waits for a new Start. A changed file or profile can't be mended at the gate: Reject and run the job again to prepare it as things are now. Arming is as it was: only `PRINT_AGENT_ALLOW_HARDWARE=1` on the command's own line.
+   Any change is said, on the card and the command line, as `Not started:` with what to do, nothing prints, and the gate waits for a new Start. A changed file or profile can't be mended at the gate: Reject and run the job again to prepare it as things are now. Arming is as it was: only `PRINT_AGENT_ALLOW_HARDWARE=1` on the command's own line. In a run without it, a Start is held too (`Not started: this run isn't armed …`), so a ready job is never lost to it: stop, and take it up with the flag and `--resume`. Where nothing reads the terminal (input piped in), the gate says `Ready to print. Start or reject it on the card.`, and the card is the way to answer.
 
    **A press names its job, and its moment.** print-shop puts the job's id in the two buttons when its gate opens, and a word that's new at each gate, and again after each Start it holds. A gate ignores a press that names another job or none, or a word that's gone (one sent again, or from before a restart), and its command line says `ignored approve for …`. So an automation or script that publishes to the command topic itself has to send what the buttons' `payload_press` holds now.
 

@@ -90,8 +90,8 @@ anything else loaded starts nothing: it says what to load, and waits for a new p
 
 **This is the only place that arms the printer,** and only when the invocation
 says so: `PRINT_AGENT_ALLOW_HARDWARE=1` on this command's own line. Without it
-the job slices, parks at the approval gate in Home Assistant, and an approval
-fails at the print node instead of starting anything. It lives outside the
+the job slices and parks at the approval gate, and a Start is held, saying so:
+the job waits, ready, for an armed `--resume` (mqucifer/print-shop#209). It lives outside the
 package so that nothing importable can arm the printer for itself.
 
 With a print started, it keeps running, watching the printer read-only, until
@@ -177,6 +177,9 @@ FINISH_WAIT_S = 900.0  # after the Start: preflight, upload, and a five-minute s
 #: The gate before printing, as the terminal says it, and how to answer (mqucifer/print-shop#209).
 READY = "Ready to print. Start it here or on the card, or reject it on the card."
 START_HERE = "  Type start here, or Yes on the card. It waits until you start or reject it."
+#: Where nothing reads the terminal (input piped, no terminal): the card only.
+READY_ON_THE_CARD = "Ready to print. Start or reject it on the card."
+ON_THE_CARD = "  It waits until you start or reject it."
 #: The bed's question at the terminal's Start, in the phone's words (mqucifer/print-shop#214).
 BED_QUESTION = "  I can see the bed is clear [y/N]"
 
@@ -527,7 +530,7 @@ def _armed(recorder: FrameRecorder | None) -> PrinterClient | None:
         print(f"ARMED by {ALLOW_HARDWARE_ENV}=1: a Start, here or on the card, starts the print.")
         return live_printer(recorder=recorder)
     print(f"Not armed ({ALLOW_HARDWARE_ENV} is not 1): a Start, here or on the card, will NOT "
-          "print. The job fails at the printer's step, and nothing is sent.")
+          "print. It's held, and the job waits for an armed `--resume`.")
     return None
 
 
@@ -618,13 +621,19 @@ def _follow(run: Run, job_id: str, *, turned: bool, read: Callable[[str], str]) 
         if gate is None:
             break  # it ended first
         shown += 1
-        for line in _gate_lines(gate, turned=turned):
+        lines = _gate_lines(gate, turned=turned)
+        here = can_ask()
+        if gate.get("gate") == Gate.BEFORE_PRINT and not here:
+            lines[0] = READY_ON_THE_CARD  # nothing reads this terminal
+        for line in lines:
             print(line)
         if gate.get("gate") == Gate.BEFORE_PRINT:
-            print(START_HERE)
-            if can_ask():
+            if here:
+                print(START_HERE)
                 threading.Thread(target=_start_here, args=(run.daemon, job_id, read, print),
                                  daemon=True).start()
+            else:
+                print(ON_THE_CARD)
             break
         print("  It waits until you answer it on the card.")
     try:
