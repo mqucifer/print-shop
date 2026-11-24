@@ -579,7 +579,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._see_other(f"/job/{job_id}/{screen}")
                 return None
             said = self.shop.answered.pop(job_id, "")
-            self._send(message_page("Nothing waits", (
+            taken = said.startswith("Taken")
+            self._send(message_page("Taken" if taken else "Nothing waits", (
                 f"{said}. " if said else "") + "It doesn't wait for you now: it's back under "
                 "\"Sent to you, or waiting on you\" when it asks again.",
                 back_to=f"/job/{job_id}", back_words="Back to the job"))

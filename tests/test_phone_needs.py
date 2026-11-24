@@ -602,3 +602,13 @@ def test_a_turn_that_waits_is_said_in_the_terminals_words(tmp_path: Path) -> Non
     phone.post("/job/j1/review", {"since": since(r.queue.asks["j1"]), "do": "ok"})
     shown = phone.get("/job/j1/review")
     assert "it doesn't fit as posed: type turn" in shown.body and r.queue.given == []
+
+
+def test_words_that_set_nothing_are_kept_and_the_page_says_its_taken(tmp_path: Path) -> None:
+    asked = Asked(job_id="j1", need=Need.QUESTIONS, questions=(PURPOSE,))
+    r = rig(tmp_path, {"j1": asked})
+    phone = r.phone()
+    phone.post("/job/j1/questions", {"since": since(asked), "q0": "o", "w0": "holds a lamp"})
+    wait_until(lambda: bool(r.queue.given))
+    assert r.queue.given[0][1] == terminal((PURPOSE,), ["o holds a lamp"])
+    assert "Taken: it goes on with your answer" in phone.get("/job/j1/questions").body

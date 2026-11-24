@@ -383,7 +383,9 @@ class Shop:
                 return found  # its end is still the page's news
             self.sessions.pop(job_id, None)
             if found.ended:
-                self.answered[job_id] = found.said
+                alike = self.answered.get(job_id, "")
+                self.answered[job_id] = found.said or (
+                    "Taken: it goes on with your answer" + (f" ({alike})" if alike else ""))
             return None
         return found
 
