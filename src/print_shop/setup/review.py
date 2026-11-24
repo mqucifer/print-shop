@@ -797,9 +797,11 @@ def _used_change(item: Item, request: ReviewRequest) -> Change:
     if item.key == PAUSE:
         purpose = pauses.refreshed(item.pause, request.material, request.stock)
         reason = pauses.because(reason, purpose)
+    # Their own from before the job was moved to another spool is theirs again, from no other print
+    # (mqucifer/print-shop#210).
     return Change(key=item.key, preset=item.preset, value=item.value, reason=reason,
                   source=Source.SPONSOR, standard=known.standard if known else "",
-                  reading=item.reading, used=item.used, pause=purpose)
+                  reading=item.reading, used=None if item.moved else item.used, pause=purpose)
 
 
 def _pause(key: str, value: str, reason: str, request: ReviewRequest) -> Change | str:

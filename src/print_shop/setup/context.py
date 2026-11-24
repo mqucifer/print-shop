@@ -18,6 +18,10 @@ it's held. On 2026-11-14 the slice reading proposed a random seam on a part whos
    the refinement pass names its meshes (`<folder>__<file>.stl`).
 3. **Neither:** the print goes on as before, and the review says so.
 
+**A part sent to the queue keeps its context as it was read** (mqucifer/print-shop#226,
+`KEPT`): `PART.context.json` in the queue's copy, read in place of the sidecar or the run, so the
+original can move, or its run change, while the job waits.
+
 **A fit** is a run's `clearance` need on this part (never a `--slide`, which reads a hold) whose
 play is at most `FIT_MM`: two parts meant to mate. Its play is the need's own limits. **Its
 place is derived from geometry** (the operator, 2026-11-14): the need's own `--box` place, else
@@ -54,6 +58,7 @@ from print_shop.bench.pausing import z_span
 
 __all__ = [
     "FIT_MM",
+    "KEPT",
     "AS_THE_FILE_LIES",
     "LOADS",
     "SET_ASIDE",
@@ -70,13 +75,18 @@ __all__ = [
     "place",
     "plain_line",
     "printed",
+    "keep",
     "read_context",
     "refuses",
     "seen_from",
+    "seen_from_words",
 ]
 
 #: A sidecar beside `PART.stl`: `PART.part.json`.
 SIDECAR = ".part.json"
+#: A context as it was read when the part was sent to the queue (mqucifer/print-shop#226):
+#: `PART.context.json`, read whole and never read again from where it came.
+KEPT = ".context.json"
 #: A `clearance` need whose play is at most this, in mm, is a fit: two parts meant to mate. A
 #: larger gap is room to keep apart, never a fit.
 FIT_MM = 0.5
@@ -363,6 +373,8 @@ def read_context(stl: Path, given: Path | None = None) -> PartContext:
         if given is not None:
             if given.is_dir():
                 return _from_run(given, stl)
+            if given.name.endswith(KEPT):
+                return PartContext.model_validate_json(given.read_text(encoding="utf-8"))
             return _from_sidecar(given)
         beside = stl.with_name(stl.stem + SIDECAR)
         if beside.is_file():
@@ -375,6 +387,17 @@ def read_context(stl: Path, given: Path | None = None) -> PartContext:
         return PartContext(notes=(f"{where} couldn't be read as a part's context: "
                                   f"{type(exc).__name__}: {exc}"[:LINE_CHARS],))
     return PartContext()
+
+
+def keep(context: PartContext, path: Path, kept_from: str) -> Path:
+    """The context as read now, kept at `path` (a name ending `KEPT`), saying where it was read
+    from, so the job reads it there whatever happens to the original (mqucifer/print-shop#226)."""
+    if not path.name.endswith(KEPT):
+        raise ValueError(f"a kept context's name ends {KEPT}")
+    kept = context.model_copy(update={"read": (*context.read, f"kept from {kept_from}")}
+                              if context.found else {})
+    path.write_text(kept.model_dump_json(indent=1), encoding="utf-8")
+    return path
 
 
 def refuses(context: PartContext | None, key: str, value: str) -> str:
@@ -492,6 +515,14 @@ def _seen(value: Any) -> Seen | None:
     said = ", ".join(faces) if faces else "nothing"
     return Seen(walls="walls" in faces, top="top" in faces, bottom="bottom" in faces,
                 said=f"{said}, as the part's context says", noted=True)
+
+
+def seen_from_words(faces: tuple[str, ...], said: str) -> Seen:
+    """The seen faces as a sender lists them (walls, top, bottom), read as the notes' are: never
+    the person's own until they confirm it (mqucifer/print-shop#226). Raises ValueError."""
+    found = _seen(list(faces))
+    assert found is not None
+    return found.model_copy(update={"said": f"{', '.join(faces) or 'nothing'}, {said}"})
 
 
 def _box(value: Any) -> Box:

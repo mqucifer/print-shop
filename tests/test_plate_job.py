@@ -57,7 +57,7 @@ from print_shop.slicer.orca import SlicerProfiles
 from tests.fakes import FakeCamera, FramePrinter, MemoryBridge
 from tests.fixtures import write_stl
 from tests.plates import PlateOrca, box, profiles
-from tests.reviewing import flat
+from tests.reviewing import flat, settled
 from tests.test_job_e2e import CFG
 from tests.test_ledger import record
 from tests.test_review import _model, _questions
@@ -85,7 +85,13 @@ def _caps(tmp_path: Path) -> list[Path]:
 
 
 class Rig:
-    """The daemon on the fakes, with a person who types the answers given."""
+    """The daemon on the fakes, with a person who types the answers given.
+
+    Each review is shown once the made-up model's settings beside it are in, as they are when
+    it answers before the screen is drawn (`settled`). Shown while it still works, a first `ok`
+    is held back to say so, and the answers typed would be one short: whether they were hung on
+    how fast the fake answered on a busy machine (mqucifer/print-shop#267).
+    """
 
     def __init__(
         self, tmp_path: Path, *typed: str, use: SlicerProfiles | None = None,
@@ -110,8 +116,9 @@ class Rig:
             self.asked += 1
             return tuple(IntakeAnswer(choice=q.recommended) for q in questions)
 
+        @settled
         def reviewer(request: ReviewRequest) -> Review:
-            self.reviews.append(request)
+            self.reviews.append(request)  # as shown
             return reviewing(request)
 
         setup: dict[str, Any] = {}
@@ -587,7 +594,8 @@ def test_print_job_takes_three_files_and_shows_each_outcome(
         thread.join(timeout=5)
     out = capsys.readouterr().out
     assert code == 0
-    assert "3 parts, one job, on one plate:" in out and "part 2, cap-mid.stl. Its context:" in out
+    assert "  part      3 parts, one job, on one plate\n" in out
+    assert "  part 2    cap-mid.stl. Its context:" in out
     assert "each kept as laid" in out
     assert "  plate       3 parts on one plate, printed BY OBJECT" in out
     assert "  turned      " not in out, "no one turn is the plate's"

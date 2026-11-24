@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -306,9 +307,9 @@ def _q_option(name: str) -> Any:
 def test_the_questions_are_shown_numbered_with_impacts_and_other(tmp_path: Path) -> None:
     qs = questions("snap", tmp_path)
     text = render(qs)
-    assert text.startswith("A few questions about this part, from its shape:\n1. ")
-    assert "   1) " in text and "   o) other: say it in your own words" in text
-    assert "[recommended: " in text
+    assert text.startswith("A few questions about this part, from its shape:\n  1. ")
+    assert re.search(r"\n   [ *] 1  ", text) and "     o  other: say it in your own words" in text
+    assert "          recommended: " in text and re.search(r"\n   \* \d  .* recommended", text)
 
 
 def test_an_answer_is_a_number_or_other_words(tmp_path: Path) -> None:

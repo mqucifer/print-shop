@@ -1065,7 +1065,10 @@ def test_the_models_log_lines_are_kept_off_the_open_prompt() -> None:
     spec.loader.exec_module(module)
 
     def said(thread: str) -> bool:
-        record = logging.LogRecord("httpx", logging.INFO, "", 0, "HTTP Request", (), None)
+        # A line of the job's own: httpx's are kept off the terminal on any thread
+        # (mqucifer/print-shop#266).
+        record = logging.LogRecord("print_shop.setup.suggest", logging.INFO, "", 0, "a line",
+                                   (), None)
         record.threadName = thread
         return bool(module.on_screen(record))
 

@@ -12,15 +12,18 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from print_shop import sliced
 from print_shop.core.mqtt import MqttConfig
 from print_shop.core.state import turn_words
 from print_shop.env import SETTINGS_PATH, load_env
 from print_shop.expert.client import LLMConfig
 from print_shop.inventory import Material, spool_lines
+from print_shop.joblog import JobLogs
 from print_shop.ledger import Ledger, Row, ledger_path
 from print_shop.orchestrator.daemon import Daemon
 from print_shop.orchestrator.live import Step
 from print_shop.orchestrator.outcome import end_name
+from print_shop.orchestrator.print_queue import AT_ONCE, Preparing, PrintQueue
 from print_shop.outcome_words import outcome_words
 from print_shop.printer.camera import camera_for_prints
 from print_shop.printer.centauri import (
@@ -37,12 +40,13 @@ from print_shop.setup.proposal import ORIENTATION
 from print_shop.setup.reading import NOW_PRINTS, PRINTS, TURNED_SINCE
 from print_shop.setup.review import Reviewer
 from print_shop.setup.waiting import Waiting
+from print_shop.sliced import SlicedJob
 from print_shop.slicer.orca import BedType, SlicerProfiles, with_bed_type
-from print_shop.slicer.store import STORE_DIR, Choice, Store
+from print_shop.slicer.store import STORE_DIR, Choice, NoChoice, Store, choose
 
 __all__ = [
-    "Run", "bed_type", "build_run", "describe", "describe_all", "describe_part", "describe_plate",
-    "profiles_for", "recording_path",
+    "Run", "bed_type", "build_queue", "build_run", "describe", "describe_all", "describe_part",
+    "describe_plate", "job_profiles", "profiles_for", "recording_path", "sliced_reader",
 ]
 
 #: Where a run's per-job files go (rotated STLs, G-code, the job checkpoint).
@@ -66,6 +70,54 @@ def profiles_for(
         filament=paths["filament"],
         used=choice.used(store_root).model_copy(update={"material": material}),
     )
+
+
+def job_profiles(
+    material: Material | None, into: Path, *, bed: BedType, store_root: Path = STORE_DIR,
+    nozzle_mm: float | None = None, filament: str | None = None, machine: str | None = None,
+    process: str | None = None,
+) -> SlicerProfiles:
+    """The profiles one job in the queue slices with, composed into its own folder, where no
+    other job's can write over them (mqucifer/print-shop#210): chosen for the spool it's for, by
+    its variety and tuning, loaded or not. With no stock, `nozzle_mm` and `filament` say.
+
+    Raises:
+        NoChoice: Where the store picks none, saying why.
+    """
+    if material is not None:
+        nozzle_mm, filament = material.nozzle_mm, material.tuning or material.variety
+    if nozzle_mm is None or not filament:
+        raise ValueError("say what's fitted: the stock isn't set up, so a nozzle and a filament")
+    choice = choose(Store(store_root), nozzle_mm=nozzle_mm, filament=filament, machine=machine,
+                    process=process)
+    profiles = profiles_for(choice, store_root, into / "composed", material)
+    return with_bed_type(profiles, bed, into / "profiles")
+
+
+def sliced_reader(
+    settings: Path | None = None, store_root: Path = STORE_DIR,
+) -> Callable[[Path, Material | None], SlicedJob]:
+    """A hand-sliced file read for the queue, for the spool it's for: refused (ValueError) if it
+    names another filament or nozzle, as `--sliced` refuses one without --loaded-ok
+    (mqucifer/print-shop#210, and for a file sent, mqucifer/print-shop#226)."""
+    store = Store(store_root)
+    bed = bed_type(load_env(settings or SETTINGS_PATH)).value
+
+    def read(path: Path, material: Material | None) -> SlicedJob:
+        file = sliced.read(path)
+        compared: sliced.Comparison | None = None
+        note = "the inventory isn't set up" if material is None else ""
+        if material is not None:
+            if wrong := sliced.loaded_mismatch(file, material, store):
+                raise ValueError("; ".join(wrong) + ": add it with the spool it was sliced for "
+                                 "(spool=S), or send it with --sliced and --loaded-ok")
+            try:
+                compared = sliced.compare(file.config, material, store, bed=bed)
+            except NoChoice as exc:
+                note = f"the store picks no tuning for it ({str(exc).splitlines()[0]})"
+        return SlicedJob.of(file, material=material, compared=compared, compared_note=note)
+
+    return read
 
 
 def bed_type(env: dict[str, str]) -> BedType:
@@ -415,3 +467,38 @@ def _setup_lines(row: Row) -> list[str]:
         said = f"set {g.key}={g.value}" if g.applied else (g.why or "read")
         lines.append(f"lesson         {g.id}, from {g.stl_name}: {said}")
     return lines
+
+
+def build_queue(
+    run: Run,
+    *,
+    settings: Path | None = None,
+    workdir: Path | None = None,
+    profiles_for: Callable[[Material | None, Path], SlicerProfiles],
+    sliced_for: Callable[[Path, Material | None], SlicedJob] | None = None,
+    at_once: int | None = None,
+    logs: JobLogs | None = None,
+) -> PrintQueue:
+    """The print queue over `run`'s daemon (mqucifer/print-shop#210): its jobs prepared with the
+    same model, Orca and lessons as one job's, and with no printer, which only the daemon's Start
+    reaches. `at_once` is how many do the machine's work at once: the settings'
+    `PRINT_SHOP_PREPARE_AT_ONCE`, or two."""
+    path = settings or SETTINGS_PATH
+    env = load_env(path)
+    llm = LLMConfig.from_settings(path)
+    ledger = run.ledger
+    if at_once is None:
+        at_once = int(env.get("PRINT_SHOP_PREPARE_AT_ONCE") or AT_ONCE)
+    return PrintQueue(
+        daemon=run.daemon, workdir=workdir or WORK_DIR, ledger=ledger,
+        profiles_for=profiles_for, sliced_for=sliced_for, at_once=at_once, logs=logs,
+        preparing=Preparing(
+            llm=llm,
+            proposer=Proposer(
+                llm=setup_llm(llm, env),
+                lessons=lambda features, filament, variety: lessons.for_part(
+                    ledger, features, filament, variety)),
+            loop=print_loop(setup_llm(llm, env)),
+            store=Store(STORE_DIR),
+        ),
+    )

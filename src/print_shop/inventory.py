@@ -715,6 +715,33 @@ class Inventory:
                 )
         return material
 
+    def for_spool(self, spool_id: int, printer_id: str | None = None) -> Material:
+        """What a job in the queue is prepared for (mqucifer/print-shop#210): the printer's
+        fitted nozzle and spool #`spool_id`, loaded or on the shelf. It needn't be loaded to
+        prepare: Start holds until it is (`why_not_start`).
+
+        Raises:
+            InventoryError: With no nozzle fitted, no such spool, or one marked empty.
+        """
+        printer = self.printer(printer_id)
+        nozzle = self.fitted(printer.id)
+        if nozzle is None:
+            raise InventoryError(
+                f"no nozzle is fitted on {printer.id}: `stock fit 0.4`. Owned: "
+                + (", ".join(f"{n.diameter_mm:g} mm" for n in self.nozzles()) or "none")
+            )
+        spool = self.spool(spool_id)
+        if spool.state is SpoolState.EMPTY:
+            raise InventoryError(f"{spool.named()} is marked empty. On hand:\n{self.listing()}")
+        if spool.printer_id not in (None, printer.id):
+            raise InventoryError(f"{spool.named()} is loaded on {spool.printer_id}, not "
+                                 f"{printer.id}")
+        return Material(
+            printer_id=printer.id, printer_model=printer.model, nozzle_mm=nozzle.diameter_mm,
+            spool_id=spool.id, manufacturer=spool.manufacturer, type=spool.type,
+            variety=spool.variety, colour=spool.colour, tuning=spool.tuning,
+        )
+
     def asked(self, printer_id: str) -> Asked:
         """What's so as a person is about to be asked of a load."""
         changes = stock_changes(self._conn)

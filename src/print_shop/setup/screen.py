@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import re
 import sqlite3
-import textwrap
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
@@ -34,6 +33,7 @@ from print_shop.bench.pausing import TOPS_OUT, mm
 from print_shop.core.state import turn_words
 from print_shop.setup import pauses
 from print_shop.setup.context import SET_ASIDE
+from print_shop.setup.layout import WIDTH, wrap
 from print_shop.setup.names import Found, named, plain, switched, with_unit
 from print_shop.setup.offer import render as render_offer
 from print_shop.setup.proposal import (
@@ -61,8 +61,6 @@ if TYPE_CHECKING:
 __all__ = ["WIDTH", "Moved", "Said", "Section", "by_model", "clock", "found", "sections",
            "what_moved", "warnings", "wrap"]
 
-#: The widest a review's line is.
-WIDTH = 100
 
 #: A row that moved since the last round.
 MOVED = "*"
@@ -168,14 +166,6 @@ def _clocked(text: str) -> str:
         return clock(float(m.group(3)))
 
     return _SAID_TIME.sub(one, text)
-
-
-def wrap(lead: str, text: str, width: int, rest: str | None = None) -> list[str]:
-    """`text` after `lead`, wrapped under its own start (or `rest`) to `width`. A word is never
-    broken: a path or a setting's name longer than the line runs past it, on its own."""
-    hang = " " * len(lead) if rest is None else rest
-    return textwrap.wrap(text, width, initial_indent=lead, subsequent_indent=hang,
-                         break_long_words=False, break_on_hyphens=False) or [lead.rstrip()]
 
 
 def found(words: str, settings: Sequence[Found], filament: str, width: int = WIDTH) -> list[str]:

@@ -7,6 +7,7 @@
         [--loaded-ok] [--record]
     uv run python scripts/print_job.py --again JOB_ID [--loaded-ok] [--record]
     uv run python scripts/print_job.py --resume [JOB_ID] [--record]
+    uv run python scripts/print_job.py --queue [FILE [xN] [spool=S] ...] [--record]
     uv run python scripts/print_job.py --serve [--record]
     uv run python scripts/print_job.py --list
     uv run python scripts/print_job.py --filaments
@@ -125,6 +126,22 @@ job marked as a reprint of it, refused if the kept file has changed. Either is r
 file names another filament or nozzle than the inventory says is loaded and fitted, unless
 `--loaded-ok` says to print it with what's loaded.
 
+**Many files queue** (mqucifer/print-shop#210), with `--queue`: parts and hand-sliced files
+together, each followed by how many (`x3`) and the spool it's for (`spool=2`, the stock's number;
+the loaded one by default, and it needn't be loaded to prepare). They're prepared while a print
+runs, and the queue's prompt shows each job's step and spool and what needs you: `answer 2` and
+`review 3` in any order (print-shop's two at once, the model's when they come, and `go 2` goes on
+without them), `answer 2 4 5` to give 4 and 5 the same answers where they ask alike, `spool 3 2`
+to move a waiting job to another spool (another colour of its filament at once; another variety or
+tuning prepared again, back to its review), and `first`, `hold`, `remove`, `retry` and `together`
+to change the queue; `help` lists them. Each job keeps its own `job.log`. Printing stays
+one at a time: when nothing prints, the first ready job is offered at the gate, on the card and
+here, saying the spool it needs, and `start` here, or Yes on the card, starts it as any job's
+Start does. A quantity is that many prints, each with its own ledger row and outcome, prepared
+once. `--queue` alone takes the queue up again, as it was: every job waits through a restart.
+`PRINT_SHOP_PREPARE_AT_ONCE` in the settings says how many are sliced and asked of the model at
+once (2).
+
 **One runs at a time** (mqucifer/print-shop#207). A part, `--sliced`, `--again` and `--serve`,
 armed or not, first take a lock that goes when the process does. A second start says in one
 sentence what's running and exits 2, having published and started nothing. `--list`, `--filaments`,
@@ -153,28 +170,34 @@ from print_shop.core.contracts import Gate
 from print_shop.env import SETTINGS_PATH, load_env
 from print_shop.expert.client import STREAM_THREAD
 from print_shop.inventory import SETUP, Inventory, InventoryError, Material
-from print_shop.joblog import LOG_NAME, JobLog, Terminal, secrets
+from print_shop.joblog import LOG_NAME, JobLog, JobLogs, Terminal, secrets
 from print_shop.ledger import Ledger, ledger_path
+from print_shop.opening import ThisJob
 from print_shop.orchestrator.daemon import Daemon
 from print_shop.orchestrator.kept import WaitingJob, WaitingJobs
 from print_shop.orchestrator.live import AlreadyLive, Live, only_live
 from print_shop.orchestrator.outcome import no_frames
 from print_shop.orchestrator.spools import ask_on_now
 from print_shop.printer.centauri import FrameRecorder, PrinterClient, live_printer
+from print_shop.queue_terminal import parse_adding, serve, stock_listing
 from print_shop.runtime import (
     WORK_DIR,
     Run,
     bed_type,
+    build_queue,
     build_run,
     describe,
     describe_all,
     describe_part,
     describe_plate,
+    job_profiles,
     profiles_for,
     recording_path,
+    sliced_reader,
 )
 from print_shop.setup.context import read_context
 from print_shop.setup.intake import Asker, cli_asker, drop_typed, replay_asker
+from print_shop.setup.layout import terminal_width
 from print_shop.setup.review import cli_reviewer
 from print_shop.setup.suggest import THREAD
 from print_shop.setup.waiting import Prompted, Waiting, can_ask, cli_waiting
@@ -227,6 +250,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--resume", nargs="?", const="", metavar="JOB_ID",
                         help="take up a job that waits for you, where it waits: the only one, "
                              "without JOB_ID")
+    parser.add_argument("--queue", action="store_true",
+                        help="the print queue: the files given are added to it, each followed by "
+                             "xN and spool=S where they aren't 1 and the loaded one")
     parser.add_argument("--plate", type=int,
                         help="which plate, for a sliced plate file that holds several")
     parser.add_argument("--project", type=Path, metavar="P.3mf",
@@ -245,6 +271,19 @@ def main(argv: list[str] | None = None) -> int:
         # A wait among the screens is said as the screens say it (mqucifer/print-shop#223).
         handler.setFormatter(Terminal("%(asctime)s %(levelname)s %(message)s"))
     by_hand = args.sliced is not None or args.again is not None
+    if args.queue:
+        for flag in ("sliced", "again", "resume", "answers", "context", "plate", "project"):
+            if getattr(args, flag) is not None:
+                parser.error(f"--{flag} isn't for --queue: give the files after it")
+        if args.serve or args.list or args.filaments or args.as_laid or args.loaded_ok:
+            parser.error("--queue takes files; leave out --serve, --list, --filaments, "
+                         "--as-laid and --loaded-ok")
+        try:
+            with only_live(WORK_DIR, ledger_path(args.settings), "the print queue") as live:
+                return _queue(args, live)
+        except AlreadyLive as refused:
+            print(refused, file=sys.stderr)
+            return 2
     if sum((bool(args.stl), args.sliced is not None, args.again is not None,
             args.resume is not None)) > 1:
         parser.error("give one of a part, --sliced FILE, --again JOB_ID or --resume")
@@ -450,13 +489,16 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
         if isinstance(found, int):
             return found
         hand_sliced = found
+    # The job's opening lines, said as one block before it's submitted (mqucifer/print-shop#266).
+    this = ThisJob(part=str(args.stl[0]) if len(args.stl or ()) == 1 else "") if args.stl else None
     if args.stl:
+        assert this is not None
         material: Material | None = None
         nozzle, filament = args.nozzle, args.filament
         with Inventory(ledger_path(args.settings)) as inventory:
             if not inventory.printers():
                 # Never skipped silently (the operator, 2026-10-25).
-                print(f"The inventory isn't set up ({SETUP}); using --nozzle and --filament.")
+                this.inventory = f"not set up ({SETUP}); using --nozzle and --filament"
                 if nozzle is None or not filament:
                     parser.error("say what's fitted: --nozzle (mm) and --filament (a variety)")
             else:
@@ -470,7 +512,7 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
                     print(STOPPED_BEFORE)
                     return 130
                 nozzle, filament = material.nozzle_mm, material.tuning or material.variety
-                print(f"From the inventory: {material.line()}.")
+                this.inventory = material.line()
         assert nozzle is not None and filament is not None
         try:
             choice = choose(
@@ -484,12 +526,10 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
             print(exc, file=sys.stderr)
             return 2
         profiles = profiles_for(choice, STORE_DIR, WORK_DIR / "composed", material)
-        print(f"Fitted: a {nozzle:g} mm nozzle and {filament}. Slicing with:")
-        print(f"  machine   {choice.machine.name}")
-        print(f"  process   {choice.process.name}")
-        print(f"  filament  {choice.filament.name}")
-        for note in choice.notes:
-            print(f"  ({note})")
+        this.fitted = f"a {nozzle:g} mm nozzle and {filament}"
+        this.presets = [("machine", choice.machine.name), ("process", choice.process.name),
+                        ("filament", choice.filament.name)]
+        this.notes = choice.notes
         answering = Prompted(read)
         try:
             asker = replay_asker(args.answers) if args.answers else cli_asker(read=answering)
@@ -500,7 +540,21 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
 
     recorder = FrameRecorder(recording_path()) if args.record else None
     a_job = bool(args.stl) or hand_sliced is not None
-    printer = _armed(recorder) if a_job else None
+    printer, armed, recording = _arming(recorder) if a_job else (None, "", "")
+    if this is not None:
+        this.armed, this.recording = armed, recording
+        if len(args.stl) > 1:
+            this.part = f"{len(args.stl)} parts, one job, on one plate"
+            this.parts = [(part.name, "; ".join(read_context(part).lines()[:2]))
+                          for part in args.stl]
+        else:
+            this.context = "; ".join(read_context(args.stl[0], args.context).lines()[:2])
+        # Said before anything that follows can fail, as each of its lines was.
+        print("\n".join(this.lines(terminal_width())))
+    else:
+        for said in (recording, armed):
+            if said:
+                print(said)
 
     run = build_run(
         printer=printer,
@@ -527,31 +581,26 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
             if hand_sliced is not None:
                 job_id = run.daemon.submit_sliced(hand_sliced)
             elif len(args.stl) > 1:
-                print(f"{len(args.stl)} parts, one job, on one plate:")
-                for n, part in enumerate(args.stl, 1):
-                    context = read_context(part)
-                    print(f"  part {n}, {part.name}. Its context: "
-                          + "; ".join(context.lines()[:2]))
                 job_id = run.daemon.submit_several(args.stl, as_laid=args.as_laid)
             else:
-                context = read_context(args.stl[0], args.context)
-                print("The part's context: " + "; ".join(context.lines()[:2]))
                 job_id = run.daemon.submit(args.stl[0], as_laid=args.as_laid,
                                            context=args.context)
             if job_log is not None:
                 job_log.open(WORK_DIR / job_id / LOG_NAME)
-                print(f"Job {job_id}'s log: {job_log.path}")
+            log = str(job_log.path) if job_log is not None else ""
             if hand_sliced is not None:
+                if log:
+                    print(f"Job {job_id}'s log: {log}")
                 print(f"Job {job_id}: taking the file as it is, then the approval gate.")
-            elif len(args.stl) > 1:
-                if args.as_laid:
-                    how = "each kept as laid, then a few questions about the parts together, here"
-                else:
-                    how = "a few questions about the parts together, here, then each part's pose"
-                print(f"Job {job_id}: {how}.")
             else:
-                how = "kept as laid" if args.as_laid else "orienting"
-                print(f"Job {job_id}: {how}, then a few questions about the part, here.")
+                if len(args.stl) > 1:
+                    how = ("each kept as laid, then a few questions about the parts together, here"
+                           if args.as_laid else
+                           "a few questions about the parts together, here, then each part's pose")
+                else:
+                    how = (f"{'kept as laid' if args.as_laid else 'orienting'}, then a few "
+                           "questions about the part, here")
+                print("\n".join(ThisJob.started(job_id, log, how, terminal_width())))
             return _follow(run, job_id, turned=hand_sliced is None, read=read)
     except KeyboardInterrupt:
         print(_stopped(run, job_id))
@@ -562,14 +611,27 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
 
 def _armed(recorder: FrameRecorder | None) -> PrinterClient | None:
     """The printer an approval commands, if this command's own line armed it, said either way."""
-    if recorder is not None:
-        print(f"Recording the printer's replies to {recorder.path}")
+    printer, armed, recording = _arming(recorder)
+    if recording:
+        print(recording)
+    print(armed)
+    return printer
+
+
+def _arming(recorder: FrameRecorder | None) -> tuple[PrinterClient | None, str, str]:
+    """The printer an approval commands, if this command's own line armed it, and what's said of
+    it: whether it's armed, and where its replies are recorded, or "". THIS JOB says them as its
+    rows (mqucifer/print-shop#266)."""
+    recording = (f"Recording the printer's replies to {recorder.path}" if recorder is not None
+                 else "")
     if hardware_allowed():
-        print(f"ARMED by {ALLOW_HARDWARE_ENV}=1: a Start, here or on the card, starts the print.")
-        return live_printer(recorder=recorder)
-    print(f"Not armed ({ALLOW_HARDWARE_ENV} is not 1): a Start, here or on the card, will NOT "
-          "print. It's held, and the job waits for an armed `--resume`.")
-    return None
+        return (live_printer(recorder=recorder),
+                f"ARMED by {ALLOW_HARDWARE_ENV}=1: a Start, here or on the card, starts the print.",
+                recording)
+    return (None,
+            f"Not armed ({ALLOW_HARDWARE_ENV} is not 1): a Start, here or on the card, will NOT "
+            "print. It's held, and the job waits for an armed `--resume`.",
+            recording)
 
 
 def _say_waiting(daemon: Daemon) -> None:
@@ -694,6 +756,69 @@ def _follow(run: Run, job_id: str, *, turned: bool, read: Callable[[str], str]) 
     return _watch(run, job_id)
 
 
+def _queue(args: argparse.Namespace, live: Live) -> int:
+    """The print queue, at this terminal (mqucifer/print-shop#210)."""
+    adding = parse_adding([str(token) for token in args.stl])
+    if isinstance(adding, str):
+        print(adding, file=sys.stderr)
+        return 2
+    for handler in logging.getLogger().handlers:
+        # The jobs prepare beside the prompt: what they log would land on it. The queue says
+        # what happens to each, before each prompt.
+        handler.setLevel(logging.WARNING)
+    with Inventory(ledger_path(args.settings)) as inventory:
+        if not inventory.printers():
+            print(f"The inventory isn't set up ({SETUP}); every job slices with --nozzle and "
+                  "--filament, and no spool can be named.")
+            if args.nozzle is None or not args.filament:
+                print("Say what's fitted: --nozzle (mm) and --filament (a variety).",
+                      file=sys.stderr)
+                return 2
+        else:
+            try:
+                _said_what_is_on(inventory, args, input)
+                print(f"From the inventory: {inventory.material(args.printer).line()}.")
+            except InventoryError as exc:
+                print(exc, file=sys.stderr)
+                return 2
+            except KeyboardInterrupt:
+                print(STOPPED_BEFORE)
+                return 130
+    bed = bed_type(load_env(args.settings))
+
+    def profiles(material: Material | None, into: Path) -> SlicerProfiles:
+        return job_profiles(material, into, bed=bed, nozzle_mm=args.nozzle,
+                            filament=args.filament, machine=args.machine, process=args.process)
+
+    recorder = FrameRecorder(recording_path()) if args.record else None
+    run = build_run(printer=_armed(recorder), profiles=None, recorder=recorder,
+                    settings=args.settings, on_step=live.at)
+    # Each job keeps its own job.log, as a lone job does (mqucifer/print-shop#139).
+    logs = JobLogs(secrets(args.settings), WORK_DIR)
+    try:
+        with run.daemon, logs.routing(), build_queue(
+                run, settings=args.settings, profiles_for=profiles, sliced_for=_sliced_for(args),
+                logs=logs) as queue:
+            if adding:
+                added, refused = queue.add(adding)
+                print(f"Added {len(added)} to the queue." if added else "Nothing was added.")
+                for why in refused:
+                    print(f"Not added: {why}")
+            return serve(queue, run.daemon, read=input,
+                         stock=stock_listing(ledger_path(args.settings)))
+    except KeyboardInterrupt:
+        print("\nPut by: every job waits where it was, and `--queue` takes them up again. Any "
+              "print without an answer stays open in the ledger.")
+        return 130
+    finally:
+        run.ledger.close()
+
+
+def _sliced_for(args: argparse.Namespace) -> Callable[[Path, Material | None], sliced.SlicedJob]:
+    """A hand-sliced file read for the queue, for the spool it's for (`runtime.sliced_reader`)."""
+    return sliced_reader(args.settings)
+
+
 def _start_here(
     daemon: Daemon, job_id: str, read: Callable[[str], str], write: Callable[[str], None],
     forget: Callable[[], None] = drop_typed,
@@ -766,8 +891,19 @@ def _watch(run: Run, job_id: str) -> int:
 
 def on_screen(record: logging.LogRecord) -> bool:
     """Whether a log line shows on the terminal: not one from the model's work beside the review,
-    which would land on the open prompt (mqucifer/print-shop#242). The job's log keeps it."""
-    return record.threadName not in (THREAD, STREAM_THREAD)
+    which would land on the open prompt (mqucifer/print-shop#242), nor bookkeeping the person
+    can't act on that lands among their answers: a model call's HTTP line, and the broker's
+    availability said again (mqucifer/print-shop#266). The job's log keeps each one."""
+    if record.threadName in (THREAD, STREAM_THREAD):
+        return False
+    if record.name.startswith(("httpx", "httpcore")) and record.levelno <= logging.INFO:
+        return False
+    return not str(record.msg).startswith(AVAILABILITY_SAID_AGAIN)
+
+
+#: How the broker's client begins its line when it says "online" again over another session's
+#: will (`core.mqtt`): nothing to act on, so it's left to the job's log.
+AVAILABILITY_SAID_AGAIN = "availability read offline while this run is online"
 
 
 def _gate_lines(gate: dict[str, object], *, turned: bool) -> list[str]:

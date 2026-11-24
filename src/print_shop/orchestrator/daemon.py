@@ -35,6 +35,11 @@ and waits for a new press, with its inbox emptied, so an earlier or doubled tap 
 job once the spool is loaded. A Reject that came while a press was checked wins, held or not. The
 hour runs on from when the gate opened. The print node refuses the same, as the backstop.
 
+**The print queue offers its jobs here, one at a time** (mqucifer/print-shop#210,
+`print_queue.py`): a ready job's gate is opened with `resume`, and `withdraw` puts one back to wait,
+ready and undecided, when another is put before it, or it's held, moved or removed. The queue's
+jobs are prepared elsewhere, with no printer: only the Start at a gate opened here reaches it.
+
 **A press names its job** (mqucifer/print-shop#207). The buttons carry the job's id while its gate
 is open, and a gate takes only a press that names its own job. That holds across processes, where
 one gate at a time didn't. `live.py` is what keeps there from being a second process.
@@ -156,6 +161,9 @@ class Command(BaseModel):
     by: str = ""
     #: A terminal command's own id, to tell it was weighed. Never read from a payload.
     id: str = ""
+    #: The queue putting the job back, ready and undecided (`Daemon.withdraw`). Never read from
+    #: a payload, and a Reject to anything that doesn't know it.
+    withdraw: bool = False
 
 
 class JobRejected(Exception):
@@ -169,6 +177,8 @@ class JobResult(BaseModel):
     approved: bool
     printed: bool
     error: str | None = None
+    #: Put back to wait, ready and undecided, by the queue (`Daemon.withdraw`).
+    withdrawn: bool = False
 
 
 def parse_command(raw: bytes) -> Command:
@@ -375,6 +385,8 @@ class Daemon:
         self._closing = False
         #: Each job's part, by name, for the ledger's row if it ends unprinted.
         self._parts: dict[str, str] = {}
+        #: Jobs put back by `withdraw`, until it's told so.
+        self._put_back_ids: set[str] = set()
 
         # Compiled graph.
         self._graph = build_graph(
@@ -495,7 +507,12 @@ class Daemon:
             self._bridge.__exit__(*exc)
             self._bridge = None
         if self._conn is not None:
-            self._conn.close()
+            # Under the checkpointer's own lock: a job still running on its thread (a queued one
+            # preparing, or one cut short) may be mid-write on this connection, and closing it
+            # under that write crashes the process, natively. Its next write is then refused
+            # with an error, and the job waits to be taken up again, as `_closing` says.
+            with self._checkpointer.lock:
+                self._conn.close()
             self._conn = None
 
     # -- public API ---------------------------------------------------------
@@ -591,6 +608,33 @@ class Daemon:
             if path is not None:
                 copied[kind] = Path(shutil.copy2(path, into / f"{kind}.json"))
         return profiles.model_copy(update=copied)
+
+    @property
+    def checkpointer(self) -> Any:
+        """The jobs' checkpoints, for the queue's preparing to share (mqucifer/print-shop#210)."""
+        return self._checkpointer
+
+    def active(self) -> str | None:
+        """The job this daemon has, at its gate or being sent, or None."""
+        return self._active_job_id
+
+    def withdraw(self, job_id: str) -> bool:
+        """Put the job whose gate is open back to wait, ready and undecided, for the queue to
+        offer another first (mqucifer/print-shop#210). Nothing is approved or rejected, and its
+        checkpoint stays at its gate. Returns once it's back, whether it was put back: not if
+        its gate wasn't open, or a Start being checked took it first."""
+        with self._job_lock:
+            if self._active_job_id != job_id or self._gate_inbox is None:
+                return False
+            self._gate_inbox.put(Command(decision=Decision.REJECT, job_id=job_id, withdraw=True))
+        # Back once it's put back, or once a Start being checked has taken it.
+        end = time.monotonic() + _CHECKED_WITHIN_S
+        while self._active_job_id == job_id and time.monotonic() < end:
+            time.sleep(0.02)
+        with self._job_lock:
+            put_back = job_id in self._put_back_ids
+            self._put_back_ids.discard(job_id)
+        return put_back
 
     def waiting(self) -> list[WaitingJob]:
         """The jobs that wait for the person, the oldest first (mqucifer/print-shop#209)."""
@@ -1088,6 +1132,10 @@ class Daemon:
                 break
             self._hold(job_id, gate_payload, why)
 
+        if cmd.withdraw:
+            self._put_back(job_id, before_print)
+            return
+
         approved = cmd.decision is Decision.APPROVE
         note = cmd.note
         by = cmd.by or "on the card"
@@ -1137,6 +1185,23 @@ class Daemon:
                 printed=False,
                 error=str(exc),
             )
+
+    def _put_back(self, job_id: str, before_print: bool) -> None:
+        """The gate closed with no decision, and the job left waiting there (`withdraw`)."""
+        self._close_gate()
+        self._left_gate()
+        self._bridge_publish(gate_topic(self._cfg), {"pending": False})
+        self._name_buttons()
+        self._publish_state({"status": "idle"})
+        self._waits(job_id, Waits.READY if before_print else Waits.MESH)
+        self._results[job_id] = JobResult(job_id=job_id, approved=False, printed=False,
+                                          withdrawn=True)
+        with self._job_lock:
+            self._put_back_ids.add(job_id)
+            if self._active_job_id == job_id:
+                self._active_job_id = None
+        self._worker_alive = False
+        self._at_gate.clear()
 
     def _weigh(self, cmd: Command) -> None:
         """`cmd` is the one the gate weighs, for a terminal's Start to know it was."""
