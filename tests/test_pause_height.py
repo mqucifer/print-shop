@@ -393,7 +393,9 @@ def test_the_benchs_pause_height_through_print_job_puts_the_m600_after_that_laye
 
     # The bench's words, the review's, and the gate's are one.
     shown = capsys.readouterr().out
-    assert f"pause_at={typed}, read from the G-code: {said}" in shown
+    assert re.search(rf"PAUSE pause_at={re.escape(typed)}: pauses (for an insert )?"
+                     rf"{re.escape(said.removeprefix('pause '))}, about \S+ in, as asked "
+                     r"\(read from the G-code\)", flat(shown))
     assert "PAUSE MISMATCH" not in shown
     # What it's for was asked, and the first choice is an insert (mqucifer/print-shop#218).
     gate = re.search(r"INSERT +(this print pauses for an insert .*)", shown)
