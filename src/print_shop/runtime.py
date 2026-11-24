@@ -371,6 +371,9 @@ def _print_lines(row: Row) -> list[str]:
 def _store_lines(row: Row) -> list[str]:
     """Where the profiles came from: print-shop's store, by file, hash and commit."""
     used = row.profiles
+    if row.sliced is not None and row.sliced.reprinted is not None:
+        return [f"store          - (a print again: job {row.sliced.reprinted.first}'s profiles, "
+                "as it kept them)"]
     if row.sliced is not None:
         return ["store          - (sliced by hand in Orca, not from profiles/)"]
     if used is None:
