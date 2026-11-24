@@ -61,7 +61,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from print_shop.env import SETTINGS_PATH, load_env
+from print_shop.env import SETTINGS_PATH, load_env, refused
 from print_shop.inventory import SCHEMA as INVENTORY_SCHEMA
 from print_shop.inventory import (
     Material,
@@ -483,6 +483,7 @@ class Ledger:
     """
 
     def __init__(self, path: Path) -> None:
+        refused(path, "a ledger")  # under tests, never the Mac's (mqucifer/print-shop#263)
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
         self._lock = threading.Lock()
@@ -535,6 +536,7 @@ class Ledger:
         Raises:
             LedgerError: If there's no ledger at `path`, or it's newer than this code.
         """
+        refused(path, "a ledger")  # under tests, never the Mac's (mqucifer/print-shop#263)
         if not path.is_file():
             raise LedgerError(f"there's no ledger at {path}")
         self = cls.__new__(cls)

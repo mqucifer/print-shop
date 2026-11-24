@@ -29,11 +29,20 @@ settings' key. So a test marked with one is skipped unless its env var opts in
 **And so do the Mac's jobs folder and its live lock** (mqucifer/print-shop#207). The lock is in
 that folder, so a test that ran `print_job.py`'s `main` would take the Sponsor's, and refuse
 their print, or be refused by it. While pytest runs the folder is the session's own.
+
+**And so do the Mac's ledger, stock and settings** (mqucifer/print-shop#263). A test whose
+made-up settings were shadowed fell back to the real ones, and listed the real spools. So, while
+pytest runs, `Ledger`, `Inventory` and `load_env` refuse the real settings file and anything
+under `~/print-shop`, before opening it, whatever the path came from, and every test's default
+ledger is the session's own. There's no opt-in. The single exception is this file's own read of
+the settings' LLM address, below, taken at import before the guard is armed: it keeps only the
+hosts and ports, to refuse the live model, and prints and logs nothing of it.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -42,9 +51,10 @@ import paho.mqtt.client as paho
 import pytest
 from pycentauri import Printer
 
+from print_shop import ledger as ledger_module
 from print_shop import runtime
 from print_shop.core.mqtt import MqttBridge
-from print_shop.env import SETTINGS_PATH, load_env
+from print_shop.env import SETTINGS_PATH, load_env, refuse_under_tests
 from print_shop.expert.client import DEFAULT_URL, URL_KEY
 from tests.live import OPT_IN, TEST_NODE, TEST_PREFIX, opted_in
 
@@ -86,6 +96,19 @@ def _its_own_jobs_folder(tmp_path_factory: pytest.TempPathFactory) -> Iterator[N
     """`WORK_DIR`, and so the live lock, for a script loaded in any test."""
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(runtime, "WORK_DIR", tmp_path_factory.mktemp("print-shop") / "jobs")
+    try:
+        yield
+    finally:
+        monkeypatch.undo()
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _its_own_ledger(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
+    """The default ledger, where settings don't name one, for every test: the session's own,
+    never `~/print-shop/ledger.sqlite` (mqucifer/print-shop#263)."""
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(ledger_module, "DEFAULT_PATH",
+                        tmp_path_factory.mktemp("print-shop") / "ledger.sqlite")
     try:
         yield
     finally:
@@ -151,6 +174,14 @@ def _llm_hosts() -> set[tuple[str, int]]:
     return found
 
 
+#: Where LiteLLM answers, read once at import (mqucifer/print-shop#263): the one read of the
+#: real settings, before the guard below is armed. Only hosts and ports are kept.
+LLM_HOSTS = _llm_hosts()
+#: The Mac's own files, which no test opens from here on (mqucifer/print-shop#263).
+REFUSED = (Path("~/print-shop").expanduser(), SETTINGS_PATH)
+refuse_under_tests(*REFUSED)
+
+
 @pytest.fixture(autouse=True, scope="session")
 def _refuse_live_services() -> Iterator[None]:
     """The broker and LiteLLM, refused for the whole session unless opted in.
@@ -187,7 +218,7 @@ def _refuse_live_services() -> Iterator[None]:
 
     monkeypatch.setattr(MqttBridge, "__enter__", enter)
 
-    llm = _llm_hosts()
+    llm = LLM_HOSTS
     send = httpx.Client.send
 
     def guarded_send(self: httpx.Client, request: httpx.Request, **kwargs: Any) -> Any:

@@ -48,6 +48,8 @@ from typing import NamedTuple
 
 from pydantic import BaseModel
 
+from print_shop.env import refused
+
 __all__ = [
     "SCHEMA",
     "Asked",
@@ -445,6 +447,7 @@ class Inventory:
     """The inventory in the ledger's file, open for one command."""
 
     def __init__(self, path: Path) -> None:
+        refused(path, "the stock")  # under tests, never the Mac's (mqucifer/print-shop#263)
         # The ledger makes its file and its tables, ours among them.
         from print_shop.ledger import Ledger
 
