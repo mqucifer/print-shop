@@ -1,0 +1,53 @@
+# print-shop's notices to your phone (mqucifer/print-shop#221): a job needs you, a pause is
+# near, or a print ended.
+#
+# The run sends each once, on `<MQTT_TOPIC_PREFIX>/notice`, never retained, while the phone's
+# page is on (PHONE_HOME set). Each is JSON: kind ("needs_you", "pause_near", "ended"),
+# title, message, and path, a page of the phone's: "/", "/job/<id>" or "/run/<id>".
+#
+# The link is built here, from the page's own address set below, and only a path of that shape
+# is taken from the message: anything else that can post to the topic can't point it elsewhere.
+#
+# To use: Settings -> Automations & Scenes -> + Create Automation -> three-dot menu ->
+# Edit in YAML, and paste this. Then change three things:
+#   - `http://A.B.C.D:8765` to the address the run says (`Your phone's page: ...`), with no
+#     slash at the end;
+#   - `3dprint-dev` to your MQTT_TOPIC_PREFIX, if you set one;
+#   - `notify.mobile_app_your_phone` to your phone's notify action (Settings -> Companion
+#     App, or Developer Tools -> Actions, "notify.mobile_app_...").
+#
+# The link opens the page in the phone's own browser: the page refuses to be framed, and it
+# is never proxied through Home Assistant. "Open" is the companion app's documented way to the
+# default browser on iOS. If a tap opens it inside the app instead, it shows "Not signed in":
+# open the link in the browser where the phone was paired.
+
+alias: print-shop notices to the phone
+description: A job needs you, a pause is near, or a print ended (mqucifer/print-shop#221).
+mode: queued
+triggers:
+  - trigger: mqtt
+    topic: 3dprint-dev/notice
+variables:
+  page: "http://A.B.C.D:8765"
+  path: >-
+    {% set p = trigger.payload_json.path | default('/') | string %}
+    {{ p if p is match('^/((job|run)/[A-Za-z0-9_-]{1,100})?\Z') else '/' }}
+  link: "{{ page ~ path }}"
+actions:
+  - action: notify.mobile_app_your_phone
+    data:
+      title: "{{ trigger.payload_json.title }}"
+      message: "{{ trigger.payload_json.message }}"
+      data:
+        # iOS's tap link, and Android's.
+        url: "{{ link }}"
+        clickAction: "{{ link }}"
+        # A pause near is time-sensitive: it shows through a Focus on iOS.
+        push:
+          interruption-level: >-
+            {{ 'time-sensitive' if trigger.payload_json.kind == 'pause_near' else 'active' }}
+        # On Android, write URI for OPEN: its companion app opens a link from an action so.
+        actions:
+          - action: OPEN
+            title: Open
+            uri: "{{ link }}"

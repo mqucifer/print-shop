@@ -536,7 +536,7 @@ A ready job can be armed and started from your phone, on the home Wi-Fi only (mq
 
 **Each print.**
 
-1. Run the job as before. Without the flag, the phone is how it starts; with it, the terminal and the card start it too (the table above). The run says `Your phone's Start: http://…/ , on the home Wi-Fi only`, and the card links to it ("Start it on your phone"). It opens in the phone's browser, never inside Home Assistant.
+1. Run the job as before. Without the flag, the phone is how it starts; with it, the terminal and the card start it too (the table above). The run says `Your phone's page: http://…/ , and its Start: http://…/start , on the home Wi-Fi only`, and the card links to Start ("Start it on your phone"). It opens in the phone's browser, never inside Home Assistant.
 2. At the gate, the phone's Start page shows the job, and what Start checks: time and plastic, the pause, the spool, the nozzle, the file and settings, and the printer. Each row says its result, and what to do where one fails.
 3. Look at the bed, tick **I can see the bed is clear**, and press **Start**. The same checks as `start` here run again. If one holds it, the phone says why, nothing is armed, and you Start again once it's mended (reload the page). Started, the phone says `Started by you. Disarmed again.`, once the printer has started it; a start that fails at the printer says `Not started: …`, and why. If sending the file takes longer than the phone waits, it says `Starting: …`, and the Start page says how it went once you reload. The ledger keeps who armed it, from where and when, with the print's row.
 
@@ -552,6 +552,20 @@ A ready job can be armed and started from your phone, on the home Wi-Fi only (mq
 - Another machine on the home network relaying raw traffic looks like that machine. What it carries is still your phone's own page and confirm, pressed by you.
 
 The flag still works: in a run armed by it, `start` at the terminal and the card's **Yes, print it** start the print, as before. Without it, nothing in Home Assistant, no MQTT message, no setting and no test can arm a start.
+
+## print-shop on your phone
+
+While a run is on (`--queue`, a job, or a `--resume`) and the phone's Start is set up (above), the phone has all of print-shop's day-to-day, not only Start (mqucifer/print-shop#221). It's the same signed-in page, on the home Wi-Fi only: from anywhere else, or signed out, it shows nothing and does nothing. Nothing on it arms but Start.
+
+**Opening it.** On the phone, on the home Wi-Fi, open the address the run says (`Your phone's page: http://…/`), or tap **The queue, on your phone** on the card. Add it to the Home Screen from Safari's share menu to open it in one tap. It opens in the phone's browser, never inside Home Assistant: the sign-in lives in the browser you paired in.
+
+**What it shows:**
+- **Main** (`/`): what's printing now (about how long is left, and a pause ahead, by the slice's own times), what was sent to you or waits on you, what's ready by spool, and what's getting ready. Tap a job for its page: **Hold** / **Let go**, **First**, **Remove** (it asks once), **What the slice shows**, and **Print it in another spool instead?**. These are the queue's own `hold`, `release`, `first`, `remove` and `spool`. A job's questions and review are still answered at the Mac (`answer N`, `review N` at `queue>`): its page says so.
+- **Finished** (`/runs`): every run, newest first, found by part, colour or note. A run waiting for its outcome takes it here, as the card's Record does: the card and the phone can't disagree. After a swap, the spool on now is picked in the same words as the card's, with nothing pre-selected. **Print again** queues it as it was. **Change and print again** turns the nozzle up or down, and slices it again only when you put it in the queue, as `again` does. Neither starts it: Start is still yours.
+- **Filaments** (`/filaments`): what's loaded, a swap job's spools, and what's on the shelf. **Load** is `stock.py load`'s: where a swap print left what's on unknown, it asks whether that print is over first. Adding a spool is still `stock.py add` at the Mac.
+- **What the slice shows**: a bar a layer, with the pause as a gap; tap a bar for that layer.
+
+**Notices.** The run sends three through Home Assistant: a job needs you, a pause is 5 minutes away, and a print ended. Once, add `ha-configs/print_shop_notices.yaml` as an automation, with your phone's notify action and your `MQTT_TOPIC_PREFIX` in it (the file says where). Tap **Open** on a notice to open the page in the browser. If a tap opens it inside the companion app instead, it says "Not signed in": open the link in the browser you paired in.
 
 ## The print desk: reading a job, and running it again
 
