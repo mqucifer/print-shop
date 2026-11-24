@@ -42,7 +42,7 @@ Settings for this print, over your presets:
 
   No changes: your presets as they are.
   note: Seen as it prints: the walls and the top
-  The model is still working on settings (0 s). What it proposes is added below, and nothing waits for it.
+  The model is still working on settings (<n> s). What it proposes is added below, and nothing waits for it.
 
 Orca's estimate: 16 min 49 s, 3.34 cm3, 100 layers
 Orientation: (0.0, 0.0, 0.0), No model was configured for this job; fell back to geometric selection. Chose rotation (0.0, 0.0, 0.0) with the lowest overhang (0.0 mm2) and highest bed contact (400.0 mm2) among the scored candidates.
@@ -152,7 +152,7 @@ frames         No camera frame was kept for this print: nothing was asked of the
   filament = Elegoo PLA @ECC
   profiles = None
   intake = <2881 characters, sha256 f13c09601d74b8bb880243d7556b2526148105047e302f8495445478fbd8b089>
-  proposal = {"changes":[],"not_applied":[],"kept":[],"reasoning":"a cube for show","design_notes":[],"notes":["Seen as it prints: the walls and the top"],"refused":[],"model":"recorded","call":{"finish_reason":"came","seconds":0.0},"skill_groups":["walls-shells","infill","surface"],"skill_sha256":"d7f085062665bb9e63c2ca2c76128117e39f66ab51093d615ac16fdb08e7017f","lessons":[],"loop":[],"loop_ending":"","suggested":[{"pose":[0.0,0.0,0.0],"ending":"came","said":"","seconds":0.0,"proposed":[{"key":"wall_loops","preset":"2","standard":"","value":"5","reason":"flat faces show the infill","source":"model","feature":"flat_top","knowledge":"walls-shells","lesson":null,"reading":"","not_applied":"","used":null,"taken":false,"said_no_to":"","pause":null}],"once_turned":[],"taken":[],"declined":[],"unseen":false,"dropped":[],"asked":"","reasoning":"a cube for show","design_notes":[],"refused":[],"model":"recorded","call":{},"skill_groups":["walls-shells","infill","surface"],"skill_sha256":"d7f085062665bb9e63c2ca2c76128117e39f66ab51093d615ac16fdb08e7017f","loop":[],"loop_ending":"","looked_up":[]}],"context":["none: no design run above the file and no sidecar beside it, so it's read as before"],"context_from":""}
+  proposal = {"changes":[],"not_applied":[],"kept":[],"reasoning":"a cube for show","design_notes":[],"notes":["Seen as it prints: the walls and the top"],"refused":[],"model":"recorded","call":{"finish_reason":"came","seconds":<n>},"skill_groups":["walls-shells","infill","surface"],"skill_sha256":"d7f085062665bb9e63c2ca2c76128117e39f66ab51093d615ac16fdb08e7017f","lessons":[],"loop":[],"loop_ending":"","suggested":[{"pose":[0.0,0.0,0.0],"ending":"came","said":"","seconds":<n>,"proposed":[{"key":"wall_loops","preset":"2","standard":"","value":"5","reason":"flat faces show the infill","source":"model","feature":"flat_top","knowledge":"walls-shells","lesson":null,"reading":"","not_applied":"","used":null,"taken":false,"said_no_to":"","pause":null}],"once_turned":[],"taken":[],"declined":[],"unseen":false,"dropped":[],"asked":"","reasoning":"a cube for show","design_notes":[],"refused":[],"model":"recorded","call":{},"skill_groups":["walls-shells","infill","surface"],"skill_sha256":"d7f085062665bb9e63c2ca2c76128117e39f66ab51093d615ac16fdb08e7017f","loop":[],"loop_ending":"","looked_up":[]}],"context":["none: no design run above the file and no sidecar beside it, so it's read as before"],"context_from":""}
   corrections = []
   start_requested_at = <time>
   started_at = <time>

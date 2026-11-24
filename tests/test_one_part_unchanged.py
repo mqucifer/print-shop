@@ -56,7 +56,10 @@ def _plain(text: str, tmp_path: Path) -> str:
     for path in (tmp_path.resolve(), tmp_path):
         text = text.replace(str(path), "<tmp>")
     text = re.sub(r"[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}", "<job>", text)
-    text = re.sub(r"(after |since \()\d+ s", r"\1<n> s", text)
+    text = re.sub(r"(after |since \()\d+(\.\d+)? s", r"\1<n> s", text)
+    # How long the model's call took (mqucifer/print-shop#242), as the record keeps it.
+    text = re.sub(r'"seconds": ?\d+(\.\d+)?', '"seconds":<n>', text)
+    text = re.sub(r"(still working on settings \()\d+ s", r"\1<n> s", text)
     text = re.sub(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?(Z|[+-]\d\d:\d\d)?", "<time>", text)
     return re.sub(r"answer by   \d\d:\d\d \(\d+ min left\)", "answer by   <time>", text)
 
