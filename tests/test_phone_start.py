@@ -378,6 +378,11 @@ def test_a_phone_on_the_home_wifi_starts_a_ready_job_in_a_run_the_flag_didnt_arm
         for label in ("Time and plastic", "Pause", "Spool", "Nozzle", "File and settings",
                       "Printer"):
             assert f"<dt>{label}</dt>" in shown.body
+        sliced = daemon._graph.get_state({"configurable": {"thread_id": job_id}}).values["slice"]
+        plastic = f"{round(sliced.print_time_s / 60)} min, {sliced.filament_cm3:.1f} cm³"
+        if sliced.filament_g is not None:
+            plastic += f", {sliced.filament_g:.0f} g"
+        assert f"<dt>Time and plastic</dt><dd>{plastic}</dd>" in shown.body
         reply = browser.start(shown.confirm())
         assert reply.status == 200, reply.body
         assert "Started by you. Disarmed again." in reply.body

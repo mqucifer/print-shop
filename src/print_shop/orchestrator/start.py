@@ -87,9 +87,11 @@ def checked(
     `graph.why_not_start`'s answer. Only reads."""
     minutes = gate.get("print_time_s")
     volume = gate.get("filament_cm3")
+    grams = _grams(state)
     plastic = ", ".join(part for part in (
         f"{round(minutes / 60)} min" if isinstance(minutes, (int, float)) else "",
-        f"{volume:.1f} cm³" if isinstance(volume, (int, float)) else "") if part)
+        f"{volume:.1f} cm³" if isinstance(volume, (int, float)) else "",
+        f"{grams:.0f} g" if grams is not None else "") if part)
     rows = [Checked("Time and plastic", plastic or "not known", True),
             Checked("Pause", str(gate.get("pause") or "none"), True)]
     spools = str(gate.get("spools") or "")
@@ -110,6 +112,15 @@ def checked(
         rows.append(Checked("Printer", busy, False) if busy else
                     Checked("Printer", "free, checked just now", True))
     return rows
+
+
+def _grams(state: PrintJobState) -> float | None:
+    """Orca's grams for the slice, where it gave them (a density it didn't know gives none)."""
+    sliced = state.get("slice")
+    if sliced is not None:
+        return sliced.filament_g
+    taken = state.get("sliced")
+    return taken.file.filament_g if taken is not None else None
 
 
 def _gcode(state: PrintJobState) -> str:
