@@ -852,6 +852,39 @@ def test_a_phones_start_builds_one_client_once_and_it_cant_connect_under_tests(
         client.snapshot()  # conftest's guard: no test opens an armed connection
 
 
+def test_a_start_builds_one_client_even_where_its_builder_asks_twice(
+    made_up_printer: None,
+) -> None:
+    """`live_printer` spends the start itself: a builder that asked twice gets one client."""
+
+    def build(armed: Armed) -> Any:
+        first = live_printer(armed=armed)
+        with pytest.raises(RuntimeError, match="no phone's confirm"):
+            live_printer(armed=armed)
+        return first
+
+    one = OneStart(build)
+    one.arm(_armed("job-a"))
+    assert one.take("job-a") is not None
+
+
+def test_a_phones_start_in_a_run_that_cant_arm_from_a_phone_is_held_in_words(
+    tmp_path: Path,
+) -> None:
+    shop = Shop(tmp_path)
+    with _unarmed(shop, None) as daemon:
+        job_id = daemon.submit(shop.stl)
+        daemon.wait_for_gate(job_id, timeout_s=WAIT_S)
+        ready = daemon.ready_to_start()
+        assert ready is not None
+        said = daemon.start_from_phone(job_id, armed=_armed(job_id), press=ready.press,
+                                       gcode_sha256=ready.gcode_sha256)
+        assert not said.started and "can't start a print from a phone" in said.said
+        assert "upload" not in shop.printer.verbs
+        shop.bridge.press(CFG, "reject")
+        daemon.wait_for_finish(job_id, timeout_s=WAIT_S)
+
+
 # --------------------------------------------------------------------------
 # Signing in
 # --------------------------------------------------------------------------
