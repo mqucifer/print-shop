@@ -100,6 +100,7 @@ class Said:
 
     full: str
     short: str
+    #: What waits: to be taken, or on the model. Said again each round, and never a move.
     waiting: bool = False
 
 
@@ -333,7 +334,9 @@ def _model_said(request: ReviewRequest) -> list[Said]:
             return [Said(f"The model is still working on settings ({waited(found.seconds)}). "
                          "What it proposes is added under Settings when you press Enter, and "
                          "nothing waits for it.",
-                         f"The model is still working on settings ({waited(found.seconds)})")]
+                         f"The model is still working on settings ({waited(found.seconds)})",
+                         # Its work under way is no warning: what it comes to may be.
+                         waiting=True)]
         out = [Said(f"note: {stopped}", "note: the print loop stopped, so the single calls "
                     "proposed") for stopped in (fell_back(found),) if stopped]
         if found.ending is not Ending.CAME:

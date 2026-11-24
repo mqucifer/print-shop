@@ -391,3 +391,12 @@ def test_any_other_log_line_keeps_its_time_and_level_on_the_terminal() -> None:
 
 def test_width_is_100() -> None:
     assert WIDTH == 100
+
+
+def test_the_model_at_work_is_no_warning_new_or_gone() -> None:
+    from print_shop.setup.proposal import Ending
+
+    found = made_up().suggested
+    assert found is not None
+    working = replace(made_up(), suggested=found.model_copy(update={"ending": Ending.WORKING}))
+    assert not [w for w in what_moved(working, made_up()).warnings if "working" in w]
