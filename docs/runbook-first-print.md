@@ -553,7 +553,7 @@ A ready job can be armed and started from your phone, on the home Wi-Fi only (mq
 3. Look at the bed, tick **I can see the bed is clear**, and press **Start**. The same checks as `start` here run again. If one holds it, the phone says why, nothing is armed, and you Start again once it's mended (reload the page). Started, the phone says `Started by you. Disarmed again.`, once the printer has started it; a start that fails at the printer says `Not started: …`, and why. If sending the file takes longer than the phone waits, it says `Starting: …`, and the Start page says how it went once you reload. The ledger keeps who armed it, from where and when, with the print's row.
 
 **What's refused, in words:**
-- a confirm used twice, or more than 2 minutes old, or from another phone, or for a gate that's moved on;
+- a confirm used twice, or more than 10 minutes old, or from another phone, or for a gate that's moved on;
 - anything signed out;
 - **anything that isn't a phone's own address on the home Wi-Fi:** the Mac itself (a tunnel or a script on it), the router (a port forward), Home Assistant's host (its remote access or an automation), another network, or any request carrying a proxy's headers. The phone shows `You're away from home`, and the job waits.
 
