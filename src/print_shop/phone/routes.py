@@ -50,6 +50,9 @@ ROUTES: tuple[Route, ...] = (
     Route("GET", rf"/job/{_ID}", "job"),
     Route("GET", rf"/job/{_ID}/remove", "remove_screen"),
     Route("POST", rf"/job/{_ID}/(?P<verb>hold|release|first|remove)", "act"),
+    # What the slice shows, for a job that's prepared and for a finished run, a failed one too.
+    Route("GET", rf"/job/{_ID}/slice", "job_slice"),
+    Route("GET", rf"/run/{_ID}/slice", "run_slice"),
     # Finished: the runs, a run, and its outcome by the card's own Record.
     Route("GET", r"/runs", "runs"),
     Route("GET", rf"/run/{_ID}", "run"),

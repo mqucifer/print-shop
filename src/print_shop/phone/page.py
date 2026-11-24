@@ -84,6 +84,19 @@ input[type=search] { width: 100%; padding: 12px; font-size: 1em; margin: 0 0 1em
 .card .head { display: flex; gap: 0.8em; justify-content: space-between; }
 .card .head .part { min-width: 0; overflow-wrap: anywhere; }
 .card .head .outcome { text-align: right; }
+.bars { display: flex; align-items: flex-end; height: 96px; margin: 0.4em 0 0.2em;
+  border-bottom: 1px solid var(--line); }
+.bars a { flex: 1 1 0; min-width: 0; background: var(--button); opacity: 0.75; }
+.bars a.on { background: var(--amber); opacity: 1; }
+.bars .gap { flex: 0 0 8px; }
+.ends { display: flex; justify-content: space-between; gap: 0.6em; }
+.ends .mid { text-align: center; }
+.feat { margin: 0 0 0.7em; }
+.feat .head { display: flex; justify-content: space-between; gap: 0.6em; }
+.feat .bar { height: 8px; background: var(--button); border-radius: 4px; margin-top: 3px; }
+.layer { display: flex; gap: 8px; align-items: center; margin: 0.6em 0; }
+.layer input { width: 5em; padding: 8px; font-size: 1em; }
+.layer button { width: auto; padding: 8px 14px; }
 """
 
 

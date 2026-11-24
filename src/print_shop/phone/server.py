@@ -61,6 +61,7 @@ from print_shop.phone.screens import (
     runs_page,
 )
 from print_shop.phone.shop import Shop
+from print_shop.phone.slice import slice_page
 
 __all__ = ["COOKIE", "PhoneOff", "Starts", "attach", "handler_for", "make_server"]
 
@@ -349,7 +350,9 @@ class _Handler(BaseHTTPRequestHandler):
         if line is None or self.shop is None:
             return
         said = parse_qs(query).get("said", [""])[0][:200]
-        self._send(job_page(line, each_s=self.shop.each_s(line.job), said=_DONE.get(said, "")))
+        sliced = self.shop.prepared(line.job.copy_of or line.job.job_id).get("slice_reading")
+        self._send(job_page(line, each_s=self.shop.each_s(line.job), said=_DONE.get(said, ""),
+                            sliced=sliced is not None))
 
     def _r_remove_screen(self, held: dict[str, str], query: str) -> None:
         line = self._job_line(held)
@@ -372,6 +375,41 @@ class _Handler(BaseHTTPRequestHandler):
         if verb == "remove":
             return self._see_other("/")
         self._see_other(f"/job/{line.job.job_id}?said={verb}")
+
+    def _layer(self, query: str) -> int | None:
+        found = parse_qs(query).get("layer", [""])[0]
+        return int(found) if found.isdigit() and len(found) < 7 else None
+
+    def _r_job_slice(self, held: dict[str, str], query: str) -> None:
+        line = self._job_line(held)
+        if line is None or self.shop is None:
+            return
+        state = self.shop.prepared(line.job.copy_of or line.job.job_id)
+        reading = state.get("slice_reading")
+        if reading is None:
+            return self._send(message_page(
+                "Not sliced yet", "It hasn't been sliced yet: what the slice shows is here once "
+                "it has.", back_to=f"/job/{line.job.job_id}", back_words="Back to the job"),
+                code=HTTPStatus.NOT_FOUND)
+        result = state.get("slice")
+        path = f"/job/{line.job.job_id}"
+        self._send(slice_page(
+            part=line.job.part, reading=reading, flags=tuple(state.get("slice_flags", ())),
+            print_time_s=result.print_time_s if result is not None else None,
+            grams=result.filament_g if result is not None else None, here=f"{path}/slice",
+            back=path, back_words="Back to the job", layer=self._layer(query)))
+
+    def _r_run_slice(self, held: dict[str, str], query: str) -> None:
+        row = self.shop.run(held["id"]) if self.shop is not None else None
+        if row is None or row.reading is None:
+            return self._send(message_page(
+                "Not here", "No slice was read for that run.", back_to="/runs",
+                back_words="Back to finished"), code=HTTPStatus.NOT_FOUND)
+        path = f"/run/{row.job_id}"
+        self._send(slice_page(
+            part=row.part_said, reading=row.reading, flags=row.flags or (),
+            print_time_s=row.print_time_s, grams=None, here=f"{path}/slice", back=path,
+            back_words="Back to the run", layer=self._layer(query)))
 
     def _r_runs(self, held: dict[str, str], query: str) -> None:
         if self.shop is None:

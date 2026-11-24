@@ -189,7 +189,7 @@ def _button(action: str, words: str, *, kind: str = "", fields: dict[str, str] |
             f"<button type=\"submit\"{cls}>{_e(words)}</button></form>")
 
 
-def job_page(line: Line, *, each_s: int | None, said: str = "") -> str:
+def job_page(line: Line, *, each_s: int | None, said: str = "", sliced: bool = False) -> str:
     """A job's own page: where it is, what it needs, and the queue's actions on it."""
     job = line.job
     rows = [("Where", _step(line))]
@@ -209,6 +209,8 @@ def job_page(line: Line, *, each_s: int | None, said: str = "") -> str:
                  f"At the Mac, for now: <code>{_COMMAND[line.needs]} {line.number}</code> at "
                  "<code>queue&gt;</code>.</div>")
     start = ("<p><a class=\"button\" href=\"/start\">Start it</a></p>" if line.offered else "")
+    if sliced:
+        start += (f"<p><a href=\"/job/{_e(job.job_id)}/slice\">What the slice shows</a></p>")
     hold = (_button(f"/job/{job.job_id}/release", "Let go") if job.held
             else _button(f"/job/{job.job_id}/hold", "Hold", kind="second"))
     buttons = (f"<div class=\"buttons\">{hold}"
@@ -350,6 +352,8 @@ def run_page(row: Row, *, choices: dict[str, Pick], said: str = "", spools_said:
         rows.append(("Pause", _e(pause.line())))
     listed = "".join(f"<dt>{_e(k)}</dt><dd>{v}</dd>" for k, v in rows)
     yours = f"<p>{_e(_yours(row))}</p>" if _yours(row) else ""
+    if row.reading is not None:
+        yours += f"<p><a href=\"/run/{_e(row.job_id)}/slice\">What the slice shows</a></p>"
     record = _outcome_form(row, choices, said) if row.awaiting_answer else (
         f"<div class=\"box\">{_e(said)}</div>" if said else "")
     return page(row.part_said, (

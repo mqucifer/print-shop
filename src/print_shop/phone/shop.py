@@ -204,6 +204,10 @@ class Shop:
     def line(self, job_id: str) -> Line | None:
         return next((li for li in self.lines() if li.job.job_id == job_id), None)
 
+    def prepared(self, job_id: str) -> dict[str, Any]:
+        """A job's state as its preparing left it, read only, or {}."""
+        return self.daemon.prepared(job_id) if self.daemon is not None else {}
+
     def each_s(self, job: WaitingJob) -> int | None:
         """The slice's time for one of `job`, read from its preparing: a copy's is its first's."""
         if self.daemon is None:

@@ -31,7 +31,15 @@ from print_shop.phone.routes import ARMS, ROUTES
 from print_shop.phone.server import handler_for
 from print_shop.phone.shop import Shop as PhoneShop
 from print_shop.setup.pauses import PauseFor
-from print_shop.setup.reading import LayerTime, PauseReading, SeamReading, SliceReading
+from print_shop.setup.proposal import Change, Source
+from print_shop.setup.reading import (
+    FeatureReading,
+    Flag,
+    LayerTime,
+    PauseReading,
+    SeamReading,
+    SliceReading,
+)
 from tests.test_ledger import record
 from tests.test_phone_start import (
     AWAY,
@@ -425,3 +433,85 @@ def test_ready_jobs_waiting_for_their_first_are_counted_once(page: Page) -> None
     page.made.ready(page.queue, added[0])
     wait_until(lambda: all(page.made.waits(j) is Waits.READY for j in added))
     assert "clip.stl × 3" in page.phone().get("/").body
+
+
+# --------------------------------------------------------------------------
+# What the slice shows
+# --------------------------------------------------------------------------
+
+
+def _reading() -> tuple[SliceReading, tuple[Flag, ...]]:
+
+    layers = tuple(LayerTime(n=n, z=round(0.2 * n, 2), time_s=30.0 + n) for n in range(1, 26))
+    return SliceReading(
+        layers=layers,
+        features=(
+            FeatureReading(kind="Outer wall", time_s=754.0, area_mm2=13576.0, layers=25,
+                           from_z=0.2, to_z=5.0),
+            FeatureReading(kind="Bridge", time_s=31.0, area_mm2=212.0, layers=1, from_z=4.2,
+                           to_z=4.2),
+            FeatureReading(kind="travel", time_s=60.0, area_mm2=0.0, layers=25, from_z=0.2,
+                           to_z=5.0),
+        ),
+        seam=SeamReading(seams=169, stacked=0.79, at=(175.0, 49.0), at_layers=9),
+        settings={"seam_position": "aligned", "overhang_fan_speed": "10"},
+        pauses=(PauseReading(before_layer=21, z=4.2, after_s=1534.0, after_z=4.0,
+                             kind=PauseFor.INSERT),),
+    ), (
+        Flag(id="layer_time", reading="Layer 20 takes 24 s, the shortest, just before the pause."),
+        Flag(id="made_up", reading="the bridge is short",
+             change=Change(key="bridge_flow", value="0.9", preset="1", source=Source.READING,
+                           reason="A made-up reason.", knowledge="made-up")),
+    )
+
+
+def test_what_the_slice_shows_has_every_figure_the_review_reads(tmp_path: Path) -> None:
+    from print_shop.phone.slice import slice_page  # noqa: PLC0415
+    from print_shop.setup.screen import clock  # noqa: PLC0415
+
+    reading, flags = _reading()
+    shown = slice_page(part="tray.stl", reading=reading, flags=flags, print_time_s=2280,
+                       grams=24.0, here="/run/r/slice", back="/run/r", back_words="Back",
+                       layer=21)
+    text = shown.replace("&#x27;", "'")
+    assert "tray.stl. 38 min. 25 layers. 24 g." in text
+    assert text.count('href="/run/r/slice?layer=') == 25 + 2, "a bar a layer, and the arrows"
+    assert text.count('class="gap"') == 1, "the pause, a gap"
+    assert "the gap is your pause, 25 min 34 s in" in text
+    assert "Layer 21, z 4.2 mm: 51 s. The first layer after the pause." in text
+    assert "Its features: Outer wall, Bridge." in text
+    for kind, took, area, z in (("Outer wall", clock(754), "13,576 mm²", "z 0.2 to 5"),
+                                ("Bridge", clock(31), "212 mm²", "z 4.2")):
+        assert kind in text and took in text and area in text and z in text
+    assert "travel" not in text.split("Where the time goes")[1], "as the review leaves it out"
+    assert "Bridge starts on layer 21, the first after the pause, at z 4.2." in text
+    assert "Layer 20 takes 24 s, the shortest, just before the pause." in text
+    assert "A made-up reason. Read: the bridge is short" in text
+    assert "aligned. 169 loop starts, 79% stacked: scattered. Most at x 175 y 49 (9 layers)." \
+        in text
+    assert "25 layers, 31 s to 55 s each, 43 s typical. The shortest is layer 1" in text
+    assert "<script" not in text
+
+
+def test_a_failed_runs_slice_opens_from_finished(page: Page) -> None:
+    reading, flags = _reading()
+    ledger = page.made.ledger
+    ledger.record_start_requested(record("failed-run").model_copy(
+        update={"reading": reading, "flags": flags}))
+    ledger.record_started("failed-run")
+    ledger.record_ended("failed-run", 9)
+    ledger.record_answer("failed-run", _answer("failed", "adhesion"))
+    phone = page.phone()
+    assert "/run/failed-run/slice" in phone.get("/run/failed-run").raw
+    shown = phone.get("/run/failed-run/slice?layer=3")
+    assert shown.status == 200 and "Layer 3, z 0.6 mm" in shown.body
+    assert phone.get("/run/failed-run/slice?layer=x").status == 200
+
+
+def test_a_ready_jobs_slice_opens_from_its_page(page: Page) -> None:
+    job_id = _ready(page, "bracket")
+    phone = page.phone()
+    assert f"/job/{job_id}/slice" in phone.get(f"/job/{job_id}").raw
+    shown = phone.get(f"/job/{job_id}/slice")
+    assert shown.status == 200 and "Time on each layer" in shown.body
+    assert "Back to the job" in shown.body
