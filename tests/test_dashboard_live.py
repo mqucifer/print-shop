@@ -29,6 +29,7 @@ import pytest
 import yaml
 
 from print_shop.env import SETTINGS_PATH
+from tests.live import opted_in
 from tests.test_dashboard import (
     DASHBOARD,
     EXTERNAL_ENTITIES,
@@ -40,7 +41,9 @@ from tests.test_mqtt import CONTRACTS_HA
 def _env() -> dict[str, str]:
     env: dict[str, str] = {}
     p = SETTINGS_PATH
-    if p.exists():
+    # Read only in a run that opts in to Home Assistant, as this runs at collection
+    # (mqucifer/print-shop#263).
+    if opted_in("ha") and p.exists():
         for line in p.read_text().splitlines():
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:

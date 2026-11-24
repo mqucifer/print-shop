@@ -35,7 +35,7 @@ from print_shop.orchestrator.daemon import (
     parse_command,
     state_payload,
 )
-from tests.live import broker_config
+from tests.live import broker_config, opted_in
 from tests.test_print_node import FakePrinter, idle
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
@@ -128,6 +128,10 @@ def test_an_idle_payload_is_still_well_formed() -> None:
 
 
 def _env_present() -> bool:
+    """Read only in a run that opts in to the broker, as this runs at collection
+    (mqucifer/print-shop#263)."""
+    if not opted_in("mqtt"):
+        return False
     p = SETTINGS_PATH
     return p.exists() and "MQTT_USER" in p.read_text()
 
