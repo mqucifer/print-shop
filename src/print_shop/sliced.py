@@ -81,6 +81,7 @@ __all__ = [
     "again",
     "by_kind",
     "compare",
+    "project_overrides",
     "loaded_mismatch",
     "read",
     "report",
@@ -505,6 +506,19 @@ def read(path: Path, plate: int | None = None, project: Path | None = None) -> S
         return file
     overrides, where = _project_overrides(project.expanduser().resolve(), file.objects)
     return file.model_copy(update={"overrides": overrides, "overrides_from": where})
+
+
+def project_overrides(
+    project: Path, objects: tuple[str, ...]
+) -> tuple[tuple[ObjectOverrides, ...], str]:
+    """The overrides of the G-code's `objects` in an Orca project, matched by name, and where
+    they came from, as `read` keeps them (mqucifer/print-shop#226 looks for the project).
+
+    Raises:
+        SlicedError: If it isn't a project, gives no overrides, or none of its objects is one of
+            `objects`.
+    """
+    return _project_overrides(project.expanduser().resolve(), objects)
 
 
 def _project_overrides(

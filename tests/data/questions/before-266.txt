@@ -1,0 +1,44 @@
+From the part's notes (sample-tray.part.json):
+  2. Seen: the bottom, as the file lays it (laid top-down, as its notes say, so only the face on the plate)
+Enter if that's right, or 2 to change it.
+notes> 
+The notes say seen: the bottom, as the file lays it
+2. Which faces of this part will be seen once it's in use, laid top-down, as its notes say?
+   1) the walls and the top as it lies now (your presets): the review keeps ironing for the top and points out a seam on the walls; sets nothing itself; the review shows Orca's estimate  [recommended: when it can't be said, judging every face as seen costs a little time, while a hidden flaw on a face that shows costs the print]
+   2) the walls; the top as it lies now is hidden (your presets): the review points out ironing on the hidden top, and a seam on the walls; sets nothing itself; the review shows Orca's estimate
+   3) the top as it lies now; the walls are hidden (your presets): the review keeps ironing for the top and lets the seam be; sets nothing itself; the review shows Orca's estimate
+   4) only the face on the plate (your presets): the review points out any ironing, which smooths only faces that end up hidden; sets nothing itself; the review shows Orca's estimate  <- the notes
+   o) other: say it in your own words
+   Enter) keep what the notes say
+2> 
+That differs from the notes. They say seen: only the face on the plate. You said: the walls and the top as it lies now.
+Enter takes your answer, or n keeps the notes.
+yours or notes> 
+A few questions about this part, from its shape:
+Its notes say: "A made-up tray that holds 24 glass tiles on a shelf; lifted by its rim now and then to dust under it"
+1. What is this part for? Its shape can't say.
+   1) decoration or display (your presets): nothing rests on it: strength stays as your presets have it, and the proposal looks at the surface; sets nothing itself; the review shows Orca's estimate
+   2) handled, clipped or lightly loaded (your presets): the proposal strengthens its thin load paths a little; a little more time and filament; sets nothing itself; the review shows Orca's estimate  [recommended: when the shape can't say, a part that turns out decorative still prints well this way, while a weak functional part costs a print]
+   3) carries a real load (your presets): the proposal strengthens the load path; noticeably more time and filament, and say the load in your own words with o; sets nothing itself; the review shows Orca's estimate
+   4) a prototype or test fit (your presets): kept quick and cheap: your presets, unless a feature needs a change; sets nothing itself; the review shows Orca's estimate
+   o) other: say it in your own words
+3. The 1,204 mm² ceiling over the tile pockets is a flat downward face at 90°, printed at a 0.9 mm section. The span is unknown but the area is large. At this thickness the choice between bridging and supporting matters for both the print and the surface.
+   1) Bridge it (no supports): the ceiling stays clean, but at the thinnest section the bridge is the weak point: a sag or a gap at the far edge, worse the longer the span; Orca: 75 min, 15.88 g
+   2) Support it (supports on, tree supports): the ceiling comes out flat whatever the span, but the marks on a large surface need cleaning up; Orca: 99 min, 19.2 g  [recommended: at a 0.9 mm section the bridge is too thin to trust at an unknown span, and the guard turns supports on anyway if nobody decides]
+   o) other: say it in your own words
+1> 
+3> 
+Added by the model, from the part's shape:
+4. The rim's walls are 1.2 mm: how many wall loops should they get?
+   1) 2 (preset) (2 walls): the rim is two lines thick, with a thin gap fill between them; Orca: 75 min, 15.88 g  [recommended: two lines fill 1.2 mm with a little gap fill, as the preset prints it]
+   2) 3 (3 walls): the rim is all wall, with no gap fill touching its face; Orca: 76 min, 16.02 g
+   o) other: say it in your own words
+4> 
+1. What is this part for? Its shape can't say.  you: handled, clipped or lightly loaded
+   The model has read the part since (7 min 11 s) and has closer choices. Each says what it sets:
+   The tray is lifted by its rim: how much infill does its floor need to stay flat?
+   Enter) keep your answer
+   1) 15% (preset) (15% infill): the floor can bow a few tenths of a millimetre when lifted full; Orca: 75 min, 15.88 g
+   2) 25% (25% infill): the floor stays flat when lifted full; a few grams more; Orca: 78 min, 17.3 g  [recommended: the floor stays flat under a full tray for a few grams more]
+   o) other: say it in your own words
+1> 

@@ -58,6 +58,7 @@ from print_shop.setup.skill import groups_for
 from print_shop.setup.waiting import Prompted, Waiting, ask_meanwhile, cli_waiting, took
 from tests.fakes import CI_PROFILES, STORE_PROFILES, FramePrinter, MemoryBridge, RecordedSlicer
 from tests.fixtures import write_stl
+from tests.reviewing import flat
 from tests.test_job_e2e import CFG
 from tests.test_review import _model
 
@@ -197,7 +198,7 @@ def test_with_a_model_that_never_answers_the_job_reaches_the_review_and_prints(
 
     assert PURPOSE.text in person.text and "seen once it's in use" in person.text
     assert "The model is still reading the part (" in person.text
-    assert "Type go and Enter to go on without waiting" in person.text
+    assert "Type go and Enter to go on without waiting" in flat(person.text)
     [review] = reviews.seen
     assert "note: you went on without the model's questions after" in render_review(review)
 
@@ -215,7 +216,7 @@ def test_only_go_goes_on_so_a_second_enter_doesnt(
 ) -> None:
     person = Person("1", "1", "", "yes", "go")
     intake = ask(person, forever)
-    assert person.text.count("Type go and Enter to go on without waiting.") == 3
+    assert flat(person.text).count("Type go and Enter to go on without waiting.") == 3
     assert intake.call["finish_reason"] == "went on"
 
 
@@ -323,8 +324,8 @@ def test_the_models_purpose_question_is_closer_choices_that_enter_keeps() -> Non
     person = Person("2", "1", "")
     intake = ask(person, lambda stop: answered(CLOSER, STOCK[1]))
     assert f"1. {PURPOSE.text}  you: handled, clipped or lightly loaded" in person.text
-    assert "closer choices" in person.text and "Enter) keep your answer" in person.text
-    assert "1) a cover (3 walls)" in person.text
+    assert "closer choices" in person.text and "     Enter  keep your answer" in person.text
+    assert "1  a cover: 3 walls" in person.text
     assert intake.questions == STOCK and intake.answers == (Answer(choice=1), Answer(choice=0))
     assert intake.offered == (CLOSER,), "what was offered is on record"
     assert "kept your purpose answer" in intake.note
@@ -412,9 +413,9 @@ def test_the_options_share_one_limit_on_slices() -> None:
 
 def test_added_questions_are_numbered_on_and_say_they_were_added() -> None:
     shown = render(Added((TOP, EDGE), before=2))
-    assert shown.startswith("Added by the model, from the part's shape:\n3. ")
+    assert shown.startswith("Added by the model, from the part's shape:\n  3. ")
     assert f"4. {EDGE.text}" in shown
-    assert render((TOP, EDGE)).startswith("A few questions about this part, from its shape:\n1. ")
+    assert render((TOP, EDGE)).startswith("A few questions about this part, from its shape:\n  1. ")
 
 
 # --------------------------------------------------------------------------
@@ -690,8 +691,8 @@ def test_on_a_terminal_whats_typed_ahead_never_answers_a_question_unseen(
     run.type("1")  # half a line, typed before the closer choices were shown
     time.sleep(0.2)
     (tmp_path / "release").write_text("")
-    run.until("Enter) keep your answer")
-    run.until("o) other")
+    run.until("Enter  keep your answer")
+    run.until("o  other")
     time.sleep(0.2)
     run.type("\n")
     run.until("FIRST purpose 1 answered 1")

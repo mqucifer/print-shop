@@ -33,11 +33,19 @@ outcome before its questions could even begin. The printer is single; preparing 
 - **The machine's steps keep their limit** (mqucifer/print-shop#209): a job whose preparing runs
   past the slice's hour from when it last came back from the person stops, saying so, and is
   retried or removed (`retry`). Each job keeps its own `job.log`, as a lone job does.
+- **Files can be sent to it from elsewhere** (mqucifer/print-shop#226, `sending.py`): by
+  Claude or the person, with who sent them and a note, while it's open or not. A sent job
+  waits `SENT` until a queue is open, which takes it up within a second, and "Sent to you"
+  (`sent`) says who sent what, when, the note, and what each needs next. A sent file sliced by
+  hand waits for the person to look at what it prints (`Need.LOOK`) before it's ready, so no
+  Start's bed question is the only screen it has. Every file added, sent
+  or typed at `add`, is the queue's own copy, with what belongs to it.
 - **The queue is the same after a restart:** it's the jobs folder's waiting jobs (`WaitingJobs`),
   in order, held or not, with their spools and copies, each taken up where it was.
-- **A finished run is added again** (`Adding.again`, mqucifer/print-shop#216): its kept file, or
-  a change's new slice (`reprint`), read as a hand-sliced file is and linked to that run. A copy
-  is given its first's kept part and profiles, so each copy's run can print again too.
+- **A finished run is added again** (`sending.Adding.again`, mqucifer/print-shop#216): its
+  kept file, or a change's new slice (`reprint`), read as a hand-sliced file is and linked to
+  that run. A copy is given its first's kept part and profiles, so each copy's run can print
+  again too.
 
 **Built so another screen can drive it:** every action is a method here that returns what
 happened in words, and what needs the person is read as data (`Asked`), never a terminal prompt
@@ -69,7 +77,8 @@ from print_shop.joblog import JobLog, JobLogs
 from print_shop.ledger import Ledger
 from print_shop.orchestrator.daemon import Daemon
 from print_shop.orchestrator.graph import build_graph
-from print_shop.orchestrator.kept import Kept, WaitingJob, WaitingJobs, Waits
+from print_shop.orchestrator.kept import Kept, Sent, WaitingJob, WaitingJobs, Waits
+from print_shop.orchestrator.sending import Adding, material_for, queue_one
 from print_shop.reprint import copy_kept
 from print_shop.setup import Proposer
 from print_shop.setup.intake import Answer, Question
@@ -77,14 +86,14 @@ from print_shop.setup.loop import PrintLoop
 from print_shop.setup.questions import Asked as QuestionsAsked
 from print_shop.setup.review import Review, Reviewer, ReviewRequest
 from print_shop.setup.waiting import QuestionsCall, Waiting, took
-from print_shop.sliced import Again as SlicedAgain
 from print_shop.sliced import SlicedJob
 from print_shop.slicer.arrange import SlicePlate
 from print_shop.slicer.naming import job_id_from_filename
 from print_shop.slicer.orca import Slicer, SlicerProfiles, slice_model, slice_plate
 from print_shop.slicer.store import Store
 
-__all__ = ["Adding", "Asked", "Gone", "Line", "Need", "Preparing", "PrintQueue", "alike"]
+__all__ = ["Adding", "Asked", "Gone", "Line", "Need", "Preparing", "PrintQueue", "SentTo",
+           "alike"]
 
 logger = logging.getLogger(__name__)
 
@@ -95,8 +104,6 @@ FINISH_WAIT_S = 900.0
 #: The machine's steps a job's preparing may take, from when it last came back from the person: the
 #: slice's hour, as a lone job's (`print_job.APPROVAL_WAIT_S`, mqucifer/print-shop#209).
 SLICE_LIMIT_S = 3600.0
-#: The suffixes of a file sliced by hand: sent as it is (mqucifer/print-shop#164).
-SLICED_SUFFIXES = (".gcode", ".gcode.3mf")
 
 
 class Need(StrEnum):
@@ -108,6 +115,9 @@ class Need(StrEnum):
     CLOSER = "the model's closer choices"
     REVIEW = "the review"
     MESH = "the mesh gate"
+    #: A file sliced by hand that someone else sent: what it prints, looked at once before it's
+    #: ready (mqucifer/print-shop#226).
+    LOOK = "look at what it prints"
 
 
 class Gone(Exception):  # noqa: N818 - a signal, not an error
@@ -131,6 +141,8 @@ class Asked:
     questions: tuple[Question, ...] = ()
     review: ReviewRequest | None = None
     gate: dict[str, Any] | None = None
+    #: For a look: what `print_job.py --sliced` shows of the file, a line each.
+    shown: tuple[str, ...] = ()
     #: For the closer choices: the answer given, which None keeps, and how long the model took.
     kept: Answer | None = None
     seconds: float = 0.0
@@ -162,18 +174,6 @@ class Asked:
 
 
 @dataclass(frozen=True)
-class Adding:
-    """A file to add: how many prints of it, and the spool it's for (None: the loaded one).
-    `again` makes it a finished run printed again (mqucifer/print-shop#216): `path` is its kept
-    file, or a change's new slice, read as a hand-sliced file is, and linked to that run."""
-
-    path: Path
-    copies: int = 1
-    spool_id: int | None = None
-    again: SlicedAgain | None = None
-
-
-@dataclass(frozen=True)
 class Line:
     """A job as the queue shows it, in its order."""
 
@@ -193,6 +193,23 @@ class Line:
         spool = f"; {self.spool}{'' if self.loaded or not self.spool else ', on the shelf'}"
         return (f"{self.number:>2}. {self.job.part}{copied}  {self.step}{held}{spool}"
                 f"  [{self.job.job_id[:8]}]")
+
+
+@dataclass(frozen=True)
+class SentTo:
+    """One send, as "Sent to you" shows it (mqucifer/print-shop#226): who, when, the note, and
+    its jobs still in the queue, each with what it needs next."""
+
+    sent: Sent
+    lines: tuple[Line, ...]
+
+    def said(self) -> str:
+        """The send in a line, with its jobs' numbers: each job's step is on its own line in
+        the queue, and `sent N` has the rest (print-shop-ux, 2026-11-23)."""
+        said = self.sent.said()
+        numbers = [str(line.number) for line in self.lines]
+        jobs = f"job {numbers[0]}" if len(numbers) == 1 else f"jobs {', '.join(numbers)}"
+        return f"{said[0].upper()}{said[1:]}: {jobs}"
 
 
 @dataclass(frozen=True)
@@ -301,7 +318,7 @@ class PrintQueue:
         checkpoint, a ready one waits to be offered, and nothing is offered while a print runs."""
         for job in self._jobs.all():
             if job.waits not in (Waits.READY, Waits.WITH_FIRST, Waits.STOPPED):
-                self._prepare(job.job_id)
+                self._take_up(job.job_id)
         self._offerer = threading.Thread(target=self._offer_loop, name="queue-offer", daemon=True)
         self._offerer.start()
         return self
@@ -365,6 +382,18 @@ class PrintQueue:
                 loaded=job.spool_id in loaded))
         return lines
 
+    def sent(self) -> list[SentTo]:
+        """"Sent to you": each send whose jobs are still in the queue, the latest first, with who
+        sent it, when, the note, and what each job needs next (mqucifer/print-shop#226)."""
+        found: dict[str, tuple[Sent, list[Line]]] = {}
+        for line in self.lines():
+            sent = line.job.sent
+            if sent is None or not sent.by:
+                continue
+            found.setdefault(sent.batch or line.job.job_id, (sent, []))[1].append(line)
+        sends = [SentTo(sent=sent, lines=tuple(lines)) for sent, lines in found.values()]
+        return sorted(sends, key=lambda s: s.sent.at, reverse=True)
+
     def printing(self) -> list[str]:
         """The print running now, as the ledger has it, and those that ended with no outcome
         yet: each is still asked for on the card."""
@@ -419,55 +448,44 @@ class PrintQueue:
         return added, refused
 
     def _add(self, one: Adding) -> str:
-        path = one.path.absolute()
-        if not path.is_file():
-            raise ValueError("not a file")
-        if one.copies < 1:
-            raise ValueError("a quantity is 1 or more")
-        material = self._material(one.spool_id)
-        job_id = str(uuid.uuid4())
-        folder = self._workdir / job_id
-        given: dict[str, Any]
-        profiles: SlicerProfiles | None = None
-        if one.again is not None or path.name.lower().endswith(SLICED_SUFFIXES):
-            if self._sliced_for is None:
-                raise ValueError("this queue doesn't take files sliced by hand")
-            job = self._sliced_for(path, material)
-            if one.again is not None:
-                job = job.again(one.again)
-            given = {"entry": "sliced_file", "sliced": job}
-        else:
-            given = {"entry": "stl_upload", "stl_path": str(path), "as_laid": False,
-                     "context_path": None}
-            profiles = self._profiles_for(material, folder)
-        spool_id = material.spool_id if material is not None else None
-        part = one.again.name if one.again is not None else path.name
-        self._jobs.add(WaitingJob(job_id=job_id, part=part, given=given, profiles=profiles,
-                                  spool_id=spool_id, copies=one.copies))
-        for n in range(2, one.copies + 1):
-            self._jobs.add(WaitingJob(
-                job_id=str(uuid.uuid4()), part=part, given=given, profiles=profiles,
-                waits=Waits.WITH_FIRST, spool_id=spool_id, copy_of=job_id, copy_n=n,
-                copies=one.copies))
-        self._prepare(job_id)
-        return job_id
+        """The queue's own copy of the file and what belongs to it, as a sent file's
+        (`sending.queue_one`), prepared at once."""
+        queued = queue_one(
+            one, workdir=self._workdir, ledger=self._ledger,
+            material=self._material(one.spool_id), profiles_for=self._profiles_for,
+            sliced_for=self._sliced_for, sent=Sent(at=time.strftime("%Y-%m-%dT%H:%M:%S+00:00",
+                                                                    time.gmtime())))
+        for line in queued.came:
+            self._say(f"{queued.part}, job {queued.job_id[:8]}: {line}", queued.job_id)
+        self._take_up(queued.job_id)
+        return queued.job_id
 
     def _material(self, spool_id: int | None) -> Material | None:
         """The printer, its nozzle and the spool a job is for: the loaded one by default. None
         where the stock isn't set up."""
-        if self._ledger is None:
-            return None
-        with Inventory(self._ledger.path) as inventory:
-            if not inventory.printers():
-                if spool_id is not None:
-                    raise InventoryError("the stock isn't set up, so no spool can be named")
-                return None
-            if spool_id is None:
-                loaded = inventory.loaded(inventory.printer().id)
-                if loaded is None:
-                    raise InventoryError("no spool is loaded: name the spool it's for")
-                spool_id = loaded.id
-            return inventory.for_spool(spool_id)
+        return material_for(self._ledger.path if self._ledger is not None else None, spool_id)
+
+    def _take_up(self, job_id: str) -> None:
+        """Prepare a job this queue isn't preparing yet: one sent while it was open or shut, or
+        one from before a restart. A job it prepares already is left to it."""
+        with self._lock:
+            if job_id in self._runs or self._closing.is_set():
+                return
+            job = self._jobs.get(job_id)
+            if job is None:
+                return
+            if job.waits is Waits.SENT:
+                self._jobs.at(job_id, Waits.PREPARING)
+            self._prepare(job_id)
+
+    def _sent_in(self) -> None:
+        """Jobs sent to the queue since it was opened (mqucifer/print-shop#226), taken up."""
+        for job in self._jobs.all():
+            if job.waits is Waits.SENT:
+                self._take_up(job.job_id)
+                if job.sent is not None and job.sent.by:
+                    self._say(f"Sent to you: {job.part}, job {job.job_id[:8]}, "
+                              f"{job.sent.said()}.", job.job_id)
 
     # -- the person's answers -------------------------------------------------
 
@@ -487,6 +505,8 @@ class PrintQueue:
             answer = {alike(q): a for q, a in zip(asked.questions, answers, strict=True)}
         elif asked.need is Need.REVIEW and not isinstance(answer, Review):
             return "a review is answered with a Review"
+        elif asked.need is Need.LOOK and not isinstance(answer, bool):
+            return "a look is answered ok (True) or reject (False)"
         return "" if asked._give(answer) else "it was answered already"
 
     def give_alike(self, job_ids: Sequence[str], questions: Sequence[Question],
@@ -622,7 +642,8 @@ class PrintQueue:
     def _ask(self, job_id: str, generation: int, asked: Asked) -> Any:
         """Wait for the person, giving the machine's place to another job meanwhile."""
         waits = {Need.QUESTIONS: Waits.QUESTIONS, Need.CLOSER: Waits.QUESTIONS,
-                 Need.REVIEW: Waits.REVIEW, Need.MESH: Waits.MESH}[asked.need]
+                 Need.REVIEW: Waits.REVIEW, Need.MESH: Waits.MESH,
+                 Need.LOOK: Waits.LOOK}[asked.need]
         with self._lock:
             run = self._runs.get(job_id)
             if run is None or run.generation != generation or self._closing.is_set():
@@ -704,6 +725,8 @@ class PrintQueue:
                 found = result["__interrupt__"][0]
                 gate = dict(getattr(found, "value", found))
                 if gate.get("gate") == Gate.BEFORE_PRINT:
+                    if not self._looked(job_id, generation, graph):
+                        return
                     self._ready(job_id, graph)
                     return
                 approved, note = self._ask(job_id, generation, Asked(
@@ -718,6 +741,50 @@ class PrintQueue:
                 self._ended(job_id, f"{exc}")
         finally:
             self._slot.release()
+
+    def _looked(self, job_id: str, generation: int, graph: Any) -> bool:
+        """A file sliced by hand that someone else sent needs the person once before it's ready:
+        what it prints, as `print_job.py --sliced` shows it (mqucifer/print-shop#226). Else a
+        Start, whose bed question is its only screen, could print what nobody here looked at.
+        False where they rejected it: it's out of the queue, unprinted."""
+        job = self._jobs.get(job_id)
+        kept = Kept(self._workdir / job_id)
+        if job is None or not job.by_hand or job.sent is None or not job.sent.by \
+                or job.copy_of or kept.looked():
+            return True
+        values = graph.get_state({"configurable": {"thread_id": job_id}}).values
+        ok = self._ask(job_id, generation, Asked(
+            job_id=job_id, need=Need.LOOK, shown=tuple(self._shown(values))))
+        if not ok:
+            self._jobs.remove(job_id)
+            for copy in [j for j in self._jobs.all() if j.copy_of == job_id]:
+                self._jobs.remove(copy.job_id)
+            self._say(f"Removed: {job.part}, job {job_id[:8]}: you rejected what it prints. "
+                      "Nothing printed.", job_id)
+            self._wake.set()
+            return False
+        kept.look()
+        self._jobs.at(job_id, Waits.PREPARING)
+        return True
+
+    def _shown(self, values: dict[str, Any]) -> list[str]:
+        """What `print_job.py --sliced` shows of a hand-sliced file: what it is, Orca's estimate,
+        what's kept of it (its settings, its objects' overrides), and the slice's reading with
+        its pauses."""
+        from print_shop import sliced as hand_sliced  # noqa: PLC0415
+
+        job: SlicedJob = values["sliced"]
+        file = job.file
+        grams = f"{file.filament_g:g} g, " if file.filament_g is not None else ""
+        out = [f"Sliced by hand: {file.said()}.",
+               "No questions, no proposal, no lesson applied, nothing sliced again.",
+               f"  sha256      {file.sha256}",
+               f"  Orca        {file.print_time_s // 60} min, {grams}{file.filament_cm3:g} cm3, "
+               f"{file.layer_count} layers"]
+        out += [f"  {line}" for line in job.record(self._preparing.store).lines()]
+        out += hand_sliced.report(job, values.get("slice_reading"),
+                                  tuple(values.get("slice_flags") or ()))
+        return out
 
     def _ready(self, job_id: str, graph: Any) -> None:
         """Ready to print, and its copies with it, each under its own name."""
@@ -1022,6 +1089,7 @@ class PrintQueue:
             if self._closing.is_set():
                 return
             try:
+                self._sent_in()
                 self._limit()
                 self._offer()
             except Exception:  # noqa: BLE001 - the loop goes on, and says it

@@ -94,7 +94,7 @@ from print_shop.setup.features import Feature, measure, resting_on
 from print_shop.setup.intake import Asker, Estimate, Intake, Question
 from print_shop.setup.loop import Part, PrintLoop
 from print_shop.setup.loop import run as run_loop
-from print_shop.setup.offer import Offering, ThisPart, moved_items
+from print_shop.setup.offer import Offering, ThisPart, moved_items, suggested_items
 from print_shop.setup.offer import offering as offer_past_prints
 from print_shop.setup.proposal import (
     ORIENTATION,
@@ -1957,9 +1957,18 @@ def _with_moved(
     offer: Offering, given: Kept, state: PrintJobState, profiles: SlicerProfiles,
 ) -> Offering:
     """`offer`, with what the person set on this job for the variety it was moved from
-    (mqucifer/print-shop#210): unticked, each saying which it was set for."""
+    (mqucifer/print-shop#210), and what its sender suggested (mqucifer/print-shop#226): unticked,
+    each saying which it was set for, or who suggested it."""
     moved = given.moved()
+    suggested = given.suggested_by_sender()
     material = _material_of(profiles)
+    if suggested:
+        process, filament = _presets(profiles)
+        machine = json.loads(profiles.machine.read_text())
+        offer = dataclasses.replace(offer, suggested=suggested_items(
+            [(s.key, s.value, s.reason, s.by) for s in suggested],
+            {"machine": machine, "process": process, "filament": filament}, state["job_id"],
+            Path(state["stl_path"]).name))
     if not moved or material is None:
         return offer
     process, filament = _presets(profiles)

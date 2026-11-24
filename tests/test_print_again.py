@@ -388,6 +388,10 @@ def test_a_run_from_before_says_what_cant_be_checked_and_still_prints_again(
         db.execute("UPDATE prints SET gcode_sha256 = NULL WHERE job_id = ?", (first,))
     for kept in (shop.work / first / reprint.KEPT_DIR).iterdir():
         kept.unlink()
+    # Nor the queue's own copy of the file (mqucifer/print-shop#226): the part is found in the
+    # parts folder, by its bytes.
+    for copied in (shop.work / first).glob("sent/*.stl"):
+        copied.unlink()
 
     run = shop.find(first)
     said = " ".join(run.unchecked)
