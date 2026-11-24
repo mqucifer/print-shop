@@ -13,15 +13,18 @@ from html import escape
 from print_shop.orchestrator.start import Checked
 
 __all__ = [
-    "away_page", "message_page", "nothing_ready_page", "pair_page", "signed_out_page",
+    "away_page", "message_page", "nothing_ready_page", "page", "pair_page", "signed_out_page",
     "start_page",
 ]
 
 _STYLE = """
 :root { color-scheme: light dark; --fg: #1b1b1b; --bg: #fafafa; --muted: #666; --line: #ddd;
-  --bad: #b3261e; --button: #1d4ed8; --button-fg: #fff; --box: #f1f1f1; }
+  --bad: #b3261e; --button: #1d4ed8; --button-fg: #fff; --box: #f1f1f1; --amber: #8a5200;
+  --dark: #1f2329; --dark-fg: #f5f5f5; --dark-muted: #b9bec6; --dark-amber: #ffc46b;
+  --bad-button: #b3261e; }
 @media (prefers-color-scheme: dark) { :root { --fg: #eee; --bg: #121212; --muted: #aaa;
-  --line: #333; --bad: #f2b8b5; --button: #3b82f6; --box: #1e1e1e; } }
+  --line: #333; --bad: #f2b8b5; --button: #3b82f6; --box: #1e1e1e; --amber: #ffc46b;
+  --dark: #2b3038; --bad-button: #c2413a; } }
 * { box-sizing: border-box; }
 body { margin: 0; padding: 16px; font: 17px/1.4 -apple-system, system-ui, sans-serif;
   color: var(--fg); background: var(--bg); max-width: 560px; }
@@ -44,7 +47,49 @@ form:has(input[name=bed]:checked) .unready { display: none; }
 input[type=text] { width: 100%; padding: 12px; font-size: 1.2em; letter-spacing: 0.15em;
   text-transform: uppercase; margin: 0 0 1em; }
 a { color: var(--button); }
+h2 { font-size: 1.05em; margin: 1.4em 0 0.5em; color: var(--muted); font-weight: 600; }
+.now { background: var(--dark); color: var(--dark-fg); border-radius: 12px; padding: 14px;
+  margin: 0 0 1em; }
+.now .small { color: var(--dark-muted); }
+.amber { color: var(--amber); }
+.now .amber { color: var(--dark-amber); }
+.good { color: var(--button); }
+ul.rows { list-style: none; margin: 0 0 1em; padding: 0; }
+ul.rows li { border-bottom: 1px solid var(--line); }
+ul.rows a.row, ul.rows div.row { display: flex; gap: 0.8em; align-items: center;
+  padding: 10px 0; color: inherit; text-decoration: none; }
+.row .what { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.row .act { color: var(--button); font-weight: 600; white-space: nowrap; }
+.row .tag { font-size: 0.8em; border: 1px solid var(--line); border-radius: 6px;
+  padding: 1px 6px; white-space: nowrap; }
+.part { font-weight: 600; }
+q { font-style: italic; }
+.foot { display: flex; gap: 10px; margin: 1.4em 0 0; }
+.foot a, a.button, button.second { flex: 1; display: block; text-align: center; padding: 12px;
+  border: 1px solid var(--line); border-radius: 10px; text-decoration: none;
+  color: var(--button); background: var(--box); font-size: 1em; }
+form.inline { display: inline; }
+.buttons { display: flex; flex-wrap: wrap; gap: 8px; margin: 0.6em 0; }
+.buttons form { flex: 1 1 40%; }
+.buttons button { padding: 11px; }
+button.danger { background: var(--bad-button); }
+.back { display: inline-block; margin: 0 0 0.6em; }
+fieldset { border: 1px solid var(--line); border-radius: 10px; margin: 0 0 1em;
+  padding: 8px 12px; }
+fieldset label { display: block; padding: 6px 0; }
+textarea { width: 100%; min-height: 4em; font: inherit; padding: 8px; }
+input[type=search] { width: 100%; padding: 12px; font-size: 1em; margin: 0 0 1em; }
+.card { border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px;
+  margin: 0 0 0.8em; background: var(--box); }
+.card .head { display: flex; gap: 0.8em; justify-content: space-between; }
+.card .head .part { min-width: 0; overflow-wrap: anywhere; }
+.card .head .outcome { text-align: right; }
 """
+
+
+def page(title: str, body: str) -> str:
+    """One page, with the phone's own CSS, and nothing to load."""
+    return _page(title, body)
 
 
 def _page(title: str, body: str) -> str:
@@ -118,8 +163,11 @@ def pair_page(said: str = "") -> str:
         "<button type=\"submit\">Sign in</button></form>"))
 
 
-def message_page(title: str, said: str, *, again: bool = True) -> str:
-    """What came of a Start or a pairing, in words, with the way back to the Start page."""
-    back = "<p><a href=\"/\">Back to Start</a></p>" if again else ""
+def message_page(title: str, said: str, *, again: bool = True, back_to: str = "/start",
+                 back_words: str = "Back to Start") -> str:
+    """What came of a Start, a pairing or a button, in words, with the way back: to the Start
+    page unless it says another."""
+    back = (f"<p><a href=\"{escape(back_to)}\">{escape(back_words)}</a></p>" if again
+            else "")
     return _page(title, f"<div class=\"box\"><strong>{escape(title)}</strong>"
                         f"{escape(said)}</div>{back}")

@@ -210,13 +210,14 @@ def run_line(row: Row, n: int | None = None) -> list[str]:
     elif row.sliced is not None:
         lines.append(f"{pad}    sliced by hand")
     else:
-        lines.append(f"{pad}    {_yours(row)}")
+        lines.append(f"{pad}    {yours(row)}")
     return lines
 
 
-def _yours(row: Row) -> str:
+def yours(row: Row) -> str:
     """What the person changed at the run's review: their corrections, a turn, and what they
-    took of the model's or the slice's proposals."""
+    took of the model's or the slice's proposals. The phone's Finished says it the same
+    (mqucifer/print-shop#221)."""
     if row.corrections is None:
         return "what you changed wasn't kept then: the run is from before the review"
     changed = [f"turned {_pose(c.value)}" if c.key == ORIENTATION else f"{c.key}={c.value}"

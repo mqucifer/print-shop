@@ -40,6 +40,10 @@ views:
           {%- elif s in ['unknown', 'unavailable'] %}Printer agent is offline
           {%- else %}{{ s }}{%- endif %}
 
+          {% set phone = state_attr('sensor.3d_print_agent_status', 'phone_page') %}
+          {%- if phone %}**[The queue, on your phone]({{ phone }})**: it opens in the phone's
+          browser, on the home Wi-Fi.{% endif %}
+
       - type: tile
         entity: sensor.3d_print_agent_status
         name: Status

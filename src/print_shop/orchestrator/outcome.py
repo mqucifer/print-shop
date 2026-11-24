@@ -438,23 +438,64 @@ class OutcomeDesk:
             if job_id is None:
                 return
             draft = dict(self._draft)
-            try:
-                answer = Answer(
-                    result=Result(draft.get("result", "")),
-                    symptom=Symptom(draft.get("symptom", "")),
-                    note=draft.get("note", ""),
-                )
-                # The answer, the pick and the stock: one write, or none of them.
-                on = self._picked[1] if self._picked is not None else None
-                self._ledger.record_answer(job_id, answer, on)
-            except SaidSince as exc:
-                self._error, self._picked = str(exc), None
-            except sqlite3.Error as exc:
-                self._error = f"it couldn't be written ({exc}): press Record again"
-            except ValueError:
-                self._error = "choose a result and a symptom first"
-            except LedgerError as exc:
-                self._error = str(exc)
-            else:
-                logger.info("job %s answered: %s", job_id, json.dumps(draft))
+            on = self._picked[1] if self._picked is not None else None
+            error, stale = self._write(job_id, draft, on)
+            if error is not None:
+                self._error = error
+                if stale:
+                    self._picked = None
             self._show_locked()
+
+    def choices(self, job_id: str) -> dict[str, Pick]:
+        """What `job_id`'s outcome can be told is on now, by the card's own words, or {}."""
+        with self._lock:
+            row = self._ledger.get(job_id)
+            return self._spools_of(row)[0] if row is not None else {}
+
+    def record(self, job_id: str, *, result: str, symptom: str, note: str = "",
+               pick: str = "", picked: Pick | None = None) -> str:
+        """The phone's Record (mqucifer/print-shop#221): the card's own, for the print it names,
+        so the two can't disagree. `pick` is the words a swap's spool was picked by, as the
+        page offered them (`spools.choices`), and `picked` what they meant when it was shown:
+        a load or a record since refuses it, as the card's does. Returns "" once it's recorded,
+        or why it wasn't, in words; the card then shows the next."""
+        with self._lock:
+            row = self._ledger.get(job_id)
+            if row is None or not row.awaiting_answer:
+                return ("it isn't waiting for an outcome: it was recorded already, on the card "
+                        "or another phone")
+            on: Pick | None = None
+            if pick:
+                now = self._spools_of(row)[0].get(pick)
+                if now is None or (picked is not None and now != picked):
+                    return ("what's on the printer has changed since the page was shown: look "
+                            "again and pick")
+                on = now
+            error, _ = self._write(job_id, {"result": result, "symptom": symptom,
+                                            "note": note[:2000]}, on)
+            self._show_locked()
+            return error or ""
+
+    def _write(
+        self, job_id: str, draft: dict[str, str], on: Pick | None,
+    ) -> tuple[str | None, bool]:
+        """An answer and its pick recorded, in one write or none: the card's and the phone's.
+        Returns None once it's written, or why it wasn't; and whether the pick was overtaken."""
+        try:
+            answer = Answer(
+                result=Result(draft.get("result", "")),
+                symptom=Symptom(draft.get("symptom", "")),
+                note=draft.get("note", ""),
+            )
+            # The answer, the pick and the stock: one write, or none of them.
+            self._ledger.record_answer(job_id, answer, on)
+        except SaidSince as exc:
+            return str(exc), True
+        except sqlite3.Error as exc:
+            return f"it couldn't be written ({exc}): press Record again", False
+        except ValueError:
+            return "choose a result and a symptom first", False
+        except LedgerError as exc:
+            return str(exc), False
+        logger.info("job %s answered: %s", job_id, json.dumps(draft))
+        return None, False

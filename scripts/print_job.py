@@ -206,6 +206,7 @@ from print_shop.orchestrator.spools import ask_on_now
 from print_shop.phone.home import Home, HomeRefused
 from print_shop.phone.phones import Phones, phones_path
 from print_shop.phone.server import PhoneOff, attach, make_server
+from print_shop.phone.shop import Shop
 from print_shop.printer.centauri import FrameRecorder, PrinterClient, live_printer
 from print_shop.queue_terminal import Runs, parse_adding, serve, stock_listing
 from print_shop.runtime import (
@@ -700,6 +701,7 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
         printer=printer,
         one_start=phone.one_start,
         start_page=phone.address,
+        phone_page=phone.main,
         profiles=profiles,
         recorder=recorder,
         settings=args.settings,
@@ -782,14 +784,18 @@ def _arming(
 
 
 class PhonePage:
-    """The phone's Start page for this run (mqucifer/print-shop#214): what a phone's confirm arms
-    for one start, and the server, on the home Wi-Fi only. Said either way as it's set up."""
+    """The phone's page for this run (mqucifer/print-shop#214, mqucifer/print-shop#221): what a
+    phone's confirm arms for one start, the server, on the home Wi-Fi only, and what its other
+    screens read. Said either way as it's set up."""
 
     def __init__(self, settings: Path | None, recorder: FrameRecorder | None) -> None:
         self.one_start: OneStart | None = None
         self._server: ThreadingHTTPServer | None = None
-        #: The page's address, for the card to link to, or "".
+        #: The Start page's address, and the page's own (the queue), for the card, or "".
         self.address = ""
+        self.main = ""
+        #: What the page's other screens read: given the daemon, and the queue where there is one.
+        self.shop: Shop | None = None
         try:
             home = Home.from_settings(settings)
         except HomeRefused as exc:
@@ -810,9 +816,11 @@ class PhonePage:
             return live_printer(armed=armed, recorder=recorder)
 
         self.one_start = OneStart(build)
-        self.address = f"{home.origin}/"
-        print(f"Your phone's Start: {home.origin}/ , on the home Wi-Fi only "
-              "(`scripts/phone.py pair` signs a phone in).")
+        self.shop = Shop(ledger_path(settings))
+        self.address = f"{home.origin}/start"
+        self.main = f"{home.origin}/"
+        print(f"Your phone's page: {home.origin}/ , and its Start: {home.origin}/start , on the "
+              "home Wi-Fi only (`scripts/phone.py pair` signs a phone in).")
 
     @classmethod
     def off(cls) -> PhonePage:
@@ -820,6 +828,8 @@ class PhonePage:
         page.one_start = None
         page._server = None
         page.address = ""
+        page.main = ""
+        page.shop = None
         return page
 
     @property
@@ -833,7 +843,9 @@ class PhonePage:
         if server is None:
             yield
             return
-        attach(server, daemon)
+        if self.shop is not None:
+            self.shop.daemon = daemon
+        attach(server, daemon, self.shop)
         thread = threading.Thread(target=server.serve_forever, name="phone-page", daemon=True)
         thread.start()
         try:
@@ -900,6 +912,7 @@ def _resume(args: argparse.Namespace, job_log: JobLog, live: Live) -> int:
         printer=printer,
         one_start=phone.one_start,
         start_page=phone.address,
+        phone_page=phone.main,
         profiles=kept.profiles,
         recorder=recorder,
         settings=args.settings,
@@ -1012,13 +1025,16 @@ def _queue(args: argparse.Namespace, live: Live) -> int:
     phone = PhonePage(args.settings, recorder)
     run = build_run(printer=_armed(recorder, phone=phone.on), profiles=None, recorder=recorder,
                     settings=args.settings, on_step=live.at, one_start=phone.one_start,
-                    start_page=phone.address)
+                    start_page=phone.address, phone_page=phone.main)
     # Each job keeps its own job.log, as a lone job does (mqucifer/print-shop#139).
     logs = JobLogs(secrets(args.settings), WORK_DIR)
     try:
         with run.daemon, phone.serving(run.daemon), logs.routing(), build_queue(
                 run, settings=args.settings, profiles_for=profiles, sliced_for=_sliced_for(args),
                 logs=logs) as queue:
+            if phone.shop is not None:
+                # The phone's Main is this queue (mqucifer/print-shop#221).
+                phone.shop.queue = queue
             if adding:
                 added, refused = queue.add(adding)
                 print(f"Added {len(added)} to the queue." if added else "Nothing was added.")

@@ -258,7 +258,7 @@ def test_a_confirm_starts_its_job_once_and_a_replay_byte_for_byte_starts_nothing
     page: type, phones: Phones, starts: FakeStarts,
 ) -> None:
     browser = signed_in(page, phones)
-    shown = browser.get("/")
+    shown = browser.get("/start")
     assert shown.status == 200 and "Cable clip" in shown.body
     made = shown.confirm()
     first = browser.start(made)
@@ -276,7 +276,7 @@ def test_each_view_makes_its_own_confirm_and_each_works_once(
     page: type, phones: Phones, starts: FakeStarts,
 ) -> None:
     browser = signed_in(page, phones)
-    one, two = browser.get("/").confirm(), browser.get("/").confirm()
+    one, two = browser.get("/start").confirm(), browser.get("/start").confirm()
     assert one != two
     assert browser.start(two).status == 200
     assert browser.start(two).status == 403
@@ -370,10 +370,10 @@ def test_a_phone_on_the_home_wifi_starts_a_ready_job_in_a_run_the_flag_didnt_arm
     with _unarmed(shop, one_start) as daemon:
         page = handler_for(home=home(), phones=phones, starts=daemon)
         browser = signed_in(page, phones, "Sponsor's made-up phone")
-        assert "Nothing is ready" in browser.get("/").body
+        assert "Nothing is ready" in browser.get("/start").body
         job_id = daemon.submit(shop.stl)
         daemon.wait_for_gate(job_id, timeout_s=WAIT_S)
-        shown = browser.get("/")
+        shown = browser.get("/start")
         assert shop.stl.name in shown.body and "I can see the bed is clear" in shown.body
         for label in ("Time and plastic", "Pause", "Spool", "Nozzle", "File and settings",
                       "Printer"):
@@ -410,15 +410,15 @@ def test_a_phones_start_held_by_a_check_arms_nothing_and_a_new_view_starts_it(
         browser = signed_in(handler_for(home=home(), phones=phones, starts=daemon), phones)
         job_id = daemon.submit(shop.stl)
         daemon.wait_for_gate(job_id, timeout_s=WAIT_S)
-        shown = browser.get("/")
+        shown = browser.get("/start")
         assert 'class="bad"' in shown.body, "the printer's row says it's busy"
         held = browser.start(shown.confirm())
         assert held.status == 409 and "Not started:" in held.body
         assert one_start.armed() is None and built == []
         assert "upload" not in shop.printer.verbs
         busy.before = "idle"
-        assert browser.get("/").status == 200
-        started = browser.start(browser.get("/").confirm())
+        assert browser.get("/start").status == 200
+        started = browser.start(browser.get("/start").confirm())
         assert started.status == 200, started.body
         assert daemon.wait_for_finish(job_id, timeout_s=WAIT_S).printed
     assert len(built) == 1
@@ -554,10 +554,10 @@ def test_start_is_refused_in_words_unless_from_a_phones_own_home_address(
     page: type, phones: Phones, starts: FakeStarts, peer: str, said: str,
 ) -> None:
     at_home = signed_in(page, phones)
-    made = at_home.get("/").confirm()
+    made = at_home.get("/start").confirm()
     relayed = Browser(page, peer)
     relayed.cookie = at_home.cookie  # the person's own sign-in, carried through a relay
-    shown = relayed.get("/")
+    shown = relayed.get("/start")
     assert "You're away from home" in shown.body and said in shown.body
     assert "Cable clip" in shown.body, "the job can be read"
     assert 'name="confirm"' not in shown.body, "no confirm is made away from home"
@@ -571,7 +571,7 @@ def test_a_request_with_any_proxys_mark_is_refused(
     page: type, phones: Phones, starts: FakeStarts, header: str,
 ) -> None:
     browser = signed_in(page, phones)
-    made = browser.get("/").confirm()
+    made = browser.get("/start").confirm()
     reply = browser.start(made, headers={header: PHONE})
     assert reply.status == 403 and "through a proxy" in reply.body
     assert starts.calls == []
@@ -591,7 +591,7 @@ def test_a_name_that_points_here_isnt_the_pages_own_host(
 ) -> None:
     """A DNS rebinding: another name for the same address. Refused, and nothing is shown."""
     browser = signed_in(page, phones)
-    made = browser.get("/").confirm()
+    made = browser.get("/start").confirm()
     for host in ("rebound.example", f"{MAC}:{PORT + 1}", ""):
         got = browser.get("/", headers={"Host": host})
         assert got.status == 421 and "Cable clip" not in got.body
@@ -604,7 +604,7 @@ def test_a_post_from_another_page_is_refused(
     page: type, phones: Phones, starts: FakeStarts, origin: str | None,
 ) -> None:
     browser = signed_in(page, phones)
-    made = browser.get("/").confirm()
+    made = browser.get("/start").confirm()
     reply = browser.start(made, origin=origin)
     assert reply.status == 403 and "another page" in reply.body
     assert starts.calls == []
@@ -655,13 +655,13 @@ def test_an_expired_confirm_is_refused_and_a_new_view_starts(
     page: type, phones: Phones, starts: FakeStarts, clock: Clock,
 ) -> None:
     browser = signed_in(page, phones)
-    made = browser.get("/").confirm()
+    made = browser.get("/start").confirm()
     clock.now += CONFIRM_LASTS_S + 1
     reply = browser.start(made)
     assert reply.status == 403 and "That confirm has expired (it lasts 2 minutes)" in reply.body
     assert browser.start(made).status == 403, "an expired one is spent too"
     assert starts.calls == []
-    assert browser.start(browser.get("/").confirm()).status == 200
+    assert browser.start(browser.get("/start").confirm()).status == 200
     assert CONFIRM_LASTS_S == 120.0 and EXPIRED.startswith("That confirm has expired")
 
 
@@ -669,9 +669,9 @@ def test_signed_out_nothing_is_shown_or_accepted(
     page: type, phones: Phones, starts: FakeStarts,
 ) -> None:
     browser = signed_in(page, phones)
-    made = browser.get("/").confirm()
+    made = browser.get("/start").confirm()
     stranger = Browser(page)
-    shown = stranger.get("/")
+    shown = stranger.get("/start")
     assert "Sign in on this phone at the Mac" in shown.body and "Cable clip" not in shown.body
     assert stranger.start(made).status == 403
     stranger.cookie = "a" * 43  # a made-up sign-in
@@ -685,7 +685,7 @@ def test_another_phones_confirm_is_refused(
 ) -> None:
     mine = signed_in(page, phones, "One made-up phone")
     theirs = signed_in(page, phones, "Another made-up phone", peer=ANOTHER_PHONE)
-    made = mine.get("/").confirm()
+    made = mine.get("/start").confirm()
     reply = theirs.start(made)
     assert reply.status == 403 and "another phone" in reply.body
     assert starts.calls == []
@@ -701,30 +701,30 @@ def test_a_confirm_from_another_address_is_refused(phones: Phones, starts: FakeS
     renewed = ip(10, 77, 0, 33)
     page = handler_for(home=home(), phones=phones, starts=starts)
     browser = signed_in(page, phones)
-    made = browser.get("/").confirm()
+    made = browser.get("/start").confirm()
     browser.peer = renewed
     reply = browser.start(made)
     assert reply.status == 403 and "another address" in reply.body
     assert starts.calls == []
-    assert browser.start(browser.get("/").confirm()).status == 200
+    assert browser.start(browser.get("/start").confirm()).status == 200
 
 
 def test_a_forgotten_phone_is_signed_out_at_once(
     page: type, phones: Phones, starts: FakeStarts,
 ) -> None:
     browser = signed_in(page, phones, "Made-up phone")
-    made = browser.get("/").confirm()
+    made = browser.get("/start").confirm()
     assert phones.forget("Made-up phone")
     assert browser.start(made).status == 403
-    assert "Sign in on this phone" in browser.get("/").body
+    assert "Sign in on this phone" in browser.get("/start").body
     assert starts.calls == []
 
 
 def test_an_unticked_bed_starts_nothing(page: type, phones: Phones, starts: FakeStarts) -> None:
     browser = signed_in(page, phones)
-    reply = browser.start(browser.get("/").confirm(), bed=None)
+    reply = browser.start(browser.get("/start").confirm(), bed=None)
     assert reply.status == 403 and "I can see the bed is clear" in reply.body
-    assert browser.start(browser.get("/").confirm(), bed="yes").status == 403
+    assert browser.start(browser.get("/start").confirm(), bed="yes").status == 403
     assert starts.calls == []
 
 
@@ -738,7 +738,7 @@ def test_a_restart_has_nothing_armed_and_knows_no_confirm(
 ) -> None:
     before = handler_for(home=home(), phones=phones, starts=starts)
     browser = signed_in(before, phones)
-    made = browser.get("/").confirm()
+    made = browser.get("/start").confirm()
     after = handler_for(home=home(), phones=phones, starts=starts)  # a new process's
     browser.handler = after
     reply = browser.start(made)
@@ -975,7 +975,8 @@ def test_the_page_shows_no_secret_and_cant_be_framed(
     assert loaded is not None and str(loaded.ha) == HA
     page = handler_for(home=loaded, phones=phones, starts=starts)
     browser = signed_in(page, phones)
-    for reply in (browser.get("/"), browser.get("/pair"), Browser(page).get("/")):
+    for reply in (browser.get("/"), browser.get("/start"), browser.get("/pair"),
+                  Browser(page).get("/")):
         for secret in (browser.cookie, "made-up-password", HA_NAME, HA, ROUTER, "PHONE_",
                        "MQTT"):
             assert secret not in reply.body
@@ -992,7 +993,8 @@ def test_every_other_method_and_route_is_refused(page: type, phones: Phones) -> 
     browser = signed_in(page, phones)
     for method in ("PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"):
         assert browser.send(method, "/start").status == 405
-    assert browser.get("/start").status == 404
+    # Start's page is at /start (mqucifer/print-shop#221).
+    assert browser.get("/start").status == 200
     assert browser.post("/elsewhere", {"a": "b"}).status == 404
 
 
@@ -1001,7 +1003,7 @@ def test_the_part_name_is_escaped(phones: Phones) -> None:
     assert starts.ready is not None
     starts.ready = starts.ready.model_copy(update={"part": "<img src=x onerror=alert(1)>"})
     page = handler_for(home=home(), phones=phones, starts=starts)
-    raw = signed_in(page, phones).get("/").raw
+    raw = signed_in(page, phones).get("/start").raw
     assert "<img" not in raw and "&lt;img" in raw
 
 

@@ -84,6 +84,7 @@ from print_shop.core.mqtt import (
     state_topic,
 )
 from print_shop.expert.client import LLMConfig
+from print_shop.inventory import Pick
 from print_shop.ledger import JobEnding, Ledger, LedgerError
 from print_shop.orchestrator.frames import FrameKeeper
 from print_shop.orchestrator.graph import build_graph, why_not_start
@@ -379,6 +380,7 @@ class Daemon:
         plate_slicer: SlicePlate = slice_plate,
         one_start: OneStart | None = None,
         start_page: str = "",
+        phone_page: str = "",
     ) -> None:
         """`printer` is what the approval gate ultimately commands.
 
@@ -438,6 +440,8 @@ class Daemon:
         (mqucifer/print-shop#214): `OneStart(build)`, `build` being `scripts/print_job.py`'s.
         None, and a phone's Start is held. `start_page` is the phone's Start page's address, for
         the card to link to (from the run's settings, never the card's YAML), or "" with none.
+        `phone_page` is the phone's main page, the queue (mqucifer/print-shop#221), which every
+        state the card is sent links to, the same way.
         """
         self._cfg = cfg
         self._on_step = on_step
@@ -453,6 +457,7 @@ class Daemon:
         #: A phone's confirm arms one start here, and nothing else (mqucifer/print-shop#214).
         self._one_start = one_start if one_start is not None else OneStart(None)
         self._start_page = start_page
+        self._phone_page = phone_page
         #: Each phone's Start waiting for the gate's answer, by its command's id
         #: (mqucifer/print-shop#214): claimed by the gate, or withdrawn by the phone, under the
         #: job's lock, so the phone is never told "Not started" of a Start that goes on.
@@ -910,6 +915,33 @@ class Daemon:
         """How the last Start from a phone went, for the page to say once the gate's gone."""
         with self._job_lock:
             return self._last_phone
+
+    def prepared(self, job_id: str) -> dict[str, Any]:
+        """A job's state as its preparing left it, read only: its slice and the slice's reading,
+        for the phone's screens (mqucifer/print-shop#221). {} where there's none."""
+        try:
+            values = self._graph.get_state({"configurable": {"thread_id": job_id}}).values
+        except Exception:  # noqa: BLE001 - a screen says less, and nothing waits on it
+            logger.warning("job %s's state couldn't be read for the phone", job_id,
+                           exc_info=True)
+            return {}
+        return dict(values or {})
+
+    def outcome_choices(self, job_id: str) -> dict[str, Pick]:
+        """What the outcome of `job_id` can be told is on now, as the card offers it: only after
+        a swap whose end isn't known (mqucifer/print-shop#218, #246's A). {} for none."""
+        if self._desk is None:
+            return {}
+        return self._desk.choices(job_id)
+
+    def record_outcome(self, job_id: str, *, result: str, symptom: str, note: str = "",
+                       pick: str = "", picked: Pick | None = None) -> str:
+        """The phone's Record: the card's own (`OutcomeDesk.record`). Returns "" once it's
+        recorded, or why it wasn't."""
+        if self._desk is None:
+            return "this run doesn't keep the ledger, so it can't record an outcome"
+        return self._desk.record(job_id, result=result, symptom=symptom, note=note, pick=pick,
+                                 picked=picked)
 
     def submit_sliced(self, job: SlicedJob) -> str:
         """Submit a hand-sliced file, to be sent as it is (mqucifer/print-shop#164). Returns
@@ -1624,6 +1656,9 @@ class Daemon:
         Assistant restart) immediately sees the current state instead of a
         blank card until the next transition.
         """
+        if self._phone_page:
+            # The phone's queue, linked from every state (mqucifer/print-shop#221).
+            fields = {**fields, "phone_page": self._phone_page}
         if self._bridge is not None:
             self._bridge.publish(
                 state_topic(self._cfg), state_payload(fields), retain=True
