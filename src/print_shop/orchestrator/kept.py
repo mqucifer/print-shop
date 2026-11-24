@@ -9,7 +9,8 @@ from the start:
   it is ever taken up again, so the checkpoints of jobs from before it are left alone.
 - **What the person and the model have given a job** (`Kept`): `kept.json` in its folder. The
   questions' answers as each set is answered, the questions and answers whole once they're done,
-  the print loop's result, each proposal, and each answer at the review. The slice step is one
+  the print loop's result, each proposal, what the model proposed beside the review once it
+  came, and each answer at the review. The slice step is one
   node of the graph, checkpointed only when it ends, so a restart runs it again from its start:
   what's kept is given back in place of asking or calling again, and the person is back at the
   step they left, with what they'd answered and corrected, and the same slice.
@@ -39,7 +40,7 @@ from pydantic import BaseModel, TypeAdapter
 
 from print_shop.setup.intake import Answer, Asker, Intake, Question
 from print_shop.setup.loop import LoopResult
-from print_shop.setup.proposal import Change, Proposal
+from print_shop.setup.proposal import Change, Ending, Proposal, Suggested
 from print_shop.setup.review import Review, Reviewer, ReviewRequest
 from print_shop.sliced import SlicedJob
 from print_shop.slicer.orca import SlicerProfiles
@@ -207,6 +208,8 @@ class _Record(BaseModel):
     intake: Intake | None = None
     loop: Any = None
     proposals: dict[str, Proposal] = {}
+    #: What the model proposed beside the review, by what it was for (mqucifer/print-shop#242).
+    suggested: dict[str, Suggested] = {}
     reviews: list[_Reviewed] = []
 
 
@@ -249,7 +252,7 @@ class Kept:
     def empty(self) -> bool:
         record = self._record
         return not (record.answers or record.intake or record.loop or record.proposals
-                    or record.reviews)
+                    or record.suggested or record.reviews)
 
     def asker(self, asker: Asker) -> Asker:
         """`asker`, with a set of questions already answered given back unasked, and each set's
@@ -304,6 +307,21 @@ class Kept:
             self._record.proposals[pose] = made
             self._write()
         return made
+
+    def suggested(self, key: str, find: Callable[[], Suggested]) -> Suggested:
+        """What the model proposed beside the review for `key` (a pose's settings, or the print
+        loop's), kept once it came: a restart shows it at once, and doesn't call again. One that
+        failed or was gone on without is asked again."""
+        with self._lock:
+            kept = self._record.suggested.get(key)
+        if kept is not None:
+            return kept
+        found = find()
+        if found.ending is Ending.CAME:
+            with self._lock:
+                self._record.suggested[key] = found
+                self._write()
+        return found
 
     def reviewer(self, reviewer: Reviewer) -> Reviewer:
         """`reviewer`, with the answers given at the review before a restart given back in

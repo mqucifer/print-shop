@@ -499,9 +499,10 @@ def build_graph(
                 progress: list[LoopCall] = []
 
                 def by_the_loop(stop: threading.Event) -> Suggested:
-                    return loop_proposes(
+                    # Kept once it came: a restart doesn't run it again (mqucifer/print-shop#209).
+                    return given.suggested("loop", lambda: loop_proposes(
                         state, measuring, intake, asked_of, questions_in, kept_side, stop,
-                        progress)
+                        progress))
 
                 beside.begin(by_the_loop, rotation_deg, progress)
             elif by_loop:
@@ -593,7 +594,7 @@ def build_graph(
                             intake, features, profiles, context, rotation_deg)
                         if proposer.suggests:
                             ask_again = settings_beside(
-                                beside, intake, features, context, rotation_deg)
+                                beside, intake, features, context, rotation_deg, given)
                             if beside.work is None:
                                 ask_again()
                     elif looped is not None:
@@ -733,13 +734,15 @@ def build_graph(
 
     def settings_beside(
         beside: Beside, intake: Intake, features: tuple[Feature, ...],
-        context: PartContext | None, pose: tuple[float, float, float],
+        context: PartContext | None, pose: tuple[float, float, float], given: Kept,
     ) -> Callable[[], None]:
-        """Begins the settings call for this pose beside its review."""
+        """Begins the settings call for this pose beside its review. What came of it before a
+        restart is given back, and not called for again (mqucifer/print-shop#209)."""
         assert proposer is not None and profiles is not None
 
         def find(stop: threading.Event) -> Suggested:
-            return suggested(proposer(intake, features, profiles, context, pose, stop=stop), pose)
+            return given.suggested(f"settings:{pose_value(pose)}", lambda: suggested(
+                proposer(intake, features, profiles, context, pose, stop=stop), pose))
 
         return lambda: beside.begin(find, pose)
 
