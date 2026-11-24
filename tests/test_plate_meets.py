@@ -128,7 +128,8 @@ def test_a_second_start_is_told_a_plate_waits_till_its_last_part_is_answered(
 def test_a_second_start_is_told_every_part_of_the_first(tmp_path: Path) -> None:
     script = _script()
     caps = _caps(tmp_path)
-    given = type("Args", (), {"serve": False, "again": None, "sliced": None, "stl": caps})()
+    given = type("Args", (), {"serve": False, "again": None, "sliced": None, "stl": caps,
+                            "resume": None})()
     assert script._part(given) == "cap-tight.stl, cap-mid.stl, cap-loose.stl"
 
 
@@ -138,7 +139,7 @@ def test_the_approval_gate_shows_a_plate_in_place_of_one_turn() -> None:
         "orientation_deg": None, "orientation_rationale": "printed by layer",
         "plate_lines": ["2 parts on one plate, printed BY LAYER", "  part 1"],
     }, turned=True)
-    assert lines[0].startswith("At the approval gate")
+    assert lines[0].startswith("Ready to print.")  # mqucifer/print-shop#209
     assert "  plate       2 parts on one plate, printed BY LAYER" in lines
     assert not any("turned" in line for line in lines)
 

@@ -7,7 +7,7 @@ Fitted: a 0.4 mm nozzle and Elegoo PLA. Slicing with:
   (machine 'Elegoo Centauri Carbon 0.4 nozzle - Copy': your tuning of 'Elegoo Centauri Carbon 0.4 nozzle')
   (process '0.20mm Standard @Elegoo CC 0.4 nozzle - Copy': your tuning of '0.20mm Standard @Elegoo CC 0.4 nozzle')
   (filament 'Elegoo PLA @ECC - Copy': your tuning of 'Elegoo PLA @ECC')
-Not armed (PRINT_AGENT_ALLOW_HARDWARE is not 1): an approval will NOT start a print.
+Not armed (PRINT_AGENT_ALLOW_HARDWARE is not 1): a Start, here or on the card, will NOT print. It's held, and the job waits for an armed `--resume`.
 The part's context: none: no design run above the file and no sidecar beside it, so it's read as before
 Job <job>'s log: <tmp>/jobs/<job>/job.log
 Job <job>: orienting, then a few questions about the part, here.
@@ -73,12 +73,13 @@ Proposed by the model (not applied unless you take it):
        flat faces show the infill [model: flat_top, walls-shells]
 
 Type ok to go on to the approval gate, take (the slice's 1), take 2 (the model's, by number), no 2 because ... (turn one down, saying why), send the orientation back (orientation), or correct a setting by name, e.g. wall_loops=3 because it's decorative (several separated by ';'), pause_at=12.4 because the nuts go in (it pauses once the layer topping out at 12.4 mm is done, and it asks what the pause is for), colour_change=12.4 because white to black (a swap), or stop.
-At the approval gate. Approve or Reject on the dashboard.
+Ready to print. Start or reject it on the card.
   time        16 min
   plastic     3.34 cm3
   turned      [0.0, 0.0, 0.0]
   because     No model was configured for this job; fell back to geometric selection. Chose rotation (0.0, 0.0, 0.0) with the lowest overhang (0.0 mm2) and highest bed contact (400.0 mm2) among the scored candidates.
-  answer by   <time>; after that it ends and nothing prints
+  It waits until you start or reject it.
+Start taken, the bed confirmed clear on the card's dialog.
 Started. Watching the printer read-only; answer in Home Assistant when it ends.
 
 job            <job>
@@ -162,8 +163,11 @@ frames         No camera frame was kept for this print: nothing was asked of the
 == the job's folder
 ECC_0.4_cube_PLA0.2_16m_<job>.gcode
 job.log
+kept.json
 options/1/plate_1.gcode
 options/1/process_proposed.json
+profiles/machine.json
+profiles/process.json
 proposed/process_proposed.json
 == the G-code sent
 a8e5956be33020d77a238e5b2d5c170be831d7c0da1bf32c42ab9be762a3b009

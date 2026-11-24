@@ -1062,6 +1062,8 @@ def build_graph(
                             part=f"{len(parts)}parts-{Path(parts[0].name).stem}")
         return {
             "gcode_path": str(result.gcode_path),
+            # What Start checks again, as for one part (mqucifer/print-shop#209).
+            "gcode_sha256": hand_sliced.sha256_of(result.gcode_path),
             "slice": result,
             "applied_orientation": AppliedOrientation(
                 rationale=f"printed {layout.sequence}; {plate_job.poses_said(turned)}"),

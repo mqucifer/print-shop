@@ -1037,3 +1037,20 @@ def test_a_plates_model_settings_are_proposals_and_not_applied_untaken(tmp_path:
     assert row.proposal.get("wall_loops") is None, "not taken, so not applied"
     proposed = [c.key for found in row.proposal.suggested for c in found.proposed]
     assert "wall_loops" in proposed, "what it proposed is kept"
+
+
+def test_a_plates_start_checks_each_parts_copy_again(tmp_path: Path) -> None:
+    """Start reads each part's own copy again, the file that was sliced (mqucifer/print-shop#209):
+    changed, nothing prints and the gate waits. The file it was given from may change freely
+    (`test_what_prints_is_the_file_as_it_was_taken`)."""
+    rig = Rig(tmp_path)
+    with rig.daemon:
+        job = rig.gated(_caps(tmp_path))
+        copy = rig.work / job / "given" / "part1_cap-tight.stl"
+        copy.write_bytes(copy.read_bytes() + b"\n")
+        rig.bridge.press(CFG, "approve")
+        _until(lambda: bool(rig.bridge.retained_json(gate_topic(CFG)).get("held")), "the hold")
+        held = str(rig.bridge.retained_json(gate_topic(CFG))["held"])
+        result = rig.press("reject", job)
+    assert "the part's file, part1_cap-tight.stl, was changed after this job was prepared" in held
+    assert not result.printed and "upload" not in rig.printer.verbs

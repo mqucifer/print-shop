@@ -97,10 +97,20 @@ def _part(state: PrintJobState) -> str:
         # above: the file it was taken from may change, and isn't what's sent
         # (mqucifer/print-shop#164).
         return ""
+    plate = state.get("parts")
+    if plate:
+        # Several parts on one plate (mqucifer/print-shop#109): each is the job's own copy, taken
+        # when it was given, which is what was sliced; the file it came from may change.
+        return "; ".join(said for said in (_file(Path(p.stl), p.sha256) for p in plate)
+                         if said)
     path, expected = state.get("stl_path"), state.get("stl_sha256", "")
     if not path:
         return ""
-    stl = Path(path)
+    return _file(Path(path), expected)
+
+
+def _file(stl: Path, expected: str) -> str:
+    """A part's file is the one it was prepared from: there, and the same bytes."""
     if not stl.is_file():
         return f"the part's file, {stl}, isn't there any more. {AGAIN}"
     try:
