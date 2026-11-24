@@ -97,9 +97,11 @@ def signed_out_page() -> str:
         "<p><a href=\"/pair\">I have a code from the Mac</a></p>"))
 
 
-def nothing_ready_page(name: str) -> str:
+def nothing_ready_page(name: str, last: str = "") -> str:
+    """Signed in, with nothing at the gate: and how the last Start from a phone went, if any."""
+    went = f"<div class=\"box\">{escape(last)}</div>" if last else ""
     return _page("Nothing to start", (
-        f"<p class=\"small\">Signed in as {escape(name)}.</p>"
+        f"<p class=\"small\">Signed in as {escape(name)}.</p>{went}"
         "<div class=\"box\"><strong>Nothing is ready to start</strong>A job ready to print shows "
         "here. Reload when one is.</div>"))
 

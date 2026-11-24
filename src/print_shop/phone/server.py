@@ -43,7 +43,7 @@ from print_shop.phone.page import (
     signed_out_page,
     start_page,
 )
-from print_shop.phone.phones import Phones
+from print_shop.phone.phones import Paired, Phones
 
 __all__ = ["COOKIE", "PhoneOff", "Starts", "attach", "handler_for", "make_server"]
 
@@ -60,7 +60,9 @@ _SECURITY_HEADERS = (
     ("Cache-Control", "no-store"),
     ("X-Content-Type-Options", "nosniff"),
     ("X-Frame-Options", "DENY"),
-    ("Referrer-Policy", "no-referrer"),
+    # Not `no-referrer`: under it a browser sends a same-origin POST's `Origin` as "null", which
+    # `_own_origin` refuses. `same-origin` sends the page's own, and nothing to another site.
+    ("Referrer-Policy", "same-origin"),
     ("Content-Security-Policy",
      "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; "
      "frame-ancestors 'none'; base-uri 'none'"),
@@ -71,6 +73,8 @@ class Starts(Protocol):
     """What the page starts with: `Daemon`'s two actions for the phone."""
 
     def ready_to_start(self) -> ReadyToStart | None: ...
+
+    def last_phone_start(self) -> str: ...
 
     def start_from_phone(
         self, job_id: str, *, armed: Armed, press: str, gcode_sha256: str,
@@ -191,12 +195,14 @@ class _Handler(BaseHTTPRequestHandler):
     # -- the screens ---------------------------------------------------------
 
     def _start_screen(self) -> None:
-        name, secret = self._signed_in()
-        if name is None:
+        phone, secret = self._signed_in()
+        if phone is None:
             return self._send(signed_out_page())
+        name = phone.name
         ready = self.starts.ready_to_start() if self.starts is not None else None
         if ready is None:
-            return self._send(nothing_ready_page(name))
+            last = self.starts.last_phone_start() if self.starts is not None else ""
+            return self._send(nothing_ready_page(name, last))
         away = self._away()
         if away:
             return self._send(away_page(part=ready.part, why=away))
@@ -207,8 +213,8 @@ class _Handler(BaseHTTPRequestHandler):
                               held=ready.held))
 
     def _start(self, form: dict[str, str]) -> None:
-        name, secret = self._signed_in()
-        if name is None:
+        phone, secret = self._signed_in()
+        if phone is None:
             return self._send(signed_out_page(), code=HTTPStatus.FORBIDDEN)
         away = self._away()
         if away:
@@ -231,6 +237,8 @@ class _Handler(BaseHTTPRequestHandler):
             gcode_sha256=spent.gcode_sha256)
         if result.started:
             return self._send(message_page("Started", result.said, again=False))
+        if result.pending:
+            return self._send(message_page("Starting", result.said), code=HTTPStatus.ACCEPTED)
         return self._send(message_page("Not started", result.said), code=HTTPStatus.CONFLICT)
 
     def _pair(self, form: dict[str, str]) -> None:
@@ -256,6 +264,7 @@ class _Handler(BaseHTTPRequestHandler):
         return str(self.client_address[0])
 
     def _away(self) -> str:
+        """Why this isn't a phone on the home Wi-Fi, in words; or ""."""
         return self.home.why_not(self._peer(), self.headers.keys())
 
     def _own_host(self) -> bool:
@@ -278,8 +287,8 @@ class _Handler(BaseHTTPRequestHandler):
                    code=HTTPStatus.FORBIDDEN)
         return False
 
-    def _signed_in(self) -> tuple[str | None, str]:
-        """The signed-in phone's name and its secret, or (None, "")."""
+    def _signed_in(self) -> tuple[Paired | None, str]:
+        """The signed-in phone and its secret, or (None, "")."""
         cookie = SimpleCookie()
         try:
             cookie.load(self.headers.get("Cookie", ""))
@@ -287,8 +296,8 @@ class _Handler(BaseHTTPRequestHandler):
             return None, ""
         held = cookie.get(COOKIE)
         secret = held.value if held is not None else ""
-        name = self.phones.signed_in(secret)
-        return (name, secret) if name is not None else (None, "")
+        phone = self.phones.signed_in(secret)
+        return (phone, secret) if phone is not None else (None, "")
 
     def _form(self) -> dict[str, str] | None:
         kind = self.headers.get("Content-Type", "").split(";")[0].strip().lower()

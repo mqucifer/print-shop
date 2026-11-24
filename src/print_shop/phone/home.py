@@ -1,4 +1,4 @@
-"""Whether a request comes from a phone on the home Wi-Fi (mqucifer/print-shop#214).
+"""Whether a request comes from a paired phone on the home Wi-Fi (mqucifer/print-shop#214).
 
 Where a request came from is the socket's peer address, never a header's: a header is what the
 sender says, and a proxy says what it likes. So a request can't claim to be local. It comes
@@ -11,15 +11,19 @@ request is refused, for Start and pairing, when it comes:
 - **through the Mac itself** (loopback, or the Mac's own address): a tunnel, `ssh -R`,
   `tailscale serve`, ngrok, a script or a session's `curl`;
 - **from outside the home network,** or from its network or broadcast address;
-- **through the router:** a port forward shows as it. Its address is `PHONE_ROUTER`, or the
-  default route's; if neither can be read, Start is refused, as where a request came from can't
-  be told;
-- **through Home Assistant's or the broker's host** (`MQTT_HOST`): HA's remote access, an
-  ingress proxy, or an automation's `rest_command`;
+- **through the router:** a port forward shows as it. The router's address is `PHONE_ROUTER`, or
+  the default route's; if neither can be read, Start is refused, as where a request came from
+  can't be told;
+- **through Home Assistant's host** (`PHONE_HA_HOST`, or `MQTT_HOST`), resolved once as the page
+  starts: HA's remote access, an ingress proxy, or an automation's `rest_command`;
 - **carrying any proxy's mark** (`Forwarded`, `X-Forwarded-*`, `Via`, `X-Real-IP`, …).
 
-**Not claimed:** a machine on the home network relaying raw TCP looks like that machine. What it
-carries is still the signed-in phone's own page and confirm, pressed by the person.
+**Not covered** (the Sponsor, 2026-11-24, on mqucifer/print-shop#214): a VPN that hands its
+clients addresses on the home range (some routers' WireGuard or IPsec servers, bridged OpenVPN),
+and a machine on the home network relaying for one (a VPN's subnet router), look like a phone at
+home. There's no such VPN in the house. **If one is ever added, this check has to change first**:
+binding a phone to its Wi-Fi hardware address was weighed and left out, as the Sponsor's phone
+rotates its private Wi-Fi address and would be refused.
 """
 
 from __future__ import annotations
@@ -30,15 +34,15 @@ import socket
 import subprocess
 import sys
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlunsplit
 
 from print_shop.env import SETTINGS_PATH, load_env
 
 __all__ = [
-    "DEFAULT_PORT", "HOME_KEY", "Home", "HomeRefused", "PORT_KEY", "PROXY_HEADERS", "ROUTER_KEY",
-    "default_router",
+    "DEFAULT_PORT", "HA_KEY", "HOME_KEY", "Home", "HomeRefused", "PORT_KEY", "PROXY_HEADERS",
+    "ROUTER_KEY", "default_router",
 ]
 
 logger = logging.getLogger(__name__)
@@ -49,6 +53,8 @@ HOME_KEY = "PHONE_HOME"
 PORT_KEY = "PHONE_PORT"
 #: The router's address, where the default route can't say it.
 ROUTER_KEY = "PHONE_ROUTER"
+#: Home Assistant's host, where it isn't the broker's (`MQTT_HOST`).
+HA_KEY = "PHONE_HA_HOST"
 DEFAULT_PORT = 8765
 
 #: Headers a proxy adds. Any of them, or any `X-Forwarded-…` or `X-Original-…`, refuses Start.
@@ -67,10 +73,6 @@ THROUGH_THE_ROUTER = ("this came through the router (a port forward, or a way in
 THROUGH_HA = "this came through Home Assistant's host, not from a phone on the home Wi-Fi"
 NO_ROUTER = ("the router's address couldn't be read, so where this came from can't be told. "
              f"Set {ROUTER_KEY} in the settings")
-NO_HA = ("Home Assistant's host couldn't be found, so a request through it can't be told. "
-         "Check MQTT_HOST in the settings")
-
-
 class HomeRefused(ValueError):
     """The settings don't place the page on a home network: said, and no page is served."""
 
@@ -85,10 +87,8 @@ class Home:
     port: int = DEFAULT_PORT
     #: The router's address, or None if it couldn't be read: then Start is refused.
     router: ipaddress.IPv4Address | None = None
-    #: Home Assistant's and the broker's host, by name or address, as the settings give it.
-    ha_host: str = ""
-    #: How a name is found: `socket.gethostbyname`, or a test's.
-    resolve: Callable[[str], str] = field(default=socket.gethostbyname, compare=False)
+    #: Home Assistant's address, resolved once as the page starts, or None where none is named.
+    ha: ipaddress.IPv4Address | None = None
 
     def __post_init__(self) -> None:
         where = ipaddress.IPv4Interface(f"{self.address}/{self.network.prefixlen}")
@@ -99,16 +99,22 @@ class Home:
             raise HomeRefused(f"{HOME_KEY} is its network's own address, not the Mac's")
         if not 0 < self.port < 65536:
             raise HomeRefused(f"{PORT_KEY} {self.port} isn't a port")
+        if self.port == 80:
+            raise HomeRefused(f"{PORT_KEY} can't be 80: a browser leaves it out of the page's "
+                              "address, which the page then can't tell is its own")
 
     @classmethod
     def from_settings(
         cls, path: Path | None = None, *, router: Callable[[], str | None] | None = None,
+        resolve: Callable[[str], str] = socket.gethostbyname,
     ) -> Home | None:
-        """The home, from `PHONE_HOME` (and `PHONE_PORT`, `PHONE_ROUTER`, `MQTT_HOST`) in the
-        settings; None if `PHONE_HOME` isn't set, which leaves the phone's Start off.
+        """The home, from `PHONE_HOME` (and `PHONE_PORT`, `PHONE_ROUTER`, `PHONE_HA_HOST` or
+        `MQTT_HOST`) in the settings; None if `PHONE_HOME` isn't set, which leaves the phone's
+        Start off. Home Assistant's host is resolved here, once.
 
         Raises:
-            HomeRefused: If `PHONE_HOME` is malformed, public, loopback or link-local.
+            HomeRefused: If `PHONE_HOME` is malformed, public, loopback or link-local, the port is
+                80, or Home Assistant's host is named and can't be found.
         """
         env = load_env(path or SETTINGS_PATH)
         given = env.get(HOME_KEY, "").strip()
@@ -136,8 +142,16 @@ class Home:
             if found is not None and found not in where.network:
                 logger.warning("the router %s isn't on the home network %s", found, where.network)
                 found = None
-        return cls(address=where.ip, network=where.network, port=port, router=found,
-                   ha_host=env.get("MQTT_HOST", "").strip())
+        ha_name = env.get(HA_KEY, "").strip() or env.get("MQTT_HOST", "").strip()
+        ha: ipaddress.IPv4Address | None = None
+        if ha_name:
+            try:
+                ha = ipaddress.IPv4Address(resolve(ha_name))
+            except (OSError, ValueError) as exc:
+                raise HomeRefused(
+                    f"Home Assistant's host ({HA_KEY}, or MQTT_HOST) couldn't be found, so a "
+                    "request through it couldn't be told") from exc
+        return cls(address=where.ip, network=where.network, port=port, router=found, ha=ha)
 
     @property
     def origin(self) -> str:
@@ -175,13 +189,8 @@ class Home:
             return NO_ROUTER
         if ip == self.router:
             return THROUGH_THE_ROUTER
-        if self.ha_host:
-            try:
-                ha = ipaddress.IPv4Address(self.resolve(self.ha_host))
-            except (OSError, ValueError):
-                return NO_HA
-            if ip == ha:
-                return THROUGH_HA
+        if self.ha is not None and ip == self.ha:
+            return THROUGH_HA
         return ""
 
 
@@ -199,15 +208,18 @@ def _header(name: str) -> str:
     return "-".join(part.capitalize() if part != "ip" else "IP" for part in name.split("-"))
 
 
+def _run(command: list[str]) -> str:
+    try:
+        return subprocess.run(command, capture_output=True, text=True, timeout=5,
+                              check=False).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
 def default_router() -> str | None:
     """The default route's gateway, read from the system, or None if it can't be read."""
-    command = (["route", "-n", "get", "default"] if sys.platform == "darwin"
+    out = _run(["route", "-n", "get", "default"] if sys.platform == "darwin"
                else ["ip", "-4", "route", "show", "default"])
-    try:
-        out = subprocess.run(command, capture_output=True, text=True, timeout=5,
-                             check=False).stdout
-    except (OSError, subprocess.SubprocessError):
-        return None
     for line in out.splitlines():
         words = line.split()
         if sys.platform == "darwin" and words[:1] == ["gateway:"] and len(words) > 1:

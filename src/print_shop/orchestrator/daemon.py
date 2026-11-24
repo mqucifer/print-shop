@@ -155,6 +155,17 @@ NO_PHONE_HERE = "this run can't start a print from a phone. Start it at the term
 #: The most a Start from the terminal waits to be checked: a printer's snapshot, and the stock.
 _CHECKED_WITHIN_S = 60.0
 
+#: The most a phone's armed Start waits to say how the start went: the upload and the start.
+_STARTED_WITHIN_S = 45.0
+
+#: What a phone is told of a Start that wasn't weighed in time: withdrawn, so it never starts.
+WITHDRAWN = ("Not started: the checks at Start took too long, so this Start was withdrawn, and "
+             "nothing will start from it. Reload the page to start")
+
+#: What a phone is told of an armed Start still being sent.
+STARTING = ("Starting: the printer is armed for this one print, and disarms once it's sent. "
+            "Reload this page for how it went")
+
 #: What a Start with no word on the bed is told.
 BED_NOT_SAID = "the bed isn't confirmed clear. Clear it, then start again and answer y"
 
@@ -232,10 +243,12 @@ class ReadyToStart(BaseModel):
 
 
 class PhoneStart(BaseModel):
-    """What came of a phone's Start: started, or not, and in words."""
+    """What came of a phone's Start: started, or not, or still being sent, and in words."""
 
     started: bool
     said: str
+    #: Armed and still being sent when the phone stopped waiting.
+    pending: bool = False
 
 
 def parse_command(raw: bytes) -> Command:
@@ -310,15 +323,21 @@ def _gcode_sha256(state: Any) -> str:
     return str(state.get("gcode_sha256") or "") if isinstance(state, dict) else ""
 
 
-def _rejection(inbox: Queue[Command]) -> Command | None:
-    """A Reject among the presses that came while an Approve was checked."""
-    while True:
-        try:
-            cmd = inbox.get_nowait()
-        except Empty:
-            return None
-        if cmd.decision is Decision.REJECT:
-            return cmd
+@dataclasses.dataclass
+class _PhoneWait:
+    """A phone's Start, waiting for the gate: "queued", "claimed" by the gate to weigh, or
+    "withdrawn" by the phone; and, once weighed, why it wasn't armed, or "" if it was."""
+
+    answered: threading.Event = dataclasses.field(default_factory=threading.Event)
+    state: str = "queued"
+    why: str = ""
+
+
+def _phone_said(result: JobResult) -> str:
+    """How a phone's armed Start went, as the phone says it."""
+    if result.printed and not result.error:
+        return "Started by you. Disarmed again."
+    return f"Not started: {result.error or 'nothing was sent'}. Disarmed again."
 
 
 class Daemon:
@@ -434,9 +453,15 @@ class Daemon:
         #: A phone's confirm arms one start here, and nothing else (mqucifer/print-shop#214).
         self._one_start = one_start if one_start is not None else OneStart(None)
         self._start_page = start_page
-        #: What came of each phone's Start the gate weighed, by its command's id: "" if it was
-        #: taken, or why it was held.
-        self._answered: dict[str, str] = {}
+        #: Each phone's Start waiting for the gate's answer, by its command's id
+        #: (mqucifer/print-shop#214): claimed by the gate, or withdrawn by the phone, under the
+        #: job's lock, so the phone is never told "Not started" of a Start that goes on.
+        self._phone_waits: dict[str, _PhoneWait] = {}
+        #: How each job ended, kept (not taken, as `wait_for_finish`'s are), for the phone.
+        self._outcomes: dict[str, JobResult] = {}
+        #: The jobs a phone armed, by the phone's name, and how the last of them went.
+        self._phone_jobs: dict[str, str] = {}
+        self._last_phone = ""
         #: The terminal's commands each gate has weighed, by their id.
         self._weighed: set[str] = set()
         #: The jobs that wait for the person, which a restart takes up again.
@@ -847,18 +872,39 @@ class Daemon:
                 return PhoneStart(started=False, said=(
                     "the job was sliced again since this page was shown: reload it"))
             cmd = cmd.model_copy(update={"press": press})
+            wait = _PhoneWait()
+            self._phone_waits[cmd.id] = wait
             self._gate_inbox.put(cmd)
-        end = time.monotonic() + _CHECKED_WITHIN_S
-        while self._press == press and time.monotonic() < end:
-            time.sleep(0.02)
+        if not wait.answered.wait(_CHECKED_WITHIN_S):
+            with self._job_lock:
+                if wait.state == "queued":
+                    # Not yet weighed: withdrawn, under the lock the gate claims it under, so it
+                    # can never start later, and the phone is told so truly.
+                    wait.state = "withdrawn"  # the gate drops it as it comes to it (`_claim`)
+                    return PhoneStart(started=False, said=WITHDRAWN)
+            wait.answered.wait(_CHECKED_WITHIN_S)  # claimed: answered as it's armed, or not
         with self._job_lock:
-            said = self._answered.pop(cmd.id, None)
-        if said is None:
-            return PhoneStart(started=False, said=(
-                "another Start or a Reject came first, and is what's said of the job now"))
-        if said:
-            return PhoneStart(started=False, said=f"Not started: {said}")
-        return PhoneStart(started=True, said="Started by you. Disarmed again.")
+            self._phone_waits.pop(cmd.id, None)
+        if wait.why:
+            return PhoneStart(started=False, said=f"Not started: {wait.why}")
+        return self._phone_outcome(job_id)
+
+    def _phone_outcome(self, job_id: str) -> PhoneStart:
+        """A phone's armed Start, as it went: started, failed, or still being sent."""
+        end = time.monotonic() + _STARTED_WITHIN_S
+        while time.monotonic() < end:
+            with self._job_lock:
+                result = self._outcomes.get(job_id)
+            if result is not None:
+                said = _phone_said(result)
+                return PhoneStart(started=result.printed and not result.error, said=said)
+            time.sleep(0.05)
+        return PhoneStart(started=False, pending=True, said=STARTING)
+
+    def last_phone_start(self) -> str:
+        """How the last Start from a phone went, for the page to say once the gate's gone."""
+        with self._job_lock:
+            return self._last_phone
 
     def submit_sliced(self, job: SlicedJob) -> str:
         """Submit a hand-sliced file, to be sent as it is (mqucifer/print-shop#164). Returns
@@ -1061,10 +1107,13 @@ class Daemon:
             return self._gate_inbox
 
     def _close_gate(self) -> None:
-        """Drop the inbox. Idempotent — may be called on an already-closed gate."""
+        """Drop the inbox. Idempotent — may be called on an already-closed gate. A phone's Start
+        left in it is told it started nothing (mqucifer/print-shop#214)."""
         with self._job_lock:
-            self._gate_inbox = None
+            left, self._gate_inbox = self._gate_inbox, None
             self._press = ""
+        if left is not None:
+            self._spend(left)
 
     def _left_gate(self) -> None:
         """The gate has its answer, or its wait ran out. Its time was the person's, so the wait
@@ -1275,8 +1324,20 @@ class Daemon:
             # This press is spent, and so is any that came while it was checked: none is kept
             # to start the job later. A Reject among them still stands, whatever the check said.
             spent, inbox = inbox, self._open_gate()
-            if rejected := _rejection(spent):
-                self._answer(cmd, "a Reject came while it was checked, and the job has ended")
+            rejected = self._spend(spent)
+            if not self._claim(cmd):
+                # A phone's Start its phone withdrew while it was checked: it was told nothing
+                # started, so nothing does. The gate waits, with a new word for a press.
+                if rejected is not None:
+                    cmd = rejected
+                    self._weigh(cmd)
+                    break
+                self._name_buttons(job_id, self._press)
+                continue
+            if rejected is not None:
+                self._answer(cmd, "a Reject came while it was checked, and the job has ended"
+                             if not rejected.withdraw else
+                             "the job was put back to wait in the queue")
                 cmd = rejected
                 self._weigh(cmd)
                 break
@@ -1357,11 +1418,46 @@ class Daemon:
                 error=str(exc),
             )
 
+    def _claim(self, cmd: Command) -> bool:
+        """The gate takes `cmd` to weigh: False for a phone's Start its phone has withdrawn."""
+        with self._job_lock:
+            wait = self._phone_waits.get(cmd.id) if cmd.phone is not None else None
+            if wait is None:
+                return cmd.phone is None
+            if wait.state == "withdrawn":
+                self._phone_waits.pop(cmd.id, None)
+                return False
+            wait.state = "claimed"
+            return True
+
     def _answer(self, cmd: Command, why: str) -> None:
-        """What came of a phone's Start, for `start_from_phone` to say: "" taken."""
-        if cmd.phone is not None and cmd.id:
-            with self._job_lock:
-                self._answered[cmd.id] = why
+        """What came of a phone's Start, for `start_from_phone` to say: "" armed."""
+        if cmd.phone is None:
+            return
+        with self._job_lock:
+            wait = self._phone_waits.get(cmd.id)
+            if wait is not None and wait.state == "withdrawn":
+                self._phone_waits.pop(cmd.id, None)  # its phone was told already
+            elif wait is not None:
+                wait.state = "claimed"
+                wait.why = why
+                if not why:
+                    self._phone_jobs[cmd.job_id] = cmd.phone.by
+                wait.answered.set()
+
+    def _spend(self, spent: Queue[Command]) -> Command | None:
+        """The commands that came while one was checked, spent: a Reject among them, which
+        stands; each phone's Start among them told it wasn't the one taken."""
+        rejected: Command | None = None
+        while True:
+            try:
+                cmd = spent.get_nowait()
+            except Empty:
+                return rejected
+            if cmd.decision is Decision.REJECT and rejected is None:
+                rejected = cmd
+            elif cmd.phone is not None:
+                self._answer(cmd, "another Start came first, and is what's said of the job now")
 
     def _put_back(self, job_id: str, before_print: bool) -> None:
         """The gate closed with no decision, and the job left waiting there (`withdraw`)."""
@@ -1484,6 +1580,10 @@ class Daemon:
             printed=printed,
             error=error,
         )
+        with self._job_lock:
+            self._outcomes[job_id] = self._results[job_id]
+            if job_id in self._phone_jobs:
+                self._last_phone = _phone_said(self._results[job_id])
 
         # It no longer waits, however it ended. A job cut short by this daemon closing isn't
         # ended: it waits to be taken up again (mqucifer/print-shop#209).

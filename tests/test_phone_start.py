@@ -10,7 +10,6 @@ to show it refuses, or that what it builds can't connect.
 
 from __future__ import annotations
 
-import dataclasses
 import html
 import io
 import ipaddress
@@ -43,7 +42,6 @@ from print_shop.orchestrator.start import Checked
 from print_shop.phone import confirm as confirm_module
 from print_shop.phone.confirm import CONFIRM_LASTS_S, EXPIRED, UNKNOWN, Confirms
 from print_shop.phone.home import (
-    NO_HA,
     NO_ROUTER,
     OUTSIDE,
     PROXY_HEADERS,
@@ -93,8 +91,7 @@ def _resolve(name: str) -> str:
 def home(**changes: Any) -> Home:
     given: dict[str, Any] = {
         "address": ipaddress.IPv4Address(MAC), "network": ipaddress.IPv4Network(NETWORK),
-        "port": PORT, "router": ipaddress.IPv4Address(ROUTER), "ha_host": HA_NAME,
-        "resolve": _resolve,
+        "port": PORT, "router": ipaddress.IPv4Address(ROUTER), "ha": ipaddress.IPv4Address(HA),
     }
     return Home(**{**given, **changes})
 
@@ -584,7 +581,6 @@ def test_a_phone_on_the_home_wifi_isnt_refused(page: type, phones: Phones) -> No
 
 def test_where_the_router_or_ha_cant_be_told_start_is_refused(page: type) -> None:
     assert home(router=None).why_not(PHONE, []) == NO_ROUTER
-    assert home(ha_host="not-a-made-up-host").why_not(PHONE, []) == NO_HA
 
 
 def test_a_name_that_points_here_isnt_the_pages_own_host(
@@ -687,20 +683,27 @@ def test_another_phones_confirm_is_refused(
     mine = signed_in(page, phones, "One made-up phone")
     theirs = signed_in(page, phones, "Another made-up phone", peer=ANOTHER_PHONE)
     made = mine.get("/").confirm()
-    theirs.peer = PHONE  # even from the same address
     reply = theirs.start(made)
     assert reply.status == 403 and "another phone" in reply.body
     assert starts.calls == []
+    confirms = Confirms()
+    one = confirms.make(phone_hash="mine", phone="p", job_id="j", press="w", gcode_sha256="g",
+                        address=PHONE)
+    assert "another phone" in str(confirms.spend(one, phone_hash="theirs", address=PHONE))
 
 
-def test_a_confirm_from_another_address_is_refused(
-    page: type, phones: Phones, starts: FakeStarts,
-) -> None:
+def test_a_confirm_from_another_address_is_refused(phones: Phones, starts: FakeStarts) -> None:
+    """The same phone, its address renewed between the page and the Start: refused, and a new
+    view of the page starts."""
+    renewed = ip(10, 77, 0, 33)
+    page = handler_for(home=home(), phones=phones, starts=starts)
     browser = signed_in(page, phones)
     made = browser.get("/").confirm()
-    browser.peer = ANOTHER_PHONE
-    assert browser.start(made).status == 403
+    browser.peer = renewed
+    reply = browser.start(made)
+    assert reply.status == 403 and "another address" in reply.body
     assert starts.calls == []
+    assert browser.start(browser.get("/").confirm()).status == 200
 
 
 def test_a_forgotten_phone_is_signed_out_at_once(
@@ -754,10 +757,12 @@ def test_a_start_that_fails_at_the_printer_leaves_nothing_armed(tmp_path: Path) 
         assert ready is not None
         said = daemon.start_from_phone(job_id, armed=_armed(job_id), press=ready.press,
                                        gcode_sha256=ready.gcode_sha256)
-        assert said.started
+        # The phone is told how the start went, not only that it was armed (the review).
+        assert not said.started and "refused" in said.said and "Disarmed again." in said.said
         result = daemon.wait_for_finish(job_id, timeout_s=WAIT_S)
         assert not result.printed and "refused" in (result.error or "")
         assert one_start.armed() is None
+        assert "refused" in daemon.last_phone_start()
     assert len(built) == 1
 
 
@@ -963,10 +968,9 @@ def test_the_page_shows_no_secret_and_cant_be_framed(
     settings = tmp_path / "made-up.env"
     settings.write_text(f"PHONE_HOME={MAC}/24\nPHONE_ROUTER={ROUTER}\nMQTT_HOST={HA_NAME}\n"
                         "MQTT_PASSWORD=made-up-password\n")
-    loaded = Home.from_settings(settings)
-    assert loaded is not None
-    page = handler_for(home=dataclasses.replace(loaded, resolve=_resolve), phones=phones,
-                       starts=starts)
+    loaded = Home.from_settings(settings, resolve=_resolve)
+    assert loaded is not None and str(loaded.ha) == HA
+    page = handler_for(home=loaded, phones=phones, starts=starts)
     browser = signed_in(page, phones)
     for reply in (browser.get("/"), browser.get("/pair"), Browser(page).get("/")):
         for secret in (browser.cookie, "made-up-password", HA_NAME, HA, ROUTER, "PHONE_",
@@ -977,6 +981,8 @@ def test_the_page_shows_no_secret_and_cant_be_framed(
         assert "script-src" not in reply.header("Content-Security-Policy")
         assert "<script" not in reply.body
         assert reply.header("Cache-Control") == "no-store"
+        # Not no-referrer, under which a browser sends a same-origin POST's Origin as "null".
+        assert reply.header("Referrer-Policy") == "same-origin"
 
 
 def test_every_other_method_and_route_is_refused(page: type, phones: Phones) -> None:
@@ -1157,3 +1163,77 @@ def test_confirms_held_are_bounded(clock: Clock) -> None:
                       address=PHONE)
     assert confirms.spend(first, phone_hash="h", address=PHONE) == UNKNOWN
 
+
+# --------------------------------------------------------------------------
+# From the cold security review: the race, the outcome, Home Assistant's host, the port
+# --------------------------------------------------------------------------
+
+
+def test_port_80_and_an_unfound_ha_host_are_refused(tmp_path: Path) -> None:
+    with pytest.raises(HomeRefused, match="can't be 80"):
+        Home.from_settings(_settings(tmp_path, f"PHONE_HOME={MAC}/24\nPHONE_PORT=80\n"),
+                           router=lambda: ROUTER)
+    with pytest.raises(HomeRefused, match="Home Assistant's host"):
+        Home.from_settings(_settings(tmp_path, f"PHONE_HOME={MAC}/24\nMQTT_HOST=nowhere\n"),
+                           router=lambda: ROUTER, resolve=_resolve)
+    named = Home.from_settings(
+        _settings(tmp_path, f"PHONE_HOME={MAC}/24\nMQTT_HOST=nowhere\nPHONE_HA_HOST={HA_NAME}\n"),
+        router=lambda: ROUTER, resolve=_resolve)
+    assert named is not None and str(named.ha) == HA
+
+
+def test_a_phones_start_its_phone_stopped_waiting_for_never_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The review's race: checks that run past the phone's wait. The phone is told it was
+    withdrawn, and the gate, coming to it after, starts nothing from it."""
+    release = threading.Event()
+
+    class Slow(FramePrinter):
+        def snapshot(self) -> PrinterSnapshot:
+            if threading.current_thread().name != "MainThread" and not release.is_set():
+                release.wait(WAIT_S)
+            return super().snapshot()
+
+    monkeypatch.setattr(daemon_module, "_CHECKED_WITHIN_S", 0.3)
+    shop, one_start, built = _phone_shop(tmp_path, Slow())
+    with _unarmed(shop, one_start) as daemon:
+        job_id = daemon.submit(shop.stl)
+        daemon.wait_for_gate(job_id, timeout_s=WAIT_S)
+        release.set()
+        ready = daemon.ready_to_start()
+        assert ready is not None
+        release.clear()
+        said = daemon.start_from_phone(job_id, armed=_armed(job_id), press=ready.press,
+                                       gcode_sha256=ready.gcode_sha256)
+        assert not said.started and "withdrawn" in said.said
+        release.set()
+        time.sleep(0.5)
+        assert built == [] and one_start.armed() is None
+        assert "upload" not in shop.printer.verbs
+        assert shop.bridge.retained_json(gate_topic(CFG)).get("pending"), "the gate still waits"
+        shop.bridge.press(CFG, "reject")
+        daemon.wait_for_finish(job_id, timeout_s=WAIT_S)
+
+
+def test_two_phones_starts_at_one_gate_start_once_and_the_other_is_told(tmp_path: Path) -> None:
+    shop, one_start, built = _phone_shop(tmp_path)
+    with _unarmed(shop, one_start) as daemon:
+        job_id = daemon.submit(shop.stl)
+        daemon.wait_for_gate(job_id, timeout_s=WAIT_S)
+        ready = daemon.ready_to_start()
+        assert ready is not None
+        said: list[PhoneStart] = []
+
+        def press() -> None:
+            said.append(daemon.start_from_phone(job_id, armed=_armed(job_id), press=ready.press,
+                                                gcode_sha256=ready.gcode_sha256))
+
+        both = [threading.Thread(target=press) for _ in range(2)]
+        for each in both:
+            each.start()
+        for each in both:
+            each.join(WAIT_S)
+        assert daemon.wait_for_finish(job_id, timeout_s=WAIT_S).printed
+    assert sorted(p.started for p in said) == [False, True]
+    assert len(built) == 1 and shop.printer.verbs.count("start") == 1

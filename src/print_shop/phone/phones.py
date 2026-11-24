@@ -166,14 +166,15 @@ class Phones:
                 raise
         return said
 
-    def signed_in(self, secret: str) -> str | None:
-        """The name of the phone whose cookie holds `secret`, or None."""
+    def signed_in(self, secret: str) -> Paired | None:
+        """The phone whose cookie holds `secret`, or None."""
         if not secret or len(secret) > 200:
             return None
         with self._lock, self._open() as conn:
-            found = conn.execute("SELECT name FROM phones WHERE secret_sha256 = ?",
+            found = conn.execute("SELECT name, paired_at FROM phones WHERE secret_sha256 = ?",
                                  (_sha256(secret),)).fetchone()
-        return str(found["name"]) if found is not None else None
+        return Paired(name=found["name"], paired_at=found["paired_at"]) if (
+            found is not None) else None
 
     def all(self) -> list[Paired]:
         """The paired phones, the oldest first."""

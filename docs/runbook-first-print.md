@@ -476,20 +476,20 @@ A ready job can be armed and started from your phone, on the home Wi-Fi only (mq
 **Once: set it up.**
 
 1. At the router, reserve the Mac's address on the home Wi-Fi, so it keeps it.
-2. In the settings (`~/.config/print-shop/.env`), set `PHONE_HOME` to that address with its network, written `A.B.C.D/24`. Optional: `PHONE_PORT` (8765), and `PHONE_ROUTER` if the run says the router's address can't be read. The page listens on that address only, and refuses a public one.
+2. In the settings (`~/.config/print-shop/.env`), set `PHONE_HOME` to that address with its network, written `A.B.C.D/24`. Optional: `PHONE_PORT` (8765; not 80), `PHONE_ROUTER` if the run says the router's address can't be read, and `PHONE_HA_HOST` if Home Assistant isn't on the broker's host (`MQTT_HOST`). The page listens on that address only, and refuses a public one. It looks up Home Assistant's host once as it starts, and stays off, saying so, if it can't find it.
 3. **Pair your phone, at the Mac's own keyboard:**
 
    ```
    uv run python scripts/phone.py pair "Your phone"
    ```
 
-   It shows the page's address and a 10-character code. On the phone, on the home Wi-Fi, open the address's `/pair`, tap through, and type the code. It lasts 10 minutes, works once, and dies after 5 wrong tries. Pairing is refused from a script, a session's shell, or a login from elsewhere. The phone is signed in for a year. The Mac keeps only a hash of its sign-in. `phone.py list` shows the paired phones, and `phone.py forget "Your phone"` signs one out at once.
+   It shows the page's address and a 10-character code. On the phone, on the home Wi-Fi, open the address's `/pair`, tap through, and type the code. It lasts 10 minutes, works once, and dies after 5 wrong tries. `pair` won't run from a script, a session's shell, or a login from elsewhere. That's a speed bump against a slip, not a lock: a process on the Mac that means to can get round it, as it could type the flag. Pairing itself is refused from the Mac's own address, so a second device on the home Wi-Fi has to type the code. The phone is signed in for a year. The Mac keeps only a hash of its sign-in. `phone.py list` shows the paired phones, and `phone.py forget "Your phone"` signs one out at once.
 
 **Each print.**
 
 1. Run the job as before. Without the flag, the phone is how it starts; with it, the terminal and the card start it too (the table above). The run says `Your phone's Start: http://…/ , on the home Wi-Fi only`, and the card links to it ("Start it on your phone"). It opens in the phone's browser, never inside Home Assistant.
 2. At the gate, the phone's Start page shows the job, and what Start checks: time and plastic, the pause, the spool, the nozzle, the file and settings, and the printer. Each row says its result, and what to do where one fails.
-3. Look at the bed, tick **I can see the bed is clear**, and press **Start**. The same checks as `start` here run again. If one holds it, the phone says why, nothing is armed, and you Start again once it's mended (reload the page). Started, the phone says `Started by you. Disarmed again.`, and the ledger keeps who armed it, from where and when, with the print's row.
+3. Look at the bed, tick **I can see the bed is clear**, and press **Start**. The same checks as `start` here run again. If one holds it, the phone says why, nothing is armed, and you Start again once it's mended (reload the page). Started, the phone says `Started by you. Disarmed again.`, once the printer has started it; a start that fails at the printer says `Not started: …`, and why. If sending the file takes longer than the phone waits, it says `Starting: …`, and the Start page says how it went once you reload. The ledger keeps who armed it, from where and when, with the print's row.
 
 **What's refused, in words:**
 - a confirm used twice, or more than 2 minutes old, or from another phone, or for a gate that's moved on;
@@ -497,7 +497,9 @@ A ready job can be armed and started from your phone, on the home Wi-Fi only (mq
 - **anything that isn't a phone's own address on the home Wi-Fi:** the Mac itself (a tunnel or a script on it), the router (a port forward), Home Assistant's host (its remote access or an automation), another network, or any request carrying a proxy's headers. The phone shows `You're away from home`, and the job waits.
 
 **What it doesn't claim:**
-- **The page is plain HTTP.** Anyone who can read the home Wi-Fi's traffic, and copies a phone's sign-in, could arm a ready job from the home network. HTTPS would close that, and is the Sponsor's call.
+- **The page is plain HTTP.** Anyone who can read the home Wi-Fi's traffic, and copies a phone's sign-in, could arm a ready job from the home network. HTTPS would close that. The Sponsor deferred it on 2026-11-24 ("HTTP for now").
+- **A copied sign-in works from any device on the home Wi-Fi,** for a year or until `phone.py forget`. Binding a phone to its Wi-Fi hardware address was weighed and left out: an iPhone rotates its private Wi-Fi address, and would be refused.
+- **A VPN that puts its clients on the home range isn't told from a phone at home:** some routers' WireGuard or IPsec servers, bridged OpenVPN, or a VPN's subnet router on a machine at home. There's no such VPN in the house (the Sponsor, 2026-11-24). **If one is ever added, change this check first,** before using it.
 - Another machine on the home network relaying raw traffic looks like that machine. What it carries is still your phone's own page and confirm, pressed by you.
 
 The flag still works: in a run armed by it, `start` at the terminal and the card's **Yes, print it** start the print, as before. Without it, nothing in Home Assistant, no MQTT message, no setting and no test can arm a start.
