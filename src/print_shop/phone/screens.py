@@ -13,11 +13,13 @@ from datetime import datetime
 from html import escape
 
 from print_shop import reprint
+from print_shop.desk.read import OnHand
 from print_shop.inventory import Pick
 from print_shop.ledger import Result, Row, Symptom
 from print_shop.orchestrator.kept import Waits, local_when
 from print_shop.orchestrator.print_queue import Line, Need, SentTo
 from print_shop.outcome_words import outcome_words
+from print_shop.phone.filaments import load_button
 from print_shop.phone.page import page
 from print_shop.phone.shop import NowPrinting, ReadyGroup, ToRecord, spool_words
 
@@ -103,12 +105,19 @@ def _waiting_rows(sends: Sequence[SentTo], lines: Sequence[Line],
     return rows
 
 
-def _ready_rows(groups: Sequence[ReadyGroup]) -> str:
+def _ready_rows(groups: Sequence[ReadyGroup], on_hand: OnHand | None, changes: int) -> str:
     out = []
     first = True
+    spools = {s.id: s for s in on_hand.spools} if on_hand is not None else {}
     for group in groups:
         where = "loaded" if group.loaded else "on the shelf"
-        out.append(f"<h2>{_e(group.spool)}, {where}</h2><ul class=\"rows\">")
+        out.append(f"<h2>{_e(group.spool)}, {where}</h2>")
+        spool = spools.get(group.spool_id) if group.spool_id is not None else None
+        if not group.loaded and spool is not None:
+            # The stock's own load: where what's on isn't known, it asks both halves first.
+            out.append(f"<div class=\"buttons\">"
+                       f"{load_button(spool, changes, f'I loaded {spool.colour}')}</div>")
+        out.append("<ul class=\"rows\">")
         for ready in group.rows:
             line = ready.line
             count = f" × {ready.count}" if ready.count > 1 else ""
@@ -133,7 +142,7 @@ def _ready_rows(groups: Sequence[ReadyGroup]) -> str:
 def main_page(
     *, printing: Sequence[NowPrinting], sends: Sequence[SentTo], lines: Sequence[Line],
     to_record: Sequence[ToRecord], ready: Sequence[ReadyGroup], queue_on: bool,
-    offered: str = "",
+    offered: str = "", on_hand: OnHand | None = None, changes: int = 0,
 ) -> str:
     """Main: what's printing, what's sent to or waits on the person, what's ready by spool, and
     what's getting ready. `offered` is the part offered at the gate in a run without a queue,
@@ -155,7 +164,7 @@ def main_page(
             body.append(f"<ul class=\"rows\">{_row('/start', what, 'Start')}</ul>")
     if ready:
         body.append("<h2>Ready. They wait until you start them.</h2>")
-        body.append(_ready_rows(ready))
+        body.append(_ready_rows(ready, on_hand, changes))
     getting = [li for li in lines if li.needs is None
                and li.job.waits is not Waits.READY]
     if getting:
@@ -165,7 +174,8 @@ def main_page(
                              f"<span class=\"part\">{_e(_named(line))}</span>"
                              f"{_small(_getting(line))}"))
         body.append("</ul>")
-    body.append("<div class=\"foot\"><a href=\"/runs\">Finished</a></div>")
+    body.append("<div class=\"foot\"><a href=\"/runs\">Finished</a>"
+                "<a href=\"/filaments\">Filaments</a></div>")
     return page("Printing", "".join(body))
 
 
@@ -189,7 +199,8 @@ def _button(action: str, words: str, *, kind: str = "", fields: dict[str, str] |
             f"<button type=\"submit\"{cls}>{_e(words)}</button></form>")
 
 
-def job_page(line: Line, *, each_s: int | None, said: str = "", sliced: bool = False) -> str:
+def job_page(line: Line, *, each_s: int | None, said: str = "", sliced: bool = False,
+             spools: str = "") -> str:
     """A job's own page: where it is, what it needs, and the queue's actions on it."""
     job = line.job
     rows = [("Where", _step(line))]
@@ -218,7 +229,8 @@ def job_page(line: Line, *, each_s: int | None, said: str = "", sliced: bool = F
                f"<p><a href=\"/job/{_e(job.job_id)}/remove\">Remove from the queue</a></p>")
     return page(_named(line), (
         "<a class=\"back\" href=\"/\">Back to queue</a>"
-        f"<h1>{_e(_named(line))}</h1>{told}<dl>{listed}</dl>{needs}{start}{buttons}"))
+        f"<h1>{_e(_named(line))}</h1>{told}<dl>{listed}</dl>{needs}{start}{buttons}"
+        f"{spools}"))
 
 
 def remove_page(line: Line) -> str:

@@ -42,6 +42,7 @@ from print_shop.arming import Armed
 from print_shop.orchestrator.daemon import PhoneStart, ReadyToStart
 from print_shop.orchestrator.print_queue import Line
 from print_shop.phone.confirm import Confirm, Confirms, secret_hash
+from print_shop.phone.filaments import SwapJob, filaments_page, load_page, spools_for_job
 from print_shop.phone.home import HOME_KEY, PORT_KEY, Home
 from print_shop.phone.page import (
     away_page,
@@ -60,7 +61,7 @@ from print_shop.phone.screens import (
     run_page,
     runs_page,
 )
-from print_shop.phone.shop import Shop
+from print_shop.phone.shop import LoadAsk, Shop
 from print_shop.phone.slice import slice_page
 
 __all__ = ["COOKIE", "PhoneOff", "Starts", "attach", "handler_for", "make_server"]
@@ -335,7 +336,7 @@ class _Handler(BaseHTTPRequestHandler):
         self._send(main_page(
             printing=shop.printing(), sends=shop.sent(), lines=lines,
             to_record=shop.to_record(), ready=shop.ready(lines), queue_on=shop.queue is not None,
-            offered=offered))
+            offered=offered, on_hand=shop.on_hand(), changes=shop.stock_changes()))
 
     def _job_line(self, held: dict[str, str]) -> Line | None:
         line = self.shop.line(held["id"]) if self.shop is not None else None
@@ -352,7 +353,8 @@ class _Handler(BaseHTTPRequestHandler):
         said = parse_qs(query).get("said", [""])[0][:200]
         sliced = self.shop.prepared(line.job.copy_of or line.job.job_id).get("slice_reading")
         self._send(job_page(line, each_s=self.shop.each_s(line.job), said=_DONE.get(said, ""),
-                            sliced=sliced is not None))
+                            sliced=sliced is not None,
+                            spools=spools_for_job(line, self.shop.on_hand())))
 
     def _r_remove_screen(self, held: dict[str, str], query: str) -> None:
         line = self._job_line(held)
@@ -375,6 +377,57 @@ class _Handler(BaseHTTPRequestHandler):
         if verb == "remove":
             return self._see_other("/")
         self._see_other(f"/job/{line.job.job_id}?said={verb}")
+
+    def _r_move(self, held: dict[str, str], form: dict[str, str]) -> None:
+        """Print it in another spool: the queue's own `spool`."""
+        line = self._job_line(held)
+        if line is None or self.shop is None:
+            return
+        spool = form.get("spool", "")
+        if not spool.isdigit() or len(spool) > 9:
+            return self._send(message_page("Not moved", "That isn't a spool.",
+                                           back_to=f"/job/{line.job.job_id}",
+                                           back_words="Back to the job"),
+                              code=HTTPStatus.BAD_REQUEST)
+        said = self.shop.move(line.job.job_id, int(spool))
+        if isinstance(said, str):
+            return self._send(message_page("Not moved", said, back_to=f"/job/{line.job.job_id}",
+                                           back_words="Back to the job"),
+                              code=HTTPStatus.CONFLICT)
+        self._send(message_page("Moved", " ".join(said), back_to="/",
+                                back_words="Back to queue"))
+
+    def _r_filaments(self, held: dict[str, str], query: str) -> None:
+        if self.shop is None:
+            return self._no_shop()
+        lines = self.shop.lines()
+        swaps = []
+        for line in lines:
+            reading = self.shop.prepared(line.job.copy_of or line.job.job_id).get(
+                "slice_reading")
+            if reading is not None and (swap := SwapJob(line, reading)).swaps:
+                swaps.append(swap)
+        self._send(filaments_page(self.shop.on_hand(), changes=self.shop.stock_changes(),
+                                  lines=lines, swaps=swaps))
+
+    def _r_load(self, held: dict[str, str], form: dict[str, str]) -> None:
+        """The stock's own load, asking both halves first where what's on isn't known."""
+        if self.shop is None:
+            return self._no_shop()
+        spool, changes = form.get("spool", ""), form.get("changes", "")
+        if not (spool.isdigit() and changes.isdigit()) or len(spool) > 9 or len(changes) > 12:
+            return self._send(message_page("Not loaded", "That wasn't the page's form.",
+                                           back_to="/filaments", back_words="Back to filaments"),
+                              code=HTTPStatus.BAD_REQUEST)
+        done = self.shop.load(int(spool), changes=int(changes), answer=form.get("answer", ""))
+        if isinstance(done, LoadAsk):
+            return self._send(load_page(done))
+        if isinstance(done, str):
+            return self._send(message_page("Not loaded", done, back_to="/filaments",
+                                           back_words="Back to filaments"),
+                              code=HTTPStatus.CONFLICT)
+        self._send(message_page("Loaded", " ".join(done), back_to="/filaments",
+                                back_words="Back to filaments"))
 
     def _layer(self, query: str) -> int | None:
         found = parse_qs(query).get("layer", [""])[0]

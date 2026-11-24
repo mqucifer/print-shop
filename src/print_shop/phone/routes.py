@@ -50,6 +50,11 @@ ROUTES: tuple[Route, ...] = (
     Route("GET", rf"/job/{_ID}", "job"),
     Route("GET", rf"/job/{_ID}/remove", "remove_screen"),
     Route("POST", rf"/job/{_ID}/(?P<verb>hold|release|first|remove)", "act"),
+    # Print it in another spool: the queue's own move.
+    Route("POST", rf"/job/{_ID}/spool", "move"),
+    # Filaments: what's loaded and on the shelf, and the stock's own load.
+    Route("GET", r"/filaments", "filaments"),
+    Route("POST", r"/filaments/load", "load"),
     # What the slice shows, for a job that's prepared and for a finished run, a failed one too.
     Route("GET", rf"/job/{_ID}/slice", "job_slice"),
     Route("GET", rf"/run/{_ID}/slice", "run_slice"),

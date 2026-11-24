@@ -515,3 +515,97 @@ def test_a_ready_jobs_slice_opens_from_its_page(page: Page) -> None:
     shown = phone.get(f"/job/{job_id}/slice")
     assert shown.status == 200 and "Time on each layer" in shown.body
     assert "Back to the job" in shown.body
+
+
+# --------------------------------------------------------------------------
+# Filaments: the stock's own load, and the queue's own move
+# --------------------------------------------------------------------------
+
+
+def _loaded(made: QueueShop) -> int | None:
+    from print_shop.inventory import Inventory  # noqa: PLC0415
+
+    with Inventory(made.ledger_path) as stock:
+        spool = stock.loaded("cc1")
+    return spool.id if spool is not None else None
+
+
+def _not_known(made: QueueShop) -> bool:
+    from print_shop.inventory import Inventory  # noqa: PLC0415
+
+    with Inventory(made.ledger_path) as stock:
+        return stock.unknown("cc1") is not None
+
+
+def _swap_sent(made: QueueShop) -> None:
+    """A made-up white-to-black print, sent and started: what's on isn't known after it."""
+    from print_shop.inventory import Inventory, SpoolUse  # noqa: PLC0415
+
+    with Inventory(made.ledger_path) as stock:
+        first = stock.material()
+        to = first.of(stock.spool(2))
+    made.ledger.record_start_requested(record("swap").model_copy(update={
+        "material": first, "spools": (SpoolUse(material=first, from_layer=1),
+                                      SpoolUse(material=to, from_layer=11, from_z=2.0))}))
+    made.ledger.record_started("swap")
+
+
+def test_filaments_shows_whats_loaded_and_on_the_shelf(page: Page) -> None:
+    _ready(page, "bracket")
+    shown = page.phone().get("/filaments").body
+    assert "white Elegoo PLA" in shown and "Loaded on cc1" in shown
+    assert "On the shelf" in shown and "black Elegoo PLA" in shown and "grey Elegoo PETG" in shown
+    assert "Add a spool at the Mac" in shown
+    assert "Filaments" in page.phone().get("/").body
+
+
+def test_load_is_the_stocks_own_and_refused_when_the_stock_changed(page: Page) -> None:
+    phone = page.phone()
+    changes = page.shop.stock_changes()
+    stale = phone.post("/filaments/load", {"spool": "2", "changes": str(changes - 1)})
+    assert stale.status == 409 and "Look again" in stale.body
+    assert _loaded(page.made) == 1, "nothing's recorded"
+    done = phone.post("/filaments/load", {"spool": "2", "changes": str(changes)})
+    assert done.status == 200 and "black Elegoo PLA is loaded on cc1" in done.body
+    assert _loaded(page.made) == 2
+
+
+def test_after_a_swap_load_asks_both_halves_with_nothing_preselected(page: Page) -> None:
+    _swap_sent(page.made)
+    assert _not_known(page.made)
+    phone = page.phone()
+    assert "doesn't know what's on cc1" in phone.get("/filaments").body
+    changes = str(page.shop.stock_changes())
+    asked = phone.post("/filaments/load", {"spool": "2", "changes": changes})
+    assert asked.status == 200 and "Is cube.stl's print" in asked.body
+    assert "is spool #2, Elegoo PLA, black, on the printer now?" in asked.body
+    assert not ticked(asked.raw)
+    assert _loaded(page.made) == 1 and _not_known(page.made), "the question alone moves nothing"
+    alone = phone.post("/filaments/load", {"spool": "2", "changes": changes, "answer": "alone"})
+    assert "still doesn't know" in alone.body
+    assert _loaded(page.made) == 2 and _not_known(page.made), "a load alone doesn't clear it"
+    changes = str(page.shop.stock_changes())
+    both = phone.post("/filaments/load", {"spool": "2", "changes": changes, "answer": "both"})
+    assert both.status == 200 and "still" not in both.body
+    assert _loaded(page.made) == 2 and not _not_known(page.made)
+
+
+def test_main_says_i_loaded_for_a_shelf_spool_with_ready_jobs(page: Page) -> None:
+    job_id = _ready(page, "bracket")
+    moved = page.phone().post(f"/job/{job_id}/spool", {"spool": "2"})
+    assert moved.status == 200, moved.body
+    wait_until(lambda: page.made.waits(job_id) is Waits.READY)
+    shown = page.phone().get("/").body
+    assert "black Elegoo PLA, on the shelf" in shown and "I loaded black" in shown
+
+
+def test_print_it_in_another_spool_is_the_queues_own_move(page: Page) -> None:
+    job_id = _ready(page, "bracket")
+    phone = page.phone()
+    shown = phone.get(f"/job/{job_id}").body
+    assert "Print it in another spool instead?" in shown and "grey Elegoo PETG" in shown
+    moved = phone.post(f"/job/{job_id}/spool", {"spool": "3"})
+    assert moved.status == 200, moved.body
+    job = page.queue.find(job_id[:8])
+    assert job is not None and job.spool_id == 3
+    assert phone.post(f"/job/{job_id}/spool", {"spool": "x"}).status == 400

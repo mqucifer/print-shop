@@ -84,6 +84,9 @@ input[type=search] { width: 100%; padding: 12px; font-size: 1em; margin: 0 0 1em
 .card .head { display: flex; gap: 0.8em; justify-content: space-between; }
 .card .head .part { min-width: 0; overflow-wrap: anywhere; }
 .card .head .outcome { text-align: right; }
+.dot { display: inline-block; flex: none; width: 14px; height: 14px; border-radius: 50%;
+  border: 1px solid var(--line); margin-right: 8px; vertical-align: middle; }
+.buttons a.button { flex: 1 1 40%; }
 .bars { display: flex; align-items: flex-end; height: 96px; margin: 0.4em 0 0.2em;
   border-bottom: 1px solid var(--line); }
 .bars a { flex: 1 1 0; min-width: 0; background: var(--button); opacity: 0.75; }

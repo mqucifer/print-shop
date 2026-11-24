@@ -24,15 +24,23 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from print_shop.desk.read import Desk, OnHand
-from print_shop.inventory import Material, Pick, Spool
+from print_shop.inventory import (
+    Asked,
+    Inventory,
+    InventoryError,
+    Material,
+    Pick,
+    Spool,
+    SpoolState,
+)
 from print_shop.ledger import Ledger, LedgerError, Row
 from print_shop.orchestrator.kept import WaitingJob, Waits
 from print_shop.orchestrator.print_queue import Line, SentTo
 from print_shop.setup.pauses import said as pause_said
 
 __all__ = [
-    "Daemonish", "NowPrinting", "Queueish", "ReadyGroup", "ReadyRow", "Shop", "ToRecord",
-    "spool_words",
+    "LOOK_AGAIN", "Daemonish", "LoadAsk", "NowPrinting", "Queueish", "ReadyGroup", "ReadyRow",
+    "Shop", "ToRecord", "spool_words",
 ]
 
 logger = logging.getLogger(__name__)
@@ -52,6 +60,8 @@ class Queueish(Protocol):
     def first(self, job_id: str) -> str: ...
 
     def remove(self, job_id: str) -> str: ...
+
+    def move(self, job_id: str, spool_id: int) -> list[str] | str: ...
 
 
 class Daemonish(Protocol):
@@ -115,6 +125,22 @@ class ReadyGroup:
     spool: str
     loaded: bool
     rows: tuple[ReadyRow, ...]
+    spool_id: int | None = None
+
+
+@dataclass(frozen=True)
+class LoadAsk:
+    """A load that has to say both halves first: that print is over, and this spool is on
+    (mqucifer/print-shop#218, #246's A), in the stock's own words."""
+
+    spool: Spool
+    question: str
+    changes: int
+
+
+#: A load refused because the stock changed since the page was read.
+LOOK_AGAIN = ("what's on the printer was changed, said or seen otherwise since the page was "
+              "shown, so nothing's recorded. Look again")
 
 
 @dataclass
@@ -241,7 +267,7 @@ class Shop:
                 rows.append(ReadyRow(line, 1, self.each_s(line.job)))
             spool = spools.get(spool_id) if spool_id is not None else None
             named = spool_words(spool) or members[0].spool or "No spool named"
-            out.append(ReadyGroup(named, members[0].loaded, tuple(rows)))
+            out.append(ReadyGroup(named, members[0].loaded, tuple(rows), spool_id))
         return sorted(out, key=lambda g: not g.loaded)
 
     # -- the queue's actions --------------------------------------------------
@@ -260,6 +286,54 @@ class Shop:
         if verb == "remove":
             return self.queue.remove(job_id)
         raise ValueError(verb)
+
+    def move(self, job_id: str, spool_id: int) -> list[str] | str:
+        """The job printed with another spool: the queue's own `spool` (mqucifer/print-shop#210).
+        Another colour moves at once; another material goes back to the review, its answers
+        kept."""
+        if self.queue is None:
+            return "the queue isn't running: start it at the Mac with `print_job.py --queue`"
+        return self.queue.move(job_id, spool_id)
+
+    # -- the stock ------------------------------------------------------------
+
+    def stock_changes(self) -> int:
+        """How many times what's loaded, or what isn't known, has changed: a load from a page
+        counts only while it's the same as when the page was read."""
+        with self.ledger() as ledger:
+            if ledger is None:
+                return 0
+            found = ledger.query("SELECT COALESCE(MAX(n), 0) AS n FROM stock_changes")
+        return int(found[0]["n"]) if found else 0
+
+    def load(self, spool_id: int, *, changes: int, answer: str = "") -> LoadAsk | list[str] | str:
+        """A spool loaded, as `stock.py load` does it: where what's on isn't known since a print,
+        the stock's question first, which says both halves; "both" says that print is over and
+        this spool is on, and "alone" records the load alone, as any other answer at the
+        terminal does. `changes` is the stock as the page was read: a change since refuses it.
+        Returns the question, what was done a line each, or why not."""
+        try:
+            with Inventory(self.ledger_path) as stock:
+                printer = stock.printer(None)
+                spool = stock.spool(spool_id)
+                stands = stock.asked(printer.id)
+                if stands.changes != changes:
+                    return LOOK_AGAIN
+                found = stands.not_known
+                if found is not None and spool.state is not SpoolState.EMPTY \
+                        and answer not in ("both", "alone"):
+                    return LoadAsk(spool, found.over_and_on(spool.named()), stands.changes)
+                over = found if found is not None and answer == "both" else None
+                loaded = stock.load(spool.id, printer.id, over=over,
+                                    asked=Asked(changes, found))
+                lines = [f"{spool_words(loaded)} is loaded on {printer.id}."]
+                if (still := stock.unknown(printer.id)) is not None:
+                    lines.append(f"print-shop still doesn't know what's on {printer.id}, as "
+                                 f"nothing said {still.print_named()} is over: jobs don't "
+                                 "start.")
+                return lines
+        except InventoryError as exc:
+            return str(exc)
 
     # -- the outcome ----------------------------------------------------------
 
