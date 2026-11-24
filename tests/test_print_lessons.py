@@ -690,7 +690,7 @@ def test_a_correction_on_one_print_reaches_a_later_similar_parts_proposal(
     assert brim is not None
     assert (brim.value, brim.source, brim.lesson) == ("outer_only", Source.LESSON, 1)
     shown = render(sponsor.shown[-1])
-    assert re.search(r"\n  brim_type +no_brim +outer_only +lesson 1\n", shown), (
+    assert re.search(r"\n  Brim +brim_type +no_brim +outer_only +lesson 1\n", shown), (
         "the review says which lesson set it")
     assert "brim_type=outer_only · set it · from rail.stl · for a part that's long_and_narrow" \
         in " ".join(shown.split())

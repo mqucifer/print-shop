@@ -237,7 +237,7 @@ def test_the_answers_are_one_list_and_the_examples_come_on_the_first_round_only(
     # ok isn't offered while the turn it needs to fit waits.
     assert ("Answers: turn (ok waits for it) · take (the slice's) · take 7 8 (the model's) · "
             "no 7 because … · use · clear 2 · orientation (send it back) · key=value because … "
-            "· stop") in first
+            "· find <words> (a setting's key) · stop") in first
     turned = _flat(render(replace(made_up(), turn_taken=True)))
     assert "Answers: ok (approval gate) · take (the slice's) ·" in turned
     assert "e.g. wall_loops=3 because it's decorative (several separated by ';')" in first
@@ -313,8 +313,8 @@ def test_use_these_the_slices_and_the_models_share_one_number_space() -> None:
     assert [n for n, _ in request.numbered] == [5, 6]
     assert [r.number for r in request.by_model if r.standing == "open"] == [7, 8]
     text = render(request)
-    assert "  5) ironing_type  top -> no ironing" in text
-    assert "  7) outer_wall_speed  200 -> 120" in text
+    assert "  5) Ironing (ironing_type)  top -> no ironing" in text
+    assert "  7) Outer wall speed (outer_wall_speed)  200 -> 120" in text
 
 
 @pytest.mark.parametrize(("answer", "said"), [

@@ -398,7 +398,7 @@ def test_the_review_shows_the_plate_each_part_and_the_order_as_a_change(tmp_path
         rig.press("reject", job)
     said = rig.shown[0]
     assert "3 parts on one plate, printed BY OBJECT, one after another" in flat(said)
-    assert re.search(r"\n  print_sequence +by layer +by object +guard\n", said)
+    assert re.search(r"\n  Print sequence +print_sequence +by layer +by object +guard\n", said)
     assert "none strings to another" in flat(said)
     for n, name in enumerate(CAP_NAMES, 1):
         assert f"\n  PART {n}, {name}\n" in said

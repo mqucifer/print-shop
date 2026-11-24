@@ -34,6 +34,7 @@ from print_shop.core.state import turn_words
 from print_shop.setup import pauses
 from print_shop.setup.context import SET_ASIDE
 from print_shop.setup.layout import WIDTH, wrap
+from print_shop.setup.names import Found, named, plain, switched, with_unit
 from print_shop.setup.offer import render as render_offer
 from print_shop.setup.proposal import (
     ORIENTATION,
@@ -57,8 +58,8 @@ from print_shop.setup.suggest import didnt_come, fell_back, turning, waited
 if TYPE_CHECKING:
     from print_shop.setup.review import ReviewRequest
 
-__all__ = ["WIDTH", "Moved", "Said", "Section", "by_model", "clock", "sections", "what_moved",
-           "warnings", "wrap"]
+__all__ = ["WIDTH", "Moved", "Said", "Section", "by_model", "clock", "found", "sections",
+           "what_moved", "warnings", "wrap"]
 
 
 #: A row that moved since the last round.
@@ -167,6 +168,30 @@ def _clocked(text: str) -> str:
     return _SAID_TIME.sub(one, text)
 
 
+def found(words: str, settings: Sequence[Found], filament: str, width: int = WIDTH) -> list[str]:
+    """What `find` shows (mqucifer/print-shop#222): each setting found, best first, as its plain
+    name, today's value and its key, the first's job beneath it where it stands in for one the
+    filament doesn't list; then how to type one. `filament` is the filament preset's name."""
+    typed = " ".join(words.split())
+    if not settings:
+        return wrap("  ", f"Nothing this filament or process has fits '{typed}'. Finding changes "
+                    "nothing: try other words, such as bridge fan, bed or wall speed.", width,
+                    "    ")
+    rows = [(f.plain, f"now {with_unit(f.key, f.now)}", f.key) for f in settings]
+    wide = [max(len(r[i]) for r in rows) for i in range(2)]
+    lines = [f"  Settings that fit '{typed}', best first:"]
+    for n, (f, row) in enumerate(zip(settings, rows, strict=True)):
+        line = f"    {row[0].ljust(wide[0])}  {row[1].ljust(wide[1])}  {row[2]}"
+        # Where the row is wider than the line, the key goes beneath it.
+        lines += [line] if len(line) <= width else [f"    {row[0]}, {row[1]}", f"      {row[2]}"]
+        if n == 0 and f.stands_in:
+            lines += wrap("      ", f"{filament or 'This filament'} uses this one for "
+                          f"{f.stands_in}.", width)
+    lines += wrap("  ", "Finding changes nothing. Type it as key=value because \u2026, e.g. "
+                  f"{settings[0].key}=<value> because <why>", width, "    ")
+    return lines
+
+
 def _table(rows: Sequence[Sequence[str]], right: Iterable[int] = (), lead: str = "") -> list[str]:
     """Rows in columns, each as wide as its widest cell, those named in `right` aligned right."""
     right = set(right)
@@ -234,7 +259,7 @@ def _warnings(request: ReviewRequest, fits: _Fits) -> list[Said]:
                         "before it.", f"NOT DONE, your last answer: {_short(request.undone, 70)}"))
     out += _pause_said(request, fits)
     for c in proposal.not_applied:
-        out.append(Said(f"NOT APPLIED {c.key}: {c.not_applied}. {c.reason} [{_by(c)}]",
+        out.append(Said(f"NOT APPLIED {named(c.key)}: {c.not_applied}. {c.reason} [{_by(c)}]",
                         f"NOT APPLIED {c.key}: {c.not_applied}"))
     out += _turn_said(request)
     out += _model_said(request)
@@ -464,9 +489,22 @@ def _settings(request: ReviewRequest, width: int, marks: Moved, fits: _Fits) -> 
     widths = [max(len(r[i]) for r in rows) for i in range(len(head))]
     widths = [w if i in (0, len(head) - 1) else min(w, _CELL) for i, w in enumerate(widths)]
     rest = " " * 6
+    # The key after the plain name, where the line has room for it, else beneath it
+    # (mqucifer/print-shop#222): what the other columns leave, and the shortest who.
+    keys = {c.key for c in (*changes, *kept)}
+    room = width - 2 - sum(widths[1:-1]) - 2 * (len(head) - 1) - min(len(head[-1]) + 9, widths[-1])
+    after = {k for k in keys if widths[0] + 2 + len(k) <= room}
+    keyed = max((len(k) for k in after), default=0)
+    if keyed:
+        widths[0] += 2 + keyed
 
-    def laid(cells: tuple[str, ...], mark: str) -> list[str]:
-        """A row in the columns. A value longer than its column is said in full beneath."""
+    def setting(c: Change) -> str:
+        return (f"{plain(c.key).ljust(widths[0] - 2 - keyed)}  {c.key}" if c.key in after
+                else plain(c.key))
+
+    def laid(cells: tuple[str, ...], mark: str, key: str = "") -> list[str]:
+        """A row in the columns. A value longer than its column is said in full beneath, and
+        a key that doesn't fit after its name goes beneath that."""
         last = len(cells) - 1
         over = [i for i in range(1, last) if len(cells[i]) > widths[i]]
         shown = [("(below)" if i in over else cell).ljust(widths[i]) if i < last else cell
@@ -474,6 +512,8 @@ def _settings(request: ReviewRequest, width: int, marks: Moved, fits: _Fits) -> 
         out = wrap(f"{mark} ", "  ".join(shown).rstrip(), width, rest)
         if len(out) == 1 or len(shown[0]) + 2 > width:
             out = [f"{mark} " + "  ".join(shown).rstrip()]
+        if key and key not in after:
+            out.append(f"    {key}")
         out += [x for i in over for x in wrap(f"{rest}{head[i]}: ", cells[i], width, rest)]
         return out
 
@@ -492,7 +532,8 @@ def _settings(request: ReviewRequest, width: int, marks: Moved, fits: _Fits) -> 
             continue
         lines += ["", f"  {title}"]
         for c in group:
-            lines += laid(_row(c, tuned, c.value), MOVED if c.key in marks.keys else " ")
+            lines += laid((setting(c), *_row(c, tuned, c.value)[1:]),
+                          MOVED if c.key in marks.keys else " ", c.key)
             lines += _beneath(c, lessons, width, fits)
         if model:
             # What the model asked for that wasn't let through, under the model's own.
@@ -505,7 +546,8 @@ def _settings(request: ReviewRequest, width: int, marks: Moved, fits: _Fits) -> 
                    else f"{_BY[c.source]}: {c.feature}" if c.source is Source.ANSWER
                    else _BY[c.source])
             cells = _row(c, tuned, c.preset)
-            lines += laid((*cells[:-1], who), MOVED if c.key in marks.keys else " ")
+            lines += laid((setting(c), *cells[1:-1], who), MOVED if c.key in marks.keys else " ",
+                          c.key)
             lines += wrap(rest, fits.named(c.reason), width)
     if request.offering is not None:
         pose = pose_value(request.orientation.rotation_deg)
@@ -517,9 +559,9 @@ def _settings(request: ReviewRequest, width: int, marks: Moved, fits: _Fits) -> 
 
 
 def _row(c: Change, tuned: bool, value: str) -> tuple[str, ...]:
-    yours = c.preset or "-"
-    standard = (c.standard or yours,) if tuned else ()
-    return (c.key, *standard, yours, value, _by(c))
+    yours = switched(c.key, c.preset) or "-"
+    standard = (switched(c.key, c.standard) or yours,) if tuned else ()
+    return (plain(c.key), *standard, yours, switched(c.key, value), _by(c))
 
 
 def _beneath(
@@ -552,8 +594,8 @@ def by_model(request: ReviewRequest, width: int = WIDTH) -> list[str]:
     for row in rows:
         c = row.change
         if row.standing == "theirs":
-            lines += wrap("     -  ", f"{c.key}: {row.by} set {row.now or '-'}, and the model "
-                          f"would set {c.value}. {'Yours' if row.by == 'you' else 'That'} "
+            lines += wrap("     -  ", f"{named(c.key)}: {row.by} set {row.now or '-'}, and the "
+                          f"model would set {c.value}. {'Yours' if row.by == 'you' else 'That'} "
                           "stands.", width, rest)
             continue
         if row.standing == "so":
@@ -565,7 +607,9 @@ def by_model(request: ReviewRequest, width: int = WIDTH) -> list[str]:
         else:
             now = request.proposal.get(c.key)
             here = now.value if now is not None else c.preset
-        lines += wrap(f"  {row.number:>3}) ", f"{c.key}  {here or '-'} -> {c.value}", width, rest)
+        lines += wrap(f"  {row.number:>3}) ", f"{named(c.key)}  {switched(c.key, here) or '-'} -> "
+                      f"{switched(c.key, c.value)}", width,
+                      rest)
         cites = ", ".join(x for x in (c.feature, c.knowledge) if x and c.key != ORIENTATION)
         if c.reading:
             lines += wrap(rest, c.reading, width)
@@ -657,7 +701,8 @@ def _slice(request: ReviewRequest, width: int, marks: Moved, fits: _Fits) -> lis
             lines += ["", "  PROPOSED FROM THE SLICE (not applied unless you take it)"]
         sliced = reading.settings.get(c.key, c.preset)
         yours = f" (your preset: {c.preset})" if c.preset and c.preset != sliced else ""
-        lines += wrap(f"  {n:>3}) ", f"{c.key}  {sliced or '-'} -> {c.value}{yours}", width,
+        lines += wrap(f"  {n:>3}) ", f"{named(c.key)}  {switched(c.key, sliced) or '-'} -> "
+                      f"{switched(c.key, c.value)}{yours}", width,
                       " " * 8)
         lines += wrap(" " * 8, f"{fits.named(c.reason)} [the slice: {c.knowledge}]", width)
         lines += wrap(" " * 8 + "read: ", fits.named(flag.reading), width, " " * 8)

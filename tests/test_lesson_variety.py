@@ -376,7 +376,7 @@ def test_with_no_past_print_to_offer_the_lessons_are_still_offered(
     found = Offering(lessons=offered(ledger, rail, FAST).lessons)
     text = " ".join(render(request(found)).split())
     assert "USE THESE: no past print has settings to offer, and lessons of this filament" in text
-    assert "[ ] 1 textured_plate_temp 60 -> 75" in text
+    assert "[ ] 1 Bed, textured plate (textured_plate_temp) 60 -> 75" in text
     assert "Answers: ok (approval gate) · use 1 ·" in text, "use is offered, by its number"
     review = parse_answer("use 1", request(found))
     assert not isinstance(review, str)

@@ -72,7 +72,7 @@ WHAT THE SLICE SHOWS
             138 (100 layers)
 
   PROPOSED FROM THE SLICE (not applied unless you take it)
-    1) seam_position  aligned -> back
+    1) Seam position (seam_position)  aligned -> back
         you said 'the walls and the top as it prints', so the walls are seen, and the seam is a line
         on them: back puts the line on the part's back as it sits on the plate (its largest y);
         random would scatter it instead [the slice: surface]
@@ -106,7 +106,7 @@ LOOK FIRST, AGAIN
   The model is still working on settings (<n> s)
   THE SLICE PROPOSES 1: take 1
 Answers: ok (approval gate) · take (the slice's) · orientation (send it back) ·
-         key=value because … · stop
+         key=value because … · find <words> (a setting's key) · stop
   e.g. wall_loops=3 because it's decorative (several separated by ';'); pause_at=12.4 because the
        nuts go in (it pauses once the layer topping out at 12.4 mm is done, and it asks what the
        pause is for); colour_change=12.4 because white to black (a swap)
@@ -115,11 +115,11 @@ The model's proposal came after <n> s. Enter adds it to the list (what you've ty
   THE MODEL PROPOSES 1 change (2), under Settings. None is applied until you take it.
 
   PROPOSED BY THE MODEL (not applied unless you take it)
-    2) wall_loops  2 -> 5
+    2) Walls (wall_loops)  2 -> 5
         flat faces show the infill [model: flat_top, walls-shells]
 
 Answers: ok (approval gate) · take (the slice's) · take 2 (the model's) · no 2 because … ·
-         orientation (send it back) · key=value because … · stop
+         orientation (send it back) · key=value because … · find <words> (a setting's key) · stop
 Ready to print. Start or reject it on the card.
   time        16 min
   plastic     3.34 cm3

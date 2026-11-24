@@ -312,8 +312,9 @@ def test_all_that_decided_a_print_is_offered_each_with_whose_it_was_and_why(
     assert all(s.selected for key, (_, s) in items.items() if key != "enable_support")
     text = " ".join(render(request_for(found)).split())
     assert "USE THESE: from plinth.stl," in text and "None is applied until you use it." in text
-    assert "YOUR OVERRIDES now -> use [x] 1 wall_loops 2 -> 4 it gets handled" in text
-    assert "seam_position aligned -> back the walls are seen; you took the slice's" in text
+    assert "YOUR OVERRIDES now -> use [x] 1 Walls (wall_loops) 2 -> 4 it gets handled" in text
+    assert ("Seam position (seam_position) aligned -> back the walls are seen; you took the "
+            "slice's") in text
     assert "YOUR ANSWERS THEN (not asked for this job)" in text
     assert "you chose 'screws': firmer" in text
     assert "you answered then: Where is it used? -> indoors" in text
