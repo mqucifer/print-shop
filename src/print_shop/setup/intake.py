@@ -39,6 +39,8 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
+from print_shop.setup.layout import WIDTH, right, terminal_width, wrap
+
 __all__ = [
     "DIFFERS_PROMPT",
     "NOTES_PROMPT",
@@ -53,6 +55,7 @@ __all__ = [
     "Question",
     "cli_asker",
     "drop_typed",
+    "option_lines",
     "replay_asker",
     "settings_line",
 ]
@@ -75,6 +78,12 @@ SQUARE_ON = (
     (0.0, 0.0, 0.0), (180.0, 0.0, 0.0), (90.0, 0.0, 0.0), (270.0, 0.0, 0.0), (0.0, 90.0, 0.0),
     (0.0, 270.0, 0.0),
 )
+#: What an option that sets nothing costs: Orca prices the answers together, at the review.
+NOTHING = "sets nothing itself; the review shows Orca's estimate"
+#: Where an option's number is, and where what it does is wrapped beneath it
+#: (mqucifer/print-shop#266).
+_NUMBER = "     "
+_BENEATH = " " * 10
 #: The most options a question is asked with. One past them is made from the notes.
 ASKED_OPTIONS = 4
 
@@ -108,20 +117,23 @@ class Option(BaseModel):
     estimate: Estimate | None = None  # Orca's, or None: "no estimate"
 
     def line(self) -> str:
-        """As the command shows it: what it sets comes from what it applies, never its text.
+        """In one line, as the print desk shows it: what it sets comes from what it applies,
+        never its text.
 
         The operator, 2026-10-25: an option's settings once said 1 wall while
         its text said 3 perimeters. So the settings line is written here from
         `settings`, and the model's words are only the impact and the why.
         """
-        if self.estimate is not None:
-            cost = self.estimate.line()
-        elif self.settings:
-            cost = "no estimate"
-        else:
-            cost = "sets nothing itself; the review shows Orca's estimate"
         rec = f"  [recommended: {self.why}]" if self.recommended else ""
-        return f"{self.label} ({settings_line(self.settings)}): {self.impact}; {cost}{rec}"
+        return f"{self.label} ({settings_line(self.settings)}): {self.impact}; {self.cost()}{rec}"
+
+    def cost(self) -> str:
+        """What it costs: Orca's estimate, or why there's none."""
+        if self.estimate is not None:
+            return self.estimate.line()
+        if self.settings:
+            return "no estimate"
+        return NOTHING
 
 
 _BRIMS = {"no_brim": "no brim", "auto_brim": "auto brim", "outer_only": "outer brim",
@@ -416,7 +428,9 @@ def _numbered_from(questions: Sequence[Question]) -> int:
     return given.before + 1 if isinstance(given, Added) else 1
 
 
-def _of_plate(questions: OfPlate, places: Sequence[int] | None = None) -> str:
+def _of_plate(
+    questions: OfPlate, places: Sequence[int] | None = None, width: int = WIDTH,
+) -> str:
     """A plate's questions, all or those at `places`, in its words: they're reworded before a
     question adds the pose it's asked in, as each part's is said in the heading."""
     def shown(text: str) -> str:
@@ -427,20 +441,22 @@ def _of_plate(questions: OfPlate, places: Sequence[int] | None = None) -> str:
     first = _numbered_from(questions)
     asked = ("Added by the model, from these parts' shapes" if _are_added(questions)
              else "A few questions about these parts")
-    lines = [f"{asked}, {questions.posed}:"]
+    lines = wrap("", f"{asked}, {questions.posed}:", width)
     for i in range(len(questions)) if places is None else places:
         q = questions[i]
         posed = q.model_copy(update={"text": shown(q.text)})
-        lines.append(f"{first + i}. {posed.asked()}")
-        lines += [f"   {n}) {shown(o.line())}" for n, o in enumerate(q.options, 1)]
-        lines.append("   o) other: say it in your own words")
+        lines += wrap(f"  {first + i}. ", posed.asked(), width)
+        lines += option_lines(q, width, shown=shown)
     return "\n".join(lines)
 
 
-def render(questions: Sequence[Question], shown: Sequence[int] | None = None) -> str:
-    """The questions to ask: all, or those at the places in `shown`, numbered as among all."""
+def render(
+    questions: Sequence[Question], shown: Sequence[int] | None = None, width: int = WIDTH,
+) -> str:
+    """The questions to ask: all, or those at the places in `shown`, numbered as among all,
+    laid out to `width` (mqucifer/print-shop#266)."""
     if isinstance(questions, OfPlate):
-        return _of_plate(questions, shown)
+        return _of_plate(questions, shown, width)
     first = _numbered_from(questions)
     places = range(len(questions)) if shown is None else shown
     if isinstance(questions, Added):
@@ -450,32 +466,71 @@ def render(questions: Sequence[Question], shown: Sequence[int] | None = None) ->
     else:
         lines = ["A few questions about this part, from its shape:"]
     for i in places:
-        lines += _listed(first + i, questions[i])
+        lines += _listed(first + i, questions[i], width)
     return "\n".join(lines)
 
 
-def _listed(n: int, question: Question) -> list[str]:
-    """A question with its options, and above it what the part's notes say on it."""
+def _listed(n: int, question: Question, width: int = WIDTH, keep: str = "") -> list[str]:
+    """A question with its options, and above it what the part's notes say on it. `keep` is
+    what Enter keeps, as a row after the options, where Enter answers."""
     if question.noted is not None:
-        lines = [f"The notes say {question.topic.lower()}: {question.notes_say()}"]
+        lines = wrap("  ", f"The notes say {question.topic.lower()}: {question.notes_say()}",
+                     width, "    ")
     elif question.beside:
-        lines = [f'Its notes say: "{question.beside}"']  # their free words, so in quotes
+        # Their free words, so in quotes.
+        lines = wrap("  ", f'Its notes say: "{question.beside}"', width, "    ")
     else:
         lines = []
-    lines.append(f"{n}. {question.asked()}")
-    for i, option in enumerate(question.options):
-        theirs = "  <- the notes" if i == question.noted else ""
-        lines.append(f"   {i + 1}) {question.shown(option.line())}{theirs}")
-    lines.append("   o) other: say it in your own words")
+    lines += wrap(f"  {n}. ", question.asked(), width)
+    return [*lines, *option_lines(question, width, keep=keep)]
+
+
+def option_lines(
+    question: Question, width: int = WIDTH, *, keep: str = "", keep_first: bool = False,
+    shown: Callable[[str], str] | None = None,
+) -> list[str]:
+    """A question's options laid out to be read (mqucifer/print-shop#266): each its number and
+    label on a line, with what it does wrapped beneath; the recommended one marked, its reason
+    beneath; what every option shares said once, after them. `keep` is what Enter keeps, as a
+    row of its own, first or after the options. `shown` rewords the text, as a plate's do.
+
+    What each sets is written from its settings, never from its words (`Option.line`)."""
+    say = shown or question.shown
+    options = question.options
+    sets = [settings_line(o.settings) for o in options]
+    costs = [o.cost() for o in options]
+    one_set, one_cost = len(set(sets)) == 1, len(set(costs)) == 1
+    enter = wrap(f"{_NUMBER}Enter  ", keep, width) if keep else []
+    lines = list(enter) if keep_first else []
+    for n, (o, does, cost) in enumerate(zip(options, sets, costs, strict=True), 1):
+        mark = "* " if o.recommended else "  "
+        label = say(o.label) + ("" if one_set else f": {does}")
+        tags = [t for t in ("recommended" if o.recommended else "",
+                            "the notes" if n - 1 == question.noted else "",
+                            "" if one_cost else cost) if t]
+        lines += right(wrap(f"   {mark}{n}  ", label, width, " " * 8), " \u00b7 ".join(tags),
+                       width)
+        lines += wrap(_BENEATH, say(o.impact), width)
+        if o.recommended and o.why:
+            lines += wrap(f"{_BENEATH}recommended: ", say(o.why), width, _BENEATH)
+    lines += wrap(f"{_NUMBER}o  ", "other: say it in your own words", width)
+    shared = ([("keeps your presets" if sets[0] == "your presets" else f"sets {sets[0]}")]
+              if one_set and sets else [])
+    shared += [costs[0]] if one_cost and costs else []
+    if shared:
+        lines += wrap(_NUMBER, f"Each {' and '.join(shared)}.", width)
+    if keep and not keep_first:
+        lines += enter
     return lines
 
 
-def render_read_back(numbered: Sequence[tuple[int, Question]]) -> str:
+def render_read_back(numbered: Sequence[tuple[int, Question]], width: int = WIDTH) -> str:
     """What the part's notes gave, on one card, to confirm at one prompt."""
     named = next((q.noted_from for _, q in numbered if q.noted_from), "")
-    lines = [f"From the part's notes{f' ({named})' if named else ''}:"]
-    lines += [f"  {n}. {q.topic}: {q.read_back()}" for n, q in numbered]
-    return "\n".join([*lines, _how_to_confirm([n for n, _ in numbered])])
+    lines = wrap("", f"From the part's notes{f' ({named})' if named else ''}:", width)
+    for n, q in numbered:
+        lines += wrap(f"  {n}. ", f"{q.topic}: {q.read_back()}", width)
+    return "\n".join([*lines, *wrap("", _how_to_confirm([n for n, _ in numbered]), width)])
 
 
 def _how_to_confirm(numbers: Sequence[int]) -> str:
@@ -511,8 +566,10 @@ def drop_typed() -> None:
 def cli_asker(
     read: Callable[[str], str] = input, write: Callable[[str], None] = print,
     forget: Callable[[], None] = drop_typed,
+    width: Callable[[], int] = terminal_width,
 ) -> Asker:
-    """Ask on the command line, again until each answer is readable.
+    """Ask on the command line, again until each answer is readable, laid out to `width`, the
+    terminal's (mqucifer/print-shop#266).
 
     What the notes give is read back first, at one prompt, and only what they leave is asked
     (mqucifer/print-shop#236). What was typed before a read-back, or a question after one or
@@ -527,7 +584,7 @@ def cli_asker(
         first = _numbered_from(questions)
 
         def asked(places: list[int]) -> None:
-            write(render(questions, places))
+            write(render(questions, places, width()))
             if noted or _are_added(questions):
                 forget()  # shown only now, so what was typed while it drew is no answer to it
             for i in places:
@@ -544,7 +601,7 @@ def cli_asker(
         noted = [i for i, q in enumerate(questions) if q.noted is not None]
         rest = [i for i in range(len(questions)) if i not in noted]
         if noted:
-            answers.update(_confirm(questions, noted, read, write, forget))
+            answers.update(_confirm(questions, noted, read, write, forget, width()))
         if rest:
             asked(rest)
         return tuple(answers[i] for i in range(len(questions)))
@@ -555,33 +612,35 @@ def cli_asker(
 def _confirm(
     questions: Sequence[Question], noted: list[int],
     read: Callable[[str], str], write: Callable[[str], None], forget: Callable[[], None],
+    width: int = WIDTH,
 ) -> dict[int, Answer]:
     """The one prompt over what was read back: Enter, or the numbers to change. Those changed
     are asked, and what isn't named stands confirmed, so nothing is asked twice."""
     first = _numbered_from(questions)
     by_key = {str(first + i): i for i in noted}
-    write(render_read_back([(first + i, questions[i]) for i in noted]))
+    write(render_read_back([(first + i, questions[i]) for i in noted], width))
     forget()
     while True:
         typed = read(NOTES_PROMPT).strip()
         named = typed.replace(",", " ").split()
         if not typed or (named and all(key in by_key for key in named)):
             break
-        write(f"  {_how_to_confirm([first + i for i in noted])}")
+        write("\n".join(wrap("  ", _how_to_confirm([first + i for i in noted]), width)))
     answers = {i: questions[i].confirm() for i in noted}
     for i in sorted({by_key[key] for key in named}):
-        answers[i] = _changed(first + i, questions[i], read, write, forget)
+        answers[i] = _changed(first + i, questions[i], read, write, forget, width)
     return answers
 
 
 def _changed(
     n: int, question: Question,
     read: Callable[[str], str], write: Callable[[str], None], forget: Callable[[], None],
+    width: int = WIDTH,
 ) -> Answer:
     """One the person changes: asked alone, and an answer that differs names both before it's
     taken, when Enter takes it and `n` keeps the notes'."""
     kept = question.confirm()
-    write("\n".join([*_listed(n, question), "   Enter) keep what the notes say"]))
+    write("\n".join(_listed(n, question, width, keep="keep what the notes say")))
     forget()
     while True:
         said = read(f"{n}> ")
@@ -593,7 +652,8 @@ def _changed(
         write(f"  {parsed}, or Enter to keep what the notes say")
     if parsed.choice == question.noted:
         return kept  # the option marked as the notes', picked here
-    write(f"{question.differs(parsed)}\nEnter takes your answer, or n keeps the notes.")
+    write("\n".join([*wrap("", question.differs(parsed), width),
+                      "Enter takes your answer, or n keeps the notes."]))
     forget()
     while True:
         said = read(DIFFERS_PROMPT).strip().lower()

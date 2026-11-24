@@ -381,7 +381,12 @@ def test_print_job_asks_at_from_the_inventory_before_any_preparing(
 
     assert did == ["on now> ", BLACK], "asked first, then prepared on the answer"
     out = capsys.readouterr().out
-    assert out.index("doesn't know what's on cc1") < out.index("From the inventory")
+    if by_hand:
+        assert out.index("doesn't know what's on cc1") < out.index("From the inventory")
+    else:
+        # A part's inventory is a row of THIS JOB, said once the presets are composed
+        # (mqucifer/print-shop#266): this run stops as they are, after it was asked.
+        assert "doesn't know what's on cc1" in out and "THIS JOB" not in out
     assert not_known(shop) == ""
 
 

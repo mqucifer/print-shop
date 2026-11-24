@@ -106,7 +106,8 @@ def test_without_an_inventory_the_print_says_so_and_takes_the_flags(
     _, seen = _print(settings, tmp_path, monkeypatch, "--nozzle", "0.4", "--filament",
                      "Elegoo PLA")
     out = capsys.readouterr().out
-    assert out.startswith("The inventory isn't set up (uv run python scripts/stock.py printer")
+    assert out.startswith("THIS JOB\n")
+    assert "\n  inventory not set up (uv run python scripts/stock.py printer" in out
     assert seen["profiles"] is not None
 
 
@@ -120,7 +121,7 @@ def test_with_an_inventory_the_print_takes_what_is_fitted_and_loaded(
     capsys.readouterr()
     _, seen = _print(settings, tmp_path, monkeypatch)
     out = capsys.readouterr().out
-    assert "From the inventory: cc1 with a 0.4 mm nozzle; spool #1, Elegoo PETG, clear." in out
+    assert "  inventory cc1 with a 0.4 mm nozzle; spool #1, Elegoo PETG, clear\n" in out
     assert "filament  Elegoo PETG @ECC" in out
     used = seen["profiles"].used  # type: ignore[attr-defined]
     assert used.material.spool_id == 1, "the ledger will point at the spool"
