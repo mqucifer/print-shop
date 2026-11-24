@@ -7,6 +7,7 @@
         [--loaded-ok] [--record]
     uv run python scripts/print_job.py --again JOB_ID [--loaded-ok] [--record]
     uv run python scripts/print_job.py --resume [JOB_ID] [--record]
+    uv run python scripts/print_job.py --queue [FILE [xN] [spool=S] ...] [--record]
     uv run python scripts/print_job.py --serve [--record]
     uv run python scripts/print_job.py --list
     uv run python scripts/print_job.py --filaments
@@ -125,6 +126,22 @@ job marked as a reprint of it, refused if the kept file has changed. Either is r
 file names another filament or nozzle than the inventory says is loaded and fitted, unless
 `--loaded-ok` says to print it with what's loaded.
 
+**Many files queue** (mqucifer/print-shop#210), with `--queue`: parts and hand-sliced files
+together, each followed by how many (`x3`) and the spool it's for (`spool=2`, the stock's number;
+the loaded one by default, and it needn't be loaded to prepare). They're prepared while a print
+runs, and the queue's prompt shows each job's step and spool and what needs you: `answer 2` and
+`review 3` in any order (print-shop's two at once, the model's when they come, and `go 2` goes on
+without them), `answer 2 4 5` to give 4 and 5 the same answers where they ask alike, `spool 3 2`
+to move a waiting job to another spool (another colour of its filament at once; another variety or
+tuning prepared again, back to its review), and `first`, `hold`, `remove`, `retry` and `together`
+to change the queue; `help` lists them. Each job keeps its own `job.log`. Printing stays
+one at a time: when nothing prints, the first ready job is offered at the gate, on the card and
+here, saying the spool it needs, and `start` here, or Yes on the card, starts it as any job's
+Start does. A quantity is that many prints, each with its own ledger row and outcome, prepared
+once. `--queue` alone takes the queue up again, as it was: every job waits through a restart.
+`PRINT_SHOP_PREPARE_AT_ONCE` in the settings says how many are sliced and asked of the model at
+once (2).
+
 **One runs at a time** (mqucifer/print-shop#207). A part, `--sliced`, `--again` and `--serve`,
 armed or not, first take a lock that goes when the process does. A second start says in one
 sentence what's running and exits 2, having published and started nothing. `--list`, `--filaments`,
@@ -153,7 +170,7 @@ from print_shop.core.contracts import Gate
 from print_shop.env import SETTINGS_PATH, load_env
 from print_shop.expert.client import STREAM_THREAD
 from print_shop.inventory import SETUP, Inventory, InventoryError, Material
-from print_shop.joblog import LOG_NAME, JobLog, Terminal, secrets
+from print_shop.joblog import LOG_NAME, JobLog, JobLogs, Terminal, secrets
 from print_shop.ledger import Ledger, ledger_path
 from print_shop.opening import ThisJob
 from print_shop.orchestrator.daemon import Daemon
@@ -162,17 +179,21 @@ from print_shop.orchestrator.live import AlreadyLive, Live, only_live
 from print_shop.orchestrator.outcome import no_frames
 from print_shop.orchestrator.spools import ask_on_now
 from print_shop.printer.centauri import FrameRecorder, PrinterClient, live_printer
+from print_shop.queue_terminal import parse_adding, serve, stock_listing
 from print_shop.runtime import (
     WORK_DIR,
     Run,
     bed_type,
+    build_queue,
     build_run,
     describe,
     describe_all,
     describe_part,
     describe_plate,
+    job_profiles,
     profiles_for,
     recording_path,
+    sliced_reader,
 )
 from print_shop.setup.context import read_context
 from print_shop.setup.intake import Asker, cli_asker, drop_typed, replay_asker
@@ -229,6 +250,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--resume", nargs="?", const="", metavar="JOB_ID",
                         help="take up a job that waits for you, where it waits: the only one, "
                              "without JOB_ID")
+    parser.add_argument("--queue", action="store_true",
+                        help="the print queue: the files given are added to it, each followed by "
+                             "xN and spool=S where they aren't 1 and the loaded one")
     parser.add_argument("--plate", type=int,
                         help="which plate, for a sliced plate file that holds several")
     parser.add_argument("--project", type=Path, metavar="P.3mf",
@@ -247,6 +271,19 @@ def main(argv: list[str] | None = None) -> int:
         # A wait among the screens is said as the screens say it (mqucifer/print-shop#223).
         handler.setFormatter(Terminal("%(asctime)s %(levelname)s %(message)s"))
     by_hand = args.sliced is not None or args.again is not None
+    if args.queue:
+        for flag in ("sliced", "again", "resume", "answers", "context", "plate", "project"):
+            if getattr(args, flag) is not None:
+                parser.error(f"--{flag} isn't for --queue: give the files after it")
+        if args.serve or args.list or args.filaments or args.as_laid or args.loaded_ok:
+            parser.error("--queue takes files; leave out --serve, --list, --filaments, "
+                         "--as-laid and --loaded-ok")
+        try:
+            with only_live(WORK_DIR, ledger_path(args.settings), "the print queue") as live:
+                return _queue(args, live)
+        except AlreadyLive as refused:
+            print(refused, file=sys.stderr)
+            return 2
     if sum((bool(args.stl), args.sliced is not None, args.again is not None,
             args.resume is not None)) > 1:
         parser.error("give one of a part, --sliced FILE, --again JOB_ID or --resume")
@@ -717,6 +754,69 @@ def _follow(run: Run, job_id: str, *, turned: bool, read: Callable[[str], str]) 
         print("Nothing was started, so the ledger has no row for this job.")
         return 0 if result is None or not result.error else 1
     return _watch(run, job_id)
+
+
+def _queue(args: argparse.Namespace, live: Live) -> int:
+    """The print queue, at this terminal (mqucifer/print-shop#210)."""
+    adding = parse_adding([str(token) for token in args.stl])
+    if isinstance(adding, str):
+        print(adding, file=sys.stderr)
+        return 2
+    for handler in logging.getLogger().handlers:
+        # The jobs prepare beside the prompt: what they log would land on it. The queue says
+        # what happens to each, before each prompt.
+        handler.setLevel(logging.WARNING)
+    with Inventory(ledger_path(args.settings)) as inventory:
+        if not inventory.printers():
+            print(f"The inventory isn't set up ({SETUP}); every job slices with --nozzle and "
+                  "--filament, and no spool can be named.")
+            if args.nozzle is None or not args.filament:
+                print("Say what's fitted: --nozzle (mm) and --filament (a variety).",
+                      file=sys.stderr)
+                return 2
+        else:
+            try:
+                _said_what_is_on(inventory, args, input)
+                print(f"From the inventory: {inventory.material(args.printer).line()}.")
+            except InventoryError as exc:
+                print(exc, file=sys.stderr)
+                return 2
+            except KeyboardInterrupt:
+                print(STOPPED_BEFORE)
+                return 130
+    bed = bed_type(load_env(args.settings))
+
+    def profiles(material: Material | None, into: Path) -> SlicerProfiles:
+        return job_profiles(material, into, bed=bed, nozzle_mm=args.nozzle,
+                            filament=args.filament, machine=args.machine, process=args.process)
+
+    recorder = FrameRecorder(recording_path()) if args.record else None
+    run = build_run(printer=_armed(recorder), profiles=None, recorder=recorder,
+                    settings=args.settings, on_step=live.at)
+    # Each job keeps its own job.log, as a lone job does (mqucifer/print-shop#139).
+    logs = JobLogs(secrets(args.settings), WORK_DIR)
+    try:
+        with run.daemon, logs.routing(), build_queue(
+                run, settings=args.settings, profiles_for=profiles, sliced_for=_sliced_for(args),
+                logs=logs) as queue:
+            if adding:
+                added, refused = queue.add(adding)
+                print(f"Added {len(added)} to the queue." if added else "Nothing was added.")
+                for why in refused:
+                    print(f"Not added: {why}")
+            return serve(queue, run.daemon, read=input,
+                         stock=stock_listing(ledger_path(args.settings)))
+    except KeyboardInterrupt:
+        print("\nPut by: every job waits where it was, and `--queue` takes them up again. Any "
+              "print without an answer stays open in the ledger.")
+        return 130
+    finally:
+        run.ledger.close()
+
+
+def _sliced_for(args: argparse.Namespace) -> Callable[[Path, Material | None], sliced.SlicedJob]:
+    """A hand-sliced file read for the queue, for the spool it's for (`runtime.sliced_reader`)."""
+    return sliced_reader(args.settings)
 
 
 def _start_here(
