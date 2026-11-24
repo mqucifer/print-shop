@@ -34,7 +34,7 @@ from print_shop.core.state import turn_words
 from print_shop.setup import pauses
 from print_shop.setup.context import SET_ASIDE
 from print_shop.setup.layout import WIDTH, wrap
-from print_shop.setup.names import Found, named, plain, switched, with_unit
+from print_shop.setup.names import Found, either, named, plain, switched, with_unit
 from print_shop.setup.offer import render as render_offer
 from print_shop.setup.proposal import (
     ORIENTATION,
@@ -187,6 +187,11 @@ def found(words: str, settings: Sequence[Found], filament: str, width: int = WID
         if n == 0 and f.stands_in:
             lines += wrap("      ", f"{filament or 'This filament'} uses this one for "
                           f"{f.stands_in}.", width)
+        if f.choices:
+            # Every word Orca takes for it, and the line that turns it off, its value last
+            # (mqucifer/print-shop#279).
+            off = f" To turn it off: {f.key}={f.off}" if f.off else ""
+            lines += wrap("      ", f"Takes {either(f.choices)}.{off}", width, "      ")
     lines += wrap("  ", "Finding changes nothing. Type it as key=value because \u2026, e.g. "
                   f"{settings[0].key}=<value> because <why>", width, "    ")
     return lines
