@@ -201,6 +201,9 @@ class FakeStarts:
     def ready_to_start(self) -> ReadyToStart | None:
         return self.ready
 
+    def last_phone_start(self) -> str:
+        return "Started by you. Disarmed again." if self.calls else ""
+
     def start_from_phone(self, job_id: str, *, armed: Armed, press: str,
                          gcode_sha256: str) -> PhoneStart:
         self.calls.append((job_id, armed, press, gcode_sha256))
