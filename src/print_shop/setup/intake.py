@@ -48,6 +48,7 @@ __all__ = [
     "Asker",
     "Estimate",
     "Intake",
+    "OfPlate",
     "Option",
     "Question",
     "cli_asker",
@@ -390,12 +391,56 @@ class Added(tuple[Question, ...]):
         return made
 
 
+class OfPlate(tuple[Question, ...]):
+    """Questions about a plate of several parts together (mqucifer/print-shop#109): shown as
+    theirs, in the pose each lies in as it's asked. `words` are what's shown differently for
+    them. The questions themselves, as they're recorded and replayed, are the same."""
+
+    given: Sequence[Question]
+    posed: str
+    words: dict[str, str]
+
+    def __new__(cls, questions: Sequence[Question], posed: str, words: dict[str, str]) -> OfPlate:
+        made = super().__new__(cls, questions)
+        made.given, made.posed, made.words = questions, posed, words
+        return made
+
+
+def _are_added(questions: Sequence[Question]) -> bool:
+    given = questions.given if isinstance(questions, OfPlate) else questions
+    return isinstance(given, Added)
+
+
 def _numbered_from(questions: Sequence[Question]) -> int:
-    return questions.before + 1 if isinstance(questions, Added) else 1
+    given = questions.given if isinstance(questions, OfPlate) else questions
+    return given.before + 1 if isinstance(given, Added) else 1
+
+
+def _of_plate(questions: OfPlate, places: Sequence[int] | None = None) -> str:
+    """A plate's questions, all or those at `places`, in its words: they're reworded before a
+    question adds the pose it's asked in, as each part's is said in the heading."""
+    def shown(text: str) -> str:
+        for said, theirs in questions.words.items():
+            text = text.replace(said, theirs)
+        return text
+
+    first = _numbered_from(questions)
+    asked = ("Added by the model, from these parts' shapes" if _are_added(questions)
+             else "A few questions about these parts")
+    lines = [f"{asked}, {questions.posed}:"]
+    for i in range(len(questions)) if places is None else places:
+        q = questions[i]
+        posed = q.model_copy(update={"text": shown(q.text)})
+        lines.append(f"{first + i}. {posed.asked()}")
+        lines += [f"   {n}) {shown(o.line())}" for n, o in enumerate(q.options, 1)]
+        lines.append("   o) other: say it in your own words")
+    return "\n".join(lines)
 
 
 def render(questions: Sequence[Question], shown: Sequence[int] | None = None) -> str:
     """The questions to ask: all, or those at the places in `shown`, numbered as among all."""
+    if isinstance(questions, OfPlate):
+        return _of_plate(questions, shown)
     first = _numbered_from(questions)
     places = range(len(questions)) if shown is None else shown
     if isinstance(questions, Added):
@@ -483,7 +528,7 @@ def cli_asker(
 
         def asked(places: list[int]) -> None:
             write(render(questions, places))
-            if noted or isinstance(questions, Added):
+            if noted or _are_added(questions):
                 forget()  # shown only now, so what was typed while it drew is no answer to it
             for i in places:
                 while True:
@@ -492,7 +537,7 @@ def cli_asker(
                     if isinstance(parsed, Answer):
                         answers[i] = parsed
                         break
-                    if typed.strip().lower() == "go" and not isinstance(questions, Added):
+                    if typed.strip().lower() == "go" and not _are_added(questions):
                         parsed += "; go works once these are answered"  # mqucifer/print-shop#208
                     write(f"  {parsed}")
 

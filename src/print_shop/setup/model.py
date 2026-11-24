@@ -26,6 +26,7 @@ from typing import Any
 
 from print_shop.expert.client import CutOff, LLMConfig, TimedOut, stream_json_call
 from print_shop.setup.bounds import SETTINGS, check
+from print_shop.setup.context import Seen
 from print_shop.setup.proposal import Change, PartFacts, Proposal, Source
 from print_shop.setup.reading import carried
 from print_shop.setup.skill import Skill
@@ -256,10 +257,13 @@ def prompt(facts: PartFacts, skill: Skill) -> str:
 def _seen(facts: PartFacts) -> list[str]:
     """What's seen in the pose the features are read in: an answer, or the notes', carried
     there (mqucifer/print-shop#248)."""
-    if facts.pose is None:
-        return []
     intake = facts.intake
-    now = carried(intake, facts.context, facts.pose)
+    if facts.seen is not None:
+        now: Seen | None = facts.seen  # a plate's, carried part by part (mqucifer/print-shop#109)
+    elif facts.pose is None:
+        return []
+    else:
+        now = carried(intake, facts.context, facts.pose)
     if now is None:
         answered = any(q.feature == "seen" and q.pose is not None for q in intake.questions)
         return (["Which faces are seen as it lies here isn't known: judge none as seen or "
