@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import errno
 import logging
+import re
 from collections.abc import Callable
 from datetime import UTC, datetime
 from http import HTTPStatus
@@ -40,11 +41,22 @@ from urllib.parse import parse_qs, urlsplit
 from print_shop import reprint
 from print_shop.arming import Armed
 from print_shop.orchestrator.daemon import PhoneStart, ReadyToStart
-from print_shop.orchestrator.print_queue import Line
+from print_shop.orchestrator.print_queue import Asked, Line, Need
 from print_shop.phone.again import again_page, also_page, nozzle_typed
 from print_shop.phone.confirm import Confirm, Confirms, secret_hash
 from print_shop.phone.filaments import SwapJob, filaments_page, load_page, spools_for_job
 from print_shop.phone.home import HOME_KEY, PORT_KEY, Home
+from print_shop.phone.needs import (
+    change_page,
+    closer_page,
+    follow_page,
+    look_page,
+    mesh_page,
+    questions_page,
+    review_page,
+    screen_of,
+    since_of,
+)
 from print_shop.phone.page import (
     away_page,
     message_page,
@@ -64,10 +76,80 @@ from print_shop.phone.screens import (
 )
 from print_shop.phone.shop import AlsoDiffers, LoadAsk, Shop
 from print_shop.phone.slice import slice_page
+from print_shop.setup.intake import NOTES_PROMPT, first_number
+from print_shop.setup.review import filament_name, finding
+from print_shop.setup.suggest import by_number
 
 __all__ = ["COOKIE", "PhoneOff", "Starts", "attach", "handler_for", "make_server"]
 
 logger = logging.getLogger(__name__)
+
+#: The fields a form sends several of: Use these' and the proposals' ticks.
+_LISTS = frozenset({"use", "take"})
+
+
+def _ahead(asked: Asked, form: dict[str, str]) -> dict[str, list[str]] | str:
+    """The questions' form as what's typed at each of the asker's prompts: Enter at the notes'
+    read-back, or the numbers of those changed; then each question's number or `o` and its
+    words. One not answered is refused, saying so: Enter takes nothing there."""
+    questions = asked.questions
+    first = first_number(questions)
+    noted = {i for i, q in enumerate(questions) if q.noted is not None}
+    change = {int(c) for c in form.get("change", "").split()
+              if c.isdecimal() and c.isascii() and int(c) in noted}
+    ahead: dict[str, list[str]] = {}
+    if noted:
+        ahead[NOTES_PROMPT] = [" ".join(str(first + i) for i in sorted(change))]
+    for i, question in enumerate(questions):
+        if i in noted and i not in change:
+            continue
+        picked = form.get(f"q{i}", "")
+        words = " ".join(form.get(f"w{i}", "").split())[:300]
+        if picked == "o" or (not picked and words):
+            if not words:
+                return f"Say it in your words for \"{question.text}\", or pick one."
+            typed = f"o {words}"
+        elif picked.isdecimal() and picked.isascii() and 1 <= int(picked) <= len(
+                question.options):
+            typed = picked
+        elif i in change:
+            typed = ""  # Enter keeps what the notes say
+        else:
+            return f"Answer \"{question.text}\": pick one, or say it in your words."
+        ahead[f"{first + i}> "] = [typed]
+    return ahead
+
+
+def _reason(text: str) -> str:
+    """A reason as one answer's: on one line, and with no `;`, which would begin another."""
+    return " ".join(text.replace(";", ",").split())[:300]
+
+
+def _review_typed(asked: Asked, form: dict[str, str]) -> str:
+    """The review's form as the answer typed at its prompt, or "!" and why it isn't one."""
+    do = form.get("do", "")
+    if do in ("ok", "stop"):
+        return do
+    if do == "use":
+        numbers = [n for n in form.get("use", "").split() if n.isdecimal() and n.isascii()]
+        return f"use {' '.join(numbers)}" if numbers else "!Tick what to use, then Use these."
+    if do == "take":
+        numbers = [n for n in form.get("take", "").split() if n.isdecimal() and n.isascii()]
+        request = asked.review
+        models = sorted(by_number(request.by_model)) if request is not None else []
+        down = [(n, _reason(form.get(f"no{n}", ""))) for n in models]
+        parts = ([f"take {' '.join(numbers)}"] if numbers else []) + [
+            f"no {n} because {why}" for n, why in down if why and str(n) not in numbers]
+        return "; ".join(parts) or "!Tick what to take, or say why to turn one down."
+    if do == "change":
+        key = form.get("key", "").strip()
+        value = " ".join(form.get("value", "").split())[:60]
+        reason = _reason(form.get("reason", ""))
+        if not re.fullmatch(r"[a-z_0-9]{1,80}", key) or not value or ";" in value:
+            return "!Give the setting a value."
+        return f"{key}={value}" + (f" because {reason}" if reason else "")
+    return "!That wasn't the page's form."
+
 
 def _number(value: str, digits: int) -> bool:
     """A plain number of at most `digits` digits: 0 to 9 only."""
@@ -475,6 +557,202 @@ class _Handler(BaseHTTPRequestHandler):
         # Its own page, so a reload doesn't queue it twice; it says what it was compared with.
         self._see_other(f"/job/{done.job_id}?said=again")
 
+    # -- what a job needs: the terminal's own screens (mqucifer/print-shop#221) --
+
+    def _need(self, held: dict[str, str], wants: tuple[Need, ...]) -> tuple[Line, Asked] | None:
+        """The job's need, where it's one this screen answers; else the page that says what
+        came of it, or the job's own page."""
+        line = self._job_line(held)
+        if line is None or self.shop is None:
+            return None
+        job_id = line.job.job_id
+        session = self.shop.session(job_id)
+        if session is not None and session.waiting:
+            self._send(follow_page(line, session, self.shop.asked(job_id)))
+            return None
+        if session is not None and session.ended:
+            self._send(message_page(
+                "Not taken" if session.said else "Taken",
+                session.said or "It's being prepared with your answer.",
+                back_to=f"/job/{job_id}", back_words="Back to the job"),
+                code=HTTPStatus.CONFLICT if session.said else HTTPStatus.OK)
+            return None
+        asked = self.shop.asked(job_id)
+        if asked is None or asked.need not in wants:
+            screen = screen_of(asked)
+            if screen:
+                self._see_other(f"/job/{job_id}/{screen}")
+                return None
+            said = self.shop.answered.pop(job_id, "")
+            taken = said.startswith("Taken")
+            self._send(message_page("Taken" if taken else "Nothing waits", (
+                f"{said}. " if said else "") + "It doesn't wait for you now: it's back under "
+                "\"Sent to you, or waiting on you\" when it asks again.",
+                back_to=f"/job/{job_id}", back_words="Back to the job"))
+            return None
+        return line, asked
+
+    def _fresh(self, line: Line, asked: Asked, form: dict[str, str]) -> bool:
+        """The form is of the need there is now: else it's refused, and nothing changes."""
+        if form.get("since", "") == since_of(asked):
+            return True
+        self._send(message_page(
+            "Not taken", "That page is out of date: it was answered at the Mac or moved on "
+            "since. Nothing was changed. Look again.", back_to=f"/job/{line.job.job_id}",
+            back_words="Back to the job"), code=HTTPStatus.CONFLICT)
+        return False
+
+    def _r_questions(self, held: dict[str, str], query: str) -> None:
+        found = self._need(held, (Need.QUESTIONS, Need.CLOSER))
+        if found is None or self.shop is None:
+            return
+        line, asked = found
+        if asked.need is Need.CLOSER:
+            return self._send(closer_page(line, asked))
+        change = frozenset(int(c) for c in parse_qs(query).get("change", [""])[0].split()
+                           if c.isdecimal() and c.isascii() and int(c) < len(asked.questions))
+        self._send(questions_page(
+            line, asked, alike=self.shop.alike(line.job.job_id),
+            reading_s=self.shop.reading(line.job.job_id), now=self.now(), change=change))
+
+    def _r_answer(self, held: dict[str, str], form: dict[str, str]) -> None:
+        """The questions' form, as the answers the terminal's asker reads at each prompt."""
+        found = self._need(held, (Need.QUESTIONS, Need.CLOSER))
+        if found is None or self.shop is None:
+            return
+        line, asked = found
+        if not self._fresh(line, asked, form):
+            return
+        job_id = line.job.job_id
+        alike_to: list[str] = []
+        if asked.need is Need.CLOSER:
+            ahead = {"1> ": [form.get("closer", "")[:6]]}
+        else:
+            made = _ahead(asked, form)
+            if isinstance(made, str):
+                return self._send(message_page("Not taken", made,
+                                               back_to=f"/job/{job_id}/questions",
+                                               back_words="Back to the questions"),
+                                  code=HTTPStatus.BAD_REQUEST)
+            ahead = made
+            offered = {li.job.job_id for li in self.shop.alike(job_id)}
+            alike_to = [j for j in form.get("alike", "").split() if j in offered]
+        self._begin(job_id, ahead, "questions", alike_to)
+
+    def _begin(self, job_id: str, ahead: dict[str, list[str]], screen: str,
+               alike_to: list[str] | None = None) -> None:
+        assert self.shop is not None
+        made = self.shop.begin(job_id, ahead, alike_to=alike_to or ())
+        if isinstance(made, str):
+            return self._send(message_page("Not taken", made, back_to=f"/job/{job_id}",
+                                           back_words="Back to the job"),
+                              code=HTTPStatus.CONFLICT)
+        made.settle()
+        self._see_other(f"/job/{job_id}/{screen}")
+
+    def _r_reply(self, held: dict[str, str], form: dict[str, str]) -> None:
+        """An answer to what the terminal's code asks now, as typed at the Mac."""
+        line = self._job_line(held)
+        if line is None or self.shop is None:
+            return
+        job_id = line.job.job_id
+        session = self.shop.session(job_id)
+        stamp = form.get("version", "")[:40]
+        typed = form.get("typed", "").replace("\r", " ").replace("\n", " ")[:2000]
+        why = ("nothing waits for an answer here now: it was answered, or moved on"
+               if session is None else session.reply(typed, stamp))
+        if why:
+            return self._send(message_page("Not taken", f"{why[:1].upper()}{why[1:]}.",
+                                           back_to=f"/job/{job_id}",
+                                           back_words="Back to the job"),
+                              code=HTTPStatus.CONFLICT)
+        assert session is not None
+        session.settle()
+        screen = screen_of(self.shop.asked(job_id))
+        self._see_other(f"/job/{job_id}/{screen}" if screen else f"/job/{job_id}")
+
+    def _r_go(self, held: dict[str, str], form: dict[str, str]) -> None:
+        line = self._job_line(held)
+        if line is None or self.shop is None:
+            return
+        why = self.shop.go(line.job.job_id, form.get("since", ""))
+        if why:
+            return self._send(message_page("Not done", f"{why[:1].upper()}{why[1:]}.",
+                                           back_to=f"/job/{line.job.job_id}/questions",
+                                           back_words="Back to the questions"),
+                              code=HTTPStatus.CONFLICT)
+        self._see_other(f"/job/{line.job.job_id}/questions")
+
+    def _r_review(self, held: dict[str, str], query: str) -> None:
+        found = self._need(held, (Need.REVIEW,))
+        if found is not None and self.shop is not None:
+            line, asked = found
+            assert asked.review is not None
+            self._send(review_page(line, asked,
+                                   since=self.shop.moved(line.job.job_id, asked.review)))
+
+    def _r_reviewed(self, held: dict[str, str], form: dict[str, str]) -> None:
+        """The review's form, as the answer the terminal's reviewer reads at its prompt."""
+        found = self._need(held, (Need.REVIEW,))
+        if found is None:
+            return
+        line, asked = found
+        if not self._fresh(line, asked, form):
+            return
+        typed = _review_typed(asked, form)
+        if typed.startswith("!"):
+            return self._send(message_page("Not taken", typed[1:],
+                                           back_to=f"/job/{line.job.job_id}/review",
+                                           back_words="Back to the review"),
+                              code=HTTPStatus.BAD_REQUEST)
+        self._begin(line.job.job_id, {"> ": [typed]}, "review")
+
+    def _r_change(self, held: dict[str, str], query: str) -> None:
+        found = self._need(held, (Need.REVIEW,))
+        if found is None:
+            return
+        line, asked = found
+        assert asked.review is not None
+        asked_for = parse_qs(query)
+        words = asked_for.get("words", [""])[0][:100]
+        key = asked_for.get("key", [""])[0][:100]
+        settings = finding(words, asked.review) if words.strip() else []
+        self._send(change_page(line, asked, words=words, found=settings,
+                               filament=filament_name(asked.review), key=key))
+
+    def _r_look(self, held: dict[str, str], query: str) -> None:
+        found = self._need(held, (Need.LOOK,))
+        if found is not None:
+            self._send(look_page(*found))
+
+    def _r_looked(self, held: dict[str, str], form: dict[str, str]) -> None:
+        self._given(held, form, Need.LOOK, lambda f: f.get("ok") == "yes")
+
+    def _r_mesh(self, held: dict[str, str], query: str) -> None:
+        found = self._need(held, (Need.MESH,))
+        if found is not None:
+            self._send(mesh_page(*found))
+
+    def _r_meshed(self, held: dict[str, str], form: dict[str, str]) -> None:
+        self._given(held, form, Need.MESH,
+                    lambda f: (f.get("approve") == "yes", "on the phone"))
+
+    def _given(self, held: dict[str, str], form: dict[str, str], need: Need,
+               answer: Callable[[dict[str, str]], Any]) -> None:
+        found = self._need(held, (need,))
+        if found is None or self.shop is None:
+            return
+        line, asked = found
+        if not self._fresh(line, asked, form):
+            return
+        why = self.shop.give_now(line.job.job_id, asked.since, answer(form))
+        if why:
+            return self._send(message_page("Not taken", f"{why[:1].upper()}{why[1:]}.",
+                                           back_to=f"/job/{line.job.job_id}",
+                                           back_words="Back to the job"),
+                              code=HTTPStatus.CONFLICT)
+        self._see_other(f"/job/{line.job.job_id}")
+
     def _layer(self, query: str) -> int | None:
         found = parse_qs(query).get("layer", [""])[0]
         return int(found) if found.isdecimal() and found.isascii() and len(found) < 7 else None
@@ -615,7 +893,10 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(message_page("Not done", "That wasn't the page's form."),
                        code=HTTPStatus.BAD_REQUEST)
             return None
-        return {key: values[0] for key, values in fields.items() if values}
+        # A checkbox's several ticks (`use`, `take`) are one field, space-separated; any other
+        # field is its first.
+        return {key: " ".join(values) if key in _LISTS else values[0]
+                for key, values in fields.items() if values}
 
     def _armed(self, confirm: Confirm) -> Armed:
         return Armed(job_id=confirm.job_id, how="phone", by=confirm.phone, where=self._peer(),

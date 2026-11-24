@@ -55,6 +55,19 @@ ROUTES: tuple[Route, ...] = (
     # Filaments: what's loaded and on the shelf, and the stock's own load.
     Route("GET", r"/filaments", "filaments"),
     Route("POST", r"/filaments/load", "load"),
+    # What the job needs from the person: the terminal's own screens, answered from the phone
+    # (`session.py`), and the queue's own `give` for a look and the mesh gate.
+    Route("GET", rf"/job/{_ID}/questions", "questions"),
+    Route("POST", rf"/job/{_ID}/questions", "answer"),
+    Route("GET", rf"/job/{_ID}/review", "review"),
+    Route("POST", rf"/job/{_ID}/review", "reviewed"),
+    Route("GET", rf"/job/{_ID}/review/change", "change"),
+    Route("POST", rf"/job/{_ID}/reply", "reply"),
+    Route("POST", rf"/job/{_ID}/go", "go"),
+    Route("GET", rf"/job/{_ID}/look", "look"),
+    Route("POST", rf"/job/{_ID}/look", "looked"),
+    Route("GET", rf"/job/{_ID}/mesh", "mesh"),
+    Route("POST", rf"/job/{_ID}/mesh", "meshed"),
     # What the slice shows, for a job that's prepared and for a finished run, a failed one too.
     Route("GET", rf"/job/{_ID}/slice", "job_slice"),
     Route("GET", rf"/run/{_ID}/slice", "run_slice"),

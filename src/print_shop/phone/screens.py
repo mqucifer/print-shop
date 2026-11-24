@@ -29,10 +29,16 @@ __all__ = [
 
 #: The word at a row's right, for what a job needs, as `queue>` names it.
 _ACTION = {Need.QUESTIONS: "Answer", Need.CLOSER: "Answer", Need.REVIEW: "Review",
-           Need.MESH: "Look", Need.LOOK: "Look"}
-#: `queue>`'s command for it, said until the phone answers it (mqucifer/print-shop#221's PR 2).
-_COMMAND = {Need.QUESTIONS: "answer", Need.CLOSER: "answer", Need.REVIEW: "review",
-            Need.MESH: "mesh", Need.LOOK: "look"}
+           Need.MESH: "Approve", Need.LOOK: "Look"}
+#: Each need's screen, under the job's path.
+_SCREEN = {Need.QUESTIONS: "questions", Need.CLOSER: "questions", Need.REVIEW: "review",
+           Need.MESH: "mesh", Need.LOOK: "look"}
+
+
+def _need_href(line: Line) -> str:
+    """Where a row opens: the screen for what the job needs, or its own page."""
+    screen = _SCREEN.get(line.needs) if line.needs is not None else None
+    return f"/job/{line.job.job_id}/{screen}" if screen else f"/job/{line.job.job_id}"
 
 
 def _e(value: object) -> str:
@@ -96,12 +102,12 @@ def _waiting_rows(sends: Sequence[SentTo], lines: Sequence[Line],
                     f"{_small(f'From {sent.by}, {local_when(sent.at)}')}{note}"
                     f"{_small(_step(line))}")
             act = _ACTION.get(line.needs, "") if line.needs is not None else ""
-            rows.append(_row(f"/job/{line.job.job_id}", what, act))
+            rows.append(_row(_need_href(line), what, act))
     for line in lines:
         if line.needs is None or line.job.job_id in in_a_send:
             continue
         what = f"<span class=\"part\">{_e(_named(line))}</span>{_small(_step(line))}"
-        rows.append(_row(f"/job/{line.job.job_id}", what, _ACTION[line.needs]))
+        rows.append(_row(_need_href(line), what, _ACTION[line.needs]))
     for done in to_record:
         what = (f"<span class=\"part\">{_e(done.part)}, finished "
                 f"{_e(local_when(done.ended_at))}</span>"
@@ -223,8 +229,8 @@ def job_page(line: Line, *, each_s: int | None, said: str = "", sliced: bool = F
     needs = ""
     if line.needs is not None:
         needs = (f"<div class=\"box\"><strong>It needs you: {_e(line.needs)}</strong>"
-                 f"At the Mac, for now: <code>{_COMMAND[line.needs]} {line.number}</code> at "
-                 "<code>queue&gt;</code>.</div>")
+                 f"<a class=\"button\" href=\"{_e(_need_href(line))}\">"
+                 f"{_e(_ACTION[line.needs])}</a></div>")
     start = ("<p><a class=\"button\" href=\"/start\">Start it on your phone</a></p>"
              if line.offered else "")
     if sliced:

@@ -59,7 +59,7 @@ if TYPE_CHECKING:
     from print_shop.setup.review import ReviewRequest
 
 __all__ = ["WIDTH", "Moved", "Said", "Section", "by_model", "clock", "found", "sections",
-           "what_moved", "warnings", "wrap"]
+           "what_moved", "warnings", "who_set", "wrap"]
 
 
 #: A row that moved since the last round.
@@ -462,6 +462,12 @@ def _print(request: ReviewRequest, width: int, marks: Moved) -> list[str]:
             drawn = line.startswith("    ")
             lines += [f"  {line}"] if drawn else wrap(f"  {line[:2]}", line[2:], width, "      ")
     return lines
+
+
+def who_set(change: Change) -> str:
+    """Who a change is from, as the review names them: the phone's rows say the same
+    (mqucifer/print-shop#221)."""
+    return _by(change)
 
 
 def _by(change: Change) -> str:

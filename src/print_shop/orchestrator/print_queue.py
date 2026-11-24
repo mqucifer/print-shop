@@ -489,13 +489,17 @@ class PrintQueue:
 
     # -- the person's answers -------------------------------------------------
 
-    def give(self, job_id: str, answer: Any) -> str:
+    def give(self, job_id: str, answer: Any, *, to: Asked | None = None) -> str:
         """Answer what the job waits on the person for: its questions' answers in order, a
         `Review`, the mesh gate's `(approved, note)`, or for the model's closer choices an
-        `Answer` from them, or None to keep the answer given. Returns "" once given, or why not."""
+        `Answer` from them, or None to keep the answer given. `to` is the ask the answer was
+        made for (the phone's, mqucifer/print-shop#221): one the job has moved on from is
+        refused, never given to what it asks now. Returns "" once given, or why not."""
         asked = self.asked(job_id)
         if asked is None:
             return "it isn't waiting for you"
+        if to is not None and asked is not to:
+            return "it moved on since: what it asks now wasn't answered"
         if asked.need is Need.CLOSER and answer is not None and not isinstance(answer, Answer):
             return "the closer choices are answered with one of them, or None to keep yours"
         if asked.need is Need.QUESTIONS:

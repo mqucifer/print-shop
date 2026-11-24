@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import tempfile
+import threading
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -26,8 +27,8 @@ from typing import Any, Protocol
 
 from print_shop import reprint
 from print_shop.desk.read import Desk, OnHand
+from print_shop.inventory import Asked as StockAsked
 from print_shop.inventory import (
-    Asked,
     Inventory,
     InventoryError,
     Material,
@@ -37,10 +38,15 @@ from print_shop.inventory import (
 )
 from print_shop.ledger import Ledger, LedgerError, Row
 from print_shop.orchestrator.kept import WaitingJob, Waits
-from print_shop.orchestrator.print_queue import Adding, Line, SentTo
+from print_shop.orchestrator.print_queue import Adding, Asked, Line, Need, SentTo, alike
+from print_shop.phone.session import Session
 from print_shop.queue_terminal import Runs
+from print_shop.setup.intake import Answer, Question, cli_asker
 from print_shop.setup.pauses import said as pause_said
 from print_shop.setup.reading import PauseReading
+from print_shop.setup.review import ReviewRequest, cli_reviewer
+from print_shop.setup.screen import Moved, what_moved
+from print_shop.setup.waiting import cli_waiting
 
 __all__ = [
     "LOOK_AGAIN", "AlsoDiffers", "Daemonish", "LoadAsk", "NowPrinting", "Queued", "Queueish",
@@ -48,6 +54,13 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+#: The width the terminal's screens are laid out to for the phone: what a phone shows in a line.
+PAGE_WIDTH = 60
+
+
+def _nothing() -> None:
+    """Nothing typed ahead to drop: the phone's answers come only from its forms."""
 
 
 class Queueish(Protocol):
@@ -68,6 +81,17 @@ class Queueish(Protocol):
     def move(self, job_id: str, spool_id: int) -> list[str] | str: ...
 
     def add(self, adding: Sequence[Adding]) -> tuple[list[str], list[str]]: ...
+
+    def asked(self, job_id: str) -> Asked | None: ...
+
+    def give(self, job_id: str, answer: Any, *, to: Asked | None = None) -> str: ...
+
+    def give_alike(self, job_ids: Sequence[str], questions: Sequence[Question],
+                   answers: Sequence[Answer]) -> list[str]: ...
+
+    def go(self, job_id: str) -> str: ...
+
+    def reading(self, job_id: str) -> float | None: ...
 
 
 class Daemonish(Protocol):
@@ -179,6 +203,14 @@ class Shop:
     #: Where the finished runs are, and what slices a change to one: the terminal's `again`'s.
     runs: Runs | None = None
     now: Callable[[], datetime] = field(default=lambda: datetime.now(UTC))
+    #: Each job's need being answered from the phone, by the terminal's own code.
+    sessions: dict[str, Session] = field(default_factory=dict)
+    #: What the last answer from the phone came to, by job: given, or why not.
+    answered: dict[str, str] = field(default_factory=dict)
+    #: Held while a session is looked up or begun: two posts at once begin one.
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    #: Each job's review as last shown, and the one before it, to say what moved since.
+    reviews: dict[str, tuple[ReviewRequest, ReviewRequest | None]] = field(default_factory=dict)
 
     # -- the ledger, read only ------------------------------------------------
 
@@ -336,6 +368,146 @@ class Shop:
             return "the queue isn't running: start it at the Mac with `print_job.py --queue`"
         return self.queue.move(job_id, spool_id)
 
+    # -- what a job needs: the terminal's own screens, answered from the phone ---
+
+    def asked(self, job_id: str) -> Asked | None:
+        return self.queue.asked(job_id) if self.queue is not None else None
+
+    def session(self, job_id: str) -> Session | None:
+        """The phone's session on this job's need now, or None. One for another need, or that
+        ended, is closed and forgotten; one that ended unanswered (let go, or put by) too, so
+        the phone can begin again."""
+        with self._lock:
+            return self._session(job_id)
+
+    def _session(self, job_id: str) -> Session | None:
+        found = self.sessions.get(job_id)
+        if found is None:
+            return None
+        asked = self.asked(job_id)
+        same = asked is not None and asked.since == found.since
+        if same and not found.ended:
+            return found
+        found.close()
+        if same and found.said and not found.closed_for:
+            return found  # its end is still the page's news: refused, and why
+        self.sessions.pop(job_id, None)
+        if found.ended:
+            alike = self.answered.get(job_id, "")
+            self.answered[job_id] = found.said or (
+                "Taken: it goes on with your answer" + (f" ({alike})" if alike else ""))
+        return None
+
+    def alike(self, job_id: str) -> list[Line]:
+        """The other jobs whose questions now are all asked alike to this one's: the same
+        answers cover them, as `answer N M` gives them (`give_alike`)."""
+        asked = self.asked(job_id)
+        if self.queue is None or asked is None or asked.need is not Need.QUESTIONS:
+            return []
+        mine = {alike(q) for q in asked.questions}
+        found = []
+        for line in self.lines():
+            other = self.queue.asked(line.job.job_id) if line.job.job_id != job_id else None
+            if other is not None and other.need is Need.QUESTIONS and other.questions and all(
+                    alike(q) in mine for q in other.questions):
+                found.append(line)
+        return found
+
+    def begin(self, job_id: str, ahead: dict[str, list[str]], *,
+              alike_to: Sequence[str] = ()) -> Session | str:
+        """The terminal's own screen for this job's need, begun with the form's answers to the
+        prompts it answers. Returns the session, or why not."""
+        queue = self.queue
+        asked = self.asked(job_id)
+        if queue is None or asked is None:
+            return "it isn't waiting for you now"
+        with self._lock:
+            if self._session(job_id) is not None:
+                return "it's being answered on a phone already: look again"
+            return self._begin(queue, asked, job_id, ahead, alike_to)
+
+    def _begin(self, q: Queueish, asked: Asked, job_id: str, ahead: dict[str, list[str]],
+               alike_to: Sequence[str]) -> Session | str:
+
+        def alive() -> bool:
+            return q.asked(job_id) is asked
+
+        def give(answer: Any) -> str:
+            return q.give(job_id, answer, to=asked)
+
+        after = None
+        run: Callable[[Callable[[str], str], Callable[[str], None]], Any]
+        if asked.need is Need.QUESTIONS:
+            questions = asked.questions
+
+            def run(read: Callable[[str], str], write: Callable[[str], None]) -> Any:
+                return cli_asker(read=read, write=write, forget=_nothing,
+                                 width=lambda: PAGE_WIDTH)(questions)
+
+            if alike_to:
+                others = list(alike_to)
+
+                def after(answers: Any) -> None:
+                    said = q.give_alike(others, questions, answers)
+                    self.answered[job_id] = "; ".join(said)
+        elif asked.need is Need.CLOSER and asked.kept is not None:
+            question, kept, seconds = asked.questions[0], asked.kept, asked.seconds
+
+            def run(read: Callable[[str], str], write: Callable[[str], None]) -> Any:
+                waiting = cli_waiting(read=read, write=write, forget=_nothing,
+                                      screen=lambda: None, typed=lambda s: False,
+                                      width=lambda: PAGE_WIDTH)
+                assert waiting.closer is not None
+                return waiting.closer(question, kept, seconds)
+        elif asked.need is Need.REVIEW and asked.review is not None:
+            request = asked.review
+
+            def run(read: Callable[[str], str], write: Callable[[str], None]) -> Any:
+                return cli_reviewer(read=read, write=write, forget=_nothing,
+                                    asks=lambda: True, screen=lambda: None,
+                                    width=lambda: PAGE_WIDTH, more=lambda: False)(request)
+        else:
+            return f"it needs {asked.need}, which this screen doesn't answer"
+        made = Session(job_id, asked.since, run, give, after=after, alive=alive)
+        self.sessions[job_id] = made
+        self.answered.pop(job_id, None)
+        made.start(ahead)
+        return made
+
+    def give_now(self, job_id: str, since: float, answer: Any) -> str:
+        """An answer that needs no screen of the terminal's: the mesh gate's or a look's, for
+        the need the page showed (`since`). Returns "" once given, or why not."""
+        asked = self.asked(job_id)
+        if self.queue is None or asked is None:
+            return "it isn't waiting for you now"
+        if asked.since != since:
+            return "that page is out of date: it moved on since. Look again"
+        return self.queue.give(job_id, answer, to=asked)
+
+    def moved(self, job_id: str, request: ReviewRequest) -> Moved | None:
+        """What moved since the review before this one of the job, as the terminal marks it
+        from its second round on; None on its first."""
+        shown = self.reviews.get(job_id)
+        if shown is None or shown[0] is not request:
+            before = shown[0] if shown is not None else None
+            self.reviews[job_id] = (request, before)
+            shown = self.reviews[job_id]
+        before = shown[1]
+        return what_moved(before, request) if before is not None else None
+
+    def go(self, job_id: str, since: str) -> str:
+        """On without the model's questions: the queue's own `go` (mqucifer/print-shop#208),
+        from the page of the questions there are now (`since`)."""
+        asked = self.asked(job_id)
+        if self.queue is None:
+            return "the queue isn't running"
+        if asked is not None and repr(asked.since) != since:
+            return "that page is out of date: look again"
+        return self.queue.go(job_id)
+
+    def reading(self, job_id: str) -> float | None:
+        return self.queue.reading(job_id) if self.queue is not None else None
+
     # -- print again (mqucifer/print-shop#216's, as `again` does it) -----------
 
     @contextmanager
@@ -435,7 +607,7 @@ class Shop:
                     return LoadAsk(spool, found.over_and_on(spool.named()), stands.changes)
                 over = found if found is not None and answer == "both" else None
                 loaded = stock.load(spool.id, printer.id, over=over,
-                                    asked=Asked(changes, found))
+                                    asked=StockAsked(changes, found))
                 lines = [f"{spool_words(loaded)} is loaded on {printer.id}."]
                 if (still := stock.unknown(printer.id)) is not None:
                     lines.append(f"print-shop still doesn't know what's on {printer.id}, as "

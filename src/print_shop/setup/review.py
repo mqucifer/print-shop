@@ -145,7 +145,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "Left", "Review", "ReviewPart", "Reviewer", "ReviewRequest", "Slipped", "cli_reviewer",
-    "parse_answer", "read_answer", "render", "send_back",
+    "filament_name", "finding", "parse_answer", "read_answer", "render", "send_back",
 ]
 
 #: `key=value`, then an optional reason after "because" or a dash. A value may have spaces,
@@ -1609,9 +1609,19 @@ def _not_a_correction(part: str, request: ReviewRequest) -> str:
 
 def _finding(words: str, request: ReviewRequest, width: int) -> list[str]:
     """What `find` says: the settings that fit the words, best first. It changes nothing."""
-    settings = names.find(words, request.process, request.filament, _sliced_with(request),
-                          _today(request))
-    return found(words, settings, _filament_name(request), min(width, WIDTH))
+    return found(words, finding(words, request), _filament_name(request), min(width, WIDTH))
+
+
+def finding(words: str, request: ReviewRequest) -> list[names.Found]:
+    """The settings that fit the words, best first, as `find` lists them: the phone's Change
+    lists the same (mqucifer/print-shop#221)."""
+    return names.find(words, request.process, request.filament, _sliced_with(request),
+                      _today(request))
+
+
+def filament_name(request: ReviewRequest) -> str:
+    """The filament preset's name, as `find` says it."""
+    return _filament_name(request)
 
 
 def _filament_name(request: ReviewRequest) -> str:
