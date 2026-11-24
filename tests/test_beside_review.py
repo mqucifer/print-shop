@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -37,7 +38,7 @@ from print_shop.setup.review import render as render_review
 from print_shop.setup.suggest import Suggesting
 from tests.fakes import STORE_PROFILES, FramePrinter, MemoryBridge
 from tests.fixtures import write_stl
-from tests.reviewing import settled
+from tests.reviewing import flat, settled
 from tests.test_job_e2e import CFG
 from tests.test_print_loop import Model
 from tests.test_review import _request
@@ -184,7 +185,8 @@ def test_with_a_model_that_never_answers_the_review_shows_in_seconds_and_the_job
     assert shown_after[0] < 10, "the review shows within seconds of the first slice"
     said = "\n".join(shown)
     assert "The model is still working on settings (" in said
-    assert "What it proposes is added below, and nothing waits for it." in said
+    assert ("What it proposes is added under Settings when you press Enter, and nothing waits "
+            "for it.") in flat(said)
     assert said.count("ok again to go on without its proposals, which closes its call") == 1
     assert held.closed.wait(WAIT_S), "going on closed its call"
     [found] = row.proposal.suggested
@@ -242,7 +244,7 @@ def test_a_reply_that_arrives_is_listed_and_none_of_it_is_applied(
                    Proposer(ask=proposing(WALLS)), as_laid=True)
     assert row is not None and row.proposal is not None, shop.error
     shown = render_review(screen.seen[0])
-    assert "Proposed by the model (not applied unless you take it):" in shown
+    assert "PROPOSED BY THE MODEL (not applied unless you take it)" in shown
     assert ") wall_loops  2 -> 4" in shown
     assert "[model: section, walls-shells]" in shown
     assert row.proposal.get("wall_loops") is None
@@ -294,7 +296,8 @@ def test_one_taken_is_sliced_and_is_the_persons_taking_everywhere(
     assert (taken.value, taken.source, taken.taken) == ("4", Source.MODEL, True)
     assert not row.corrections, "taking isn't a correction"
     assert row.proposal.suggested[0].taken == ("wall_loops",)
-    assert "[model, taken by you" in render_review(screen.seen[1])
+    assert re.search(r"\n  wall_loops +2 +2 +4 +model, taken by you\n",
+                     render_review(screen.seen[1]))
     assert "(model, taken by you)" in describe(row)
     assert "Taken from the model's proposals" in "\n".join(again(row, stl).notes)
     assert "wall_loops=4 (taken)" in describe(row)
@@ -393,7 +396,7 @@ def test_each_failure_is_shown_and_recorded_as_what_it_is(
     assert row is not None and row.proposal is not None, shop.error
     said = render_review(screen.seen[0])
     assert f"The model's settings didn't come: {says}" in said
-    assert "These are the settings without it." in said
+    assert "These are the settings without it." in flat(said)
     assert "still working" not in said, "it takes the waiting line's place"
     [found] = row.proposal.suggested
     assert found.ending is ending
@@ -464,8 +467,8 @@ def test_loop_posed_the_review_shows_the_files_pose_and_the_turn_is_a_proposal(
     assert first.orientation.rotation_deg == LAID
     assert "as the file lays it; the model can only propose a turn" in shown
     assert ("the check on poses says another pose has less to support: 0 mm2, where this has "
-            "285.9 mm2") in shown
-    assert "How the part was read:" not in shown, "the reading is the turned pose's, until taken"
+            "285.9 mm2") in flat(shown)
+    assert "How the model read it" not in shown, "the reading is the turned pose's, until taken"
     assert row.proposal.reasoning == "", "and in the record it stays with that proposal"
     assert row.proposal.suggested[0].reasoning == "slab down"
     assert ") orientation  0,0,0 -> 180,0,0" in shown
@@ -496,7 +499,7 @@ def test_a_turn_taken_brings_the_loops_settings_as_proposals_with_no_second_call
     after = screen.seen[1]
     assert after.orientation.rotation_deg == FLIPPED
     assert ") wall_loops  2 -> 4" in render_review(after)
-    assert "How the part was read:\n  slab down" in render_review(after), "taken, it's this pose's"
+    assert "How the model read it\n    slab down" in render_review(after), "taken, it's this pose's"
     assert row.proposal.get("wall_loops") is None, "turned, they're still only proposed"
     assert (len(model.shown), held.calls) == (1, 0), "no second call"
     assert [found.pose for found in row.proposal.suggested] == [LAID, FLIPPED]
@@ -641,14 +644,14 @@ def test_one_that_arrives_under_the_prompt_moves_no_number_until_enter_adds_it()
     def read(prompt: str) -> str:
         if not screens:
             term.arrive()
-        screens.append(term.said.count("Proposed by the model ("))
+        screens.append(term.said.count("PROPOSED BY THE MODEL ("))
         return next(typed)
 
     found = term.review(read)
     assert "Enter adds it to the list (what you've typed is kept)." in term.said
     assert "take a number from 1 to 1" in term.said, "a 2 typed then names what was on screen"
     assert screens == [0, 0, 1], "only Enter drew a new list"
-    assert term.said.count("Settings for this print") == 1, "and only that block and the prompt"
+    assert term.said.count("SETTINGS, over your presets") == 1, "and only that block and the prompt"
     assert term.said.count("Orca's estimate") == 1
     assert term.forgotten == 2, "written, then forgotten, then read: each drawing"
     [taken] = found.taken
@@ -670,7 +673,7 @@ def test_bare_take_stays_the_slices_alone_once_the_models_are_listed() -> None:
 
     found = term.review(read)
     assert [(c.key, c.source) for c in found.taken] == [("ironing_type", Source.READING)]
-    assert "take (the slice's 1), take 2 (the model's, by number)" in term.said
+    assert "take (the slice's) · take 2 (the model's) · no 2 because …" in flat(term.said)
 
 
 def test_ok_before_theyve_been_shown_says_so_once() -> None:
@@ -733,7 +736,7 @@ def test_a_failure_enter_adds_is_its_one_line_and_the_prompt() -> None:
                         screen=lambda: None)(request).approved
     added = shown[-1].strip().splitlines()
     assert added[0].startswith("The model's settings didn't come: timed out after")
-    assert added[-1].startswith("Type ok") and len(added) == 3
+    assert added[-1].startswith("Answers: ok") and len(added) == 3
 
 
 def test_the_gate_on_the_terminal_says_it_went_on(tmp_path: Path) -> None:
@@ -901,7 +904,7 @@ def test_whats_taken_and_left_behind_by_a_turn_is_said(shop: Shop, tmp_path: Pat
     said = ("Taken at 0,0,0 and left behind by the turn: wall_loops=4. Take it again if it's "
             "proposed here, or type it.")
     assert said in row.proposal.notes
-    assert "note: " + said in render_review(steps.seen[2])
+    assert "note: " + said in flat(render_review(steps.seen[2]))
     assert "wall_loops=4 (taken, then left behind by a turn)" in describe(row)
 
 

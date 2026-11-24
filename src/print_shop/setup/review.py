@@ -49,6 +49,11 @@ orientation step is given next time. The part is then turned and sliced again.
 **A pose still being measured says so** (mqucifer/print-shop#235). A kept pose's job doesn't
 wait for the other five, so the table can be drawn before they're in. `orientation` waits for
 them, saying that it is, and then lists them as ever.
+
+**It's laid out to be read** (mqucifer/print-shop#223, `screen.py`): in sections, aligned and
+wrapped to the terminal, with Look first said again above the prompt and, from the second round
+on, what moved marked and listed. Use these' items, the slice's and the model's share one number
+space, in that order, and a number typed to the wrong command says whose it is.
 """
 
 from __future__ import annotations
@@ -333,10 +338,8 @@ def _end(request: ReviewRequest, width: int, since: Moved | None, first: bool) -
 
 def _answers(request: ReviewRequest, width: int) -> list[str]:
     """What the prompt takes, as it's now listed, on a line."""
-    said = []
-    if request.turn_waiting:
-        said.append("turn (ok waits for it)")
-    said.append("ok (approval gate)")
+    # ok isn't offered before a turn it needs to fit is taken: it waits for that.
+    said = ["turn (ok waits for it)" if request.turn_waiting else "ok (approval gate)"]
     if request.numbered:
         said.append("take (the slice's)")
     models = sorted(by_number(request.by_model))
@@ -452,10 +455,12 @@ def parse_answer(answer: str, request: ReviewRequest) -> Review | str:
                 return "there's no past print's settings to use"
             verb = offered.group(1).lower()
             numbers = [int(n) for n in re.findall(r"\d+", offered.group(2))]
-            if verb != "from" and (past := offering.past) is not None:
-                beyond = [n for n in numbers if n > len(past.items)]
-                if beyond and beyond[0] > request.offered:
-                    return _whose_number(beyond[0], request, models, verb)
+            if verb != "from" and offering.past is not None:
+                # Another's number: said whose. Any other is the offer's to refuse.
+                theirs = [n for n in numbers if n > request.offered
+                          and (n in models or n in dict(request.numbered))]
+                if theirs:
+                    return _whose_number(theirs[0], request, models, verb)
             if verb == "use":
                 if picked:
                     return "look at that print's settings first: from picks it, then use"
@@ -748,10 +753,13 @@ def _whose_number(n: int, request: ReviewRequest, models: dict[int, Change], ver
         return f"{n} is the slice's: take {n}"
     if n in models:
         return f"{n} is the model's: take {n}"
-    there = [f"{whose} {lo}-{hi}" if hi > lo else f"{whose} {lo}"
-             for whose, lo, hi in _ranges(request, models)]
-    if not there:
-        return "the slice proposes nothing to take" if verb == "take" else f"there's no {n}"
+    runs = _ranges(request, models)
+    if not runs:
+        return "the slice proposes nothing to take"
+    if len(runs) == 1:
+        _, lo, hi = runs[0]
+        return f"take a number from {lo} to {hi}"
+    there = [f"{whose} {lo}-{hi}" if hi > lo else f"{whose} {lo}" for whose, lo, hi in runs]
     return f"there's no {n}: {', '.join(there)}"
 
 

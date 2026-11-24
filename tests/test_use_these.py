@@ -318,7 +318,7 @@ def test_all_that_decided_a_print_is_offered_each_with_whose_it_was_and_why(
     assert "you chose 'screws': firmer" in text
     assert "you answered then: Where is it used? -> indoors" in text
     assert "bridge_speed" not in items, "a model's choice isn't the person's"
-    assert "use what decided that print (use, or use 1 3)," in text
+    assert "Answers: ok (approval gate) · use · clear 1 ·" in text
 
 
 def test_a_near_file_just_across_a_traits_threshold_still_gets_the_lessons_setting(
@@ -704,7 +704,7 @@ def test_what_was_used_shows_as_used_and_isnt_used_twice(two: Offering) -> None:
     assert isinstance(first, Review)
     after = request_for(two, Proposal().corrected(list(first.corrections)))
     assert standings(two, after.proposal)["wall_loops"][1] == Standing("=", ("used",))
-    assert "[you, used from plinth.stl, job first]" in render(after)
+    assert "  you, used from plinth.stl, job first\n" in render(after)
     assert parse_answer("use 1", after) == "that's so here already"
     assert isinstance(parse_answer("use", after), str)
 
@@ -716,7 +716,7 @@ def test_on_the_command_picking_shows_only_the_offer_again(two: Offering) -> Non
     assert [c.key for c in review.corrections] == ["wall_loops", "seam_position"]
     assert review.offering is not None
     assert ("other", "bridge_speed") in review.offering.cleared, "kept for the next review"
-    whole = [text for text in shown if "Settings for this print" in text]
+    whole = [text for text in shown if "SETTINGS, over your presets" in text]
     assert len(whole) == 1 and len(shown) == 4
 
 

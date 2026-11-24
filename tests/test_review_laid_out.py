@@ -234,9 +234,12 @@ def test_look_first_is_said_again_above_the_prompt_each_line_whole() -> None:
 
 def test_the_answers_are_one_list_and_the_examples_come_on_the_first_round_only() -> None:
     first = _flat(render(made_up()))
-    assert ("Answers: turn (ok waits for it) · ok (approval gate) · take (the slice's) · "
-            "take 7 8 (the model's) · no 7 because … · use · clear 2 · orientation (send it "
-            "back) · key=value because … · stop") in first
+    # ok isn't offered while the turn it needs to fit waits.
+    assert ("Answers: turn (ok waits for it) · take (the slice's) · take 7 8 (the model's) · "
+            "no 7 because … · use · clear 2 · orientation (send it back) · key=value because … "
+            "· stop") in first
+    turned = _flat(render(replace(made_up(), turn_taken=True)))
+    assert "Answers: ok (approval gate) · take (the slice's) ·" in turned
     assert "e.g. wall_loops=3 because it's decorative (several separated by ';')" in first
     later = render(made_up(), first=False)
     assert "e.g." not in later

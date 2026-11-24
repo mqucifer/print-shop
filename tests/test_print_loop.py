@@ -258,7 +258,7 @@ def test_a_part_like_an_earlier_one_gets_its_kept_lessons_and_the_review_says_wh
     assert given.applied and given.looked_up
     assert row.proposal.get("brim_type") is not None
     shown = render(run.shown[-1])
-    assert "(set it; the print loop looked it up with past_prints)" in shown
+    assert " · set it; the print loop looked it up with past_prints · " in " ".join(shown.split())
 
 
 # The limit, and the fallback

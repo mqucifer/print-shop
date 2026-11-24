@@ -39,8 +39,10 @@ from print_shop.setup.reading import (
     read_slice,
 )
 from print_shop.setup.review import ReviewRequest, parse_answer, render
+from print_shop.setup.screen import warnings
 from print_shop.slicer.orca import _DEFAULT_BINARY, slice_model
 from tests.fakes import CI_PROFILES, STORE_PROFILES, FramePrinter, MemoryBridge
+from tests.reviewing import flat
 from tests.test_job_e2e import CFG
 from tests.test_review import _model, _questions
 from tests.test_runtime import settings  # noqa: F401  (the fixture)
@@ -113,15 +115,14 @@ def _request(asked: str | None, reading: SliceReading | None) -> ReviewRequest:
 
 
 def _pause_lines(request: ReviewRequest) -> list[str]:
-    """The review's own line on where the pause landed."""
-    return [line.strip() for line in render(request).splitlines()
-            if re.match(r"  (PAUSE |pause_at=\S+, read from)", line)]
+    """The review's own line on where the pause landed, in full, as Look first says it."""
+    return [w.full for w in warnings(request) if re.match(r"PAUSE ", w.full)]
 
 
 def test_the_review_says_where_it_landed_beside_the_height_asked_for() -> None:
     assert _pause_lines(_request("2.6", _reading(14))) == [
-        "pause_at=2.6, read from the G-code: "
-        "pause after layer 13, at z=2.6, before layer 14, at z=2.8"
+        "PAUSE pause_at=2.6: pauses after layer 13, at z=2.6, before layer 14, at z=2.8, "
+        "about 2:10 in, as asked (read from the G-code)"
     ]
 
 
@@ -200,10 +201,10 @@ def test_a_pause_after_the_layer_that_closes_over_a_fit_is_said_beside_where_it_
     assert note.reading == said
 
     request = replace(_request("2.8", reading), flags=found)
-    lines = render(request).splitlines()
-    at = lines.index(f"  note: {said}")
-    assert lines[at - 1].startswith("  pause_at=2.8, read from the G-code: ")
-    assert lines.count(f"  note: {said}") == 1
+    lines = [w.full for w in warnings(request)]
+    at = lines.index(f"note: {said}")
+    assert lines[at - 1].startswith("PAUSE pause_at=2.8: pauses after layer 14")
+    assert flat(render(request)).count(f"note: {said}") == 1
     assert not isinstance(parse_answer("ok", request), str), "it can still be approved"
 
 

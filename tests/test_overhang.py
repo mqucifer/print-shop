@@ -13,6 +13,7 @@ it reads each pose's box as it lies.
 from __future__ import annotations
 
 import math
+import re
 from pathlib import Path
 from typing import Any
 
@@ -164,13 +165,12 @@ def test_the_review_shows_each_poses_figures(tmp_path: Path) -> None:
         orientation=AppliedOrientation(rotation_deg=(0.0, 90.0, 0.0), rationale="for warping"),
         candidates=found,
     ))
-    assert "  the poses it weighed (overhang is what would need support):" in shown
+    assert "  The poses it weighed (overhang is what would need support; ! is this print)" in shown
+    assert re.search(r"\n    pose +overhang mm2 +on the plate mm2 +tall mm +left out mm2\n", shown)
     # 571.7 before mqucifer/print-shop#239: 0.2 mm2 of the round read 45.0012 degrees past
     # vertical, 1.6e-5 mm past the limit's 0.4 mm of reach, which is a tie at it.
-    assert ("        0,0,0  0 mm2 overhang, 571.5 mm2 rising from the plate left out, 4968 mm2 "
-            "on the plate, 12 mm tall") in shown
-    assert "       0,90,0  0 mm2 overhang, 108.3 mm2 rising from the plate left out, 496 mm2 on " \
-           "the plate, 100 mm tall  <- this print" in shown
+    assert re.search(r"\n    0,0,0 +0 +4968 +12 +571\.5\n", shown)
+    assert re.search(r"\n  ! 0,90,0 +0 +496 +100 +108\.3\n", shown), "this print's, marked"
 
 
 # Elephant foot, and standing a part up

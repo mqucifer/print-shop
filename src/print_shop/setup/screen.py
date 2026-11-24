@@ -48,8 +48,8 @@ from print_shop.setup.reading import (
     NOW_PRINTS,
     PAUSE_PAST_FIT,
     PRINTS,
-    TURNED_SINCE,
     FeatureReading,
+    PauseReading,
     SliceReading,
 )
 from print_shop.setup.suggest import didnt_come, fell_back, turning, waited
@@ -262,20 +262,21 @@ def _pause_said(request: ReviewRequest, fits: _Fits) -> list[Said]:
         # Where it landed as asked, it's said once, with when it comes.
         p = placed[0]
         asked = checked[0].partition(", read from the G-code: ")[0]
-        what = pauses.said(p.kind) if p.kind is not None else "a pause"
         at = f"{mm(p.after_z)} mm" if p.after_z is not None else f"z={mm(p.z)}"
         out.append(Said(f"PAUSE {asked}: {_clocked(p.line())}, as asked (read from the G-code)",
-                        f"PAUSE at {at} for {what}, about {clock(p.after_s)} in"))
+                        f"PAUSE at {at}{_for(p)}, about {clock(p.after_s)} in"))
     else:
         for line in checked:
-            head = line.split(":", 1)[0]
-            out.append(Said(line, head if head != line else line))
+            # Its short form: what was asked, and what the G-code has, without the advice.
+            head, _, rest = line.partition(": ")
+            has = rest.partition("the G-code has: ")[2].partition(": type ")[0]
+            short = f"{head}: the G-code has {has}" if has else head
+            out.append(Said(line, short))
         for p in placed:
-            what = pauses.said(p.kind) if p.kind is not None else "a pause"
-            out.append(Said(_clocked(p.line()), f"PAUSE {p.where()} for {what}, about "
+            out.append(Said(_clocked(p.line()), f"PAUSE {p.where()}{_for(p)}, about "
                                                 f"{clock(p.after_s)} in"))
-    out += [Said(fits.named(f"note: {f.reading}"), "note: the pause comes past a fit, see "
-                 "Look first") for f in request.flags if f.id == PAUSE_PAST_FIT]
+    out += [Said(fits.named(f"note: {f.reading}"), "note: the pause comes after the layer that "
+                 "closes over a fit") for f in request.flags if f.id == PAUSE_PAST_FIT]
     proposal = request.proposal
     paused = proposal.get(PAUSE)
     purpose = paused.pause if paused is not None and paused.value != "none" else None
@@ -296,6 +297,11 @@ def _pause_said(request: ReviewRequest, fits: _Fits) -> list[Said]:
         line = f"the stock couldn't be read ({exc}): an Approve checks it again"
         out.append(Said(line, "the stock couldn't be read: an Approve checks it again"))
     return out
+
+
+def _for(p: PauseReading) -> str:
+    """What a pause is for, as its short form says it, or "" where the G-code doesn't say."""
+    return f" for {pauses.said(p.kind)}" if p.kind is not None else ""
 
 
 def _turn_said(request: ReviewRequest) -> list[Said]:
@@ -693,9 +699,10 @@ def _part(request: ReviewRequest, width: int, fits: _Fits) -> list[str]:
     here = found if found is not None and not turning(found) else None
     reasoning = proposal.reasoning if found is None else here.reasoning if here else ""
     lines: list[str] = []
-    if reasoning:
+    if reasoning.strip():
         lines += ["  How the model read it", *wrap("    ", reasoning, width)]
-    seen = [n for n in proposal.notes if n.startswith((PRINTS, NOW_PRINTS, TURNED_SINCE))]
+    # A turn since the answer that leaves nothing judged is a warning: it's under Look first.
+    seen = [n for n in proposal.notes if n.startswith((PRINTS, NOW_PRINTS))]
     if seen:
         lines += ["", "  Seen"]
         lines += [x for note in seen for x in wrap("    ", note, width, "      ")]
@@ -757,6 +764,8 @@ def _pose(request: ReviewRequest, width: int) -> list[str]:
     if flare:
         lines += wrap("    ", "left out: the round or chamfer rising from the plate, left out of "
                       "the overhang, as the layers under it carry it", width, "    ")
+    lines += [f"    {pose_value(c.rotation_deg)}  doesn't fit, however it's turned on the plate"
+              for c in ready if c.fits_no_way]
     measured = {c.rotation_deg for c in ready}
     lines += [f"    {pose_value(r)}  still being measured: orientation waits for it"
               for r in pending if r not in measured and r not in failed]
