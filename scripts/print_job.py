@@ -6,6 +6,7 @@
     uv run python scripts/print_job.py --sliced FILE [--plate N] [--project P.3mf]
         [--loaded-ok] [--record]
     uv run python scripts/print_job.py --again JOB_ID [--loaded-ok] [--record]
+    uv run python scripts/print_job.py --resume [JOB_ID] [--record]
     uv run python scripts/print_job.py --serve [--record]
     uv run python scripts/print_job.py --list
     uv run python scripts/print_job.py --filaments
@@ -52,10 +53,25 @@ takes one, bare `take` stays the slice's, and `no 2 because ...` turns one down,
 None is applied by arriving. `ok` goes on, saying once if it's without them; or correct a
 setting by name and it slices again. Home Assistant's approval gate comes after that, unchanged.
 
-**The questions and the review take as long as you take** (mqucifer/print-shop#125). The
-hour for the slice to reach the approval gate starts when the review is approved; the gate
-then waits an hour for Approve or Reject, and says by when. A wait that runs out ends the job
-in one sentence, with a ledger row saying it timed out, and nothing printed.
+**The questions, the review and the gates take as long as you take** (mqucifer/print-shop#125,
+mqucifer/print-shop#209). Nothing waiting for you has a deadline: a job left ready waits for days.
+Only the machine's steps are timed: the hour for the slice to reach the approval gate, from the
+review's `ok`, and the upload and start after a Start. One that runs out ends the job in one
+sentence, with a ledger row saying it timed out, and nothing printed.
+
+**A job waiting for you survives this command** (mqucifer/print-shop#209). Stopped with Ctrl-C,
+or by a restart, at the questions, at the review or ready to print, it waits in the jobs folder.
+`--resume JOB_ID` takes it up at that step, with what you'd answered and corrected and its slice;
+`--resume` alone takes the only one, and `--list` shows them. A job is never kept approved: a
+restart leaves it ready, and nothing is armed.
+
+**Start is the approval, given when it's time to print** (mqucifer/print-shop#209). At the
+approval gate, type `start` here, or press Yes on the card. Start checks again the G-code's hash,
+the part's file, the profiles, the loaded spool, the fitted nozzle and that the printer is free,
+and asks that the bed is clear: here, "I can see the bed is clear", where only `y` starts it, and
+on the card in its dialog, which can't be checked from here until mqucifer/print-shop#214. A
+change is said, with what to do, nothing prints, and the gate waits for a new Start. `reject` here
+is the card's Reject. One Start a gate: the second, from either, is told it was already taken.
 
 **Each gate says which it is** (mqucifer/print-shop#200). A part whose mesh isn't closed stops
 at the mesh gate first, before any question or slice: it's shown with its reason, the mesh's
@@ -84,8 +100,8 @@ anything else loaded starts nothing: it says what to load, and waits for a new p
 
 **This is the only place that arms the printer,** and only when the invocation
 says so: `PRINT_AGENT_ALLOW_HARDWARE=1` on this command's own line. Without it
-the job slices, parks at the approval gate in Home Assistant, and an approval
-fails at the print node instead of starting anything. It lives outside the
+the job slices and parks at the approval gate, and a Start is held, saying so:
+the job waits, ready, for an armed `--resume` (mqucifer/print-shop#209). It lives outside the
 package so that nothing importable can arm the printer for itself.
 
 With a print started, it keeps running, watching the printer read-only, until
@@ -125,6 +141,7 @@ import argparse
 import logging
 import shlex
 import sys
+import threading
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -139,7 +156,8 @@ from print_shop.inventory import SETUP, Inventory, InventoryError, Material
 from print_shop.joblog import LOG_NAME, JobLog, Terminal, secrets
 from print_shop.ledger import Ledger, ledger_path
 from print_shop.opening import ThisJob
-from print_shop.orchestrator.daemon import GATE_WAIT_S
+from print_shop.orchestrator.daemon import Daemon
+from print_shop.orchestrator.kept import WaitingJob, WaitingJobs
 from print_shop.orchestrator.live import AlreadyLive, Live, only_live
 from print_shop.orchestrator.outcome import no_frames
 from print_shop.orchestrator.spools import ask_on_now
@@ -169,7 +187,16 @@ from print_shop.slicer.store import describe as describe_store
 #: From the review's `ok` (or the job's submit, with no review) to the approval gate: the slice
 #: and its reading. The intake and the review aren't counted (mqucifer/print-shop#125).
 APPROVAL_WAIT_S = 3600.0
-FINISH_WAIT_S = 900.0  # after the press: preflight, upload, and a five-minute start watch
+FINISH_WAIT_S = 900.0  # after the Start: preflight, upload, and a five-minute start watch
+
+#: The gate before printing, as the terminal says it, and how to answer (mqucifer/print-shop#209).
+READY = "Ready to print. Start it here or on the card, or reject it on the card."
+START_HERE = "  Type start here, or Yes on the card. It waits until you start or reject it."
+#: Where nothing reads the terminal (input piped, no terminal): the card only.
+READY_ON_THE_CARD = "Ready to print. Start or reject it on the card."
+ON_THE_CARD = "  It waits until you start or reject it."
+#: The bed's question at the terminal's Start, in the phone's words (mqucifer/print-shop#214).
+BED_QUESTION = "  I can see the bed is clear [y/N]"
 
 
 #: Ctrl-C at the question before preparing.
@@ -199,6 +226,9 @@ def main(argv: list[str] | None = None) -> int:
                              "the plate's sliced file (.gcode.3mf)")
     parser.add_argument("--again", metavar="JOB_ID",
                         help="print a past hand-sliced job's file again, as a reprint of it")
+    parser.add_argument("--resume", nargs="?", const="", metavar="JOB_ID",
+                        help="take up a job that waits for you, where it waits: the only one, "
+                             "without JOB_ID")
     parser.add_argument("--plate", type=int,
                         help="which plate, for a sliced plate file that holds several")
     parser.add_argument("--project", type=Path, metavar="P.3mf",
@@ -217,8 +247,18 @@ def main(argv: list[str] | None = None) -> int:
         # A wait among the screens is said as the screens say it (mqucifer/print-shop#223).
         handler.setFormatter(Terminal("%(asctime)s %(levelname)s %(message)s"))
     by_hand = args.sliced is not None or args.again is not None
-    if sum((bool(args.stl), args.sliced is not None, args.again is not None)) > 1:
-        parser.error("give one of a part, --sliced FILE, or --again JOB_ID")
+    if sum((bool(args.stl), args.sliced is not None, args.again is not None,
+            args.resume is not None)) > 1:
+        parser.error("give one of a part, --sliced FILE, --again JOB_ID or --resume")
+    if args.resume is not None:
+        if args.serve or args.list or args.filaments:
+            parser.error("--resume takes up a job; leave out --serve, --list, --filaments")
+        for flag in ("nozzle", "filament", "machine", "process", "answers", "context", "plate",
+                     "project"):
+            if getattr(args, flag) is not None:
+                parser.error(f"--{flag} isn't for --resume: the job keeps what it was given")
+        if args.as_laid or args.loaded_ok:
+            parser.error("--as-laid and --loaded-ok aren't for --resume: the job keeps its own")
     if by_hand and (args.serve or args.list or args.filaments):
         parser.error("--sliced and --again send a job; leave out --serve, --list, --filaments")
     if args.sliced is not None and not args.sliced.is_file():
@@ -237,7 +277,7 @@ def main(argv: list[str] | None = None) -> int:
     if len(args.stl) > 1 and args.context is not None:
         parser.error("--context is for one part: with several, each part's context is read "
                      "beside it")
-    a_job = bool(args.stl) or by_hand
+    a_job = bool(args.stl) or by_hand or args.resume is not None
     if args.list or args.filaments or not (a_job or args.serve):
         return _main(parser, args)  # it only reads, or has nothing to do: no lock
     try:
@@ -253,6 +293,8 @@ def main(argv: list[str] | None = None) -> int:
                 files = args.stl or ([args.sliced] if args.sliced is not None else [])
                 job_log.write(_header(files, given))
                 try:
+                    if args.resume is not None:
+                        return _resume(args, job_log, live)
                     return _main(parser, args, job_log, live)
                 finally:
                     job_log.close()
@@ -267,6 +309,8 @@ def _part(args: argparse.Namespace) -> str | None:
         return None
     if args.again is not None:
         return f"a reprint of job {args.again}"
+    if args.resume is not None:
+        return f"job {args.resume}, taken up again" if args.resume else "a job taken up again"
     if args.sliced is not None:
         return Path(args.sliced).name
     return ", ".join(part.name for part in args.stl)
@@ -384,6 +428,11 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
                 print("\nEnded without printing:")
                 for job in unprinted:
                     print(f"  {job.line()}")
+        left = WaitingJobs(WORK_DIR / "jobs.sqlite").all()
+        if left:
+            print("\nWaiting for you (`--resume JOB_ID`):")
+            for kept in left:
+                print(f"  {kept.line()}")
         return 0
     by_hand = args.sliced is not None or args.again is not None
     if not args.serve and not args.stl and not by_hand:
@@ -453,15 +502,8 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
                               prompt=answering.prompt, several=len(args.stl) > 1)
 
     recorder = FrameRecorder(recording_path()) if args.record else None
-    printer: PrinterClient | None = None
     a_job = bool(args.stl) or hand_sliced is not None
-    armed = ""
-    if a_job and hardware_allowed():
-        printer = live_printer(recorder=recorder)
-        armed = f"ARMED by {ALLOW_HARDWARE_ENV}=1: an approval in Home Assistant starts the print."
-    elif a_job:
-        armed = f"Not armed ({ALLOW_HARDWARE_ENV} is not 1): an approval will NOT start a print."
-    recording = f"Recording the printer's replies to {recorder.path}" if recorder else ""
+    printer, armed, recording = _arming(recorder) if a_job else (None, "", "")
     if this is not None:
         this.armed, this.recording = armed, recording
         if len(args.stl) > 1:
@@ -473,7 +515,7 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
         # Said before anything that follows can fail, as each of its lines was.
         print("\n".join(this.lines(terminal_width())))
     else:
-        for said in (armed, recording):
+        for said in (recording, armed):
             if said:
                 print(said)
 
@@ -490,6 +532,7 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
         store=Store(STORE_DIR) if hand_sliced is not None else None,
         on_step=live.at if live is not None else None,
     )
+    job_id = ""
     try:
         with run.daemon:
             if args.serve:
@@ -497,6 +540,7 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
                 while True:
                     time.sleep(1)
 
+            _say_waiting(run.daemon)
             if hand_sliced is not None:
                 job_id = run.daemon.submit_sliced(hand_sliced)
             elif len(args.stl) > 1:
@@ -520,46 +564,196 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
                     how = (f"{'kept as laid' if args.as_laid else 'orienting'}, then a few "
                            "questions about the part, here")
                 print("\n".join(ThisJob.started(job_id, log, how, terminal_width())))
-            shown = 0
-            while True:  # a gate at a time, to the one before printing
-                try:
-                    gate = run.daemon.wait_for_gate(job_id, APPROVAL_WAIT_S, shown)
-                except TimeoutError as ran_out:
-                    print(ran_out)  # the sentence, and the ledger's row is written
-                    return 1
-                if gate is None:
-                    break  # it ended first
-                shown += 1
-                for line in _gate_lines(gate, turned=hand_sliced is None):
-                    print(line)
-                print(f"  answer by   {_answer_by(gate)}; after that it ends and nothing prints")
-                if gate.get("gate") == Gate.BEFORE_PRINT:
-                    break
-            try:
-                result = run.daemon.wait_for_finish(
-                    job_id, timeout_s=GATE_WAIT_S + FINISH_WAIT_S, tell=print)
-            except TimeoutError:
-                print(run.daemon.abandon(job_id, "waiting for the job to finish",
-                                         GATE_WAIT_S + FINISH_WAIT_S))
-                if run.ledger.get(job_id) is None:
-                    return 1
-                result = None
-            ended = run.ledger.unprinted(job_id)
-            if ended is not None:
-                print(ended.detail)  # a gate's own wait ran out
-                return 1
-            if result is not None and result.error:
-                print(f"The job ended without printing: {result.error}")
-            row = run.ledger.get(job_id)
-            if row is None:
-                print("Nothing was started, so the ledger has no row for this job.")
-                return 0 if result is None or not result.error else 1
-            return _watch(run, job_id)
+            return _follow(run, job_id, turned=hand_sliced is None, read=read)
     except KeyboardInterrupt:
-        print("\nStopped. Any print without an answer stays open in the ledger.")
+        print(_stopped(run, job_id))
         return 130
     finally:
         run.ledger.close()
+
+
+def _armed(recorder: FrameRecorder | None) -> PrinterClient | None:
+    """The printer an approval commands, if this command's own line armed it, said either way."""
+    printer, armed, recording = _arming(recorder)
+    if recording:
+        print(recording)
+    print(armed)
+    return printer
+
+
+def _arming(recorder: FrameRecorder | None) -> tuple[PrinterClient | None, str, str]:
+    """The printer an approval commands, if this command's own line armed it, and what's said of
+    it: whether it's armed, and where its replies are recorded, or "". THIS JOB says them as its
+    rows (mqucifer/print-shop#266)."""
+    recording = (f"Recording the printer's replies to {recorder.path}" if recorder is not None
+                 else "")
+    if hardware_allowed():
+        return (live_printer(recorder=recorder),
+                f"ARMED by {ALLOW_HARDWARE_ENV}=1: a Start, here or on the card, starts the print.",
+                recording)
+    return (None,
+            f"Not armed ({ALLOW_HARDWARE_ENV} is not 1): a Start, here or on the card, will NOT "
+            "print. It's held, and the job waits for an armed `--resume`.",
+            recording)
+
+
+def _say_waiting(daemon: Daemon) -> None:
+    """Jobs that wait for the person from before, so a new one doesn't hide them."""
+    waiting = daemon.waiting()
+    if waiting:
+        print("Waiting for you from before (`--resume JOB_ID` takes one up):")
+        for kept in waiting:
+            print(f"  {kept.line()}")
+
+
+def _stopped(run: Run, job_id: str) -> str:
+    """What Ctrl-C leaves: a job that waits says how to take it up again."""
+    said = "\nStopped. Any print without an answer stays open in the ledger."
+    if job_id and any(kept.job_id == job_id for kept in run.daemon.waiting()):
+        said += (f"\nJob {job_id} waits where it was: "
+                 f"`uv run python scripts/print_job.py --resume {job_id}` takes it up again.")
+    return said
+
+
+def _resume(args: argparse.Namespace, job_log: JobLog, live: Live) -> int:
+    """A job that waits for the person, taken up at its step (mqucifer/print-shop#209)."""
+    read: Callable[[str], str] = job_log.reader(input)
+    jobs = WaitingJobs(WORK_DIR / "jobs.sqlite")
+    kept: WaitingJob | None
+    if args.resume:
+        kept = jobs.get(args.resume)
+        if kept is None:
+            print(f"No job {args.resume} is waiting: `--list` shows those that are.",
+                  file=sys.stderr)
+            return 2
+    else:
+        waiting = jobs.all()
+        if not waiting:
+            print("Nothing is waiting for you.")
+            return 0
+        if len(waiting) > 1:
+            print("Several jobs wait for you; say which with `--resume JOB_ID`:", file=sys.stderr)
+            for one in waiting:
+                print(f"  {one.line()}", file=sys.stderr)
+            return 2
+        kept = waiting[0]
+    job_id = kept.job_id
+    job_log.write(f"resumed: job {job_id} ({kept.part}), {kept.waits}\n")
+    job_log.open(WORK_DIR / job_id / LOG_NAME)
+    print(f"Job {job_id} ({kept.part}), {kept.waits}, taken up again. Its log: {job_log.path}")
+    asker: Asker | None = None
+    waiting_on: Waiting | None = None
+    if not kept.by_hand:
+        answering = Prompted(read)
+        asker = cli_asker(read=answering)
+        waiting_on = cli_waiting(read=read, replayed=False, prompt=answering.prompt)
+    recorder = FrameRecorder(recording_path()) if args.record else None
+    run = build_run(
+        printer=_armed(recorder),
+        profiles=kept.profiles,
+        recorder=recorder,
+        settings=args.settings,
+        asker=asker,
+        waiting=waiting_on,
+        reviewer=cli_reviewer(read=read) if not kept.by_hand else None,
+        show=print if kept.by_hand else None,
+        store=Store(STORE_DIR) if kept.by_hand else None,
+        on_step=live.at,
+    )
+    try:
+        with run.daemon:
+            run.daemon.resume(job_id)
+            return _follow(run, job_id, turned=not kept.by_hand, read=read)
+    except KeyboardInterrupt:
+        print(_stopped(run, job_id))
+        return 130
+    finally:
+        run.ledger.close()
+
+
+def _follow(run: Run, job_id: str, *, turned: bool, read: Callable[[str], str]) -> int:
+    """The job from its gates to its end: each gate shown, a Start taken here or on the card,
+    and a print watched until its outcome is answered."""
+    shown = 0
+    while True:  # a gate at a time, to the one before printing
+        try:
+            gate = run.daemon.wait_for_gate(job_id, APPROVAL_WAIT_S, shown)
+        except TimeoutError as ran_out:
+            print(ran_out)  # the sentence, and the ledger's row is written
+            return 1
+        if gate is None:
+            break  # it ended first
+        shown += 1
+        lines = _gate_lines(gate, turned=turned)
+        here = can_ask()
+        if gate.get("gate") == Gate.BEFORE_PRINT and not here:
+            lines[0] = READY_ON_THE_CARD  # nothing reads this terminal
+        for line in lines:
+            print(line)
+        if gate.get("gate") == Gate.BEFORE_PRINT:
+            if here:
+                print(START_HERE)
+                threading.Thread(target=_start_here, args=(run.daemon, job_id, read, print),
+                                 daemon=True).start()
+            else:
+                print(ON_THE_CARD)
+            break
+        print("  It waits until you answer it on the card.")
+    try:
+        result = run.daemon.wait_for_finish(job_id, timeout_s=FINISH_WAIT_S, tell=print)
+    except TimeoutError:
+        print(run.daemon.abandon(job_id, "waiting for the job to finish", FINISH_WAIT_S))
+        if run.ledger.get(job_id) is None:
+            return 1
+        result = None
+    ended = run.ledger.unprinted(job_id)
+    if ended is not None:
+        print(ended.detail)  # a wait ran out
+        return 1
+    if result is not None and result.error:
+        print(f"The job ended without printing: {result.error}")
+    row = run.ledger.get(job_id)
+    if row is None:
+        print("Nothing was started, so the ledger has no row for this job.")
+        return 0 if result is None or not result.error else 1
+    return _watch(run, job_id)
+
+
+def _start_here(
+    daemon: Daemon, job_id: str, read: Callable[[str], str], write: Callable[[str], None],
+    forget: Callable[[], None] = drop_typed,
+) -> None:
+    """Start and Reject at the terminal, while the gate before printing is open
+    (mqucifer/print-shop#209). Start asks the bed's question, drawn first, with what was typed
+    before it dropped, so a y typed ahead never answers it. Whatever comes of a Start is said by
+    the job: started, or not and why."""
+    while True:
+        gate = daemon.pending_gate()
+        if gate is None or gate.get("job_id") != job_id:
+            return
+        try:
+            typed = read("> ").strip().lower()
+        except (EOFError, OSError, ValueError):
+            return
+        if typed not in ("start", "reject"):
+            write("  Type start, or reject.")
+            continue
+        if decided := daemon.decided(job_id):
+            # Decided on the card while this prompt was open: said at once, nothing asked.
+            write(f"  Not taken: {decided}.")
+            return
+        if typed == "reject":
+            why = daemon.reject(job_id)
+        else:
+            write(BED_QUESTION)
+            forget()  # shown only now: what was typed before it is no answer to it
+            try:
+                bed = read("bed clear> ").strip().lower()
+            except (EOFError, OSError, ValueError):
+                return
+            why = daemon.start(job_id, bed_clear=bed in ("y", "yes"))
+        if why:
+            write(f"  Not taken: {why}.")
 
 
 def _watch(run: Run, job_id: str) -> int:
@@ -619,6 +813,7 @@ def _gate_lines(gate: dict[str, object], *, turned: bool) -> list[str]:
     """
     lines = [f"At {Gate.named(gate)}. Approve or Reject on the dashboard."]
     if gate.get("gate") == Gate.BEFORE_PRINT:
+        lines = [READY]
         seconds = gate.get("print_time_s")
         lines += [f"  time        {int(seconds) // 60 if isinstance(seconds, int | float) else 0}"
                   " min",
@@ -661,16 +856,6 @@ def _gate_lines(gate: dict[str, object], *, turned: bool) -> list[str]:
         "answer. Nothing prints.",
         "  Reject      ends the job: nothing is sliced or printed",
     ]
-
-
-def _answer_by(gate: dict[str, object]) -> str:
-    """The gate's deadline in local time, and the minutes left."""
-    raw = gate.get("answer_by")
-    if not isinstance(raw, str):
-        return "within the hour"
-    by = datetime.fromisoformat(raw).astimezone()
-    left = max(0, round((by - datetime.now(by.tzinfo)).total_seconds() / 60))
-    return f"{by:%H:%M} ({left} min left)"
 
 
 if __name__ == "__main__":

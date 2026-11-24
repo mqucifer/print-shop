@@ -22,8 +22,8 @@ import pytest
 import trimesh
 
 from print_shop.core.contracts import Gate
-from print_shop.core.mqtt import command_topic, gate_topic
-from print_shop.ledger import JobEnding, Ledger
+from print_shop.core.mqtt import gate_topic
+from print_shop.ledger import Ledger
 from print_shop.orchestrator.daemon import Daemon
 from print_shop.setup import Proposer
 from print_shop.setup.intake import replay_asker
@@ -55,13 +55,15 @@ class Desk:
         self.bridge = MemoryBridge()
         self.printer = FramePrinter()
         self.reviewed = 0
-        self.gate_wait_s = 30.0
         #: How long the person takes over each gate.
         self.thinks_s = 0.0
         self._shown: list[dict[str, Any]] = []
         monkeypatch.delenv("PRINT_AGENT_ALLOW_HARDWARE", raising=False)
         monkeypatch.setattr(self.script, "WORK_DIR", self.jobs)
         monkeypatch.setattr(self.script, "build_run", self._build_run)
+        # As on the Mac's terminal: the gate says `start` is read here. What's typed isn't, as
+        # stdin is pytest's, so the reader stops at once (mqucifer/print-shop#209).
+        monkeypatch.setattr(self.script, "can_ask", lambda: True)
 
     def _review(self, request: ReviewRequest) -> Review:
         self.reviewed += 1
@@ -75,7 +77,7 @@ class Desk:
             cfg=CFG, profiles=CI_PROFILES, workdir=self.jobs, printer=self.printer,
             slicer=RecordedSlicer(recordings), bridge=lambda cfg: self.bridge, ledger=ledger,
             proposer=Proposer(ask=_model, ask_questions=_questions),
-            asker=replay_asker(ANSWERS), reviewer=self._review, gate_wait_s=self.gate_wait_s,
+            asker=replay_asker(ANSWERS), reviewer=self._review,
         )
         wait = daemon.wait_for_gate
 
@@ -99,9 +101,7 @@ class Desk:
                     if done.wait(0.02):
                         return
                 time.sleep(self.thinks_s)
-                self.bridge.deliver(command_topic(CFG), {
-                    "decision": decision, "job_id": self._shown[n]["job_id"],
-                })
+                self.bridge.press(CFG, decision)
 
         thread = threading.Thread(target=person, daemon=True)
         thread.start()
@@ -146,9 +146,9 @@ def test_a_mesh_that_isnt_closed_shows_the_mesh_gate_its_reason_and_its_facts(
     )
     for shown, where in ((out, "the terminal"), (log, "job.log")):
         assert "\n".join(lines) in shown, where
-        assert "At the approval gate" not in shown, where
+        assert "Ready to print" not in shown, where
         assert "None cm3" not in shown and "time        0 min" not in shown, where
-        assert "answer by" in shown, where
+        assert "  It waits until you answer it on the card." in shown, where
     assert desk.reviewed == 0, "nothing was asked or sliced before the gate"
     assert desk.printer.calls == []
 
@@ -161,7 +161,8 @@ def test_approved_at_the_mesh_gate_the_approval_gate_is_shown_after_the_review(
 
     for shown in (capsys.readouterr().out, desk.log()):
         first = shown.index("At the mesh gate")
-        second = shown.index("At the approval gate. Approve or Reject on the dashboard.")
+        second = shown.index(
+            "Ready to print. Start it here or on the card, or reject it on the card.")
         assert first < second
         after = shown[second:]
         assert "  time        16 min\n" in after and "  plastic     " in after
@@ -181,14 +182,12 @@ def test_a_gate_answered_before_the_terminal_looked_is_still_shown_and_logged(
         publish(topic, payload, retain, qos)
         if topic == gate_topic(CFG) and payload.get("pending"):
             at_mesh = payload["gate"] == Gate.REVIEW_PROPOSAL.value
-            desk.bridge.deliver(command_topic(CFG), {
-                "decision": "approve" if at_mesh else "reject", "job_id": payload["job_id"],
-            })
+            desk.bridge.press(CFG, "approve" if at_mesh else "reject")
 
     desk.bridge.publish = answered_at_once  # type: ignore[method-assign]
     desk.run(write_stl("nicked_cube", desk.tmp))
     for shown in (capsys.readouterr().out, desk.log()):
-        assert shown.index("At the mesh gate") < shown.index("At the approval gate")
+        assert shown.index("At the mesh gate") < shown.index("Ready to print")
 
 
 @pytest.mark.parametrize("last", ["approve", "reject"])
@@ -202,7 +201,9 @@ def test_what_the_mesh_gate_says_of_approve_is_true(
     out = capsys.readouterr().out
     assert "where today the job fails whatever you answer. Nothing prints." in out
     assert "The job ended without printing:" in out
-    assert desk.printer.calls == []
+    # An Approve there is a Start, which reads the printer and sends it nothing
+    # (mqucifer/print-shop#209).
+    assert [verb for verb, _ in desk.printer.calls if verb != "snapshot"] == []
 
 
 def test_the_gate_before_printing_shows_as_it_did(
@@ -212,16 +213,16 @@ def test_the_gate_before_printing_shows_as_it_did(
 
     (gate,) = [g for g in desk.bridge.on(gate_topic(CFG)) if g.get("pending")]
     expected = (
-        "At the approval gate. Approve or Reject on the dashboard.\n"
+        "Ready to print. Start it here or on the card, or reject it on the card.\n"
         "  time        16 min\n"
         f"  plastic     {gate['filament_cm3']} cm3\n"
         f"  turned      {gate['orientation_deg']}\n"
         f"  because     {gate['orientation_rationale']}\n"
-        "  answer by   "
+        "  Type start here, or Yes on the card. It waits until you start or reject it.\n"
     )
     for shown in (capsys.readouterr().out, desk.log()):
         assert expected in shown
-        assert "after that it ends and nothing prints" in shown
+        assert "after that it ends and nothing prints" not in shown
         assert "mesh gate" not in shown
 
 
@@ -235,26 +236,24 @@ def test_no_gate_but_the_one_before_printing_is_shown_as_the_approval_gate(
 ) -> None:
     lines: Callable[..., list[str]] = desk.script._gate_lines
     shown = "\n".join(lines({"gate": gate, "reason": "why it stopped", **facts}, turned=True))
-    assert "approval gate" not in shown
+    assert "approval gate" not in shown and "Ready to print" not in shown
     assert "why it stopped" in shown
     for number in ("time", "plastic", "turned"):
         assert f"  {number} " not in shown, "only the gate before printing has them"
 
 
-def test_a_wait_that_runs_out_at_the_mesh_gate_names_that_gate(
-    desk: Desk, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+def test_the_gates_say_they_wait_with_no_deadline(
+    desk: Desk, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    desk.gate_wait_s = 1.0
-    monkeypatch.setattr(desk.script, "APPROVAL_WAIT_S", 0.8)
-    assert desk.run(write_stl("nicked_cube", desk.tmp)) == 1
-
-    sentence = "Timed out waiting for Approve or Reject at the mesh gate after 1 s, so nothing"
+    """mqucifer/print-shop#209: no gate has an hour. Each says how it's answered, and that it
+    waits. The mesh gate's line is in the test above."""
+    assert desk.run(write_stl("cube", desk.tmp), "reject") == 0
     for shown in (capsys.readouterr().out, desk.log()):
-        assert sentence in shown
-        assert "approval gate" not in shown
+        assert ("Type start here, or Yes on the card. It waits until you start or reject it."
+                in shown)
+        assert "answer by" not in shown and "Timed out" not in shown
     with Ledger(desk.tmp / "ledger.sqlite") as ledger:
-        (ended,) = ledger.unprinted_jobs()
-    assert ended.outcome is JobEnding.TIMED_OUT and "mesh gate" in ended.detail
+        assert ledger.unprinted_jobs() == []
 
 
 def test_the_time_at_the_mesh_gate_isnt_counted_against_the_slice(
@@ -267,7 +266,7 @@ def test_the_time_at_the_mesh_gate_isnt_counted_against_the_slice(
     desk.run(write_stl("nicked_cube", desk.tmp), "approve", "reject")
     out = capsys.readouterr().out
     assert "Timed out" not in out
-    assert "At the approval gate" in out
+    assert "Ready to print" in out
 
 
 def test_a_closed_mesh_with_no_pose_that_fits_isnt_called_unclosed(tmp_path: Path) -> None:
@@ -288,5 +287,5 @@ def test_a_closed_mesh_with_no_pose_that_fits_isnt_called_unclosed(tmp_path: Pat
         assert "not manifold" not in gate["reason"]
         assert gate["reason"].startswith("No pose passed its check")
         assert "exceeds build volume" in gate["reason"]
-        bridge.deliver(command_topic(CFG), {"decision": "reject", "job_id": job_id})
+        bridge.press(CFG, "reject")
         daemon.wait_for_finish(job_id, timeout_s=30)

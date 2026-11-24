@@ -199,7 +199,7 @@ def test_a_job_prepared_with_the_old_tuning_says_so_at_start_and_prints_nothing(
     assert result.printed is False and result.error is not None
     assert f'spool #1\'s tuning was changed from "{COOLER}" to "{HOTTER}"' in result.error
     assert "Run the job again" in result.error
-    assert rig.printer.calls == [], "refused before the printer was reached"
+    assert rig.printer.verbs == ["snapshot"], "Start read it, and nothing was sent"
     assert rig.ledger.rows() == []
 
 
@@ -213,7 +213,7 @@ def test_a_tuning_edited_holds_the_gate_and_put_back_it_starts_on_a_new_press(
     wait_until(lambda: bool(rig.bridge.retained_json(gate_topic(CFG)).get("held")))
     held = rig.bridge.retained_json(gate_topic(CFG))["held"]
     assert f'spool #1\'s tuning was changed from "{COOLER}" to "{HOTTER}"' in held
-    assert rig.printer.calls == [] and rig.ledger.rows() == []
+    assert rig.printer.verbs == ["snapshot"] and rig.ledger.rows() == []
 
     assert _stock(env, "edit", "1", "--tuning", COOLER) == 0
     rig.press("approve")
@@ -280,7 +280,7 @@ def test_the_terminal_says_so_for_a_hand_sliced_job_too(
         (row,) = rows
         assert row.material is not None and row.material.colour == "grey"
     else:
-        assert code == 1 and rows == [] and shop.printer.calls == []
+        assert code == 1 and rows == [] and shop.printer.verbs == ["snapshot"]
         assert "The job ended without printing: spool #1's tuning was changed from the " \
                f"variety's default to \"{PLA_TUNING}\"" in out
         (log,) = shop.jobs.glob("*/job.log")
@@ -311,4 +311,4 @@ def test_a_hand_sliced_job_is_held_for_another_colour_too(
 
     assert "Not started: this job was prepared for spool #1" in capsys.readouterr().out
     with Ledger(shop.ledger_path) as ledger:
-        assert ledger.rows() == [] and shop.printer.calls == []
+        assert ledger.rows() == [] and shop.printer.verbs == ["snapshot"]

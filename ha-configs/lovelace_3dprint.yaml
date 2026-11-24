@@ -83,8 +83,14 @@ views:
                 {% set held = state_attr('sensor.3d_print_agent_status', 'held') %}
                 {%- if held %}**Not started:** {{ held | replace('Not started: ', '') }}.{% endif %}
 
+                *Waits until you start or reject it.*
+
             - type: horizontal-stack
               cards:
+                # Start (mqucifer/print-shop#209). The dialog asks the bed, in the words of
+                # the phone's Start (mqucifer/print-shop#214). It can't take a template, so
+                # it names the card above. A press can't say it was shown: the bed is still
+                # the person's to look at, and print-shop says so.
                 - type: button
                   entity: button.3d_print_agent_approve
                   name: "Yes, print it"
@@ -96,6 +102,8 @@ views:
                     perform_action: button.press
                     target:
                       entity_id: button.3d_print_agent_approve
+                    confirmation:
+                      text: "I can see the bed is clear. Print the job shown above?"
                 - type: button
                   entity: button.3d_print_agent_reject
                   name: "No, stop"

@@ -7,10 +7,26 @@ CONTRACTS.md §1: the pipeline is one process. This is that process gaining a
 lifecycle, not a new service.
 
 **Waiting is counted only while the job isn't with the person** (mqucifer/print-shop#125).
-The intake's questions and the settings review take as long as the person takes; a caller's
-wait for the gate counts from when the job last came back from them. The gate then waits
-`GATE_WAIT_S` for Approve or Reject. A wait that runs out ends the job in one sentence, with a
-ledger row whose outcome is that it timed out, and nothing is sent to the printer after it.
+The intake's questions, the settings review and the gates take as long as the person takes,
+with no deadline (mqucifer/print-shop#209): a job left ready waits for days. A caller's wait
+counts only the machine's steps, from when the job last came back from the person: the slice
+to the gate, and the upload and the start after a Start. A wait that runs out ends the job in
+one sentence, with a ledger row whose outcome is that it timed out, and nothing is sent to the
+printer after it: a job it ran out on never opens a gate, even where the step it ran out on
+ends as it's ended.
+
+**A waiting job outlives its process** (mqucifer/print-shop#209, `kept.py`). Each job is in the
+jobs folder's list of waiting jobs from its submit to its end, and `resume` takes one up again at
+the step it waits at, with what was answered and corrected, and its slice. A job a restart caught
+after its Start, and before anything reached the printer, is taken up ready again: an approval
+is never kept for later, and nothing is armed by a restart.
+
+**Start is the approval, given when it's time to print** (mqucifer/print-shop#209). An Approve
+at the gate before printing, or `start` at the terminal, checks again the G-code, the part, the
+profiles, the loaded spool, the fitted nozzle and the printer (`start.why_not_now`), and that the
+bed was said to be clear. The card's dialog asks that, and it can't be checked from here until
+mqucifer/print-shop#214; the terminal asks it itself. Each press names its gate's word, new at
+each gate and after each press it spends, so a press sent again starts nothing.
 
 **An Approve with the wrong spool loaded starts nothing** (mqucifer/print-shop#218). The press is
 checked before the graph resumes, on the stock and the ledger alone as they are when it's pressed
@@ -29,12 +45,12 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import shutil
 import sqlite3
 import threading
 import time
 import uuid
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from queue import Empty, Queue
@@ -43,6 +59,7 @@ from typing import Any, ParamSpec, TypeVar
 from langgraph.types import Command as LgCommand
 from pydantic import BaseModel
 
+from print_shop.arming import ALLOW_HARDWARE_ENV
 from print_shop.core.checkpoint import open_checkpointer
 from print_shop.core.contracts import Gate
 from print_shop.core.mqtt import (
@@ -58,8 +75,10 @@ from print_shop.expert.client import LLMConfig
 from print_shop.ledger import JobEnding, Ledger, LedgerError
 from print_shop.orchestrator.frames import FrameKeeper
 from print_shop.orchestrator.graph import build_graph, why_not_start
+from print_shop.orchestrator.kept import WaitingJob, WaitingJobs, Waits
 from print_shop.orchestrator.live import Step
 from print_shop.orchestrator.outcome import OutcomeDesk, Watcher
+from print_shop.orchestrator.start import why_not_now
 from print_shop.printer.camera import Camera
 from print_shop.printer.centauri import PrinterClient
 from print_shop.setup import Proposer
@@ -75,7 +94,8 @@ from print_shop.slicer.store import Store
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "GATE_WAIT_S",
+    "BED_AT_TERMINAL",
+    "BED_ON_CARD",
     "Decision",
     "Command",
     "JobRejected",
@@ -86,8 +106,21 @@ __all__ = [
 ]
 
 
-#: How long the approval gate waits for Approve or Reject, from when it opens.
-GATE_WAIT_S = 3600.0
+#: How the bed was said to be clear, as the job's record keeps it: the card's dialog, which
+#: can't be checked from here until mqucifer/print-shop#214, or the terminal's own question.
+BED_ON_CARD = "on the card's dialog"
+BED_AT_TERMINAL = "at the terminal"
+
+#: What a Start in a run that isn't armed is told: held, so the ready job isn't lost.
+NOT_ARMED = (f"this run isn't armed ({ALLOW_HARDWARE_ENV} is not 1), so nothing can print. Stop "
+             f"it, and take the job up with `{ALLOW_HARDWARE_ENV}=1 uv run python "
+             "scripts/print_job.py --resume <job>`")
+
+#: The most a Start from the terminal waits to be checked: a printer's snapshot, and the stock.
+_CHECKED_WITHIN_S = 60.0
+
+#: What a Start with no word on the bed is told.
+BED_NOT_SAID = "the bed isn't confirmed clear. Clear it, then start again and answer y"
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
@@ -114,7 +147,15 @@ class Command(BaseModel):
     decision: Decision
     #: The job the press is for. A gate takes no other, and none that's empty.
     job_id: str = ""
+    #: The gate's word for this press (`approval_buttons`): a gate takes only its current one.
+    press: str = ""
     note: str = ""
+    #: How the person said the bed is clear, for a Start: never read from a payload.
+    bed: str = ""
+    #: Where it was given, as it's said: "on the card" or "here", at the terminal.
+    by: str = ""
+    #: A terminal command's own id, to tell it was weighed. Never read from a payload.
+    id: str = ""
 
 
 class JobRejected(Exception):
@@ -163,7 +204,11 @@ def parse_command(raw: bytes) -> Command:
     if not isinstance(job_id, str):
         raise ValueError("job_id must be a string")
 
-    return Command(decision=Decision(decision), job_id=job_id, note=note)
+    press = data.get("press", "")
+    if not isinstance(press, str):
+        raise ValueError("press must be a string")
+
+    return Command(decision=Decision(decision), job_id=job_id, press=press, note=note)
 
 
 def state_payload(fields: dict[str, Any]) -> str:
@@ -231,12 +276,12 @@ class Daemon:
         proposer: Proposer | None = None,
         asker: Asker | None = None,
         reviewer: Reviewer | None = None,
-        gate_wait_s: float = GATE_WAIT_S,
         loop: PrintLoop | None = None,
         show: Callable[[str], None] | None = None,
         store: Store | None = None,
         on_step: Callable[[str, str, Step], None] | None = None,
         waiting: Waiting | None = None,
+        store_root: Path | None = None,
         plate_slicer: SlicePlate = slice_plate,
     ) -> None:
         """`printer` is what the approval gate ultimately commands.
@@ -270,8 +315,8 @@ class Daemon:
         there are none; None keeps none and says nothing.
 
         `asker` and `reviewer` are the person's: while either has the job,
-        `wait_for_gate` doesn't count the time (mqucifer/print-shop#125).
-        `gate_wait_s` is how long the approval gate waits for a press.
+        `wait_for_gate` doesn't count the time (mqucifer/print-shop#125). A gate waits for its
+        press with no deadline (mqucifer/print-shop#209).
 
         `loop` is the print loop (mqucifer/print-shop#129), which decides the pose and the
         settings after the questions; its questions to the person are the person's time too.
@@ -286,6 +331,9 @@ class Daemon:
         (mqucifer/print-shop#208). Choosing among its closer choices is their time; the wait
         for the model is counted, as the call always was.
 
+        `store_root` is the profile store the slices' profiles come from, read again by hash at
+        Start (mqucifer/print-shop#209); None leaves them unread there.
+
         `plate_slicer` is what slices a job of several parts (`submit_several`,
         mqucifer/print-shop#109).
         """
@@ -293,6 +341,17 @@ class Daemon:
         self._on_step = on_step
         self._profiles = profiles
         self._workdir = workdir
+        self._store_root = store_root
+        #: Read once at Start, for a snapshot only: the watcher's read-only client, or else the
+        #: printer the print node commands.
+        self._reads_printer = watch_printer or printer
+        #: Whether a Start here can reach a printer: without one it's held, and the job waits
+        #: for an armed run to take it up (mqucifer/print-shop#209).
+        self._commands_printer = printer is not None
+        #: The terminal's commands each gate has weighed, by their id.
+        self._weighed: set[str] = set()
+        #: The jobs that wait for the person, which a restart takes up again.
+        self._waiting = WaitingJobs(workdir / "jobs.sqlite")
 
         # Checkpointer — kept open for the daemon's lifetime (CODE_REVIEW.md P0-3).
         checkpointer, conn = open_checkpointer(workdir / "jobs.sqlite")
@@ -304,11 +363,16 @@ class Daemon:
         # from them (mqucifer/print-shop#125): their time isn't counted against a wait.
         self._with_person = threading.Event()
         self._back_at = time.monotonic()
-        self._gate_wait_s = gate_wait_s
         #: Jobs a wait ran out on, with the sentence that ended them: no gate opens for one.
+        #: Marked before the ledger's row is written, so a step that ends meanwhile sees it.
         self._abandoned: dict[str, str] = {}
-        #: Why each Approve that was held started nothing, in order, for the terminal to say.
+        #: Why each Start that was held started nothing, and how a Start taken was confirmed,
+        #: in order, for the terminal to say.
         self._held: dict[str, list[str]] = {}
+        #: The open gate's word for a press (`approval_buttons`), "" with none open.
+        self._press = ""
+        #: The daemon is closing: a job its worker can't finish still waits.
+        self._closing = False
         #: Each job's part, by name, for the ledger's row if it ends unprinted.
         self._parts: dict[str, str] = {}
 
@@ -322,13 +386,14 @@ class Daemon:
             slicer=slicer,
             ledger=ledger,
             proposer=proposer,
-            asker=self._persons(asker) if asker is not None else None,
-            reviewer=self._persons(reviewer) if reviewer is not None else None,
-            loop=(dataclasses.replace(loop, person=self._persons(loop.person))
+            asker=self._persons(asker, Waits.QUESTIONS) if asker is not None else None,
+            reviewer=self._persons(reviewer, Waits.REVIEW) if reviewer is not None else None,
+            loop=(dataclasses.replace(loop, person=self._persons(loop.person, Waits.QUESTIONS))
                   if loop is not None else None),
             show=show,
             store=store,
-            waiting=(dataclasses.replace(waiting, closer=self._persons(waiting.closer))
+            waiting=(dataclasses.replace(
+                waiting, closer=self._persons(waiting.closer, Waits.QUESTIONS))
                      if waiting is not None and waiting.closer is not None else waiting),
             plate_slicer=plate_slicer,
         )
@@ -347,6 +412,9 @@ class Daemon:
         self._at_gate = threading.Event()  # wakes `wait_for_gate` as one opens
         #: Each gate a job has opened, in order, answered or not: what `wait_for_gate` returns.
         self._opened: dict[str, list[dict[str, Any]]] = {}
+        #: How each job's last gate was decided, as the terminal says it once it's decided:
+        #: "started on the card", "rejected here".
+        self._decided: dict[str, str] = {}
 
         # Gate-scoped inbox: the MQTT callback pushes into it, the gate that
         # opened it consumes it. None when no gate is open — a command that
@@ -413,6 +481,8 @@ class Daemon:
         return self
 
     def __exit__(self, *exc: object) -> None:
+        # A job cut short from here on still waits, to be taken up again.
+        self._closing = True
         if self._watcher is not None:
             self._watcher.stop()
             self._watcher = None
@@ -444,9 +514,10 @@ class Daemon:
         """
         return self._submit(Path(stl_path).name, {
             "entry": "stl_upload",
-            "stl_path": str(stl_path),
+            # Absolute, so a `--resume` from another folder finds it (mqucifer/print-shop#209).
+            "stl_path": str(Path(stl_path).absolute()),
             "as_laid": as_laid,
-            "context_path": str(context) if context else None,
+            "context_path": str(Path(context).absolute()) if context else None,
         })
 
     def submit_several(self, stl_paths: list[Path], *, as_laid: bool = False) -> str:
@@ -469,29 +540,130 @@ class Daemon:
         })
 
     def _submit(self, part: str, given: dict[str, Any]) -> str:
-        """Start a job's worker with `given` as its state, if no job is active."""
+        """Start a job's worker with `given` as its state, if no job is active. The job waits in
+        the jobs folder until it ends, with a copy of the profiles it slices with."""
+        job_id = self._take(part, str(uuid.uuid4()))
+        try:
+            self._waiting.add(WaitingJob(
+                job_id=job_id, part=part, given=given, profiles=self._kept_profiles(job_id)))
+        except Exception:  # noqa: BLE001 - the job runs either way, as it did before
+            # A job that couldn't be kept still runs: it just won't survive its process.
+            logger.exception("job %s couldn't be kept to survive a restart", job_id)
+        self._work(job_id, self._run_job, given)
+        return job_id
+
+    def _take(self, part: str, job_id: str) -> str:
+        """Make `job_id` the active job.
+
+        Raises:
+            JobRejected: If another is.
+        """
         with self._job_lock:
             if self._active_job_id is not None:
                 raise JobRejected(
                     f"job {self._active_job_id} is already running"
                 )
-            job_id = str(uuid.uuid4())
             self._active_job_id = job_id
             self._parts[job_id] = part
             self._back_at = time.monotonic()
+        return job_id
 
+    def _work(self, job_id: str, target: Callable[..., None], *args: Any) -> None:
+        """The job's worker, started."""
         self._step(job_id, Step.PREPARING)
         self._publish_state({"status": "analyzing", "job_id": job_id})
-
-        self._worker = threading.Thread(
-            target=self._run_job,
-            args=(job_id, given),
-            daemon=True,
-        )
+        self._worker = threading.Thread(target=target, args=(job_id, *args), daemon=True)
         self._worker_alive = True
         self._at_gate.clear()
         self._worker.start()
-        return job_id
+
+    def _kept_profiles(self, job_id: str) -> SlicerProfiles | None:
+        """The profiles this daemon slices with, copied into the job's folder, where the next
+        job's can't write over them. None with none."""
+        profiles = self._profiles
+        if profiles is None:
+            return None
+        into = self._workdir / job_id / "profiles"
+        into.mkdir(parents=True, exist_ok=True)
+        copied: dict[str, Path] = {}
+        for kind in ("machine", "process", "filament"):
+            path: Path | None = getattr(profiles, kind)
+            if path is not None:
+                copied[kind] = Path(shutil.copy2(path, into / f"{kind}.json"))
+        return profiles.model_copy(update=copied)
+
+    def waiting(self) -> list[WaitingJob]:
+        """The jobs that wait for the person, the oldest first (mqucifer/print-shop#209)."""
+        return self._waiting.all()
+
+    def resume(self, job_id: str) -> str:
+        """Take a waiting job up again, at the step it waits at (mqucifer/print-shop#209).
+
+        At the questions or the review, they're shown again with what was answered and corrected
+        before; ready, its gate opens again, unapproved. A job a restart caught after its Start
+        and before anything reached the printer is ready again. Returns its part.
+
+        Raises:
+            KeyError: If no job by that id is waiting.
+            JobRejected: If another job is active.
+        """
+        kept = self._waiting.get(job_id)
+        if kept is None:
+            raise KeyError(job_id)
+        self._take(kept.part, job_id)
+        self._work(job_id, self._resume_job, kept)
+        return kept.part
+
+    def start(self, job_id: str, *, bed_clear: bool) -> str:
+        """Start at the terminal (mqucifer/print-shop#209): the same Start as the card's, for
+        the job whose gate before printing is open. `bed_clear` is the person's own yes to the
+        bed's question, asked as they Start. Returns "" once it's been checked, whether it
+        started the job or was held (said, as the card's is, to `wait_for_finish`'s `tell`), or
+        why it wasn't taken: one Start a gate, whichever comes first.
+        """
+        return self._from_terminal(Command(
+            decision=Decision.APPROVE, job_id=job_id,
+            bed=BED_AT_TERMINAL if bed_clear else ""))
+
+    def reject(self, job_id: str) -> str:
+        """Reject at the terminal: as the card's. Returns "", or why it wasn't taken."""
+        return self._from_terminal(Command(decision=Decision.REJECT, job_id=job_id))
+
+    def decided(self, job_id: str) -> str:
+        """Why a Start or Reject from the terminal can't be taken now, its gate being decided or
+        gone: "it was started on the card", or "" while it's open (mqucifer/print-shop#209)."""
+        with self._job_lock:
+            gate = self._pending_gate
+            if (self._active_job_id == job_id and self._gate_inbox is not None
+                    and gate is not None and gate.get("job_id") == job_id):
+                return ""
+            how = self._decided.get(job_id)
+        return f"it was {how}" if how else "it was already started or decided"
+
+    def _from_terminal(self, cmd: Command) -> str:
+        cmd = cmd.model_copy(update={"by": "here"})
+        if why := self.decided(cmd.job_id):
+            return why
+        with self._job_lock:
+            gate = self._pending_gate
+            if (self._active_job_id != cmd.job_id or self._gate_inbox is None or gate is None
+                    or gate.get("job_id") != cmd.job_id):
+                how = self._decided.get(cmd.job_id)
+                return f"it was {how}" if how else "it was already started or decided"
+            if cmd.decision is Decision.APPROVE and gate.get("gate") != Gate.BEFORE_PRINT:
+                return "only the gate before printing starts a print"
+            word = self._press
+            cmd = cmd.model_copy(update={"press": word, "id": uuid.uuid4().hex})
+            self._gate_inbox.put(cmd)
+        # Back once it's been checked: the gate has a new word for a press, or none.
+        end = time.monotonic() + _CHECKED_WITHIN_S
+        while self._press == word and time.monotonic() < end:
+            time.sleep(0.02)
+        with self._job_lock:
+            if cmd.id in self._weighed:
+                return ""
+        # The card's came first, and this one was spent with it, unweighed.
+        return "the card's came first, and is what's said of the gate now"
 
     def submit_sliced(self, job: SlicedJob) -> str:
         """Submit a hand-sliced file, to be sent as it is (mqucifer/print-shop#164). Returns
@@ -522,7 +694,10 @@ class Daemon:
         its submit, its last intake answer, the review's `ok` or `take`, or
         its last gate's answer, for a job with another gate after it.
         While the intake, the review or an open gate is with them it doesn't
-        count, however long they take (mqucifer/print-shop#125).
+        count, however long they take (mqucifer/print-shop#125, mqucifer/print-shop#209).
+
+        Whether the gate opened or the wait ran out is decided once, under the job's lock: a
+        gate that opens as it runs out is returned, and a job it ran out on opens none.
 
         Raises:
             TimeoutError: If `timeout_s` runs out first. The job is ended
@@ -535,15 +710,18 @@ class Daemon:
                     return dict(opened[shown])
                 if self._active_job_id != job_id:
                     return None
-                self._at_gate.clear()
-            if self._at_gate.wait(timeout=0.2):
-                continue
-            # An open gate has a wait of its own (`gate_wait_s`).
-            with_person = self._with_person.is_set() or self._pending_gate is not None
-            if not with_person and time.monotonic() - self._back_at >= timeout_s:
-                raise TimeoutError(
-                    self.abandon(job_id, "waiting for the approval gate", timeout_s)
-                )
+                with_person = self._with_person.is_set() or self._pending_gate is not None
+                if not with_person and time.monotonic() - self._back_at >= timeout_s:
+                    sentence = self._mark_abandoned(job_id, "waiting for the approval gate",
+                                                    timeout_s)
+                    ran_out = True
+                else:
+                    ran_out = False
+                    self._at_gate.clear()
+            if ran_out:
+                raise TimeoutError(self._record_abandoned(job_id, sentence, "waiting for the "
+                                                          "approval gate", timeout_s))
+            self._at_gate.wait(timeout=0.2)
 
     def abandon(self, job_id: str, what: str, waited_s: float) -> str:
         """End a job a wait ran out on: the sentence that says so, and the ledger's row.
@@ -552,8 +730,22 @@ class Daemon:
         refuses its start. One sentence says what ran out, after how long, and that nothing
         printed, and the ledger keeps it as timed out (mqucifer/print-shop#125). A job already
         sent to the printer is a print, and its row stays open, said so instead.
+
+        The job is marked ended before the ledger's row is written, so a step that ends while
+        it's written opens no gate (mqucifer/print-shop#209).
         """
+        with self._job_lock:
+            sentence = self._mark_abandoned(job_id, what, waited_s)
+        return self._record_abandoned(job_id, sentence, what, waited_s)
+
+    def _mark_abandoned(self, job_id: str, what: str, waited_s: float) -> str:
+        """Mark the job ended. Called with the job's lock held."""
         sentence = f"Timed out {what} after {duration(waited_s)}, so nothing printed."
+        self._abandoned.setdefault(job_id, sentence)
+        return sentence
+
+    def _record_abandoned(self, job_id: str, sentence: str, what: str, waited_s: float) -> str:
+        """The ledger's row for a job just marked ended, and the sentence as it stands."""
         if self._ledger is not None:
             try:
                 self._ledger.record_unprinted(
@@ -564,24 +756,38 @@ class Daemon:
                     f"Timed out {what} after {duration(waited_s)}, after the printer was told to "
                     "start, so its row in the ledger stays open."
                 )
-        with self._job_lock:
-            self._abandoned[job_id] = sentence
+                with self._job_lock:
+                    self._abandoned[job_id] = sentence
+        self._forget(job_id)
         return sentence
+
+    def _forget(self, job_id: str) -> None:
+        """The job no longer waits: it ended."""
+        try:
+            self._waiting.remove(job_id)
+        except (OSError, sqlite3.Error):
+            logger.exception("job %s ended, and couldn't be taken off the waiting jobs", job_id)
 
     def wait_for_finish(
         self, job_id: str, timeout_s: float, tell: Callable[[str], None] | None = None
     ) -> JobResult:
         """Block until the job finishes (or times out).
 
-        `tell` is told each Approve that was held, and why, as it happens
-        (mqucifer/print-shop#218).
+        `tell` is told each Start that was held, and why, as it happens
+        (mqucifer/print-shop#218), and how the bed was confirmed for the one taken.
+
+        `timeout_s` counts the machine's steps only, from when the job last left the person:
+        an open gate waits as long as they take (mqucifer/print-shop#209).
 
         Returns the JobResult. Raises TimeoutError on timeout; the caller ends the job with
         `abandon`.
         """
-        deadline = time.monotonic() + timeout_s
+        began = time.monotonic()
         told = 0
-        while time.monotonic() < deadline:
+        while True:
+            with_person = self._with_person.is_set() or self._pending_gate is not None
+            if not with_person and time.monotonic() - max(began, self._back_at) >= timeout_s:
+                break
             with self._job_lock:
                 held = list(self._held.get(job_id, ()))
             if tell is not None:
@@ -614,18 +820,30 @@ class Daemon:
 
     # -- internals ----------------------------------------------------------
 
-    def _persons(self, step: Callable[_P, _R]) -> Callable[_P, _R]:
-        """`step` (the intake or the review), marked as with the person while it runs."""
+    def _persons(self, step: Callable[_P, _R], waits: Waits) -> Callable[_P, _R]:
+        """`step` (the intake or the review), marked as with the person while it runs, and the
+        job as waiting there, for a restart (mqucifer/print-shop#209)."""
 
         def with_person(*args: _P.args, **kwargs: _P.kwargs) -> _R:
             self._with_person.set()
+            job_id = self._active_job_id
+            self._waits(job_id, waits)
             try:
                 return step(*args, **kwargs)
             finally:
                 self._back_at = time.monotonic()
                 self._with_person.clear()
+                self._waits(job_id, Waits.PREPARING)
 
         return with_person
+
+    def _waits(self, job_id: str | None, waits: Waits) -> None:
+        if job_id is None:
+            return
+        try:
+            self._waiting.at(job_id, waits)
+        except (OSError, sqlite3.Error):
+            logger.warning("couldn't keep where job %s waits", job_id, exc_info=True)
 
     def _open_gate(self) -> Queue[Command]:
         """Install a fresh inbox and return it. Called when a gate parks.
@@ -643,12 +861,15 @@ class Daemon:
         """
         with self._job_lock:
             self._gate_inbox = Queue()
+            # A new word for the next press, too: one sent again names a word that's gone.
+            self._press = uuid.uuid4().hex
             return self._gate_inbox
 
     def _close_gate(self) -> None:
         """Drop the inbox. Idempotent — may be called on an already-closed gate."""
         with self._job_lock:
             self._gate_inbox = None
+            self._press = ""
 
     def _left_gate(self) -> None:
         """The gate has its answer, or its wait ran out. Its time was the person's, so the wait
@@ -664,7 +885,9 @@ class Daemon:
         approval must never apply to a job a person has not seen, so retained
         commands are ignored. Commands arriving while no gate is pending are
         also ignored rather than buffered for the next job. So is a command
-        that names another job, or none (mqucifer/print-shop#207).
+        that names another job, or none (mqucifer/print-shop#207), and one that
+        doesn't name the open gate's word for its press: one from before a
+        restart, or one already spent there (mqucifer/print-shop#209).
 
         ``retain`` had a ``= False`` default here, and `MqttBridge` called the
         handler with two arguments, so this guard never fired. A reconnect
@@ -700,6 +923,14 @@ class Daemon:
                     self._active_job_id,
                 )
                 return
+            if cmd.press != self._press:
+                logger.warning("ignored %s for job %s: it names a press this gate has spent, "
+                               "or none, so it was sent before, or again", cmd.decision,
+                               cmd.job_id)
+                return
+            # The card asks the bed in a dialog, which can't be checked from here
+            # (mqucifer/print-shop#214 is what binds it to a person): said as such, never more.
+            cmd = cmd.model_copy(update={"bed": BED_ON_CARD, "by": "on the card"})
             # Check and put under the same lock: the gate can close between a
             # read of the inbox and a put, which would re-open the race this
             # scoping exists to close.
@@ -714,18 +945,21 @@ class Daemon:
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             **given,
         }
+        self._ran(job_id, lambda: self._graph.invoke(initial_state, config=thread_config),
+                  thread_config)
 
+    def _ran(
+        self, job_id: str, run: Callable[[], dict[str, Any]], thread_config: dict[str, Any],
+    ) -> None:
+        """Run the graph to its first gate, or its end, and go on from there."""
         try:
-            # First invoke: run until the first interrupt (or completion).
-            result = self._graph.invoke(initial_state, config=thread_config)
-
+            result = run()
             # Check if we're parked at a gate.
             if "__interrupt__" in result:
                 self._handle_interrupt(job_id, result, thread_config)
             else:
                 # Graph completed without hitting a gate.
                 self._finish_job(job_id, approved=False, printed=False)
-
         except Exception as exc:
             self._finish_job(
                 job_id,
@@ -733,6 +967,64 @@ class Daemon:
                 printed=False,
                 error=str(exc),
             )
+
+    def _resume_job(self, job_id: str, kept: WaitingJob) -> None:
+        """Take a waiting job up again from its checkpoint (mqucifer/print-shop#209)."""
+        config: dict[str, Any] = {"configurable": {"thread_id": job_id}}
+        try:
+            snapshot = self._graph.get_state(config)
+            ended = self._ledger.unprinted(job_id) if self._ledger is not None else None
+            row = self._ledger.get(job_id) if self._ledger is not None else None
+        except Exception as exc:
+            self._finish_job(job_id, approved=False, printed=False,
+                             error=f"it couldn't be read back ({type(exc).__name__}: {exc})")
+            return
+        if ended is not None:
+            self._finish_job(job_id, approved=False, printed=False, error=ended.detail)
+            return
+        if row is not None:
+            # Its start was asked of the printer: a print, which the ledger and the watcher have.
+            self._finish_job(job_id, approved=True, printed=False,
+                             error="it had been sent to the printer before the restart: its "
+                                   "row in the ledger says what came of it")
+            return
+        if not snapshot.values:
+            # Stopped before its first step ended: run from the start, with what it was given.
+            self._run_job(job_id, kept.state())
+            return
+        if tuple(snapshot.next) == ("print",):
+            # Started, and stopped before anything reached the printer: an approval isn't kept,
+            # so it's ready again, from the checkpoint at its gate. Without one it ends: the
+            # print node never runs on a Start from before the restart.
+            at_gate = self._at_its_gate(config)
+            if at_gate is None:
+                self._finish_job(job_id, approved=False, printed=False, error=(
+                    "it was started before the restart, and its gate couldn't be found again, "
+                    "so nothing was sent: run the job again"))
+                return
+            snapshot = at_gate
+        interrupts = [i for task in snapshot.tasks for i in task.interrupts]
+        if interrupts:
+            self._ran(job_id, lambda: {"__interrupt__": interrupts}, config)
+        elif snapshot.next:
+            self._ran(job_id, lambda: self._graph.invoke(None, config=config), config)
+        else:
+            self._finish_job(job_id, approved=False, printed=False,
+                             error="it had already ended before the restart")
+
+    def _at_its_gate(self, config: dict[str, Any]) -> Any:
+        """The job's last checkpoint at the gate before printing, made its latest, unanswered;
+        or None if there's none."""
+        for past in self._graph.get_state_history(config):
+            if tuple(past.next) == (Gate.BEFORE_PRINT.value,) and any(
+                    t.interrupts for t in past.tasks):
+                # Written again as the newest, so the graph goes on from there, and the press
+                # it had is gone with what came after.
+                again = self._graph.update_state(past.config, None)
+                return self._graph.get_state({"configurable": {
+                    "thread_id": config["configurable"]["thread_id"],
+                    "checkpoint_id": again["configurable"]["checkpoint_id"]}})
+        return None
 
     def _handle_interrupt(
         self, job_id: str, result: dict[str, Any], thread_config: dict[str, Any]
@@ -742,26 +1034,27 @@ class Daemon:
         # the payload lives on `.value`.
         interrupt = result["__interrupt__"][0]
         gate_payload: dict[str, Any] = dict(interrupt.value)
+        before_print = gate_payload.get("gate") == Gate.BEFORE_PRINT
         with self._job_lock:
+            # Decided once, under the lock `wait_for_gate` decides a wait under: a job a wait ran
+            # out on opens no gate, and one whose gate opens isn't run out on
+            # (mqucifer/print-shop#209).
             ended = self._abandoned.get(job_id)
+            if ended is None:
+                self._pending_gate = {**gate_payload, "job_id": job_id}
         if ended is not None:
             # A wait ran out on it before the gate: the person was told nothing would print.
             self._finish_job(job_id, approved=False, printed=False, error=ended)
             return
-        # The time left to answer, shown with the gate (mqucifer/print-shop#125).
-        answer_by = datetime.now(UTC) + timedelta(seconds=self._gate_wait_s)
-        self._pending_gate = {
-            **gate_payload, "job_id": job_id, "answer_within_s": self._gate_wait_s,
-            "answer_by": answer_by.isoformat(timespec="seconds"),
-        }
+        self._waits(job_id, Waits.READY if before_print else Waits.MESH)
 
         # Open a fresh inbox before publishing the gate, so a press that lands
         # the moment the dashboard updates has somewhere to go. It is scoped to
-        # this gate and closed once we have our answer (or time out).
+        # this gate and closed once we have our answer.
         inbox = self._open_gate()
         self._step(job_id, Step.AT_GATE)
-        # The buttons name the job before the card that shows them does.
-        self._name_buttons(job_id)
+        # The buttons name the job, and the press, before the card that shows them does.
+        self._name_buttons(job_id, self._press)
 
         # Publish the gate with pending: true.
         gate_msg = {**gate_payload, "pending": True, "job_id": job_id}
@@ -772,38 +1065,24 @@ class Daemon:
 
         # Signal that we're at a gate, now it's published.
         with self._job_lock:
-            self._opened.setdefault(job_id, []).append(dict(self._pending_gate))
+            self._opened.setdefault(job_id, []).append(dict(self._pending_gate or {}))
             self._at_gate.set()
 
-        # Wait for a command from this gate's inbox. An Approve that's held waits for another,
-        # within the same hour (mqucifer/print-shop#218).
-        deadline = time.monotonic() + self._gate_wait_s
-        before_print = gate_payload.get("gate") == Gate.BEFORE_PRINT
+        # Wait for a command from this gate's inbox, as long as the person takes
+        # (mqucifer/print-shop#209). A Start that's held waits for another
+        # (mqucifer/print-shop#218).
         while True:
-            try:
-                left = deadline - time.monotonic()
-                if left <= 0:
-                    raise Empty
-                cmd = inbox.get(timeout=left)
-            except Empty:
-                self._close_gate()
-                self._left_gate()
-                self._bridge_publish(gate_topic(self._cfg), {"pending": False})
-                self._name_buttons()
-                sentence = self.abandon(
-                    job_id, f"waiting for Approve or Reject at {Gate.named(gate_payload)}",
-                    self._gate_wait_s,
-                )
-                self._finish_job(job_id, approved=False, printed=False, error=sentence)
-                return
+            cmd = inbox.get()
+            self._weigh(cmd)
             if cmd.decision is not Decision.APPROVE or not before_print:
                 break
-            why = self._not_yet(thread_config)
+            why = self._not_yet(thread_config, cmd)
             # This press is spent, and so is any that came while it was checked: none is kept
             # to start the job later. A Reject among them still stands, whatever the check said.
             checked, inbox = inbox, self._open_gate()
             if rejected := _rejection(checked):
                 cmd = rejected
+                self._weigh(cmd)
                 break
             if not why:
                 break
@@ -811,6 +1090,19 @@ class Daemon:
 
         approved = cmd.decision is Decision.APPROVE
         note = cmd.note
+        by = cmd.by or "on the card"
+        with self._job_lock:
+            if approved and before_print:
+                said = f"the bed confirmed clear {cmd.bed}"
+                note = f"{note}; {said}" if note else said
+                self._held.setdefault(job_id, []).append(f"Start taken, {said}.")
+                self._decided[job_id] = f"started {by}"
+            elif approved:
+                self._decided[job_id] = f"approved {by}"
+            else:
+                self._held.setdefault(job_id, []).append(
+                    f"Rejected {by}: nothing printed, and the job has ended.")
+                self._decided[job_id] = f"rejected {by}"
 
         # We have our answer; close this gate's inbox so a stale press cannot
         # leak into the next gate.
@@ -821,7 +1113,7 @@ class Daemon:
         self._bridge_publish(gate_topic(self._cfg), {"pending": False})
         self._name_buttons()
         if approved:
-            before_print = gate_payload.get("gate") == Gate.BEFORE_PRINT
+            self._waits(job_id, Waits.PREPARING)
             self._step(job_id, Step.SENDING if before_print else Step.PREPARING)
 
         # Resume the graph.
@@ -846,27 +1138,44 @@ class Daemon:
                 error=str(exc),
             )
 
-    def _not_yet(self, thread_config: dict[str, Any]) -> str:
-        """Why this Approve mustn't start the job, or "" (mqucifer/print-shop#218).
+    def _weigh(self, cmd: Command) -> None:
+        """`cmd` is the one the gate weighs, for a terminal's Start to know it was."""
+        if cmd.id:
+            with self._job_lock:
+                self._weighed.add(cmd.id)
 
-        Only the stock and the ledger are read, so that the press is judged on them as they
-        are when it's pressed, and a slow printer can't hold up a Reject or stretch the hour.
-        A check that can't be made holds.
+    def _not_yet(self, thread_config: dict[str, Any], cmd: Command) -> str:
+        """Why this Start mustn't start the job, with what to do, or "" (mqucifer/print-shop#218,
+        mqucifer/print-shop#209).
+
+        The spool first, then what Start checks again (`start.why_not_now`), then the bed. The
+        printer is read once, for a snapshot, and never waited on for a Reject: one that came
+        meanwhile wins. A check that can't be made holds.
         """
         try:
             state = self._graph.get_state(thread_config).values
-            return why_not_start(state, self._ledger)
+            found = [why for why in (why_not_start(state, self._ledger),) if why]
+            found += why_not_now(state, self._ledger, store_root=self._store_root,
+                                 printer=self._reads_printer)
         except Exception as exc:  # noqa: BLE001 - never started on a check that wasn't made
-            logger.exception("the spool couldn't be checked before the start")
-            return f"what's loaded couldn't be checked ({exc}): approve again"
+            logger.exception("what Start checks couldn't be checked")
+            return f"what Start checks couldn't be checked ({exc}): Start again"
+        if not cmd.bed:
+            found.append(BED_NOT_SAID)
+        if not self._commands_printer:
+            # Held, so the job keeps waiting: an unarmed run never ends a ready job.
+            found.append(NOT_ARMED)
+        return ". Also, ".join(found)
 
     def _hold(self, job_id: str, gate_payload: dict[str, Any], why: str) -> None:
-        """An Approve held: the gate stays open, saying why, on the card and in the terminal."""
+        """A Start held: the gate stays open, saying why, on the card and in the terminal, with a
+        new word for the next press."""
         said = f"Not started: {why}"
         # What's held says what to load, so the gate's own line, from when it opened, gives way.
         gate_payload = {**gate_payload, "spools": ""}
         if self._pending_gate is not None:
             self._pending_gate = {**self._pending_gate, "held": said}
+        self._name_buttons(job_id, self._press)
         self._bridge_publish(
             gate_topic(self._cfg),
             {**gate_payload, "pending": True, "job_id": job_id, "held": said},
@@ -913,6 +1222,11 @@ class Daemon:
             error=error,
         )
 
+        # It no longer waits, however it ended. A job cut short by this daemon closing isn't
+        # ended: it waits to be taken up again (mqucifer/print-shop#209).
+        if not self._closing:
+            self._forget(job_id)
+
         # Clear the active job.
         with self._job_lock:
             if self._active_job_id == job_id:
@@ -929,9 +1243,10 @@ class Daemon:
         if self._on_step is not None:
             self._on_step(job_id, self._parts.get(job_id, "?"), step)
 
-    def _name_buttons(self, job_id: str = "") -> None:
-        """Approve and Reject republished, naming `job_id`, or no job (mqucifer/print-shop#207)."""
-        for topic, config in approval_buttons(self._cfg, job_id):
+    def _name_buttons(self, job_id: str = "", press: str = "") -> None:
+        """Approve and Reject republished, naming `job_id` and the gate's word for a press, or no
+        job (mqucifer/print-shop#207, mqucifer/print-shop#209)."""
+        for topic, config in approval_buttons(self._cfg, job_id, press):
             self._bridge_publish(topic, config)
 
     def _publish_state(self, fields: dict[str, Any]) -> None:

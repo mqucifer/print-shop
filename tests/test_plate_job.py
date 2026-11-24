@@ -22,7 +22,6 @@ import pytest
 
 from print_shop.core.checkpoint import open_checkpointer
 from print_shop.core.mqtt import (
-    command_topic,
     gate_topic,
     outcome_note_topic,
     outcome_result_topic,
@@ -135,7 +134,8 @@ class Rig:
         return job
 
     def press(self, decision: str, job: str) -> Any:
-        self.bridge.deliver(command_topic(CFG), {"decision": decision, "job_id": job})
+        # What the card's button sends now: the job, and the gate's word (mqucifer/print-shop#209).
+        self.bridge.press(CFG, decision)
         return self.daemon.wait_for_finish(job, timeout_s=30)
 
     def card(self) -> dict[str, Any]:
@@ -234,6 +234,7 @@ def test_a_rejected_plate_prints_nothing_and_leaves_no_row(tmp_path: Path) -> No
 
 
 def test_an_unarmed_plate_starts_nothing_when_approved(tmp_path: Path) -> None:
+    """Held, so the ready plate waits for an armed run (mqucifer/print-shop#209)."""
     rig = Rig(tmp_path)
     bridge = MemoryBridge()
     unarmed = Daemon(cfg=CFG, profiles=profiles(tmp_path / "p"), workdir=rig.work, printer=None,
@@ -241,10 +242,13 @@ def test_an_unarmed_plate_starts_nothing_when_approved(tmp_path: Path) -> None:
     with unarmed:
         job = unarmed.submit_several(_caps(tmp_path), as_laid=True)
         unarmed.wait_for_gate(job, timeout_s=30)
-        bridge.deliver(command_topic(CFG), {"decision": "approve", "job_id": job})
+        bridge.press(CFG, "approve")
+        _until(lambda: bool(bridge.retained_json(gate_topic(CFG)).get("held")), "the hold")
+        held = str(bridge.retained_json(gate_topic(CFG))["held"])
+        bridge.press(CFG, "reject")
         result = unarmed.wait_for_finish(job, timeout_s=30)
-    assert not result.printed and result.error is not None
-    assert "without a printer" in result.error and rig.ledger.rows() == []
+    assert "this run isn't armed" in held, held
+    assert not result.printed and result.error is None and rig.ledger.rows() == []
 
 
 def test_every_edge_to_the_printer_still_comes_from_the_gate(tmp_path: Path) -> None:
@@ -254,12 +258,14 @@ def test_every_edge_to_the_printer_still_comes_from_the_gate(tmp_path: Path) -> 
     assert ungated_edges(graph_edges(app)) == []
 
 
-def test_a_gate_that_times_out_is_one_unprinted_job(tmp_path: Path) -> None:
+def test_a_plate_a_wait_ran_out_on_is_one_unprinted_job(tmp_path: Path) -> None:
+    """A gate has no deadline now (mqucifer/print-shop#209): a wait on the machine's steps that
+    runs out ends the plate as one job."""
     rig = Rig(tmp_path)
     with rig.daemon:
-        rig.daemon._gate_wait_s = 0.3
         job = rig.gated(_caps(tmp_path))
-        rig.daemon.wait_for_finish(job, timeout_s=30)
+        rig.daemon.abandon(job, "waiting for the job to finish", 900)
+        rig.press("reject", job)
     [ended] = rig.ledger.unprinted_jobs()
     assert (ended.job_id, ended.outcome) == (job, JobEnding.TIMED_OUT)
     assert ended.stl_name == ", ".join(CAP_NAMES)
@@ -563,8 +569,7 @@ def test_print_job_takes_three_files_and_shows_each_outcome(
                 gate = json.loads(bridge.retained.get(gate_topic(CFG), "{}"))
                 if not pressed and gate.get("pending"):
                     time.sleep(0.3)  # the terminal has shown the gate
-                    bridge.deliver(command_topic(CFG), {"decision": "approve",
-                                                        "job_id": gate["job_id"]})
+                    bridge.press(CFG, "approve")
                     pressed = True
                 card = json.loads(bridge.retained.get(outcome_topic(CFG), "{}"))
                 if card.get("pending") and card["job_id"] not in answered:
@@ -1036,3 +1041,20 @@ def test_a_plates_model_settings_are_proposals_and_not_applied_untaken(tmp_path:
     assert row.proposal.get("wall_loops") is None, "not taken, so not applied"
     proposed = [c.key for found in row.proposal.suggested for c in found.proposed]
     assert "wall_loops" in proposed, "what it proposed is kept"
+
+
+def test_a_plates_start_checks_each_parts_copy_again(tmp_path: Path) -> None:
+    """Start reads each part's own copy again, the file that was sliced (mqucifer/print-shop#209):
+    changed, nothing prints and the gate waits. The file it was given from may change freely
+    (`test_what_prints_is_the_file_as_it_was_taken`)."""
+    rig = Rig(tmp_path)
+    with rig.daemon:
+        job = rig.gated(_caps(tmp_path))
+        copy = rig.work / job / "given" / "part1_cap-tight.stl"
+        copy.write_bytes(copy.read_bytes() + b"\n")
+        rig.bridge.press(CFG, "approve")
+        _until(lambda: bool(rig.bridge.retained_json(gate_topic(CFG)).get("held")), "the hold")
+        held = str(rig.bridge.retained_json(gate_topic(CFG))["held"])
+        result = rig.press("reject", job)
+    assert "the part's file, part1_cap-tight.stl, was changed after this job was prepared" in held
+    assert not result.printed and "upload" not in rig.printer.verbs

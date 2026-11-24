@@ -364,8 +364,9 @@ def test_a_sliced_job_is_sent_as_it_is_with_no_question_or_proposal(
     rig.press("approve")
     result = rig.daemon.wait_for_finish(job_id, timeout_s=30)
     assert (result.approved, result.printed, result.error) == (True, True, None)
-    assert rig.printer.verbs == ["snapshot", "upload", "start"]
-    uploaded = Path(rig.printer.calls[1][1])
+    # Start reads the printer once (mqucifer/print-shop#209), then the print node does.
+    assert rig.printer.verbs == ["snapshot", "snapshot", "upload", "start"]
+    uploaded = _uploaded(rig)
     assert uploaded.read_bytes() == sent, "the file's bytes are what's sent"
     assert job_id_from_filename(uploaded.name) == job_id
     assert uploaded.parent == rig.jobs / job_id
@@ -400,11 +401,18 @@ def test_a_file_changed_after_it_was_taken_is_refused_before_upload(
     with taken.open("ab") as f:
         f.write(b"G1 X0 Y0 ; one more move\n")
 
+    told: list[str] = []
     rig.press("approve")
-    result = rig.daemon.wait_for_finish(job_id, timeout_s=30)
+    # Start checks it again, and holds (mqucifer/print-shop#209); the print node still would.
+    deadline = time.monotonic() + 30
+    while not rig.daemon.pending_gate() or "held" not in (rig.daemon.pending_gate() or {}):
+        assert time.monotonic() < deadline, "the Start was never held"
+        time.sleep(0.02)
+    rig.press("reject")
+    result = rig.daemon.wait_for_finish(job_id, timeout_s=30, tell=told.append)
 
     assert result.printed is False
-    assert result.error is not None and "changed since it was taken" in result.error
+    assert f"{taken.name} was changed after this job took it" in told[0]
     assert "upload" not in rig.printer.verbs and "start" not in rig.printer.verbs
     assert rig.ledger.rows() == []
 
@@ -420,7 +428,7 @@ def test_the_file_is_taken_at_submit_so_a_later_edit_of_the_source_isnt_sent(
     rig.press("approve")
     rig.daemon.wait_for_finish(job_id, timeout_s=30)
 
-    assert Path(rig.printer.calls[1][1]).read_bytes() == before, "what the gate showed"
+    assert _uploaded(rig).read_bytes() == before, "what the gate showed"
 
 
 def test_a_source_changed_between_reading_and_taking_is_refused(
@@ -458,7 +466,7 @@ def test_a_reprint_sends_the_same_bytes_and_is_recorded_against_its_original(
     assert two.sliced is not None and one.sliced is not None
     assert two.sliced.reprint_of == first, "a new job, marked as a reprint of the old one"
     assert two.sliced.gcode_sha256 == one.sliced.gcode_sha256
-    assert Path(rig.printer.calls[1][1]).read_bytes() == sliced.read(source).gcode_bytes()
+    assert _uploaded(rig).read_bytes() == sliced.read(source).gcode_bytes()
     assert two.sliced.overrides == one.sliced.overrides, "kept from the original's plate file"
     assert f"job {first}" in two.sliced.overrides_from
     assert two.stl_name == one.stl_name
@@ -659,7 +667,7 @@ def test_print_job_sends_a_sliced_file_unarmed_to_the_gate_and_asks_nothing(
     assert "sparse_infill_density" in out and "15% -> 40%" in out, "what differs from the tuning"
     assert f"{OBJECTS[0]}: layer_height=0.12" in out, "each object's overrides"
     assert "layers: 6" in out and "nothing is proposed" in out, "the slice's report"
-    assert "At the approval gate" in out and "PAUSE       this print pauses after" in out
+    assert "Ready to print" in out and "PAUSE       this print pauses after" in out
     assert "SWAP" not in out, "a file sliced by hand doesn't say what its pause is for"
     (built,) = shop.built
     assert built["printer"] is None and built["profiles"] is None
@@ -692,7 +700,7 @@ def test_print_job_sends_a_bambu_petg_file_to_its_spool_without_loaded_ok(
 
     assert shop.run("--sliced", str(_sliced_for(tmp_path, HF, "PET"))) == 0
     out = capsys.readouterr().out
-    assert "At the approval gate" in out and "--loaded-ok" not in out
+    assert "Ready to print" in out and "--loaded-ok" not in out
 
 
 def test_print_job_prints_a_past_sliced_job_again_and_refuses_another_filament(
@@ -747,3 +755,8 @@ def test_the_fixture_is_the_shape_the_readers_read() -> None:
     text = gcode_text()
     assert text.startswith("; HEADER_BLOCK_START")
     assert "; CONFIG_BLOCK_START" in text and text.rstrip().endswith("; CONFIG_BLOCK_END")
+
+
+def _uploaded(rig: Rig) -> Path:
+    """The file uploaded: Start reads the printer first (mqucifer/print-shop#209)."""
+    return Path(next(name for verb, name in rig.printer.calls if verb == "upload"))

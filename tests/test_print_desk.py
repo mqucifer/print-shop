@@ -532,6 +532,10 @@ class _Daemon:
     def __exit__(self, *exc: object) -> None:
         pass
 
+    def waiting(self) -> list[object]:
+        """No job waits from before (mqucifer/print-shop#209)."""
+        return []
+
     def submit(self, stl: Path, as_laid: bool = False, context: Path | None = None) -> str:
         import logging
         import sys
