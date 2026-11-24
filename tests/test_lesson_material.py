@@ -186,8 +186,9 @@ def test_the_review_says_a_lesson_for_another_filament_wasnt_given(
 ) -> None:
     ledger.record_start_requested(_record("petg-1", "PETG", _plate(), _brim()))
     _kept(ledger)
-    proposer = Proposer(
-        ask=_model, lessons=lambda features, filament: lessons.for_part(ledger, features, filament)
+    proposer = Proposer(  # the type alone: the variety is mqucifer/print-shop#219's
+        ask=_model, lessons=lambda features, filament, _: lessons.for_part(
+            ledger, features, filament)
     )
 
     petg = proposer(Intake(), RAIL, _profiles(tmp_path, "PETG"))

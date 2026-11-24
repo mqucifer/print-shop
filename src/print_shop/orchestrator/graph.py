@@ -1963,13 +1963,16 @@ def _lessons_for(
     offers at the review, read in the pose the person chose (mqucifer/print-shop#128)."""
     filament = _presets(profiles)[1].get("filament_type", "")
     kind = str(filament[0] if isinstance(filament, list) and filament else filament)
+    material = _material_of(profiles)  # its variety, for a filament's lessons
+    variety = material.variety if material is not None else ""
 
     def found(pose: Orientation) -> tuple[GivenLesson, ...]:
         if ledger is None:
             return ()
         turned = stl if pose.rotation_deg == (0.0, 0.0, 0.0) else write_rotated(
             stl, pose.rotation_deg, outdir / f"{pose_value(pose.rotation_deg)}.stl")
-        return print_lessons.for_part(ledger, measure(turned, pose.bed_contact_area_mm2), kind)
+        return print_lessons.for_part(
+            ledger, measure(turned, pose.bed_contact_area_mm2), kind, variety)
 
     return found
 

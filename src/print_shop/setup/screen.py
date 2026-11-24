@@ -387,14 +387,18 @@ def _waiting(request: ReviewRequest) -> list[Said]:
     """What waits to be taken: Use these' ticked, the model's and the slice's, by number."""
     out: list[Said] = []
     offering = request.offering
-    if offering is not None and offering.past is not None:
+    if offering is not None and offering.items():
         pose = pose_value(request.orientation.rotation_deg)
         ticked = len(offering.ticked(request.proposal, pose))
         past = offering.past
+        # A lesson not set for this variety may be ticked with no past print on offer
+        # (mqucifer/print-shop#219).
+        whence = f" from {past.stl_name}, {past.on}," if past is not None else ""
+        short = f" from {past.stl_name}" if past is not None else ""
         if ticked:
-            out.append(Said(f"USE THESE: {ticked} ticked from {past.stl_name}, {past.on}, under "
+            out.append(Said(f"USE THESE: {ticked} ticked{whence} under "
                             "Settings. None is applied until you use it.",
-                            f"USE THESE: {ticked} ticked from {past.stl_name} (use)", True))
+                            f"USE THESE: {ticked} ticked{short} (use)", True))
     slices = [n for n, _ in request.numbered]
     if slices:
         them = "1 change" if len(slices) == 1 else f"{len(slices)} changes"

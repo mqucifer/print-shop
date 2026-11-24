@@ -267,7 +267,7 @@ class ReviewRequest:
         offer, so that picking another moves none of the slice's or the model's numbers. One
         number space, so that a number on screen is one thing (mqucifer/print-shop#223)."""
         offering = self.offering
-        return max((len(p.items) for p in offering.options), default=0) if offering else 0
+        return offering.span() if offering else 0
 
     @property
     def numbered(self) -> list[tuple[int, Flag]]:
@@ -504,9 +504,9 @@ def _answers(request: ReviewRequest, width: int) -> list[str]:
         said += [f"take {' '.join(map(str, models))} (the model's)",
                  f"no {models[0]} because \u2026"]
     offering = request.offering
-    if offering is not None and offering.past is not None and offering.past.items:
+    if offering is not None and offering.items():
         pose = pose_value(request.orientation.rotation_deg)
-        ticked = [n for n, item in enumerate(offering.past.items, 1)
+        ticked = [n for n, item in enumerate(offering.items(), 1)
                   if offering.standing(item, request.proposal, pose).selected]
         said += ["use", f"clear {ticked[0]}"] if ticked else ["use 1"]
     if request.parts:
@@ -658,7 +658,7 @@ def _read_parts(parts: list[str | Left], request: ReviewRequest) -> Review | Sli
                 continue
             verb = offered.group(1).lower()
             numbers = [int(n) for n in re.findall(r"\d+", offered.group(2))]
-            if verb != "from" and offering.past is not None:
+            if verb != "from" and offering.items():
                 # Another's number: said whose. Any other is the offer's to refuse.
                 theirs = [n for n in numbers if n > request.offered
                           and (n in models or n in dict(request.numbered))]
