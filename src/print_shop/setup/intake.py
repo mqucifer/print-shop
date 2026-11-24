@@ -61,6 +61,7 @@ __all__ = [
     "replay_asker",
     "settings_line",
     "take_words",
+    "first_number",
 ]
 
 logger = logging.getLogger(__name__)
@@ -465,6 +466,12 @@ def _are_added(questions: Sequence[Question]) -> bool:
 def _numbered_from(questions: Sequence[Question]) -> int:
     given = questions.given if isinstance(questions, OfPlate) else questions
     return given.before + 1 if isinstance(given, Added) else 1
+
+
+def first_number(questions: Sequence[Question]) -> int:
+    """The number the first of `questions` is asked by: its prompt is `{n}> `. The phone's
+    questions answer each by it (mqucifer/print-shop#221)."""
+    return _numbered_from(questions)
 
 
 def _of_plate(

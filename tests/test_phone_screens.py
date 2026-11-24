@@ -278,8 +278,9 @@ def test_a_job_that_needs_you_says_where_to_answer_it(page: Page) -> None:
     wait_until(lambda: page.queue.asked(job_id) is not None)
     phone = page.phone()
     assert "Answer" in phone.get("/").body
-    shown = phone.get(f"/job/{job_id}").body
-    assert "It needs you" in shown and "answer 1" in shown
+    assert f'href="/job/{job_id}/questions"' in phone.get("/").raw
+    shown = phone.get(f"/job/{job_id}").raw
+    assert "It needs you" in shown and f'href="/job/{job_id}/questions"' in shown
 
 
 def test_a_job_not_in_the_queue_is_said_so(page: Page) -> None:
