@@ -188,6 +188,14 @@ def wait_until(ok: Callable[[], bool], within_s: float = WAIT_S) -> None:
         time.sleep(0.02)
 
 
+@pytest.fixture(autouse=True)
+def _the_card_starts_under_the_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These are mqucifer/print-shop#209's tests, whose Start is the card's under the flag: the
+    switch's other way (mqucifer/print-shop#214). Its default, the card starting nothing, is
+    `tests/test_phone_start.py`'s."""
+    monkeypatch.setattr(daemon_module, "CARD_STARTS_UNDER_FLAG", True)
+
+
 @pytest.fixture
 def shop(tmp_path: Path) -> Shop:
     return Shop(tmp_path)

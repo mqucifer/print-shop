@@ -270,16 +270,16 @@ Finish that job, or stop it with Ctrl-C in its terminal (which doesn't stop the 
 2. **Start at the gate, when it's time to print** (mqucifer/print-shop#209). The command line shows the gate and says how to answer it:
 
    ```
-   Ready to print. Start it here or on the card, or reject it on the card.
+   Ready to print. Start it here, or reject it on the card.
      time        10 min
      plastic     2.9 cm3
      ...
-     Type start here, or Yes on the card. It waits until you start or reject it.
+     Type start here. It waits until you start or reject it.
    ```
 
    Check the numbers first: about 11 minutes (Orca's estimate for your presets is 10 m 54 s; the review shows the estimate with its changes), about 2.9 cm³ of plastic, and a turn that's a multiple of 90° on each axis, save a turn on the plate you took at the review, which is the last number. A cube sits flat on every face.
 
-   **Start is new at the terminal:** type `start`. It asks `I can see the bed is clear [y/N]`, and only `y` starts it; what you typed before the question showed doesn't count. Anything else says `Not started: the bed isn't confirmed clear`, and the gate stays open. `reject` here is the card's **No, stop**. On the dashboard, **Yes, print it** asks the same in a dialog: "I can see the bed is clear. Print the job shown above?". That dialog is the card's courtesy: print-shop can't tell from a press whether it was shown, so until mqucifer/print-shop#214's Start on the phone, the bed is yours to look at either way. The job's log says which it was: "the bed confirmed clear at the terminal" or "on the card's dialog". One Start a gate: once it's decided, a `start` or `reject` here is told at once how, such as `Not taken: it was started on the card.`, and a press on the card after a decision here starts nothing. A Reject, here or on the card, says `Rejected here: nothing printed, and the job has ended.` (or `on the card`).
+   **Start is new at the terminal:** type `start`. It asks `I can see the bed is clear [y/N]`, and only `y` starts it; what you typed before the question showed doesn't count. Anything else says `Not started: the bed isn't confirmed clear`, and the gate stays open. `reject` here is the card's **No, stop**. **The card's Start starts nothing** (mqucifer/print-shop#214): a button press is an MQTT message, which anyone on the broker can send, so at this gate the card's **Approve** is held with `Not started: a Start on the card doesn't start a print. Start it on your phone, on the home Wi-Fi, or at the terminal`. Start here, or on your phone ("Starting from your phone", below). The job's log says how the bed was confirmed and who armed it: "the bed confirmed clear at the terminal, armed by PRINT_AGENT_ALLOW_HARDWARE=1", or "on the phone "…", armed on the phone …". One Start a gate: once it's decided, a `start` or `reject` here is told at once how, such as `Not taken: it was started on the phone "…".`, and a press after a decision starts nothing. A Reject, here or on the card, says `Rejected here: nothing printed, and the job has ended.` (or `on the card`).
 
    **Nothing here has a deadline.** A job waits ready for as long as you take, days if need be. In place of a clock, Start checks again, at the moment you give it, what could have changed while it waited:
    - the G-code is the one sliced, byte for byte;
@@ -290,7 +290,7 @@ Finish that job, or stop it with Ctrl-C in its terminal (which doesn't stop the 
    - the printer is free, read once;
    - and the bed, as above.
 
-   Any change is said, on the card and the command line, as `Not started:` with what to do, nothing prints, and the gate waits for a new Start. A changed file or profile can't be mended at the gate: Reject and run the job again to prepare it as things are now. Arming is as it was: only `PRINT_AGENT_ALLOW_HARDWARE=1` on the command's own line. In a run without it, a Start is held too (`Not started: this run isn't armed …`), so a ready job is never lost to it: stop, and take it up with the flag and `--resume`. Where nothing reads the terminal (input piped in), the gate says `Ready to print. Start or reject it on the card.`, and the card is the way to answer.
+   Any change is said, on the card and the command line, as `Not started:` with what to do, nothing prints, and the gate waits for a new Start. A changed file or profile can't be mended at the gate: Reject and run the job again to prepare it as things are now. **A person arms each start** (mqucifer/print-shop#214): `PRINT_AGENT_ALLOW_HARDWARE=1` on the command's own line, for `start` here, or a signed-in phone's Start, on the home Wi-Fi, for one start. In a run without the flag, a `start` here is held (`Not started: this run isn't armed …`), so a ready job is never lost to it: Start it on your phone, or stop, and take it up with the flag and `--resume`. Where nothing reads the terminal (input piped in), the gate says `Ready to print. Start it on your phone, or reject it on the card.`, or, with no phone set up, that nothing there can start it.
 
    **A press names its job, and its moment.** print-shop puts the job's id in the two buttons when its gate opens, and a word that's new at each gate, and again after each Start it holds. A gate ignores a press that names another job or none, or a word that's gone (one sent again, or from before a restart), and its command line says `ignored approve for …`. So an automation or script that publishes to the command topic itself has to send what the buttons' `payload_press` holds now.
 
@@ -416,6 +416,39 @@ PRINT_AGENT_ALLOW_HARDWARE=1 uv run python scripts/print_job.py --again 3f2a…
 
 It sends the file that job printed, kept in its folder, as a new job marked as a reprint of the old one, with the old one's overrides. It's refused if the kept file has changed or is gone (send the file again with `--sliced`), and if what's loaded isn't what the file names, unless you add `--loaded-ok`. A job that print-shop sliced itself isn't printed again this way: its page on the desk gives the command for it.
 
+## Starting from your phone
+
+A ready job can be armed and started from your phone, on the home Wi-Fi only (mqucifer/print-shop#214). A person arms each start: the phone's confirm arms that one job for that one start, and it disarms straight after.
+
+**Once: set it up.**
+
+1. At the router, reserve the Mac's address on the home Wi-Fi, so it keeps it.
+2. In the settings (`~/.config/print-shop/.env`), set `PHONE_HOME` to that address with its network, written `A.B.C.D/24`. Optional: `PHONE_PORT` (8765), and `PHONE_ROUTER` if the run says the router's address can't be read. The page listens on that address only, and refuses a public one.
+3. **Pair your phone, at the Mac's own keyboard:**
+
+   ```
+   uv run python scripts/phone.py pair "Your phone"
+   ```
+
+   It shows the page's address and a 10-character code. On the phone, on the home Wi-Fi, open the address's `/pair`, tap through, and type the code. It lasts 10 minutes, works once, and dies after 5 wrong tries. Pairing is refused from a script, a session's shell, or a login from elsewhere. The phone is signed in for a year. The Mac keeps only a hash of its sign-in. `phone.py list` shows the paired phones, and `phone.py forget "Your phone"` signs one out at once.
+
+**Each print.**
+
+1. Run the job as before, without the flag. The run says `Your phone's Start: http://…/ , on the home Wi-Fi only`, and the card links to it ("Start it on your phone"). It opens in the phone's browser, never inside Home Assistant.
+2. At the gate, the phone's Start page shows the job, and what Start checks: time and plastic, the pause, the spool, the nozzle, the file and settings, and the printer. Each row says its result, and what to do where one fails.
+3. Look at the bed, tick **I can see the bed is clear**, and press **Start**. The same checks as `start` here run again. If one holds it, the phone says why, nothing is armed, and you Start again once it's mended (reload the page). Started, the phone says `Started by you. Disarmed again.`, and the ledger keeps who armed it, from where and when, with the print's row.
+
+**What's refused, in words:**
+- a confirm used twice, or more than 2 minutes old, or from another phone, or for a gate that's moved on;
+- anything signed out;
+- **anything that isn't a phone's own address on the home Wi-Fi:** the Mac itself (a tunnel or a script on it), the router (a port forward), Home Assistant's host (its remote access or an automation), another network, or any request carrying a proxy's headers. The phone shows `You're away from home`, and the job waits.
+
+**What it doesn't claim:**
+- **The page is plain HTTP.** Anyone who can read the home Wi-Fi's traffic, and copies a phone's sign-in, could arm a ready job from the home network. HTTPS would close that, and is the Sponsor's call.
+- Another machine on the home network relaying raw traffic looks like that machine. What it carries is still your phone's own page and confirm, pressed by you.
+
+The flag still works, for `start` at the terminal. Nothing in Home Assistant, no MQTT message, no setting and no test can arm a start.
+
 ## The print desk: reading a job, and running it again
 
 A page on the Mac shows what's loaded and every job (mqucifer/print-shop#139), so a job can be read after it's scrolled past, and a past job's settings copied to print it again. From print-shop's checkout:
@@ -464,7 +497,10 @@ Then open <http://127.0.0.1:8719/> in a browser on the Mac. `--port` picks anoth
 | `Not started: this job was sliced for a 0.4 mm nozzle …` | another nozzle is fitted in the stock | fit it and `stock fit 0.4`, then Start again; or Reject and run the job again |
 | `Not started: the printer is not free …` / `the printer couldn't be read` | the printer is busy, paused, in error or unreachable | Start again when it's free; nothing was sent |
 | `Not started: the bed isn't confirmed clear` | Start at the terminal had no `y` to the bed's question | clear the bed, `start`, then `y` |
-| `ignored approve for …: it names a press this gate has spent` | a press sent again, or from before a restart | press again on the card, or `start` at the terminal |
+| `ignored approve for …: it names a press this gate has spent` | a press sent again, or from before a restart | `start` at the terminal, or Start on your phone |
+| `Not started: a Start on the card doesn't start a print …` | the card's Approve at the gate before printing (mqucifer/print-shop#214) | Start on your phone, on the home Wi-Fi, or `start` at the terminal in a run armed by the flag |
+| the phone says `You're away from home` | Start came from somewhere other than a phone's own address on the home Wi-Fi: the line under it says which | start it from the phone on the home Wi-Fi; the job waits |
+| `the phone's Start is off: this Mac doesn't have … now` | the Mac isn't on the home Wi-Fi, or its address changed | reserve the Mac's address at the router and set `PHONE_HOME` to it |
 | `print-shop doesn't know what's on cc1 since …` | a print with a swap was sent, and you haven't yet said that it's over and which spool is on | answer it where it's asked (before preparing, or `y` at the review), or `stock load <id>` and `y`, or pick on that print's outcome card; then approve |
 | `… still doesn't know what's on cc1, as nothing said … is over` | `stock load` recorded the load without a `y` to whether that print's over, or had no terminal to ask in | run `stock load <id>` in a terminal, and `y` once that print is over |
 | `… loaded on cc1, so nothing was uploaded or printed` | the stock changed between your Approve and the start | nothing was started; `stock load <id>`, then run the job again |

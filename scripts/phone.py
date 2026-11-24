@@ -14,7 +14,7 @@ pairing page itself until the phone is paired or the code dies.
 `forget` signs a phone out at once. `list` shows the paired phones.
 
 The page is set up by `PHONE_HOME` in the settings: the Mac's address on the home Wi-Fi with its
-network, such as `192.168.1.20/24` (reserve it at the router). Optional: `PHONE_PORT` (8765), and
+network, such as `A.B.C.D/24` (reserve it at the router). Optional: `PHONE_PORT` (8765), and
 `PHONE_ROUTER` where the default route can't say the router's address. Nothing here arms: a
 signed-in phone's Start does, for one start, on the home Wi-Fi (`docs/runbook-first-print.md`).
 """
@@ -99,7 +99,7 @@ def _pair(phones: Phones, name: str, settings: Path | None) -> int:
         return 2
     if home is None:
         print(f"Not paired: the phone's Start isn't set up. Set {HOME_KEY} in the settings to "
-              "the Mac's address on the home Wi-Fi with its network, such as 192.168.1.20/24.",
+              "the Mac's address on the home Wi-Fi with its network, such as A.B.C.D/24.",
               file=sys.stderr)
         return 2
     try:

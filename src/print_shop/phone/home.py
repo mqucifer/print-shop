@@ -5,7 +5,7 @@ sender says, and a proxy says what it likes. So a request can't claim to be loca
 from a phone's own address on the home network, or it's refused, in words.
 
 The page listens only on the Mac's address on the home Wi-Fi (`PHONE_HOME`, with its network,
-such as `192.168.1.20/24`), so no other interface reaches it: not loopback, not a VPN's. And a
+such as `A.B.C.D/24`), so no other interface reaches it: not loopback, not a VPN's. And a
 request is refused, for Start and pairing, when it comes:
 
 - **through the Mac itself** (loopback, or the Mac's own address): a tunnel, `ssh -R`,
@@ -42,7 +42,7 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-#: The Mac's address on the home Wi-Fi, with its network: `192.168.1.20/24`.
+#: The Mac's address on the home Wi-Fi, with its network: `A.B.C.D/24`.
 HOME_KEY = "PHONE_HOME"
 #: The page's port on that address.
 PORT_KEY = "PHONE_PORT"
@@ -118,9 +118,9 @@ class Home:
         except ValueError as exc:
             raise HomeRefused(
                 f"{HOME_KEY}={given!r} isn't an IPv4 address with its network, such as "
-                "192.168.1.20/24") from exc
+                "A.B.C.D/24") from exc
         if where.network.prefixlen == 32:
-            raise HomeRefused(f"{HOME_KEY} needs its network, such as 192.168.1.20/24")
+            raise HomeRefused(f"{HOME_KEY} needs its network, such as A.B.C.D/24")
         try:
             port = int(env.get(PORT_KEY, "") or DEFAULT_PORT)
         except ValueError as exc:

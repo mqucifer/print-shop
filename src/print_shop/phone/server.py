@@ -45,7 +45,7 @@ from print_shop.phone.page import (
 )
 from print_shop.phone.phones import Phones
 
-__all__ = ["COOKIE", "PhoneOff", "Starts", "attach", "make_server"]
+__all__ = ["COOKIE", "PhoneOff", "Starts", "attach", "handler_for", "make_server"]
 
 logger = logging.getLogger(__name__)
 
@@ -94,17 +94,11 @@ def make_server(
         PhoneOff: If it can't listen there, saying why.
     """
 
-    class Handler(_Handler):
-        pass
-
-    Handler.home = home
-    Handler.phones = phones
-    Handler.starts = starts
-    Handler.confirms = confirms or Confirms()
-    Handler.now = clock or (lambda: datetime.now(UTC))
+    handler = handler_for(home=home, phones=phones, starts=starts, confirms=confirms,
+                          clock=clock)
     address = listen_on or str(home.address)
     try:
-        return ThreadingHTTPServer((address, home.port), Handler)
+        return ThreadingHTTPServer((address, home.port), handler)
     except OSError as exc:
         if exc.errno == errno.EADDRNOTAVAIL:
             raise PhoneOff(
@@ -116,6 +110,24 @@ def make_server(
                 f"the phone's Start is off: port {home.port} is in use on {home.address}. "
                 f"Set another with {PORT_KEY}") from exc
         raise PhoneOff(f"the phone's Start is off: it can't listen on {home.host} ({exc})") from exc
+
+
+def handler_for(
+    *, home: Home, phones: Phones, starts: Starts | None, confirms: Confirms | None = None,
+    clock: Callable[[], datetime] | None = None,
+) -> type[BaseHTTPRequestHandler]:
+    """The page's request handler, bound to these: `make_server`'s, and a test's to drive with
+    a peer address of its own."""
+
+    class Handler(_Handler):
+        pass
+
+    Handler.home = home
+    Handler.phones = phones
+    Handler.starts = starts
+    Handler.confirms = confirms or Confirms()
+    Handler.now = staticmethod(clock or (lambda: datetime.now(UTC)))
+    return Handler
 
 
 def attach(server: ThreadingHTTPServer, starts: Starts) -> None:

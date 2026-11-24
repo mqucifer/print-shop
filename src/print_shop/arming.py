@@ -75,7 +75,7 @@ class Armed(BaseModel):
     token: str = ""
 
     def said(self) -> str:
-        """As a line says it: "armed on the phone "Sponsor's phone" (192.168.1.31)"."""
+        """As a line says it: "armed on the phone "Sponsor's phone" (A.B.C.E)"."""
         if self.how == "phone":
             return f'armed on the phone "{self.by}" ({self.where}), on the home Wi-Fi'
         return f"armed by {self.by}, at the Mac"

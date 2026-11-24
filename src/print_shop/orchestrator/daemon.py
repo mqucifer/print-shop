@@ -1327,11 +1327,11 @@ class Daemon:
         meanwhile wins. A check that can't be made holds.
 
         Who may start comes first (mqucifer/print-shop#214): the card's Start starts nothing
-        (`CARD_STARTS_UNDER_FLAG`), and is held without reading the printer, so a message on the
-        broker can't make it be read.
+        (`CARD_STARTS_UNDER_FLAG` False), and is held without reading the printer, so a message
+        on the broker can't make it be read. With it True, the card's Start is checked as the
+        terminal's is, and held in a run the flag didn't arm (`NOT_ARMED`).
         """
-        if cmd.phone is None and cmd.by == "on the card" and not (
-                CARD_STARTS_UNDER_FLAG and self._commands_printer):
+        if cmd.phone is None and cmd.by == "on the card" and not CARD_STARTS_UNDER_FLAG:
             return CARD_DOESNT_START
         try:
             state = self._graph.get_state(thread_config).values
