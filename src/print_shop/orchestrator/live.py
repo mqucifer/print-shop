@@ -187,7 +187,10 @@ def _printed(row: Row) -> str:
 def _row(ledger: Path, job_id: str) -> Row | None:
     try:
         with Ledger.read_only(ledger) as read:
-            return read.get(job_id)
+            # A plate's parts are answered one by one: it's waiting till the last is
+            # (mqucifer/print-shop#109).
+            rows = read.job_rows(job_id)
+            return next((r for r in rows if r.result is None), rows[0] if rows else None)
     except (LedgerError, sqlite3.Error, ValueError):
         return None  # the step the holder wrote is said instead
 

@@ -113,10 +113,12 @@ class Person:
     def asker(self) -> Asker:
         return cli_asker(read=self.read, write=self.write)
 
-    def waiting(self, *, terminal: bool = True, replayed: bool = False) -> Waiting:
+    def waiting(
+        self, *, terminal: bool = True, replayed: bool = False, several: bool = False,
+    ) -> Waiting:
         screen = io.StringIO() if terminal else None
         return cli_waiting(self.read, self.write, replayed=replayed, screen=lambda: screen,
-                           typed=self._typed, forget=lambda: None)
+                           typed=self._typed, forget=lambda: None, several=several)
 
     def _typed(self, timeout_s: float) -> bool:
         # A script that goes on types its lines into the wait. Any other line is an answer, and

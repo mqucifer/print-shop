@@ -30,6 +30,9 @@ the slice's there (mqucifer/print-shop#211) is used again (`use`), not typed.
 file it printed, kept in its folder, as a new job marked as a reprint of it. There's no part to
 find, nothing to answer and nothing to correct, so that one line is all there is.
 
+**A plate of several parts runs again whole** (mqucifer/print-shop#109): from any of its parts'
+rows, the command names every file.
+
 The line doesn't arm the printer. Arming stays on the command's own line, as the runbook says.
 """
 
@@ -45,6 +48,7 @@ from print_shop.inventory import Material, Spool
 from print_shop.ledger import Row
 from print_shop.orchestrator.graph import AS_LAID
 from print_shop.setup import pauses
+from print_shop.setup.context import SIDECAR
 from print_shop.setup.intake import Answer, Question
 from print_shop.setup.proposal import ORIENTATION, PAUSE, Change, Source, pose_value
 from print_shop.setup.reading import AT_THE_BACK, turned_on_plate
@@ -181,24 +185,39 @@ def correction_line(row: Row, on_hand: dict[int, Spool] | None = None) -> str:
 
 def again(
     row: Row, part_path: Path | None, printers: int = 1, part_found: bool = False,
+    plate_parts: tuple[tuple[Path, bool], ...] = (),
+    plate_rows: tuple[Row, ...] = (),
     on_hand: dict[int, Spool] | None = None,
 ) -> Again:
     """How to run `row`'s job again. `part_path` is the part's file, and `part_found` says it
     has the bytes the job printed (by sha256); else it's the path the log names, if any.
-    `printers` is how many the inventory has (`--printer` is needed with more than one)."""
+    `printers` is how many the inventory has (`--printer` is needed with more than one).
+    `plate_parts` are each of a plate's files the same way, and `plate_rows` each of its rows, as
+    the whole plate is what's run again, the same from any part's page
+    (mqucifer/print-shop#109)."""
     if row.sliced is not None:
         return _sliced_again(row, part_path, printers, part_found)
     notes: list[str] = []
-    part = str(part_path) if part_path is not None else row.stl_name
-    if not part_found:
-        where = ("nothing in the parts folder or the job's folder has the bytes it printed "
-                 f"(sha256 {row.stl_sha256[:12]}…)")
-        if part_path is not None and part_path.is_file():
-            notes.append(f"{part_path} has changed since this job, and {where}: check it's "
-                         "the part you mean.")
-        else:
-            notes.append(f"{row.stl_name} wasn't found: {where}. Give its path in its place.")
-    args = [part]
+    if row.plate is not None:
+        args = []
+        files = plate_parts or tuple((Path(p.path), False) for p in row.plate.parts)
+        for n, (given, (path, found)) in enumerate(zip(row.plate.parts, files, strict=True), 1):
+            args.append(str(path))
+            if not found:
+                notes += _not_found(given.name, given.sha256, path)
+            if given.context and not path.with_name(path.stem + SIDECAR).is_file() and (
+                str(path) != given.path or not Path(given.context).exists()
+            ):
+                notes.append(f"Part {n}, {given.name}, was read with the context at "
+                             f"{given.context}, and it won't be found beside {path}: its fits, "
+                             "seen faces and side would be lost. Put it back, or put its sidecar "
+                             f"({path.stem + SIDECAR}) beside the file.")
+        notes.append("It's the whole plate again. Each part's context is read beside its file "
+                     "as given here, with no --context.")
+    else:
+        args = [str(part_path) if part_path is not None else row.stl_name]
+        if not part_found:
+            notes += _not_found(row.stl_name, row.stl_sha256, part_path)
     material = row.material
     if material is not None:
         args += ["--nozzle", f"{material.nozzle_mm:g}",
@@ -213,11 +232,11 @@ def again(
                      "from its slice.")
     if row.profiles is not None:
         args += ["--machine", row.profiles.machine.name, "--process", row.profiles.process.name]
-    if row.orientation_source == AS_LAID:
+    if row.plate.as_laid if row.plate is not None else row.orientation_source == AS_LAID:
         args.append("--as-laid")
     # The part's context is named, as the part may be found elsewhere, away from its sidecar or
     # its design run (mqucifer/print-shop#130).
-    context = row.proposal.context_from if row.proposal is not None else ""
+    context = row.proposal.context_from if row.proposal is not None and row.plate is None else ""
     if context:
         args += ["--context", context]
         if not Path(context).exists():
@@ -239,17 +258,23 @@ def again(
     elif row.intake is not None and row.intake.questions:
         notes.append("The answers don't match the questions kept, so there's no answers file: "
                      "answer them as they're asked.")
-    for c in row.corrections or ():
-        if c.said_no_to:
-            what = (f"turn to {c.said_no_to}" if c.key == ORIENTATION
-                    else f"{c.key}={c.said_no_to}")
-            notes.append(f"You turned down the model's {what}, because {c.reason}. Say no to it "
-                         "again at the review if it's proposed.")
-        elif c.key == ORIENTATION:
-            notes.append(f"The pose was sent back at the review, from {c.preset} to {c.value}, "
-                         f"because {c.reason}. Type orientation at the review to send it back "
-                         "again.")
-    turned = turned_on_plate(row.reading, row.rotation_deg)
+    for each in plate_rows or (row,):
+        whose, which = "The pose", ""
+        if each.plate is not None:
+            whose = f"Part {each.plate.n}, {each.stl_name}: the pose"
+            which = f", then {each.plate.n} for the part,"
+        for c in each.corrections or ():
+            if c.said_no_to:
+                what = (f"turn to {c.said_no_to}" if c.key == ORIENTATION
+                        else f"{c.key}={c.said_no_to}")
+                notes.append(f"You turned down the model's {what}, because {c.reason}. Say no to "
+                             "it again at the review if it's proposed.")
+            elif c.key == ORIENTATION:
+                notes.append(f"{whose} was sent back at the review, from {c.preset} to "
+                             f"{c.value}, because {c.reason}. Type orientation at the review"
+                             f"{which} to send it back again.")
+    # A plate is sliced with no turn on it (mqucifer/print-shop#109), so this is one part's.
+    turned = turned_on_plate(row.reading, row.rotation_deg) if not plate_rows else 0.0
     if turned:
         notes.append(f"It was turned {turn_words(turned)}, on the plate to fit. It's offered "
                      "again only if it still doesn't fit as posed: type turn at the review to "
@@ -320,6 +345,15 @@ def again(
                      + "; ".join(f"{c.key}={c.value}" for c in reused) + ".")
     return Again(command=command, corrections=correction_line(row, on_hand), answers=answers,
                  answers_name=name, notes=tuple(notes))
+
+
+def _not_found(name: str, sha256: str, path: Path | None) -> list[str]:
+    """The note for a part whose bytes weren't found."""
+    where = ("nothing in the parts folder or the job's folder has the bytes it printed "
+             f"(sha256 {sha256[:12]}…)")
+    if path is not None and path.is_file():
+        return [f"{path} has changed since this job, and {where}: check it's the part you mean."]
+    return [f"{name} wasn't found: {where}. Give its path in its place."]
 
 
 def _sliced_again(row: Row, kept: Path | None, printers: int, kept_found: bool) -> Again:

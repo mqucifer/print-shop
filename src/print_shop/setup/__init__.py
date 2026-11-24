@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from print_shop.expert.client import LLMConfig
-from print_shop.setup.context import PartContext
+from print_shop.setup.context import PartContext, Seen
 from print_shop.setup.features import Feature
 from print_shop.setup.intake import Intake
 from print_shop.setup.model import Ask, llm_ask, llm_ask_streamed, propose_by_model
@@ -84,11 +84,14 @@ class Proposer:
     def __call__(
         self, intake: Intake, features: tuple[Feature, ...], profiles: SlicerProfiles,
         context: PartContext | None = None, pose: tuple[float, float, float] | None = None,
+        seen: Seen | None = None,
         stop: threading.Event | None = None,
     ) -> Proposal:
         """The proposal, the model's changes in it. `stop` ends the model's call. The review
-        starts from `without_model`'s (mqucifer/print-shop#242)."""
-        facts = dataclasses.replace(self._facts(intake, features, profiles, context), pose=pose)
+        starts from `without_model`'s (mqucifer/print-shop#242). `seen` is several parts' faces
+        already carried, for a plate's (mqucifer/print-shop#109)."""
+        facts = dataclasses.replace(self._facts(intake, features, profiles, context), pose=pose,
+                                    seen=seen)
         given = self.lessons(features, facts.filament_type) if self.lessons is not None else ()
         learned, learned_kept, marked = from_lessons(facts, given)
         facts = dataclasses.replace(facts, lessons=marked)

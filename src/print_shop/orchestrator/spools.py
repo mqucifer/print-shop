@@ -23,6 +23,7 @@ from collections.abc import Callable
 
 from print_shop.inventory import Inventory, InventoryError, NotKnown, Pick, Spool, spool_lines
 from print_shop.ledger import Ledger, Row
+from print_shop.plate import plate_job
 
 __all__ = ["ask_on_now", "ask_over", "choices", "said"]
 
@@ -128,6 +129,16 @@ def said(ledger: Ledger, row: Row) -> str:
         return (f"{used}. " if used else "") + (
             f"print-shop doesn't know what's on {printer} until you say this print is over and "
             "which spool is on")
+    first = plate_job(row.job_id)
+    plate = (ledger.not_known(printer, first)
+             if first != row.job_id and found is not None else None)
+    if plate is not None:
+        # One mark a plate, on its first row: its first card takes the pick
+        # (mqucifer/print-shop#109).
+        return (f"{used}. " if used else "") + (
+            f"print-shop doesn't know what's on {printer} until you say this print is over and "
+            f"which spool is on: on the card for {plate.stl_name}, this plate's first, or at "
+            "the terminal")
     if not used:
         return ""
     if found is not None:

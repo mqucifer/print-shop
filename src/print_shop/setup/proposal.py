@@ -46,7 +46,7 @@ from pydantic import BaseModel
 
 from print_shop.bench.pausing import TOPS_OUT
 from print_shop.materials import material_name
-from print_shop.setup.context import PartContext, refuses
+from print_shop.setup.context import PartContext, Seen, refuses
 from print_shop.setup.features import Feature
 from print_shop.setup.intake import Intake
 from print_shop.setup.pauses import Pause
@@ -326,6 +326,9 @@ class PartFacts:
     #: The pose the features are read in, which what's seen is carried to
     #: (mqucifer/print-shop#248). None: not known.
     pose: tuple[float, float, float] | None = None
+    #: What's seen, already carried: several parts' faces read as one plate's, each from the
+    #: pose it was asked in (mqucifer/print-shop#109). Read before `pose`.
+    seen: Seen | None = None
 
     def feature(self, id: str) -> float:
         return next((f.value for f in self.features if f.id == id), 0.0)

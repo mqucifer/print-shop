@@ -30,6 +30,11 @@ more like learning than me remembering".
 
 A failed print is told by its result, never by a symptom, as a success may carry one
 (mqucifer/print-shop#189).
+
+**A plate of several parts is one print among them** (mqucifer/print-shop#109), shown by the part
+of it most like this one. Its order was that plate's choice and is never offered: by object
+carried to one part would lose its pause. Its settings and pause were all its parts', so a pause
+from it isn't pre-selected, and nor is a setting a failed part of it bears on.
 """
 
 from __future__ import annotations
@@ -50,6 +55,7 @@ from print_shop.core.state import Orientation, pose_of, turn_words
 from print_shop.inventory import Material, Spool
 from print_shop.materials import material_name
 from print_shop.outcome_words import outcome_words
+from print_shop.plate import SEQUENCE, plate_job
 from print_shop.rounds.lessons import REJECTED, RETIRED
 from print_shop.setup import pauses, similar
 from print_shop.setup.bounds import MATERIAL, check
@@ -222,12 +228,14 @@ class Offering:
         if isinstance(items, str):
             return items
         assert self.past is not None
-        return replace(self, cleared=self.cleared | {(self.past.job_id, i.key) for i in items})
+        job = plate_job(self.past.job_id)
+        return replace(self, cleared=self.cleared | {(job, i.key) for i in items})
 
     def carried_to(self, built: Offering) -> Offering:
         """`built` for another pose, with the print picked and what was cleared here kept."""
-        job = self.past.job_id if self.past else ""
-        at = next((n for n, p in enumerate(built.options) if p.job_id == job), 0)
+        # By the print: turned, another part of the same plate may be the one most like it.
+        job = plate_job(self.past.job_id) if self.past else ""
+        at = next((n for n, p in enumerate(built.options) if plate_job(p.job_id) == job), 0)
         return replace(built, picked=at, cleared=self.cleared)
 
     def standing(self, item: Item, proposal: Proposal, pose: str) -> Standing:
@@ -241,7 +249,7 @@ class Offering:
         else:
             now = _now(proposal, item.key)
             if now is not None and _same(item.key, now.value, item.value):
-                if now.used is not None and now.used.job_id == past.job_id:
+                if now.used is not None and plate_job(now.used.job_id) == plate_job(past.job_id):
                     return Standing("=", ("used",))
                 if _theirs(now) or now.source in (Source.ANSWER, Source.LESSON):
                     return Standing("=", (f"{_set_by(now)} set it here already",))
@@ -265,7 +273,7 @@ class Offering:
             turn = next((i for i in past.items if i.key == ORIENTATION), None)
             if turn is None or not self.standing(turn, proposal, pose).selected:
                 why.append(f"it held in the pose {item.pose}, and the turn to it isn't selected")
-        if (past.job_id, item.key) in self.cleared:
+        if (plate_job(past.job_id), item.key) in self.cleared:
             why.insert(0, "you cleared it")
         if item.key != ORIENTATION and (why or item.used.by not in _PERSONS):
             here = now.value if now is not None else item.preset
@@ -444,10 +452,14 @@ def offering(ledger: Ledger, part: ThisPart) -> Offering:
     """The past prints most like `part`, each with what decided it. No model is asked."""
     found = [_against(n, row, part) for n, row in enumerate(ledger.rows())
              if row.sliced is None]  # a hand-sliced file had nothing decided here
-    offered = sorted(
+    ranked = sorted(
         (f for f in found if any(c.value != "none" for c in f.decided.values())),
         key=_Found.rank,
-    )[:SHOWN]
+    )
+    prints: dict[str, _Found] = {}  # a plate is one print, by its part most like this one
+    for f in ranked:
+        prints.setdefault(plate_job(f.row.job_id), f)
+    offered = list(prints.values())[:SHOWN]
     return Offering(options=tuple(_past(ledger, f, found, part) for f in offered))
 
 
@@ -542,6 +554,8 @@ def _decided(row: Row) -> dict[str, Change]:
     for key, c in {c.key: c for c in said}.items():
         if key not in standing:  # a pose sent back, or a row from before the proposal was kept
             found[key] = c
+    if row.plate is not None:
+        found.pop(SEQUENCE, None)  # that plate's choice, as a lesson never takes it
     turn = _turn_taken(row)
     if turn is not None and ORIENTATION not in found:
         found[ORIENTATION] = turn
@@ -604,6 +618,10 @@ def _past(ledger: Ledger, f: _Found, found: list[_Found], part: ThisPart) -> Pas
                + (", the same name or run" if like.source == 1 else ""))
     moved = [] if same_part else similar.differences(f.here, f.then)
     differs: list[str] = []
+    if row.plate is not None:
+        count, sequence = len(row.plate.parts), row.plate.layout.sequence
+        differs.append(f"it was part {row.plate.n} of {count} on one plate, printed {sequence}: "
+                       "its settings were all of theirs")
     crossed: dict[str, list[str]] = {}
     if then_pose != part.pose:
         differs.append(f"it printed in the pose {then_pose}, this is {part.pose}")
@@ -806,9 +824,35 @@ class _Items:
                            "that bears on isn't known")
             elif bears.search(key):
                 why.append(f"that print failed with {symptom}, which this bears on")
+        if row.plate is not None:
+            why += self._plates(key)
         since = self._since(key, value)
         if since:
             why.append(since)
+        return why
+
+    def _plates(self, key: str) -> list[str]:
+        """What's in doubt as it was decided for a whole plate (mqucifer/print-shop#109)."""
+        row = self.f.row
+        assert row.plate is not None
+        if key == ORIENTATION:
+            return []  # each part's pose was its own
+        if key == PAUSE:
+            return [f"it paused all {len(row.plate.parts)} parts of a plate, so it may have been "
+                    "another part's"]
+        why = []
+        for other in self.found:
+            beside = other.row
+            if (beside.job_id == row.job_id or beside.result != "failed"
+                    or plate_job(beside.job_id) != row.plate.job_id):
+                continue
+            bears = BEARS_ON.get(str(beside.symptom or ""))
+            if bears is None:
+                why.append(f"{beside.part_said} of that plate failed ({beside.symptom}), and "
+                           "which setting that bears on isn't known")
+            elif bears.search(key):
+                why.append(f"{beside.part_said} of that plate failed with {beside.symptom}, "
+                           "which this bears on")
         return why
 
     def _setting(self, change: Change, value: str) -> list[str]:
@@ -928,6 +972,8 @@ class _Items:
         for other in reversed(self.found):
             if other.at <= self.f.at:
                 break
+            if plate_job(other.row.job_id) == plate_job(row.job_id):
+                continue  # the parts beside it on its plate aren't later prints
             if not (other.same_file if shape_bound else other.related):
                 continue
             later = other.decided.get(key)

@@ -27,7 +27,7 @@ import re
 import sqlite3
 import textwrap
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from print_shop.bench.pausing import TOPS_OUT, mm
@@ -78,6 +78,13 @@ _GROUPS: tuple[tuple[str, tuple[Source, ...]], ...] = (
     ("FROM THE SLICE", (Source.READING,)),
     ("LESSONS AND GUARDS", (Source.LESSON, Source.GUARD)),
     ("THE MODEL", (Source.MODEL,)),
+)
+
+#: What a plate's review says where one part's has "use these" (mqucifer/print-shop#109).
+NOT_FOR_A_PLATE = (
+    "USE THESE: not offered for a plate of several parts yet, as one part's settings would go on "
+    "every part. Type what you want, or to print the same plate again, copy its line from the "
+    "print desk."
 )
 
 #: How far a value's column runs before the value is said in full beneath its row.
@@ -231,18 +238,33 @@ def _warnings(request: ReviewRequest, fits: _Fits) -> list[Said]:
     """Warnings, anything not applied, how the model's work went, each pause with when it
     comes, the turn it needs to fit, and what waits to be taken."""
     proposal = request.proposal
-    out = _pause_said(request, fits)
+    out: list[Said] = []
+    if request.undone:
+        out.append(Said(f"NOT DONE, your last answer: {request.undone}. The plate is as it was "
+                        "before it.", f"NOT DONE, your last answer: {_short(request.undone, 70)}"))
+    out += _pause_said(request, fits)
     for c in proposal.not_applied:
         out.append(Said(f"NOT APPLIED {c.key}: {c.not_applied}. {c.reason} [{_by(c)}]",
                         f"NOT APPLIED {c.key}: {c.not_applied}"))
     out += _turn_said(request)
     out += _model_said(request)
     for note in proposal.notes:
-        if note.startswith((PRINTS, NOW_PRINTS)):
+        if _seen(note):
             continue  # what's seen is the part's: under The part
         out.append(Said(f"note: {note}", _upper_head(_short(note, WIDTH - 2))))
     out += _waiting(request)
     return out
+
+
+def _seen(note: str) -> bool:
+    """Whether a note says what's seen as it prints: one part's, or on a plate a part's or every
+    part's (mqucifer/print-shop#109). That's the part's, under The part."""
+    return _SEEN.match(note) is not None
+
+
+#: A note on what's seen, as one part has it or a plate names the part it's of.
+_SEEN = re.compile(rf"^(?:every part: |part \d+, [^:]+: )?(?:{re.escape(PRINTS)}|"
+                   rf"{re.escape(NOW_PRINTS)})")
 
 
 def _upper_head(text: str) -> str:
@@ -400,12 +422,22 @@ def _print(request: ReviewRequest, width: int, marks: Moved) -> list[str]:
     rows = [
         (f"{mark('time')} time", f"{clock(s.print_time_s)}, Orca's estimate"),
         (f"{mark('plastic')} plastic", plastic),
-        (f"{mark('layers')} layers", str(s.layer_count)),
+        (f"{mark('layers')} layers",
+         str(s.layer_count) + (" for the whole plate" if request.plate else "")),
         ("  machine", machine),
         ("  process", process),
         ("  filament", filament),
     ]
-    return [line for name, value in rows for line in wrap(f"{name:<12}", value, width, " " * 12)]
+    lines = [line for name, value in rows for line in wrap(f"{name:<12}", value, width, " " * 12)]
+    if request.plate is not None:
+        # How the plate prints and where each part is (mqucifer/print-shop#109). Its map is drawn,
+        # so only its words are wrapped.
+        plate = request.plate.lines()
+        lines += ["", *wrap("  ", plate[0], width, "    ")]
+        for line in plate[1:]:
+            drawn = line.startswith("    ")
+            lines += [f"  {line}"] if drawn else wrap(f"  {line[:2]}", line[2:], width, "      ")
+    return lines
 
 
 def _by(change: Change) -> str:
@@ -484,6 +516,8 @@ def _settings(request: ReviewRequest, width: int, marks: Moved, fits: _Fits) -> 
     if request.offering is not None:
         pose = pose_value(request.orientation.rotation_deg)
         lines += render_offer(request.offering, proposal, pose, width=width - 2, lead="  ")
+    elif request.plate is not None:
+        lines += ["", *wrap("  ", NOT_FOR_A_PLATE, width, "    ")]
     lines += by_model(request, width)
     return lines
 
@@ -598,6 +632,11 @@ def _slice(request: ReviewRequest, width: int, marks: Moved, fits: _Fits) -> lis
         for each in why.get(f.kind, ()):
             lines += wrap(f"     {MATTERS} {f.kind}: ", each, width, " " * 8)
     lines.append("")
+    again = reading.starts_again()
+    if again:
+        lines += wrap("    by object ", f"z starts again at layer{'s' if len(again) != 1 else ''} "
+                      f"{', '.join(map(str, again))}, so a layer's z is up its own object", width,
+                      " " * 14)
     shortest = reading.shortest()
     if shortest is not None:
         times = sorted(layer.time_s for layer in reading.layers)
@@ -705,7 +744,7 @@ def _part(request: ReviewRequest, width: int, fits: _Fits) -> list[str]:
     if reasoning.strip():
         lines += ["  How the model read it", *wrap("    ", reasoning, width)]
     # A turn since the answer that leaves nothing judged is a warning: it's under Look first.
-    seen = [n for n in proposal.notes if n.startswith((PRINTS, NOW_PRINTS))]
+    seen = [n for n in proposal.notes if _seen(n)]
     if seen:
         lines += ["", "  Seen"]
         lines += [x for note in seen for x in wrap("    ", note, width, "      ")]
@@ -734,6 +773,19 @@ def _part(request: ReviewRequest, width: int, fits: _Fits) -> list[str]:
 
 
 def _pose(request: ReviewRequest, width: int) -> list[str]:
+    """This print's pose, or on a plate each part's, as one part's is shown
+    (mqucifer/print-shop#109)."""
+    if not request.parts:
+        return _one_pose(request, width)
+    lines: list[str] = []
+    for part in request.parts:
+        own = replace(request, orientation=part.orientation, candidates=part.candidates)
+        lines += [*([""] if lines else []), f"  PART {part.n}, {part.name}",
+                  *_one_pose(own, width)]
+    return lines
+
+
+def _one_pose(request: ReviewRequest, width: int) -> list[str]:
     """This print's pose and why, the turn it needs to fit, then the poses weighed, as a table,
     with this print's marked."""
     o = request.orientation
