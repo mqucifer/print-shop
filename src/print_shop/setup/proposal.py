@@ -110,8 +110,13 @@ class Used(BaseModel):
     #: What they took was the model's proposal (mqucifer/print-shop#242). `by` is then
     #: `READING`, what was taken, so older code reads the row as it reads a slice's take.
     of_model: bool = False
+    #: Taken from what the sender of this job suggested (mqucifer/print-shop#226): who that was.
+    #: `job_id` is then this job's own.
+    suggested_by: str = ""
 
     def line(self) -> str:
+        if self.suggested_by:
+            return f"taken from what {self.suggested_by} suggested when sending it"
         lesson = f", lesson {self.lesson}'s" if self.by is Source.LESSON else ""
         return f"used from {self.stl_name}, job {self.job_id[:8]}{lesson}"
 

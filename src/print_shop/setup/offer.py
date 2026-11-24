@@ -40,6 +40,12 @@ It's still only applied by `use`.
 a temperature or fan they set for the variety it left is offered here instead, saying which it was
 set for, and one `use` takes it back.
 
+**What the sender suggested comes unticked too** (mqucifer/print-shop#226,
+`Offering.suggested`): a job sent to the queue may carry settings its sender suggests, each with
+why. They're offered under "SUGGESTED BY" the sender, never ticked, and one `use` takes it, as
+the person's correction recorded as taken from that suggestion (`Used.suggested_by`). Untaken,
+nothing of it reaches the slice, the corrections or a lesson.
+
 A failed print is told by its result, never by a symptom, as a success may carry one
 (mqucifer/print-shop#189).
 
@@ -87,6 +93,7 @@ if TYPE_CHECKING:  # the ledger imports the proposal, and the graph imports this
 
 __all__ = [
     "Item", "Offering", "Past", "Standing", "ThisPart", "moved_items", "offering", "render",
+    "suggested_items",
 ]
 
 #: How many past prints can be picked from, the most similar first.
@@ -181,6 +188,8 @@ class Item:
     also: str = ""
     #: This job's own, set for the variety it was moved from (mqucifer/print-shop#210).
     moved: bool = False
+    #: Suggested by whoever sent this job to the queue: their name (mqucifer/print-shop#226).
+    suggested_by: str = ""
 
 
 @dataclass(frozen=True)
@@ -244,6 +253,9 @@ class Offering:
     #: What the person set on this job for the variety it was moved from, numbered last
     #: (mqucifer/print-shop#210, `moved_items`).
     moved: tuple[Item, ...] = ()
+    #: What the sender suggested for this job, numbered after those (mqucifer/print-shop#226,
+    #: `suggested_items`).
+    suggested: tuple[Item, ...] = ()
 
     @property
     def past(self) -> Past | None:
@@ -272,7 +284,7 @@ class Offering:
                                                 f"{lesson.source}",
                                  also="" if said in ("", _NO_REASON) else said)
             lessons.append(lesson)
-        return (*own, *lessons, *self.moved)
+        return (*own, *lessons, *self.moved, *self.suggested)
 
     def span(self) -> int:
         """The numbers Use these holds whichever print is picked: the most items of any, with
@@ -280,7 +292,7 @@ class Offering:
         none of the numbers after them."""
         picks = [replace(self, picked=n).items() for n in range(len(self.options))]
         return max((len(items) for items in picks),
-                   default=len(self.lessons) + len(self.moved))
+                   default=len(self.lessons) + len(self.moved) + len(self.suggested))
 
     def pick(self, n: int) -> Offering | str:
         if not 1 <= n <= len(self.options):
@@ -298,6 +310,8 @@ class Offering:
         """What clearing an item keeps: by the print it's from, or the lesson's, by its number."""
         if item.moved:
             return "moved", item.key
+        if item.suggested_by:
+            return "suggested", item.key
         if item.not_set_here:
             return f"lesson {item.used.lesson}", item.key
         assert self.past is not None
@@ -308,12 +322,13 @@ class Offering:
         # By the print: turned, another part of the same plate may be the one most like it.
         job = plate_job(self.past.job_id) if self.past else ""
         at = next((n for n, p in enumerate(built.options) if plate_job(p.job_id) == job), 0)
-        return replace(built, picked=at, cleared=self.cleared, moved=built.moved or self.moved)
+        return replace(built, picked=at, cleared=self.cleared, moved=built.moved or self.moved,
+                       suggested=built.suggested or self.suggested)
 
     def standing(self, item: Item, proposal: Proposal, pose: str) -> Standing:
         """An item against what's set at this review: what's already so, what's the person's
         since, and what was cleared."""
-        if item.moved:
+        if item.moved or item.suggested_by:
             return self._moved_standing(item, proposal)
         if item.not_set_here:
             return self._lesson_standing(item, proposal)
@@ -385,12 +400,18 @@ class Offering:
         return Standing(" " if why else "x", tuple(why))
 
     def _moved_standing(self, item: Item, proposal: Proposal) -> Standing:
-        """The person's own for the variety the job left: never ticked (mqucifer/print-shop#210)."""
+        """The person's own for the variety the job left (mqucifer/print-shop#210), or what the
+        sender suggested (mqucifer/print-shop#226): never ticked."""
         now = _now(proposal, item.key)
         here = now.value if now is not None else item.preset
+        if item.blocked:
+            return Standing("-", (item.blocked,))
         if here and _same(item.key, here, item.value):
             if now is not None and _theirs(now):
-                return Standing("=", ("used",) if now.reason == item.reason
+                used = now.reason == item.reason and (
+                    not item.suggested_by
+                    or (now.used is not None and now.used.suggested_by == item.suggested_by))
+                return Standing("=", ("used",) if used
                                 else (f"{_set_by(now)} set it here already",))
             return Standing("=", (f"it's {here} here already",))
         why = list(item.doubts)
@@ -1292,9 +1313,12 @@ def _render(offer: Offering, proposal: Proposal, pose: str) -> list[str]:
     for heading, sources in _GROUPS:
         group = [row for row in open_rows if row[1].used.by in sources
                  and row[1].not_set_here == (heading == _NOT_SET_HERE)
-                 and row[1].moved == (heading == _MOVED)]
+                 and row[1].moved == (heading == _MOVED)
+                 and bool(row[1].suggested_by) == (heading == _SUGGESTED)]
         if not group:
             continue
+        if heading == _SUGGESTED:
+            heading = f"{_SUGGESTED} {group[0][1].suggested_by.upper()}, WHO SENT IT"
         if Source.ANSWER in sources:
             # The same file may hold one this job didn't ask, which is ticked.
             again = any(ASKED_AGAIN in found.why for _, _, found in group)
@@ -1320,6 +1344,8 @@ def _render(offer: Offering, proposal: Proposal, pose: str) -> list[str]:
 _NOT_SET_HERE = "LESSONS NOT SET FOR THIS VARIETY"
 #: This job's own, set for the variety it was moved from (mqucifer/print-shop#210).
 _MOVED = "YOURS, SET FOR THE SPOOL IT WAS MOVED FROM"
+#: What the sender suggested for this job, with their name (mqucifer/print-shop#226).
+_SUGGESTED = "SUGGESTED BY"
 #: The items' groups, by whose each was, then the lessons not set for this variety, then this
 #: job's own from before a move.
 _GROUPS: tuple[tuple[str, tuple[Source, ...]], ...] = (
@@ -1328,6 +1354,7 @@ _GROUPS: tuple[tuple[str, tuple[Source, ...]], ...] = (
     ("YOUR ANSWERS THEN", (Source.ANSWER,)),
     (_NOT_SET_HERE, (Source.LESSON,)),
     (_MOVED, _PERSONS),
+    (_SUGGESTED, (Source.SPONSOR,)),
 )
 
 
@@ -1347,6 +1374,27 @@ def moved_items(
             key=change.key, value=change.value, preset=preset, reason=change.reason, fits="",
             used=Used(job_id=job_id, stl_name=stl_name, by=Source.SPONSOR),
             doubts=(f"you set it for {was}, and this job is now for {variety}",), moved=True))
+    return tuple(items)
+
+
+def suggested_items(
+    suggested: list[tuple[str, str, str, str]], presets: dict[str, dict[str, Any]],
+    job_id: str, stl_name: str,
+) -> tuple[Item, ...]:
+    """What the sender of this job suggested, each `(key, value, reason, by)`, as items to use,
+    unticked, each saying who suggested it (mqucifer/print-shop#226). `presets` are this print's
+    machine, process and filament: one outside its bound here can't be used, saying why."""
+    items = []
+    for key, value, reason, by in suggested:
+        preset = next((_first(p[key]) for p in (presets.get("filament", {}),
+                                                 presets.get("process", {})) if key in p), "")
+        refused = check(key, value, presets) if key != PAUSE else (
+            "a pause is set at the review, where its height is read against the slice")
+        items.append(Item(
+            key=key, value=value, preset=preset, reason=reason, fits="",
+            used=Used(job_id=job_id, stl_name=stl_name, by=Source.SPONSOR, suggested_by=by),
+            doubts=(f"{by} suggested it when sending this file: it's yours only if you use it",),
+            blocked=f"{key}={value} is {refused} here" if refused else "", suggested_by=by))
     return tuple(items)
 
 

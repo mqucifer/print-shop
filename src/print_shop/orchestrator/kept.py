@@ -20,6 +20,11 @@ whether it's held, the spool it's for and, for one of several copies, its first.
 another spool keeps its answers and the person's changes (`Kept.move`), less the review's own
 `ok`, and a temperature or fan they set for another variety is kept to offer back, unticked.
 
+**A job can be sent to the queue from elsewhere** (mqucifer/print-shop#226, `sending.py`): it
+waits `SENT` until a queue is open to prepare it, with who sent it and their note (`Sent`), and
+what the sender suggested for its settings is kept here (`Kept.suggested`), offered at the review
+unticked and never applied unless the person uses it.
+
 **An approval is never kept.** A Start is spent when it's taken, and nothing here records one:
 a restart leaves a job ready, never approved and never armed. The review's `ok` is kept, as it's
 the review's and not the print's.
@@ -52,7 +57,8 @@ from print_shop.setup.review import Review, Reviewer, ReviewRequest
 from print_shop.sliced import SlicedJob
 from print_shop.slicer.orca import SlicerProfiles
 
-__all__ = ["KEPT_NAME", "Kept", "Moved", "WaitingJob", "WaitingJobs", "Waits"]
+__all__ = ["KEPT_NAME", "Kept", "Moved", "Sent", "Suggestion", "WaitingJob", "WaitingJobs",
+           "Waits", "local_when"]
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +80,64 @@ class Waits(StrEnum):
     #: Its preparing stopped, saying why (`WaitingJob.note`): it's retried or removed by the
     #: person (mqucifer/print-shop#210).
     STOPPED = "stopped"
+    #: Sent from elsewhere, and not yet taken up by a queue: it's prepared once the queue is open
+    #: (mqucifer/print-shop#226).
+    SENT = "to be prepared once the queue is open"
+    #: A file sliced by hand that someone else sent, waiting for the person to look at what it
+    #: prints before it's ready (mqucifer/print-shop#226).
+    LOOK = "at its look"
+
+
+def local_when(at: str, now: datetime | None = None) -> str:
+    """When, as the Mac's clock says it: "04:43 today", "22:43 yesterday", or "21 Nov 22:43"
+    beyond that, with the year where it isn't this one (mqucifer/print-shop#226)."""
+    try:
+        when = datetime.fromisoformat(at).astimezone()
+    except ValueError:
+        return at
+    today = (now or datetime.now(UTC)).astimezone().date()
+    clock = f"{when:%H:%M}"
+    days = (today - when.date()).days
+    if days == 0:
+        return f"{clock} today"
+    if days == 1:
+        return f"{clock} yesterday"
+    year = f" {when.year}" if when.year != today.year else ""
+    return f"{when.day} {when:%b}{year} {clock}"
+
+
+class Sent(BaseModel):
+    """Where a job came from (mqucifer/print-shop#226): who sent it, when, their note, the bytes
+    sent, and what came with it, each in words. `by` is "" for a file added at the queue."""
+
+    by: str = ""
+    note: str = ""
+    at: str = ""
+    #: The files sent together, for the person to see as one send.
+    batch: str = ""
+    #: The sha256 of the file's bytes, as sent: the same bytes sent again are said.
+    sha256: str = ""
+    #: Where the original was, when it was sent: the queue prints its own copy.
+    source: str = ""
+    #: What came with it, and what wasn't taken and why, each a line.
+    came: tuple[str, ...] = ()
+
+    def said(self) -> str:
+        """"sent by Claude, 14:02 today: 'the lid set'", in the Mac's own time."""
+        note = f": '{self.note}'" if self.note else ""
+        return f"sent by {self.by}, {local_when(self.at)}{note}"
+
+
+class Suggestion(BaseModel):
+    """A setting the sender suggested, with why: offered at the review as theirs, unticked, and
+    never applied unless the person uses it (mqucifer/print-shop#226)."""
+
+    model_config = {"frozen": True}
+
+    key: str
+    value: str
+    reason: str
+    by: str
 
 
 class WaitingJob(BaseModel):
@@ -101,6 +165,8 @@ class WaitingJob(BaseModel):
     copies: int = 1
     #: Why its preparing stopped, where it did.
     note: str = ""
+    #: Who sent it and what came with it (mqucifer/print-shop#226). None: from before.
+    sent: Sent | None = None
 
     @property
     def by_hand(self) -> bool:
@@ -112,10 +178,11 @@ class WaitingJob(BaseModel):
         return f"{self.copy_n} of {self.copies}" if self.copies > 1 else ""
 
     def line(self) -> str:
-        since = f", since {self.since[:16].replace('T', ' ')} UTC" if self.since else ""
+        since = f", since {local_when(self.since)}" if self.since else ""
         copied = f" ({self.copied})" if self.copied else ""
         held = ", held" if self.held else ""
-        return f"job {self.job_id}  {self.part}{copied}  {self.waits}{held}{since}"
+        sent = f"  ({self.sent.said()})" if self.sent is not None and self.sent.by else ""
+        return f"job {self.job_id}  {self.part}{copied}  {self.waits}{held}{since}{sent}"
 
     def state(self) -> dict[str, Any]:
         """The given state as the graph takes it."""
@@ -146,6 +213,8 @@ _QUEUE_COLUMNS = (
     ("copy_n", "INTEGER NOT NULL DEFAULT 1"),
     ("copies", "INTEGER NOT NULL DEFAULT 1"),
     ("note", "TEXT NOT NULL DEFAULT ''"),
+    #: Who sent it and what came with it, as JSON (mqucifer/print-shop#226).
+    ("sent", "TEXT"),
 )
 
 
@@ -190,10 +259,11 @@ class WaitingJobs:
                 position = (last or 0) + 1
             db.execute(
                 "INSERT OR REPLACE INTO waiting_jobs (job_id, part, given, profiles, waits, "
-                "added_at, since, position, held, spool_id, copy_of, copy_n, copies, note) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "added_at, since, position, held, spool_id, copy_of, copy_n, copies, note, sent) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (job.job_id, job.part, given, profiles, job.waits.value, at, job.since or at,
-                 position, int(held), job.spool_id, job.copy_of, job.copy_n, job.copies, job.note),
+                 position, int(held), job.spool_id, job.copy_of, job.copy_n, job.copies, job.note,
+                 job.sent.model_dump_json() if job.sent is not None else None),
             )
 
     def order(self, job_ids: Sequence[str]) -> None:
@@ -255,6 +325,7 @@ def _job(row: sqlite3.Row) -> WaitingJob:
         waits=Waits(row["waits"]), added_at=row["added_at"], since=row["since"],
         position=row["position"], held=bool(row["held"]), spool_id=row["spool_id"],
         copy_of=row["copy_of"], copy_n=row["copy_n"], copies=row["copies"], note=row["note"],
+        sent=Sent.model_validate_json(row["sent"]) if row["sent"] else None,
     )
 
 
@@ -312,6 +383,12 @@ class _Record(BaseModel):
     reviews: list[_Reviewed] = []
     #: What the person set for another variety than the job's now (mqucifer/print-shop#210).
     moved: list[Moved] = []
+    #: What the sender suggested for its settings (mqucifer/print-shop#226): offered, never
+    #: given back as the person's.
+    sender_suggested: list[Suggestion] = []
+    #: The person looked at what a sent hand-sliced file prints, and let it be ready
+    #: (mqucifer/print-shop#226).
+    looked: bool = False
 
 
 _LOOP = TypeAdapter(LoopResult)
@@ -452,6 +529,31 @@ class Kept:
 
         return review
 
+
+    # -- sent with suggestions (mqucifer/print-shop#226) ----------------------
+
+    def suggested_by_sender(self) -> list[Suggestion]:
+        """What the sender suggested for the job's settings, to offer unticked."""
+        with self._lock:
+            return list(self._record.sender_suggested)
+
+    def suggest(self, suggestions: Sequence[Suggestion]) -> None:
+        """The sender's suggestions, kept to offer: none of them is an answer or a change."""
+        with self._lock:
+            self._record.sender_suggested = list(suggestions)
+            self._write()
+
+    def looked(self) -> bool:
+        """Whether the person has looked at what this sent hand-sliced file prints."""
+        with self._lock:
+            return self._record.looked
+
+    def look(self) -> None:
+        """The person looked at what it prints, and let it be ready: kept, so a restart doesn't
+        ask again. It's no approval: Start is still theirs."""
+        with self._lock:
+            self._record.looked = True
+            self._write()
 
     # -- moved to another spool (mqucifer/print-shop#210) --------------------
 
