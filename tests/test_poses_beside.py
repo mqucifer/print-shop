@@ -35,7 +35,7 @@ from print_shop.setup.review import Review, Reviewer, ReviewRequest, cli_reviewe
 from tests.fakes import CI_PROFILES, FramePrinter, MemoryBridge
 from tests.fixtures import write_stl
 from tests.plate_235 import write_plate
-from tests.reviewing import settled
+from tests.reviewing import OK_AGAIN, screen, settled
 from tests.test_job_e2e import CFG
 from tests.test_review import _model, _questions
 from tests.test_send_back import AnyPart
@@ -177,6 +177,8 @@ class Person:
             self.held.let_go.set()
 
     def read(self, prompt: str) -> str:
+        if prompt == "> " and self.shown and self.shown[-1].rstrip().endswith(OK_AGAIN):
+            return "ok"  # the ok's block, answered (mqucifer/print-shop#283)
         assert self.answers, f"asked more than was scripted, at {prompt!r}"
         return self.answers.pop(0)
 
@@ -313,7 +315,7 @@ def test_the_review_says_which_arent_ready_and_orientation_waits_saying_so(
     for n, pose in enumerate(six[1:], 1):
         assert (f"  {n}) {pose_value(pose.rotation_deg)}: {pose.overhang_area_mm2:g} mm2 of "
                 f"overhang, {pose.bed_contact_area_mm2:g} mm2 on the plate") in person.said
-    again = person.shown[-1]  # the review once turned
+    again = screen(person.shown)  # the review once turned
     assert "still being measured" not in again
     for pose in six:
         assert re.search(rf"\n  [ !] {re.escape(pose_value(pose.rotation_deg))} +"

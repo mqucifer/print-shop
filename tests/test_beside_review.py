@@ -187,7 +187,7 @@ def test_with_a_model_that_never_answers_the_review_shows_in_seconds_and_the_job
     assert "The model is still working on settings (" in said
     assert ("What it proposes is added under Settings when you press Enter, and nothing waits "
             "for it.") in flat(said)
-    assert said.count("ok again to go on without its proposals, which closes its call") == 1
+    assert said.count("and ok closes its call") == 1
     assert held.closed.wait(WAIT_S), "going on closed its call"
     [found] = row.proposal.suggested
     assert (found.ending, found.proposed, found.taken) == (Ending.WENT_ON, (), ())
@@ -620,7 +620,7 @@ class Open:
         self.release.set()
         assert self.work.wait(WAIT_S)
         until = time.monotonic() + WAIT_S
-        while not any("came after" in text for text in self.shown):
+        while not any("came back after" in text for text in self.shown):
             assert time.monotonic() < until, "its arrival was never said"
             time.sleep(0.005)
 
@@ -648,7 +648,7 @@ def test_one_that_arrives_under_the_prompt_moves_no_number_until_enter_adds_it()
         return next(typed)
 
     found = term.review(read)
-    assert "Enter adds it to the list (what you've typed is kept)." in term.said
+    assert "Enter shows it (what you've typed is kept)." in term.said
     assert "take a number from 1 to 1" in term.said, "a 2 typed then names what was on screen"
     assert screens == [0, 0, 1], "only Enter drew a new list"
     assert term.said.count("SETTINGS, over your presets") == 1, "and only that block and the prompt"
@@ -689,8 +689,8 @@ def test_ok_before_theyve_been_shown_says_so_once() -> None:
 
     found = term.review(read)
     assert found.approved and not found.taken
-    assert term.said.count("are in and you haven't seen") + term.said.count(
-        "is in and you haven't seen") == 1
+    assert term.said.count("they're in and you haven't seen") + term.said.count(
+        "it's in and you haven't seen") == 1
 
 
 def test_an_ok_warned_while_it_worked_warns_again_once_theyre_in_unseen() -> None:
@@ -706,8 +706,8 @@ def test_an_ok_warned_while_it_worked_warns_again_once_theyre_in_unseen() -> Non
 
     found = term.review(read)
     assert found.approved and prompts == 3
-    assert term.said.count("ok again to go on without its proposals") == 1
-    assert term.said.count("is in and you haven't seen it") == 1
+    assert term.said.count("and ok closes its call") == 1
+    assert term.said.count("it's in and you haven't seen it") == 1
     assert "Went on without the model's settings: its 1 proposal came and wasn't seen" in term.said
 
 
@@ -755,7 +755,7 @@ def test_ok_while_it_works_says_so_once_and_then_goes_on() -> None:
     found = term.review(lambda prompt: "ok")
     term.release.set()
     assert found.approved
-    assert term.said.count("ok again to go on without its proposals") == 1
+    assert term.said.count("and ok closes its call") == 1
 
 
 def test_a_turn_is_taken_alone(tmp_path: Path) -> None:
@@ -1120,9 +1120,9 @@ def test_an_end_just_after_the_prompt_looks_is_still_said_under_it() -> None:
 
     def read(prompt: str) -> str:
         until = time.monotonic() + WAIT_S
-        while not any("came after" in s for s in term.shown) and time.monotonic() < until:
+        while not any("came back after" in s for s in term.shown) and time.monotonic() < until:
             time.sleep(0.01)
-        said.append(any("came after" in s for s in term.shown))
+        said.append(any("came back after" in s for s in term.shown))
         return "stop"
 
     term.review(read)

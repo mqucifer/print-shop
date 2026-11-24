@@ -771,7 +771,7 @@ def test_an_ok_with_ticked_ones_unused_says_so_once(two: Offering) -> None:
     review = cli_reviewer(lambda prompt: next(typed), shown.append)(request_for(two))
     assert review == Review(approved=True), "and the second carries nothing"
     assert shown[1:] == [
-        "  2 ticked aren't used yet: use to take them, or ok again to go on without"]
+        "  ok approves without 2 ticked in Use these (use takes them). ok again to approve."]
 
 
 def test_an_ok_then_use_takes_them(two: Offering) -> None:

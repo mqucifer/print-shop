@@ -139,7 +139,9 @@ def test_one_part_is_byte_for_byte_what_it_was(
         return SimpleNamespace(daemon=daemon, ledger=ledger)
 
     # Asked meanwhile, the model's closer choices on purpose come after the two, and Enter keeps.
-    typed = iter(["1", "1", "", "", "ok"] if asks_meanwhile else ["1", "1", "", "ok"])
+    # The ok says what it goes without, the model's proposal not taken, and ok again approves
+    # (mqucifer/print-shop#283).
+    typed = iter(["1", "1", "", "", "ok", "ok"] if asks_meanwhile else ["1", "1", "", "ok", "ok"])
 
     def person_types(prompt: str = "") -> str:
         prompts.append(prompt)

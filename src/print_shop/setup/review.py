@@ -50,10 +50,17 @@ in and says why the turn was wrong, or meets the step's concern by settings inst
 by Orca. A reason is required: it's recorded as the correction, and drawn as a lesson the
 orientation step is given next time. The part is then turned and sliced again.
 
-**A refused line sets nothing, and the `ok` after it says so** (mqucifer/print-shop#279): "Your
-'ironing=0' wasn't set. ok again to approve without it." An ok typed ahead of that never answers
-it, and a line after the refused one, set or not, answers it. A word Orca doesn't take for a
+**A refused line sets nothing, and the `ok` after it says so** (mqucifer/print-shop#279): "ok
+approves without your 'ironing=0', which wasn't set. ok again to approve." A line after the
+refused one, set or not, answers it. A word Orca doesn't take for a
 setting whose words are all known (`names.not_a_choice`) is refused before anything slices.
+
+**An `ok` says what it goes without, in one block asked once** (mqucifer/print-shop#283): a
+refused line, the slice's and the model's proposals not taken (each saying what stays), what's
+ticked in Use these and not used, and the model's still working or unseen. One more ok
+approves; an ok typed ahead of the block never answers it. A model proposal that's the same
+change as the slice's is said with it, "THE MODEL AGREES WITH 7", and not numbered again: `take
+7` takes it, and the model's record says so. Its arrival says what came.
 
 **A pose still being measured says so** (mqucifer/print-shop#235). A kept pose's job doesn't
 wait for the other five, so the table can be drawn before they're in. `orientation` waits for
@@ -129,6 +136,7 @@ from print_shop.setup.screen import (
 from print_shop.setup.suggest import (
     Listed,
     Suggesting,
+    agreeing,
     by_number,
     didnt_come,
     listed,
@@ -301,9 +309,17 @@ class ReviewRequest:
     @property
     def by_model(self) -> list[Listed]:
         """The model's proposals on this screen, numbered on from the slice's."""
-        return listed(self.suggested, self.proposal,
-                      pose_value(self.orientation.rotation_deg),
-                      self.offered + len(self.proposed))
+        return self.listing(self.suggested)
+
+    def listing(self, found: Suggested | None) -> list[Listed]:
+        """`found`'s proposals as this screen would list them: numbered on from the slice's, and
+        one the slice proposes too said with it (mqucifer/print-shop#283)."""
+        slices: dict[str, tuple[int, str]] = {}
+        for n, flag in self.numbered:
+            assert flag.change is not None
+            slices.setdefault(flag.change.key, (n, flag.change.value))
+        return listed(found, self.proposal, pose_value(self.orientation.rotation_deg),
+                      self.offered + len(self.proposed), slices)
 
     def refreshed(self) -> ReviewRequest:
         """The same review with what the model has come to by now added: a new screen, whose
@@ -329,6 +345,9 @@ class Review:
     part: int | None = None
     #: The model's proposals turned down, saying why, by key. Each is a correction as well.
     declined: tuple[str, ...] = ()
+    #: The model's proposals taken as the slice's, which they agreed with, by key: the model's
+    #: record says they were taken (mqucifer/print-shop#283).
+    agreed: tuple[str, ...] = ()
     #: The model's proposals as the last screen before the answer had them, where a reviewer
     #: added to them itself. None: as the request had them.
     saw: Suggested | None = None
@@ -491,14 +510,15 @@ def render_arrived(request: ReviewRequest, width: int = WIDTH) -> str:
     lines += by_model(request, width)
     if not turning(found):  # else they're under the turn
         lines += [x for note in found.design_notes if note not in request.proposal.design_notes
-                  for x in wrap("  design: ", note, width, "    ")]
+                  for x in wrap("  The model's note on the design: ", note, width, "    ")]
         lines += [x for each in found.refused if each not in request.proposal.refused
                   for x in wrap("  refused from the model: ", each, width, "    ")]
     return "\n".join([*lines, "", *_answers(request, width)])
 
 
 #: How Look first's lines of the model's work begin, to say again when it arrives.
-_OF_MODEL = ("The model", "The model's", "note: the print loop stopped", "THE MODEL PROPOSES")
+_OF_MODEL = ("The model", "The model's", "note: the print loop stopped", "THE MODEL PROPOSES",
+             "THE MODEL AGREES")
 
 
 def _end(request: ReviewRequest, width: int, since: Moved | None, first: bool) -> list[str]:
@@ -659,6 +679,7 @@ def _read_parts(parts: list[str | Left], request: ReviewRequest) -> Review | Sli
     offering = request.offering
     picked = False
     models = by_number(request.by_model)
+    agree = agreeing(request.by_model)
     down: list[Change] = []
     for at, part in enumerate(parts):
         if isinstance(part, Left):
@@ -666,7 +687,10 @@ def _read_parts(parts: list[str | Left], request: ReviewRequest) -> Review | Sli
             continue
         said_no = _NO.match(part)
         if said_no is not None:
-            change = _turned_down(int(said_no.group(1)), said_no.group(2) or "", request, models)
+            # The slice's number turns down the model's that agrees with it, as `no` did when
+            # it had a number of its own (mqucifer/print-shop#283).
+            change = _turned_down(int(said_no.group(1)), said_no.group(2) or "", request,
+                                  {**models, **agree})
             if isinstance(change, str):
                 slips.append((at, change))
                 continue
@@ -792,8 +816,11 @@ def _read_parts(parts: list[str | Left], request: ReviewRequest) -> Review | Sli
     stands = {c.key: c.value for c in used}
     down = [c.model_copy(update={"value": stands.get(c.key, c.value)}) for c in down
             if c.key not in keys]
+    # The slice's taken where the model agrees: the model's record says it was taken too.
+    agreed = tuple(c.key for c in agree.values() if c.key not in {d.key for d in down}
+                   and any(t.key == c.key and not t.taken and t.value == c.value for t in taken))
     return Review(corrections=(*used, *down, *corrections), taken=tuple(taken),
-                  declined=tuple(c.key for c in down),
+                  declined=tuple(c.key for c in down), agreed=agreed,
                   offering=None if offering == request.offering else offering)
 
 
@@ -1127,10 +1154,7 @@ def cli_reviewer(
 
         def said_in(found: Suggested) -> str:
             if found.proposed:
-                many = len(found.proposed)
-                them = "proposal" if many == 1 else f"{many} proposals"
-                return (f"The model's {them} came after {waited(found.seconds)}. Enter adds "
-                        f"{'it' if many == 1 else 'them'} to the list")
+                return _came(request, found)
             if found.ending is Ending.CAME:
                 return f"The model proposed no change, after {waited(found.seconds)}"
             return didnt_come(found).rstrip(".")
@@ -1226,6 +1250,7 @@ def cli_reviewer(
             took = False  # the turn to fit, taken here
             told = False  # that what's ticked isn't used yet
             told_model: set[str] = set()  # what's been said of the model's, at an ok
+            told_left: set[str] = set()  # the proposals said at an ok to be left out
             unset: list[str] = []  # the settings the last line refused didn't set, till an ok
             added = False
             while True:
@@ -1305,30 +1330,28 @@ def cli_reviewer(
                     told = False
                     continue
                 if parsed.approved:
-                    waits: list[str] = []
-                    asked_unset = bool(unset)
-                    if unset:
-                        them = " and ".join(f"'{u}'" for u in unset)
-                        was, it = ("wasn't", "it") if len(unset) == 1 else ("weren't", "them")
-                        waits.append(f"  Your {them} {was} set. ok again to approve without "
-                                     f"{it}.")
-                        unset = []
+                    # All an ok goes without, in one block asked once: one more ok approves
+                    # (mqucifer/print-shop#279, mqucifer/print-shop#283).
+                    out = [f"your '{u}', which wasn't set" for u in unset]
+                    unset = []
+                    for key, said in _not_taken(request):
+                        if key not in told_left:
+                            told_left.add(key)
+                            out.append(said)
                     if not told and request.offering is not None:
                         pose = pose_value(request.orientation.rotation_deg)
                         ticked = len(request.offering.ticked(request.proposal, pose))
                         if ticked:
                             told = True
-                            aren, them = ("isn't", "it") if ticked == 1 else ("aren't", "them")
-                            waits.append(f"  {ticked} ticked {aren} used yet: use to take {them}, "
-                                         "or ok again to go on without")
+                            out.append(f"{ticked} ticked in Use these (use takes "
+                                       f"{'it' if ticked == 1 else 'them'})")
                     state, said = _going_on(request)
                     if state and state not in told_model:
                         told_model.add(state)
-                        waits.append(said)
-                    if waits:
-                        write("\n".join(waits))
-                        if asked_unset:
-                            forget()  # an ok typed before this was shown never answers it
+                        out.append(said)
+                    if out:
+                        write("\n".join(_left_out(out, min(width(), WIDTH))))
+                        forget()  # an ok typed before this was shown never answers it
                         continue
                     if without := _without(request):
                         write(f"  {without}.")
@@ -1396,21 +1419,118 @@ def _same_job(before: ReviewRequest, now: ReviewRequest) -> bool:
 
 
 def _going_on(request: ReviewRequest) -> tuple[str, str]:
-    """What an `ok` goes on without, of the model's: which, and what's said of it once."""
+    """What an `ok` goes on without, of the model's work not on screen: which, and how it's
+    said in the ok's block (`_left_out`)."""
     shown = request.suggested
     if request.suggesting is None or shown is None or shown.ending is not Ending.WORKING:
         return "", ""
     now = request.suggesting.now()
     if now.ending is Ending.WORKING:
-        return "working", (f"  The model is still working ({waited(now.seconds)}): ok again to "
-                           "go on without its proposals, which closes its call.")
+        return "working", (f"the model's proposals: it's still working ({waited(now.seconds)}), "
+                           "and ok closes its call")
     if not now.proposed:
         return "", ""
     many = len(now.proposed)
-    of, are, them = (("proposal", "is", "it") if many == 1
-                     else (f"{many} proposals", "are", "them"))
-    return "unseen", (f"  The model's {of} {are} in and you haven't seen {them}: Enter adds "
-                      f"{them} to the list, ok again goes on without {them}.")
+    of, are, them = (("proposal", "it's", "it") if many == 1
+                     else (f"{many} proposals", "they're", "them"))
+    return "unseen", (f"the model's {of}: {are} in and you haven't seen {them}. Enter shows "
+                      f"{them}")
+
+
+def _left_out(items: list[str], width: int) -> list[str]:
+    """What an `ok` goes without, as one block asked once (mqucifer/print-shop#283): a line,
+    or a line each."""
+    if len(items) == 1:
+        return wrap("  ", f"ok approves without {items[0]}. ok again to approve.", width, "    ")
+    return ["  ok approves without:",
+            *(x for item in items for x in wrap("    - ", item, width, "      ")),
+            "  ok again to approve."]
+
+
+def _now_of(request: ReviewRequest, key: str, preset: str) -> str:
+    """A setting's value at this review: as it's changed here, else the preset's, else as the
+    slice has it, where the preset doesn't list it; the pose's for a pose."""
+    if key == ORIENTATION:
+        return pose_value(request.orientation.rotation_deg)
+    change = request.proposal.get(key)
+    if change is not None:
+        return change.value
+    return preset or (request.reading.settings.get(key, "") if request.reading else "")
+
+
+def _is(here: str, value: str) -> bool:
+    try:
+        return float(here.rstrip("%")) == float(value.rstrip("%"))
+    except ValueError:
+        return here == value
+
+
+def _stays(key: str, here: str, value: str) -> str:
+    """"Ironing stays top, not topmost"."""
+    name = names.plain(key)
+    stay = "stay" if name.endswith("s") and not name.endswith("ss") else "stays"
+    return (f"{name} {stay} {names.switched(key, here) or '-'}, not "
+            f"{names.switched(key, value)}")
+
+
+def _cut(reading: str) -> str:
+    """A slice reading's figures, short: its words before ", on" or the first colon."""
+    return re.split(r", on |: ", reading, maxsplit=1)[0].strip()
+
+
+def _not_taken(request: ReviewRequest) -> list[tuple[str, str]]:
+    """The proposals on screen an `ok` goes without, each by who and what, and as it's said:
+    the slice's, with its figures, then the model's (mqucifer/print-shop#283). One the model
+    agrees with is the slice's; one turned down with `no` isn't on screen to leave out."""
+    out = []
+    for n, flag in request.numbered:
+        c = flag.change
+        assert c is not None
+        here = _now_of(request, c.key, c.preset)
+        if _is(here, c.value):
+            continue
+        figures = f" ({_cut(flag.reading)})" if flag.reading else ""
+        out.append((f"slice {c.key}={c.value}",
+                    f"{n}: {_stays(c.key, here, c.value)}{figures}"))
+    for row in request.by_model:
+        if row.standing != "open":
+            continue
+        c = row.change
+        out.append((f"model {c.key}={c.value}",
+                    f"{row.number}, the model's: "
+                    f"{_stays(c.key, _now_of(request, c.key, c.preset), c.value)}"))
+    return out
+
+
+def _came(request: ReviewRequest, found: Suggested) -> str:
+    """The model's proposals as they come in, said by what they are and against the slice's
+    (mqucifer/print-shop#283), before Enter shows them."""
+    rows = request.listing(found)
+    said = []
+    for row in rows:
+        c = row.change
+        here = _now_of(request, c.key, c.preset)
+        change = (f"{names.plain(c.key)} {names.switched(c.key, here) or '-'} -> "
+                  f"{names.switched(c.key, c.value)}")
+        if row.standing == "agrees":
+            said.append(f"{change}, the same as the slice's {row.slice}")
+        elif row.standing == "open" and row.slice:
+            said.append(f"{change}, where the slice's {row.slice} has "
+                        f"{names.switched(c.key, row.slice_value)}")
+        elif row.standing == "so":
+            said.append(f"{names.plain(c.key)} {names.switched(c.key, c.value)}, so here already")
+        elif row.standing == "theirs":
+            said.append(f"{names.plain(c.key)} {names.switched(c.key, c.value)}, where "
+                        f"{row.by} set {names.switched(c.key, row.now)}")
+        else:
+            said.append(change)
+    after = f"The model came back after {waited(found.seconds)}"
+    if not said:
+        return f"{after}: nothing that isn't turned down already"
+    many = len(said)
+    them = "1 change" if many == 1 else f"{many} changes"
+    listed_ = "; ".join(said[:3]) + (f"; and {many - 3} more" if many > 3 else "")
+    return f"{after}: {them}, {listed_}. Enter shows {'it' if many == 1 else 'them'}"
 
 
 def _without(request: ReviewRequest) -> str:

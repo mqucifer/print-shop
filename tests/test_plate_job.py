@@ -57,7 +57,7 @@ from print_shop.slicer.orca import SlicerProfiles
 from tests.fakes import FakeCamera, FramePrinter, MemoryBridge
 from tests.fixtures import write_stl
 from tests.plates import PlateOrca, box, profiles
-from tests.reviewing import flat, settled
+from tests.reviewing import answering, flat, screen, settled
 from tests.test_job_e2e import CFG
 from tests.test_ledger import record
 from tests.test_review import _model, _questions
@@ -110,7 +110,9 @@ class Rig:
         self.shown: list[str] = []
         self.reviews: list[ReviewRequest] = []
         self.asked = 0
-        reviewing = cli_reviewer(read=lambda _: self.typed.pop(0), write=self.shown.append)
+        # `typed` read when it's asked, as a test may give the rig new answers.
+        reviewing = cli_reviewer(read=lambda prompt: answering(self.typed, self.shown)(prompt),
+                                 write=self.shown.append)
 
         def asker(questions: Any) -> tuple[IntakeAnswer, ...]:
             self.asked += 1
@@ -675,8 +677,8 @@ def test_a_pose_sent_back_that_doesnt_fit_is_taken_back(tmp_path: Path) -> None:
     with rig.daemon:
         job = rig.gated([lying, standing])
         rig.press("approve", job)
-    assert "NOT DONE, your last answer:" in rig.shown[-1]
-    assert "don't all fit on one plate" in rig.shown[-1]
+    assert "NOT DONE, your last answer:" in screen(rig.shown)
+    assert "don't all fit on one plate" in screen(rig.shown)
     one, two = rig.ledger.rows()
     assert two.rotation_deg == (0.0, 0.0, 0.0) and two.orientation_source == "as_laid"
     assert [c.key for c in two.corrections or ()] == ["wall_loops"], "what stood before it stands"

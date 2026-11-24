@@ -31,7 +31,7 @@ from print_shop.setup.review import render as render_review
 from print_shop.setup.turned import as_posed, held
 from tests.fakes import CI_PROFILES, STORE_PROFILES, FramePrinter, MemoryBridge
 from tests.fixtures import write_stl
-from tests.reviewing import flat, takes
+from tests.reviewing import answering, flat, takes
 from tests.test_job_e2e import CFG
 from tests.test_print_loop import Model, _part, _pose
 from tests.test_send_back import AnyPart
@@ -75,7 +75,7 @@ class Job:
         loop: PrintLoop | None = None, as_laid: bool = True, reviewed: bool = True,
     ) -> Row:
         typed, at_review = list(answers), list(review)
-        person = cli_reviewer(lambda prompt: at_review.pop(0), self.shown.append)
+        person = cli_reviewer(answering(at_review, self.shown), self.shown.append)
 
         def reviewer(request: ReviewRequest) -> Review:
             self.requests.append(request)

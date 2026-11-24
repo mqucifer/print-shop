@@ -12,6 +12,7 @@ Every value is escaped, and there's no script.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from datetime import datetime
 from html import escape
@@ -26,7 +27,7 @@ from print_shop.setup.offer import Item
 from print_shop.setup.proposal import ORIENTATION, pose_value
 from print_shop.setup.review import ReviewRequest
 from print_shop.setup.screen import Moved
-from print_shop.setup.suggest import by_number
+from print_shop.setup.suggest import agreeing, by_number
 
 __all__ = [
     "SCREENS", "change_page", "closer_page", "follow_page", "look_page", "mesh_page",
@@ -230,22 +231,29 @@ def _at_review(job_id: str, version: str, said: str,
                request: ReviewRequest | None) -> tuple[str, list[str]]:
     """What the reviewer's prompt asks after an answer, in plain words, and buttons that each
     say what they do: never ok by another name."""
-    if "ticked" in said and "used yet" in said:
-        items = _unused(request)
-        it = "it" if len(items) == 1 else "them"
-        head = (f"{len(items)} ticked {'isn' if len(items) == 1 else 'aren'}'t used yet: "
-                f"{'; '.join(items)}." if items else said)
-        return head, [_reply(job_id, version, "use", f"Use {it} first"),
-                      _reply(job_id, version, "ok", f"Make it ready without {it}", "second")]
-    if "The model is still working" in said:
-        return said, [_reply(job_id, version, "", "Check the model again", "second"),
-                      _reply(job_id, version, "ok",
-                             "Make it ready without the model's proposals", "second")]
-    if "haven't seen" in said:
-        return said, [_reply(job_id, version, "", "Show me the model's proposals"),
-                      _reply(job_id, version, "ok", "Make it ready without them", "second")]
-    if "wasn't set" in said and "approve without" in said:
-        return said, [_reply(job_id, version, "ok", "Make it ready without it", "second")]
+    if "ok approves without" in said and "ok again to approve" in said:
+        # One block of all an ok goes without (mqucifer/print-shop#283): a way out for each
+        # that has one, and ok, once, for them all.
+        buttons = []
+        ticked = re.search(r"(\d+) ticked in Use these", said)
+        if ticked:
+            items = _unused(request)
+            if items:
+                said = said.replace(ticked.group(0), f"{ticked.group(0)}: {'; '.join(items)}")
+            buttons.append(_reply(job_id, version, "use",
+                                  f"Use {'it' if ticked.group(1) == '1' else 'them'} first"))
+        if "still working" in said:
+            buttons.append(_reply(job_id, version, "", "Check the model again", "second"))
+        if "haven't seen" in said:
+            buttons.append(_reply(job_id, version, "", "Show me the model's proposals"))
+        one = "ok approves without:" not in said
+        buttons.append(_reply(job_id, version, "ok",
+                              f"Make it ready without {'it' if one else 'them'}", "second"))
+        if not one:
+            # A line each, as the terminal has them ("->" is a change, never an item's dash).
+            said = re.sub(r"\s+-\s+(?=\S)", "\n- ", said).replace(
+                " ok again to approve.", "\nok again to approve.")
+        return said, buttons
     if "type turn" in said:
         return said, [_reply(job_id, version, "turn", "Take the turn")]
     return said, []
@@ -338,16 +346,23 @@ def _use_these(request: ReviewRequest) -> str:
 
 def _proposals(request: ReviewRequest) -> str:
     rows = []
+    agree = agreeing(request.by_model)
     for n, flag in request.numbered:
         c = flag.change
         assert c is not None
+        # The model's that's the same change is said with it, not numbered again, and turned
+        # down here (mqucifer/print-shop#283).
+        model = agree.get(n)
+        agreed = (f"<br>{_small('The model agrees: ' + model.reason)}</span></label>"
+                  f"<label class=\"small turn-down\">Turn the model's down: why?"
+                  f"<input type=\"text\" name=\"no{n}\" maxlength=\"300\"></label></li>"
+                  if model is not None else "</span></label></li>")
         rows.append(
             f"<li><label class=\"row\"><input type=\"checkbox\" name=\"take\" value=\"{n}\">"
             f"<span class=\"what\"><span class=\"part\">{n}. {_e(plain(c.key))}</span> "
             f"{_small(f'{switched(c.key, c.preset) or chr(45)} to {switched(c.key, c.value)}')}"
             f"<br>{_small(c.reason)} {_small(f'[the slice: {c.knowledge}]')}"
-            f"<br>{_small('The slice read: ' + flag.reading)}</span>"
-            "</label></li>")
+            f"<br>{_small('The slice read: ' + flag.reading)}{agreed}")
     for n, c in sorted(by_number(request.by_model).items()):
         rows.append(
             f"<li><label class=\"row\"><input type=\"checkbox\" name=\"take\" value=\"{n}\">"

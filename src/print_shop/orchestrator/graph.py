@@ -2259,7 +2259,9 @@ def _propose_and_review(
         models = [c for c in review.taken if c.taken]
         took += models
         if beside is not None:
-            beside.note([c.key for c in models], list(review.declined))
+            # The slice's taken where the model agreed is the model's taken too
+            # (mqucifer/print-shop#283).
+            beside.note([*(c.key for c in models), *review.agreed], list(review.declined))
         if review.approved:
             if result.turn_deg and taken_turn != result.turn_deg:
                 raise RuntimeError("approved without taking the turn it needs to fit the plate; "

@@ -64,7 +64,7 @@ from print_shop.setup.review import render as render_review
 from print_shop.setup.skill import groups_for, load
 from tests.fakes import CI_PROFILES, STORE_PROFILES, FramePrinter, MemoryBridge
 from tests.fixtures import write_stl
-from tests.reviewing import flat, takes
+from tests.reviewing import answering, flat, takes
 from tests.test_job_e2e import CFG
 from tests.test_print_loop import Model
 from tests.test_reading import FILAMENT, PETG, PROCESS, _read
@@ -161,7 +161,7 @@ class Turned:
         loop: PrintLoop | None = None, as_laid: bool = False,
     ) -> Row:
         typed, at_review = list(answers), list(review)
-        person = cli_reviewer(lambda prompt: at_review.pop(0), self.shown.append)
+        person = cli_reviewer(answering(at_review, self.shown), self.shown.append)
 
         def reviewer(request: ReviewRequest) -> Review:
             self.requests.append(request)

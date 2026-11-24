@@ -25,7 +25,7 @@ from print_shop.runtime import describe_all
 from print_shop.setup.intake import replay_asker
 from print_shop.setup.questions import PLATE_WORDS, PURPOSE, SEEN, STOCK
 from tests.plates import box
-from tests.reviewing import flat
+from tests.reviewing import flat, screen
 from tests.test_plate_job import Rig, _caps
 from tests.test_waiting import WAIT_S, Person
 
@@ -329,7 +329,7 @@ def test_no_supports_isnt_carried_onto_a_new_overhang(
     assert supports is not None
     assert (supports.value, supports.source) == ("1", "guard"), "the new overhang decides again"
     assert "'Support the made-up ledge?', you said 'no supports'" in " ".join(
-        rig.shown[-1].split())
+        screen(rig.shown).split())
 
 
 def test_a_purpose_choices_setting_for_a_pose_isnt_carried_either(tmp_path: Path) -> None:
@@ -364,8 +364,8 @@ def test_sent_back_to_the_pose_asked_of_the_answer_holds_again(
     with rig.daemon:
         rig.press("reject", rig.gated(_caps(tmp_path), as_laid=False))
     assert "Seen as it now prints" in rig.shown[0]
-    assert "Seen as it now prints" not in rig.shown[-1]
-    assert "every part: Seen as it prints: the walls and the top" in rig.shown[-1]
+    assert "Seen as it now prints" not in screen(rig.shown)
+    assert "every part: Seen as it prints: the walls and the top" in screen(rig.shown)
     assert "seam_seen" in [f.id for f in rig.reviews[-1].flags]
 
 
