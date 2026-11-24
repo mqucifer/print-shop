@@ -16,13 +16,18 @@ config block, was refused as if it weren't one. So:
   the nearest ones this print takes; or a real Orca setting (the slice's config block has it)
   that this print's presets don't list, with the one that does that job here, where it's known
   (`STANDS_IN`). The other cases are `reach.unplaced`'s.
+- **A setting that takes words says them** (mqucifer/print-shop#279), where the settings table
+  holds every word Orca takes for it (`bounds.Setting.orcas`): beside it as the nearest, and
+  under it in `find`, with the line that turns it off where one does. A correction to another
+  word is refused before anything slices (`not_a_choice`). The table is the one source: the
+  shop's bound on the model's proposals (`support_type`'s tree only) is never said as Orca's.
 """
 
 from __future__ import annotations
 
 import difflib
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -30,8 +35,8 @@ from print_shop.setup.bounds import MATERIAL, SETTINGS
 from print_shop.setup.reach import profile_of, unplaced
 from print_shop.sliced import NOT_SETTINGS, PROFILE_IDS
 
-__all__ = ["PLAIN", "STANDS_IN", "Found", "find", "named", "plain", "refused", "switched",
-           "typed", "with_unit"]
+__all__ = ["PLAIN", "STANDS_IN", "Found", "choices", "either", "find", "named", "not_a_choice",
+           "off", "plain", "refused", "switched", "turns_off", "typed", "with_unit"]
 
 _PERCENT, _SPEED, _TEMP, _MM, _S = "%", " mm/s", " °C", " mm", " s"
 #: A switch's "unit": its 0 and 1 are shown off and on, and may be typed so (`typed`).
@@ -164,6 +169,9 @@ class Found:
     now: str
     #: That it does the job of a setting this print's presets don't list: that job, in words.
     stands_in: str = ""
+    #: The words it takes, where they're all Orca's (`choices`), and the one that turns it off.
+    choices: tuple[str, ...] = ()
+    off: str = ""
 
 
 #: print-shop's own answers that are typed as a key is, and aren't Orca's.
@@ -212,10 +220,49 @@ def switched(key: str, value: str) -> str:
 
 def typed(key: str, value: str) -> str:
     """A switch's value typed as it's shown, `on` or `off` (or yes and no), as Orca writes it,
-    1 or 0; any other as typed."""
+    1 or 0; one of a setting's words in Orca's case (`No ironing` is `no ironing`); any other as
+    typed."""
+    word = next((c for c in choices(key) if c == value.strip().lower()), None)
+    if word is not None:
+        return word
     if PLAIN.get(key, ("", ""))[1] != _SWITCH:
         return value
     return {"on": "1", "yes": "1", "off": "0", "no": "0"}.get(value.strip().lower(), value)
+
+
+def choices(key: str) -> tuple[str, ...]:
+    """The words `key` takes, where the settings table holds every one Orca does
+    (`bounds.Setting.orcas`, mqucifer/print-shop#279); none for any other."""
+    setting = SETTINGS.get(key)
+    return setting.choices if setting is not None and setting.orcas else ()
+
+
+def off(key: str) -> str:
+    """Of `choices`, the one that turns `key` off, or '' where none does."""
+    setting = SETTINGS.get(key)
+    return setting.off if setting is not None and setting.orcas else ""
+
+
+def either(words: Sequence[str]) -> str:
+    """Choices said as a list, `no ironing, top, topmost or solid`; '' where there are none."""
+    return ", ".join(words[:-1]) + f" or {words[-1]}" if len(words) > 1 else "".join(words)
+
+
+def turns_off(key: str) -> str:
+    """The line that turns `key` off, its value last, as a space may be in it; '' where none
+    does."""
+    word = off(key)
+    return f"To turn it off: {key}={word}" if word else ""
+
+
+def not_a_choice(key: str, value: str) -> str:
+    """Why `key=value` is refused, before anything slices, where `value` isn't one of the
+    words `key` takes (`choices`), or ''. Where it has no `choices`, ''."""
+    words = choices(key)
+    if not words or value.strip().lower() in words:
+        return ""
+    said = f"'{value}' isn't one of {key}'s choices: {either(words)}"
+    return f"{said}. {turns_off(key)}" if off(key) else said
 
 
 _NUMBER = re.compile(r"^-?\d+(\.\d+)?$")
@@ -291,9 +338,9 @@ def find(
     changed = changed or {}
     if not asked:
         return []
-    takes = _takes(process, filament)
+    keys = _takes(process, filament)
     scored: list[tuple[float, int, int, str]] = []
-    for key in takes:
+    for key in keys:
         known = _known_words(key)
         fits = [_fit(w, known) for w in asked]
         score = sum(fits)
@@ -304,7 +351,7 @@ def find(
     # A setting the presets don't list, named by the words, brings the one that stands in.
     stands: dict[str, str] = {}
     for gone, (key, job) in STANDS_IN.items():
-        if (key in takes and gone not in takes and all(_fit(w, _known_words(gone)) for w in asked)
+        if (key in keys and gone not in keys and all(_fit(w, _known_words(gone)) for w in asked)
                 and set(_words(job)) & set(asked)):
             stands[key] = job
             scored.append((-len(asked) - 0.5, 0, 0, key))
@@ -316,7 +363,7 @@ def find(
     some = [r for r in ranked if -r[0] < len(asked)]
     out = [*whole, *some][:_LISTED]
     return [Found(key=k, plain=plain(k), now=_now(k, process, filament, config, changed),
-                  stands_in=stands.get(k, "")) for *_, k in out]
+                  stands_in=stands.get(k, ""), choices=choices(k), off=off(k)) for *_, k in out]
 
 
 def _nearest(key: str, among: Iterable[str]) -> list[str]:
@@ -347,10 +394,17 @@ def refused(
     if not why or not why.endswith("isn't a setting in the filament or the process preset"):
         return why
     changed = changed or {}
-    takes = _takes(process, filament)
+    keys = _takes(process, filament)
 
     def said(k: str) -> str:
-        return f"{k} ({plain(k)}, now {with_unit(k, _now(k, process, filament, config, changed))})"
+        now = with_unit(k, _now(k, process, filament, config, changed))
+        words = f"; {either(choices(k))}" if choices(k) else ""
+        return f"{k} ({plain(k)}, now {now}{words})"
+
+    def listed(near: list[str]) -> str:
+        """The nearest, each said, then the line that turns each off, where one does."""
+        offs = [line for k in near if (line := turns_off(k))]
+        return "; ".join(map(said, near)) + "".join(f". {line}" for line in offs)
 
     orca = set(config or ()) | set(PLAIN) | set(STANDS_IN)
     if key in orca:
@@ -361,12 +415,12 @@ def refused(
         lists = (f"{name} doesn't list it" if filaments
                  else f"neither {name} nor the process lists it")
         out = f"'{key}' is a real Orca setting, but {lists}, so it can't be set here"
-        if stand is not None and stand[0] in takes:
+        if stand is not None and stand[0] in keys:
             return f"{out}. Here {said(stand[0])} does that job, for {stand[1]}"
-        near = [k for k in _nearest(key, takes) if k != key]
-        return f"{out}. Nearest here: " + "; ".join(map(said, near)) if near else out
-    near = _nearest(key, takes)
+        near = [k for k in _nearest(key, keys) if k != key]
+        return f"{out}. Nearest here: " + listed(near) if near else out
+    near = _nearest(key, keys)
     if not near:
         return (f"'{key}' isn't an Orca setting, and nothing this print takes is near it: "
                 "find <words> looks one up")
-    return f"'{key}' isn't an Orca setting. Nearest: " + "; ".join(map(said, near))
+    return f"'{key}' isn't an Orca setting. Nearest: " + listed(near)

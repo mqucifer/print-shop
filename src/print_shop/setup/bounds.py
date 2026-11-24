@@ -27,6 +27,15 @@ class Setting:
     filament: bool  # a filament-preset setting, else the process's
     bound: Callable[[dict[str, Any]], tuple[float, float]] | None = None
     choices: tuple[str, ...] = ()
+    #: That `choices` are every word Orca takes for it, not the shop's bound on the model's
+    #: proposals (mqucifer/print-shop#279): only then are they said where it's named, and a
+    #: correction to another word refused before anything slices.
+    orcas: bool = False
+    #: Of Orca's choices, the one that turns it off, where one does.
+    off: str = ""
+
+    def __post_init__(self) -> None:
+        assert not self.off or (self.orcas and self.off in self.choices), self.key
 
     def check(self, value: str, presets: dict[str, dict[str, Any]]) -> str:
         """Why `value` is refused, or '' when it's inside the bound."""
@@ -95,10 +104,13 @@ SETTINGS: dict[str, Setting] = {
         Setting("elefant_foot_compensation", False,
                 lambda p: (0, _num(p, "process", "initial_layer_line_width")
                            or _num(p, "machine", "nozzle_diameter"))),
-        # Orca's own choices, as its config writes them.
-        Setting("ironing_type", False, choices=("no ironing", "top", "topmost", "solid")),
+        # Orca's own choices, as its config writes them: each of them, as OrcaSlicer's binary
+        # has them (mqucifer/print-shop#279). `brim_type`'s above are some of Orca's only: it
+        # takes inner_only, outer_and_inner and painted too.
+        Setting("ironing_type", False, choices=("no ironing", "top", "topmost", "solid"),
+                orcas=True, off="no ironing"),
         Setting("seam_position", False,
-                choices=("aligned", "aligned_back", "back", "nearest", "random")),
+                choices=("aligned", "aligned_back", "back", "nearest", "random"), orcas=True),
         *(Setting(key, True, lambda p: (0, BED_MAX_C))
           for key in ("textured_plate_temp", "textured_plate_temp_initial_layer",
                       "cool_plate_temp", "cool_plate_temp_initial_layer")),

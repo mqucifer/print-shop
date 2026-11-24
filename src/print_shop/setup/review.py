@@ -50,6 +50,11 @@ in and says why the turn was wrong, or meets the step's concern by settings inst
 by Orca. A reason is required: it's recorded as the correction, and drawn as a lesson the
 orientation step is given next time. The part is then turned and sliced again.
 
+**A refused line sets nothing, and the `ok` after it says so** (mqucifer/print-shop#279): "Your
+'ironing=0' wasn't set. ok again to approve without it." An ok typed ahead of that never answers
+it, and a line after the refused one, set or not, answers it. A word Orca doesn't take for a
+setting whose words are all known (`names.not_a_choice`) is refused before anything slices.
+
 **A pose still being measured says so** (mqucifer/print-shop#235). A kept pose's job doesn't
 wait for the other five, so the table can be drawn before they're in. `orientation` waits for
 them, saying that it is, and then lists them as ever.
@@ -159,6 +164,11 @@ _NO = re.compile(r"^\s*no\s+(\d+)\b\s*(?:(?:because\b|-|—|:)\s*(.*))?$", re.I)
 _FIND = re.compile(r"^\s*find\b\s*(.*)$", re.I | re.S)
 #: `bridge fan=60`: a setting named in words where its key goes.
 _WORDS_SET = re.compile(r"^\s*([a-zA-Z][a-zA-Z0-9_ ]*?)\s*=\s*(\S.*?)\s*$")
+#: A setting typed to be set, by its key or in words, its reason after: what a refused line
+#: didn't set, said at the `ok` after it (mqucifer/print-shop#279).
+_TO_SET = re.compile(
+    r"^\s*([a-zA-Z][a-zA-Z0-9_ ]*?)\s*=\s*(.+?)\s*(?:(?:\bbecause\b|\s-\s|\s?—\s?)\s*(.*))?$"
+)
 #: `turn`: the turn on the plate that a part which doesn't fit as posed is offered.
 _TURN = "turn"
 #: `use`, `use 2 4`, `clear 3` or `from 2`: what the most similar past print offers.
@@ -741,6 +751,12 @@ def _read_parts(parts: list[str | Left], request: ReviewRequest) -> Review | Sli
         if preset is None:
             slips.append((at, _refused(key, request)))
             continue
+        wrong = names.not_a_choice(key, value)
+        if wrong:
+            # Not one of the words Orca takes: refused before anything slices, where it would
+            # only be read back as not reaching the file (mqucifer/print-shop#279).
+            slips.append((at, wrong))
+            continue
         known = request.proposal.get(key) or next(
             (c for c in (*request.proposal.not_applied, *request.proposal.kept) if c.key == key),
             None,
@@ -1210,6 +1226,7 @@ def cli_reviewer(
             took = False  # the turn to fit, taken here
             told = False  # that what's ticked isn't used yet
             told_model: set[str] = set()  # what's been said of the model's, at an ok
+            unset: list[str] = []  # the settings the last line refused didn't set, till an ok
             added = False
             while True:
                 # Typed ahead, before the prompt opened, each line is an answer as ever: lines
@@ -1251,6 +1268,10 @@ def cli_reviewer(
                 try:
                     parsed = _settled(read_answer(answer, request), request, read, write,
                                       width(), waiting)
+                    # A refused line sets nothing: an ok after it says so once
+                    # (mqucifer/print-shop#279). Any other line answers it, as does back.
+                    if not (isinstance(parsed, Review) and parsed.approved):
+                        unset = _unset(answer) if isinstance(parsed, str) else []
                     if parsed is None:
                         write("  Back to the review: nothing from that answer is taken.")
                         continue
@@ -1285,6 +1306,13 @@ def cli_reviewer(
                     continue
                 if parsed.approved:
                     waits: list[str] = []
+                    asked_unset = bool(unset)
+                    if unset:
+                        them = " and ".join(f"'{u}'" for u in unset)
+                        was, it = ("wasn't", "it") if len(unset) == 1 else ("weren't", "them")
+                        waits.append(f"  Your {them} {was} set. ok again to approve without "
+                                     f"{it}.")
+                        unset = []
                     if not told and request.offering is not None:
                         pose = pose_value(request.orientation.rotation_deg)
                         ticked = len(request.offering.ticked(request.proposal, pose))
@@ -1299,6 +1327,8 @@ def cli_reviewer(
                         waits.append(said)
                     if waits:
                         write("\n".join(waits))
+                        if asked_unset:
+                            forget()  # an ok typed before this was shown never answers it
                         continue
                     if without := _without(request):
                         write(f"  {without}.")
@@ -1344,6 +1374,19 @@ def _settled(
             return None
         read_ = _read_parts(parts, request)
     return read_
+
+
+def _unset(answer: str) -> list[str]:
+    """The settings an answer typed to set, each as `key=value` without its reason: those a
+    refused line didn't set (mqucifer/print-shop#279)."""
+    lines = [line for line in answer.splitlines() if line.strip()]
+    parts = _paste_parts(lines) if len(lines) > 1 else _split(answer)
+    out = []
+    for part in parts:
+        match = _TO_SET.match(part) if isinstance(part, str) else None
+        if match is not None:
+            out.append(f"{match.group(1).strip()}={match.group(2)}")
+    return out
 
 
 def _same_job(before: ReviewRequest, now: ReviewRequest) -> bool:
