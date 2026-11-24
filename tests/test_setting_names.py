@@ -21,7 +21,7 @@ import pytest
 from print_shop.core.state import AppliedOrientation, SliceResult
 from print_shop.setup.bounds import MATERIAL, SETTINGS
 from print_shop.setup.names import PLAIN, STANDS_IN, find, named, plain, refused, with_unit
-from print_shop.setup.proposal import Change, Proposal, Source
+from print_shop.setup.proposal import Change, Proposal, Source, read_back
 from print_shop.setup.review import Review, ReviewRequest, cli_reviewer, parse_answer, render
 from print_shop.slicer.orca import parse_config_block
 from print_shop.slicer.store import Store, choose
@@ -303,3 +303,14 @@ def test_a_refusal_at_the_prompt_is_wrapped_to_the_width() -> None:
     said = person.shown[1].splitlines()
     assert len(said) > 1 and all(len(line) <= 80 for line in said)
     assert said[0].startswith("  'enable_overhang_bridge_fan' is a real Orca setting")
+
+
+def test_a_switch_typed_on_is_read_back_from_the_slice_as_1() -> None:
+    """Typed `on`, it's 1 from the start, so the slice's config is read against 1 as ever."""
+    review = parse_answer("enable_support=on because the arch sags", _request())
+    assert isinstance(review, Review)
+    asked = Proposal(changes=review.corrections)
+    sliced = read_back(asked, PROCESS, FILAMENT, {**CONFIG, "enable_support": "1"})
+    assert [(c.key, c.value) for c in sliced.changes] == [("enable_support", "1")]
+    missed = read_back(asked, PROCESS, FILAMENT, {**CONFIG, "enable_support": "0"})
+    assert [c.not_applied for c in missed.not_applied] == ["asked 1, sliced 0"]
