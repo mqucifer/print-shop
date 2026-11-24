@@ -115,15 +115,15 @@ from print_shop.setup.suggest import (
     waited,
     went_on,
 )
-from print_shop.setup.waiting import can_ask, terminal
+from print_shop.setup.waiting import _keys_waiting, can_ask, terminal
 from print_shop.slicer.orca import SlicerProfiles
 
 if TYPE_CHECKING:
     from print_shop.ingest.measuring import Measuring
 
 __all__ = [
-    "Review", "ReviewPart", "Reviewer", "ReviewRequest", "cli_reviewer", "parse_answer", "render",
-    "send_back",
+    "Left", "Review", "ReviewPart", "Reviewer", "ReviewRequest", "Slipped", "cli_reviewer",
+    "parse_answer", "read_answer", "render", "send_back",
 ]
 
 #: `key=value`, then an optional reason after "because" or a dash. A value may have spaces,
@@ -142,6 +142,16 @@ _NO = re.compile(r"^\s*no\s+(\d+)\b\s*(?:(?:because\b|-|—|:)\s*(.*))?$", re.I)
 _TURN = "turn"
 #: `use`, `use 2 4`, `clear 3` or `from 2`: what the most similar past print offers.
 _OFFER = re.compile(r"^\s*(use|clear|from)\b\s*([\d ,]*)$", re.I)
+#: What a `;` must stand before to start the next answer (mqucifer/print-shop#224): a `key=`,
+#: or the whole of a `take`, `use`, `clear` or `from`, or a `no 2` and its reason. Anywhere
+#: else, as in a reason, it's the answer's own.
+_STARTS = re.compile(
+    r"\s*(?:[a-z_0-9]+\s*="
+    r"|(?i:take|use|clear|from)\b[\d ,]*\s*(?=;|$)"
+    r"|(?i:no)\s+\d+\b\s*(?:(?i:because)\b|-|—|:|(?=;|$)))"
+)
+#: How an `ok` and the words like it are typed: in a paste they approve and end nothing.
+_ALONE = ("ok", "yes", "y", "approve", "stop", "no", "n", _TURN)
 
 
 @dataclass(frozen=True)
@@ -304,6 +314,119 @@ class Review:
         )
 
 
+@dataclass(frozen=True)
+class Left:
+    """The lines of a paste that aren't answers: one part, asked about once
+    (mqucifer/print-shop#224)."""
+
+    lines: tuple[str, ...]
+
+    def why(self) -> str:
+        first = self.lines[0].strip()
+        shown = first if len(first) <= 40 else first[:39] + "\u2026"
+        them = (f"'{shown}'" if len(self.lines) == 1
+                else f"'{shown}' and {len(self.lines) - 1} more lines")
+        one = "isn't an answer" if len(self.lines) == 1 else "of the paste aren't answers"
+        said = [w for w in _ALONE if any(line.strip().lower() == w for line in self.lines)]
+        alone = (f" ({' or '.join(said)} in a paste approves and ends nothing: type it on its "
+                 "own)") if said else ""
+        return f"{them} {one}{alone}"
+
+
+@dataclass(frozen=True)
+class Slipped:
+    """An answer some of whose parts can't be read (mqucifer/print-shop#224): the others are held,
+    applied to nothing, while the first that can't is asked about, to correct or drop. Nothing
+    is sliced till it's all read."""
+
+    parts: tuple[str | Left, ...]
+    #: Each part that can't be read, by its place in `parts`, and why not.
+    slips: tuple[tuple[int, str], ...]
+
+    @property
+    def held(self) -> tuple[str, ...]:
+        """The parts that are read, each as short as says what it is: a correction's reason
+        isn't repeated."""
+        bad = {at for at, _ in self.slips}
+        out = []
+        for at, part in enumerate(self.parts):
+            if at in bad or isinstance(part, Left):
+                continue
+            match = _CORRECTION.match(part)
+            out.append(f"{match.group(1)}={match.group(2)}" if match else part)
+        return tuple(out)
+
+    def asked(self, width: int) -> list[str]:
+        """What's held and what isn't, as the command shows it above the question."""
+        at, why = self.slips[0]
+        part = self.parts[at]
+        lines = wrap("  Held, nothing sliced yet: ", " \u00b7 ".join(self.held), width,
+                     "    ") if self.held else []
+        lines += wrap("  ", why if isinstance(part, Left) or why.startswith(f"'{part}'")
+                      else f"'{part}': {why}", width, "    ")
+        it = "them" if isinstance(part, Left) and len(part.lines) > 1 else "it"
+        what = "what it should say" if isinstance(part, Left) else "it corrected"
+        if it == "them":
+            what = "what they should say"
+        lines += wrap("  ", f"Type {what}, drop to leave {it} out, or back to leave the whole "
+                      "answer.", width, "    ")
+        return lines
+
+    def answered(self, typed: str) -> list[str | Left] | None:
+        """The parts with the one asked about corrected, or dropped by `drop`; None for `back`.
+        A blank line changes nothing, and is asked again."""
+        at, _ = self.slips[0]
+        parts: list[str | Left] = list(self.parts)
+        lines = [line for line in typed.splitlines() if line.strip()]
+        word = typed.strip().lower()
+        if word == "back":
+            return None
+        if word == "drop":
+            del parts[at]
+        elif len(lines) > 1:
+            parts[at:at + 1] = _paste_parts(lines)
+        elif lines:
+            parts[at:at + 1] = _split(lines[0])
+        return parts
+
+
+def _split(text: str) -> list[str]:
+    """A line's answers: split at a `;` only before another answer (`_STARTS`), so that a reason
+    keeps its own (mqucifer/print-shop#224)."""
+    text = text.strip().strip(";")
+    parts, start = [], 0
+    for semi in re.finditer(";", text):
+        if _STARTS.match(text, semi.end()):
+            parts.append(text[start:semi.start()])
+            start = semi.end()
+    parts.append(text[start:])
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _paste_parts(lines: list[str]) -> list[str | Left]:
+    """A paste's answers, from its lines that start as one, unindented: the review's own lines
+    are indented, its examples among them, so a pasted screen offers none. The other lines are
+    one part, after them."""
+    parts: list[str | Left] = []
+    left: list[str] = []
+    for line in lines:
+        if line[:1].isspace() or not _STARTS.match(line):
+            left.append(line)
+        else:
+            parts += _split(line)
+    return [*parts, Left(tuple(left))] if left else parts
+
+
+def _no_correction(lines: list[str]) -> str:
+    """A paste with no answer in it, said in one sentence (mqucifer/print-shop#224)."""
+    said = [w for w in _ALONE if any(line.strip().lower() == w for line in lines)]
+    alone = (f", and the {' and the '.join(said)} in it approves and ends nothing"
+             if said else "")
+    return (f"that paste of {len(lines)} lines is one answer with no correction in it, so "
+            f"nothing's taken from it{alone}: type a correction as key=value because \u2026, "
+            "or ok on its own")
+
+
 class Reviewer(Protocol):
     def __call__(self, request: ReviewRequest) -> Review: ...
 
@@ -448,7 +571,25 @@ def _pauses(request: ReviewRequest) -> list[str]:
 
 
 def parse_answer(answer: str, request: ReviewRequest) -> Review | str:
-    """The Sponsor's answer as a `Review`, or why it can't be read."""
+    """The Sponsor's answer as a `Review`, or why it can't be read: for an answer with a slip in
+    it, why its first slip can't be (`read_answer` holds the rest)."""
+    read = read_answer(answer, request)
+    return read.slips[0][1] if isinstance(read, Slipped) else read
+
+
+def read_answer(answer: str, request: ReviewRequest) -> Review | Slipped | str:
+    """The answer as a `Review`; or, where some of its parts can't be read, those that can held
+    and those that can't to ask about (`Slipped`); or why it can't be read at all.
+
+    Pasted text of several lines is one answer (mqucifer/print-shop#224): its corrections are
+    read, and its other lines are one part to ask about. One that holds no correction is said in
+    a sentence, and an `ok` or `stop` in it neither approves nor ends anything."""
+    lines = [line for line in answer.splitlines() if line.strip()]
+    if len(lines) > 1:
+        parts = _paste_parts(lines)
+        if not any(isinstance(p, str) for p in parts):
+            return _no_correction(lines)
+        return _read_parts(parts, request)
     text = answer.strip()
     if text.lower() in ("ok", "yes", "y", "approve"):
         if request.turn_waiting:
@@ -467,6 +608,14 @@ def parse_answer(answer: str, request: ReviewRequest) -> Review | str:
         return Review(turn_taken=True)
     if text.lower() in ("stop", "no", "n"):
         return Review(stop=True)
+    return _read_parts(list(_split(text)), request)
+
+
+def _read_parts(parts: list[str | Left], request: ReviewRequest) -> Review | Slipped | str:
+    """The answer's parts, each read: a `Review` once all are, else what's held and what isn't
+    (mqucifer/print-shop#224). Why the whole can't stand, where its parts are read but don't go
+    together, is said for the whole."""
+    slips: list[tuple[int, str]] = []
     corrections = []
     taken: list[Change] = []
     used: list[Change] = []
@@ -474,26 +623,32 @@ def parse_answer(answer: str, request: ReviewRequest) -> Review | str:
     picked = False
     models = by_number(request.by_model)
     down: list[Change] = []
-    for part in filter(None, (p.strip() for p in text.split(";"))):
+    for at, part in enumerate(parts):
+        if isinstance(part, Left):
+            slips.append((at, part.why()))
+            continue
         said_no = _NO.match(part)
         if said_no is not None:
             change = _turned_down(int(said_no.group(1)), said_no.group(2) or "", request, models)
             if isinstance(change, str):
-                return change
+                slips.append((at, change))
+                continue
             down.append(change)
             continue
         took = _TAKE.match(part)
         if took is not None:
             found = _take(took.group(1), request, models)
             if isinstance(found, str):
-                return found
+                slips.append((at, found))
+                continue
             taken += found
             continue
         offered = _OFFER.match(part)
         if offered is not None:
             if offering is None:
-                return (NOT_FOR_A_PLATE if request.plate is not None
-                        else "there's no past print's settings to use")
+                slips.append((at, NOT_FOR_A_PLATE if request.plate is not None
+                              else "there's no past print's settings to use"))
+                continue
             verb = offered.group(1).lower()
             numbers = [int(n) for n in re.findall(r"\d+", offered.group(2))]
             if verb != "from" and offering.past is not None:
@@ -501,44 +656,60 @@ def parse_answer(answer: str, request: ReviewRequest) -> Review | str:
                 theirs = [n for n in numbers if n > request.offered
                           and (n in models or n in dict(request.numbered))]
                 if theirs:
-                    return _whose_number(theirs[0], request, models, verb)
+                    slips.append((at, _whose_number(theirs[0], request, models, verb)))
+                    continue
             if verb == "use":
                 if picked:
-                    return "look at that print's settings first: from picks it, then use"
+                    slips.append((at, "look at that print's settings first: from picks it, "
+                                      "then use"))
+                    continue
                 items = offering.use(numbers, request.proposal,
                                      pose_value(request.orientation.rotation_deg))
                 if isinstance(items, str):
-                    return items
-                for item in items:
-                    # Again here, as the stock can change while the review waits.
-                    if item.key == PAUSE and (why := pauses.cant_start(
-                        item.pause, request.material, request.stock() if request.stock else ()
-                    )):
-                        return f"{PAUSE} can't be used: {why}"
+                    slips.append((at, items))
+                    continue
+                # Again here, as the stock can change while the review waits.
+                gone = next((why for item in items if item.key == PAUSE and (
+                    why := pauses.cant_start(item.pause, request.material,
+                                             request.stock() if request.stock else ()))), "")
+                if gone:
+                    slips.append((at, f"{PAUSE} can't be used: {gone}"))
+                    continue
                 used += [_used_change(item, request) for item in items]
                 continue
             if verb == "from" and len(numbers) != 1:
-                return "from picks one print, such as from 2"
+                slips.append((at, "from picks one print, such as from 2"))
+                continue
             changed = offering.pick(numbers[0]) if verb == "from" else offering.clear(numbers)
             if isinstance(changed, str):
-                return changed
+                slips.append((at, changed))
+                continue
             offering, picked = changed, picked or verb == "from"
             continue
         match = _CORRECTION.match(part)
         if match is None:
-            return f"'{part}' isn't setting=value"
+            slips.append((at, f"'{part}' isn't setting=value"))
+            continue
         key, value, reason = match.group(1), match.group(2), (match.group(3) or "").strip()
+        if ";" in value:
+            # A `;` is the next answer's only before one (`_split`), and a reason's otherwise.
+            slips.append((at, f"'{value}' isn't a value of {key}: a ';' goes before the next "
+                              "key=value or take, or in a reason after because"))
+            continue
         if request.plate is not None and key == SEQUENCE and value not in SEQUENCES:
-            return f"{SEQUENCE} is {' or '.join(SEQUENCES)}"
+            slips.append((at, f"{SEQUENCE} is {' or '.join(SEQUENCES)}"))
+            continue
         if key in PAUSE_NAMES:
             change = _pause(key, value, reason, request)
             if isinstance(change, str):
-                return change
+                slips.append((at, change))
+                continue
             corrections.append(change)
             continue
         preset = _preset_of(request, key)
         if preset is None:
-            return unplaced(key, request.process, request.filament)
+            slips.append((at, unplaced(key, request.process, request.filament)))
+            continue
         known = request.proposal.get(key) or next(
             (c for c in (*request.proposal.not_applied, *request.proposal.kept) if c.key == key),
             None,
@@ -555,6 +726,8 @@ def parse_answer(answer: str, request: ReviewRequest) -> Review | str:
     over = keys | {c.key for c in taken}
     used = [c for c in {c.key: c for c in used}.values() if c.key not in over]
     # What's used counts as what's typed: neither gets a pause onto a plate printing by object.
+    if slips:
+        return Slipped(parts=tuple(parts), slips=tuple(slips))
     refused = _pause_by_object([*used, *corrections], request)
     if refused:
         return refused
@@ -879,6 +1052,7 @@ def cli_reviewer(
     asks: Callable[[], bool] | None = None,
     screen: Callable[[], TextIO | None] = terminal,
     width: Callable[[], int] = lambda: shutil.get_terminal_size((WIDTH, 24)).columns,
+    more: Callable[[], bool] | None = None,
 ) -> Reviewer:
     """Show the review on the command line and read the answer, again until it's readable.
     `orientation` starts the send-back conversation (`send_back`). `forget` drops what was typed
@@ -893,6 +1067,9 @@ def cli_reviewer(
     From the second round of a job on, what moved since the round before is marked and listed.
     """
     shown: list[ReviewRequest] = []  # the round before, of this job
+    if more is None:
+        # A line already waiting at a terminal came in the same paste; piped lines are answers.
+        more = lambda: can_ask() and _keys_waiting(0.05)  # noqa: E731
 
     def review(request: ReviewRequest) -> Review:
         work = request.suggesting
@@ -1004,6 +1181,8 @@ def cli_reviewer(
             added = False
             while True:
                 answer = ask()
+                while more():  # pasted with it: one answer (mqucifer/print-shop#224)
+                    answer += "\n" + read("")
                 if request.suggested is not None and not answer.strip():
                     newer = request.refreshed()
                     assert newer.suggested is not None
@@ -1027,7 +1206,11 @@ def cli_reviewer(
                     write("  Back to the review: ok, a correction, orientation, or stop.")
                     continue
                 try:
-                    parsed = parse_answer(answer, request)
+                    parsed = _settled(read_answer(answer, request), request, read, write,
+                                      width())
+                    if parsed is None:
+                        write("  Back to the review: nothing from that answer is taken.")
+                        continue
                     if isinstance(parsed, str):
                         write(f"  {parsed}")
                         continue
@@ -1082,6 +1265,21 @@ def cli_reviewer(
                 work.hear(None)
 
     return review
+
+
+def _settled(
+    read_: Review | Slipped | str, request: ReviewRequest, read: Callable[[str], str],
+    write: Callable[[str], None], width: int,
+) -> Review | str | None:
+    """The answer once each slip in it is corrected or dropped, the rest held meanwhile, so that
+    it's sliced once (mqucifer/print-shop#224). None: `back`, or nothing left of it."""
+    while isinstance(read_, Slipped):
+        write("\n".join(read_.asked(min(width, WIDTH))))
+        parts = read_.answered(read("fix> "))
+        if not parts:
+            return None
+        read_ = _read_parts(parts, request)
+    return read_
 
 
 def _same_job(before: ReviewRequest, now: ReviewRequest) -> bool:
