@@ -47,7 +47,7 @@ from tests.fakes import (
     echo_settings,
 )
 from tests.fixtures import write_stl
-from tests.reviewing import settled
+from tests.reviewing import flat, settled
 from tests.test_job_e2e import CFG
 from tests.test_ledger import record
 from tests.test_review import ANSWERS, _model, _questions, _request
@@ -245,9 +245,9 @@ def test_back_returns_to_the_review_having_sent_nothing() -> None:
 
 def test_the_review_offers_to_send_the_pose_back_and_names_the_pose_read_in() -> None:
     shown = render(_on_edge())
-    assert "send the orientation back (orientation)," in shown
-    assert ("  the part's features were read in this pose: rotation (0.0, 90.0, 0.0), 100 mm "
-            "tall, 372 mm2 on the plate") in shown
+    assert "orientation (send it back)" in shown
+    assert ("features read in this pose: rotation (0.0, 90.0, 0.0), 100 mm tall, 372 mm2 on "
+            "the plate") in flat(shown)
 
 
 # Through the daemon: job 1 sends the pose back, job 2 is given the lesson
@@ -331,12 +331,10 @@ def test_a_pose_sent_back_turns_the_part_and_is_recorded_as_the_correction(
 ) -> None:
     ledger, run = shop
     job_id, person = run("wall_loops=4 because I handle it", "orientation", "1", REASON, "ok")
-    assert person.said.count("Settings for this print") == 3, (
+    assert person.said.count("SETTINGS, over your presets") == 3, (
         "the review, a correction, then again once turned"
     )
-    assert "Orientation: (0.0, 0.0, 0.0), sent back at the review, by you: " + REASON in (
-        person.said
-    )
+    assert "this print 0,0,0: sent back at the review, by you: " + REASON in flat(person.said)
     row = ledger.get(job_id)
     assert row is not None
     assert (row.rotation_deg, row.orientation_source) == ((0.0, 0.0, 0.0), "sponsor")
@@ -385,9 +383,9 @@ def test_a_kept_orientation_lesson_reaches_the_next_parts_orientation_by_itself(
     assert line.startswith(f"Lesson {lesson['id']}, from lid.stl, for a part that's flat_and_wide"
                            ", large_bed_contact")
     assert line.endswith(f"orientation=0,0,0: {REASON}")
-    assert f"orientation=0,0,0: {REASON} (given to the orientation step with its poses)" in (
-        person.said
-    ), "the review says which it was given"
+    assert ("orientation=0,0,0 · given to the orientation step with its poses · from lid.stl"
+            in flat(person.said)), "the review says which it was given"
+    assert f" {REASON} " in flat(person.said)
     [given] = ledger.query("SELECT * FROM job_lessons WHERE job_id=?", job_2)
     assert given["lesson"] == lesson["id"]
     [scored] = ledger.query("SELECT score, why FROM print_lesson_scores")
@@ -457,11 +455,12 @@ def test_standing_the_lid_up_for_warping_is_corrected_before_the_review(
     job_id, person = run("ok")
     row = ledger.get(job_id)
     assert row is not None and row.rotation_deg in ((0.0, 0.0, 0.0), (180.0, 0.0, 0.0))
-    assert ("the part's features were read in this pose: rotation (0.0, 0.0, 0.0), 6 mm tall, "
-            "6200 mm2 on the plate") in person.said, "the flat pose's own figures"
-    assert "Orientation: (0.0, 0.0, 0.0), moved by the validator: (0.0, 0.0, 0.0) puts 6200 mm2 " \
-           "on the plate against 372" in person.said
-    assert f"The model had said: {WARPING}" in person.said
+    said = flat(person.said)
+    assert ("features read in this pose: rotation (0.0, 0.0, 0.0), 6 mm tall, 6200 mm2 on the "
+            "plate") in said, "the flat pose's own figures"
+    assert ("this print 0,0,0: moved by the validator: (0.0, 0.0, 0.0) puts 6200 mm2 on the "
+            "plate against 372") in said
+    assert f"The model had said: {flat(WARPING)}" in said
     assert {f.id: f.value for f in row.features or ()}["bed_contact"] == pytest.approx(6200)
 
 
@@ -482,7 +481,7 @@ def test_a_flat_part_with_a_warping_risk_keeps_its_pose_and_the_settings_answer_
         "(brim_type), the chamber's exhaust (during_print_exhaust_fan_speed) and the side fan "
         "(additional_cooling_fan_speed) answer it, not turning the part"
     )
-    assert f"  note: {risk}" in person.said, "the review shows it"
+    assert f"note: {risk}" in flat(person.said), "the review shows it"
 
 
 def test_the_orientation_model_reads_the_skills_symptom_map(

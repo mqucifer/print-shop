@@ -46,3 +46,9 @@ def takes(reviewer: Reviewer) -> Reviewer:
         return taken
 
     return settled(take)
+
+
+def flat(text: str) -> str:
+    """A review's text with its wrapping undone, to find what it says whatever the width
+    (mqucifer/print-shop#223)."""
+    return " ".join(text.split())

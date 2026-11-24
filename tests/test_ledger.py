@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from print_shop import ledger as ledger_module
 from print_shop.ledger import (
     DEFAULT_PATH,
     Answer,
@@ -199,7 +200,9 @@ def test_the_path_comes_from_the_settings(tmp_path: Path) -> None:
     settings = tmp_path / ".env"
     settings.write_text(f"PRINT_SHOP_LEDGER={tmp_path}/elsewhere.sqlite\n")
     assert ledger_path(settings) == tmp_path / "elsewhere.sqlite"
-    assert ledger_path(tmp_path / "absent.env") == DEFAULT_PATH
+    # Under tests the default is the session's own (mqucifer/print-shop#263); as written, the
+    # Mac's.
+    assert ledger_path(tmp_path / "absent.env") == ledger_module.DEFAULT_PATH
     assert Path("~/print-shop/ledger.sqlite").expanduser() == DEFAULT_PATH
 
 

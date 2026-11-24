@@ -182,6 +182,10 @@ LIVE_SETTINGS = Path(os.environ.get("PRINT_SHOP_LLM_SETTINGS", str(SETTINGS_PATH
 
 
 def _live_config() -> LLMConfig | None:
+    """The live key's config: read only in a run that opts in to LiteLLM, as this runs at
+    collection (mqucifer/print-shop#263)."""
+    if not opted_in("llm"):
+        return None
     try:
         return LLMConfig.from_settings(LIVE_SETTINGS)
     except RuntimeError:

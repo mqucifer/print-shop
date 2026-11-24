@@ -60,6 +60,7 @@ from tests.fakes import (
     RecordedSlicer,
 )
 from tests.fixtures import write_stl
+from tests.reviewing import flat
 from tests.test_graph import needs_orca
 from tests.test_job_e2e import CFG
 from tests.test_review import ANSWERS, Sponsor, _model, _questions, _request
@@ -232,7 +233,7 @@ def test_a_declared_key_the_preset_doesnt_list_is_accepted_at_the_review(tmp_pat
     applied = apply(_profiles(tmp_path, PROCESS, SPARSE), asked, tmp_path / "out")
     assert _written(applied) == (PROCESS, {**SPARSE, key: ["20"]})
     shown = read_back(asked, PROCESS, SPARSE, {key: "20"})
-    assert re.search(rf"{key} +- -> 20", render(_request(shown))), "its preset shows as '-'"
+    assert re.search(rf"{key} +- +20 ", render(_request(shown))), "its preset shows as '-'"
 
 
 @pytest.mark.parametrize("key", sorted(MATERIAL))
@@ -381,10 +382,10 @@ def test_the_review_shows_a_change_that_didnt_reach_the_slice_as_a_mismatch() ->
     text = render(request)
     assert "NOT APPLIED overhang_fan_speed: asked 30, sliced 80" in text
     assert "made up [lesson 7]" in text
-    assert not re.search(r"overhang_fan_speed +\S+ -> 30", text), "never as old -> new"
-    assert re.search(r"wall_loops +\S+ -> 4", text), "one that reached it shows as before"
-    assert "(it didn't reach the slice: asked 30, sliced 80)" in text
-    assert "(set it)" not in text
+    assert not re.search(r"\n  overhang_fan_speed +\S+ +30 ", text), "never as old -> new"
+    assert re.search(r"\n  wall_loops +\S+ +4 ", text), "one that reached it shows as before"
+    assert " · it didn't reach the slice: asked 30, sliced 80 · " in flat(text)
+    assert " · set it · " not in flat(text)
 
 
 def test_with_nothing_in_the_slice_the_review_doesnt_say_there_were_no_changes() -> None:
@@ -462,7 +463,7 @@ def test_a_filament_correction_reaches_the_slice_and_is_kept_as_applied(
         "overhang_fan_speed=30 because made up; activate_air_filtration=1", "ok"
     )
     text = render(sponsor.shown[1])
-    assert re.search(r"overhang_fan_speed +100 -> 30", text)
+    assert re.search(r"overhang_fan_speed +100 +30 ", text)
     assert "NOT APPLIED" not in text
     row = ledger.get(job_id)
     assert row is not None and row.proposal is not None
@@ -508,7 +509,7 @@ def test_a_lesson_that_didnt_reach_the_slice_isnt_applied_or_scored_as_used(
 
     job_id, sponsor = run("ok", slicer=deaf, given=(given,))
     why = "it didn't reach the slice: asked 30, sliced 100"
-    assert f"({why})" in render(sponsor.shown[0])
+    assert f" · {why} · " in flat(render(sponsor.shown[0]))
     [kept] = ledger.query("SELECT * FROM job_lessons WHERE job_id=?", job_id)
     assert (kept["applied"], kept["why"]) == (0, why)
     [scored] = ledger.query("SELECT * FROM print_lesson_scores WHERE job_id=?", job_id)
@@ -526,7 +527,7 @@ def test_a_lesson_of_a_filament_key_reaches_the_slice_and_is_scored_as_used(
     given = _lesson("overhang_fan_speed", "30").model_copy(update={"id": made})
 
     job_id, sponsor = run("ok", given=(given,))
-    assert re.search(r"overhang_fan_speed +100 -> 30", render(sponsor.shown[0]))
+    assert re.search(r"overhang_fan_speed +100 +30 ", render(sponsor.shown[0]))
     assert sliced_with(ledger, job_id)["overhang_fan_speed"] == "30"
     [scored] = ledger.query("SELECT * FROM print_lesson_scores WHERE job_id=?", job_id)
     assert scored["score"] == "used"

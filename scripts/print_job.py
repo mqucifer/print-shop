@@ -153,7 +153,7 @@ from print_shop.core.contracts import Gate
 from print_shop.env import SETTINGS_PATH, load_env
 from print_shop.expert.client import STREAM_THREAD
 from print_shop.inventory import SETUP, Inventory, InventoryError, Material
-from print_shop.joblog import LOG_NAME, JobLog, secrets
+from print_shop.joblog import LOG_NAME, JobLog, Terminal, secrets
 from print_shop.ledger import Ledger, ledger_path
 from print_shop.orchestrator.daemon import Daemon
 from print_shop.orchestrator.kept import WaitingJob, WaitingJobs
@@ -242,6 +242,8 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     for handler in logging.getLogger().handlers:
         handler.addFilter(on_screen)
+        # A wait among the screens is said as the screens say it (mqucifer/print-shop#223).
+        handler.setFormatter(Terminal("%(asctime)s %(levelname)s %(message)s"))
     by_hand = args.sliced is not None or args.again is not None
     if sum((bool(args.stl), args.sliced is not None, args.again is not None,
             args.resume is not None)) > 1:

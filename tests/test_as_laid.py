@@ -89,10 +89,11 @@ def test_as_laid_through_the_daemon_asks_no_model_and_the_review_says_so(
             assert daemon.wait_for_finish(job_id, timeout_s=30).printed
         [shown] = sponsor.shown
         review = render(shown)
-        assert ("Orientation: (0.0, 0.0, 0.0), kept as laid, by you (--as-laid): no "
-                "orientation model was asked") in review
-        assert ("  the part's features were read in this pose: rotation (0.0, 0.0, 0.0), "
-                "20 mm tall, 400 mm2 on the plate") in review
+        said = " ".join(review.split())
+        assert ("this print 0,0,0: kept as laid, by you (--as-laid): no orientation model was "
+                "asked") in said
+        assert ("features read in this pose: rotation (0.0, 0.0, 0.0), 20 mm tall, 400 mm2 on "
+                "the plate") in said
         row = ledger.get(job_id)
         assert row is not None
         assert (row.rotation_deg, row.orientation_source, row.orientation_accepted) == (
