@@ -117,6 +117,20 @@ Finish that job, or stop it with Ctrl-C in its terminal (which doesn't stop the 
 
    **Then a few questions about the part,** once it's oriented. There are at most four. Two need no model and show at once (mqucifer/print-shop#208): what the part is for, and which of its faces will be seen. Each is asked only where the part's notes don't say it (mqucifer/print-shop#236). The model's own come from its measured features, and a simple part may get none. Each option shows what it would set, its impact on strength, surface and risk, and Orca's time and filament for it ("Orca: 11 min, 3.1 g", or "no estimate"). One option is marked recommended, with why. They're laid out to be read (mqucifer/print-shop#266): each option is its number and label on a line, `*` beside the recommended one and its estimate and marks at the right, with what it does and why it's recommended wrapped beneath, at 100 columns or the terminal's width. What every option shares is said once after them, such as "Each keeps your presets and sets nothing itself; the review shows Orca's estimate." Answer with its number, or `o` and your own words. The second, on which faces will be seen, decides what the review says about ironing and the seam. Its options say top and plate as the part lies then (`as it lies now`), and it names the pose it's asked in: `as the file lays it`, `laid front-down, as its notes say`, or `turned 90,0,0`. For the test cube, take the recommended option. To replay answers, pass `--answers file.json`, each answer naming its question by its text or its feature, e.g. `{"answers": [{"question": "purpose", "choice": 1}]}`. A file that doesn't answer exactly the questions asked is refused, and the job ends listing them.
 
+   **An answer in your own words is read back as the decision it makes** (mqucifer/print-shop#213), where the question's options set something. It's read with no model: supports on or off, a named brim, a wall count and an infill percentage, and only a setting that question decides:
+
+   ```
+   1> o no support, it bridges fine
+     So supports off, and nothing turns them back on? From your words, 'no support, it bridges fine'.
+     Enter or y: yes, supports off, your decision. n: your words set nothing.
+   yes or no>
+   ```
+
+   - **Confirmed, it's your decision,** as a picked option is: the guard and the lessons leave it, and the review shows it under your answers, "you said 'no support', read back as no supports, and confirmed". What was typed before the read-back showed is dropped, so an Enter typed with the words never confirms them.
+   - **Words that set nothing say so there,** with why: none of them says what the question decides, they say it two ways, or you said no to the reading. Then the proposal and the guard decide it, as if it weren't answered. Enter keeps your words so, or answer again. Nothing is guessed: a misspelt "no suport" sets nothing.
+   - **Words on what the part is for are a purpose,** with no prompt. Where they set nothing they're kept as what it's for, and at the model's closer choices beside the purpose you'd given: "Your words are kept as what it's for, beside 'handled, clipped or lightly loaded'. They set no walls or infill, so the proposal decides those." Words there that do set something, such as "4 walls", are read back as above.
+   - **In an `--answers` file** words set nothing unless the answer records what they were confirmed as, `{"question": "overhang", "other": "no support", "sets": {"enable_support": "0"}}`, and they still read so. The desk's answers file for a past print records it.
+
    **What the notes say is read back, at one prompt** (mqucifer/print-shop#236), and only the rest is asked:
 
    ```

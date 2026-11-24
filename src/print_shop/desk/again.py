@@ -92,7 +92,10 @@ def answers_file(row: Row) -> dict[str, Any] | None:
                             # by eye (mqucifer/print-shop#248).
                             **_given_in(row, q, a)})
         else:
-            answers.append({"question": q.text, "other": a.other})
+            # What they were read back as and confirmed, which a replay sets again only while
+            # the words still read so (mqucifer/print-shop#213).
+            answers.append({"question": q.text, "other": a.other,
+                            **({"sets": dict(a.sets)} if a.sets else {})})
     return {"answers": answers}
 
 

@@ -49,6 +49,7 @@ from print_shop.setup.intake import (
     drop_typed,
     option_lines,
     parse,
+    take_words,
 )
 from print_shop.setup.layout import terminal_width, wrap
 from print_shop.setup.questions import PLATE_WORDS, PURPOSE, STOCK, Asked, only_stock
@@ -465,14 +466,21 @@ def cli_waiting(
         write("\n".join(lines))
         if screen() is not None:
             forget()  # Enter keeps their answer here, so never one typed while this drew
+        line = read("1> ")
         while True:
-            line = read("1> ")
             if not line.strip():
                 return None
             parsed = parse(line, question)
             if isinstance(parsed, Answer):
-                return parsed
+                # Words read back as what they'd set (mqucifer/print-shop#213).
+                taken = take_words(question, parsed, "1> ", read, write, forget, across,
+                                   beside=PURPOSE.label(kept))
+                if not isinstance(taken, str):
+                    return taken
+                line = taken  # answered again
+                continue
             write(f"  {parsed}, or Enter to keep your answer")
+            line = read("1> ")
 
     def went_on(call: QuestionsCall) -> None:
         with lock:
