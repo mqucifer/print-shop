@@ -70,6 +70,7 @@ from print_shop.setup.context import AS_PRINTED, SET_ASIDE, PartContext, Seen, p
 from print_shop.setup.features import Feature
 from print_shop.setup.lessons import for_part, material_of, same_variety, taken_on, used_on
 from print_shop.setup.lessons import variety_of as _variety_of
+from print_shop.setup.names import named
 from print_shop.setup.proposal import ORIENTATION, PAUSE, Change, Proposal, Source, Used, pose_value
 from print_shop.setup.reach import not_sliced, profile_of, unplaced
 from print_shop.setup.reading import AT_THE_BACK, seen, turned_on_plate
@@ -1320,7 +1321,8 @@ def _cells(
     else:
         now = _now(proposal, item.key)
         here = now.value if now is not None else item.preset
-    return f"[{found.mark}] {n:>{digits}} {item.key}", here or "-", item.value
+    # Its plain name, with the key that's typed (mqucifer/print-shop#222).
+    return f"[{found.mark}] {n:>{digits}} {named(item.key)}", here or "-", item.value
 
 
 def _group(

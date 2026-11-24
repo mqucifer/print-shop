@@ -68,9 +68,10 @@ def _request(proposal: Proposal | None = None) -> ReviewRequest:
 def test_the_review_shows_each_change_against_the_preset_and_the_reasoning() -> None:
     text = render(_request())
     assert "  How the model read it\n    A 20 mm cube for show" in text
-    assert re.search(r"\n  wall_loops +2 +3 +model\n", text)
+    assert re.search(r"\n  Walls +wall_loops +2 +3 +model\n", text)
     assert "      the flat faces show infill through 2 walls [flat_top, walls]" in text
-    assert re.search(r"KEPT AT YOUR PRESET\n  enable_support +0 +0 +model\n      nothing overhangs",
+    assert re.search(r"KEPT AT YOUR PRESET\n  Supports on +enable_support +0 +0 +model\n"
+                     r"      nothing overhangs",
                      text)
     assert ("  time      10:54, Orca's estimate\n  plastic   2.9 cm3, 3.6 g\n"
             "  layers    100\n") in text
@@ -86,8 +87,8 @@ def test_a_change_from_an_intake_answer_is_shown_as_yours() -> None:
                                       reason="holds shape under light use"),),
                       model="crew-code-think")
     text = render(_request(answer))
-    assert re.search(r"YOURS\n  wall_loops +2 +3 +your answer\n      holds shape under light use",
-                     text)
+    assert re.search(r"YOURS\n  Walls +wall_loops +2 +3 +your answer\n"
+                     r"      holds shape under light use", text)
 
 
 def test_a_cut_off_is_shown_as_one() -> None:
@@ -156,7 +157,7 @@ def test_the_review_shows_the_slice_layer_by_layer_and_what_it_proposes() -> Non
     assert re.search(r"\n +Sparse infill +\d+:\d\d +#+", text)
     assert "    seam    aligned: " in text and "a line up the wall" in flat(text)
     assert "PROPOSED FROM THE SLICE (not applied unless you take it)" in text
-    assert "    1) seam_position  aligned -> back" in text
+    assert "    1) Seam position (seam_position)  aligned -> back" in text
     assert "read: " in text
     assert "take (the slice's)" in text
 
@@ -178,7 +179,7 @@ def test_a_reading_proposes_and_only_take_applies_it() -> None:
 
 
 @pytest.mark.parametrize(("answer", "why"), [
-    ("walls=3", "'walls' isn't a setting in the filament or the process preset"),
+    ("walls=3", "'walls' isn't an Orca setting. Nearest: wall_loops (Walls, now 3)"),
     ("wall_loops 3", "'wall_loops 3' isn't setting=value"),
 ])
 def test_an_unreadable_answer_says_why(answer: str, why: str) -> None:

@@ -678,7 +678,8 @@ def test_a_job_with_a_lessons_elephant_foot_and_a_fit_shows_both(job: Any, tmp_p
     assert not [f for f in review.proposed if f.change.key == "elefant_foot_compensation"]
     text = render(review)
     # The lesson's 0.2 stands as a change, named for the lesson, its words under Lessons ...
-    assert re.search(r"\n  elefant_foot_compensation +\S+ +(\S+ +)?0\.2 +lesson 24\n", text)
+    assert re.search(r"\n  Elephant foot +elefant_foot_compensation +\S+ +(\S+ +)?0\.2 +"
+                     r"lesson 24\n", text)
     assert "elefant_foot_compensation=0.2 · set it · " in flat(text)
     assert "for a part that's large_bed_contact" in flat(text)
     # ... and the fit's note says the plate fit is covered by it.

@@ -245,7 +245,7 @@ def test_a_reply_that_arrives_is_listed_and_none_of_it_is_applied(
     assert row is not None and row.proposal is not None, shop.error
     shown = render_review(screen.seen[0])
     assert "PROPOSED BY THE MODEL (not applied unless you take it)" in shown
-    assert ") wall_loops  2 -> 4" in shown
+    assert ") Walls (wall_loops)  2 -> 4" in shown
     assert "[model: section, walls-shells]" in shown
     assert row.proposal.get("wall_loops") is None
     [found] = row.proposal.suggested
@@ -296,7 +296,7 @@ def test_one_taken_is_sliced_and_is_the_persons_taking_everywhere(
     assert (taken.value, taken.source, taken.taken) == ("4", Source.MODEL, True)
     assert not row.corrections, "taking isn't a correction"
     assert row.proposal.suggested[0].taken == ("wall_loops",)
-    assert re.search(r"\n  wall_loops +2 +2 +4 +model, taken by you\n",
+    assert re.search(r"\n  Walls +wall_loops +2 +2 +4 +model, taken by you\n",
                      render_review(screen.seen[1]))
     assert "(model, taken by you)" in describe(row)
     assert "Taken from the model's proposals" in "\n".join(again(row, stl).notes)
@@ -471,7 +471,7 @@ def test_loop_posed_the_review_shows_the_files_pose_and_the_turn_is_a_proposal(
     assert "How the model read it" not in shown, "the reading is the turned pose's, until taken"
     assert row.proposal.reasoning == "", "and in the record it stays with that proposal"
     assert row.proposal.suggested[0].reasoning == "slab down"
-    assert ") orientation  0,0,0 -> 180,0,0" in shown
+    assert ") Pose (orientation)  0,0,0 -> 180,0,0" in shown
     assert "It's a big change: turn it to 180,0,0 from the file's own pose." in shown
     assert "Once turned it would also propose: wall_loops 2 -> 4" in shown
     assert (row.rotation_deg, row.orientation_source) == (LAID, "as_filed"), "approving took none"
@@ -498,7 +498,7 @@ def test_a_turn_taken_brings_the_loops_settings_as_proposals_with_no_second_call
     assert not row.corrections, "a turn taken is no correction, and no lesson"
     after = screen.seen[1]
     assert after.orientation.rotation_deg == FLIPPED
-    assert ") wall_loops  2 -> 4" in render_review(after)
+    assert ") Walls (wall_loops)  2 -> 4" in render_review(after)
     assert "How the model read it\n    slab down" in render_review(after), "taken, it's this pose's"
     assert row.proposal.get("wall_loops") is None, "turned, they're still only proposed"
     assert (len(model.shown), held.calls) == (1, 0), "no second call"
@@ -787,7 +787,7 @@ def test_a_turn_is_still_listed_where_the_settings_call_after_it_failed() -> Non
             loop_ending="past its limit of 3 calls, after 3 calls in 1 s"),
     })
     said = render_review(request)
-    assert "1) orientation  0,0,0 -> 180,0,0" in said
+    assert "1) Pose (orientation)  0,0,0 -> 180,0,0" in said
     assert "the print loop stopped, past its limit of 3 calls" in said
     assert "The model's settings didn't come: unavailable" in said
 

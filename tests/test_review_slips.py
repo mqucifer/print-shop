@@ -75,7 +75,7 @@ def test_the_bad_one_corrected_slices_all_four_once() -> None:
     person = Person("; ".join([*GOOD, BAD]), "wall_loops=4 because it's thin")
     review = person.reviewer()(_request())
     assert "Held, nothing sliced yet: wall_loops=3 · layer_height=0.16 · " in person.said
-    assert "'walls' isn't a setting" in person.said
+    assert "'walls' isn't an Orca setting. Nearest: wall_loops (Walls, now 3)" in person.said
     assert person.prompts == ["> ", "fix> "], "one answer, one fix, then back to slice"
     # The fix names wall_loops too: typed later, it's the one that stands.
     assert [(c.key, c.value) for c in review.corrections] == [
@@ -96,7 +96,7 @@ def test_two_slips_are_asked_one_after_the_other() -> None:
     person = Person(f"{GOOD[0]}; {BAD}; fans=9", "drop", "drop")
     review = person.reviewer()(_request())
     assert person.prompts == ["> ", "fix> ", "fix> "]
-    assert "'fans' isn't a setting" in person.said
+    assert "'fans' isn't an Orca setting" in person.said
     assert [c.key for c in review.corrections] == ["wall_loops"]
 
 
@@ -182,7 +182,7 @@ def test_a_slip_with_nothing_held_is_typed_again_at_the_review() -> None:
     person = Person("walls=4; fans=9", "stop")
     assert person.reviewer()(_request()) == Review(stop=True)
     assert person.prompts == ["> ", "> "]
-    assert person.said == "  'walls' isn't a setting in the filament or the process preset"
+    assert person.said == "  'walls' isn't an Orca setting. Nearest: wall_loops (Walls, now 3)"
 
 
 def test_typed_answers_one_at_a_time_are_still_each_an_answer() -> None:
