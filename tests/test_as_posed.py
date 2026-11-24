@@ -66,7 +66,7 @@ from tests.fakes import (
     MemoryBridge,
     echo_settings,
 )
-from tests.reviewing import flat, settled
+from tests.reviewing import answering, flat, settled
 from tests.test_graph import needs_orca
 from tests.test_job_e2e import CFG
 from tests.test_print_loop import Model, Person
@@ -146,7 +146,7 @@ def job(
     if reviewer == "cli":
         # The model's settings come beside the review (mqucifer/print-shop#242): it waits for
         # them here, as the answers are typed for the screen once they're in.
-        reviewer = settled(cli_reviewer(read=lambda prompt: answers.pop(0), write=shown.append))
+        reviewer = settled(cli_reviewer(read=answering(answers, shown), write=shown.append))
     (tmp_path / "work").mkdir(exist_ok=True)
     bridge, printer = MemoryBridge(), FramePrinter()
     with Ledger(tmp_path / "ledger.sqlite") as ledger:

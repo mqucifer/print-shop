@@ -111,8 +111,8 @@ Answers: ok (approval gate) · take (the slice's) · orientation (send it back) 
        nuts go in (it pauses once the layer topping out at 12.4 mm is done, and it asks what the
        pause is for); colour_change=12.4 because white to black (a swap)
 
-The model's proposal came after <n> s. Enter adds it to the list (what you've typed is kept).
-  THE MODEL PROPOSES 1 change (2), under Settings. None is applied until you take it.
+The model came back after <n> s: 1 change, Walls 2 -> 5. Enter shows it (what you've typed is kept).
+  THE MODEL PROPOSES 1 change: 2) Walls 2 -> 5. None is applied until you take it.
 
   PROPOSED BY THE MODEL (not applied unless you take it)
     2) Walls (wall_loops)  2 -> 5
@@ -120,6 +120,10 @@ The model's proposal came after <n> s. Enter adds it to the list (what you've ty
 
 Answers: ok (approval gate) · take (the slice's) · take 2 (the model's) · no 2 because … ·
          orientation (send it back) · key=value because … · find <words> (a setting's key) · stop
+  ok approves without:
+    - 1: Seam position stays aligned, not back (99% of 100 wall loops start on the one below)
+    - 2, the model's: Walls stay 2, not 5
+  ok again to approve.
 Ready to print. Start or reject it on the card.
   time        16 min
   plastic     3.34 cm3

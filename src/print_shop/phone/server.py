@@ -78,7 +78,7 @@ from print_shop.phone.shop import AlsoDiffers, LoadAsk, Shop
 from print_shop.phone.slice import slice_page
 from print_shop.setup.intake import NOTES_PROMPT, first_number
 from print_shop.setup.review import filament_name, finding
-from print_shop.setup.suggest import by_number
+from print_shop.setup.suggest import agreeing, by_number
 
 __all__ = ["COOKIE", "PhoneOff", "Starts", "attach", "handler_for", "make_server"]
 
@@ -136,7 +136,10 @@ def _review_typed(asked: Asked, form: dict[str, str]) -> str:
     if do == "take":
         numbers = [n for n in form.get("take", "").split() if n.isdecimal() and n.isascii()]
         request = asked.review
-        models = sorted(by_number(request.by_model)) if request is not None else []
+        # The model's, and the slice's it agrees with, which turns the model's down
+        # (mqucifer/print-shop#283).
+        models = (sorted({**by_number(request.by_model), **agreeing(request.by_model)})
+                  if request is not None else [])
         down = [(n, _reason(form.get(f"no{n}", ""))) for n in models]
         parts = ([f"take {' '.join(numbers)}"] if numbers else []) + [
             f"no {n} because {why}" for n, why in down if why and str(n) not in numbers]

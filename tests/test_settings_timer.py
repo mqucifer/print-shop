@@ -76,8 +76,8 @@ def test_the_settings_wait_ticks_above_the_prompt_and_what_is_typed_stays_put() 
         later = read_until(r"\x1b7\x1b\[1A\r\x1b\[2K  waiting for the model's settings: (\d+) s"
                            r"\x1b8", typed_at)
         assert int(later.group(1)) > int(first.group(1)), "it ticks"
-        arrived = read_until(r"came after \d+ s\. Enter adds it to the list "
-                             r"\(what you've typed is kept\)\.", later.end())
+        arrived = read_until(r"The model came back after \d+ s: 1 change, Top layers \S+ -> 5\. "
+                             r"Enter shows it \(what you've typed is kept\)\.", later.end())
         assert "\x1b7\x1b[1A\r\x1b[2K\x1b8" in seen[later.end():arrived.start()], (
             "its line is cleared as the arrival is said")
         os.write(fd, b"ause it's decorative\n")

@@ -632,6 +632,9 @@ def test_a_runs_part_prints_with_its_context_by_the_print_loop(job: Any, tmp_pat
                                    "part has a fit")
     assert second.result.startswith("proposed: 180,0,0")
     assert row.proposal.get("seam_position").value == "back"
+    # The slice proposes back too, so the model's is said with the slice's and taken by its
+    # number; the model's record says it was taken (mqucifer/print-shop#283).
+    assert row.proposal.suggested[-1].taken == ("seam_position",)
     # The model was told the context, and the pose kept unless it asks.
     told = model.shown[0][1]["content"]
     assert "The part's context, as the file lies" in told

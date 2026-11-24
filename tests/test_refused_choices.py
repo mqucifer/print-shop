@@ -31,9 +31,14 @@ IRONING = ("'ironing' isn't an Orca setting. Nearest: ironing_type (Ironing, now
            "ironing_speed (Ironing speed, now 20 mm/s). To turn it off: ironing_type=no ironing")
 NOT_OFF = ("'off' isn't one of ironing_type's choices: no ironing, top, topmost or solid. To turn "
            "it off: ironing_type=no ironing")
-ASKED = "  Your 'ironing=0' wasn't set. ok again to approve without it."
+ASKED = "  ok approves without your 'ironing=0', which wasn't set. ok again to approve."
 ROOT = Path(__file__).resolve().parent.parent
 DEADLINE_S = 40.0
+
+
+def flat_shown(person: Person) -> list[str]:
+    """What was shown, each with its wrapping undone, kept at its lead."""
+    return [f"  {' '.join(text.split())}" for text in person.shown]
 
 
 class Forgetting(Person):
@@ -85,8 +90,8 @@ def test_the_ok_after_a_refused_word_asks_once_and_the_next_approves_without_it(
     person = Person("ironing_type=off because a test print", "ok", "ok")
     assert person.review(_request()) == Review(approved=True), "nothing from it is set"
     assert " ".join(person.shown[1].split()) == NOT_OFF
-    assert person.shown[2] == ("  Your 'ironing_type=off' wasn't set. ok again to approve "
-                               "without it.")
+    assert person.shown[2] == ("  ok approves without your 'ironing_type=off', which wasn't "
+                               "set. ok again to approve.")
     assert person.prompts == ["> ", "> ", "> "]
 
 
@@ -176,15 +181,17 @@ def test_find_leaves_the_question_to_the_ok() -> None:
 def test_several_refused_in_one_line_are_each_named() -> None:
     person = Person("ironing=0 because a test print; seam=back", "ok", "ok")
     assert person.review(_request()) == Review(approved=True)
-    assert ("  Your 'ironing=0' and 'seam=back' weren't set. ok again to approve without "
-            "them.") in person.shown
+    assert ("  ok approves without:\n"
+            "    - your 'ironing=0', which wasn't set\n"
+            "    - your 'seam=back', which wasn't set\n"
+            "  ok again to approve.") in person.shown
 
 
 def test_a_setting_named_in_words_that_is_refused_asks_too() -> None:
     person = Person("ironing type=no ironing because a test print", "ok", "ok")
     assert person.review(_request()) == Review(approved=True)
-    assert ("  Your 'ironing type=no ironing' wasn't set. ok again to approve without it."
-            in person.shown)
+    assert ("  ok approves without your 'ironing type=no ironing', which wasn't set. ok again to "
+            "approve." in flat_shown(person))
 
 
 def test_a_refused_line_answered_by_another_asks_nothing() -> None:
@@ -287,7 +294,8 @@ def test_an_ok_typed_ahead_of_the_question_never_answers_it(tmp_path: Path) -> N
         at = read_until(r"HOLD\r?\n", at).end()
         os.write(fd, b"ok\n")  # typed ahead of the question, as it's being drawn
         flag.touch()
-        at = read_until(r"Your 'ironing=0' wasn't set\. ok again to approve without it\.",
+        at = read_until(r"ok approves without your 'ironing=0', which wasn't set\. ok again to "
+                        r"approve\.",
                         at).end()
         at = read_until(r"> ", at).end()
         os.write(fd, b"find ironing\n")

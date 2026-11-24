@@ -503,11 +503,14 @@ def test_looks_good_makes_it_ready_as_ok_does(tmp_path: Path) -> None:
     from print_shop.phone.needs import _unused  # noqa: PLC0415
 
     (item,) = _unused(r.queue.asks["j1"].review)
-    assert f"1 ticked isn't used yet: {item}." in shown.body
-    assert "Use it first" in shown.body and "Make it ready without it" in shown.body
+    assert f"<p>- 1 ticked in Use these: {item} (use takes it)</p>" in shown.body
+    assert "<p>ok approves without:</p>" in shown.body, "a paragraph an item"
+    assert "<p>ok again to approve.</p>" in shown.body
+    # Several left out, so the one button that sends ok says them all.
+    assert "Use it first" in shown.body and "Make it ready without them" in shown.body
     assert "Looks good" not in shown.body.split("Back to queue")[1]
     ok = re.search(r'name="typed" value="ok"><button type="submit" class="second">'
-                   r"Make it ready without it", shown.raw)
+                   r"Make it ready without them", shown.raw)
     assert ok is not None, "the button that goes on without it is the one that sends ok"
     assert phone.post("/job/j1/reply", {"version": version(shown), "typed": "ok"}).status == 303
     wait_until(lambda: bool(r.queue.given))

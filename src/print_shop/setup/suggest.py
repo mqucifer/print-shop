@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Literal
 
@@ -39,7 +39,7 @@ from print_shop.setup.proposal import (
 )
 
 __all__ = [
-    "Beside", "Finding", "Listed", "Suggesting", "by_number", "didnt_come", "fell_back",
+    "Beside", "Finding", "Listed", "Suggesting", "agreeing", "by_number", "didnt_come", "fell_back",
     "listed", "looked_up", "once_turned", "recorded", "suggested", "turning", "waited",
     "went_on", "THREAD",
 ]
@@ -164,17 +164,30 @@ class Listed:
 
     change: Change
     #: "open" has a number. "theirs" says what stands in its place. "so" is so here already.
-    standing: Literal["open", "theirs", "so"]
+    #: "agrees" is the same change as one the slice proposes, said with it and not numbered
+    #: again (mqucifer/print-shop#283).
+    standing: Literal["open", "theirs", "so", "agrees"]
     #: Its number, from where the slice's end, for one that's open.
     number: int = 0
     #: What's set here now, and by whom, for "theirs".
     now: str = ""
     by: str = ""
+    #: The slice's proposal on the same setting, by its number, and the value it proposes: the
+    #: one it agrees with, or, for one that's open, the one it differs from.
+    slice: int = 0
+    slice_value: str = ""
 
 
-def listed(found: Suggested | None, proposal: Proposal, pose: str, after: int) -> list[Listed]:
+def listed(
+    found: Suggested | None, proposal: Proposal, pose: str, after: int,
+    slices: Mapping[str, tuple[int, str]] | None = None,
+) -> list[Listed]:
     """The model's proposals against what's set at this review, numbered on from `after`, the
-    slice's. The numbers are for this screen: one that arrives later moves none of them."""
+    slice's. The numbers are for this screen: one that arrives later moves none of them.
+    `slices` is the slice's proposals by key, each its number and value: one the model makes too
+    is said with it and not numbered again (mqucifer/print-shop#283), so the model's close up
+    among themselves, after every number drawn before they came."""
+    slices = slices or {}
     # A turn can be in though the settings' own call failed, after the loop fell back.
     if found is None or not found.proposed:
         return []
@@ -191,19 +204,28 @@ def listed(found: Suggested | None, proposal: Proposal, pose: str, after: int) -
                         if c.key == change.key), None)
             here = now.value if now is not None else change.preset
             stands = _whose(now) if now is not None else ""
+        n, value = slices.get(change.key, (0, ""))
         if _same(here, change.value):
             rows.append(Listed(change, "so"))
         elif stands:
             rows.append(Listed(change, "theirs", now=here, by=stands))
+        elif n and _same(value, change.value):
+            rows.append(Listed(change, "agrees", slice=n, slice_value=value))
         else:
             number += 1
-            rows.append(Listed(change, "open", number=number))
+            rows.append(Listed(change, "open", number=number, slice=n, slice_value=value))
     return rows
 
 
 def by_number(rows: list[Listed]) -> dict[int, Change]:
     """The proposals that can be taken or turned down, by the number on screen."""
     return {row.number: row.change for row in rows if row.standing == "open"}
+
+
+def agreeing(rows: list[Listed]) -> dict[int, Change]:
+    """The model's proposals that are the slice's too, by the slice's number: `take` of that
+    number takes both, and `no` turns the model's down (mqucifer/print-shop#283)."""
+    return {row.slice: row.change for row in rows if row.standing == "agrees"}
 
 
 def _whose(now: Change) -> str:

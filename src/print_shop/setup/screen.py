@@ -425,14 +425,33 @@ def _waiting(request: ReviewRequest) -> list[Said]:
         out.append(Said(f"THE SLICE PROPOSES {them} ({_listed(slices)}), under What the slice "
                         "shows. None is applied until you take it.",
                         f"THE SLICE PROPOSES {len(slices)}: take {_listed(slices)}", True))
-    models = [row.number for row in request.by_model if row.standing == "open"]
+    # Said by what they are, not by where (mqucifer/print-shop#283): the model's block may be
+    # drawn far below, or come later.
+    rows = request.by_model
+    models = [row for row in rows if row.standing == "open"]
     if models:
         them = "1 change" if len(models) == 1 else f"{len(models)} changes"
-        numbers = " ".join(map(str, models))
-        out.append(Said(f"THE MODEL PROPOSES {them} ({numbers}), under Settings. None is applied "
-                        "until you take it.", f"THE MODEL PROPOSES {len(models)}: take {numbers}",
-                        True))
+        numbers = " ".join(str(row.number) for row in models)
+        said = "; ".join(f"{row.number}) {_change(request, row.change)}" for row in models[:3])
+        more = f"; and {len(models) - 3} more" if len(models) > 3 else ""
+        out.append(Said(f"THE MODEL PROPOSES {them}: {said}{more}. None is applied until you "
+                        "take it.", f"THE MODEL PROPOSES {len(models)}: take {numbers}", True))
+    for row in (row for row in rows if row.standing == "agrees"):
+        out.append(Said(f"THE MODEL AGREES WITH {row.slice}: {_change(request, row.change)} "
+                        f"(take {row.slice})", f"THE MODEL AGREES WITH {row.slice}: take "
+                        f"{row.slice}", True))
     return out
+
+
+def _change(request: ReviewRequest, c: Change) -> str:
+    """A proposed change as it's said in a line: "Ironing top -> topmost"."""
+    if c.key == ORIENTATION:
+        here = pose_value(request.orientation.rotation_deg)
+    else:
+        now = request.proposal.get(c.key)
+        here = now.value if now is not None else c.preset or (
+            request.reading.settings.get(c.key, "") if request.reading else "")
+    return f"{plain(c.key)} {switched(c.key, here) or '-'} -> {switched(c.key, c.value)}"
 
 
 def _print(request: ReviewRequest, width: int, marks: Moved) -> list[str]:
@@ -613,13 +632,23 @@ def by_model(request: ReviewRequest, width: int = WIDTH) -> list[str]:
             lines += wrap("     -  ", f"{c.key} {c.value}: taken." if c.key in found.taken
                           else f"{c.key}: the model's {c.value} is so here already.", width, rest)
             continue
+        if row.standing == "agrees":
+            # The slice's proposal too: said with it, not numbered again (mqucifer/print-shop#283).
+            lines += wrap("  ", f"THE MODEL AGREES WITH {row.slice}: {_change(request, c)} "
+                          f"(take {row.slice} takes it)", width, rest)
+            cites = ", ".join(x for x in (c.feature, c.knowledge) if x)
+            if c.reason:
+                lines += wrap(rest, f"{c.reason} [model{': ' + cites if cites else ''}]", width)
+            continue
         if c.key == ORIENTATION:
             here = pose_value(request.orientation.rotation_deg)
         else:
             now = request.proposal.get(c.key)
             here = now.value if now is not None else c.preset
+        other = (f"; the slice's {row.slice} has {switched(c.key, row.slice_value)}"
+                 if row.slice else "")
         lines += wrap(f"  {row.number:>3}) ", f"{named(c.key)}  {switched(c.key, here) or '-'} -> "
-                      f"{switched(c.key, c.value)}", width,
+                      f"{switched(c.key, c.value)}{other}", width,
                       rest)
         cites = ", ".join(x for x in (c.feature, c.knowledge) if x and c.key != ORIENTATION)
         if c.reading:
