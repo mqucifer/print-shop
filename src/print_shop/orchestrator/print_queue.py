@@ -12,12 +12,16 @@ outcome before its questions could even begin. The printer is single; preparing 
   is `at_once`. A job waiting for the person holds no place: its place goes to the next.
 - **The person answers in any order** (`needs`, `give`), and one answer can be given to several
   files at once (`give_alike`): a question another file asks alike is answered for it, now or when
-  it comes, and only what's left is asked.
+  it comes, and only what's left is asked. As for a lone job (mqucifer/print-shop#208),
+  print-shop's two are asked at once and the model's when they come, and `go` goes on without
+  them (`_waiting`).
 - **The queue can be read and changed** (`lines`, `order`, `first`, `together`, `hold`, `remove`):
   each job's step and spool, what needs the person, and the jobs for one spool taken together.
-- **A waiting job's spool can be changed, colour or material** (`move`). It's prepared again with
-  the person's answers and changes kept (`Kept.move`) and comes back to their review. A
-  temperature or fan they set for another variety comes back unticked, in the review's offer.
+- **A waiting job's spool can be changed, colour or material** (`move`). Another spool of the same
+  variety and tuning moves at once, its slice and review standing, and the job names it (the
+  Sponsor, 2026-11-24). Another variety or tuning is prepared again with the person's answers and
+  changes kept (`Kept.move`) and comes back to their review, and a temperature or fan they set
+  for another variety comes back unticked, in the review's offer.
 - **A quantity is that many prints,** each its own job, with its own ledger row and outcome. The
   copies wait for the first to be prepared, and then print what its review settled: its G-code,
   under each copy's own name.
@@ -26,6 +30,9 @@ outcome before its questions could even begin. The printer is single; preparing 
   needs (`Daemon.resume`). An outcome not yet recorded doesn't keep it back: the card still asks
   for it. Nothing here starts a print, approves one or arms the printer: the jobs prepare with no
   printer at all, and only a Start at the gate, the daemon's, can reach it.
+- **The machine's steps keep their limit** (mqucifer/print-shop#209): a job whose preparing runs
+  past the slice's hour from when it last came back from the person stops, saying so, and is
+  retried or removed (`retry`). Each job keeps its own `job.log`, as a lone job does.
 - **The queue is the same after a restart:** it's the jobs folder's waiting jobs (`WaitingJobs`),
   in order, held or not, with their spools and copies, each taken up where it was.
 
@@ -55,6 +62,7 @@ from langgraph.types import Command as LgCommand
 from print_shop.core.contracts import Gate
 from print_shop.expert.client import LLMConfig
 from print_shop.inventory import Inventory, InventoryError, Material, Spool
+from print_shop.joblog import JobLog, JobLogs
 from print_shop.ledger import Ledger
 from print_shop.orchestrator.daemon import Daemon
 from print_shop.orchestrator.graph import build_graph
@@ -62,7 +70,9 @@ from print_shop.orchestrator.kept import Kept, WaitingJob, WaitingJobs, Waits
 from print_shop.setup import Proposer
 from print_shop.setup.intake import Answer, Question
 from print_shop.setup.loop import PrintLoop
+from print_shop.setup.questions import Asked as QuestionsAsked
 from print_shop.setup.review import Review, Reviewer, ReviewRequest
+from print_shop.setup.waiting import QuestionsCall, Waiting, took
 from print_shop.sliced import SlicedJob
 from print_shop.slicer.arrange import SlicePlate
 from print_shop.slicer.naming import job_id_from_filename
@@ -77,6 +87,9 @@ logger = logging.getLogger(__name__)
 AT_ONCE = 2
 #: After a Start: the upload and the start, as `print_job.py` waits for them.
 FINISH_WAIT_S = 900.0
+#: The machine's steps a job's preparing may take, from when it last came back from the person: the
+#: slice's hour, as a lone job's (`print_job.APPROVAL_WAIT_S`, mqucifer/print-shop#209).
+SLICE_LIMIT_S = 3600.0
 #: The suffixes of a file sliced by hand: sent as it is (mqucifer/print-shop#164).
 SLICED_SUFFIXES = (".gcode", ".gcode.3mf")
 
@@ -85,6 +98,9 @@ class Need(StrEnum):
     """What a job waits on the person for."""
 
     QUESTIONS = "the questions"
+    #: The model's closer choices on what it's for, beside the answer given
+    #: (mqucifer/print-shop#208).
+    CLOSER = "the model's closer choices"
     REVIEW = "the review"
     MESH = "the mesh gate"
 
@@ -110,6 +126,9 @@ class Asked:
     questions: tuple[Question, ...] = ()
     review: ReviewRequest | None = None
     gate: dict[str, Any] | None = None
+    #: For the closer choices: the answer given, which None keeps, and how long the model took.
+    kept: Answer | None = None
+    seconds: float = 0.0
     since: float = field(default_factory=time.time)
     _done: threading.Event = field(default_factory=threading.Event, repr=False)
     _answer: Any = None
@@ -188,6 +207,29 @@ class _Run:
     generation: int = 0
     thread: threading.Thread | None = None
     asked: Asked | None = None
+    #: The model's questions call while it runs (mqucifer/print-shop#208), and `go` on it.
+    call: QuestionsCall | None = None
+    go: threading.Event = field(default_factory=threading.Event)
+    #: When it last came back from the person: the machine's steps count from here.
+    back_at: float = field(default_factory=time.monotonic)
+
+
+def _on_spool(values: dict[str, Any], now: Material | None) -> dict[str, Any]:
+    """The state's update for a job prepared for one spool to start on `now`, another of the same
+    variety and tuning; {} where it's that spool already, or another filament."""
+    sliced = values.get("sliced")
+    used = values.get("profiles_used")
+    had = sliced.material if sliced is not None else (used.material if used is not None else None)
+    if had is None or now is None or had.spool_id == now.spool_id or not had.same_filament(now):
+        return {}
+    if sliced is not None:
+        return {"sliced": sliced.model_copy(update={"material": now})}
+    assert used is not None
+    return {"profiles_used": used.model_copy(update={"material": now})}
+
+
+def _said_limit(seconds: float) -> str:
+    return f"{seconds / 3600:g} h" if seconds >= 3600 else took(seconds)
 
 
 def _never_asked(question: str) -> str:
@@ -216,6 +258,8 @@ class PrintQueue:
         preparing: Preparing | None = None,
         at_once: int = AT_ONCE,
         finish_wait_s: float = FINISH_WAIT_S,
+        slice_limit_s: float = SLICE_LIMIT_S,
+        logs: JobLogs | None = None,
     ) -> None:
         self._daemon = daemon
         self._workdir = workdir
@@ -224,6 +268,9 @@ class PrintQueue:
         self._sliced_for = sliced_for
         self._preparing = preparing or Preparing()
         self._finish_wait_s = finish_wait_s
+        self._slice_limit_s = slice_limit_s
+        #: Each job's own job.log, as a lone job keeps one. None keeps none.
+        self._logs = logs
         self._jobs = WaitingJobs(workdir / "jobs.sqlite")
         #: The machine's work at once. A job waiting for the person gives its place up.
         self._slot = threading.Semaphore(max(1, at_once))
@@ -245,7 +292,7 @@ class PrintQueue:
         """Take the queue up where it was: each job not ready is prepared on from its
         checkpoint, a ready one waits to be offered, and nothing is offered while a print runs."""
         for job in self._jobs.all():
-            if job.waits not in (Waits.READY, Waits.WITH_FIRST):
+            if job.waits not in (Waits.READY, Waits.WITH_FIRST, Waits.STOPPED):
                 self._prepare(job.job_id)
         self._offerer = threading.Thread(target=self._offer_loop, name="queue-offer", daemon=True)
         self._offerer.start()
@@ -292,8 +339,14 @@ class PrintQueue:
         for n, job in enumerate(jobs, 1):
             need = asked[job.job_id].need if job.job_id in asked else None
             step = str(job.waits)
-            if need is not None:
+            reading = self.reading(job.job_id)
+            if job.waits is Waits.STOPPED:
+                step = f"STOPPED: {job.note}"
+            elif need is not None:
                 step = f"needs you: {need}"
+            elif reading is not None:
+                step = (f"the model's questions: still reading, {took(reading)} (`go {n}` goes "
+                        "on without them)")
             elif job.job_id == offered:
                 step = "offered to print: Start it here or on the card"
             spool = spools.get(job.spool_id) if job.spool_id is not None else None
@@ -408,10 +461,13 @@ class PrintQueue:
 
     def give(self, job_id: str, answer: Any) -> str:
         """Answer what the job waits on the person for: its questions' answers in order, a
-        `Review`, or the mesh gate's `(approved, note)`. Returns "" once given, or why not."""
+        `Review`, the mesh gate's `(approved, note)`, or for the model's closer choices an
+        `Answer` from them, or None to keep the answer given. Returns "" once given, or why not."""
         asked = self.asked(job_id)
         if asked is None:
             return "it isn't waiting for you"
+        if asked.need is Need.CLOSER and answer is not None and not isinstance(answer, Answer):
+            return "the closer choices are answered with one of them, or None to keep yours"
         if asked.need is Need.QUESTIONS:
             answers = tuple(answer)
             if len(answers) != len(asked.questions):
@@ -440,10 +496,12 @@ class PrintQueue:
                 if covered:
                     asked._give(covered)
                 left = len(asked.questions) - len(covered)
-                said.append(f"{name}: {len(covered)} answered alike" + (
-                    f", {left} of its own still to answer" if left else ""))
+                same = ("the same answer" if len(covered) == 1
+                        else f"the same {len(covered)} answers")
+                said.append(f"{name}: {same}" + (
+                    f", and {left} of its own still to answer" if left else ""))
             else:
-                said.append(f"{name}: answered alike when its questions come")
+                said.append(f"{name}: the same answers, given when its questions come")
         return said
 
     def _asker(self, job_id: str, generation: int) -> Callable[[Sequence[Question]], tuple[
@@ -457,10 +515,89 @@ class PrintQueue:
                 left = tuple(q for q in questions if alike(q) not in have)
                 if not left:
                     return tuple(have[alike(q)] for q in questions)
+                if len(left) == len(questions):
+                    left = tuple(questions)  # as they came: added ones are numbered on
                 have.update(self._ask(job_id, generation, Asked(
                     job_id=job_id, need=Need.QUESTIONS, questions=left)))
 
         return ask
+
+    def _waiting(self, job_id: str, generation: int) -> Waiting:
+        """The person's side of the wait for the model's questions (mqucifer/print-shop#208), as
+        a lone job has it: print-shop's two, or what the notes give, are asked at once, and the
+        model's are asked as a second need when they come. Waiting on them is said in the job's
+        line, gives the machine's place up, and `go` goes on without them."""
+
+        def run_now() -> _Run:
+            with self._lock:
+                run = self._runs.get(job_id)
+            if run is None or run.generation != generation or self._closing.is_set():
+                raise Gone(job_id)
+            return run
+
+        def started(call: QuestionsCall) -> None:
+            run = run_now()
+            run.call = call
+            run.go.clear()
+
+        def ended(call: QuestionsCall, asked: QuestionsAsked) -> None:
+            if call.stopped:
+                return
+            job = self._jobs.get(job_id)
+            name = job.part if job is not None else job_id[:8]
+            if asked.failed:
+                said = f"the model {asked.failed} after {took(call.seconds)}"
+            elif asked.closer or asked.added:
+                said = f"the model's questions came after {took(call.seconds)}"
+            else:
+                said = f"the model read it in {took(call.seconds)} and has no other question"
+            self._say(f"{name}, job {job_id[:8]}: {said}.", job_id)
+
+        def wait(call: QuestionsCall) -> bool:
+            run = run_now()
+            self._slot.release()
+            try:
+                while not call.ended(0.2):
+                    if run.go.is_set():
+                        return False
+                    if self._stale(job_id, generation):
+                        raise Gone(job_id)
+                return True
+            finally:
+                self._slot.acquire()
+                run.back_at = time.monotonic()
+
+        def closer(question: Question, kept: Answer, seconds: float) -> Answer | None:
+            picked: Answer | None = self._ask(job_id, generation, Asked(
+                job_id=job_id, need=Need.CLOSER, questions=(question,), kept=kept,
+                seconds=seconds))
+            return picked
+
+        def went_on(call: QuestionsCall) -> None:
+            self._say(f"job {job_id[:8]}: the notes gave what it's for and what's seen, so the "
+                      "model's questions weren't waited for.", job_id)
+
+        return Waiting(started=started, ended=ended, wait=wait, closer=closer, went_on=went_on)
+
+    def go(self, job_id: str) -> str:
+        """Go on without the model's questions for this job, as `go` does at a lone job's wait
+        (mqucifer/print-shop#208). Returns "", or why not."""
+        with self._lock:
+            run = self._runs.get(job_id)
+        call = run.call if run is not None else None
+        if run is None or call is None or call.ended() or call.stopped:
+            return "it isn't waiting for the model's questions"
+        run.go.set()
+        return ""
+
+    def reading(self, job_id: str) -> float | None:
+        """How long the model has been reading this job for its questions, or None."""
+        with self._lock:
+            run = self._runs.get(job_id)
+        call = run.call if run is not None else None
+        if call is None or call.ended() or call.stopped:
+            return None
+        return call.seconds
 
     def _reviewer(self, job_id: str, generation: int) -> Reviewer:
         def review(request: ReviewRequest) -> Review:
@@ -472,8 +609,8 @@ class PrintQueue:
 
     def _ask(self, job_id: str, generation: int, asked: Asked) -> Any:
         """Wait for the person, giving the machine's place to another job meanwhile."""
-        waits = {Need.QUESTIONS: Waits.QUESTIONS, Need.REVIEW: Waits.REVIEW,
-                 Need.MESH: Waits.MESH}[asked.need]
+        waits = {Need.QUESTIONS: Waits.QUESTIONS, Need.CLOSER: Waits.QUESTIONS,
+                 Need.REVIEW: Waits.REVIEW, Need.MESH: Waits.MESH}[asked.need]
         with self._lock:
             run = self._runs.get(job_id)
             if run is None or run.generation != generation or self._closing.is_set():
@@ -488,6 +625,7 @@ class PrintQueue:
             with self._lock:
                 if run.asked is asked:
                     run.asked = None
+                run.back_at = time.monotonic()
             if not asked._gone:
                 self._jobs.at(job_id, Waits.PREPARING)
 
@@ -500,7 +638,7 @@ class PrintQueue:
             run.generation += 1
             run.thread = threading.Thread(target=self._preparing_run,
                                           args=(job_id, run.generation),
-                                          name=f"prepare-{job_id[:8]}", daemon=True)
+                                          name=f"prepare-{job_id}", daemon=True)
             run.thread.start()
 
     def _stale(self, job_id: str, generation: int) -> bool:
@@ -517,7 +655,8 @@ class PrintQueue:
             reviewer=self._reviewer(job.job_id, generation),
             loop=(dataclasses.replace(p.loop, person=_never_asked) if p.loop is not None
                   else None),
-            show=None, store=p.store, waiting=None, plate_slicer=p.plate_slicer,
+            show=None, store=p.store, waiting=self._waiting(job.job_id, generation),
+            plate_slicer=p.plate_slicer,
         )
 
     def _preparing_run(self, job_id: str, generation: int) -> None:
@@ -570,6 +709,7 @@ class PrintQueue:
 
     def _ready(self, job_id: str, graph: Any) -> None:
         """Ready to print, and its copies with it, each under its own name."""
+        self._respooled(job_id, graph)  # moved to another colour while it was prepared
         self._jobs.at(job_id, Waits.READY)
         job = self._jobs.get(job_id)
         for copy in [j for j in self._jobs.all() if j.copy_of == job_id
@@ -580,12 +720,12 @@ class PrintQueue:
                 logger.warning("copy %s couldn't take its first's slice", copy.job_id,
                                exc_info=True)
                 self._say(f"{copy.part} ({copy.copied}) couldn't take its first copy's slice "
-                          f"({exc}), so it's prepared on its own")
+                          f"({exc}), so it's prepared on its own", copy.job_id)
                 self._jobs.add(copy.model_copy(update={"waits": Waits.PREPARING, "copy_of": ""}))
                 self._prepare(copy.job_id)
         if job is not None:
             self._say(f"Ready: {job.part}" + (f" ({job.copied})" if job.copied else "")
-                      + f", job {job_id[:8]}.")
+                      + f", job {job_id[:8]}.", job_id)
         self._wake.set()
 
     def _copied(self, first: str, copy: WaitingJob, graph: Any) -> None:
@@ -608,6 +748,7 @@ class PrintQueue:
             "slice": values["slice"].model_copy(update={"gcode_path": target}),
         })
         values.pop("gate_decisions", None)  # its own gate decides it, as a new job's does
+        values.update(_on_spool(values, self._spool_material(copy)))
         config: dict[str, Any] = {"configurable": {"thread_id": copy.job_id}}
         by = "sliced" if values.get("sliced") is not None else "slice"
         graph.update_state(config, values, as_node=by)
@@ -621,17 +762,24 @@ class PrintQueue:
         job = self._jobs.get(job_id)
         name = job.part if job is not None else job_id[:8]
         self._jobs.remove(job_id)
-        self._say(f"Ended without printing: {name}, job {job_id[:8]}: {why}")
+        self._say(f"Ended without printing: {name}, job {job_id[:8]}: {why}", job_id)
         for copy in [j for j in self._jobs.all() if j.copy_of == job_id
                      and j.waits is Waits.WITH_FIRST]:
             self._jobs.remove(copy.job_id)
-            self._say(f"Ended without printing: {copy.part} ({copy.copied}), which waited for it")
+            self._say(f"Ended without printing: {copy.part} ({copy.copied}), which waited for "
+                      "it", copy.job_id)
         self._wake.set()
 
-    def _say(self, said: str) -> None:
+    def _say(self, said: str, job_id: str = "") -> None:
         logger.info("queue: %s", said)
         with self._lock:
             self._said.append(said)
+        if self._logs is not None and job_id:
+            self._logs.log(job_id).write(f"queue: {said}\n")
+
+    def log(self, job_id: str) -> JobLog | None:
+        """The job's own log, for a screen to keep what it shows of the job and what's typed."""
+        return self._logs.log(job_id) if self._logs is not None else None
 
     # -- changing the queue ---------------------------------------------------
 
@@ -707,7 +855,7 @@ class PrintQueue:
                 self._jobs.add(other.model_copy(update={"copy_of": heir.job_id}))
             self._prepare(heir.job_id)
         self._say(f"Removed: {job.part}" + (f" ({job.copied})" if job.copied else "")
-                  + f", job {job_id[:8]}. Nothing printed.")
+                  + f", job {job_id[:8]}. Nothing printed.", job_id)
         self._wake.set()
         return ""
 
@@ -745,6 +893,8 @@ class PrintQueue:
                     "it again in Orca for the other, and add that")
         if self._daemon.active() == job_id and not self._daemon.withdraw(job_id):
             return "it was started, and is being sent"
+        if was is not None and now is not None and was.same_filament(now):
+            return self._recoloured(job, now)
         thread = self._stop(job_id)
         if job.copy_of and job.waits is Waits.WITH_FIRST:
             # A copy moved alone leaves its first: prepared itself, with what its first kept.
@@ -766,9 +916,54 @@ class PrintQueue:
                 "spool_id": now.spool_id if now is not None else None,
                 "waits": Waits.WITH_FIRST if one.copy_of else Waits.PREPARING}))
         threading.Thread(target=self._prepared_again, args=(job_id, thread),
-                         name=f"move-{job_id[:8]}", daemon=True).start()
+                         name=f"move-{job_id}", daemon=True).start()
         named = now.named() if now is not None else f"spool #{spool_id}"
         return [f"{job.part}: moved to {named}, prepared again, and back to your review", *said]
+
+    def _recoloured(self, job: WaitingJob, now: Material) -> list[str]:
+        """Another spool of the same variety and tuning, only its colour different: the job moves
+        at once, its slice and review standing, and it names the new spool, which is what its
+        Start asks to be loaded (the Sponsor, 2026-11-24). Its copies waiting with it move too."""
+        moving = [job, *(j for j in self._jobs.all() if j.copy_of == job.job_id
+                         and j.waits is Waits.WITH_FIRST)]
+        for one in moving:
+            given = dict(one.given)
+            profiles = one.profiles
+            if one.by_hand:
+                given["sliced"] = one.state()["sliced"].model_copy(update={"material": now})
+            elif profiles is not None and profiles.used is not None:
+                profiles = profiles.model_copy(update={
+                    "used": profiles.used.model_copy(update={"material": now})})
+            self._jobs.add(one.model_copy(update={
+                "given": given, "profiles": profiles, "spool_id": now.spool_id}))
+        if job.waits is Waits.READY:
+            moved = self._jobs.get(job.job_id)
+            assert moved is not None
+            self._respooled(job.job_id, self._graph(moved, 0))
+        self._wake.set()
+        return [f"{job.part}: moved to {now.named()}: the same filament, so its slice and "
+                "review stand, and nothing is prepared again"]
+
+    def _respooled(self, job_id: str, graph: Any) -> None:
+        """A job at its gate names the spool the queue has it for: its checkpoint's spool, which
+        Start checks, changed to it where only the colour differs, and the gate made again."""
+        job = self._jobs.get(job_id)
+        config: dict[str, Any] = {"configurable": {"thread_id": job_id}}
+        values = graph.get_state(config).values
+        update = _on_spool(values, self._spool_material(job))
+        if not update:
+            return
+        by = "sliced" if values.get("sliced") is not None else "slice"
+        graph.update_state(config, update, as_node=by)
+        graph.invoke(None, config=config)  # its gate, unapproved, as it was
+
+    def _spool_material(self, job: WaitingJob | None) -> Material | None:
+        if job is None or job.spool_id is None:
+            return None
+        try:
+            return self._material(job.spool_id)
+        except InventoryError:
+            return None
 
     def _prepared_again(self, job_id: str, thread: threading.Thread | None) -> None:
         if thread is not None and thread is not threading.current_thread():
@@ -813,9 +1008,47 @@ class PrintQueue:
             if self._closing.is_set():
                 return
             try:
+                self._limit()
                 self._offer()
             except Exception:  # noqa: BLE001 - the loop goes on, and says it
                 logger.exception("the queue couldn't offer its next job")
+
+    def _limit(self) -> None:
+        """A job whose machine steps have run past the slice's limit stops, saying so: it never
+        sits as being prepared for ever (mqucifer/print-shop#209's limits on machine steps)."""
+        now = time.monotonic()
+        with self._lock:
+            over = [(job_id, run) for job_id, run in self._runs.items()
+                    if run.thread is not None and run.thread.is_alive()
+                    and (run.asked is None or not run.asked.open)
+                    and self.reading(job_id) is None
+                    and now - run.back_at >= self._slice_limit_s]
+        for job_id, _ in over:
+            numbers = {j.job_id: n for n, j in enumerate(self._jobs.all(), 1)}
+            if job_id not in numbers:
+                continue
+            n = numbers[job_id]
+            self._stop(job_id)
+            why = (f"its slice took over {_said_limit(self._slice_limit_s)}: `retry {n}` "
+                   f"prepares it again, with what you gave it, or `remove {n}`")
+            self._jobs.at(job_id, Waits.STOPPED, why)
+            job = self._jobs.get(job_id)
+            self._say(f"Stopped: {job.part if job else job_id[:8]}, job {job_id[:8]}: {why}.",
+                      job_id)
+
+    def retry(self, job_id: str) -> str:
+        """A stopped job prepared again, with the answers and changes kept: once what it was
+        doing has ended, from its start. Returns "", or why not."""
+        job = self._jobs.get(job_id)
+        if job is None:
+            return "not in the queue"
+        if job.waits is not Waits.STOPPED:
+            return "it hasn't stopped"
+        thread = self._stop(job_id)
+        self._jobs.at(job_id, Waits.PREPARING)
+        threading.Thread(target=self._prepared_again, args=(job_id, thread),
+                         name=f"retry-{job_id}", daemon=True).start()
+        return ""
 
     def _offer(self) -> None:
         active = self._daemon.active()
@@ -843,17 +1076,18 @@ class PrintQueue:
         self._say(f"Offered to print: {ready.part}" + (f" ({ready.copied})" if ready.copied
                                                        else "")
                   + f", job {ready.job_id[:8]}" + (f", on {spool}" if spool else "")
-                  + ". Start it here or on the card.")
+                  + ". Start it here or on the card.", ready.job_id)
         threading.Thread(target=self._followed, args=(ready.job_id, ready.part), daemon=True,
-                         name=f"follow-{ready.job_id[:8]}").start()
+                         name=f"follow-{ready.job_id}").start()
 
     def _followed(self, job_id: str, part: str) -> None:
         """The offered job to its end: put back, started, rejected or failed, each said."""
         try:
-            result = self._daemon.wait_for_finish(job_id, self._finish_wait_s, tell=self._say)
+            result = self._daemon.wait_for_finish(
+                job_id, self._finish_wait_s, tell=lambda said: self._say(said, job_id))
         except TimeoutError:
             self._say(self._daemon.abandon(job_id, "waiting for the job to finish",
-                                           self._finish_wait_s))
+                                           self._finish_wait_s), job_id)
             self._wake.set()
             return
         if result.withdrawn:
@@ -861,11 +1095,12 @@ class PrintQueue:
             return  # back to wait, and its preparing is the queue's again
         if result.printed:
             self._say(f"Started: {part}, job {job_id[:8]}. Its outcome is asked on the card when "
-                      "it ends.")
+                      "it ends.", job_id)
         elif result.error:
-            self._say(f"Ended without printing: {part}, job {job_id[:8]}: {result.error}")
+            self._say(f"Ended without printing: {part}, job {job_id[:8]}: {result.error}",
+                      job_id)
         else:
-            self._say(f"Rejected: {part}, job {job_id[:8]}. Nothing printed.")
+            self._say(f"Rejected: {part}, job {job_id[:8]}. Nothing printed.", job_id)
         with self._lock:
             self._runs.pop(job_id, None)
         self._wake.set()

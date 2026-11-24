@@ -17,6 +17,7 @@ from print_shop.core.state import turn_words
 from print_shop.env import SETTINGS_PATH, load_env
 from print_shop.expert.client import LLMConfig
 from print_shop.inventory import Material, spool_lines
+from print_shop.joblog import JobLogs
 from print_shop.ledger import Ledger, Row, ledger_path
 from print_shop.orchestrator.daemon import Daemon
 from print_shop.orchestrator.live import Step
@@ -449,6 +450,7 @@ def build_queue(
     profiles_for: Callable[[Material | None, Path], SlicerProfiles],
     sliced_for: Callable[[Path, Material | None], SlicedJob] | None = None,
     at_once: int | None = None,
+    logs: JobLogs | None = None,
 ) -> PrintQueue:
     """The print queue over `run`'s daemon (mqucifer/print-shop#210): its jobs prepared with the
     same model, Orca and lessons as one job's, and with no printer, which only the daemon's Start
@@ -462,7 +464,7 @@ def build_queue(
         at_once = int(env.get("PRINT_SHOP_PREPARE_AT_ONCE") or AT_ONCE)
     return PrintQueue(
         daemon=run.daemon, workdir=workdir or WORK_DIR, ledger=ledger,
-        profiles_for=profiles_for, sliced_for=sliced_for, at_once=at_once,
+        profiles_for=profiles_for, sliced_for=sliced_for, at_once=at_once, logs=logs,
         preparing=Preparing(
             llm=llm,
             proposer=Proposer(

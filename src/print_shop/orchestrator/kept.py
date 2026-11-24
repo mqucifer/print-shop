@@ -71,6 +71,9 @@ class Waits(StrEnum):
     REVIEW = "at the review"
     MESH = "at the mesh gate"
     READY = "ready to print"
+    #: Its preparing stopped, saying why (`WaitingJob.note`): it's retried or removed by the
+    #: person (mqucifer/print-shop#210).
+    STOPPED = "stopped"
 
 
 class WaitingJob(BaseModel):
@@ -96,6 +99,8 @@ class WaitingJob(BaseModel):
     copy_of: str = ""
     copy_n: int = 1
     copies: int = 1
+    #: Why its preparing stopped, where it did.
+    note: str = ""
 
     @property
     def by_hand(self) -> bool:
@@ -140,6 +145,7 @@ _QUEUE_COLUMNS = (
     ("copy_of", "TEXT NOT NULL DEFAULT ''"),
     ("copy_n", "INTEGER NOT NULL DEFAULT 1"),
     ("copies", "INTEGER NOT NULL DEFAULT 1"),
+    ("note", "TEXT NOT NULL DEFAULT ''"),
 )
 
 
@@ -184,10 +190,10 @@ class WaitingJobs:
                 position = (last or 0) + 1
             db.execute(
                 "INSERT OR REPLACE INTO waiting_jobs (job_id, part, given, profiles, waits, "
-                "added_at, since, position, held, spool_id, copy_of, copy_n, copies) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "added_at, since, position, held, spool_id, copy_of, copy_n, copies, note) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (job.job_id, job.part, given, profiles, job.waits.value, at, job.since or at,
-                 position, int(held), job.spool_id, job.copy_of, job.copy_n, job.copies),
+                 position, int(held), job.spool_id, job.copy_of, job.copy_n, job.copies, job.note),
             )
 
     def order(self, job_ids: Sequence[str]) -> None:
@@ -203,11 +209,13 @@ class WaitingJobs:
         with self._db() as db:
             db.execute("UPDATE waiting_jobs SET held = ? WHERE job_id = ?", (int(held), job_id))
 
-    def at(self, job_id: str, waits: Waits) -> None:
-        """The job waits at `waits` now. A job that isn't waiting is left out."""
+    def at(self, job_id: str, waits: Waits, note: str = "") -> None:
+        """The job waits at `waits` now, with why where it stopped. A job that isn't waiting is
+        left out."""
         with self._db() as db:
-            db.execute("UPDATE waiting_jobs SET waits = ?, since = ? WHERE job_id = ? "
-                       "AND waits != ?", (waits.value, _now(), job_id, waits.value))
+            db.execute("UPDATE waiting_jobs SET waits = ?, since = ?, note = ? WHERE job_id = ? "
+                       "AND (waits != ? OR note != ?)",
+                       (waits.value, _now(), note, job_id, waits.value, note))
 
     def remove(self, job_id: str) -> None:
         with self._db() as db:
@@ -246,7 +254,7 @@ def _job(row: sqlite3.Row) -> WaitingJob:
                   if row["profiles"] else None),
         waits=Waits(row["waits"]), added_at=row["added_at"], since=row["since"],
         position=row["position"], held=bool(row["held"]), spool_id=row["spool_id"],
-        copy_of=row["copy_of"], copy_n=row["copy_n"], copies=row["copies"],
+        copy_of=row["copy_of"], copy_n=row["copy_n"], copies=row["copies"], note=row["note"],
     )
 
 

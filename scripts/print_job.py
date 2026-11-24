@@ -130,9 +130,11 @@ file names another filament or nozzle than the inventory says is loaded and fitt
 together, each followed by how many (`x3`) and the spool it's for (`spool=2`, the stock's number;
 the loaded one by default, and it needn't be loaded to prepare). They're prepared while a print
 runs, and the queue's prompt shows each job's step and spool and what needs you: `answer 2` and
-`review 3` in any order, `answer 2 4 5` to give 4 and 5 the same answers where they ask alike,
-`spool 3 2` to move a waiting job to another spool (prepared again, back to its review), and
-`first`, `hold`, `remove` and `together` to change the queue; `help` lists them. Printing stays
+`review 3` in any order (print-shop's two at once, the model's when they come, and `go 2` goes on
+without them), `answer 2 4 5` to give 4 and 5 the same answers where they ask alike, `spool 3 2`
+to move a waiting job to another spool (another colour of its filament at once; another variety or
+tuning prepared again, back to its review), and `first`, `hold`, `remove`, `retry` and `together`
+to change the queue; `help` lists them. Each job keeps its own `job.log`. Printing stays
 one at a time: when nothing prints, the first ready job is offered at the gate, on the card and
 here, saying the spool it needs, and `start` here, or Yes on the card, starts it as any job's
 Start does. A quantity is that many prints, each with its own ledger row and outcome, prepared
@@ -168,7 +170,7 @@ from print_shop.core.contracts import Gate
 from print_shop.env import SETTINGS_PATH, load_env
 from print_shop.expert.client import STREAM_THREAD
 from print_shop.inventory import SETUP, Inventory, InventoryError, Material
-from print_shop.joblog import LOG_NAME, JobLog, Terminal, secrets
+from print_shop.joblog import LOG_NAME, JobLog, JobLogs, Terminal, secrets
 from print_shop.ledger import Ledger, ledger_path
 from print_shop.orchestrator.daemon import Daemon
 from print_shop.orchestrator.kept import WaitingJob, WaitingJobs
@@ -765,9 +767,12 @@ def _queue(args: argparse.Namespace, live: Live) -> int:
     recorder = FrameRecorder(recording_path()) if args.record else None
     run = build_run(printer=_armed(recorder), profiles=None, recorder=recorder,
                     settings=args.settings, on_step=live.at)
+    # Each job keeps its own job.log, as a lone job does (mqucifer/print-shop#139).
+    logs = JobLogs(secrets(args.settings), WORK_DIR)
     try:
-        with run.daemon, build_queue(run, settings=args.settings, profiles_for=profiles,
-                                     sliced_for=_sliced_for(args)) as queue:
+        with run.daemon, logs.routing(), build_queue(
+                run, settings=args.settings, profiles_for=profiles, sliced_for=_sliced_for(args),
+                logs=logs) as queue:
             if adding:
                 added, refused = queue.add(adding)
                 print(f"Added {len(added)} to the queue." if added else "Nothing was added.")

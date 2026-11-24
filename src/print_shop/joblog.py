@@ -32,7 +32,7 @@ from typing import TextIO
 
 from print_shop.env import load_env
 
-__all__ = ["LOG_NAME", "REDACTED", "SAID", "JobLog", "Terminal", "secrets"]
+__all__ = ["LOG_NAME", "REDACTED", "SAID", "JobLog", "JobLogs", "Terminal", "secrets"]
 
 #: The log's name in the job's folder.
 LOG_NAME = "job.log"
@@ -153,6 +153,67 @@ class JobLog:
         finally:
             root.removeHandler(handler)
             sys.stdout, sys.stderr = out, err
+
+
+class JobLogs:
+    """Each queued job's own `job.log` (mqucifer/print-shop#210), as a lone job keeps one: what its
+    preparing logs, what the queue says of it, and its screens and answers at the terminal. Many
+    jobs prepare at once, so a record goes to the job whose thread logged it: one named
+    `<what>-<job id>` (`print_queue.py` names them so)."""
+
+    def __init__(self, secrets: Iterable[str], jobs: Path) -> None:
+        self._secrets = list(secrets)
+        self._jobs = jobs
+        self._lock = Lock()
+        self._logs: dict[str, JobLog] = {}
+        self._handler = _Routed(self)
+        self._handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+
+    def log(self, job_id: str) -> JobLog:
+        """The job's log, opened in its folder, appended to."""
+        with self._lock:
+            found = self._logs.get(job_id)
+            if found is None:
+                found = self._logs[job_id] = JobLog(self._secrets)
+                found.open(self._jobs / job_id / LOG_NAME)
+            return found
+
+    def of_thread(self, name: str) -> JobLog | None:
+        """The log of the job a thread named `<what>-<job id>` works for, or None."""
+        _, _, job_id = name.partition("-")
+        if len(job_id) != 36 or not (self._jobs / job_id).is_dir():
+            return None
+        return self.log(job_id)
+
+    @contextmanager
+    def routing(self) -> Iterator[None]:
+        """Records from a job's threads also go to its log, while it's open."""
+        root = logging.getLogger()
+        root.addHandler(self._handler)
+        try:
+            yield
+        finally:
+            root.removeHandler(self._handler)
+            with self._lock:
+                logs, self._logs = list(self._logs.values()), {}
+            for log in logs:
+                log.close()
+
+
+class _Routed(logging.Handler):
+    """Log records into the log of the job whose thread logged them."""
+
+    def __init__(self, logs: JobLogs) -> None:
+        super().__init__(logging.INFO)
+        self._logs = logs
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            log = self._logs.of_thread(record.threadName or "")
+            if log is not None:
+                log.write(self.format(record) + "\n")
+        except Exception:  # noqa: BLE001 - a log line never stops a job
+            self.handleError(record)
 
 
 class Terminal(logging.Formatter):

@@ -9,6 +9,7 @@ records it. A restart is a second queue on the same jobs folder, the first one p
 from __future__ import annotations
 
 import shutil
+import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack
@@ -18,6 +19,7 @@ from typing import Any
 import pytest
 
 from print_shop.core.mqtt import gate_topic
+from print_shop.core.state import SliceResult
 from print_shop.inventory import Inventory
 from print_shop.ledger import Ledger, Result
 from print_shop.orchestrator import print_queue
@@ -30,7 +32,7 @@ from print_shop.setup import Proposer
 from print_shop.setup.intake import Answer
 from print_shop.setup.proposal import Change, Source
 from print_shop.setup.review import Review
-from print_shop.slicer.orca import BedType
+from print_shop.slicer.orca import BedType, SlicerProfiles
 from print_shop.slicer.store import Store
 from tests.fakes import STORE, FramePrinter, MemoryBridge, RecordedSlicer
 from tests.fixtures import write_stl
@@ -112,10 +114,20 @@ class Shop:
         return asked
 
     def answer(self, queue: PrintQueue, job_id: str) -> None:
-        """Its questions answered, each with its first option. With no waiting on the model's,
-        they're asked as one set."""
-        asked = self.need(queue, job_id, Need.QUESTIONS)
-        assert queue.give(job_id, [Answer(choice=0) for _ in asked.questions]) == ""
+        """Its questions answered, each with its first option: print-shop's two at once, then
+        the model's when they come (mqucifer/print-shop#208), until its review."""
+        def asking() -> bool:
+            asked = queue.asked(job_id)
+            return asked is not None and asked.need in (Need.QUESTIONS, Need.REVIEW)
+
+        while True:
+            wait_until(asking)
+            asked = queue.asked(job_id)
+            assert asked is not None
+            if asked.need is Need.REVIEW:
+                return
+            assert queue.give(job_id, [Answer(choice=0) for _ in asked.questions]) == ""
+            wait_until(lambda a=asked: queue.asked(job_id) is not a)  # type: ignore[misc]
 
     def review(self, queue: PrintQueue, job_id: str, review: Review | None = None) -> Asked:
         asked = self.need(queue, job_id, Need.REVIEW)
@@ -267,11 +279,15 @@ def test_one_answer_is_given_to_several_files_at_once(
 ) -> None:
     _, queue = running
     added, _ = queue.add([Adding(shop.part(f"lid{n}")) for n in range(1, 4)])
-    asked = shop.need(queue, added[0], Need.QUESTIONS)
-    answers = [Answer(choice=0) for _ in asked.questions]
-    assert queue.give(added[0], answers) == ""
-    said = queue.give_alike(added[1:], asked.questions, answers)
-    assert len(said) == 2
+    said: list[str] = []
+    # print-shop's two, then the model's own when they come: each set given to the others.
+    for _ in range(2):
+        asked = shop.need(queue, added[0], Need.QUESTIONS)
+        answers = [Answer(choice=0) for _ in asked.questions]
+        assert queue.give(added[0], answers) == ""
+        said += queue.give_alike(added[1:], asked.questions, answers)
+        wait_until(lambda a=asked: queue.asked(added[0]) is not a)  # type: ignore[misc]
+    assert "lid2.stl: the same 2 answers" in said
     # The others' questions are the same, so nothing more is asked of them: on to their review.
     for job_id in added[1:]:
 
@@ -281,7 +297,7 @@ def test_one_answer_is_given_to_several_files_at_once(
         wait_until(reviewing)
     kept = Kept(shop.work / added[2])
     assert kept._record.intake is not None
-    assert [a.answer for a in kept._record.answers] == answers[: len(kept._record.answers)]
+    assert [a.answer for a in kept._record.answers] == [Answer(choice=0)] * 3
 
 
 # Done when: a quantity, and outcomes each against its own job
@@ -477,26 +493,40 @@ def keys(asked: Asked) -> dict[str, str]:
     return {c.key: c.value for c in asked.review.proposal.changes}
 
 
-def test_a_waiting_job_moved_to_another_colour_comes_back_to_the_review_with_all_kept(
+def test_a_waiting_job_moved_to_another_colour_moves_at_once_its_slice_and_review_standing(
     shop: Shop, running: tuple[Daemon, PrintQueue],
 ) -> None:
+    """The same variety and tuning, only the colour different: nothing is prepared again, and
+    the job names the new spool, which its Start asks for (the Sponsor, 2026-11-24, "A")."""
     daemon, queue = running
     job_id, _ = reviewed_ready(shop, queue, "colour")
     wait_until(lambda: shop.offered() == job_id)
+    gcode = shop.gate()["gcode_path"]
+    sliced = len(shop.slicer.calls)
     said = queue.move(job_id, BLACK)
-    assert isinstance(said, list) and "moved to spool #2, Elegoo PLA, black" in said[0]
-    wait_until(lambda: shop.offered() == "")  # put back from the card
-    asked = shop.need(queue, job_id, Need.REVIEW)
-    assert queue.asked(job_id) is asked  # no question was asked again
-    assert {"wall_loops": "4", "nozzle_temperature": "205", "fan_max_speed": "60"}.items() \
-        <= keys(asked).items(), "the same variety: every change is given back"
+    assert said == ["colour.stl: moved to spool #2, Elegoo PLA, black: the same filament, so its "
+                    "slice and review stand, and nothing is prepared again"]
     job = WaitingJobs(shop.work / "jobs.sqlite").get(job_id)
-    assert job is not None and job.spool_id == BLACK
-    assert asked.review is not None and asked.review.material is not None
-    assert asked.review.material.colour == "black"
-    assert not (asked.review.offering and asked.review.offering.moved)
-    shop.review(queue, job_id)
-    wait_until(lambda: shop.waits(job_id) is Waits.READY)
+    assert job is not None and job.spool_id == BLACK and job.waits is Waits.READY
+    assert job.profiles is not None and job.profiles.used is not None
+    assert job.profiles.used.material is not None
+    assert job.profiles.used.material.colour == "black"
+    # Offered again, with the same slice, and nothing asked.
+    wait_until(lambda: shop.offered() == job_id)
+    assert shop.gate()["gcode_path"] == gcode and len(shop.slicer.calls) == sliced
+    assert queue.asked(job_id) is None
+    line = next(li for li in queue.lines() if li.job.job_id == job_id)
+    assert "black" in line.spool and not line.loaded
+    # Its Start asks for the black spool, and starts once it's loaded.
+    shop.bridge.press(CFG, "approve")
+    wait_until(lambda: "Load spool #2" in str(shop.gate().get("held", "")))
+    with Inventory(shop.ledger_path) as stock:
+        stock.load(BLACK)
+    start_offered(shop, daemon, job_id)
+    row = shop.ledger.get(job_id)
+    assert row is not None and row.material is not None and row.material.colour == "black"
+    kept = Kept(shop.work / job_id)
+    assert kept._record.reviews[-1].approved, "its review stands"
 
 
 def test_a_waiting_job_moved_to_another_material_comes_back_to_the_review_with_its_answers(
@@ -661,6 +691,8 @@ class Typist:
 def test_the_terminal_answers_reviews_and_starts_jobs_in_any_order(
     shop: Shop, running: tuple[Daemon, PrintQueue],
 ) -> None:
+    """At `queue>`: answers given alike, a Start that names its job and spool, and what comes of
+    it said before the prompt is back."""
     from print_shop.queue_terminal import serve  # noqa: PLC0415
 
     daemon, queue = running
@@ -670,27 +702,153 @@ def test_the_terminal_answers_reviews_and_starts_jobs_in_any_order(
         return lambda: len(queue.jobs()) >= n and needs(queue).get(queue.jobs()[n - 1].job_id) \
             is need
 
-    typist = Typist(
+    screen: list[str] = []
+
+    class Shown(Typist):
+        def __call__(self, prompt: str) -> str:
+            typed = super().__call__(prompt)
+            screen.append(f"{prompt}{typed}")
+            return typed
+
+    typist = Shown(
         queue,
         (f"add {one} {two} x2", lambda: True),
-        # The second's questions, given to the first alike; then the second's review, which it
-        # goes on to as it comes.
+        # The second's questions, given to the first alike, the model's too as they come; then
+        # the second's review, which it goes on to.
         ("answer 2 1", asks(2, Need.QUESTIONS)),
         ("review 1", asks(1, Need.REVIEW)),
         ("start 3", lambda: all(j.waits is Waits.READY for j in queue.jobs())),
-        ("list", lambda: any(said.startswith("Started") for said in queue.said())),
     )
-    written: list[str] = []
-    assert serve(queue, daemon, read=typist, write=written.append, forget=lambda: None) == 0
-    shown = "\n".join(written)
+    assert serve(queue, daemon, read=typist, write=screen.append, forget=lambda: None) == 0
+    shown = "\n".join(screen)
     assert "Added 2." in shown
-    assert "first.stl: 3 answered alike" in shown
+    assert "first.stl: the same 2 answers" in shown
+    assert "first.stl: the same answer" in shown
+    third = next(j for j in WaitingJobs(shop.work / "jobs.sqlite").all() if j.copied == "1 of 2")
     started = [job_id_in(n) for v, n in shop.printer.calls if v == "start"]
-    third = queue.find(started[0][:8])
-    assert third is None, "started: it's out of the queue"
-    assert "* Started: second.stl" in shown and "QUEUE" in shown
+    assert len(started) == 1 and started[0] != third.job_id
+    # The bed's question names the job and its spool, and what came of the Start is said before
+    # the prompt is back.
+    asked_at = next(n for n, line in enumerate(screen) if "I can see the bed is clear" in line)
+    assert screen[asked_at].startswith(f"  Start second.stl (2 of 2) (job {started[0][:8]}) on "
+                                       "spool #1, Elegoo PLA, white? I can see the bed is clear")
+    after = screen[asked_at:]
+    prompt_back = next(n for n, line in enumerate(after) if line.startswith("queue> "))
+    assert any(line.startswith("  * Started: second.stl") for line in after[:prompt_back])
     assert [j.part for j in queue.jobs()] == ["first.stl", "second.stl"]
     assert [j.copied for j in queue.jobs()] == ["", "1 of 2"]
+
+
+def test_each_queued_job_keeps_its_own_log(shop: Shop, tmp_path: Path) -> None:
+    """What a job's preparing logs, what the queue says of it, and its screens and answers at the
+    terminal, in its own `job.log`, as a lone job's are."""
+    import logging  # noqa: PLC0415
+
+    from print_shop.joblog import LOG_NAME, JobLogs  # noqa: PLC0415
+    from print_shop.queue_terminal import serve  # noqa: PLC0415
+
+    logs = JobLogs(["a-made-up-secret-value"], shop.work)
+    logging.getLogger().setLevel(logging.INFO)
+    with shop.daemon() as daemon, logs.routing():
+        queue = shop.queue(daemon)
+        queue._logs = logs
+        with queue:
+            one, two = queue.add([Adding(shop.part("logged")), Adding(shop.part("other"))])[0]
+            typist = Typist(queue, ("answer 1", lambda: needs(queue).get(one) is Need.QUESTIONS))
+            assert serve(queue, daemon, read=typist, write=lambda _: None,
+                         forget=lambda: None) == 0
+            shop.answer(queue, one)
+            shop.review(queue, one)
+            wait_until(lambda: shop.waits(one) is Waits.READY)
+    log = (shop.work / one / LOG_NAME).read_text()
+    assert "What is this part for?" in log, "its screen at the terminal"
+    assert "1> 1" in log, "what was typed"
+    assert "queue: Ready: logged.stl" in log
+    assert "INFO" in log, "what its preparing logged"
+    assert "other.stl" not in log, "only its own"
+
+
+def test_go_goes_on_without_the_models_questions(shop: Shop) -> None:
+    """print-shop's two are asked at once; while the model still reads, the job's line says so,
+    and `go` goes on without its questions (mqucifer/print-shop#208)."""
+    held = threading.Event()
+
+    def slow_questions(system: str, user: str, schema: dict[str, Any]) -> dict[str, Any]:
+        held.wait(WAIT_S)
+        return _top_question(system, user, schema)
+
+    with shop.daemon() as daemon:
+        queue = shop.queue(daemon)
+        queue._preparing = Preparing(
+            slicer=shop.slicer, proposer=Proposer(ask=_model, ask_questions=slow_questions),
+            store=Store(shop.store))
+        with queue:
+            job_id = queue.add([Adding(shop.part("slow"))])[0][0]
+            asked = shop.need(queue, job_id, Need.QUESTIONS)
+            assert len(asked.questions) == 2, "print-shop's two, at once"
+            queue.give(job_id, [Answer(choice=0)] * 2)
+            wait_until(lambda: "still reading" in queue.lines()[0].step)
+            assert "`go 1` goes on without them" in queue.lines()[0].step
+            assert queue.go(job_id) == ""
+            review = shop.need(queue, job_id, Need.REVIEW)
+            assert review.review is not None
+            held.set()
+    assert any("went on without the model's questions" in n
+               for n in review.review.proposal.notes), review.review.proposal.notes
+
+
+def test_a_slice_past_its_limit_stops_saying_so_and_is_retried(shop: Shop) -> None:
+    """The machine's steps keep their limit: a slice that runs past it stops the job, saying so in
+    its line, and `retry` prepares it again (mqucifer/print-shop#209's limits)."""
+    slow = threading.Event()
+    slow.set()
+    real = shop.slicer
+
+    def slicer(stl_path: Path | str, profiles: SlicerProfiles,
+               outdir: Path | str) -> SliceResult:
+        if slow.is_set():
+            time.sleep(1.5)
+        return real(stl_path, profiles, outdir)
+
+    with shop.daemon() as daemon:
+        queue = shop.queue(daemon)
+        queue._slice_limit_s = 0.5
+        queue._preparing = Preparing(slicer=slicer,
+                                     proposer=Proposer(ask=_model, ask_questions=_top_question),
+                                     store=Store(shop.store))
+        with queue:
+            job_id = queue.add([Adding(shop.part("hung"))])[0][0]
+            for _ in range(2):  # print-shop's two, then the model's: then it slices
+                asked = shop.need(queue, job_id, Need.QUESTIONS)
+                queue.give(job_id, [Answer(choice=0)] * len(asked.questions))
+                wait_until(lambda a=asked: queue.asked(job_id) is not a)  # type: ignore[misc]
+            wait_until(lambda: shop.waits(job_id) is Waits.STOPPED)
+            line = queue.lines()[0]
+            assert line.step == ("STOPPED: its slice took over 0 s: `retry 1` prepares it again, "
+                                 "with what you gave it, or `remove 1`")
+            assert any(s.startswith("Stopped: hung.stl") for s in queue.said())
+            slow.clear()
+            queue._slice_limit_s = 3600.0
+            assert queue.retry(job_id) == ""
+            shop.ready(queue, job_id)
+    assert queue.retry(job_id) == "it hasn't stopped"
+
+
+def test_a_job_moved_in_colour_while_at_its_review_names_the_new_spool_once_ready(
+    shop: Shop, running: tuple[Daemon, PrintQueue],
+) -> None:
+    _, queue = running
+    job_id = queue.add([Adding(shop.part("midway"))])[0][0]
+    shop.answer(queue, job_id)
+    review = shop.need(queue, job_id, Need.REVIEW)
+    said = queue.move(job_id, BLACK)
+    assert isinstance(said, list) and "nothing is prepared again" in said[0]
+    assert queue.asked(job_id) is review, "its review stands"
+    shop.review(queue, job_id)
+    wait_until(lambda: shop.waits(job_id) is Waits.READY)
+    wait_until(lambda: shop.offered() == job_id)
+    shop.bridge.press(CFG, "approve")
+    wait_until(lambda: "Load spool #2" in str(shop.gate().get("held", "")))
 
 
 def test_print_job_queue_adds_files_and_takes_the_queue_up_again(
