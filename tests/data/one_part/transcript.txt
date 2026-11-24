@@ -22,57 +22,88 @@ A few questions about this part:
    3) the top as it lies now; the walls are hidden (your presets): the review keeps ironing for the top and lets the seam be; sets nothing itself; the review shows Orca's estimate
    4) only the face on the plate (your presets): the review points out any ironing, which smooths only faces that end up hidden; sets nothing itself; the review shows Orca's estimate
    o) other: say it in your own words
-Settings for this print, over your presets:
+LOOK FIRST
+  The model is still working on settings (<n> s). What it proposes is added under Settings when you
+    press Enter, and nothing waits for it.
+  THE SLICE PROPOSES 1 change (1), under What the slice shows. None is applied until you take it.
+
+PRINT
+  time      16:49, Orca's estimate
+  plastic   3.34 cm3
+  layers    100
   machine   CI Centauri Carbon 0.4 nozzle
   process   CI 0.20mm Standard
   filament  -
 
+SETTINGS, over your presets
   No changes: your presets as they are.
-  note: Seen as it prints: the walls and the top
-  The model is still working on settings (<n> s). What it proposes is added below, and nothing waits for it.
 
-Orca's estimate: 16 min 49 s, 3.34 cm3, 100 layers
-Orientation: (0.0, 0.0, 0.0), No model was configured for this job; fell back to geometric selection. Chose rotation (0.0, 0.0, 0.0) with the lowest overhang (0.0 mm2) and highest bed contact (400.0 mm2) among the scored candidates.
-  the part's features were read in this pose: rotation (0.0, 0.0, 0.0), 20 mm tall, 400 mm2 on the plate
-  the poses it weighed (overhang is what would need support):
-        0,0,0  0 mm2 overhang, 400 mm2 on the plate, 20 mm tall  <- this print
-      180,0,0  0 mm2 overhang, 400 mm2 on the plate, 20 mm tall
-       90,0,0  0 mm2 overhang, 400 mm2 on the plate, 20 mm tall
-      270,0,0  0 mm2 overhang, 400 mm2 on the plate, 20 mm tall
-       0,90,0  0 mm2 overhang, 400 mm2 on the plate, 20 mm tall
-      0,270,0  0 mm2 overhang, 400 mm2 on the plate, 20 mm tall
+  USE THESE: no past print has settings to offer.
 
-The part's context (its design run, or a sidecar beside it):
-  none: no design run above the file and no sidecar beside it, so it's read as before
+WHAT THE SLICE SHOWS
+    feature                  time                    area mm2  layers  z mm
+    Sparse infill            7:50  ################      8152      93  0.8 to 19.2
+    Outer wall               2:53  ######                3517     100  0.2 to 20
+    Inner wall               2:19  #####                 3363     100  0.2 to 20
+    Internal solid infill    1:22  ###                   1524       5  0.4 to 19.8
+    Internal Bridge        0:28.3  #                      301       1  19.4
+    Bottom surface         0:25.9  #                      377       1  0.2
+    Top surface            0:20.3  #                      381       1  20
+    Skirt                  0:02.4  #                       42       1  0.2
 
-What the slice shows, layer by layer:
-  layers: 100, 8.6 s to 36.9 s each, 8.9 s typical; the shortest is layer 4 at z 0.8 mm
-  Sparse infill: 7 min 50 s, 8152 mm2 on 93 layers, z 0.8 to 19.2 mm
-  Outer wall: 2 min 53 s, 3517 mm2 on 100 layers, z 0.2 to 20 mm
-  Inner wall: 2 min 19 s, 3363 mm2 on 100 layers, z 0.2 to 20 mm
-  Internal solid infill: 1 min 22 s, 1524 mm2 on 5 layers, z 0.4 to 19.8 mm
-  Internal Bridge: 28.3 s, 301 mm2 on 1 layer, z 19.4 to 19.4 mm
-  Bottom surface: 25.9 s, 377 mm2 on 1 layer, z 0.2 to 0.2 mm
-  Top surface: 20.3 s, 381 mm2 on 1 layer, z 20 to 20 mm
-  Skirt: 2.4 s, 42 mm2 on 1 layer, z 0.2 to 0.2 mm
-  seam (aligned): 100 loop starts, 99% on the one below, so a line up the wall, most at x 138 y 138 (100 layers)
+    layers  100, 0:08.6 to 0:36.9 each, 0:08.9 typical; the shortest is layer 4 at z 0.8 mm
+    seam    aligned: 100 loop starts, 99% on the one below, so a line up the wall, most at x 138 y
+            138 (100 layers)
 
-Proposed from the slice (not applied unless you take it):
-  1) seam_position  aligned -> back
-       you said 'the walls and the top as it prints', so the walls are seen, and the seam is a line on them: back puts the line on the part's back as it sits on the plate (its largest y); random would scatter it instead [the slice: surface]
-       read: 99% of 100 wall loops start on the one below: the seam is a line up the wall at x 138 y 138, over 100 layers
+  PROPOSED FROM THE SLICE (not applied unless you take it)
+    1) seam_position  aligned -> back
+        you said 'the walls and the top as it prints', so the walls are seen, and the seam is a line
+        on them: back puts the line on the part's back as it sits on the plate (its largest y);
+        random would scatter it instead [the slice: surface]
+        read: 99% of 100 wall loops start on the one below: the seam is a line up the wall at x 138
+        y 138, over 100 layers
 
-USE THESE: no past print has settings to offer.
+THE PART
+  Seen
+    Seen as it prints: the walls and the top
 
-Type ok to go on to the approval gate, or take what the slice proposes (take, or take 1), send the orientation back (orientation), or correct a setting by name, e.g. wall_loops=3 because it's decorative (several separated by ';'), pause_at=12.4 because the nuts go in (it pauses once the layer topping out at 12.4 mm is done, and it asks what the pause is for), colour_change=12.4 because white to black (a swap), or stop.
+  Its context (its design run, or a sidecar beside it)
+    none: no design run above the file and no sidecar beside it, so it's read as before
+
+POSE
+    this print  0,0,0: No model was configured for this job; fell back to geometric selection. Chose
+                rotation (0.0, 0.0, 0.0) with the lowest overhang (0.0 mm2) and highest bed contact
+                (400.0 mm2) among the scored candidates.
+    features    read in this pose: rotation (0.0, 0.0, 0.0), 20 mm tall, 400 mm2 on the plate
+
+  The poses it weighed (overhang is what would need support; ! is this print)
+    pose     overhang mm2  on the plate mm2  tall mm
+  ! 0,0,0               0               400       20
+    180,0,0             0               400       20
+    90,0,0              0               400       20
+    270,0,0             0               400       20
+    0,90,0              0               400       20
+    0,270,0             0               400       20
+
+----------------------------------------------------------------------------------------------------
+LOOK FIRST, AGAIN
+  The model is still working on settings (<n> s)
+  THE SLICE PROPOSES 1: take 1
+Answers: ok (approval gate) · take (the slice's) · orientation (send it back) ·
+         key=value because … · stop
+  e.g. wall_loops=3 because it's decorative (several separated by ';'); pause_at=12.4 because the
+       nuts go in (it pauses once the layer topping out at 12.4 mm is done, and it asks what the
+       pause is for); colour_change=12.4 because white to black (a swap)
 
 The model's proposal came after <n> s. Enter adds it to the list (what you've typed is kept).
+  THE MODEL PROPOSES 1 change (2), under Settings. None is applied until you take it.
 
-Proposed by the model (not applied unless you take it):
-  2) wall_loops  2 -> 5
-       flat faces show the infill [model: flat_top, walls-shells]
+  PROPOSED BY THE MODEL (not applied unless you take it)
+    2) wall_loops  2 -> 5
+        flat faces show the infill [model: flat_top, walls-shells]
 
-Type ok to go on to the approval gate, take (the slice's 1), take 2 (the model's, by number), no 2 because ... (turn one down, saying why), send the orientation back (orientation), or correct a setting by name, e.g. wall_loops=3 because it's decorative (several separated by ';'), pause_at=12.4 because the nuts go in (it pauses once the layer topping out at 12.4 mm is done, and it asks what the pause is for), colour_change=12.4 because white to black (a swap), or stop.
+Answers: ok (approval gate) · take (the slice's) · take 2 (the model's) · no 2 because … ·
+         orientation (send it back) · key=value because … · stop
 At the approval gate. Approve or Reject on the dashboard.
   time        16 min
   plastic     3.34 cm3
@@ -96,10 +127,10 @@ slice read     layers: 100, 8.6 s to 36.9 s each, 8.9 s typical; the shortest is
                Outer wall: 2 min 53 s, 3517 mm2 on 100 layers, z 0.2 to 20 mm
                Inner wall: 2 min 19 s, 3363 mm2 on 100 layers, z 0.2 to 20 mm
                Internal solid infill: 1 min 22 s, 1524 mm2 on 5 layers, z 0.4 to 19.8 mm
-               Internal Bridge: 28.3 s, 301 mm2 on 1 layer, z 19.4 to 19.4 mm
-               Bottom surface: 25.9 s, 377 mm2 on 1 layer, z 0.2 to 0.2 mm
-               Top surface: 20.3 s, 381 mm2 on 1 layer, z 20 to 20 mm
-               Skirt: 2.4 s, 42 mm2 on 1 layer, z 0.2 to 0.2 mm
+               Internal Bridge: 28.3 s, 301 mm2 on 1 layer, at z 19.4 mm
+               Bottom surface: 25.9 s, 377 mm2 on 1 layer, at z 0.2 mm
+               Top surface: 20.3 s, 381 mm2 on 1 layer, at z 20 mm
+               Skirt: 2.4 s, 42 mm2 on 1 layer, at z 0.2 mm
                seam (aligned): 100 loop starts, 99% on the one below, so a line up the wall, most at x 138 y 138 (100 layers)
   flagged      seam_seen: 99% of 100 wall loops start on the one below: the seam is a line up the wall at x 138 y 138, over 100 layers
 plate          Cool Plate, bed 35 C

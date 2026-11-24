@@ -14,6 +14,7 @@ and nothing reaches LiteLLM, Orca, the printer or the broker.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -44,7 +45,7 @@ from print_shop.setup.review import Review, ReviewRequest, render
 from print_shop.setup.skill import GROUPS, load
 from tests.fakes import STORE_PROFILES, FramePrinter, MemoryBridge
 from tests.fixtures import write_stl
-from tests.reviewing import takes
+from tests.reviewing import flat, takes
 from tests.test_job_e2e import CFG
 from tests.test_print_loop import Model, Person
 from tests.test_reading import ALL_SEEN, FILAMENT, PETG, PROCESS, _read
@@ -605,10 +606,12 @@ def test_a_runs_part_prints_with_its_context_by_the_single_calls(job: Any, tmp_p
                for r in row.proposal.refused)
     # The review says what was read, and the band is derived, from which need.
     text = render(review)
-    assert "The part's context (its design run, or a sidecar beside it):" in text
+    assert "  Its context (its design run, or a sidecar beside it)" in text
     assert "  from the design run `eval-lid-9`, part `lid`" in text
-    assert ("fit at z 4.8 to 10 mm as it prints: a 0.05 to 0.15 mm fit with references/base.step "
-            "(`lid-fit`), derived from where this part's box meets its mate's") in text
+    said = flat(text)
+    assert ("fit 1 a 0.05 to 0.15 mm fit with references/base.step (`lid-fit`), derived from "
+            "where this part's box meets its mate's, from ") in said
+    assert "; z 4.8 to 10 mm as it prints" in said
     # The ledger keeps what was read.
     assert row.proposal.context[0] == "from the design run `eval-lid-9`, part `lid`"
 
@@ -673,14 +676,13 @@ def test_a_job_with_a_lessons_elephant_foot_and_a_fit_shows_both(job: Any, tmp_p
     change = row.proposal.get("elefant_foot_compensation")
     assert (change.value, change.source, change.lesson) == ("0.2", Source.LESSON, 24)
     assert not [f for f in review.proposed if f.change.key == "elefant_foot_compensation"]
-    lines = render(review).splitlines()
-    # The lesson's 0.2 stands as a change, named for the lesson ...
-    at = next(n for n, line in enumerate(lines)
-              if line.startswith("  elefant_foot_compensation  "))
-    assert lines[at].endswith("-> 0.2")
-    assert lines[at + 1].endswith("[lesson 24: large_bed_contact]")
+    text = render(review)
+    # The lesson's 0.2 stands as a change, named for the lesson, its words under Lessons ...
+    assert re.search(r"\n  elefant_foot_compensation +\S+ +(\S+ +)?0\.2 +lesson 24\n", text)
+    assert "elefant_foot_compensation=0.2 · set it · " in flat(text)
+    assert "for a part that's large_bed_contact" in flat(text)
     # ... and the fit's note says the plate fit is covered by it.
-    text = "\n".join(lines)
+    text = flat(text)
     assert ("elefant_foot_compensation is 0.2, set by lesson 24: the plate fit is covered, as "
             "0.2 mm is at least the 0.1 mm it wants, so nothing is proposed") in text
 

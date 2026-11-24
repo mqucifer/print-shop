@@ -53,13 +53,18 @@ orientation step is given next time. The part is then turned and sliced again.
 **A pose still being measured says so** (mqucifer/print-shop#235). A kept pose's job doesn't
 wait for the other five, so the table can be drawn before they're in. `orientation` waits for
 them, saying that it is, and then lists them as ever.
+
+**It's laid out to be read** (mqucifer/print-shop#223, `screen.py`): in sections, aligned and
+wrapped to the terminal, with Look first said again above the prompt and, from the second round
+on, what moved marked and listed. Use these' items, the slice's and the model's share one number
+space, in that order, and a number typed to the wrong command says whose it is.
 """
 
 from __future__ import annotations
 
 import re
+import shutil
 import sqlite3
-import textwrap
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -88,13 +93,22 @@ from print_shop.setup.proposal import (
     pose_value,
 )
 from print_shop.setup.reach import profile_of, unplaced
-from print_shop.setup.reading import PAUSE_PAST_FIT, Flag, SliceReading
+from print_shop.setup.reading import Flag, SliceReading
+from print_shop.setup.screen import (
+    NOT_FOR_A_PLATE,
+    WIDTH,
+    Moved,
+    by_model,
+    sections,
+    warnings,
+    what_moved,
+    wrap,
+)
 from print_shop.setup.suggest import (
     Listed,
     Suggesting,
     by_number,
     didnt_come,
-    fell_back,
     listed,
     looked_up,
     turning,
@@ -128,14 +142,6 @@ _NO = re.compile(r"^\s*no\s+(\d+)\b\s*(?:(?:because\b|-|—|:)\s*(.*))?$", re.I)
 _TURN = "turn"
 #: `use`, `use 2 4`, `clear 3` or `from 2`: what the most similar past print offers.
 _OFFER = re.compile(r"^\s*(use|clear|from)\b\s*([\d ,]*)$", re.I)
-
-
-#: What a plate's review says where one part's has "use these" (mqucifer/print-shop#109).
-NOT_FOR_A_PLATE = (
-    "USE THESE: not offered for a plate of several parts yet, as one part's settings would go on "
-    "every part. Type what you want, or to print the same plate again, copy its line from the "
-    "print desk."
-)
 
 
 @dataclass(frozen=True)
@@ -235,14 +241,28 @@ class ReviewRequest:
 
     @property
     def proposed(self) -> tuple[Flag, ...]:
-        """The flags that propose a change, numbered from 1 at the review."""
+        """The flags that propose a change, in the order they're numbered (`numbered`)."""
         return tuple(f for f in self.flags if f.change is not None)
+
+    @property
+    def offered(self) -> int:
+        """The numbers Use these holds, which come first: the most items of any past print on
+        offer, so that picking another moves none of the slice's or the model's numbers. One
+        number space, so that a number on screen is one thing (mqucifer/print-shop#223)."""
+        offering = self.offering
+        return max((len(p.items) for p in offering.options), default=0) if offering else 0
+
+    @property
+    def numbered(self) -> list[tuple[int, Flag]]:
+        """The slice's proposals, numbered on from Use these' items."""
+        return list(enumerate(self.proposed, self.offered + 1))
 
     @property
     def by_model(self) -> list[Listed]:
         """The model's proposals on this screen, numbered on from the slice's."""
         return listed(self.suggested, self.proposal,
-                      pose_value(self.orientation.rotation_deg), len(self.proposed))
+                      pose_value(self.orientation.rotation_deg),
+                      self.offered + len(self.proposed))
 
     def refreshed(self) -> ReviewRequest:
         """The same review with what the model has come to by now added: a new screen, whose
@@ -290,205 +310,105 @@ class Reviewer(Protocol):
 
 #: Who each change is from, as the review names it. Every `Source` has one, so a
 #: change from an intake answer shows like any other (it raised KeyError, 2026-11-13).
-_BY = {Source.ANSWER: "your answer", Source.MODEL: "model", Source.GUARD: "guard",
-       Source.SPONSOR: "you", Source.READING: "the slice", Source.LESSON: "lesson"}
+def render(
+    request: ReviewRequest, width: int = WIDTH, since: Moved | None = None, first: bool = True,
+) -> str:
+    """The review as the command prints it, in sections, to `width` (mqucifer/print-shop#223).
+    `since` is what moved since the last round, marked and listed at the top and above the
+    prompt; `first` is the first round, which shows the correction examples."""
+    width = min(width, WIDTH)
+    lines: list[str] = []
+    if since:
+        lines += ["MOVED SINCE YOUR LAST ANSWER",
+                  *(x for line in since.lines for x in wrap("  * ", line, width, "    ")), ""]
+    for n, section in enumerate(sections(request, width, since)):
+        lines += [*([""] if n else []), section.title, *section.lines]
+    return "\n".join([*lines, *_end(request, width, since, first)])
 
 
-def render(request: ReviewRequest) -> str:
-    """The review as the command prints it."""
-    machine, process, filament = request.presets
-    s = request.slice
-    lines = [
-        "Settings for this print, over your presets:",
-        f"  machine   {machine}",
-        f"  process   {process}",
-        f"  filament  {filament}",
-        "",
-    ]
-    if request.undone:
-        lines += [f"NOT DONE, your last answer: {request.undone}. The plate is as it was before "
-                  "it.", ""]
-    if request.plate is not None:
-        lines += [*request.plate.lines(), ""]
-    proposal = request.proposal
-    found = request.suggested
-    # A turn's reading, notes and refusals are for that pose, and shown only under it.
-    here = found if found is not None and not turning(found) else None
-    reasoning = proposal.reasoning if found is None else here.reasoning if here else ""
-    if reasoning:
-        lines += ["How the part was read:", *_wrap(reasoning), ""]
-    changes = proposal.changes
-    if changes:
-        width = max(len(c.key) for c in changes)
-        tuned = any(c.standard for c in changes)
-        head = "standard -> your tuning -> this print" if tuned else "your preset -> this print"
-        lines.append(f"  {'setting'.ljust(width)}  {head}")
-        for c in changes:
-            by = _by(c)
-            cites = ", ".join(x for x in (c.feature, c.knowledge) if x)
-            was = f"{c.standard} -> {c.preset or '-'}" if c.standard else (c.preset or "-")
-            lines.append(f"  {c.key.ljust(width)}  {was} -> {c.value}")
-            lines.append(f"  {''.ljust(width)}    {c.reason} [{by}{': ' + cites if cites else ''}]")
-            if c.reading:
-                lines.append(f"  {''.ljust(width)}    read: {c.reading}")
-    elif proposal.not_applied:
-        lines.append("  No change reached the slice.")
-    else:
-        lines.append("  No changes: your presets as they are.")
-    for c in proposal.not_applied:
-        lines.append(f"  NOT APPLIED {c.key}: {c.not_applied}")
-        lines.append(f"    {c.reason} [{_by(c)}]")
-    lines += _pauses(request)
-    lines += [f"  note: {f.reading}" for f in request.flags if f.id == PAUSE_PAST_FIT]
-    paused = proposal.get(PAUSE)
-    purpose = paused.pause if paused is not None and paused.value != "none" else None
-    try:
-        unknown = request.stands().not_known if request.stands else None
-        why = unknown.why() if unknown is not None else ""
-        if purpose is not None:
-            lines += pauses.for_review(purpose, request.reading, request.material, request.stock,
-                                       why)
-        if why and (purpose is None or purpose.start is None):  # a swap's LOAD FIRST says it
-            lines.append(f"  {why}: at ok you're asked, and Start holds until you say")
-    except sqlite3.Error as exc:
-        lines.append(f"  the stock couldn't be read ({exc}): an Approve checks it again")
-    for c in proposal.kept:
-        by = (
-            f" [lesson {c.lesson}]" if c.lesson is not None
-            # An answer that keeps the preset's value is a decision too (mqucifer/print-shop#124).
-            else f" [{_BY[c.source]}: {c.feature}]" if c.source is Source.ANSWER
-            else ""
-        )
-        lines.append(f"  kept {c.key} at {c.preset}: {c.reason}{by}")
-    from_model = here.design_notes if here is not None else ()
-    for note in dict.fromkeys((*proposal.design_notes, *from_model)):
-        lines.append(f"  design: {note}")
-    for note in proposal.notes:
-        lines.append(f"  note: {note}")
-    for refusal in dict.fromkeys((*proposal.refused, *(here.refused if here else ()))):
-        lines.append(f"  refused from the model: {refusal}")
-    if found is not None:
-        lines += _model_line(found)
-    elif proposal.model.startswith("cut off"):
-        lines.append(
-            f"  CUT OFF: the model's answer was {proposal.model}. Nothing it proposed is "
-            "used; only the guards' changes stand. This is recorded, to tune the limit."
-        )
-    elif proposal.model.startswith(("unavailable", "timed out")):
-        lines.append(f"  the model was {proposal.model}; only the guards' changes stand")
-    elif not proposal.model:
-        lines.append("  no model was asked; only the guards' changes stand")
-    if proposal.lessons:
-        lines += ["", "Lessons from earlier prints, kept by a reviewer, for a part like this:"]
-        for g in proposal.lessons:
-            used = (
-                f"not given: {g.withheld}" if g.withheld
-                else "set it" if g.applied else (g.why or "read by the model")
-            )
-            if g.looked_up:
-                used += "; the print loop looked it up with past_prints"
-            lines.append(f"  {g.line()} ({used})")
-    lines += [
-        "",
-        f"Orca's estimate: {s.print_time_s // 60} min {s.print_time_s % 60} s, "
-        f"{s.filament_cm3} cm3" + (f", {s.filament_g} g" if s.filament_g else "")
-        + f", {s.layer_count} layers" + (" for the whole plate" if request.plate else ""),
-        *(_parts(request) if request.parts else _oriented(request)),
-    ]
-    if request.context:
-        lines += ["", "The part's context (its design run, or a sidecar beside it):",
-                  *(f"  {line}" for line in request.context)]
-    lines += _read(request)
-    lines += _by_model(request)
-    if request.offering is not None:
-        pose = pose_value(request.orientation.rotation_deg)
-        lines += render_offer(request.offering, proposal, pose)
-    elif request.plate is not None:
-        lines += ["", *_wrap(NOT_FOR_A_PLATE)]
-    lines += _prompt(request)
-    return "\n".join(lines)
-
-
-def render_arrived(request: ReviewRequest) -> str:
+def render_arrived(request: ReviewRequest, width: int = WIDTH) -> str:
     """Only what came since the screen above it was drawn: the model's block, or how it failed,
-    and the prompt (mqucifer/print-shop#242). The rest of the review hasn't changed."""
+    and the answers (mqucifer/print-shop#242). The rest of the review hasn't changed."""
     found = request.suggested
     assert found is not None
-    lines = [*_model_line(found), *_by_model(request)]
+    width = min(width, WIDTH)
+    said = [w for w in warnings(request) if w.full.startswith(_OF_MODEL)]
+    lines = [x for w in said for x in wrap("  ", w.full, width, "    ")]
+    lines += by_model(request, width)
     if not turning(found):  # else they're under the turn
-        lines += [f"  design: {note}" for note in found.design_notes
-                  if note not in request.proposal.design_notes]
-        lines += [f"  refused from the model: {refusal}" for refusal in found.refused
-                  if refusal not in request.proposal.refused]
-    return "\n".join([*lines, *_prompt(request)])
+        lines += [x for note in found.design_notes if note not in request.proposal.design_notes
+                  for x in wrap("  design: ", note, width, "    ")]
+        lines += [x for each in found.refused if each not in request.proposal.refused
+                  for x in wrap("  refused from the model: ", each, width, "    ")]
+    return "\n".join([*lines, "", *_answers(request, width)])
 
 
-def _prompt(request: ReviewRequest) -> list[str]:
-    """What can be typed at the review as it's now listed."""
-    use = (" use what decided that print (use, or use 1 3),"
-           if request.offering is not None and request.offering.options else "")
-    take = _take_says(request)
-    back = (" send a part's orientation back (orientation)," if request.parts
-            else " send the orientation back (orientation)," if request.candidates else "")
-    go_on = "Type ok to go on to the approval gate,"
-    if request.turn_waiting:
-        go_on = (f"It doesn't fit as posed. Type turn to take it turned "
-                 f"{turn_words(request.slice.turn_deg)} (ok waits for that),")
+#: How Look first's lines of the model's work begin, to say again when it arrives.
+_OF_MODEL = ("The model", "The model's", "note: the print loop stopped", "THE MODEL PROPOSES")
+
+
+def _end(request: ReviewRequest, width: int, since: Moved | None, first: bool) -> list[str]:
+    """What a terminal leaves on screen above the prompt: Look first again, each line in its
+    short form, what moved, and the answers."""
+    lines = ["", "-" * width]
+    said = warnings(request)
+    if said:
+        lines += ["LOOK FIRST, AGAIN",
+                  *(x for w in said for x in wrap("  ", w.short, width, "    "))]
+    if since:
+        lines += ["MOVED", *(x for line in since.lines for x in wrap("  * ", line, width, "    "))]
+    lines += _answers(request, width)
+    if first:
+        lines += _examples(request, width)
+    return lines
+
+
+def _answers(request: ReviewRequest, width: int) -> list[str]:
+    """What the prompt takes, as it's now listed, on a line."""
+    # ok isn't offered before a turn it needs to fit is taken: it waits for that.
+    said = ["turn (ok waits for it)" if request.turn_waiting else "ok (approval gate)"]
+    if request.numbered:
+        said.append("take (the slice's)")
+    models = sorted(by_number(request.by_model))
+    if models:
+        said += [f"take {' '.join(map(str, models))} (the model's)",
+                 f"no {models[0]} because \u2026"]
+    offering = request.offering
+    if offering is not None and offering.past is not None and offering.past.items:
+        pose = pose_value(request.orientation.rotation_deg)
+        ticked = [n for n, item in enumerate(offering.past.items, 1)
+                  if offering.standing(item, request.proposal, pose).selected]
+        said += ["use", f"clear {ticked[0]}"] if ticked else ["use 1"]
+    if request.parts:
+        said.append("orientation (send a part's back)")
+    elif request.candidates:
+        said.append("orientation (send it back)")
+    said += ["key=value because \u2026", "stop"]
+    # Broken between answers, never inside one, where they don't fit a line.
+    lines = ["Answers: " + said[0]]
+    for each in said[1:]:
+        if len(lines[-1]) + 3 + len(each) + 2 <= width:  # and room for a " ·" after it
+            lines[-1] += f" \u00b7 {each}"
+        else:
+            lines[-1] += " \u00b7"
+            lines.append(" " * 9 + each)
+    return lines
+
+
+def _examples(request: ReviewRequest, width: int) -> list[str]:
+    """The corrections' examples, on the first round."""
     lands = "it pauses once the layer topping out at 12.4 mm is done"
-    example = (
+    pause = (
         f"pause_at=12.4 for insert because the nuts go in ({lands})"
         if _insert_stands_or_is_ticked(request)
         else f"pause_at=12.4 because the nuts go in ({lands}, and it asks what the pause is "
-             "for), colour_change=12.4 because white to black (a swap)"
+             "for); colour_change=12.4 because white to black (a swap)"
     )
     if request.plate is not None and request.plate.by_object:
-        example = (f"{SEQUENCE}={BY_LAYER} to print them all at once (a pause_at or a "
-                   "colour_change needs that)")
-    return [
-        "",
-        f"{go_on}{use}{take}{back} or correct a setting by name, "
-        f"e.g. wall_loops=3 because it's decorative (several separated by ';'), {example}, "
-        "or stop.",
-    ]
-
-
-def _turn(request: ReviewRequest) -> list[str]:
-    """The turn it needs to fit the plate, offered or taken (mqucifer/print-shop#257)."""
-    deg = request.slice.turn_deg
-    if not deg:
-        return []
-    turned = f"turned {turn_words(deg)}"
-    theirs = 'x, y and the seam\'s "back" are the turned part\'s'
-    if request.turn_taken:
-        return [f"  TURNED ON THE PLATE to fit, as you took it: {turned}; {theirs}"]
-    posed = next((c for c in request.candidates
-                  if c.rotation_deg == request.orientation.rotation_deg), None)
-    size = f" ({posed.bbox_mm[0]:.1f} x {posed.bbox_mm[1]:.1f} mm)" if posed else ""
-    other = " For another side down, type orientation." if request.another_side else ""
-    return [f"  DOESN'T FIT AS POSED{size}: Orca has no room for it that way.",
-            f"    It fits {turned}, with the same side down.",
-            f"    What's shown here is already sliced that way: the time, {theirs}. "
-            f"Nothing prints that way unless you type turn.{other}"]
-
-
-def _oriented(request: ReviewRequest) -> list[str]:
-    return [
-        f"Orientation: {request.orientation.rotation_deg}, {request.orientation.rationale}",
-        # The pose the features, and the lessons keyed to them, were read in
-        # (mqucifer/print-shop#128).
-        f"  the part's features were read in this pose: {request.orientation.pose()}",
-        *_turn(request),
-        *_poses(request),
-    ]
-
-
-def _parts(request: ReviewRequest) -> list[str]:
-    """Each part's pose, as one part's is shown."""
-    lines = []
-    for part in request.parts:
-        own = replace(request, orientation=part.orientation, candidates=part.candidates)
-        lines += ["", f"Part {part.n}, {part.name}:", *(f"  {line}" for line in _oriented(own))]
-    return lines
+        pause = (f"{SEQUENCE}={BY_LAYER} to print them all at once (a pause_at or a "
+                 "colour_change needs that)")
+    return wrap("  e.g. ", f"wall_loops=3 because it's decorative (several separated by ';'); "
+                f"{pause}", width, " " * 7)
 
 
 def _pauses(request: ReviewRequest) -> list[str]:
@@ -525,141 +445,6 @@ def _pauses(request: ReviewRequest) -> list[str]:
         line += ": type " + " or ".join(f"{PAUSE}={mm(t)}" for t in near)
     return [line]
 
-
-def _by(change: Change) -> str:
-    """Who a change is from, as the review names them."""
-    if change.taken and change.used is None:
-        return f"{_BY[change.source]}, taken by you"
-    if change.used is not None:
-        return f"{_BY[change.source]}, {change.used.line()}"
-    return _BY[change.source] + (f" {change.lesson}" if change.lesson is not None else "")
-
-
-def _poses(request: ReviewRequest) -> list[str]:
-    """Each pose the orientation step weighed, with the figures its choice rested on
-    (mqucifer/print-shop#128): what would need support, the round or chamfer at the plate left out
-    of it, the area on the plate and the height."""
-    if not request.candidates:
-        return []
-    lines = ["  the poses it weighed (overhang is what would need support):"]
-    measuring = request.measuring
-    # What's pending is read first: one that lands between the two reads is shown measured.
-    pending = measuring.pending() if measuring is not None else ()
-    failed = measuring.failed() if measuring is not None else {}
-    ready = measuring.ready() if measuring is not None else request.candidates
-    for c in ready:
-        here = "  <- this print" if c.rotation_deg == request.orientation.rotation_deg else ""
-        if c.fits_no_way:
-            here += "  (doesn't fit, however it's turned on the plate)"
-        flare = (f", {c.flare_area_mm2:g} mm2 rising from the plate left out"
-                 if c.flare_area_mm2 else "")
-        lines.append(
-            f"    {pose_value(c.rotation_deg):>9}  {c.overhang_area_mm2:g} mm2 overhang{flare}, "
-            f"{c.bed_contact_area_mm2:g} mm2 on the plate, {c.height_mm:g} mm tall{here}"
-        )
-    measured = {c.rotation_deg for c in ready}
-    lines += [f"    {pose_value(r):>9}  still being measured: orientation waits for it"
-              for r in pending if r not in measured and r not in failed]
-    lines += [f"    {pose_value(r):>9}  couldn't be measured: {why}" for r, why in failed.items()]
-    return lines
-
-
-def _read(request: ReviewRequest) -> list[str]:
-    """What the slice shows, and what it proposes."""
-    reading = request.reading
-    if reading is None:
-        return []
-    lines = ["", "What the slice shows, layer by layer:"]
-    lines += [f"  {line}" for line in reading.lines()]
-    for flag in request.flags:
-        if flag.change is None and flag.id != PAUSE_PAST_FIT:  # that one's beside its pause
-            lines.append(f"  note: {flag.reading}")
-    for n, flag in enumerate(request.proposed, 1):
-        c = flag.change
-        assert c is not None
-        if n == 1:
-            lines += ["", "Proposed from the slice (not applied unless you take it):"]
-        sliced = reading.settings.get(c.key, c.preset)
-        yours = f" (your preset: {c.preset})" if c.preset and c.preset != sliced else ""
-        lines.append(f"  {n}) {c.key}  {sliced or '-'} -> {c.value}{yours}")
-        lines.append(f"       {c.reason} [the slice: {c.knowledge}]")
-        lines.append(f"       read: {flag.reading}")
-    return lines
-
-
-def _model_line(found: Suggested) -> list[str]:
-    """The model's work on the settings, in one line: still at it, or what it came to."""
-    if found.ending is Ending.WORKING:
-        return [f"  The model is still working on settings ({waited(found.seconds)}). What it "
-                "proposes is added below, and nothing waits for it."]
-    lines = [f"  note: {stopped}"] if (stopped := fell_back(found)) else []
-    if found.ending is not Ending.CAME:
-        lines.append(f"  {didnt_come(found)}")
-    elif not found.proposed:
-        lines.append(f"  The model proposed no change, after {waited(found.seconds)}.")
-    return lines
-
-
-def _by_model(request: ReviewRequest) -> list[str]:
-    """The model's proposals, numbered on from the slice's, and those that don't stand."""
-    rows = request.by_model
-    found = request.suggested
-    down = [c for c in request.turned_down if found is not None and c.key in found.declined]
-    if found is None or not (rows or down or found.asked):
-        return []
-    lines = ["", "Proposed by the model (not applied unless you take it):"]
-    if found.asked:
-        lines.append(f"  It would have asked first: {found.asked}")
-    for row in rows:
-        c = row.change
-        if row.standing == "theirs":
-            lines.append(f"  -  {c.key}: {row.by} set {row.now or '-'}, and the model would set "
-                         f"{c.value}. {'Yours' if row.by == 'you' else 'That'} stands.")
-            continue
-        if row.standing == "so":
-            lines.append(f"  -  {c.key} {c.value}: taken." if c.key in found.taken
-                         else f"  -  {c.key}: the model's {c.value} is so here already.")
-            continue
-        if c.key == ORIENTATION:
-            here = pose_value(request.orientation.rotation_deg)
-        else:
-            now = request.proposal.get(c.key)
-            here = now.value if now is not None else c.preset
-        lines.append(f"  {row.number}) {c.key}  {here or '-'} -> {c.value}")
-        cites = ", ".join(x for x in (c.feature, c.knowledge) if x and c.key != ORIENTATION)
-        if c.reading:
-            lines.append(f"       {c.reading}")
-        if c.reason:
-            lines.append(f"       {c.reason} [model{': ' + cites if cites else ''}]")
-        if c.key == ORIENTATION:
-            if found.reasoning and not found.reasoning.startswith(c.reason):
-                lines.append(f"       How it read the part turned so: {found.reasoning}")
-            if found.once_turned:
-                then = ", ".join(f"{t.key} {t.preset or '-'} -> {t.value}"
-                                 for t in found.once_turned)
-                lines.append(f"       Once turned it would also propose: {then}")
-            lines += [f"       design, turned so: {note}" for note in found.design_notes]
-            lines += [f"       refused from the model, turned so: {each}" for each in found.refused]
-    for c in down:
-        lines.append(f"  -  {c.key} stays {c.value}: {c.reason} [you, saying no to the model's "
-                     f"{c.said_no_to}]")
-    return lines
-
-
-def _take_says(request: ReviewRequest) -> str:
-    """What the prompt says `take` takes: bare, the slice's, and the model's by number."""
-    slices = len(request.proposed)
-    models = sorted(by_number(request.by_model))
-    if not models:
-        return " or take what the slice proposes (take, or take 1)," if slices else ""
-    numbers = " ".join(map(str, models))
-    of_slice = (f"take (the slice's {'1' if slices == 1 else f'1-{slices}'}), " if slices else "")
-    return (f" {of_slice}take {numbers} (the model's, by number), no {models[0]} because ... "
-            "(turn one down, saying why),")
-
-
-def _wrap(text: str, width: int = 96) -> list[str]:
-    return ["  " + line for line in textwrap.wrap(text, width)]
 
 
 def parse_answer(answer: str, request: ReviewRequest) -> Review | str:
@@ -711,6 +496,12 @@ def parse_answer(answer: str, request: ReviewRequest) -> Review | str:
                         else "there's no past print's settings to use")
             verb = offered.group(1).lower()
             numbers = [int(n) for n in re.findall(r"\d+", offered.group(2))]
+            if verb != "from" and offering.past is not None:
+                # Another's number: said whose. Any other is the offer's to refuse.
+                theirs = [n for n in numbers if n > request.offered
+                          and (n in models or n in dict(request.numbered))]
+                if theirs:
+                    return _whose_number(theirs[0], request, models, verb)
             if verb == "use":
                 if picked:
                     return "look at that print's settings first: from picks it, then use"
@@ -996,26 +787,60 @@ def _take(
     numbers: str, request: ReviewRequest, models: dict[int, Change]
 ) -> list[Change] | str:
     """The changes `take` names, by the numbers on screen: the slice's, all of them by a bare
-    `take`, and the model's, by number alone (mqucifer/print-shop#242)."""
-    proposed = request.proposed
+    `take`, and the model's, by number alone (mqucifer/print-shop#242). Use these' numbers come
+    first and are `use`'s (mqucifer/print-shop#223)."""
+    slices = dict(request.numbered)
     picked = list(dict.fromkeys(int(n) for n in re.findall(r"\d+", numbers)))
     if not picked:
-        if not proposed:
+        if not slices:
             return ("the slice proposes nothing to take"
                     + (f": the model's are taken by number, take {min(models)}" if models else ""))
-        picked = list(range(1, len(proposed) + 1))
-    highest = max([len(proposed), *models])
-    if not highest:
-        return "the slice proposes nothing to take"
-    if any(not 1 <= n <= highest for n in picked):
-        return f"take a number from 1 to {highest}"
+        picked = list(slices)
+    for n in picked:
+        if n not in slices and n not in models:
+            return _whose_number(n, request, models, "take")
     taken: list[Change] = []
     for n in sorted(picked):  # the slice's first, so that the model's stands where both name one
-        change = proposed[n - 1].change if n <= len(proposed) else models[n]
-        assert change is not None
-        taken.append(change if n <= len(proposed) else change.model_copy(update={"taken": True}))
+        if n in slices:
+            change = slices[n].change
+            assert change is not None
+            taken.append(change)
+        else:
+            taken.append(models[n].model_copy(update={"taken": True}))
     # Named for one setting as well, the model's replaces the slice's: it was asked for by number.
     return list({c.key: c for c in taken}.values())
+
+
+def _whose_number(n: int, request: ReviewRequest, models: dict[int, Change], verb: str) -> str:
+    """Why `verb n` can't take `n`: whose number it is, and what takes it, or the numbers there
+    are (mqucifer/print-shop#223)."""
+    if 1 <= n <= request.offered:
+        return f"{verb} {n} is one of Use these: use {n}"
+    if n in dict(request.numbered):
+        return f"{n} is the slice's: take {n}"
+    if n in models:
+        return f"{n} is the model's: take {n}"
+    runs = _ranges(request, models)
+    if not runs:
+        return "the slice proposes nothing to take"
+    if len(runs) == 1:
+        _, lo, hi = runs[0]
+        return f"take a number from {lo} to {hi}"
+    there = [f"{whose} {lo}-{hi}" if hi > lo else f"{whose} {lo}" for whose, lo, hi in runs]
+    return f"there's no {n}: {', '.join(there)}"
+
+
+def _ranges(request: ReviewRequest, models: dict[int, Change]) -> list[tuple[str, int, int]]:
+    """The numbers on screen, as runs, and whose: Use these', the slice's, the model's."""
+    runs = []
+    if request.offered:
+        runs.append(("Use these", 1, request.offered))
+    slices = [n for n, _ in request.numbered]
+    if slices:
+        runs.append(("the slice's", slices[0], slices[-1]))
+    if models:
+        runs.append(("the model's", min(models), max(models)))
+    return runs
 
 
 def _turned_down(
@@ -1053,6 +878,7 @@ def cli_reviewer(
     forget: Callable[[], None] = drop_typed,
     asks: Callable[[], bool] | None = None,
     screen: Callable[[], TextIO | None] = terminal,
+    width: Callable[[], int] = lambda: shutil.get_terminal_size((WIDTH, 24)).columns,
 ) -> Reviewer:
     """Show the review on the command line and read the answer, again until it's readable.
     `orientation` starts the send-back conversation (`send_back`). `forget` drops what was typed
@@ -1062,7 +888,11 @@ def cli_reviewer(
     The model's proposals are said as they arrive, under the open prompt, and added to the list
     by Enter (mqucifer/print-shop#242). What's typed is read against the list on screen. While
     the model works, a timer ticks on the line above the prompt, on the screen alone.
+
+    The review is laid out to `width`, the terminal's, up to `WIDTH` (mqucifer/print-shop#223).
+    From the second round of a job on, what moved since the round before is marked and listed.
     """
+    shown: list[ReviewRequest] = []  # the round before, of this job
 
     def review(request: ReviewRequest) -> Review:
         work = request.suggesting
@@ -1123,7 +953,10 @@ def cli_reviewer(
                     out.flush()
 
         def show() -> None:
-            write(render(request))
+            before = shown[-1] if shown and _same_job(shown[-1], request) else None
+            since = what_moved(before, request) if before is not None else None
+            write(render(request, width(), since, first=before is None))
+            shown[:] = [request]
             if request.suggested is not None:
                 forget()  # its numbers are only now the ones on screen
 
@@ -1176,7 +1009,7 @@ def cli_reviewer(
                     assert newer.suggested is not None
                     if newer.suggested.ending is not request.suggested.ending:
                         request, added = replace(newer, turn_taken=request.turn_taken), True
-                        write(render_arrived(request))
+                        write(render_arrived(request, width()))
                         forget()  # its numbers are only now the ones on screen
                     elif newer.suggested.ending is Ending.WORKING:
                         write("  The model is still working on settings "
@@ -1218,7 +1051,8 @@ def cli_reviewer(
                     assert moved is not None
                     request = replace(request, offering=moved)
                     pose = pose_value(request.orientation.rotation_deg)
-                    write("\n".join(render_offer(moved, request.proposal, pose)))
+                    write("\n".join(render_offer(moved, request.proposal, pose,
+                                                  width=min(width(), WIDTH) - 2, lead="  ")))
                     told = False
                     continue
                 if parsed.approved:
@@ -1248,6 +1082,12 @@ def cli_reviewer(
                 work.hear(None)
 
     return review
+
+
+def _same_job(before: ReviewRequest, now: ReviewRequest) -> bool:
+    """Whether two reviews are rounds of one job: what moved is said between those alone."""
+    return (before.presets == now.presets
+            and before.slice.gcode_path.parent == now.slice.gcode_path.parent)
 
 
 def _going_on(request: ReviewRequest) -> tuple[str, str]:

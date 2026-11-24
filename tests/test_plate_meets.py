@@ -10,6 +10,7 @@ Everything is made up and runs on fakes.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,7 @@ from print_shop.setup.reading import (
     flags,
 )
 from tests.plates import profiles
+from tests.reviewing import flat
 from tests.test_job_e2e import CFG
 from tests.test_ledger import record
 from tests.test_plate_job import (
@@ -167,7 +169,8 @@ def test_a_plates_pause_is_copied_as_its_g_code_paused_from_any_parts_page(
     with rig.daemon:
         job = rig.gated(caps)
         rig.press("approve", job)
-    assert "pause_at=3, read from the G-code" in rig.shown[-1], "where it landed, at the review"
+    assert re.search(r"PAUSE pause_at=3: pauses .*, as asked \(read from the G-code\)",
+                     flat(rig.shown[-1])), "where it landed, at the review"
     desk = Desk(rig.path, rig.work, tmp_path / "caps")
     lines = set()
     for n in (1, 2, 3):

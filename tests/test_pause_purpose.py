@@ -254,7 +254,8 @@ def test_an_insert_never_says_swap_or_filament_at_any_step(shop: Shop) -> None:
 
     assert ran.result.printed, ran.result.error
     assert ran.row is not None
-    reviewed = ran.terminal.split("Settings for this print")[-1]
+    # The review, from its first heading (mqucifer/print-shop#223): it's shown once here.
+    reviewed = ran.terminal[ran.terminal.rindex("\nLOOK FIRST\n"):]
     front, page = shop.desk(ran.job_id)
     pausing = {
         "the review": re.sub(r"(?m)^  filament .*$", "", reviewed),

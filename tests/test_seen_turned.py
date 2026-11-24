@@ -64,7 +64,7 @@ from print_shop.setup.review import render as render_review
 from print_shop.setup.skill import groups_for, load
 from tests.fakes import CI_PROFILES, STORE_PROFILES, FramePrinter, MemoryBridge
 from tests.fixtures import write_stl
-from tests.reviewing import takes
+from tests.reviewing import flat, takes
 from tests.test_job_e2e import CFG
 from tests.test_print_loop import Model
 from tests.test_reading import FILAMENT, PETG, PROCESS, _read
@@ -229,9 +229,9 @@ def test_a_part_flipped_after_the_top_is_seen_reads_the_plates_face_at_the_revie
     assert row.rotation_deg == FLIPPED
     assert three(job.given[0][0] or job.read_as) == (False, True, False), "before the turn"
     assert three(job.read_as) == PLATE
-    assert ("note: Seen as it now prints: the face on the plate. The top wasn't asked about, as "
+    assert ("Seen Seen as it now prints: the face on the plate. The top wasn't asked about, as "
             "it was on the plate when you answered, so ironing isn't judged. You said the top, "
-            "as the file lays it; it was turned 180,0,0 since") in job.last_review
+            "as the file lays it; it was turned 180,0,0 since") in flat(job.last_review)
 
     faces, placed = job.given[-1]
     ironed = _read(tmp_path, layers=20, ironed=(20,), config=PETG)
@@ -257,7 +257,7 @@ def test_a_quarter_turn_onto_a_side_is_carried_as_part_of_the_walls(
     assert three(job.read_as) == (True, False, False) and job.read_as.part_walls
     assert ("Seen as it now prints: part of the walls. One of the walls wasn't asked about, as "
             "it was on the plate when you answered, so it isn't judged hidden. You said the top"
-            ) in job.last_review
+            ) in flat(job.last_review)
 
 
 def test_walls_turned_onto_a_side_are_the_top_and_the_plates_face_too(
@@ -328,10 +328,11 @@ def test_seen_from_the_notes_follows_a_turn_as_an_answer_does(
     stl.with_name(stl.stem + SIDECAR).write_text(json.dumps({"seen": ["top"]}))
     job.run(stl, ["", "2"], sent_to(FLIPPED), as_laid=True)
     assert three(job.read_as) == PLATE
-    assert ("note: Seen as it now prints: the face on the plate. The notes said the top, as the "
-            "file lays it, and you confirmed it; it was turned 180,0,0 since") in job.last_review
-    assert "seen: top, as the part's context says (as it prints: the face on the plate)" in (
+    assert ("Seen as it now prints: the face on the plate. The notes said the top, as the "
+            "file lays it, and you confirmed it; it was turned 180,0,0 since") in flat(
         job.last_review)
+    # The context's own line says the same, so it's said once, under Seen (mqucifer/print-shop#223).
+    assert "seen: top, as the part's context says" not in job.last_review
 
 
 def test_an_answer_given_on_the_notes_side_is_carried_back_to_the_files_pose(
@@ -363,8 +364,9 @@ def test_words_turned_cant_be_carried_so_none_is_judged_and_it_says_so(
             as_laid=True)
     faces, placed = job.given[-1]
     assert faces is None and (placed is None or placed.seen is None)
-    assert ("TURNED SINCE YOU ANSWERED: you said 'only the curved bit', as the file lays it. "
-            "That can't be carried to 180,0,0, so no face is judged seen") in job.last_review
+    assert ("note: TURNED SINCE YOU ANSWERED: you said 'only the curved bit', as the file lays "
+            "it. That can't be carried to 180,0,0, so no face is judged seen") in flat(
+        job.last_review)
     assert "judge none as seen or hidden" in job.settings_prompts[-1]
 
 
@@ -798,7 +800,7 @@ def test_both_quarter_turns_show_the_line_at_the_review(
     pose: tuple[float, float, float], tmp_path: Path, job: Turned
 ) -> None:
     job.run(write_stl("cube", tmp_path), TOP_SEEN, sent_to(pose), as_laid=True)
-    assert "note: seam (aligned): a line up the wall at x 138 y 138" in job.last_review
+    assert "- seam (aligned): a line up the wall at x 138 y 138" in flat(job.last_review)
     assert "seam_position  aligned ->" not in job.last_review
 
 
@@ -936,10 +938,10 @@ def test_the_recommended_answer_flipped_never_calls_the_top_hidden(
     """It's the answer for when it can't be said, and never named the face on the plate."""
     job.run(write_stl("cube", tmp_path), ["2", "1"], sent_to(FLIPPED), as_laid=True)
     assert job.read_as.top_unsaid and job.read_as.bottom
-    assert ("note: Seen as it now prints: the walls and the face on the plate. The top wasn't "
+    assert ("Seen as it now prints: the walls and the face on the plate. The top wasn't "
             "asked about, as it was on the plate when you answered, so ironing isn't judged. "
             "You said the walls and the top, as the file lays it; it was turned 180,0,0 since"
-            ) in job.last_review
+            ) in flat(job.last_review)
     assert "don't judge that face hidden" in job.settings_prompts[-1]
     faces, placed = job.given[-1]
     ironed = _read(tmp_path, layers=20, ironed=(20,), config=PETG)

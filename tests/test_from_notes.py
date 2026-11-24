@@ -58,7 +58,7 @@ from print_shop.setup.skill import groups_for, load
 from print_shop.setup.waiting import Waiting, ask_meanwhile, cli_waiting
 from tests.fakes import CI_PROFILES, STORE_PROFILES, FramePrinter, MemoryBridge
 from tests.fixtures import write_stl
-from tests.reviewing import takes
+from tests.reviewing import flat, takes
 from tests.test_job_e2e import CFG
 from tests.test_reading import FILAMENT, PETG, PROCESS, _read
 from tests.test_send_back import AnyPart
@@ -388,7 +388,7 @@ def test_a_contradicting_answer_names_both_before_its_taken_and_the_record_has_b
     [request] = job.reviews.requests
     aside = ("seen: top, bottom, as the part's context says "
              f"(set aside: you said '{yours} when asked')")
-    assert aside in request.context and f"  {aside}" in render_review(request)
+    assert aside in request.context and f" {aside}" in flat(render_review(request))
     assert not [line for line in request.context if line.endswith("context says")], (
         "none reads as what's being judged")
     assert aside in job.settings_prompts[0]

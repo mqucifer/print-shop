@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
@@ -304,7 +305,7 @@ def test_the_review_says_which_arent_ready_and_orientation_waits_saying_so(
     assert row is not None, job.error
     first = person.shown[0]
     for rotation in OTHERS:
-        assert (f"{pose_value(rotation):>9}  still being measured: orientation waits for it"
+        assert (f"    {pose_value(rotation)}  still being measured: orientation waits for it"
                 in first)
     waits = ("Waiting for the 5 poses still being measured: "
              f"{'; '.join(map(pose_value, OTHERS))}.")
@@ -315,9 +316,9 @@ def test_the_review_says_which_arent_ready_and_orientation_waits_saying_so(
     again = person.shown[-1]  # the review once turned
     assert "still being measured" not in again
     for pose in six:
-        assert (f"{pose_value(pose.rotation_deg):>9}  {pose.overhang_area_mm2:g} mm2 overhang"
-                in again)
-    assert "<- this print" in again
+        assert re.search(rf"\n  [ !] {re.escape(pose_value(pose.rotation_deg))} +"
+                         rf"{re.escape(f'{pose.overhang_area_mm2:g}')} ", again)
+    assert re.search(r"\n  ! \d", again), "this print's is marked"
     assert row.rotation_deg == FLIPPED
     assert [(c.key, c.value) for c in row.corrections or ()] == [(ORIENTATION, "180,0,0")]
 
@@ -343,7 +344,7 @@ def test_the_review_shows_all_six_as_today_once_theyre_in(tmp_path: Path, job: J
     assert job.run(stl, review, as_laid=True) is not None, job.error
     [(now, today)] = shown
     assert now == today
-    assert now.count(" mm tall") >= 6
+    assert len(re.findall(r"\n  [ !] \d+,\d+,\d+ ", now)) >= 6
 
 
 def test_the_past_prints_offer_waits_only_for_the_pose_one_was_in(
