@@ -172,7 +172,7 @@ def test_a_bed_lesson_is_set_on_its_variety_offered_on_another_and_withheld_on_a
     assert (item.key, item.value, item.used.lesson, item.used.by) == (
         "textured_plate_temp", "75", 1, Source.LESSON)
     assert standing.mark == " "
-    assert standing.why == (f"learned on another variety, {BASIC}; this is {FAST}",)
+    assert standing.why == (f"this is {FAST}",)
     assert (item.source, item.notes) == (f"lesson 1, learned on {BASIC}", ())
     assert offered(ledger, rail, BASIC).lessons == (), "set on its own variety, not offered"
     pla_part = this(rail, process=PROCESS, filament=PLA, filament_names=("Made-up PLA",),
@@ -210,7 +210,7 @@ def test_the_proposal_sets_it_on_its_variety_and_the_review_says_why_not_on_anot
     text = " ".join(shown.split())
     assert "LESSONS NOT SET FOR THIS VARIETY" in text
     assert (f"your override on rail.stl, and lesson 1, learned on {BASIC} (in Lessons above); "
-            f"not ticked: learned on another variety, {BASIC}; this is {FAST}") in text
+            f"not ticked: this is {FAST}") in text
 
 
 def profiles(tmp_path: Path, kind_of: str) -> SlicerProfiles:
@@ -312,7 +312,7 @@ def test_taken_in_a_print_that_failed_or_isnt_answered_it_stays_unticked(
     taken(ledger, rail, "fast-1", result)
     _, standing = the_lesson(offered(ledger, rail, FAST))
     assert not standing.selected
-    assert standing.why == (f"learned on another variety, {BASIC}; this is {FAST}",)
+    assert standing.why == (f"this is {FAST}",)
 
 
 def test_used_it_reads_as_used_and_cleared_it_says_so(ledger: Ledger, rail: Path) -> None:

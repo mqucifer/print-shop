@@ -569,7 +569,7 @@ def _not_set_here(ledger: Ledger, part: ThisPart) -> tuple[Item, ...]:
         elif not variety:
             doubts.append("this print's variety isn't known")
         elif not same_variety(learned, variety):
-            doubts.append(f"learned on another variety, {learned}; this is {variety}")
+            doubts.append(f"this is {variety}")  # its source says the variety it was learned on
         tier = profile_of(g.key, part.process, part.filament)
         preset = _first((part.filament if tier == "filament" else part.process).get(g.key, ""))
         items.append(Item(
