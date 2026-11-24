@@ -192,6 +192,7 @@ from print_shop.runtime import (
     job_profiles,
     profiles_for,
     recording_path,
+    sliced_reader,
 )
 from print_shop.setup.context import read_context
 from print_shop.setup.intake import Asker, cli_asker, drop_typed, replay_asker
@@ -789,27 +790,8 @@ def _queue(args: argparse.Namespace, live: Live) -> int:
 
 
 def _sliced_for(args: argparse.Namespace) -> Callable[[Path, Material | None], sliced.SlicedJob]:
-    """A hand-sliced file read for the queue, for the spool it's for: refused if it names another
-    filament or nozzle, as `--sliced` refuses one without --loaded-ok."""
-    store = Store(STORE_DIR)
-    bed = bed_type(load_env(args.settings)).value
-
-    def read(path: Path, material: Material | None) -> sliced.SlicedJob:
-        file = sliced.read(path)
-        compared: sliced.Comparison | None = None
-        note = "the inventory isn't set up" if material is None else ""
-        if material is not None:
-            if wrong := sliced.loaded_mismatch(file, material, store):
-                raise ValueError("; ".join(wrong) + ": add it with the spool it was sliced for "
-                                 "(spool=S), or send it with --sliced and --loaded-ok")
-            try:
-                compared = sliced.compare(file.config, material, store, bed=bed)
-            except NoChoice as exc:
-                note = f"the store picks no tuning for it ({str(exc).splitlines()[0]})"
-        return sliced.SlicedJob.of(file, material=material, compared=compared,
-                                   compared_note=note)
-
-    return read
+    """A hand-sliced file read for the queue, for the spool it's for (`runtime.sliced_reader`)."""
+    return sliced_reader(args.settings)
 
 
 def _start_here(

@@ -12,6 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from print_shop import sliced
 from print_shop.core.mqtt import MqttConfig
 from print_shop.core.state import turn_words
 from print_shop.env import SETTINGS_PATH, load_env
@@ -41,11 +42,11 @@ from print_shop.setup.review import Reviewer
 from print_shop.setup.waiting import Waiting
 from print_shop.sliced import SlicedJob
 from print_shop.slicer.orca import BedType, SlicerProfiles, with_bed_type
-from print_shop.slicer.store import STORE_DIR, Choice, Store, choose
+from print_shop.slicer.store import STORE_DIR, Choice, NoChoice, Store, choose
 
 __all__ = [
     "Run", "bed_type", "build_queue", "build_run", "describe", "describe_all", "describe_part",
-    "describe_plate", "job_profiles", "profiles_for", "recording_path",
+    "describe_plate", "job_profiles", "profiles_for", "recording_path", "sliced_reader",
 ]
 
 #: Where a run's per-job files go (rotated STLs, G-code, the job checkpoint).
@@ -91,6 +92,32 @@ def job_profiles(
                     process=process)
     profiles = profiles_for(choice, store_root, into / "composed", material)
     return with_bed_type(profiles, bed, into / "profiles")
+
+
+def sliced_reader(
+    settings: Path | None = None, store_root: Path = STORE_DIR,
+) -> Callable[[Path, Material | None], SlicedJob]:
+    """A hand-sliced file read for the queue, for the spool it's for: refused (ValueError) if it
+    names another filament or nozzle, as `--sliced` refuses one without --loaded-ok
+    (mqucifer/print-shop#210, and for a file sent, mqucifer/print-shop#226)."""
+    store = Store(store_root)
+    bed = bed_type(load_env(settings or SETTINGS_PATH)).value
+
+    def read(path: Path, material: Material | None) -> SlicedJob:
+        file = sliced.read(path)
+        compared: sliced.Comparison | None = None
+        note = "the inventory isn't set up" if material is None else ""
+        if material is not None:
+            if wrong := sliced.loaded_mismatch(file, material, store):
+                raise ValueError("; ".join(wrong) + ": add it with the spool it was sliced for "
+                                 "(spool=S), or send it with --sliced and --loaded-ok")
+            try:
+                compared = sliced.compare(file.config, material, store, bed=bed)
+            except NoChoice as exc:
+                note = f"the store picks no tuning for it ({str(exc).splitlines()[0]})"
+        return SlicedJob.of(file, material=material, compared=compared, compared_note=note)
+
+    return read
 
 
 def bed_type(env: dict[str, str]) -> BedType:

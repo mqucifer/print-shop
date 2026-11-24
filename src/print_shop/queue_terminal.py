@@ -20,12 +20,18 @@ the person picks, in any order.
     retry 3                    a stopped job prepared again, with what you gave it
     spool 3 2                  3 moved to spool #2: another colour at once; another filament
                                prepared again, back to its review
-    add FILE [x3] [spool=2]    more files, in one go
+    sent 3                     what came with 3, sent to you: who, when, the note, where the
+                               file was, and what came with it or wasn't taken
+    add FILE [x3] [spool=2]    more files, in one go; after a file also for="what it's for",
+                               loaded=..., seen=walls,top, project=P.3mf, and
+                               suggest="KEY=VALUE because ...", as `scripts/send.py` takes them
     quit                       put the queue by: every job waits where it is (Ctrl-C too)
 """
 
 from __future__ import annotations
 
+import dataclasses
+import re
 import shlex
 import shutil
 import threading
@@ -38,6 +44,7 @@ from print_shop.inventory import Inventory
 from print_shop.orchestrator.daemon import Daemon
 from print_shop.orchestrator.kept import Waits
 from print_shop.orchestrator.print_queue import Adding, Need, PrintQueue
+from print_shop.orchestrator.sending import loaded_from
 from print_shop.setup.intake import cli_asker, drop_typed
 from print_shop.setup.review import cli_reviewer
 from print_shop.setup.waiting import cli_waiting, terminal
@@ -61,26 +68,65 @@ LIVE_EVERY_S = 0.5
 _START_ENDS = ("Started:", "Not started", "Ended without printing", "Rejected", "Timed out")
 
 
+#: What follows a file, said of it: `for=`, `loaded=`, `seen=`, `project=` and `suggest=`
+#: (mqucifer/print-shop#226).
+SAID_OF = ("for=", "loaded=", "seen=", "project=", "suggest=")
+#: A suggested setting, as a correction is typed at the review: `KEY=VALUE because ...`.
+SUGGESTED = re.compile(r"^\s*([a-z_]+)\s*=\s*(\S+)\s+because\s+(\S.*)$", re.IGNORECASE | re.DOTALL)
+
+
 def parse_adding(tokens: list[str]) -> list[Adding] | str:
     """Files to add, each followed by its quantity (`x3`) and its spool (`spool=2`) where they
-    aren't one and the loaded one. Returns them, or why they can't be read."""
+    aren't one and the loaded one, and what's said of it (`SAID_OF`). Returns them, or why they
+    can't be read."""
     found: list[Adding] = []
     for token in tokens:
         low = token.lower()
-        if low.startswith("x") and low[1:].isdigit() or low.startswith("spool="):
+        quantity = low.startswith("x") and low[1:].isdigit()
+        if quantity or low.startswith(("spool=", *SAID_OF)):
             if not found:
                 return f"{token} goes after the file it's for"
-            last = found[-1]
-            if low.startswith("x"):
-                found[-1] = Adding(last.path, copies=int(low[1:]), spool_id=last.spool_id)
-            else:
-                number = low.removeprefix("spool=").lstrip("#")
-                if not number.isdigit():
-                    return f"{token}: a spool is its number in the stock, spool=2"
-                found[-1] = Adding(last.path, copies=last.copies, spool_id=int(number))
+            said = _said_of(found[-1], token, low, quantity)
+            if isinstance(said, str):
+                return said
+            found[-1] = said
         else:
             found.append(Adding(Path(token).expanduser()))
     return found
+
+
+def _said_of(last: Adding, token: str, low: str, quantity: bool) -> Adding | str:
+    """`last` with what `token` says of it, or why it can't be read."""
+    name, _, value = token.partition("=")
+    name = name.lower()
+    if quantity:
+        return dataclasses.replace(last, copies=int(low[1:]))
+    if name == "spool":
+        number = value.lstrip("#")
+        if not number.isdigit():
+            return f"{token}: a spool is its number in the stock, spool=2"
+        return dataclasses.replace(last, spool_id=int(number))
+    if name == "for":
+        return dataclasses.replace(last, purpose=value.strip())
+    if name == "loaded":
+        try:
+            return dataclasses.replace(last, loaded=loaded_from(value))
+        except ValueError as exc:
+            return str(exc)
+    if name == "seen":
+        faces = tuple(f.strip().lower() for f in value.split(",") if f.strip())
+        faces = () if faces == ("nothing",) or faces == ("none",) else faces
+        if wrong := [f for f in faces if f not in ("walls", "top", "bottom")]:
+            return f"{token}: seen lists walls, top and bottom, or nothing; not {', '.join(wrong)}"
+        return dataclasses.replace(last, seen=faces)
+    if name == "project":
+        return dataclasses.replace(last, project=Path(value).expanduser())
+    matched = SUGGESTED.match(value)
+    if matched is None:
+        return (f"{token}: a suggestion is suggest=\"KEY=VALUE because why\", such as "
+                "suggest=\"wall_loops=4 because the flange carries the shelf\"")
+    key, setting, why = matched.groups()
+    return dataclasses.replace(last, suggested=(*last.suggested, (key.lower(), setting, why)))
 
 
 def serve(
@@ -194,6 +240,12 @@ class _Terminal:
             self.write("  empty: `add FILE` adds one, or several")
         for line in lines:
             self.write(f"  {line.said()}")
+        sends = self.queue.sent()
+        if sends:
+            self.write("SENT TO YOU")
+            for sent in sends:
+                for said in sent.said():
+                    self.write(f"  {said}")
         asks = [f"`{_verb(li.needs)} {li.number}`" for li in lines if li.needs is not None]
         if asks:
             self.write("Needs you: " + ", ".join(asks) + ". `help` lists the rest.")
@@ -214,8 +266,8 @@ class _Terminal:
             "mesh": self._mesh, "start": self._start, "reject": self._reject,
             "first": self._first, "place": self._place, "together": self._together,
             "hold": self._hold, "release": self._release, "remove": self._remove,
-            "spool": self._spool, "add": self._add, "stock": self._stock, "go": self._go,
-            "retry": self._retry,
+            "spool": self._spool, "add": self._add, "sent": self._sent, "stock": self._stock,
+            "go": self._go, "retry": self._retry,
         }.get(verb)
         if action is None:
             self.write(f"  Not a queue command: {verb}. `help` lists them.")
@@ -473,6 +525,22 @@ class _Terminal:
     def _retry(self, args: list[str]) -> None:
         if job_id := self._job(args):
             self._done(self.queue.retry(job_id))
+
+    def _sent(self, args: list[str]) -> None:
+        """What came with a job sent to the queue (mqucifer/print-shop#226)."""
+        job_id = self._job(args)
+        job = self.queue.find(job_id[:8]) if job_id else None
+        if job is None:
+            return
+        sent = job.sent
+        if sent is None or not sent.by:
+            self.write("  It was added here, not sent.")
+            return
+        self.write(f"  {job.part}: {sent.said()}")
+        if sent.source:
+            self.write(f"  from {sent.source}; the queue prints its own copy")
+        for line in sent.came:
+            self.write(f"  {line}")
 
     def _stock(self, args: list[str]) -> None:
         self.write(self.stock() if self.stock is not None else "  The stock isn't set up.")

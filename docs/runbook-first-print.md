@@ -394,6 +394,28 @@ PRINT_AGENT_ALLOW_HARDWARE=1 uv run python scripts/print_job.py --queue
 
 The queue's jobs prepare beside the prompt, so what they log isn't shown on it. While `queue>` is open, the line above it says what needs you and what just happened, rewritten in place as it changes, and what you're typing is left as it is; the whole of what happened to each (ready, offered, started, held, stopped, ended) is said at the next `queue>`. Each job keeps its own `job.log` in its folder, as a lone job does: what its preparing logged, what the queue said of it, and its screens and what you typed at them.
 
+### Files sent to the queue
+
+Files can be sent to the queue with one command, by a Claude session in any repository or by you, and picked up when you can (mqucifer/print-shop#226). The queue keeps its own copy of each, with its notes file, its design run's context as it reads then, and for G-code the Orca project it was sliced from, so the originals can move. Sending answers nothing, approves nothing and arms nothing, whatever `PRINT_AGENT_ALLOW_HARDWARE` says.
+
+```
+uv run python scripts/send.py --by "you" --note "the box set: lid first" lid.stl x2 for="the box's lid" loaded=handled suggest="wall_loops=4 because it clips on" box.stl spool=2
+```
+
+- After each file, besides `x2` and `spool=2`: `for="..."` and `loaded=...` say what a part is for and how it's loaded, which the questions read back for you to confirm (`loaded` is one of the purpose question's four); `seen=top,walls`; `project=P.3mf` for G-code; and `suggest="KEY=VALUE because why"`, a setting the sender suggests.
+- **What a sender suggests is only offered.** At the review it's under "SUGGESTED BY" the sender, unticked, with why: `use N` takes it, as your correction marked as taken from their suggestion. Left, it reaches neither the slice, your corrections nor a lesson.
+- **The same bytes for the same spool aren't sent twice:** the answer names the job that waits. The same bytes as a past print are queued, saying that print and how it came out.
+- **At `queue>`, "SENT TO YOU"** lists each send: who, when, the note, and what each job needs next. `sent 3` shows what came with job 3: where the file was, its notes, the project, the suggestions, and what wasn't taken. A file sent while the queue is open is taken up within a second; otherwise when `--queue` next opens. `--list` shows sent jobs with who sent them.
+
+**For Claude sessions on this Mac,** the skill `skills/send-to-queue/` tells any session how to send and that sending is all it does. Install it once, for every session, as a link to the repository's copy, so it stays current with main:
+
+```
+mkdir -p ~/.claude/skills
+ln -s ~/Documents/git/print-shop/skills/send-to-queue ~/.claude/skills/send-to-queue
+```
+
+A session started after that finds it by its description ("send files to the person's print queue"). To take it away, `rm ~/.claude/skills/send-to-queue`.
+
 ## A file you sliced by hand
 
 For a print you set up yourself in Orca (mqucifer/print-shop#164): a test with a different setting on each object, a calibration print, or a job you know is good. print-shop sends it **as it is** and keeps it in the ledger. It asks no questions, proposes nothing, applies no lesson and slices nothing again.
