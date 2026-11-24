@@ -39,6 +39,7 @@ from print_shop.orchestrator.kept import WaitingJob, Waits
 from print_shop.orchestrator.print_queue import Adding, Line, SentTo
 from print_shop.queue_terminal import Runs
 from print_shop.setup.pauses import said as pause_said
+from print_shop.setup.reading import PauseReading
 
 __all__ = [
     "LOOK_AGAIN", "AlsoDiffers", "Daemonish", "LoadAsk", "NowPrinting", "Queued", "Queueish",
@@ -207,15 +208,31 @@ class Shop:
         said = (f"About {_minutes(left)} min left.{spool_said}" if left > 0
                 else f"Past the slice's {_minutes(row.print_time_s)} min.{spool_said}")
         pause = ""
-        for p in row.reading.pauses if row.reading else ():
-            ahead = p.after_s - elapsed
-            if ahead > 0:
-                what = pause_said(p.kind)
-                to = f" to {p.to}" if p.to else ""
-                pause = (f"Pauses in {_minutes(ahead)} min for {what}{to}. "
-                         "Be at the printer.")
-                break
+        ahead = self._pause_ahead(row, elapsed)
+        if ahead is not None:
+            p, seconds = ahead
+            to = f" to {p.to}" if p.to else ""
+            pause = (f"Pauses in {_minutes(seconds)} min for {pause_said(p.kind)}{to}. "
+                     "Be at the printer.")
         return NowPrinting(row.job_id, row.part_said, said, pause)
+
+    @staticmethod
+    def _pause_ahead(row: Row, elapsed: float) -> tuple[PauseReading, float] | None:
+        """The next pause, by the slice's own times from the start, and how far ahead."""
+        for p in row.reading.pauses if row.reading else ():
+            if p.after_s - elapsed > 0:
+                return p, p.after_s - elapsed
+        return None
+
+    def pause_ahead(self, job_id: str) -> tuple[int, float] | None:
+        """The running print's next pause, as the layer it comes before and the seconds to it,
+        or None."""
+        row = self.run(job_id)
+        elapsed = self._since(row.started_at) if row is not None else None
+        if row is None or elapsed is None:
+            return None
+        ahead = self._pause_ahead(row, elapsed)
+        return (ahead[0].before_layer, ahead[1]) if ahead is not None else None
 
     def _since(self, at: str | None) -> float | None:
         if not at:

@@ -1,0 +1,42 @@
+# print-shop's notices to your phone (mqucifer/print-shop#221): a job needs you, a pause is
+# near, or a print ended.
+#
+# The run sends each once, on `<MQTT_TOPIC_PREFIX>/notice`, never retained, while the phone's
+# page is on (PHONE_HOME set). Each is JSON: kind ("needs_you", "pause_near", "ended"),
+# title, message, and url, the phone's page itself on the home Wi-Fi.
+#
+# To use: Settings -> Automations & Scenes -> + Create Automation -> three-dot menu ->
+# Edit in YAML, and paste this. Then change two things:
+#   - `3dprint-dev` to your MQTT_TOPIC_PREFIX, if you set one;
+#   - `notify.mobile_app_your_phone` to your phone's notify action (Settings -> Companion
+#     App, or Developer Tools -> Actions, "notify.mobile_app_...").
+#
+# The link opens the page in the phone's own browser: the page refuses to be framed, and it
+# is never proxied through Home Assistant. "Open" is the companion app's documented way to the
+# default browser on iOS. If a tap opens it inside the app instead, it shows "Not signed in":
+# open the link in the browser where the phone was paired.
+
+alias: print-shop notices to the phone
+description: A job needs you, a pause is near, or a print ended (mqucifer/print-shop#221).
+mode: queued
+triggers:
+  - trigger: mqtt
+    topic: 3dprint-dev/notice
+actions:
+  - action: notify.mobile_app_your_phone
+    data:
+      title: "{{ trigger.payload_json.title }}"
+      message: "{{ trigger.payload_json.message }}"
+      data:
+        # iOS's tap link, and Android's.
+        url: "{{ trigger.payload_json.url }}"
+        clickAction: "{{ trigger.payload_json.url }}"
+        # A pause near is time-sensitive: it shows through a Focus on iOS.
+        push:
+          interruption-level: >-
+            {{ 'time-sensitive' if trigger.payload_json.kind == 'pause_near' else 'active' }}
+        # On Android, write URI for OPEN: its companion app opens a link from an action so.
+        actions:
+          - action: OPEN
+            title: Open
+            uri: "{{ trigger.payload_json.url }}"

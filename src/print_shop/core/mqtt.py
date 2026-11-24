@@ -115,6 +115,12 @@ def availability_topic(cfg: MqttConfig) -> str:
     return f"{cfg.topic_prefix}/availability"
 
 
+def notice_topic(cfg: MqttConfig) -> str:
+    """A notice for the phone (mqucifer/print-shop#221): a job needs the person, a pause is
+    near, or a print ended. Never retained: Home Assistant's automation sends each once."""
+    return f"{cfg.topic_prefix}/notice"
+
+
 def outcome_topic(cfg: MqttConfig) -> str:
     """The outcome gate: the print on show, the draft answer, any error. Retained."""
     return f"{cfg.topic_prefix}/outcome"

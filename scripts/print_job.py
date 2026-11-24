@@ -204,6 +204,7 @@ from print_shop.orchestrator.live import AlreadyLive, Live, only_live
 from print_shop.orchestrator.outcome import no_frames
 from print_shop.orchestrator.spools import ask_on_now
 from print_shop.phone.home import Home, HomeRefused
+from print_shop.phone.notices import Notices
 from print_shop.phone.phones import Phones, phones_path
 from print_shop.phone.server import PhoneOff, attach, make_server
 from print_shop.phone.shop import Shop
@@ -843,14 +844,22 @@ class PhonePage:
         if server is None:
             yield
             return
+        notices = None
         if self.shop is not None:
             self.shop.daemon = daemon
+            # A job that needs you, a pause near, a print ended: to the phone through Home
+            # Assistant (mqucifer/print-shop#221).
+            notices = Notices(self.shop, lambda n: daemon.notify(n.payload()),
+                              origin=self.main.rstrip("/"))
+            notices.start()
         attach(server, daemon, self.shop)
         thread = threading.Thread(target=server.serve_forever, name="phone-page", daemon=True)
         thread.start()
         try:
             yield
         finally:
+            if notices is not None:
+                notices.stop()
             server.shutdown()
             server.server_close()
 

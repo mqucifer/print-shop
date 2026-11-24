@@ -81,6 +81,7 @@ from print_shop.core.mqtt import (
     approval_buttons,
     command_topic,
     gate_topic,
+    notice_topic,
     state_topic,
 )
 from print_shop.expert.client import LLMConfig
@@ -915,6 +916,12 @@ class Daemon:
         """How the last Start from a phone went, for the page to say once the gate's gone."""
         with self._job_lock:
             return self._last_phone
+
+    def notify(self, notice: dict[str, str]) -> None:
+        """A notice for the phone, through Home Assistant (mqucifer/print-shop#221), on the
+        notice topic, never retained: a replay sends nothing."""
+        if self._bridge is not None:
+            self._bridge.publish(notice_topic(self._cfg), json.dumps(notice), retain=False)
 
     def prepared(self, job_id: str) -> dict[str, Any]:
         """A job's state as its preparing left it, read only: its slice and the slice's reading,

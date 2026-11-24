@@ -705,3 +705,59 @@ def test_a_nozzle_off_the_runs_span_changes_nothing(again_page: tuple[Page, Any]
     assert nozzle_typed(found, str(was + 100)) == ""
     assert nozzle_typed(found, "x") == "" and nozzle_typed(found, str(was)) == ""
     assert nozzle_typed(found, str(was + 5)) == f"nozzle_temperature={was + 5}"
+
+
+# --------------------------------------------------------------------------
+# Notices to the phone, through Home Assistant
+# --------------------------------------------------------------------------
+
+
+def test_each_notice_goes_once_on_the_notice_topic_never_retained(page: Page) -> None:
+    from print_shop.core.mqtt import notice_topic  # noqa: PLC0415
+    from print_shop.phone.notices import Notices  # noqa: PLC0415
+    from tests.test_job_e2e import CFG  # noqa: PLC0415
+
+    origin = f"http://{MAC}:8765"
+    notices = Notices(page.shop, lambda n: page.daemon.notify(n.payload()), origin=origin)
+    job_id = page.queue.add([Adding(page.made.part("bracket"))])[0][0]
+    wait_until(lambda: page.queue.asked(job_id) is not None)
+    _finished(page.made.ledger, "run-1")
+    ledger = page.made.ledger
+    reading = SliceReading(layers=(LayerTime(n=1, z=0.2, time_s=60.0),), features=(),
+                           seam=SeamReading(seams=0, stacked=0.0),
+                           pauses=(PauseReading(before_layer=12, z=2.4, after_s=900.0,
+                                                kind=PauseFor.INSERT),))
+    ledger.record_start_requested(record("printing").model_copy(update={"reading": reading}))
+    ledger.record_started("printing")
+    row = ledger.get("printing")
+    assert row is not None and row.started_at is not None
+    started = datetime.fromisoformat(row.started_at)
+    page.shop.now = lambda: started + timedelta(minutes=5)  # the pause is 10 min ahead
+    first = {n.kind for n in notices.look()}
+    assert first == {"needs_you", "ended"}, "a pause 10 min ahead isn't near yet"
+    page.shop.now = lambda: started + timedelta(minutes=11)
+    assert [n.kind for n in notices.look()] == ["pause_near"]
+    assert notices.look() == [], "each once"
+    sent = [p for p in page.made.bridge.published if p.topic == notice_topic(CFG)]
+    assert len(sent) == 3 and not any(p.retain for p in sent)
+    said = {json.loads(p.payload)["kind"]: json.loads(p.payload) for p in sent}
+    assert said["needs_you"]["url"] == f"{origin}/job/{job_id}"
+    assert said["ended"]["url"] == f"{origin}/run/run-1"
+    assert said["ended"]["message"] == "cube.stl ended. How did it come out?"
+    assert "Pauses in 4 min for an insert" in said["pause_near"]["message"]
+    for payload in said.values():
+        assert set(payload) == {"kind", "title", "message", "url"}, "nothing else is in one"
+
+
+def test_the_notices_automation_links_the_page_and_never_frames_it() -> None:
+    import yaml  # noqa: PLC0415
+
+    found = yaml.safe_load((Path(__file__).parents[1] / "ha-configs"
+                            / "print_shop_notices.yaml").read_text())
+    (trigger,) = found["triggers"]
+    assert trigger["trigger"] == "mqtt" and trigger["topic"].endswith("/notice")
+    (action,) = found["actions"]
+    data = action["data"]["data"]
+    assert data["url"] == data["clickAction"] == "{{ trigger.payload_json.url }}"
+    assert data["actions"][0]["uri"] == "{{ trigger.payload_json.url }}"
+    assert "iframe" not in json.dumps(found) and "webpage" not in json.dumps(found)
