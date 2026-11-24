@@ -138,6 +138,7 @@ from print_shop.expert.client import STREAM_THREAD
 from print_shop.inventory import SETUP, Inventory, InventoryError, Material
 from print_shop.joblog import LOG_NAME, JobLog, Terminal, secrets
 from print_shop.ledger import Ledger, ledger_path
+from print_shop.opening import ThisJob
 from print_shop.orchestrator.daemon import GATE_WAIT_S
 from print_shop.orchestrator.live import AlreadyLive, Live, only_live
 from print_shop.orchestrator.outcome import no_frames
@@ -157,6 +158,7 @@ from print_shop.runtime import (
 )
 from print_shop.setup.context import read_context
 from print_shop.setup.intake import Asker, cli_asker, drop_typed, replay_asker
+from print_shop.setup.layout import terminal_width
 from print_shop.setup.review import cli_reviewer
 from print_shop.setup.suggest import THREAD
 from print_shop.setup.waiting import Prompted, Waiting, can_ask, cli_waiting
@@ -401,13 +403,16 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
         if isinstance(found, int):
             return found
         hand_sliced = found
+    # The job's opening lines, said as one block before it's submitted (mqucifer/print-shop#266).
+    this = ThisJob(part=str(args.stl[0]) if len(args.stl or ()) == 1 else "") if args.stl else None
     if args.stl:
+        assert this is not None
         material: Material | None = None
         nozzle, filament = args.nozzle, args.filament
         with Inventory(ledger_path(args.settings)) as inventory:
             if not inventory.printers():
                 # Never skipped silently (the operator, 2026-10-25).
-                print(f"The inventory isn't set up ({SETUP}); using --nozzle and --filament.")
+                this.inventory = f"not set up ({SETUP}); using --nozzle and --filament"
                 if nozzle is None or not filament:
                     parser.error("say what's fitted: --nozzle (mm) and --filament (a variety)")
             else:
@@ -421,7 +426,7 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
                     print(STOPPED_BEFORE)
                     return 130
                 nozzle, filament = material.nozzle_mm, material.tuning or material.variety
-                print(f"From the inventory: {material.line()}.")
+                this.inventory = material.line()
         assert nozzle is not None and filament is not None
         try:
             choice = choose(
@@ -435,12 +440,10 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
             print(exc, file=sys.stderr)
             return 2
         profiles = profiles_for(choice, STORE_DIR, WORK_DIR / "composed", material)
-        print(f"Fitted: a {nozzle:g} mm nozzle and {filament}. Slicing with:")
-        print(f"  machine   {choice.machine.name}")
-        print(f"  process   {choice.process.name}")
-        print(f"  filament  {choice.filament.name}")
-        for note in choice.notes:
-            print(f"  ({note})")
+        this.fitted = f"a {nozzle:g} mm nozzle and {filament}"
+        this.presets = [("machine", choice.machine.name), ("process", choice.process.name),
+                        ("filament", choice.filament.name)]
+        this.notes = choice.notes
         answering = Prompted(read)
         try:
             asker = replay_asker(args.answers) if args.answers else cli_asker(read=answering)
@@ -452,13 +455,19 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
     recorder = FrameRecorder(recording_path()) if args.record else None
     printer: PrinterClient | None = None
     a_job = bool(args.stl) or hand_sliced is not None
+    armed = ""
     if a_job and hardware_allowed():
         printer = live_printer(recorder=recorder)
-        print(f"ARMED by {ALLOW_HARDWARE_ENV}=1: an approval in Home Assistant starts the print.")
+        armed = f"ARMED by {ALLOW_HARDWARE_ENV}=1: an approval in Home Assistant starts the print."
     elif a_job:
-        print(f"Not armed ({ALLOW_HARDWARE_ENV} is not 1): an approval will NOT start a print.")
-    if recorder is not None:
-        print(f"Recording the printer's replies to {recorder.path}")
+        armed = f"Not armed ({ALLOW_HARDWARE_ENV} is not 1): an approval will NOT start a print."
+    recording = f"Recording the printer's replies to {recorder.path}" if recorder else ""
+    if this is not None:
+        this.armed, this.recording = armed, recording
+    else:
+        for said in (armed, recording):
+            if said:
+                print(said)
 
     run = build_run(
         printer=printer,
@@ -483,31 +492,35 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
             if hand_sliced is not None:
                 job_id = run.daemon.submit_sliced(hand_sliced)
             elif len(args.stl) > 1:
-                print(f"{len(args.stl)} parts, one job, on one plate:")
-                for n, part in enumerate(args.stl, 1):
-                    context = read_context(part)
-                    print(f"  part {n}, {part.name}. Its context: "
-                          + "; ".join(context.lines()[:2]))
+                assert this is not None
+                this.part = f"{len(args.stl)} parts, one job, on one plate"
+                this.parts = [(part.name, "; ".join(read_context(part).lines()[:2]))
+                              for part in args.stl]
+                print("\n".join(this.lines(terminal_width())))
                 job_id = run.daemon.submit_several(args.stl, as_laid=args.as_laid)
             else:
+                assert this is not None
                 context = read_context(args.stl[0], args.context)
-                print("The part's context: " + "; ".join(context.lines()[:2]))
+                this.context = "; ".join(context.lines()[:2])
+                print("\n".join(this.lines(terminal_width())))
                 job_id = run.daemon.submit(args.stl[0], as_laid=args.as_laid,
                                            context=args.context)
             if job_log is not None:
                 job_log.open(WORK_DIR / job_id / LOG_NAME)
-                print(f"Job {job_id}'s log: {job_log.path}")
+            log = str(job_log.path) if job_log is not None else ""
             if hand_sliced is not None:
+                if log:
+                    print(f"Job {job_id}'s log: {log}")
                 print(f"Job {job_id}: taking the file as it is, then the approval gate.")
-            elif len(args.stl) > 1:
-                if args.as_laid:
-                    how = "each kept as laid, then a few questions about the parts together, here"
-                else:
-                    how = "a few questions about the parts together, here, then each part's pose"
-                print(f"Job {job_id}: {how}.")
             else:
-                how = "kept as laid" if args.as_laid else "orienting"
-                print(f"Job {job_id}: {how}, then a few questions about the part, here.")
+                if len(args.stl) > 1:
+                    how = ("each kept as laid, then a few questions about the parts together, here"
+                           if args.as_laid else
+                           "a few questions about the parts together, here, then each part's pose")
+                else:
+                    how = (f"{'kept as laid' if args.as_laid else 'orienting'}, then a few "
+                           "questions about the part, here")
+                print("\n".join(ThisJob.started(job_id, log, how, terminal_width())))
             shown = 0
             while True:  # a gate at a time, to the one before printing
                 try:
@@ -585,8 +598,19 @@ def _watch(run: Run, job_id: str) -> int:
 
 def on_screen(record: logging.LogRecord) -> bool:
     """Whether a log line shows on the terminal: not one from the model's work beside the review,
-    which would land on the open prompt (mqucifer/print-shop#242). The job's log keeps it."""
-    return record.threadName not in (THREAD, STREAM_THREAD)
+    which would land on the open prompt (mqucifer/print-shop#242), nor bookkeeping the person
+    can't act on that lands among their answers: a model call's HTTP line, and the broker's
+    availability said again (mqucifer/print-shop#266). The job's log keeps each one."""
+    if record.threadName in (THREAD, STREAM_THREAD):
+        return False
+    if record.name.startswith(("httpx", "httpcore")) and record.levelno <= logging.INFO:
+        return False
+    return not str(record.msg).startswith(AVAILABILITY_SAID_AGAIN)
+
+
+#: How the broker's client begins its line when it says "online" again over another session's
+#: will (`core.mqtt`): nothing to act on, so it's left to the job's log.
+AVAILABILITY_SAID_AGAIN = "availability read offline while this run is online"
 
 
 def _gate_lines(gate: dict[str, object], *, turned: bool) -> list[str]:

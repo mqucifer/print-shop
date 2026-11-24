@@ -82,7 +82,7 @@ def test_a_plates_two_questions_wait_for_no_model_and_go_reaches_the_review(
         assert rig.press("approve", job).printed
     assert poses.asked_after == [3, 3, 3], "no pose's call before the two answers and go"
     assert PLATE_WORDS[PURPOSE.text] in person.text and PLATE_WORDS[SEEN.text] in person.text
-    assert "Type go and Enter to go on without waiting" in person.text
+    assert "Type go and Enter to go on without waiting" in flat(person.text)
     said = " ".join(rig.shown[0].split())
     assert "note: you went on without the model's questions after" in said
     rows = rig.ledger.job_rows(job)

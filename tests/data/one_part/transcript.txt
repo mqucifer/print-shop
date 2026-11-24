@@ -1,27 +1,42 @@
 == print_job.py
-The inventory isn't set up (uv run python scripts/stock.py printer add cc1 "Elegoo Centauri Carbon"); using --nozzle and --filament.
-Fitted: a 0.4 mm nozzle and Elegoo PLA. Slicing with:
+THIS JOB
+  part      <tmp>/cube.stl
+  inventory not set up (uv run python scripts/stock.py printer add cc1 "Elegoo Centauri Carbon");
+            using --nozzle and --filament
+  fitted    a 0.4 mm nozzle and Elegoo PLA
   machine   Elegoo Centauri Carbon 0.4 nozzle - Copy
+              your tuning of Elegoo Centauri Carbon 0.4 nozzle
   process   0.20mm Standard @Elegoo CC 0.4 nozzle - Copy
+              your tuning of 0.20mm Standard @Elegoo CC 0.4 nozzle
   filament  Elegoo PLA @ECC - Copy
-  (machine 'Elegoo Centauri Carbon 0.4 nozzle - Copy': your tuning of 'Elegoo Centauri Carbon 0.4 nozzle')
-  (process '0.20mm Standard @Elegoo CC 0.4 nozzle - Copy': your tuning of '0.20mm Standard @Elegoo CC 0.4 nozzle')
-  (filament 'Elegoo PLA @ECC - Copy': your tuning of 'Elegoo PLA @ECC')
-Not armed (PRINT_AGENT_ALLOW_HARDWARE is not 1): an approval will NOT start a print.
-The part's context: none: no design run above the file and no sidecar beside it, so it's read as before
-Job <job>'s log: <tmp>/jobs/<job>/job.log
-Job <job>: orienting, then a few questions about the part, here.
+              your tuning of Elegoo PLA @ECC
+  arming    Not armed (PRINT_AGENT_ALLOW_HARDWARE is not 1): an approval will NOT start a print.
+  context   none: no design run above the file and no sidecar beside it, so it's read as before
+  job       <job>: orienting, then a few questions about the part,
+            here
+  log       <tmp>/jobs/<job>/job.log
 A few questions about this part:
-1. What is the cube for?
-   1) a test print (your presets): ; sets nothing itself; the review shows Orca's estimate  [recommended: it's a cube]
-   2) a gift (3 walls): sturdier faces; Orca: 16 min, 3.34 cm3
-   o) other: say it in your own words
-2. Which faces of this part will be seen once it's in use, as the file lays it?
-   1) the walls and the top as it lies now (your presets): the review keeps ironing for the top and points out a seam on the walls; sets nothing itself; the review shows Orca's estimate  [recommended: when it can't be said, judging every face as seen costs a little time, while a hidden flaw on a face that shows costs the print]
-   2) the walls; the top as it lies now is hidden (your presets): the review points out ironing on the hidden top, and a seam on the walls; sets nothing itself; the review shows Orca's estimate
-   3) the top as it lies now; the walls are hidden (your presets): the review keeps ironing for the top and lets the seam be; sets nothing itself; the review shows Orca's estimate
-   4) only the face on the plate (your presets): the review points out any ironing, which smooths only faces that end up hidden; sets nothing itself; the review shows Orca's estimate
-   o) other: say it in your own words
+  1. What is the cube for?
+   * 1  a test print: your presets
+                                 recommended · sets nothing itself; the review shows Orca's estimate
+
+          recommended: it's a cube
+     2  a gift: 3 walls                                                       Orca: 16 min, 3.34 cm3
+          sturdier faces
+     o  other: say it in your own words
+  2. Which faces of this part will be seen once it's in use, as the file lays it?
+   * 1  the walls and the top as it lies now                                             recommended
+          the review keeps ironing for the top and points out a seam on the walls
+          recommended: when it can't be said, judging every face as seen costs a little time, while
+          a hidden flaw on a face that shows costs the print
+     2  the walls; the top as it lies now is hidden
+          the review points out ironing on the hidden top, and a seam on the walls
+     3  the top as it lies now; the walls are hidden
+          the review keeps ironing for the top and lets the seam be
+     4  only the face on the plate
+          the review points out any ironing, which smooths only faces that end up hidden
+     o  other: say it in your own words
+     Each keeps your presets and sets nothing itself; the review shows Orca's estimate.
 LOOK FIRST
   The model is still working on settings (<n> s). What it proposes is added under Settings when you
     press Enter, and nothing waits for it.
