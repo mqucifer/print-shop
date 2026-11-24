@@ -634,7 +634,7 @@ def _slice(request: ReviewRequest, width: int, marks: Moved, fits: _Fits) -> lis
     lines.append("")
     again = reading.starts_again()
     if again:
-        lines += wrap("    by object ", f"z starts again at layer{'s' if len(again) != 1 else ''} "
+        lines += wrap("    by object  ", f"z starts again at layer{'s' if len(again) != 1 else ''} "
                       f"{', '.join(map(str, again))}, so a layer's z is up its own object", width,
                       " " * 14)
     shortest = reading.shortest()
@@ -780,8 +780,9 @@ def _pose(request: ReviewRequest, width: int) -> list[str]:
     lines: list[str] = []
     for part in request.parts:
         own = replace(request, orientation=part.orientation, candidates=part.candidates)
+        # Set in under its part, so each part's table reads as its own.
         lines += [*([""] if lines else []), f"  PART {part.n}, {part.name}",
-                  *_one_pose(own, width)]
+                  *(f"  {line}" if line else line for line in _one_pose(own, width - 2))]
     return lines
 
 
