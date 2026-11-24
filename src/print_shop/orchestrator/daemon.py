@@ -507,7 +507,12 @@ class Daemon:
             self._bridge.__exit__(*exc)
             self._bridge = None
         if self._conn is not None:
-            self._conn.close()
+            # Under the checkpointer's own lock: a job still running on its thread (a queued one
+            # preparing, or one cut short) may be mid-write on this connection, and closing it
+            # under that write crashes the process, natively. Its next write is then refused
+            # with an error, and the job waits to be taken up again, as `_closing` says.
+            with self._checkpointer.lock:
+                self._conn.close()
             self._conn = None
 
     # -- public API ---------------------------------------------------------
