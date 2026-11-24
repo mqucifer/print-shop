@@ -30,9 +30,12 @@ from print_shop.setup.bounds import MATERIAL, SETTINGS
 from print_shop.setup.reach import profile_of, unplaced
 from print_shop.sliced import NOT_SETTINGS, PROFILE_IDS
 
-__all__ = ["PLAIN", "STANDS_IN", "Found", "find", "named", "plain", "refused", "with_unit"]
+__all__ = ["PLAIN", "STANDS_IN", "Found", "find", "named", "plain", "refused", "switched",
+           "typed", "with_unit"]
 
 _PERCENT, _SPEED, _TEMP, _MM, _S = "%", " mm/s", " °C", " mm", " s"
+#: A switch's "unit": its 0 and 1 are shown off and on, and may be typed so (`typed`).
+_SWITCH = "on/off"
 
 #: Each setting's plain name and the unit its value is in ("" for a count or a choice).
 PLAIN: dict[str, tuple[str, str]] = {
@@ -43,7 +46,7 @@ PLAIN: dict[str, tuple[str, str]] = {
     "bottom_shell_layers": ("Bottom layers", ""),
     "sparse_infill_density": ("Infill density", _PERCENT),
     "sparse_infill_pattern": ("Infill pattern", ""),
-    "enable_support": ("Supports on", ""),
+    "enable_support": ("Supports", _SWITCH),
     "support_type": ("Support type", ""),
     "support_threshold_angle": ("Steepest overhang without support", "°"),
     "brim_type": ("Brim", ""),
@@ -65,7 +68,7 @@ PLAIN: dict[str, tuple[str, str]] = {
     "overhang_fan_threshold": ("Overhang that turns the bridge fan on", _PERCENT),
     "close_fan_the_first_x_layers": ("Fan off for the first layers", ""),
     "full_fan_speed_layer": ("Layer the fan is full by", ""),
-    "slow_down_for_layer_cooling": ("Slow down to cool a layer", ""),
+    "slow_down_for_layer_cooling": ("Slowing for layer cooling", _SWITCH),
     "slow_down_layer_time": ("Least time a layer takes", _S),
     "slow_down_min_speed": ("Slowest a layer slows to", _SPEED),
     "chamber_temperature": ("Chamber temperature", _TEMP),
@@ -81,9 +84,9 @@ PLAIN: dict[str, tuple[str, str]] = {
     "supertack_plate_temp_initial_layer": ("Bed, SuperTack plate, first layer", _TEMP),
     # Orca's others a correction is likely to name.
     "chamber_temperatures": ("Chamber temperature", _TEMP),
-    "enable_overhang_bridge_fan": ("Bridge and overhang fan forced on", ""),
+    "enable_overhang_bridge_fan": ("Bridge fan", _SWITCH),
     "fan_cooling_layer_time": ("Fan speeds up below this layer time", _S),
-    "reduce_fan_stop_start_freq": ("Keep the fan from stopping and starting", ""),
+    "reduce_fan_stop_start_freq": ("Fewer fan stops and starts", _SWITCH),
     "filament_flow_ratio": ("Flow ratio", ""),
     "filament_max_volumetric_speed": ("Most plastic a second", " mm³/s"),
     "filament_retraction_length": ("Retraction length", _MM),
@@ -108,9 +111,9 @@ PLAIN: dict[str, tuple[str, str]] = {
     "ironing_spacing": ("Ironing line spacing", _MM),
     "wall_sequence": ("Wall order", ""),
     "wall_generator": ("Wall generator", ""),
-    "only_one_wall_top": ("One wall on top surfaces", ""),
-    "detect_thin_wall": ("Print thin walls", ""),
-    "support_on_build_plate_only": ("Supports from the plate only", ""),
+    "only_one_wall_top": ("Single wall on top surfaces", _SWITCH),
+    "detect_thin_wall": ("Thin walls", _SWITCH),
+    "support_on_build_plate_only": ("Plate-only supports", _SWITCH),
     "support_style": ("Support style", ""),
     "support_top_z_distance": ("Gap above support", _MM),
     "support_bottom_z_distance": ("Gap below support", _MM),
@@ -192,9 +195,27 @@ def with_unit(key: str, value: str) -> str:
     first = value.split(",")[0].strip() if key not in _TEXT and not key.endswith("_gcode") \
         else value
     unit = PLAIN.get(key, ("", ""))[1]
+    if unit == _SWITCH:
+        return switched(key, first)
     if not unit or first.endswith(unit.strip()) or not _NUMBER.match(first):
         return first
     return f"{first}{unit}"
+
+
+def switched(key: str, value: str) -> str:
+    """A switch's value as it's shown, off or on; any other value as it is. A switch's name
+    names what it sets, never its state, so its value says which."""
+    if PLAIN.get(key, ("", ""))[1] != _SWITCH:
+        return value
+    return {"0": "off", "1": "on", "false": "off", "true": "on"}.get(value.strip().lower(), value)
+
+
+def typed(key: str, value: str) -> str:
+    """A switch's value typed as it's shown, `on` or `off` (or yes and no), as Orca writes it,
+    1 or 0; any other as typed."""
+    if PLAIN.get(key, ("", ""))[1] != _SWITCH:
+        return value
+    return {"on": "1", "yes": "1", "off": "0", "no": "0"}.get(value.strip().lower(), value)
 
 
 _NUMBER = re.compile(r"^-?\d+(\.\d+)?$")

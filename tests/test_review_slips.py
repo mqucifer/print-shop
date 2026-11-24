@@ -147,9 +147,12 @@ def test_a_pasted_review_gets_one_sentence_and_its_ok_approves_nothing() -> None
     review = person.reviewer()(_request())
     assert review == Review(stop=True), "the ok in it approved nothing"
     after = person.shown[1:]
-    assert after == ["  that paste of 20 lines is one answer with no correction in it, so "
-                     "nothing's taken from it, and the ok in it approves and ends nothing: type "
-                     "a correction as key=value because …, or ok on its own"]
+    # Said in one write, wrapped to the width (mqucifer/print-shop#222).
+    assert len(after) == 1 and all(len(line) <= 100 for line in after[0].splitlines())
+    assert " ".join(after[0].split()) == (
+        "that paste of 20 lines is one answer with no correction in it, so nothing's taken "
+        "from it, and the ok in it approves and ends nothing: type a correction as key=value "
+        "because …, or ok on its own")
     assert person.prompts.count("> ") == 2
 
 

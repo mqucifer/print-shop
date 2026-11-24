@@ -274,3 +274,32 @@ def test_a_setting_without_a_plain_name_is_said_as_its_keys_words() -> None:
 ])
 def test_a_value_is_shown_with_its_unit(key: str, value: str, shown: str) -> None:
     assert with_unit(key, value) == shown
+
+
+def test_a_switch_is_named_for_what_it_sets_and_shown_off_or_on() -> None:
+    """print-shop-ux, on mqucifer/print-shop#275: "Supports on  0  0" read as a contradiction."""
+    assert plain("enable_support") == "Supports"
+    lines = render(_request(), 100).splitlines()
+    kept = next(line for line in lines if "enable_support" in line)
+    assert kept.split()[:4] == ["Supports", "enable_support", "off", "off"]
+    assert with_unit("enable_overhang_bridge_fan", "1") == "on"
+
+
+def test_a_switch_may_be_typed_on_or_off() -> None:
+    review = parse_answer("enable_support=on because the arch sags", _request())
+    assert isinstance(review, Review)
+    assert [(c.key, c.value) for c in review.corrections] == [("enable_support", "1")]
+    review = parse_answer("enable_support=1 because the arch sags", _request())
+    assert isinstance(review, Review) and review.corrections[0].value == "1", "as ever"
+    review = parse_answer("wall_loops=on", _request())
+    assert isinstance(review, Review) and review.corrections[0].value == "on", (
+        "only a switch's on is read as 1: the rest is checked as typed")
+
+
+def test_a_refusal_at_the_prompt_is_wrapped_to_the_width() -> None:
+    person = Person("enable_overhang_bridge_fan=60", "stop")
+    person.review(_request(), width=80)
+    assert len(person.shown) == 2
+    said = person.shown[1].splitlines()
+    assert len(said) > 1 and all(len(line) <= 80 for line in said)
+    assert said[0].startswith("  'enable_overhang_bridge_fan' is a real Orca setting")

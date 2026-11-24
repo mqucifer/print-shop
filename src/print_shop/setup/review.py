@@ -721,6 +721,7 @@ def _read_parts(parts: list[str | Left], request: ReviewRequest) -> Review | Sli
             slips.append((at, _not_a_correction(part, request)))
             continue
         key, value, reason = match.group(1), match.group(2), (match.group(3) or "").strip()
+        value = names.typed(key, value)  # a switch's on or off, as Orca writes it
         if ";" in value:
             # A `;` is the next answer's only before one (`_split`), and a reason's otherwise.
             slips.append((at, f"'{value}' isn't a value of {key}: a ';' goes before the next "
@@ -1252,7 +1253,9 @@ def cli_reviewer(
                         write("  Back to the review: nothing from that answer is taken.")
                         continue
                     if isinstance(parsed, str):
-                        write(f"  {parsed}")
+                        # One line is wrapped to the width, as at fix>; several are laid out.
+                        write(f"  {parsed}" if "\n" in parsed
+                              else "\n".join(wrap("  ", parsed, min(width(), WIDTH), "    ")))
                         continue
                     purposed = _purposed(parsed, request, read, write)
                 except sqlite3.Error as exc:

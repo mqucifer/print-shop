@@ -70,7 +70,7 @@ def test_the_review_shows_each_change_against_the_preset_and_the_reasoning() -> 
     assert "  How the model read it\n    A 20 mm cube for show" in text
     assert re.search(r"\n  Walls +wall_loops +2 +3 +model\n", text)
     assert "      the flat faces show infill through 2 walls [flat_top, walls]" in text
-    assert re.search(r"KEPT AT YOUR PRESET\n  Supports on +enable_support +0 +0 +model\n"
+    assert re.search(r"KEPT AT YOUR PRESET\n  Supports +enable_support +off +off +model\n"
                      r"      nothing overhangs",
                      text)
     assert ("  time      10:54, Orca's estimate\n  plastic   2.9 cm3, 3.6 g\n"

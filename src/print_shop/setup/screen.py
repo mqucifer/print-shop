@@ -34,7 +34,7 @@ from print_shop.bench.pausing import TOPS_OUT, mm
 from print_shop.core.state import turn_words
 from print_shop.setup import pauses
 from print_shop.setup.context import SET_ASIDE
-from print_shop.setup.names import Found, named, plain, with_unit
+from print_shop.setup.names import Found, named, plain, switched, with_unit
 from print_shop.setup.offer import render as render_offer
 from print_shop.setup.proposal import (
     ORIENTATION,
@@ -569,9 +569,9 @@ def _settings(request: ReviewRequest, width: int, marks: Moved, fits: _Fits) -> 
 
 
 def _row(c: Change, tuned: bool, value: str) -> tuple[str, ...]:
-    yours = c.preset or "-"
-    standard = (c.standard or yours,) if tuned else ()
-    return (plain(c.key), *standard, yours, value, _by(c))
+    yours = switched(c.key, c.preset) or "-"
+    standard = (switched(c.key, c.standard) or yours,) if tuned else ()
+    return (plain(c.key), *standard, yours, switched(c.key, value), _by(c))
 
 
 def _beneath(
@@ -617,7 +617,8 @@ def by_model(request: ReviewRequest, width: int = WIDTH) -> list[str]:
         else:
             now = request.proposal.get(c.key)
             here = now.value if now is not None else c.preset
-        lines += wrap(f"  {row.number:>3}) ", f"{named(c.key)}  {here or '-'} -> {c.value}", width,
+        lines += wrap(f"  {row.number:>3}) ", f"{named(c.key)}  {switched(c.key, here) or '-'} -> "
+                      f"{switched(c.key, c.value)}", width,
                       rest)
         cites = ", ".join(x for x in (c.feature, c.knowledge) if x and c.key != ORIENTATION)
         if c.reading:
@@ -710,7 +711,8 @@ def _slice(request: ReviewRequest, width: int, marks: Moved, fits: _Fits) -> lis
             lines += ["", "  PROPOSED FROM THE SLICE (not applied unless you take it)"]
         sliced = reading.settings.get(c.key, c.preset)
         yours = f" (your preset: {c.preset})" if c.preset and c.preset != sliced else ""
-        lines += wrap(f"  {n:>3}) ", f"{named(c.key)}  {sliced or '-'} -> {c.value}{yours}", width,
+        lines += wrap(f"  {n:>3}) ", f"{named(c.key)}  {switched(c.key, sliced) or '-'} -> "
+                      f"{switched(c.key, c.value)}{yours}", width,
                       " " * 8)
         lines += wrap(" " * 8, f"{fits.named(c.reason)} [the slice: {c.knowledge}]", width)
         lines += wrap(" " * 8 + "read: ", fits.named(flag.reading), width, " " * 8)
