@@ -32,6 +32,16 @@ The ledger now keeps each print's features (`prints.features`), so a print's tra
 - **For the reviewer,** the listing shows each one's material. `edit ID --material any` widens it to every filament, and `--material PLA` names one.
 - **Lessons from before** take their material from their print's own record when the ledger opens, each with a step saying so. A print that doesn't say leaves the material NOT KNOWN, and the lesson isn't given until a reviewer names one. On a copy of the ledger with the first 11 lessons, the 6 temperature and fan lessons each took PETG from their prints, and a second open changed nothing.
 
+### And they're set only on the variety they were learned on
+
+**Of its own filament type, such a lesson is set only on the variety it was learned on** (mqucifer/print-shop#219; the Sponsor, 2026-11-21, changing "same type is enough" from 2026-11-14 as far as what's pre-selected). Two varieties of a type don't start from the same preset, so one lesson's value is a different change on each: a plate temperature learned on one PETG variety is another change on a PETG whose preset is 10 degrees warmer.
+- **Its variety** is the one the inventory gave the print it was learned on (`print_material`, mqucifer/print-shop#11), read from that print each time it's looked up. This print's is its loaded spool's. Where either print doesn't say, nothing is guessed from a profile's name.
+- **On the same variety,** it's set as before, and a past print's item for it is pre-selected at Use these.
+- **On another variety of its type, or where either variety isn't known,** it sets nothing, the model isn't given it, and the Lessons block says why ("not given: learned on Basic PETG; this print is Fast PETG"). It's neither set nor hidden: Use these lists it under **LESSONS NOT SET FOR THIS VARIETY**, unticked, with the variety it was learned on and how many prints that didn't fail it was used on, whichever past print is picked, and one `use` takes it. A past print's own override of such a setting on another variety is unticked too, saying both varieties.
+- **Taken there, it's given and scored as used:** its `job_lessons` row is applied, with the why `taken at the review, from use these`. Left unticked, it's neither given nor scored, so it's never in the way or given and not used.
+- **Once taken on a variety in a print that didn't fail** (answered, and no part of its plate failed), it's ticked there from then on, saying so ("taken on Fast PETG on 23 Nov 2026, on rail.stl, which didn't fail"). It's still applied only by `use`: a lesson checked once isn't then set without being seen. Making it that variety's own is the reviewer's step.
+- **A lesson widened to `any` stays widened,** and is set on every variety. Another filament type's is withheld, as above, and a shape's setting (pause, supports, walls, brim) goes by shape alone.
+
 ## Candidates, drawn by code
 
 When the ledger records a print (`Ledger.record_start_requested`) and again when its outcome is answered (`record_answer`), `lessons.after_print` reads the row:
@@ -112,6 +122,7 @@ A lesson is for any part with its traits, so a reviewer keeps it first. A person
 - **A lesson that applied to that print and wouldn't to this one is listed,** with the trait it misses, where it would have dropped out in silence. It's pre-selected unless the part is far from that trait's measure, or the lesson has been edited or retired since.
 - **Using one accepts no lesson.** The person's own override, used again, counts as one typed does: evidence for a lesson that reaches this part, marked as used, or, where none does, a candidate keyed to this part for the reviewer (mqucifer/print-shop#212). So using in place of typing still reaches the shape it was used on. One a reviewer rejected or retired for this shape isn't drawn again by using it. An answer's, a lesson's or the slice's draws nothing.
 - **A lesson whose setting was used at its own value stood,** and is scored `used`. Used at another value, it was `in_the_way`.
+- **A lesson of this filament type not set for this variety** is offered beside the past print's, in its own group, unticked unless it was taken on this variety in a print that didn't fail (mqucifer/print-shop#219, above). Where the picked print had it too, it's said once, there.
 - **In the ledger,** a used item is a correction with `used`: the print it came from, whose it was, and the print it began on.
 
 ## Tables

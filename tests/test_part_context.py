@@ -578,7 +578,7 @@ def job(tmp_path: Path) -> Iterator[Any]:
                 cfg=CFG, profiles=STORE_PROFILES, workdir=tmp_path / "work",
                 printer=FramePrinter(), slicer=AnyPart(), bridge=lambda cfg: bridge,
                 ledger=ledger, proposer=Proposer(ask=_random_seam, ask_questions=_questions,
-                                                 lessons=lambda features, kind: lessons),
+                                                 lessons=lambda features, kind, variety: lessons),
                 asker=replay_asker(ANSWERS), reviewer=takes(review), loop=loop,
             )
             with daemon:

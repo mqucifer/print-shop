@@ -106,7 +106,10 @@ __all__ = [
     "settle",
     "to_promote",
     "to_retire",
+    "taken_on",
     "upgrade",
+    "used_on",
+    "variety_of",
     "write",
 ]
 
@@ -125,6 +128,10 @@ BY_HAND = "by hand"
 #: What a step said when the rule before mqucifer/print-shop#212 took a correction in as evidence
 #: for a lesson that didn't reach its part. No step says it now: `draw` finds those by it.
 ABSORBED = "the same {kind} again on {part}, whose part isn't every trait it's keyed to"
+#: What `job_lessons.why` says of a lesson not set for its variety that the person took at the
+#: review from Use these (mqucifer/print-shop#219). It's applied, as one set is, and only this says
+#: it was taken, not set: a set one has no why.
+TAKEN = "taken at the review, from use these"
 #: Where a delivery is: `owner/repo#n`, or a path.
 _WHERE = re.compile(r"^([\w.-]+/[\w.-]+#\d+|[\w./-]+)$")
 
@@ -348,6 +355,58 @@ def material_of(settings: dict[str, Any]) -> str | None:
     """A print's filament type, as it was sliced (`filament_type`), or None if it doesn't say."""
     found = material_name(str(settings.get("filament_type") or ""))
     return found or None
+
+
+def variety_of(row: Row) -> str:
+    """A print's filament variety, from the spool the inventory gave it (mqucifer/print-shop#11),
+    or "" where its row doesn't say. Nothing is guessed from a profile's name."""
+    material = row.material or (row.profiles.material if row.profiles is not None else None)
+    return material.variety if material is not None else ""
+
+
+def same_variety(a: str, b: str) -> bool:
+    """Both known and the same, as the inventory names them."""
+    return bool(a) and bool(b) and a.casefold() == b.casefold()
+
+
+def taken_on(ledger: Ledger, lesson: int, variety: str) -> Row | None:
+    """The latest print of `variety` that the person took `lesson` on at its review, from Use
+    these, and that didn't fail (mqucifer/print-shop#219): from then on it's ticked on that
+    variety. A plate with any failed part failed, and one with no outcome yet isn't counted."""
+    if not variety:
+        return None
+    for found in ledger.query(
+        "SELECT job_id FROM job_lessons WHERE lesson=? AND applied=1 AND why=?"
+        " ORDER BY given_at DESC, job_id DESC", lesson, TAKEN,
+    ):
+        printed = ledger.get(found["job_id"])
+        if printed is None or not same_variety(variety_of(printed), variety):
+            continue
+        rows = ledger.job_rows(found["job_id"])
+        if any(r.result is None for r in rows) or any(r.result == "failed" for r in rows):
+            continue
+        return printed
+    return None
+
+
+def used_on(ledger: Ledger, lesson: int) -> list[str]:
+    """The prints a lesson was used on that didn't fail, by job, each said once: a plate is one
+    print, and one with any failed part, or a score other than used, doesn't count."""
+    good: dict[str, str] = {}
+    spoiled: set[str] = set()
+    for job, s in latest_scores(ledger, lesson).items():
+        printed = ledger.get(job)
+        if s["score"] != "used" or printed is None or any(
+            r.result == "failed" for r in ledger.job_rows(job)
+        ):
+            spoiled.add(plate_job(job))
+            continue
+        good.setdefault(
+            plate_job(job),
+            printed.stl_name + (
+                f" ({outcome_words(printed.result, printed.symptom)})"
+                if printed.result else ""))
+    return [said for job, said in good.items() if job not in spoiled]
 
 
 def upgrade(db: sqlite3.Connection) -> list[int]:
@@ -741,14 +800,20 @@ def for_orienting(ledger: Ledger, features: tuple[Feature, ...]) -> tuple[GivenL
 
 
 def for_part(
-    ledger: Ledger, features: tuple[Feature, ...], filament_type: str = "", *,
-    orienting: bool = False,
+    ledger: Ledger, features: tuple[Feature, ...], filament_type: str = "",
+    variety: str | None = None, *, orienting: bool = False,
 ) -> tuple[GivenLesson, ...]:
     """Each kept lesson keyed to traits this part has every one of, oldest first. One in the
     skill is read there, not given. One for a setting the filament decides holds only for its
     own filament type (mqucifer/print-shop#117): for another, or when either isn't known, it's
     listed as withheld, with why, and sets nothing. An orientation lesson is the orientation
-    step's (`orienting`), never the settings proposal's."""
+    step's (`orienting`), never the settings proposal's.
+
+    `variety` is this print's filament variety ("" not known). Of its own type, such a lesson
+    sets its setting only on the variety its print was (mqucifer/print-shop#219): the same
+    lesson's value is another change on a preset that starts elsewhere. On another variety, or
+    where either doesn't say, it's withheld too, and offered unticked at the review's Use these
+    (`offer.py`), where one `use` takes it. None compares the filament type alone."""
     has = set(traits(features))
     this = material_name(filament_type)
     given = []
@@ -772,6 +837,8 @@ def for_part(
                 withheld = (
                     f"learned on {made_of}; this print is {this or 'of a filament not known'}"
                 )
+            elif variety is not None:
+                withheld = _not_this_variety(ledger, row, variety)
         given.append(GivenLesson(
             id=row["id"], text=row["text"], key=row["setting"] or "", value=row["value"] or "",
             job_id=row["job_id"], stl_name=row["stl_name"], traits=tuple(keyed),
@@ -781,11 +848,45 @@ def for_part(
     return tuple(given)
 
 
+def _not_this_variety(ledger: Ledger, lesson: dict[str, Any], variety: str) -> str:
+    """Why a lesson of this print's filament type isn't set on its variety, or "" where it's
+    the variety it was learned on (mqucifer/print-shop#219). Its variety is read from the print
+    it was learned on, and nothing is guessed where that doesn't say."""
+    printed = ledger.get(lesson["job_id"])
+    learned = variety_of(printed) if printed is not None else ""
+    if same_variety(learned, variety):
+        return ""
+    if not learned:
+        why = "the variety it was learned on isn't known: its print doesn't say"
+    elif not variety:
+        why = f"learned on {learned}; this print's variety isn't known"
+    else:
+        why = f"learned on {learned}; this print is {variety}"
+    if taken_on(ledger, int(lesson["id"]), variety) is not None:
+        why += ", which you took it on before, in a print that didn't fail"
+    return why
+
+
+def _taken(row: Row, g: GivenLesson) -> bool:
+    """Whether the person took a lesson withheld for its variety, from Use these, at its value
+    (mqucifer/print-shop#219). One withheld for another filament type isn't counted, however
+    it was used: it says nothing of this type."""
+    if not g.withheld or not g.material or g.material != material_of(row.slicer_settings):
+        return False
+    return any(
+        c.key == g.key and c.used is not None and c.used.by is Source.LESSON
+        and c.used.lesson == g.id and c.value == g.value
+        for c in row.corrections or ()
+    )
+
+
 def _given(ledger: Ledger, row: Row) -> None:
     """A row of `job_lessons` for each lesson the print's proposal was given, and each given the
-    first time is `given`."""
+    first time is `given`. One withheld is given only where the person took it from Use these,
+    as for another variety (mqucifer/print-shop#219): then it's applied, and says it was taken."""
     for g in row.proposal.lessons if row.proposal else ():
-        if g.withheld:
+        taken = _taken(row, g)
+        if g.withheld and not taken:
             continue  # its shape matched, its filament didn't: never given
         if ledger.query("SELECT 1 FROM job_lessons WHERE job_id=? AND lesson=?", row.job_id, g.id):
             continue
@@ -793,11 +894,13 @@ def _given(ledger: Ledger, row: Row) -> None:
             db.execute(
                 "INSERT INTO job_lessons (job_id, lesson, given_at, applied, why, text)"
                 " VALUES (?, ?, ?, ?, ?, ?)",
-                (row.job_id, g.id, _now(), int(g.applied), g.why or None, g.line()),
+                (row.job_id, g.id, _now(), int(g.applied or taken),
+                 TAKEN if taken else g.why or None, g.line()),
             )
         if one(ledger, g.id)["status"] in (ACCEPTED, EDITED):
             _status(ledger, g.id, GIVEN, HARNESS)
-        said = "set its setting" if g.applied else (g.why or "given")
+        said = (f"{TAKEN} ({g.withheld})" if taken else
+                "set its setting" if g.applied else (g.why or "given"))
         _step(ledger, g.id, GIVEN, HARNESS, f"to {row.stl_name}: {said}", job_id=row.job_id)
 
 
@@ -814,12 +917,17 @@ def _scored_at_review(ledger: Ledger, row: Row) -> None:
     stood = {c.key: c for c in (*row.proposal.changes, *row.proposal.not_applied)
              } if row.proposal else {}
     for g in row.proposal.lessons if row.proposal else ():
-        if not g.key or g.withheld or ledger.query(
+        # One withheld, for another variety and left unticked, is neither in the way nor given
+        # and not used: it wasn't given (mqucifer/print-shop#219).
+        taken = _taken(row, g)
+        if not g.key or (g.withheld and not taken) or ledger.query(
             "SELECT 1 FROM print_lesson_scores WHERE job_id=? AND lesson=? AND by=?",
             row.job_id, g.id, AT_REVIEW,
         ):
             continue
-        if g.key == ORIENTATION:
+        if taken:
+            scored, why = "used", f"{g.key}={g.value} taken at the review, from use these"
+        elif g.key == ORIENTATION:
             # Given to the orientation step: it stood where the print was in its pose and
             # nobody sent it back (mqucifer/print-shop#242: the model only proposes a turn).
             sent = corrected.get(ORIENTATION)
@@ -910,21 +1018,7 @@ def to_promote(ledger: Ledger) -> list[tuple[dict[str, Any], list[str]]]:
         " ORDER BY id",
         *KEPT,
     ):
-        good: dict[str, str] = {}  # by job: a plate is one print, however many parts it has
-        spoiled: set[str] = set()
-        for job, s in latest_scores(ledger, int(row["id"])).items():
-            printed = ledger.get(job)
-            if s["score"] != "used" or printed is None or any(
-                r.result == "failed" for r in ledger.job_rows(job)
-            ):
-                spoiled.add(plate_job(job))
-                continue
-            good.setdefault(
-                plate_job(job),
-                printed.stl_name + (
-                    f" ({outcome_words(printed.result, printed.symptom)})"
-                    if printed.result else ""))
-        counted = [said for job, said in good.items() if job not in spoiled]
+        counted = used_on(ledger, int(row["id"]))
         if len(counted) >= USED_TO_PROMOTE:
             shown.append((row, counted))
     return shown
