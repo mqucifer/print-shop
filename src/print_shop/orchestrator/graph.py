@@ -127,6 +127,7 @@ from print_shop.setup.suggest import (
     went_on,
 )
 from print_shop.setup.traits import traits
+from print_shop.setup.turned import as_posed
 from print_shop.setup.waiting import Waiting, ask_meanwhile
 from print_shop.slicer.arrange import DoesNotFit, SlicePlate, ToPlace, slice_parts
 from print_shop.slicer.naming import job_id_from_filename, name_gcode
@@ -660,8 +661,11 @@ def build_graph(
                 if found_by.proposed:
                     features = featured()
                     reply = found_by.reply
+                    # Its settings are read in its pose: an answer for the pose the questions
+                    # were asked in is set aside there (mqucifer/print-shop#258).
                     made = dataclasses.replace(proposer, ask=lambda *_: reply, llm=None)(
-                        intake, features, profiles, context, rotation_deg)
+                        as_posed(intake, questions_in, rotation_deg)[0], features, profiles,
+                        context, rotation_deg)
                     looked = set(found_by.looked_up)
                     looped = made.model_copy(update={
                         **record, "model": f"loop:{loop.model}",
@@ -688,23 +692,30 @@ def build_graph(
                         else:
                             offer = offer.carried_to(built)
                     ask_again: Callable[[], None] | None = None
+                    # Turned since the questions, an answer that's for a pose is set aside: the
+                    # guard decides again, and the settings call isn't told it
+                    # (mqucifer/print-shop#258). The record keeps every answer as given.
+                    judged, turned_since = as_posed(intake, questions_in, rotation_deg)
                     if beside is not None:
                         proposal = proposer.without_model(
-                            intake, features, profiles, context, rotation_deg)
+                            judged, features, profiles, context, rotation_deg)
                         if proposer.suggests:
                             ask_again = settings_beside(
-                                beside, intake, features, context, rotation_deg, given)
+                                beside, judged, features, context, rotation_deg, given)
                             if beside.work is None:
                                 ask_again()
                     elif looped is not None:
                         proposal, looped = looped, None
                     else:
                         proposal = given.proposal(pose_value(rotation_deg), functools.partial(
-                            proposer, intake, features, profiles, context, rotation_deg))
+                            proposer, judged, features, profiles, context, rotation_deg))
                         if fell_back:
                             proposal = proposal.model_copy(update={
                                 "loop": fell_back["loop"], "loop_ending": fell_back["loop_ending"],
                                 "notes": proposal.notes + fell_back["notes"]})
+                    if turned_since:
+                        proposal = proposal.model_copy(
+                            update={"notes": (turned_since, *proposal.notes)})
                     proposal = _with_orienting(proposal, state.get("orientation_lessons", ()))
                     if intake.without:
                         # Said at the review, as well as when it happened (mqucifer/print-shop#208).
@@ -1183,7 +1194,9 @@ def build_graph(
             measured = measure(posed, pose.bed_contact_area_mm2)
         if stop.is_set():
             return Suggested(pose=asked_in, ending=Ending.WENT_ON, **record)
-        made = makes(intake, measured, profiles, context, at, stop=stop)
+        # Its settings for its own turn read the answers as they hold there
+        # (mqucifer/print-shop#258).
+        made = makes(as_posed(intake, asked_in, at)[0], measured, profiles, context, at, stop=stop)
         if found.proposed:
             looked = set(found.looked_up)
             made = made.model_copy(update={

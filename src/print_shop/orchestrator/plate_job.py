@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import dataclasses
 import json
-import re
 import shutil
 from pathlib import Path
 from typing import Any
@@ -27,12 +26,13 @@ from print_shop.plate import BY_OBJECT, SEQUENCE, GivenPart, PlateRow, row_id
 from print_shop.setup import Proposer
 from print_shop.setup.context import SIDECAR, PartContext, Placed, Seen, place
 from print_shop.setup.features import Feature, measure
-from print_shop.setup.intake import Asker, Intake, OfPlate, Question
+from print_shop.setup.intake import Asker, Intake, OfPlate
 from print_shop.setup.proposal import ORIENTATION, Change, GivenLesson, Proposal, Source, pose_value
 from print_shop.setup.questions import PLATE_WORDS, SEEN, pose_words
 from print_shop.setup.reading import NOW_PRINTS, TURNED_SINCE, carried, seen_across, seen_said
 from print_shop.setup.skill import WARPS_MM2
 from print_shop.setup.traits import traits
+from print_shop.setup.turned import held
 from print_shop.slicer.arrange import ToPlace, object_file
 from print_shop.slicer.orca import SlicerProfiles
 
@@ -105,14 +105,6 @@ def posed(
     return tuple(turned), tuple(files)
 
 
-#: The questions an answer to which holds however the part is turned.
-_ANY_POSE = frozenset({"purpose", "volume", "section"})
-#: The settings that are for a pose, whichever question's option set them.
-_FOR_A_POSE = re.compile(
-    r"support|bridge|overhang|ironing|seam|brim|raft|elefant|^top_|^bottom_|initial_layer"
-)
-
-
 def asked_about(asker: Asker, parts: tuple[PlatePart, ...]) -> Asker:
     """`asker`, showing the questions as about these parts in the poses they lie in now: "top"
     means that, and a part can still be turned after they're answered."""
@@ -157,39 +149,17 @@ def still_holds(
     ]
     if not moved:
         return intake, ""
-    questions: list[Question] = []
-    answers = []
-    dropped: list[str] = []
-    for question, answer in zip(intake.questions, intake.answers, strict=True):
-        option = question.options[answer.choice] if answer.choice is not None else None
-        # As it was shown: "as it prints" would read as the pose it has been turned to. Their own
-        # words are quoted as typed.
-        label = _as_shown(option.label) if option is not None else answer.other
-        if question.feature == SEEN.feature:
-            continue  # carried part by part, and said so (`seen_of`)
-        if question.feature not in _ANY_POSE:
-            dropped.append(f"'{_as_shown(question.text)}', you said '{label}'")
-            continue
-        if option is not None and answer.choice is not None:
-            held = {k: v for k, v in option.settings.items() if not _FOR_A_POSE.search(k)}
-            if held != option.settings:
-                lost = ", ".join(f"{k}={v}" for k, v in option.settings.items() if k not in held)
-                dropped.append(f"{lost}, from '{label}'")
-                options = list(question.options)
-                options[answer.choice] = option.model_copy(update={"settings": held})
-                question = question.model_copy(update={"options": tuple(options)})
-        questions.append(question)
-        answers.append(answer)
-    held_to = intake.model_copy(update={"questions": tuple(questions), "answers": tuple(answers)})
-    if not dropped:
-        return held_to, ""
+    # Which faces are seen is carried part by part, and said so (`seen_of`).
+    kept = held(intake, seen_kept=False, shown=_as_shown)
+    if not kept.aside:
+        return kept.intake, ""
     who = "; ".join(f"part {part.n}, {part.name}, to {pose_value(turn)}" for part, turn in moved)
     note = (
         f"{TURNED_SINCE}: {who}. These were said of the parts as they lay when asked, so they "
-        f"aren't used now: {'; '.join(dropped)}. Send a part back with orientation, or say what "
+        f"aren't used now: {'; '.join(kept.aside)}. Send a part back with orientation, or say what "
         "you want with a correction"
     )
-    return held_to, note
+    return kept.intake, note
 
 
 def seen_of(
