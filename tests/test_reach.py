@@ -288,7 +288,11 @@ def test_a_lone_setting_of_each_kind_is_placed() -> None:
 def test_a_key_that_cant_be_placed_is_refused_and_never_the_process_by_default(
     key: str, process: dict[str, Any], filament: dict[str, Any], why: str, tmp_path: Path
 ) -> None:
-    assert _corrected(f"{key}=1", process, filament) == why
+    # The review says which case a key it can't find is (mqucifer/print-shop#222); the rest
+    # are said as everywhere.
+    assert _corrected(f"{key}=1", process, filament) == (
+        "'no_such_key' isn't an Orca setting, and nothing this print takes is near it: find "
+        "<words> looks one up" if key == "no_such_key" else why)
 
     changes, kept, [given] = from_lessons(_facts(process, filament), (_lesson(key, "1"),))
     assert (changes, kept, given.applied) == ([], [], False)
@@ -380,10 +384,12 @@ def test_the_review_shows_a_change_that_didnt_reach_the_slice_as_a_mismatch() ->
         _request(read_back(asked, PROCESS, FILAMENT, config)), process=PROCESS, filament=FILAMENT
     )
     text = render(request)
-    assert "NOT APPLIED overhang_fan_speed: asked 30, sliced 80" in text
-    assert "made up [lesson 7]" in text
-    assert not re.search(r"\n  overhang_fan_speed +\S+ +30 ", text), "never as old -> new"
-    assert re.search(r"\n  wall_loops +\S+ +4 ", text), "one that reached it shows as before"
+    assert ("NOT APPLIED Fan on bridges and overhangs (overhang_fan_speed): asked 30, sliced 80"
+            in flat(text))
+    assert "made up [lesson 7]" in flat(text)
+    assert not re.search(r"\n  Fan on bridges and overhangs +overhang_fan_speed +\S+ +30 ", text), (
+        "never as old -> new")
+    assert re.search(r"\n  Walls +wall_loops +\S+ +4 ", text), "one that reached it shows as before"
     assert " · it didn't reach the slice: asked 30, sliced 80 · " in flat(text)
     assert " · set it · " not in flat(text)
 

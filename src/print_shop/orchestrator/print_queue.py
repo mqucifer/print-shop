@@ -42,6 +42,10 @@ outcome before its questions could even begin. The printer is single; preparing 
   or typed at `add`, is the queue's own copy, with what belongs to it.
 - **The queue is the same after a restart:** it's the jobs folder's waiting jobs (`WaitingJobs`),
   in order, held or not, with their spools and copies, each taken up where it was.
+- **A finished run is added again** (`sending.Adding.again`, mqucifer/print-shop#216): its
+  kept file, or a change's new slice (`reprint`), read as a hand-sliced file is and linked to
+  that run. A copy is given its first's kept part and profiles, so each copy's run can print
+  again too.
 
 **Built so another screen can drive it:** every action is a method here that returns what
 happened in words, and what needs the person is read as data (`Asked`), never a terminal prompt
@@ -75,6 +79,7 @@ from print_shop.orchestrator.daemon import Daemon
 from print_shop.orchestrator.graph import build_graph
 from print_shop.orchestrator.kept import Kept, Sent, WaitingJob, WaitingJobs, Waits
 from print_shop.orchestrator.sending import Adding, material_for, queue_one
+from print_shop.reprint import copy_kept
 from print_shop.setup import Proposer
 from print_shop.setup.intake import Answer, Question
 from print_shop.setup.loop import PrintLoop
@@ -815,6 +820,8 @@ class PrintQueue:
         if job_id_from_filename(target.name) != copy.job_id:
             raise RuntimeError(f"{target.name} doesn't carry job {copy.job_id}")
         Kept(self._workdir / first).copy_to(folder)
+        # What the first kept to print again, as each copy is its run (mqucifer/print-shop#216).
+        copy_kept(self._workdir / first, folder)
         values.update({
             "job_id": copy.job_id, "trace_id": str(uuid.uuid4()),
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

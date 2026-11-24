@@ -46,6 +46,11 @@ what differs from the inventory's tuning, each object's overrides, Orca's estima
 it prints again, if it's a reprint. Nothing in it was chosen by the loop, so it has no intake,
 proposal or corrections, and no lesson is given to it.
 
+**A finished run printed again** (mqucifer/print-shop#216) is kept the same way, marked `again`,
+its `reprint_of` the run it came from, and its record says what was changed, how its slice
+differed from that run's and what was suggested. Each print keeps the sha256 of the G-code it
+sent (`gcode_sha256`), which a print again is checked by; a row from before has none.
+
 The file lives outside every checkout, at `~/print-shop/ledger.sqlite`, and is
 archived nightly by mqucifer/infra#36.
 """
@@ -229,6 +234,9 @@ class PrintRecord(BaseModel):
     plate: PlateRow | None = None
     #: A swap's spools, in order, each with the layer planned (mqucifer/print-shop#218).
     spools: tuple[SpoolUse, ...] = ()
+    #: The sha256 of the G-code sent, which a reprint of it is checked by
+    #: (mqucifer/print-shop#216). A hand-sliced file's is also its record's.
+    gcode_sha256: str = ""
 
     def has_swap(self) -> bool:
         """Whether it pauses for a swap, however many spools of it could be recorded."""
@@ -318,6 +326,9 @@ class Row(BaseModel):
     #: The plate it's an object of, with the others (mqucifer/print-shop#109). None: a job's
     #: only part.
     plate: PlateRow | None = None
+    #: The sha256 of the G-code sent (mqucifer/print-shop#216). None: from before it was kept,
+    #: where only a hand-sliced file's record has it.
+    gcode_sha256: str | None = None
     start_requested_at: str
     started_at: str | None
     start_error: str | None
@@ -508,6 +519,8 @@ MIGRATIONS = {
 #: Columns added to `prints` if missing, by name and type. A row from before has NULL.
 ADDED = (
     ("features", "TEXT"),  # JSON [Feature]: the part's features (mqucifer/print-shop#106)
+    # The sha256 of the G-code sent, which a reprint is checked by (mqucifer/print-shop#216).
+    ("gcode_sha256", "TEXT"),
 )
 
 
@@ -717,9 +730,9 @@ class Ledger:
                     print_time_s, filament_cm3, layer_count, slicer_settings,
                     slicer_config, slicer_config_sha256, printer_machine,
                     printer_firmware, filament, profiles, intake, proposal,
-                    corrections, features, start_requested_at
+                    corrections, features, gcode_sha256, start_requested_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                          ?)""",
+                          ?, ?)""",
                 (
                     record.job_id,
                     record.stl_name,
@@ -744,6 +757,8 @@ class Ledger:
                     json.dumps([c.model_dump(mode="json") for c in record.corrections]),
                     json.dumps([f.model_dump(mode="json") for f in record.features])
                     if record.features else None,
+                    record.gcode_sha256 or (
+                        record.sliced.gcode_sha256 if record.sliced is not None else None),
                     at,
                 ),
             )
@@ -1078,6 +1093,14 @@ class Ledger:
             ).fetchall()
             swaps = self._swaps()
         return [_row(r, *_swapped(r["job_id"], swaps)) for r in found]
+
+    def config(self, job_id: str) -> dict[str, str] | None:
+        """The whole config block of the G-code a print sent, as kept, or None where there's no
+        such print (mqucifer/print-shop#216)."""
+        with self._lock:
+            found = self._conn.execute(
+                "SELECT slicer_config FROM prints WHERE job_id = ?", (job_id,)).fetchone()
+        return dict(json.loads(found["slicer_config"])) if found is not None else None
 
     def reprints(self, job_id: str) -> list[str]:
         """The jobs that print `job_id`'s file again, oldest first."""

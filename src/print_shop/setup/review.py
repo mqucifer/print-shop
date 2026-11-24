@@ -65,23 +65,32 @@ parts that read are held, applied to nothing, while the one that doesn't is aske
 one slice. A `;` starts an answer only before one (`key=`, `take`, `use`, `clear`, `from`,
 `no 2`): anywhere else it's the reason's. Pasted lines are one answer: its corrections are read,
 its other lines asked about once, and an `ok` or `stop` in it approves and ends nothing.
+
+**A setting is found by plain words** (mqucifer/print-shop#222, `names.py`). `find bridge fan`
+lists the settings this filament and process take that fit, best first, each by its plain name,
+today's value and its key, at the prompt or at `fix>`; it changes nothing. A key that can't be
+used says whether it's no Orca setting, with the nearest, or a real one these presets don't
+list, with the one that does its job here (`_refused`), and `bridge fan=60` says the key to type.
+A setting is shown by its plain name wherever it's listed, with its key beside or beneath.
 """
 
 from __future__ import annotations
 
+import functools
 import re
 import shutil
 import sqlite3
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, TextIO
 
 from print_shop.bench.pausing import TOPS_OUT, mm
 from print_shop.core.state import AppliedOrientation, Orientation, SliceResult, turn_words
 from print_shop.inventory import Asked, InventoryError, Material
 from print_shop.plate import BY_LAYER, BY_OBJECT, SEQUENCE, SEQUENCES, PlateLayout
-from print_shop.setup import pauses
+from print_shop.setup import names, pauses
 from print_shop.setup.concerns import concern_in, ways
 from print_shop.setup.intake import Estimate, drop_typed
 from print_shop.setup.offer import Item, Offering
@@ -99,13 +108,14 @@ from print_shop.setup.proposal import (
     Suggested,
     pose_value,
 )
-from print_shop.setup.reach import profile_of, unplaced
+from print_shop.setup.reach import profile_of
 from print_shop.setup.reading import Flag, SliceReading
 from print_shop.setup.screen import (
     NOT_FOR_A_PLATE,
     WIDTH,
     Moved,
     by_model,
+    found,
     sections,
     warnings,
     what_moved,
@@ -123,7 +133,7 @@ from print_shop.setup.suggest import (
     went_on,
 )
 from print_shop.setup.waiting import _keys_waiting, can_ask, terminal
-from print_shop.slicer.orca import SlicerProfiles
+from print_shop.slicer.orca import SlicerProfiles, parse_config_block
 
 if TYPE_CHECKING:
     from print_shop.ingest.measuring import Measuring
@@ -145,6 +155,10 @@ _SEND_BACK = re.compile(r"^\s*orientation\b(?:\s*=\s*(\d+))?\s*(?:(?:because|-|â
 _TAKE = re.compile(r"^\s*take\b\s*([\d ,]*)$", re.I)
 #: `no 3 because ...`: one of the model's proposals turned down, saying why.
 _NO = re.compile(r"^\s*no\s+(\d+)\b\s*(?:(?:because\b|-|â€”|:)\s*(.*))?$", re.I)
+#: `find bridge fan`: the settings that fit the words, looked up (mqucifer/print-shop#222).
+_FIND = re.compile(r"^\s*find\b\s*(.*)$", re.I | re.S)
+#: `bridge fan=60`: a setting named in words where its key goes.
+_WORDS_SET = re.compile(r"^\s*([a-zA-Z][a-zA-Z0-9_ ]*?)\s*=\s*(\S.*?)\s*$")
 #: `turn`: the turn on the plate that a part which doesn't fit as posed is offered.
 _TURN = "turn"
 #: `use`, `use 2 4`, `clear 3` or `from 2`: what the most similar past print offers.
@@ -513,7 +527,7 @@ def _answers(request: ReviewRequest, width: int) -> list[str]:
         said.append("orientation (send a part's back)")
     elif request.candidates:
         said.append("orientation (send it back)")
-    said += ["key=value because \u2026", "stop"]
+    said += ["key=value because \u2026", "find <words> (a setting's key)", "stop"]
     # Broken between answers, never inside one, where they don't fit a line.
     lines = ["Answers: " + said[0]]
     for each in said[1:]:
@@ -615,6 +629,12 @@ def read_answer(answer: str, request: ReviewRequest) -> Review | Slipped | str:
         return Review(turn_taken=True)
     if text.lower() in ("stop", "no", "n"):
         return Review(stop=True)
+    looked = _FIND.match(text)
+    if looked is not None:
+        # Said, and asked again: finding changes nothing (mqucifer/print-shop#222).
+        if not looked.group(1).strip():
+            return "find looks a setting up by plain words, such as find bridge fan"
+        return "\n".join(_finding(looked.group(1), request, WIDTH)).lstrip()
     return _read_parts(list(_split(text)), request)
 
 
@@ -693,11 +713,15 @@ def _read_parts(parts: list[str | Left], request: ReviewRequest) -> Review | Sli
                 continue
             offering, picked = changed, picked or verb == "from"
             continue
+        if _FIND.match(part) is not None:
+            slips.append((at, "find looks a setting up, and changes nothing: type it on its own"))
+            continue
         match = _CORRECTION.match(part)
         if match is None:
-            slips.append((at, f"'{part}' isn't setting=value"))
+            slips.append((at, _not_a_correction(part, request)))
             continue
         key, value, reason = match.group(1), match.group(2), (match.group(3) or "").strip()
+        value = names.typed(key, value)  # a switch's on or off, as Orca writes it
         if ";" in value:
             # A `;` is the next answer's only before one (`_split`), and a reason's otherwise.
             slips.append((at, f"'{value}' isn't a value of {key}: a ';' goes before the next "
@@ -715,7 +739,7 @@ def _read_parts(parts: list[str | Left], request: ReviewRequest) -> Review | Sli
             continue
         preset = _preset_of(request, key)
         if preset is None:
-            slips.append((at, unplaced(key, request.process, request.filament)))
+            slips.append((at, _refused(key, request)))
             continue
         known = request.proposal.get(key) or next(
             (c for c in (*request.proposal.not_applied, *request.proposal.kept) if c.key == key),
@@ -1209,6 +1233,13 @@ def cli_reviewer(
                         write("  Nothing new to add: ok, take, a correction, orientation, "
                               "or stop.")
                     continue
+                looked = _FIND.match(answer)
+                if looked is not None:
+                    if not looked.group(1).strip():
+                        write("  find looks a setting up by plain words, such as find bridge fan.")
+                    else:
+                        write("\n".join(_finding(looked.group(1), request, width())))
+                    continue
                 back = _SEND_BACK.match(answer)
                 if back is not None and (request.candidates or request.parts):
                     send = _send_back_part if request.parts else send_back
@@ -1224,7 +1255,9 @@ def cli_reviewer(
                         write("  Back to the review: nothing from that answer is taken.")
                         continue
                     if isinstance(parsed, str):
-                        write(f"  {parsed}")
+                        # One line is wrapped to the width, as at fix>; several are laid out.
+                        write(f"  {parsed}" if "\n" in parsed
+                              else "\n".join(wrap("  ", parsed, min(width(), WIDTH), "    ")))
                         continue
                     purposed = _purposed(parsed, request, read, write)
                 except sqlite3.Error as exc:
@@ -1301,6 +1334,11 @@ def _settled(
         typed = read("fix> ")
         while waiting():  # a paste here is one fix, and leaves nothing for the next prompt
             typed += "\n" + read("")
+        looked = _FIND.match(typed)
+        if looked is not None and looked.group(1).strip():
+            # Looked up, and asked again: finding changes nothing (mqucifer/print-shop#222).
+            write("\n".join(_finding(looked.group(1), request, width)))
+            continue
         parts = read_.answered(typed)
         if not parts:
             return None
@@ -1495,6 +1533,67 @@ def _preset_of(request: ReviewRequest, key: str) -> str | None:
     data = request.filament if tier == "filament" else request.process
     found = data.get(key, "")
     return str(found[0] if isinstance(found, list) and found else found)
+
+
+def _today(request: ReviewRequest) -> dict[str, str]:
+    """What this review changes, by key: a setting's value today, before the slice's."""
+    return {c.key: c.value for c in request.proposal.changes}
+
+
+def _refused(key: str, request: ReviewRequest) -> str:
+    """Why `key` can't be corrected on this print, saying which case it is
+    (mqucifer/print-shop#222, `names.refused`)."""
+    return names.refused(key, request.process, request.filament, _sliced_with(request),
+                         preset=_filament_name(request), changed=_today(request))
+
+
+def _not_a_correction(part: str, request: ReviewRequest) -> str:
+    """Why `part` isn't read as a correction: where a setting is named in words before an `=`,
+    the one they find, to type in its place."""
+    said = f"'{part}' isn't setting=value"
+    words = _WORDS_SET.match(part)
+    if words is None or " " not in words.group(1).strip():
+        return said
+    best = names.find(words.group(1), request.process, request.filament, _sliced_with(request),
+                      _today(request))
+    if not best:
+        return f"{said}, and nothing this print takes fits '{words.group(1).strip()}'"
+    key = best[0].key
+    return (f"{said}: a setting's key goes before the =. '{words.group(1).strip()}' finds "
+            f"{names.named(key)}: type {key}={words.group(2)}, or find {words.group(1).strip()} "
+            "for others")
+
+
+def _finding(words: str, request: ReviewRequest, width: int) -> list[str]:
+    """What `find` says: the settings that fit the words, best first. It changes nothing."""
+    settings = names.find(words, request.process, request.filament, _sliced_with(request),
+                          _today(request))
+    return found(words, settings, _filament_name(request), min(width, WIDTH))
+
+
+def _filament_name(request: ReviewRequest) -> str:
+    """The filament preset's name as it's said: `Bambu PETG HF @System` is Bambu PETG HF."""
+    return request.presets[2].split(" @")[0].strip()
+
+
+def _sliced_with(request: ReviewRequest) -> dict[str, str] | None:
+    """The slice's config block, read once a slice: what Orca sliced with, and so which keys
+    are Orca's settings. None where it can't be read."""
+    path = request.slice.gcode_path
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return _config_block(path, stat.st_mtime_ns, stat.st_size)
+
+
+@functools.lru_cache(maxsize=4)
+def _config_block(path: Path, mtime_ns: int, size: int) -> dict[str, str] | None:
+    del mtime_ns, size  # the cache's key: a file sliced again over the same path is read again
+    try:
+        return parse_config_block(path)
+    except (OSError, ValueError, RuntimeError):
+        return None
 
 
 def _setting_change(request: ReviewRequest, key: str, value: str, reason: str) -> Change:

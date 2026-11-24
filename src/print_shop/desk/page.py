@@ -237,7 +237,8 @@ def _summary(row: Row, record: JobRecord) -> str:
         f"<p><strong>{escape(status(row))}</strong>. Orca's estimate: "
         f"{_minutes(row.print_time_s)}, {row.filament_cm3:g} cm³, {row.layer_count} layers"
         + (f"; with {_A[pause_word(row)]}" if pause_word(row) else "")
-        + ("; sliced by hand" if row.sliced is not None else "") + ".</p>"
+        + (("; printed again" if row.sliced.reprinted is not None else "; sliced by hand")
+           if row.sliced is not None else "") + ".</p>"
         f"<p>{escape(material)}</p>"
         + ("<p>Spools, in order: "
            + escape("; ".join(spool_lines(row.spools, row.ended_with))) + "</p>"
@@ -276,8 +277,12 @@ def _sliced(row: Row) -> str:
     kept = row.sliced
     assert kept is not None
     took = row.real_time_s
+    again = kept.reprinted is not None
     parts = [
-        "<section><h2>Sliced by hand</h2>",
+        # A run print-shop sliced, printed again (mqucifer/print-shop#216), or a file by hand.
+        "<section><h2>Printed again</h2>" if again else "<section><h2>Sliced by hand</h2>",
+        "<p>Nothing was asked or proposed, and no lesson was applied: it's that run's file, or "
+        "its part, pose, profiles and settings with the changes below.</p><ul>" if again else
         "<p>Sent as the file is: nothing was asked, proposed, turned or sliced again, and no "
         "lesson was applied.</p><ul>",
         f"<li>From {escape(kept.source)}"

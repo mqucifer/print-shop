@@ -95,6 +95,9 @@ class Adding:
     seen: tuple[str, ...] | None = None
     project: Path | None = None
     suggested: tuple[tuple[str, str, str], ...] = ()
+    #: A finished run printed again (mqucifer/print-shop#216): `path` is its kept file, or a
+    #: change's new slice, read as a hand-sliced file is and linked to that run, by its name.
+    again: sliced.Again | None = None
 
 
 @dataclass
@@ -173,7 +176,7 @@ def queue_one(
     if one.copies < 1:
         raise NotQueued("a quantity is 1 or more")
     low = path.name.lower()
-    by_hand = low.endswith(SLICED_SUFFIXES)
+    by_hand = low.endswith(SLICED_SUFFIXES) or one.again is not None
     if not by_hand and not low.endswith(PARTS):
         raise NotQueued("print-shop prints a part as an STL, or a file you sliced by hand "
                         "(G-code, or Orca's sliced plate file, .gcode.3mf): export it as one")
@@ -224,14 +227,16 @@ def queue_one(
     if suggestions:
         Kept(workdir / job_id).suggest(suggestions)
     sent = sent.model_copy(update={"sha256": sha, "source": str(path), "came": tuple(came)})
-    jobs.add(WaitingJob(job_id=job_id, part=path.name, given=given, profiles=profiles,
+    # A print again is named as its run is, not by its kept file (mqucifer/print-shop#216).
+    part = one.again.name if one.again is not None else path.name
+    jobs.add(WaitingJob(job_id=job_id, part=part, given=given, profiles=profiles,
                         waits=Waits.SENT, spool_id=spool_id, copies=one.copies, sent=sent))
     for n in range(2, one.copies + 1):
         jobs.add(WaitingJob(
-            job_id=str(uuid.uuid4()), part=path.name, given=given, profiles=profiles,
+            job_id=str(uuid.uuid4()), part=part, given=given, profiles=profiles,
             waits=Waits.WITH_FIRST, spool_id=spool_id, copy_of=job_id, copy_n=n,
             copies=one.copies, sent=sent))
-    return Queued(job_id=job_id, part=path.name, copies=one.copies, came=came)
+    return Queued(job_id=job_id, part=part, copies=one.copies, came=came)
 
 
 def _part(
@@ -348,6 +353,13 @@ def _sliced(
         came.append("not taken: what it's for, what's seen and suggested settings: a file "
                     "sliced by hand is sent as it is, with nothing asked or proposed")
     job = sliced_for(copy, material)
+    if one.again is not None:
+        # A finished run printed again: what its record carries goes with it, its objects'
+        # overrides included, and nothing is looked for beside the file (mqucifer/print-shop#216).
+        changed = one.again.reprinted is not None and bool(one.again.reprinted.changes)
+        came.append(f"a print again of job {one.again.reprint_of[:8]}, "
+                    + ("with your change" if changed else "as it was"))
+        return {"entry": "sliced_file", "sliced": job.again(one.again)}, came
     file = job.file
     if file.kind == "plate":
         if one.project is not None:

@@ -53,6 +53,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
+from print_shop import reprint
 from print_shop import sliced as hand_sliced
 from print_shop.arming import Armed, OneStart, armed_by_flag
 from print_shop.core.contracts import Gate, GateDecision, Outcome, approved_at, propose_validate
@@ -281,7 +282,7 @@ def build_graph(
             "gcode_path": str(result.gcode_path),
             "gcode_sha256": job.file.sha256,
             "slice": result,
-            "applied_orientation": AppliedOrientation(rationale=hand_sliced.RATIONALE),
+            "applied_orientation": AppliedOrientation(rationale=job.rationale()),
             "profiles_used": None,
             "slice_reading": reading,
             "slice_flags": found,
@@ -821,6 +822,9 @@ def build_graph(
         result = name_gcode(
             result, job_id=state["job_id"], part=Path(state["stl_path"]).stem
         )
+        # The part and the profiles it's sliced with, kept so the run can print again with a
+        # small change (mqucifer/print-shop#216). What can't be kept is logged; nothing stops.
+        reprint.keep(outdir, Path(state["stl_path"]), state.get("stl_sha256", ""), profiles)
         return {
             "gcode_path": str(result.gcode_path),
             "gcode_sha256": hand_sliced.sha256_of(result.gcode_path),
@@ -1708,9 +1712,10 @@ def _print_record(
             job_id=state["job_id"],
             stl_name=job.name,
             stl_sha256=job.file.sha256,
-            rotation_deg=(0.0, 0.0, 0.0),
+            # A print again's pose is its run's, baked into its G-code (mqucifer/print-shop#216).
+            rotation_deg=job.reprinted.pose if job.reprinted is not None else (0.0, 0.0, 0.0),
             orientation_source=hand_sliced.SOURCE,
-            orientation_rationale=hand_sliced.RATIONALE,
+            orientation_rationale=job.rationale(),
             orientation_accepted=True,
             gcode_name=remote_name,
             print_time_s=slice_result.print_time_s,
@@ -1754,6 +1759,8 @@ def _print_record(
         reading=state.get("slice_reading"),
         flags=tuple(state.get("slice_flags", ())),
         spools=spools,
+        # What a print again of it is checked by (mqucifer/print-shop#216).
+        gcode_sha256=state.get("gcode_sha256", ""),
     )
 
 
