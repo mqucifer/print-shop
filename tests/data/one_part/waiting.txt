@@ -40,11 +40,9 @@ Settings for this print, over your presets:
   process   CI 0.20mm Standard
   filament  -
 
-How the part was read:
-  a cube for show
-
   No changes: your presets as they are.
   note: Seen as it prints: the walls and the top
+  The model is still working on settings (0 s). What it proposes is added below, and nothing waits for it.
 
 Orca's estimate: 16 min 49 s, 3.34 cm3, 100 layers
 Orientation: (0.0, 0.0, 0.0), No model was configured for this job; fell back to geometric selection. Chose rotation (0.0, 0.0, 0.0) with the lowest overhang (0.0 mm2) and highest bed contact (400.0 mm2) among the scored candidates.
@@ -77,11 +75,15 @@ Proposed from the slice (not applied unless you take it):
        you said 'the walls and the top as it prints', so the walls are seen, and the seam is a line on them: back puts the line on the part's back as it sits on the plate (its largest y); random would scatter it instead [the slice: surface]
        read: 99% of 100 wall loops start on the one below: the seam is a line up the wall at x 138 y 138, over 100 layers
 
+USE THESE: no past print has settings to offer.
+
+Type ok to go on to the approval gate, or take what the slice proposes (take, or take 1), send the orientation back (orientation), or correct a setting by name, e.g. wall_loops=3 because it's decorative (several separated by ';'), pause_at=12.4 because the nuts go in (it pauses once the layer topping out at 12.4 mm is done, and it asks what the pause is for), colour_change=12.4 because white to black (a swap), or stop.
+
+The model's proposal came after <n> s. Enter adds it to the list (what you've typed is kept).
+
 Proposed by the model (not applied unless you take it):
   2) wall_loops  2 -> 5
        flat faces show the infill [model: flat_top, walls-shells]
-
-USE THESE: no past print has settings to offer.
 
 Type ok to go on to the approval gate, take (the slice's 1), take 2 (the model's, by number), no 2 because ... (turn one down, saying why), send the orientation back (orientation), or correct a setting by name, e.g. wall_loops=3 because it's decorative (several separated by ';'), pause_at=12.4 because the nuts go in (it pauses once the layer topping out at 12.4 mm is done, and it asks what the pause is for), colour_change=12.4 because white to black (a swap), or stop.
 At the approval gate. Approve or Reject on the dashboard.

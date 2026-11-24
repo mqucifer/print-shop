@@ -104,6 +104,9 @@ def test_one_part_is_byte_for_byte_what_it_was(
     profiles = CI_PROFILES.model_copy(update={"process": process})
     asks_meanwhile = name == "waiting"
     second_shown, come = threading.Event(), threading.Event()
+    # The model's settings come beside the review (mqucifer/print-shop#242): once its prompt is
+    # open, every run alike, and the person waits for them and adds them with Enter, then ok.
+    review_open, settled = threading.Event(), threading.Event()
     prompts: list[str] = []
     bridge = MemoryBridge()
 
@@ -113,6 +116,13 @@ def test_one_part_is_byte_for_byte_what_it_was(
             second_shown.wait(20)
             come.set()
         return _questions(system, user, schema)
+
+    def proposes(system: str, user: str, schema: dict[str, Any]) -> dict[str, Any]:
+        review_open.wait(20)
+        try:
+            return _model(system, user, schema)
+        finally:
+            settled.set()
     printer = FramePrinter(after_start=["printing", "completed"])
 
     def build_run(**given: Any) -> SimpleNamespace:
@@ -120,14 +130,14 @@ def test_one_part_is_byte_for_byte_what_it_was(
         daemon = Daemon(
             cfg=CFG, profiles=profiles, workdir=jobs, printer=printer, watch_printer=printer,
             watch_poll_s=0.05, slicer=RecordedSlicer(), bridge=lambda cfg: bridge, ledger=ledger,
-            proposer=Proposer(ask=_model, ask_questions=questions),
+            proposer=Proposer(ask=proposes, ask_questions=questions),
             asker=given["asker"], reviewer=given["reviewer"],
             **({"waiting": given["waiting"]} if asks_meanwhile else {}),
         )
         return SimpleNamespace(daemon=daemon, ledger=ledger)
 
     # Asked meanwhile, the model's closer choices on purpose come after the two, and Enter keeps.
-    typed = iter(["1", "1", "", "ok"] if asks_meanwhile else ["1", "1", "ok"])
+    typed = iter(["1", "1", "", "", "ok"] if asks_meanwhile else ["1", "1", "", "ok"])
 
     def person_types(prompt: str = "") -> str:
         prompts.append(prompt)
@@ -135,6 +145,10 @@ def test_one_part_is_byte_for_byte_what_it_was(
             second_shown.set()
             come.wait(20)
             time.sleep(0.3)  # what landed is said under the open prompt
+        if prompt == "> " and not review_open.is_set():
+            review_open.set()
+            assert settled.wait(20), "the model's settings never came"
+            time.sleep(0.3)  # what came is said under the open prompt
         return next(typed)
     monkeypatch.delenv("PRINT_AGENT_ALLOW_HARDWARE", raising=False)
     monkeypatch.setattr(script, "WORK_DIR", jobs)
