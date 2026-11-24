@@ -97,8 +97,22 @@ def _look(request: ReviewRequest) -> str:
         cls = "card look waiting" if said.waiting else "card look"
         cards.append(f"<div class=\"{cls}\">"
                      + (f"<span class=\"label\">{_e(_sentence(label))}</span> " if label else "")
-                     + f"{_e(rest)}</div>")
+                     + f"{_linked(rest)}</div>")
     return "".join(cards)
+
+
+#: The terminal's pointers to a section up its screen, and the phone's section they name.
+_POINTERS = {"under What the slice shows": "slice", "under Settings": "settings",
+             "under The part": "part", "under Pose": "pose", "under Lessons": "lessons"}
+
+
+def _linked(text: str) -> str:
+    """`text` escaped, with each pointer to a section a link to it on the page."""
+    out = _e(text)
+    for words, anchor in _POINTERS.items():
+        title = words.removeprefix("under ")
+        out = out.replace(_e(words), f"under <a href=\"#{anchor}\">{_e(title)}</a>")
+    return out
 
 
 def _print(request: ReviewRequest) -> str:
@@ -326,5 +340,16 @@ def review_sections(request: ReviewRequest, since: Moved | None, slice_page: str
         ("Lessons from earlier prints, kept by a reviewer, for a part like this",
          _lessons(request)),
     ]
-    return "".join(_fold(title, body, big=True) if title in _FOLDED
-                   else f"<h2>{_e(title)}</h2>{body}" for title, body in parts if body)
+    anchors = {"Settings, over your presets": "settings", "What the slice shows": "slice",
+               "The part": "part", "Pose": "pose"}
+    out = []
+    for title, body in parts:
+        if not body:
+            continue
+        anchor = anchors.get(title, "lessons" if title.startswith("Lessons") else "")
+        if title in _FOLDED:
+            out.append(f"<div id=\"{anchor}\">{_fold(title, body, big=True)}</div>")
+        else:
+            out.append(f"<h2{f' id={chr(34)}{anchor}{chr(34)}' if anchor else ''}>{_e(title)}"
+                       f"</h2>{body}")
+    return "".join(out)

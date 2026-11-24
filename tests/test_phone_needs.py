@@ -716,3 +716,24 @@ def test_two_posts_at_once_begin_one_session(tmp_path: Path) -> None:
     r = rig(tmp_path, {"j1": asked})
     made = [r.shop.begin("j1", {}) for _ in range(2)]
     assert isinstance(made[0], Session) and isinstance(made[1], str)
+
+
+def test_a_ticked_item_is_said_from_this_prints_value_to_its_own(tmp_path: Path) -> None:
+    """print-shop-ux, on mqucifer/print-shop#282: "Supports off to off" where this print has
+    supports on (the guard's) read as a reason to skip it."""
+    from print_shop.phone.needs import _unused  # noqa: PLC0415
+
+    review = request()
+    assert review.proposal.get("enable_support") is not None
+    assert review.proposal.get("enable_support").value == "1"
+    assert _unused(review) == ["Supports on to off"]
+    r = rig(tmp_path, {"j1": Asked(job_id="j1", need=Need.REVIEW, review=review)})
+    assert "on to off" in r.phone().get("/job/j1/review").body
+
+
+def test_look_firsts_pointers_are_links_to_their_section(tmp_path: Path) -> None:
+    r = rig(tmp_path, {"j1": Asked(job_id="j1", need=Need.REVIEW, review=request())})
+    raw = r.phone().get("/job/j1/review").raw
+    assert 'under <a href="#settings">Settings</a>' in raw
+    assert 'under <a href="#slice">What the slice shows</a>' in raw
+    assert 'id="settings"' in raw and 'id="slice"' in raw

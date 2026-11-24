@@ -23,7 +23,7 @@ from print_shop.phone.session import Session
 from print_shop.setup.intake import DIFFERS_PROMPT, NOTES_PROMPT, WORDS_PROMPT, Question
 from print_shop.setup.names import Found, plain, switched, with_unit
 from print_shop.setup.offer import Item
-from print_shop.setup.proposal import pose_value
+from print_shop.setup.proposal import ORIENTATION, pose_value
 from print_shop.setup.review import ReviewRequest
 from print_shop.setup.screen import Moved
 from print_shop.setup.suggest import by_number
@@ -201,13 +201,28 @@ def _reply(job_id: str, version: str, typed: str, words: str, kind: str = "") ->
             f"<button type=\"submit\"{cls}>{_e(words)}</button></form>")
 
 
+def _now(request: ReviewRequest, item: Item) -> str:
+    """This print's value of an item's setting, as the review has it now: its change's, else
+    the preset's; its pose for a pose."""
+    if item.key == ORIENTATION:
+        return pose_value(request.orientation.rotation_deg)
+    change = request.proposal.get(item.key)
+    return change.value if change is not None else item.preset
+
+
+def _from_to(request: ReviewRequest, item: Item) -> str:
+    """"Supports on to off": this print's value, then the item's."""
+    now = _now(request, item)
+    return (f"{with_unit(item.key, now) if now else '-'} to "
+            f"{with_unit(item.key, item.value)}")
+
+
 def _unused(request: ReviewRequest | None) -> list[str]:
-    """What's ticked in Use these and not used, each as "Bed 70 to 75"."""
+    """What's ticked in Use these and not used, each as "Supports on to off"."""
     if request is None or request.offering is None:
         return []
     pose = pose_value(request.orientation.rotation_deg)
-    return [f"{plain(i.key)} {with_unit(i.key, i.preset) if i.preset else '-'} to "
-            f"{with_unit(i.key, i.value)}"
+    return [f"{plain(i.key)} {_from_to(request, i)}"
             for i in request.offering.ticked(request.proposal, pose)]
 
 
@@ -283,7 +298,6 @@ def _item_row(n: int, item: Item, request: ReviewRequest) -> str:
     usable = standing.mark in ("x", " ")
     box = (f"<input type=\"checkbox\" name=\"use\" value=\"{n}\"{on} aria-label=\"Use "
            f"{_e(plain(item.key))}\">" if usable else "")
-    was = with_unit(item.key, item.preset) if item.preset else "-"
     why = " ".join(item.reason.split()) or item.fits
     whose = item.source or item.used.line()
     note = ""
@@ -291,8 +305,8 @@ def _item_row(n: int, item: Item, request: ReviewRequest) -> str:
         state = "Not selected" if usable else "Not used"
         note = f"<br><span class=\"amber small\">{_e(state)}: {_e('; '.join(standing.why))}.</span>"
     return (f"<li><label class=\"row\">{box}<span class=\"what\"><span class=\"part\">"
-            f"{n}. {_e(plain(item.key))}</span> <span class=\"small\">{_e(was)} to "
-            f"{_e(with_unit(item.key, item.value))}</span>"
+            f"{n}. {_e(plain(item.key))}</span> <span class=\"small\">"
+            f"{_e(_from_to(request, item))}</span>"
             f"{'<br>' + _small(why) if why else ''}"
             f"{'<br>' + _small(str(whose)) if whose else ''}{note}</span></label></li>")
 
