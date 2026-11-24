@@ -25,6 +25,12 @@ flagged, each with the change it proposes, its reason and the reading it rests
 on. `take` takes them, or `take 2` one of them; nothing from a reading is
 applied otherwise.
 
+**The model's settings are proposals** (mqucifer/print-shop#242, `suggest.py`). The review
+doesn't wait for them: it says the model is working, and adds them to the list when Enter asks,
+numbered on from the slice's. `take 2` takes one, bare `take` stays the slice's, and
+`no 2 because ...` turns one down as a correction. An `ok` before they're in, or before they've
+been shown, says so once.
+
 **Use these** (mqucifer/print-shop#211, `offer.py`): what decided the most similar past print,
 pre-selected, each with why. `use` takes the selected ones, `use 2 4` those numbered, `clear 3`
 clears one and `from 2` picks another print. Only `use` applies any. An `ok` with ticked ones
@@ -50,9 +56,10 @@ from __future__ import annotations
 import re
 import sqlite3
 import textwrap
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, TextIO
 
 from print_shop.bench.pausing import TOPS_OUT, mm
 from print_shop.core.state import AppliedOrientation, Orientation, SliceResult, turn_words
@@ -68,14 +75,28 @@ from print_shop.setup.proposal import (
     PAUSE_NAMES,
     SWAP_NAMES,
     Change,
+    Ending,
     GivenLesson,
     Proposal,
     Source,
+    Suggested,
     pose_value,
 )
 from print_shop.setup.reach import profile_of, unplaced
 from print_shop.setup.reading import PAUSE_PAST_FIT, Flag, SliceReading
-from print_shop.setup.waiting import can_ask
+from print_shop.setup.suggest import (
+    Listed,
+    Suggesting,
+    by_number,
+    didnt_come,
+    fell_back,
+    listed,
+    looked_up,
+    turning,
+    waited,
+    went_on,
+)
+from print_shop.setup.waiting import can_ask, terminal
 from print_shop.slicer.orca import SlicerProfiles
 
 if TYPE_CHECKING:
@@ -95,6 +116,8 @@ _SEND_BACK = re.compile(r"^\s*orientation\b(?:\s*=\s*(\d+))?\s*(?:(?:because|-|â
                         re.I)
 #: `take`, or `take 1 3`: the changes the slice's reading proposed.
 _TAKE = re.compile(r"^\s*take\b\s*([\d ,]*)$", re.I)
+#: `no 3 because ...`: one of the model's proposals turned down, saying why.
+_NO = re.compile(r"^\s*no\s+(\d+)\b\s*(?:(?:because\b|-|â€”|:)\s*(.*))?$", re.I)
 #: `turn`: the turn on the plate that a part which doesn't fit as posed is offered.
 _TURN = "turn"
 #: `use`, `use 2 4`, `clear 3` or `from 2`: what the most similar past print offers.
@@ -134,6 +157,13 @@ class ReviewRequest:
     context: tuple[str, ...] = ()
     #: What decided the past prints most like this one, to use (mqucifer/print-shop#211).
     offering: Offering | None = None
+    #: The model's proposals as this screen has them (mqucifer/print-shop#242): what a number
+    #: typed is read against. None: no model proposes here.
+    suggested: Suggested | None = None
+    #: The model at work on them, beside the review: how long, and what it's come to since.
+    suggesting: Suggesting | None = None
+    #: The model's proposals turned down at this job so far, each saying why.
+    turned_down: tuple[Change, ...] = ()
     #: The spool the job was prepared with, and the spools on hand, for a swap to name its two
     #: (mqucifer/print-shop#218). None with no stock set up.
     material: Material | None = None
@@ -176,6 +206,21 @@ class ReviewRequest:
         """The flags that propose a change, numbered from 1 at the review."""
         return tuple(f for f in self.flags if f.change is not None)
 
+    @property
+    def by_model(self) -> list[Listed]:
+        """The model's proposals on this screen, numbered on from the slice's."""
+        return listed(self.suggested, self.proposal,
+                      pose_value(self.orientation.rotation_deg), len(self.proposed))
+
+    def refreshed(self) -> ReviewRequest:
+        """The same review with what the model has come to by now added: a new screen, whose
+        numbers are the ones to type. The phone asks for it as Enter does, and says it in
+        `Review.saw` when it answers, or what came is recorded as unseen."""
+        if self.suggesting is None:
+            return self
+        now = self.suggesting.now()
+        return replace(self, suggested=now, proposal=looked_up(self.proposal, now))
+
 
 @dataclass(frozen=True)
 class Review:
@@ -185,8 +230,13 @@ class Review:
     approved: bool = False
     corrections: tuple[Change, ...] = ()
     stop: bool = False
-    #: The changes the reading proposed that the Sponsor took (`take`).
+    #: The changes proposed, by the reading or the model, that the Sponsor took (`take`).
     taken: tuple[Change, ...] = ()
+    #: The model's proposals turned down, saying why, by key. Each is a correction as well.
+    declined: tuple[str, ...] = ()
+    #: The model's proposals as the last screen before the answer had them, where a reviewer
+    #: added to them itself. None: as the request had them.
+    saw: Suggested | None = None
     #: The offer as the answer left it, where it picked another print or cleared an item.
     offering: Offering | None = None
     #: The turn offered to fit the plate was taken (`turn`, mqucifer/print-shop#257).
@@ -222,8 +272,12 @@ def render(request: ReviewRequest) -> str:
         "",
     ]
     proposal = request.proposal
-    if proposal.reasoning:
-        lines += ["How the part was read:", *_wrap(proposal.reasoning), ""]
+    found = request.suggested
+    # A turn's reading, notes and refusals are for that pose, and shown only under it.
+    here = found if found is not None and not turning(found) else None
+    reasoning = proposal.reasoning if found is None else here.reasoning if here else ""
+    if reasoning:
+        lines += ["How the part was read:", *_wrap(reasoning), ""]
     changes = proposal.changes
     if changes:
         width = max(len(c.key) for c in changes)
@@ -267,18 +321,21 @@ def render(request: ReviewRequest) -> str:
             else ""
         )
         lines.append(f"  kept {c.key} at {c.preset}: {c.reason}{by}")
-    for note in proposal.design_notes:
+    from_model = here.design_notes if here is not None else ()
+    for note in dict.fromkeys((*proposal.design_notes, *from_model)):
         lines.append(f"  design: {note}")
     for note in proposal.notes:
         lines.append(f"  note: {note}")
-    for refusal in proposal.refused:
+    for refusal in dict.fromkeys((*proposal.refused, *(here.refused if here else ()))):
         lines.append(f"  refused from the model: {refusal}")
-    if proposal.model.startswith("cut off"):
+    if found is not None:
+        lines += _model_line(found)
+    elif proposal.model.startswith("cut off"):
         lines.append(
             f"  CUT OFF: the model's answer was {proposal.model}. Nothing it proposed is "
             "used; only the guards' changes stand. This is recorded, to tune the limit."
         )
-    elif proposal.model.startswith("unavailable"):
+    elif proposal.model.startswith(("unavailable", "timed out")):
         lines.append(f"  the model was {proposal.model}; only the guards' changes stand")
     elif not proposal.model:
         lines.append("  no model was asked; only the guards' changes stand")
@@ -308,12 +365,33 @@ def render(request: ReviewRequest) -> str:
         lines += ["", "The part's context (its design run, or a sidecar beside it):",
                   *(f"  {line}" for line in request.context)]
     lines += _read(request)
+    lines += _by_model(request)
     if request.offering is not None:
         pose = pose_value(request.orientation.rotation_deg)
         lines += render_offer(request.offering, proposal, pose)
+    lines += _prompt(request)
+    return "\n".join(lines)
+
+
+def render_arrived(request: ReviewRequest) -> str:
+    """Only what came since the screen above it was drawn: the model's block, or how it failed,
+    and the prompt (mqucifer/print-shop#242). The rest of the review hasn't changed."""
+    found = request.suggested
+    assert found is not None
+    lines = [*_model_line(found), *_by_model(request)]
+    if not turning(found):  # else they're under the turn
+        lines += [f"  design: {note}" for note in found.design_notes
+                  if note not in request.proposal.design_notes]
+        lines += [f"  refused from the model: {refusal}" for refusal in found.refused
+                  if refusal not in request.proposal.refused]
+    return "\n".join([*lines, *_prompt(request)])
+
+
+def _prompt(request: ReviewRequest) -> list[str]:
+    """What can be typed at the review as it's now listed."""
     use = (" use what decided that print (use, or use 1 3),"
            if request.offering is not None and request.offering.options else "")
-    take = " or take what the slice proposes (take, or take 1)," if request.proposed else ""
+    take = _take_says(request)
     back = " send the orientation back (orientation)," if request.candidates else ""
     go_on = "Type ok to go on to the approval gate,"
     if request.turn_waiting:
@@ -326,13 +404,12 @@ def render(request: ReviewRequest) -> str:
         else f"pause_at=12.4 because the nuts go in ({lands}, and it asks what the pause is "
              "for), colour_change=12.4 because white to black (a swap)"
     )
-    lines += [
+    return [
         "",
         f"{go_on}{use}{take}{back} or correct a setting by name, "
         f"e.g. wall_loops=3 because it's decorative (several separated by ';'), {example}, "
         "or stop.",
     ]
-    return "\n".join(lines)
 
 
 def _turn(request: ReviewRequest) -> list[str]:
@@ -391,6 +468,8 @@ def _pauses(request: ReviewRequest) -> list[str]:
 
 def _by(change: Change) -> str:
     """Who a change is from, as the review names them."""
+    if change.taken and change.used is None:
+        return f"{_BY[change.source]}, taken by you"
     if change.used is not None:
         return f"{_BY[change.source]}, {change.used.line()}"
     return _BY[change.source] + (f" {change.lesson}" if change.lesson is not None else "")
@@ -448,6 +527,77 @@ def _read(request: ReviewRequest) -> list[str]:
     return lines
 
 
+def _model_line(found: Suggested) -> list[str]:
+    """The model's work on the settings, in one line: still at it, or what it came to."""
+    if found.ending is Ending.WORKING:
+        return [f"  The model is still working on settings ({waited(found.seconds)}). What it "
+                "proposes is added below, and nothing waits for it."]
+    lines = [f"  note: {stopped}"] if (stopped := fell_back(found)) else []
+    if found.ending is not Ending.CAME:
+        lines.append(f"  {didnt_come(found)}")
+    elif not found.proposed:
+        lines.append(f"  The model proposed no change, after {waited(found.seconds)}.")
+    return lines
+
+
+def _by_model(request: ReviewRequest) -> list[str]:
+    """The model's proposals, numbered on from the slice's, and those that don't stand."""
+    rows = request.by_model
+    found = request.suggested
+    down = [c for c in request.turned_down if found is not None and c.key in found.declined]
+    if found is None or not (rows or down or found.asked):
+        return []
+    lines = ["", "Proposed by the model (not applied unless you take it):"]
+    if found.asked:
+        lines.append(f"  It would have asked first: {found.asked}")
+    for row in rows:
+        c = row.change
+        if row.standing == "theirs":
+            lines.append(f"  -  {c.key}: {row.by} set {row.now or '-'}, and the model would set "
+                         f"{c.value}. {'Yours' if row.by == 'you' else 'That'} stands.")
+            continue
+        if row.standing == "so":
+            lines.append(f"  -  {c.key} {c.value}: taken." if c.key in found.taken
+                         else f"  -  {c.key}: the model's {c.value} is so here already.")
+            continue
+        if c.key == ORIENTATION:
+            here = pose_value(request.orientation.rotation_deg)
+        else:
+            now = request.proposal.get(c.key)
+            here = now.value if now is not None else c.preset
+        lines.append(f"  {row.number}) {c.key}  {here or '-'} -> {c.value}")
+        cites = ", ".join(x for x in (c.feature, c.knowledge) if x and c.key != ORIENTATION)
+        if c.reading:
+            lines.append(f"       {c.reading}")
+        if c.reason:
+            lines.append(f"       {c.reason} [model{': ' + cites if cites else ''}]")
+        if c.key == ORIENTATION:
+            if found.reasoning and not found.reasoning.startswith(c.reason):
+                lines.append(f"       How it read the part turned so: {found.reasoning}")
+            if found.once_turned:
+                then = ", ".join(f"{t.key} {t.preset or '-'} -> {t.value}"
+                                 for t in found.once_turned)
+                lines.append(f"       Once turned it would also propose: {then}")
+            lines += [f"       design, turned so: {note}" for note in found.design_notes]
+            lines += [f"       refused from the model, turned so: {each}" for each in found.refused]
+    for c in down:
+        lines.append(f"  -  {c.key} stays {c.value}: {c.reason} [you, saying no to the model's "
+                     f"{c.said_no_to}]")
+    return lines
+
+
+def _take_says(request: ReviewRequest) -> str:
+    """What the prompt says `take` takes: bare, the slice's, and the model's by number."""
+    slices = len(request.proposed)
+    models = sorted(by_number(request.by_model))
+    if not models:
+        return " or take what the slice proposes (take, or take 1)," if slices else ""
+    numbers = " ".join(map(str, models))
+    of_slice = (f"take (the slice's {'1' if slices == 1 else f'1-{slices}'}), " if slices else "")
+    return (f" {of_slice}take {numbers} (the model's, by number), no {models[0]} because ... "
+            "(turn one down, saying why),")
+
+
 def _wrap(text: str, width: int = 96) -> list[str]:
     return ["  " + line for line in textwrap.wrap(text, width)]
 
@@ -461,6 +611,10 @@ def parse_answer(answer: str, request: ReviewRequest) -> Review | str:
             return ("it doesn't fit as posed: type turn to take it turned "
                     f"{turn_words(request.slice.turn_deg)},{side} or stop")
         return Review(approved=True)
+    if text.lower() in ("no", "n") and by_number(request.by_model):
+        # The screen teaches `no 2 because ...`: a bare no doesn't end the job here.
+        return ("no turns one of the model's down, saying why: no "
+                f"{min(by_number(request.by_model))} because ... To end the job, type stop.")
     if text.lower() == _TURN:
         if not request.slice.turn_deg:
             return ("it fits as posed, so there's no turn to take: orientation sends the pose "
@@ -473,10 +627,19 @@ def parse_answer(answer: str, request: ReviewRequest) -> Review | str:
     used: list[Change] = []
     offering = request.offering
     picked = False
+    models = by_number(request.by_model)
+    down: list[Change] = []
     for part in filter(None, (p.strip() for p in text.split(";"))):
+        said_no = _NO.match(part)
+        if said_no is not None:
+            change = _turned_down(int(said_no.group(1)), said_no.group(2) or "", request, models)
+            if isinstance(change, str):
+                return change
+            down.append(change)
+            continue
         took = _TAKE.match(part)
         if took is not None:
-            found = _take(took.group(1), request)
+            found = _take(took.group(1), request, models)
             if isinstance(found, str):
                 return found
             taken += found
@@ -531,13 +694,28 @@ def parse_answer(answer: str, request: ReviewRequest) -> Review | str:
                    source=Source.SPONSOR, standard=known.standard if known else "")
         )
     keys = {c.key for c in corrections}
+    # Named twice, as `take 2; take`, the model's taken by number is the one taken.
+    taken = list({c.key: c for c in sorted(taken, key=lambda c: c.taken)}.values())
     taken = [c for c in taken if c.key not in keys]
     # Typed wins over taken, and both over used.
     over = keys | {c.key for c in taken}
     used = [c for c in {c.key: c for c in used}.values() if c.key not in over]
     if taken and any(c.key == ORIENTATION for c in used):
         return "that turns the part, which slices it afresh: use it, then take at the next review"
-    return Review(corrections=(*used, *corrections), taken=tuple(taken),
+    turn = next((n for n, c in models.items() if c.key == ORIENTATION), None)
+    if any(c.key == ORIENTATION for c in taken) and (
+        len(taken) > 1 or used or corrections or down
+    ):
+        return (f"that turns the part, which slices it afresh: take {turn} alone first, then "
+                "the rest at the next review")
+    if {c.key for c in down} & {c.key for c in taken}:
+        return "that's both taken and turned down: one or the other"
+    # What's typed is the no's answer, and what's used stands in its place: the no says so.
+    stands = {c.key: c.value for c in used}
+    down = [c.model_copy(update={"value": stands.get(c.key, c.value)}) for c in down
+            if c.key not in keys]
+    return Review(corrections=(*used, *down, *corrections), taken=tuple(taken),
+                  declined=tuple(c.key for c in down),
                   offering=None if offering == request.offering else offering)
 
 
@@ -727,86 +905,290 @@ def _insert_stands_or_is_ticked(request: ReviewRequest) -> bool:
                for item in request.offering.ticked(request.proposal, pose))
 
 
-def _take(numbers: str, request: ReviewRequest) -> list[Change] | str:
-    """The reading's changes `take` names: all of them, or those numbered."""
+def _take(
+    numbers: str, request: ReviewRequest, models: dict[int, Change]
+) -> list[Change] | str:
+    """The changes `take` names, by the numbers on screen: the slice's, all of them by a bare
+    `take`, and the model's, by number alone (mqucifer/print-shop#242)."""
     proposed = request.proposed
-    if not proposed:
-        return "the slice proposes nothing to take"
-    picked = [int(n) for n in re.findall(r"\d+", numbers)]
+    picked = list(dict.fromkeys(int(n) for n in re.findall(r"\d+", numbers)))
     if not picked:
+        if not proposed:
+            return ("the slice proposes nothing to take"
+                    + (f": the model's are taken by number, take {min(models)}" if models else ""))
         picked = list(range(1, len(proposed) + 1))
-    wrong = [n for n in picked if not 1 <= n <= len(proposed)]
-    if wrong:
-        return f"take a number from 1 to {len(proposed)}"
-    return [c for n in picked if (c := proposed[n - 1].change) is not None]
+    highest = max([len(proposed), *models])
+    if not highest:
+        return "the slice proposes nothing to take"
+    if any(not 1 <= n <= highest for n in picked):
+        return f"take a number from 1 to {highest}"
+    taken: list[Change] = []
+    for n in sorted(picked):  # the slice's first, so that the model's stands where both name one
+        change = proposed[n - 1].change if n <= len(proposed) else models[n]
+        assert change is not None
+        taken.append(change if n <= len(proposed) else change.model_copy(update={"taken": True}))
+    # Named for one setting as well, the model's replaces the slice's: it was asked for by number.
+    return list({c.key: c for c in taken}.values())
+
+
+def _turned_down(
+    n: int, why: str, request: ReviewRequest, models: dict[int, Change]
+) -> Change | str:
+    """`no n because ...`: the person's no, with why, and a lesson candidate as a no to the print
+    loop's question was (mqucifer/print-shop#242). It records what stands here and sets
+    nothing: a guard's setting stays the guard's, and another pose has its own."""
+    change = models.get(n)
+    if change is None:
+        if not models:
+            return "there's nothing of the model's to turn down"
+        return ("no turns down one of the model's: "
+                + " or ".join(map(str, sorted(models))))
+    if not why.strip():
+        return f"say why, it's what the next print learns from: no {n} because ..."
+    if change.key == ORIENTATION:
+        # Shaped as a pose sent back is: the pose refused, the one kept, the laid pose's traits.
+        here = pose_value(request.orientation.rotation_deg)
+        preset, feature = change.value, ", ".join(request.laid_traits)
+    else:
+        proposal = request.proposal
+        now = next((c for c in (*proposal.changes, *proposal.not_applied, *proposal.kept)
+                    if c.key == change.key), None)
+        here = now.value if now is not None else change.preset
+        preset, feature = change.preset, ""
+    return Change(key=change.key, preset=preset, value=here, reason=why.strip(),
+                  source=Source.SPONSOR, feature=feature, standard=change.standard,
+                  said_no_to=change.value)
 
 
 def cli_reviewer(
     read: Callable[[str], str] = input, write: Callable[[str], None] = print,
+    *,
     forget: Callable[[], None] = drop_typed,
     asks: Callable[[], bool] | None = None,
+    screen: Callable[[], TextIO | None] = terminal,
 ) -> Reviewer:
     """Show the review on the command line and read the answer, again until it's readable.
     `orientation` starts the send-back conversation (`send_back`). `forget` drops what was typed
-    before the load's question was shown: a y approves here too, and mustn't answer that. `asks`
-    is whether there's a terminal to ask that in (`can_ask`)."""
+    before something was shown that a number or a y answers: the model's list, or the load's
+    question. `asks` is whether there's a terminal to ask that in (`can_ask`).
+
+    The model's proposals are said as they arrive, under the open prompt, and added to the list
+    by Enter (mqucifer/print-shop#242). What's typed is read against the list on screen. While
+    the model works, a timer ticks on the line above the prompt, on the screen alone.
+    """
 
     def review(request: ReviewRequest) -> Review:
-        write(render(request))
-        moved: Offering | None = None  # the offer as picked and cleared here
-        took = False  # the turn to fit, taken here
-        told = False  # that what's ticked isn't used yet
-        while True:
-            answer = read("> ")
-            back = _SEND_BACK.match(answer)
-            if back is not None and request.candidates:
-                sent = send_back(request, read, write, back.group(1), back.group(2))
-                if sent is not None:
-                    return _as_left(sent, moved, took)
-                write("  Back to the review: ok, a correction, orientation, or stop.")
-                continue
+        work = request.suggesting
+        lock = threading.Lock()  # the model's end and the prompt both write
+        asking = threading.Event()
+        announced = False
+
+        def said_in(found: Suggested) -> str:
+            if found.proposed:
+                many = len(found.proposed)
+                them = "proposal" if many == 1 else f"{many} proposals"
+                return (f"The model's {them} came after {waited(found.seconds)}. Enter adds "
+                        f"{'it' if many == 1 else 'them'} to the list")
+            if found.ending is Ending.CAME:
+                return f"The model proposed no change, after {waited(found.seconds)}"
+            return didnt_come(found).rstrip(".")
+
+        def heard(found: Suggested) -> None:
+            nonlocal announced
+            with lock:
+                if not asking.is_set():
+                    return  # said before the next prompt
+                announced = True
+                out = screen()
+                if out is not None and timed.is_set():
+                    # The timer's line, above what's being typed, cleared: it's said below.
+                    out.write("\0337\033[1A\r\033[2K\0338")
+                    out.flush()
+                    timed.clear()
+                write(f"\n{said_in(found)} (what you've typed is kept).")
+                out = screen()
+                if out is not None:
+                    # On the screen alone: the log gets the prompt with its answer.
+                    out.write("> ")
+                    out.flush()
+
+        timed = threading.Event()  # the timer's line is drawn above the open prompt
+        done = threading.Event()
+
+        def working() -> bool:
+            return work is not None and work.now().ending is Ending.WORKING
+
+        def timer() -> str:
+            assert work is not None
+            return f"  waiting for the model's settings: {waited(work.now().seconds)}"
+
+        def tick() -> None:
+            """The timer's line, rewritten each second above what's being typed, with the cursor
+            put back: as the questions' wait does (`waiting.cli_waiting`)."""
+            while not done.wait(1.0):
+                with lock:
+                    out = screen()
+                    if out is None or not timed.is_set() or not asking.is_set():
+                        continue
+                    if not working():
+                        continue  # its end is said by `heard`
+                    out.write(f"\0337\033[1A\r\033[2K{timer()}\0338")
+                    out.flush()
+
+        def show() -> None:
+            write(render(request))
+            if request.suggested is not None:
+                forget()  # its numbers are only now the ones on screen
+
+        def ask() -> str:
+            nonlocal announced
+            # Looked at and marked open together, so that an end between the two is said once,
+            # by one or the other.
+            with lock:
+                if work is not None and not announced:
+                    now = work.now()
+                    if (request.suggested is not None and now.ending is not Ending.WORKING
+                            and request.suggested.ending is Ending.WORKING):
+                        announced = True
+                        write(f"  {said_in(now)}.")
+                out = screen()
+                timed.clear()
+                if out is not None and working():
+                    # On the screen alone, and ticking (`tick`): the log has the review's line.
+                    out.write(f"{timer()}\n")
+                    out.flush()
+                    timed.set()
+                asking.set()
             try:
-                parsed = parse_answer(answer, request)
-                if isinstance(parsed, str):
-                    write(f"  {parsed}")
+                return read("> ")
+            finally:
+                with lock:
+                    asking.clear()
+
+        def left(answer: Review) -> Review:
+            """The answer as this review leaves it: with what was picked or taken here, and
+            what of the model's it had on screen."""
+            answer = _as_left(answer, moved, took)
+            return replace(answer, saw=request.suggested) if added else answer
+
+        if work is not None:
+            work.hear(heard)
+            if screen() is not None:
+                threading.Thread(target=tick, daemon=True, name="settings-timer").start()
+        try:
+            show()
+            moved: Offering | None = None  # the offer as picked and cleared here
+            took = False  # the turn to fit, taken here
+            told = False  # that what's ticked isn't used yet
+            told_model: set[str] = set()  # what's been said of the model's, at an ok
+            added = False
+            while True:
+                answer = ask()
+                if request.suggested is not None and not answer.strip():
+                    newer = request.refreshed()
+                    assert newer.suggested is not None
+                    if newer.suggested.ending is not request.suggested.ending:
+                        request, added = replace(newer, turn_taken=request.turn_taken), True
+                        write(render_arrived(request))
+                        forget()  # its numbers are only now the ones on screen
+                    elif newer.suggested.ending is Ending.WORKING:
+                        write("  The model is still working on settings "
+                              f"({waited(newer.suggested.seconds)}).")
+                    else:
+                        write("  Nothing new to add: ok, take, a correction, orientation, "
+                              "or stop.")
                     continue
-                purposed = _purposed(parsed, request, read, write)
-            except sqlite3.Error as exc:
-                write(f"  The stock couldn't be read ({exc}): type it again.")
-                continue
-            if purposed is None:
-                write("  Back to the review: ok, a correction, or stop.")
-                continue
-            parsed = purposed
-            if parsed.turn_taken:
-                took = True
-                request = replace(request, turn_taken=True)
-                write(f"  Taken: turned {turn_words(request.slice.turn_deg)}. "
-                      "ok goes on to the approval gate.")
-                continue
-            if parsed.browsing:
-                # Only the offer moved, so only the offer is shown again.
-                moved = parsed.offering
-                assert moved is not None
-                request = replace(request, offering=moved)
-                pose = pose_value(request.orientation.rotation_deg)
-                write("\n".join(render_offer(moved, request.proposal, pose)))
-                told = False
-                continue
-            if parsed.approved and not told and request.offering is not None:
-                pose = pose_value(request.orientation.rotation_deg)
-                left = len(request.offering.ticked(request.proposal, pose))
-                if left:
-                    told = True
-                    aren, them = ("isn't", "it") if left == 1 else ("aren't", "them")
-                    write(f"  {left} ticked {aren} used yet: use to take {them}, "
-                          "or ok again to go on without")
+                back = _SEND_BACK.match(answer)
+                if back is not None and request.candidates:
+                    sent = send_back(request, read, write, back.group(1), back.group(2))
+                    if sent is not None:
+                        return left(sent)
+                    write("  Back to the review: ok, a correction, orientation, or stop.")
                     continue
-            if parsed.approved:
-                _loaded_first(request, read, write, forget, asks or can_ask)
-            return _as_left(parsed, moved, took)
+                try:
+                    parsed = parse_answer(answer, request)
+                    if isinstance(parsed, str):
+                        write(f"  {parsed}")
+                        continue
+                    purposed = _purposed(parsed, request, read, write)
+                except sqlite3.Error as exc:
+                    write(f"  The stock couldn't be read ({exc}): type it again.")
+                    continue
+                if purposed is None:
+                    write("  Back to the review: ok, a correction, or stop.")
+                    continue
+                parsed = purposed
+                if parsed.turn_taken:
+                    took = True
+                    request = replace(request, turn_taken=True)
+                    write(f"  Taken: turned {turn_words(request.slice.turn_deg)}. "
+                          "ok goes on to the approval gate.")
+                    continue
+                if parsed.browsing:
+                    # Only the offer moved, so only the offer is shown again.
+                    moved = parsed.offering
+                    assert moved is not None
+                    request = replace(request, offering=moved)
+                    pose = pose_value(request.orientation.rotation_deg)
+                    write("\n".join(render_offer(moved, request.proposal, pose)))
+                    told = False
+                    continue
+                if parsed.approved:
+                    waits: list[str] = []
+                    if not told and request.offering is not None:
+                        pose = pose_value(request.orientation.rotation_deg)
+                        ticked = len(request.offering.ticked(request.proposal, pose))
+                        if ticked:
+                            told = True
+                            aren, them = ("isn't", "it") if ticked == 1 else ("aren't", "them")
+                            waits.append(f"  {ticked} ticked {aren} used yet: use to take {them}, "
+                                         "or ok again to go on without")
+                    state, said = _going_on(request)
+                    if state and state not in told_model:
+                        told_model.add(state)
+                        waits.append(said)
+                    if waits:
+                        write("\n".join(waits))
+                        continue
+                    if without := _without(request):
+                        write(f"  {without}.")
+                    _loaded_first(request, read, write, forget, asks or can_ask)
+                return left(parsed)
+        finally:
+            done.set()
+            if work is not None:
+                work.hear(None)
 
     return review
+
+
+def _going_on(request: ReviewRequest) -> tuple[str, str]:
+    """What an `ok` goes on without, of the model's: which, and what's said of it once."""
+    shown = request.suggested
+    if request.suggesting is None or shown is None or shown.ending is not Ending.WORKING:
+        return "", ""
+    now = request.suggesting.now()
+    if now.ending is Ending.WORKING:
+        return "working", (f"  The model is still working ({waited(now.seconds)}): ok again to "
+                           "go on without its proposals, which closes its call.")
+    if not now.proposed:
+        return "", ""
+    many = len(now.proposed)
+    of, are, them = (("proposal", "is", "it") if many == 1
+                     else (f"{many} proposals", "are", "them"))
+    return "unseen", (f"  The model's {of} {are} in and you haven't seen {them}: Enter adds "
+                      f"{them} to the list, ok again goes on without {them}.")
+
+
+def _without(request: ReviewRequest) -> str:
+    """What this approval goes on without, of the model's, said as it's given, or ""."""
+    shown = request.suggested
+    if request.suggesting is None or shown is None or shown.ending is not Ending.WORKING:
+        return ""
+    now = request.suggesting.now()
+    update = ({"ending": Ending.WENT_ON} if now.ending is Ending.WORKING
+              else {"unseen": bool(now.proposed)})
+    return went_on(now.model_copy(update=update))
 
 
 def _as_left(answer: Review, moved: Offering | None, took: bool) -> Review:

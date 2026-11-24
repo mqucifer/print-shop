@@ -51,7 +51,10 @@ from print_shop.setup.intake import (
 )
 from print_shop.setup.questions import PURPOSE, STOCK, Asked, only_stock
 
-__all__ = ["GO_ON", "Prompted", "QuestionsCall", "Waiting", "ask_meanwhile", "cli_waiting", "took"]
+__all__ = [
+    "GO_ON", "Prompted", "QuestionsCall", "Waiting", "ask_meanwhile", "cli_waiting", "terminal",
+    "took",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -311,7 +314,7 @@ def _keys_waiting(timeout_s: float) -> bool:
     return bool(select.select([sys.stdin], [], [], timeout_s)[0])
 
 
-def _terminal() -> TextIO | None:
+def terminal() -> TextIO | None:
     """The screen, where there's a person at a terminal: the timer is drawn straight on it, so
     the job's log keeps a line for the wait and not one for each second."""
     screen = sys.__stdout__
@@ -322,7 +325,7 @@ def _terminal() -> TextIO | None:
 
 def can_ask() -> bool:
     """Whether there's a person's terminal to ask in."""
-    return _terminal() is not None
+    return terminal() is not None
 
 
 def cli_waiting(
@@ -331,7 +334,7 @@ def cli_waiting(
     *,
     replayed: bool = False,
     prompt: Callable[[], str] = lambda: "",
-    screen: Callable[[], TextIO | None] = _terminal,
+    screen: Callable[[], TextIO | None] = terminal,
     typed: Callable[[float], bool] = _keys_waiting,
     forget: Callable[[], None] = drop_typed,
 ) -> Waiting:

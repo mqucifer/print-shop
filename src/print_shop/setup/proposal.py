@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -60,12 +61,14 @@ __all__ = [
     "PAUSE",
     "PAUSE_NAMES",
     "Change",
+    "Ending",
     "GivenLesson",
     "LoopCall",
     "NotPlaced",
     "PartFacts",
     "Proposal",
     "Source",
+    "Suggested",
     "Used",
     "answered",
     "answered_kept",
@@ -77,6 +80,7 @@ __all__ = [
     "pose_value",
     "read_back",
     "reached",
+    "tree_supports",
 ]
 
 
@@ -103,6 +107,9 @@ class Used(BaseModel):
     #: The print it began on, where that print had used it from another.
     first_job_id: str = ""
     first_stl_name: str = ""
+    #: What they took was the model's proposal (mqucifer/print-shop#242). `by` is then
+    #: `READING`, what was taken, so older code reads the row as it reads a slice's take.
+    of_model: bool = False
 
     def line(self) -> str:
         lesson = f", lesson {self.lesson}'s" if self.by is Source.LESSON else ""
@@ -132,6 +139,12 @@ class Change(BaseModel):
     not_applied: str = ""
     #: The past print it was used from, or None (mqucifer/print-shop#211).
     used: Used | None = None
+    #: The model's proposal, taken by the person at the review (mqucifer/print-shop#242). One of
+    #: the model's without it was applied unasked, as they were until then.
+    taken: bool = False
+    #: A correction that turned the model's proposal down: the value it had proposed. It
+    #: records the no and what stood, for the lessons, and sets nothing in the slice.
+    said_no_to: str = ""
     #: What a pause is for, and a swap's spools (mqucifer/print-shop#218). None for any other
     #: setting, and for a pause from before it said.
     pause: Pause | None = None
@@ -184,6 +197,60 @@ class LoopCall(BaseModel):
     seconds: float
 
 
+class Ending(StrEnum):
+    """How the model's work on a pose's settings ended (mqucifer/print-shop#242)."""
+
+    WORKING = "working"
+    CAME = "came"
+    CUT_OFF = "cut off"
+    TIMED_OUT = "timed out"
+    UNAVAILABLE = "unavailable"
+    #: The person went on without it.
+    WENT_ON = "went on"
+    #: The part was turned to another pose first.
+    TURNED = "turned"
+
+
+class Suggested(BaseModel):
+    """What the model proposed for one pose and what came of it: what the review shows and what
+    the record keeps (mqucifer/print-shop#242, `suggest.py`)."""
+
+    model_config = {"frozen": True}
+
+    #: The pose it was worked out in.
+    pose: tuple[float, float, float]
+    ending: Ending = Ending.WORKING
+    #: How it failed, in the client's words.
+    said: str = ""
+    seconds: float = 0.0
+    #: Its proposals, in the order they're numbered: settings, or a turn of the print loop's
+    #: (`ORIENTATION`). A big change's words are its `reading`.
+    proposed: tuple[Change, ...] = ()
+    #: The settings the loop chose with its turn, which are offered once the part is turned.
+    once_turned: tuple[Change, ...] = ()
+    #: What the person took of them, and what they turned down saying why, by key.
+    taken: tuple[str, ...] = ()
+    declined: tuple[str, ...] = ()
+    #: The person went on past them once they were in, without having them on screen.
+    unseen: bool = False
+    #: What was taken and then left behind when the part was turned, by key.
+    dropped: tuple[str, ...] = ()
+    #: The loop's question before a big change that no proposal carries: the guard's supports
+    #: in the pose shown, which it would have asked about.
+    asked: str = ""
+    reasoning: str = ""
+    design_notes: tuple[str, ...] = ()
+    refused: tuple[str, ...] = ()
+    model: str = ""
+    call: dict[str, Any] = {}
+    skill_groups: tuple[str, ...] = ()
+    skill_sha256: str = ""
+    loop: tuple[LoopCall, ...] = ()
+    loop_ending: str = ""
+    #: The lessons the loop looked up, which the review says.
+    looked_up: tuple[int, ...] = ()
+
+
 class Proposal(BaseModel):
     """The changes for one print, the reasoning behind them, and what wasn't done."""
 
@@ -218,6 +285,10 @@ class Proposal(BaseModel):
     #: for a proposal from the single calls.
     loop: tuple[LoopCall, ...] = ()
     loop_ending: str = ""
+    #: What the model proposed at this job's reviews, a pose at a time, with what was taken and
+    #: how each ended (mqucifer/print-shop#242). () in a row from before, whose model's changes
+    #: were applied unasked.
+    suggested: tuple[Suggested, ...] = ()
     #: The part's context as it was read, from its design run or a sidecar, in lines
     #: (mqucifer/print-shop#130), or why there was none.
     context: tuple[str, ...] = ()
@@ -383,12 +454,7 @@ def guard(facts: PartFacts, proposal: Proposal) -> Proposal:
             reason=f"the {overhang:g} mm2 overhang would print into the air, and nothing "
                    "decided otherwise",
             source=Source.GUARD, feature="overhang", knowledge="supports"))
-    if value("enable_support") == "1" and value("support_type") != "tree(auto)":
-        changes = [c for c in changes if c.key != "support_type"]
-        changes.append(Change(
-            key="support_type", preset=facts.preset("support_type"), value="tree(auto)",
-            reason="tree supports, as you use them", source=Source.GUARD,
-            feature="overhang", knowledge="supports"))
+    changes = tree_supports(changes, facts.preset)
 
     # A part with a fit never gets a random seam from the model or a lesson
     # (mqucifer/print-shop#130); the person's own answer or correction stands.
@@ -416,6 +482,21 @@ def guard(facts: PartFacts, proposal: Proposal) -> Proposal:
         "notes": proposal.notes + tuple(_notes(facts)),
         "refused": tuple(refused),
     })
+
+
+def tree_supports(changes: list[Change], preset: Callable[[str], str]) -> list[Change]:
+    """The guard that supports are always tree: held over a proposal, and again over what's
+    taken of the model's at the review (mqucifer/print-shop#242)."""
+
+    def value(key: str) -> str:
+        return next((c.value for c in changes if c.key == key), preset(key))
+
+    if value("enable_support") != "1" or value("support_type") == "tree(auto)":
+        return changes
+    return [*(c for c in changes if c.key != "support_type"), Change(
+        key="support_type", preset=preset("support_type"), value="tree(auto)",
+        reason="tree supports, as you use them", source=Source.GUARD,
+        feature="overhang", knowledge="supports")]
 
 
 def _notes(f: PartFacts) -> list[str]:

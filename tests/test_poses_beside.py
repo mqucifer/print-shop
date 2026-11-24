@@ -34,6 +34,7 @@ from print_shop.setup.review import Review, Reviewer, ReviewRequest, cli_reviewe
 from tests.fakes import CI_PROFILES, FramePrinter, MemoryBridge
 from tests.fixtures import write_stl
 from tests.plate_235 import write_plate
+from tests.reviewing import settled
 from tests.test_job_e2e import CFG
 from tests.test_review import _model, _questions
 from tests.test_send_back import AnyPart
@@ -183,7 +184,7 @@ class Person:
         return "\n".join(self.shown)
 
     def reviewer(self) -> Reviewer:
-        return cli_reviewer(self.read, self.write)
+        return settled(cli_reviewer(self.read, self.write))
 
 
 def approves(request: ReviewRequest) -> Review:
@@ -266,7 +267,7 @@ def test_a_kept_pose_under_the_print_loop_asks_first_and_the_loop_has_all_six(
         raise RuntimeError("no model here")
 
     loop = PrintLoop(chat=chat, person=lambda question: "yes", model="fake")
-    row = job.run(down(tmp_path, "tee", "+z"), approves, loop)
+    row = job.run(down(tmp_path, "tee", "+z"), settled(approves), loop)
     assert row is not None, job.error
     assert said[0] == "asked", "the questions came before anything waited"
     assert said[1].startswith("waiting for the 5 poses still being"), "and the loop's wait says so"

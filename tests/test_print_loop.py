@@ -4,7 +4,9 @@ mqucifer/print-shop#129. After the intake's questions, one conversation with `sl
 `orca_setting`, `past_prints`, `ask` and `propose` decides the pose and the settings, in place of
 the orientation call and the settings call. Code decides what's big; the review and the approval
 gate are unchanged; every tool call is kept with the job; past its limit, the job falls back to
-the single calls and says so. Every model here is a scripted fake, and every slice the cube's
+the single calls and says so. With a review the loop proposes and the person takes
+(mqucifer/print-shop#242), as `takes` does here; with none to take them, it asks first as it
+did. Every model here is a scripted fake, and every slice the cube's
 recording: nothing reaches LiteLLM, Orca, the printer or the broker.
 """
 
@@ -32,6 +34,7 @@ from print_shop.setup.review import ReviewRequest, render
 from print_shop.setup.skill import GROUPS, load
 from tests.fakes import STORE_PROFILES, FramePrinter, MemoryBridge
 from tests.fixtures import write_stl
+from tests.reviewing import takes
 from tests.test_job_e2e import CFG
 from tests.test_ledger import record
 from tests.test_review import ANSWERS, _model, _questions
@@ -83,7 +86,8 @@ def _results(proposal: Any) -> list[tuple[str, str]]:
 @pytest.fixture
 def shop(tmp_path: Path) -> Iterator[Any]:
     """A daemon with the loop, the store's presets, and a ledger: `run(part, model, person)`
-    prints the part through the gate, the review answering ok."""
+    prints the part through the gate, the review taking the model's proposals and then
+    answering ok. `reviewed=False` is a job with no review, where the loop asks."""
     with Ledger(tmp_path / "ledger.sqlite") as ledger:
         (tmp_path / "work").mkdir()
         shown: list[ReviewRequest] = []
@@ -94,7 +98,9 @@ def shop(tmp_path: Path) -> Iterator[Any]:
 
             return Review(approved=True)
 
-        def run(part: str, model: Model, person: Person, **limits: Any) -> tuple[str, Any]:
+        def run(
+            part: str, model: Model, person: Person, reviewed: bool = True, **limits: Any
+        ) -> tuple[str, Any]:
             bridge = MemoryBridge()
             daemon = Daemon(
                 cfg=CFG, profiles=STORE_PROFILES, workdir=tmp_path / "work",
@@ -102,7 +108,7 @@ def shop(tmp_path: Path) -> Iterator[Any]:
                 ledger=ledger,
                 proposer=Proposer(ask=_model, ask_questions=_questions,
                                   lessons=lambda f, kind: print_lessons.for_part(ledger, f, kind)),
-                asker=replay_asker(ANSWERS), reviewer=review,
+                asker=replay_asker(ANSWERS), reviewer=takes(review) if reviewed else None,
                 loop=PrintLoop(chat=model, person=person, **limits),
             )
             with daemon:
@@ -146,7 +152,8 @@ def test_a_flat_part_with_a_warping_risk_keeps_its_pose_and_gets_settings_withou
     person = Person()
     job_id, row = run("lid", model, person)
     assert person.asked == [], "nothing big: nobody was asked"
-    assert (row.rotation_deg, row.orientation_source) == ((0.0, 0.0, 0.0), "loop:fake")
+    assert (row.rotation_deg, row.orientation_source) == ((0.0, 0.0, 0.0), "as_filed"), (
+        "the loop proposed no turn, so it's the file's own pose")
     proposal = row.proposal
     assert proposal.model == "loop:fake"
     made = {c.key: (c.value, c.source) for c in proposal.changes}
@@ -175,7 +182,7 @@ def test_a_part_that_needs_a_turn_to_clear_an_overhang_asks_first_with_its_reaso
         [("propose", {"rotation": [180, 0, 0], "settings": [], "reasoning": "slab down"})],
     )
     person = Person("yes")
-    job_id, row = run("tee", model, person)
+    job_id, row = run("tee", model, person, reviewed=False)
     [asked] = person.asked
     assert "Turn it over, so the slab lies on the plate?" in asked
     assert "turn it to 180,0,0 from the file's own pose" in asked
@@ -199,7 +206,7 @@ def test_a_turn_the_person_says_no_to_is_their_correction_and_a_lesson(shop: Any
         [("propose", {"rotation": [0, 0, 0], "settings": [], "reasoning": "as it lies"})],
     )
     person = Person(no, "yes")
-    job_id, row = run("tee", model, person)
+    job_id, row = run("tee", model, person, reviewed=False)
     results = _results(row.proposal)
     assert results[1] == ("propose", f"refused: the person said no to pose 180,0,0: {no}")
     assert results[2][1].startswith("ask first: supports on, for ")
@@ -265,7 +272,8 @@ def test_past_its_limit_the_job_falls_back_to_the_single_calls_and_says_so(shop:
     assert len(model.shown) == 3
     proposal = row.proposal
     assert proposal.model == "recorded", "the single settings call made it"
-    assert row.orientation_source == "geometric", "and the single orientation call"
+    assert row.orientation_source == "as_filed", (
+        "and the single orientation call's pose was the file's own, so there was no turn")
     assert any(n.startswith("the print loop stopped, past its limit of 3 calls, after 3 calls")
                for n in proposal.notes)
     assert [c.tool for c in proposal.loop] == ["orca_setting"] * 3, "what it did is kept"

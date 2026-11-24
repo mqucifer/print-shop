@@ -242,7 +242,7 @@ class Offering:
             if now is not None and _same(item.key, now.value, item.value):
                 if now.used is not None and now.used.job_id == past.job_id:
                     return Standing("=", ("used",))
-                if now.source in (*_PERSONS, Source.ANSWER, Source.LESSON):
+                if _theirs(now) or now.source in (Source.ANSWER, Source.LESSON):
                     return Standing("=", (f"{_set_by(now)} set it here already",))
         if item.blocked:
             return Standing("-", (item.blocked,))
@@ -250,7 +250,7 @@ class Offering:
         if item.key != ORIENTATION and now is not None and not _same(
             item.key, now.value, item.value
         ):
-            if now.source in _PERSONS:
+            if _theirs(now):
                 why.append(f"you set it to {now.value} at this review")
             elif now.source is Source.ANSWER and (
                 item.used.by not in _PERSONS or (item.key, now.value) not in past.answered
@@ -329,9 +329,24 @@ def _now(proposal: Proposal, key: str) -> Change | None:
     return next((c for c in (*changed, *proposal.kept) if c.key == key), None)
 
 
+def _whose(change: Change) -> Source:
+    """Who decided it, as an offered item keeps it: the model's that was taken is the person's
+    taking, `READING`, so that older code reads it (mqucifer/print-shop#242)."""
+    if change.used is not None:
+        return change.used.by
+    return Source.READING if change.taken else change.source
+
+
+def _theirs(change: Change) -> bool:
+    """The person's own: a correction, or what they took of the slice's or the model's."""
+    return change.source in _PERSONS or change.taken
+
+
 def _set_by(change: Change) -> str:
     if change.source is Source.LESSON:
         return f"lesson {change.lesson}"
+    if change.taken:
+        return "you"
     others = {Source.ANSWER: "your answer", Source.MODEL: "the model", Source.GUARD: "a guard"}
     return others.get(change.source, "you")
 
@@ -414,7 +429,7 @@ class _Found:
 
     @property
     def persons(self) -> bool:
-        return any(c.source in _PERSONS for c in self.decided.values())
+        return any(_theirs(c) for c in self.decided.values())
 
     def rank(self) -> tuple[bool, float, bool, bool, int]:
         """The same bytes, then closeness; of those alike, one that didn't fail, then one with
@@ -516,15 +531,30 @@ def _decided(row: Row) -> dict[str, Change]:
             if c.source in (Source.ANSWER, Source.LESSON):
                 found[c.key] = c
         for c in (*proposal.changes, *proposal.not_applied):
-            if c.source in (*_PERSONS, Source.ANSWER, Source.LESSON):
+            if _theirs(c) or c.source in (Source.ANSWER, Source.LESSON):
                 found[c.key] = c
             else:
                 found.pop(c.key, None)
     standing = {c.key for c in (*proposal.changes, *proposal.not_applied)} if proposal else set()
-    for key, c in {c.key: c for c in row.corrections or ()}.items():
+    # A no to the model's sets nothing, so it isn't offered as a value: a pose kept is.
+    said = [c for c in row.corrections or () if not c.said_no_to or c.key == ORIENTATION]
+    for key, c in {c.key: c for c in said}.items():
         if key not in standing:  # a pose sent back, or a row from before the proposal was kept
             found[key] = c
+    turn = _turn_taken(row)
+    if turn is not None and ORIENTATION not in found:
+        found[ORIENTATION] = turn
     return found
+
+
+def _turn_taken(row: Row) -> Change | None:
+    """The model's turn, where the person took it and the print was in that pose."""
+    pose = pose_value(row.rotation_deg)
+    for found in reversed(row.proposal.suggested if row.proposal else ()):
+        for c in found.proposed:
+            if c.key == ORIENTATION and ORIENTATION in found.taken and c.value == pose:
+                return c.model_copy(update={"taken": True, "reason": c.reason or "the model's"})
+    return None
 
 
 def _never_started(row: Row) -> bool:
@@ -627,8 +657,7 @@ def _past(ledger: Ledger, f: _Found, found: list[_Found], part: ThisPart) -> Pas
 def _order(change: Change) -> int:
     if change.key in (ORIENTATION, PAUSE):
         return (ORIENTATION, PAUSE).index(change.key)
-    by = change.used.by if change.used else change.source
-    return 2 + (*_PERSONS, Source.LESSON, Source.ANSWER).index(by)
+    return 2 + (*_PERSONS, Source.LESSON, Source.ANSWER).index(_whose(change))
 
 
 def _pose(part: ThisPart, value: str) -> Orientation | None:
@@ -692,10 +721,11 @@ class _Items:
     def item(self, change: Change) -> Item:
         row, part, key = self.f.row, self.part, change.key
         origin = change.used
-        by = origin.by if origin else change.source
+        by = _whose(change)
         lesson = origin.lesson if origin else change.lesson
         used = Used(
             job_id=row.job_id, stl_name=row.stl_name, by=by, lesson=lesson,
+            of_model=origin.of_model if origin else change.taken,
             first_job_id=(origin.first_job_id or origin.job_id) if origin else "",
             first_stl_name=(origin.first_stl_name or origin.stl_name) if origin else "",
         )
@@ -900,7 +930,7 @@ class _Items:
             if not (other.same_file if shape_bound else other.related):
                 continue
             later = other.decided.get(key)
-            if later is None or later.source not in _PERSONS:
+            if later is None or not _theirs(later):
                 continue
             if key in MATERIAL and _filament_name(other.row) != _filament_name(row):
                 continue
@@ -1150,7 +1180,7 @@ def _tags(item: Item) -> list[str]:
             said += f": {item.pause.start.named()}, then {item.pause.to.named()}"
         tags.insert(0, said)
     if u.by is Source.READING:
-        tags.append("you took the slice's")
+        tags.append("you took the model's" if u.of_model else "you took the slice's")
     if u.first_job_id and u.first_job_id != u.job_id:
         tags.append(f"first on {u.first_stl_name}, job {u.first_job_id[:8]}")
     return tags

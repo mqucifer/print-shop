@@ -20,8 +20,10 @@ Their tuning is used where there is one, the standard where there isn't;
 several tunings of one are listed to choose from. `--machine` and
 `--process` name a profile, when the Sponsor picks.
 
-**The part is oriented by the orientation model,** or, with `--as-laid`, kept as the file
-lays it: for a part already laid for printing, no model is asked (mqucifer/print-shop#128).
+**The part is shown as the file lays it, or on the side its context lays it,** and a turn of
+the print loop's is proposed at the review (mqucifer/print-shop#242). With `--as-laid` no turn
+is proposed: for a part already laid for printing, no orientation model is asked
+(mqucifer/print-shop#128).
 
 **The part's context goes with it** (mqucifer/print-shop#130): its fits, seen faces, purpose,
 the side it's laid on and its holds, from a sidecar beside it (`PART.part.json`), or from the
@@ -40,9 +42,14 @@ back instead of asked (mqucifer/print-shop#236): Enter confirms it, a number cha
 with both in the notes nothing waits for the model's questions. `--answers file.json` replays
 recorded answers, each naming its question by its text or its feature; a
 file that doesn't answer exactly the questions asked is refused, and the job
-ends saying which. The settings are then proposed and shown here for review:
-`ok`, or correct a setting by name and it slices again. Home Assistant's
-approval gate comes after that, unchanged.
+ends saying which.
+
+**The review shows at the first slice, and waits for no model** (mqucifer/print-shop#242): the
+answers, the kept lessons, the guards and what the slice proposes. The model's settings are
+proposals, added to the list by Enter once they're in, numbered on from the slice's: `take 2`
+takes one, bare `take` stays the slice's, and `no 2 because ...` turns one down, saying why.
+None is applied by arriving. `ok` goes on, saying once if it's without them; or correct a
+setting by name and it slices again. Home Assistant's approval gate comes after that, unchanged.
 
 **The questions and the review take as long as you take** (mqucifer/print-shop#125). The
 hour for the slice to reach the approval gate starts when the review is approved; the gate
@@ -117,6 +124,7 @@ from print_shop import sliced
 from print_shop.arming import ALLOW_HARDWARE_ENV, hardware_allowed
 from print_shop.core.contracts import Gate
 from print_shop.env import SETTINGS_PATH, load_env
+from print_shop.expert.client import STREAM_THREAD
 from print_shop.inventory import SETUP, Inventory, InventoryError, Material
 from print_shop.joblog import LOG_NAME, JobLog, secrets
 from print_shop.ledger import Ledger, ledger_path
@@ -137,6 +145,7 @@ from print_shop.runtime import (
 from print_shop.setup.context import read_context
 from print_shop.setup.intake import Asker, cli_asker, drop_typed, replay_asker
 from print_shop.setup.review import cli_reviewer
+from print_shop.setup.suggest import THREAD
 from print_shop.setup.waiting import Prompted, Waiting, can_ask, cli_waiting
 from print_shop.slicer.orca import SlicerProfiles
 from print_shop.slicer.store import STORE_DIR, NoChoice, Store, choose
@@ -187,6 +196,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(on_screen)
     by_hand = args.sliced is not None or args.again is not None
     if sum(x is not None for x in (args.stl, args.sliced, args.again)) > 1:
         parser.error("give one of a part, --sliced FILE, or --again JOB_ID")
@@ -520,6 +531,12 @@ def _watch(run: Run, job_id: str) -> int:
     return 0
 
 
+def on_screen(record: logging.LogRecord) -> bool:
+    """Whether a log line shows on the terminal: not one from the model's work beside the review,
+    which would land on the open prompt (mqucifer/print-shop#242). The job's log keeps it."""
+    return record.threadName not in (THREAD, STREAM_THREAD)
+
+
 def _gate_lines(gate: dict[str, object], *, turned: bool) -> list[str]:
     """A gate as the terminal, and so the job's log, shows it (mqucifer/print-shop#200).
 
@@ -534,6 +551,8 @@ def _gate_lines(gate: dict[str, object], *, turned: bool) -> list[str]:
         if turned:
             lines.append(f"  turned      {gate.get('orientation_deg')}")
         lines.append(f"  because     {gate.get('orientation_rationale')}")
+        if gate.get("without"):
+            lines.append(f"  model       {gate['without']}")
         if gate.get("pause"):
             what = str(gate.get("pause_for") or "pause").upper()
             lines.append(f"  {what:<12}{gate['pause']}: be at the printer for it")

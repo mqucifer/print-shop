@@ -78,7 +78,7 @@ from print_shop.rounds.lessons import (
 from print_shop.rounds.lessons import writer as _writer
 from print_shop.setup.bounds import MATERIAL
 from print_shop.setup.features import Feature
-from print_shop.setup.proposal import ORIENTATION, PAUSE, GivenLesson, Source, Used
+from print_shop.setup.proposal import ORIENTATION, PAUSE, GivenLesson, Source, Used, pose_value
 from print_shop.setup.traits import TRAITS, traits
 
 if TYPE_CHECKING:  # the ledger opens these tables, so it imports this
@@ -757,6 +757,12 @@ def _given(ledger: Ledger, row: Row) -> None:
         _step(ledger, g.id, GIVEN, HARNESS, f"to {row.stl_name}: {said}", job_id=row.job_id)
 
 
+#: `graph.AS_FILED`, which imports this: the file's own pose, where the loop only proposed one.
+AS_FILED = "as_filed"
+#: How the graph says a pose it showed because the file's own doesn't fit, which nobody chose.
+GEOMETRIC_SHOWN = "the geometric choice, as the check on poses passed it"
+
+
 def _scored_at_review(ledger: Ledger, row: Row) -> None:
     """Each setting a lesson set here, by what the Sponsor did with it at the review: stood is
     `used`, corrected `in_the_way`. One that set nothing is `not_used`. Once for each print."""
@@ -770,12 +776,22 @@ def _scored_at_review(ledger: Ledger, row: Row) -> None:
         ):
             continue
         if g.key == ORIENTATION:
-            # Given to the orientation step: it stood unless the pose was sent back again.
+            # Given to the orientation step: it stood where the print was in its pose and
+            # nobody sent it back (mqucifer/print-shop#242: the model only proposes a turn).
             sent = corrected.get(ORIENTATION)
-            scored, why = (
-                ("in_the_way", f"the pose was sent back again, to {sent.value}: {sent.reason}")
-                if sent is not None else ("used", "the pose wasn't sent back at the review")
-            )
+            printed = pose_value(row.rotation_deg)
+            if sent is not None and not sent.said_no_to:
+                scored, why = ("in_the_way",
+                               f"the pose was sent back again, to {sent.value}: {sent.reason}")
+            elif "taken by you at the review" in row.orientation_rationale and printed != g.value:
+                scored, why = "in_the_way", f"the model's turn to {printed} was taken instead"
+            elif printed != g.value and (
+                row.orientation_source == AS_FILED or GEOMETRIC_SHOWN in row.orientation_rationale
+            ):
+                # The loop only proposed, and nobody turned the part to the lesson's pose.
+                scored, why = "not_used", f"the print was in {printed}, and nothing turned it"
+            else:
+                scored, why = "used", "the pose wasn't sent back at the review"
         elif not g.applied:
             scored, why = "not_used", g.why
         elif g.key in corrected and not (
