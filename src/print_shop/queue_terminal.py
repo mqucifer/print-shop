@@ -27,9 +27,12 @@ the person picks, in any order.
 from __future__ import annotations
 
 import shlex
+import shutil
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import TextIO
 
 from print_shop.inventory import Inventory
 from print_shop.orchestrator.daemon import Daemon
@@ -37,7 +40,7 @@ from print_shop.orchestrator.kept import Waits
 from print_shop.orchestrator.print_queue import Adding, Need, PrintQueue
 from print_shop.setup.intake import cli_asker, drop_typed
 from print_shop.setup.review import cli_reviewer
-from print_shop.setup.waiting import cli_waiting
+from print_shop.setup.waiting import cli_waiting, terminal
 
 __all__ = ["HELP", "BED_QUESTION", "parse_adding", "serve"]
 
@@ -52,6 +55,8 @@ FOLLOW_S = 3.0
 #: After a Start, the most it waits to say what came of it before the prompt is back: the
 #: upload and the start's own limit (`print_queue.FINISH_WAIT_S`).
 STARTED_WITHIN_S = 900.0
+#: How often the line above an open `queue>` is read again, and rewritten where it's changed.
+LIVE_EVERY_S = 0.5
 #: What's said once a Start has come to something: started, held, ended or put back.
 _START_ENDS = ("Started:", "Not started", "Ended without printing", "Rejected", "Timed out")
 
@@ -81,21 +86,67 @@ def parse_adding(tokens: list[str]) -> list[Adding] | str:
 def serve(
     queue: PrintQueue, daemon: Daemon, *, read: Callable[[str], str] = input,
     write: Callable[[str], None] = print, forget: Callable[[], None] = drop_typed,
-    stock: Callable[[], str] | None = None,
+    stock: Callable[[], str] | None = None, screen: Callable[[], TextIO | None] = terminal,
 ) -> int:
-    """The queue at the terminal until `quit`, Ctrl-D or Ctrl-C: every job waits where it is."""
-    terminal = _Terminal(queue, daemon, read, write, forget, stock)
-    terminal.show()
+    """The queue at the terminal until `quit`, Ctrl-D or Ctrl-C: every job waits where it is.
+
+    While `queue>` is open on a terminal, the line above it says what needs the person and what
+    has just happened, rewritten in place as it changes, as the review's timer is
+    (mqucifer/print-shop#260): what's being typed is left as it is. The whole of what happened
+    is said at the next prompt."""
+    term = _Terminal(queue, daemon, read, write, forget, stock)
+    term.show()
     while True:
+        live = _Live(term, screen())
+        live.start()
         try:
             typed = read("queue> ").strip()
         except EOFError:
             write("")
             return 0
+        finally:
+            live.stop()
         if typed in ("quit", "exit", "q"):
             return 0
-        terminal.do(typed)
-        terminal.show()
+        term.do(typed)
+        term.show()
+
+
+class _Live:
+    """The line above an open `queue>`, kept up to date on the screen alone: the job's log and
+    what's typed are left as they are."""
+
+    def __init__(self, term: _Terminal, out: TextIO | None) -> None:
+        self.term, self.out = term, out
+        self.told = term.told
+        self.shown = term.live()
+        self.stopped = threading.Event()
+        self.thread = threading.Thread(target=self._run, daemon=True, name="queue-live")
+
+    def start(self) -> None:
+        if self.out is not None:
+            self.thread.start()
+
+    def stop(self) -> None:
+        self.stopped.set()
+        if self.thread.is_alive():
+            self.thread.join(timeout=2)
+
+    def _run(self) -> None:
+        assert self.out is not None
+        while not self.stopped.wait(LIVE_EVERY_S):
+            try:
+                now = self.term.live(self.told)
+            except Exception:  # noqa: BLE001 - the line is a courtesy: the prompt goes on
+                continue
+            if now == self.shown:
+                continue
+            self.shown = now
+            width = shutil.get_terminal_size((100, 24)).columns
+            text = now if len(now) < width else now[: max(width - 2, 10)] + "…"
+            # The line above what's being typed, rewritten, and the cursor put back.
+            self.out.write(f"\0337\033[1A\r\033[2K{text}\0338")
+            self.out.flush()
 
 
 class _Terminal:
@@ -114,8 +165,24 @@ class _Terminal:
         self.told += len(new)
         return new
 
+    def live(self, since: int | None = None) -> str:
+        """One line: what needs the person, and the last thing that happened since `since`, for
+        above the open prompt."""
+        lines = self.queue.lines()
+        asks = [f"{_verb(li.needs)} {li.number} ({li.job.part}, {li.needs})"
+                for li in lines if li.needs is not None]
+        said = [f"Needs you: {', '.join(asks)}"] if asks else ["Nothing needs you now"]
+        offered = next((li for li in lines if li.offered), None)
+        if offered is not None:
+            said.append(f"offered to print: {offered.number} {offered.job.part}")
+        new = self.queue.said(self.told if since is None else since)
+        if new:
+            said.append(new[-1] + (f" (+{len(new) - 1} more)" if len(new) > 1 else ""))
+        return "  " + " · ".join(said)
+
     def show(self) -> None:
-        """What's happened since, the print, and the queue in its order."""
+        """What's happened since, the print, and the queue in its order, and the line that's kept
+        up to date above the prompt."""
         self.drain()
         self.write("")
         printing = self.queue.printing()
@@ -130,6 +197,8 @@ class _Terminal:
         asks = [f"`{_verb(li.needs)} {li.number}`" for li in lines if li.needs is not None]
         if asks:
             self.write("Needs you: " + ", ".join(asks) + ". `help` lists the rest.")
+        # The line kept up to date while the prompt is open (`_Live`).
+        self.write(self.live())
 
     def do(self, typed: str) -> None:
         if not typed or typed == "list":
