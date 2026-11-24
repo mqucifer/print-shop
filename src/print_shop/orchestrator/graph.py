@@ -28,6 +28,7 @@ can be asserted against the real graph rather than a synthetic list.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import json
 import logging
 import sqlite3
@@ -68,6 +69,7 @@ from print_shop.inventory import Asked, Inventory, InventoryError, Material, Spo
 from print_shop.ledger import Ledger, PrintRecord
 from print_shop.orchestrator.fitness import scoring_profiles
 from print_shop.orchestrator.fitting import Fitting, with_turns
+from print_shop.orchestrator.kept import Kept
 from print_shop.printer.centauri import PreflightFailed, PrinterClient, preflight
 from print_shop.setup import Proposer, pauses
 from print_shop.setup import lessons as print_lessons
@@ -234,6 +236,7 @@ def build_graph(
             show("\n".join(hand_sliced.report(job, reading, found)))
         return {
             "gcode_path": str(result.gcode_path),
+            "gcode_sha256": job.file.sha256,
             "slice": result,
             "applied_orientation": AppliedOrientation(rationale=hand_sliced.RATIONALE),
             "profiles_used": None,
@@ -355,6 +358,9 @@ def build_graph(
         measured overhang area to determine support requirements.
         """
         outdir = outdir_root / state["job_id"]
+        # What the person and the model gave this job before a restart, given back in place of
+        # asking or calling again (mqucifer/print-shop#209).
+        given = Kept(outdir)
         outcome = state.get("orientation")
         if outcome is not None and outcome.accepted:
             chosen = outcome.proposal.value
@@ -406,15 +412,20 @@ def build_graph(
             # What the notes say is read back in the pose the questions are asked in, and the
             # model asks only what they leave open (mqucifer/print-shop#236).
             two = stock(context, rotation_deg)
-            if waiting is not None and proposer.asks_model:
-                measured = features
-                intake = ask_meanwhile(
-                    lambda stop: proposer.questions(measured, profiles, stop, context),
-                    asker, waiting, lambda questions: _priced(questions, priced), two,
-                )
-            else:
-                intake = _ask(proposer.questions(features, profiles, context=context), asker,
-                              priced, two)
+            person = given.asker(asker)
+
+            def asking() -> Intake:
+                assert proposer is not None
+                if waiting is not None and proposer.asks_model:
+                    measured = features
+                    return ask_meanwhile(
+                        lambda stop: proposer.questions(measured, profiles, stop, context),
+                        person, waiting, lambda questions: _priced(questions, priced), two,
+                    )
+                return _ask(proposer.questions(features, profiles, context=context), person,
+                            priced, two)
+
+            intake = given.intake(asking)
             proposed["intake"] = intake
             earlier: list[Change] = []
             looped: Proposal | None = None
@@ -425,7 +436,7 @@ def build_graph(
                 _say_waiting(measuring.pending(), "the print loop chooses among all six")
                 poses = measuring.all_six()
                 kept = _kept(context, poses, build_volume) if context is not None else None
-                found_by = run_loop(loop, Part(
+                found_by = given.loop(lambda: run_loop(loop, Part(
                     stl=Path(state["stl_path"]),
                     facts=proposer.facts(intake, features, profiles, context),
                     candidates=poses, build_volume_mm=build_volume,
@@ -435,7 +446,7 @@ def build_graph(
                     lessons=proposer.lessons_for(features, profiles),
                     kept=kept.rotation_deg if kept is not None else (0.0, 0.0, 0.0),
                     kept_from=context.down_from if kept is not None and context else "",
-                ))
+                )))
                 record = {"loop": found_by.calls, "loop_ending": (
                     f"{found_by.ended}, after {found_by.model_calls} calls in "
                     f"{found_by.seconds:g} s")}
@@ -501,7 +512,8 @@ def build_graph(
                 if looped is not None:
                     proposal, looped = looped, None
                 else:
-                    proposal = proposer(intake, features, profiles, context, rotation_deg)
+                    proposal = given.proposal(pose_value(rotation_deg), functools.partial(
+                        proposer, intake, features, profiles, context, rotation_deg))
                     if fell_back:
                         proposal = proposal.model_copy(update={
                             "loop": fell_back["loop"], "loop_ending": fell_back["loop_ending"],
@@ -519,7 +531,8 @@ def build_graph(
                     result, reviewed = _propose_and_review(
                         proposal, profiles,
                         lambda p, stl=stl_to_slice: fitting(stl, p, outdir),
-                        reviewer, applied, outdir / "proposed", intake,
+                        given.reviewer(reviewer) if reviewer is not None else None, applied,
+                        outdir / "proposed", intake,
                         measuring=measuring, laid_traits=state.get("laid_traits", ()),
                         cost=_coster(fitting, stl_to_slice, profiles, proposal, outdir / "offers"),
                         lessons_for=_lessons_for(ledger, state["stl_path"], profiles,
@@ -592,6 +605,7 @@ def build_graph(
         )
         return {
             "gcode_path": str(result.gcode_path),
+            "gcode_sha256": hand_sliced.sha256_of(result.gcode_path),
             "slice": result,
             "applied_orientation": applied,
             "profiles_used": profiles.used,
@@ -739,10 +753,11 @@ def build_graph(
             raise PreflightFailed(verdict)
 
         taken = state.get("sliced")
-        if taken is not None:
-            # A hand-sliced file is sent as it was read: hashed again, last thing before the
-            # upload (mqucifer/print-shop#164).
-            hand_sliced.verify(gcode, taken.file.sha256)
+        sliced_as = taken.file.sha256 if taken is not None else state.get("gcode_sha256")
+        if sliced_as:
+            # The file is sent as it was sliced, or read for a hand-sliced one: hashed again,
+            # last thing before the upload (mqucifer/print-shop#164, #209).
+            hand_sliced.verify(gcode, sliced_as)
         remote_name = client.upload(gcode)
         if job_id_from_filename(remote_name) != state["job_id"]:
             raise RuntimeError(

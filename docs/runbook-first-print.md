@@ -50,7 +50,7 @@ A print uses your tuning where there is one, and the standard where you haven't 
 
    - `stock` alone lists what's on hand, loaded and fitted.
    - `stock empty <id>` marks a spool used up.
-   - `stock edit <id> --colour grey` or `stock edit <id> --tuning "…"` corrects a spool, keeping its number and whether it's loaded (mqucifer/print-shop#220). `--tuning none` is the variety's default. Prints already made keep the spool as it was. A job still waiting when you edit records the new colour; if the tuning changed, an Approve starts nothing and says so: set it back and approve again, or Reject and run the job again.
+   - `stock edit <id> --colour grey` or `stock edit <id> --tuning "…"` corrects a spool, keeping its number and whether it's loaded (mqucifer/print-shop#220). `--tuning none` is the variety's default. Prints already made keep the spool as it was. A job still waiting when you edit records the new colour; if the tuning changed, a Start starts nothing and says so: set it back and Start again, or Reject and run the job again.
    - A variety you've tuned more than once asks which tuning the spool prints with when you add it (`--tuning "…"`).
    - Prints then take the fitted nozzle and the loaded spool by default, and say so.
    - After a print with a swap the stock doesn't know what's loaded, and says so (mqucifer/print-shop#218). print-shop never moves it by itself. `stock load <id>` then asks whether that print is over: `y` says that it is and that this spool is on now. Any other answer, or no terminal to ask in, records the load and doesn't clear it.
@@ -162,7 +162,7 @@ Finish that job, or stop it with Ctrl-C in its terminal (which doesn't stop the 
    - what the slice shows, read layer by layer: each layer's time and the shortest, each feature's time and area (ironing, gap fill, walls, infill), and where the seams fall;
    - what that means for this part, each with a proposed change, its reason and the reading it rests on: layers too short for the filament to cool (slow-down on), ironing on a face you said is hidden (ironing off, or only the topmost), a seam in a line on walls you said are seen (moved to the back). Nothing from the slice is applied unless you take it.
 
-   It reasons with `crew-code-think` (the `PRINT_SHOP_SETUP_MODEL` setting), which usually takes two to three minutes (up to about ten at its 16,000-token limit). If its answer is cut off at that limit, the review says CUT OFF and shows only the guards' changes; that is recorded, and nothing is retried. Type `ok` to go on to the gate. To take what the slice proposes, type `take`, or `take 2` for one of them; it slices again. To correct a setting, type it by name, e.g. `layer_height=0.2 because it's a test cube`, and it slices again and shows the review again. **For a pause at a height,** type `pause_at=2.6 for insert` for parts to drop in, or `colour_change=12.4 from #1 to #2 because white walls, a black top` for a swap (what you leave out is asked: "What a pause is for", below; `pause_at=none` takes it away). **A pause height is the top of the last layer printed before the pause** (mqucifer/print-shop#203, [the bench](bench.md)): the print pauses after the layer that tops out at 12.4 mm, through the printer's own pause (`M600`), so everything up to 12.4 is the first colour and everything above it the second. For parts dropped in, it's the z the bench's `pause` says. The review reads the sliced G-code and shows where the pause landed, beside the height asked for ("pause after layer 62, at z=12.4, before layer 63, at z=12.6"), with how far into the print it falls in the slice's reading. If it says `PAUSE MISMATCH`, the pause isn't where you asked: correct the height, or the layer heights, before `ok`. **Don't add a layer:** before mqucifer/print-shop#203 you had to type 2.8 to drop parts into pockets topping out at 2.6, and 2.8 now pauses once the layer over them has printed, too late. Type 2.6, and change any sidecar note that says to add one. The review notes it where the part's context has that fit's height and the slice shows the layer before the pause closing over it; elsewhere it can't tell, and says nothing; the approval gate says it, so you can be at the printer; and at the outcome, say in the note how the swap or the insert went (mqucifer/print-shop#119). Or type `stop`. **The questions and the review take as long as you take** (mqucifer/print-shop#125): nothing counts down while they wait for you.
+   It reasons with `crew-code-think` (the `PRINT_SHOP_SETUP_MODEL` setting), which usually takes two to three minutes (up to about ten at its 16,000-token limit). If its answer is cut off at that limit, the review says CUT OFF and shows only the guards' changes; that is recorded, and nothing is retried. Type `ok` to go on to the gate. To take what the slice proposes, type `take`, or `take 2` for one of them; it slices again. To correct a setting, type it by name, e.g. `layer_height=0.2 because it's a test cube`, and it slices again and shows the review again. **For a pause at a height,** type `pause_at=2.6 for insert` for parts to drop in, or `colour_change=12.4 from #1 to #2 because white walls, a black top` for a swap (what you leave out is asked: "What a pause is for", below; `pause_at=none` takes it away). **A pause height is the top of the last layer printed before the pause** (mqucifer/print-shop#203, [the bench](bench.md)): the print pauses after the layer that tops out at 12.4 mm, through the printer's own pause (`M600`), so everything up to 12.4 is the first colour and everything above it the second. For parts dropped in, it's the z the bench's `pause` says. The review reads the sliced G-code and shows where the pause landed, beside the height asked for ("pause after layer 62, at z=12.4, before layer 63, at z=12.6"), with how far into the print it falls in the slice's reading. If it says `PAUSE MISMATCH`, the pause isn't where you asked: correct the height, or the layer heights, before `ok`. **Don't add a layer:** before mqucifer/print-shop#203 you had to type 2.8 to drop parts into pockets topping out at 2.6, and 2.8 now pauses once the layer over them has printed, too late. Type 2.6, and change any sidecar note that says to add one. The review notes it where the part's context has that fit's height and the slice shows the layer before the pause closing over it; elsewhere it can't tell, and says nothing; the approval gate says it, so you can be at the printer; and at the outcome, say in the note how the swap or the insert went (mqucifer/print-shop#119). Or type `stop`. **The questions, the review and the gates take as long as you take** (mqucifer/print-shop#125, mqucifer/print-shop#209): nothing counts down while they wait for you, and a job can wait ready for days.
 
    **What a pause is for: a swap or an insert** (mqucifer/print-shop#218). The review, the gate, the print desk and the outcome use that word. A pause from before it was said, or in a file sliced by hand, is only "a pause".
    - **`pause_at=2.6 for insert`** is parts dropped in. `pause_at=2.6` alone asks which it is, `1` an insert or `2` a swap, with this review's, or the past print's, pre-selected for Enter. `back` sets no pause.
@@ -170,7 +170,7 @@ Finish that job, or stop it with Ctrl-C in its terminal (which doesn't stop the 
    - **A swap printed again never starts on another spool by itself.** Where the first it had can't start this job (it's of another filament than the one now loaded and sliced for, or it's used up), "use these" says `CAN'T USE` with why, and nothing is pre-selected: load that spool and run the job again, or type the swap.
    - **The spool it starts on is of the filament it's sliced with.** Another colour of that is fine. For another filament, load it and run the job again.
    - **The spool swapped to can be any on hand.** The slice has one filament's settings, so another variety is noted at the review: the layers after the swap print with the first's.
-   - **Start checks the first is loaded.** Where the stock has another, the review and the gate say `LOAD FIRST`. At `ok` you're asked "Is spool #1 …, on the printer now?": `y` records the load (it's `stock load 1`), and anything else writes nothing. What you typed before the question was shown doesn't count. Later, load it and record it with `uv run python scripts/stock.py load 1` in another terminal. An Approve before that starts nothing: the card and the terminal say `Not started`, why and what to load, and the gate waits for a new press, within its same hour.
+   - **Start checks the first is loaded.** Where the stock has another, the review and the gate say `LOAD FIRST`. At `ok` you're asked "Is spool #1 …, on the printer now?": `y` records the load (it's `stock load 1`), and anything else writes nothing. What you typed before the question was shown doesn't count. Later, load it and record it with `uv run python scripts/stock.py load 1` in another terminal. A Start before that starts nothing: the card and the terminal say `Not started`, why and what to load, and the gate waits for a new Start, for as long as you take.
    - **The ledger keeps both spools, in order, each with the layer planned,** and the print desk and a print of it again carry them. The spool it ended with is the one you pick at its outcome, or "not said".
 
    **After a swap print, print-shop asks you what's loaded** (mqucifer/print-shop#218). It can't see the spool, and the printer's reports don't say whether you swapped, so from the moment such a print is sent it doesn't know, and Start holds. One word of yours that says both halves clears it: that print is over, and this spool is on the printer now. There are four places to say it, and one is enough:
@@ -188,7 +188,7 @@ Finish that job, or stop it with Ctrl-C in its terminal (which doesn't stop the 
    **A job starts on what it was prepared for** (mqucifer/print-shop#218), with or without a pause, hand-sliced and `--again` too. The loaded spool is compared again when you approve:
    - the same spool starts, with a colour you've corrected on it since recorded;
    - another spool of the same variety, colour and tuning starts, and is the one recorded (never the spool a swap is to, as its first);
-   - anything else starts nothing: `Not started`, with what to load, and the way out if you've changed your mind ("to print in black, Reject and run the job again"). Press Approve again once it's loaded and recorded. A press counts on the stock as it was when you pressed: one from before is never kept, and the hour isn't extended.
+   - anything else starts nothing: `Not started`, with what to load, and the way out if you've changed your mind ("to print in black, Reject and run the job again"). Start again once it's loaded and recorded. A Start counts on the stock as it was when you gave it: one from before is never kept.
 
    An answer at the questions is a decision, even one that keeps your preset's value. "Bridge it — no support" over a preset with supports off sets nothing, and the review says `kept enable_support at 0: you chose 'Bridge it — no support' … [your answer: overhang]`; the guard that switches tree supports on for an overhang only does so when nothing decided otherwise (mqucifer/print-shop#124). An option that says no support always carries `enable_support=0`. Your corrections go in the ledger: they are what print-shop learns from. Each one is a candidate lesson, keyed to the part's shape; once a reviewer keeps it, a later part with the same shape gets that setting by itself, and the review says which lesson set it (`docs/print-lessons.md`).
 
@@ -240,21 +240,48 @@ Finish that job, or stop it with Ctrl-C in its terminal (which doesn't stop the 
      bbox_mm     20 x 20 x 20
      Approve     goes on to slice a mesh this gate calls untrustworthy, as the file lays it: the questions and the review follow, then the gate before printing, where today the job fails whatever you answer. Nothing prints.
      Reject      ends the job: nothing is sliced or printed
-     answer by   14:32 (60 min left); after that it ends and nothing prints
+     It waits until you answer it on the card.
    ```
 
    The dashboard's card doesn't tell the two gates apart: it asks "Print this?" at the mesh gate too. Read the command line before you press. Reject and mend the file: Orca slices a damaged mesh without complaint and can get it badly wrong, and today a job approved at the mesh gate fails when the approval gate is answered, with nothing sent to the printer (`can only concatenate list`).
 
-2. **Approve at the gate.** The dashboard asks "Print this?". Check the numbers before you press:
-   - Time: about 11 minutes (Orca's estimate for your presets is 10 m 54 s; the review shows the estimate with its changes);
-   - Plastic: about 2.9 cm³;
-   - Turned: a multiple of 90° on each axis, save a turn on the plate you took at the review, which is the last number. A cube sits flat on every face.
+2. **Start at the gate, when it's time to print** (mqucifer/print-shop#209). The command line shows the gate and says how to answer it:
 
-   Press **Yes, print it**. Anything else wrong: press **No, stop**.
+   ```
+   Ready to print. Start it here or on the card, or reject it on the card.
+     time        10 min
+     plastic     2.9 cm3
+     ...
+     Type start here, or Yes on the card. It waits until you start or reject it.
+   ```
 
-   A press names the job it's for: print-shop puts the job's id in the two buttons when its gate opens, so the dashboard needs no change. A gate ignores a press that names another job or none, and its command line says `ignored approve for …`. So an automation or script that publishes to the command topic itself has to send the `job_id` the gate topic shows.
+   Check the numbers first: about 11 minutes (Orca's estimate for your presets is 10 m 54 s; the review shows the estimate with its changes), about 2.9 cm³ of plastic, and a turn that's a multiple of 90° on each axis, save a turn on the plate you took at the review, which is the last number. A cube sits flat on every face.
 
-   The command line says by when, `answer by 14:32 (60 min left)`. The gate waits an hour from when it opens; the hour before it, for the slice to reach the gate, starts when you type `ok` at the review. If either runs out, the job ends in one sentence, such as "Timed out waiting for Approve or Reject at the approval gate after 60 min, so nothing printed.", nothing goes to the printer, and the ledger keeps the job as timed out (`--list` shows it under "Ended without printing"). Submit it again to print it.
+   **Start is new at the terminal:** type `start`. It asks `I can see the bed is clear [y/N]`, and only `y` starts it; what you typed before the question showed doesn't count. Anything else says `Not started: the bed isn't confirmed clear`, and the gate stays open. `reject` here is the card's **No, stop**. On the dashboard, **Yes, print it** asks the same in a dialog: "I can see the bed is clear. Print the job shown above?". That dialog is the card's courtesy: print-shop can't tell from a press whether it was shown, so until mqucifer/print-shop#214's Start on the phone, the bed is yours to look at either way. The job's log says which it was: "the bed confirmed clear at the terminal" or "on the card's dialog". One Start a gate: whichever comes second is told the job was already started or decided.
+
+   **Nothing here has a deadline.** A job waits ready for as long as you take, days if need be. In place of a clock, Start checks again, at the moment you give it, what could have changed while it waited:
+   - the G-code is the one sliced, byte for byte;
+   - the part's file is the one it was prepared from;
+   - the profiles it sliced with are the store's files as they were;
+   - the loaded spool is the one it was prepared for (above);
+   - the fitted nozzle is the size it was sliced for (`stock.py fit 0.4`);
+   - the printer is free, read once;
+   - and the bed, as above.
+
+   Any change is said, on the card and the command line, as `Not started:` with what to do, nothing prints, and the gate waits for a new Start. A changed file or profile can't be mended at the gate: Reject and run the job again to prepare it as things are now. Arming is as it was: only `PRINT_AGENT_ALLOW_HARDWARE=1` on the command's own line.
+
+   **A press names its job, and its moment.** print-shop puts the job's id in the two buttons when its gate opens, and a word that's new at each gate, and again after each Start it holds. A gate ignores a press that names another job or none, or a word that's gone (one sent again, or from before a restart), and its command line says `ignored approve for …`. So an automation or script that publishes to the command topic itself has to send what the buttons' `payload_press` holds now.
+
+   **A closed terminal or a restart loses nothing** (mqucifer/print-shop#209). Ctrl-C at the questions, at the review or at the gate, or a restart of the Mac, leaves the job waiting in the jobs folder:
+
+   ```
+   Stopped. Any print without an answer stays open in the ledger.
+   Job 6f1c… waits where it was: `uv run python scripts/print_job.py --resume 6f1c…` takes it up again.
+   ```
+
+   `--resume JOB_ID` takes it up at that step: the questions with what you'd answered (a set at a time: print-shop's two, then the model's), the review with your corrections and the same slice, or ready, with nothing sliced again. `--resume` alone takes the only one; `--list` lists them under "Waiting for you", and a new job lists them as it starts. Arm it on that command's line as for any job. A job is never kept approved: one a restart caught after its Start, before anything reached the printer, comes back ready and asks for a new Start. Reject ends a waiting job for good.
+
+   The machine's own steps are still timed: the slice has an hour to reach the gate from your `ok` at the review, and after a Start the upload and the start have 15 minutes. One that runs out ends the job in one sentence, such as "Timed out waiting for the approval gate after 60 min, so nothing printed.", nothing goes to the printer, no gate opens for it afterwards, and the ledger keeps the job as timed out (`--list` shows it under "Ended without printing"). Submit it again to print it.
 
 3. **What to watch.** Before it uploads, the program checks that the printer is idle and has room. Then it uploads, starts, and watches the printer's own status for up to 5 minutes until the print visibly begins: preheating, then printing.
    - **It says "Started. Watching the printer read-only".** That is the proof #3 is for: the start was seen, not assumed.
@@ -385,12 +412,17 @@ Then open <http://127.0.0.1:8719/> in a browser on the Mac. `--port` picks anoth
 | `Not sent: the file is sliced for …` | the hand-sliced file names another filament or nozzle than the inventory says is loaded | load or fit what it names, fix the inventory, or add `--loaded-ok` |
 | `… has changed since it was taken … nothing was uploaded` | the job's copy of a hand-sliced file was changed after the gate opened | send the file again with `--sliced` |
 | `LOAD FIRST: it starts on spool #…` | the swap starts on a spool the stock doesn't have loaded | `y` at `ok` if it's on the printer, or load it and `stock load <id>` before you approve |
-| `Not started: …` | you approved, and what's loaded in the stock isn't what the job was prepared for | do what it says (`stock load <id>`), then press Approve again; or, to print with what's loaded, Reject and run the job again; nothing was sent |
+| `Not started: …` | you gave Start, and what's loaded in the stock isn't what the job was prepared for | do what it says (`stock load <id>`), then Start again; or, to print with what's loaded, Reject and run the job again; nothing was sent |
+| `Not started: … was changed after …` | the G-code, the part's file or a profile changed while the job waited | Reject and run the job again; nothing was sent |
+| `Not started: this job was sliced for a 0.4 mm nozzle …` | another nozzle is fitted in the stock | fit it and `stock fit 0.4`, then Start again; or Reject and run the job again |
+| `Not started: the printer is not free …` / `the printer couldn't be read` | the printer is busy, paused, in error or unreachable | Start again when it's free; nothing was sent |
+| `Not started: the bed isn't confirmed clear` | Start at the terminal had no `y` to the bed's question | clear the bed, `start`, then `y` |
+| `ignored approve for …: it names a press this gate has spent` | a press sent again, or from before a restart | press again on the card, or `start` at the terminal |
 | `print-shop doesn't know what's on cc1 since …` | a print with a swap was sent, and you haven't yet said that it's over and which spool is on | answer it where it's asked (before preparing, or `y` at the review), or `stock load <id>` and `y`, or pick on that print's outcome card; then approve |
 | `… still doesn't know what's on cc1, as nothing said … is over` | `stock load` recorded the load without a `y` to whether that print's over, or had no terminal to ask in | run `stock load <id>` in a terminal, and `y` once that print is over |
 | `… loaded on cc1, so nothing was uploaded or printed` | the stock changed between your Approve and the start | nothing was started; `stock load <id>`, then run the job again |
 | `the job is sliced for …, and spool #… is …` | a swap was to start on another filament than the slice's | load that spool and run the job again, or start on one of the sliced filament |
-| `spool #…'s tuning was changed from …` | the spool's tuning was edited after the job was prepared | nothing was started; set it back and approve again, or Reject and run the job again |
+| `spool #…'s tuning was changed from …` | the spool's tuning was edited after the job was prepared | nothing was started; set it back and Start again, or Reject and run the job again |
 | `printer preflight failed — printer.ready` | the printer is busy, paused, or in error | clear it at the machine, then run again |
 | `printer preflight failed — printer.free_space` | the printer's storage is full | delete old files on the printer |
 | The approval card never appears | the broker or the dashboard is wrong | check the broker settings; re-paste the dashboard |

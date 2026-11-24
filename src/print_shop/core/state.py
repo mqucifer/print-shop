@@ -252,6 +252,9 @@ class PrintJobState(TypedDict):
     # Artifacts. Local paths; the pipeline is one process (see CONTRACTS.md §1).
     stl_path: NotRequired[str]
     gcode_path: NotRequired[str]
+    #: Of the G-code's bytes as sliced: Start and the print node check it again, however long
+    #: the job waited (mqucifer/print-shop#209).
+    gcode_sha256: NotRequired[str]
 
     # Deterministic analysis.
     mesh: NotRequired[MeshReport]

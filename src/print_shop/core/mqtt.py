@@ -196,9 +196,9 @@ OUTCOME_PART_TEMPLATE = (
 
 
 def approval_buttons(
-    cfg: MqttConfig, job_id: str = ""
+    cfg: MqttConfig, job_id: str = "", press: str = ""
 ) -> list[tuple[str, dict[str, object]]]:
-    """Approve and Reject's discovery configs, whose press names `job_id`.
+    """Approve and Reject's discovery configs, whose press names `job_id`, and `press`.
 
     A press names its job (mqucifer/print-shop#207), and a button's payload is a fixed string, so
     the daemon publishes these again when a gate opens, with that job's id, and when it closes,
@@ -206,9 +206,15 @@ def approval_buttons(
     holds when pressed (2026.8.3, `components/mqtt/button.py` and `entity.py`), so a dashboard
     needn't change. A template over the gate's state would have needed the entity's id, which
     isn't this project's to choose.
+
+    `press` is the gate's word for this press, new each time a gate opens and each time a press is
+    spent there (mqucifer/print-shop#209): a press sent again, from before a restart or after
+    one was held, names a word that's gone, and starts nothing.
     """
     device = {"identifiers": [cfg.node_id], "name": "3D Print Agent"}
-    named = {"job_id": job_id} if job_id else {}
+    named: dict[str, str] = {"job_id": job_id} if job_id else {}
+    if job_id and press:
+        named["press"] = press
     return [
         (
             f"{cfg.discovery_prefix}/button/{cfg.node_id}/{decision}/config",

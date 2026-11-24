@@ -91,6 +91,7 @@ class Shop:
         self.jobs.mkdir()
         self.parts = tmp_path / "parts"
         self.told: list[str] = []
+        self.taken: list[str] = []
         self.parts.mkdir()
         self.part = write_stl("cube", self.parts)
         process = json.loads(CI_PROFILES.process.read_text())
@@ -117,6 +118,11 @@ class Shop:
             assert found is not None, "there's nothing to say is over"
             stock.load(spool, over=found)
 
+    def _tell(self, said: str) -> None:
+        """What the terminal is told: each Start held, in `told`, and the one taken, with how the
+        bed was confirmed (mqucifer/print-shop#209), in `taken`."""
+        (self.taken if said.startswith("Start taken") else self.told).append(said)
+
     def told_so_far(self, bridge: MemoryBridge) -> str:
         return str(bridge.retained_json(gate_topic(CFG))["held"]).removeprefix("Not started: ")
 
@@ -128,7 +134,7 @@ class Shop:
     def run(
         self, *typed: str, press: str = "approve", ends: str = "completed",
         at_gate: Callable[[], None] | None = None,
-        held: Callable[[MemoryBridge], None] | None = None, gate_wait_s: float = 60.0,
+        held: Callable[[MemoryBridge], None] | None = None,
         at_outcome: Callable[[MemoryBridge], None] | None = None,
     ) -> Ran:
         """A job, typed at as at the terminal, pressed at the gate and answered at the end."""
@@ -152,14 +158,14 @@ class Shop:
 
         bridge = MemoryBridge()
         printer = self.printer = FramePrinter(after_start=["printing", ends])
-        self.told = []
+        self.told, self.taken = [], []
         with Ledger(self.path) as ledger:
             daemon = Daemon(
                 cfg=CFG, profiles=profiles, workdir=self.jobs, printer=printer,
                 slicer=PausingSlicer(), bridge=lambda cfg: bridge, ledger=ledger,
                 proposer=Proposer(), asker=lambda questions: (),
                 reviewer=cli_reviewer(read=read, write=said.append, asks=lambda: True),
-                watch_printer=printer, watch_poll_s=0.01, gate_wait_s=gate_wait_s,
+                watch_printer=printer, watch_poll_s=0.01,
             )
             with daemon:
                 job_id = daemon.submit(self.part, as_laid=True)
@@ -176,7 +182,7 @@ class Shop:
                     if held is not None:
                         wait_until(lambda: bool(bridge.retained_json(gate_topic(CFG)).get("held")))
                         held(bridge)
-                result = daemon.wait_for_finish(job_id, timeout_s=30, tell=self.told.append)
+                result = daemon.wait_for_finish(job_id, timeout_s=30, tell=self._tell)
                 if result.printed:
                     wait_until(lambda: bridge.retained_json(
                         outcome_topic(CFG)).get("job_id") == job_id)
@@ -558,6 +564,11 @@ def test_the_same_variety_at_a_swap_isnt_noted(shop: Shop) -> None:
     assert "one filament's settings" not in shop.run("colour_change=2 from #1 to #2", "ok").terminal
 
 
+def sent(shop: Shop) -> list[str]:
+    """What was sent to the printer: Start's read of it isn't (mqucifer/print-shop#209)."""
+    return [verb for verb in shop.printer.verbs if verb != "snapshot"]
+
+
 def test_start_refuses_a_swap_whose_first_spool_isnt_loaded(
     shop: Shop, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -567,7 +578,7 @@ def test_start_refuses_a_swap_whose_first_spool_isnt_loaded(
 
     assert "LOAD FIRST: it starts on spool #2, Elegoo PLA, black" in ran.terminal
     assert ran.gate["spools"].startswith("LOAD FIRST")
-    assert shop.printer.calls == []
+    assert sent(shop) == [], "Start reads the printer, and nothing is sent"
     assert not ran.result.printed and ran.row is None
     assert "this print starts on spool #2, Elegoo PLA, black" in (ran.result.error or "")
     assert "nothing was uploaded or printed" in (ran.result.error or "")
@@ -910,7 +921,8 @@ def test_an_approve_with_the_first_not_loaded_starts_nothing_and_waits(shop: Sho
 
     ran = shop.run(*UNLOADED, held=held)
 
-    assert seen["calls"] == [], "nothing read, uploaded or started"
+    assert [verb for verb, _ in seen["calls"] if verb != "snapshot"] == [], (
+        "Start reads the printer (mqucifer/print-shop#209), and nothing is uploaded or started")
     why = seen["gate"]["held"]
     assert seen["gate"]["pending"] is True and seen["state"]["status"] == "awaiting_approval"
     assert seen["state"]["held"] == why
@@ -1010,21 +1022,21 @@ def test_a_double_tap_before_its_loaded_starts_nothing(shop: Shop) -> None:
     assert not shop.run(*UNLOADED, held=twice).result.printed
 
 
-def test_the_hour_still_ends_a_held_job(shop: Shop) -> None:
-    began: list[float] = []
+def test_a_held_job_waits_for_a_start_with_no_deadline(shop: Shop) -> None:
+    """mqucifer/print-shop#209: the hour that ended a held job is gone. Presses held one after
+    another neither end the job nor start it; it waits until it's started or rejected."""
 
     def keep_pressing(bridge: MemoryBridge) -> None:
-        while bridge.retained_json(gate_topic(CFG)).get("pending"):
-            assert time.monotonic() - began[0] < 4, "the presses extended the wait"
+        for _ in range(10):
+            assert bridge.retained_json(gate_topic(CFG)).get("pending"), "the job ended"
             bridge.press(CFG, "approve")
             time.sleep(0.1)
+        bridge.press(CFG, "reject")
 
-    ran = shop.run(*UNLOADED, gate_wait_s=1.0, held=keep_pressing,
-                   at_gate=lambda: began.append(time.monotonic()))
-    assert time.monotonic() - began[0] < 4
-    assert not ran.result.printed and "Timed out waiting for Approve" in (ran.result.error or "")
+    ran = shop.run(*UNLOADED, held=keep_pressing)
+    assert not ran.result.printed and ran.result.error is None
     with Ledger(shop.path) as ledger:
-        assert ledger.unprinted(ran.job_id) is not None
+        assert ledger.unprinted(ran.job_id) is None, "nothing ran out"
     assert starts(shop) == 0
 
 
@@ -1198,7 +1210,7 @@ def test_with_the_gates_check_bypassed_start_still_refuses_any_jobs_other_spool(
 ) -> None:
     monkeypatch.setattr(daemon_module, "why_not_start", lambda state, ledger: "")
     ran = shop.run("ok", at_gate=lambda: shop.load(CLEAR))
-    assert not ran.result.printed and ran.row is None and shop.printer.calls == []
+    assert not ran.result.printed and ran.row is None and sent(shop) == []
     assert "nothing was uploaded or printed" in (ran.result.error or "")
 
 

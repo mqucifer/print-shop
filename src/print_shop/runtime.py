@@ -37,7 +37,7 @@ from print_shop.setup.reading import NOW_PRINTS, PRINTS, TURNED_SINCE
 from print_shop.setup.review import Reviewer
 from print_shop.setup.waiting import Waiting
 from print_shop.slicer.orca import BedType, SlicerProfiles, with_bed_type
-from print_shop.slicer.store import Choice, Store
+from print_shop.slicer.store import STORE_DIR, Choice, Store
 
 __all__ = ["Run", "bed_type", "build_run", "describe", "profiles_for", "recording_path"]
 
@@ -177,6 +177,8 @@ def build_run(
         show=show,
         store=store,
         on_step=on_step,
+        # What Start reads the slice's profiles again from (mqucifer/print-shop#209).
+        store_root=STORE_DIR,
         waiting=waiting,
     )
     return Run(daemon=daemon, ledger=ledger, recorder=recorder)

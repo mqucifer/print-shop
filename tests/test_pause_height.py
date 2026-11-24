@@ -22,7 +22,7 @@ import pytest
 import trimesh
 
 from print_shop.bench import host, pausing
-from print_shop.core.mqtt import command_topic
+from print_shop.core.mqtt import gate_topic
 from print_shop.core.state import AppliedOrientation, SliceResult
 from print_shop.ledger import Ledger
 from print_shop.orchestrator.daemon import Daemon
@@ -357,11 +357,11 @@ def test_the_benchs_pause_height_through_print_job_puts_the_m600_after_that_laye
         def reject() -> None:
             while not finished.is_set():
                 gate = daemon.pending_gate()
-                if gate:
+                # Pressed once the card has it: the buttons name the press before it shows.
+                if gate and bridge.retained_json(gate_topic(CFG)).get("pending"):
                     sliced.append(Path(str(gate["gcode_path"])))
                     # A press names its job (mqucifer/print-shop#207).
-                    bridge.deliver(command_topic(CFG),
-                                   {"decision": "reject", "job_id": gate["job_id"]})
+                    bridge.press(CFG, "reject")
                     return
                 time.sleep(0.05)
 
