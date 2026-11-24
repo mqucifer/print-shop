@@ -651,18 +651,104 @@ def test_the_page_wont_listen_where_the_mac_hasnt_that_address(phones: Phones) -
 # --------------------------------------------------------------------------
 
 
-def test_an_expired_confirm_is_refused_and_a_new_view_starts(
+def test_a_confirm_lasts_ten_minutes(page: type, phones: Phones, starts: FakeStarts,
+                                    clock: Clock) -> None:
+    """The Sponsor's choice, 2026-11-24 (mqucifer/print-shop#280): "10 minutes", long enough
+    to open the page, go to the printer and look at the bed."""
+    assert CONFIRM_LASTS_S == 600.0
+    assert EXPIRED == ("That confirm has expired (it lasts 10 minutes): tick the bed again to "
+                       "start")
+    browser = signed_in(page, phones)
+    made = browser.get("/start").confirm()
+    clock.now += 9 * 60
+    reply = browser.start(made)
+    assert reply.status == 200 and "Started by you. Disarmed again." in reply.body
+    assert len(starts.calls) == 1
+    assert browser.start(made).status == 403, "still once only"
+    assert len(starts.calls) == 1
+
+
+def test_a_confirm_ten_minutes_and_a_second_old_is_refused_and_a_new_view_starts(
     page: type, phones: Phones, starts: FakeStarts, clock: Clock,
 ) -> None:
     browser = signed_in(page, phones)
     made = browser.get("/start").confirm()
-    clock.now += CONFIRM_LASTS_S + 1
+    clock.now += 10 * 60 + 1
     reply = browser.start(made)
-    assert reply.status == 403 and "That confirm has expired (it lasts 2 minutes)" in reply.body
+    assert reply.status == 403 and EXPIRED in reply.body
     assert browser.start(made).status == 403, "an expired one is spent too"
     assert starts.calls == []
     assert browser.start(browser.get("/start").confirm()).status == 200
-    assert CONFIRM_LASTS_S == 120.0 and EXPIRED.startswith("That confirm has expired")
+
+
+def test_a_confirm_is_good_to_its_last_second_on_a_fake_clock(clock: Clock) -> None:
+    confirms = Confirms(clock=clock)
+    bound = {"phone_hash": "h", "phone": "p", "job_id": "j", "press": "w",
+             "gcode_sha256": "g", "address": PHONE}
+    at_ten = confirms.make(**bound)
+    late = confirms.make(**bound)
+    clock.now += 10 * 60
+    assert not isinstance(confirms.spend(at_ten, phone_hash="h", address=PHONE), str)
+    clock.now += 1
+    assert confirms.spend(late, phone_hash="h", address=PHONE) == EXPIRED
+
+
+def test_a_confirm_nine_minutes_old_is_still_refused_once_the_gate_word_has_changed(
+    tmp_path: Path, clock: Clock,
+) -> None:
+    """A longer life loosens nothing else: a Start held by a check spends the gate's word, so a
+    page viewed before it is refused, however young its confirm."""
+    busy = FramePrinter(before="printing")
+    shop, one_start, built = _phone_shop(tmp_path, busy)
+    phones = Phones(tmp_path / "phones.sqlite")
+    with _unarmed(shop, one_start) as daemon:
+        page = handler_for(home=home(), phones=phones, starts=daemon,
+                           confirms=Confirms(clock=clock))
+        browser = signed_in(page, phones)
+        job_id = daemon.submit(shop.stl)
+        daemon.wait_for_gate(job_id, timeout_s=WAIT_S)
+        first = browser.get("/start").confirm()
+        held = browser.start(browser.get("/start").confirm())
+        assert held.status == 409 and "Not started:" in held.body
+        busy.before = "idle"
+        clock.now += 9 * 60
+        reply = browser.start(first)
+        assert reply.status == 409, reply.body
+        assert "the job's gate has changed since this page was shown" in reply.body
+        assert one_start.armed() is None and built == []
+        assert "upload" not in shop.printer.verbs
+        assert browser.start(browser.get("/start").confirm()).status == 200
+        assert daemon.wait_for_finish(job_id, timeout_s=WAIT_S).printed
+    assert len(built) == 1
+
+
+def test_a_confirm_nine_minutes_old_is_still_refused_once_the_job_is_sliced_again(
+    tmp_path: Path, clock: Clock, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shop, one_start, built = _phone_shop(tmp_path)
+    phones = Phones(tmp_path / "phones.sqlite")
+    with _unarmed(shop, one_start) as daemon:
+        page = handler_for(home=home(), phones=phones, starts=daemon,
+                           confirms=Confirms(clock=clock))
+        browser = signed_in(page, phones)
+        job_id = daemon.submit(shop.stl)
+        daemon.wait_for_gate(job_id, timeout_s=WAIT_S)
+        made = browser.get("/start").confirm()
+        # The job's G-code is another file now, as after a slice again.
+        sliced_again = [True]
+        real = daemon_module._gcode_sha256
+        monkeypatch.setattr(daemon_module, "_gcode_sha256",
+                            lambda state: "b" * 64 if sliced_again[0] else real(state))
+        clock.now += 9 * 60
+        reply = browser.start(made)
+        assert reply.status == 409, reply.body
+        assert "the job was sliced again since this page was shown" in reply.body
+        assert one_start.armed() is None and built == []
+        assert "upload" not in shop.printer.verbs
+        sliced_again[0] = False
+        assert browser.start(browser.get("/start").confirm()).status == 200
+        assert daemon.wait_for_finish(job_id, timeout_s=WAIT_S).printed
+    assert len(built) == 1
 
 
 def test_signed_out_nothing_is_shown_or_accepted(
