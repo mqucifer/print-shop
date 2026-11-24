@@ -772,6 +772,8 @@ def _set_by(change: Change | None) -> str:
         return "the preset"
     if change.source is Source.LESSON:
         return f"lesson {change.lesson}" if change.lesson is not None else "a lesson"
+    if change.taken:
+        return "the model's proposal you took"
     return {Source.MODEL: "the model", Source.ANSWER: "your answer", Source.SPONSOR: "you",
             Source.GUARD: "a guard", Source.READING: "the slice's proposal you took"}[change.source]
 

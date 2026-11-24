@@ -162,7 +162,7 @@ def correction_line(row: Row, on_hand: dict[int, Spool] | None = None) -> str:
     parts = []
     stood = _standing_pause(row)
     for c in row.corrections or ():
-        if c.key == ORIENTATION or _used_as_anothers(c):
+        if c.key == ORIENTATION or _used_as_anothers(c) or c.said_no_to:
             continue
         key, value, reason = c.key, c.value, c.reason
         if c.key == PAUSE:
@@ -240,7 +240,12 @@ def again(
         notes.append("The answers don't match the questions kept, so there's no answers file: "
                      "answer them as they're asked.")
     for c in row.corrections or ():
-        if c.key == ORIENTATION:
+        if c.said_no_to:
+            what = (f"turn to {c.said_no_to}" if c.key == ORIENTATION
+                    else f"{c.key}={c.said_no_to}")
+            notes.append(f"You turned down the model's {what}, because {c.reason}. Say no to it "
+                         "again at the review if it's proposed.")
+        elif c.key == ORIENTATION:
             notes.append(f"The pose was sent back at the review, from {c.preset} to {c.value}, "
                          f"because {c.reason}. Type orientation at the review to send it back "
                          "again.")
@@ -295,6 +300,20 @@ def again(
         notes.append("Taken from the slice's reading, so take them again at the review (take) "
                      "if it proposes them: "
                      + "; ".join(f"{c.key}={c.value}" for c in taken) + ".")
+    turn = next((c for found in (row.proposal.suggested if row.proposal else ())
+                 for c in found.proposed
+                 if c.key == ORIENTATION and ORIENTATION in found.taken
+                 and c.value == pose_value(row.rotation_deg)), None)
+    if turn is not None:
+        notes.append(f"The model's turn to {turn.value} was taken at the review: take it again "
+                     "there if it's proposed, or type orientation to send the part to it.")
+    by_model = [c for c in ((*row.proposal.changes, *row.proposal.not_applied)
+                            if row.proposal else ())
+                if c.taken]
+    if by_model:
+        notes.append("Taken from the model's proposals, so take them again at the review, by "
+                     "number, if it proposes them, or type them: "
+                     + "; ".join(f"{c.key}={c.value}" for c in by_model) + ".")
     reused = [c for c in row.corrections or () if _used_as_anothers(c)]
     if reused:
         notes.append("Used from a past print, so use them again at the review (use): "

@@ -44,6 +44,7 @@ from print_shop.setup.review import Review, ReviewRequest, render
 from print_shop.setup.skill import GROUPS, load
 from tests.fakes import STORE_PROFILES, FramePrinter, MemoryBridge
 from tests.fixtures import write_stl
+from tests.reviewing import takes
 from tests.test_job_e2e import CFG
 from tests.test_print_loop import Model, Person
 from tests.test_reading import ALL_SEEN, FILAMENT, PETG, PROCESS, _read
@@ -558,8 +559,8 @@ def _random_seam(system: str, user: str, schema: dict[str, Any]) -> dict[str, An
 
 @pytest.fixture
 def job(tmp_path: Path) -> Iterator[Any]:
-    """`run(stl, loop=None)` prints a part through the gate, the review answering ok: the
-    ledger's row and the review it was shown."""
+    """`run(stl, loop=None)` prints a part through the gate, the review taking the model's
+    proposals and then answering ok: the ledger's row and the review it was shown."""
     with Ledger(tmp_path / "ledger.sqlite") as ledger:
         (tmp_path / "work").mkdir()
 
@@ -577,7 +578,7 @@ def job(tmp_path: Path) -> Iterator[Any]:
                 printer=FramePrinter(), slicer=AnyPart(), bridge=lambda cfg: bridge,
                 ledger=ledger, proposer=Proposer(ask=_random_seam, ask_questions=_questions,
                                                  lessons=lambda features, kind: lessons),
-                asker=replay_asker(ANSWERS), reviewer=review, loop=loop,
+                asker=replay_asker(ANSWERS), reviewer=takes(review), loop=loop,
             )
             with daemon:
                 job_id = daemon.submit(stl, **submit)

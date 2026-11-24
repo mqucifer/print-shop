@@ -47,6 +47,7 @@ from tests.fakes import (
     echo_settings,
 )
 from tests.fixtures import write_stl
+from tests.reviewing import settled
 from tests.test_job_e2e import CFG
 from tests.test_ledger import record
 from tests.test_review import ANSWERS, _model, _questions, _request
@@ -311,7 +312,8 @@ def shop(tmp_path: Path) -> Iterator[tuple[Ledger, Any]]:
                 slicer=AnyPart(), bridge=lambda cfg: bridge, ledger=ledger,
                 llm=LLMConfig(api_key=SecretStr("not-a-key"), model="fake"),
                 proposer=Proposer(ask=_model, ask_questions=_questions),
-                asker=replay_asker(ANSWERS), reviewer=cli_reviewer(person.read, person.write),
+                asker=replay_asker(ANSWERS),
+                reviewer=settled(cli_reviewer(person.read, person.write)),
             )
             with daemon:
                 job_id = daemon.submit(write_stl("lid", tmp_path))
