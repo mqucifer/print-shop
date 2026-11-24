@@ -582,7 +582,8 @@ def test_print_job_takes_three_files_and_shows_each_outcome(
         thread.join(timeout=5)
     out = capsys.readouterr().out
     assert code == 0
-    assert "3 parts, one job, on one plate:" in out and "part 2, cap-mid.stl. Its context:" in out
+    assert "  part      3 parts, one job, on one plate\n" in out
+    assert "  part 2    cap-mid.stl. Its context:" in out
     assert "each kept as laid" in out
     assert "  plate       3 parts on one plate, printed BY OBJECT" in out
     assert "  turned      " not in out, "no one turn is the plate's"

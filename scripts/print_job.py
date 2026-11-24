@@ -464,6 +464,14 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
     recording = f"Recording the printer's replies to {recorder.path}" if recorder else ""
     if this is not None:
         this.armed, this.recording = armed, recording
+        if len(args.stl) > 1:
+            this.part = f"{len(args.stl)} parts, one job, on one plate"
+            this.parts = [(part.name, "; ".join(read_context(part).lines()[:2]))
+                          for part in args.stl]
+        else:
+            this.context = "; ".join(read_context(args.stl[0], args.context).lines()[:2])
+        # Said before anything that follows can fail, as each of its lines was.
+        print("\n".join(this.lines(terminal_width())))
     else:
         for said in (armed, recording):
             if said:
@@ -492,17 +500,8 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
             if hand_sliced is not None:
                 job_id = run.daemon.submit_sliced(hand_sliced)
             elif len(args.stl) > 1:
-                assert this is not None
-                this.part = f"{len(args.stl)} parts, one job, on one plate"
-                this.parts = [(part.name, "; ".join(read_context(part).lines()[:2]))
-                              for part in args.stl]
-                print("\n".join(this.lines(terminal_width())))
                 job_id = run.daemon.submit_several(args.stl, as_laid=args.as_laid)
             else:
-                assert this is not None
-                context = read_context(args.stl[0], args.context)
-                this.context = "; ".join(context.lines()[:2])
-                print("\n".join(this.lines(terminal_width())))
                 job_id = run.daemon.submit(args.stl[0], as_laid=args.as_laid,
                                            context=args.context)
             if job_log is not None:
