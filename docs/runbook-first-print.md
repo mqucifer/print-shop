@@ -90,7 +90,7 @@ Finish that job, or stop it with Ctrl-C in its terminal (which doesn't stop the 
    PRINT_AGENT_ALLOW_HARDWARE=1 uv run python scripts/print_job.py ~/print-shop/parts/cube.stl --record
    ```
 
-   It should say `ARMED`, and that it is recording to `~/print-shop/recordings/sdcp-<time>.jsonl`. If it says `Not armed`, the flag didn't reach it: stop with Ctrl-C and type it again on the same line.
+   It opens with one block, THIS JOB (mqucifer/print-shop#266): the part, what the inventory has, the nozzle and filament fitted, each preset with whose tuning it is beneath it, whether it's armed, the part's context, then the job's id and its log. Its `arming` row should say `ARMED`, and its `recording` row that it is recording to `~/print-shop/recordings/sdcp-<time>.jsonl`. If it says `Not armed`, the flag didn't reach it: stop with Ctrl-C and type it again on the same line.
 
    **A part already laid for printing keeps its pose with `--as-laid`** (mqucifer/print-shop#128): no orientation model is asked, it prints as the file lays it, and the review and the gate say it was kept as laid, by you. Without it, the orientation model chooses among the six square-on poses. Either way, the review names the pose the part's features were read in (its height, and its area on the plate), since the questions and the lessons are keyed to them. Kept as laid, or on the side its context lays it on, the questions don't wait for the other five poses to be measured (mqucifer/print-shop#235): those are measured beside them, and what needs one waits for it, saying so.
 
@@ -115,7 +115,7 @@ Finish that job, or stop it with Ctrl-C in its terminal (which doesn't stop the 
 
    Every key is optional, and a sidecar that can't be read is said at the start and the job goes on as before. A part with a fit never gets a random seam, whoever proposes it, and the review's reading says why, naming the fit. A fit at the plate gets elephant foot compensation proposed (0.1 mm, inside its bound), for you to take or not. A hold that slides on along the layers' stacking is said. The review lists what was read under "The part's context", or says there was none.
 
-   **Then a few questions about the part,** once it's oriented. There are at most four. Two need no model and show at once (mqucifer/print-shop#208): what the part is for, and which of its faces will be seen. Each is asked only where the part's notes don't say it (mqucifer/print-shop#236). The model's own come from its measured features, and a simple part may get none. Each option shows what it would set, its impact on strength, surface and risk, and Orca's time and filament for it ("Orca: 11 min, 3.1 g", or "no estimate"). One option is marked recommended, with why. Answer with its number, or `o` and your own words. The second, on which faces will be seen, decides what the review says about ironing and the seam. Its options say top and plate as the part lies then (`as it lies now`), and it names the pose it's asked in: `as the file lays it`, `laid front-down, as its notes say`, or `turned 90,0,0`. For the test cube, take the recommended option. To replay answers, pass `--answers file.json`, each answer naming its question by its text or its feature, e.g. `{"answers": [{"question": "purpose", "choice": 1}]}`. A file that doesn't answer exactly the questions asked is refused, and the job ends listing them.
+   **Then a few questions about the part,** once it's oriented. There are at most four. Two need no model and show at once (mqucifer/print-shop#208): what the part is for, and which of its faces will be seen. Each is asked only where the part's notes don't say it (mqucifer/print-shop#236). The model's own come from its measured features, and a simple part may get none. Each option shows what it would set, its impact on strength, surface and risk, and Orca's time and filament for it ("Orca: 11 min, 3.1 g", or "no estimate"). One option is marked recommended, with why. They're laid out to be read (mqucifer/print-shop#266): each option is its number and label on a line, `*` beside the recommended one and its estimate and marks at the right, with what it does and why it's recommended wrapped beneath, at 100 columns or the terminal's width. What every option shares is said once after them, such as "Each keeps your presets and sets nothing itself; the review shows Orca's estimate." Answer with its number, or `o` and your own words. The second, on which faces will be seen, decides what the review says about ironing and the seam. Its options say top and plate as the part lies then (`as it lies now`), and it names the pose it's asked in: `as the file lays it`, `laid front-down, as its notes say`, or `turned 90,0,0`. For the test cube, take the recommended option. To replay answers, pass `--answers file.json`, each answer naming its question by its text or its feature, e.g. `{"answers": [{"question": "purpose", "choice": 1}]}`. A file that doesn't answer exactly the questions asked is refused, and the job ends listing them.
 
    **What the notes say is read back, at one prompt** (mqucifer/print-shop#236), and only the rest is asked:
 
@@ -193,7 +193,7 @@ Finish that job, or stop it with Ctrl-C in its terminal (which doesn't stop the 
    - **The ledger keeps both spools, in order, each with the layer planned,** and the print desk and a print of it again carry them. The spool it ended with is the one you pick at its outcome, or "not said".
 
    **After a swap print, print-shop asks you what's loaded** (mqucifer/print-shop#218). It can't see the spool, and the printer's reports don't say whether you swapped, so from the moment such a print is sent it doesn't know, and Start holds. One word of yours that says both halves clears it: that print is over, and this spool is on the printer now. There are four places to say it, and one is enough:
-   - **when you start the next job,** at "From the inventory", before anything's prepared (`--sliced` and `--again` too): type the number of the spool that's on, or `y` for the one the stock names. The job is prepared with that spool. Enter is later;
+   - **when you start the next job,** where it asks what's on, before anything's prepared (`--sliced` and `--again` too): type the number of the spool that's on, or `y` for the one the stock names. The job is prepared with that spool. Enter is later;
    - **at that job's review,** `y` at `ok` to "Is …'s print over, and is spool #1 …, on the printer now?". To print the same plate again, load its first spool and that `y` is all it takes;
    - **`uv run python scripts/stock.py load 2`** in a terminal, then `y` to whether that print's over. Without a terminal to ask in, as from a script, the load is recorded and Start still holds;
    - **on that print's own outcome card,** from the phone: pick the spool under "It's over, and on the printer now is", then Record. `as recorded` says neither half, so it doesn't clear it.
@@ -383,6 +383,49 @@ It's one job: one set of questions, one review, one gate and one print. Arming i
 - **The outcome is asked part by part** when the print ends. The card names each by its file, its number and its place on the plate, such as `cap-mid.stl (part 2 of 3), front centre, x 166 y 85`, so answer before you clear the plate. The frames are the whole print's.
 - **At the end, and in `--list`,** what the parts share is said once, then a block for each part: its file, number, place, pose and outcome.
 - **In the ledger each object is a row,** with the job's id for the first and the id with `-2`, `-3` for the others. Each has its own pose, features and outcome. The time, plastic and layers in each are the whole plate's. The print desk's "run it again" from any of them is the whole plate.
+
+## Many files: the queue
+
+With several files ready, each needn't wait for the last print and its outcome before its questions begin (mqucifer/print-shop#210). Add them to the queue in one go, parts and hand-sliced files together. After a file, `x3` is how many prints of it, and `spool=2` the spool it's for, by its number in the stock (`stock.py list`); without it, the loaded one.
+
+```
+uv run python scripts/print_job.py --queue lid.stl x2 box.stl spool=2 knob.gcode.3mf
+PRINT_AGENT_ALLOW_HARDWARE=1 uv run python scripts/print_job.py --queue
+```
+
+- **They're prepared while a print runs.** Two at a time do the slicing and the model's work (`PRINT_SHOP_PREPARE_AT_ONCE` in the settings changes it); one waiting for you gives its place to the next. A spool needn't be loaded to prepare: the job slices with that spool's filament, and its Start holds until it's loaded.
+- **At `queue>`** each job shows its step and spool, and "Needs you" says what to type: `answer 2`, `review 3`, in any order. As for a lone job, print-shop's two questions (or the notes' read-back) are asked at once, and the model's own are added as a second set when they come. While the model still reads, the job's line says so with how long, and `go 2` goes on without them. `answer 2 4 5` gives 4 and 5 the same answers where they ask alike, the model's that follow included, and asks them only what's left. After an answer, what that job asks next follows straight away if it comes within a moment.
+- **Change the queue:** `first 3`, `place 3 1`, `together 2` (spool #2's jobs first), `hold 3` and `release 3`, `remove 3`, `add FILE …`. `help` lists them.
+- **Another spool:** `spool 3 2` moves a waiting job, and its copies still waiting with it, to spool #2. Another spool of the same variety and tuning, only its colour different, moves at once: its slice and review stand, and it names the new spool, which its Start asks to be loaded. Another variety or tuning is prepared again with your answers and changes kept, and comes back to your review. A temperature or fan you set for the variety it left comes back unticked, under "YOURS, SET FOR THE SPOOL IT WAS MOVED FROM", saying which it was set for: `use N` takes it back. Moved back to that variety, it's given back as it was. A file sliced by hand can change colour, not filament.
+- **Printing is one at a time, and you start it.** When nothing prints, the first ready job that isn't held is offered at the gate, on the card and at `queue>` ("Offered to print: …, on spool #2 …"). `start` here, then `y` to the bed's question, which names the job and its spool ("Start lid.stl (job 4f51176a) on spool #1, Elegoo PLA, white? I can see the bed is clear [y/N]"), or Yes on the card. What comes of it, started or held and why, is said before the prompt is back. `start 3` puts 3 first and offers it. `reject` ends the offered job. The checks at Start, the arming and the outcome are the same as any job's. An outcome you haven't recorded doesn't keep the next one back: the card still asks it, oldest first.
+- **A quantity** is that many prints, each a job with its own ledger row and outcome. The copies are prepared with the first, answered and reviewed once, and print its G-code under their own names.
+- **The machine's steps keep their limit:** a job whose slicing runs past the hour, from when it last came back from you, stops, saying so in its line: `retry 3` prepares it again with what you gave it, or `remove 3`.
+- **The queue survives:** `quit` or Ctrl-C puts it by, and `--queue` alone takes it up as it was, each job where it waited. `--list` shows them under "Waiting for you".
+
+The queue's jobs prepare beside the prompt, so what they log isn't shown on it. While `queue>` is open, the line above it says what needs you and what just happened, rewritten in place as it changes, and what you're typing is left as it is; the whole of what happened to each (ready, offered, started, held, stopped, ended) is said at the next `queue>`. Each job keeps its own `job.log` in its folder, as a lone job does: what its preparing logged, what the queue said of it, and its screens and what you typed at them.
+
+### Files sent to the queue
+
+Files can be sent to the queue with one command, by a Claude session in any repository or by you, and picked up when you can (mqucifer/print-shop#226). The queue keeps its own copy of each, with its notes file, its design run's context as it reads then, and for G-code the Orca project it was sliced from, so the originals can move. Sending answers nothing, approves nothing and arms nothing, whatever `PRINT_AGENT_ALLOW_HARDWARE` says.
+
+```
+uv run python scripts/send.py --by "you" --note "the box set: lid first" lid.stl x2 for="the box's lid" loaded=handled suggest="wall_loops=4 because it clips on" box.stl spool=2
+```
+
+- After each file, besides `x2` and `spool=2`: `for="..."` and `loaded=...` say what a part is for and how it's loaded, which the questions read back for you to confirm (`loaded` is one of the purpose question's four); `seen=top,walls`; `project=P.3mf` for G-code; and `suggest="KEY=VALUE because why"`, a setting the sender suggests.
+- **What a sender suggests is only offered.** At the review it's under "SUGGESTED BY" the sender, unticked, with why: `use N` takes it, as your correction marked as taken from their suggestion. Left, it reaches neither the slice, your corrections nor a lesson.
+- **The same bytes for the same spool aren't sent twice:** the answer names the job that waits. The same bytes as a past print are queued, saying that print and how it came out.
+- **A file sliced by hand that someone sent waits for you to look at it** before it's ready, so it's never offered with the bed's question as its only screen: "needs you: look at what it prints". `look 3` shows what `--sliced` shows (what the file is, Orca's estimate, its settings against your tuning, its objects' overrides, and the slice's reading with its pauses), then `ok` makes it ready and `reject` takes it out unprinted. A sent part is reviewed as any part is. Your own hand-sliced file, added at `queue>`, isn't asked.
+- **At `queue>`, "SENT TO YOU"** gives each send in a line: who, when (the Mac's time: "04:43 today", "22:43 yesterday"), the note, and its jobs' numbers, whose steps are on their own lines above. `sent 3` shows what came with job 3: where the file was, its notes, the project, the suggestions, and what wasn't taken. A file sent while the queue is open is taken up within a second; otherwise when `--queue` next opens. `--list` shows sent jobs with who sent them, and when each reached its step, in the Mac's time.
+
+**For Claude sessions on this Mac,** the skill `skills/send-to-queue/` tells any session how to send and that sending is all it does. Install it once, for every session, as a link to the repository's copy, so it stays current with main:
+
+```
+mkdir -p ~/.claude/skills
+ln -s ~/Documents/git/print-shop/skills/send-to-queue ~/.claude/skills/send-to-queue
+```
+
+A session started after that finds it by its description ("send files to the person's print queue"). To take it away, `rm ~/.claude/skills/send-to-queue`.
 
 ## A file you sliced by hand
 
