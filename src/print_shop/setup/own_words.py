@@ -79,7 +79,8 @@ class Reading:
 
 def read(words: str, settings: Iterable[str]) -> Reading:
     """Words read as what they'd set among `settings`, the keys a question's options set."""
-    deciding = set(settings)
+    settings_order = list(settings)
+    deciding = set(settings_order)
     found: dict[str, set[str]] = {}
     for key, value in _readings(words):
         found.setdefault(key, set()).add(value)
@@ -97,7 +98,7 @@ def read(words: str, settings: Iterable[str]) -> Reading:
         else:
             sets[key] = next(iter(values))
     if not found:
-        asked = sorted({NAMES.get(k, k) for k in deciding})
+        asked = list(dict.fromkeys(NAMES.get(k, k) for k in settings_order))
         nothing.append("none of them says " + either(asked) if asked else
                        "this question's options set nothing")
     return Reading(sets, tuple(nothing))

@@ -128,7 +128,7 @@ Finish that job, or stop it with Ctrl-C in its terminal (which doesn't stop the 
 
    - **Confirmed, it's your decision,** as a picked option is: the guard and the lessons leave it, and the review shows it under your answers, "you said 'no support', read back as no supports, and confirmed". What was typed before the read-back showed is dropped, so an Enter typed with the words never confirms them.
    - **Words that set nothing say so there,** with why: none of them says what the question decides, they say it two ways, or you said no to the reading. Then the proposal and the guard decide it, as if it weren't answered. Enter keeps your words so, or answer again. Nothing is guessed: a misspelt "no suport" sets nothing.
-   - **Where the options set nothing,** as what the part is for, your words are kept as said, with no prompt.
+   - **Words on what the part is for are a purpose,** with no prompt. Where they set nothing they're kept as what it's for, and at the model's closer choices beside the purpose you'd given: "Your words are kept as what it's for, beside 'handled, clipped or lightly loaded'. They set no walls or infill, so the proposal decides those." Words there that do set something, such as "4 walls", are read back as above.
    - **In an `--answers` file** words set nothing unless the answer records what they were confirmed as, `{"question": "overhang", "other": "no support", "sets": {"enable_support": "0"}}`, and they still read so. The desk's answers file for a past print records it.
 
    **What the notes say is read back, at one prompt** (mqucifer/print-shop#236), and only the rest is asked:

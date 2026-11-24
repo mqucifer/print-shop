@@ -473,7 +473,8 @@ def cli_waiting(
             parsed = parse(line, question)
             if isinstance(parsed, Answer):
                 # Words read back as what they'd set (mqucifer/print-shop#213).
-                taken = take_words(question, parsed, "1> ", read, write, forget, across)
+                taken = take_words(question, parsed, "1> ", read, write, forget, across,
+                                   beside=PURPOSE.label(kept))
                 if not isinstance(taken, str):
                     return taken
                 line = taken  # answered again

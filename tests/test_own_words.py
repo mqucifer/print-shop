@@ -184,6 +184,22 @@ def test_words_to_a_question_whose_options_set_nothing_are_kept_with_no_prompt()
     assert "Your words set nothing: they're kept as what it's for." in person.said()
 
 
+def test_words_on_a_purpose_whose_options_set_something_are_kept_as_a_purpose() -> None:
+    """A purpose question whose options set walls: words that set none are what it's for, said
+    so, with no prompt; words that do are still read back."""
+    purpose = Question(feature="purpose", text="A made-up cover or spacer?", options=(
+        Option(label="a cover", settings={"wall_loops": "3"}, impact="i", recommended=True,
+               why="w"),
+        Option(label="a spacer", settings={"sparse_infill_density": "40%"}, impact="i")))
+    person = Terminal("o a lid for a box")
+    assert person.ask(purpose) == (Answer(other="a lid for a box"),)
+    assert person.prompts == ["1> "]
+    assert ("Your words are kept as what it's for. They set no walls or infill, so the proposal "
+            "decides those.") in person.said()
+    person = Terminal("o 4 walls", "y")
+    assert person.ask(purpose) == (Answer(other="4 walls", sets={"wall_loops": "4"}),)
+
+
 def test_a_chosen_option_is_never_read_back() -> None:
     person = Terminal()
     answer = Answer(choice=0)

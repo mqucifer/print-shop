@@ -730,7 +730,7 @@ def _changed(
 def take_words(
     question: Question, answer: Answer, prompt: str,
     read: Callable[[str], str], write: Callable[[str], None], forget: Callable[[], None],
-    width: int = WIDTH,
+    width: int = WIDTH, beside: str = "",
 ) -> Answer | str:
     """An answer in words, read back as the decision it makes and confirmed or corrected
     (mqucifer/print-shop#213); any other answer as it is.
@@ -741,11 +741,16 @@ def take_words(
     never confirms them. Enter or y makes it a decision, as a chosen option is. Words that set
     nothing, or a no, say so, and the person keeps them so with Enter or answers again at
     `prompt`, the question's own: the typed line is returned, to be read as an answer. Where
-    the options set nothing, as what it's for, that's said, and the words stand.
+    the options set nothing, that's said, and the words stand.
+
+    Words on what the part is for are a purpose, whatever its options set (print-shop-ux, on
+    the model's closer choices): where they set nothing they're kept as what it's for, beside
+    the purpose already given (`beside`), with no prompt. The proposal decides what the options
+    would have set, and nothing is lost.
     """
     if answer.choice is not None:
         return answer
-    keys = {k for o in question.options for k in o.settings}
+    keys = list(dict.fromkeys(k for o in question.options for k in o.settings))
     if not keys:
         kept = "what it's for" if question.feature == "purpose" else "your answer"
         write("\n".join(wrap("  ", f"Your words set nothing: they're kept as {kept}.", width)))
@@ -771,7 +776,12 @@ def take_words(
         why = "you said no to what they were read as"
     else:
         why = "; ".join(reading.nothing)
-    decides = own_words.either(sorted({own_words.NAMES.get(k, k) for k in keys}))
+    decides = own_words.either(list(dict.fromkeys(own_words.NAMES.get(k, k) for k in keys)))
+    if question.feature == "purpose":
+        given = f", beside '{beside}'" if beside else ""
+        write("\n".join(wrap("  ", f"Your words are kept as what it's for{given}. They set no "
+                                  f"{decides}, so the proposal decides those.", width)))
+        return answer
     write("\n".join([
         *wrap("  ", f"Your words set nothing: {why}. The proposal decides {decides}, as if this "
                     "weren't answered.", width),
