@@ -26,9 +26,10 @@ from tests.reviewing import flat
 #: Main's lines for the same made-up job (7c9ef1f), as `_drive` gets them.
 BEFORE = Path(__file__).parent / "data" / "questions" / "before-266.txt"
 
-#: What's typed: the read-back's 2 changed, to 1, kept as the notes; then 1> and 3>; the added
-#: 4>; and the closer choice.
-TYPED = ("2", "1", "n", "2", "o it holds glass tiles", "2", "2")
+#: What's typed: the read-back's 2 changed, to 1, kept as the notes; then 1> and 3>, whose words
+#: set nothing and Enter keeps them so (mqucifer/print-shop#213); the added 4>; and the closer
+#: choice.
+TYPED = ("2", "1", "n", "2", "o it holds glass tiles", "", "2", "2")
 
 
 def _drive(width: int = 100) -> tuple[str, list[Answer]]:
@@ -84,7 +85,8 @@ def test_the_answers_are_read_as_they_were() -> None:
 def test_the_prompts_and_what_enter_keeps_are_as_they_were() -> None:
     now, _ = _drive()
     prompts = [line for line in now.splitlines() if line.endswith("> ")]
-    assert prompts == ["notes> ", "2> ", "yours or notes> ", "1> ", "3> ", "4> ", "1> "]
+    assert prompts == ["notes> ", "2> ", "yours or notes> ", "1> ", "3> ", "3> ", "4> ", "1> "]
+    assert "Your words set nothing: none of them says " in now  # mqucifer/print-shop#213
     assert "Enter if that's right, or 2 to change it." in now
     assert "     Enter  keep what the notes say" in now
     assert "     Enter  keep your answer" in now
@@ -132,6 +134,20 @@ def test_what_every_option_shares_is_said_once() -> None:
                      r"Orca: 99 min, 19\.2 g\n", bridge)
 
 
+def test_options_with_no_estimate_say_so_once_in_a_sentence() -> None:
+    """"Each no estimate." was a broken line: the shared cost is its own sentence."""
+    unpriced = BRIDGE.model_copy(update={"options": tuple(
+        o.model_copy(update={"estimate": None}) for o in BRIDGE.options)})
+    text = "\n".join(option_lines(unpriced, 100))
+    assert text.endswith("     None of these has an Orca estimate yet.")
+    assert "Each no estimate" not in text and text.count("no estimate") == 0
+    same = BRIDGE.model_copy(update={"options": tuple(
+        o.model_copy(update={"settings": {}, "estimate": BRIDGE.options[0].estimate})
+        for o in BRIDGE.options)})
+    assert "\n".join(option_lines(same, 100)).endswith(
+        "     Each keeps your presets. Orca's estimate for each: 75 min, 15.88 g.")
+
+
 def test_the_notes_option_is_marked_as_the_notes() -> None:
     text = "\n".join(option_lines(SEEN_NOTED, 100))
     assert re.search(r"     4  only the face on the plate +the notes\n", text)
@@ -146,7 +162,8 @@ def test_a_question_wraps_under_itself() -> None:
 
 def test_one_question_with_no_options_shared_says_none() -> None:
     one = Question(feature="x", text="One?", options=BRIDGE.options[:1])
-    assert option_lines(one, 100)[-1].startswith("     Each sets no supports and Orca: 75 min")
+    assert option_lines(one, 100)[-1] == (
+        "     Each sets no supports. Orca's estimate for each: 75 min, 15.88 g.")
 
 
 # --------------------------------------------------------------------------

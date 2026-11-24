@@ -292,12 +292,13 @@ def test_questions_that_come_late_are_added_without_losing_an_answer() -> None:
             release.set()
             time.sleep(0.2)
 
-    person = Person("2", "3", "2", "o it bends", before=arrives)
+    # "it bends" sets nothing the edge's options set; Enter keeps it so (mqucifer/print-shop#213).
+    person = Person("2", "3", "2", "o it bends", "", before=arrives)
     intake = ask(person, slow)
     assert intake.questions == (*STOCK, TOP, EDGE)
     assert intake.answers == (
         Answer(choice=1), Answer(choice=2), Answer(choice=1), Answer(other="it bends"))
-    assert [p for p, _ in person.prompts] == ["1> ", "2> ", "3> ", "4> "]
+    assert [p for p, _ in person.prompts] == ["1> ", "2> ", "3> ", "4> ", "4> "]
 
 
 def test_a_list_never_changes_under_an_open_prompt() -> None:

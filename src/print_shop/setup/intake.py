@@ -555,12 +555,26 @@ def option_lines(
     lines += wrap(f"{_NUMBER}o  ", "other: say it in your own words", width)
     shared = ([("keeps your presets" if sets[0] == "your presets" else f"sets {sets[0]}")]
               if one_set and sets else [])
-    shared += [costs[0]] if one_cost and costs else []
-    if shared:
-        lines += wrap(_NUMBER, f"Each {' and '.join(shared)}.", width)
+    priced = ""
+    if one_cost and costs:
+        if costs[0] == NOTHING:
+            shared.append(NOTHING)
+        else:
+            priced = _priced(costs[0])
+    said = " ".join(x for x in (f"Each {' and '.join(shared)}." if shared else "", priced) if x)
+    if said:
+        lines += wrap(_NUMBER, said, width)
     if keep and not keep_first:
         lines += enter
     return lines
+
+
+def _priced(cost: str) -> str:
+    """One cost every option shares, as a sentence of its own: "Each" can't take "no estimate"
+    or "Orca: 11 min, 3.1 g" (mqucifer/print-shop#266's shared line)."""
+    if cost == "no estimate":
+        return "None of these has an Orca estimate yet."
+    return f"Orca's estimate for each: {cost.removeprefix('Orca: ')}."
 
 
 def render_read_back(numbered: Sequence[tuple[int, Question]], width: int = WIDTH) -> str:

@@ -13,7 +13,14 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
+import pty
 import re
+import select
+import subprocess
+import sys
+import textwrap
+import time
 from pathlib import Path
 from typing import Any
 
@@ -281,3 +288,58 @@ def test_a_recorded_confirmation_the_words_dont_bear_out_is_refused(
 ) -> None:
     with pytest.raises(AnswersRefused, match=re.escape(says)):
         replay_asker(_recorded(tmp_path, row))((CEILING,))
+
+
+# --------------------------------------------------------------------------
+# The real terminal: an Enter typed with the words confirms nothing
+# --------------------------------------------------------------------------
+
+_TERMINAL = textwrap.dedent("""
+    from print_shop.setup.intake import Option, Question, cli_asker
+
+    ceiling = Question(feature="overhang", text="The made-up ceiling overhangs. Support it?",
+                       options=(Option(label="Bridge it", settings={"enable_support": "0"},
+                                       impact="i", recommended=True, why="w"),
+                                Option(label="Tree supports", settings={"enable_support": "1"},
+                                       impact="i")))
+    [answer] = cli_asker()((ceiling,))
+    print("ANSWER", answer.other, answer.sets, flush=True)
+""")
+
+#: How long the terminal is given to show something.
+WAIT_S = 30.0
+
+
+def test_on_a_terminal_an_enter_typed_with_the_words_never_confirms_them(tmp_path: Path) -> None:
+    """The words and an Enter typed together: the Enter is dropped once the read-back is drawn,
+    nothing is answered until another is typed at "yes or no>", and that one confirms."""
+    script = tmp_path / "terminal.py"
+    script.write_text(_TERMINAL)
+    master, slave = pty.openpty()
+    child = subprocess.Popen([sys.executable, str(script)],
+                             stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
+    os.close(slave)
+    shown = ""
+
+    def until(text: str) -> None:
+        nonlocal shown
+        give_up = time.monotonic() + WAIT_S
+        while text not in shown:
+            assert time.monotonic() < give_up, f"{text!r} never showed in {shown!r}"
+            if select.select([master], [], [], 0.2)[0]:
+                shown += os.read(master, 65536).decode(errors="replace")
+
+    try:
+        until("1> ")
+        os.write(master, b"o no support\n\n")  # the Enter typed ahead, with the words
+        until(WORDS_PROMPT)
+        time.sleep(0.5)
+        if select.select([master], [], [], 0.3)[0]:
+            shown += os.read(master, 65536).decode(errors="replace")
+        assert "ANSWER" not in shown, "the Enter typed ahead confirmed the reading"
+        os.write(master, b"\n")  # an Enter typed after the read-back drew
+        until("ANSWER no support {'enable_support': '0'}")
+    finally:
+        child.kill()
+        child.wait(WAIT_S)
+        os.close(master)
