@@ -345,7 +345,7 @@ def test_notes_with_about_alone_ask_purpose_with_that_text_beside_it(tmp_path: P
     person = Person("2", "1")
     intake = ask_meanwhile(nothing, person.asker(), person.waiting(), same,
                            (purpose, seen_faces))
-    assert f'Its notes say: "{about}"\n1. {PURPOSE.text}' in person.text
+    assert f'Its notes say: "{about}" 1. {PURPOSE.text}' in flat(person.text)
     assert "From the part's notes" not in person.text
     assert intake.answers[0] == Answer(choice=1), "the answer given, whatever the words said"
     assert intake.questions[0].beside == about and not intake.over_notes()
@@ -374,7 +374,7 @@ def test_a_contradicting_answer_names_both_before_its_taken_and_the_record_has_b
     theirs, yours = "the top as it prints and the face on the plate", SEEN.options[3].label
     assert prompt == DIFFERS_PROMPT
     assert (f"They say seen: {theirs.replace('as it prints', 'as it lies now')}. "
-            f"You said: {yours}.") in before_taken
+            f"You said: {yours}.") in flat(before_taken)
     assert "Enter takes your answer, or n keeps the notes." in before_taken
 
     assert row.intake is not None
@@ -425,7 +425,7 @@ def test_changing_a_line_says_what_the_notes_say_on_it_with_quotes_for_about_alo
     cli_asker(person.read, person.write)(two(tmp_path, BOTH))
     assert "The notes say for: a made-up bracket for a shelf. Carries a real load\n" in person.text
     assert "The notes say seen: the top and the bottom, as the file lays it\n" in person.text
-    assert "Its notes say" not in person.text and "Enter) keep what the notes say" in person.text
+    assert "Its notes say" not in person.text and "Enter  keep what the notes say" in person.text
 
 
 def test_both_can_be_changed_at_the_one_prompt(tmp_path: Path) -> None:
@@ -1007,7 +1007,7 @@ class TypesAsItDraws:
 
 @pytest.mark.parametrize(("data", "at", "early", "after"), [
     (BOTH, "From the part's notes", "", ["1", ""]),
-    (BOTH, "Enter) keep what the notes say", "", ["2", "4", ""]),
+    (BOTH, "Enter  keep what the notes say", "", ["2", "4", ""]),
     (BOTH, "That differs from the notes", "", ["2", "4", "n"]),
     ({"seen": ["top"]}, "A few questions about this part", "4", ["", "2"]),
 ])

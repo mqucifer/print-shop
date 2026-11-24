@@ -47,8 +47,10 @@ from print_shop.setup.intake import (
     Intake,
     Question,
     drop_typed,
+    option_lines,
     parse,
 )
+from print_shop.setup.layout import terminal_width, wrap
 from print_shop.setup.questions import PLATE_WORDS, PURPOSE, STOCK, Asked, only_stock
 
 __all__ = [
@@ -196,9 +198,10 @@ def ask_meanwhile(
         stock: print-shop's two as this part's notes leave them (`questions.stock`).
     """
     call = QuestionsCall(propose, waiting.ended, stock)
+    # Said before it starts, so that what it comes to is never said first (mqucifer/print-shop#266).
+    waiting.started(call)
     call.start()
     try:
-        waiting.started(call)
         first = tuple(asker(stock)) if waiting.stock_first else ()
         replayed = False
         if call.unwaited and not waiting.stock_first:
@@ -338,14 +341,24 @@ def cli_waiting(
     typed: Callable[[float], bool] = _keys_waiting,
     forget: Callable[[], None] = drop_typed,
     several: bool = False,
+    width: Callable[[], int] = terminal_width,
 ) -> Waiting:
     """The wait on the command line. `replayed` is for recorded answers. `prompt` is the one
     that's open (`Prompted.prompt`): it's shown again under anything said while it's open.
 
     Without a terminal nobody can type `go`: the call runs to its own end, as it did.
 
-    `several` words it for a plate of several parts (mqucifer/print-shop#109).
+    `several` words it for a plate of several parts (mqucifer/print-shop#109). What it says is
+    wrapped to `width`, the terminal's, and the closer choices laid out as the questions are
+    (mqucifer/print-shop#266).
     """
+
+    def said(text: str) -> str:
+        """A sentence, wrapped to the terminal; a blank line before it is kept."""
+        blank = "\n" * (len(text) - len(text.lstrip("\n")))
+        return blank + "\n".join(line for part in text.lstrip("\n").split("\n")
+                                 for line in wrap("", part, width()))
+
     whose = "these parts" if several else "the part"
     purpose = PLATE_WORDS[PURPOSE.text] if several else PURPOSE.text
     lock = threading.Lock()  # the call's end and the timer both write
@@ -360,7 +373,7 @@ def cli_waiting(
             how = "The notes give what it's for and what's seen, so nothing waits for it."
         else:
             how = "Answer these meanwhile: you won't have to wait for it."
-        write(f"The model is reading {whose} for questions of its own. {how}")
+        write(said(f"The model is reading {whose} for questions of its own. {how}"))
         if not replayed:
             at_prompt.set()
 
@@ -370,25 +383,25 @@ def cli_waiting(
                 return
             after = took(call.seconds)
             if asked.failed:
-                said = f"The model {asked.failed} after {after}. " + (
+                line = f"The model {asked.failed} after {after}. " + (
                     "It adds no question." if call.from_notes
                     else "Only purpose and what's seen are asked.")
             elif asked.closer or asked.added:
-                said = f"The model's questions came after {after}."
+                line = f"The model's questions came after {after}."
                 if at_prompt.is_set():
-                    said += " They follow the answers you're giving."
+                    line += " They follow the answers you're giving."
             else:
-                said = f"The model read {whose} in {after} and has no other question."
+                line = f"The model read {whose} in {after} and has no other question."
             out = screen()
             open_prompt = prompt() if at_prompt.is_set() else ""
             if open_prompt:
                 keep = ("Enter still confirms the notes above" if open_prompt == NOTES_PROMPT
                         else "Enter still takes your answer" if open_prompt == DIFFERS_PROMPT
                         else f"Keep answering {open_prompt.rstrip('> ')}")
-                said = f"\n{said}\n{keep} (what you've typed is kept):"
+                line = f"\n{line}\n{keep} (what you've typed is kept):"
             elif at_prompt.is_set() or out is not None:
-                said = f"\n{said}"  # off the line that's being typed on
-            write(said)
+                line = f"\n{line}"  # off the line that's being typed on
+            write(said(line))
             if open_prompt and out is not None:
                 # On the screen alone: the log gets the prompt with its answer.
                 out.write(open_prompt)
@@ -401,9 +414,10 @@ def cli_waiting(
             if out is not None:
                 forget()
             return True
-        write(f"The model is still reading {whose} ({took(call.seconds)}). "
-              "If it has another question, it's added here."
-              + (f" Type {GO_ON} and Enter to go on without waiting." if out is not None else ""))
+        write(said(f"The model is still reading {whose} ({took(call.seconds)}). "
+                   "If it has another question, it's added here."
+                   + (f" Type {GO_ON} and Enter to go on without waiting."
+                      if out is not None else "")))
         said_at = time.monotonic()
 
         def draw() -> None:
@@ -442,13 +456,12 @@ def cli_waiting(
         return True
 
     def closer(question: Question, kept: Answer, seconds: float) -> Answer | None:
-        lines = [f"1. {purpose}  you: {PURPOSE.label(kept)}",
-                 f"   The model has read {whose} since ({took(seconds)}) and has closer choices. "
-                 "Each says what it sets:",
-                 f"   {question.text}",
-                 "   Enter) keep your answer"]
-        lines += [f"   {i}) {o.line()}" for i, o in enumerate(question.options, 1)]
-        lines.append("   o) other: say it in your own words")
+        across = width()
+        lines = [*wrap("  1. ", f"{purpose}  you: {PURPOSE.label(kept)}", across),
+                 *wrap("     ", f"The model has read {whose} since ({took(seconds)}) and has "
+                       "closer choices. Each says what it sets:", across),
+                 *wrap("     ", question.text, across),
+                 *option_lines(question, across, keep="keep your answer", keep_first=True)]
         write("\n".join(lines))
         if screen() is not None:
             forget()  # Enter keeps their answer here, so never one typed while this drew
@@ -463,8 +476,8 @@ def cli_waiting(
 
     def went_on(call: QuestionsCall) -> None:
         with lock:
-            write("Going on without waiting for the model's questions: the notes gave what it's "
-                  "for and what's seen.")
+            write(said("Going on without waiting for the model's questions: the notes gave "
+                       "what it's for and what's seen."))
 
     return Waiting(started=started, ended=ended, wait=wait, went_on=went_on,
                    closer=None if replayed else closer, stock_first=not replayed)

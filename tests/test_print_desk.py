@@ -584,8 +584,8 @@ def test_print_job_keeps_what_it_shows_in_the_jobs_folder_and_no_secret(
 
     log = (tmp_path / "jobs" / "job-log-1" / "job.log").read_text()
     assert log.splitlines()[1] == f"part: {part.resolve()}"
-    assert "The inventory isn't set up" in log, "what was shown before the job had a folder"
-    assert "Fitted: a 0.4 mm nozzle and Elegoo PLA" in log
+    assert "  inventory not set up (" in log, "what was shown before the job had a folder"
+    assert "  fitted    a 0.4 mm nozzle and Elegoo PLA" in log
     assert "the key is [redacted], the password [redacted]" in log
     assert "the token is [redacted]" in log and "calling with [redacted]" in log
     assert "1. What is the part for?" in log and "1> 2\n" in log, "the question and its answer"
