@@ -58,6 +58,13 @@ them, saying that it is, and then lists them as ever.
 wrapped to the terminal, with Look first said again above the prompt and, from the second round
 on, what moved marked and listed. Use these' items, the slice's and the model's share one number
 space, in that order, and a number typed to the wrong command says whose it is.
+
+**A slip doesn't cost the rest of the line** (mqucifer/print-shop#224, `read_answer`). The
+parts that read are held, applied to nothing, while the one that doesn't is asked about at
+`fix>`: corrected, dropped, or `back` for none of it. Nothing's sliced till it's settled, so it's
+one slice. A `;` starts an answer only before one (`key=`, `take`, `use`, `clear`, `from`,
+`no 2`): anywhere else it's the reason's. Pasted lines are one answer: its corrections are read,
+its other lines asked about once, and an `ok` or `stop` in it approves and ends nothing.
 """
 
 from __future__ import annotations
@@ -1057,7 +1064,8 @@ def cli_reviewer(
     """Show the review on the command line and read the answer, again until it's readable.
     `orientation` starts the send-back conversation (`send_back`). `forget` drops what was typed
     before something was shown that a number or a y answers: the model's list, or the load's
-    question. `asks` is whether there's a terminal to ask that in (`can_ask`).
+    question. `asks` is whether there's a terminal to ask that in (`can_ask`). `more` is whether
+    another line is already waiting, to read a paste as one answer (mqucifer/print-shop#224).
 
     The model's proposals are said as they arrive, under the open prompt, and added to the list
     by Enter (mqucifer/print-shop#242). What's typed is read against the list on screen. While
@@ -1067,9 +1075,7 @@ def cli_reviewer(
     From the second round of a job on, what moved since the round before is marked and listed.
     """
     shown: list[ReviewRequest] = []  # the round before, of this job
-    if more is None:
-        # A line already waiting at a terminal came in the same paste; piped lines are answers.
-        more = lambda: can_ask() and _keys_waiting(0.05)  # noqa: E731
+    waiting = _pasted if more is None else more
 
     def review(request: ReviewRequest) -> Review:
         work = request.suggesting
@@ -1180,8 +1186,12 @@ def cli_reviewer(
             told_model: set[str] = set()  # what's been said of the model's, at an ok
             added = False
             while True:
+                # Typed ahead, before the prompt opened, each line is an answer as ever: lines
+                # waiting once one is read at the open prompt were pasted with it, and are one
+                # answer with it (mqucifer/print-shop#224).
+                ahead = waiting()
                 answer = ask()
-                while more():  # pasted with it: one answer (mqucifer/print-shop#224)
+                while not ahead and waiting():
                     answer += "\n" + read("")
                 if request.suggested is not None and not answer.strip():
                     newer = request.refreshed()
@@ -1207,7 +1217,7 @@ def cli_reviewer(
                     continue
                 try:
                     parsed = _settled(read_answer(answer, request), request, read, write,
-                                      width())
+                                      width(), waiting)
                     if parsed is None:
                         write("  Back to the review: nothing from that answer is taken.")
                         continue
@@ -1267,15 +1277,29 @@ def cli_reviewer(
     return review
 
 
+def _pasted() -> bool:
+    """Whether a line is already waiting at a person's terminal. Piped lines are each an answer,
+    and what can't be looked at is none."""
+    try:
+        return can_ask() and _keys_waiting(0.05)
+    except (OSError, ValueError):
+        return False
+
+
 def _settled(
     read_: Review | Slipped | str, request: ReviewRequest, read: Callable[[str], str],
-    write: Callable[[str], None], width: int,
+    write: Callable[[str], None], width: int, waiting: Callable[[], bool],
 ) -> Review | str | None:
     """The answer once each slip in it is corrected or dropped, the rest held meanwhile, so that
     it's sliced once (mqucifer/print-shop#224). None: `back`, or nothing left of it."""
     while isinstance(read_, Slipped):
+        if not read_.held:
+            return read_.slips[0][1]  # nothing to hold: said, and typed again at the review
         write("\n".join(read_.asked(min(width, WIDTH))))
-        parts = read_.answered(read("fix> "))
+        typed = read("fix> ")
+        while waiting():  # a paste here is one fix, and leaves nothing for the next prompt
+            typed += "\n" + read("")
+        parts = read_.answered(typed)
         if not parts:
             return None
         read_ = _read_parts(parts, request)
