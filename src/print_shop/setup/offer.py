@@ -169,6 +169,9 @@ class Item:
     #: Whose it is, said in place of a lesson's number: such a lesson's, with the variety it was
     #: learned on, and the picked print's own at the same value where it's folded in.
     source: str = ""
+    #: The reason the picked print's own was given, where it's folded in: the person's words,
+    #: said on this item's line as they were on its own.
+    also: str = ""
 
 
 @dataclass(frozen=True)
@@ -250,8 +253,12 @@ class Offering:
             also = [_whose_words(i) for i in same
                     if not (i.used.by is Source.LESSON and i.used.lesson == lesson.used.lesson)]
             if also and past is not None:
+                folded = next(i for i in same if i.used.by is not Source.LESSON
+                              or i.used.lesson != lesson.used.lesson)
+                said = " ".join(folded.reason.split())
                 lesson = replace(lesson, source=f"{also[0]} on {past.stl_name}, and "
-                                                f"{lesson.source}")
+                                                f"{lesson.source}",
+                                 also="" if said in ("", _NO_REASON) else said)
             lessons.append(lesson)
         return (*own, *lessons)
 
@@ -1327,7 +1334,7 @@ def _group(
     for _, item, found in group:
         reason = _reason(item, proposal)
         parts = reason.split(_AND, 1) if item.used.by is Source.LESSON else [reason]
-        words = [*parts, *_tags(item), *item.notes]
+        words = [*([item.also] if item.also else []), *parts, *_tags(item), *item.notes]
         if found.mark == " ":
             words += [f"not ticked: {why}" for why in found.why
                       if why != ASKED_AGAIN and why not in shared]
@@ -1414,6 +1421,8 @@ def _settled(rows: list[tuple[int, Item, Standing]], proposal: Proposal) -> list
             # Its words are in the Lessons section where it's there, or where it set this.
             listed = any(g.id == u.lesson for g in proposal.lessons)
             why = "" if listed or (now is not None and now.lesson == u.lesson) else item.reason
+            if item.also:
+                why = item.also  # the person's words, folded in: theirs, wherever the lesson's are
         elif item.key == ORIENTATION or (now is not None and now.reason == item.reason):
             why = ""
         else:

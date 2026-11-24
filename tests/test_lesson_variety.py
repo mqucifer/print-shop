@@ -22,6 +22,7 @@ from print_shop.ledger import Ledger, PrintRecord, Row
 from print_shop.setup import Proposer, lessons, variety
 from print_shop.setup.intake import Intake
 from print_shop.setup.offer import Item, Offering, Standing, offering
+from print_shop.setup.offer import render as offer_render
 from print_shop.setup.proposal import Change, GivenLesson, Proposal, Source
 from print_shop.setup.review import ReviewRequest, parse_answer, render
 from print_shop.slicer.orca import SlicerProfiles
@@ -209,7 +210,8 @@ def test_the_proposal_sets_it_on_its_variety_and_the_review_says_why_not_on_anot
     text = " ".join(shown.split())
     assert f"not given: learned on {BASIC}; this print is {FAST}" in text
     assert "LESSONS NOT SET FOR THIS VARIETY" in text
-    assert (f"your override on rail.stl, and lesson 1, learned on {BASIC} (in Lessons below); "
+    assert (f"it lifted at 60; your override on rail.stl, and lesson 1, learned on {BASIC} "
+            "(in Lessons below); "
             f"not ticked: this is {FAST}") in text
 
 
@@ -379,3 +381,23 @@ def test_with_no_past_print_to_offer_the_lessons_are_still_offered(
     review = parse_answer("use 1", request(found))
     assert not isinstance(review, str)
     assert [c.key for c in review.corrections] == ["textured_plate_temp"]
+
+
+@pytest.mark.parametrize("lesson", [1, 9])
+def test_folded_and_already_set_here_it_keeps_the_persons_words_under_its_number(
+    ledger: Ledger, rail: Path, lesson: int,
+) -> None:
+    """Already set here, by that lesson or another, the line beneath says the reason the person
+    gave for their own, as it did before it was folded in."""
+    learned_on_basic(ledger, rail)
+    found = offered(ledger, rail, FAST)
+    number = numbered(found)
+    here = Proposal(changes=(Change(key="textured_plate_temp", preset="60", value="75",
+                                    reason="a lesson", source=Source.LESSON, lesson=lesson),))
+    _, standing = the_lesson(found, here)
+    assert standing.mark == "="
+    shown = offer_render(found, here, "0,0,0")
+    at = shown.index("  ALREADY SET HERE")
+    by = "lesson 1" if lesson == 1 else "lesson 9; lesson 1"
+    assert shown[at + 1:at + 3] == [f"  {number} textured_plate_temp 75 ({by})",
+                                    f"      {number}: it lifted at 60"]
