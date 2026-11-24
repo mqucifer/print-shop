@@ -170,7 +170,8 @@ def build_run(
         # (mqucifer/print-shop#106).
         proposer=Proposer(
             llm=setup_llm(llm, env),
-            lessons=lambda features, filament: lessons.for_part(ledger, features, filament),
+            lessons=lambda features, filament, variety: lessons.for_part(
+                ledger, features, filament, variety),
         ),
         asker=asker,
         reviewer=reviewer,
