@@ -849,8 +849,7 @@ class PhonePage:
             self.shop.daemon = daemon
             # A job that needs you, a pause near, a print ended: to the phone through Home
             # Assistant (mqucifer/print-shop#221).
-            notices = Notices(self.shop, lambda n: daemon.notify(n.payload()),
-                              origin=self.main.rstrip("/"))
+            notices = Notices(self.shop, lambda n: daemon.notify(n.payload()))
             notices.start()
         attach(server, daemon, self.shop)
         thread = threading.Thread(target=server.serve_forever, name="phone-page", daemon=True)

@@ -508,9 +508,12 @@ def _pauses_then_and_now(row: Row, gcode: Path) -> list[str]:
 
 
 def find(ledger: Ledger, jobs: Path, job_id: str, *, store_root: Path,
-         bed: BedType, parts: Path | None = None) -> Reprint:
+         bed: BedType, parts: Path | None = None, scratch: Path | None = None) -> Reprint:
     """A finished run, by its id or the start of it, with what's kept of it checked. `parts`
     is the parts folder, where a run from before has its part looked for by its sha256.
+    `scratch` is where a run from before has its profiles composed from the store, in place of
+    its own folder: the phone's, so that showing a run writes nothing of its
+    (mqucifer/print-shop#221).
 
     Raises:
         Refused: If no run has that id, or several start with it, or it hasn't finished.
@@ -543,7 +546,7 @@ def find(ledger: Ledger, jobs: Path, job_id: str, *, store_root: Path,
     elif first.plate is not None:
         reprint.no_change = "a plate of several parts prints again as it was"
     else:
-        _for_a_change(reprint, ledger, jobs, store_root, bed, unchecked, parts)
+        _for_a_change(reprint, ledger, jobs, store_root, bed, unchecked, parts, scratch)
     reprint.unchecked = tuple(unchecked)
     return reprint
 
@@ -602,7 +605,7 @@ def _config(ledger: Ledger, row: Row, gcode: Path | None) -> dict[str, str]:
 
 
 def _for_a_change(reprint: Reprint, ledger: Ledger, jobs: Path, store_root: Path, bed: BedType,
-                  unchecked: list[str], parts: Path | None) -> None:
+                  unchecked: list[str], parts: Path | None, scratch: Path | None = None) -> None:
     """What a change slices with: the first run's part, profiles and settings, checked."""
     first = reprint.first
     folder = jobs / first.job_id
@@ -613,7 +616,7 @@ def _for_a_change(reprint: Reprint, ledger: Ledger, jobs: Path, store_root: Path
                              f"it printed (sha256 {first.stl_sha256[:12]}…) is where its log "
                              "names it, in its folder or in the parts folder")
         return
-    profiles = _profiles(first, folder, kept, store_root, bed, unchecked)
+    profiles = _profiles(first, folder, kept, store_root, bed, unchecked, scratch)
     if isinstance(profiles, str):
         reprint.no_change = profiles
         return
@@ -676,7 +679,8 @@ _PART_SUFFIXES = (".stl", ".3mf", ".obj")
 
 
 def _profiles(first: Row, folder: Path, kept: dict[str, dict[str, str]], store_root: Path,
-              bed: BedType, unchecked: list[str]) -> SlicerProfiles | str:
+              bed: BedType, unchecked: list[str], scratch: Path | None = None,
+              ) -> SlicerProfiles | str:
     """The profiles it sliced with: those kept in its folder, checked by their hash; for a run
     from before, the store's files it names, each checked by the hash the ledger has."""
     paths: dict[str, Path] = {}
@@ -697,7 +701,7 @@ def _profiles(first: Row, folder: Path, kept: dict[str, dict[str, str]], store_r
     unchecked.append("its profiles weren't kept then: it's sliced with the store's files it "
                      f"names, on today's plate setting ({bed.value})")
     store = Store(store_root)
-    into = folder / KEPT_DIR / "from-store"
+    into = (scratch if scratch is not None else folder / KEPT_DIR) / "from-store"
     composed: dict[str, Path] = {}
     for kind, ref in (("machine", used.machine), ("process", used.process),
                       ("filament", used.filament)):

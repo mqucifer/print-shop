@@ -3,10 +3,15 @@
 #
 # The run sends each once, on `<MQTT_TOPIC_PREFIX>/notice`, never retained, while the phone's
 # page is on (PHONE_HOME set). Each is JSON: kind ("needs_you", "pause_near", "ended"),
-# title, message, and url, the phone's page itself on the home Wi-Fi.
+# title, message, and path, a page of the phone's: "/", "/job/<id>" or "/run/<id>".
+#
+# The link is built here, from the page's own address set below, and only a path of that shape
+# is taken from the message: anything else that can post to the topic can't point it elsewhere.
 #
 # To use: Settings -> Automations & Scenes -> + Create Automation -> three-dot menu ->
-# Edit in YAML, and paste this. Then change two things:
+# Edit in YAML, and paste this. Then change three things:
+#   - `http://A.B.C.D:8765` to the address the run says (`Your phone's page: ...`), with no
+#     slash at the end;
 #   - `3dprint-dev` to your MQTT_TOPIC_PREFIX, if you set one;
 #   - `notify.mobile_app_your_phone` to your phone's notify action (Settings -> Companion
 #     App, or Developer Tools -> Actions, "notify.mobile_app_...").
@@ -22,6 +27,12 @@ mode: queued
 triggers:
   - trigger: mqtt
     topic: 3dprint-dev/notice
+variables:
+  page: "http://A.B.C.D:8765"
+  path: >-
+    {% set p = trigger.payload_json.path | default('/') | string %}
+    {{ p if p is match('^/((job|run)/[A-Za-z0-9_-]{1,100})?\Z') else '/' }}
+  link: "{{ page ~ path }}"
 actions:
   - action: notify.mobile_app_your_phone
     data:
@@ -29,8 +40,8 @@ actions:
       message: "{{ trigger.payload_json.message }}"
       data:
         # iOS's tap link, and Android's.
-        url: "{{ trigger.payload_json.url }}"
-        clickAction: "{{ trigger.payload_json.url }}"
+        url: "{{ link }}"
+        clickAction: "{{ link }}"
         # A pause near is time-sensitive: it shows through a Focus on iOS.
         push:
           interruption-level: >-
@@ -39,4 +50,4 @@ actions:
         actions:
           - action: OPEN
             title: Open
-            uri: "{{ trigger.payload_json.url }}"
+            uri: "{{ link }}"

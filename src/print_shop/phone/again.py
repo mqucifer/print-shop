@@ -57,7 +57,7 @@ def nozzle_typed(found: Reprint, asked: str) -> str:
     """The change − and + made, as `again>` takes one, or "" for none: within the span of the
     run's, in its steps."""
     was = was_nozzle(found)
-    if was is None or not asked.isdigit():
+    if was is None or not (asked.isdecimal() and asked.isascii()):
         return ""
     now = int(asked)
     if now == was or abs(now - was) > NOZZLE_SPAN:

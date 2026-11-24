@@ -567,7 +567,8 @@ def test_load_is_the_stocks_own_and_refused_when_the_stock_changed(page: Page) -
     assert stale.status == 409 and "Look again" in stale.body
     assert _loaded(page.made) == 1, "nothing's recorded"
     done = phone.post("/filaments/load", {"spool": "2", "changes": str(changes)})
-    assert done.status == 200 and "black Elegoo PLA is loaded on cc1" in done.body
+    assert done.status == 303 and done.header("Location") == "/filaments?said=loaded"
+    assert "Loaded." in phone.get("/filaments?said=loaded").body
     assert _loaded(page.made) == 2
 
 
@@ -583,18 +584,20 @@ def test_after_a_swap_load_asks_both_halves_with_nothing_preselected(page: Page)
     assert not ticked(asked.raw)
     assert _loaded(page.made) == 1 and _not_known(page.made), "the question alone moves nothing"
     alone = phone.post("/filaments/load", {"spool": "2", "changes": changes, "answer": "alone"})
-    assert "still doesn't know" in alone.body
+    assert alone.status == 303
+    assert "doesn't know what's on cc1" in phone.get("/filaments?said=loaded").body
     assert _loaded(page.made) == 2 and _not_known(page.made), "a load alone doesn't clear it"
     changes = str(page.shop.stock_changes())
     both = phone.post("/filaments/load", {"spool": "2", "changes": changes, "answer": "both"})
-    assert both.status == 200 and "still" not in both.body
+    assert both.status == 303
+    assert "doesn't know" not in phone.get("/filaments?said=loaded").body
     assert _loaded(page.made) == 2 and not _not_known(page.made)
 
 
 def test_main_says_i_loaded_for_a_shelf_spool_with_ready_jobs(page: Page) -> None:
     job_id = _ready(page, "bracket")
     moved = page.phone().post(f"/job/{job_id}/spool", {"spool": "2"})
-    assert moved.status == 200, moved.body
+    assert moved.status == 303, moved.body
     wait_until(lambda: page.made.waits(job_id) is Waits.READY)
     shown = page.phone().get("/").body
     assert "black Elegoo PLA, on the shelf" in shown and "I loaded black" in shown
@@ -606,7 +609,7 @@ def test_print_it_in_another_spool_is_the_queues_own_move(page: Page) -> None:
     shown = phone.get(f"/job/{job_id}").body
     assert "Print it in another spool instead?" in shown and "grey Elegoo PETG" in shown
     moved = phone.post(f"/job/{job_id}/spool", {"spool": "3"})
-    assert moved.status == 200, moved.body
+    assert moved.status == 303 and moved.header("Location") == f"/job/{job_id}?said=moved"
     job = page.queue.find(job_id[:8])
     assert job is not None and job.spool_id == 3
     assert phone.post(f"/job/{job_id}/spool", {"spool": "x"}).status == 400
@@ -652,9 +655,11 @@ def test_print_again_as_it_was_queues_the_same_file_and_starts_nothing(
     card = phone.get("/runs")
     assert "Print again" in card.body and "Change and print again" in card.body
     done = phone.post(f"/run/{first}/again", {"go": "1"})
-    assert done.status == 200 and "In the queue: a print again of job" in done.body, done.body
-    assert "Start is still yours" in done.body
     (job,) = page.queue.jobs()
+    assert done.status == 303 and done.header("Location") == f"/job/{job.job_id}?said=again"
+    shown = phone.get(done.header("Location")).body
+    assert "In the queue: a print again. Start is still yours" in shown
+    assert f"The same file as job {first[:8]}, not sliced again." in shown
     assert job.by_hand and job.part == "bracket.stl"
     assert len(made.slicer.calls) == sliced, "nothing is sliced again"
     assert made.printer.verbs.count("start") == started, "and nothing starts"
@@ -669,9 +674,9 @@ def test_change_and_print_again_slices_only_when_queued_and_keeps_the_run_pinned
     page, made = again_page
     first = made.printed(page.daemon, page.queue, Adding(made.part("bracket")),
                          symptom=Symptom.STRINGING)
-    found = page.shop.reprint(first)
-    assert not isinstance(found, str)
-    was = was_nozzle(found)
+    with page.shop.again_of(first) as found:
+        assert not isinstance(found, str)
+        was = was_nozzle(found)
     assert was is not None, f"{NOZZLE} is in the run's G-code"
     phone = page.phone()
     shown = phone.get(f"/run/{first}/again")
@@ -682,10 +687,11 @@ def test_change_and_print_again_slices_only_when_queued_and_keeps_the_run_pinned
     assert f"{was - 5} °C" in cooler.body and "slices it again" in cooler.body
     assert len(made.slicer.calls) == sliced, "− and + slice nothing"
     done = phone.post(f"/run/{first}/again", {"nozzle": str(was - 5)})
-    assert done.status == 200 and "In the queue" in done.body, done.body
-    assert "Sliced again. Against that run's G-code:" in done.body
+    assert done.status == 303, done.body
     assert len(made.slicer.calls) > sliced
     (job,) = page.queue.jobs()
+    queued = phone.get(done.header("Location")).body
+    assert f"Sliced again, then compared with job {first[:8]}'s file: {NOZZLE}:" in queued
     assert job.by_hand
     kept = json.dumps(job.given, default=str)
     assert first in kept, "a print again of that run"
@@ -698,13 +704,15 @@ def test_a_nozzle_off_the_runs_span_changes_nothing(again_page: tuple[Page, Any]
 
     page, made = again_page
     first = made.printed(page.daemon, page.queue, Adding(made.part("bracket")))
-    found = page.shop.reprint(first)
-    assert not isinstance(found, str)
-    was = was_nozzle(found)
-    assert was is not None
-    assert nozzle_typed(found, str(was + 100)) == ""
-    assert nozzle_typed(found, "x") == "" and nozzle_typed(found, str(was)) == ""
-    assert nozzle_typed(found, str(was + 5)) == f"nozzle_temperature={was + 5}"
+    with page.shop.again_of(first) as found:
+        assert not isinstance(found, str)
+        was = was_nozzle(found)
+        assert was is not None
+        assert nozzle_typed(found, str(was + 100)) == ""
+        assert nozzle_typed(found, "x") == "" and nozzle_typed(found, str(was)) == ""
+        assert nozzle_typed(found, "²") == "", "a superscript digit isn't a number here"
+        assert nozzle_typed(found, str(was + 5)) == f"nozzle_temperature={was + 5}"
+    assert page.phone().get(f"/run/{first}/again?nozzle=²").status == 200
 
 
 # --------------------------------------------------------------------------
@@ -717,8 +725,7 @@ def test_each_notice_goes_once_on_the_notice_topic_never_retained(page: Page) ->
     from print_shop.phone.notices import Notices  # noqa: PLC0415
     from tests.test_job_e2e import CFG  # noqa: PLC0415
 
-    origin = f"http://{MAC}:8765"
-    notices = Notices(page.shop, lambda n: page.daemon.notify(n.payload()), origin=origin)
+    notices = Notices(page.shop, lambda n: page.daemon.notify(n.payload()))
     job_id = page.queue.add([Adding(page.made.part("bracket"))])[0][0]
     wait_until(lambda: page.queue.asked(job_id) is not None)
     _finished(page.made.ledger, "run-1")
@@ -741,12 +748,12 @@ def test_each_notice_goes_once_on_the_notice_topic_never_retained(page: Page) ->
     sent = [p for p in page.made.bridge.published if p.topic == notice_topic(CFG)]
     assert len(sent) == 3 and not any(p.retain for p in sent)
     said = {json.loads(p.payload)["kind"]: json.loads(p.payload) for p in sent}
-    assert said["needs_you"]["url"] == f"{origin}/job/{job_id}"
-    assert said["ended"]["url"] == f"{origin}/run/run-1"
+    assert said["needs_you"]["path"] == f"/job/{job_id}"
+    assert said["ended"]["path"] == "/run/run-1" and said["pause_near"]["path"] == "/"
     assert said["ended"]["message"] == "cube.stl ended. How did it come out?"
     assert "Pauses in 4 min for an insert" in said["pause_near"]["message"]
     for payload in said.values():
-        assert set(payload) == {"kind", "title", "message", "url"}, "nothing else is in one"
+        assert set(payload) == {"kind", "title", "message", "path"}, "nothing else is in one"
 
 
 def test_the_notices_automation_links_the_page_and_never_frames_it() -> None:
@@ -758,6 +765,97 @@ def test_the_notices_automation_links_the_page_and_never_frames_it() -> None:
     assert trigger["trigger"] == "mqtt" and trigger["topic"].endswith("/notice")
     (action,) = found["actions"]
     data = action["data"]["data"]
-    assert data["url"] == data["clickAction"] == "{{ trigger.payload_json.url }}"
-    assert data["actions"][0]["uri"] == "{{ trigger.payload_json.url }}"
+    assert data["url"] == data["clickAction"] == data["actions"][0]["uri"] == "{{ link }}"
+    assert found["variables"]["link"] == "{{ page ~ path }}"
+    assert "trigger.payload_json.url" not in json.dumps(found), "no link from the message"
     assert "iframe" not in json.dumps(found) and "webpage" not in json.dumps(found)
+
+
+@pytest.mark.parametrize(("path", "taken"), [
+    ("/", "/"), ("/job/a1b2-c3_d4", "/job/a1b2-c3_d4"), ("/run/run-1", "/run/run-1"),
+    ("//elsewhere.example/x", "/"), ("http://elsewhere.example/", "/"), ("/job/../x", "/"),
+    ("/start", "/"), ("/pair", "/"), ("/job/a\n", "/"), ("", "/"),
+])
+def test_the_automation_takes_only_a_path_of_the_pages_shape(path: str, taken: str) -> None:
+    """The path test the automation makes, read from it and run as Python's `re`, which
+    Home Assistant's `match` test uses."""
+    import yaml  # noqa: PLC0415
+
+    found = yaml.safe_load((Path(__file__).parents[1] / "ha-configs"
+                            / "print_shop_notices.yaml").read_text())
+    pattern = re.search(r"match\('([^']+)'\)", found["variables"]["path"])
+    assert pattern is not None
+    assert (path if re.match(pattern.group(1), path) else "/") == taken
+
+
+def test_every_job_on_main_opens_its_page_and_the_one_offered_keeps_start(page: Page) -> None:
+    """print-shop-ux, on mqucifer/print-shop#277: the job offered had no page of its own."""
+    one = _ready(page, "bracket")
+    two = _ready(page, "hook")
+    wait_until(lambda: page.made.offered() in (one, two))
+    offered = page.made.offered()
+    phone = page.phone()
+    raw = phone.get("/").raw
+    for job_id in (one, two):
+        assert f'href="/job/{job_id}"' in raw, job_id
+    assert '<a class="act" href="/start">Start</a>' in raw
+    shown = phone.get(f"/job/{offered}").body
+    assert "Start it on your phone" in shown and "Hold" in shown and "First" in shown
+
+
+def test_a_finished_run_says_its_time_as_well_as_its_day(page: Page) -> None:
+    _finished(page.made.ledger, "run-1")
+    row = page.made.ledger.get("run-1")
+    assert row is not None and row.ended_at is not None
+    at = datetime.fromisoformat(row.ended_at).astimezone()
+    assert f"{at:%A %-d %b, %H:%M}." in page.phone().get("/runs").body
+
+
+def test_showing_a_run_again_writes_nothing_of_its_own(again_page: tuple[Page, Any]) -> None:
+    """The security review of mqucifer/print-shop#277: a GET composed a run-from-before's
+    profiles into its own folder. Now they're composed in a scratch folder that's gone after."""
+    page, made = again_page
+    first = made.printed(page.daemon, page.queue, Adding(made.part("bracket")))
+    from print_shop import reprint  # noqa: PLC0415
+
+    kept = made.work / first / reprint.KEPT_DIR / reprint.KEPT_JSON
+    kept.unlink()  # a run from before kept no profiles: they come from the store
+    before = {p: p.stat().st_mtime_ns for p in made.work.rglob("*")}
+    phone = page.phone()
+    for path in (f"/run/{first}/again", f"/run/{first}/again?nozzle=200", f"/run/{first}",
+                 "/runs", "/", "/filaments", f"/run/{first}/slice"):
+        assert phone.get(path).status < 500, path
+    assert {p: p.stat().st_mtime_ns for p in made.work.rglob("*")} == before
+    assert not (made.work / first / reprint.KEPT_DIR / "from-store").exists()
+
+
+def test_a_form_with_many_picks_records_and_one_with_too_many_fields_is_refused(
+    tmp_path: Path,
+) -> None:
+    with Ledger(tmp_path / "ledger.sqlite") as ledger:
+        _finished(ledger, "run-1")
+    offered = {f"spool #{n}, PLA, made-up is on now, and that print is over": Pick(n, 5)
+               for n in range(1, 9)}
+    daemon = PickingDaemon(offered)
+    phones = Phones(tmp_path / "phones.sqlite")
+    handler = handler_for(home=home(), phones=phones, starts=FakeStarts(),
+                          shop=PhoneShop(tmp_path / "ledger.sqlite", daemon=daemon))
+    phone = signed_in(handler, phones)
+    words = next(iter(offered))
+    form = {"result": "success", "symptom": "none", "note": "é" * 2000, "pick": words,
+            **{f"picked_{i}": f"{p.spool_id}:{p.changes}" for i, p in enumerate(offered.values())}}
+    assert phone.post("/run/run-1/outcome", form).status == 303
+    assert daemon.recorded[0]["note"] == "é" * 2000
+    flood = {f"f{i}": "x" for i in range(100)}
+    assert phone.post("/run/run-1/outcome", flood).status == 400
+    assert len(daemon.recorded) == 1
+
+
+def test_a_layer_in_superscript_digits_is_no_layer(page: Page) -> None:
+    reading, flags = _reading()
+    ledger = page.made.ledger
+    ledger.record_start_requested(record("r").model_copy(update={"reading": reading}))
+    ledger.record_started("r")
+    ledger.record_ended("r", 9)
+    shown = page.phone().get("/run/r/slice?layer=²")
+    assert shown.status == 200 and "Layer ²" not in shown.body

@@ -16,6 +16,7 @@ Nothing here starts, arms or approves anything: no method reaches the gate.
 from __future__ import annotations
 
 import logging
+import tempfile
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -159,9 +160,10 @@ class AlsoDiffers:
 
 @dataclass(frozen=True)
 class Queued:
-    """A print again, in the queue: what was said of it."""
+    """A print again, in the queue: what was said of it, and its job."""
 
     lines: tuple[str, ...]
+    job_id: str = ""
 
 
 @dataclass
@@ -336,17 +338,27 @@ class Shop:
 
     # -- print again (mqucifer/print-shop#216's, as `again` does it) -----------
 
-    def reprint(self, run_id: str) -> reprint.Reprint | str:
-        """The run, found to print again, or why it can't be."""
+    @contextmanager
+    def again_of(self, run_id: str) -> Iterator[reprint.Reprint | str]:
+        """The run, found to print again, or why it can't be: the ledger read-only, and a run
+        from before has its profiles composed in a scratch folder that's gone after, so that
+        showing it writes nothing (a GET changes nothing)."""
         if self.runs is None:
-            return "this run can't print a run again: `again` at the Mac's queue does"
+            yield "this run can't print a run again: `again` at the Mac's queue does"
+            return
         runs = self.runs
-        try:
-            with Ledger(runs.ledger_path) as ledger:
-                return reprint.find(ledger, runs.jobs, run_id, store_root=runs.store_root,
-                                    bed=runs.bed, parts=runs.parts)
-        except reprint.Refused as exc:
-            return str(exc)
+        with tempfile.TemporaryDirectory(prefix="phone-again-") as scratch, \
+                self.ledger() as ledger:
+            if ledger is None:
+                yield "there's no ledger yet"
+                return
+            try:
+                found: reprint.Reprint | str = reprint.find(
+                    ledger, runs.jobs, run_id, store_root=runs.store_root, bed=runs.bed,
+                    parts=runs.parts, scratch=Path(scratch))
+            except reprint.Refused as exc:
+                found = str(exc)
+            yield found
 
     def again(self, run_id: str, typed: str = "", *, also: bool = False,
               spool_id: int | None = None) -> Queued | AlsoDiffers | str:
@@ -357,9 +369,14 @@ class Shop:
         person's, at the gate."""
         if self.queue is None or self.runs is None:
             return "the queue isn't running: start it at the Mac with `print_job.py --queue`"
-        found = self.reprint(run_id)
-        if isinstance(found, str):
-            return found
+        with self.again_of(run_id) as found:
+            if isinstance(found, str):
+                return found
+            return self._again(found, typed, also=also, spool_id=spool_id)
+
+    def _again(self, found: reprint.Reprint, typed: str, *, also: bool,
+               spool_id: int | None) -> Queued | AlsoDiffers | str:
+        assert self.queue is not None and self.runs is not None
         said: list[str] = []
         try:
             if not typed:
@@ -386,7 +403,7 @@ class Shop:
         if not added:
             return "; ".join(refused) or "it wasn't added"
         return Queued((f"In the queue: a print again of job {found.row.job_id[:8]}. Start is "
-                       "still yours, at the gate.", *said, *refused))
+                       "still yours, at the gate.", *said, *refused), added[0])
 
     # -- the stock ------------------------------------------------------------
 

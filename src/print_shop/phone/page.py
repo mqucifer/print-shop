@@ -59,6 +59,7 @@ ul.rows li { border-bottom: 1px solid var(--line); }
 ul.rows a.row, ul.rows div.row { display: flex; gap: 0.8em; align-items: center;
   padding: 10px 0; color: inherit; text-decoration: none; }
 .row .what { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+ul.rows a.what { color: inherit; text-decoration: none; }
 .row .act { color: var(--button); font-weight: 600; white-space: nowrap; }
 .row .tag { font-size: 0.8em; border: 1px solid var(--line); border-radius: 6px;
   padding: 1px 6px; white-space: nowrap; }

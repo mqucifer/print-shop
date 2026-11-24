@@ -69,8 +69,16 @@ __all__ = ["COOKIE", "PhoneOff", "Starts", "attach", "handler_for", "make_server
 
 logger = logging.getLogger(__name__)
 
+def _number(value: str, digits: int) -> bool:
+    """A plain number of at most `digits` digits: 0 to 9 only."""
+    return value.isdecimal() and value.isascii() and 0 < len(value) <= digits
+
+
 #: What a button did, said on the page it comes back to.
-_DONE = {"hold": "Held: it's never offered until you let it go.",
+_DONE = {
+         "again": "In the queue: a print again. Start is still yours, at the gate.",
+         "moved": "Moved to the spool you picked. Another material goes back to its review, "
+                  "with your answers kept.","hold": "Held: it's never offered until you let it go.",
          "release": "Let go: it's offered in its turn.",
          "first": "First in the queue now."}
 
@@ -78,8 +86,11 @@ _DONE = {"hold": "Held: it's never offered until you let it go.",
 COOKIE = "ps_phone"
 #: A year: the phone stays signed in until `phone.py forget`.
 COOKIE_AGE_S = 365 * 24 * 3600
-#: The most a POST may send: a confirm's id and the bed's answer, or a code.
-MAX_BODY = 2048
+#: The most a POST may send: a confirm's id and the bed's answer, or a code; or an outcome's
+#: note of 2000 characters, each of which can take 9 bytes encoded.
+MAX_BODY = 20_000
+#: The most fields a form has: an outcome's, with a pick for each spool on hand.
+MAX_FIELDS = 64
 
 _SECURITY_HEADERS = (
     ("Cache-Control", "no-store"),
@@ -385,7 +396,7 @@ class _Handler(BaseHTTPRequestHandler):
         if line is None or self.shop is None:
             return
         spool = form.get("spool", "")
-        if not spool.isdigit() or len(spool) > 9:
+        if not _number(spool, 9):
             return self._send(message_page("Not moved", "That isn't a spool.",
                                            back_to=f"/job/{line.job.job_id}",
                                            back_words="Back to the job"),
@@ -395,8 +406,7 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send(message_page("Not moved", said, back_to=f"/job/{line.job.job_id}",
                                            back_words="Back to the job"),
                               code=HTTPStatus.CONFLICT)
-        self._send(message_page("Moved", " ".join(said), back_to="/",
-                                back_words="Back to queue"))
+        self._see_other(f"/job/{line.job.job_id}?said=moved")
 
     def _r_filaments(self, held: dict[str, str], query: str) -> None:
         if self.shop is None:
@@ -408,15 +418,16 @@ class _Handler(BaseHTTPRequestHandler):
                 "slice_reading")
             if reading is not None and (swap := SwapJob(line, reading)).swaps:
                 swaps.append(swap)
+        said = "Loaded." if parse_qs(query).get("said", [""])[0] == "loaded" else ""
         self._send(filaments_page(self.shop.on_hand(), changes=self.shop.stock_changes(),
-                                  lines=lines, swaps=swaps))
+                                  lines=lines, swaps=swaps, said=said))
 
     def _r_load(self, held: dict[str, str], form: dict[str, str]) -> None:
         """The stock's own load, asking both halves first where what's on isn't known."""
         if self.shop is None:
             return self._no_shop()
         spool, changes = form.get("spool", ""), form.get("changes", "")
-        if not (spool.isdigit() and changes.isdigit()) or len(spool) > 9 or len(changes) > 12:
+        if not (_number(spool, 9) and _number(changes, 12)):
             return self._send(message_page("Not loaded", "That wasn't the page's form.",
                                            back_to="/filaments", back_words="Back to filaments"),
                               code=HTTPStatus.BAD_REQUEST)
@@ -427,19 +438,18 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send(message_page("Not loaded", done, back_to="/filaments",
                                            back_words="Back to filaments"),
                               code=HTTPStatus.CONFLICT)
-        self._send(message_page("Loaded", " ".join(done), back_to="/filaments",
-                                back_words="Back to filaments"))
+        self._see_other("/filaments?said=loaded")
 
     def _r_again_screen(self, held: dict[str, str], query: str) -> None:
         if self.shop is None:
             return self._no_shop()
-        found = self.shop.reprint(held["id"])
-        if isinstance(found, str):
-            return self._send(message_page("Can't print it again", found, back_to="/runs",
-                                           back_words="Back to finished"),
-                              code=HTTPStatus.CONFLICT)
         nozzle = parse_qs(query).get("nozzle", [""])[0][:6]
-        self._send(again_page(found, nozzle=nozzle))
+        with self.shop.again_of(held["id"]) as found:
+            if isinstance(found, str):
+                return self._send(message_page("Can't print it again", found, back_to="/runs",
+                                               back_words="Back to finished"),
+                                  code=HTTPStatus.CONFLICT)
+            self._send(again_page(found, nozzle=nozzle))
 
     def _r_again(self, held: dict[str, str], form: dict[str, str]) -> None:
         """Put it in the queue: as it was, or with − and +'s change, sliced again."""
@@ -448,12 +458,12 @@ class _Handler(BaseHTTPRequestHandler):
         nozzle = form.get("nozzle", "")[:6]
         typed = ""
         if nozzle:
-            found = self.shop.reprint(held["id"])
-            if isinstance(found, str):
-                return self._send(message_page("Not queued", found, back_to="/runs",
-                                               back_words="Back to finished"),
-                                  code=HTTPStatus.CONFLICT)
-            typed = nozzle_typed(found, nozzle)
+            with self.shop.again_of(held["id"]) as found:
+                if isinstance(found, str):
+                    return self._send(message_page("Not queued", found, back_to="/runs",
+                                                   back_words="Back to finished"),
+                                      code=HTTPStatus.CONFLICT)
+                typed = nozzle_typed(found, nozzle)
         done = self.shop.again(held["id"], typed, also=form.get("also") == "yes")
         if isinstance(done, AlsoDiffers):
             return self._send(also_page(held["id"], nozzle=nozzle, lines=done.lines,
@@ -462,12 +472,12 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send(message_page("Not queued", done, back_to=f"/run/{held['id']}",
                                            back_words="Back to the run"),
                               code=HTTPStatus.CONFLICT)
-        self._send(message_page("In the queue", " ".join(line.strip() for line in done.lines),
-                                back_to="/", back_words="Back to queue"))
+        # Its own page, so a reload doesn't queue it twice; it says what it was compared with.
+        self._see_other(f"/job/{done.job_id}?said=again")
 
     def _layer(self, query: str) -> int | None:
         found = parse_qs(query).get("layer", [""])[0]
-        return int(found) if found.isdigit() and len(found) < 7 else None
+        return int(found) if found.isdecimal() and found.isascii() and len(found) < 7 else None
 
     def _r_job_slice(self, held: dict[str, str], query: str) -> None:
         line = self._job_line(held)
@@ -599,7 +609,12 @@ class _Handler(BaseHTTPRequestHandler):
                        code=HTTPStatus.BAD_REQUEST)
             return None
         body = self.rfile.read(length).decode("utf-8", "replace")
-        fields = parse_qs(body, max_num_fields=8)
+        try:
+            fields = parse_qs(body, max_num_fields=MAX_FIELDS)
+        except ValueError:
+            self._send(message_page("Not done", "That wasn't the page's form."),
+                       code=HTTPStatus.BAD_REQUEST)
+            return None
         return {key: values[0] for key, values in fields.items() if values}
 
     def _armed(self, confirm: Confirm) -> Armed:

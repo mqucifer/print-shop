@@ -7,7 +7,10 @@ Home Assistant's automation (`ha-configs/print_shop_notices.yaml`) turns each in
 notification whose link opens the phone's page in the phone's browser: never framed, and never
 through Home Assistant.
 
-A notice carries the part's name, what it's about, and the page's own address: nothing else.
+A notice carries the part's name, what it's about, and a path on the page: nothing else. The
+automation puts the page's own address, set in it once, before the path, and takes only a path
+of the page's own shape: a message on the topic from anything else can't point the link
+elsewhere.
 Nothing here starts, arms or approves anything.
 """
 
@@ -33,12 +36,12 @@ EVERY_S = 15.0
 @dataclass(frozen=True)
 class Notice:
     """One notification: its kind ("needs_you", "pause_near", "ended"), its words, and the
-    page to open."""
+    path on the page to open: "/", "/job/<id>" or "/run/<id>"."""
 
     kind: str
     title: str
     message: str
-    url: str
+    path: str
 
     def payload(self) -> dict[str, str]:
         return asdict(self)
@@ -47,9 +50,9 @@ class Notice:
 class Notices:
     """What's new since it last looked, sent once each, for as long as the run lasts."""
 
-    def __init__(self, shop: Shop, send: Callable[[Notice], None], *, origin: str,
+    def __init__(self, shop: Shop, send: Callable[[Notice], None], *,
                  every_s: float = EVERY_S, pause_ahead_s: float = PAUSE_AHEAD_S) -> None:
-        self.shop, self.send, self.origin = shop, send, origin
+        self.shop, self.send = shop, send
         self.every_s, self.pause_ahead_s = every_s, pause_ahead_s
         self._sent: set[tuple[str, ...]] = set()
         self._stop = threading.Event()
@@ -63,18 +66,17 @@ class Notices:
                 continue
             found.append(((line.job.job_id, "needs", str(line.needs)), Notice(
                 "needs_you", "print-shop needs you",
-                f"{line.job.part}: {line.needs}.", f"{self.origin}/job/{line.job.job_id}")))
+                f"{line.job.part}: {line.needs}.", f"/job/{line.job.job_id}")))
         for now in self.shop.printing():
             ahead = self.shop.pause_ahead(now.job_id)
             if ahead is None or not 0 < ahead[1] <= self.pause_ahead_s:
                 continue
             found.append(((now.job_id, "pause", str(ahead[0])), Notice(
-                "pause_near", "A pause is near", f"{now.part}: {now.pause}",
-                f"{self.origin}/")))
+                "pause_near", "A pause is near", f"{now.part}: {now.pause}", "/")))
         for done in self.shop.to_record():
             found.append(((done.job_id, "ended"), Notice(
                 "ended", "A print ended", f"{done.part} ended. How did it come out?",
-                f"{self.origin}/run/{done.job_id}")))
+                f"/run/{done.job_id}")))
         sent = []
         for key, notice in found:
             if key in self._sent:

@@ -48,7 +48,12 @@ def _named(line: Line) -> str:
     return f"{line.job.part}{copied}"
 
 
-def _row(href: str, what: str, act: str = "") -> str:
+def _row(href: str, what: str, act: str = "", act_href: str = "") -> str:
+    """A row that opens `href`; with `act_href`, its action word at the right opens that
+    instead (the job offered: its page, and Start)."""
+    if act_href:
+        return (f"<li><div class=\"row\"><a class=\"what\" href=\"{_e(href)}\">{what}</a>"
+                f"<a class=\"act\" href=\"{_e(act_href)}\">{_e(act)}</a></div></li>")
     act_said = f"<span class=\"act\">{_e(act)}</span>" if act else ""
     return (f"<li><a class=\"row\" href=\"{_e(href)}\"><span class=\"what\">{what}</span>"
             f"{act_said}</a></li>")
@@ -132,7 +137,7 @@ def _ready_rows(groups: Sequence[ReadyGroup], on_hand: OnHand | None, changes: i
             what = (f"<span class=\"part\">{_e(line.job.part)}{_e(count)}</span>{tag}"
                     f"{_small(said)}")
             if line.offered:
-                out.append(_row("/start", what, "Start"))
+                out.append(_row(f"/job/{line.job.job_id}", what, "Start", act_href="/start"))
             else:
                 out.append(_row(f"/job/{line.job.job_id}", what))
         out.append("</ul>")
@@ -213,13 +218,15 @@ def job_page(line: Line, *, each_s: int | None, said: str = "", sliced: bool = F
     if job.since:
         rows.append(("Since", local_when(job.since)))
     told = f"<div class=\"box\">{_e(said)}</div>" if said else ""
+    told += _reprinted(job.given)
     listed = "".join(f"<dt>{_e(k)}</dt><dd>{_e(v)}</dd>" for k, v in rows)
     needs = ""
     if line.needs is not None:
         needs = (f"<div class=\"box\"><strong>It needs you: {_e(line.needs)}</strong>"
                  f"At the Mac, for now: <code>{_COMMAND[line.needs]} {line.number}</code> at "
                  "<code>queue&gt;</code>.</div>")
-    start = ("<p><a class=\"button\" href=\"/start\">Start it</a></p>" if line.offered else "")
+    start = ("<p><a class=\"button\" href=\"/start\">Start it on your phone</a></p>"
+             if line.offered else "")
     if sliced:
         start += (f"<p><a href=\"/job/{_e(job.job_id)}/slice\">What the slice shows</a></p>")
     hold = (_button(f"/job/{job.job_id}/release", "Let go") if job.held
@@ -231,6 +238,19 @@ def job_page(line: Line, *, each_s: int | None, said: str = "", sliced: bool = F
         "<a class=\"back\" href=\"/\">Back to queue</a>"
         f"<h1>{_e(_named(line))}</h1>{told}<dl>{listed}</dl>{needs}{start}{buttons}"
         f"{spools}"))
+
+
+def _reprinted(given: dict[str, object]) -> str:
+    """A print again's comparison with the run it came from, as it was queued with it."""
+    found = given.get("sliced")
+    again = found.get("reprinted") if isinstance(found, dict) else None
+    if not isinstance(found, dict) or not isinstance(again, dict):
+        return ""
+    of = str(found.get("reprint_of") or "")[:8]
+    differs = [str(d) for d in again.get("differs") or ()]
+    said = (f"Sliced again, then compared with job {of}'s file: " + "; ".join(differs) + "."
+            if differs else f"The same file as job {of}, not sliced again.")
+    return f"<p class=\"small\">{_e(said)}</p>"
 
 
 def remove_page(line: Line) -> str:
@@ -264,7 +284,7 @@ def _when(at: str | None) -> str:
     if not at:
         return ""
     try:
-        return f"{datetime.fromisoformat(at).astimezone():%A %-d %b}"
+        return f"{datetime.fromisoformat(at).astimezone():%A %-d %b, %H:%M}"
     except ValueError:
         return at
 
