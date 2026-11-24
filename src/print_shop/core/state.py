@@ -40,7 +40,23 @@ __all__ = [
     "PrintStatus",
     "SliceResult",
     "AppliedOrientation",
+    "pose_of",
+    "turn_words",
 ]
+
+
+def pose_of(rotation_deg: tuple[float, float, float]) -> tuple[float, float, float]:
+    """The pose in a rotation as printed. No pose turns about z, so a z there is a turn on the
+    plate to fit (mqucifer/print-shop#257)."""
+    return (rotation_deg[0], rotation_deg[1], 0.0)
+
+
+def turn_words(deg: float) -> str:
+    """A turn on the plate as a person makes it: "45° anticlockwise, seen from above"."""
+    if deg == 180:
+        return "180°"
+    by, way = (deg, "anticlockwise") if deg < 180 else (360 - deg, "clockwise")
+    return f"{by:g}° {way}, seen from above"
 
 
 class EntryPath(StrEnum):
@@ -131,6 +147,10 @@ class SliceResult(BaseModel):
     material: str | None = None
     layer_height_mm: float | None = None
 
+    #: How far it was turned about z to fit the plate, where it didn't as posed, or 0. It's
+    #: printed so only once the person has taken the turn (mqucifer/print-shop#257).
+    turn_deg: float = 0.0
+
 
 class Orientation(BaseModel):
     """How the part sits on the plate, plus the scores that justified it.
@@ -157,11 +177,19 @@ class Orientation(BaseModel):
     #: build-volume check is per-candidate, not per-part.
     bbox_mm: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
+    #: It doesn't fit as posed and does turned on the plate, which the review offers
+    #: (mqucifer/print-shop#257, `orchestrator.fitting.with_turns`).
+    fits_turned: bool = False
+    #: It fits neither as posed nor in any turn on the plate, so the pose isn't sent back to it
+    #: (mqucifer/print-shop#257).
+    fits_no_way: bool = False
+
     #: Which face the user sees. Free text from the model, never control flow.
     primary_visible_face: str = ""
 
     def fits_in(self, build_volume_mm: tuple[float, float, float]) -> bool:
-        return all(a <= b for a, b in zip(self.bbox_mm, build_volume_mm, strict=True))
+        return self.fits_turned or all(
+            a <= b for a, b in zip(self.bbox_mm, build_volume_mm, strict=True))
 
 
 class AppliedOrientation(BaseModel):
@@ -182,6 +210,14 @@ class AppliedOrientation(BaseModel):
     #: in (mqucifer/print-shop#128): its height, and its area on the plate. None: not measured.
     height_mm: float | None = None
     bed_contact_area_mm2: float | None = None
+    #: The turn on the plate the person took at the review, to fit (mqucifer/print-shop#257).
+    #: `rotation_deg` stays the pose, which is what the features and the faces are read in.
+    turn_deg: float = 0.0
+
+    def as_printed(self) -> tuple[float, float, float]:
+        """The whole rotation: the pose, then the turn on the plate."""
+        x, y, z = self.rotation_deg
+        return (x, y, z + self.turn_deg)
 
     def pose(self) -> str:
         """The pose as the review names it."""

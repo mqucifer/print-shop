@@ -50,7 +50,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import trimesh
 
-from print_shop.core.state import Orientation
+from print_shop.core.state import Orientation, pose_of, turn_words
 from print_shop.inventory import Material, Spool
 from print_shop.materials import material_name
 from print_shop.outcome_words import outcome_words
@@ -63,7 +63,7 @@ from print_shop.setup.features import Feature
 from print_shop.setup.lessons import material_of
 from print_shop.setup.proposal import ORIENTATION, PAUSE, Change, Proposal, Source, Used, pose_value
 from print_shop.setup.reach import not_sliced, profile_of, unplaced
-from print_shop.setup.reading import seen
+from print_shop.setup.reading import AT_THE_BACK, seen, turned_on_plate
 from print_shop.setup.similar import Likeness, Numbers
 from print_shop.setup.traits import TRAITS, traits
 from print_shop.sliced import same_setting
@@ -250,7 +250,7 @@ class Offering:
             if now is not None and _same(item.key, now.value, item.value):
                 if now.used is not None and plate_job(now.used.job_id) == plate_job(past.job_id):
                     return Standing("=", ("used",))
-                if now.source in (*_PERSONS, Source.ANSWER, Source.LESSON):
+                if _theirs(now) or now.source in (Source.ANSWER, Source.LESSON):
                     return Standing("=", (f"{_set_by(now)} set it here already",))
         if item.blocked:
             return Standing("-", (item.blocked,))
@@ -258,7 +258,7 @@ class Offering:
         if item.key != ORIENTATION and now is not None and not _same(
             item.key, now.value, item.value
         ):
-            if now.source in _PERSONS:
+            if _theirs(now):
                 why.append(f"you set it to {now.value} at this review")
             elif now.source is Source.ANSWER and (
                 item.used.by not in _PERSONS or (item.key, now.value) not in past.answered
@@ -337,9 +337,24 @@ def _now(proposal: Proposal, key: str) -> Change | None:
     return next((c for c in (*changed, *proposal.kept) if c.key == key), None)
 
 
+def _whose(change: Change) -> Source:
+    """Who decided it, as an offered item keeps it: the model's that was taken is the person's
+    taking, `READING`, so that older code reads it (mqucifer/print-shop#242)."""
+    if change.used is not None:
+        return change.used.by
+    return Source.READING if change.taken else change.source
+
+
+def _theirs(change: Change) -> bool:
+    """The person's own: a correction, or what they took of the slice's or the model's."""
+    return change.source in _PERSONS or change.taken
+
+
 def _set_by(change: Change) -> str:
     if change.source is Source.LESSON:
         return f"lesson {change.lesson}"
+    if change.taken:
+        return "you"
     others = {Source.ANSWER: "your answer", Source.MODEL: "the model", Source.GUARD: "a guard"}
     return others.get(change.source, "you")
 
@@ -422,7 +437,7 @@ class _Found:
 
     @property
     def persons(self) -> bool:
-        return any(c.source in _PERSONS for c in self.decided.values())
+        return any(_theirs(c) for c in self.decided.values())
 
     def rank(self) -> tuple[bool, float, bool, bool, int]:
         """The same bytes, then closeness; of those alike, one that didn't fail, then one with
@@ -451,10 +466,11 @@ def _against(at: int, row: Row, part: ThisPart) -> _Found:
     then = similar.numbers(row.features or ())
     here = similar.numbers(part.features)
     shapes = [(here, part.rotation_deg)]
-    if row.rotation_deg != part.rotation_deg:
-        there = part.lying(pose_value(row.rotation_deg))
+    lay = pose_of(row.rotation_deg)  # a turn on the plate is no other pose
+    if lay != part.rotation_deg:
+        there = part.lying(pose_value(lay))
         if there is not None:
-            shapes.append((similar.posed(here, there), row.rotation_deg))
+            shapes.append((similar.posed(here, there), lay))
     was_seen = _seen_then(row)
     context = part.context or PartContext()
     proposal = row.proposal
@@ -497,7 +513,10 @@ def _compared(
 def _seen_then(row: Row) -> Seen | None:
     """What was seen on that print, as it printed. A row from before has no pose for its answer,
     which is read in the pose it printed in, and its notes' faces are read from their line."""
-    mine = seen(row.intake, row.rotation_deg)
+    # Its faces in the pose it printed in: a turn on the plate turns none to another
+    # (mqucifer/print-shop#257).
+    lay = pose_of(row.rotation_deg)
+    mine = seen(row.intake, lay)
     if mine is not None:
         return mine
     if row.intake is not None and "seen" in row.intake.set_aside():
@@ -511,7 +530,7 @@ def _seen_then(row: Row) -> Seen | None:
             names = listed.split(", ")
             noted = Seen(walls="walls" in names, top="top" in names, bottom="bottom" in names,
                          said=listed, noted=True)
-            return printed(noted, row.rotation_deg)
+            return printed(noted, lay)
     return None
 
 
@@ -524,17 +543,32 @@ def _decided(row: Row) -> dict[str, Change]:
             if c.source in (Source.ANSWER, Source.LESSON):
                 found[c.key] = c
         for c in (*proposal.changes, *proposal.not_applied):
-            if c.source in (*_PERSONS, Source.ANSWER, Source.LESSON):
+            if _theirs(c) or c.source in (Source.ANSWER, Source.LESSON):
                 found[c.key] = c
             else:
                 found.pop(c.key, None)
     standing = {c.key for c in (*proposal.changes, *proposal.not_applied)} if proposal else set()
-    for key, c in {c.key: c for c in row.corrections or ()}.items():
+    # A no to the model's sets nothing, so it isn't offered as a value: a pose kept is.
+    said = [c for c in row.corrections or () if not c.said_no_to or c.key == ORIENTATION]
+    for key, c in {c.key: c for c in said}.items():
         if key not in standing:  # a pose sent back, or a row from before the proposal was kept
             found[key] = c
     if row.plate is not None:
         found.pop(SEQUENCE, None)  # that plate's choice, as a lesson never takes it
+    turn = _turn_taken(row)
+    if turn is not None and ORIENTATION not in found:
+        found[ORIENTATION] = turn
     return found
+
+
+def _turn_taken(row: Row) -> Change | None:
+    """The model's turn, where the person took it and the print was in that pose."""
+    pose = pose_value(row.rotation_deg)
+    for found in reversed(row.proposal.suggested if row.proposal else ()):
+        for c in found.proposed:
+            if c.key == ORIENTATION and ORIENTATION in found.taken and c.value == pose:
+                return c.model_copy(update={"taken": True, "reason": c.reason or "the model's"})
+    return None
 
 
 def _never_started(row: Row) -> bool:
@@ -556,7 +590,7 @@ def _outcome(row: Row) -> str:
 
 def _past(ledger: Ledger, f: _Found, found: list[_Found], part: ThisPart) -> Past:
     row = f.row
-    then_pose = pose_value(row.rotation_deg)
+    then_pose = pose_value(pose_of(row.rotation_deg))
     decided = dict(f.decided)
     laid = row.orientation_source == "as_laid"  # `graph.AS_LAID`, which imports this
     if laid and ORIENTATION not in decided and then_pose != part.pose:
@@ -601,6 +635,17 @@ def _past(ledger: Ledger, f: _Found, found: list[_Found], part: ThisPart) -> Pas
                 differs.append(said)
     if not f.same_file and f.likeness.context < 1:
         differs.append("its fits, holds or seen faces weren't these")
+    seam = decided.get("seam_position")
+    if seam is not None and seam.value in AT_THE_BACK and row.sliced is None:
+        # Back is the plate's, so it's another side of a part turned on it
+        # (mqucifer/print-shop#257). A row from before doesn't say whether Orca turned it.
+        was = turned_on_plate(row.reading, row.rotation_deg)
+        if was is None:
+            differs.append("Orca may have turned it on the plate, unsaid then, so its back may "
+                           "have been another side")
+        elif was:
+            differs.append(f"it was turned {turn_words(was)}, to fit, so its back was as it "
+                           "lay so")
     names = part.filament_names
     if names and _filament_name(row) not in names:
         differs.append(f"its filament was {_filament_name(row) or 'not recorded'}, this is "
@@ -630,8 +675,7 @@ def _past(ledger: Ledger, f: _Found, found: list[_Found], part: ThisPart) -> Pas
 def _order(change: Change) -> int:
     if change.key in (ORIENTATION, PAUSE):
         return (ORIENTATION, PAUSE).index(change.key)
-    by = change.used.by if change.used else change.source
-    return 2 + (*_PERSONS, Source.LESSON, Source.ANSWER).index(by)
+    return 2 + (*_PERSONS, Source.LESSON, Source.ANSWER).index(_whose(change))
 
 
 def _pose(part: ThisPart, value: str) -> Orientation | None:
@@ -695,10 +739,11 @@ class _Items:
     def item(self, change: Change) -> Item:
         row, part, key = self.f.row, self.part, change.key
         origin = change.used
-        by = origin.by if origin else change.source
+        by = _whose(change)
         lesson = origin.lesson if origin else change.lesson
         used = Used(
             job_id=row.job_id, stl_name=row.stl_name, by=by, lesson=lesson,
+            of_model=origin.of_model if origin else change.taken,
             first_job_id=(origin.first_job_id or origin.job_id) if origin else "",
             first_stl_name=(origin.first_stl_name or origin.stl_name) if origin else "",
         )
@@ -851,6 +896,7 @@ class _Items:
         by = change.used.by if change.used else change.source
         if by is not Source.SPONSOR or not self.f.same_file:
             return False
+        # The whole rotation: on a print turned on the plate, the back was another side.
         if pose_value(row.rotation_deg) != part.pose:
             return False
         here, then = self._seen_here(), _seen_then(row)
@@ -930,7 +976,7 @@ class _Items:
             if not (other.same_file if shape_bound else other.related):
                 continue
             later = other.decided.get(key)
-            if later is None or later.source not in _PERSONS:
+            if later is None or not _theirs(later):
                 continue
             if key in MATERIAL and _filament_name(other.row) != _filament_name(row):
                 continue
@@ -1180,7 +1226,7 @@ def _tags(item: Item) -> list[str]:
             said += f": {item.pause.start.named()}, then {item.pause.to.named()}"
         tags.insert(0, said)
     if u.by is Source.READING:
-        tags.append("you took the slice's")
+        tags.append("you took the model's" if u.of_model else "you took the slice's")
     if u.first_job_id and u.first_job_id != u.job_id:
         tags.append(f"first on {u.first_stl_name}, job {u.first_job_id[:8]}")
     return tags

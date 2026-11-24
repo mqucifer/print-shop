@@ -1,4 +1,7 @@
-"""The print loop: one short conversation with tools decides a part's pose and its settings.
+"""The print loop: one short conversation with tools chooses a part's pose and its settings.
+
+Where there's a review it works beside it and what it chooses is proposed
+(mqucifer/print-shop#242). With none, it decides, and asks first.
 
 mqucifer/print-shop#129, planned with the Sponsor on 2026-11-14: "one loop, only ask on big
 changes. it is asking good questions so far at the initial request". Orientation and the
@@ -17,6 +20,9 @@ intake's questions, which stay as they are, one loop through LiteLLM :4000 decid
   `BIG_TIME_SHARE` added to the print. Code decides what's big, not the model: `ask` about a
   small change asks nobody, and a proposal holding a big change nobody agreed to is refused.
   A no is the person's correction, with its reason, and a lesson candidate like any;
+  **Beside a review** (`Part.proposes`, mqucifer/print-shop#242) nobody is asked: what it would
+  have asked becomes its proposals' words, the person takes each or doesn't, and `propose` takes
+  a big change as that. What's big is still code's to say;
 - **`propose`**: the pose and the changes, which ends the loop. Its pose must be one of the
   candidates and pass `validate_orientation`; each value its bound. A refusal goes back to the
   model, which may choose again.
@@ -38,6 +44,7 @@ so an answer is a few hundred tokens, not thousands.
 from __future__ import annotations
 
 import json
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -46,7 +53,7 @@ from typing import TYPE_CHECKING, Any
 
 from print_shop.core.contracts import Proposal as Chosen
 from print_shop.core.state import Orientation
-from print_shop.expert.client import CutOff, LLMConfig, chat_with_tools
+from print_shop.expert.client import CutOff, LLMConfig, Stopped, TimedOut, chat_with_tools
 from print_shop.expert.orientation import OrientationRequest, symptom_map, validate_orientation
 from print_shop.ingest.orientation import write_rotated
 from print_shop.outcome_words import outcome_words
@@ -92,6 +99,10 @@ __all__ = [
 #: proposal, to lower from what runs show.
 MAX_CALLS = 16
 MAX_SECONDS = 900.0
+#: The most characters one of its answers may be, content and tool calls' arguments together
+#: (mqucifer/print-shop#242). `propose` at every cap is about 12,000; the largest recorded
+#: settings answer was 3,741.
+LOOP_ANSWER_CHARS = 16_000
 #: A proposal that adds more than this share to the print's time, against its slice in the
 #: file's own pose with the intake's answers, is a big change: asked first.
 BIG_TIME_SHARE = 0.25
@@ -181,6 +192,9 @@ class PrintLoop:
     model: str = "fake"
     max_calls: int = MAX_CALLS
     max_seconds: float = MAX_SECONDS
+    #: The same model, each of whose calls ends when the event is set (mqucifer/print-shop#242).
+    #: None: `chat`, which isn't ended under way.
+    stoppable: Callable[[threading.Event], Chat] | None = None
 
 
 @dataclass(frozen=True)
@@ -205,6 +219,9 @@ class Part:
     #: it on (mqucifer/print-shop#130), and where that side was read.
     kept: tuple[float, float, float] = AS_LAID
     kept_from: str = ""
+    #: It runs beside a review, where what it chooses is proposed: nobody's asked
+    #: (mqucifer/print-shop#242).
+    proposes: bool = False
 
 
 @dataclass(frozen=True)
@@ -222,17 +239,21 @@ class LoopResult:
     corrections: tuple[Change, ...] = ()
     #: The lessons `past_prints` showed.
     looked_up: tuple[int, ...] = ()
+    #: For a loop that proposes: each big change's words, by the setting it's of, or
+    #: "orientation" for the pose.
+    big: dict[str, str] = field(default_factory=dict)
 
     @property
     def proposed(self) -> bool:
         return self.ended == "proposed"
 
 
-def llm_chat(config: LLMConfig) -> Chat:
+def llm_chat(config: LLMConfig, stop: threading.Event | None = None) -> Chat:
     """The real model: one chat completion with tools through LiteLLM (`chat_with_tools`)."""
 
     def chat(messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any]:
-        return chat_with_tools(config, messages, tools)[0]
+        return chat_with_tools(
+            config, messages, tools, answer_chars=LOOP_ANSWER_CHARS, stop=stop)[0]
 
     return chat
 
@@ -296,15 +317,20 @@ class _State:
     refused: dict[str, str] = field(default_factory=dict)
     corrections: list[Change] = field(default_factory=list)
     looked_up: list[int] = field(default_factory=list)
+    #: The question and reason the model gave for each big change, when it proposes.
+    words: dict[str, tuple[str, str]] = field(default_factory=dict)
     calls: list[LoopCall] = field(default_factory=list)
     baseline_s: int | None = None
     slices: int = 0
 
 
-def run(loop: PrintLoop, part: Part) -> LoopResult:
-    """The loop, to `propose` or a limit. It never raises for the model: a failure is an
-    ending, and the caller falls back."""
-    state = _State()
+def run(
+    loop: PrintLoop, part: Part, stop: threading.Event | None = None,
+    kept: list[LoopCall] | None = None,
+) -> LoopResult:
+    """The loop, to `propose`, a limit or `stop`. It never raises for the model: a failure is an
+    ending, and the caller falls back. `kept` is where its calls are kept as it makes them."""
+    state = _State(calls=kept if kept is not None else [])
     started = time.monotonic()
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": _SYSTEM + symptom_map() + "\n\n" + part.skill.text},
@@ -319,13 +345,18 @@ def run(loop: PrintLoop, part: Part) -> LoopResult:
             looked_up=tuple(dict.fromkeys(state.looked_up)), **done,
         )
 
+    chat = loop.chat
+    if stop is not None and loop.stoppable is not None:
+        chat = loop.stoppable(stop)
     while True:
+        if stop is not None and stop.is_set():
+            return ended("stopped")
         if model_calls >= loop.max_calls:
             return ended(f"past its limit of {loop.max_calls} calls")
         if time.monotonic() - started > loop.max_seconds:
             return ended(f"past its limit of {loop.max_seconds:g} s")
         try:
-            message = loop.chat(messages, TOOLS)
+            message = chat(messages, TOOLS)
         except CutOff as exc:
             # A turn, not an ending: said to the model, recorded, and counted.
             model_calls += 1
@@ -335,6 +366,10 @@ def run(loop: PrintLoop, part: Part) -> LoopResult:
                 f"Your last answer was cut off at its output limit ({exc}). Answer with one "
                 "tool call, and keep your reasoning short.")})
             continue
+        except Stopped:
+            return ended("stopped")
+        except TimedOut as exc:
+            return ended(f"the model {exc}")
         except Exception as exc:  # noqa: BLE001 - the model failing is an ending, said
             return ended(f"the model couldn't be reached: {type(exc).__name__}: {exc}"[:300])
         model_calls += 1
@@ -345,6 +380,8 @@ def run(loop: PrintLoop, part: Part) -> LoopResult:
             messages.append({"role": "user", "content": "Call a tool. End with `propose`."})
             continue
         for call in calls:
+            if stop is not None and stop.is_set():
+                return ended("stopped")
             name = str(call["function"]["name"])
             began = time.monotonic()
             try:
@@ -358,7 +395,7 @@ def run(loop: PrintLoop, part: Part) -> LoopResult:
                              "content": result})
             if done is not None:
                 pose, reply = done
-                return ended("proposed", pose=pose, reply=reply)
+                return ended("proposed", pose=pose, reply=reply, big=reply.pop("big", {}))
 
 
 def _user(part: Part) -> str:
@@ -451,6 +488,9 @@ def _slice(part: Part, state: _State, pose: Orientation, settings: dict[str, str
         return f"Orca couldn't slice it: {exc}"[:400]
     said = [f"Orca: {result.print_time_s // 60} min {result.print_time_s % 60} s, "
             f"{result.filament_cm3} cm3, {result.layer_count} layers"]
+    if result.turn_deg:
+        said.append(f"It doesn't fit as posed: this slice is turned {result.turn_deg:g} degrees "
+                    "about z to fit, so x, y and the back are as it lies turned")
     try:
         said += read_slice(result.gcode_path).lines()
     except (OSError, ValueError) as exc:
@@ -542,6 +582,12 @@ def _ask(part: Part, loop: PrintLoop, state: _State, args: dict[str, Any]) -> st
         return ("not a big change, so nobody was asked: propose it, and the person reviews it "
                 "with the rest")
     asked = "; ".join(said for _, said in big_ones)
+    if part.proposes:
+        state.agreed.update(what for what, _ in big_ones)
+        for what, _ in big_ones:
+            state.words[what] = (str(args["question"]), str(args["reason"]).rstrip("."))
+        return (f"nobody is asked now, as the person takes or turns down each change at the "
+                f"review: your question becomes the proposal's words ({asked}). Propose it.")
     question = f"{args['question']}\n  ({asked}; because {args['reason']})\n  yes, or say why not"
     while True:
         answer = loop.person(question).strip()
@@ -611,12 +657,12 @@ def _propose(
         seconds = _seconds(part, state, pose, settings).print_time_s
     except (RuntimeError, OSError, ValueError):
         pass  # no estimate: time isn't judged
-    unasked = [(w, s) for w, s in big(part, pose, settings, seconds, baseline)
-               if w not in state.agreed]
-    if unasked:
+    big_ones = big(part, pose, settings, seconds, baseline)
+    unasked = [(w, s) for w, s in big_ones if w not in state.agreed]
+    if unasked and not part.proposes:
         return ("ask first: " + "; ".join(s for _, s in unasked)
                 + ". Ask the person with `ask`, then propose.", None)
-    reply = {
+    reply: dict[str, Any] = {
         "reasoning": str(args.get("reasoning", "")),
         "changes": [
             {"key": str(c["key"]), "value": str(c["value"]).strip(),
@@ -626,7 +672,37 @@ def _propose(
         ],
         "design_notes": [str(n) for n in args.get("design_notes") or ()],
     }
+    if part.proposes:
+        reply["big"] = _big_words(part, pose, settings, state, big_ones)
     return f"proposed: {pose_value(pose.rotation_deg)}, {len(settings)} settings", (pose, reply)
+
+
+def _big_words(
+    part: Part, pose: Orientation, settings: dict[str, str], state: _State,
+    big_ones: list[tuple[str, str]],
+) -> dict[str, str]:
+    """A proposed big change's words, by what carries it: the pose, the setting, or for time the
+    turn, else each setting proposed. The model's own question comes first, where it gave one."""
+    found: dict[str, list[str]] = {}
+    for what, said in big_ones:
+        if what.startswith("pose"):
+            on = ["orientation"]
+        elif what == "supports":
+            # On the setting where it proposes it, else on its turn; else it's the guard's in
+            # the pose shown, and its words are said by themselves.
+            on = (["enable_support"] if "enable_support" in settings
+                  else ["orientation"] if pose.rotation_deg != part.kept else [""])
+        elif what.startswith("setting "):
+            on = [what.removeprefix("setting ")]
+        else:
+            on = ["orientation"] if pose.rotation_deg != part.kept else list(settings)
+        question, reason = state.words.get(what, ("", ""))
+        for key in on:
+            said_before = any(question and f'"{question}"' in each for each in found.get(key, ()))
+            words = f'"{question}" ' if question and not said_before else ""
+            because = f" The model's reason: {reason}." if reason and not said_before else ""
+            found.setdefault(key, []).append(f"{words}It's a big change: {said}.{because}")
+    return {key: " ".join(each) for key, each in found.items()}
 
 
 def _whats(part: Part, pose: Orientation, settings: dict[str, str]) -> set[str]:

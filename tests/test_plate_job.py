@@ -1012,3 +1012,23 @@ def test_a_plate_at_the_gate_reads_back_from_the_checkpoint_as_its_types(
     assert state["orientations"][2].proposal.value.height_mm == 8.0
     assert not [r for r in caplog.records if "unregistered type" in r.getMessage()
                 or "Blocked deserialization" in r.getMessage()]
+
+
+def test_a_plates_model_settings_are_proposals_and_not_applied_untaken(tmp_path: Path) -> None:
+    """mqucifer/print-shop#242 on a plate: the settings call works beside the review, and what
+    it comes to is proposed, never applied by arriving."""
+    from tests.reviewing import WAIT_S
+
+    rig = Rig(tmp_path, "ok", "ok")
+    with rig.daemon:
+        job = rig.gated(_caps(tmp_path))
+        assert rig.press("approve", job).printed
+    [first, *_] = rig.reviews
+    assert first.suggesting is not None, "beside the review, not before it"
+    assert first.suggesting.wait(WAIT_S)
+    assert first.proposal.get("wall_loops") is None, "the review starts without the model's"
+    row = rig.ledger.get(job)
+    assert row is not None and row.proposal is not None
+    assert row.proposal.get("wall_loops") is None, "not taken, so not applied"
+    proposed = [c.key for found in row.proposal.suggested for c in found.proposed]
+    assert "wall_loops" in proposed, "what it proposed is kept"

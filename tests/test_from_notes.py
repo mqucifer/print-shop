@@ -58,6 +58,7 @@ from print_shop.setup.skill import groups_for, load
 from print_shop.setup.waiting import Waiting, ask_meanwhile, cli_waiting
 from tests.fakes import CI_PROFILES, STORE_PROFILES, FramePrinter, MemoryBridge
 from tests.fixtures import write_stl
+from tests.reviewing import takes
 from tests.test_job_e2e import CFG
 from tests.test_reading import FILAMENT, PETG, PROCESS, _read
 from tests.test_send_back import AnyPart
@@ -176,7 +177,7 @@ class Job:
             cfg=CFG, profiles=CI_PROFILES, workdir=self.tmp_path / "work",
             printer=FramePrinter(), slicer=AnyPart(), bridge=lambda cfg: bridge,
             ledger=self.ledger, proposer=Proposer(ask=self.settings, ask_questions=questions),
-            asker=asker, waiting=waiting, reviewer=self.reviews,
+            asker=asker, waiting=waiting, reviewer=takes(self.reviews),
         )
         with daemon:
             job_id = daemon.submit(stl, as_laid=True)

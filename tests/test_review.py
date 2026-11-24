@@ -35,6 +35,7 @@ from tests.fakes import (
     RecordedSlicer,
 )
 from tests.fixtures import write_stl
+from tests.reviewing import settled
 from tests.test_job_e2e import CFG
 
 #: The cube's one question, answered with its second option (3 walls).
@@ -244,7 +245,7 @@ def setup(tmp_path: Path) -> Iterator[tuple[Daemon, Sponsor, RecordedSlicer, Led
     daemon = Daemon(cfg=CFG, profiles=profiles, workdir=tmp_path / "work",
                     printer=FramePrinter(), slicer=slicer, bridge=lambda cfg: bridge,
                     ledger=ledger, proposer=Proposer(ask=_model, ask_questions=_questions),
-                    asker=replay_asker(ANSWERS), reviewer=sponsor)
+                    asker=replay_asker(ANSWERS), reviewer=settled(sponsor))
     daemon.press = lambda d: bridge.press(CFG, d)  # type: ignore[attr-defined]
     with daemon:
         yield daemon, sponsor, slicer, ledger, write_stl("cube", tmp_path)
@@ -263,7 +264,10 @@ def test_a_correction_slices_again_and_the_ledger_keeps_it(
     )
     first = sponsor.shown[0].proposal
     assert [(c.value, c.source) for c in first.changes] == [("3", Source.ANSWER)]
-    assert first.refused == ("wall_loops=5: you answered it at the intake",)
+    refused = ("wall_loops=5: you answered it at the intake",)
+    assert sponsor.shown[0].suggested is not None
+    assert sponsor.shown[0].suggested.refused == refused, "said with the model's proposals"
+    assert "refused from the model: " + refused[0] in render(sponsor.shown[0])
     assert [(c.value, c.source) for c in sponsor.shown[1].proposal.changes] == [
         ("4", Source.SPONSOR)
     ]
@@ -281,6 +285,7 @@ def test_a_correction_slices_again_and_the_ledger_keeps_it(
     assert option.estimate is not None, "Orca's estimate, from the recorded slice"
     assert row.proposal is not None
     assert [(c.key, c.value) for c in row.proposal.changes] == [("wall_loops", "4")]
+    assert row.proposal.refused == refused, "and kept with the job"
     assert [(c.key, c.preset, c.value) for c in row.corrections or ()] == [
         ("wall_loops", "2", "4")
     ]

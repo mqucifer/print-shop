@@ -43,6 +43,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from print_shop.core.state import pose_of, turn_words
 from print_shop.inventory import Material, Spool
 from print_shop.ledger import Row
 from print_shop.orchestrator.graph import AS_LAID
@@ -50,6 +51,7 @@ from print_shop.setup import pauses
 from print_shop.setup.context import SIDECAR
 from print_shop.setup.intake import Answer, Question
 from print_shop.setup.proposal import ORIENTATION, PAUSE, Change, Source, pose_value
+from print_shop.setup.reading import AT_THE_BACK, turned_on_plate
 
 __all__ = ["DOWNLOADS", "Again", "again", "answers_file", "correction_line"]
 
@@ -95,10 +97,11 @@ def answers_file(row: Row) -> dict[str, Any] | None:
 
 def _given_in(row: Row, question: Question, answer: Answer) -> dict[str, str]:
     """The pose an answer about faces was given in, which a replay carries it from. A row from
-    before poses were kept is read in the pose it printed in (mqucifer/print-shop#248)."""
+    before poses were kept is read in the pose it printed in (mqucifer/print-shop#248), less any
+    turn on the plate, which turns no face to another (mqucifer/print-shop#257)."""
     if question.feature != "seen" or question.confirmed(answer):
         return {}
-    return {"pose": pose_value(question.answered_in(answer) or row.rotation_deg)}
+    return {"pose": pose_value(question.answered_in(answer) or pose_of(row.rotation_deg))}
 
 
 def _used_as_anothers(change: Change) -> bool:
@@ -163,7 +166,7 @@ def correction_line(row: Row, on_hand: dict[int, Spool] | None = None) -> str:
     parts = []
     stood = _standing_pause(row)
     for c in row.corrections or ():
-        if c.key == ORIENTATION or _used_as_anothers(c):
+        if c.key == ORIENTATION or _used_as_anothers(c) or c.said_no_to:
             continue
         key, value, reason = c.key, c.value, c.reason
         if c.key == PAUSE:
@@ -261,10 +264,27 @@ def again(
             whose = f"Part {each.plate.n}, {each.stl_name}: the pose"
             which = f", then {each.plate.n} for the part,"
         for c in each.corrections or ():
-            if c.key == ORIENTATION:
+            if c.said_no_to:
+                what = (f"turn to {c.said_no_to}" if c.key == ORIENTATION
+                        else f"{c.key}={c.said_no_to}")
+                notes.append(f"You turned down the model's {what}, because {c.reason}. Say no to "
+                             "it again at the review if it's proposed.")
+            elif c.key == ORIENTATION:
                 notes.append(f"{whose} was sent back at the review, from {c.preset} to "
                              f"{c.value}, because {c.reason}. Type orientation at the review"
                              f"{which} to send it back again.")
+    # A plate is sliced with no turn on it (mqucifer/print-shop#109), so this is one part's.
+    turned = turned_on_plate(row.reading, row.rotation_deg) if not plate_rows else 0.0
+    if turned:
+        notes.append(f"It was turned {turn_words(turned)}, on the plate to fit. It's offered "
+                     "again only if it still doesn't fit as posed: type turn at the review to "
+                     "take it.")
+    elif (turned is None and row.reading is not None
+          and row.reading.settings.get("seam_position") in AT_THE_BACK):
+        # A row from before, read as it was sliced: back was whichever side Orca turned there.
+        notes.append("Its seam was at the back, and Orca may have turned it on the plate, unsaid "
+                     "then. Again prints it as posed, so the back may be another side than this "
+                     "job's.")
     stood = _standing_pause(row)
     if stood is not None:
         copied = _pause_again(row, stood)
@@ -305,6 +325,20 @@ def again(
         notes.append("Taken from the slice's reading, so take them again at the review (take) "
                      "if it proposes them: "
                      + "; ".join(f"{c.key}={c.value}" for c in taken) + ".")
+    turn = next((c for found in (row.proposal.suggested if row.proposal else ())
+                 for c in found.proposed
+                 if c.key == ORIENTATION and ORIENTATION in found.taken
+                 and c.value == pose_value(row.rotation_deg)), None)
+    if turn is not None:
+        notes.append(f"The model's turn to {turn.value} was taken at the review: take it again "
+                     "there if it's proposed, or type orientation to send the part to it.")
+    by_model = [c for c in ((*row.proposal.changes, *row.proposal.not_applied)
+                            if row.proposal else ())
+                if c.taken]
+    if by_model:
+        notes.append("Taken from the model's proposals, so take them again at the review, by "
+                     "number, if it proposes them, or type them: "
+                     + "; ".join(f"{c.key}={c.value}" for c in by_model) + ".")
     reused = [c for c in row.corrections or () if _used_as_anothers(c)]
     if reused:
         notes.append("Used from a past print, so use them again at the review (use): "

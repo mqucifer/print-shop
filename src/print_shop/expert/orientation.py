@@ -16,13 +16,14 @@ as much on the plate.
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 from pydantic import BaseModel
 
 from print_shop.core.contracts import NoAutoFix, OneOf, Proposal, Severity, Verdict, Violation
 from print_shop.core.state import Orientation
-from print_shop.expert.client import LLMConfig, complete_json
+from print_shop.expert.client import LLMConfig, complete_json, stream_json_call
 from print_shop.setup.skill import SKILL_DIR
 
 __all__ = [
@@ -147,8 +148,13 @@ def _rebuild(
     )
 
 
+#: The most characters an orientation answer may be, where it's streamed: a rotation, a
+#: rationale and a confidence.
+ORIENTATION_ANSWER_CHARS = 8_000
+
+
 def propose_orientation(
-    request: OrientationRequest, config: LLMConfig
+    request: OrientationRequest, config: LLMConfig, stop: threading.Event | None = None,
 ) -> Proposal[Orientation]:
     """Ask the model to pick one of the scored candidates.
 
@@ -161,6 +167,7 @@ def propose_orientation(
         f"Rotation {c.rotation_deg}: overhang {c.overhang_area_mm2:.1f} mm2, "
         f"bed contact {c.bed_contact_area_mm2:.1f} mm2, "
         f"height {c.height_mm:.1f} mm, bbox {c.bbox_mm}"
+        + (", fits the plate turned about z" if c.fits_turned else "")
         for c in request.candidates
     ]
     user = (
@@ -196,7 +203,12 @@ def propose_orientation(
         },
         "strict": True,
     }
-    reply = complete_json(config, _SYSTEM + symptom_map(), user, schema)
+    if stop is None:
+        reply = complete_json(config, _SYSTEM + symptom_map(), user, schema)
+    else:
+        # Beside a review, where going on ends it (mqucifer/print-shop#242).
+        reply = stream_json_call(config, _SYSTEM + symptom_map(), user, schema,
+                                 answer_chars=ORIENTATION_ANSWER_CHARS, stop=stop)[0]
 
     raw = reply["rotation_deg"]
     if len(raw) != 3:

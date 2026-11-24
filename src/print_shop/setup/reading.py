@@ -22,9 +22,9 @@ printed in.
 **Where only part of the walls is seen no seam change is proposed** (mqucifer/print-shop#248).
 "back" was the hidden side while "the walls" meant all round. Carried, only part of them may be
 seen, and where a line lands against that part can't be told: on a flat back Orca's back takes
-a corner, which a side wall shares, and its CLI can turn a part about z as it arranges the
-plate. Scattered, it would be all over that part. So the line is said, to be looked at. With
-the walls seen all round it's as it was.
+a corner, which a side wall shares, and a part turned on the plate to fit has its back on
+another side (mqucifer/print-shop#257). Scattered, it would be all over that part. So the line
+is said, to be looked at. With the walls seen all round it's as it was.
 
 **z doesn't only rise** (mqucifer/print-shop#109). Printed by object, it starts again at each
 object, so nothing here takes the first or last layer's z for the lowest or highest: the seam is
@@ -183,6 +183,22 @@ class PauseReading(BaseModel):
         return f"pauses for {said(self.kind)}{to} {about}"
 
 
+#: The seams that are put by the plate's back, so on whichever side of the part is turned there
+#: (mqucifer/print-shop#257).
+AT_THE_BACK = ("back", "aligned_back")
+
+
+def turned_on_plate(
+    reading: SliceReading | None, rotation_deg: tuple[float, float, float],
+) -> float | None:
+    """How far a print was turned on the plate to fit, 0 as posed, or None where it isn't known:
+    a row from before mqucifer/print-shop#257, when Orca could turn a part unsaid. Its reading
+    says, else its rotation, which has a turn in z only from then on."""
+    if reading is not None and reading.turn_deg is not None:
+        return reading.turn_deg
+    return rotation_deg[2] or None
+
+
 class SliceReading(BaseModel):
     """One slice, read layer by layer."""
 
@@ -201,6 +217,10 @@ class SliceReading(BaseModel):
     pauses: tuple[PauseReading, ...] = ()
     #: Each layer that lays `CLOSES_OVER`: its number, and the area of it in mm².
     over_air: tuple[tuple[int, float], ...] = ()
+    #: How far the part was turned on the plate to fit, 0 as posed (mqucifer/print-shop#257).
+    #: None: not known, as in a row from before it, when Orca could turn a part unsaid. Its x
+    #: and y are of the G-code as it was sliced, whichever it was.
+    turn_deg: float | None = None
 
     @property
     def time_s(self) -> float:
@@ -781,6 +801,8 @@ def _set_by(change: Change | None) -> str:
         return "the preset"
     if change.source is Source.LESSON:
         return f"lesson {change.lesson}" if change.lesson is not None else "a lesson"
+    if change.taken:
+        return "the model's proposal you took"
     return {Source.MODEL: "the model", Source.ANSWER: "your answer", Source.SPONSOR: "you",
             Source.GUARD: "a guard", Source.READING: "the slice's proposal you took"}[change.source]
 

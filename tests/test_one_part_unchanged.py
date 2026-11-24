@@ -7,7 +7,7 @@ paths are the only things replaced.
 
 It runs twice: with the questions asked all together (`transcript.txt`), and as `print_job.py`
 asks them, print-shop's two while the model reads (`waiting.txt`, mqucifer/print-shop#208). Both
-files in `tests/data/one_part/` were written by this test run on e65581a, main without that
+files in `tests/data/one_part/` were written by this test run on 2662e23, main without that
 change. A change that means to alter one part's flow writes them again, and the diff shows what
 it altered:
 

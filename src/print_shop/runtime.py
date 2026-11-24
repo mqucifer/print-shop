@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from print_shop.core.mqtt import MqttConfig
+from print_shop.core.state import turn_words
 from print_shop.env import SETTINGS_PATH, load_env
 from print_shop.expert.client import LLMConfig
 from print_shop.inventory import Material, spool_lines
@@ -99,6 +100,13 @@ class Run:
     recorder: FrameRecorder | None
 
 
+def print_loop(config: LLMConfig) -> PrintLoop:
+    """The print loop on the setup model. Its calls can be ended, as going on at the review ends
+    them (mqucifer/print-shop#242)."""
+    return PrintLoop(chat=llm_chat(config), person=cli_person(), model=config.model,
+                     stoppable=lambda stop: llm_chat(config, stop))
+
+
 def build_run(
     *,
     printer: PrinterClient | None,
@@ -168,8 +176,7 @@ def build_run(
         reviewer=reviewer,
         # One loop with tools decides the pose and the settings after the questions, and asks
         # the person on the command line only before a big change (mqucifer/print-shop#129).
-        loop=PrintLoop(chat=llm_chat(setup_llm(llm, env)), person=cli_person(),
-                       model=setup_llm(llm, env).model),
+        loop=print_loop(setup_llm(llm, env)),
         ledger=ledger,
         # Read-only: watching needs a snapshot and nothing else.
         watch_printer=CentauriClient(printer_config, recorder=recorder),
@@ -194,6 +201,7 @@ def describe(row: Row) -> str:
         f"job            {row.job_id}",
         f"part           {row.stl_name}  (sha256 {row.stl_sha256[:12]}…)",
         _orientation_line(row),
+        *_turned_lines(row),
         *_print_lines(row),
         _outcome_line(row),
     ])
@@ -262,6 +270,12 @@ def _orientation_line(row: Row) -> str:
         return "orientation    as the file lays it: nothing was turned"
     return (f"orientation    {row.rotation_deg} by {row.orientation_source}"
             f"{'' if row.orientation_accepted else ' (not accepted; authored pose)'}")
+
+
+def _turned_lines(row: Row) -> list[str]:
+    """A turn on the plate taken at the review (mqucifer/print-shop#242)."""
+    return ([f"turned         {turn_words(row.rotation_deg[2])}, on the plate to fit,"
+             " as taken at the review"] if row.rotation_deg[2] else [])
 
 
 def _outcome_line(row: Row) -> str:
@@ -367,7 +381,8 @@ def _setup_lines(row: Row) -> list[str]:
             lines.append(f"               {note}")  # the faces as they printed
     changes = row.proposal.changes if row.proposal else ()
     for c in changes:
-        lines.append(f"  {c.key}: {c.preset or '-'} -> {c.value} ({c.source.value}) "
+        by = f"{c.source.value}, taken by you" if c.taken else c.source.value
+        lines.append(f"  {c.key}: {c.preset or '-'} -> {c.value} ({by}) "
                      f"{pauses.reason_of(c)}")
     for c in row.proposal.not_applied if row.proposal else ():
         lines.append(f"  {c.key}: not applied, {c.not_applied} ({c.source.value}) {c.reason}")
@@ -375,9 +390,22 @@ def _setup_lines(row: Row) -> list[str]:
         said = ", ".join(
             f"{c.key}={c.value}" + (f" ({c.used.line()})" if c.used else "")
             + (f" (not applied: {c.not_applied})" if c.not_applied else "")
+            + (f" (saying no to the model's {c.said_no_to})" if c.said_no_to else "")
             for c in row.corrections
         )
         lines.append(f"corrected      {said}")
+    for found in row.proposal.suggested if row.proposal else ():
+        offered = ", ".join(
+            f"{c.key}={c.value}" + (" (taken, then left behind by a turn)"
+                                    if c.key in found.dropped
+                                    else " (taken)" if c.key in found.taken
+                                    else " (turned down)" if c.key in found.declined else "")
+            for c in found.proposed
+        )
+        said = f"{found.ending.value} after {found.seconds:g} s"
+        if found.unseen:
+            said += ", and you went on without seeing them"
+        lines.append(f"model proposed {offered or 'nothing'}: {said}")
     for pause in row.reading.pauses if row.reading else ():
         lines.append(f"{pause.kind or 'pause':<15}{pause.line()}")
     for g in row.proposal.lessons if row.proposal else ():

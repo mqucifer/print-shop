@@ -85,7 +85,11 @@ class Proposer:
         self, intake: Intake, features: tuple[Feature, ...], profiles: SlicerProfiles,
         context: PartContext | None = None, pose: tuple[float, float, float] | None = None,
         seen: Seen | None = None,
+        stop: threading.Event | None = None,
     ) -> Proposal:
+        """The proposal, the model's changes in it. `stop` ends the model's call. The review
+        starts from `without_model`'s (mqucifer/print-shop#242). `seen` is several parts' faces
+        already carried, for a plate's (mqucifer/print-shop#109)."""
         facts = dataclasses.replace(self._facts(intake, features, profiles, context), pose=pose,
                                     seen=seen)
         given = self.lessons(features, facts.filament_type) if self.lessons is not None else ()
@@ -95,7 +99,7 @@ class Proposer:
         if self.ask is not None:
             reasoned = propose_by_model(facts, skill, self.ask, "recorded")
         elif self.llm is not None:
-            reasoned = propose_by_model(facts, skill, llm_ask(self.llm), self.llm.model)
+            reasoned = propose_by_model(facts, skill, llm_ask(self.llm, stop), self.llm.model)
         else:
             reasoned = Proposal(model="")
         # The Sponsor's answers first, then the lessons: the model may not change what they set.
@@ -105,6 +109,20 @@ class Proposer:
             "lessons": marked,
         })
         return guard(facts, reasoned)
+
+    @property
+    def suggests(self) -> bool:
+        """Whether a model proposes the settings, which a review mustn't wait for."""
+        return self.ask is not None or self.llm is not None
+
+    def without_model(
+        self, intake: Intake, features: tuple[Feature, ...], profiles: SlicerProfiles,
+        context: PartContext | None = None, pose: tuple[float, float, float] | None = None,
+    ) -> Proposal:
+        """The proposal with the model absent, as a failed call leaves it: the answers, the kept
+        lessons and the guards. The review starts from it (mqucifer/print-shop#242)."""
+        return dataclasses.replace(self, ask=None, llm=None)(
+            intake, features, profiles, context, pose)
 
     def facts(
         self, intake: Intake, features: tuple[Feature, ...], profiles: SlicerProfiles,
