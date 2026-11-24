@@ -568,7 +568,7 @@ class _Handler(BaseHTTPRequestHandler):
         job_id = line.job.job_id
         session = self.shop.session(job_id)
         if session is not None and session.waiting:
-            self._send(follow_page(line, session))
+            self._send(follow_page(line, session, self.shop.asked(job_id)))
             return None
         if session is not None and session.ended:
             self._send(message_page(

@@ -183,7 +183,8 @@ def test_the_questions_preselect_nothing_as_enter_takes_nothing_there(tmp_path: 
     shown = r.phone().get("/job/j1/questions")
     assert shown.status == 200
     assert "What's it for?" in shown.body and "The underside overhangs. Support it?" in shown.body
-    assert "recommended" in shown.body and "it's a bracket" in shown.body
+    assert "recommended" in shown.body and "It's a bracket" in shown.body
+    assert shown.body.count("recommended") == 2, "a badge on each question's, said once"
     assert ticked(shown.raw) == [], "Enter takes nothing at a question: nothing is picked"
     assert "Answer" in r.phone().get("/").body
     assert 'href="/job/j1/questions"' in r.phone().get("/").raw
@@ -393,8 +394,10 @@ def test_the_models_closer_choices_keep_your_answer_as_enter_does(tmp_path: Path
 
 def _words(text: str) -> list[str]:
     """The words and figures of a text, as facts: case and the punctuation after them aside."""
+    text = re.sub(r"(?<=\d),(?=\d{3})", "", html.unescape(text))  # 13,576 is 13576
+    text = text.replace("³", "3").replace("²", "2")  # cm³ is cm3
     return [w.lower().rstrip(".") for w in
-            re.findall(r"[A-Za-z0-9][A-Za-z0-9.%°³²/'_-]*", html.unescape(text))]
+            re.findall(r"[A-Za-z0-9][A-Za-z0-9.%°/'_-]*", text)]
 
 
 def request() -> Any:
@@ -410,16 +413,16 @@ def test_every_fact_in_the_terminals_review_is_on_the_phone(tmp_path: Path) -> N
     r = rig(tmp_path, {"j1": asked})
     shown = r.phone().get("/job/j1/review")
     assert shown.status == 200
-    page = " ".join(shown.body.split())
-    for section in sections(review, REVIEW_WIDTH):
-        for line in section.lines:
-            assert " ".join(html.escape(line).split()) in " ".join(shown.raw.split()) or \
-                " ".join(line.split()) in page, line
+    review_part = shown.raw.split("Or answer as at the Mac")[0]
+    assert "<pre" not in review_part, "laid out for a phone, never the terminal's columns"
     on_page = set(_words(shown.body))
     # Less what a terminal leaves above its prompt: Look first again, in short, and the answers.
     full = render(review).split("LOOK FIRST, AGAIN")[0]
     missing = sorted({w for w in _words(full) if w not in on_page})
     assert missing == [], f"in the terminal's review and not on the phone: {missing[:20]}"
+    narrow = " ".join(line for sec in sections(review, REVIEW_WIDTH) for line in sec.lines)
+    missing = sorted({w for w in _words(narrow) if w not in on_page})
+    assert missing == [], f"in its sections and not on the phone: {missing[:20]}"
 
 
 def test_use_these_preselects_what_the_terminal_does_and_says_why_not(tmp_path: Path) -> None:
@@ -495,8 +498,17 @@ def test_looks_good_makes_it_ready_as_ok_does(tmp_path: Path) -> None:
     asked = r.queue.asks["j1"]
     phone.post("/job/j1/review", {"since": since(asked), "do": "ok"})
     shown = phone.get("/job/j1/review")
-    assert "1 ticked isn't used yet: use to take it, or ok again" in shown.body, \
-        "the terminal's own words"
+    # In plain words, naming what's ticked and unused; each button says what it does
+    # (print-shop-ux, on mqucifer/print-shop#283: ok by another name made a print with ironing).
+    from print_shop.phone.needs import _unused  # noqa: PLC0415
+
+    (item,) = _unused(r.queue.asks["j1"].review)
+    assert f"1 ticked isn't used yet: {item}." in shown.body
+    assert "Use it first" in shown.body and "Make it ready without it" in shown.body
+    assert "Looks good" not in shown.body.split("Back to queue")[1]
+    ok = re.search(r'name="typed" value="ok"><button type="submit" class="second">'
+                   r"Make it ready without it", shown.raw)
+    assert ok is not None, "the button that goes on without it is the one that sends ok"
     assert phone.post("/job/j1/reply", {"version": version(shown), "typed": "ok"}).status == 303
     wait_until(lambda: bool(r.queue.given))
     given = r.queue.given[0][1]

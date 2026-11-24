@@ -95,6 +95,11 @@ input[type=search] { width: 100%; padding: 12px; font-size: 1em; margin: 0 0 1em
 .suggested { border: 1px dashed var(--line); border-radius: 10px; padding: 10px 12px;
   margin: 0 0 1em; }
 details summary { color: var(--button); margin-top: 0.4em; }
+details.section { border-top: 1px solid var(--line); margin: 1em 0 0; padding: 0.6em 0 0; }
+details.section > summary { font-size: 1.05em; font-weight: 600; color: var(--muted); }
+.row.setting .who { text-align: right; max-width: 40%; }
+.card.look .label, p .label { font-weight: 600; }
+label.turn-down { display: block; margin: 0.2em 0 0.6em; }
 pre.said { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.78em; line-height: 1.35;
   background: var(--box); border: 1px solid var(--line); border-radius: 10px; padding: 10px;
   margin: 0 0 1em; }

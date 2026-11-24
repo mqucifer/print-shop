@@ -20,7 +20,7 @@ from print_shop.setup.names import named, switched
 from print_shop.setup.reading import PAUSE_PAST_FIT, Flag, LayerTime, SliceReading
 from print_shop.setup.screen import clock
 
-__all__ = ["slice_page"]
+__all__ = ["features_html", "layers_said", "seam_said", "slice_page", "worth"]
 
 
 
@@ -78,7 +78,7 @@ def _picked(reading: SliceReading, picked: LayerTime, here: str) -> str:
             f"<div class=\"ends small\"><span>{prev}</span><span>{nxt}</span></div></div>")
 
 
-def _features(reading: SliceReading) -> str:
+def features_html(reading: SliceReading) -> str:
     kept = sorted((f for f in reading.features if f.kind != "travel"), key=lambda f: -f.time_s)
     longest = max((f.time_s for f in kept), default=0.0) or 1.0
     rows = []
@@ -93,7 +93,7 @@ def _features(reading: SliceReading) -> str:
     return "".join(rows)
 
 
-def _worth(reading: SliceReading, flags: Sequence[Flag]) -> list[str]:
+def worth(reading: SliceReading, flags: Sequence[Flag]) -> list[str]:
     """What's worth a look, as the review says it: the first layer after a pause, and each of
     the reading's flags that proposes nothing."""
     out = []
@@ -119,7 +119,7 @@ def _proposed(reading: SliceReading, flags: Sequence[Flag]) -> list[str]:
     return out
 
 
-def _layers_said(reading: SliceReading) -> list[str]:
+def layers_said(reading: SliceReading) -> list[str]:
     out = []
     again = reading.starts_again()
     if again:
@@ -136,7 +136,7 @@ def _layers_said(reading: SliceReading) -> list[str]:
     return out
 
 
-def _seam(reading: SliceReading) -> str:
+def seam_said(reading: SliceReading) -> str:
     seam = reading.seam
     if not seam.seams:
         return ""
@@ -169,13 +169,13 @@ def slice_page(
                 "<label for=\"layer\">Layer</label><input id=\"layer\" type=\"number\" "
                 f"name=\"layer\" min=\"1\" inputmode=\"numeric\" value=\"{_e(layer or '')}\">"
                 "<button type=\"submit\">Show</button></form>")
-    body += [f"<p class=\"small\">{_e(said)}</p>" for said in _layers_said(reading)]
-    body += ["<h2>Where the time goes</h2>", _features(reading)]
-    worth = _worth(reading, flags)
-    if worth:
+    body += [f"<p class=\"small\">{_e(said)}</p>" for said in layers_said(reading)]
+    body += ["<h2>Where the time goes</h2>", features_html(reading)]
+    looks = worth(reading, flags)
+    if looks:
         body.append("<h2>Worth a look</h2><ul class=\"rows\">")
         body += [f"<li><div class=\"row\"><span class=\"what amber\">{_e(w)}</span></div></li>"
-                 for w in worth]
+                 for w in looks]
         body.append("</ul>")
     proposed = _proposed(reading, flags)
     if proposed:
@@ -184,7 +184,7 @@ def slice_page(
         body += [f"<li><div class=\"row\"><span class=\"what\">{_e(p)}</span></div></li>"
                  for p in proposed]
         body.append("</ul>")
-    seam = _seam(reading)
+    seam = seam_said(reading)
     if seam:
         body += ["<h2>Seam</h2>", f"<p>{_e(seam)}</p>"]
     return page(f"What the slice shows: {part}", "".join(body))

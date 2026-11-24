@@ -18,13 +18,14 @@ from html import escape
 
 from print_shop.orchestrator.print_queue import Asked, Line, Need
 from print_shop.phone.page import page
+from print_shop.phone.review_layout import paragraphs, review_sections
 from print_shop.phone.session import Session
 from print_shop.setup.intake import DIFFERS_PROMPT, NOTES_PROMPT, WORDS_PROMPT, Question
 from print_shop.setup.names import Found, plain, switched, with_unit
 from print_shop.setup.offer import Item
 from print_shop.setup.proposal import pose_value
 from print_shop.setup.review import ReviewRequest
-from print_shop.setup.screen import Moved, sections
+from print_shop.setup.screen import Moved
 from print_shop.setup.suggest import by_number
 
 __all__ = [
@@ -70,12 +71,21 @@ def _small(text: str) -> str:
 # --------------------------------------------------------------------------
 
 
+def _shared_cost(question: Question) -> str:
+    """What every option costs alike, said once under the question (as mqucifer/print-shop#266
+    has the terminal say it), or ""."""
+    costs = {o.cost() for o in question.options}
+    return costs.pop() if len(costs) == 1 else ""
+
+
 def _option_note(question: Question, n: int) -> str:
+    """An option's impact, its reason where it's recommended, and its cost where the options'
+    differ."""
     option = question.options[n]
-    note = option.impact
-    if option.recommended and option.why:
-        note = f"recommended: {option.why}. {note}"
-    return f"{note} {option.cost()}".strip()
+    note = f"{option.why}. {option.impact}" if option.recommended and option.why else option.impact
+    note = note[:1].upper() + note[1:] if note else note
+    shared = _shared_cost(question)
+    return note if shared else f"{note}. {option.cost()}".strip(". ")
 
 
 def _question_card(question: Question, i: int, picked: str = "") -> str:
@@ -89,7 +99,9 @@ def _question_card(question: Question, i: int, picked: str = "") -> str:
             f"{_small(_option_note(question, n))}</label>")
     beside = f"<p class=\"small\">{_e(question.beside)}</p>" if question.beside else ""
     posed = f"<p class=\"small\">As it lies: {_e(question.posed)}</p>" if question.posed else ""
-    return (f"<fieldset class=\"card\"><legend>{_e(question.text)}</legend>{beside}{posed}"
+    shared = _shared_cost(question)
+    cost = f"<p class=\"small\">Each: {_e(shared)}.</p>" if shared else ""
+    return (f"<fieldset class=\"card\"><legend>{_e(question.text)}</legend>{beside}{posed}{cost}"
             f"{''.join(radios)}"
             f"<label><input type=\"radio\" name=\"q{i}\" value=\"o\"> In your own words</label>"
             f"<input type=\"text\" name=\"w{i}\" maxlength=\"300\" "
@@ -189,35 +201,71 @@ def _reply(job_id: str, version: str, typed: str, words: str, kind: str = "") ->
             f"<button type=\"submit\"{cls}>{_e(words)}</button></form>")
 
 
-def follow_page(line: Line, session: Session) -> str:
+def _unused(request: ReviewRequest | None) -> list[str]:
+    """What's ticked in Use these and not used, each as "Bed 70 to 75"."""
+    if request is None or request.offering is None:
+        return []
+    pose = pose_value(request.orientation.rotation_deg)
+    return [f"{plain(i.key)} {with_unit(i.key, i.preset) if i.preset else '-'} to "
+            f"{with_unit(i.key, i.value)}"
+            for i in request.offering.ticked(request.proposal, pose)]
+
+
+def _at_review(job_id: str, version: str, said: str,
+               request: ReviewRequest | None) -> tuple[str, list[str]]:
+    """What the reviewer's prompt asks after an answer, in plain words, and buttons that each
+    say what they do: never ok by another name."""
+    if "ticked" in said and "used yet" in said:
+        items = _unused(request)
+        it = "it" if len(items) == 1 else "them"
+        head = (f"{len(items)} ticked {'isn' if len(items) == 1 else 'aren'}'t used yet: "
+                f"{'; '.join(items)}." if items else said)
+        return head, [_reply(job_id, version, "use", f"Use {it} first"),
+                      _reply(job_id, version, "ok", f"Make it ready without {it}", "second")]
+    if "The model is still working" in said:
+        return said, [_reply(job_id, version, "", "Check the model again", "second"),
+                      _reply(job_id, version, "ok",
+                             "Make it ready without the model's proposals", "second")]
+    if "haven't seen" in said:
+        return said, [_reply(job_id, version, "", "Show me the model's proposals"),
+                      _reply(job_id, version, "ok", "Make it ready without them", "second")]
+    if "wasn't set" in said and "approve without" in said:
+        return said, [_reply(job_id, version, "ok", "Make it ready without it", "second")]
+    if "type turn" in said:
+        return said, [_reply(job_id, version, "turn", "Take the turn")]
+    return said, []
+
+
+def follow_page(line: Line, session: Session, asked: Asked | None = None) -> str:
     """What the terminal's code said since the last answer, and its prompt, to answer as at
-    the Mac: with buttons for what its prompt takes, and a box for anything else."""
+    the Mac: with buttons that each say what they do, and a box for anything else."""
     job_id = line.job.job_id
     prompt = session.prompt or ""
     version = session.stamp
     said = "\n".join(session.said_since()).strip("\n")
-    buttons = []
+    buttons: list[str] = []
     if prompt == WORDS_PROMPT:
         buttons = [_reply(job_id, version, "y", "Yes, that's my decision"),
-                   _reply(job_id, version, "n", "No", "second")]
+                   _reply(job_id, version, "n", "No: my words set nothing", "second")]
     elif prompt == DIFFERS_PROMPT:
         buttons = [_reply(job_id, version, "", "Take my answer"),
                    _reply(job_id, version, "n", "Keep what the notes say", "second")]
     elif prompt == NOTES_PROMPT:
         buttons = [_reply(job_id, version, "", "That's right")]
     elif prompt == "> ":
-        buttons = [_reply(job_id, version, "ok", "Looks good, make it ready"),
-                   _reply(job_id, version, "use", "Use what's ticked", "second")]
+        said, buttons = _at_review(job_id, version, " ".join(said.split()),
+                                   asked.review if asked is not None else None)
     elif prompt.endswith("> ") and prompt[:-2].isdigit():
-        buttons = [_reply(job_id, version, "", "Keep it so", "second")]
+        buttons = [_reply(job_id, version, "", "Keep my words as they are", "second")]
     typed = (f"<form method=\"post\" action=\"/job/{_e(job_id)}/reply\" class=\"typed\">"
              f"{_hidden('version', version)}<label for=\"typed\">Or answer as at the Mac, at "
              f"<code>{_e(prompt.strip())}</code></label>"
              "<input id=\"typed\" type=\"text\" name=\"typed\" maxlength=\"2000\" "
              "autocapitalize=\"off\" spellcheck=\"false\">"
              "<button type=\"submit\" class=\"second\">Answer</button></form>")
+    told = "".join(f"<p>{_e(p)}</p>" for p in paragraphs(said.split("\n")))
     return page(f"{line.job.part}: it asks", (
-        f"{_head(line)}<pre class=\"said\">{_e(said)}</pre>"
+        f"{_head(line)}<div class=\"box\">{told}</div>"
         f"<div class=\"buttons\">{''.join(buttons)}</div>{typed}"))
 
 
@@ -283,14 +331,15 @@ def _proposals(request: ReviewRequest) -> str:
             f"<li><label class=\"row\"><input type=\"checkbox\" name=\"take\" value=\"{n}\">"
             f"<span class=\"what\"><span class=\"part\">{n}. {_e(plain(c.key))}</span> "
             f"{_small(f'{switched(c.key, c.preset) or chr(45)} to {switched(c.key, c.value)}')}"
-            f"<br>{_small(c.reason)}<br>{_small('The slice: ' + flag.reading)}</span>"
+            f"<br>{_small(c.reason)} {_small(f'[the slice: {c.knowledge}]')}"
+            f"<br>{_small('The slice read: ' + flag.reading)}</span>"
             "</label></li>")
     for n, c in sorted(by_number(request.by_model).items()):
         rows.append(
             f"<li><label class=\"row\"><input type=\"checkbox\" name=\"take\" value=\"{n}\">"
             f"<span class=\"what\"><span class=\"part\">{n}. {_e(plain(c.key))}</span> "
             f"{_small(f'to {switched(c.key, c.value)}, the model')}<br>{_small(c.reason)}"
-            f"</span></label><label class=\"small\">Turn it down, why? "
+            f"</span></label><label class=\"small turn-down\">Turn it down: why?"
             f"<input type=\"text\" name=\"no{n}\" maxlength=\"300\"></label></li>")
     if not rows:
         return ""
@@ -310,10 +359,7 @@ def review_page(line: Line, asked: Asked, said: str = "", since: Moved | None = 
     if since:
         told += ("<div class=\"box\"><strong>Moved since your last answer</strong><ul>"
                  + "".join(f"<li>{_e(m)}</li>" for m in since.lines) + "</ul></div>")
-    parts = "".join(
-        f"<h2>{_e(s.title[:1] + s.title[1:].lower())}</h2>"
-        f"<pre class=\"said\">{_e(chr(10).join(s.lines))}</pre>"
-        for s in sections(request, REVIEW_WIDTH, since))
+    parts = review_sections(request, since, f"/job/{job_id}/slice")
     send_back = ""
     if request.candidates or request.parts:
         send_back = (f"<p class=\"small\">To send the pose back, at the Mac: <code>review "
