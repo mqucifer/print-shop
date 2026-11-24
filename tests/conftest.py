@@ -178,7 +178,10 @@ def _llm_hosts() -> set[tuple[str, int]]:
 #: real settings, before the guard below is armed. Only hosts and ports are kept.
 LLM_HOSTS = _llm_hosts()
 #: The Mac's own files, which no test opens from here on (mqucifer/print-shop#263).
-REFUSED = (Path("~/print-shop").expanduser(), SETTINGS_PATH)
+#: The settings file is left readable only in a run that opts in to a live service on purpose,
+#: whose tests need the real credentials; `~/print-shop` never is.
+REFUSED = (Path("~/print-shop").expanduser(),
+           *(() if any(opted_in(marker) for marker in OPT_IN) else (SETTINGS_PATH,)))
 refuse_under_tests(*REFUSED)
 
 

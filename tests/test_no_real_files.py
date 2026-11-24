@@ -19,6 +19,7 @@ from print_shop.inventory import Inventory
 from print_shop.ledger import Ledger, ledger_path
 from tests import conftest
 from tests.fixtures import write_stl
+from tests.live import OPT_IN, opted_in
 
 SECRET = "MQTT_PASSWORD=never-read-this"
 
@@ -45,7 +46,10 @@ def stand_in(tmp_path: Path) -> Iterator[StandIn]:
 
 def test_the_guard_is_armed_for_every_test_after_conftests_one_read() -> None:
     assert tuple(p.resolve() for p in conftest.REFUSED) == env._REFUSED
-    assert (Path("~/print-shop").expanduser(), SETTINGS_PATH) == conftest.REFUSED
+    # The settings are left readable only in a run that opts in to a live service.
+    live = any(opted_in(marker) for marker in OPT_IN)
+    expected = (Path("~/print-shop").expanduser(), *(() if live else (SETTINGS_PATH,)))
+    assert expected == conftest.REFUSED
     # The one read before it: only where LiteLLM answers is kept, as hosts and ports.
     assert all(isinstance(host, str) and isinstance(port, int) for host, port in conftest.LLM_HOSTS)
 
@@ -119,3 +123,30 @@ def test_a_script_that_drops_its_settings_fails_saying_why(
         script.main([str(part), "--nozzle", "0.4", "--filament", "Elegoo PLA"])
     assert "never-read-this" not in str(refused.value)
     assert not stand_in.home.exists()
+
+
+@pytest.mark.parametrize("module", ["test_mqtt", "test_daemon", "test_gate_isolation"])
+def test_a_live_tests_collection_reads_no_settings_unless_opted_in(
+    module: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """Its credential check runs at collection: it reads the settings only in a run that opts
+    in to the broker. A folder stands in for them, which a read would fail on."""
+    import importlib
+
+    found = importlib.import_module(f"tests.{module}")
+    monkeypatch.setattr(found, "SETTINGS_PATH", tmp_path)
+    monkeypatch.delenv(OPT_IN["mqtt"], raising=False)
+    assert found._env_present() is False
+
+
+def test_the_dashboards_and_the_models_live_settings_are_read_only_opted_in(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from tests import test_dashboard_live, test_orientation_agent
+
+    monkeypatch.setattr(test_dashboard_live, "SETTINGS_PATH", tmp_path)
+    monkeypatch.delenv(OPT_IN["ha"], raising=False)
+    assert "HA_TOKEN" not in test_dashboard_live._env()
+    monkeypatch.setattr(test_orientation_agent, "LIVE_SETTINGS", tmp_path)
+    monkeypatch.delenv(OPT_IN["llm"], raising=False)
+    assert test_orientation_agent._live_config() is None

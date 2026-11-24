@@ -39,10 +39,14 @@ from print_shop.core.mqtt import (
     state_topic,
 )
 from print_shop.env import SETTINGS_PATH
-from tests.live import broker_config
+from tests.live import broker_config, opted_in
 
 
 def _env_present() -> bool:
+    """Whether the Mac's settings have broker credentials: read only in a run that opts in to
+    the broker, as this runs at collection (mqucifer/print-shop#263)."""
+    if not opted_in("mqtt"):
+        return False
     env = SETTINGS_PATH
     if not env.exists():
         return False
