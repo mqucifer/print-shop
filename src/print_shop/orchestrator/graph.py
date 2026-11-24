@@ -127,7 +127,7 @@ from print_shop.setup.suggest import (
     went_on,
 )
 from print_shop.setup.traits import traits
-from print_shop.setup.turned import as_posed
+from print_shop.setup.turned import after_turn, as_posed
 from print_shop.setup.waiting import Waiting, ask_meanwhile
 from print_shop.slicer.arrange import DoesNotFit, SlicePlate, ToPlace, slice_parts
 from print_shop.slicer.naming import job_id_from_filename, name_gcode
@@ -695,7 +695,7 @@ def build_graph(
                     # Turned since the questions, an answer that's for a pose is set aside: the
                     # guard decides again, and the settings call isn't told it
                     # (mqucifer/print-shop#258). The record keeps every answer as given.
-                    judged, turned_since = as_posed(intake, questions_in, rotation_deg)
+                    judged = as_posed(intake, questions_in, rotation_deg)[0]
                     if beside is not None:
                         proposal = proposer.without_model(
                             judged, features, profiles, context, rotation_deg)
@@ -713,9 +713,7 @@ def build_graph(
                             proposal = proposal.model_copy(update={
                                 "loop": fell_back["loop"], "loop_ending": fell_back["loop_ending"],
                                 "notes": proposal.notes + fell_back["notes"]})
-                    if turned_since:
-                        proposal = proposal.model_copy(
-                            update={"notes": (turned_since, *proposal.notes)})
+                    proposal = after_turn(proposal, intake, questions_in, rotation_deg)
                     proposal = _with_orienting(proposal, state.get("orientation_lessons", ()))
                     if intake.without:
                         # Said at the review, as well as when it happened (mqucifer/print-shop#208).

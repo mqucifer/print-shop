@@ -130,7 +130,8 @@ ON_ITS_SIDE = (90.0, 0.0, 0.0)
 
 
 def turned(to: str = "180,0,0") -> str:
-    return f"TURNED SINCE YOU ANSWERED: turned to {to} from 0,0,0, where you answered."
+    return (f"TURNED SINCE YOU ANSWERED: 'No support' was for 0,0,0, so at {to} the guard "
+            "decides supports.")
 SET_ASIDE = ("These were said of the part as it lay when asked, so they aren't used now: 'Does "
              "the underside need support?', you said 'No support'. Send it back with "
              "orientation, or say what you want with a correction")
@@ -146,7 +147,13 @@ def supports(proposal: Proposal) -> tuple[str, str] | None:
 def assert_guarded_and_noted(job: Job, row: Row, to: str = "180,0,0") -> None:
     """The guard's supports over the overhang it was turned onto, and the note."""
     assert supports(job.last) == ("1", "guard")
+    guarded = job.last.get("enable_support")
+    assert guarded is not None and guarded.reason.endswith(
+        "mm2 overhang would print into the air; your 'No support' was for the part at 0,0,0")
     assert job.last.get("support_type") is not None
+    # All Look first, again and Moved show of it: the answer, within a line.
+    again = render_review(job.requests[-1]).split("LOOK FIRST, AGAIN")[-1]
+    assert f"  {turned(to).rstrip('.')}\n" in again
     assert not any(c.key == "enable_support" for c in job.last.kept), "no longer kept as yours"
     assert f"{turned(to)} {SET_ASIDE}" in flat(job.last_review)
     assert row.proposal is not None
@@ -276,9 +283,10 @@ def test_the_loops_fallback_turn_sets_aside_an_answer_for_supports_too(
     assert row.rotation_deg == FLIPPED, "the single call turned it"
     assert row.proposal is not None
     assert supports(row.proposal) is None, "no answer and no overhang: the preset's"
-    assert ("TURNED SINCE YOU ANSWERED: turned to 180,0,0 from 0,0,0, where you answered. These "
-            "were said of the part as it lay when asked, so they aren't used now: 'Does the "
-            "underside need support?', you said 'Tree supports'.") in " ".join(row.proposal.notes)
+    assert ("TURNED SINCE YOU ANSWERED: 'Tree supports' was for 0,0,0, so at 180,0,0 the guard "
+            "decides supports. These were said of the part as it lay when asked, so they aren't "
+            "used now: 'Does the underside need support?', you said 'Tree supports'.") in " ".join(
+        row.proposal.notes)
     assert "Tree supports" not in job.settings_prompts[-1]
 
 
@@ -352,7 +360,8 @@ def test_not_turned_or_turned_back_every_answer_is_read_as_given() -> None:
     assert as_posed(given, FLIPPED, FLIPPED) == (given, "")
     assert as_posed(given, None, FLIPPED) == (given, ""), "not known where it was asked"
     judged, note = as_posed(given, LAID, FLIPPED)
-    assert note.startswith("TURNED SINCE YOU ANSWERED: turned to 180,0,0 from 0,0,0")
+    assert note.startswith("TURNED SINCE YOU ANSWERED: 'No support' was for 0,0,0, so at "
+                           "180,0,0 the guard decides supports. ")
     assert [q.feature for q in judged.questions] == ["purpose", "seen"]
 
 
@@ -400,3 +409,32 @@ def test_the_loop_reads_an_answer_for_a_pose_in_that_pose_only(tmp_path: Path) -
     part = _part(tmp_path, "tee", intake=no_support())
     assert big(part, _pose(part, LAID), {}, None, None) == [], "your answer decides it here"
     assert "supports" in [w for w, _ in big(part, over, {}, None, None)]
+
+
+@pytest.mark.parametrize(("labels", "sets", "first"), [  # the two too long for a line wrap
+    (["No support"], ["enable_support"],
+     "TURNED SINCE YOU ANSWERED: 'No support' was for 0,0,0, so at 180,0,0 the guard decides "
+     "supports"),
+    (["No support", "outer brim"], ["enable_support", "brim_type"],
+     "TURNED SINCE YOU ANSWERED: 'No support' and 1 more were for 0,0,0, so at 180,0,0 the guard "
+     "decides supports"),
+    (["outer brim"], ["brim_type"],
+     "TURNED SINCE YOU ANSWERED: 'outer brim' was for 0,0,0, so at 180,0,0 it isn't used"),
+    (["outer brim", "no ironing"], ["brim_type", "ironing_type"],
+     "TURNED SINCE YOU ANSWERED: 'outer brim' and 1 more were for 0,0,0, so at 180,0,0 they "
+     "aren't used"),
+    (["leave the whole underside bare; I'll sand it. It's hidden"], ["enable_support"],
+     "TURNED SINCE YOU ANSWERED: 'leave the\u2026' was for 0,0,0, so at 180,0,0 the guard decides "
+     "supports"),
+])
+def test_the_notes_first_sentence_names_the_answer_within_a_line(
+    labels: list[str], sets: list[str], first: str
+) -> None:
+    questions = tuple(Question(feature=f"made_up_{n}", text=f"Question {n}?", options=(
+        Option(label=label, settings={key: "made up"}, impact="made up"),
+        Option(label="the other", settings={}, impact="made up"),
+    )) for n, (label, key) in enumerate(zip(labels, sets, strict=True)))
+    given = Intake(questions=questions, answers=tuple(Answer(choice=0) for _ in questions))
+    _, note = as_posed(given, LAID, FLIPPED)
+    assert note.startswith(first + ". These were said")
+    assert len("  " + first) <= 100 or labels == ["No support", "outer brim"]

@@ -161,10 +161,13 @@ Finish that job, or stop it with Ctrl-C in its terminal (which doesn't stop the 
    - **After a turn, an answer that's for a pose is set aside** (mqucifer/print-shop#258), by the print loop, by `orientation`, or to a past print's pose, as on a plate: a question on the part's shape, and any setting for a pose, such as no supports, whether an option or your confirmed words set it. "No support" said of a part on its side doesn't hold the supports off once it's turned onto an overhang: the guard decides again there, and the settings call isn't told the old answer. The review says which, in its notes:
 
      ```
-       note: TURNED SINCE YOU ANSWERED: turned to 180,0,0 from 0,0,0, where you answered. These were said
-         of the part as it lay when asked, so they aren't used now: 'Does the underside need support?',
-         you said 'No support'. Send it back with orientation, or say what you want with a correction
+       note: TURNED SINCE YOU ANSWERED: 'No support' was for 0,0,0, so at 180,0,0 the guard decides
+         supports. These were said of the part as it lay when asked, so they aren't used now: 'Does the
+         underside need support?', you said 'No support'. Send it back with orientation, or say what
+         you want with a correction
      ```
+
+     Its first sentence is what Look first, again and Moved show. The guard's supports say why too: `the 286 mm2 overhang would print into the air; your 'No support' was for the part at 0,0,0`.
 
      Turned back, every answer holds again. What the part is for holds in any pose, and the record keeps every answer as you gave it. The print loop is told which answers hold only in the pose you answered in, and a pose it weighs where they don't is read without them: supports the guard would turn on there are a big change it asks about, or says on its proposal.
 

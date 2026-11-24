@@ -23,10 +23,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from print_shop.setup.intake import Intake, Question
-from print_shop.setup.proposal import pose_value
+from print_shop.setup.proposal import Proposal, Source, pose_value
 from print_shop.setup.reading import TURNED_SINCE
 
-__all__ = ["ANY_POSE", "FOR_A_POSE", "Held", "as_posed", "held"]
+__all__ = ["ANY_POSE", "FOR_A_POSE", "Held", "after_turn", "as_posed", "held"]
 
 #: The questions an answer to which holds however the part is turned.
 ANY_POSE = frozenset({"purpose", "volume", "section"})
@@ -36,6 +36,14 @@ SEEN = "seen"
 FOR_A_POSE = re.compile(
     r"support|bridge|overhang|ironing|seam|brim|raft|elefant|^top_|^bottom_|initial_layer"
 )
+#: The note's first sentence is all Look first, again and Moved show (`screen._short`): it names
+#: the answer, and fits Look first, again's line of 100 columns (print-shop-ux, 2026-11-24).
+SUMMARY_CHARS = 100 - len("  ")
+#: The fewest of the answer's characters it keeps, its "\u2026" included: "No support" whole. It's
+#: shortened at a word where it can be.
+LABEL_CHARS = 10
+#: How the guard's supports end their reason where nothing decided them (`proposal.guard`).
+_UNDECIDED = ", and nothing decided otherwise"
 
 
 @dataclass(frozen=True)
@@ -45,6 +53,11 @@ class Held:
 
     intake: Intake
     aside: tuple[str, ...] = ()
+    #: Each answer set aside, as it was said, in order.
+    labels: tuple[str, ...] = ()
+    #: Each setting set aside, with the answer that set it: a later one's wins, as it does
+    #: where they're applied (`proposal._answers`).
+    set_by: tuple[tuple[str, str], ...] = ()
 
 
 def held(
@@ -59,6 +72,8 @@ def held(
     questions: list[Question] = []
     answers = []
     aside: list[str] = []
+    labels: list[str] = []
+    set_by: dict[str, str] = {}
     for question, answer in zip(intake.questions, intake.answers, strict=True):
         option = question.options[answer.choice] if answer.choice is not None else None
         # As it was shown: "as it prints" would read as the pose it has been turned to. Their own
@@ -69,14 +84,18 @@ def held(
                 questions.append(question)
                 answers.append(answer)
             continue
+        sets = option.settings if option is not None else answer.sets
         if question.feature not in ANY_POSE:
             aside.append(f"'{shown(question.text)}', you said '{label}'")
+            labels.append(label)
+            set_by.update(dict.fromkeys(sets, label))
             continue
-        sets = option.settings if option is not None else answer.sets
         keeps = {k: v for k, v in sets.items() if not FOR_A_POSE.search(k)}
         if keeps != sets:
             lost = ", ".join(f"{k}={v}" for k, v in sets.items() if k not in keeps)
             aside.append(f"{lost}, from '{label}'")
+            labels.append(label)
+            set_by.update(dict.fromkeys((k for k in sets if k not in keeps), label))
             if option is not None and answer.choice is not None:
                 options = list(question.options)
                 options[answer.choice] = option.model_copy(update={"settings": keeps})
@@ -87,7 +106,7 @@ def held(
         answers.append(answer)
     return Held(
         intake.model_copy(update={"questions": tuple(questions), "answers": tuple(answers)}),
-        tuple(aside))
+        tuple(aside), tuple(dict.fromkeys(labels)), tuple(set_by.items()))
 
 
 def as_posed(
@@ -106,8 +125,59 @@ def as_posed(
     if not kept.aside:
         return kept.intake, ""
     return kept.intake, (
-        f"{TURNED_SINCE}: turned to {pose_value(now)} from {pose_value(asked_in)}, where you "
-        "answered. These were said of the part as it lay when asked, so they aren't used now: "
-        f"{'; '.join(kept.aside)}. Send it back with orientation, or say what you want with a "
-        "correction"
+        f"{_summary(kept, asked_in, now)}. These were said of the part as it lay when asked, so "
+        f"they aren't used now: {'; '.join(kept.aside)}. Send it back with orientation, or say "
+        "what you want with a correction"
     )
+
+
+def _summary(kept: Held, asked_in: tuple[float, float, float],
+             now: tuple[float, float, float]) -> str:
+    """The note's first sentence: the first answer set aside, how many more, and what decides
+    in its place. Within `SUMMARY_CHARS`, the answer's words shortened if they must be, down to
+    `LABEL_CHARS`: with supports and more than one answer it can't fit, so it wraps."""
+    more = len(kept.labels) - 1
+    was = f" and {more} more were" if more else " was"
+    then = ("the guard decides supports" if "enable_support" in dict(kept.set_by)
+            else "they aren't used" if more else "it isn't used")
+
+    def said(label: str) -> str:
+        return (f"{TURNED_SINCE}: '{label}'{was} for {pose_value(asked_in)}, so at "
+                f"{pose_value(now)} {then}")
+
+    # A colon past the head, ". " or "; " would end the short form early (`screen._short`).
+    label = re.sub(r"(?<=\D)\. |; ", ", ", kept.labels[0])
+    # Never shorter than its first words: past the line, it wraps rather than lose them.
+    room = max(SUMMARY_CHARS - len(said("")), LABEL_CHARS)
+    if len(label) > room:
+        cut = label[: room - 1]
+        label = (cut.rsplit(" ", 1)[0] if " " in cut.strip() else cut).rstrip(" ,") + "\u2026"
+    return said(label)
+
+
+def after_turn(
+    proposal: Proposal, intake: Intake, asked_in: tuple[float, float, float] | None,
+    now: tuple[float, float, float],
+) -> Proposal:
+    """The proposal for a part turned since its questions: the note first, and the guard's
+    supports saying whose answer was for the pose it was asked in, where one was. Not turned,
+    it's unchanged."""
+    _, note = as_posed(intake, asked_in, now)
+    if not note:
+        return proposal
+    assert asked_in is not None
+    by = dict(held(intake).set_by).get("enable_support")
+
+    def reason(text: str) -> str:
+        if by is None or not text.endswith(_UNDECIDED):
+            return text
+        return (f"{text.removesuffix(_UNDECIDED)}; your '{by}' was for the part at "
+                f"{pose_value(asked_in)}")
+
+    return proposal.model_copy(update={
+        "notes": (note, *proposal.notes),
+        "changes": tuple(
+            c.model_copy(update={"reason": reason(c.reason)})
+            if c.key == "enable_support" and c.source == Source.GUARD else c
+            for c in proposal.changes),
+    })
