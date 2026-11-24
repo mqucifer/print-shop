@@ -515,7 +515,7 @@ def test_the_lessons_for_any_part_are_given_once(tmp_path: Path) -> None:
                        reviewed_by="reviewer: test")
     read: list[float] = []
 
-    def lessons(features: Any, filament: str) -> tuple[GivenLesson, ...]:
+    def lessons(features: Any, filament: str, variety: str) -> tuple[GivenLesson, ...]:
         read.append(next(f.value for f in features if f.id == "height"))
         return (kept,)
 

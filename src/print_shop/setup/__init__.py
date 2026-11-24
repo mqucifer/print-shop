@@ -38,9 +38,10 @@ if TYPE_CHECKING:  # the slicer imports the job state, which imports this
 
 __all__ = ["Lessons", "Proposer"]
 
-#: The reviewed lessons for a part with these features in this filament type (`lessons.for_part`,
-#: over the ledger). A lesson for a setting the filament decides is withheld for another filament.
-Lessons = Callable[[tuple[Feature, ...], str], tuple[GivenLesson, ...]]
+#: The reviewed lessons for a part with these features in this filament type and variety
+#: (`lessons.for_part`, over the ledger). A lesson for a setting the filament decides is withheld
+#: for another filament, and for another variety of it (mqucifer/print-shop#219).
+Lessons = Callable[[tuple[Feature, ...], str, str], tuple[GivenLesson, ...]]
 
 
 @dataclass(frozen=True)
@@ -92,7 +93,8 @@ class Proposer:
         already carried, for a plate's (mqucifer/print-shop#109)."""
         facts = dataclasses.replace(self._facts(intake, features, profiles, context), pose=pose,
                                     seen=seen)
-        given = self.lessons(features, facts.filament_type) if self.lessons is not None else ()
+        given = (self.lessons(features, facts.filament_type, variety(profiles))
+                 if self.lessons is not None else ())
         learned, learned_kept, marked = from_lessons(facts, given)
         facts = dataclasses.replace(facts, lessons=marked)
         skill = load(groups_for(intake, features))
@@ -141,7 +143,8 @@ class Proposer:
         """The kept lessons for a part with these features, on these presets' filament."""
         if self.lessons is None:
             return ()
-        return self.lessons(features, self._facts(Intake(), features, profiles).filament_type)
+        return self.lessons(features, self._facts(Intake(), features, profiles).filament_type,
+                            variety(profiles))
 
     def _facts(
         self, intake: Intake, features: tuple[Feature, ...], profiles: SlicerProfiles,
@@ -170,3 +173,11 @@ def _standard(profiles: SlicerProfiles, kind: str) -> dict[str, Any]:
     path = STORE_DIR / ref.standard_file
     data: dict[str, Any] = json.loads(path.read_text()) if path.is_file() else {}
     return data
+
+
+def variety(profiles: SlicerProfiles) -> str:
+    """The filament variety of the spool these profiles were taken for, or "" where they weren't
+    taken from the inventory (mqucifer/print-shop#219): a lesson of the filament's is then not
+    set, and nothing is guessed from a preset's name."""
+    material = profiles.used.material if profiles.used is not None else None
+    return material.variety if material is not None else ""

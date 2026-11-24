@@ -265,8 +265,11 @@ class Together:
         if kept is None:
             return proposer
 
-        def lessons(_: tuple[Feature, ...], filament_type: str) -> tuple[GivenLesson, ...]:
-            found = {g.id: g for part in self.parts for g in kept(part.features, filament_type)}
+        def lessons(
+            _: tuple[Feature, ...], filament_type: str, variety: str
+        ) -> tuple[GivenLesson, ...]:
+            found = {g.id: g for part in self.parts
+                     for g in kept(part.features, filament_type, variety)}
             return tuple(found[i] for i in sorted(found))
 
         return dataclasses.replace(proposer, lessons=lessons)

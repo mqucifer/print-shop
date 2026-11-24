@@ -28,6 +28,13 @@ more like learning than me remembering".
   person's correction, carrying the print it came from (`proposal.Used`). Carrying an override
   isn't a lesson accepted: those still go through the reviewer (`lessons.draw`).
 
+**A lesson of this filament type that isn't set for this variety is offered too**
+(mqucifer/print-shop#219, `Offering.lessons`): one learned on another variety, or where either
+print doesn't say which. The same value is another change on a preset that starts elsewhere, so
+it's unticked, saying the variety it was learned on, and one `use` takes it, whichever past print
+is picked. Once taken on this variety in a print that didn't fail, it's ticked here, saying so.
+It's still only applied by `use`.
+
 A failed print is told by its result, never by a symptom, as a success may carry one
 (mqucifer/print-shop#189).
 
@@ -61,7 +68,8 @@ from print_shop.setup import pauses, similar
 from print_shop.setup.bounds import MATERIAL, check
 from print_shop.setup.context import AS_PRINTED, SET_ASIDE, PartContext, Seen, printed, refuses
 from print_shop.setup.features import Feature
-from print_shop.setup.lessons import material_of
+from print_shop.setup.lessons import for_part, material_of, same_variety, taken_on, used_on
+from print_shop.setup.lessons import variety_of as _variety_of
 from print_shop.setup.proposal import ORIENTATION, PAUSE, Change, Proposal, Source, Used, pose_value
 from print_shop.setup.reach import not_sliced, profile_of, unplaced
 from print_shop.setup.reading import AT_THE_BACK, seen, turned_on_plate
@@ -155,6 +163,15 @@ class Item:
     pose: str = ""
     #: What a pause was for there, and a swap's spools as it printed.
     pause: pauses.Pause | None = None
+    #: A kept lesson that reaches this part and isn't set for its variety
+    #: (mqucifer/print-shop#219): offered beside the past print's, whichever is picked.
+    not_set_here: bool = False
+    #: Whose it is, said in place of a lesson's number: such a lesson's, with the variety it was
+    #: learned on, and the picked print's own at the same value where it's folded in.
+    source: str = ""
+    #: The reason the picked print's own was given, where it's folded in: the person's words,
+    #: said on this item's line as they were on its own.
+    also: str = ""
 
 
 @dataclass(frozen=True)
@@ -212,10 +229,45 @@ class Offering:
     failed: str = ""
     #: What the model's reading of the differences came to (`doubts.py`), said under the offer.
     model: str = ""
+    #: The kept lessons of this filament type not set for this variety, numbered after the past
+    #: print's items (mqucifer/print-shop#219).
+    lessons: tuple[Item, ...] = ()
 
     @property
     def past(self) -> Past | None:
         return self.options[self.picked] if self.options else None
+
+    def items(self) -> tuple[Item, ...]:
+        """Everything on offer, numbered as `use` and `clear` take them: the picked print's, then
+        the lessons not set for this variety. One setting at one value has one number: where
+        that print had such a lesson, or set the same at the same value, it's said once, in the
+        lessons' group, with both sources on its line."""
+        past = self.past
+        own = list(past.items) if past is not None else []
+        lessons = []
+        for lesson in self.lessons:
+            same = [i for i in own if i.key == lesson.key and (
+                (i.used.by is Source.LESSON and i.used.lesson == lesson.used.lesson)
+                or _same(i.key, i.value, lesson.value))]
+            own = [i for i in own if i not in same]
+            also = [_whose_words(i) for i in same
+                    if not (i.used.by is Source.LESSON and i.used.lesson == lesson.used.lesson)]
+            if also and past is not None:
+                folded = next(i for i in same if i.used.by is not Source.LESSON
+                              or i.used.lesson != lesson.used.lesson)
+                said = " ".join(folded.reason.split())
+                lesson = replace(lesson, source=f"{also[0]} on {past.stl_name}, and "
+                                                f"{lesson.source}",
+                                 also="" if said in ("", _NO_REASON) else said)
+            lessons.append(lesson)
+        return (*own, *lessons)
+
+    def span(self) -> int:
+        """The numbers Use these holds whichever print is picked: the most items of any, with
+        the lessons not set for this variety (mqucifer/print-shop#219). Picking another moves
+        none of the numbers after them."""
+        picks = [replace(self, picked=n).items() for n in range(len(self.options))]
+        return max((len(items) for items in picks), default=len(self.lessons))
 
     def pick(self, n: int) -> Offering | str:
         if not 1 <= n <= len(self.options):
@@ -227,9 +279,14 @@ class Offering:
         items = self._numbered(numbers)
         if isinstance(items, str):
             return items
+        return replace(self, cleared=self.cleared | {self._cleared_as(i) for i in items})
+
+    def _cleared_as(self, item: Item) -> tuple[str, str]:
+        """What clearing an item keeps: by the print it's from, or the lesson's, by its number."""
+        if item.not_set_here:
+            return f"lesson {item.used.lesson}", item.key
         assert self.past is not None
-        job = plate_job(self.past.job_id)
-        return replace(self, cleared=self.cleared | {(job, i.key) for i in items})
+        return plate_job(self.past.job_id), item.key
 
     def carried_to(self, built: Offering) -> Offering:
         """`built` for another pose, with the print picked and what was cleared here kept."""
@@ -241,6 +298,8 @@ class Offering:
     def standing(self, item: Item, proposal: Proposal, pose: str) -> Standing:
         """An item against what's set at this review: what's already so, what's the person's
         since, and what was cleared."""
+        if item.not_set_here:
+            return self._lesson_standing(item, proposal)
         past = self.past
         assert past is not None
         if item.key == ORIENTATION:
@@ -283,13 +342,37 @@ class Offering:
                 return Standing("=", (f"it's {here} here already",))
         return Standing(" " if why else "x", tuple(why))
 
+    def _lesson_standing(self, item: Item, proposal: Proposal) -> Standing:
+        """A lesson not set for this variety, against this review (mqucifer/print-shop#219)."""
+        now = _now(proposal, item.key)
+        if now is not None and now.used is not None and now.used.by is Source.LESSON \
+                and now.used.lesson == item.used.lesson and _same(item.key, now.value, item.value):
+            return Standing("=", ("used",))
+        if item.blocked:
+            return Standing("-", (item.blocked,))
+        here = now.value if now is not None else item.preset
+        if here and _same(item.key, here, item.value):
+            by = _set_by(now) if now is not None else "your preset"
+            return Standing("=", (f"{by} set it here already",) if now is not None
+                            else (f"it's {here} here already",))
+        why = list(item.doubts)
+        if now is not None:
+            if _theirs(now):
+                why.append(f"you set it to {now.value} at this review")
+            elif now.source is Source.ANSWER:
+                why.append(f"your answer set it to {now.value} here")
+            elif now.source is Source.LESSON:
+                why.append(f"lesson {now.lesson} sets it to {now.value} here")
+        if self._cleared_as(item) in self.cleared:
+            why.insert(0, "you cleared it")
+        return Standing(" " if why else "x", tuple(why))
+
     def use(self, numbers: list[int], proposal: Proposal, pose: str) -> list[Item] | str:
         """The items `use` takes: those pre-selected, or those numbered, doubted or not."""
-        past = self.past
-        if past is None:
+        if not self.items():
             return "there's no past print's settings to use"
         if not numbers:
-            chosen = [i for i in past.items if self.standing(i, proposal, pose).selected]
+            chosen = [i for i in self.items() if self.standing(i, proposal, pose).selected]
             if not chosen:
                 return "nothing is ticked: name one by its number, such as use 1"
         else:
@@ -316,20 +399,27 @@ class Offering:
 
     def ticked(self, proposal: Proposal, pose: str) -> list[Item]:
         """The items pre-selected and not used: what a plain ok goes on without."""
-        past = self.past
-        if past is None:
-            return []
-        return [i for i in past.items if self.standing(i, proposal, pose).selected]
+        return [i for i in self.items() if self.standing(i, proposal, pose).selected]
 
     def _numbered(self, numbers: list[int]) -> list[Item] | str:
-        past = self.past
-        if past is None:
+        items = self.items()
+        if not items:
             return "there's no past print's settings to use"
         if not numbers:
-            return list(past.items)
-        if any(not 1 <= n <= len(past.items) for n in numbers):
-            return f"a number from 1 to {len(past.items)}"
-        return [past.items[n - 1] for n in dict.fromkeys(numbers)]
+            return list(items)
+        if any(not 1 <= n <= len(items) for n in numbers):
+            return f"a number from 1 to {len(items)}"
+        return [items[n - 1] for n in dict.fromkeys(numbers)]
+
+
+def _whose_words(item: Item) -> str:
+    """Whose an item was, in a few words, for a line that names two sources."""
+    u = item.used
+    if u.by is Source.LESSON:
+        return f"lesson {u.lesson}"
+    if u.by is Source.READING:
+        return "what you took of the model's" if u.of_model else "what you took of the slice's"
+    return "your answer" if u.by is Source.ANSWER else "your override"
 
 
 def _now(proposal: Proposal, key: str) -> Change | None:
@@ -460,7 +550,50 @@ def offering(ledger: Ledger, part: ThisPart) -> Offering:
     for f in ranked:
         prints.setdefault(plate_job(f.row.job_id), f)
     offered = list(prints.values())[:SHOWN]
-    return Offering(options=tuple(_past(ledger, f, found, part) for f in offered))
+    return Offering(options=tuple(_past(ledger, f, found, part) for f in offered),
+                    lessons=_not_set_here(ledger, part))
+
+
+def _not_set_here(ledger: Ledger, part: ThisPart) -> tuple[Item, ...]:
+    """Each kept lesson of this filament type that reaches this part and isn't set for its
+    variety, as an item to use (mqucifer/print-shop#219). Unticked, saying the variety it was
+    learned on, unless the person took it on this variety in a print that didn't fail."""
+    kind = material_name(_first(part.filament.get("filament_type")))
+    variety = part.material.variety if part.material is not None else ""
+    items = []
+    for g in for_part(ledger, part.features, kind, variety):
+        if not g.withheld or not g.key or not kind or g.material != kind:
+            continue  # set here, only read, or for another filament type: withheld as before
+        learned = ""
+        printed = ledger.get(g.job_id)
+        if printed is not None:
+            learned = _variety_of(printed)
+        notes, doubts = [], []
+        source = f"lesson {g.id}, " + (
+            f"learned on {learned}" if learned else "learned on a variety its print doesn't say")
+        good = used_on(ledger, g.id)
+        if good:
+            notes.append(f"used on {len(good)} print{'s' if len(good) > 1 else ''} that didn't "
+                         "fail")
+        taken = taken_on(ledger, g.id, variety)
+        if taken is not None:
+            notes.append(f"taken on {variety} on {_day(taken.start_requested_at)}, on "
+                         f"{taken.stl_name}, which didn't fail")
+        elif not learned:
+            doubts.append("the variety it was learned on isn't known: its print doesn't say")
+        elif not variety:
+            doubts.append("this print's variety isn't known")
+        elif not same_variety(learned, variety):
+            doubts.append(f"this is {variety}")  # its source says the variety it was learned on
+        tier = profile_of(g.key, part.process, part.filament)
+        preset = _first((part.filament if tier == "filament" else part.process).get(g.key, ""))
+        items.append(Item(
+            key=g.key, value=g.value, preset=preset, reason=" ".join(g.text.split()), fits="",
+            used=Used(job_id=g.job_id, stl_name=g.stl_name, by=Source.LESSON, lesson=g.id),
+            doubts=tuple(doubts), blocked=unplaced(g.key, part.process, part.filament),
+            notes=tuple(notes), not_set_here=True, source=source,
+        ))
+    return tuple(items)
 
 
 def _against(at: int, row: Row, part: ThisPart) -> _Found:
@@ -915,6 +1048,10 @@ class _Items:
         now = material_name(_first(part.filament.get("filament_type")))
         if then and now and then != now:
             return [f"another filament: that was {then}, this is {now}"]
+        # The same type on another variety starts from another preset (mqucifer/print-shop#219).
+        was, is_now = _variety_of(row), part.material.variety if part.material else ""
+        if was and is_now and not same_variety(was, is_now):
+            return [f"learned on another variety, {was}; this is {is_now}"]
         name = _filament_name(row)
         if not name or name not in part.filament_names:
             here = part.filament_names[0] if part.filament_names else now or "not known"
@@ -1088,13 +1225,18 @@ def _render(offer: Offering, proposal: Proposal, pose: str) -> list[str]:
         return ["", *_wrapped("", "USE THESE: the past prints couldn't be read, so none is "
                                   f"offered: {offer.failed}")]
     past = offer.past
-    if past is None:
+    if not offer.items():
         return ["", "USE THESE: no past print has settings to offer."]
     rows = [(n, item, offer.standing(item, proposal, pose))
-            for n, item in enumerate(past.items, 1)]
-    lines = ["", *_wrapped("", f"USE THESE: from {past.stl_name}, {past.on}, job "
-                               f"{past.job_id[:8]}. None is applied until you use it.")]
-    lines += _about(past)
+            for n, item in enumerate(offer.items(), 1)]
+    if past is not None:
+        lines = ["", *_wrapped("", f"USE THESE: from {past.stl_name}, {past.on}, job "
+                                   f"{past.job_id[:8]}. None is applied until you use it.")]
+        lines += _about(past)
+    else:
+        lines = ["", *_wrapped("", "USE THESE: no past print has settings to offer, and lessons "
+                                   "of this filament aren't set for this variety. None is "
+                                   "applied until you use it.")]
 
     # Why one isn't ticked, said once where several share it.
     unticked = [(n, why) for n, _, found in rows if found.mark == " "
@@ -1112,7 +1254,8 @@ def _render(offer: Offering, proposal: Proposal, pose: str) -> list[str]:
               for i, least in enumerate(("", "now", ""))]
     headed = False
     for heading, sources in _GROUPS:
-        group = [row for row in open_rows if row[1].used.by in sources]
+        group = [row for row in open_rows if row[1].used.by in sources
+                 and row[1].not_set_here == (heading == _NOT_SET_HERE)]
         if not group:
             continue
         if Source.ANSWER in sources:
@@ -1122,7 +1265,7 @@ def _render(offer: Offering, proposal: Proposal, pose: str) -> list[str]:
         lines += _group(heading, group, cells, widths, proposal, set(shared), not headed)
         headed = True
     lines += _settled(rows, proposal)
-    for answer in past.answers:
+    for answer in past.answers if past is not None else ():
         lines += _wrapped("  you answered then: ", answer)
     if offer.model:
         lines += _wrapped("  ", offer.model)
@@ -1135,11 +1278,15 @@ def _render(offer: Offering, proposal: Proposal, pose: str) -> list[str]:
     return [*lines, "", *_wrapped("  ", _next(rows, bool(others)))]
 
 
-#: The items' groups, by whose each was.
+#: The group of lessons not set for this variety, whichever print is picked
+#: (mqucifer/print-shop#219).
+_NOT_SET_HERE = "LESSONS NOT SET FOR THIS VARIETY"
+#: The items' groups, by whose each was, then the lessons not set for this variety.
 _GROUPS: tuple[tuple[str, tuple[Source, ...]], ...] = (
     ("YOUR OVERRIDES", _PERSONS),
     ("LESSONS IT HAD", (Source.LESSON,)),
     ("YOUR ANSWERS THEN", (Source.ANSWER,)),
+    (_NOT_SET_HERE, (Source.LESSON,)),
 )
 
 
@@ -1187,7 +1334,7 @@ def _group(
     for _, item, found in group:
         reason = _reason(item, proposal)
         parts = reason.split(_AND, 1) if item.used.by is Source.LESSON else [reason]
-        words = [*parts, *_tags(item), *item.notes]
+        words = [*([item.also] if item.also else []), *parts, *_tags(item), *item.notes]
         if found.mark == " ":
             words += [f"not ticked: {why}" for why in found.why
                       if why != ASKED_AGAIN and why not in shared]
@@ -1230,6 +1377,9 @@ def _reason(item: Item, proposal: Proposal) -> str:
     u = item.used
     if u.by is not Source.LESSON:
         return "no reason given" if item.reason in ("", _NO_REASON) else item.reason
+    if item.source:
+        listed = any(g.id == u.lesson for g in proposal.lessons)
+        return item.source + (" (in Lessons below)" if listed else f": {item.reason}")
     if any(g.id == u.lesson for g in proposal.lessons):
         return f"lesson {u.lesson}, in Lessons below"
     return f"lesson {u.lesson}{_AND}{item.reason}"
@@ -1271,6 +1421,8 @@ def _settled(rows: list[tuple[int, Item, Standing]], proposal: Proposal) -> list
             # Its words are in the Lessons section where it's there, or where it set this.
             listed = any(g.id == u.lesson for g in proposal.lessons)
             why = "" if listed or (now is not None and now.lesson == u.lesson) else item.reason
+            if item.also:
+                why = item.also  # the person's words, folded in: theirs, wherever the lesson's are
         elif item.key == ORIENTATION or (now is not None and now.reason == item.reason):
             why = ""
         else:
