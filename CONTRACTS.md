@@ -112,6 +112,15 @@ edge as the failing case.
 When the graph exists, assert `ungated_edges(graph_edges()) == []` against the
 compiled graph. Until then the helper is tested against synthetic edge sets.
 
+**A person arms each start** (mqucifer/print-shop#214). A gate's approval isn't
+enough to move the machine: something a person does, which a message can't
+imitate, arms each start. Two ways: `PRINT_AGENT_ALLOW_HARDWARE=1` on the
+command's own line, which arms that run for the terminal's and the card's Start,
+or a signed-in phone's confirm on the home Wi-Fi, which arms one job's one start
+and is disarmed straight after (`arming.OneStart`). No setting, MQTT message,
+Home Assistant entity or automation, and no test arms.
+`live_printer()` is the one armed constructor, and refuses anything else.
+
 ---
 
 ## What these do not decide

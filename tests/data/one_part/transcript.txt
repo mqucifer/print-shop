@@ -167,6 +167,12 @@ frames         No camera frame was kept for this print: nothing was asked of the
 == the outcome's card
 {"pending": true, "waiting": 1, "job_id": "<job>", "stl_name": "cube.stl", "gcode_name": "ECC_0.4_cube_PLA0.2_16m_<job>.gcode", "started_at": "<time>", "ended_at": "<time>", "printer_end": "completed", "pause": "", "pause_for": "", "spools": "", "spool": "as recorded", "spool_choices": 0, "result": "unset", "symptom": "unset", "note": "", "error": null, "frames": 0, "frame": 0, "frame_at": "", "frames_why": "No camera frame was kept for this print: nothing was asked of the camera."}
 == the ledger
+[armed_starts]
+  job_id = <job>
+  how = flag
+  armed_by = PRINT_AGENT_ALLOW_HARDWARE=1 on the command line
+  armed_from = the Mac
+  armed_at = <time>
 [prints]
   job_id = <job>
   stl_name = cube.stl

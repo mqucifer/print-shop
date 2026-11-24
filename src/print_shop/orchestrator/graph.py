@@ -55,6 +55,7 @@ from langgraph.types import interrupt
 
 from print_shop import reprint
 from print_shop import sliced as hand_sliced
+from print_shop.arming import Armed, OneStart, armed_by_flag
 from print_shop.core.contracts import Gate, GateDecision, Outcome, approved_at, propose_validate
 from print_shop.core.contracts import Proposal as Chosen
 from print_shop.core.state import (
@@ -180,6 +181,7 @@ def build_graph(
     store: Store | None = None,
     waiting: Waiting | None = None,
     plate_slicer: SlicePlate = slice_plate,
+    one_start: OneStart | None = None,
 ) -> Any:
     """Build and compile the print pipeline graph.
 
@@ -205,6 +207,12 @@ def build_graph(
             build-it-from-the-environment fallback: that fallback existed for
             one afternoon and it started an unattended print from the test
             suite.
+            It's the client `PRINT_AGENT_ALLOW_HARDWARE=1` armed for the whole
+            run, or None.
+        one_start: A phone's confirm, armed for one job's one start
+            (mqucifer/print-shop#214). The print node takes it once, before
+            ``printer``, and it's disarmed as it's taken. None, and only
+            ``printer`` can print.
 
         slicer: What slices. The real Orca by default, a local process
             with no hardware behind it; tests replay a recorded slice.
@@ -1312,18 +1320,26 @@ def build_graph(
                 f"last decision was {last!r}. Refusing to command the printer."
             )
 
-        if printer is None:
-            raise RuntimeError(
-                "this graph was built without a printer, so it cannot command "
-                "one. Pass `printer=` to build_graph — `live_printer()` for the "
-                "real machine. Refusing to arm hardware that nobody asked for."
-            )
-        client: PrinterClient = printer
         if ledger is None:
             raise RuntimeError(
                 "this graph was built without a ledger. Every print the agent "
                 "starts is recorded (mqucifer/print-shop#2); refusing to start "
                 "one that would not be."
+            )
+        # A person arms each start (mqucifer/print-shop#214): a phone's confirm for this one,
+        # taken once and disarmed as it's taken, or the flag on the command's own line.
+        phone = one_start.take(state["job_id"]) if one_start is not None else None
+        client: PrinterClient
+        armed: Armed
+        if phone is not None:
+            client, armed = phone
+        elif printer is not None:
+            client, armed = printer, armed_by_flag(state["job_id"])
+        else:
+            raise RuntimeError(
+                "nobody armed this start: no phone's confirm armed it, and this run "
+                "wasn't started with PRINT_AGENT_ALLOW_HARDWARE=1. Refusing to arm "
+                "hardware that nobody asked for."
             )
 
         material = _as_started(state, ledger, "nothing was uploaded or printed")
@@ -1374,7 +1390,7 @@ def build_graph(
             else (_print_record(sent, remote_name, gcode, snapshot.machine, snapshot.firmware,
                                 store, material, spools),)
         )
-        ledger.record_start_requested(*rows, loaded=material)
+        ledger.record_start_requested(*rows, loaded=material, armed=armed)
         try:
             client.start(remote_name)
         except Exception as exc:

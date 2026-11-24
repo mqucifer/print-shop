@@ -68,13 +68,16 @@ or by a restart, at the questions, at the review or ready to print, it waits in 
 `--resume` alone takes the only one, and `--list` shows them. A job is never kept approved: a
 restart leaves it ready, and nothing is armed.
 
-**Start is the approval, given when it's time to print** (mqucifer/print-shop#209). At the
-approval gate, type `start` here, or press Yes on the card. Start checks again the G-code's hash,
+**Start is the approval, given when it's time to print** (mqucifer/print-shop#209). At the approval
+gate, type `start` here or press Yes on the card (in a run armed by the flag), or Start on your
+signed-in phone, on the home Wi-Fi (mqucifer/print-shop#214). Start checks again the G-code's hash,
 the part's file, the profiles, the loaded spool, the fitted nozzle and that the printer is free,
 and asks that the bed is clear: here, "I can see the bed is clear", where only `y` starts it, and
-on the card in its dialog, which can't be checked from here until mqucifer/print-shop#214. A
-change is said, with what to do, nothing prints, and the gate waits for a new Start. `reject` here
-is the card's Reject. One Start a gate: the second, from either, is told it was already taken.
+on the phone its tick box. A change is said, with what to do, nothing prints, and the gate waits
+for a new Start. `reject` here is the card's Reject. One Start a gate: the second is told it was
+already taken. **The card's Start is an MQTT message,** which anyone on the broker can send, so it
+starts only in a run the flag armed; in one it didn't, it's held before anything is read
+(mqucifer/print-shop#214, the Sponsor's "B").
 
 **Each gate says which it is** (mqucifer/print-shop#200). A part whose mesh isn't closed stops
 at the mesh gate first, before any question or slice: it's shown with its reason, the mesh's
@@ -101,11 +104,15 @@ print is over and which spool is on, and one answer says both. Start holds until
 sliced for, a swap's first, or another of the same variety, colour and tuning. An Approve with
 anything else loaded starts nothing: it says what to load, and waits for a new press.
 
-**This is the only place that arms the printer,** and only when the invocation
-says so: `PRINT_AGENT_ALLOW_HARDWARE=1` on this command's own line. Without it
-the job slices and parks at the approval gate, and a Start is held, saying so:
-the job waits, ready, for an armed `--resume` (mqucifer/print-shop#209). It lives outside the
-package so that nothing importable can arm the printer for itself.
+**A person arms each start, and this is the only place that builds what arms
+the printer** (mqucifer/print-shop#214). Two ways: `PRINT_AGENT_ALLOW_HARDWARE=1`
+on this command's own line, which arms the run for the terminal's and the card's
+Start; or a signed-in phone's Start, on the home Wi-Fi, which arms one start of
+one job, and disarms straight after. With `PHONE_HOME` in the settings, a job's
+run serves the phone's Start page (`scripts/phone.py` pairs a phone). Without
+either, a Start is held, saying so: the job waits, ready, for the phone or an
+armed `--resume` (mqucifer/print-shop#209). It lives outside the package so that
+nothing importable can arm the printer for itself.
 
 With a print started, it keeps running, watching the printer read-only, until
 the outcome is recorded in Home Assistant. Stopping it (Ctrl-C) leaves the
@@ -170,17 +177,19 @@ typed, so it can be read after it's scrolled past (mqucifer/print-shop#139): by 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import logging
 import shlex
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 from print_shop import reprint, sliced
-from print_shop.arming import ALLOW_HARDWARE_ENV, hardware_allowed
+from print_shop.arming import ALLOW_HARDWARE_ENV, Armed, OneStart, hardware_allowed
 from print_shop.core.contracts import Gate
 from print_shop.desk.read import parts_dir
 from print_shop.env import SETTINGS_PATH, load_env
@@ -189,11 +198,14 @@ from print_shop.inventory import SETUP, Inventory, InventoryError, Material
 from print_shop.joblog import LOG_NAME, JobLog, JobLogs, Terminal, secrets
 from print_shop.ledger import Ledger, ledger_path
 from print_shop.opening import ThisJob
-from print_shop.orchestrator.daemon import Daemon
+from print_shop.orchestrator.daemon import CARD_STARTS_UNDER_FLAG, Daemon
 from print_shop.orchestrator.kept import WaitingJob, WaitingJobs
 from print_shop.orchestrator.live import AlreadyLive, Live, only_live
 from print_shop.orchestrator.outcome import no_frames
 from print_shop.orchestrator.spools import ask_on_now
+from print_shop.phone.home import Home, HomeRefused
+from print_shop.phone.phones import Phones, phones_path
+from print_shop.phone.server import PhoneOff, attach, make_server
 from print_shop.printer.centauri import FrameRecorder, PrinterClient, live_printer
 from print_shop.queue_terminal import Runs, parse_adding, serve, stock_listing
 from print_shop.runtime import (
@@ -226,14 +238,43 @@ from print_shop.slicer.store import describe as describe_store
 APPROVAL_WAIT_S = 3600.0
 FINISH_WAIT_S = 900.0  # after the Start: preflight, upload, and a five-minute start watch
 
-#: The gate before printing, as the terminal says it, and how to answer (mqucifer/print-shop#209).
-READY = "Ready to print. Start it here or on the card, or reject it on the card."
-START_HERE = "  Type start here, or Yes on the card. It waits until you start or reject it."
-#: Where nothing reads the terminal (input piped, no terminal): the card only.
-READY_ON_THE_CARD = "Ready to print. Start or reject it on the card."
+#: The gate before printing, as the terminal says it, and how to answer (mqucifer/print-shop#209,
+#: mqucifer/print-shop#214): see `start_words`.
+READY = "Ready to print. Start it here, or reject it on the card."
+START_HERE = "  Type start here. It waits until you start or reject it."
 ON_THE_CARD = "  It waits until you start or reject it."
 #: The bed's question at the terminal's Start, in the phone's words (mqucifer/print-shop#214).
 BED_QUESTION = "  I can see the bed is clear [y/N]"
+
+
+
+
+def start_words(*, phone: bool, here: bool) -> tuple[str, str]:
+    """The gate before printing's two lines: where a Start is taken, and how to answer.
+
+    `phone` is whether the phone's Start page is served, and `here` whether this terminal is
+    read. The card's is taken where `CARD_STARTS_UNDER_FLAG` (mqucifer/print-shop#214): like a
+    `start` here, it prints only in a run the flag armed, as the run's first line says.
+    """
+    card = CARD_STARTS_UNDER_FLAG
+    where = [w for w, can in (("here", here), ("on your phone", phone), ("on the card", card))
+             if can]
+    if not where:
+        ready = ("Ready to print. Nothing here can start it: take it up at a terminal "
+                 "(`--resume`), or set up your phone's Start. Reject it on the card.")
+    elif where == ["on the card"]:
+        ready = "Ready to print. Start or reject it on the card."
+    else:
+        places = " or ".join(where) if len(where) < 3 else f"{where[0]}, {where[1]} or {where[2]}"
+        ready = f"Ready to print. Start it {places}, or reject it on the card."
+    if not here:
+        return ready, ON_THE_CARD
+    how = ["Type start here"]
+    if phone:
+        how.append("Start on your phone")
+    if card:
+        how.append("Yes on the card")
+    return ready, f"  {', or '.join(how)}. It waits until you start or reject it."
 
 
 #: Ctrl-C at the question before preparing.
@@ -638,7 +679,8 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
 
     recorder = FrameRecorder(recording_path()) if args.record else None
     a_job = bool(args.stl) or hand_sliced is not None
-    printer, armed, recording = _arming(recorder) if a_job else (None, "", "")
+    phone = PhonePage(args.settings, recorder) if a_job else PhonePage.off()
+    printer, armed, recording = _arming(recorder, phone=phone.on) if a_job else (None, "", "")
     if this is not None:
         this.armed, this.recording = armed, recording
         if len(args.stl) > 1:
@@ -656,6 +698,8 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
 
     run = build_run(
         printer=printer,
+        one_start=phone.one_start,
+        start_page=phone.address,
         profiles=profiles,
         recorder=recorder,
         settings=args.settings,
@@ -669,7 +713,7 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
     )
     job_id = ""
     try:
-        with run.daemon:
+        with run.daemon, phone.serving(run.daemon):
             if args.serve:
                 print("Serving the outcome gate. Ctrl-C to stop; open prints stay open.")
                 while True:
@@ -699,7 +743,8 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
                     how = (f"{'kept as laid' if args.as_laid else 'orienting'}, then a few "
                            "questions about the part, here")
                 print("\n".join(ThisJob.started(job_id, log, how, terminal_width())))
-            return _follow(run, job_id, turned=hand_sliced is None, read=read)
+            return _follow(run, job_id, turned=hand_sliced is None, read=read,
+                           armed=printer is not None, phone=phone.on)
     except KeyboardInterrupt:
         print(_stopped(run, job_id))
         return 130
@@ -707,29 +752,95 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
         run.ledger.close()
 
 
-def _armed(recorder: FrameRecorder | None) -> PrinterClient | None:
+def _armed(recorder: FrameRecorder | None, *, phone: bool = False) -> PrinterClient | None:
     """The printer an approval commands, if this command's own line armed it, said either way."""
-    printer, armed, recording = _arming(recorder)
+    printer, armed, recording = _arming(recorder, phone=phone)
     if recording:
         print(recording)
     print(armed)
     return printer
 
 
-def _arming(recorder: FrameRecorder | None) -> tuple[PrinterClient | None, str, str]:
-    """The printer an approval commands, if this command's own line armed it, and what's said of
-    it: whether it's armed, and where its replies are recorded, or "". THIS JOB says them as its
-    rows (mqucifer/print-shop#266)."""
+def _arming(
+    recorder: FrameRecorder | None, *, phone: bool = False,
+) -> tuple[PrinterClient | None, str, str]:
+    """The printer a Start commands, if this command's own line armed it, and what's said of it:
+    whether it's armed, with the phone's Start where it's served (mqucifer/print-shop#214), and
+    where its replies are recorded, or "". THIS JOB says them as its rows
+    (mqucifer/print-shop#266)."""
     recording = (f"Recording the printer's replies to {recorder.path}" if recorder is not None
                  else "")
+    where = "a Start, here or on the card," if CARD_STARTS_UNDER_FLAG else "a Start here"
     if hardware_allowed():
         return (live_printer(recorder=recorder),
-                f"ARMED by {ALLOW_HARDWARE_ENV}=1: a Start, here or on the card, starts the print.",
-                recording)
+                f"ARMED by {ALLOW_HARDWARE_ENV}=1: {where} starts the print.", recording)
+    waits = "a Start on your phone, or an armed `--resume`" if phone else "an armed `--resume`"
     return (None,
-            f"Not armed ({ALLOW_HARDWARE_ENV} is not 1): a Start, here or on the card, will NOT "
-            "print. It's held, and the job waits for an armed `--resume`.",
+            f"Not armed ({ALLOW_HARDWARE_ENV} is not 1): {where} will NOT print. It's held, and "
+            f"the job waits for {waits}.",
             recording)
+
+
+class PhonePage:
+    """The phone's Start page for this run (mqucifer/print-shop#214): what a phone's confirm arms
+    for one start, and the server, on the home Wi-Fi only. Said either way as it's set up."""
+
+    def __init__(self, settings: Path | None, recorder: FrameRecorder | None) -> None:
+        self.one_start: OneStart | None = None
+        self._server: ThreadingHTTPServer | None = None
+        #: The page's address, for the card to link to, or "".
+        self.address = ""
+        try:
+            home = Home.from_settings(settings)
+        except HomeRefused as exc:
+            print(f"The phone's Start is off: {exc}.")
+            return
+        if home is None:
+            return  # not set up: the terminal's Start, as before
+        try:
+            self._server = make_server(home=home, phones=Phones(phones_path(settings)),
+                                       starts=None)
+        except PhoneOff as exc:
+            print(f"{exc}.")
+            return
+
+        def build(armed: Armed) -> PrinterClient:
+            # The only other door to an armed client: a phone's confirm for one start, which
+            # `live_printer` spends (mqucifer/print-shop#214).
+            return live_printer(armed=armed, recorder=recorder)
+
+        self.one_start = OneStart(build)
+        self.address = f"{home.origin}/"
+        print(f"Your phone's Start: {home.origin}/ , on the home Wi-Fi only "
+              "(`scripts/phone.py pair` signs a phone in).")
+
+    @classmethod
+    def off(cls) -> PhonePage:
+        page = cls.__new__(cls)
+        page.one_start = None
+        page._server = None
+        page.address = ""
+        return page
+
+    @property
+    def on(self) -> bool:
+        return self._server is not None
+
+    @contextlib.contextmanager
+    def serving(self, daemon: Daemon) -> Iterator[None]:
+        """The page served for `daemon`, for as long as the run lasts."""
+        server = self._server
+        if server is None:
+            yield
+            return
+        attach(server, daemon)
+        thread = threading.Thread(target=server.serve_forever, name="phone-page", daemon=True)
+        thread.start()
+        try:
+            yield
+        finally:
+            server.shutdown()
+            server.server_close()
 
 
 def _say_waiting(daemon: Daemon) -> None:
@@ -783,8 +894,12 @@ def _resume(args: argparse.Namespace, job_log: JobLog, live: Live) -> int:
         asker = cli_asker(read=answering)
         waiting_on = cli_waiting(read=read, replayed=False, prompt=answering.prompt)
     recorder = FrameRecorder(recording_path()) if args.record else None
+    phone = PhonePage(args.settings, recorder)
+    printer = _armed(recorder, phone=phone.on)
     run = build_run(
-        printer=_armed(recorder),
+        printer=printer,
+        one_start=phone.one_start,
+        start_page=phone.address,
         profiles=kept.profiles,
         recorder=recorder,
         settings=args.settings,
@@ -796,9 +911,10 @@ def _resume(args: argparse.Namespace, job_log: JobLog, live: Live) -> int:
         on_step=live.at,
     )
     try:
-        with run.daemon:
+        with run.daemon, phone.serving(run.daemon):
             run.daemon.resume(job_id)
-            return _follow(run, job_id, turned=not kept.by_hand, read=read)
+            return _follow(run, job_id, turned=not kept.by_hand, read=read,
+                           armed=printer is not None, phone=phone.on)
     except KeyboardInterrupt:
         print(_stopped(run, job_id))
         return 130
@@ -806,8 +922,11 @@ def _resume(args: argparse.Namespace, job_log: JobLog, live: Live) -> int:
         run.ledger.close()
 
 
-def _follow(run: Run, job_id: str, *, turned: bool, read: Callable[[str], str]) -> int:
-    """The job from its gates to its end: each gate shown, a Start taken here or on the card,
+def _follow(
+    run: Run, job_id: str, *, turned: bool, read: Callable[[str], str], armed: bool = False,
+    phone: bool = False,
+) -> int:
+    """The job from its gates to its end: each gate shown, a Start taken here or on the phone,
     and a print watched until its outcome is answered."""
     shown = 0
     while True:  # a gate at a time, to the one before printing
@@ -819,15 +938,14 @@ def _follow(run: Run, job_id: str, *, turned: bool, read: Callable[[str], str]) 
         if gate is None:
             break  # it ended first
         shown += 1
-        lines = _gate_lines(gate, turned=turned)
         here = can_ask()
-        if gate.get("gate") == Gate.BEFORE_PRINT and not here:
-            lines[0] = READY_ON_THE_CARD  # nothing reads this terminal
+        ready, how = start_words(phone=phone, here=here)
+        lines = _gate_lines(gate, turned=turned, ready=ready)
         for line in lines:
             print(line)
         if gate.get("gate") == Gate.BEFORE_PRINT:
             if here:
-                print(START_HERE)
+                print(how)
                 threading.Thread(target=_start_here, args=(run.daemon, job_id, read, print),
                                  daemon=True).start()
             else:
@@ -889,12 +1007,16 @@ def _queue(args: argparse.Namespace, live: Live) -> int:
                             filament=args.filament, machine=args.machine, process=args.process)
 
     recorder = FrameRecorder(recording_path()) if args.record else None
-    run = build_run(printer=_armed(recorder), profiles=None, recorder=recorder,
-                    settings=args.settings, on_step=live.at)
+    # The queue's jobs are offered at the daemon's gate, one at a time: the phone starts them
+    # there as it does a lone job (mqucifer/print-shop#214).
+    phone = PhonePage(args.settings, recorder)
+    run = build_run(printer=_armed(recorder, phone=phone.on), profiles=None, recorder=recorder,
+                    settings=args.settings, on_step=live.at, one_start=phone.one_start,
+                    start_page=phone.address)
     # Each job keeps its own job.log, as a lone job does (mqucifer/print-shop#139).
     logs = JobLogs(secrets(args.settings), WORK_DIR)
     try:
-        with run.daemon, logs.routing(), build_queue(
+        with run.daemon, phone.serving(run.daemon), logs.routing(), build_queue(
                 run, settings=args.settings, profiles_for=profiles, sliced_for=_sliced_for(args),
                 logs=logs) as queue:
             if adding:
@@ -1006,14 +1128,14 @@ def on_screen(record: logging.LogRecord) -> bool:
 AVAILABILITY_SAID_AGAIN = "availability read offline while this run is online"
 
 
-def _gate_lines(gate: dict[str, object], *, turned: bool) -> list[str]:
+def _gate_lines(gate: dict[str, object], *, turned: bool, ready: str = READY) -> list[str]:
     """A gate as the terminal, and so the job's log, shows it (mqucifer/print-shop#200).
 
     `turned` is False for a hand-sliced file, which nothing turns.
     """
     lines = [f"At {Gate.named(gate)}. Approve or Reject on the dashboard."]
     if gate.get("gate") == Gate.BEFORE_PRINT:
-        lines = [READY]
+        lines = [ready]
         seconds = gate.get("print_time_s")
         lines += [f"  time        {int(seconds) // 60 if isinstance(seconds, int | float) else 0}"
                   " min",

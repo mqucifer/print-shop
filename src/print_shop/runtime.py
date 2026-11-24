@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from print_shop import sliced
+from print_shop.arming import OneStart
 from print_shop.core.mqtt import MqttConfig
 from print_shop.core.state import turn_words
 from print_shop.env import SETTINGS_PATH, load_env
@@ -172,6 +173,8 @@ def build_run(
     store: Store | None = None,
     on_step: Callable[[str, str, Step], None] | None = None,
     waiting: Waiting | None = None,
+    one_start: OneStart | None = None,
+    start_page: str = "",
 ) -> Run:
     """A daemon wired to the real broker, Orca, LiteLLM, ledger and a read-only watcher.
 
@@ -194,6 +197,10 @@ def build_run(
 
     `waiting` is what the person sees and does while the model works on its questions
     (`cli_waiting`, mqucifer/print-shop#208).
+
+    `one_start` is what a signed-in phone's confirm arms, for one job's one start
+    (mqucifer/print-shop#214); its builder is `scripts/print_job.py`'s. None, and a phone's Start
+    is held. `start_page` is its page's address, for the card to link to.
 
     Raises:
         RuntimeError, FileNotFoundError: On missing settings, before a job starts.
@@ -243,6 +250,8 @@ def build_run(
         # What Start reads the slice's profiles again from (mqucifer/print-shop#209).
         store_root=STORE_DIR,
         waiting=waiting,
+        one_start=one_start,
+        start_page=start_page,
     )
     return Run(daemon=daemon, ledger=ledger, recorder=recorder)
 

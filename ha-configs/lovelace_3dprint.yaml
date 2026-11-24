@@ -83,14 +83,21 @@ views:
                 {% set held = state_attr('sensor.3d_print_agent_status', 'held') %}
                 {%- if held %}**Not started:** {{ held | replace('Not started: ', '') }}.{% endif %}
 
+                {% set start = state_attr('sensor.3d_print_agent_status', 'start_page') %}
+                {%- if start %}**[Start it on your phone]({{ start }})**, on the home Wi-Fi: it
+                opens in the phone's browser.{% endif %}
+
                 *Waits until you start or reject it.*
 
             - type: horizontal-stack
               cards:
-                # Start (mqucifer/print-shop#209). The dialog asks the bed, in the words of
-                # the phone's Start (mqucifer/print-shop#214). It can't take a template, so
-                # it names the card above. A press can't say it was shown: the bed is still
-                # the person's to look at, and print-shop says so.
+                # Start (mqucifer/print-shop#209, mqucifer/print-shop#214). A press is an MQTT
+                # message, which anyone on the broker can send, so at the gate before printing
+                # it starts the print only in a run armed by PRINT_AGENT_ALLOW_HARDWARE=1 (the
+                # Sponsor's "B", 2026-11-24). In a run that isn't, it's held, saying so, and the
+                # phone's Start page, linked above, starts it on the home Wi-Fi. The dialog asks
+                # the bed. It can't take a template, so it names the card above, and a press
+                # can't say it was shown: the bed is still the person's to look at.
                 - type: button
                   entity: button.3d_print_agent_approve
                   name: "Yes, print it"
