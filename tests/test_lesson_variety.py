@@ -120,6 +120,11 @@ def offered(ledger: Ledger, rail: Path, kind_of: str) -> Offering:
                                  filament_names=(kind_of,), material=spool(kind_of)))
 
 
+def numbered(found: Offering) -> int:
+    """The number the lesson not set for this variety is used by."""
+    return next(n for n, i in enumerate(found.items(), 1) if i.not_set_here)
+
+
 def the_lesson(found: Offering, proposal: Proposal | None = None) -> tuple[Item, Standing]:
     [item] = found.lessons
     return item, found.standing(item, proposal or Proposal(), "0,0,0")
@@ -138,7 +143,7 @@ def request(found: Offering, proposal: Proposal | None = None) -> ReviewRequest:
 def taken(ledger: Ledger, rail: Path, job: str, result: str | None = "success") -> Row:
     """A print on the fast variety that took the basic one's plate lesson from Use these."""
     found = offered(ledger, rail, FAST)
-    number = found.items().index(found.lessons[0]) + 1
+    number = numbered(found)
     review = parse_answer(f"use {number}", request(found))
     assert not isinstance(review, str), review
     [used] = review.corrections
@@ -167,8 +172,8 @@ def test_a_bed_lesson_is_set_on_its_variety_offered_on_another_and_withheld_on_a
     assert (item.key, item.value, item.used.lesson, item.used.by) == (
         "textured_plate_temp", "75", 1, Source.LESSON)
     assert standing.mark == " "
-    assert standing.why == (f"this print is another variety, {FAST}",)
-    assert item.notes == (f"learned on {BASIC}",)
+    assert standing.why == (f"learned on another variety, {BASIC}; this is {FAST}",)
+    assert (item.source, item.notes) == (f"lesson 1, learned on {BASIC}", ())
     assert offered(ledger, rail, BASIC).lessons == (), "set on its own variety, not offered"
     pla_part = this(rail, process=PROCESS, filament=PLA, filament_names=("Made-up PLA",),
                     material=spool("Made-up PLA", "PLA"))
@@ -204,7 +209,8 @@ def test_the_proposal_sets_it_on_its_variety_and_the_review_says_why_not_on_anot
     assert f"(not given: learned on {BASIC}; this print is {FAST})" in shown
     text = " ".join(shown.split())
     assert "LESSONS NOT SET FOR THIS VARIETY" in text
-    assert f"learned on {BASIC}; not ticked: this print is another variety, {FAST}" in text
+    assert (f"your override on rail.stl, and lesson 1, learned on {BASIC} (in Lessons above); "
+            f"not ticked: learned on another variety, {BASIC}; this is {FAST}") in text
 
 
 def profiles(tmp_path: Path, kind_of: str) -> SlicerProfiles:
@@ -242,7 +248,24 @@ def test_a_past_prints_own_override_on_another_variety_says_the_variety(
     [mine] = [i for i in found.past.items if i.key == "textured_plate_temp"]
     standing = found.standing(mine, Proposal(), "0,0,0")
     assert standing.mark == " "
-    assert f"another variety: that was {BASIC}, this is {FAST}" in standing.why
+    assert f"learned on another variety, {BASIC}; this is {FAST}" in standing.why
+
+
+def test_one_setting_at_one_value_has_one_number(ledger: Ledger, rail: Path) -> None:
+    """The print it was learned on set the same, at the same value: it's said once, in the
+    lessons' group, with both sources, so it can't be ticked twice or used twice."""
+    learned_on_basic(ledger, rail)
+    found = offered(ledger, rail, FAST)
+    assert [i.key for i in found.items()] == ["brim_type", "textured_plate_temp"]
+    [lesson] = [i for i in found.items() if i.not_set_here]
+    assert lesson.source == f"your override on rail.stl, and lesson 1, learned on {BASIC}"
+    other = on(ledger, "basic-2", rail, BASIC, plate("80"), brim())
+    assert other.job_id == "basic-2"
+    later = offered(ledger, rail, FAST)
+    assert later.past is not None and later.past.job_id == "basic-2"
+    assert [(i.key, i.value) for i in later.items() if i.key == "textured_plate_temp"] == [
+        ("textured_plate_temp", "80"), ("textured_plate_temp", "75")], (
+        "another value is another choice, and each says why")
 
 
 # --------------------------------------------------------------------------
@@ -270,7 +293,8 @@ def test_one_use_takes_it_and_a_print_that_didnt_fail_ticks_it_there_from_then_o
     day = row.start_requested_at
     assert any(n.startswith(f"taken on {FAST} on ") and n.endswith(
         "on rail.stl, which didn't fail") for n in item.notes), (item.notes, day)
-    assert f"learned on {BASIC}, used on 1 print that didn't fail" in item.notes
+    assert item.source == f"lesson 1, learned on {BASIC}"
+    assert "used on 1 print that didn't fail" in item.notes
     found = offered(ledger, rail, FAST)
     assert found.past is not None and found.past.job_id == "fast-1", "the print it was taken on"
     assert [i.used.lesson for i in found.items() if i.used.by is Source.LESSON] == [1], (
@@ -288,13 +312,13 @@ def test_taken_in_a_print_that_failed_or_isnt_answered_it_stays_unticked(
     taken(ledger, rail, "fast-1", result)
     _, standing = the_lesson(offered(ledger, rail, FAST))
     assert not standing.selected
-    assert standing.why == (f"this print is another variety, {FAST}",)
+    assert standing.why == (f"learned on another variety, {BASIC}; this is {FAST}",)
 
 
 def test_used_it_reads_as_used_and_cleared_it_says_so(ledger: Ledger, rail: Path) -> None:
     learned_on_basic(ledger, rail)
     found = offered(ledger, rail, FAST)
-    number = found.items().index(found.lessons[0]) + 1
+    number = numbered(found)
     review = parse_answer(f"use {number}", request(found))
     assert not isinstance(review, str)
     _, standing = the_lesson(found, Proposal(changes=review.corrections))
@@ -337,7 +361,8 @@ def test_an_older_lessons_variety_is_read_from_its_print_or_said_to_be_unknown(
         assert given(ledger, rail, kind_of)["textured_plate_temp"].withheld == unknown
     item, standing = the_lesson(offered(ledger, rail, BASIC))
     assert standing.why == (unknown,)
-    assert item.notes == ("learned on a variety its print doesn't say",)
+    assert (item.source, item.notes) == (
+        "lesson 1, learned on a variety its print doesn't say", ())
 
 
 def test_with_no_past_print_to_offer_the_lessons_are_still_offered(

@@ -165,6 +165,9 @@ class Item:
     #: A kept lesson that reaches this part and isn't set for its variety
     #: (mqucifer/print-shop#219): offered beside the past print's, whichever is picked.
     not_set_here: bool = False
+    #: Whose it is, said in place of a lesson's number: such a lesson's, with the variety it was
+    #: learned on, and the picked print's own at the same value where it's folded in.
+    source: str = ""
 
 
 @dataclass(frozen=True)
@@ -232,12 +235,24 @@ class Offering:
 
     def items(self) -> tuple[Item, ...]:
         """Everything on offer, numbered as `use` and `clear` take them: the picked print's, then
-        the lessons not set for this variety. Such a lesson is said once, there, with where it
-        stands on this variety, though that print had it too."""
-        mine = {i.used.lesson for i in self.lessons}
-        own = self.past.items if self.past is not None else ()
-        return tuple(i for i in own if i.used.by is not Source.LESSON
-                     or i.used.lesson not in mine) + self.lessons
+        the lessons not set for this variety. One setting at one value has one number: where
+        that print had such a lesson, or set the same at the same value, it's said once, in the
+        lessons' group, with both sources on its line."""
+        past = self.past
+        own = list(past.items) if past is not None else []
+        lessons = []
+        for lesson in self.lessons:
+            same = [i for i in own if i.key == lesson.key and (
+                (i.used.by is Source.LESSON and i.used.lesson == lesson.used.lesson)
+                or _same(i.key, i.value, lesson.value))]
+            own = [i for i in own if i not in same]
+            also = [_whose_words(i) for i in same
+                    if not (i.used.by is Source.LESSON and i.used.lesson == lesson.used.lesson)]
+            if also and past is not None:
+                lesson = replace(lesson, source=f"{also[0]} on {past.stl_name}, and "
+                                                f"{lesson.source}")
+            lessons.append(lesson)
+        return (*own, *lessons)
 
     def pick(self, n: int) -> Offering | str:
         if not 1 <= n <= len(self.options):
@@ -380,6 +395,16 @@ class Offering:
         if any(not 1 <= n <= len(items) for n in numbers):
             return f"a number from 1 to {len(items)}"
         return [items[n - 1] for n in dict.fromkeys(numbers)]
+
+
+def _whose_words(item: Item) -> str:
+    """Whose an item was, in a few words, for a line that names two sources."""
+    u = item.used
+    if u.by is Source.LESSON:
+        return f"lesson {u.lesson}"
+    if u.by is Source.READING:
+        return "what you took of the model's" if u.of_model else "what you took of the slice's"
+    return "your answer" if u.by is Source.ANSWER else "your override"
 
 
 def _now(proposal: Proposal, key: str) -> Change | None:
@@ -529,11 +554,12 @@ def _not_set_here(ledger: Ledger, part: ThisPart) -> tuple[Item, ...]:
         if printed is not None:
             learned = _variety_of(printed)
         notes, doubts = [], []
-        said = f"learned on {learned}" if learned else "learned on a variety its print doesn't say"
+        source = f"lesson {g.id}, " + (
+            f"learned on {learned}" if learned else "learned on a variety its print doesn't say")
         good = used_on(ledger, g.id)
         if good:
-            said += f", used on {len(good)} print{'s' if len(good) > 1 else ''} that didn't fail"
-        notes.append(said)
+            notes.append(f"used on {len(good)} print{'s' if len(good) > 1 else ''} that didn't "
+                         "fail")
         taken = taken_on(ledger, g.id, variety)
         if taken is not None:
             notes.append(f"taken on {variety} on {_day(taken.start_requested_at)}, on "
@@ -543,14 +569,14 @@ def _not_set_here(ledger: Ledger, part: ThisPart) -> tuple[Item, ...]:
         elif not variety:
             doubts.append("this print's variety isn't known")
         elif not same_variety(learned, variety):
-            doubts.append(f"this print is another variety, {variety}")
+            doubts.append(f"learned on another variety, {learned}; this is {variety}")
         tier = profile_of(g.key, part.process, part.filament)
         preset = _first((part.filament if tier == "filament" else part.process).get(g.key, ""))
         items.append(Item(
             key=g.key, value=g.value, preset=preset, reason=" ".join(g.text.split()), fits="",
             used=Used(job_id=g.job_id, stl_name=g.stl_name, by=Source.LESSON, lesson=g.id),
             doubts=tuple(doubts), blocked=unplaced(g.key, part.process, part.filament),
-            notes=tuple(notes), not_set_here=True,
+            notes=tuple(notes), not_set_here=True, source=source,
         ))
     return tuple(items)
 
@@ -1010,7 +1036,7 @@ class _Items:
         # The same type on another variety starts from another preset (mqucifer/print-shop#219).
         was, is_now = _variety_of(row), part.material.variety if part.material else ""
         if was and is_now and not same_variety(was, is_now):
-            return [f"another variety: that was {was}, this is {is_now}"]
+            return [f"learned on another variety, {was}; this is {is_now}"]
         name = _filament_name(row)
         if not name or name not in part.filament_names:
             here = part.filament_names[0] if part.filament_names else now or "not known"
@@ -1319,6 +1345,9 @@ def _reason(item: Item, proposal: Proposal) -> str:
     u = item.used
     if u.by is not Source.LESSON:
         return "no reason given" if item.reason in ("", _NO_REASON) else item.reason
+    if item.source:
+        listed = any(g.id == u.lesson for g in proposal.lessons)
+        return item.source + (" (in Lessons above)" if listed else f": {item.reason}")
     if any(g.id == u.lesson for g in proposal.lessons):
         return f"lesson {u.lesson}, in Lessons above"
     return f"lesson {u.lesson}{_AND}{item.reason}"
