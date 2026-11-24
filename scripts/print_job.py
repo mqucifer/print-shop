@@ -1032,18 +1032,19 @@ def _queue(args: argparse.Namespace, live: Live) -> int:
         with run.daemon, phone.serving(run.daemon), logs.routing(), build_queue(
                 run, settings=args.settings, profiles_for=profiles, sliced_for=_sliced_for(args),
                 logs=logs) as queue:
+            runs = Runs(ledger_path(args.settings), WORK_DIR, STORE_DIR, bed, slice_model,
+                        parts_dir(args.settings))
             if phone.shop is not None:
-                # The phone's Main is this queue (mqucifer/print-shop#221).
-                phone.shop.queue = queue
+                # The phone's Main is this queue, and its Again this `again`
+                # (mqucifer/print-shop#221).
+                phone.shop.queue, phone.shop.runs = queue, runs
             if adding:
                 added, refused = queue.add(adding)
                 print(f"Added {len(added)} to the queue." if added else "Nothing was added.")
                 for why in refused:
                     print(f"Not added: {why}")
             return serve(queue, run.daemon, read=input,
-                         stock=stock_listing(ledger_path(args.settings)),
-                         runs=Runs(ledger_path(args.settings), WORK_DIR, STORE_DIR, bed,
-                                   slice_model, parts_dir(args.settings)))
+                         stock=stock_listing(ledger_path(args.settings)), runs=runs)
     except KeyboardInterrupt:
         print("\nPut by: every job waits where it was, and `--queue` takes them up again. Any "
               "print without an answer stays open in the ledger.")

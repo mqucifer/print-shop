@@ -9,6 +9,7 @@ arms, and no request but #214's confirm reaches the gate.
 from __future__ import annotations
 
 import inspect
+import json
 import re
 from collections.abc import Iterator
 from contextlib import ExitStack
@@ -609,3 +610,98 @@ def test_print_it_in_another_spool_is_the_queues_own_move(page: Page) -> None:
     job = page.queue.find(job_id[:8])
     assert job is not None and job.spool_id == 3
     assert phone.post(f"/job/{job_id}/spool", {"spool": "x"}).status == 400
+
+
+# --------------------------------------------------------------------------
+# Again: the terminal's own `again`, which only queues
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def again_page(tmp_path: Path) -> Iterator[tuple[Page, Any]]:
+    from print_shop.queue_terminal import Runs  # noqa: PLC0415
+    from tests.test_print_again import PEI  # noqa: PLC0415
+    from tests.test_print_again import Again as AgainShop  # noqa: PLC0415
+
+    made = AgainShop(tmp_path)
+    phones = Phones(tmp_path / "phones.sqlite")
+    starts = FakeStarts()
+    try:
+        with ExitStack() as stack:
+            daemon = stack.enter_context(made.daemon())
+            queue = stack.enter_context(made.queue(daemon))
+            shop = PhoneShop(made.ledger_path, queue=queue, daemon=daemon,
+                             runs=Runs(made.ledger_path, made.work, made.store, PEI, made.slicer,
+                                       tmp_path / "parts"))
+            handler = handler_for(home=home(), phones=phones, starts=starts, shop=shop)
+            yield Page(handler, shop, phones, starts, queue, daemon, made), made
+    finally:
+        made.ledger.close()
+
+
+def test_print_again_as_it_was_queues_the_same_file_and_starts_nothing(
+    again_page: tuple[Page, Any],
+) -> None:
+    from print_shop.ledger import Symptom  # noqa: PLC0415
+
+    page, made = again_page
+    first = made.printed(page.daemon, page.queue, Adding(made.part("bracket")),
+                         symptom=Symptom.STRINGING)
+    started, sliced = made.printer.verbs.count("start"), len(made.slicer.calls)
+    phone = page.phone()
+    card = phone.get("/runs")
+    assert "Print again" in card.body and "Change and print again" in card.body
+    done = phone.post(f"/run/{first}/again", {"go": "1"})
+    assert done.status == 200 and "In the queue: a print again of job" in done.body, done.body
+    assert "Start is still yours" in done.body
+    (job,) = page.queue.jobs()
+    assert job.by_hand and job.part == "bracket.stl"
+    assert len(made.slicer.calls) == sliced, "nothing is sliced again"
+    assert made.printer.verbs.count("start") == started, "and nothing starts"
+
+
+def test_change_and_print_again_slices_only_when_queued_and_keeps_the_run_pinned(
+    again_page: tuple[Page, Any],
+) -> None:
+    from print_shop.ledger import Symptom  # noqa: PLC0415
+    from print_shop.phone.again import NOZZLE, was_nozzle  # noqa: PLC0415
+
+    page, made = again_page
+    first = made.printed(page.daemon, page.queue, Adding(made.part("bracket")),
+                         symptom=Symptom.STRINGING)
+    found = page.shop.reprint(first)
+    assert not isinstance(found, str)
+    was = was_nozzle(found)
+    assert was is not None, f"{NOZZLE} is in the run's G-code"
+    phone = page.phone()
+    shown = phone.get(f"/run/{first}/again")
+    assert "Starts exactly as" in shown.body and "You noted stringing last time" in shown.body
+    assert f"{was} °C last time" in shown.body and "No changes: the same file as" in shown.body
+    sliced, started = len(made.slicer.calls), made.printer.verbs.count("start")
+    cooler = phone.get(f"/run/{first}/again?nozzle={was - 5}")
+    assert f"{was - 5} °C" in cooler.body and "slices it again" in cooler.body
+    assert len(made.slicer.calls) == sliced, "− and + slice nothing"
+    done = phone.post(f"/run/{first}/again", {"nozzle": str(was - 5)})
+    assert done.status == 200 and "In the queue" in done.body, done.body
+    assert "Sliced again. Against that run's G-code:" in done.body
+    assert len(made.slicer.calls) > sliced
+    (job,) = page.queue.jobs()
+    assert job.by_hand
+    kept = json.dumps(job.given, default=str)
+    assert first in kept, "a print again of that run"
+    assert f'"key": "{NOZZLE}", "value": "{was - 5}"' in kept, "with that change alone"
+    assert made.printer.verbs.count("start") == started, "only queued: Start is still yours"
+
+
+def test_a_nozzle_off_the_runs_span_changes_nothing(again_page: tuple[Page, Any]) -> None:
+    from print_shop.phone.again import nozzle_typed, was_nozzle  # noqa: PLC0415
+
+    page, made = again_page
+    first = made.printed(page.daemon, page.queue, Adding(made.part("bracket")))
+    found = page.shop.reprint(first)
+    assert not isinstance(found, str)
+    was = was_nozzle(found)
+    assert was is not None
+    assert nozzle_typed(found, str(was + 100)) == ""
+    assert nozzle_typed(found, "x") == "" and nozzle_typed(found, str(was)) == ""
+    assert nozzle_typed(found, str(was + 5)) == f"nozzle_temperature={was + 5}"

@@ -41,6 +41,7 @@ from print_shop import reprint
 from print_shop.arming import Armed
 from print_shop.orchestrator.daemon import PhoneStart, ReadyToStart
 from print_shop.orchestrator.print_queue import Line
+from print_shop.phone.again import again_page, also_page, nozzle_typed
 from print_shop.phone.confirm import Confirm, Confirms, secret_hash
 from print_shop.phone.filaments import SwapJob, filaments_page, load_page, spools_for_job
 from print_shop.phone.home import HOME_KEY, PORT_KEY, Home
@@ -61,7 +62,7 @@ from print_shop.phone.screens import (
     run_page,
     runs_page,
 )
-from print_shop.phone.shop import LoadAsk, Shop
+from print_shop.phone.shop import AlsoDiffers, LoadAsk, Shop
 from print_shop.phone.slice import slice_page
 
 __all__ = ["COOKIE", "PhoneOff", "Starts", "attach", "handler_for", "make_server"]
@@ -428,6 +429,41 @@ class _Handler(BaseHTTPRequestHandler):
                               code=HTTPStatus.CONFLICT)
         self._send(message_page("Loaded", " ".join(done), back_to="/filaments",
                                 back_words="Back to filaments"))
+
+    def _r_again_screen(self, held: dict[str, str], query: str) -> None:
+        if self.shop is None:
+            return self._no_shop()
+        found = self.shop.reprint(held["id"])
+        if isinstance(found, str):
+            return self._send(message_page("Can't print it again", found, back_to="/runs",
+                                           back_words="Back to finished"),
+                              code=HTTPStatus.CONFLICT)
+        nozzle = parse_qs(query).get("nozzle", [""])[0][:6]
+        self._send(again_page(found, nozzle=nozzle))
+
+    def _r_again(self, held: dict[str, str], form: dict[str, str]) -> None:
+        """Put it in the queue: as it was, or with − and +'s change, sliced again."""
+        if self.shop is None:
+            return self._no_shop()
+        nozzle = form.get("nozzle", "")[:6]
+        typed = ""
+        if nozzle:
+            found = self.shop.reprint(held["id"])
+            if isinstance(found, str):
+                return self._send(message_page("Not queued", found, back_to="/runs",
+                                               back_words="Back to finished"),
+                                  code=HTTPStatus.CONFLICT)
+            typed = nozzle_typed(found, nozzle)
+        done = self.shop.again(held["id"], typed, also=form.get("also") == "yes")
+        if isinstance(done, AlsoDiffers):
+            return self._send(also_page(held["id"], nozzle=nozzle, lines=done.lines,
+                                        beyond=done.beyond))
+        if isinstance(done, str):
+            return self._send(message_page("Not queued", done, back_to=f"/run/{held['id']}",
+                                           back_words="Back to the run"),
+                              code=HTTPStatus.CONFLICT)
+        self._send(message_page("In the queue", " ".join(line.strip() for line in done.lines),
+                                back_to="/", back_words="Back to queue"))
 
     def _layer(self, query: str) -> int | None:
         found = parse_qs(query).get("layer", [""])[0]

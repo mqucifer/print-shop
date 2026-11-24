@@ -62,6 +62,9 @@ ROUTES: tuple[Route, ...] = (
     Route("GET", r"/runs", "runs"),
     Route("GET", rf"/run/{_ID}", "run"),
     Route("POST", rf"/run/{_ID}/outcome", "outcome"),
+    # Print again, as it was or with a change: the terminal's `again`. It only queues.
+    Route("GET", rf"/run/{_ID}/again", "again_screen"),
+    Route("POST", rf"/run/{_ID}/again", "again"),
 )
 
 #: The routes that arm: #214's Start, alone.

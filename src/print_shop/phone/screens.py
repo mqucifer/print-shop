@@ -283,6 +283,19 @@ def _yours(row: Row) -> str:
     return f"{said[:1].upper()}{said[1:]}."
 
 
+def _again_buttons(row: Row) -> str:
+    """Print again, and Change and print again: the terminal's `again`. A file sliced by hand
+    prints again as it was: it's changed in Orca."""
+    run = _e(row.job_id)
+    plain = (f"<form method=\"post\" action=\"/run/{run}/again\"><button type=\"submit\" "
+             "class=\"second\">Print again</button></form>")
+    if row.sliced is not None and not row.sliced.reprint_of:
+        return f"<div class=\"buttons\">{plain}</div>"
+    return (f"<div class=\"buttons\">{plain}<a class=\"button\" href=\"/run/{run}/again\">"
+            "Change and print again</a></div><p class=\"small\">A new version of this file: "
+            "send it to the queue, and its review offers this run's settings.</p>")
+
+
 def _run_card(row: Row) -> str:
     outcome, colour = _outcome(row)
     spool = spool_words(row.material)
@@ -296,8 +309,7 @@ def _run_card(row: Row) -> str:
         lines.append(_small(yours))
     record = (f"<p><a class=\"button\" href=\"/run/{_e(row.job_id)}\">Record how it came "
               "out</a></p>" if row.awaiting_answer else "")
-    again = (f"<p class=\"small\">To print it again, at the Mac for now: <code>again "
-             f"{_e(row.job_id[:8])}</code> at <code>queue&gt;</code>.</p>")
+    again = _again_buttons(row)
     return (f"<div class=\"card\"><div class=\"head\"><a class=\"part\" "
             f"href=\"/run/{_e(row.job_id)}\">{_e(row.part_said)}</a>"
             f"<span class=\"outcome {colour}\">{_e(outcome)}</span></div>"

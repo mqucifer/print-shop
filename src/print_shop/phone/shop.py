@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
+from print_shop import reprint
 from print_shop.desk.read import Desk, OnHand
 from print_shop.inventory import (
     Asked,
@@ -35,12 +36,13 @@ from print_shop.inventory import (
 )
 from print_shop.ledger import Ledger, LedgerError, Row
 from print_shop.orchestrator.kept import WaitingJob, Waits
-from print_shop.orchestrator.print_queue import Line, SentTo
+from print_shop.orchestrator.print_queue import Adding, Line, SentTo
+from print_shop.queue_terminal import Runs
 from print_shop.setup.pauses import said as pause_said
 
 __all__ = [
-    "LOOK_AGAIN", "Daemonish", "LoadAsk", "NowPrinting", "Queueish", "ReadyGroup", "ReadyRow",
-    "Shop", "ToRecord", "spool_words",
+    "LOOK_AGAIN", "AlsoDiffers", "Daemonish", "LoadAsk", "NowPrinting", "Queued", "Queueish",
+    "ReadyGroup", "ReadyRow", "Shop", "ToRecord", "spool_words",
 ]
 
 logger = logging.getLogger(__name__)
@@ -62,6 +64,8 @@ class Queueish(Protocol):
     def remove(self, job_id: str) -> str: ...
 
     def move(self, job_id: str, spool_id: int) -> list[str] | str: ...
+
+    def add(self, adding: Sequence[Adding]) -> tuple[list[str], list[str]]: ...
 
 
 class Daemonish(Protocol):
@@ -143,6 +147,22 @@ LOOK_AGAIN = ("what's on the printer was changed, said or seen otherwise since t
               "shown, so nothing's recorded. Look again")
 
 
+@dataclass(frozen=True)
+class AlsoDiffers:
+    """A change's slice that differs from the run in more than was changed: it's asked once,
+    as Enter is asked again at the terminal."""
+
+    lines: tuple[str, ...]
+    beyond: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class Queued:
+    """A print again, in the queue: what was said of it."""
+
+    lines: tuple[str, ...]
+
+
 @dataclass
 class Shop:
     """The run's queue and daemon, and where the ledger is: what the screens read.
@@ -153,6 +173,8 @@ class Shop:
     ledger_path: Path
     queue: Queueish | None = None
     daemon: Daemonish | None = None
+    #: Where the finished runs are, and what slices a change to one: the terminal's `again`'s.
+    runs: Runs | None = None
     now: Callable[[], datetime] = field(default=lambda: datetime.now(UTC))
 
     # -- the ledger, read only ------------------------------------------------
@@ -294,6 +316,60 @@ class Shop:
         if self.queue is None:
             return "the queue isn't running: start it at the Mac with `print_job.py --queue`"
         return self.queue.move(job_id, spool_id)
+
+    # -- print again (mqucifer/print-shop#216's, as `again` does it) -----------
+
+    def reprint(self, run_id: str) -> reprint.Reprint | str:
+        """The run, found to print again, or why it can't be."""
+        if self.runs is None:
+            return "this run can't print a run again: `again` at the Mac's queue does"
+        runs = self.runs
+        try:
+            with Ledger(runs.ledger_path) as ledger:
+                return reprint.find(ledger, runs.jobs, run_id, store_root=runs.store_root,
+                                    bed=runs.bed, parts=runs.parts)
+        except reprint.Refused as exc:
+            return str(exc)
+
+    def again(self, run_id: str, typed: str = "", *, also: bool = False,
+              spool_id: int | None = None) -> Queued | AlsoDiffers | str:
+        """A finished run put in the queue, as `again` does it: as it was where nothing is
+        typed, else sliced again from its part, pose, profiles and settings with `typed` over
+        them (`key=value; ...`, as `again>` reads it), and compared with its G-code. What
+        differs beyond what was changed is asked once (`also`). Only queued: Start is still a
+        person's, at the gate."""
+        if self.queue is None or self.runs is None:
+            return "the queue isn't running: start it at the Mac with `print_job.py --queue`"
+        found = self.reprint(run_id)
+        if isinstance(found, str):
+            return found
+        said: list[str] = []
+        try:
+            if not typed:
+                chosen = found.as_it_was()
+            else:
+                changes = reprint.parse_changes(typed, found)
+                if isinstance(changes, str):
+                    return changes
+                folder = reprint.slice_folder(self.runs.jobs, found.row)
+                try:
+                    made = found.change(changes, folder, self.runs.slicer)
+                except reprint.Refused:
+                    reprint.clear(folder)
+                    raise
+                if made.beyond and not also:
+                    reprint.clear(folder)
+                    return AlsoDiffers(tuple(made.lines()),
+                                       tuple(d.line() for d in made.beyond))
+                said = made.lines()
+                chosen = found.changed(made)
+        except reprint.Refused as exc:
+            return str(exc)
+        added, refused = self.queue.add([Adding(chosen.path, spool_id=spool_id, again=chosen)])
+        if not added:
+            return "; ".join(refused) or "it wasn't added"
+        return Queued((f"In the queue: a print again of job {found.row.job_id[:8]}. Start is "
+                       "still yours, at the gate.", *said, *refused))
 
     # -- the stock ------------------------------------------------------------
 
