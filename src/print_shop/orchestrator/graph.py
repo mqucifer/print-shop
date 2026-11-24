@@ -93,7 +93,7 @@ from print_shop.setup.features import Feature, measure, resting_on
 from print_shop.setup.intake import Asker, Estimate, Intake, Question
 from print_shop.setup.loop import Part, PrintLoop
 from print_shop.setup.loop import run as run_loop
-from print_shop.setup.offer import Offering, ThisPart
+from print_shop.setup.offer import Offering, ThisPart, moved_items
 from print_shop.setup.offer import offering as offer_past_prints
 from print_shop.setup.proposal import (
     ORIENTATION,
@@ -671,6 +671,9 @@ def build_graph(
                         # (mqucifer/print-shop#211).
                         built = _offering(ledger, state, stl_to_slice, features, applied, profiles,
                                           build_volume, earlier, intake, measuring, chose)
+                        # What they set for the spool this job was moved from, unticked
+                        # (mqucifer/print-shop#210).
+                        built = _with_moved(built, given, state, profiles)
                         if offer is None:
                             offer, doubting = built, Doubting.start(built, proposer.doubter())
                         else:
@@ -1941,6 +1944,22 @@ def _offering(
     except Exception as exc:  # noqa: BLE001 - a print is never stopped by what it might reuse
         logger.warning("the past prints couldn't be read for the offer: %s", exc)
         return Offering(failed=f"{type(exc).__name__}: {exc}"[:300])
+
+
+def _with_moved(
+    offer: Offering, given: Kept, state: PrintJobState, profiles: SlicerProfiles,
+) -> Offering:
+    """`offer`, with what the person set on this job for the variety it was moved from
+    (mqucifer/print-shop#210): unticked, each saying which it was set for."""
+    moved = given.moved()
+    material = _material_of(profiles)
+    if not moved or material is None:
+        return offer
+    process, filament = _presets(profiles)
+    return dataclasses.replace(offer, moved=moved_items(
+        [(m.change, m.variety) for m in moved], material.variety,
+        {"process": process, "filament": filament}, state["job_id"],
+        Path(state["stl_path"]).name))
 
 
 def _tops(plate: PlateLayout) -> tuple[int, ...]:

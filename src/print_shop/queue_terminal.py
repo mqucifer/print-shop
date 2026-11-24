@@ -1,0 +1,349 @@
+"""The print queue at the terminal (mqucifer/print-shop#210): one screen that can drive it.
+
+Everything here calls the queue's actions (`PrintQueue`) and the daemon's Start; nothing the queue
+does lives in these prompts, so a phone's page can do the same (mqucifer/print-shop#221). The
+questions and the review are the terminal's own (`cli_asker`, `cli_reviewer`), shown for the job
+the person picks, in any order.
+
+    queue>                     the queue again, with what's happened since
+    answer 2 [4 5]             2's questions; the same answers to 4 and 5 where they ask alike
+    review 3                   3's review
+    mesh 2                     2's mesh gate: approve or reject it
+    start [3]                  Start 3, or the job offered: it's offered first, then the bed's
+                               question, as at any gate
+    reject                     reject the job offered: it ends, unprinted
+    first 3 / place 3 1        the queue's order
+    together 2                 the jobs for spool #2 first, together
+    hold 3 / release 3         held, a job is never offered until it's let go
+    remove 3                   out of the queue, unprinted
+    spool 3 2                  3 moved to spool #2: prepared again, back to its review
+    add FILE [x3] [spool=2]    more files, in one go
+    quit                       put the queue by: every job waits where it is (Ctrl-C too)
+"""
+
+from __future__ import annotations
+
+import shlex
+import time
+from collections.abc import Callable
+from pathlib import Path
+
+from print_shop.inventory import Inventory
+from print_shop.orchestrator.daemon import Daemon
+from print_shop.orchestrator.print_queue import Adding, Need, PrintQueue
+from print_shop.setup.intake import cli_asker, drop_typed
+from print_shop.setup.review import cli_reviewer
+
+__all__ = ["HELP", "BED_QUESTION", "parse_adding", "serve"]
+
+#: The bed's question at a Start, in the phone's words (mqucifer/print-shop#214), as
+#: `print_job.py` asks it.
+BED_QUESTION = "  I can see the bed is clear [y/N]"
+
+HELP = __doc__.split("\n\n")[2].rstrip() if __doc__ else ""
+
+#: After an answer, how long the job is followed to what it asks next, before the queue again.
+FOLLOW_S = 3.0
+
+
+def parse_adding(tokens: list[str]) -> list[Adding] | str:
+    """Files to add, each followed by its quantity (`x3`) and its spool (`spool=2`) where they
+    aren't one and the loaded one. Returns them, or why they can't be read."""
+    found: list[Adding] = []
+    for token in tokens:
+        low = token.lower()
+        if low.startswith("x") and low[1:].isdigit() or low.startswith("spool="):
+            if not found:
+                return f"{token} goes after the file it's for"
+            last = found[-1]
+            if low.startswith("x"):
+                found[-1] = Adding(last.path, copies=int(low[1:]), spool_id=last.spool_id)
+            else:
+                number = low.removeprefix("spool=").lstrip("#")
+                if not number.isdigit():
+                    return f"{token}: a spool is its number in the stock, spool=2"
+                found[-1] = Adding(last.path, copies=last.copies, spool_id=int(number))
+        else:
+            found.append(Adding(Path(token).expanduser()))
+    return found
+
+
+def serve(
+    queue: PrintQueue, daemon: Daemon, *, read: Callable[[str], str] = input,
+    write: Callable[[str], None] = print, forget: Callable[[], None] = drop_typed,
+    stock: Callable[[], str] | None = None,
+) -> int:
+    """The queue at the terminal until `quit`, Ctrl-D or Ctrl-C: every job waits where it is."""
+    terminal = _Terminal(queue, daemon, read, write, forget, stock)
+    terminal.show()
+    while True:
+        try:
+            typed = read("queue> ").strip()
+        except EOFError:
+            write("")
+            return 0
+        if typed in ("quit", "exit", "q"):
+            return 0
+        terminal.do(typed)
+        terminal.show()
+
+
+class _Terminal:
+    def __init__(self, queue: PrintQueue, daemon: Daemon, read: Callable[[str], str],
+                 write: Callable[[str], None], forget: Callable[[], None],
+                 stock: Callable[[], str] | None) -> None:
+        self.queue, self.daemon = queue, daemon
+        self.read, self.write, self.forget, self.stock = read, write, forget, stock
+        self.told = 0
+
+    def show(self) -> None:
+        """What's happened since, the print, and the queue in its order."""
+        for said in self.queue.said(self.told):
+            self.write(f"  * {said}")
+            self.told += 1
+        self.write("")
+        printing = self.queue.printing()
+        self.write("QUEUE" + ("" if printing else "  (nothing printing)"))
+        for running in printing:
+            self.write(f"  {running}")
+        lines = self.queue.lines()
+        if not lines:
+            self.write("  empty: `add FILE` adds one, or several")
+        for line in lines:
+            self.write(f"  {line.said()}")
+        asks = [f"`{_verb(li.needs)} {li.number}`" for li in lines if li.needs is not None]
+        if asks:
+            self.write("Needs you: " + ", ".join(asks) + ". `help` lists the rest.")
+
+    def do(self, typed: str) -> None:
+        if not typed or typed == "list":
+            return
+        try:
+            words = shlex.split(typed)
+        except ValueError as exc:
+            self.write(f"  Not read: {exc}")
+            return
+        verb, args = words[0].lower(), words[1:]
+        action = {
+            "help": self._help, "answer": self._answer, "review": self._review,
+            "mesh": self._mesh, "start": self._start, "reject": self._reject,
+            "first": self._first, "place": self._place, "together": self._together,
+            "hold": self._hold, "release": self._release, "remove": self._remove,
+            "spool": self._spool, "add": self._add, "stock": self._stock,
+        }.get(verb)
+        if action is None:
+            self.write(f"  Not a queue command: {verb}. `help` lists them.")
+            return
+        action(args)
+
+    # -- the person's answers -----------------------------------------------
+
+    def _job(self, args: list[str], at: int = 0) -> str | None:
+        if len(args) <= at:
+            self.write("  Which job? Its number in the queue, or the start of its id.")
+            return None
+        job = self.queue.find(args[at])
+        if job is None:
+            self.write(f"  No job {args[at]} in the queue.")
+            return None
+        return job.job_id
+
+    def _answer(self, args: list[str]) -> None:
+        job_id = self._job(args)
+        if job_id is None:
+            return
+        others = [j for j in (self.queue.find(a) for a in args[1:]) if j is not None]
+        asked = self.queue.asked(job_id)
+        if asked is None or asked.need is not Need.QUESTIONS:
+            self.write("  It has no questions waiting" + (
+                f": it needs {asked.need}" if asked is not None else "") + ".")
+            return
+        self._title(job_id)
+        answers = cli_asker(read=self.read, write=self.write, forget=self.forget)(
+            asked.questions)
+        if why := self.queue.give(job_id, answers):
+            self.write(f"  Not taken: {why}.")
+            return
+        for said in self.queue.give_alike([j.job_id for j in others], asked.questions, answers):
+            self.write(f"  {said}")
+        self._follow(job_id)
+
+    def _review(self, args: list[str]) -> None:
+        job_id = self._job(args)
+        if job_id is None:
+            return
+        asked = self.queue.asked(job_id)
+        if asked is None or asked.need is not Need.REVIEW or asked.review is None:
+            self.write("  It has no review waiting" + (
+                f": it needs {asked.need}" if asked is not None else "") + ".")
+            return
+        self._title(job_id)
+        review = cli_reviewer(read=self.read, write=self.write, forget=self.forget)(asked.review)
+        if why := self.queue.give(job_id, review):
+            self.write(f"  Not taken: {why}.")
+            return
+        self._follow(job_id)
+
+    def _mesh(self, args: list[str]) -> None:
+        job_id = self._job(args)
+        if job_id is None:
+            return
+        asked = self.queue.asked(job_id)
+        if asked is None or asked.need is not Need.MESH or asked.gate is None:
+            self.write("  It isn't at the mesh gate.")
+            return
+        self._title(job_id)
+        gate = asked.gate
+        self.write(f"  because     {gate.get('reason') or 'it gave no reason'}")
+        self.write(f"  is_manifold {gate.get('is_manifold')}")
+        self.write("  approve     goes on to slice it as the file lays it: the questions and the "
+                   "review follow")
+        self.write("  reject      ends the job: nothing is sliced or printed")
+        typed = self.read("mesh> ").strip().lower()
+        if typed not in ("approve", "reject"):
+            self.write("  Nothing decided: `mesh` asks again.")
+            return
+        self.queue.give(job_id, (typed == "approve", "at the terminal"))
+        self._follow(job_id)
+
+    def _follow(self, job_id: str) -> None:
+        """What the job asks next, if it asks within a moment: else back to the queue."""
+        end = time.monotonic() + FOLLOW_S
+        while time.monotonic() < end:
+            asked = self.queue.asked(job_id)
+            if asked is not None:
+                {Need.QUESTIONS: self._answer, Need.REVIEW: self._review,
+                 Need.MESH: self._mesh}[asked.need]([job_id])
+                return
+            time.sleep(0.05)
+        self.write("  It's being prepared: it's back under \"Needs you\" when it asks again.")
+
+    def _title(self, job_id: str) -> None:
+        job = next((li for li in self.queue.lines() if li.job.job_id == job_id), None)
+        if job is not None:
+            copied = f" ({job.job.copied})" if job.job.copied else ""
+            spool = f", for {job.spool}" if job.spool else ""
+            self.write(f"\n-- {job.number}. {job.job.part}{copied}{spool}  "
+                       f"[job {job_id}] --")
+
+    # -- printing -----------------------------------------------------------
+
+    def _start(self, args: list[str]) -> None:
+        gate = self.daemon.pending_gate()
+        job_id = self._job(args) if args else (str(gate["job_id"]) if gate else None)
+        if job_id is None:
+            if not args:
+                self.write("  Nothing is offered to print: `start N` names one that's ready.")
+            return
+        job = self.queue.find(job_id[:8])
+        if job is not None and job.held:
+            self.write("  It's held: `release` it first.")
+            return
+        if gate is None or gate.get("job_id") != job_id:
+            if why := self.queue.first(job_id):
+                self.write(f"  Not started: {why}.")
+                return
+            end = time.monotonic() + 10.0
+            while time.monotonic() < end:
+                gate = self.daemon.pending_gate()
+                if gate is not None and gate.get("job_id") == job_id:
+                    break
+                time.sleep(0.05)
+            else:
+                self.write("  It's first now, and isn't offered yet: it's offered once it's "
+                           "ready and nothing prints. `start` then.")
+                return
+        self.write(BED_QUESTION)
+        self.forget()  # shown only now: what was typed before it is no answer to it
+        bed = self.read("bed clear> ").strip().lower()
+        why = self.daemon.start(job_id, bed_clear=bed in ("y", "yes"))
+        if why:
+            self.write(f"  Not taken: {why}.")
+
+    def _reject(self, args: list[str]) -> None:
+        gate = self.daemon.pending_gate()
+        if gate is None:
+            self.write("  Nothing is offered to reject. `remove N` takes a job out.")
+            return
+        if why := self.daemon.reject(str(gate["job_id"])):
+            self.write(f"  Not taken: {why}.")
+
+    # -- changing the queue -------------------------------------------------
+
+    def _done(self, why: str) -> None:
+        if why:
+            self.write(f"  Not done: {why}.")
+
+    def _first(self, args: list[str]) -> None:
+        if job_id := self._job(args):
+            self._done(self.queue.first(job_id))
+
+    def _place(self, args: list[str]) -> None:
+        job_id = self._job(args)
+        if job_id and len(args) > 1 and args[1].isdigit():
+            self._done(self.queue.place(job_id, int(args[1])))
+        elif job_id:
+            self.write("  `place N K` moves N to K in the queue.")
+
+    def _together(self, args: list[str]) -> None:
+        if args and args[0].lstrip("#").isdigit():
+            self._done(self.queue.together(int(args[0].lstrip("#"))))
+        else:
+            self.write("  `together S` takes the jobs for spool S first: its number in the stock.")
+
+    def _hold(self, args: list[str]) -> None:
+        if job_id := self._job(args):
+            self._done(self.queue.hold(job_id))
+
+    def _release(self, args: list[str]) -> None:
+        if job_id := self._job(args):
+            self._done(self.queue.hold(job_id, False))
+
+    def _remove(self, args: list[str]) -> None:
+        if job_id := self._job(args):
+            self._done(self.queue.remove(job_id))
+
+    def _spool(self, args: list[str]) -> None:
+        job_id = self._job(args)
+        if job_id is None:
+            return
+        if len(args) < 2 or not args[1].lstrip("#").isdigit():
+            self.write("  `spool N S` moves N to spool S, its number in the stock (`stock`).")
+            return
+        said = self.queue.move(job_id, int(args[1].lstrip("#")))
+        if isinstance(said, str):
+            self.write(f"  Not moved: {said}.")
+            return
+        for line in said:
+            self.write(f"  {line}")
+
+    def _add(self, args: list[str]) -> None:
+        adding = parse_adding(args)
+        if isinstance(adding, str):
+            self.write(f"  Not added: {adding}.")
+            return
+        added, refused = self.queue.add(adding)
+        self.write(f"  Added {len(added)}." if added else "  Nothing added.")
+        for why in refused:
+            self.write(f"  Not added: {why}")
+
+    def _stock(self, args: list[str]) -> None:
+        self.write(self.stock() if self.stock is not None else "  The stock isn't set up.")
+
+    def _help(self, args: list[str]) -> None:
+        self.write(HELP)
+
+
+def _verb(need: Need | None) -> str:
+    return {Need.QUESTIONS: "answer", Need.REVIEW: "review", Need.MESH: "mesh"}.get(
+        need or Need.QUESTIONS, "answer")
+
+
+def stock_listing(ledger_path: Path) -> Callable[[], str]:
+    """The stock, as `stock.py` lists it, for `stock`."""
+
+    def listing() -> str:
+        with Inventory(ledger_path) as inventory:
+            return inventory.listing()
+
+    return listing

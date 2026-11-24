@@ -374,6 +374,25 @@ It's one job: one set of questions, one review, one gate and one print. Arming i
 - **At the end, and in `--list`,** what the parts share is said once, then a block for each part: its file, number, place, pose and outcome.
 - **In the ledger each object is a row,** with the job's id for the first and the id with `-2`, `-3` for the others. Each has its own pose, features and outcome. The time, plastic and layers in each are the whole plate's. The print desk's "run it again" from any of them is the whole plate.
 
+## Many files: the queue
+
+With several files ready, each needn't wait for the last print and its outcome before its questions begin (mqucifer/print-shop#210). Add them to the queue in one go, parts and hand-sliced files together. After a file, `x3` is how many prints of it, and `spool=2` the spool it's for, by its number in the stock (`stock.py list`); without it, the loaded one.
+
+```
+uv run python scripts/print_job.py --queue lid.stl x2 box.stl spool=2 knob.gcode.3mf
+PRINT_AGENT_ALLOW_HARDWARE=1 uv run python scripts/print_job.py --queue
+```
+
+- **They're prepared while a print runs.** Two at a time do the slicing and the model's work (`PRINT_SHOP_PREPARE_AT_ONCE` in the settings changes it); one waiting for you gives its place to the next. A spool needn't be loaded to prepare: the job slices with that spool's filament, and its Start holds until it's loaded.
+- **At `queue>`** each job shows its step and spool, and "Needs you" says what to type: `answer 2`, `review 3`, in any order. `answer 2 4 5` gives 4 and 5 the same answers where they ask alike, and asks them only what's left. After an answer, what that job asks next follows straight away if it comes within a moment.
+- **Change the queue:** `first 3`, `place 3 1`, `together 2` (spool #2's jobs first), `hold 3` and `release 3`, `remove 3`, `add FILE …`. `help` lists them.
+- **Another spool:** `spool 3 2` moves a waiting job, and its copies still waiting with it, to spool #2, colour or material. It's prepared again with your answers and changes kept, and comes back to your review. A temperature or fan you set for the variety it left comes back unticked, under "YOURS, SET FOR THE SPOOL IT WAS MOVED FROM", saying which it was set for: `use N` takes it back. Moved back to that variety, it's given back as it was. A file sliced by hand can change colour, not filament.
+- **Printing is one at a time, and you start it.** When nothing prints, the first ready job that isn't held is offered at the gate, on the card and at `queue>` ("Offered to print: …, on spool #2 …"). `start` here, then `y` to the bed's question, or Yes on the card. `start 3` puts 3 first and offers it. `reject` ends the offered job. The checks at Start, the arming and the outcome are the same as any job's. An outcome you haven't recorded doesn't keep the next one back: the card still asks it, oldest first.
+- **A quantity** is that many prints, each a job with its own ledger row and outcome. The copies are prepared with the first, answered and reviewed once, and print its G-code under their own names.
+- **The queue survives:** `quit` or Ctrl-C puts it by, and `--queue` alone takes it up as it was, each job where it waited. `--list` shows them under "Waiting for you".
+
+The queue's jobs prepare beside the prompt, so what they log isn't shown on it: what happens to each (ready, offered, started, held, ended) is said at the next `queue>`.
+
 ## A file you sliced by hand
 
 For a print you set up yourself in Orca (mqucifer/print-shop#164): a test with a different setting on each object, a calibration print, or a job you know is good. print-shop sends it **as it is** and keeps it in the ledger. It asks no questions, proposes nothing, applies no lesson and slices nothing again.
