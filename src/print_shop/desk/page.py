@@ -360,7 +360,8 @@ def _questions(row: Row) -> str:
         parts.append("</ul>")
         if answer is not None and answer.choice is None:
             whose = f" ({q.whose(answer)})" if q.whose(answer) else ""
-            parts.append(f"<p class=\"chosen\">Your own words: {escape(answer.other + whose)}</p>")
+            said = escape(answer.in_words() + whose)
+            parts.append(f"<p class=\"chosen\">Your own words: {said}</p>")
     if intake.note and intake.questions:
         parts.append(f"<p class=\"muted\">{escape(intake.note)}</p>")
     parts.append("</section>")

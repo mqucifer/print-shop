@@ -384,8 +384,7 @@ def _answers(facts: PartFacts) -> list[Change]:
         for key, value in option.settings.items():
             changes[key] = Change(
                 key=key, preset=facts.preset(key), value=value, source=Source.ANSWER,
-                reason=f"you chose '{option.label}': {option.impact}",
-                feature=question.feature,
+                reason=option.reason(), feature=question.feature,
             )
     return list(changes.values())
 

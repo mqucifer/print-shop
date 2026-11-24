@@ -39,11 +39,13 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
+from print_shop.setup import own_words
 from print_shop.setup.layout import WIDTH, right, terminal_width, wrap
 
 __all__ = [
     "DIFFERS_PROMPT",
     "NOTES_PROMPT",
+    "WORDS_PROMPT",
     "Added",
     "Answer",
     "AnswersRefused",
@@ -58,6 +60,7 @@ __all__ = [
     "option_lines",
     "replay_asker",
     "settings_line",
+    "take_words",
 ]
 
 logger = logging.getLogger(__name__)
@@ -66,6 +69,9 @@ logger = logging.getLogger(__name__)
 NOTES_PROMPT = "notes> "
 #: The prompt after an answer that differs from the notes: not the one that took option numbers.
 DIFFERS_PROMPT = "yours or notes> "
+#: The prompt that confirms what an answer in words was read back as (mqucifer/print-shop#213):
+#: its own, so it isn't taken for the question asked again.
+WORDS_PROMPT = "yes or no> "
 #: The questions call's finish reason where the notes gave both and it wasn't waited for.
 NOT_WAITED = "not waited"
 #: How an option of faces names the pose: changed only as it's shown (`Question.shown`).
@@ -127,6 +133,10 @@ class Option(BaseModel):
         rec = f"  [recommended: {self.why}]" if self.recommended else ""
         return f"{self.label} ({settings_line(self.settings)}): {self.impact}; {self.cost()}{rec}"
 
+    def reason(self) -> str:
+        """Why what it sets is set, as the review says it."""
+        return f"you chose '{self.label}': {self.impact}"
+
     def cost(self) -> str:
         """What it costs: Orca's estimate, or why there's none."""
         if self.estimate is not None:
@@ -177,6 +187,15 @@ def settings_line(settings: dict[str, str]) -> str:
         parts.append(f"fan from {s.pop('fan_min_speed')}%")
     parts += [f"{k} {v}" for k, v in s.items()]
     return ", ".join(parts)
+
+
+class Said(Option):
+    """An answer in the person's own words, read back and confirmed (mqucifer/print-shop#213):
+    a decision as a chosen option is, so `Intake.chosen` gives it as one. Never in a question's
+    options."""
+
+    def reason(self) -> str:
+        return f"you said '{self.label}', {self.impact}"
 
 
 class Question(BaseModel):
@@ -325,6 +344,23 @@ class Answer(BaseModel):
     #: The pose faces were named in, where that isn't the question's: a recorded answer's, which
     #: is carried from there (mqucifer/print-shop#248).
     given_in: tuple[float, float, float] | None = None
+    #: What their words were read back as, and the person confirmed (mqucifer/print-shop#213):
+    #: a decision, as a chosen option's settings are. Empty: their words set nothing. Never
+    #: inferred: only a confirmation, at the questions or recorded, sets it.
+    sets: dict[str, str] = {}
+
+    def in_words(self) -> str:
+        """Their own words, with what they were confirmed to set."""
+        if not self.sets:
+            return self.other
+        return f"{self.other} (read back as {settings_line(self.sets)}, and confirmed)"
+
+    def said(self) -> Said | None:
+        """Their words as the decision they were confirmed as, or None."""
+        if self.choice is not None or not self.sets:
+            return None
+        return Said(label=self.other, settings=dict(self.sets),
+                    impact=f"read back as {settings_line(self.sets)}, and confirmed")
 
 
 class Intake(BaseModel):
@@ -348,12 +384,15 @@ class Intake(BaseModel):
     without: str = ""
 
     def chosen(self) -> list[tuple[Question, Option]]:
-        """Each question answered with an option, and that option."""
-        return [
-            (q, q.options[a.choice])
-            for q, a in zip(self.questions, self.answers, strict=True)
-            if a.choice is not None
-        ]
+        """Each question answered with an option, and that option. An answer in words that was
+        read back and confirmed is one as well (`Said`, mqucifer/print-shop#213)."""
+        chosen: list[tuple[Question, Option]] = []
+        for q, a in zip(self.questions, self.answers, strict=True):
+            if a.choice is not None:
+                chosen.append((q, q.options[a.choice]))
+            elif (said := a.said()) is not None:
+                chosen.append((q, said))
+        return chosen
 
     def could_set(self) -> frozenset[str]:
         """The settings this job's questions could set: every question shown, with the model's
@@ -381,7 +420,7 @@ class Intake(BaseModel):
             return "no questions: the part's features left nothing to ask"
         parts = []
         for q, a in zip(self.questions, self.answers, strict=True):
-            said = q.as_answered(a) if a.choice is not None else f"other: {a.other}"
+            said = q.as_answered(a) if a.choice is not None else f"other: {a.in_words()}"
             whose = q.whose(a)
             parts.append(f"{q.asked()} {said}" + (f" ({whose})" if whose else ""))
         return "; ".join(parts)
@@ -588,15 +627,21 @@ def cli_asker(
             if noted or _are_added(questions):
                 forget()  # shown only now, so what was typed while it drew is no answer to it
             for i in places:
+                typed = read(f"{first + i}> ")
                 while True:
-                    typed = read(f"{first + i}> ")
                     parsed = parse(typed, questions[i])
                     if isinstance(parsed, Answer):
-                        answers[i] = parsed
+                        took = take_words(questions[i], parsed, f"{first + i}> ", read, write,
+                                          forget, width())
+                        if isinstance(took, str):
+                            typed = took  # answered again
+                            continue
+                        answers[i] = took
                         break
                     if typed.strip().lower() == "go" and not _are_added(questions):
                         parsed += "; go works once these are answered"  # mqucifer/print-shop#208
                     write(f"  {parsed}")
+                    typed = read(f"{first + i}> ")
 
         noted = [i for i, q in enumerate(questions) if q.noted is not None]
         rest = [i for i in range(len(questions)) if i not in noted]
@@ -642,14 +687,20 @@ def _changed(
     kept = question.confirm()
     write("\n".join(_listed(n, question, width, keep="keep what the notes say")))
     forget()
+    said = read(f"{n}> ")
     while True:
-        said = read(f"{n}> ")
         if not said.strip():
             return kept
         parsed = parse(said, question)
         if isinstance(parsed, Answer):
-            break
+            took = take_words(question, parsed, f"{n}> ", read, write, forget, width)
+            if not isinstance(took, str):
+                parsed = took
+                break
+            said = took  # answered again
+            continue
         write(f"  {parsed}, or Enter to keep what the notes say")
+        said = read(f"{n}> ")
     if parsed.choice == question.noted:
         return kept  # the option marked as the notes', picked here
     write("\n".join([*wrap("", question.differs(parsed), width),
@@ -660,6 +711,77 @@ def _changed(
         if said in ("", "n"):
             return kept if said else parsed
         write("  Enter takes your answer, or n keeps the notes.")
+
+
+def take_words(
+    question: Question, answer: Answer, prompt: str,
+    read: Callable[[str], str], write: Callable[[str], None], forget: Callable[[], None],
+    width: int = WIDTH,
+) -> Answer | str:
+    """An answer in words, read back as the decision it makes and confirmed or corrected
+    (mqucifer/print-shop#213); any other answer as it is.
+
+    Where the question's options set something, the words are read with no model
+    (`own_words.read`). What they'd set is read back, "So supports off, and nothing turns them
+    back on?", drawn before what was typed ahead is dropped, so an Enter typed with the words
+    never confirms them. Enter or y makes it a decision, as a chosen option is. Words that set
+    nothing, or a no, say so, and the person keeps them so with Enter or answers again at
+    `prompt`, the question's own: the typed line is returned, to be read as an answer. Where
+    the options set nothing, as what it's for, that's said, and the words stand.
+    """
+    if answer.choice is not None:
+        return answer
+    keys = {k for o in question.options for k in o.settings}
+    if not keys:
+        kept = "what it's for" if question.feature == "purpose" else "your answer"
+        write("\n".join(wrap("  ", f"Your words set nothing: they're kept as {kept}.", width)))
+        return answer
+    reading = own_words.read(answer.other, keys)
+    aside = [f"Some of them set nothing: {why}." for why in reading.nothing if reading.sets]
+    if reading.sets:
+        yes = (f"Enter or y: yes, {_short(reading.sets)}, your decision. "
+               "n: your words set nothing.")
+        lines = [*wrap("  ", f"So {_read_as(reading.sets)}? From your words, "
+                             f"'{answer.other}'.", width)]
+        for line in (*aside, yes):
+            lines += wrap("  ", line, width)
+        write("\n".join(lines))
+        forget()  # an Enter typed with the words never confirms what they were read as
+        while True:
+            said = read(WORDS_PROMPT).strip().lower()
+            if said in ("", "y", "yes"):
+                return answer.model_copy(update={"sets": dict(reading.sets)})
+            if said in ("n", "no"):
+                break
+            write("\n".join(wrap("  ", yes, width)))
+        why = "you said no to what they were read as"
+    else:
+        why = "; ".join(reading.nothing)
+    decides = own_words.either(sorted({own_words.NAMES.get(k, k) for k in keys}))
+    write("\n".join([
+        *wrap("  ", f"Your words set nothing: {why}. The proposal decides {decides}, as if this "
+                    "weren't answered.", width),
+        *wrap("  ", "Enter keeps them so, or answer again: a number, or o and your words.",
+              width),
+    ]))
+    forget()
+    again = read(prompt)
+    return again if again.strip() else answer
+
+
+def _read_as(sets: dict[str, str]) -> str:
+    """What words were read as, as it's read back: supports off is said with what that means."""
+    rest = {k: v for k, v in sets.items() if (k, v) != ("enable_support", "0")}
+    said = [settings_line(rest)] if rest else []
+    if sets.get("enable_support") == "0":
+        said.append("supports off, and nothing turns them back on")
+    return " and ".join(said)
+
+
+def _short(sets: dict[str, str]) -> str:
+    rest = {k: v for k, v in sets.items() if (k, v) != ("enable_support", "0")}
+    return ", ".join([settings_line(rest)] * bool(rest)
+                     + ["supports off"] * (sets.get("enable_support") == "0"))
 
 
 class AnswersRefused(ValueError):
@@ -691,6 +813,12 @@ def replay_asker(path: Path, write: Callable[[str], None] = print) -> Asker:
     carried from it into whatever pose it's asked in now (mqucifer/print-shop#248). One given in
     another pose is never taken for the notes' own by its words, which name other faces there.
     Without a pose it's read in the pose it's asked in, and `write` is told which.
+
+    An answer in words replays as words, setting nothing, unless it records what they were read
+    back as and confirmed: ``{"question": "overhang", "other": "no support", "sets":
+    {"enable_support": "0"}}`` (mqucifer/print-shop#213). That's a decision, used only while
+    the words still read so; words that would set something and record nothing are told to
+    `write`, and set nothing.
 
     What the notes gave replays as ``{"question": "seen", "notes": "top, bottom"}``: confirmed,
     if the notes still say it (mqucifer/print-shop#236). Nothing of theirs is confirmed that the
@@ -752,6 +880,11 @@ def replay_asker(path: Path, write: Callable[[str], None] = print) -> Asker:
                     write(f"{path.name} names no pose for which faces are seen, so it's read "
                           f"{q.posed}, as it's asked now.")
         for q, a in zip(questions, found, strict=False):
+            unconfirmed = _unconfirmed(q, a)
+            if unconfirmed:
+                write(f"{path.name} answers '{q.text}' in words, '{a.other}', which read as "
+                      f"{unconfirmed}, and records no \"sets\" confirming it, so they set "
+                      "nothing and the proposal decides.")
             if q.noted is not None and not q.agrees(a):
                 write(f"{q.differs(a)} That's from {path.name}, and it's used in their place.")
         return found
@@ -769,6 +902,8 @@ class _Recorded(BaseModel):
     other: str = ""
     notes: str = ""  # what it confirms the notes gave
     pose: str = ""  # the pose an answer about faces was given in
+    #: What its words were read back as and confirmed (mqucifer/print-shop#213).
+    sets: dict[str, str] = {}
 
     def matches(self, questions: Sequence[Question]) -> list[int]:
         said = _plain(self.question)
@@ -805,8 +940,20 @@ class _Recorded(BaseModel):
         return found
 
     def _picked(self, question: Question) -> Answer | str:
+        if self.sets and (self.choice is not None or not self.other.strip()):
+            return "\"sets\" records what words were read as, and it has no words"
         if self.choice is None:
-            return Answer(other=self.other) if self.other.strip() else "neither a choice nor words"
+            if not self.other.strip():
+                return "neither a choice nor words"
+            if not self.sets:
+                return Answer(other=self.other)
+            keys = {k for o in question.options for k in o.settings}
+            now = own_words.read(self.other, keys).sets
+            if now != self.sets:
+                reads = settings_line(now) if now else "nothing"
+                return (f"its words '{self.other}' read as {reads} now, not the "
+                        f"{settings_line(self.sets)} it records as confirmed")
+            return Answer(other=self.other, sets=dict(self.sets))
         if isinstance(self.choice, int):
             if self.choice > ASKED_OPTIONS and self.choice - 1 == question.noted:
                 return (f"choice {self.choice} is whatever the notes say now, so a number can't "
@@ -819,6 +966,15 @@ class _Recorded(BaseModel):
             if wanted in (_plain(option.label), _plain(question.shown(option.label))):
                 return Answer(choice=at)
         return f"'{self.choice}' isn't one of its options"
+
+
+def _unconfirmed(question: Question, answer: Answer) -> str:
+    """What words with nothing confirmed would set, in words, or "" for none."""
+    if answer.choice is not None or answer.sets:
+        return ""
+    keys = {k for o in question.options for k in o.settings}
+    reading = own_words.read(answer.other, keys) if keys else None
+    return settings_line(reading.sets) if reading is not None and reading.sets else ""
 
 
 def _plain(text: str) -> str:
