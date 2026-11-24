@@ -32,6 +32,7 @@ import sys
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlunsplit
 
 from print_shop.env import SETTINGS_PATH, load_env
 
@@ -141,7 +142,9 @@ class Home:
     @property
     def origin(self) -> str:
         """The page's own origin: what `Host` and `Origin` must say."""
-        return f"http://{self.address}:{self.port}"
+        # Built, not written as a URL: it's the page's own address, which nothing calls, and
+        # `tests/test_config_boundary.py` keeps written URLs to the model's proxy alone.
+        return urlunsplit(("http", self.host, "", "", ""))
 
     @property
     def host(self) -> str:

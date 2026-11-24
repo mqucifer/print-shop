@@ -1258,12 +1258,15 @@ class Daemon:
         with self._job_lock:
             if approved and before_print:
                 said = f"the bed confirmed clear {cmd.bed}"
-                if cmd.phone is not None:
-                    said += f", {cmd.phone.said()}"
-                elif self._commands_printer:
-                    said += f", armed by {ALLOW_HARDWARE_ENV}=1"
-                note = f"{note}; {said}" if note else said
-                self._held.setdefault(job_id, []).append(f"Start taken, {said}.")
+                # Who armed it (mqucifer/print-shop#214): said where it's a phone's, and kept in
+                # the gate decision's note either way, as the ledger keeps it with the row.
+                armed = (cmd.phone.said() if cmd.phone is not None
+                         else f"armed by {ALLOW_HARDWARE_ENV}=1" if self._commands_printer
+                         else "")
+                told = f"{said}, {armed}" if cmd.phone is not None else said
+                kept = f"{said}, {armed}" if armed else said
+                note = f"{note}; {kept}" if note else kept
+                self._held.setdefault(job_id, []).append(f"Start taken, {told}.")
                 self._decided[job_id] = f"started {by}"
             elif approved:
                 self._decided[job_id] = f"approved {by}"
@@ -1392,8 +1395,9 @@ class Daemon:
             "pause_for": gate_payload.get("pause_for") or "",
             "spools": gate_payload.get("spools") or "",
             "held": held,
-            # Where a print is started (mqucifer/print-shop#214), for the card to link to.
-            "start_page": self._start_page,
+            # Where a print is started (mqucifer/print-shop#214), for the card to link to, where
+            # the phone's Start page is on.
+            **({"start_page": self._start_page} if self._start_page else {}),
             # How a plate of several prints, and why (mqucifer/print-shop#109).
             **({"plate": gate_payload["plate"]} if gate_payload.get("plate") else {}),
         }
