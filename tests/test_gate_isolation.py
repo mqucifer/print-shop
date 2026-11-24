@@ -36,7 +36,7 @@ import pytest
 from print_shop.core.mqtt import MqttConfig, command_topic
 from print_shop.env import SETTINGS_PATH
 from print_shop.orchestrator.daemon import Decision
-from tests.live import broker_config
+from tests.live import broker_config, opted_in
 
 JOB = "job-under-test"
 APPROVE = json.dumps({"decision": "approve", "job_id": JOB}).encode()
@@ -44,6 +44,10 @@ REJECT = json.dumps({"decision": "reject", "job_id": JOB}).encode()
 
 
 def _env_present() -> bool:
+    """Read only in a run that opts in to the broker, as this runs at collection
+    (mqucifer/print-shop#263)."""
+    if not opted_in("mqtt"):
+        return False
     p = SETTINGS_PATH
     return p.exists() and "MQTT_USER" in p.read_text()
 

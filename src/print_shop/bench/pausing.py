@@ -20,6 +20,14 @@ def mm(z: float) -> str:
     return f"{round(z, 3):g}"
 
 
+def z_span(low: float, high: float, lead: str = "") -> str:
+    """Heights as a person reads them: "z 1.2 to 4.2 mm" after `lead`, and "at z 3.2 mm" where
+    the two are one (mqucifer/print-shop#223)."""
+    if f"{low:g}" == f"{high:g}":
+        return f"at z {low:g} mm"
+    return f"{lead}z {low:g} to {high:g} mm"
+
+
 def where(after_layer: int, after_z: float, before_layer: int, before_z: float) -> str:
     """Where a pause falls: the layer it comes after and the one it comes before, by their tops."""
     return (

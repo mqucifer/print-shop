@@ -1,0 +1,131 @@
+Settings for this print, over your presets:
+  machine   Made-up Printer 0.4 nozzle - Copy
+  process   0.20mm Standard @Made-up 0.4 - Copy
+  filament  Made-up PETG HF @System
+
+  setting                            standard -> your tuning -> this print
+  sparse_infill_density              15% -> 15% -> 25%
+                                       you chose 'A tray that's handled': the floor carries the tiles and is lifted by its rim, so a little more fill than a display piece. [your answer: purpose]
+  textured_plate_temp                70 -> 75
+                                       learned on sample-tray-a.stl: corners of a wide tray lifted at 70; at 75 they held, with the first layer a touch wide. [lesson 11: large_bed_contact]
+  textured_plate_temp_initial_layer  70 -> 75
+                                       learned on sample-tray-a.stl: a wide PETG footprint keeps 75 on its first layer too: at 70 then 65 the corners of the 5,400 mm2 base lifted. [lesson 12: large_bed_contact]
+  during_print_exhaust_fan_speed     70 -> 15
+                                       learned on sample-tray-a.stl: the exhaust at the profile's 70 cooled the chamber and the corners lifted; at 15 the tray stayed down. [lesson 13: large_bed_contact]
+  additional_cooling_fan_speed       - -> 25
+                                       learned on sample-tray-a.stl: the side fan at 70 lifted a corner of the tray; 25 held it. [lesson 14: large_bed_contact]
+  bridge_flow                        1 -> 1 -> 0.9
+                                       learned on sample-tray-a.stl: less sag over the 8 mm slot in the lid. [lesson 15: bridges]
+  bridge_speed                       50 -> 50 -> 35
+                                       learned on sample-tray-a.stl: less sag over the 8 mm slot in the lid. [lesson 16: bridges]
+  elefant_foot_compensation          0.1 -> 0.1 -> 0.15
+                                       learned on sample-tray-a.stl: a slight foot on the tray at bed 75 with 0.1. [lesson 17: large_bed_contact]
+  ironing_type                       no ironing -> top -> no ironing
+                                       Only the floor's underside, on the plate, is seen; the top holds the tile pockets, which ironing would smooth for nothing but time. [model: flat_top, surface]
+  support_type                       normal(auto) -> normal(auto) -> tree(auto)
+                                       tree supports, as you use them [guard: overhang, supports]
+  enable_support                     0 -> 0 -> 1
+                                       the 1,204 mm2 overhang would print into the air, and nothing decided otherwise [guard: overhang, supports]
+  pause_at                           - -> 3.2
+                                       drop the tiles in [you]
+  NOT APPLIED top_surface_pattern: asked concentric, sliced monotonicline
+    concentric tops follow the rim [model]
+  pause_at=3.2, read from the G-code: pause after layer 16, at z=3.2, before layer 17, at z=3.4
+  the pause is for an insert
+  kept wall_loops at 3: three walls already hold the rim
+  kept brim_type at no_brim: you said the corners are trimmed by hand [your answer: purpose]
+  design: 1,204 mm2 overhangs, up to 90 degrees past vertical: a chamfer to 45 degrees or a support designed into the part would print without Orca's supports. That's a design change, for the CAD side.
+  design: The slot in the floor could be a row of 45-degree teeth instead of a flat bridge. That's a design change, not a setting.
+  note: Seen as it prints: the bottom, on the plate, as the notes say
+  note: warping risk: 5,400 mm2 on the plate. The plate's temperature (textured_plate_temp), a brim (brim_type), the chamber's exhaust (during_print_exhaust_fan_speed) and the side fan (additional_cooling_fan_speed) answer it, not turning the part
+  refused from the model: sparse_infill_density=20%: you answered it at the intake
+
+Lessons from earlier prints, kept by a reviewer, for a part like this:
+  Lesson 11, from sample-tray-a.stl, for a part that's large_bed_contact, in PETG, kept by operator test-op: textured_plate_temp=75: corners of a wide tray lifted at 70; at 75 they held, with the first layer a touch wide. (set it)
+  Lesson 12, from sample-tray-a.stl, for a part that's large_bed_contact, in PETG, kept by operator test-op: textured_plate_temp_initial_layer=75: a wide PETG footprint keeps 75 on its first layer too: at 70 then 65 the corners of the 5,400 mm2 base lifted. (set it)
+  Lesson 13, from sample-tray-a.stl, for a part that's large_bed_contact, in PETG, kept by operator test-op: during_print_exhaust_fan_speed=15: the exhaust at the profile's 70 cooled the chamber and the corners lifted; at 15 the tray stayed down. (set it)
+  Lesson 14, from sample-tray-a.stl, for a part that's large_bed_contact, in PETG, kept by operator test-op: additional_cooling_fan_speed=25: the side fan at 70 lifted a corner of the tray; 25 held it. (set it)
+  Lesson 15, from sample-tray-a.stl, for a part that's bridges, kept by operator test-op: bridge_flow=0.9: less sag over the 8 mm slot in the lid. (set it)
+  Lesson 16, from sample-tray-a.stl, for a part that's bridges, kept by operator test-op: bridge_speed=35: less sag over the 8 mm slot in the lid. (set it)
+  Lesson 17, from sample-tray-a.stl, for a part that's large_bed_contact, in PETG, kept by operator test-op: elefant_foot_compensation=0.15: a slight foot on the tray at bed 75 with 0.1. (set it)
+  Lesson 31, from sample-lid-b.stl, for a part that's large_bed_contact, thin_walls, kept by operator test-op: Wipe the plate with dish soap before a wide PETG footprint: a tray's first layer tore at one corner on a greasy plate, and laid down clean once it was washed. (read by the model)
+  Lesson 32, from sample-lid-b.stl, for a part that's large_bed_contact, kept by operator test-op: An older textured plate of the same make held nothing but the start strip and grew a blob on the nozzle; the newer plate of the same type printed the same file clean. Use the newer plate for wide PETG. (read by the model)
+
+Orca's estimate: 75 min 26 s, 12.41 cm3, 15.88 g, 21 layers
+Orientation: (0.0, 0.0, 0.0), kept as laid, by you (--as-laid): no orientation model was asked
+  the part's features were read in this pose: rotation (0.0, 0.0, 0.0), 4.2 mm tall, 5401.7 mm2 on the plate
+  DOESN'T FIT AS POSED (262.0 x 160.0 mm): Orca has no room for it that way.
+    It fits turned 90° anticlockwise, seen from above, with the same side down.
+    What's shown here is already sliced that way: the time, x, y and the seam's "back" are the turned part's. Nothing prints that way unless you type turn. For another side down, type orientation.
+  the poses it weighed (overhang is what would need support):
+        0,0,0  1204.3 mm2 overhang, 5401.7 mm2 on the plate, 4.2 mm tall  <- this print
+      180,0,0  2310.8 mm2 overhang, 4120.2 mm2 on the plate, 4.2 mm tall
+       90,0,0  1402.1 mm2 overhang, 4.1 mm2 on the plate, 160 mm tall
+      270,0,0  1311.6 mm2 overhang, 3.9 mm2 on the plate, 160 mm tall
+       0,90,0  2077.4 mm2 overhang, 0 mm2 on the plate, 120 mm tall
+      0,270,0  2140.9 mm2 overhang, 64.2 mm2 rising from the plate left out, 71.3 mm2 on the plate, 120 mm tall
+
+The part's context (its design run, or a sidecar beside it):
+  from the sidecar sample-tray.part.json
+  read /tmp/made-up/parts/sample-tray/a-rather-long-folder-name-for-a-made-up-part/sample-tray.part.json
+  fit: a 0.2 mm fit with the 24 glass tiles, 2.0 mm thick (`each tile drops into its pocket at the pause`), at z 1.2 to 3.2 mm as the file lies, as the sidecar gives it
+  fit: a -0.05 mm fit with the lid's rail: a rib 1.2 mm wide in a groove 1.1 mm wide and 0.6 deep (`the lid's rib presses into the groove along the long edge`), at z 3.6 to 4.2 mm as the file lies, as the sidecar gives it
+  seen: bottom, as the part's context says
+  laid on its -z side (the sidecar)
+  note: A made-up tray of 24 tiles, laid on its flat underside; pause after layer 16, at z 3.2, to drop the tiles in, then the lip prints over them.
+  fit at z 1.2 to 3.2 mm as it prints: a 0.2 mm fit with the 24 glass tiles, 2.0 mm thick (`each tile drops into its pocket at the pause`), at z 1.2 to 3.2 mm as the file lies, as the sidecar gives it
+  fit at z 3.6 to 4.2 mm as it prints: a -0.05 mm fit with the lid's rail: a rib 1.2 mm wide in a groove 1.1 mm wide and 0.6 deep (`the lid's rib presses into the groove along the long edge`), at z 3.6 to 4.2 mm as the file lies, as the sidecar gives it
+
+What the slice shows, layer by layer:
+  layers: 21, 1 min 3 s to 12 min 54 s each, 3 min 39 s typical; the shortest is layer 16 at z 3.2 mm
+  Ironing: 12 min 19 s, 6890 mm2 on 2 layers, z 1.2 to 4.2 mm
+  Support: 8 min 51 s, 7810 mm2 on 8 layers, z 0.2 to 1.6 mm
+  Outer wall: 7 min 32 s, 20411 mm2 on 21 layers, z 0.2 to 4.2 mm
+  Top surface: 7 min 11 s, 7102 mm2 on 3 layers, z 1.2 to 4.2 mm
+  Internal solid infill: 4 min 28 s, 12480 mm2 on 16 layers, z 0.4 to 4 mm
+  Bridge: 4 min 24 s, 2402 mm2 on 1 layer, z 3.4 to 3.4 mm
+  Inner wall: 3 min 54 s, 10011 mm2 on 20 layers, z 0.2 to 4 mm
+  Bottom surface: 3 min 26 s, 1760 mm2 on 1 layer, z 0.2 to 0.2 mm
+  Gap infill: 1 min 35 s, 4712 mm2 on 21 layers, z 0.2 to 4.2 mm
+  pauses for an insert after layer 16, at z=3.2, before layer 17, at z=3.4, about 29 min 23 s in
+  seam (aligned): 702 loop starts, 71% on the one below, so scattered, most at x 188 y 96 (14 layers)
+  note: 1 of 21 layers take under 70 s, the filament's layer time for cooling; the shortest, layer 16 at z 3.2 mm, takes 1 min 3 s (short layers from z 3.2 to 3.2 mm); slow-down is on and its floor is as low as it goes: printing several copies at once lengthens a layer
+
+Proposed from the slice (not applied unless you take it):
+  1) ironing_type  top -> no ironing
+       the top isn't seen, so ironing it is time for nothing [the slice: ironing_hidden]
+       read: Ironing takes 12 min 19 s on 2 layers, z 1.2 to 4.2 mm, on the top, which isn't seen
+  2) elefant_foot_compensation  0.15 -> 0.2
+       a fit starts 1.2 mm up, so a wider first layer narrows no pocket; 0.2 keeps the base's edge true [the slice: fit_elephant_foot]
+       read: z 1.2 to 3.2 mm as it prints: a 0.2 mm fit with the 24 glass tiles, 2.0 mm thick (`each tile drops into its pocket at the pause`), at z 1.2 to 3.2 mm as the file lies, as the sidecar gives it; elefant_foot_compensation is 0.15, from lesson 17
+
+Proposed by the model (not applied unless you take it):
+  3) outer_wall_speed  200 -> 120
+       the rim is what's handled and seen from the side [model: thin_walls, walls]
+  -  bridge_flow: lesson 15 set 0.9, and the model would set 0.85. That stands.
+  4) top_shell_layers  4 -> 5
+       the pocket floors are thin [model: flat_top, surface]
+
+USE THESE: from sample-tray-old.stl, 21 Nov, job 0f3c2a1b. None is applied until you use it.
+  Came out  success
+  Alike     same shape, height and pockets; came out well
+  Differs   then  now
+    height     4  4.2 mm
+    12% less on the plate
+
+  YOUR OVERRIDES        now -> use
+  [x] 2 enable_support    1 -> 0  the pockets are filled at the pause
+  [ ] 3 bridge_flow     0.9 -> 1
+      the lip over the tiles prints over 0.2 mm of air; not ticked: this tray's slot is 2 mm wider;
+      not ticked: lesson 15 sets it to 0.9 here
+
+  ALREADY SET HERE
+  1 pause_at 3.2 (you)
+  4 textured_plate_temp 75 (lesson 11)
+
+  OTHER PRINTS
+  from 2  sample-coaster.stl, 18 Nov: your pause at 3.2, supports off; success, with stringing
+
+  use (the 1 ticked)   use 2 (by number)   clear 2   from 2 (another print)
+
+It doesn't fit as posed. Type turn to take it turned 90° anticlockwise, seen from above (ok waits for that), use what decided that print (use, or use 1 3), take (the slice's 1-2), take 3 4 (the model's, by number), no 3 because ... (turn one down, saying why), send the orientation back (orientation), or correct a setting by name, e.g. wall_loops=3 because it's decorative (several separated by ';'), pause_at=12.4 for insert because the nuts go in (it pauses once the layer topping out at 12.4 mm is done), or stop.

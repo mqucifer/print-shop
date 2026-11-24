@@ -39,10 +39,14 @@ from print_shop.core.mqtt import (
     state_topic,
 )
 from print_shop.env import SETTINGS_PATH
-from tests.live import broker_config
+from tests.live import broker_config, opted_in
 
 
 def _env_present() -> bool:
+    """Whether the Mac's settings have broker credentials: read only in a run that opts in to
+    the broker, as this runs at collection (mqucifer/print-shop#263)."""
+    if not opted_in("mqtt"):
+        return False
     env = SETTINGS_PATH
     if not env.exists():
         return False
@@ -63,10 +67,10 @@ def cfg() -> MqttConfig:
 
 
 @pytest.fixture
-def settings_cfg() -> MqttConfig:
-    """The settings' config, for a test that only builds discovery from it and connects to
-    nothing."""
-    return MqttConfig.from_env()
+def settings_cfg(tmp_path: Path) -> MqttConfig:
+    """A made-up settings file's config, for a test that only builds discovery from it and
+    connects to nothing: never the Mac's (mqucifer/print-shop#263)."""
+    return MqttConfig.from_env(tmp_path / "absent.env")
 
 
 # --------------------------------------------------------------------------
@@ -74,10 +78,12 @@ def settings_cfg() -> MqttConfig:
 # --------------------------------------------------------------------------
 
 
-@needs_broker
-def test_reads_credentials_from_env() -> None:
-    """Reads the settings, and connects to nothing."""
-    cfg = MqttConfig.from_env()
+def test_reads_credentials_from_env(tmp_path: Path) -> None:
+    """Reads a settings file, made up here (mqucifer/print-shop#263), and connects to nothing."""
+    made_up = tmp_path / ".env"
+    made_up.write_text("MQTT_HOST=broker.invalid\nMQTT_PORT=1883\nMQTT_USER=print-shop\n"
+                       "MQTT_PASSWORD=made-up\n")
+    cfg = MqttConfig.from_env(made_up)
     assert cfg.host and cfg.port
     assert cfg.user and cfg.password
     assert cfg.topic_prefix == "3dprint-dev", "dev prefix, not the live one"

@@ -25,6 +25,7 @@ from print_shop.runtime import describe_all
 from print_shop.setup.intake import replay_asker
 from print_shop.setup.questions import PLATE_WORDS, PURPOSE, SEEN, STOCK
 from tests.plates import box
+from tests.reviewing import flat
 from tests.test_plate_job import Rig, _caps
 from tests.test_waiting import WAIT_S, Person
 
@@ -157,7 +158,7 @@ def test_a_pose_chosen_after_the_questions_is_the_one_sliced(
         assert rig.press("approve", job).printed
     for row in rig.ledger.job_rows(job):
         assert row.rotation_deg == (180.0, 0.0, 0.0) and row.orientation_source == "model:made-up"
-    assert "(180.0, 0.0, 0.0), the made-up model chose it" in rig.shown[0]
+    assert "this print 180,0,0: the made-up model chose it" in flat(rig.shown[0])
 
 
 def test_poses_chosen_that_dont_fit_keep_the_questions_poses_and_the_answers(
@@ -169,7 +170,7 @@ def test_poses_chosen_that_dont_fit_keep_the_questions_poses_and_the_answers(
     with rig.daemon:
         job = rig.gated(standing, as_laid=False)
         assert rig.press("approve", job).printed
-    assert "the poses chosen don't fit one plate together" in rig.shown[0]
+    assert "the poses chosen don't fit one plate together" in flat(rig.shown[0])
     for row in rig.ledger.job_rows(job):
         assert (row.rotation_deg, row.orientation_source) == ((0.0, 0.0, 0.0), "plate:kept")
         assert row.intake is not None and row.intake.answers[0].choice == 1

@@ -66,7 +66,7 @@ from tests.fakes import (
     MemoryBridge,
     echo_settings,
 )
-from tests.reviewing import settled
+from tests.reviewing import flat, settled
 from tests.test_graph import needs_orca
 from tests.test_job_e2e import CFG
 from tests.test_print_loop import Model, Person
@@ -300,14 +300,17 @@ def test_a_part_that_fits_only_turned_says_so_and_the_turn_taken_is_recorded_and
     done = job(tmp_path, block(tmp_path, long, 20), "ok", "turn", "ok", as_laid=as_laid)
     assert done.result.printed, done.result.error
 
-    offered = done.shown
+    offered = flat(done.shown)
     assert f"DOESN'T FIT AS POSED ({long:.1f} x 20.0 mm)" in offered
     assert "It fits turned 45° anticlockwise, seen from above, with the same side down." in offered
     assert ("What's shown here is already sliced that way: the time, x, y and the seam's \"back\" "
             "are the turned part's. Nothing prints that way unless you type turn. For another "
             "side down, type orientation.") in offered
-    assert "Type turn to take it turned 45° anticlockwise" in offered
-    assert "Type ok to go on" not in offered, "ok isn't offered before the turn is taken"
+    assert "DOESN'T FIT AS POSED: it fits turned 45° anticlockwise, seen from above; type turn" \
+        in offered, "said again above the prompt"
+    assert "Answers: turn (ok waits for it) ·" in offered
+    first = offered[:offered.index("> ")]
+    assert "ok (approval gate)" not in first, "ok isn't offered before the turn is taken"
     assert ("it doesn't fit as posed: type turn to take it turned 45° anticlockwise, seen from "
             "above, orientation for another side down, or stop") in offered, "and is refused"
     assert "Taken: turned 45° anticlockwise" in offered
@@ -337,7 +340,7 @@ def test_a_part_that_fits_as_posed_is_neither_turned_nor_offered_a_turn(tmp_path
     assert done.result.printed, done.result.error
     assert "DOESN'T FIT" not in done.shown and "TURNED ON THE PLATE" not in done.shown
     assert "it fits as posed, so there's no turn to take" in done.shown
-    assert "Type ok to go on to the approval gate" in done.shown
+    assert "Answers: ok (approval gate) ·" in done.shown
     assert set(bed.sliced) == {stl}
     assert done.gate is not None and done.gate["orientation_deg"] == [0.0, 0.0, 0.0]
     assert done.row is not None and done.row.rotation_deg == AS_POSED
@@ -397,7 +400,8 @@ def test_a_correction_that_needs_another_turn_is_offered_that_one(tmp_path: Path
     done = job(tmp_path, block(tmp_path, 255, 20), "turn", "wall_loops=7", "ok", "turn", "ok",
                slicer=Bed(room))
     assert done.result.printed, done.result.error
-    assert done.shown.count("DOESN'T FIT AS POSED") == 2, "the new turn is its own offer"
+    assert done.shown.count("Orca has no room for it that way") == 2, (
+        "the new turn is its own offer")
     assert "TURNED ON THE PLATE" not in done.shown, "45 taken isn't this angle taken"
     assert "it doesn't fit as posed: type turn" in done.shown, "and ok waits again"
     assert done.row is not None
@@ -424,7 +428,8 @@ def test_a_turn_taken_ends_with_a_slice_that_fits_as_posed(tmp_path: Path) -> No
     done = job(tmp_path, block(tmp_path, 255, 20), "turn", "wall_loops=7", "wall_loops=4", "ok",
                "turn", "ok", slicer=Bed(room))
     assert done.result.printed, done.result.error
-    assert done.shown.count("DOESN'T FIT AS POSED") == 2, "needed again, it's offered again"
+    assert done.shown.count("Orca has no room for it that way") == 2, (
+        "needed again, it's offered again")
     assert "TURNED ON THE PLATE" not in done.shown
     assert done.row is not None and done.row.rotation_deg == (0.0, 0.0, 45.0)
 
@@ -445,7 +450,8 @@ def test_a_pose_sent_back_takes_no_turn_with_it(tmp_path: Path) -> None:
     done = job(tmp_path, block(tmp_path, 255, 20),
                "turn", "orientation=1 because the post is seen", "ok", "turn", "ok")
     assert done.result.printed, done.result.error
-    assert done.shown.count("DOESN'T FIT AS POSED") == 2, "the other pose's turn is its own offer"
+    assert done.shown.count("Orca has no room for it that way") == 2, (
+        "the other pose's turn is its own offer")
     assert "TURNED ON THE PLATE" not in done.shown, "the same angle, but another side down"
     assert "it doesn't fit as posed: type turn" in done.shown, "and ok waits again"
     assert done.row is not None and done.row.rotation_deg == (180.0, 0.0, 45.0)
@@ -474,7 +480,8 @@ def test_with_no_other_side_that_fits_orientation_says_so_and_isnt_pointed_to() 
         orientation=AppliedOrientation(), profiles=CI_PROFILES, candidates=(here, tall),
     )
     assert "For another side down" not in render(request)
-    assert "(doesn't fit, however it's turned on the plate)" in render(request), "once measured"
+    assert "    0,90,0  doesn't fit, however it's turned on the plate" in render(request), \
+        "once measured"
     assert "orientation for another side" not in str(parse_answer("ok", request))
     said: list[str] = []
     assert send_back(request, lambda prompt: pytest.fail("nothing to pick"), said.append) is None

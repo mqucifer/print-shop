@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import shlex
 import sqlite3
 import threading
@@ -57,6 +58,7 @@ from print_shop.slicer.orca import SlicerProfiles
 from tests.fakes import FakeCamera, FramePrinter, MemoryBridge
 from tests.fixtures import write_stl
 from tests.plates import PlateOrca, box, profiles
+from tests.reviewing import flat
 from tests.test_job_e2e import CFG
 from tests.test_ledger import record
 from tests.test_review import _model, _questions
@@ -362,8 +364,9 @@ def test_parts_over_the_rod_print_by_layer_and_the_review_and_gate_say_why(
         result = rig.press("approve", job)
     assert result.error is None
     said = rig.shown[0]
-    assert "printed BY LAYER, all at once" in said and "over the 36 mm to the rod" in said
-    assert "NOT APPLIED print_sequence: asked by object, sliced by layer" in said
+    assert "printed BY LAYER, all at once" in flat(said)
+    assert "over the 36 mm to the rod" in flat(said)
+    assert "NOT APPLIED print_sequence: asked by object, sliced by layer" in flat(said)
     assert "over the 36 mm to the rod" in gate["plate"]
     row = rig.ledger.rows()[0]
     assert row.plate is not None and row.plate.layout.sequence == BY_LAYER
@@ -381,14 +384,14 @@ def test_the_review_shows_the_plate_each_part_and_the_order_as_a_change(tmp_path
         job = rig.gated(_caps(tmp_path))
         rig.press("reject", job)
     said = rig.shown[0]
-    assert "3 parts on one plate, printed BY OBJECT, one after another" in said
-    assert "print_sequence  by layer -> by object" in said
-    assert "[guard]" in said and "none strings to another" in said
+    assert "3 parts on one plate, printed BY OBJECT, one after another" in flat(said)
+    assert re.search(r"\n  print_sequence +by layer +by object +guard\n", said)
+    assert "none strings to another" in flat(said)
     for n, name in enumerate(CAP_NAMES, 1):
-        assert f"Part {n}, {name}:" in said
+        assert f"\n  PART {n}, {name}\n" in said
         assert f"part {n}, {name}: at x " in said
     assert "for the whole plate" in said
-    assert "send a part's orientation back (orientation)" in said
+    assert "orientation (send a part's back)" in said
     assert "pause_at=12.4" not in said, "not offered where it would be refused"
     [request] = rig.reviews
     assert render(request) == said

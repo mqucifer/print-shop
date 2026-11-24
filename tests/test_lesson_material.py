@@ -208,7 +208,7 @@ def test_the_review_says_a_lesson_for_another_filament_wasnt_given(
         orientation=AppliedOrientation(rotation_deg=(0.0, 0.0, 0.0), rationale="flat"),
         profiles=pla_profiles,
     ))
-    assert "(not given: learned on PETG; this print is PLA)" in shown
+    assert " · not given: learned on PETG; this print is PLA · " in " ".join(shown.split())
 
     # The ledger records it as never given, and never scores it.
     ledger.record_start_requested(_record("pla-2", "PLA").model_copy(update={"proposal": pla}))

@@ -32,12 +32,17 @@ from typing import TextIO
 
 from print_shop.env import load_env
 
-__all__ = ["LOG_NAME", "REDACTED", "JobLog", "secrets"]
+__all__ = ["LOG_NAME", "REDACTED", "SAID", "JobLog", "Terminal", "secrets"]
 
 #: The log's name in the job's folder.
 LOG_NAME = "job.log"
 
 REDACTED = "[redacted]"
+
+#: A log record's words as the terminal says them, in `extra`: a wait said among the screens as
+#: `orientation`'s is, with no time or level (mqucifer/print-shop#223). The job's log keeps the
+#: record as it's logged.
+SAID = "said"
 
 #: A setting's name that says its value is a secret.
 _SECRET_NAME = re.compile(r"KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASS$|CREDENTIAL|AUTH", re.I)
@@ -148,6 +153,15 @@ class JobLog:
         finally:
             root.removeHandler(handler)
             sys.stdout, sys.stderr = out, err
+
+
+class Terminal(logging.Formatter):
+    """The terminal's log lines: a record that says how it's said (`SAID`) shows as those words,
+    and any other with its time and level."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        said = getattr(record, SAID, None)
+        return said if isinstance(said, str) else super().format(record)
 
 
 class _Tee(io.TextIOBase):

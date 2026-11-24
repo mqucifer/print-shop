@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -367,8 +368,8 @@ def test_an_answer_to_bridge_without_support_is_kept_and_the_guard_leaves_it(
 def test_the_review_says_supports_are_kept_off_because_of_the_answer(tmp_path: Path) -> None:
     proposal = _proposal("snap", tmp_path, _no_model(), _snap_answering(tmp_path, Answer(choice=0)))
     shown = render(_request(proposal))
-    assert "  kept enable_support at 0: you chose 'Bridge, no support': " in shown
-    assert "[your answer: overhang]" in shown
+    assert re.search(r"KEPT AT YOUR PRESET\n  enable_support +0 +(0 +)?0 +your answer: overhang\n"
+                     r"      you chose 'Bridge, no support': ", shown)
     assert "[guard" not in shown
 
 

@@ -9,6 +9,7 @@ the intake, the proposal and the corrections (part 4).
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import Iterator
 from dataclasses import replace
@@ -25,7 +26,8 @@ from print_shop.setup import Proposer
 from print_shop.setup.intake import replay_asker
 from print_shop.setup.proposal import Change, Proposal, Source
 from print_shop.setup.reading import Seen, flags, read_slice
-from print_shop.setup.review import _BY, Review, ReviewRequest, parse_answer, render
+from print_shop.setup.review import Review, ReviewRequest, parse_answer, render
+from print_shop.setup.screen import _BY
 from tests.fakes import (
     CI_PROFILES,
     DATA,
@@ -35,7 +37,7 @@ from tests.fakes import (
     RecordedSlicer,
 )
 from tests.fixtures import write_stl
-from tests.reviewing import settled
+from tests.reviewing import flat, settled
 from tests.test_job_e2e import CFG
 
 #: The cube's one question, answered with its second option (3 walls).
@@ -65,11 +67,13 @@ def _request(proposal: Proposal | None = None) -> ReviewRequest:
 
 def test_the_review_shows_each_change_against_the_preset_and_the_reasoning() -> None:
     text = render(_request())
-    assert "How the part was read:\n  A 20 mm cube for show" in text
-    assert "wall_loops  2 -> 3" in text
-    assert "the flat faces show infill through 2 walls [model: flat_top, walls]" in text
-    assert "kept enable_support at 0: nothing overhangs" in text
-    assert "Orca's estimate: 10 min 54 s, 2.9 cm3, 3.6 g, 100 layers" in text
+    assert "  How the model read it\n    A 20 mm cube for show" in text
+    assert re.search(r"\n  wall_loops +2 +3 +model\n", text)
+    assert "      the flat faces show infill through 2 walls [flat_top, walls]" in text
+    assert re.search(r"KEPT AT YOUR PRESET\n  enable_support +0 +0 +model\n      nothing overhangs",
+                     text)
+    assert ("  time      10:54, Orca's estimate\n  plastic   2.9 cm3, 3.6 g\n"
+            "  layers    100\n") in text
     assert "flat face down" in text
 
 
@@ -81,7 +85,9 @@ def test_a_change_from_an_intake_answer_is_shown_as_yours() -> None:
     answer = Proposal(changes=(Change(key="wall_loops", preset="2", value="3", source=Source.ANSWER,
                                       reason="holds shape under light use"),),
                       model="crew-code-think")
-    assert "holds shape under light use [your answer]" in render(_request(answer))
+    text = render(_request(answer))
+    assert re.search(r"YOURS\n  wall_loops +2 +3 +your answer\n      holds shape under light use",
+                     text)
 
 
 def test_a_cut_off_is_shown_as_one() -> None:
@@ -96,8 +102,8 @@ def test_a_tuned_preset_shows_standard_then_tuning_then_this_print() -> None:
     hotter = Proposal(changes=(Change(key="nozzle_temperature", standard="210", preset="220",
                                       value="230", source=Source.MODEL, reason="bonding"),))
     text = render(_request(hotter))
-    assert "setting             standard -> your tuning -> this print" in text
-    assert "nozzle_temperature  210 -> 220 -> 230" in text
+    assert re.search(r"setting +standard +your tuning +this print +who\n", text)
+    assert re.search(r"nozzle_temperature +210 +220 +230 +model\n", text)
 
 
 def test_ok_approves_and_stop_stops() -> None:
@@ -145,13 +151,14 @@ def _read_request() -> ReviewRequest:
 
 def test_the_review_shows_the_slice_layer_by_layer_and_what_it_proposes() -> None:
     text = render(_read_request())
-    assert "What the slice shows, layer by layer:\n  layers: 100, " in text
-    assert "  Sparse infill: " in text
-    assert "seam (aligned): " in text and "a line up the wall" in text
-    assert "Proposed from the slice (not applied unless you take it):" in text
-    assert "  1) seam_position  aligned -> back" in text
+    assert "WHAT THE SLICE SHOWS\n" in text
+    assert "    layers  100, " in text
+    assert re.search(r"\n +Sparse infill +\d+:\d\d +#+", text)
+    assert "    seam    aligned: " in text and "a line up the wall" in flat(text)
+    assert "PROPOSED FROM THE SLICE (not applied unless you take it)" in text
+    assert "    1) seam_position  aligned -> back" in text
     assert "read: " in text
-    assert "take what the slice proposes (take, or take 1)" in text
+    assert "take (the slice's)" in text
 
 
 def test_a_reading_proposes_and_only_take_applies_it() -> None:
@@ -267,7 +274,7 @@ def test_a_correction_slices_again_and_the_ledger_keeps_it(
     refused = ("wall_loops=5: you answered it at the intake",)
     assert sponsor.shown[0].suggested is not None
     assert sponsor.shown[0].suggested.refused == refused, "said with the model's proposals"
-    assert "refused from the model: " + refused[0] in render(sponsor.shown[0])
+    assert "    refused: " + refused[0] in render(sponsor.shown[0])
     assert [(c.value, c.source) for c in sponsor.shown[1].proposal.changes] == [
         ("4", Source.SPONSOR)
     ]

@@ -206,10 +206,10 @@ def test_the_proposal_sets_it_on_its_variety_and_the_review_says_why_not_on_anot
         orientation=AppliedOrientation(rotation_deg=(0.0, 0.0, 0.0), rationale="flat"),
         profiles=fast_profiles, offering=offered(ledger, rail, FAST),
     ))
-    assert f"(not given: learned on {BASIC}; this print is {FAST})" in shown
     text = " ".join(shown.split())
+    assert f"not given: learned on {BASIC}; this print is {FAST}" in text
     assert "LESSONS NOT SET FOR THIS VARIETY" in text
-    assert (f"your override on rail.stl, and lesson 1, learned on {BASIC} (in Lessons above); "
+    assert (f"your override on rail.stl, and lesson 1, learned on {BASIC} (in Lessons below); "
             f"not ticked: this is {FAST}") in text
 
 
@@ -266,6 +266,8 @@ def test_one_setting_at_one_value_has_one_number(ledger: Ledger, rail: Path) -> 
     assert [(i.key, i.value) for i in later.items() if i.key == "textured_plate_temp"] == [
         ("textured_plate_temp", "80"), ("textured_plate_temp", "75")], (
         "another value is another choice, and each says why")
+    assert later.span() == 3 == len(later.items()), (
+        "Use these holds the most any pick has, so picking moves no number after it")
 
 
 # --------------------------------------------------------------------------
@@ -373,7 +375,7 @@ def test_with_no_past_print_to_offer_the_lessons_are_still_offered(
     text = " ".join(render(request(found)).split())
     assert "USE THESE: no past print has settings to offer, and lessons of this filament" in text
     assert "[ ] 1 textured_plate_temp 60 -> 75" in text
-    assert "use what decided that print (use, or use 1 3)" in text
+    assert "Answers: ok (approval gate) · use 1 ·" in text, "use is offered, by its number"
     review = parse_answer("use 1", request(found))
     assert not isinstance(review, str)
     assert [c.key for c in review.corrections] == ["textured_plate_temp"]

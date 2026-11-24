@@ -120,7 +120,7 @@ def test_the_contract_matches_what_discovery_publishes() -> None:
     thing from the discovery side; this one exists so a failure here points at
     the dashboard rather than at MQTT.
     """
-    cfg = MqttConfig.from_env()
+    cfg = MqttConfig.from_env(Path("/nonexistent/made-up.env"))  # the defaults, not the Mac's
     published = set()
     for topic, payload in discovery_payloads(cfg):
         component = topic.split("/")[1]

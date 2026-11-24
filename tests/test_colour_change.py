@@ -28,6 +28,7 @@ from print_shop.setup.intake import replay_asker
 from print_shop.setup.proposal import PAUSE, Change, Proposal, Source, apply, pause_z
 from print_shop.setup.reading import read_slice
 from print_shop.setup.review import Review, ReviewRequest, parse_answer, render
+from print_shop.setup.screen import warnings
 from print_shop.slicer import gcode
 from print_shop.slicer.orca import PauseAt, SlicerProfiles, slice_model
 from tests.fakes import (
@@ -297,12 +298,12 @@ def test_a_layer_typed_up_is_noted_and_the_planned_room_over_a_fit_is_not(tmp_pa
             result = daemon.wait_for_finish(job_id, timeout_s=30)
     assert not result.printed
     _, typed_up, at_the_top = sponsor.shown
-    assert ("  note: the fit `pocket` tops out at z=9.8, and the layer this pauses after is the "
-            "first to bridge or overhang above it: for parts dropped in, pause_at=10\n"
-            ) in render(typed_up)
+    assert ("note: the fit `pocket` tops out at z=9.8, and the layer this pauses after is the "
+            "first to bridge or overhang above it: for parts dropped in, pause_at=10"
+            ) in [w.full for w in warnings(typed_up)]
     said = render(at_the_top)
     assert "note: the fit `pocket`" not in said, "a layer of room over the band, as planned"
-    assert "pause_at=10, read from the G-code: pause after layer 50, at z=10," in said
+    assert "PAUSE pause_at=10: pauses after layer 50, at z=10," in said
 
 
 def test_a_colour_change_draws_no_lesson(tmp_path: Path) -> None:
