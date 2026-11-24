@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import tempfile
+import threading
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -83,7 +84,7 @@ class Queueish(Protocol):
 
     def asked(self, job_id: str) -> Asked | None: ...
 
-    def give(self, job_id: str, answer: Any) -> str: ...
+    def give(self, job_id: str, answer: Any, *, to: Asked | None = None) -> str: ...
 
     def give_alike(self, job_ids: Sequence[str], questions: Sequence[Question],
                    answers: Sequence[Answer]) -> list[str]: ...
@@ -206,6 +207,8 @@ class Shop:
     sessions: dict[str, Session] = field(default_factory=dict)
     #: What the last answer from the phone came to, by job: given, or why not.
     answered: dict[str, str] = field(default_factory=dict)
+    #: Held while a session is looked up or begun: two posts at once begin one.
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     #: Each job's review as last shown, and the one before it, to say what moved since.
     reviews: dict[str, tuple[ReviewRequest, ReviewRequest | None]] = field(default_factory=dict)
 
@@ -372,22 +375,28 @@ class Shop:
 
     def session(self, job_id: str) -> Session | None:
         """The phone's session on this job's need now, or None. One for another need, or that
-        ended, is closed and forgotten."""
+        ended, is closed and forgotten; one that ended unanswered (let go, or put by) too, so
+        the phone can begin again."""
+        with self._lock:
+            return self._session(job_id)
+
+    def _session(self, job_id: str) -> Session | None:
         found = self.sessions.get(job_id)
         if found is None:
             return None
         asked = self.asked(job_id)
-        if found.ended or asked is None or asked.since != found.since:
-            found.close()
-            if found.ended and found.since == getattr(asked, "since", None):
-                return found  # its end is still the page's news
-            self.sessions.pop(job_id, None)
-            if found.ended:
-                alike = self.answered.get(job_id, "")
-                self.answered[job_id] = found.said or (
-                    "Taken: it goes on with your answer" + (f" ({alike})" if alike else ""))
-            return None
-        return found
+        same = asked is not None and asked.since == found.since
+        if same and not found.ended:
+            return found
+        found.close()
+        if same and found.said and not found.closed_for:
+            return found  # its end is still the page's news: refused, and why
+        self.sessions.pop(job_id, None)
+        if found.ended:
+            alike = self.answered.get(job_id, "")
+            self.answered[job_id] = found.said or (
+                "Taken: it goes on with your answer" + (f" ({alike})" if alike else ""))
+        return None
 
     def alike(self, job_id: str) -> list[Line]:
         """The other jobs whose questions now are all asked alike to this one's: the same
@@ -412,15 +421,19 @@ class Shop:
         asked = self.asked(job_id)
         if queue is None or asked is None:
             return "it isn't waiting for you now"
-        if self.session(job_id) is not None:
-            return "it's being answered on a phone already: look again"
-        q = queue
+        with self._lock:
+            if self._session(job_id) is not None:
+                return "it's being answered on a phone already: look again"
+            return self._begin(queue, asked, job_id, ahead, alike_to)
+
+    def _begin(self, q: Queueish, asked: Asked, job_id: str, ahead: dict[str, list[str]],
+               alike_to: Sequence[str]) -> Session | str:
 
         def alive() -> bool:
             return q.asked(job_id) is asked
 
         def give(answer: Any) -> str:
-            return q.give(job_id, answer)
+            return q.give(job_id, answer, to=asked)
 
         after = None
         run: Callable[[Callable[[str], str], Callable[[str], None]], Any]
@@ -469,7 +482,7 @@ class Shop:
             return "it isn't waiting for you now"
         if asked.since != since:
             return "that page is out of date: it moved on since. Look again"
-        return self.queue.give(job_id, answer)
+        return self.queue.give(job_id, answer, to=asked)
 
     def moved(self, job_id: str, request: ReviewRequest) -> Moved | None:
         """What moved since the review before this one of the job, as the terminal marks it
@@ -482,10 +495,14 @@ class Shop:
         before = shown[1]
         return what_moved(before, request) if before is not None else None
 
-    def go(self, job_id: str) -> str:
-        """On without the model's questions: the queue's own `go` (mqucifer/print-shop#208)."""
+    def go(self, job_id: str, since: str) -> str:
+        """On without the model's questions: the queue's own `go` (mqucifer/print-shop#208),
+        from the page of the questions there are now (`since`)."""
+        asked = self.asked(job_id)
         if self.queue is None:
             return "the queue isn't running"
+        if asked is not None and repr(asked.since) != since:
+            return "that page is out of date: look again"
         return self.queue.go(job_id)
 
     def reading(self, job_id: str) -> float | None:

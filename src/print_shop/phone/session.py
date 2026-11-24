@@ -20,11 +20,12 @@ print: a review's ok makes a job ready, and Start is still a person's at the gat
 from __future__ import annotations
 
 import logging
+import secrets
 import threading
 from collections.abc import Callable
 from typing import Any
 
-__all__ = ["Closed", "Session"]
+__all__ = ["IDLE", "Closed", "Session"]
 
 logger = logging.getLogger(__name__)
 
@@ -35,13 +36,17 @@ LOOK_EVERY_S = 1.0
 #: How long a prompt waits for the phone before the session ends; the job still waits, for the
 #: Mac or the phone's next look.
 IDLE_S = 30 * 60.0
+#: What a session that waited `IDLE_S` for the phone says: the job waits, to begin again.
+IDLE = "nothing was answered for 30 minutes, so the phone let it go: it still waits"
 
 Read = Callable[[str], str]
 Write = Callable[[str], None]
 
 
-class Closed(EOFError):
-    """The session was closed while its code waited: its need moved on."""
+class Closed(BaseException):  # noqa: N818 - a signal, not an error
+    """The session was closed while its code waited: its need moved on, or nobody answered.
+    Not an `EOFError`, which the terminal's code reads as Enter at some prompts: a closed
+    session answers nothing."""
 
 
 class Session:
@@ -65,6 +70,11 @@ class Session:
         #: How it ended: what the queue said of the answer ("" once given), or why not.
         self.said = ""
         self._closed = False
+        #: Why it was closed: "moved" on, or "idle".
+        self.closed_for = ""
+        #: This session's own, in every reply's stamp: a page of another session's prompt,
+        #: whatever its number, answers nothing here.
+        self._token = secrets.token_hex(8)
         self._run, self._give, self._after = run, give, after
         self._alive, self._idle_s = alive, idle_s
         self._thread = threading.Thread(target=self._go, name=f"phone-{job_id[:8]}",
@@ -89,8 +99,10 @@ class Session:
                 # at the Mac, put by) or nobody answers for `idle_s`, the session ends.
                 self._cv.wait(LOOK_EVERY_S)
                 waited += LOOK_EVERY_S
-                if not self._typed and (waited >= self._idle_s or not self._alive()):
-                    self._closed = True
+                if not self._typed and not self._alive():
+                    self._closed, self.closed_for = True, self.closed_for or "moved"
+                elif not self._typed and waited >= self._idle_s:
+                    self._closed, self.closed_for = True, self.closed_for or "idle"
             if self._closed:
                 raise Closed(self.job_id)
             typed = self._typed.pop(0)
@@ -107,14 +119,18 @@ class Session:
         try:
             found = self._run(self._read, self._write)
         except Closed:
-            said = "put by: answered elsewhere, or it moved on"
+            said = (IDLE if self.closed_for == "idle" else
+                    "put by: it was answered elsewhere, or it moved on")
         except EOFError:
             said = "ended without an answer"
         except Exception as exc:  # noqa: BLE001 - said on the page; the job waits as it was
             logger.warning("the phone's session for job %s failed", self.job_id, exc_info=True)
             said = f"it couldn't be answered here ({type(exc).__name__}): answer it at the Mac"
         else:
-            said = self._give(found)
+            with self._cv:
+                closed = self._closed
+            said = ("put by: it was answered elsewhere, or it moved on" if closed
+                    else self._give(found))
             if not said and self._after is not None:
                 try:
                     self._after(found)
@@ -132,13 +148,20 @@ class Session:
             self._ahead = {k: list(v) for k, v in ahead.items()}
         self._thread.start()
 
-    def reply(self, typed: str, version: int) -> str:
-        """An answer to the prompt that waits, as typed at the Mac. Returns "" once taken, or
-        why not: the page was of another prompt, or it's ended."""
+    @property
+    def stamp(self) -> str:
+        """The prompt that waits now, as its page carries it: this session's, and its number."""
+        with self._cv:
+            return f"{self._token}-{self.version}"
+
+    def reply(self, typed: str, stamp: str) -> str:
+        """An answer to the prompt that waits, as typed at the Mac. `stamp` is the prompt the
+        page showed. Returns "" once taken, or why not: the page was of another prompt, of
+        another session's, or it's ended."""
         with self._cv:
             if self.ended:
                 return "it's been answered already"
-            if self.prompt is None or version != self.version:
+            if self.prompt is None or stamp != f"{self._token}-{self.version}":
                 return "that page is out of date: look again"
             self._typed.append(typed)
             self._cv.notify_all()
@@ -157,7 +180,7 @@ class Session:
 
     def close(self) -> None:
         with self._cv:
-            self._closed = True
+            self._closed, self.closed_for = True, self.closed_for or "moved"
             self._cv.notify_all()
 
     @property

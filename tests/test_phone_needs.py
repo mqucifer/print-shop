@@ -26,7 +26,7 @@ from print_shop.orchestrator.print_queue import Adding, Asked, Line, Need
 from print_shop.phone.needs import REVIEW_WIDTH
 from print_shop.phone.phones import Phones
 from print_shop.phone.server import handler_for
-from print_shop.phone.session import Session
+from print_shop.phone.session import IDLE, Session
 from print_shop.phone.shop import Shop
 from print_shop.setup.intake import Answer, Option, Question, cli_asker
 from print_shop.setup.review import Review, parse_answer, render
@@ -85,10 +85,12 @@ class FakeQueue:
         found = self.asks.get(job_id)
         return found if found is not None and found.open else None
 
-    def give(self, job_id: str, answer: Any) -> str:
+    def give(self, job_id: str, answer: Any, *, to: Asked | None = None) -> str:
         found = self.asked(job_id)
         if found is None:
             return "it isn't waiting for you"
+        if to is not None and found is not to:
+            return "it moved on since: what it asks now wasn't answered"
         if not found._give(answer):
             return "it was answered already"
         self.given.append((job_id, answer))
@@ -158,7 +160,7 @@ def follow(phone: Browser, path: str) -> Reply:
 
 
 def version(reply: Reply) -> str:
-    found = re.search(r'name="version" value="(\d+)"', reply.raw)
+    found = re.search(r'name="version" value="([0-9a-f]+-\d+)"', reply.raw)
     assert found is not None, reply.body
     return found.group(1)
 
@@ -217,7 +219,9 @@ def test_own_words_are_read_back_and_confirmed_once_from_the_form(tmp_path: Path
     assert "So supports off" in shown.body and "no supports please" in shown.body
     assert "Yes, that's my decision" in shown.body and r.queue.given == []
     v = version(shown)
-    assert phone.post("/job/j1/reply", {"version": str(int(v) + 1), "typed": "y"}).status == 409
+    token, n = v.rsplit("-", 1)
+    later = f"{token}-{int(n) + 1}"
+    assert phone.post("/job/j1/reply", {"version": later, "typed": "y"}).status == 409
     took = phone.post("/job/j1/reply", {"version": v, "typed": "y"})
     assert took.status == 303
     wait_until(lambda: bool(r.queue.given))
@@ -342,7 +346,7 @@ def test_a_phone_that_walks_away_holds_nothing(tmp_path: Path) -> None:
     session.settle(5.0)
     assert session.waiting
     wait_until(lambda: session.ended, 5.0)
-    assert "put by" in session.said and queue.given == [] and asked.open
+    assert session.said == IDLE and queue.given == [] and asked.open
     assert queue.give("j1", terminal((SUPPORT,), ["2"])) == "", "the Mac answers it"
     wait_until(lambda: not session._thread.is_alive(), 5.0)
 
@@ -367,7 +371,8 @@ def test_the_models_wait_is_said_as_of_the_page_and_go_is_the_queues(tmp_path: P
     assert "The model is still reading the part (reading since" in shown.body
     assert "Check again" in shown.body and "Done, go on without waiting" in shown.body
     assert "http-equiv" not in shown.raw, "no refresh on a form page"
-    assert r.phone().post("/job/j1/go", {"go": "1"}).status == 303
+    assert r.phone().post("/job/j1/go", {"since": "4.0"}).status == 409, "a stale page"
+    assert r.phone().post("/job/j1/go", {"since": since(asked)}).status == 303
 
 
 def test_the_models_closer_choices_keep_your_answer_as_enter_does(tmp_path: Path) -> None:
@@ -612,3 +617,90 @@ def test_words_that_set_nothing_are_kept_and_the_page_says_its_taken(tmp_path: P
     wait_until(lambda: bool(r.queue.given))
     assert r.queue.given[0][1] == terminal((PURPOSE,), ["o holds a lamp"])
     assert "Taken: it goes on with your answer" in phone.get("/job/j1/questions").body
+
+
+# --------------------------------------------------------------------------
+# The cold security review of mqucifer/print-shop#282, and what came of it
+# --------------------------------------------------------------------------
+
+
+def test_an_old_sessions_page_answers_nothing_in_a_newer_one(tmp_path: Path) -> None:
+    """Finding 1: each session's prompts are numbered from 1, so a page of an earlier one
+    once answered a later one's. A reply now carries its session's own token."""
+    first = Asked(job_id="j1", need=Need.QUESTIONS, questions=(SUPPORT,))
+    r = rig(tmp_path, {"j1": first})
+    phone = r.phone()
+    phone.post("/job/j1/questions", {"since": since(first), "q0": "o", "w0": "no supports"})
+    old = version(phone.get("/job/j1/questions"))
+    first._cancel()  # put by at the Mac; then asked again
+    second = Asked(job_id="j1", need=Need.QUESTIONS, questions=(SUPPORT,))
+    r.queue.asks["j1"] = second
+    phone.get("/job/j1/questions")  # the old session is let go
+    phone.post("/job/j1/questions", {"since": since(second), "q0": "o", "w0": "no supports"})
+    new = version(phone.get("/job/j1/questions"))
+    assert old.split("-")[1] == new.split("-")[1] and old != new, "same number, other session"
+    assert phone.post("/job/j1/reply", {"version": old, "typed": "y"}).status == 409
+    assert r.queue.given == []
+
+
+def test_a_closed_session_gives_nothing_though_its_code_reads_eof_as_enter(
+    tmp_path: Path,
+) -> None:
+    """Finding 2: `loaded>` reads EOF as Enter, so a session let go once approved. Closing it
+    is no EOF now, and a closed session gives nothing."""
+    asked = Asked(job_id="j1", need=Need.REVIEW, review=request())
+    r = rig(tmp_path, {"j1": asked})
+    queue = r.queue
+
+    def run(read: Any, write: Any) -> Any:
+        try:
+            read("loaded> ")
+        except EOFError:
+            return Review(approved=True)  # as `_loaded_first` takes an EOF
+        return Review(approved=True)
+
+    session = Session("j1", asked.since, run, lambda a: queue.give("j1", a, to=asked),
+                      idle_s=0.3)
+    session.start({})
+    wait_until(lambda: session.ended, 5.0)
+    assert session.said == IDLE and queue.given == [] and asked.open
+
+
+def test_the_queue_gives_only_to_the_ask_it_was_for(tmp_path: Path) -> None:
+    first = Asked(job_id="j1", need=Need.REVIEW, review=request())
+    r = rig(tmp_path, {"j1": first})
+    second = Asked(job_id="j1", need=Need.REVIEW, review=request())
+    r.queue.asks["j1"] = second
+    assert r.queue.give("j1", Review(approved=True), to=first) != ""
+    assert second.open
+
+
+def test_a_semicolon_in_a_reason_adds_no_second_change(tmp_path: Path) -> None:
+    """Finding 3."""
+    review = request()
+    r = rig(tmp_path, {"j1": Asked(job_id="j1", need=Need.REVIEW, review=review)})
+    given = _given_review(r, r.phone(), {"do": "change", "key": "wall_loops", "value": "4",
+                                         "reason": "walls; sparse_infill_density=5%"})
+    assert [c.key for c in given.corrections] == ["wall_loops"]
+    assert given.corrections[0].reason == "walls, sparse_infill_density=5%"
+
+
+def test_the_phone_begins_again_after_it_let_a_prompt_go(tmp_path: Path) -> None:
+    """Finding 4: a session let go held the need from the phone until the Mac answered."""
+    asked = Asked(job_id="j1", need=Need.QUESTIONS, questions=(SUPPORT,))
+    r = rig(tmp_path, {"j1": asked})
+    phone = r.phone()
+    phone.post("/job/j1/questions", {"since": since(asked), "q0": "o", "w0": "no supports"})
+    r.shop.sessions["j1"].close()
+    wait_until(lambda: r.shop.sessions["j1"].ended, 5.0)
+    shown = phone.get("/job/j1/questions")
+    assert shown.status == 200 and "The underside overhangs" in shown.body
+    assert phone.post("/job/j1/questions", {"since": since(asked), "q0": "2"}).status == 303
+    wait_until(lambda: bool(r.queue.given))
+
+
+def test_two_posts_at_once_begin_one_session(tmp_path: Path) -> None:
+    asked = Asked(job_id="j1", need=Need.QUESTIONS, questions=(SUPPORT,))
+    r = rig(tmp_path, {"j1": asked})
+    made = [r.shop.begin("j1", {}) for _ in range(2)]
+    assert isinstance(made[0], Session) and isinstance(made[1], str)

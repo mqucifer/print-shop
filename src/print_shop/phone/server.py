@@ -120,6 +120,11 @@ def _ahead(asked: Asked, form: dict[str, str]) -> dict[str, list[str]] | str:
     return ahead
 
 
+def _reason(text: str) -> str:
+    """A reason as one answer's: on one line, and with no `;`, which would begin another."""
+    return " ".join(text.replace(";", ",").split())[:300]
+
+
 def _review_typed(asked: Asked, form: dict[str, str]) -> str:
     """The review's form as the answer typed at its prompt, or "!" and why it isn't one."""
     do = form.get("do", "")
@@ -132,14 +137,14 @@ def _review_typed(asked: Asked, form: dict[str, str]) -> str:
         numbers = [n for n in form.get("take", "").split() if n.isdecimal() and n.isascii()]
         request = asked.review
         models = sorted(by_number(request.by_model)) if request is not None else []
-        down = [(n, " ".join(form.get(f"no{n}", "").split())[:300]) for n in models]
+        down = [(n, _reason(form.get(f"no{n}", ""))) for n in models]
         parts = ([f"take {' '.join(numbers)}"] if numbers else []) + [
             f"no {n} because {why}" for n, why in down if why and str(n) not in numbers]
         return "; ".join(parts) or "!Tick what to take, or say why to turn one down."
     if do == "change":
         key = form.get("key", "").strip()
         value = " ".join(form.get("value", "").split())[:60]
-        reason = " ".join(form.get("reason", "").split())[:300]
+        reason = _reason(form.get("reason", ""))
         if not re.fullmatch(r"[a-z_0-9]{1,80}", key) or not value or ";" in value:
             return "!Give the setting a value."
         return f"{key}={value}" + (f" because {reason}" if reason else "")
@@ -652,12 +657,10 @@ class _Handler(BaseHTTPRequestHandler):
             return
         job_id = line.job.job_id
         session = self.shop.session(job_id)
-        version = form.get("version", "")
+        stamp = form.get("version", "")[:40]
         typed = form.get("typed", "").replace("\r", " ").replace("\n", " ")[:2000]
         why = ("nothing waits for an answer here now: it was answered, or moved on"
-               if session is None else
-               session.reply(typed, int(version)) if _number(version, 9)
-               else "that wasn't the page's form")
+               if session is None else session.reply(typed, stamp))
         if why:
             return self._send(message_page("Not taken", f"{why[:1].upper()}{why[1:]}.",
                                            back_to=f"/job/{job_id}",
@@ -672,7 +675,7 @@ class _Handler(BaseHTTPRequestHandler):
         line = self._job_line(held)
         if line is None or self.shop is None:
             return
-        why = self.shop.go(line.job.job_id)
+        why = self.shop.go(line.job.job_id, form.get("since", ""))
         if why:
             return self._send(message_page("Not done", f"{why[:1].upper()}{why[1:]}.",
                                            back_to=f"/job/{line.job.job_id}/questions",

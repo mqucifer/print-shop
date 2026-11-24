@@ -150,6 +150,7 @@ def questions_page(
     body.append(f"<button type=\"submit\">{_e(words)}</button></form>")
     if reading_s is not None:
         body.append(f"<form method=\"post\" action=\"/job/{_e(job_id)}/go\">"
+                    f"{_hidden('since', since_of(asked))}"
                     "<button type=\"submit\" class=\"second\">Skip the model's questions"
                     "</button></form>")
     return page(f"{line.job.part}: questions", "".join(body))
@@ -181,7 +182,7 @@ def closer_page(line: Line, asked: Asked) -> str:
 # --------------------------------------------------------------------------
 
 
-def _reply(job_id: str, version: int, typed: str, words: str, kind: str = "") -> str:
+def _reply(job_id: str, version: str, typed: str, words: str, kind: str = "") -> str:
     cls = f" class=\"{kind}\"" if kind else ""
     return (f"<form method=\"post\" action=\"/job/{_e(job_id)}/reply\">"
             f"{_hidden('version', version)}{_hidden('typed', typed)}"
@@ -193,7 +194,7 @@ def follow_page(line: Line, session: Session) -> str:
     the Mac: with buttons for what its prompt takes, and a box for anything else."""
     job_id = line.job.job_id
     prompt = session.prompt or ""
-    version = session.version
+    version = session.stamp
     said = "\n".join(session.said_since()).strip("\n")
     buttons = []
     if prompt == WORDS_PROMPT:
