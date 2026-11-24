@@ -509,7 +509,8 @@ def _again(args: argparse.Namespace, read: Callable[[str], str]) -> sliced.Again
         if isinstance(changes, str):
             print(f"--change not read: {changes}", file=sys.stderr)
             return 2
-        made = run.change(changes, into(), slice_model)
+        folder = into()
+        made = run.change(changes, folder, slice_model)
     except reprint.Refused as exc:
         print(exc, file=sys.stderr)
         return 2
@@ -518,6 +519,13 @@ def _again(args: argparse.Namespace, read: Callable[[str], str]) -> sliced.Again
         return 130
     for line in made.lines():
         print(line)
+    if made.beyond:
+        # Unasked, nothing that no change named is printed: at the terminal Enter asks once.
+        print("Not sent: it also changes " + ", ".join(d.key for d in made.beyond) + ", which "
+              "--change didn't name. Run --again without --change to see it and say.",
+              file=sys.stderr)
+        reprint.clear(folder)
+        return 2
     return run.changed(made)
 
 

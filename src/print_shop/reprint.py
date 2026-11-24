@@ -22,7 +22,9 @@ profiles, and it didn't come out the same.
   sha256, and its profiles are the store's files it names, each checked by its hash. What
   can't be checked is said, and the comparison shows what it changes.
 - **The new slice is compared with that run's** (`compare`), read from both G-codes' config
-  blocks: what differs is shown, and anything beyond what was changed is named.
+  blocks. What differs beyond what was changed, a profile edited since say, is kept at the run's
+  own value from its G-code and sliced again, saying so, so a change is that change alone. What
+  can't be kept so is named, and Enter asks once before printing it (`screen`).
 - **A newer lesson is a suggestion here, never applied by itself** (`Reprint.suggestions`), and
   so is a setting asked at that run that didn't reach its slice (mqucifer/print-shop#206).
   `take N` takes one, as a change.
@@ -50,6 +52,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from print_shop import sliced
+from print_shop.core.state import SliceResult
 from print_shop.ingest.orientation import write_rotated
 from print_shop.ledger import Ledger, Row
 from print_shop.outcome_words import outcome_words
@@ -197,21 +200,33 @@ def run_line(row: Row, n: int | None = None) -> list[str]:
     lines.append(f"{pad}    {said}")
     spool = row.material.named() if row.material is not None else row.filament
     lines.append(f"{pad}    on {spool}")
-    changed = [f"{c.key}={c.value}" for c in row.corrections or ()
-               if c.key != ORIENTATION and not c.said_no_to]
-    turned = [c for c in row.corrections or () if c.key == ORIENTATION]
-    if turned:
-        changed.insert(0, f"turned to {turned[-1].value}")
     again = row.sliced.reprinted if row.sliced is not None else None
     if row.sliced is not None and row.sliced.reprint_of:
-        how = ("changed: " + "; ".join(again.said_changes()) if again and again.changes
+        how = ("changed: " + ", ".join(again.said_changes()) if again and again.changes
                else "as it was")
         lines.append(f"{pad}    a print again of job {row.sliced.reprint_of[:8]}, {how}")
     elif row.sliced is not None:
         lines.append(f"{pad}    sliced by hand")
-    elif changed:
-        lines.append(f"{pad}    you changed: " + "; ".join(changed))
+    else:
+        lines.append(f"{pad}    {_yours(row)}")
     return lines
+
+
+def _yours(row: Row) -> str:
+    """What the person changed at the run's review: their corrections, a turn, and what they
+    took of the model's or the slice's proposals."""
+    if row.corrections is None:
+        return "what you changed wasn't kept then: the run is from before the review"
+    changed = [f"turned to {c.value}" if c.key == ORIENTATION else f"{c.key}={c.value}"
+               for c in row.corrections if not c.said_no_to]
+    taken = [f"{c.key}={c.value} (taken)" for c in
+             (row.proposal.changes if row.proposal is not None else ())
+             if (c.taken or c.source is Source.READING)
+             and not any(m.key == c.key for m in row.corrections)]
+    said_no = [f"no to {c.key}={c.said_no_to}" for c in row.corrections if c.said_no_to]
+    yours = changed + taken + said_no
+    return ("you changed: " + ", ".join(yours) if yours
+            else "you changed nothing at its review: its settings as proposed")
 
 
 # --- one run, found to print again ---------------------------------------------------------------
@@ -257,6 +272,9 @@ class Changed:
     differs: tuple[Difference, ...]
     #: The pause, and Orca's time, filament and layers, then and now.
     totals: tuple[str, ...] = ()
+    #: What differed that no change named, kept at the run's own value and sliced again: each
+    #: as it differed before it was kept.
+    pinned: tuple[Difference, ...] = ()
 
     @property
     def beyond(self) -> tuple[Difference, ...]:
@@ -271,7 +289,10 @@ class Changed:
         unmoved = [c.key for c in self.changes
                    if c.key != PAUSE and not any(d.key == c.key for d in self.differs)]
         out += [f"  NOT CHANGED  {key}: the slice has the run's value still" for key in unmoved]
-        out += [f"  ALSO DIFFERS {d.line()}: no change of yours named it" for d in self.beyond]
+        out += [f"  KEPT         {d.key} at {_short(d.was)}, as that run printed it: its profile "
+                f"says {_short(d.now)} now" for d in self.pinned]
+        out += [f"  ALSO DIFFERS {d.line()}: no change of yours named it, and it couldn't be kept "
+                "at the run's value" for d in self.beyond]
         if not self.beyond:
             out.append("  Nothing else differs.")
         return out
@@ -325,8 +346,12 @@ class Reprint:
         out = run_line(self.row)
         out[0] = "Print again: " + out[0]
         if self.gcode is not None:
+            failed = (f" (it failed: {self.row.symptom})"
+                      if self.row.result is not None and self.row.result == "failed"
+                      and self.row.symptom not in (None, "none")
+                      else " (it failed)" if self.row.result == "failed" else "")
             out.append(f"Its file is kept ({self.gcode.name}), with the bytes it printed: Enter "
-                       "prints it as it was.")
+                       f"prints it as it was{failed}.")
         else:
             out.append(f"It can't print as it was: {self.gone}.")
         out += [f"  ({u})" for u in self.unchecked]
@@ -395,28 +420,47 @@ class Reprint:
         if refused:
             raise Refused("; ".join(refused))
         into.mkdir(parents=True, exist_ok=True)
-        try:
-            profiles = apply(self.profiles, placeable(asked, process, filament),
-                             into / "profiles")
-        except NotPlaced as exc:
-            raise Refused(str(exc)) from exc
         rotation = self.first.rotation_deg
         stl = (self.part if rotation == (0.0, 0.0, 0.0)
                else write_rotated(self.part, rotation, into / "rotated.stl"))
-        try:
-            result = slicer(stl, profiles, into / "slice")
-        except (RuntimeError, OSError) as exc:
-            raise Refused(f"it couldn't be sliced: {str(exc).splitlines()[0]}") from exc
-        now = parse_config_block(result.gcode_path)
         named = {c.key for c in changes} | {c.key for c in self.earlier}
-        differs = compare(self.config, now, named)
+        result, differs = self._sliced(stl, asked, into, slicer, named)
+        # What differs that no change named (a profile edited since, say) is kept at the run's
+        # own value, from its G-code, and it's sliced again: a change is that change alone.
+        pins = [d for d in differs if not d.changed and d.key not in PAUSE_NAMES
+                and d.was != "(not in it)" and not unplaced(d.key, process, filament)]
+        pinned: tuple[Difference, ...] = ()
+        if pins:
+            kept = asked.corrected([
+                Change(key=d.key, preset=d.now, value=d.was, source=Source.SPONSOR,
+                       reason=f"kept at {d.was}, as the run printed it, at a print again")
+                for d in pins])
+            result, differs = self._sliced(stl, kept, into / "kept", slicer, named)
+            pinned = tuple(d for d in pins if all(n.key != d.key for n in differs))
         totals = [f"Orca         {self.row.print_time_s // 60} min, "
                   f"{self.row.filament_cm3:g} cm3, {self.row.layer_count} layers then; "
                   f"{result.print_time_s // 60} min, {result.filament_cm3:g} cm3, "
                   f"{result.layer_count} layers now"]
         totals += _pauses_then_and_now(self.row, result.gcode_path)
         return Changed(gcode=result.gcode_path, changes=tuple(changes), differs=differs,
-                       totals=tuple(totals))
+                       totals=tuple(totals), pinned=pinned)
+
+    def _sliced(self, stl: Path, asked: Proposal, into: Path, slicer: Slicer,
+                named: set[str]) -> tuple[SliceResult, tuple[Difference, ...]]:
+        """`asked` over the run's profiles, sliced into `into`, and how it differs from the
+        run's G-code."""
+        assert self.profiles is not None
+        process, filament = self._presets.get("process", {}), self._presets.get("filament", {})
+        try:
+            profiles = apply(self.profiles, placeable(asked, process, filament),
+                             into / "profiles")
+        except NotPlaced as exc:
+            raise Refused(str(exc)) from exc
+        try:
+            result = slicer(stl, profiles, into / "slice")
+        except (RuntimeError, OSError) as exc:
+            raise Refused(f"it couldn't be sliced: {str(exc).splitlines()[0]}") from exc
+        return result, compare(self.config, parse_config_block(result.gcode_path), named)
 
     def changed(self, made: Changed) -> sliced.Again:
         """A change's slice, to send as a new job marked a print again of the run, with what
@@ -430,6 +474,8 @@ class Reprint:
                               for c in (*self.earlier, *made.changes)),
                 differs=tuple(d.line() for d in made.differs),
                 beyond=tuple(d.key for d in made.beyond),
+                pinned=tuple(f"{d.key} kept at {d.was}, as that run printed it; its profile "
+                             f"says {d.now} now" for d in made.pinned),
                 suggested=tuple(f"{s.key}={s.value}: {s.why}" for s in self.suggestions),
                 unchecked=self.unchecked, pose=self.first.rotation_deg))
 
@@ -773,6 +819,7 @@ def screen(
     made: Changed | None = None
     changes: list[Change] = []
     folders: list[Path] = []  # each change's slice: those not sent are cleared
+    confirmed: Changed | None = None  # what Enter was asked about once, and pressed again for
 
     def leaving(kept: Path | None = None) -> None:
         for folder in folders:
@@ -790,6 +837,12 @@ def screen(
             return None
         if typed.lower() in ("", "ok", "y", "yes"):
             if made is not None:
+                if made.beyond and confirmed is not made:
+                    confirmed = made
+                    write("  This also changes " + "; ".join(d.line() for d in made.beyond)
+                          + ", which no change of yours named: Enter again to print it so, or "
+                          "undo.")
+                    continue
                 leaving(made.gcode)
                 return reprint.changed(made)
             try:
@@ -820,6 +873,11 @@ def screen(
             write(line)
         write("Enter prints this; another change slices it again; undo goes back to the run as "
               "it was; stop ends it.")
+
+
+def clear(folder: Path) -> None:
+    """A change's slice that isn't sent."""
+    shutil.rmtree(folder, ignore_errors=True)
 
 
 def slice_folder(jobs: Path, row: Row) -> Path:

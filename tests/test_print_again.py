@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import threading
 import time
 import uuid
@@ -23,6 +24,7 @@ import trimesh
 
 from print_shop import reprint, sliced
 from print_shop.core.mqtt import gate_topic
+from print_shop.core.state import SliceResult
 from print_shop.inventory import Material
 from print_shop.ledger import Answer, Ledger, PrintRecord, Result, Symptom
 from print_shop.orchestrator.daemon import Daemon
@@ -33,9 +35,16 @@ from print_shop.runtime import job_profiles, profiles_for
 from print_shop.setup import Proposer
 from print_shop.setup import lessons as print_lessons
 from print_shop.setup.proposal import Change, Proposal, Source, apply
+from print_shop.setup.review import Review
 from print_shop.setup.traits import traits
 from print_shop.slicer.naming import name_gcode
-from print_shop.slicer.orca import BedType, parse_config_block, slice_model, with_bed_type
+from print_shop.slicer.orca import (
+    BedType,
+    SlicerProfiles,
+    parse_config_block,
+    slice_model,
+    with_bed_type,
+)
 from print_shop.slicer.store import Store, choose
 from tests.fakes import STORE
 from tests.sliced_fixtures import write_gcode
@@ -328,6 +337,29 @@ def test_finished_runs_are_listed_newest_first_and_found_by_part_colour_or_note(
     lines = reprint.run_line(found[0])
     assert lines[1].strip() == 'failed, warping: "lifted at a corner"'
     assert "white" in lines[2]
+    assert lines[3].strip() == "you changed nothing at its review: its settings as proposed"
+    assert any("Enter prints it as it was (it failed: warping)." in line
+               for line in shop.find(bad).lines())
+    assert any(line.endswith("Enter prints it as it was.") for line in shop.find(good).lines())
+
+
+def test_a_run_says_what_you_changed_at_its_review(
+    shop: Again, running: tuple[Daemon, PrintQueue],
+) -> None:
+    daemon, queue = running
+    added, _ = queue.add([Adding(shop.part("bracket"))])
+    job = added[0]
+    shop.answer(queue, job)
+    asked = shop.review(queue, job, Review(corrections=(Change(
+        key="sparse_infill_density", preset="15%", value="40%", reason="stiffer",
+        source=Source.SPONSOR),)))
+    wait_until(lambda: (a := queue.asked(job)) is not None and a is not asked)
+    shop.review(queue, job)
+    wait_until(lambda: shop.waits(job) is Waits.READY or shop.offered() == job)
+    start_offered(shop, daemon, job)
+    shop.end_print(job)
+    (row,) = reprint.runs(shop.ledger)
+    assert reprint.run_line(row)[3].strip() == "you changed: sparse_infill_density=40%"
 
 
 # --- a run from before ---------------------------------------------------------------------------
@@ -351,9 +383,51 @@ def test_a_run_from_before_says_what_cant_be_checked_and_still_prints_again(
     assert "its part wasn't kept then" in said and str(part) in said
     assert "its profiles weren't kept then" in said
     assert run.as_it_was().path == shop.uploaded()
+    # Today's store sets wall_loops otherwise: kept at the run's value, from its G-code.
+    was = parse_config_block(shop.uploaded())
+    _edit_store(shop.store, "wall_loops", "7")
+    run = shop.find(first)
+    assert any("has been edited since" in u for u in run.unchecked)
     made = run.change(reprint.parse_changes("sparse_infill_density=35%", run),  # type: ignore[arg-type]
                       shop.tmp / "change", shop.slicer)
-    assert "sparse_infill_density" in {d.key for d in made.differs}
+    now = parse_config_block(made.gcode)
+    assert {k for k in was.keys() | now.keys() if was.get(k) != now.get(k)} == {
+        "sparse_infill_density"}, "the change alone, though the profile was edited since"
+    assert [(d.key, d.was, d.now) for d in made.pinned] == [("wall_loops", was["wall_loops"], "7")]
+    assert made.beyond == ()
+    assert (f"  KEPT         wall_loops at {was['wall_loops']}, as that run printed it: its "
+            "profile says 7 now") in made.lines()
+    assert "  Nothing else differs." in made.lines()
+    sent = run.changed(made)
+    assert sent.reprinted is not None and sent.reprinted.pinned and sent.reprinted.beyond == ()
+
+
+def test_what_cant_be_kept_at_the_runs_value_is_named_and_enter_asks_once(
+    shop: Again, running: tuple[Daemon, PrintQueue],
+) -> None:
+    daemon, queue = running
+    first = shop.printed(daemon, queue, Adding(shop.part("bracket")))
+
+    def stubborn(stl_path: Path | str, profiles: SlicerProfiles,
+                 outdir: Path | str) -> SliceResult:
+        """Orca as if it always wrote top_shell_layers its own way: no profile keeps it."""
+        result = shop.slicer(stl_path, profiles, outdir)
+        text = result.gcode_path.read_text()
+        result.gcode_path.write_text(re.sub(r"(?m)^; top_shell_layers = .*$",
+                                            "; top_shell_layers = 99", text))
+        return result
+
+    run = shop.find(first)
+    said: list[str] = []
+    typed = iter(["sparse_infill_density=35%", "", ""])
+    sent = reprint.screen(run, slicer=stubborn, into=lambda: reprint.slice_folder(shop.work,
+                          run.row), read=lambda prompt: next(typed), write=said.append)
+    text = "\n".join(said)
+    assert "ALSO DIFFERS top_shell_layers:" in text and "couldn't be kept" in text
+    assert "This also changes top_shell_layers:" in text and "Enter again to print it so" in text
+    assert text.count("This also changes") == 1, "asked once"
+    assert sent is not None and sent.reprinted is not None
+    assert sent.reprinted.beyond == ("top_shell_layers",)
 
 
 # --- the run's settings --------------------------------------------------------------------------

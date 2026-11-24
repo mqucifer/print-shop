@@ -447,7 +447,7 @@ uv run python scripts/print_job.py --runs
 uv run python scripts/print_job.py --runs lid white
 ```
 
-Every run that ended is listed, failed ones too, newest first: when, the part and the job's id, the outcome with your note, the spool, and what you changed at its review (or that it was a print again of another, and how). Words find runs by part, colour, filament, note or outcome. It only reads, beside a running job.
+Every run that ended is listed, failed ones too, newest first: when, the part and the job's id, the outcome with your note, the spool, and what you changed at its review, your corrections and what you took (or that you changed nothing, or that it was a print again of another, and how). A failed run prints again unchanged if you say so: its screen says it failed, at the Enter line. Words find runs by part, colour, filament, note or outcome. It only reads, beside a running job.
 
 **Print it again:**
 
@@ -458,9 +458,9 @@ PRINT_AGENT_ALLOW_HARDWARE=1 uv run python scripts/print_job.py --again 3f2a…
 The run's id, or the start of it. It shows the run, what's kept of it, its settings, and what's suggested, then:
 
 - **Enter prints it as it was:** the G-code that run printed, kept in its folder, goes to the gate as it is. Nothing is asked, proposed or sliced. It's checked against the sha256 the ledger kept of what was sent, and a file that's gone or has changed says so and prints nothing.
-- **A change slices it again:** type `layer_height=0.16` (several with `;`, `because …` as at the review). It's sliced from that run's own part, in its pose, with the profiles and the settings it printed with, and your change over them. No question and no model. The new slice is shown against that run's G-code, read from both: Orca's time, plastic and layers then and now, the pause, each setting you changed, a change that didn't move the slice, and **ALSO DIFFERS** for anything else that's different. "Nothing else differs." when nothing is. Another change slices again from the run; `undo` goes back to it as it was; Enter sends what's shown; `stop` ends it with nothing sent.
+- **A change slices it again:** type `layer_height=0.16` (several with `;`, `because …` as at the review). It's sliced from that run's own part, in its pose, with the profiles and the settings it printed with, and your change over them. No question and no model. The new slice is shown against that run's G-code, read from both: Orca's time, plastic and layers then and now, the pause, each setting you changed, and a change that didn't move the slice. Anything else that came out different (a profile edited since, say) is **kept at that run's own value**, read from its G-code, and sliced again, so the change is your change alone: it's said, `KEPT wall_loops at 2, as that run printed it: its profile says 7 now`. "Nothing else differs." when nothing does. A setting that can't be kept so is named, **ALSO DIFFERS**, and Enter asks once before printing it so. Another change slices again from the run; `undo` goes back to it as it was; Enter sends what's shown; `stop` ends it with nothing sent.
 - **What's suggested is never applied by itself:** a lesson kept or edited since that run, for its part and filament, whose setting it printed otherwise, and a setting asked at that run that didn't reach its slice (mqucifer/print-shop#206). `take 1` takes one, as a change.
-- `--again 3f2a… --change "sparse_infill_density=35%"` does the same without asking: it shows the comparison and goes on to the gate.
+- `--again 3f2a… --change "sparse_infill_density=35%"` does the same without asking: it shows the comparison and goes on to the gate. If something else would differ that can't be kept at the run's value, it's not sent, saying what: run `--again` without `--change` to see it and say.
 
 The new job is a print again of that run in the ledger, with its own outcome. `--list`, `--runs` and the desk say so, with the changes, how it differed and what was suggested. Start, its checks and the arming are any job's: what's loaded must be what the file names (`--loaded-ok` as for a hand-sliced file), and the bed's question is asked.
 

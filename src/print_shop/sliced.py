@@ -283,6 +283,8 @@ class Reprinted(BaseModel):
     differs: tuple[str, ...] = ()
     #: Of those, the settings no change named.
     beyond: tuple[str, ...] = ()
+    #: What differed that no change named, kept at that run's own value, each said.
+    pinned: tuple[str, ...] = ()
     #: What was suggested and not applied: newer lessons, and what was known to be wrong.
     suggested: tuple[str, ...] = ()
     #: What couldn't be checked of the run, each a sentence.
@@ -300,6 +302,7 @@ class Reprinted(BaseModel):
         out += [f"differs: {d}" for d in self.differs]
         if self.changes and not self.beyond:
             out.append("nothing differs that wasn't changed")
+        out += [f"kept as that run had it: {p}" for p in self.pinned]
         out += [f"not changed, and differs: {key}" for key in self.beyond]
         out += [f"suggested, not applied: {s}" for s in self.suggested]
         out += [f"not checked: {u}" for u in self.unchecked]
