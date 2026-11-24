@@ -5,7 +5,9 @@
     uv run python scripts/print_job.py A.stl B.stl C.stl [--as-laid] [--answers F] [--record]
     uv run python scripts/print_job.py --sliced FILE [--plate N] [--project P.3mf]
         [--loaded-ok] [--record]
-    uv run python scripts/print_job.py --again JOB_ID [--loaded-ok] [--record]
+    uv run python scripts/print_job.py --again JOB_ID [--change "KEY=VALUE; ..."] [--loaded-ok]
+        [--record]
+    uv run python scripts/print_job.py --runs [WORDS]
     uv run python scripts/print_job.py --resume [JOB_ID] [--record]
     uv run python scripts/print_job.py --queue [FILE [xN] [spool=S] ...] [--record]
     uv run python scripts/print_job.py --serve [--record]
@@ -121,10 +123,23 @@ What's shown before the gate is what the ledger keeps: the settings from the fil
 own config block, each that differs from the inventory's tuning for the loaded filament, each
 object's overrides, Orca's estimate, and the slice's reading as a report with nothing proposed.
 The arming rule, the approval gate, the watching, the frames and the outcome question are the
-same as for any job. **`--again JOB_ID` prints a past hand-sliced job's file again,** as a new
-job marked as a reprint of it, refused if the kept file has changed. Either is refused when the
-file names another filament or nozzle than the inventory says is loaded and fitted, unless
-`--loaded-ok` says to print it with what's loaded.
+same as for any job. Either is refused when the file names another filament or nozzle than the
+inventory says is loaded and fitted, unless `--loaded-ok` says to print it with what's loaded.
+
+**A finished run prints again, as it was or with a small change** (mqucifer/print-shop#216).
+`--runs` lists the runs that ended, failed ones too, newest first, with the outcome, the note,
+the spool and what you changed; `--runs WORDS` finds them by part, colour or note. `--again
+JOB_ID` (or the start of it) shows the run and what's suggested, and Enter sends its kept file to
+the gate as it is: nothing asked, proposed or sliced, refused if the file is gone or has changed
+since it printed. Type a change instead (`layer_height=0.16; take 1`) and it's sliced again from
+that run's own part, pose, profiles and settings, with no question and no model, and how the new
+slice differs from the run's is shown, anything beyond what you changed named; Enter sends that.
+A lesson kept since, and a setting that didn't reach that run's slice, are suggested, never
+applied. `--change "KEY=VALUE; ..."` does the same without asking. The new run is a print again
+of that one in the ledger, with its own outcome. Start, its checks and the arming are any job's.
+Each job keeps its G-code's hash, a copy of its part and its three profiles from its start, for
+this; for a run from before, what can't be checked is said. A hand-sliced file or a plate prints
+again as it was.
 
 **Many files queue** (mqucifer/print-shop#210), with `--queue`: parts and hand-sliced files
 together, each followed by how many (`x3`) and the spool it's for (`spool=2`, the stock's number;
@@ -164,9 +179,10 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
-from print_shop import sliced
+from print_shop import reprint, sliced
 from print_shop.arming import ALLOW_HARDWARE_ENV, hardware_allowed
 from print_shop.core.contracts import Gate
+from print_shop.desk.read import parts_dir
 from print_shop.env import SETTINGS_PATH, load_env
 from print_shop.expert.client import STREAM_THREAD
 from print_shop.inventory import SETUP, Inventory, InventoryError, Material
@@ -178,7 +194,7 @@ from print_shop.orchestrator.live import AlreadyLive, Live, only_live
 from print_shop.orchestrator.outcome import no_frames
 from print_shop.orchestrator.spools import ask_on_now
 from print_shop.printer.centauri import FrameRecorder, PrinterClient, live_printer
-from print_shop.queue_terminal import parse_adding, serve, stock_listing
+from print_shop.queue_terminal import Runs, parse_adding, serve, stock_listing
 from print_shop.runtime import (
     WORK_DIR,
     Run,
@@ -198,7 +214,7 @@ from print_shop.setup.intake import Asker, cli_asker, drop_typed, replay_asker
 from print_shop.setup.review import cli_reviewer
 from print_shop.setup.suggest import THREAD
 from print_shop.setup.waiting import Prompted, Waiting, can_ask, cli_waiting
-from print_shop.slicer.orca import SlicerProfiles
+from print_shop.slicer.orca import SlicerProfiles, slice_model
 from print_shop.slicer.store import STORE_DIR, NoChoice, Store, choose
 from print_shop.slicer.store import describe as describe_store
 
@@ -243,7 +259,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="a file you sliced by hand in Orca, sent as it is: its G-code, or "
                              "the plate's sliced file (.gcode.3mf)")
     parser.add_argument("--again", metavar="JOB_ID",
-                        help="print a past hand-sliced job's file again, as a reprint of it")
+                        help="print a finished run again: as it was, or with a small change")
+    parser.add_argument("--change", metavar="KEY=VALUE; ...",
+                        help="with --again: these changes, sliced again from the run, unasked")
+    parser.add_argument("--runs", nargs="?", const="", metavar="WORDS",
+                        help="list the finished runs, newest first; WORDS finds them by part, "
+                             "colour or note")
     parser.add_argument("--resume", nargs="?", const="", metavar="JOB_ID",
                         help="take up a job that waits for you, where it waits: the only one, "
                              "without JOB_ID")
@@ -268,6 +289,12 @@ def main(argv: list[str] | None = None) -> int:
         # A wait among the screens is said as the screens say it (mqucifer/print-shop#223).
         handler.setFormatter(Terminal("%(asctime)s %(levelname)s %(message)s"))
     by_hand = args.sliced is not None or args.again is not None
+    if args.change is not None and args.again is None:
+        parser.error("--change goes with --again: it changes a finished run")
+    if args.runs is not None:
+        if by_hand or args.stl or args.queue or args.resume is not None or args.serve:
+            parser.error("--runs only lists: give it alone, with words to find runs by")
+        return _runs(args)
     if args.queue:
         for flag in ("sliced", "again", "resume", "answers", "context", "plate", "project"):
             if getattr(args, flag) is not None:
@@ -375,24 +402,31 @@ def _hand_sliced(
     exit code, having said why it isn't sent. Nothing is asked but what's on the printer, where
     that isn't known (`_said_what_is_on`)."""
     store = Store(STORE_DIR)
-    reprint: sliced.Again | None = None
+    again: sliced.Again | None = None
     try:
         if args.again is not None:
-            with Ledger(ledger_path(args.settings)) as ledger:
-                reprint = sliced.again(ledger, WORK_DIR, args.again)
+            found = _again(args, read)
+            if isinstance(found, int):
+                return found
+            again = found
             if job_log is not None:
-                job_log.write(f"part: {reprint.path}\n")
-            file = sliced.read(reprint.path)
+                job_log.write(f"part: {again.path}\n")
+            file = sliced.read(again.path)
         else:
             file = sliced.read(args.sliced, args.plate, args.project)
     except sliced.SlicedError as exc:
         print(exc, file=sys.stderr)
         return 2
-    print(f"Sliced by hand: {file.said()}.")
-    print("No questions, no proposal, no lesson applied, nothing sliced again.")
-    if reprint is not None:
-        print(f"A reprint of job {reprint.reprint_of} ({reprint.name}): the file it printed, "
-              "kept in its folder, with the same bytes.")
+    if again is None or again.reprinted is None:
+        print(f"Sliced by hand: {file.said()}.")
+        print("No questions, no proposal, no lesson applied, nothing sliced again.")
+    if again is not None and again.reprinted is not None and again.reprinted.changes:
+        print(f"A reprint of job {again.reprint_of} ({again.name}), sliced again from its part, "
+              "pose, profiles and settings with: "
+              + "; ".join(again.reprinted.said_changes()) + ". No questions, no model.")
+    elif again is not None:
+        print(f"A reprint of job {again.reprint_of} ({again.name}): the file it printed, "
+              "kept in its folder, with the same bytes. Nothing asked, proposed or sliced.")
     grams = f"{file.filament_g:g} g, " if file.filament_g is not None else ""
     print(f"  sha256      {file.sha256}")
     print(f"  Orca        {file.print_time_s // 60} min, {grams}{file.filament_cm3:g} cm3, "
@@ -435,16 +469,71 @@ def _hand_sliced(
         except NoChoice as exc:
             note = f"the store picks no tuning for what's loaded ({str(exc).splitlines()[0]})"
     job = sliced.SlicedJob.of(
-        file, material=material, compared=compared, compared_note=note, loaded_ok=loaded_ok,
-        name=reprint.name if reprint else None,
-        reprint_of=reprint.reprint_of if reprint else None,
-        overrides=reprint.overrides if reprint else None,
-        overrides_from=reprint.overrides_from if reprint else "",
-    )
+        file, material=material, compared=compared, compared_note=note, loaded_ok=loaded_ok)
+    if again is not None:
+        job = job.again(again)
     for line in job.record(store).lines():
         if not line.startswith("printed with what was loaded"):
             print(f"  {line}")
     return job
+
+
+def _again(args: argparse.Namespace, read: Callable[[str], str]) -> sliced.Again | int:
+    """A finished run to print again (mqucifer/print-shop#216): shown with what's kept of it and
+    what's suggested; as it was, or with the changes typed here or given with --change. Returns
+    what to send, or the exit code, having said why nothing is."""
+    bed = bed_type(load_env(args.settings))
+    try:
+        with Ledger(ledger_path(args.settings)) as ledger:
+            run = reprint.find(ledger, WORK_DIR, args.again, store_root=STORE_DIR, bed=bed,
+                               parts=parts_dir(args.settings))
+    except reprint.Refused as exc:
+        print(exc, file=sys.stderr)
+        return 2
+
+    def into() -> Path:
+        return reprint.slice_folder(WORK_DIR, run.row)
+
+    try:
+        if args.change is None and can_ask():
+            chosen = reprint.screen(run, slicer=slice_model, into=into, read=read, write=print)
+            if chosen is None:
+                print(STOPPED_BEFORE)
+                return 130
+            return chosen
+        for line in run.lines(asking=False):
+            print(line)
+        if args.change is None:
+            return run.as_it_was()
+        changes = reprint.parse_changes(args.change, run)
+        if isinstance(changes, str):
+            print(f"--change not read: {changes}", file=sys.stderr)
+            return 2
+        made = run.change(changes, into(), slice_model)
+    except reprint.Refused as exc:
+        print(exc, file=sys.stderr)
+        return 2
+    except KeyboardInterrupt:
+        print(STOPPED_BEFORE)
+        return 130
+    for line in made.lines():
+        print(line)
+    return run.changed(made)
+
+
+def _runs(args: argparse.Namespace) -> int:
+    """The finished runs, newest first, or those `--runs WORDS` finds (mqucifer/print-shop#216).
+    It only reads: no lock."""
+    with Ledger(ledger_path(args.settings)) as ledger:
+        found = reprint.runs(ledger, args.runs)
+    if not found:
+        print(f"No finished run has {args.runs!r}." if args.runs else "No run has finished yet.")
+        return 0
+    for row in found:
+        for line in reprint.run_line(row):
+            print(line)
+    print("`--again JOB_ID` prints one again, as it was or with a small change.")
+    return 0
 
 
 def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
@@ -779,7 +868,9 @@ def _queue(args: argparse.Namespace, live: Live) -> int:
                 for why in refused:
                     print(f"Not added: {why}")
             return serve(queue, run.daemon, read=input,
-                         stock=stock_listing(ledger_path(args.settings)))
+                         stock=stock_listing(ledger_path(args.settings)),
+                         runs=Runs(ledger_path(args.settings), WORK_DIR, STORE_DIR, bed,
+                                   slice_model, parts_dir(args.settings)))
     except KeyboardInterrupt:
         print("\nPut by: every job waits where it was, and `--queue` takes them up again. Any "
               "print without an answer stays open in the ledger.")

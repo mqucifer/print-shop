@@ -434,7 +434,42 @@ For a print you set up yourself in Orca (mqucifer/print-shop#164): a test with a
 PRINT_AGENT_ALLOW_HARDWARE=1 uv run python scripts/print_job.py --again 3f2a…
 ```
 
-It sends the file that job printed, kept in its folder, as a new job marked as a reprint of the old one, with the old one's overrides. It's refused if the kept file has changed or is gone (send the file again with `--sliced`), and if what's loaded isn't what the file names, unless you add `--loaded-ok`. A job that print-shop sliced itself isn't printed again this way: its page on the desk gives the command for it.
+It sends the file that job printed, kept in its folder, as a new job marked as a reprint of the old one, with the old one's overrides. It's refused if the kept file has changed or is gone (send the file again with `--sliced`), and if what's loaded isn't what the file names, unless you add `--loaded-ok`. A job print-shop sliced prints again the same way, and can be changed too: the next section.
+
+## A finished run, printed again
+
+To repeat a good print, or repeat it with one small change, without the questions, the model and that day's lessons again (mqucifer/print-shop#216).
+
+**Find it:**
+
+```
+uv run python scripts/print_job.py --runs
+uv run python scripts/print_job.py --runs lid white
+```
+
+Every run that ended is listed, failed ones too, newest first: when, the part and the job's id, the outcome with your note, the spool, and what you changed at its review (or that it was a print again of another, and how). Words find runs by part, colour, filament, note or outcome. It only reads, beside a running job.
+
+**Print it again:**
+
+```
+PRINT_AGENT_ALLOW_HARDWARE=1 uv run python scripts/print_job.py --again 3f2a…
+```
+
+The run's id, or the start of it. It shows the run, what's kept of it, its settings, and what's suggested, then:
+
+- **Enter prints it as it was:** the G-code that run printed, kept in its folder, goes to the gate as it is. Nothing is asked, proposed or sliced. It's checked against the sha256 the ledger kept of what was sent, and a file that's gone or has changed says so and prints nothing.
+- **A change slices it again:** type `layer_height=0.16` (several with `;`, `because …` as at the review). It's sliced from that run's own part, in its pose, with the profiles and the settings it printed with, and your change over them. No question and no model. The new slice is shown against that run's G-code, read from both: Orca's time, plastic and layers then and now, the pause, each setting you changed, a change that didn't move the slice, and **ALSO DIFFERS** for anything else that's different. "Nothing else differs." when nothing is. Another change slices again from the run; `undo` goes back to it as it was; Enter sends what's shown; `stop` ends it with nothing sent.
+- **What's suggested is never applied by itself:** a lesson kept or edited since that run, for its part and filament, whose setting it printed otherwise, and a setting asked at that run that didn't reach its slice (mqucifer/print-shop#206). `take 1` takes one, as a change.
+- `--again 3f2a… --change "sparse_infill_density=35%"` does the same without asking: it shows the comparison and goes on to the gate.
+
+The new job is a print again of that run in the ledger, with its own outcome. `--list`, `--runs` and the desk say so, with the changes, how it differed and what was suggested. Start, its checks and the arming are any job's: what's loaded must be what the file names (`--loaded-ok` as for a hand-sliced file), and the bed's question is asked.
+
+- **What each job keeps for this:** from its slice, its G-code's sha256 (in the ledger), and in `jobs/<job>/again/` a copy of its part and the three profiles it sliced with. A queued copy has its first's.
+- **A run from before kept none of those.** What can't be checked is said: its G-code is checked by its settings, Orca's time and its layers against the ledger, but not its bytes; its part is looked for by its sha256 where its log names it, in its folder and in the parts folder; its profiles are the store's files it names, each checked by its hash, with today's plate setting. An edited profile is said, and the comparison shows what it changes.
+- **Its pause** is given at the height that pauses where that run did, and one whose G-code doesn't say where it paused is left out, saying so: type the top of the layer to pause after. A swap's spools aren't tracked through a print again, as for a hand-sliced file: the gate still shows the pause.
+- **A plate of several parts, and a file you sliced by hand,** print again as they were. Change a hand-sliced file in Orca. The pose stays the run's: another pose, or another file, is a new job (or "Use these" at its review, mqucifer/print-shop#211).
+
+**From the queue:** `runs` and `runs WORDS` at `queue>`, then `again 3f2a…` (with `spool=2` for another spool of its filament) shows the same screen, and Enter adds it to the queue, ready to print.
 
 ## The print desk: reading a job, and running it again
 
@@ -454,7 +489,7 @@ Then open <http://127.0.0.1:8719/> in a browser on the Mac. `--port` picks anoth
   - the correction line, to paste at the review when it asks, with what a pause was for (`pause_at=2.6 for insert`, or `colour_change=12.4 from #1 to #2` with the spools that print used; one that's used up since is left out, and asked);
   - the answers file: press **Save** and it goes to `~/Downloads`, where the command line looks for it. If the browser names it differently, change the path in the command to match.
 
-  A job you sliced by hand has one line, `--again` and its id, and a "Sliced by hand" section with what was kept of the file.
+  A job you sliced by hand has one line, `--again` and its id, and a "Sliced by hand" section with what was kept of the file. Any finished run also prints again with `--again` and its id, as it was or with a small change (above, "A finished run, printed again").
 
   What the lines can't carry is said under them: a pose you sent back is sent back again at the review (`orientation`), and a change you took from the slice is taken again (`take`) if it proposes it. If the questions asked are different this time, `--answers` refuses the file and lists the new ones; answer them as they come.
 

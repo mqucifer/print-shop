@@ -196,6 +196,7 @@ frames         No camera frame was kept for this print: nothing was asked of the
   note = 
   answered_at = <time>
   features = [{"id": "height", "value": 20.0, "unit": "mm", "says": "height as it prints"}, {"id": "footprint", "value": 20.0, "unit": "mm", "says": "x by 20.0 mm in y, the outline on the plate"}, {"id": "bed_contact", "value": 400.0, "unit": "mm2", "says": "area touching the plate, which holds it down"}, {"id": "length", "value": 20.0, "unit": "mm", "says": "the footprint's long side, 20.0 mm across; a long part's ends lift as its layers cool and shrink"}, {"id": "footprint_aspect", "value": 1.0, "unit": "x", "says": "the footprint's length over its width; a long, narrow part lifts at its ends however much of it touches the plate"}, {"id": "slenderness", "value": 1.0, "unit": "x", "says": "height over its narrowest width; tall and narrow parts wobble and lift"}, {"id": "overhang", "value": 0.0, "unit": "mm2", "says": "faces past 45 degrees from vertical, off the plate"}, {"id": "steepest_overhang", "value": 0.0, "unit": "deg", "says": "the worst overhang, degrees past vertical (90 is a ceiling)"}, {"id": "bridge", "value": 0.0, "unit": "mm2", "says": "flat downward faces off the plate, printed as bridges or on support"}, {"id": "flat_top", "value": 400.0, "unit": "mm2", "says": "upward flat faces, whose finish the top layers decide"}, {"id": "section", "value": 6.67, "unit": "mm", "says": "typical wall or section thickness (twice volume over surface)"}, {"id": "volume", "value": 8000.0, "unit": "mm3", "says": "solid volume"}]
+  gcode_sha256 = a8e5956be33020d77a238e5b2d5c170be831d7c0da1bf32c42ab9be762a3b009
 [slice_readings]
   job_id = <job>
   reading = <4371 characters, sha256 1f4c9300b4453368d6daaf53d6886320c4bdd5403da9e94877c6df42412ec3c2>
@@ -206,6 +207,10 @@ frames         No camera frame was kept for this print: nothing was asked of the
   read_at = <time>
 == the job's folder
 ECC_0.4_cube_PLA0.2_16m_<job>.gcode
+again/kept.json
+again/machine.json
+again/part.stl
+again/process.json
 job.log
 kept.json
 options/1/plate_1.gcode

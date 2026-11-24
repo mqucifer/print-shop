@@ -21,6 +21,9 @@ the person picks, in any order.
     spool 3 2                  3 moved to spool #2: another colour at once; another filament
                                prepared again, back to its review
     add FILE [x3] [spool=2]    more files, in one go
+    runs [WORDS]               the finished runs, newest first, or those WORDS find
+    again RUN [spool=2]        a finished run printed again: Enter as it was, or type a change
+                               and it's sliced again from that run, and shown against it
     quit                       put the queue by: every job waits where it is (Ctrl-C too)
 """
 
@@ -29,17 +32,21 @@ from __future__ import annotations
 import shlex
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
+from print_shop import reprint
 from print_shop.inventory import Inventory
+from print_shop.ledger import Ledger
 from print_shop.orchestrator.daemon import Daemon
 from print_shop.orchestrator.kept import Waits
 from print_shop.orchestrator.print_queue import Adding, Need, PrintQueue
 from print_shop.setup.intake import cli_asker, drop_typed
 from print_shop.setup.review import cli_reviewer
 from print_shop.setup.waiting import cli_waiting
+from print_shop.slicer.orca import BedType, Slicer
 
-__all__ = ["HELP", "BED_QUESTION", "parse_adding", "serve"]
+__all__ = ["HELP", "BED_QUESTION", "Runs", "parse_adding", "serve"]
 
 #: The bed's question at a Start, in the phone's words (mqucifer/print-shop#214), as
 #: `print_job.py` asks it.
@@ -78,13 +85,28 @@ def parse_adding(tokens: list[str]) -> list[Adding] | str:
     return found
 
 
+@dataclass(frozen=True)
+class Runs:
+    """Where the finished runs are, and what slices a change to one, for `runs` and `again`
+    (mqucifer/print-shop#216)."""
+
+    ledger_path: Path
+    jobs: Path
+    store_root: Path
+    bed: BedType
+    slicer: Slicer
+    #: The parts folder, where a run from before has its part looked for.
+    parts: Path | None = None
+
+
 def serve(
     queue: PrintQueue, daemon: Daemon, *, read: Callable[[str], str] = input,
     write: Callable[[str], None] = print, forget: Callable[[], None] = drop_typed,
-    stock: Callable[[], str] | None = None,
+    stock: Callable[[], str] | None = None, runs: Runs | None = None,
 ) -> int:
     """The queue at the terminal until `quit`, Ctrl-D or Ctrl-C: every job waits where it is."""
     terminal = _Terminal(queue, daemon, read, write, forget, stock)
+    terminal.runs = runs
     terminal.show()
     while True:
         try:
@@ -105,6 +127,7 @@ class _Terminal:
         self.queue, self.daemon = queue, daemon
         self.read, self.write, self.forget, self.stock = read, write, forget, stock
         self.told = 0
+        self.runs: Runs | None = None
 
     def drain(self) -> list[str]:
         """What's happened since it was last said, said now."""
@@ -146,7 +169,7 @@ class _Terminal:
             "first": self._first, "place": self._place, "together": self._together,
             "hold": self._hold, "release": self._release, "remove": self._remove,
             "spool": self._spool, "add": self._add, "stock": self._stock, "go": self._go,
-            "retry": self._retry,
+            "retry": self._retry, "runs": self._runs, "again": self._again,
         }.get(verb)
         if action is None:
             self.write(f"  Not a queue command: {verb}. `help` lists them.")
@@ -392,6 +415,58 @@ class _Terminal:
             return
         added, refused = self.queue.add(adding)
         self.write(f"  Added {len(added)}." if added else "  Nothing added.")
+        for why in refused:
+            self.write(f"  Not added: {why}")
+
+    def _runs(self, args: list[str]) -> None:
+        if self.runs is None:
+            self.write("  The runs aren't read here.")
+            return
+        with Ledger(self.runs.ledger_path) as ledger:
+            found = reprint.runs(ledger, " ".join(args))
+        if not found:
+            self.write("  No finished run has that." if args else "  No run has finished yet.")
+            return
+        for row in found:
+            for line in reprint.run_line(row):
+                self.write(f"  {line}")
+        self.write("  `again RUN` prints one again, by its id or the start of it.")
+
+    def _again(self, args: list[str]) -> None:
+        """A finished run, shown with what's suggested, and added to the queue as it was or
+        with the person's change, sliced again here."""
+        runs = self.runs
+        if runs is None:
+            self.write("  The runs aren't read here.")
+            return
+        named = [a for a in args if not a.lower().startswith("spool=")]
+        spools = [a for a in args if a.lower().startswith("spool=")]
+        if len(named) != 1:
+            self.write("  Which run? `again RUN`, by its id or the start of it: `runs` lists them.")
+            return
+        spool_id = None
+        if spools:
+            number = spools[-1].lower().removeprefix("spool=").lstrip("#")
+            if not number.isdigit():
+                self.write(f"  {spools[-1]}: a spool is its number in the stock, spool=2.")
+                return
+            spool_id = int(number)
+        try:
+            with Ledger(runs.ledger_path) as ledger:
+                run = reprint.find(ledger, runs.jobs, named[0], store_root=runs.store_root,
+                                   bed=runs.bed, parts=runs.parts)
+        except reprint.Refused as exc:
+            self.write(f"  {exc}.")
+            return
+        chosen = reprint.screen(run, slicer=runs.slicer,
+                                into=lambda: reprint.slice_folder(runs.jobs, run.row),
+                                read=self.read, write=self.write)
+        if chosen is None:
+            self.write("  Nothing added.")
+            return
+        added, refused = self.queue.add([Adding(chosen.path, spool_id=spool_id, again=chosen)])
+        self.write("  Added: a print again of job "
+                   f"{chosen.reprint_of[:8]}." if added else "  Nothing added.")
         for why in refused:
             self.write(f"  Not added: {why}")
 

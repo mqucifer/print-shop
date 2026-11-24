@@ -35,6 +35,9 @@ outcome before its questions could even begin. The printer is single; preparing 
   retried or removed (`retry`). Each job keeps its own `job.log`, as a lone job does.
 - **The queue is the same after a restart:** it's the jobs folder's waiting jobs (`WaitingJobs`),
   in order, held or not, with their spools and copies, each taken up where it was.
+- **A finished run is added again** (`Adding.again`, mqucifer/print-shop#216): its kept file, or
+  a change's new slice (`reprint`), read as a hand-sliced file is and linked to that run. A copy
+  is given its first's kept part and profiles, so each copy's run can print again too.
 
 **Built so another screen can drive it:** every action is a method here that returns what
 happened in words, and what needs the person is read as data (`Asked`), never a terminal prompt
@@ -67,12 +70,14 @@ from print_shop.ledger import Ledger
 from print_shop.orchestrator.daemon import Daemon
 from print_shop.orchestrator.graph import build_graph
 from print_shop.orchestrator.kept import Kept, WaitingJob, WaitingJobs, Waits
+from print_shop.reprint import copy_kept
 from print_shop.setup import Proposer
 from print_shop.setup.intake import Answer, Question
 from print_shop.setup.loop import PrintLoop
 from print_shop.setup.questions import Asked as QuestionsAsked
 from print_shop.setup.review import Review, Reviewer, ReviewRequest
 from print_shop.setup.waiting import QuestionsCall, Waiting, took
+from print_shop.sliced import Again as SlicedAgain
 from print_shop.sliced import SlicedJob
 from print_shop.slicer.arrange import SlicePlate
 from print_shop.slicer.naming import job_id_from_filename
@@ -158,11 +163,14 @@ class Asked:
 
 @dataclass(frozen=True)
 class Adding:
-    """A file to add: how many prints of it, and the spool it's for (None: the loaded one)."""
+    """A file to add: how many prints of it, and the spool it's for (None: the loaded one).
+    `again` makes it a finished run printed again (mqucifer/print-shop#216): `path` is its kept
+    file, or a change's new slice, read as a hand-sliced file is, and linked to that run."""
 
     path: Path
     copies: int = 1
     spool_id: int | None = None
+    again: SlicedAgain | None = None
 
 
 @dataclass(frozen=True)
@@ -421,20 +429,24 @@ class PrintQueue:
         folder = self._workdir / job_id
         given: dict[str, Any]
         profiles: SlicerProfiles | None = None
-        if path.name.lower().endswith(SLICED_SUFFIXES):
+        if one.again is not None or path.name.lower().endswith(SLICED_SUFFIXES):
             if self._sliced_for is None:
                 raise ValueError("this queue doesn't take files sliced by hand")
-            given = {"entry": "sliced_file", "sliced": self._sliced_for(path, material)}
+            job = self._sliced_for(path, material)
+            if one.again is not None:
+                job = job.again(one.again)
+            given = {"entry": "sliced_file", "sliced": job}
         else:
             given = {"entry": "stl_upload", "stl_path": str(path), "as_laid": False,
                      "context_path": None}
             profiles = self._profiles_for(material, folder)
         spool_id = material.spool_id if material is not None else None
-        self._jobs.add(WaitingJob(job_id=job_id, part=path.name, given=given, profiles=profiles,
+        part = one.again.name if one.again is not None else path.name
+        self._jobs.add(WaitingJob(job_id=job_id, part=part, given=given, profiles=profiles,
                                   spool_id=spool_id, copies=one.copies))
         for n in range(2, one.copies + 1):
             self._jobs.add(WaitingJob(
-                job_id=str(uuid.uuid4()), part=path.name, given=given, profiles=profiles,
+                job_id=str(uuid.uuid4()), part=part, given=given, profiles=profiles,
                 waits=Waits.WITH_FIRST, spool_id=spool_id, copy_of=job_id, copy_n=n,
                 copies=one.copies))
         self._prepare(job_id)
@@ -741,6 +753,8 @@ class PrintQueue:
         if job_id_from_filename(target.name) != copy.job_id:
             raise RuntimeError(f"{target.name} doesn't carry job {copy.job_id}")
         Kept(self._workdir / first).copy_to(folder)
+        # What the first kept to print again, as each copy is its run (mqucifer/print-shop#216).
+        copy_kept(self._workdir / first, folder)
         values.update({
             "job_id": copy.job_id, "trace_id": str(uuid.uuid4()),
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

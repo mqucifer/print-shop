@@ -61,6 +61,7 @@ if TYPE_CHECKING:
     from print_shop.setup.reading import Flag, SliceReading
 
 __all__ = [
+    "AGAIN",
     "BY_HAND",
     "NOT_SETTINGS",
     "PROFILE_IDS",
@@ -69,7 +70,9 @@ __all__ = [
     "Again",
     "Comparison",
     "Difference",
+    "Made",
     "ObjectOverrides",
+    "Reprinted",
     "SlicedChanged",
     "SlicedError",
     "SlicedFile",
@@ -89,6 +92,9 @@ __all__ = [
 
 #: How the ledger marks a job the loop chose nothing for.
 BY_HAND = "by hand"
+#: How it marks a run print-shop sliced, printed again from its kept file or sliced again from
+#: its part with a small change (mqucifer/print-shop#216): nothing was asked or proposed.
+AGAIN = "again"
 #: The ledger's `orientation_source` for one: nothing was turned.
 SOURCE = "sliced"
 #: What the approval gate and the ledger say of its pose.
@@ -252,6 +258,54 @@ class SlicedFile(BaseModel):
         return f"{self.source.name} is G-code: its bytes are what's sent"
 
 
+class Made(BaseModel):
+    """A change the person made at a print again (mqucifer/print-shop#216)."""
+
+    model_config = {"frozen": True}
+
+    key: str
+    value: str
+    reason: str = ""
+
+
+class Reprinted(BaseModel):
+    """A run print-shop sliced, printed again (mqucifer/print-shop#216): as it was, from its kept
+    file, or sliced again from its part, pose, profiles and settings with a small change."""
+
+    model_config = {"frozen": True}
+
+    #: The run whose part, pose, profiles and settings it's from: the run asked of, or the one
+    #: that run was itself made from. `reprint_of` is the run asked of.
+    first: str
+    #: The person's changes over that run's settings, in order: () as it was.
+    changes: tuple[Made, ...] = ()
+    #: How its slice differs from the run's, read from both G-codes, each "key: was -> now".
+    differs: tuple[str, ...] = ()
+    #: Of those, the settings no change named.
+    beyond: tuple[str, ...] = ()
+    #: What was suggested and not applied: newer lessons, and what was known to be wrong.
+    suggested: tuple[str, ...] = ()
+    #: What couldn't be checked of the run, each a sentence.
+    unchecked: tuple[str, ...] = ()
+    #: The pose `first` printed in, which a change slices in again.
+    pose: tuple[float, float, float] = (0.0, 0.0, 0.0)
+
+    def said_changes(self) -> list[str]:
+        return [f"{c.key}={c.value}" for c in self.changes]
+
+    def lines(self) -> list[str]:
+        out = [("as it was, its kept file" if not self.changes
+                else "changed: " + "; ".join(self.said_changes()))
+               + (f", from job {self.first}'s part and settings" if self.changes else "")]
+        out += [f"differs: {d}" for d in self.differs]
+        if self.changes and not self.beyond:
+            out.append("nothing differs that wasn't changed")
+        out += [f"not changed, and differs: {key}" for key in self.beyond]
+        out += [f"suggested, not applied: {s}" for s in self.suggested]
+        out += [f"not checked: {u}" for u in self.unchecked]
+        return out
+
+
 class SlicedRecord(BaseModel):
     """What the ledger keeps of a hand-sliced print, beside its row."""
 
@@ -288,9 +342,14 @@ class SlicedRecord(BaseModel):
     #: The file named another filament or nozzle than was loaded, and the Sponsor said to print
     #: it: what differed, or "".
     loaded_ok: str = ""
+    #: A run print-shop sliced, printed again (mqucifer/print-shop#216): `sliced` is then AGAIN.
+    reprinted: Reprinted | None = None
 
     def lines(self) -> list[str]:
         """What was kept of the file, as `--list` and the desk say it."""
+        if self.reprinted is not None:
+            return [f"a print again of job {self.reprint_of}: {line}" if n == 0 else line
+                    for n, line in enumerate(self.reprinted.lines())]
         out = [f"profiles: {self.machine} / {self.process} / {self.filament}, as Orca named them"]
         if self.compared is None:
             out.append(f"not compared with a tuning: {self.compared_note or 'none was found'}")
@@ -328,13 +387,17 @@ class SlicedJob(BaseModel):
     compared_note: str = ""
     reprint_of: str | None = None
     loaded_ok: str = ""
+    #: BY_HAND, or AGAIN for a run print-shop sliced, printed again (mqucifer/print-shop#216).
+    sliced: str = BY_HAND
+    reprinted: Reprinted | None = None
 
     @classmethod
     def of(
         cls, file: SlicedFile, *, material: Material | None = None,
         compared: Comparison | None = None, compared_note: str = "", name: str | None = None,
         reprint_of: str | None = None, overrides: tuple[ObjectOverrides, ...] | None = None,
-        overrides_from: str = "", loaded_ok: str = "",
+        overrides_from: str = "", loaded_ok: str = "", sliced: str = BY_HAND,
+        reprinted: Reprinted | None = None,
     ) -> SlicedJob:
         """The job for `file`. A reprint gives the original's `name`, and its `overrides`,
         which the kept G-code can't carry."""
@@ -343,12 +406,34 @@ class SlicedJob(BaseModel):
                                            "overrides_from": overrides_from})
         return cls(file=file, name=name or file.source.name, material=material,
                    compared=compared, compared_note=compared_note, reprint_of=reprint_of,
-                   loaded_ok=loaded_ok)
+                   loaded_ok=loaded_ok, sliced=sliced, reprinted=reprinted)
+
+    def rationale(self) -> str:
+        """What the gate and the ledger say of its pose."""
+        again = self.reprinted
+        if again is None:
+            return RATIONALE
+        if not again.changes:
+            return (f"a print again of job {self.reprint_of}, as it was: its kept file, sent as "
+                    "it is, with nothing turned, proposed or sliced")
+        return (f"a print again of job {self.reprint_of}, sliced again in the pose job "
+                f"{again.first} printed in, with {'; '.join(again.said_changes())}: nothing "
+                "else was turned, asked or proposed")
+
+    def again(self, found: Again) -> SlicedJob:
+        """This job as a print again of the run `found` is of: its name, the link, and what
+        the run's record carries that the file can't."""
+        return SlicedJob.of(
+            self.file, material=self.material, compared=self.compared,
+            compared_note=self.compared_note, name=found.name, reprint_of=found.reprint_of,
+            overrides=found.overrides, overrides_from=found.overrides_from,
+            loaded_ok=self.loaded_ok, sliced=found.sliced_as, reprinted=found.reprinted)
 
     def record(self, store: Store | None = None) -> SlicedRecord:
         """What the ledger keeps of it."""
         f = self.file
         return SlicedRecord(
+            sliced=self.sliced, reprinted=self.reprinted,
             source=str(f.source), kind=f.kind, plate=f.plate, gcode_sha256=f.sha256,
             container_sha256=f.container_sha256, reprint_of=self.reprint_of,
             machine=f.machine, process=f.process, filament=f.filament,
@@ -360,13 +445,17 @@ class SlicedJob(BaseModel):
 
 
 class Again(BaseModel):
-    """A past sliced job, found to print again: its kept file, and what goes with it."""
+    """A past job, found to print again: its kept file, or a change's new slice, and what goes
+    with it."""
 
     path: Path
     name: str
     reprint_of: str
     overrides: tuple[ObjectOverrides, ...] | None = None
     overrides_from: str = ""
+    #: BY_HAND for a hand-sliced file's; AGAIN for a run print-shop sliced, with its record.
+    sliced_as: str = BY_HAND
+    reprinted: Reprinted | None = None
 
 
 # --- reading the file ---------------------------------------------------------------------------

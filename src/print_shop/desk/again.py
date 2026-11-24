@@ -47,6 +47,7 @@ from print_shop.core.state import pose_of, turn_words
 from print_shop.inventory import Material, Spool
 from print_shop.ledger import Row
 from print_shop.orchestrator.graph import AS_LAID
+from print_shop.plate import plate_job
 from print_shop.setup import pauses
 from print_shop.setup.context import SIDECAR
 from print_shop.setup.intake import Answer, Question
@@ -343,6 +344,11 @@ def again(
     if reused:
         notes.append("Used from a past print, so use them again at the review (use): "
                      + "; ".join(f"{c.key}={c.value}" for c in reused) + ".")
+    if row.ended_at is not None:
+        # The line above runs it all again, with today's lessons and the model's questions.
+        notes.append("To print this run again as it was, or with a small change, with nothing "
+                     "asked and no model: uv run python scripts/print_job.py --again "
+                     f"{plate_job(row.job_id)} (mqucifer/print-shop#216).")
     return Again(command=command, corrections=correction_line(row, on_hand), answers=answers,
                  answers_name=name, notes=tuple(notes))
 
