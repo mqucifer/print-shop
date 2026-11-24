@@ -343,6 +343,17 @@ def test_picking_a_closer_choice_replaces_the_answer_and_keeps_both_on_record() 
     assert "in place of your first answer, 'handled, clipped or lightly loaded'" in intake.note
 
 
+def test_words_at_closer_choices_are_read_back_as_the_decision_they_make() -> None:
+    """mqucifer/print-shop#213: the closer choices set something, so words there are read back
+    and, confirmed, are a decision as a picked one is."""
+    person = Person("2", "1", "o 40% infill", "y")
+    intake = ask(person, lambda stop: answered(CLOSER, STOCK[1]))
+    assert "So 40% infill? From your words, '40% infill'." in person.text
+    assert intake.answers[0] == Answer(other="40% infill",
+                                       sets={"sparse_infill_density": "40%"})
+    assert intake.chosen()[0][1].settings == {"sparse_infill_density": "40%"}
+
+
 def test_a_kept_answers_choices_still_open_their_skill_groups() -> None:
     """The skill read for the part is what it was when those choices replaced purpose."""
     surface = CLOSER.model_copy(update={"options": (
