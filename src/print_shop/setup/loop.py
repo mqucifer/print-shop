@@ -29,8 +29,11 @@ intake's questions, which stay as they are, one loop through LiteLLM :4000 decid
 
 What it proposes goes through the same steps as the single call's reply (`propose_by_model`): the
 intake's answers and the kept lessons set their settings first, every value is bounded, and the
-guards hold. The review and the approval gate are unchanged. Every tool call, with its arguments,
-its result and its time, is kept in the proposal (`Proposal.loop`), so the ledger has it.
+guards hold. An answer that's for a pose holds only in the pose the questions were asked in,
+`Part.kept` (mqucifer/print-shop#258): in any other it's set aside, so a "no support" given of a
+part on its side doesn't hold supports off over the overhang it's turned onto. The review and
+the approval gate are unchanged. Every tool call, with its arguments, its result and its time, is
+kept in the proposal (`Proposal.loop`), so the ledger has it.
 
 The loop has a limit on calls and on time (`PrintLoop`), recorded with how it ended. Past
 either, or if the model can't be reached, the job falls back to the single calls and says so.
@@ -47,7 +50,7 @@ import json
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -75,6 +78,7 @@ from print_shop.setup.proposal import (
 from print_shop.setup.reading import carried, read_slice
 from print_shop.setup.skill import Skill
 from print_shop.setup.traits import TRAITS, traits
+from print_shop.setup.turned import held
 
 if TYPE_CHECKING:  # the slicer imports the job state, which imports the setup
     from print_shop.ledger import Ledger, Row
@@ -216,7 +220,8 @@ class Part:
     #: The kept settings lessons for this part, in the file's own pose.
     lessons: tuple[GivenLesson, ...] = ()
     #: The pose kept unless the loop asks: the file's own, or the side the part's context lays
-    #: it on (mqucifer/print-shop#130), and where that side was read.
+    #: it on (mqucifer/print-shop#130), and where that side was read. The questions were asked
+    #: in it, so an answer that's for a pose holds there only (mqucifer/print-shop#258).
     kept: tuple[float, float, float] = AS_LAID
     kept_from: str = ""
     #: It runs beside a review, where what it chooses is proposed: nobody's asked
@@ -282,7 +287,7 @@ def big(
                else "the file's own pose")
         found.append((f"pose {pose_value(pose.rotation_deg)}",
                       f"turn it to {pose_value(pose.rotation_deg)} from {own}"))
-    decided = {k for _, o in part.facts.intake.chosen() for k in o.settings}
+    decided = {k for _, o in _in_pose(part, pose).intake.chosen() for k in o.settings}
     support = changes.get("enable_support", part.facts.preset("enable_support"))
     guarded = (pose.overhang_area_mm2 > 0 and "enable_support" not in changes
                and "enable_support" not in decided)
@@ -309,6 +314,14 @@ def big(
         found.append(("time", f"{(seconds - baseline_s) // 60} more minutes, "
                               f"{seconds / baseline_s - 1:.0%} longer"))
     return found
+
+
+def _in_pose(part: Part, pose: Orientation) -> PartFacts:
+    """What the part's facts say in that pose: turned from where the questions were asked, an
+    answer that's for a pose is set aside (mqucifer/print-shop#258)."""
+    if pose.rotation_deg == part.kept:
+        return part.facts
+    return replace(part.facts, intake=held(part.facts.intake).intake)
 
 
 @dataclass
@@ -424,6 +437,10 @@ def _user(part: Part) -> str:
         lines.append(f"- {pose_value(c.rotation_deg)}: {c.overhang_area_mm2:g} mm2 overhang, "
                      f"{c.bed_contact_area_mm2:g} mm2 on the plate, {c.height_mm:g} mm tall"
                      f"{shown}")
+    if aside := held(intake).aside:
+        lines += ["", f"Said of the part as it lies at {pose_value(part.kept)}, so they hold in "
+                      f"that pose only: {'; '.join(aside)}. In any other pose they aren't "
+                      "decided: weigh those settings for the pose you propose."]
     if part.orienting:
         lines += ["", "Kept lessons on posing parts like this one: a person sent a pose back, "
                       "and why:", *(f"- {g.line()}" for g in part.orienting)]
@@ -472,7 +489,7 @@ def _seconds(part: Part, state: _State, pose: Orientation, settings: dict[str, s
     stl: Path = part.stl
     if pose.rotation_deg != AS_LAID:
         stl = write_rotated(part.stl, pose.rotation_deg, out / "posed.stl")
-    changes = [*answered(part.facts), *(
+    changes = [*answered(_in_pose(part, pose)), *(
         Change(key=k, preset=part.facts.preset(k), value=v, reason="", source=Source.MODEL)
         for k, v in settings.items())]
     return part.slicer(stl, apply(part.profiles, Proposal().corrected(changes), out), out)

@@ -158,6 +158,18 @@ Finish that job, or stop it with Ctrl-C in its terminal (which doesn't stop the 
    - **Only the notes and the answer "only the face on the plate" speak of the face on the plate.** The other three answers can't, so turned to be the top or a wall it's never judged hidden by one.
    - **Where they can't be carried,** as with an answer in your own words, none is judged, and the note opens `TURNED SINCE YOU ANSWERED`.
    - **Only the faces seen are carried:** an answer on the part's shape, or a setting an option set, isn't. An answer from before this has no pose, and is read in the pose it printed in.
+   - **After a turn, an answer that's for a pose is set aside** (mqucifer/print-shop#258), by the print loop, by `orientation`, or to a past print's pose, as on a plate: a question on the part's shape, and any setting for a pose, such as no supports, whether an option or your confirmed words set it. "No support" said of a part on its side doesn't hold the supports off once it's turned onto an overhang: the guard decides again there, and the settings call isn't told the old answer. The review says which, in its notes:
+
+     ```
+       note: TURNED SINCE YOU ANSWERED: 'No support' was for 0,0,0, so at 180,0,0 the guard decides
+         supports. These were said of the part as it lay when asked, so they aren't used now: 'Does the
+         underside need support?', you said 'No support'. Send it back with orientation, or say what
+         you want with a correction
+     ```
+
+     Its first sentence is what Look first, again and Moved show. The guard's supports say why too: `the 286 mm2 overhang would print into the air; your 'No support' was for the part at 0,0,0`.
+
+     Turned back, every answer holds again. What the part is for holds in any pose, and the record keeps every answer as you gave it. The print loop is told which answers hold only in the pose you answered in, and a pose it weighs where they don't is read without them: supports the guard would turn on there are a big change it asks about, or says on its proposal.
 
    **The model reads the part while you answer those two** (mqucifer/print-shop#208). It's given the part's notes too, and asks only what they leave open. Its call has taken 3 to 19 minutes, so you don't have to wait for it:
    - **Its questions are added when they arrive,** after the answers you're giving and numbered on from them. A list never changes while you're typing an answer to it.
@@ -541,7 +553,7 @@ A ready job can be armed and started from your phone, on the home Wi-Fi only (mq
 3. Look at the bed, tick **I can see the bed is clear**, and press **Start**. The same checks as `start` here run again. If one holds it, the phone says why, nothing is armed, and you Start again once it's mended (reload the page). Started, the phone says `Started by you. Disarmed again.`, once the printer has started it; a start that fails at the printer says `Not started: …`, and why. If sending the file takes longer than the phone waits, it says `Starting: …`, and the Start page says how it went once you reload. The ledger keeps who armed it, from where and when, with the print's row.
 
 **What's refused, in words:**
-- a confirm used twice, or more than 2 minutes old, or from another phone, or for a gate that's moved on;
+- a confirm used twice, or more than 10 minutes old, or from another phone, or for a gate that's moved on;
 - anything signed out;
 - **anything that isn't a phone's own address on the home Wi-Fi:** the Mac itself (a tunnel or a script on it), the router (a port forward), Home Assistant's host (its remote access or an automation), another network, or any request carrying a proxy's headers. The phone shows `You're away from home`, and the job waits.
 

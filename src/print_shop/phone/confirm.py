@@ -29,8 +29,9 @@ from dataclasses import dataclass
 
 __all__ = ["CONFIRM_LASTS_S", "Confirm", "Confirms", "EXPIRED", "HELD_AT_MOST", "UNKNOWN"]
 
-#: How long a confirm lasts from the page's view: enough to read it and look at the bed.
-CONFIRM_LASTS_S = 120.0
+#: How long a confirm lasts from the page's view: enough to open the page, go to the printer and
+#: look at the bed. The Sponsor's choice, 2026-11-24 (mqucifer/print-shop#280): "10 minutes".
+CONFIRM_LASTS_S = 600.0
 
 #: The most confirms held at once: the oldest goes first. A page viewed many times makes many.
 HELD_AT_MOST = 32
