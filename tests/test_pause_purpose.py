@@ -209,7 +209,7 @@ class Shop:
         record = Desk(self.path, self.jobs, self.parts).job(job_id)
         assert record is not None and record.row is not None
         return again(record.row, record.part_path, record.printers, record.part_found,
-                     record.on_hand).corrections
+                     on_hand=record.on_hand).corrections
 
 
 @pytest.fixture

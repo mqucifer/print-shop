@@ -33,11 +33,12 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 __all__ = [
     "Layer",
     "Line",
+    "Move",
     "Sliced",
     "Warning",
     "read",
@@ -77,6 +78,21 @@ class Line:
     @property
     def length(self) -> float:
         return math.hypot(self.x1 - self.x0, self.y1 - self.y0)
+
+
+class Move(NamedTuple):
+    """One straight move of the nozzle, its ends in mm, on the layer it's made in (counted from 1;
+    0 before the first). `width` is the line's where it lays one, else 0."""
+
+    layer: int
+    x0: float
+    y0: float
+    z0: float
+    x1: float
+    y1: float
+    z1: float
+    width: float
+    laying: bool
 
 
 @dataclass
@@ -123,6 +139,9 @@ class Sliced:
     outlines: dict[str, list[list[float]]]
     #: What the footer says: per-filament use, time, and the settings Orca sliced with.
     footer: dict[str, str]
+    #: Every move of the nozzle in order, the end G-code's too, where `read` was asked to keep
+    #: them (`keep_moves`).
+    head: list[Move] = field(default_factory=list)
 
     def per_filament(self, key: str) -> list[float]:
         """A footer figure for each filament, as `filament used [g]`."""
@@ -262,11 +281,14 @@ class _Moves:
         return found
 
 
-def read(gcode: Path, keep_lines: bool = False) -> Sliced:
+def read(gcode: Path, keep_lines: bool = False, keep_moves: bool = False) -> Sliced:
     """A G-code as Orca wrote it: layers, labels, widths, pauses, filament changes, the footer.
 
-    `keep_lines` keeps every extruded line, for reading where on the plate they fall.
+    `keep_lines` keeps every extruded line, for reading where on the plate they fall, and
+    `keep_moves` every move of the nozzle, for reading what the head passes. Nothing here assumes
+    z only rises: printed by object, it starts again at each object (mqucifer/print-shop#109).
     """
+    head: list[Move] = []
     layers: list[Layer] = []
     pauses: list[dict[str, Any]] = []
     changes: list[dict[str, Any]] = []
@@ -417,6 +439,9 @@ def read(gcode: Path, keep_lines: bool = False) -> Sliced:
             for k, (qx, qy) in enumerate(points, 1):
                 qz = z + (nz - z) * k / len(points)
                 moves.move(qx - px, qy - py, qz - pz, feed, accel, here, what)
+                if keep_moves:
+                    head.append(Move(here + 1, px, py, pz, qx, qy, qz,
+                                     width if laying else 0.0, laying))
                 if laying and layer is not None:
                     piece = Line(px, py, qx, qy, width, kind, obj)
                     lengths[kind] += piece.length
@@ -433,7 +458,7 @@ def read(gcode: Path, keep_lines: bool = False) -> Sliced:
             x, y, z = nx, ny, nz
     close()
     _time(layers, moves)
-    return Sliced(layers, pauses, changes, outlines, footer)
+    return Sliced(layers, pauses, changes, outlines, footer, head)
 
 
 def _time(layers: list[Layer], moves: _Moves) -> None:

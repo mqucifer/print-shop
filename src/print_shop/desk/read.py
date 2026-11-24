@@ -29,6 +29,7 @@ from print_shop.joblog import LOG_NAME
 from print_shop.ledger import Frame, Ledger, LedgerError, Row, UnprintedJob
 from print_shop.orchestrator.frames import FRAMES_DIR
 from print_shop.outcome_words import outcome_words
+from print_shop.plate import plate_job
 from print_shop.setup.proposal import PAUSE
 
 __all__ = [
@@ -160,6 +161,10 @@ class JobRecord:
     #: Whether `part_path` holds the bytes the job printed, by their sha256.
     part_found: bool = False
     printers: int = 0
+    #: Each file of the plate it's an object of, found the same way (mqucifer/print-shop#109).
+    plate_parts: tuple[tuple[Path, bool], ...] = ()
+    #: Each of that plate's rows, as it's run again whole.
+    plate_rows: tuple[Row, ...] = ()
     #: The spools on hand by number, as they are now, for the line to print it again
     #: (mqucifer/print-shop#218).
     on_hand: dict[int, Spool] | None = None
@@ -262,11 +267,12 @@ class Desk:
                     "SELECT job_id, count(*) AS n FROM print_frames GROUP BY job_id")
             } if ledger is not None else {}
         for row in rows:
+            # A plate's time and plastic are one print's, so one line has them.
             found.append(JobSummary(
-                job_id=row.job_id, at=row.start_requested_at, part=row.stl_name,
-                status=status(row), print_time_s=row.print_time_s,
-                filament_cm3=row.filament_cm3, pause=pause_said(row),
-                frames=frames.get(row.job_id, 0), failed=row.result == "failed",
+                job_id=row.job_id, at=row.start_requested_at, part=row.part_said,
+                status=status(row), print_time_s=row.print_time_s if row.heads_job else None,
+                filament_cm3=row.filament_cm3 if row.heads_job else None, pause=pause_said(row),
+                frames=frames.get(plate_job(row.job_id), 0), failed=row.result == "failed",
             ))
         for job in unprinted:
             found.append(JobSummary(job_id=job.job_id, at=job.ended_at, part=job.stl_name,
@@ -276,10 +282,11 @@ class Desk:
             job_id = log.parent.name
             if job_id in known:
                 continue
-            part = _part(log.read_text(encoding="utf-8", errors="replace"))
+            names = [Path(p.strip()).name
+                     for p in _PART.findall(log.read_text(encoding="utf-8", errors="replace"))]
             at = datetime.fromtimestamp(log.stat().st_mtime, UTC).isoformat(timespec="seconds")
             found.append(JobSummary(
-                job_id=job_id, at=at, part=part.name if part else "?",
+                job_id=job_id, at=at, part=", ".join(names) or "?",
                 status="never sent to the printer: its log only",
             ))
         return sorted(found, key=lambda j: j.at, reverse=True)
@@ -296,6 +303,9 @@ class Desk:
             return None
         with self._ledger() as ledger:
             row = ledger.get(job_id) if ledger is not None else None
+            plate_rows = (tuple(ledger.job_rows(job_id))
+                          if ledger is not None and row is not None and row.plate is not None
+                          else ())
             unprinted = ledger.unprinted(job_id) if ledger is not None else None
             frames = tuple(ledger.frames(job_id)) if ledger is not None else ()
             missed = ledger.frames_missed(job_id) if ledger is not None else None
@@ -319,10 +329,17 @@ class Desk:
                 job_id=job_id, row=row, frames=frames, frames_missed=missed, log=text,
                 part_path=kept, part_found=same, printers=printers,
             )
-        found = (self._finder.find(row.stl_sha256, named,
-                                   (self.parts_dir, self.jobs_dir / job_id))
+        folders = (self.parts_dir, self.jobs_dir / plate_job(job_id))
+        plate_parts: tuple[tuple[Path, bool], ...] = ()
+        if row is not None and row.plate is not None:
+            each = [(Path(p.path), self._finder.find(p.sha256, Path(p.path), folders))
+                    for p in row.plate.parts]
+            plate_parts = tuple((here or given, here is not None) for given, here in each)
+            named = Path(row.plate.parts[row.plate.n - 1].path)
+        found = (self._finder.find(row.stl_sha256, named, folders)
                  if row is not None else None)
         return JobRecord(
+            plate_parts=plate_parts, plate_rows=plate_rows,
             job_id=job_id, row=row, unprinted=unprinted, frames=frames, frames_missed=missed,
             log=text, part_path=found or named, part_found=found is not None, printers=printers,
             on_hand=on_hand,
@@ -331,7 +348,7 @@ class Desk:
     def log_path(self, job_id: str) -> Path | None:
         if not plain_id(job_id):
             return None
-        path = self.jobs_dir / job_id / LOG_NAME
+        path = self.jobs_dir / plate_job(job_id) / LOG_NAME
         return path if path.is_file() else None
 
     def frame_path(self, job_id: str, n: int) -> Path | None:
@@ -339,7 +356,7 @@ class Desk:
         record = self.job(job_id)
         if record is None or not 0 <= n < len(record.frames):
             return None
-        path = self.jobs_dir / job_id / FRAMES_DIR / Path(record.frames[n].path).name
+        path = self.jobs_dir / plate_job(job_id) / FRAMES_DIR / Path(record.frames[n].path).name
         return path if path.is_file() else None
 
 

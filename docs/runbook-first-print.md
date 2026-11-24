@@ -216,6 +216,8 @@ Finish that job, or stop it with Ctrl-C in its terminal (which doesn't stop the 
    - **To use them:** `use` takes those marked `[x]` and slices again. `use 2 4` takes those numbers, marked or not. `clear 3` clears one, and `clear` all of them. `ok` without `use` carries nothing: with some still ticked, it says so once, and `ok` again goes on without them. What you type in the same answer wins: `use; wall_loops=3 because it's decorative`.
    - **With a model,** it's also asked what the differences put in doubt. It can only unselect, with its reason, and the offer doesn't wait for it: a doubt that comes late is on the next review, and `use` only ever takes what the review in front of you marked.
 
+   - **From a plate of several parts** (mqucifer/print-shop#109): the plate is one print in the list, shown by its part most like this one. Its `print_sequence` is never offered. A pause from it isn't selected, as it may have been another part's, and nor is a setting that a failed part of it bears on.
+
    What you use is your correction, and the ledger keeps the print it came from (`--list` says `used from`). It isn't a lesson kept: those still go through the reviewer (`docs/print-lessons.md`).
 
    **The review shows every pose the orientation step weighed** (mqucifer/print-shop#128): what would need support, any round or chamfer rising from the plate that's left out of it (it's carried by the layers under it), the area on the plate and the height, with this print's marked. The step chooses on those, and on fit. It doesn't stand a part up for warping: a pose stood up where a lower one has no more to support and twice as much on the plate is laid back down, saying so, and a part with 5000 mm² or more on the plate gets a `warping risk` note naming the plate's temperature, a brim, the exhaust and the side fan. Elephant foot is `elefant_foot_compensation` (0.1 mm on your profile). A part too big for the plate in every pose, however it's turned on it, is refused before it's sliced. For a kept pose, one of the others may still be being measured when the review is drawn: its line says `still being measured: orientation waits for it` (mqucifer/print-shop#235).
@@ -340,6 +342,31 @@ Finish that job, or stop it with Ctrl-C in its terminal (which doesn't stop the 
    - whether the printer went back to idle on its own after it completed, or stayed in completed.
 
    The recording replaces the synthetic frames in `tests/data/sdcp/`.
+
+## Several parts in one job
+
+For small parts you'd print one job each, such as caps at several clearances (mqucifer/print-shop#109): name the files together. Name a file twice for two of it.
+
+```
+uv run python scripts/print_job.py cap-tight.stl cap-mid.stl cap-loose.stl --as-laid
+PRINT_AGENT_ALLOW_HARDWARE=1 uv run python scripts/print_job.py cap-tight.stl cap-mid.stl cap-loose.stl --as-laid
+```
+
+It's one job: one set of questions, one review, one gate and one print. Arming is the same as for any job.
+
+- **By object, where the head has the room.** The parts are arranged on one plate and each is finished before the next, so none strings to another. The machine profile says the room: 68 mm round the nozzle (the larger of its two radii), 36 mm up to the rod, 90 mm up to the lid. print-shop reads every move of the head from the G-code against those and spaces the parts wider where they fall short, as Orca doesn't count a brim.
+- **By layer where it hasn't, saying why.** That's parts too many to space, a part over 36 mm with another beside it, two over 90 mm, or a pause. The review says it at its top, and so does the gate. The dashboard's gate card says it on a **Plate** line once you paste `ha-configs/lovelace_3dprint.yaml` again. The command line says it without that.
+- **Refused, with nothing sliced for printing:** parts that don't fit one plate even by layer, and a part whose mesh isn't closed (there's no mesh gate for a job of several: mend it or leave it out).
+- **The review** shows where each part is on the plate (x and y from the front left) and when it prints, with a small map of the numbers, the front nearest you. The gate and the end show the map too. `print_sequence` is a change like any: `print_sequence=by layer` prints them all at once. A correction is the whole plate's. One the plate can't be sliced with, or a pose sent back that doesn't fit, is taken back, and the review says why. `orientation` asks which part, then goes on as for one.
+- **A pause needs by layer.** Orca writes no pause by object and doesn't say so, so `pause_at` is refused there. `print_sequence=by layer; pause_at=3` pauses every part once the layer topping out at 3 mm is done. The note of a pause typed a layer past a fit isn't given for a plate, as one part's bridge would pass for another's pocket closing: read the pause's line at the review. A part that needs a pause of its own prints by itself.
+- **The questions are about the parts together, and wait for no model,** as for one part (mqucifer/print-shop#208): print-shop's two show at once, the model's follow, and `go` goes on without them, which the review notes.
+- **The questions say how the parts lie as they're asked:** top and bottom mean that. Which faces you said are seen follows each part when it's turned after, by the pose chosen then or by your send-back, as one part's does (mqucifer/print-shop#248): each is carried from the pose it was asked in, and the review has a line for each part, or one for every part where they're the same. The plate is read as one: a face seen on any part is seen, and where any part's can't be carried, none is judged. The questions on a part's shape, and any option's setting that's for a pose, such as no supports, aren't carried: after a turn they aren't used, and the review says which, under TURNED SINCE YOU ANSWERED. The record keeps every answer as given, with the pose each part was asked in. Send a part back with `orientation`, or say what you want with a correction.
+- **Each part's pose** is its own: as laid with `--as-laid`, the side its context gives, or one orientation call each, made after the questions. Where the poses it chooses don't fit one plate together, they're kept as the questions had them and the review says so: send back any you want turned. The print loop reads one part, so it isn't run for a plate and the settings come from the single call. All six poses of each part are measured before the questions, so on detailed parts they can come later than for one part, which measures only the pose it keeps first (mqucifer/print-shop#235).
+- **Each part's context is read beside it.** `--context` is for one part only.
+- **Use these isn't offered for a plate yet,** as one part's settings would go on every part: the review says so. Type what you want, or to print the same plate again copy its line from the print desk. A plate is offered to a later print of one part.
+- **The outcome is asked part by part** when the print ends. The card names each by its file, its number and its place on the plate, such as `cap-mid.stl (part 2 of 3), front centre, x 166 y 85`, so answer before you clear the plate. The frames are the whole print's.
+- **At the end, and in `--list`,** what the parts share is said once, then a block for each part: its file, number, place, pose and outcome.
+- **In the ledger each object is a row,** with the job's id for the first and the id with `-2`, `-3` for the others. Each has its own pose, features and outcome. The time, plastic and layers in each are the whole plate's. The print desk's "run it again" from any of them is the whole plate.
 
 ## A file you sliced by hand
 

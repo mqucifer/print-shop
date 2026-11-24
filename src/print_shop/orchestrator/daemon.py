@@ -87,7 +87,8 @@ from print_shop.setup.loop import PrintLoop
 from print_shop.setup.review import Reviewer
 from print_shop.setup.waiting import Waiting
 from print_shop.sliced import SlicedJob
-from print_shop.slicer.orca import Slicer, SlicerProfiles, slice_model
+from print_shop.slicer.arrange import SlicePlate
+from print_shop.slicer.orca import Slicer, SlicerProfiles, slice_model, slice_plate
 from print_shop.slicer.store import Store
 
 logger = logging.getLogger(__name__)
@@ -281,6 +282,7 @@ class Daemon:
         on_step: Callable[[str, str, Step], None] | None = None,
         waiting: Waiting | None = None,
         store_root: Path | None = None,
+        plate_slicer: SlicePlate = slice_plate,
     ) -> None:
         """`printer` is what the approval gate ultimately commands.
 
@@ -331,6 +333,9 @@ class Daemon:
 
         `store_root` is the profile store the slices' profiles come from, read again by hash at
         Start (mqucifer/print-shop#209); None leaves them unread there.
+
+        `plate_slicer` is what slices a job of several parts (`submit_several`,
+        mqucifer/print-shop#109).
         """
         self._cfg = cfg
         self._on_step = on_step
@@ -390,6 +395,7 @@ class Daemon:
             waiting=(dataclasses.replace(
                 waiting, closer=self._persons(waiting.closer, Waits.QUESTIONS))
                      if waiting is not None and waiting.closer is not None else waiting),
+            plate_slicer=plate_slicer,
         )
 
         # MQTT bridge.
@@ -512,6 +518,25 @@ class Daemon:
             "stl_path": str(Path(stl_path).absolute()),
             "as_laid": as_laid,
             "context_path": str(Path(context).absolute()) if context else None,
+        })
+
+    def submit_several(self, stl_paths: list[Path], *, as_laid: bool = False) -> str:
+        """Submit several parts as one job, arranged on one plate and printed by object where
+        the head has the room (mqucifer/print-shop#109). Returns the job_id.
+
+        One review, one gate and one print, as any job's. `as_laid` keeps every part's own pose.
+        Each part's context is read beside it.
+
+        Raises:
+            ValueError: With fewer than two parts: one is `submit`'s.
+            JobRejected: If a job is already active.
+        """
+        if len(stl_paths) < 2:
+            raise ValueError("several parts are two or more: one part is submitted by itself")
+        return self._submit(", ".join(p.name for p in stl_paths), {
+            "entry": "stl_upload",
+            "stl_paths": tuple(str(p) for p in stl_paths),
+            "as_laid": as_laid,
         })
 
     def _submit(self, part: str, given: dict[str, Any]) -> str:
@@ -1172,6 +1197,8 @@ class Daemon:
             "pause_for": gate_payload.get("pause_for") or "",
             "spools": gate_payload.get("spools") or "",
             "held": held,
+            # How a plate of several prints, and why (mqucifer/print-shop#109).
+            **({"plate": gate_payload["plate"]} if gate_payload.get("plate") else {}),
         }
 
     def _finish_job(

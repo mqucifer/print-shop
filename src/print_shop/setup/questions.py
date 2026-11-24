@@ -160,6 +160,14 @@ PLATE_UNSAID = frozenset(label for label, (_, _, plate) in SEEN_FACES.items() if
 #: The questions that need no model, shown at once (mqucifer/print-shop#208).
 STOCK = (PURPOSE, SEEN)
 
+#: print-shop's two as they're shown about a plate of several parts (mqucifer/print-shop#109).
+#: A part can still be turned after they're asked, so "as it prints" is said as how it lies now.
+PLATE_WORDS = {
+    PURPOSE.text: "What are these parts for? Their shapes can't say.",
+    SEEN.text: "Which faces of these parts will be seen once they're in use?",
+    "as it prints": "as it lies now",
+}
+
 
 def stock(
     context: PartContext | None, rotation_deg: tuple[float, float, float],

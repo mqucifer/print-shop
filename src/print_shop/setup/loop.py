@@ -61,6 +61,7 @@ from print_shop.setup.bounds import SETTINGS, check
 from print_shop.setup.context import refuses
 from print_shop.setup.model import LEAVE_THE_SEAM, prompt
 from print_shop.setup.proposal import (
+    ORIENTATION,
     Change,
     GivenLesson,
     LoopCall,
@@ -76,7 +77,7 @@ from print_shop.setup.skill import Skill
 from print_shop.setup.traits import TRAITS, traits
 
 if TYPE_CHECKING:  # the slicer imports the job state, which imports the setup
-    from print_shop.ledger import Ledger
+    from print_shop.ledger import Ledger, Row
     from print_shop.slicer.orca import Slicer, SlicerProfiles
 
 __all__ = [
@@ -514,6 +515,23 @@ def _orca_setting(part: Part, key: str | None) -> str:
     return "\n".join(said)
 
 
+def _past_plate(rows: list[Row]) -> str:
+    """A plate of several parts as one past print: its one review's corrections once, and each
+    part's outcome (mqucifer/print-shop#109)."""
+    first = rows[0]
+    each = "; ".join(
+        f"{r.part_said} "
+        + (outcome_words(r.result, r.symptom) if r.result else "no outcome yet")
+        + (f" ({r.note})" if r.note else "")
+        for r in rows
+    )
+    fixed = ", ".join(f"{c.key}={c.value}" for c in first.corrections or ()
+                      if c.key != ORIENTATION) or "nothing"
+    how = first.plate.layout.sequence if first.plate is not None else ""
+    return (f"- a plate of {len(rows)}, printed {how}, job {first.job_id}: {each}; "
+            f"corrected once, for the plate: {fixed}")
+
+
 def _past_prints(part: Part, state: _State, wanted: list[str] | None) -> str:
     # The real model, asked once at the boundary, gave words ("flat", "lid", "PLA") where traits
     # go: a word that isn't one is said and set aside, and none leaves the part's own.
@@ -530,8 +548,19 @@ def _past_prints(part: Part, state: _State, wanted: list[str] | None) -> str:
         lines.append("- none")
     lines.append("Earlier prints of parts with those traits:")
     shown = 0
+    plates: set[str] = set()
     for row in reversed(part.ledger.rows() if part.ledger is not None else []):
         if not has or not has <= set(traits(row.features or ())):
+            continue
+        if row.plate is not None and part.ledger is not None:
+            # One print, however many of its parts are like this one.
+            if row.plate.job_id in plates:
+                continue
+            plates.add(row.plate.job_id)
+            lines.append(_past_plate(part.ledger.job_rows(row.job_id)))
+            shown += 1
+            if shown == 8:
+                break
             continue
         outcome = outcome_words(row.result, row.symptom) if row.result else "no outcome yet"
         fixed = ", ".join(f"{c.key}={c.value}" for c in row.corrections or ()) or "nothing"
