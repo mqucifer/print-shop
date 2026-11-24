@@ -180,9 +180,10 @@ def test_one_file_is_prepared_offered_and_started_by_the_person(
     wait_until(lambda: shop.offered() == job_id)
     assert shop.printer.verbs.count("start") == 0, "nothing starts by itself"
     assert daemon.start(job_id, bed_clear=True) == ""
-    wait_until(lambda: shop.ledger.get(job_id) is not None)
-    assert shop.printer.verbs[-2:] == ["upload", "start"]
+    # The ledger's row is written just before the printer is told to start: its start, then.
     wait_until(lambda: any("Started: bracket.stl" in s for s in queue.said()))
+    assert shop.ledger.get(job_id) is not None
+    assert shop.printer.verbs[-2:] == ["upload", "start"]
     assert shop.waits(job_id) is None
 
 
