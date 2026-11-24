@@ -10,12 +10,14 @@
    from `.env`: a `.env` value is ambient configuration, set once and in force for every run
    after, and that is the shape of what went wrong on 2026-09-16, when the prototype's test
    suite started two real prints. Arming has to be an act, made again on each invocation. Under
-   it, the terminal's `start` and `y` starts the print. The name is the prototype's, kept so the
-   Sponsor's command is the same one.
+   it, the terminal's `start` and `y`, and the card's Start, start the print (the Sponsor's
+   "B", 2026-11-24). The name is the prototype's, kept so the Sponsor's command is the same
+   one.
 
-Nothing else arms: no setting, no Home Assistant entity or automation, no MQTT message (a
-button's payload is in its retained discovery config, readable by every client of the broker),
-and no test (`tests/conftest.py` refuses every armed connection, whatever the environment).
+Nothing else arms: no setting, no Home Assistant entity or automation, no MQTT message (a button's
+payload is in its retained discovery config, readable by every client of the broker, so in a run
+the flag didn't arm the card's Start is held), and no test (`tests/conftest.py` refuses every armed
+connection, whatever the environment).
 
 Who armed each start, how, from where and when is kept with the print's ledger row
 (`Ledger.record_start_requested`'s `armed`).

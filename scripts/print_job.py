@@ -65,15 +65,16 @@ or by a restart, at the questions, at the review or ready to print, it waits in 
 `--resume` alone takes the only one, and `--list` shows them. A job is never kept approved: a
 restart leaves it ready, and nothing is armed.
 
-**Start is the approval, given when it's time to print** (mqucifer/print-shop#209). At the
-approval gate, type `start` here (in a run armed by the flag), or Start on your signed-in phone,
-on the home Wi-Fi (mqucifer/print-shop#214). Start checks again the G-code's hash, the part's
-file, the profiles, the loaded spool, the fitted nozzle and that the printer is free, and asks
-that the bed is clear: here, "I can see the bed is clear", where only `y` starts it, and on the
-phone its tick box. A change is said, with what to do, nothing prints, and the gate waits for a
-new Start. `reject` here is the card's Reject. One Start a gate: the second is told it was
-already taken. **The card's Start starts nothing** (mqucifer/print-shop#214): it's an MQTT
-message, which anyone on the broker can send, so it's held, saying where to start.
+**Start is the approval, given when it's time to print** (mqucifer/print-shop#209). At the approval
+gate, type `start` here or press Yes on the card (in a run armed by the flag), or Start on your
+signed-in phone, on the home Wi-Fi (mqucifer/print-shop#214). Start checks again the G-code's hash,
+the part's file, the profiles, the loaded spool, the fitted nozzle and that the printer is free,
+and asks that the bed is clear: here, "I can see the bed is clear", where only `y` starts it, and
+on the phone its tick box. A change is said, with what to do, nothing prints, and the gate waits
+for a new Start. `reject` here is the card's Reject. One Start a gate: the second is told it was
+already taken. **The card's Start is an MQTT message,** which anyone on the broker can send, so it
+starts only in a run the flag armed; in one it didn't, it's held before anything is read
+(mqucifer/print-shop#214, the Sponsor's "B").
 
 **Each gate says which it is** (mqucifer/print-shop#200). A part whose mesh isn't closed stops
 at the mesh gate first, before any question or slice: it's shown with its reason, the mesh's
@@ -101,14 +102,14 @@ sliced for, a swap's first, or another of the same variety, colour and tuning. A
 anything else loaded starts nothing: it says what to load, and waits for a new press.
 
 **A person arms each start, and this is the only place that builds what arms
-the printer** (mqucifer/print-shop#214). Two ways: `PRINT_AGENT_ALLOW_HARDWARE=1` on
-this command's own line, which arms the run for the terminal's `start`; or a
-signed-in phone's Start, on the home Wi-Fi, which arms one start of one job, and
-disarms straight after. With `PHONE_HOME` in the settings, a job's run serves the
-phone's Start page (`scripts/phone.py` pairs a phone). Without either, a Start is
-held, saying so: the job waits, ready, for the phone or an armed `--resume`
-(mqucifer/print-shop#209). It lives outside the package so that nothing importable
-can arm the printer for itself.
+the printer** (mqucifer/print-shop#214). Two ways: `PRINT_AGENT_ALLOW_HARDWARE=1`
+on this command's own line, which arms the run for the terminal's and the card's
+Start; or a signed-in phone's Start, on the home Wi-Fi, which arms one start of
+one job, and disarms straight after. With `PHONE_HOME` in the settings, a job's
+run serves the phone's Start page (`scripts/phone.py` pairs a phone). Without
+either, a Start is held, saying so: the job waits, ready, for the phone or an
+armed `--resume` (mqucifer/print-shop#209). It lives outside the package so that
+nothing importable can arm the printer for itself.
 
 With a print started, it keeps running, watching the printer read-only, until
 the outcome is recorded in Home Assistant. Stopping it (Ctrl-C) leaves the
@@ -209,18 +210,21 @@ BED_QUESTION = "  I can see the bed is clear [y/N]"
 
 
 
-def start_words(*, armed: bool, phone: bool, here: bool) -> tuple[str, str]:
-    """The gate before printing's two lines: where it can be started, and how to answer.
+def start_words(*, phone: bool, here: bool) -> tuple[str, str]:
+    """The gate before printing's two lines: where a Start is taken, and how to answer.
 
-    `armed` is the flag's, `phone` whether the phone's Start page is served, and `here` whether
-    this terminal is read. The card's Start is offered only where it starts
-    (`CARD_STARTS_UNDER_FLAG`, mqucifer/print-shop#214).
+    `phone` is whether the phone's Start page is served, and `here` whether this terminal is
+    read. The card's is taken where `CARD_STARTS_UNDER_FLAG` (mqucifer/print-shop#214): like a
+    `start` here, it prints only in a run the flag armed, as the run's first line says.
     """
-    where = [w for w, can in (("here", here), ("on your phone", phone),
-                              ("on the card", CARD_STARTS_UNDER_FLAG and armed)) if can]
+    card = CARD_STARTS_UNDER_FLAG
+    where = [w for w, can in (("here", here), ("on your phone", phone), ("on the card", card))
+             if can]
     if not where:
         ready = ("Ready to print. Nothing here can start it: take it up at a terminal "
                  "(`--resume`), or set up your phone's Start. Reject it on the card.")
+    elif where == ["on the card"]:
+        ready = "Ready to print. Start or reject it on the card."
     else:
         places = " or ".join(where) if len(where) < 3 else f"{where[0]}, {where[1]} or {where[2]}"
         ready = f"Ready to print. Start it {places}, or reject it on the card."
@@ -229,7 +233,7 @@ def start_words(*, armed: bool, phone: bool, here: bool) -> tuple[str, str]:
     how = ["Type start here"]
     if phone:
         how.append("Start on your phone")
-    if CARD_STARTS_UNDER_FLAG and armed:
+    if card:
         how.append("Yes on the card")
     return ready, f"  {', or '.join(how)}. It waits until you start or reject it."
 
@@ -606,13 +610,13 @@ def _armed(recorder: FrameRecorder | None, *, phone: bool = False) -> PrinterCli
     the phone's Start where it's served (mqucifer/print-shop#214)."""
     if recorder is not None:
         print(f"Recording the printer's replies to {recorder.path}")
-    card = ", or on the card," if CARD_STARTS_UNDER_FLAG else ""
+    where = "a Start, here or on the card," if CARD_STARTS_UNDER_FLAG else "a Start here"
     if hardware_allowed():
-        print(f"ARMED by {ALLOW_HARDWARE_ENV}=1: a Start here{card} starts the print.")
+        print(f"ARMED by {ALLOW_HARDWARE_ENV}=1: {where} starts the print.")
         return live_printer(recorder=recorder)
     waits = "a Start on your phone, or an armed `--resume`" if phone else "an armed `--resume`"
-    print(f"Not armed ({ALLOW_HARDWARE_ENV} is not 1): a Start here will NOT print. It's held, "
-          f"and the job waits for {waits}.")
+    print(f"Not armed ({ALLOW_HARDWARE_ENV} is not 1): {where} will NOT print. It's held, and "
+          f"the job waits for {waits}.")
     return None
 
 
@@ -774,7 +778,7 @@ def _follow(
             break  # it ended first
         shown += 1
         here = can_ask()
-        ready, how = start_words(armed=armed, phone=phone, here=here)
+        ready, how = start_words(phone=phone, here=here)
         lines = _gate_lines(gate, turned=turned, ready=ready)
         for line in lines:
             print(line)

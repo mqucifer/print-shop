@@ -34,7 +34,7 @@ from print_shop.ledger import Ledger
 from print_shop.orchestrator import daemon as daemon_module
 from print_shop.orchestrator.daemon import (
     CARD_DOESNT_START,
-    NOT_ARMED,
+    NOT_ARMED_PHONE,
     Daemon,
     PhoneStart,
     ReadyToStart,
@@ -424,10 +424,39 @@ def test_a_phones_start_held_by_a_check_arms_nothing_and_a_new_view_starts_it(
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("flag", [False, True], ids=["unarmed", "armed-by-the-flag"])
-def test_the_cards_start_starts_nothing_in_any_run_and_reads_no_printer(
-    tmp_path: Path, flag: bool,
+def test_in_a_run_the_flag_didnt_arm_no_message_or_card_press_starts_and_none_reads_the_printer(
+    tmp_path: Path,
 ) -> None:
+    """The Sponsor's "B" (2026-11-24): a run the flag didn't arm holds the card's Start, and any
+    bare, retained or replayed message, before anything is read."""
+    shop, one_start, built = _phone_shop(tmp_path)
+    with _unarmed(shop, one_start) as daemon:
+        job_id = daemon.submit(shop.stl)
+        daemon.wait_for_gate(job_id, timeout_s=WAIT_S)
+        reads = shop.printer.verbs.count("snapshot")
+        shop.bridge.press(CFG, "approve")
+        assert NOT_ARMED_PHONE in _held(shop)
+        word = json.loads(shop.bridge.button(CFG, "approve"))["press"]
+        bare = json.dumps({"decision": "approve", "job_id": job_id, "press": word})
+        shop.bridge.deliver(command_topic(CFG), bare)
+        shop.bridge.deliver(command_topic(CFG), bare)  # replayed
+        shop.bridge.deliver(command_topic(CFG), bare, retain=True)
+        time.sleep(0.3)
+        assert shop.printer.verbs.count("snapshot") == reads, "a broker message reads nothing"
+        assert shop.bridge.retained_json(gate_topic(CFG)).get("pending")
+        assert "upload" not in shop.printer.verbs and built == []
+        assert one_start.armed() is None
+        shop.bridge.press(CFG, "reject")
+        assert not daemon.wait_for_finish(job_id, timeout_s=WAIT_S).printed
+
+
+@pytest.mark.parametrize("flag", [False, True], ids=["unarmed", "armed-by-the-flag"])
+def test_with_the_switch_off_the_cards_start_starts_nothing_in_any_run(
+    tmp_path: Path, flag: bool, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`CARD_STARTS_UNDER_FLAG` False, the switch's other way: held in every run, and nothing
+    read."""
+    monkeypatch.setattr(daemon_module, "CARD_STARTS_UNDER_FLAG", False)
     shop, one_start, built = _phone_shop(tmp_path)
     with _unarmed(shop, one_start, flag=flag) as daemon:
         job_id = daemon.submit(shop.stl)
@@ -463,18 +492,16 @@ def test_no_payload_can_carry_a_phones_confirm(tmp_path: Path) -> None:
         shop.bridge.deliver(command_topic(CFG), json.dumps({
             "decision": "approve", "job_id": job_id, "press": word,
             "phone": _armed(job_id).model_dump(), "bed": "on the phone", "by": "on the phone"}))
-        assert CARD_DOESNT_START in _held(shop)
+        assert NOT_ARMED_PHONE in _held(shop), "read as a card press, in a run not armed"
         assert built == [] and "upload" not in shop.printer.verbs
         shop.bridge.press(CFG, "reject")
         daemon.wait_for_finish(job_id, timeout_s=WAIT_S)
 
 
-def test_with_the_switch_the_card_starts_under_the_flag_only(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """`CARD_STARTS_UNDER_FLAG` True, the Sponsor's other choice: the card's Start starts in a
-    run the flag armed, kept as armed by the flag, and is held in one it didn't."""
-    monkeypatch.setattr(daemon_module, "CARD_STARTS_UNDER_FLAG", True)
+def test_the_cards_start_starts_under_the_flag_only(tmp_path: Path) -> None:
+    """The Sponsor's "B" (2026-11-24): the card's Start starts in a run the flag armed, kept as
+    armed by the flag, and is held in one it didn't."""
+    assert daemon_module.CARD_STARTS_UNDER_FLAG is True
     shop, one_start, _ = _phone_shop(tmp_path)
     with _unarmed(shop, one_start) as daemon:
         job_id = daemon.submit(shop.stl)
@@ -994,18 +1021,23 @@ def test_who_armed_is_kept_with_the_row_and_an_older_ledger_gains_the_table(
         assert db.execute("SELECT name FROM sqlite_master WHERE name = 'armed_starts'").fetchone()
 
 
-def test_the_terminal_says_where_to_start() -> None:
+def test_the_terminal_says_where_to_start(monkeypatch: pytest.MonkeyPatch) -> None:
     script = _script()
-    assert script.start_words(armed=False, phone=True, here=True) == (
-        "Ready to print. Start it here or on your phone, or reject it on the card.",
-        "  Type start here, or Start on your phone. It waits until you start or reject it.")
-    assert script.start_words(armed=True, phone=False, here=True)[0] == (
-        "Ready to print. Start it here, or reject it on the card.")
-    assert script.start_words(armed=False, phone=True, here=False)[0] == (
+    assert script.start_words(phone=False, here=True) == (
+        "Ready to print. Start it here or on the card, or reject it on the card.",
+        "  Type start here, or Yes on the card. It waits until you start or reject it.",
+    ), "as before mqucifer/print-shop#214, with no phone"
+    assert script.start_words(phone=False, here=False)[0] == (
+        "Ready to print. Start or reject it on the card.")
+    assert script.start_words(phone=True, here=True) == (
+        "Ready to print. Start it here, on your phone or on the card, or reject it on the card.",
+        "  Type start here, or Start on your phone, or Yes on the card. It waits until you "
+        "start or reject it.")
+    monkeypatch.setattr(script, "CARD_STARTS_UNDER_FLAG", False)
+    assert script.start_words(phone=True, here=False)[0] == (
         "Ready to print. Start it on your phone, or reject it on the card.")
-    assert "Nothing here can start it" in script.start_words(
-        armed=True, phone=False, here=False)[0]
-    assert "on the card" not in script.start_words(armed=True, phone=True, here=True)[1]
+    assert "Nothing here can start it" in script.start_words(phone=False, here=False)[0]
+    assert "on the card" not in script.start_words(phone=True, here=True)[1]
 
 
 def test_the_terminals_start_in_a_run_the_flag_didnt_arm_says_the_phone(tmp_path: Path) -> None:
@@ -1014,7 +1046,7 @@ def test_the_terminals_start_in_a_run_the_flag_didnt_arm_says_the_phone(tmp_path
         job_id = daemon.submit(shop.stl)
         daemon.wait_for_gate(job_id, timeout_s=WAIT_S)
         assert daemon.start(job_id, bed_clear=True) == ""
-        assert NOT_ARMED in _held(shop) and "on your phone" in NOT_ARMED
+        assert NOT_ARMED_PHONE in _held(shop) and "on your phone" in NOT_ARMED_PHONE
         assert built == [] and "upload" not in shop.printer.verbs
         shop.bridge.press(CFG, "reject")
         daemon.wait_for_finish(job_id, timeout_s=WAIT_S)

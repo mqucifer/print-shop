@@ -38,9 +38,9 @@ hour runs on from when the gate opened. The print node refuses the same, as the 
 **A person arms each start** (mqucifer/print-shop#214, `arming.py`). A phone's confirm, on the
 home Wi-Fi, comes in through `start_from_phone`, and arms that one job's one start only once
 the checks at Start pass: the print node takes it once, and a `finally` around the graph's
-resume disarms it, however the start went. The terminal's `start` starts only in a run the flag
-armed. The card's Start is an MQTT message, which anyone on the broker can send, so it starts
-nothing (`CARD_STARTS_UNDER_FLAG`): it's held, saying where to start.
+resume disarms it, however the start went. The terminal's `start`, and the card's, start only in
+a run the flag armed. The card's Start is an MQTT message, which anyone on the broker can send,
+so in a run the flag didn't arm it's held before anything is read (`CARD_STARTS_UNDER_FLAG`).
 
 **A press names its job** (mqucifer/print-shop#207). The buttons carry the job's id while its gate
 is open, and a gate takes only a press that names its own job. That holds across processes, where
@@ -122,18 +122,23 @@ BED_ON_CARD = "on the card's dialog"
 BED_AT_TERMINAL = "at the terminal"
 
 #: What a Start in a run that isn't armed is told: held, so the ready job isn't lost.
-NOT_ARMED = (f"this run isn't armed ({ALLOW_HARDWARE_ENV} is not 1), so a Start here can't print. "
-             "Start it on your phone, on the home Wi-Fi; or stop this run, and take the job up "
-             f"with `{ALLOW_HARDWARE_ENV}=1 uv run python scripts/print_job.py --resume <job>`")
+NOT_ARMED = (f"this run isn't armed ({ALLOW_HARDWARE_ENV} is not 1), so nothing can print. Stop "
+             f"it, and take the job up with `{ALLOW_HARDWARE_ENV}=1 uv run python "
+             "scripts/print_job.py --resume <job>`")
+#: The same, in a run whose phone's Start page is on (mqucifer/print-shop#214).
+NOT_ARMED_PHONE = (f"this run isn't armed ({ALLOW_HARDWARE_ENV} is not 1), so a Start here or on "
+                   "the card can't print. Start it on your phone, on the home Wi-Fi; or stop "
+                   f"this run, and take the job up with `{ALLOW_HARDWARE_ENV}=1 uv run python "
+                   "scripts/print_job.py --resume <job>`")
 
 #: Whether the card's Start starts a print in a run the flag armed (mqucifer/print-shop#214). The
 #: card's Start is an MQTT message: its payload is in the button's retained discovery config, so
-#: any client of the broker, and any Home Assistant automation, can send it. False: it starts
-#: nothing in any run, and is held, saying where to start. True: under the flag it starts, as it
-#: did from mqucifer/print-shop#209, and it's still held in a run the flag didn't arm. A constant
-#: in the code, never a setting, so no setting changes who arms. **Its default is the Sponsor's
-#: answer, pending** (mqucifer/print-shop#214).
-CARD_STARTS_UNDER_FLAG = False
+#: any client of the broker, and any Home Assistant automation, can send it. True, the Sponsor's
+#: choice ("B", 2026-11-24): under the flag, which the person typed at the Mac to arm the run, it
+#: starts, as it did from mqucifer/print-shop#209; in a run the flag didn't arm it's held, before
+#: anything is read, and the phone or the terminal starts. False: it starts nothing in any run.
+#: A constant in the code, never a setting, so no setting changes who arms.
+CARD_STARTS_UNDER_FLAG = True
 
 #: What a card's Start that can't start is told.
 CARD_DOESNT_START = ("a Start on the card doesn't start a print. Start it on your phone, on the "
@@ -1326,13 +1331,15 @@ class Daemon:
         printer is read once, for a snapshot, and never waited on for a Reject: one that came
         meanwhile wins. A check that can't be made holds.
 
-        Who may start comes first (mqucifer/print-shop#214): the card's Start starts nothing
-        (`CARD_STARTS_UNDER_FLAG` False), and is held without reading the printer, so a message
-        on the broker can't make it be read. With it True, the card's Start is checked as the
-        terminal's is, and held in a run the flag didn't arm (`NOT_ARMED`).
+        Who may start comes first (mqucifer/print-shop#214): the card's Start, in a run the flag
+        didn't arm (or in any run, with `CARD_STARTS_UNDER_FLAG` False), is held without reading
+        anything, so a message on the broker can't make the printer be read.
         """
-        if cmd.phone is None and cmd.by == "on the card" and not CARD_STARTS_UNDER_FLAG:
-            return CARD_DOESNT_START
+        if cmd.phone is None and cmd.by == "on the card":
+            if not CARD_STARTS_UNDER_FLAG:
+                return CARD_DOESNT_START
+            if not self._commands_printer:
+                return self._not_armed()
         try:
             state = self._graph.get_state(thread_config).values
             found = [why for why in (why_not_start(state, self._ledger),) if why]
@@ -1348,8 +1355,12 @@ class Daemon:
                 found.append(NO_PHONE_HERE)
         elif not self._commands_printer:
             # Held, so the job keeps waiting: an unarmed run never ends a ready job.
-            found.append(NOT_ARMED)
+            found.append(self._not_armed())
         return ". Also, ".join(found)
+
+    def _not_armed(self) -> str:
+        """What a Start here or on the card is told in a run the flag didn't arm."""
+        return NOT_ARMED_PHONE if self._one_start.can_arm else NOT_ARMED
 
     def _hold(self, job_id: str, gate_payload: dict[str, Any], why: str) -> None:
         """A Start held: the gate stays open, saying why, on the card and in the terminal, with a

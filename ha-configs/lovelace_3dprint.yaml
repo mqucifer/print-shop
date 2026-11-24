@@ -91,13 +91,16 @@ views:
 
             - type: horizontal-stack
               cards:
-                # Approve (mqucifer/print-shop#214). At the mesh gate it approves. At the
-                # gate before printing it starts nothing: a button press is an MQTT message,
-                # which anyone on the broker can send, so a print is started on the phone's
-                # Start page, linked above, on the home Wi-Fi. A press there is held, saying so.
+                # Start (mqucifer/print-shop#209, mqucifer/print-shop#214). A press is an MQTT
+                # message, which anyone on the broker can send, so at the gate before printing
+                # it starts the print only in a run armed by PRINT_AGENT_ALLOW_HARDWARE=1 (the
+                # Sponsor's "B", 2026-11-24). In a run that isn't, it's held, saying so, and the
+                # phone's Start page, linked above, starts it on the home Wi-Fi. The dialog asks
+                # the bed. It can't take a template, so it names the card above, and a press
+                # can't say it was shown: the bed is still the person's to look at.
                 - type: button
                   entity: button.3d_print_agent_approve
-                  name: "Approve"
+                  name: "Yes, print it"
                   icon: "mdi:check-circle"
                   icon_height: 48px
                   show_state: false
@@ -107,7 +110,7 @@ views:
                     target:
                       entity_id: button.3d_print_agent_approve
                     confirmation:
-                      text: "Approve the job shown above? A print is started on your phone."
+                      text: "I can see the bed is clear. Print the job shown above?"
                 - type: button
                   entity: button.3d_print_agent_reject
                   name: "No, stop"
