@@ -35,6 +35,13 @@ and waits for a new press, with its inbox emptied, so an earlier or doubled tap 
 job once the spool is loaded. A Reject that came while a press was checked wins, held or not. The
 hour runs on from when the gate opened. The print node refuses the same, as the backstop.
 
+**A person arms each start** (mqucifer/print-shop#214, `arming.py`). A phone's confirm, on the
+home Wi-Fi, comes in through `start_from_phone`, and arms that one job's one start only once
+the checks at Start pass: the print node takes it once, and a `finally` around the graph's
+resume disarms it, however the start went. The terminal's `start` starts only in a run the flag
+armed. The card's Start is an MQTT message, which anyone on the broker can send, so it starts
+nothing (`CARD_STARTS_UNDER_FLAG`): it's held, saying where to start.
+
 **A press names its job** (mqucifer/print-shop#207). The buttons carry the job's id while its gate
 is open, and a gate takes only a press that names its own job. That holds across processes, where
 one gate at a time didn't. `live.py` is what keeps there from being a second process.
@@ -59,7 +66,7 @@ from typing import Any, ParamSpec, TypeVar
 from langgraph.types import Command as LgCommand
 from pydantic import BaseModel
 
-from print_shop.arming import ALLOW_HARDWARE_ENV
+from print_shop.arming import ALLOW_HARDWARE_ENV, Armed, OneStart
 from print_shop.core.checkpoint import open_checkpointer
 from print_shop.core.contracts import Gate
 from print_shop.core.mqtt import (
@@ -78,7 +85,7 @@ from print_shop.orchestrator.graph import build_graph, why_not_start
 from print_shop.orchestrator.kept import WaitingJob, WaitingJobs, Waits
 from print_shop.orchestrator.live import Step
 from print_shop.orchestrator.outcome import OutcomeDesk, Watcher
-from print_shop.orchestrator.start import why_not_now
+from print_shop.orchestrator.start import Checked, checked, why_not_now
 from print_shop.printer.camera import Camera
 from print_shop.printer.centauri import PrinterClient
 from print_shop.setup import Proposer
@@ -96,6 +103,9 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "BED_AT_TERMINAL",
     "BED_ON_CARD",
+    "CARD_STARTS_UNDER_FLAG",
+    "PhoneStart",
+    "ReadyToStart",
     "Decision",
     "Command",
     "JobRejected",
@@ -112,9 +122,25 @@ BED_ON_CARD = "on the card's dialog"
 BED_AT_TERMINAL = "at the terminal"
 
 #: What a Start in a run that isn't armed is told: held, so the ready job isn't lost.
-NOT_ARMED = (f"this run isn't armed ({ALLOW_HARDWARE_ENV} is not 1), so nothing can print. Stop "
-             f"it, and take the job up with `{ALLOW_HARDWARE_ENV}=1 uv run python "
-             "scripts/print_job.py --resume <job>`")
+NOT_ARMED = (f"this run isn't armed ({ALLOW_HARDWARE_ENV} is not 1), so a Start here can't print. "
+             "Start it on your phone, on the home Wi-Fi; or stop this run, and take the job up "
+             f"with `{ALLOW_HARDWARE_ENV}=1 uv run python scripts/print_job.py --resume <job>`")
+
+#: Whether the card's Start starts a print in a run the flag armed (mqucifer/print-shop#214). The
+#: card's Start is an MQTT message: its payload is in the button's retained discovery config, so
+#: any client of the broker, and any Home Assistant automation, can send it. False: it starts
+#: nothing in any run, and is held, saying where to start. True: under the flag it starts, as it
+#: did from mqucifer/print-shop#209, and it's still held in a run the flag didn't arm. A constant
+#: in the code, never a setting, so no setting changes who arms. **Its default is the Sponsor's
+#: answer, pending** (mqucifer/print-shop#214).
+CARD_STARTS_UNDER_FLAG = False
+
+#: What a card's Start that can't start is told.
+CARD_DOESNT_START = ("a Start on the card doesn't start a print. Start it on your phone, on the "
+                     "home Wi-Fi, or at the terminal")
+
+#: What a phone's Start is told in a run that can't arm from a phone.
+NO_PHONE_HERE = "this run can't start a print from a phone. Start it at the terminal"
 
 #: The most a Start from the terminal waits to be checked: a printer's snapshot, and the stock.
 _CHECKED_WITHIN_S = 60.0
@@ -156,6 +182,9 @@ class Command(BaseModel):
     by: str = ""
     #: A terminal command's own id, to tell it was weighed. Never read from a payload.
     id: str = ""
+    #: The phone's confirm that would arm this one start (mqucifer/print-shop#214). Never read
+    #: from a payload: only `start_from_phone` sets it, in the process.
+    phone: Armed | None = None
 
 
 class JobRejected(Exception):
@@ -169,6 +198,29 @@ class JobResult(BaseModel):
     approved: bool
     printed: bool
     error: str | None = None
+
+
+class ReadyToStart(BaseModel):
+    """The job whose gate before printing is open, as the phone's Start shows it and binds its
+    confirm to (mqucifer/print-shop#214). No setting, token or address is in it."""
+
+    job_id: str
+    part: str
+    #: The gate's word for a press now: a confirm is bound to it.
+    press: str
+    #: The G-code's SHA-256 as it was sliced: a confirm is bound to it.
+    gcode_sha256: str
+    #: What Start checks, read now.
+    checks: list[Checked]
+    #: Why the last Start was held, if it was.
+    held: str = ""
+
+
+class PhoneStart(BaseModel):
+    """What came of a phone's Start: started, or not, and in words."""
+
+    started: bool
+    said: str
 
 
 def parse_command(raw: bytes) -> Command:
@@ -235,6 +287,14 @@ def state_payload(fields: dict[str, Any]) -> str:
 # --------------------------------------------------------------------------
 
 
+def _gcode_sha256(state: Any) -> str:
+    """The G-code's hash as the job sliced or took it, or ""."""
+    taken = state.get("sliced") if isinstance(state, dict) else None
+    if taken is not None:
+        return str(taken.file.sha256)
+    return str(state.get("gcode_sha256") or "") if isinstance(state, dict) else ""
+
+
 def _rejection(inbox: Queue[Command]) -> Command | None:
     """A Reject among the presses that came while an Approve was checked."""
     while True:
@@ -283,6 +343,8 @@ class Daemon:
         waiting: Waiting | None = None,
         store_root: Path | None = None,
         plate_slicer: SlicePlate = slice_plate,
+        one_start: OneStart | None = None,
+        start_page: str = "",
     ) -> None:
         """`printer` is what the approval gate ultimately commands.
 
@@ -336,6 +398,12 @@ class Daemon:
 
         `plate_slicer` is what slices a job of several parts (`submit_several`,
         mqucifer/print-shop#109).
+
+        `printer` is the client `PRINT_AGENT_ALLOW_HARDWARE=1` armed, for the whole run.
+        `one_start` is what a phone's confirm arms, for one job's one start
+        (mqucifer/print-shop#214): `OneStart(build)`, `build` being `scripts/print_job.py`'s.
+        None, and a phone's Start is held. `start_page` is the phone's Start page's address, for
+        the card to link to (from the run's settings, never the card's YAML), or "" with none.
         """
         self._cfg = cfg
         self._on_step = on_step
@@ -348,6 +416,12 @@ class Daemon:
         #: Whether a Start here can reach a printer: without one it's held, and the job waits
         #: for an armed run to take it up (mqucifer/print-shop#209).
         self._commands_printer = printer is not None
+        #: A phone's confirm arms one start here, and nothing else (mqucifer/print-shop#214).
+        self._one_start = one_start if one_start is not None else OneStart(None)
+        self._start_page = start_page
+        #: What came of each phone's Start the gate weighed, by its command's id: "" if it was
+        #: taken, or why it was held.
+        self._answered: dict[str, str] = {}
         #: The terminal's commands each gate has weighed, by their id.
         self._weighed: set[str] = set()
         #: The jobs that wait for the person, which a restart takes up again.
@@ -396,6 +470,7 @@ class Daemon:
                 waiting, closer=self._persons(waiting.closer, Waits.QUESTIONS))
                      if waiting is not None and waiting.closer is not None else waiting),
             plate_slicer=plate_slicer,
+            one_start=self._one_start,
         )
 
         # MQTT bridge.
@@ -483,6 +558,7 @@ class Daemon:
     def __exit__(self, *exc: object) -> None:
         # A job cut short from here on still waits, to be taken up again.
         self._closing = True
+        self._one_start.disarm()
         if self._watcher is not None:
             self._watcher.stop()
             self._watcher = None
@@ -664,6 +740,81 @@ class Daemon:
                 return ""
         # The card's came first, and this one was spent with it, unweighed.
         return "the card's came first, and is what's said of the gate now"
+
+    def ready_to_start(self) -> ReadyToStart | None:
+        """The job whose gate before printing is open, with what Start checks read now, or None
+        (mqucifer/print-shop#214). Only reads: the printer once, for a snapshot."""
+        with self._job_lock:
+            gate = self._pending_gate
+            job_id = self._active_job_id
+            press = self._press
+            if (gate is None or job_id is None or gate.get("job_id") != job_id
+                    or gate.get("gate") != Gate.BEFORE_PRINT or self._gate_inbox is None
+                    or not press):
+                return None
+            gate = dict(gate)
+            part = self._parts.get(job_id, "?")
+        config = {"configurable": {"thread_id": job_id}}
+        try:
+            state = self._graph.get_state(config).values
+            spool_why = why_not_start(state, self._ledger)
+            rows = checked(state, gate, self._ledger, spool_why=spool_why,
+                           store_root=self._store_root, printer=self._reads_printer)
+        except Exception as exc:  # noqa: BLE001 - shown as a check that couldn't be made
+            logger.exception("what Start checks couldn't be read for the phone")
+            rows = [Checked("Checks", f"couldn't be read ({type(exc).__name__}): reload", False)]
+            state = {}
+        return ReadyToStart(job_id=job_id, part=part, press=press,
+                            gcode_sha256=_gcode_sha256(state), checks=rows,
+                            held=str(gate.get("held") or ""))
+
+    def start_from_phone(
+        self, job_id: str, *, armed: Armed, press: str, gcode_sha256: str,
+    ) -> PhoneStart:
+        """A phone's Start, its confirm already checked (`print_shop.phone`): the same Start as
+        the terminal's, which arms this job's one start once the checks at Start pass
+        (mqucifer/print-shop#214).
+
+        `press` and `gcode_sha256` are what the confirm was bound to when the page was shown: a
+        gate that's moved on since, or a job sliced again, refuses it. Returns whether it was
+        started, and what to say.
+        """
+        if armed.how != "phone" or armed.job_id != job_id:
+            return PhoneStart(started=False, said="that confirm isn't for this job")
+        on = f'on the phone "{armed.by}"'
+        cmd = Command(decision=Decision.APPROVE, job_id=job_id, bed=on, by=on, phone=armed,
+                      id=uuid.uuid4().hex)
+        try:
+            state = self._graph.get_state({"configurable": {"thread_id": job_id}}).values
+        except Exception as exc:  # noqa: BLE001 - never started on a check that wasn't made
+            logger.exception("a phone's Start couldn't read its job")
+            return PhoneStart(started=False, said=f"the job couldn't be read ({exc}): reload")
+        with self._job_lock:
+            gate = self._pending_gate
+            if (self._active_job_id != job_id or self._gate_inbox is None or gate is None
+                    or gate.get("job_id") != job_id or gate.get("gate") != Gate.BEFORE_PRINT):
+                how = self._decided.get(job_id)
+                return PhoneStart(started=False, said=(
+                    f"it was {how}" if how else "this job isn't ready to start now"))
+            if not press or press != self._press:
+                return PhoneStart(started=False, said=(
+                    "the job's gate has changed since this page was shown: reload it"))
+            if not gcode_sha256 or gcode_sha256 != _gcode_sha256(state):
+                return PhoneStart(started=False, said=(
+                    "the job was sliced again since this page was shown: reload it"))
+            cmd = cmd.model_copy(update={"press": press})
+            self._gate_inbox.put(cmd)
+        end = time.monotonic() + _CHECKED_WITHIN_S
+        while self._press == press and time.monotonic() < end:
+            time.sleep(0.02)
+        with self._job_lock:
+            said = self._answered.pop(cmd.id, None)
+        if said is None:
+            return PhoneStart(started=False, said=(
+                "another Start or a Reject came first, and is what's said of the job now"))
+        if said:
+            return PhoneStart(started=False, said=f"Not started: {said}")
+        return PhoneStart(started=True, said="Started by you. Disarmed again.")
 
     def submit_sliced(self, job: SlicedJob) -> str:
         """Submit a hand-sliced file, to be sent as it is (mqucifer/print-shop#164). Returns
@@ -1079,11 +1230,19 @@ class Daemon:
             why = self._not_yet(thread_config, cmd)
             # This press is spent, and so is any that came while it was checked: none is kept
             # to start the job later. A Reject among them still stands, whatever the check said.
-            checked, inbox = inbox, self._open_gate()
-            if rejected := _rejection(checked):
+            spent, inbox = inbox, self._open_gate()
+            if rejected := _rejection(spent):
+                self._answer(cmd, "a Reject came while it was checked, and the job has ended")
                 cmd = rejected
                 self._weigh(cmd)
                 break
+            if not why and cmd.phone is not None:
+                # Armed for this one start only now, its checks passed (mqucifer/print-shop#214).
+                try:
+                    self._one_start.arm(cmd.phone)
+                except RuntimeError as exc:
+                    why = f"it couldn't be armed ({exc}). Start again"
+            self._answer(cmd, why)
             if not why:
                 break
             self._hold(job_id, gate_payload, why)
@@ -1094,6 +1253,10 @@ class Daemon:
         with self._job_lock:
             if approved and before_print:
                 said = f"the bed confirmed clear {cmd.bed}"
+                if cmd.phone is not None:
+                    said += f", {cmd.phone.said()}"
+                elif self._commands_printer:
+                    said += f", armed by {ALLOW_HARDWARE_ENV}=1"
                 note = f"{note}; {said}" if note else said
                 self._held.setdefault(job_id, []).append(f"Start taken, {said}.")
                 self._decided[job_id] = f"started {by}"
@@ -1119,7 +1282,12 @@ class Daemon:
         # Resume the graph.
         try:
             resume_cmd: LgCommand[Any] = LgCommand(resume={"approved": approved, "note": note})
-            result = self._graph.invoke(resume_cmd, config=thread_config)
+            try:
+                result = self._graph.invoke(resume_cmd, config=thread_config)
+            finally:
+                # Disarmed straight after, however the start went (mqucifer/print-shop#214):
+                # the print node took it, or it raised before it could.
+                self._one_start.disarm()
 
             if "__interrupt__" in result:
                 # Another gate — handle recursively.
@@ -1138,6 +1306,12 @@ class Daemon:
                 error=str(exc),
             )
 
+    def _answer(self, cmd: Command, why: str) -> None:
+        """What came of a phone's Start, for `start_from_phone` to say: "" taken."""
+        if cmd.phone is not None and cmd.id:
+            with self._job_lock:
+                self._answered[cmd.id] = why
+
     def _weigh(self, cmd: Command) -> None:
         """`cmd` is the one the gate weighs, for a terminal's Start to know it was."""
         if cmd.id:
@@ -1151,7 +1325,14 @@ class Daemon:
         The spool first, then what Start checks again (`start.why_not_now`), then the bed. The
         printer is read once, for a snapshot, and never waited on for a Reject: one that came
         meanwhile wins. A check that can't be made holds.
+
+        Who may start comes first (mqucifer/print-shop#214): the card's Start starts nothing
+        (`CARD_STARTS_UNDER_FLAG`), and is held without reading the printer, so a message on the
+        broker can't make it be read.
         """
+        if cmd.phone is None and cmd.by == "on the card" and not (
+                CARD_STARTS_UNDER_FLAG and self._commands_printer):
+            return CARD_DOESNT_START
         try:
             state = self._graph.get_state(thread_config).values
             found = [why for why in (why_not_start(state, self._ledger),) if why]
@@ -1162,7 +1343,10 @@ class Daemon:
             return f"what Start checks couldn't be checked ({exc}): Start again"
         if not cmd.bed:
             found.append(BED_NOT_SAID)
-        if not self._commands_printer:
+        if cmd.phone is not None:
+            if not self._one_start.can_arm:
+                found.append(NO_PHONE_HERE)
+        elif not self._commands_printer:
             # Held, so the job keeps waiting: an unarmed run never ends a ready job.
             found.append(NOT_ARMED)
         return ". Also, ".join(found)
@@ -1197,6 +1381,8 @@ class Daemon:
             "pause_for": gate_payload.get("pause_for") or "",
             "spools": gate_payload.get("spools") or "",
             "held": held,
+            # Where a print is started (mqucifer/print-shop#214), for the card to link to.
+            "start_page": self._start_page,
             # How a plate of several prints, and why (mqucifer/print-shop#109).
             **({"plate": gate_payload["plate"]} if gate_payload.get("plate") else {}),
         }
@@ -1210,6 +1396,8 @@ class Daemon:
         error: str | None = None,
     ) -> None:
         """Finalize a job: publish state, clear the active job."""
+        # However it ended, nothing stays armed (mqucifer/print-shop#214).
+        self._one_start.disarm()
         self._step(job_id, Step.ENDING)
         status = "failed" if error else ("done" if printed else "rejected")
         self._publish_state({"status": status, "job_id": job_id})

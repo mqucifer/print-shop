@@ -20,7 +20,10 @@ blacklist would treat an unrecognised state as permission.
 this client and on `pycentauri.Printer`, so a client built by accident can read
 the printer and nothing else. `live_printer()` is the one function in this
 project that builds an armed client, and it is the one occurrence of
-`enable_control=True`; `tests/test_print_node.py` asserts both.
+`enable_control=True`; `tests/test_print_node.py` asserts both. It builds one
+only when a person armed this start: `PRINT_AGENT_ALLOW_HARDWARE=1` on the
+command's own line, or a phone's confirm for that one start (`arming.OneStart`,
+mqucifer/print-shop#214), which it spends.
 
 This was not the original design and the original design was wrong. `print_node`
 used to fall back to building an armed client from the environment whenever the
@@ -55,6 +58,7 @@ from pycentauri.models import Attributes, Status
 from pycentauri.models import PrintStatus as SdcpPrintStatus
 from pydantic import BaseModel
 
+from print_shop.arming import Armed, spend
 from print_shop.core.contracts import NoAutoFix, Verdict, Violation
 from print_shop.env import SETTINGS_PATH, load_env
 
@@ -543,7 +547,8 @@ class CentauriClient:
 
 
 def live_printer(
-    *, auto_leveling: bool = False, recorder: FrameRecorder | None = None
+    *, auto_leveling: bool = False, recorder: FrameRecorder | None = None,
+    armed: Armed | None = None,
 ) -> CentauriClient:
     """Build a client that can actually move the machine.
 
@@ -552,10 +557,13 @@ def live_printer(
     arming hardware is something a caller does on purpose, in a place a reader
     can find by grepping one string.
 
-    Refuses unless `PRINT_AGENT_ALLOW_HARDWARE=1` is in the process
-    environment. Host and mainboard id come from `.env` because they are
-    addresses and never change; the arming flag does not, because it is a
-    decision and it should have to be made again every time.
+    Refuses unless a person armed it: `PRINT_AGENT_ALLOW_HARDWARE=1` in the
+    process environment, or `armed`, a phone's confirm for one start that
+    `arming.OneStart.take` handed out and that hasn't been spent
+    (mqucifer/print-shop#214). It's spent here: the same one never builds a
+    second client. Host and mainboard id come from `.env` because they are
+    addresses and never change; the arming does not, because it is a decision
+    and it should have to be made again every time.
 
     Nothing in `src/` calls this. The process that runs a real printer does —
     see `Daemon(printer=...)`. Tests pass a double, and `tests/conftest.py`
@@ -564,11 +572,13 @@ def live_printer(
     Raises:
         RuntimeError: If the environment has not opted in.
     """
-    if os.environ.get(ALLOW_HARDWARE_ENV) != "1":
+    by_phone = armed is not None and spend(armed)
+    if not by_phone and os.environ.get(ALLOW_HARDWARE_ENV) != "1":
         raise RuntimeError(
             f"refusing to build an armed printer client: {ALLOW_HARDWARE_ENV} is "
-            f"not set to '1' in the environment. Commanding a machine that "
-            f"reaches 250 C is a deliberate act — run the daemon with "
+            f"not set to '1' in the environment, and no phone's confirm armed this "
+            f"start. Commanding a machine that reaches 250 C is a deliberate act — "
+            f"start it from your phone on the home Wi-Fi, or run with "
             f"{ALLOW_HARDWARE_ENV}=1 when you mean it."
         )
     return CentauriClient(

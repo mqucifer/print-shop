@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Any, NamedTuple
 
 from print_shop.core.contracts import NoAutoFix
 from print_shop.core.state import PrintJobState
@@ -33,7 +34,7 @@ from print_shop.printer.centauri import PrinterClient, preflight
 from print_shop.sliced import sha256_of as file_sha256
 from print_shop.slicer.store import ProfileRef
 
-__all__ = ["AGAIN", "why_not_now"]
+__all__ = ["AGAIN", "Checked", "checked", "why_not_now"]
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,48 @@ def why_not_now(
         if busy:
             found.append(busy)
     return found
+
+
+class Checked(NamedTuple):
+    """One row of what Start checks, as the phone's Start shows it (mqucifer/print-shop#214)."""
+
+    label: str
+    value: str
+    ok: bool
+
+
+def checked(
+    state: PrintJobState, gate: dict[str, Any], ledger: Ledger | None, *, spool_why: str,
+    store_root: Path | None = None, printer: PrinterClient | None = None,
+) -> list[Checked]:
+    """What Start checks, a row each, with its result in words, and what to do where it fails:
+    the same checks as `why_not_now`, read now. `gate` is the gate's payload, and `spool_why`
+    `graph.why_not_start`'s answer. Only reads."""
+    minutes = gate.get("print_time_s")
+    volume = gate.get("filament_cm3")
+    plastic = ", ".join(part for part in (
+        f"{round(minutes / 60)} min" if isinstance(minutes, (int, float)) else "",
+        f"{volume:.1f} cm³" if isinstance(volume, (int, float)) else "") if part)
+    rows = [Checked("Time and plastic", plastic or "not known", True),
+            Checked("Pause", str(gate.get("pause") or "none"), True)]
+    spools = str(gate.get("spools") or "")
+    rows.append(Checked("Spool", spool_why, False) if spool_why else
+                Checked("Spool", f"{spools}, as prepared" if spools else "as prepared", True))
+    nozzle = _nozzle(state, ledger) if ledger is not None else ""
+    material = _prepared(state)
+    rows.append(Checked("Nozzle", nozzle, False) if nozzle else Checked(
+        "Nozzle", f"{material.nozzle_mm:g} mm, as sliced" if material is not None else
+        "not recorded", True))
+    files = [said for said in (_gcode(state), _part(state), _profiles(state, store_root)) if said]
+    rows.append(Checked("File and settings", "; ".join(files), False) if files else
+                Checked("File and settings", "unchanged", True))
+    if printer is None:
+        rows.append(Checked("Printer", "checked as it starts", True))
+    else:
+        busy = _printer(state, printer)
+        rows.append(Checked("Printer", busy, False) if busy else
+                    Checked("Printer", "free, checked just now", True))
+    return rows
 
 
 def _gcode(state: PrintJobState) -> str:

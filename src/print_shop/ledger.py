@@ -66,6 +66,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from print_shop.arming import Armed
 from print_shop.env import SETTINGS_PATH, load_env, refused
 from print_shop.inventory import SCHEMA as INVENTORY_SCHEMA
 from print_shop.inventory import (
@@ -475,6 +476,20 @@ CREATE TABLE IF NOT EXISTS plate_objects (
 );
 """
 
+#: Who armed each start, how, from where and when (mqucifer/print-shop#214), in a table of its own,
+#: created if missing, without moving the schema version. Written in the same transaction as the
+#: print's row, so a row started from now on never lacks it; a row from before has none here.
+#: A plate's is its first object's row's.
+ARMED_SCHEMA = """
+CREATE TABLE IF NOT EXISTS armed_starts (
+    job_id       TEXT PRIMARY KEY REFERENCES prints(job_id),
+    how          TEXT NOT NULL CHECK (how IN ('phone', 'flag')),
+    armed_by     TEXT NOT NULL,           -- the phone's name, as paired, or the flag
+    armed_from   TEXT NOT NULL,           -- the phone's address on the home Wi-Fi, or the Mac
+    armed_at     TEXT NOT NULL            -- UTC, when the person armed it
+);
+"""
+
 #: What each version adds to the one before, applied in order to an older file.
 #: 2: the profiles a print used, by store file, hash and commit (print-shop#6).
 #: A row from before has none: NULL, not a guess.
@@ -560,6 +575,7 @@ class Ledger:
         self._conn.executescript(UNPRINTED_SCHEMA)
         self._conn.executescript(SLICED_SCHEMA)
         self._conn.executescript(PLATES_SCHEMA)
+        self._conn.executescript(ARMED_SCHEMA)
         self._has_sliced = self._has_swaps = True
         self._has_plates = True
 
@@ -629,7 +645,8 @@ class Ledger:
     # --- writes, in the order a print goes through them ------------------
 
     def record_start_requested(
-        self, record: PrintRecord, *others: PrintRecord, loaded: Material | None = None
+        self, record: PrintRecord, *others: PrintRecord, loaded: Material | None = None,
+        armed: Armed | None = None,
     ) -> None:
         """Before `start()`: the agent is about to start this print. `others` are the plate's
         other objects (mqucifer/print-shop#109), written with it or not at all.
@@ -639,6 +656,9 @@ class Ledger:
         unless `loaded`, the spool it was checked to start on, is still the one loaded and known
         to be. With a swap, what's on the printer isn't known from this request, whatever comes
         of it (mqucifer/print-shop#218).
+
+        `armed` is who armed this start, how, from where and when (mqucifer/print-shop#214),
+        kept with the row in the same transaction.
         """
         with self._write() as db:
             ended = db.execute(
@@ -665,6 +685,12 @@ class Ledger:
             at = _now()
             for each in (record, *others):
                 self._insert(db, each, at)
+            if armed is not None:
+                db.execute(
+                    "INSERT INTO armed_starts (job_id, how, armed_by, armed_from, armed_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (record.job_id, armed.how, armed.by, armed.where, armed.at),
+                )
             # A plate is one print: what's loaded is marked not known once, by its first row,
             # the one its watcher and the first outcome card name (mqucifer/print-shop#218).
             material = record.material or (
@@ -935,6 +961,19 @@ class Ledger:
                 "SELECT * FROM unprinted_jobs WHERE job_id = ?", (job_id,)
             ).fetchone()
         return UnprintedJob.model_validate(dict(found)) if found is not None else None
+
+    def armed(self, job_id: str) -> Armed | None:
+        """Who armed the job's start, how, from where and when (mqucifer/print-shop#214); None
+        for a print from before that was kept. An object of a plate's is its plate's."""
+        with self._lock:
+            found = self._conn.execute(
+                "SELECT job_id, how, armed_by, armed_from, armed_at FROM armed_starts"
+                " WHERE job_id = ?", (plate_job(job_id),),
+            ).fetchone()
+        if found is None:
+            return None
+        return Armed(job_id=found["job_id"], how=found["how"], by=found["armed_by"],
+                     where=found["armed_from"], at=found["armed_at"])
 
     def unprinted_jobs(self) -> list[UnprintedJob]:
         """Every job that ended unprinted, oldest first."""
