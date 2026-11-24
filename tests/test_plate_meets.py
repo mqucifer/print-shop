@@ -83,16 +83,16 @@ def test_a_tuning_changed_while_a_plate_waits_prints_none_of_it(tmp_path: Path) 
         with Inventory(rig.path) as inventory:
             inventory.edit(inventory.material().spool_id, tuning="Elegoo PLA @ECC - Copy")
         # An Approve with it changed starts nothing and holds the gate (mqucifer/print-shop#218).
-        rig.bridge.deliver(command_topic(CFG), {"decision": "approve", "job_id": job})
+        rig.bridge.press(CFG, "approve")
         _until(lambda: bool(rig.bridge.retained_json(gate_topic(CFG)).get("held")), "the hold")
         held = str(rig.bridge.retained_json(gate_topic(CFG))["held"])
         result = rig.press("reject", job)
     assert "tuning was changed" in held, held
-    assert not result.printed and rig.printer.calls == [] and rig.ledger.rows() == []
+    # Start read the printer (mqucifer/print-shop#209), and nothing was sent.
+    assert not result.printed and rig.printer.verbs == ["snapshot"] and rig.ledger.rows() == []
 
 
 def test_a_press_for_another_job_doesnt_start_a_plate(tmp_path: Path) -> None:
-    from print_shop.core.mqtt import command_topic
     from tests.test_job_e2e import CFG
 
     rig = Rig(tmp_path)
@@ -130,7 +130,8 @@ def test_a_second_start_is_told_a_plate_waits_till_its_last_part_is_answered(
 def test_a_second_start_is_told_every_part_of_the_first(tmp_path: Path) -> None:
     script = _script()
     caps = _caps(tmp_path)
-    given = type("Args", (), {"serve": False, "again": None, "sliced": None, "stl": caps})()
+    given = type("Args", (), {"serve": False, "again": None, "sliced": None, "stl": caps,
+                            "resume": None})()
     assert script._part(given) == "cap-tight.stl, cap-mid.stl, cap-loose.stl"
 
 
@@ -140,7 +141,7 @@ def test_the_approval_gate_shows_a_plate_in_place_of_one_turn() -> None:
         "orientation_deg": None, "orientation_rationale": "printed by layer",
         "plate_lines": ["2 parts on one plate, printed BY LAYER", "  part 1"],
     }, turned=True)
-    assert lines[0].startswith("At the approval gate")
+    assert lines[0].startswith("Ready to print.")  # mqucifer/print-shop#209
     assert "  plate       2 parts on one plate, printed BY LAYER" in lines
     assert not any("turned" in line for line in lines)
 

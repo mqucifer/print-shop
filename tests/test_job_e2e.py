@@ -9,6 +9,7 @@ pull request (mqucifer/print-shop#1's "runs end to end against fakes").
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -81,7 +82,8 @@ def test_an_approved_job_is_sliced_gated_uploaded_and_started(rig: Rig) -> None:
     result = rig.daemon.wait_for_finish(job_id, timeout_s=30)
 
     assert (result.approved, result.printed, result.error) == (True, True, None)
-    assert rig.printer.verbs == ["snapshot", "upload", "start"]
+    # Start reads the printer once (mqucifer/print-shop#209), then the print node does.
+    assert rig.printer.verbs == ["snapshot", "snapshot", "upload", "start"]
     started = rig.printer.calls[-1][1]
     assert job_id_from_filename(started) == job_id
     assert rig.bridge.retained_json(gate_topic(CFG)) == {"pending": False}
@@ -123,19 +125,29 @@ def test_a_retained_approval_is_not_an_answer(rig: Rig) -> None:
     assert rig.printer.calls == []
 
 
-def test_a_busy_printer_fails_the_job_at_preflight(tmp_path: Path) -> None:
+def test_a_busy_printer_holds_start_and_the_job_waits(tmp_path: Path) -> None:
+    """Start reads the printer (mqucifer/print-shop#209): busy, it starts nothing and the job
+    waits, ready, for another Start. The print node's preflight is still the backstop
+    (`test_print_node.py`)."""
     (tmp_path / "work").mkdir()
     r = Rig(tmp_path)
     r.printer.before = "printing"
+    told: list[str] = []
     with r.daemon:
         job_id = r.daemon.submit(r.stl)
         r.daemon.wait_for_gate(job_id, timeout_s=30)
         r.press("approve")
-        result = r.daemon.wait_for_finish(job_id, timeout_s=30)
+        deadline = time.monotonic() + 30
+        while not r.bridge.retained_json(gate_topic(CFG)).get("held"):
+            assert time.monotonic() < deadline, "the Start was never held"
+            time.sleep(0.02)
+        assert r.bridge.retained_json(gate_topic(CFG))["pending"] is True
+        r.press("reject")
+        result = r.daemon.wait_for_finish(job_id, timeout_s=30, tell=told.append)
 
-    assert result.printed is False
-    assert result.error is not None and "printer.ready" in result.error
-    assert r.printer.verbs == ["snapshot"], "refused before any upload"
+    assert result.printed is False and result.error is None
+    assert told[0].startswith("Not started: the printer is not free to start a new job")
+    assert r.printer.verbs == ["snapshot"], "read once at Start, and nothing sent"
     assert r.ledger.rows() == []
 
 
@@ -190,4 +202,4 @@ def test_without_a_ledger_nothing_is_started(tmp_path: Path) -> None:
 
     assert result.printed is False
     assert result.error is not None and "without a ledger" in result.error
-    assert printer.calls == []
+    assert printer.verbs == ["snapshot"], "Start reads it; nothing is sent"

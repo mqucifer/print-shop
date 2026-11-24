@@ -31,7 +31,6 @@ from typing import Any
 import pytest
 
 from print_shop.core.mqtt import (
-    command_topic,
     gate_topic,
     outcome_result_topic,
     outcome_submit_topic,
@@ -169,8 +168,7 @@ def test_one_part_is_byte_for_byte_what_it_was(
             if not pressed and gate.get("pending"):
                 gates.append(gate)
                 time.sleep(0.3)  # the terminal has shown the gate
-                bridge.deliver(command_topic(CFG), {"decision": "approve",
-                                                    "job_id": gate["job_id"]})
+                bridge.press(CFG, "approve")
                 pressed = True
             if json.loads(bridge.retained.get(outcome_topic(CFG), "{}")).get("pending"):
                 bridge.deliver(outcome_result_topic(CFG), "success")

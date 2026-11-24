@@ -82,6 +82,7 @@ __all__ = [
     "read",
     "report",
     "same_setting",
+    "sha256_of",
     "take",
     "verify",
 ]
@@ -373,6 +374,16 @@ class Again(BaseModel):
 
 def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def sha256_of(path: Path) -> str:
+    """A file's sha256, read in blocks: what a slice is checked by again at Start and before
+    the upload (mqucifer/print-shop#209)."""
+    digest = hashlib.sha256()
+    with path.open("rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _first(raw: str) -> str:

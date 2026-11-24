@@ -100,15 +100,18 @@ def test_with_two_gates_open_a_press_for_one_doesnt_reach_the_other(
     a, a_id, b, b_id = two_gates
     jobs = [(a, a_id), (b, b_id)]
     (pressed, pressed_id), (other, other_id) = jobs[first], jobs[1 - first]
-    pressed.bridge.deliver(command_topic(CFG), {"decision": "approve", "job_id": pressed_id})
+    pressed.bridge.deliver(command_topic(CFG), {"decision": "approve", "job_id": pressed_id,
+                                                "press": pressed.daemon._press})
 
     assert pressed.daemon.wait_for_finish(pressed_id, timeout_s=30).printed
-    assert pressed.printer.verbs == ["snapshot", "upload", "start"]
+    # Start reads the printer once, then the print node reads, uploads and starts.
+    assert pressed.printer.verbs == ["snapshot", "snapshot", "upload", "start"]
     assert other.printer.verbs == [], "one Approve started one print"
     still = other.daemon.pending_gate()
     assert still is not None and still["job_id"] == other_id
 
-    other.bridge.deliver(command_topic(CFG), {"decision": "reject", "job_id": other_id})
+    other.bridge.deliver(command_topic(CFG), {"decision": "reject", "job_id": other_id,
+                                              "press": other.daemon._press})
     assert not other.daemon.wait_for_finish(other_id, timeout_s=30).printed
     assert other.ledger.rows() == []
 
@@ -151,8 +154,9 @@ def test_the_buttons_name_the_job_before_its_card_shows_and_none_after(tmp_path:
         job_id = job.at_gate()
         for decision in ("approve", "reject"):
             sent = json.loads(job.bridge.button(CFG, decision))
-            assert sent == {"decision": decision, "job_id": job_id}
-        named = approval_buttons(CFG, job_id)
+            # And the gate's word for a press (mqucifer/print-shop#209).
+            assert sent == {"decision": decision, "job_id": job_id, "press": job.daemon._press}
+        named = approval_buttons(CFG, job_id, job.daemon._press)
         sent_at = [(p.topic, p.payload) for p in job.bridge.published]
         card = next(n for n, (topic, text) in enumerate(sent_at)
                     if topic == gate_topic(CFG) and json.loads(text)["pending"])
@@ -183,11 +187,11 @@ def test_leaving_at_the_gate_leaves_no_button_naming_the_job(tmp_path: Path) -> 
         assert json.loads(job.bridge.button(CFG, decision)) == {"decision": decision}
 
 
-def test_a_gate_that_timed_out_leaves_no_button_naming_the_job(tmp_path: Path) -> None:
+def test_a_rejected_gate_leaves_no_button_naming_the_job(tmp_path: Path) -> None:
     job = Job(tmp_path, MemoryBridge())
-    job.daemon._gate_wait_s = 0.2
     with job.daemon:
         job_id = job.at_gate()
+        job.bridge.press(CFG, "reject")
         job.daemon.wait_for_finish(job_id, timeout_s=30)
         assert json.loads(job.bridge.button(CFG, "approve")) == {"decision": "approve"}
 
@@ -591,7 +595,12 @@ def test_the_commands_that_only_read_run_beside_a_job_and_a_real_second_start_do
     )
 
     listed = mac.run("print_job", "--list")
-    assert (listed.returncode, listed.stdout) == (0, "the ledger is empty\n"), listed.stderr
+    assert listed.returncode == 0, listed.stderr
+    # The job at its gate waits for the person, so it's listed (mqucifer/print-shop#209).
+    assert listed.stdout == (
+        "the ledger is empty\n\nWaiting for you (`--resume JOB_ID`):\n"
+        f"  job {held.job_id}  {mac.part.name}  ready to print, since "
+    ) + listed.stdout.split(", since ", 1)[1]
     filaments = mac.run("print_job", "--filaments")
     assert filaments.returncode == 0 and "Elegoo PLA" in filaments.stdout, filaments.stderr
     for stock in ((), ("printer", "add", "cc1", "Elegoo Centauri Carbon"), ("fit", "0.4")):
