@@ -433,7 +433,11 @@ def test_ready_jobs_waiting_for_their_first_are_counted_once(page: Page) -> None
     added = page.queue.add([Adding(page.made.part("clip"), copies=3)])[0]
     page.made.ready(page.queue, added[0])
     wait_until(lambda: all(page.made.waits(j) is Waits.READY for j in added))
-    assert "clip.stl × 3" in page.phone().get("/").body
+    phone = page.phone()
+    # A copy can be a moment behind its first in the queue's own lines: shown as getting ready
+    # until it's ready, then counted in its first's row.
+    wait_until(lambda: "clip.stl × 3" in phone.get("/").body)
+    assert phone.get("/").body.count("clip.stl") == 1, "one row for the three"
 
 
 # --------------------------------------------------------------------------
