@@ -107,7 +107,8 @@ def shop(tmp_path: Path) -> Iterator[Any]:
                 printer=FramePrinter(), slicer=AnyPart(), bridge=lambda cfg: bridge,
                 ledger=ledger,
                 proposer=Proposer(ask=_model, ask_questions=_questions,
-                                  lessons=lambda f, kind: print_lessons.for_part(ledger, f, kind)),
+                                  lessons=lambda f, kind, variety: print_lessons.for_part(
+                                      ledger, f, kind, variety)),
                 asker=replay_asker(ANSWERS), reviewer=takes(review) if reviewed else None,
                 loop=PrintLoop(chat=model, person=person, **limits),
             )

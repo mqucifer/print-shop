@@ -645,7 +645,8 @@ def shop(tmp_path: Path) -> Iterator[tuple[Daemon, Sponsor, Ledger, Path]]:
         ledger=ledger,
         proposer=Proposer(
             ask=_model, ask_questions=_questions,
-            lessons=lambda features, filament: lessons.for_part(ledger, features, filament),
+            lessons=lambda features, filament, variety: lessons.for_part(
+                ledger, features, filament, variety),
         ),
         asker=replay_asker(ANSWERS), reviewer=sponsor,
     )

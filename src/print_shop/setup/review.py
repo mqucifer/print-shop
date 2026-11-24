@@ -426,7 +426,7 @@ def render_arrived(request: ReviewRequest) -> str:
 def _prompt(request: ReviewRequest) -> list[str]:
     """What can be typed at the review as it's now listed."""
     use = (" use what decided that print (use, or use 1 3),"
-           if request.offering is not None and request.offering.options else "")
+           if request.offering is not None and request.offering.items() else "")
     take = _take_says(request)
     back = (" send a part's orientation back (orientation)," if request.parts
             else " send the orientation back (orientation)," if request.candidates else "")

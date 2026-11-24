@@ -441,7 +441,7 @@ def shop(tmp_path: Path) -> Iterator[tuple[Ledger, Job]]:
                 cfg=CFG, profiles=profiles, workdir=work, printer=FramePrinter(),
                 slicer=slicer or RecordedSlicer(), bridge=lambda cfg: bridge, ledger=ledger,
                 proposer=Proposer(ask=_model, ask_questions=_questions,
-                                  lessons=lambda features, kind: given),
+                                  lessons=lambda features, kind, variety: given),
                 asker=replay_asker(ANSWERS), reviewer=sponsor,
             )
             with daemon:
