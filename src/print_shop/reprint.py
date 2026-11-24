@@ -68,6 +68,7 @@ from print_shop.setup.proposal import (
     Source,
     apply,
     placeable,
+    pose_value,
 )
 from print_shop.setup.reach import unplaced
 from print_shop.slicer.orca import (
@@ -217,7 +218,7 @@ def _yours(row: Row) -> str:
     took of the model's or the slice's proposals."""
     if row.corrections is None:
         return "what you changed wasn't kept then: the run is from before the review"
-    changed = [f"turned to {c.value}" if c.key == ORIENTATION else f"{c.key}={c.value}"
+    changed = [f"turned {_pose(c.value)}" if c.key == ORIENTATION else f"{c.key}={c.value}"
                for c in row.corrections if not c.said_no_to]
     taken = [f"{c.key}={c.value} (taken)" for c in
              (row.proposal.changes if row.proposal is not None else ())
@@ -227,6 +228,15 @@ def _yours(row: Row) -> str:
     yours = changed + taken + said_no
     return ("you changed: " + ", ".join(yours) if yours
             else "you changed nothing at its review: its settings as proposed")
+
+
+def _pose(value: str) -> str:
+    """A pose as the review says it: "90,0,0"."""
+    try:
+        x, y, z = (float(a) for a in value.split(","))
+    except ValueError:
+        return value
+    return pose_value((x, y, z))
 
 
 # --- one run, found to print again ---------------------------------------------------------------

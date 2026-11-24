@@ -360,6 +360,18 @@ def test_a_run_says_what_you_changed_at_its_review(
     shop.end_print(job)
     (row,) = reprint.runs(shop.ledger)
     assert reprint.run_line(row)[3].strip() == "you changed: sparse_infill_density=40%"
+    # A pose sent back is said as the review says a pose.
+    turned = Change(key="orientation", preset="0,0,0", value="90.0,0,0", reason="made up",
+                    source=Source.SPONSOR)
+    with shop.ledger.writing() as db:
+        db.execute("UPDATE prints SET corrections = ? WHERE job_id = ?",
+                   (json.dumps([turned.model_dump(mode="json"),
+                                *json.loads(db.execute("SELECT corrections FROM prints WHERE "
+                                                       "job_id = ?", (job,)).fetchone()[0])]),
+                    job))
+    (row,) = reprint.runs(shop.ledger)
+    assert reprint.run_line(row)[3].strip() == (
+        "you changed: turned 90,0,0, sparse_infill_density=40%")
 
 
 # --- a run from before ---------------------------------------------------------------------------
