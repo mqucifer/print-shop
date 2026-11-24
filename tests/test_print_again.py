@@ -9,7 +9,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import pty
 import re
+import select
+import subprocess
+import sys
+import textwrap
 import threading
 import time
 import uuid
@@ -597,3 +603,106 @@ def test_with_orca_a_change_differs_from_the_run_in_that_setting_alone(tmp_path:
         "sparse_infill_density"}
     assert now["wall_loops"] == was["wall_loops"] == "4"
     assert made.beyond == ()
+
+
+# --- the real terminal: an Enter typed ahead adds nothing ----------------------------------------
+
+#: The screen on a terminal, for a stub run: its file kept, and a change that also moves a
+#: setting it can't keep, slicing for a moment. Each step waits for the test's word in a file, so
+#: the test can type ahead of what's drawn.
+_AGAIN_ON_A_TERMINAL = textwrap.dedent("""
+    import sys, time
+    from pathlib import Path
+    from print_shop import reprint, sliced
+
+    folder = Path(sys.argv[1])
+
+    class Run:
+        suggestions = ()
+        config = {"sparse_infill_density": "15%"}
+        no_change = ""
+        def lines(self, asking=True):
+            return ["Print again: a made-up run", "Enter prints what's shown"]
+        def as_it_was(self):
+            return sliced.Again(path=folder / "kept.gcode", name="cube.stl", reprint_of="run-1")
+        def change(self, asked, into, slicer):
+            time.sleep(1.0)  # slicing, while an Enter is typed
+            return reprint.Changed(gcode=folder / "new.gcode", changes=tuple(asked), differs=(
+                reprint.Difference("sparse_infill_density", "15%", "35%", True),
+                reprint.Difference("top_shell_layers", "5", "99", False)))
+        def changed(self, made):
+            return sliced.Again(path=made.gcode, name="cube.stl", reprint_of="run-1")
+
+    def step(name):
+        print(f"WAITING {name}", flush=True)
+        while not (folder / name).exists():
+            time.sleep(0.02)
+
+    step("first")
+    sent = reprint.screen(Run(), slicer=None, into=lambda: folder, read=input, write=print)
+    print("SENT", sent.path.name if sent else None, flush=True)
+    step("second")
+    sent = reprint.screen(Run(), slicer=None, into=lambda: folder, read=input, write=print)
+    print("SENT", sent.path.name if sent else None, flush=True)
+""")
+
+
+def test_on_a_terminal_an_enter_typed_ahead_never_prints_a_run_again(tmp_path: Path) -> None:
+    """mqucifer/print-shop#254's rule at `again>`: Enter adds a print, so one typed before the
+    run's screen, while a change slices, or before the question about what else it changes is
+    drawn, is dropped, and only one typed after them prints."""
+    script = tmp_path / "terminal.py"
+    script.write_text(_AGAIN_ON_A_TERMINAL)
+    master, slave = pty.openpty()
+    child = subprocess.Popen([sys.executable, str(script), str(tmp_path)],
+                             stdin=slave, stdout=slave, stderr=slave, start_new_session=True,
+                             cwd=Path(__file__).resolve().parents[1])
+    os.close(slave)
+    shown = ""
+
+    def until(text: str, after: int = 0) -> int:
+        nonlocal shown
+        give_up = time.monotonic() + 30
+        while text not in shown[after:]:
+            assert time.monotonic() < give_up, f"{text!r} never showed in {shown[after:]!r}"
+            if select.select([master], [], [], 0.2)[0]:
+                shown += os.read(master, 65536).decode(errors="replace")
+        return shown.index(text, after) + len(text)
+
+    def quiet() -> None:
+        """Nothing more is drawn: the typed-ahead Enter was taken for nothing."""
+        nonlocal shown
+        time.sleep(0.5)
+        if select.select([master], [], [], 0.3)[0]:
+            shown += os.read(master, 65536).decode(errors="replace")
+        assert "SENT" not in shown[at:], shown[at:]
+
+    try:
+        # As it was: an Enter typed before its screen is drawn.
+        at = until("WAITING first")
+        os.write(master, b"\n")
+        time.sleep(0.2)
+        (tmp_path / "first").write_text("")
+        at = until("again> ", at)
+        quiet()
+        os.write(master, b"\n")
+        assert until("SENT kept.gcode", at)
+
+        # A change: an Enter typed while it slices, and one before the question is drawn.
+        at = until("WAITING second", at)
+        (tmp_path / "second").write_text("")
+        at = until("again> ", at)
+        os.write(master, b"sparse_infill_density=35%\n")
+        time.sleep(0.2)
+        os.write(master, b"\n")  # while it slices
+        at = until("again> ", until("ALSO DIFFERS top_shell_layers", at))
+        quiet()
+        os.write(master, b"\n")
+        at = until("again> ", until("Enter again to print it so", at))
+        quiet()
+        os.write(master, b"\n")
+        assert until("SENT new.gcode", at)
+    finally:
+        child.kill()
+        child.wait(30)
+        os.close(master)

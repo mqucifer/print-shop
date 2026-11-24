@@ -58,6 +58,7 @@ from print_shop.ledger import Ledger, Row
 from print_shop.outcome_words import outcome_words
 from print_shop.plate import plate_job
 from print_shop.setup import lessons as print_lessons
+from print_shop.setup.intake import drop_typed
 from print_shop.setup.proposal import (
     ORIENTATION,
     PAUSE,
@@ -820,12 +821,19 @@ def parse_changes(typed: str, reprint: Reprint) -> list[Change] | str:
 def screen(
     reprint: Reprint, *, slicer: Slicer, into: Callable[[], Path],
     read: Callable[[str], str], write: Callable[[str], None],
+    forget: Callable[[], None] = drop_typed,
 ) -> sliced.Again | None:
     """The run at the terminal, before it prints again: Enter prints what's shown, a change
     slices it again and shows how it differs, and stop ends it. Returns what to send, or None
-    for stop."""
+    for stop.
+
+    Enter adds a print, so it's taken only when typed after what it prints is shown
+    (mqucifer/print-shop#254): what was typed before the run's screen, the comparison after a
+    change (typed while it sliced) or the question before printing more than was changed, is
+    dropped once each is drawn (`forget`, main's `drop_typed`)."""
     for line in reprint.lines():
         write(line)
+    forget()
     made: Changed | None = None
     changes: list[Change] = []
     folders: list[Path] = []  # each change's slice: those not sent are cleared
@@ -852,6 +860,7 @@ def screen(
                     write("  This also changes " + "; ".join(d.line() for d in made.beyond)
                           + ", which no change of yours named: Enter again to print it so, or "
                           "undo.")
+                    forget()
                     continue
                 leaving(made.gcode)
                 return reprint.changed(made)
@@ -883,6 +892,7 @@ def screen(
             write(line)
         write("Enter prints this; another change slices it again; undo goes back to the run as "
               "it was; stop ends it.")
+        forget()  # an Enter typed while it sliced is no answer to what it came to
 
 
 def clear(folder: Path) -> None:

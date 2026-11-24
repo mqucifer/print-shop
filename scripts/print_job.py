@@ -499,7 +499,8 @@ def _again(args: argparse.Namespace, read: Callable[[str], str]) -> sliced.Again
 
     try:
         if args.change is None and can_ask():
-            chosen = reprint.screen(run, slicer=slice_model, into=into, read=read, write=print)
+            chosen = reprint.screen(run, slicer=slice_model, into=into, read=read, write=print,
+                                    forget=drop_typed)
             if chosen is None:
                 print(STOPPED_BEFORE)
                 return 130

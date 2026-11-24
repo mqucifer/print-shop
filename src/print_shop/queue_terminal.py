@@ -585,13 +585,13 @@ class _Terminal:
             return
         chosen = reprint.screen(run, slicer=runs.slicer,
                                 into=lambda: reprint.slice_folder(runs.jobs, run.row),
-                                read=self.read, write=self.write)
+                                read=self.read, write=self.write, forget=self.forget)
         if chosen is None:
             self.write("  Nothing added.")
             return
         added, refused = self.queue.add([Adding(chosen.path, spool_id=spool_id, again=chosen)])
-        self.write("  Added: a print again of job "
-                   f"{chosen.reprint_of[:8]}." if added else "  Nothing added.")
+        if added:
+            self.write(f"  Added: a print again of job {chosen.reprint_of[:8]}.")
         for why in refused:
             self.write(f"  Not added: {why}")
 
