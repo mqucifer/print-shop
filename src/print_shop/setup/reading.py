@@ -41,6 +41,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from print_shop.bench import pausing
+from print_shop.bench.pausing import z_span
 from print_shop.materials import material_name
 from print_shop.setup.context import (
     FitBand,
@@ -246,7 +247,7 @@ class SliceReading(BaseModel):
         for f in sorted(kept, key=lambda f: -f.time_s):
             out.append(
                 f"{f.kind}: {_s(f.time_s)}, {f.area_mm2:.0f} mm2 on {f.layers} "
-                f"layer{'s' if f.layers != 1 else ''}, z {f.from_z:g} to {f.to_z:g} mm"
+                f"layer{'s' if f.layers != 1 else ''}, {z_span(f.from_z, f.to_z)}"
             )
         out += [p.line() for p in self.pauses]
         if self.seam.seams:
@@ -568,8 +569,8 @@ def _layer_time(reading: SliceReading, filament: dict[str, Any]) -> list[Flag]:
     said = (
         f"{len(short)} of {len(reading.layers)} layers take under {threshold:g} s, the "
         f"filament's layer time for cooling; the shortest, layer {shortest.n} at z "
-        f"{shortest.z:g} mm, takes {_s(shortest.time_s)} (short layers from z "
-        f"{short[0].z:g} to {short[-1].z:g} mm)"
+        f"{shortest.z:g} mm, takes {_s(shortest.time_s)} (short layers "
+        f"{z_span(short[0].z, short[-1].z, 'from ')})"
     )
     if s.get("slow_down_for_layer_cooling", "1") != "1":
         change = Change(

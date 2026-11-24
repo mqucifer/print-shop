@@ -25,7 +25,8 @@ from print_shop.setup import Proposer
 from print_shop.setup.intake import replay_asker
 from print_shop.setup.proposal import Change, Proposal, Source
 from print_shop.setup.reading import Seen, flags, read_slice
-from print_shop.setup.review import _BY, Review, ReviewRequest, parse_answer, render
+from print_shop.setup.review import Review, ReviewRequest, parse_answer, render
+from print_shop.setup.screen import _BY
 from tests.fakes import (
     CI_PROFILES,
     DATA,

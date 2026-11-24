@@ -38,6 +38,7 @@ import json
 import re
 import textwrap
 from collections.abc import Callable
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -1017,9 +1018,26 @@ def _rests_on(key: str) -> tuple[str, ...]:
 # --------------------------------------------------------------------------
 
 
-def render(offer: Offering, proposal: Proposal, pose: str) -> list[str]:
+def render(
+    offer: Offering, proposal: Proposal, pose: str, width: int = WIDTH, lead: str = "",
+) -> list[str]:
     """The offer, laid out to be read: the print and what's shared said once, what differs in
-    columns, then the items by whose they were, numbered as `use` and `clear` take them."""
+    columns, then the items by whose they were, numbered as `use` and `clear` take them. Laid
+    out to `width` and set in by `lead`, as the review's Settings has it
+    (mqucifer/print-shop#223)."""
+    token = _WIDTH.set(width)
+    try:
+        lines = _render(offer, proposal, pose)
+    finally:
+        _WIDTH.reset(token)
+    return [f"{lead}{line}" if line else line for line in lines]
+
+
+#: The width `render` lays out to, for the helpers it calls.
+_WIDTH: ContextVar[int] = ContextVar("offer_width", default=WIDTH)
+
+
+def _render(offer: Offering, proposal: Proposal, pose: str) -> list[str]:
     if offer.failed:
         return ["", *_wrapped("", "USE THESE: the past prints couldn't be read, so none is "
                                   f"offered: {offer.failed}")]
@@ -1145,12 +1163,12 @@ def _group(
         row = f"  {name:<{key}}  {here:>{was}} -> {value:<{to}}"
         text = "; ".join(word for word in words if word not in common)
         if not text:
-            lines += _wrapped("  ", row.strip()) if len(row) > WIDTH else [row.rstrip()]
-        elif len(row) + 2 + len(text) <= WIDTH:
+            lines += _wrapped("  ", row.strip()) if len(row) > _WIDTH.get() else [row.rstrip()]
+        elif len(row) + 2 + len(text) <= _WIDTH.get():
             lines.append(f"{row}  {text}")
         else:
             # Longer than its column: beneath, at full width.
-            lines += [*(_wrapped("  ", row.strip()) if len(row) > WIDTH else [row.rstrip()]),
+            lines += [*(_wrapped("  ", row.strip()) if len(row) > _WIDTH.get() else [row.rstrip()]),
                       *_wrapped("      ", text)]
     for text, ns in common.items():
         lines += _wrapped(f"      {_listed(ns)}: ", text)
@@ -1167,7 +1185,7 @@ def _reason(item: Item, proposal: Proposal) -> str:
     if u.by is not Source.LESSON:
         return "no reason given" if item.reason in ("", _NO_REASON) else item.reason
     if any(g.id == u.lesson for g in proposal.lessons):
-        return f"lesson {u.lesson}, in Lessons above"
+        return f"lesson {u.lesson}, in Lessons below"
     return f"lesson {u.lesson}{_AND}{item.reason}"
 
 
@@ -1296,5 +1314,5 @@ def _listed(numbers: list[int]) -> str:
 
 def _wrapped(lead: str, text: str) -> list[str]:
     """One plain line, wrapped under its own start where it's longer than the review's width."""
-    return textwrap.wrap(text, WIDTH, initial_indent=lead, subsequent_indent=" " * len(lead),
+    return textwrap.wrap(text, _WIDTH.get(), initial_indent=lead, subsequent_indent=" " * len(lead),
                          break_long_words=False, break_on_hyphens=False) or [lead.rstrip()]

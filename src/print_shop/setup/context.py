@@ -50,6 +50,8 @@ from typing import Any
 import numpy as np
 from pydantic import BaseModel
 
+from print_shop.bench.pausing import z_span
+
 __all__ = [
     "FIT_MM",
     "AS_THE_FILE_LIES",
@@ -321,7 +323,7 @@ class FitBand(BaseModel):
     z_to: float
 
     def line(self) -> str:
-        return f"z {self.z_from:g} to {self.z_to:g} mm as it prints: {self.fit.line()}"
+        return f"{z_span(self.z_from, self.z_to)} as it prints: {self.fit.line()}"
 
 
 class Placed(BaseModel):
@@ -338,7 +340,9 @@ class Placed(BaseModel):
     off_side: str = ""
 
     def lines(self) -> list[str]:
-        out = [f"fit at {b.line()}" for b in self.fits]
+        # A band of one height says "at z" itself (mqucifer/print-shop#223).
+        out = [f"fit {line}" if (line := b.line()).startswith("at ") else f"fit at {line}"
+               for b in self.fits]
         out += [f"hold across the layers: {h.line()}: its pull is across the layer lines, where "
                 "a print is weakest" for h in self.across]
         if self.off_side:
@@ -413,7 +417,7 @@ def _from_sidecar(path: Path) -> PartContext:
         elif "z" in entry:
             z0, z1 = sorted(float(v) for v in entry["z"])
             box = ((-1e9, -1e9, z0), (1e9, 1e9, z1))
-            derived = f"at z {z0:g} to {z1:g} mm as the file lies, as the sidecar gives it"
+            derived = f"{z_span(z0, z1, 'at ')} as the file lies, as the sidecar gives it"
         else:
             derived = "the sidecar gives no place, so the whole wall is held as the fit"
         fits.append(Fit(name=name, mate=str(entry.get("mate") or ""), play_min=low,
