@@ -757,9 +757,17 @@ def test_each_queued_job_keeps_its_own_log(shop: Shop, tmp_path: Path) -> None:
             typist = Typist(queue, ("answer 1", lambda: needs(queue).get(one) is Need.QUESTIONS))
             assert serve(queue, daemon, read=typist, write=lambda _: None,
                          forget=lambda: None) == 0
-            shop.answer(queue, one)
-            shop.review(queue, one)
-            wait_until(lambda: shop.waits(one) is Waits.READY)
+
+            def ready_by_now() -> bool:
+                # The terminal may have followed it through its review already: else it's done here.
+                asked = queue.asked(one)
+                if asked is not None and asked.need is Need.QUESTIONS:
+                    queue.give(one, [Answer(choice=0)] * len(asked.questions))
+                elif asked is not None and asked.need is Need.REVIEW:
+                    queue.give(one, Review(approved=True))
+                return shop.waits(one) is Waits.READY
+
+            wait_until(ready_by_now)
     log = (shop.work / one / LOG_NAME).read_text()
     assert "What is this part for?" in log, "its screen at the terminal"
     assert "1> 1" in log, "what was typed"
