@@ -355,7 +355,15 @@ def _answers(request: ReviewRequest, width: int) -> list[str]:
     if request.candidates:
         said.append("orientation (send it back)")
     said += ["key=value because \u2026", "stop"]
-    return wrap("Answers: ", " \u00b7 ".join(said), width, " " * 9)
+    # Broken between answers, never inside one, where they don't fit a line.
+    lines = ["Answers: " + said[0]]
+    for each in said[1:]:
+        if len(lines[-1]) + 3 + len(each) + 2 <= width:  # and room for a " ·" after it
+            lines[-1] += f" \u00b7 {each}"
+        else:
+            lines[-1] += " \u00b7"
+            lines.append(" " * 9 + each)
+    return lines
 
 
 def _examples(request: ReviewRequest, width: int) -> list[str]:
