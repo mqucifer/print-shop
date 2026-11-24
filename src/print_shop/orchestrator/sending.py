@@ -21,7 +21,9 @@ from a phone.
 **Sending can't answer, approve, arm or start.** Nothing here takes a printer, a daemon or an
 answer: a sent job waits `SENT`, in the jobs folder, until a queue is open to prepare it
 (`print_queue.PrintQueue` takes it up), and the questions, the review, the arming and the Start
-are the person's there. `scripts/send.py` is the command.
+are the person's there. A sent file sliced by hand is looked at by the person once, as
+`print_job.py --sliced` shows it, before it's ready (`PrintQueue._looked`). `scripts/send.py`
+is the command.
 """
 
 from __future__ import annotations

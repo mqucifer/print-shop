@@ -20,6 +20,8 @@ the person picks, in any order.
     retry 3                    a stopped job prepared again, with what you gave it
     spool 3 2                  3 moved to spool #2: another colour at once; another filament
                                prepared again, back to its review
+    look 3                     what 3 prints, for a file sliced by hand that was sent to you:
+                               ok lets it be ready, reject takes it out
     sent 3                     what came with 3, sent to you: who, when, the note, where the
                                file was, and what came with it or wasn't taken
     add FILE [x3] [spool=2]    more files, in one go; after a file also for="what it's for",
@@ -244,8 +246,7 @@ class _Terminal:
         if sends:
             self.write("SENT TO YOU")
             for sent in sends:
-                for said in sent.said():
-                    self.write(f"  {said}")
+                self.write(f"  {sent.said()}")
         asks = [f"`{_verb(li.needs)} {li.number}`" for li in lines if li.needs is not None]
         if asks:
             self.write("Needs you: " + ", ".join(asks) + ". `help` lists the rest.")
@@ -266,8 +267,8 @@ class _Terminal:
             "mesh": self._mesh, "start": self._start, "reject": self._reject,
             "first": self._first, "place": self._place, "together": self._together,
             "hold": self._hold, "release": self._release, "remove": self._remove,
-            "spool": self._spool, "add": self._add, "sent": self._sent, "stock": self._stock,
-            "go": self._go, "retry": self._retry,
+            "spool": self._spool, "add": self._add, "sent": self._sent, "look": self._look,
+            "stock": self._stock, "go": self._go, "retry": self._retry,
         }.get(verb)
         if action is None:
             self.write(f"  Not a queue command: {verb}. `help` lists them.")
@@ -380,7 +381,7 @@ class _Terminal:
                     self._answer([job_id, *(others or ())])
                 else:
                     {Need.CLOSER: self._answer, Need.REVIEW: self._review,
-                     Need.MESH: self._mesh}[asked.need]([job_id])
+                     Need.MESH: self._mesh, Need.LOOK: self._look}[asked.need]([job_id])
                 return
             job = self.queue.find(job_id[:8])
             if job is None or job.waits in (Waits.READY, Waits.STOPPED):
@@ -526,6 +527,31 @@ class _Terminal:
         if job_id := self._job(args):
             self._done(self.queue.retry(job_id))
 
+    def _look(self, args: list[str]) -> None:
+        """A sent hand-sliced file's look (mqucifer/print-shop#226): what it prints, then `ok`
+        lets it be ready, and `reject` takes it out, unprinted."""
+        job_id = self._job(args)
+        if job_id is None:
+            return
+        asked = self.queue.asked(job_id)
+        if asked is None or asked.need is not Need.LOOK:
+            self.write("  It has nothing waiting for you to look at.")
+            return
+        self._title(job_id)
+        read, write = self._io(job_id)
+        for line in asked.shown:
+            write(f"  {line}")
+        write("  ok      it's ready to print, offered in its turn: Start is still yours")
+        write("  reject  takes it out of the queue: nothing prints")
+        typed = read("look> ").strip().lower()
+        if typed not in ("ok", "reject"):
+            self.write("  Nothing decided: `look` shows it again.")
+            return
+        if why := self.queue.give(job_id, typed == "ok"):
+            self.write(f"  Not taken: {why}.")
+            return
+        self._follow(job_id)
+
     def _sent(self, args: list[str]) -> None:
         """What came with a job sent to the queue (mqucifer/print-shop#226)."""
         job_id = self._job(args)
@@ -551,7 +577,7 @@ class _Terminal:
 
 def _verb(need: Need | None) -> str:
     return {Need.QUESTIONS: "answer", Need.CLOSER: "answer", Need.REVIEW: "review",
-            Need.MESH: "mesh"}.get(
+            Need.MESH: "mesh", Need.LOOK: "look"}.get(
         need or Need.QUESTIONS, "answer")
 
 

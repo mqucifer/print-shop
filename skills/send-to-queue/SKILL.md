@@ -34,6 +34,7 @@ The command answers in words to relay to the person as they are: what was queued
 
 - The queue keeps its own copy of each file and what belongs to it, so the originals can move.
 - The same bytes as a job already waiting, for the same spool, aren't queued twice: send `xN` for more prints. The same bytes as a past print are queued, and the answer says that print and how it came out: tell the person.
+- A file sliced by hand waits for the person to look at what it prints before it's ready.
 - Nothing is prepared until the person opens the queue (`print_job.py --queue`); if it's open already, it starts at once.
 
 Then tell the person what was sent and anything the answer said wasn't taken. That's the end of your part.

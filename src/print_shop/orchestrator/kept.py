@@ -58,7 +58,7 @@ from print_shop.sliced import SlicedJob
 from print_shop.slicer.orca import SlicerProfiles
 
 __all__ = ["KEPT_NAME", "Kept", "Moved", "Sent", "Suggestion", "WaitingJob", "WaitingJobs",
-           "Waits"]
+           "Waits", "local_when"]
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +83,27 @@ class Waits(StrEnum):
     #: Sent from elsewhere, and not yet taken up by a queue: it's prepared once the queue is open
     #: (mqucifer/print-shop#226).
     SENT = "to be prepared once the queue is open"
+    #: A file sliced by hand that someone else sent, waiting for the person to look at what it
+    #: prints before it's ready (mqucifer/print-shop#226).
+    LOOK = "at its look"
+
+
+def local_when(at: str, now: datetime | None = None) -> str:
+    """When, as the Mac's clock says it: "04:43 today", "22:43 yesterday", or "21 Nov 22:43"
+    beyond that, with the year where it isn't this one (mqucifer/print-shop#226)."""
+    try:
+        when = datetime.fromisoformat(at).astimezone()
+    except ValueError:
+        return at
+    today = (now or datetime.now(UTC)).astimezone().date()
+    clock = f"{when:%H:%M}"
+    days = (today - when.date()).days
+    if days == 0:
+        return f"{clock} today"
+    if days == 1:
+        return f"{clock} yesterday"
+    year = f" {when.year}" if when.year != today.year else ""
+    return f"{when.day} {when:%b}{year} {clock}"
 
 
 class Sent(BaseModel):
@@ -102,10 +123,9 @@ class Sent(BaseModel):
     came: tuple[str, ...] = ()
 
     def said(self) -> str:
-        """"sent by Claude, 23 Nov 14:02: 'the lid set'"."""
-        when = self.at[:16].replace("T", " ")
+        """"sent by Claude, 14:02 today: 'the lid set'", in the Mac's own time."""
         note = f": '{self.note}'" if self.note else ""
-        return f"sent by {self.by}, {when} UTC{note}"
+        return f"sent by {self.by}, {local_when(self.at)}{note}"
 
 
 class Suggestion(BaseModel):
@@ -158,7 +178,7 @@ class WaitingJob(BaseModel):
         return f"{self.copy_n} of {self.copies}" if self.copies > 1 else ""
 
     def line(self) -> str:
-        since = f", since {self.since[:16].replace('T', ' ')} UTC" if self.since else ""
+        since = f", since {local_when(self.since)}" if self.since else ""
         copied = f" ({self.copied})" if self.copied else ""
         held = ", held" if self.held else ""
         sent = f"  ({self.sent.said()})" if self.sent is not None and self.sent.by else ""
@@ -366,6 +386,9 @@ class _Record(BaseModel):
     #: What the sender suggested for its settings (mqucifer/print-shop#226): offered, never
     #: given back as the person's.
     sender_suggested: list[Suggestion] = []
+    #: The person looked at what a sent hand-sliced file prints, and let it be ready
+    #: (mqucifer/print-shop#226).
+    looked: bool = False
 
 
 _LOOP = TypeAdapter(LoopResult)
@@ -518,6 +541,18 @@ class Kept:
         """The sender's suggestions, kept to offer: none of them is an answer or a change."""
         with self._lock:
             self._record.sender_suggested = list(suggestions)
+            self._write()
+
+    def looked(self) -> bool:
+        """Whether the person has looked at what this sent hand-sliced file prints."""
+        with self._lock:
+            return self._record.looked
+
+    def look(self) -> None:
+        """The person looked at what it prints, and let it be ready: kept, so a restart doesn't
+        ask again. It's no approval: Start is still theirs."""
+        with self._lock:
+            self._record.looked = True
             self._write()
 
     # -- moved to another spool (mqucifer/print-shop#210) --------------------

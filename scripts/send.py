@@ -30,7 +30,8 @@ a past print are queued, saying that print and how it came out.
 **Sending is all it does.** It has no option to answer, approve, arm or start, and it ignores
 `PRINT_AGENT_ALLOW_HARDWARE`: nothing here takes a printer or the daemon. The files wait in the
 jobs folder until the queue is open (`print_job.py --queue`), which prepares them at once if it is
-already. The questions, the review, the arming and the Start are the person's there. It runs beside
+already. The questions, the review, the arming and the Start are the person's there, and a file
+sliced by hand waits for them to look at what it prints before it's ready. It runs beside
 any job, and takes no lock.
 
 Exits 0 when every file was queued, 1 when some weren't, and 2 when none was.

@@ -132,6 +132,14 @@ def test_three_files_sent_from_elsewhere_wait_with_their_notes_after_a_move_and_
     lid, box, tiles = (j.job_id for j in jobs)
     with shop.daemon() as daemon, shop.queue(daemon) as queue:
         queue._sliced_for = sliced_reader(shop.tmp / "no-settings.env", shop.store)
+        # G-code another session sliced is looked at once, as `--sliced` shows it, before it's
+        # ready: never offered with only the bed's question for a screen (print-shop-ux).
+        look = shop.need(queue, tiles, Need.LOOK)
+        shown = "\n".join(look.shown)
+        assert "per-object overrides (the project light-test.3mf" in shown, shown
+        assert "The slice, read as it is" in shown
+        assert shop.offered() == "", "nothing is offered before its look"
+        assert queue.give(tiles, True) == ""
         wait_until(lambda: shop.waits(tiles) is Waits.READY)
         asked = shop.need(queue, lid, Need.QUESTIONS)
         assert any("the lid of a made-up box" in str(q) for q in asked.questions), \
@@ -141,7 +149,7 @@ def test_three_files_sent_from_elsewhere_wait_with_their_notes_after_a_move_and_
     # The service restarts: the same jobs, where they were, with their notes.
     with shop.daemon() as daemon, shop.queue(daemon) as queue:
         queue._sliced_for = sliced_reader(shop.tmp / "no-settings.env", shop.store)
-        assert shop.waits(tiles) is Waits.READY
+        assert shop.waits(tiles) is Waits.READY, "its look is kept"
         for job_id in (lid, box):
             shop.answer(queue, job_id)
         review = shop.need(queue, lid, Need.REVIEW).review
@@ -387,8 +395,7 @@ def test_the_person_sees_sent_to_you_with_who_when_the_note_and_what_each_needs(
                  forget=lambda: None) == 0
     shown = "\n".join(written)
     assert "SENT TO YOU" in shown
-    assert f"Sent by {BY}, " in shown and ": 'the box set'" in shown
-    assert "1. lid.stl: needs you: the questions" in shown
+    assert f"  Sent by {BY}, " in shown and " today: 'the box set': jobs 1, 2" in shown
     assert "lid.stl: sent by" in shown and "the queue prints its own copy" in shown
     assert "suggested, offered at the review unticked: wall_loops=4 (it clips on)" in shown
 
@@ -420,6 +427,45 @@ def test_what_isnt_taken_is_said_with_what_to_do_instead(shop: Shop) -> None:
                             "file sliced by hand is sent as it is") for c in came), came
     # Nothing is left behind of what wasn't queued.
     assert len([p for p in shop.work.iterdir() if p.is_dir()]) == 1
+
+
+def test_a_sent_hand_sliced_file_rejected_at_its_look_is_out_of_the_queue_unprinted(
+    shop: Shop, running: tuple[Daemon, PrintQueue],
+) -> None:
+    _, queue = running
+    gcode = write_gcode(shop.tmp / "tiles")
+    done = sent(shop, Adding(gcode, copies=2, spool_id=GREY))
+    tiles = done.queued[0].job_id
+    shop.need(queue, tiles, Need.LOOK)
+    line = next(li for li in queue.lines() if li.job.job_id == tiles)
+    assert line.step == "needs you: look at what it prints"
+    assert queue.give(tiles, "yes") == "a look is answered ok (True) or reject (False)"
+    assert queue.give(tiles, False) == ""
+    wait_until(lambda: queue.jobs() == [])
+    assert any(s == f"Removed: light-test.gcode, job {tiles[:8]}: you rejected what it prints. "
+               "Nothing printed." for s in queue.said()), queue.said()
+    assert shop.ledger.rows() == []
+    # The person's own hand-sliced file, added at the queue, is theirs: no look.
+    queue._sliced_for = sliced_reader(shop.tmp / "no-settings.env", shop.store)
+    own = queue.add([Adding(gcode, spool_id=GREY)])[0][0]
+    wait_until(lambda: shop.waits(own) is Waits.READY)
+
+
+def test_when_is_said_in_the_macs_own_time() -> None:
+    from datetime import UTC, datetime, timedelta  # noqa: PLC0415
+
+    from print_shop.orchestrator.kept import local_when  # noqa: PLC0415
+
+    now = datetime(2026, 11, 23, 12, 0, tzinfo=UTC)
+    local = now.astimezone()
+    assert local_when(now.isoformat(), now) == f"{local:%H:%M} today"
+    day = now - timedelta(days=1)
+    assert local_when(day.isoformat(), now) == f"{day.astimezone():%H:%M} yesterday"
+    old = (now - timedelta(days=40)).astimezone()
+    assert local_when(old.isoformat(), now) == f"{old.day} {old:%b} {old:%H:%M}"
+    last_year = (now - timedelta(days=400)).astimezone()
+    assert local_when(last_year.isoformat(), now).endswith(f"{last_year.year} "
+                                                           f"{last_year:%H:%M}")
 
 
 def test_the_words_after_a_file_are_read(tmp_path: Path) -> None:
