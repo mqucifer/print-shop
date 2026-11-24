@@ -1100,6 +1100,8 @@ class PrintQueue:
             result = self._daemon.wait_for_finish(
                 job_id, self._finish_wait_s, tell=lambda said: self._say(said, job_id))
         except TimeoutError:
+            if self._closing.is_set():
+                return  # put by: the job waits where it was, for the queue taken up again
             self._say(self._daemon.abandon(job_id, "waiting for the job to finish",
                                            self._finish_wait_s), job_id)
             self._wake.set()

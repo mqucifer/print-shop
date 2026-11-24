@@ -180,9 +180,10 @@ def test_one_file_is_prepared_offered_and_started_by_the_person(
     wait_until(lambda: shop.offered() == job_id)
     assert shop.printer.verbs.count("start") == 0, "nothing starts by itself"
     assert daemon.start(job_id, bed_clear=True) == ""
-    wait_until(lambda: shop.ledger.get(job_id) is not None)
-    assert shop.printer.verbs[-2:] == ["upload", "start"]
+    # The ledger's row is written just before the printer is told to start: its start, then.
     wait_until(lambda: any("Started: bracket.stl" in s for s in queue.said()))
+    assert shop.ledger.get(job_id) is not None
+    assert shop.printer.verbs[-2:] == ["upload", "start"]
     assert shop.waits(job_id) is None
 
 
@@ -943,3 +944,83 @@ def test_a_hand_sliced_file_queues_with_copies_and_moves_only_in_colour(
                 shop.end_print(job_id)
     rows = [shop.ledger.get(j) for j in (first, copy.job_id)]
     assert all(r is not None for r in rows)
+
+
+
+_LIVE = """
+import tempfile, threading, time
+from pathlib import Path
+
+from tests.test_queue import Adding, Shop
+from print_shop.queue_terminal import serve
+
+shop = Shop(Path(tempfile.mkdtemp()))
+
+
+def read(prompt):
+    typed = input(prompt)
+    print("TYPED", repr(typed), flush=True)
+    return typed
+
+
+with shop.daemon() as daemon, shop.queue(daemon) as queue:
+    def later():
+        time.sleep(1.0)  # once the prompt is open, with nothing typed
+        queue.add([Adding(shop.part("bracket"))])
+
+    threading.Thread(target=later, daemon=True).start()
+    serve(queue, daemon, read=read, write=lambda s: print(s, flush=True), forget=lambda: None)
+    print("DONE", flush=True)
+"""
+
+
+def test_on_a_terminal_what_needs_the_person_shows_while_queue_is_open_and_typing_is_kept() -> None:
+    """print-shop-ux, on a real pty: with `queue>` open and nothing sent, a job that comes to need
+    the person is said in the line above the prompt within seconds, and what's half typed is
+    kept. On a real terminal, with input() itself."""
+    import os  # noqa: PLC0415
+    import select  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+
+    ours, theirs = os.openpty()
+    root = Path(__file__).parents[1]
+    child = subprocess.Popen(
+        [sys.executable, "-c", _LIVE], stdin=theirs, stdout=theirs, stderr=theirs, cwd=root,
+        start_new_session=True,
+        env={**os.environ, "PYTHONPATH": f"{root / 'src'}{os.pathsep}{root}"},
+    )
+    os.close(theirs)
+    out = b""
+
+    def until(word: bytes, after: int = 0) -> int:
+        nonlocal out
+        end = time.monotonic() + WAIT_S
+        while word not in out[after:] and time.monotonic() < end:
+            if not select.select([ours], [], [], 0.2)[0]:
+                continue
+            try:
+                got = os.read(ours, 65536)
+            except OSError:
+                break
+            if not got:
+                break
+            out += got
+        assert word in out[after:], out.decode(errors="replace")[-2000:]
+        return out.index(word, after)
+
+    try:
+        opened = until(b"queue> ")
+        os.write(ours, b"lis")  # half typed, and not sent
+        # Said above the prompt, in place, with nothing sent.
+        live = until(b"Needs you: answer 1 (bracket.stl, the questions)", opened)
+        assert b"\x1b7\x1b[1A\r\x1b[2K" in out[opened:live], "rewritten in place"
+        assert b"TYPED" not in out
+        os.write(ours, b"t\n")
+        until(b"TYPED 'list'")  # what was typed before it was drawn is kept
+        os.write(ours, b"quit\n")
+        until(b"DONE")
+    finally:
+        child.kill()
+        child.wait(timeout=10)
+        os.close(ours)

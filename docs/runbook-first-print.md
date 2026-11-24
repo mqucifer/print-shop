@@ -392,7 +392,7 @@ PRINT_AGENT_ALLOW_HARDWARE=1 uv run python scripts/print_job.py --queue
 - **The machine's steps keep their limit:** a job whose slicing runs past the hour, from when it last came back from you, stops, saying so in its line: `retry 3` prepares it again with what you gave it, or `remove 3`.
 - **The queue survives:** `quit` or Ctrl-C puts it by, and `--queue` alone takes it up as it was, each job where it waited. `--list` shows them under "Waiting for you".
 
-The queue's jobs prepare beside the prompt, so what they log isn't shown on it: what happens to each (ready, offered, started, held, stopped, ended) is said at the next `queue>`. Each job keeps its own `job.log` in its folder, as a lone job does: what its preparing logged, what the queue said of it, and its screens and what you typed at them.
+The queue's jobs prepare beside the prompt, so what they log isn't shown on it. While `queue>` is open, the line above it says what needs you and what just happened, rewritten in place as it changes, and what you're typing is left as it is; the whole of what happened to each (ready, offered, started, held, stopped, ended) is said at the next `queue>`. Each job keeps its own `job.log` in its folder, as a lone job does: what its preparing logged, what the queue said of it, and its screens and what you typed at them.
 
 ## A file you sliced by hand
 
