@@ -119,9 +119,9 @@ class Shop:
             stock.load(spool, over=found)
 
     def _tell(self, said: str) -> None:
-        """What the terminal is told: each Start held, in `told`, and the one taken, with how the
-        bed was confirmed (mqucifer/print-shop#209), in `taken`."""
-        (self.taken if said.startswith("Start taken") else self.told).append(said)
+        """What the terminal is told: each Start held, in `told`, and how the gate was decided
+        (mqucifer/print-shop#209), in `taken`."""
+        (self.taken if said.startswith(("Start taken", "Rejected ")) else self.told).append(said)
 
     def told_so_far(self, bridge: MemoryBridge) -> str:
         return str(bridge.retained_json(gate_topic(CFG))["held"]).removeprefix("Not started: ")

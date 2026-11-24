@@ -466,7 +466,7 @@ def test_a_check_that_names_what_to_do_lets_the_next_start_through(
     result = daemon.wait_for_finish(job_id, timeout_s=WAIT_S, tell=told.append)
     assert result.printed
     assert told[-1] == f"Start taken, the bed confirmed clear {BED_AT_TERMINAL}."
-    assert daemon.start(job_id, bed_clear=True) == "it was already started or decided"
+    assert daemon.start(job_id, bed_clear=True) == "it was started here"
 
 
 def test_the_cards_start_says_how_the_bed_was_confirmed(ready: tuple[Shop, Daemon, str]) -> None:
@@ -475,7 +475,7 @@ def test_the_cards_start_says_how_the_bed_was_confirmed(ready: tuple[Shop, Daemo
     shop.press("approve")
     assert daemon.wait_for_finish(job_id, timeout_s=WAIT_S, tell=told.append).printed
     assert told == [f"Start taken, the bed confirmed clear {BED_ON_CARD}."]
-    assert daemon.reject(job_id) == "it was already started or decided"
+    assert daemon.reject(job_id) == "it was started on the card"
 
 
 # Presses
@@ -680,6 +680,9 @@ class Daemon:
     def pending_gate(self):
         return None if self.started else {"job_id": "job-1"}
 
+    def decided(self, job_id):
+        return ""
+
     def start(self, job_id, *, bed_clear):
         self.started = True
         print("BED", bed_clear, flush=True)
@@ -732,3 +735,32 @@ def test_on_a_terminal_a_y_typed_ahead_never_answers_the_beds_question() -> None
         child.wait(timeout=10)
         os.close(ours)
     assert b"BED False" in out and b"BED True" not in out
+
+
+def test_a_start_typed_after_the_card_decided_is_told_so_at_once(
+    ready: tuple[Shop, Daemon, str],
+) -> None:
+    """print-shop-ux, on b81f925: the terminal's prompt was open as the card started the job, and
+    `start` then asked the bed's question before saying it was taken. Now it says so at once."""
+    shop, daemon, job_id = ready
+    script = _script()
+    shown: list[str] = []
+
+    def card_then_start(prompt: str) -> str:
+        """The prompt is open; the card starts the job; then `start` is typed."""
+        shop.press("approve")
+        wait_until(lambda: bool(daemon.decided(job_id)))
+        return "start"
+
+    script._start_here(daemon, job_id, card_then_start, shown.append, lambda: None)
+    assert shown == ["  Not taken: it was started on the card."]
+    assert daemon.wait_for_finish(job_id, timeout_s=WAIT_S).printed
+
+
+def test_a_reject_says_where_it_was_given(ready: tuple[Shop, Daemon, str]) -> None:
+    shop, daemon, job_id = ready
+    told: list[str] = []
+    assert daemon.reject(job_id) == ""
+    assert not daemon.wait_for_finish(job_id, timeout_s=WAIT_S, tell=told.append).printed
+    assert told == ["Rejected here: nothing printed, and the job has ended."]
+    assert daemon.start(job_id, bed_clear=True) == "it was rejected here"

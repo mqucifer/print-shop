@@ -145,6 +145,8 @@ class Command(BaseModel):
     note: str = ""
     #: How the person said the bed is clear, for a Start: never read from a payload.
     bed: str = ""
+    #: Where it was given, as it's said: "on the card" or "here", at the terminal.
+    by: str = ""
 
 
 class JobRejected(Exception):
@@ -391,6 +393,9 @@ class Daemon:
         self._at_gate = threading.Event()  # wakes `wait_for_gate` as one opens
         #: Each gate a job has opened, in order, answered or not: what `wait_for_gate` returns.
         self._opened: dict[str, list[dict[str, Any]]] = {}
+        #: How each job's last gate was decided, as the terminal says it once it's decided:
+        #: "started on the card", "rejected here".
+        self._decided: dict[str, str] = {}
 
         # Gate-scoped inbox: the MQTT callback pushes into it, the gate that
         # opened it consumes it. None when no gate is open — a command that
@@ -585,12 +590,27 @@ class Daemon:
         """Reject at the terminal: as the card's. Returns "", or why it wasn't taken."""
         return self._from_terminal(Command(decision=Decision.REJECT, job_id=job_id))
 
+    def decided(self, job_id: str) -> str:
+        """Why a Start or Reject from the terminal can't be taken now, its gate being decided or
+        gone: "it was started on the card", or "" while it's open (mqucifer/print-shop#209)."""
+        with self._job_lock:
+            gate = self._pending_gate
+            if (self._active_job_id == job_id and self._gate_inbox is not None
+                    and gate is not None and gate.get("job_id") == job_id):
+                return ""
+            how = self._decided.get(job_id)
+        return f"it was {how}" if how else "it was already started or decided"
+
     def _from_terminal(self, cmd: Command) -> str:
+        cmd = cmd.model_copy(update={"by": "here"})
+        if why := self.decided(cmd.job_id):
+            return why
         with self._job_lock:
             gate = self._pending_gate
             if (self._active_job_id != cmd.job_id or self._gate_inbox is None or gate is None
                     or gate.get("job_id") != cmd.job_id):
-                return "it was already started or decided"
+                how = self._decided.get(cmd.job_id)
+                return f"it was {how}" if how else "it was already started or decided"
             if cmd.decision is Decision.APPROVE and gate.get("gate") != Gate.BEFORE_PRINT:
                 return "only the gate before printing starts a print"
             word = self._press
@@ -866,7 +886,7 @@ class Daemon:
                 return
             # The card asks the bed in a dialog, which can't be checked from here
             # (mqucifer/print-shop#214 is what binds it to a person): said as such, never more.
-            cmd = cmd.model_copy(update={"bed": BED_ON_CARD})
+            cmd = cmd.model_copy(update={"bed": BED_ON_CARD, "by": "on the card"})
             # Check and put under the same lock: the gate can close between a
             # read of the inbox and a put, which would re-open the race this
             # scoping exists to close.
@@ -1017,11 +1037,19 @@ class Daemon:
 
         approved = cmd.decision is Decision.APPROVE
         note = cmd.note
-        if approved and before_print:
-            said = f"the bed confirmed clear {cmd.bed}"
-            note = f"{note}; {said}" if note else said
-            with self._job_lock:
+        by = cmd.by or "on the card"
+        with self._job_lock:
+            if approved and before_print:
+                said = f"the bed confirmed clear {cmd.bed}"
+                note = f"{note}; {said}" if note else said
                 self._held.setdefault(job_id, []).append(f"Start taken, {said}.")
+                self._decided[job_id] = f"started {by}"
+            elif approved:
+                self._decided[job_id] = f"approved {by}"
+            else:
+                self._held.setdefault(job_id, []).append(
+                    f"Rejected {by}: nothing printed, and the job has ended.")
+                self._decided[job_id] = f"rejected {by}"
 
         # We have our answer; close this gate's inbox so a stale press cannot
         # leak into the next gate.

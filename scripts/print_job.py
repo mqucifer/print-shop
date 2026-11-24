@@ -666,6 +666,10 @@ def _start_here(
         if typed not in ("start", "reject"):
             write("  Type start, or reject.")
             continue
+        if decided := daemon.decided(job_id):
+            # Decided on the card while this prompt was open: said at once, nothing asked.
+            write(f"  Not taken: {decided}.")
+            return
         if typed == "reject":
             why = daemon.reject(job_id)
         else:
