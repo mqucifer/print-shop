@@ -49,7 +49,7 @@ from print_shop.setup.intake import (
     drop_typed,
     parse,
 )
-from print_shop.setup.questions import PURPOSE, STOCK, Asked, only_stock
+from print_shop.setup.questions import PLATE_WORDS, PURPOSE, STOCK, Asked, only_stock
 
 __all__ = [
     "GO_ON", "Prompted", "QuestionsCall", "Waiting", "ask_meanwhile", "cli_waiting", "terminal",
@@ -337,12 +337,17 @@ def cli_waiting(
     screen: Callable[[], TextIO | None] = terminal,
     typed: Callable[[float], bool] = _keys_waiting,
     forget: Callable[[], None] = drop_typed,
+    several: bool = False,
 ) -> Waiting:
     """The wait on the command line. `replayed` is for recorded answers. `prompt` is the one
     that's open (`Prompted.prompt`): it's shown again under anything said while it's open.
 
     Without a terminal nobody can type `go`: the call runs to its own end, as it did.
+
+    `several` words it for a plate of several parts (mqucifer/print-shop#109).
     """
+    whose = "these parts" if several else "the part"
+    purpose = PLATE_WORDS[PURPOSE.text] if several else PURPOSE.text
     lock = threading.Lock()  # the call's end and the timer both write
     at_prompt = threading.Event()  # an answer is being typed
 
@@ -355,7 +360,7 @@ def cli_waiting(
             how = "The notes give what it's for and what's seen, so nothing waits for it."
         else:
             how = "Answer these meanwhile: you won't have to wait for it."
-        write(f"The model is reading the part for questions of its own. {how}")
+        write(f"The model is reading {whose} for questions of its own. {how}")
         if not replayed:
             at_prompt.set()
 
@@ -373,7 +378,7 @@ def cli_waiting(
                 if at_prompt.is_set():
                     said += " They follow the answers you're giving."
             else:
-                said = f"The model read the part in {after} and has no other question."
+                said = f"The model read {whose} in {after} and has no other question."
             out = screen()
             open_prompt = prompt() if at_prompt.is_set() else ""
             if open_prompt:
@@ -396,7 +401,7 @@ def cli_waiting(
             if out is not None:
                 forget()
             return True
-        write(f"The model is still reading the part ({took(call.seconds)}). "
+        write(f"The model is still reading {whose} ({took(call.seconds)}). "
               "If it has another question, it's added here."
               + (f" Type {GO_ON} and Enter to go on without waiting." if out is not None else ""))
         said_at = time.monotonic()
@@ -437,8 +442,8 @@ def cli_waiting(
         return True
 
     def closer(question: Question, kept: Answer, seconds: float) -> Answer | None:
-        lines = [f"1. {PURPOSE.text}  you: {PURPOSE.label(kept)}",
-                 f"   The model has read the part since ({took(seconds)}) and has closer choices. "
+        lines = [f"1. {purpose}  you: {PURPOSE.label(kept)}",
+                 f"   The model has read {whose} since ({took(seconds)}) and has closer choices. "
                  "Each says what it sets:",
                  f"   {question.text}",
                  "   Enter) keep your answer"]

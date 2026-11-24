@@ -57,6 +57,7 @@ from typing import TYPE_CHECKING, Any
 
 from print_shop.materials import material_name
 from print_shop.outcome_words import outcome_words
+from print_shop.plate import SEQUENCE, plate_job
 from print_shop.rounds.lessons import (
     ACCEPTED,
     AFTER_SCORE,
@@ -266,9 +267,37 @@ def after_print(ledger: Ledger, job_id: str) -> None:
     row = ledger.get(job_id)
     if row is None:
         raise Refused(f"job {job_id} isn't in the ledger")
+    row = _its_own(row)
     _given(ledger, row)
     _scored_at_review(ledger, row)
     draw(ledger, row)
+
+
+def _its_own(row: Row) -> Row:
+    """The row with what is that row's to teach. A plate's one review is drawn and scored once,
+    at its first part's row (mqucifer/print-shop#109): three rows of it aren't three prints. A
+    later part's own are its pose's and, when it's answered, its outcome."""
+    if row.heads_job:
+        return row
+    proposal = row.proposal
+    if proposal is not None:
+        proposal = proposal.model_copy(update={
+            "changes": (), "not_applied": (),
+            "lessons": tuple(g for g in proposal.lessons if g.key == ORIENTATION),
+        })
+    return row.model_copy(update={
+        "proposal": proposal,
+        "corrections": tuple(c for c in row.corrections or () if c.key == ORIENTATION),
+    })
+
+
+def _plate_said(ledger: Ledger, job_id: str) -> str:
+    """Beside a print's outcome, that it was one part of a plate, and how many of those failed."""
+    rows = ledger.job_rows(job_id)
+    if len(rows) < 2:
+        return ""
+    failed = sum(r.result == "failed" for r in rows)
+    return f"; on a plate of {len(rows)}" + (f", {failed} failed" if failed else "")
 
 
 def _part(row: Row) -> dict[str, Any]:
@@ -282,6 +311,10 @@ def _part(row: Row) -> dict[str, Any]:
         "features": {f.id: f.value for f in features},
         "flags": [{"id": f.id, "reading": f.reading} for f in row.flags or ()],
     }
+    if row.plate is not None:
+        # Whether it printed alone among others or with them is what stringing turns on.
+        part["plate"] = {"n": row.plate.n, "parts": [p.name for p in row.plate.parts],
+                         "sequence": row.plate.layout.sequence}
     if row.sliced is not None:
         # Sliced by hand: nothing here was the loop's choice, and what the outcome is keyed
         # by is the file's own settings (mqucifer/print-shop#164).
@@ -360,6 +393,17 @@ def draw(ledger: Ledger, row: Row) -> list[int]:
         if c.source is Source.READING and c.key not in last:
             last[c.key] = (READING, c)  # taken from the slice's reading, its own kind
     part = _part(row)
+    reviewed = list(part["traits"])
+    if row.plate is not None:
+        # The order is a choice for that plate, as a pause is for that part.
+        last.pop(SEQUENCE, None)
+        if row.plate.first:
+            # Lessons are looked up part by part, so it's keyed to one part's traits: the part
+            # with the most, the narrowest key that still reaches this plate printed again.
+            # The reviewer has every part's beside it, to key it otherwise.
+            each = [list(traits(r.features or ())) for r in ledger.job_rows(row.job_id)]
+            reviewed = max(each, key=len)
+            part["plate"]["traits"] = each
     for key, (kind, c) in last.items():
         if c.used is not None and c.used.by is not Source.SPONSOR:
             continue  # confirmed again at the review, and never the person's correction
@@ -368,7 +412,7 @@ def draw(ledger: Ledger, row: Row) -> list[int]:
             detail["not_applied"] = c.not_applied
         if c.used is not None:
             detail["used"] = c.used.model_dump(mode="json")
-        keyed = list(part["traits"])
+        keyed = list(reviewed)
         if kind == READING:
             detail["reading"] = c.reading
         if key == ORIENTATION:
@@ -866,15 +910,23 @@ def to_promote(ledger: Ledger) -> list[tuple[dict[str, Any], list[str]]]:
         " ORDER BY id",
         *KEPT,
     ):
-        good = []
+        good: dict[str, str] = {}  # by job: a plate is one print, however many parts it has
+        spoiled: set[str] = set()
         for job, s in latest_scores(ledger, int(row["id"])).items():
             printed = ledger.get(job)
-            if s["score"] == "used" and printed is not None and printed.result != "failed":
-                good.append(printed.stl_name + (
-                    f" ({outcome_words(printed.result, printed.symptom)})" if printed.result else ""
-                ))
-        if len(good) >= USED_TO_PROMOTE:
-            shown.append((row, good))
+            if s["score"] != "used" or printed is None or any(
+                r.result == "failed" for r in ledger.job_rows(job)
+            ):
+                spoiled.add(plate_job(job))
+                continue
+            good.setdefault(
+                plate_job(job),
+                printed.stl_name + (
+                    f" ({outcome_words(printed.result, printed.symptom)})"
+                    if printed.result else ""))
+        counted = [said for job, said in good.items() if job not in spoiled]
+        if len(counted) >= USED_TO_PROMOTE:
+            shown.append((row, counted))
     return shown
 
 
@@ -888,7 +940,7 @@ def to_retire(ledger: Ledger) -> list[tuple[dict[str, Any], str]]:
     ):
         scores = latest_scores(ledger, int(row["id"])).values()
         in_the_way = sorted(s["job_id"] for s in scores if s["score"] == "in_the_way")
-        unused = sorted(s["job_id"] for s in scores if s["score"] == "not_used")
+        unused = sorted({plate_job(s["job_id"]) for s in scores if s["score"] == "not_used"})
         if in_the_way:
             shown.append((row, f"got in the way on {', '.join(in_the_way)}"))
         elif len(unused) >= UNUSED_TO_RETIRE:
@@ -960,6 +1012,7 @@ def _evidence_lines(ledger: Ledger, lesson: int) -> list[str]:
             ) + _frames_said(d)
         lines.append(
             f"    - job {e['job_id']}, {part}, {said} [print: {outcome}"
+            + _plate_said(ledger, e["job_id"])
             + (f"; the slice flagged {flagged}" if flagged else "") + "]"
             + (f" (until now only evidence for lesson {d['absorbed_by']}, which didn't reach it)"
                if d.get("absorbed_by") else "")
@@ -974,7 +1027,8 @@ def _evidence_lines(ledger: Ledger, lesson: int) -> list[str]:
         scored = f"{s['score']} ({s['why']})" if s else "not scored"
         outcome = outcome_words(g["result"], g["symptom"]) if g["result"] else "no outcome yet"
         lines.append(
-            f"    - given to {g['stl_name']}, job {g['job_id']}: {scored} [print: {outcome}]"
+            f"    - given to {g['stl_name']}, job {g['job_id']}: {scored} [print: {outcome}"
+            + _plate_said(ledger, g["job_id"]) + "]"
         )
     return lines
 

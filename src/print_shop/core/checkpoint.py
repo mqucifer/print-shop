@@ -47,10 +47,12 @@ from print_shop.core.state import (
     EntryPath,
     MeshReport,
     Orientation,
+    PlatePart,
     PrintStatus,
     SliceResult,
 )
 from print_shop.inventory import Material
+from print_shop.plate import OnPlate, PlateLayout
 from print_shop.setup.context import Fit, Hold, PartContext, Seen
 from print_shop.setup.features import Feature
 from print_shop.setup.intake import Answer, Estimate, Intake, Option, Question
@@ -131,6 +133,10 @@ PERSISTED_TYPES: tuple[type, ...] = (
     ObjectOverrides,
     Comparison,
     Difference,
+    # A job of several parts on one plate (mqucifer/print-shop#109).
+    PlatePart,
+    PlateLayout,
+    OnPlate,
 )
 
 
