@@ -110,6 +110,9 @@ class Desk:
     def fact(self, args: dict[str, Any]) -> Judged:
         return Judged("fact", "ok", "kept")
 
+    def mark_facts(self, args: dict[str, Any]) -> Judged:
+        return Judged("mark_facts", "ok", "marked")
+
     def lessons(self, args: dict[str, Any]) -> Judged:
         return Judged("lessons", "ok", "none")
 

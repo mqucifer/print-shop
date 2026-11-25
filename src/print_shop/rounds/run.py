@@ -216,6 +216,13 @@ class State:
     # (mqucifer/print-shop#78): `record/FACTS.md` holds them, and every new conversation, every
     # compaction's note and every resume gives them whole.
     facts: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # The facts listed beside a person's answers, note or pick, until `mark_facts` marks each
+    # kept or changed against it (mqucifer/print-shop#314): who, what they said, the call it came
+    # before and the facts' names.
+    facts_beside: dict[str, Any] | None = None
+    # Each fact changed against a person's word: its name, its old fact, what it is now (None if
+    # removed), who and what it was changed against, why, and the call.
+    facts_changed: list[dict[str, Any]] = field(default_factory=list)
     # The last thing a person said to the model: its kind, who, the text and the call it came
     # before. Every compaction's note says what it asked.
     last_said: dict[str, Any] | None = None
@@ -661,11 +668,15 @@ class Run:
             )
         picked: dict[str, str] | None = None
         fault_told = ""
+        # What a person said here, by kind and who, for the facts to be read against.
+        arrived: list[tuple[str, str]] = []
         if stop and stop["kind"] == "questions":
             self._take_answers(int(stop["n"]), note_from)
+            arrived.append(("answers", note_from))
         elif stop and stop["kind"] == "ask":
             picked = self._take_pick(int(stop["n"]), reopening=reopen_needs)
             fault_told = picked.pop("told")
+            arrived.append(("pick", picked["by"]))
         self._go_on()
         told: list[str] = []
         if reopen_needs:
@@ -679,7 +690,9 @@ class Run:
                 told.append(self._reopen(note_from, bool(note.strip())))
         if note.strip():
             self._note(note.strip(), note_from)
+            arrived.append(("note", note_from))
         told.append(self._set_beside())
+        told.append(self._facts_beside(arrived))
         # How the run holds each fault of a fix-first's list, and any it took the place of
         # (mqucifer/print-shop#175).
         told.append(fault_told)
@@ -757,6 +770,128 @@ class Run:
         return (
             f"The model is shown its {len(settled)} settled needs beside the note, and `needs` is "
             "refused until each is marked kept or changed against it."
+        )
+
+    def _facts_beside(self, arrived: list[tuple[str, str]]) -> str:
+        """After a person's answers, note or pick, each fact listed beside them, and `needs` and
+        `done` held until `mark_facts` marks each kept or changed (mqucifer/print-shop#314). On a
+        design run a stand-in corrected a fact at a questions stop, the model agreed and left the
+        fact as it was, and two compactions later the claim was back. A run with no facts lists
+        nothing. What comes back is said to whoever resumed."""
+        kept = self._facts()
+        if not kept or not arrived:
+            return ""
+        said = facts.whence([kind for kind, _ in arrived])
+        who = list(dict.fromkeys(from_words(by) for _, by in arrived))
+        text = facts.beside(kept, said)
+        self.state.facts_beside = {
+            "by": " and ".join(who),
+            "whence": said,
+            "at_call": self.session.requests + 1,
+            "facts": [one.name for one in kept],
+        }
+        self._relay("facts_beside", arrived[-1][1], text)
+        count = f"{len(kept)} fact" + ("s" if len(kept) > 1 else "")
+        return (
+            f"The model is shown its {count} beside {said}, and `needs` and `done` are refused "
+            "until each is marked kept or changed against it."
+        )
+
+    def _facts_listed(self) -> list[facts.Fact]:
+        """The facts listed beside a person's word and not yet marked, as they stand: one removed
+        since with `fact` has nothing left to mark."""
+        listed = (self.state.facts_beside or {}).get("facts") or []
+        return [one for one in self._facts() if one.name in listed]
+
+    def _facts_unmarked(self, tool: str) -> Judged | None:
+        """`needs` or `done` refused while the facts beside a person's word aren't marked."""
+        beside = self.state.facts_beside
+        listed = self._facts_listed()
+        if not beside or not listed:
+            return None
+        names = [one.name for one in listed]
+        reply = facts.unmarked_refused(tool, names, str(beside["whence"]))
+        return Judged(tool, "failed", reply, "facts_unmarked")
+
+    def mark_facts(self, args: dict[str, Any]) -> Judged:
+        """Each fact listed beside a person's word marked kept or changed against it, a changed
+        one rewritten here, and `record/FACTS.md` written again with its old words and who
+        changed it (mqucifer/print-shop#314). All or nothing: one mark wrong changes none."""
+        beside = self.state.facts_beside
+        listed = self._facts_listed()
+        if not beside or not listed:
+            self.state.facts_beside = None
+            reply = (
+                "Nothing to mark: your facts are listed beside a person's answers, note or pick "
+                "when those come, and none is waiting. To change a fact, set it again with `fact`."
+            )
+            return Judged("mark_facts", "failed", reply, "nothing_listed")
+        said, by = str(beside["whence"]), str(beside["by"])
+        source = f"{said} from {by}"[: facts.SOURCE_CHARS]
+        found, wrong = facts.marked(args.get("marks"), listed, source, self._references())
+        if wrong:
+            lines = "\n".join(f"- {w}" for w in wrong)
+            reply = (
+                f"Nothing was marked:\n{lines}\nMark every fact listed beside {said}, each kept "
+                "or changed with a line on why, and send them all again."
+            )
+            return Judged("mark_facts", "failed", reply, "not_marked")
+        n = self.session.requests
+        old = {one.name: one for one in listed}
+        changed = []
+        for mark in found:
+            if mark.args is None:
+                continue
+            shape: dict[str, Any] = {
+                k: str(mark.args.get(k) or "").strip() for k in ("box", "way_in", "held_by")
+            }
+            if facts.fixed_of(mark.args.get("fixed")):
+                shape["fixed"] = True
+            if facts.loose_of(mark.args.get("loose")):
+                shape["loose"] = True
+            text = str(mark.args["text"]).strip()
+            now: dict[str, Any] | None = None
+            if not text and not any(shape.values()):
+                del self.state.facts[mark.name]
+            else:
+                now = asdict(facts.Fact(mark.name, text, source, n, **shape))
+                self.state.facts[mark.name] = now
+            row = {
+                "name": mark.name,
+                "was": asdict(old[mark.name]),
+                "now": now,
+                "by": by,
+                "against": said,
+                "why": mark.why,
+                "at_call": n,
+            }
+            self.state.facts_changed.append(row)
+            changed.append(mark.name)
+        self.state.facts_beside = None
+        self.session._record(
+            "facts_marked",
+            against=said,
+            by=by,
+            at_call=n,
+            marks={m.name: {"is": m.said, "why": m.why} for m in found},
+        )
+        self._facts_written()
+        self.save()
+        kept = len(found) - len(changed)
+        reply = f"Marked against {said}: {kept} kept, {len(changed)} changed."
+        if changed:
+            named = ", ".join(f"`{name}`" for name in changed)
+            reply += (
+                f" {named} {'is' if len(changed) == 1 else 'are'} rewritten: every later message "
+                f"and compaction's note gives the new words, and `{facts.RECORD}` keeps the old "
+                "ones and who changed them."
+            )
+        detail = {"kept": kept, "changed": changed}
+        return Judged("mark_facts", "ok", reply, detail=detail)
+
+    def _facts_written(self) -> None:
+        paths.write_inside(
+            self.work, facts.RECORD, facts.record(self._facts(), self.state.facts_changed)
         )
 
     def _go_on(self) -> None:
@@ -1054,6 +1189,7 @@ class Run:
         self._relay("send_back", by, note.strip(), message)
         told = [self._reopen(by, True)] if reopen_needs else []
         told.append(self._set_beside())
+        told.append(self._facts_beside([("send_back", by)]))
         self._start_round()
         self.save()
         return [t for t in told if t]
@@ -1373,6 +1509,11 @@ class Run:
         standing = faults.standing_said(self._faults())
         if standing:
             self.session.say(standing)
+        listed = self._facts_listed()
+        if listed:
+            # The facts still to be marked against a person's word, listed beside it again.
+            said = str((self.state.facts_beside or {}).get("whence"))
+            self.session.say(facts.beside(listed, said))
         for said in after or []:
             self.session.say(said)
         self.save()
@@ -1935,9 +2076,13 @@ class Run:
         there to stop a loop, never to end a run that has a design to show: a leg-joint eval was
         locked at intake, its plan `ask` refused for no breakdown and `breakdown` refused as
         ask-only, and it ended `blocked` with a design it said was complete."""
+        # The facts listed beside a person's word, which `needs` and `done` wait on, are marked
+        # under the lock too (mqucifer/print-shop#314).
+        marking = ("mark_facts",) if self.state.facts_beside else ()
         if self.state.stage == "intake":
-            return ("questions", "breakdown", "needs"), "at intake"
-        return ("needs", "done") if self.state.reopened else ("done",), "in the rounds"
+            return ("questions", "breakdown", "needs", *marking), "at intake"
+        rounds = ("needs", "done") if self.state.reopened else ("done",)
+        return (*rounds, *marking), "in the rounds"
 
     def _building(self, name: Any) -> tuple[str, dict[str, Any]] | None:
         """What a reply leads with when the run is building at intake: once it has read a part
@@ -1998,6 +2143,9 @@ class Run:
         parts = [
             # Led by the needs a note reopened, until `needs` is taken (mqucifer/print-shop#79).
             stuck.REOPENED if self.state.reopened else "",
+            # Led by the facts listed beside a person's word, until they're marked
+            # (mqucifer/print-shop#314).
+            facts.UNMARKED if self._facts_listed() else "",
             self.failing_said() or NOTHING_FAILING,
             # The end checks' send-back, until they pass (mqucifer/print-shop#150).
             str((self.state.end_sent or {}).get("note") or ""),
@@ -2093,7 +2241,7 @@ class Run:
                 "whole into every compaction's note and every new conversation. Set "
                 f"`{name}` again to change it, or with an empty `text` to remove it."
             )
-        paths.write_inside(self.work, facts.RECORD, facts.record(self._facts()))
+        self._facts_written()
         self.save()
         return Judged("fact", "ok", reply, detail={"fact": name, "facts": len(self.state.facts)})
 
@@ -2758,6 +2906,9 @@ class Run:
             )
             return Judged("needs", "failed", reply, "needs_settled")
         trying = args.get("try") is True
+        unmarked = None if trying else self._facts_unmarked("needs")
+        if unmarked is not None:
+            return unmarked
         form = self._form()
         if form is not None and not trying and not self.state.breakdowns:
             reply = (
@@ -3118,6 +3269,9 @@ class Run:
         if not self.state.needs:
             reply = "There are no needs yet, so there's nothing to check it against: `needs` first."
             return Judged("done", "failed", reply, "no_needs")
+        unmarked = self._facts_unmarked("done")
+        if unmarked is not None:
+            return unmarked
         open_stop = self._open_stop()
         if open_stop is not None:
             reply = (

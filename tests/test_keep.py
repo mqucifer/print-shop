@@ -402,9 +402,11 @@ def test_every_resume_gives_the_facts_whole(tmp_path: Path) -> None:
     assert facts.HEADING not in json.dumps(run.session.messages), "nothing to give yet"
     run.fact({"name": "fan-airflow", "text": "Air goes in at -z.", "from": "call 4"})
     run.resume("Go on.", False, "ops")
-    gave = [m["content"] for m in run.session.messages if m["role"] == "user"][-2:]
+    gave = [m["content"] for m in run.session.messages if m["role"] == "user"][-3:]
     assert gave[0].startswith(facts.HEADING) and "fan-airflow" in gave[0]
     assert gave[1].startswith("A note from ops")
+    # Then the facts beside the note, to be marked against it (mqucifer/print-shop#314).
+    assert gave[2].startswith("The note came while you hold these facts.")
 
 
 def test_the_start_says_what_a_fact_is_for_in_two_lines(tmp_path: Path) -> None:
