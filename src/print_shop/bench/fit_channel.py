@@ -296,10 +296,13 @@ def _end(
         )
     )
     if not faces:
+        opens = "down" if float(gap["toward"] @ up) < -1 + UP else "sideways"
+        upward = ("-" if side[0] == "+" else "+") + side[1]
         wrong.append(
-            f"in {name}, laid on its {side} face, its open side is toward ({own}) of {name}'s "
-            f"own file, where up is ({_said(-_way(side))}): it needs support. A channel prints "
-            "without supports only with its open side up"
+            f"in {name}, it needs support: it opens {opens} as {name} is laid on its {side} "
+            f"face. Lay {name} so the channel opens up, or open it toward {name}'s {upward}. "
+            f"Its open side is toward ({own}) of {name}'s own file, and up is "
+            f"({_said(-_way(side))})"
         )
     return end
 

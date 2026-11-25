@@ -3493,8 +3493,9 @@ def test_fit_bed_reads_two_halves_joined_by_a_bolt_in_a_drop_in_channel(bench: A
 @pytest.mark.parametrize(
     ("name", "said"),
     [
-        ("down", "in right, laid on its +z face, its open side is toward (0, 0, 1) of right's own "
-                 "file, where up is (0, 0, -1): it needs support"),
+        ("down", "in right, it needs support: it opens down as right is laid on its +z face. Lay "
+                 "right so the channel opens up, or open it toward right's -z. Its open side is "
+                 "toward (0, 0, 1) of right's own file, and up is (0, 0, -1)"),
         ("narrow", "in right, the washer m5-washer under the nut sits on 37.7 mm² of the nut's "
                    "wall at x=28, of its ring's 54.8 mm², and 40.6 mm² less the channel's cut: "
                    "the wall is too narrow for it"),
