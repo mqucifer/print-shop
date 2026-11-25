@@ -11,6 +11,12 @@ points inside each footprint, and a point is open where no ray meets the frame. 
 pieces are, the narrowest band of frame between two of them is the leading as a person sees it,
 and rays along the line across it read it again.
 
+A **stepped pane**, a flush pane's raised face on its body (mqucifer/print-shop#287), shows
+glass only where it's that all through: its raised face. The ring of play round the face is
+open, but what shows through it is the body under air, not glass level with the lead, so
+neither method counts it: the first takes what the pane is at every height, the second opens
+only a ray that crosses the pane's whole height. Its share is of its whole footprint.
+
 **Thickness** (`thickness PANE...`): each pane's thickness straight through. The first method is
 the fine mesh's height; the second, rays straight up through the pane from a grid, each reading
 the material it crosses. A pane thicker in one place than the rays find reads as a disagreement,
@@ -80,6 +86,39 @@ def _footprint(pane: Part) -> Any:
     return shapely.unary_union(cuts)
 
 
+def _steps(pane: Part) -> list[float]:
+    """The heights a stepped pane's sections change at: each with level faces strictly
+    between its bottom and top. None for a flat pane, which is one section all through."""
+    mesh = pane.fine()
+    low, high = (float(v) for v in np.asarray(mesh.bounds)[:, 2])
+    return [
+        f["z"] for f in flat_heights(mesh, least=0.01) if low + LEVEL < f["z"] < high - LEVEL
+    ]
+
+
+def _shows(pane: Part, steps: list[float]) -> Any:
+    """What of a stepped pane shows as glass straight through: what it is at every height, its
+    sections between each two steps as one. A flush pane's raised face, which fills its
+    opening to the play round it (mqucifer/print-shop#287): through that ring, its body shows
+    under air, not glass level with the lead."""
+    mesh = pane.fine()
+    low, high = (float(v) for v in np.asarray(mesh.bounds)[:, 2])
+    edges = [low, *sorted(steps), high]
+    built = pane.manifold()
+    cuts = [slice_at(built, (a + b) / 2.0) for a, b in zip(edges, edges[1:], strict=False)]
+    found = cuts[0]
+    for cut in cuts[1:]:
+        found = found.intersection(cut)
+    return found
+
+
+def _through(pane: Any, x: float, y: float, low: float, high: float) -> bool:
+    """Whether a ray straight up at (x, y) crosses the pane's whole height in glass."""
+    met = sorted(float(h.position[2]) for h in pane.ray_cast((x, y, low - 1.0), (x, y, high + 1.0)))
+    crossed = sum(met[k + 1] - met[k] for k in range(0, len(met) - 1, 2))
+    return crossed >= high - low - 2 * LEVEL
+
+
 def grid(region: Any, count: int) -> tuple[np.ndarray, float]:
     """Points inside a region, about `count` of them, on a square grid offset by half a step."""
     x0, y0, x1, y1 = region.bounds
@@ -106,15 +145,27 @@ def visible(pane: Any, cover: Any) -> tuple[Any, float]:
 
 
 def visible_by_rays(
-    pane: Any, region: Any, built: list[Any], low: float, high: float, count: int
+    pane: Any,
+    region: Any,
+    built: list[Any],
+    low: float,
+    high: float,
+    count: int,
+    stepped: tuple[Any, float, float] | None = None,
 ) -> tuple[float, int, float]:
     """The same share a different way: rays straight up through the frame from a grid in the
     pane, open where none meets it. Its share, how many rays, and how far a grid that fine can be
-    from the area, in percentage points."""
+    from the area, in percentage points. With `stepped`, a stepped pane's own mesh and its
+    bottom and top: a ray is open only where it crosses the pane's whole height in glass too."""
     points, step = grid(pane, count)
     if not len(points):
         raise NoAnswer("a pane is too small for a ray to land in")
-    clear = sum(1 for x, y in points if not _blocked(built, float(x), float(y), low, high))
+    clear = sum(
+        1
+        for x, y in points
+        if not _blocked(built, float(x), float(y), low, high)
+        and (stepped is None or _through(stepped[0], float(x), float(y), stepped[1], stepped[2]))
+    )
     edges = float(pane.boundary.length) + float(region.boundary.length)
     band = max(FLOOR_PCT, 100.0 * EDGE_SHARE * edges * step / float(pane.area))
     return 100.0 * clear / len(points), len(points), band
@@ -147,12 +198,30 @@ def run_light(args: Any, report: Report) -> None:
     rows: list[dict[str, Any]] = []
     differs: list[str] = []
     opened: list[tuple[str, Any]] = []
+    stepped_files: list[str] = []
+    # Each stepped pane's mesh and heights, and what of its footprint isn't its raised face.
+    rings: list[tuple[tuple[Any, float, float], Any]] = []
     for name, pane in panes:
         foot = _footprint(pane)
         if foot.is_empty or foot.area <= 0:
             raise NoAnswer(f"{name} has no section to read: is it a solid?")
-        open_region, pct = visible(foot, cover)
-        pct_rays, rays, band = visible_by_rays(foot, open_region, built, low, high, args.rays)
+        steps = _steps(pane)
+        if steps:
+            # A stepped pane: the glass that shows is what it is all through, and it's said of
+            # its whole footprint.
+            shows = _shows(pane, steps)
+            open_region = shows.difference(cover)
+            pct = 100.0 * float(open_region.area) / float(foot.area)
+            bottom, top = (float(v) for v in np.asarray(pane.fine().bounds)[:, 2])
+            stepped = (pane.manifold(), bottom, top)
+            stepped_files.append(name)
+            rings.append((stepped, foot.difference(shows)))
+        else:
+            open_region, pct = visible(foot, cover)
+            stepped = None
+        pct_rays, rays, band = visible_by_rays(
+            foot, open_region, built, low, high, args.rays, stepped
+        )
         x0, y0, x1, y1 = foot.bounds
         row = {
             "file": name,
@@ -183,6 +252,13 @@ def run_light(args: Any, report: Report) -> None:
             )
         opened += [(name, piece) for piece in _pieces(open_region)]
     report.numbers["panes"] = rows
+    if stepped_files:
+        report.numbers["stepped"] = stepped_files
+        report.line(
+            f"{', '.join(stepped_files)}: stepped, a flush pane's raised face on its body, so "
+            "the glass that shows is the raised face, what the pane is all through, and the "
+            "ring of play round it isn't counted; by rays, where a ray crosses the whole pane"
+        )
     least = min(rows, key=lambda r: r["open_pct"])
     report.fact(
         "least_open_pct",
@@ -194,7 +270,7 @@ def run_light(args: Any, report: Report) -> None:
         "rays straight up through the frame from a grid in each pane's footprint: "
         + "; ".join(f"{r['file']} {r['open_pct_rays']:.1f}% of {r['rays']}" for r in rows)
     )
-    _narrowest_band(opened, built, low, high, report, differs)
+    _narrowest_band(opened, built, low, high, report, differs, rings)
     problems = []
     if args.min_open is not None:
         short = [r for r in rows if under(r["open_pct"], args.min_open)]
@@ -230,8 +306,11 @@ def _narrowest_band(
     high: float,
     report: Report,
     differs: list[str],
+    rings: list[tuple[tuple[Any, float, float], Any]] | None = None,
 ) -> None:
-    """The narrowest frame between two open pieces, as a person sees the leading."""
+    """The narrowest frame between two open pieces, as a person sees the leading. A ray in
+    the ring round a stepped pane's raised face is covered too, where it crosses less than the
+    pane's whole height: that ring isn't the glass that shows."""
     if len(opened) < 2:
         report.note("fewer than two open pieces, so there's no band of frame between them")
         report.numbers["narrowest_band_mm"] = None
@@ -255,7 +334,17 @@ def _narrowest_band(
     # Rays straight up along the line across it: the length of it the frame covers.
     steps = max(2, int(np.ceil(gap / BAND_STEP)) + 1)
     line = np.linspace([near.x, near.y], [far.x, far.y], steps)
-    covered = sum(1 for x, y in line[1:-1] if _blocked(built, float(x), float(y), low, high))
+
+    def covers(x: float, y: float) -> bool:
+        if _blocked(built, x, y, low, high):
+            return True
+        return any(
+            ring.buffer(1e-6).contains(shapely.Point(x, y))
+            and not _through(mesh, x, y, bottom, top)
+            for (mesh, bottom, top), ring in rings or []
+        )
+
+    covered = sum(1 for x, y in line[1:-1] if covers(float(x), float(y)))
     across = gap * covered / max(1, steps - 1)
     report.second(
         f"rays straight up along the line across the narrowest band, every {gap / (steps - 1):.3f}"

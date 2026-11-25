@@ -61,9 +61,10 @@ from typing import Any
 
 import numpy as np
 import shapely
+import shapely.affinity
 from shapely.geometry.polygon import orient
 
-from . import piecemap
+from . import colours, piecemap
 from .limits import under
 from .piecemap import Map, Piece
 from .pieces_check import gaps
@@ -448,6 +449,69 @@ def heights(thickness: float, pane: float, layer: float) -> dict[str, float]:
     }
 
 
+def flush_heights(
+    thickness: float,
+    pane: float,
+    layer: float,
+    lip_thick: float | None = None,
+    body: float | None = None,
+) -> dict[str, float]:
+    """A flush pane's heights (mqucifer/print-shop#287): its body in the pocket, on the lip
+    the frame prints on the bed, and its raised face down through the opening to the bed, so
+    the pane's face is the lead's. The lip is `lip_thick`, on a layer line, and the body
+    `body`, each two layers or more; unless given, the lip is a flat pane's lower lip and the
+    body is `pane`. The pocket's top is the first layer line that leaves the body `ROOM` or
+    more, and the pause comes after the layer that tops out there."""
+    if not (thickness > 0 and pane > 0 and layer > 0):
+        raise NoAnswer("--thickness, --pane and --layer are each over 0, in mm")
+    two = round(2.0 * layer, 6)
+    least_lip = max(LEAST_LIP_THICK, two)
+    if lip_thick is None:
+        lip_thick = math.floor(round((thickness - pane - ROOM) / 2.0 / layer, 6)) * layer
+    body = pane if body is None else body
+    lip_thick, body = round(lip_thick, 6), round(body, 6)
+    if under(body, two):
+        raise NoAnswer(
+            f"--body {body:g} is under two layers, {two:g} mm: a pane's body that thin is "
+            f"held by nothing. Give --body {two:g} or more"
+        )
+    if under(lip_thick, least_lip):
+        raise NoAnswer(
+            f"the lip under the panes, {lip_thick:g} mm, is under two layers, {least_lip:g} "
+            f"mm: give --lip-thick {least_lip:g} or more"
+        )
+    layers = lip_thick / layer
+    if abs(layers - round(layers)) > 1e-6:
+        low = math.floor(layers) * layer
+        raise NoAnswer(
+            f"--lip-thick {lip_thick:g} isn't on a layer line of {layer:g} mm: the pocket's "
+            f"floor is printed on one, and the raised face is the lip's height. Give "
+            f"--lip-thick {max(low, least_lip):g} or {math.ceil(layers) * layer:g}"
+        )
+    floor = round(round(layers) * layer, 6)
+    top = round(math.ceil(round((floor + body + ROOM) / layer, 6)) * layer, 6)
+    if thickness - top < LEAST_LIP_THICK - 1e-9:
+        need = math.ceil(round((top + LEAST_LIP_THICK) / layer, 6)) * layer
+        raise NoAnswer(
+            f"a frame {thickness:g} mm thick has no room over a {body:g} mm body on a lip of "
+            f"{floor:g} mm: the lip over it would be {thickness - top:g} mm, where it's "
+            f"{LEAST_LIP_THICK:g} or more. Give --thickness {need:g} or more, or a thinner "
+            "--body or --lip-thick"
+        )
+    return {
+        "pocket_floor_z": floor,
+        "pocket_top_z": top,
+        "pane_top_z": round(floor + body, 6),
+        "room_over_pane_mm": round(top - floor - body, 6),
+        "lower_lip_mm": floor,
+        "upper_lip_mm": round(thickness - top, 6),
+        "pocket_z": round(floor + body / 2.0, 6),
+        "body_mm": body,
+        "face_mm": floor,
+        "pause_after_layer": int(round(top / layer)),
+    }
+
+
 def _inset(shape: Any, by: float) -> list[Any]:
     return piecemap.polygons(shape.buffer(-by, join_style="mitre", mitre_limit=5.0))
 
@@ -735,6 +799,7 @@ def plan(
     play: float,
     fit: float,
     min_visible: float | None = None,
+    face_play: float | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Each piece's pane, pocket and opening in 2D, with the lip it takes and its curves as
     they'll be built, and what's wrong with any that can't be. The pocket is the pane and the
@@ -751,7 +816,12 @@ def plan(
     `capture`'s own function: the full one if the pane keeps that share visible with it, else
     the widest that keeps it, never under the least. A piece that can't keep it at the least
     is refused. With every piece at the full lip, a long curved piece came out 43% visible
-    where the request asked 60, and `capture` failed it."""
+    where the request asked 60, and `capture` failed it.
+
+    With `face_play`, each pane is flush (mqucifer/print-shop#287): it has a raised face, its
+    opening moved in by that play (`face_curves`), and a piece is refused where that's no one
+    face, or where the face, as its body moves in its pocket, would reach the lead
+    (`face_reach`): named with the place and the play that keeps it off."""
     full, least = lips
     rows, wrong = [], []
     for piece in sorted(found.pieces, key=lambda p: p.id):
@@ -835,10 +905,32 @@ def plan(
                     )
                 except NoAnswer as exc:
                     stops.append(f"{after}can't be built: {exc}")
+        face = None
+        if not stops and face_play is not None and curves is not None:
+            try:
+                face = face_curves(judged, curves, face_play)
+            except NoAnswer as exc:
+                stops.append(f"{after}has no raised face: {exc}")
+            else:
+                over, at, moves, room = face_reach(curves, face["face_2d"], play)
+                face["reach_mm"] = over
+                if over > TOUCH:
+                    # A face's room that way grows with its play, as its body's moves with
+                    # the body's: at a corner both over the sine of half the corner.
+                    need = face_play * moves / room if room > 0 else face_play + over
+                    need = math.ceil((need - CLOSE) * 100.0) / 100.0
+                    stops.append(
+                        f"{after}has a raised face that would touch the lead at "
+                        f"{piecemap.said_at(at)}: its body moves {moves:.3f} mm that way in its "
+                        f"pocket, and the face has {room:.3f} mm to its opening's wall there. "
+                        f"Give --face-play {need:g} or more"
+                    )
         if stops:
             wrong.append(f"piece {piece.id}, round {where}, " + ". And ".join(stops))
             continue
-        rows.append({"piece": piece, "lip_mm": lip, "pocket": pocket, "curves": curves})
+        rows.append(
+            {"piece": piece, "lip_mm": lip, "pocket": pocket, "curves": curves, "face": face}
+        )
     return rows, wrong
 
 
@@ -1270,6 +1362,398 @@ def _curves(
     }
 
 
+#: The ways round a pane's raised face is moved when its reach is read: every 5 degrees.
+WAYS = 72
+#: A raised face reaches the lead where its body moves this much further toward it, in mm,
+#: than the face has room: what a pane and its own pocket may differ by, as `play_off`.
+TOUCH = 4.0 * CLOSE
+#: A tip a raised face stops short of, where a nozzle can't print it, is said where what's
+#: left of the opening there is this big, in mm², and reaches `TIP` from the face.
+TIP_MM2 = 0.01
+
+
+def face_curves(piece: Piece, curves: dict[str, Any], face_play: float) -> dict[str, Any]:
+    """A flush pane's raised face (mqucifer/print-shop#287): its opening's lines and arcs moved
+    in by `face_play`, as a pane is its pocket's moved in by the play. Where a nozzle can't
+    print that, a tip under its width at a sharp corner, it's Shapely's inset cut back and
+    rounded by half a nozzle, as a pane is, moved in by twice `CLOSE` and fitted again within
+    it, so it's never nearer the lead than its play: so no tip of it
+    is thinner than a nozzle prints, which a slicer would print a line wide and into the lead.
+    Each tip it stops short of is given, with where. Refused where what's left isn't one face
+    `LEAST_ACROSS` wide."""
+    opening = curves["opening"]
+    opening_2d = _ring_polygon(opening)
+    inset = [
+        part
+        for part in _inset(opening_2d, face_play)
+        if not under(piecemap.widest(part, 0.02)[0], LEAST_ACROSS)
+    ]
+    where = piecemap.said_at(shapely.get_coordinates(opening_2d.representative_point())[0])
+    if len(inset) != 1:
+        raise NoAnswer(
+            f"its opening, {piecemap.widest(opening_2d)[0]:.2f} mm at its widest, leaves "
+            f"{'no' if not inset else len(inset)} raised face(s) {LEAST_ACROSS:g} mm wide once "
+            f"{face_play:g} mm of play is taken all round, round {where}, where it takes one. "
+            "A narrower --lip, or --face-play, leaves it more"
+        )
+    face: list[Any] = [offset_ring(ring, face_play) for ring in opening]
+    plain = _same(face, inset[0], 0.001 * inset[0].area + 0.01)
+    if plain:
+        sharp = _ring_polygon(face)
+        printed = piecemap.polygons(sharp.buffer(-NOZZLE / 2.0).buffer(NOZZLE / 2.0))
+        plain = len(printed) == 1 and (
+            sharp.boundary.hausdorff_distance(printed[0].boundary) <= TIP
+        )
+    if not plain:
+        made = pane_of(opening_2d, face_play)
+        if made is None:
+            raise NoAnswer(
+                f"its raised face, once a nozzle's tips are cut back from it, isn't one face "
+                f"{LEAST_ACROSS:g} mm wide, round {where}"
+            )
+        # Fitted within `CLOSE` of its points, and so up to twice that of the sides between
+        # them: moved in by that first, so no face is nearer the lead than its play.
+        inner = piecemap.polygons(made.buffer(-2.0 * CLOSE, join_style="mitre"))
+        face = _close(inner[0] if len(inner) == 1 else made)
+    face_2d = _ring_polygon(face)
+    # A tip cut back: what of the inset the face leaves, where it reaches further from the
+    # face than a corner's rounding by half a nozzle moves it, `TIP`.
+    tips = []
+    for part in piecemap.polygons(inset[0].difference(face_2d.buffer(CLOSE))):
+        far = shapely.get_coordinates(part.exterior)
+        reach = np.asarray(shapely.distance(shapely.points(far), face_2d))
+        if part.area >= TIP_MM2 and float(reach.max()) > TIP:
+            tips.append(
+                {"at": piecemap.xy(far[int(reach.argmax())]), "mm": round(float(reach.max()), 3)}
+            )
+    return {"face": face, "face_2d": face_2d, "plain": plain, "tips": tips}
+
+
+def _free(inner: Any, outer: Any, way: np.ndarray, most: float) -> float:
+    """How far `inner` moves along `way` before it leaves `outer`, to a micron or so: up to
+    `most`."""
+    if outer.contains(shapely.affinity.translate(inner, *(way * most))):
+        return most
+    low, high = 0.0, most
+    while high - low > 1e-4:
+        middle = (low + high) / 2.0
+        if outer.contains(shapely.affinity.translate(inner, *(way * middle))):
+            low = middle
+        else:
+            high = middle
+    return low
+
+
+def face_reach(
+    curves: dict[str, Any], face_2d: Any, play: float
+) -> tuple[float, np.ndarray, float, float]:
+    """How far a flush pane's raised face reaches past its opening's wall, as its body moves
+    in its pocket: the most, of every way round, that the body moves further than the face has
+    room, with the place on the opening's wall it reaches and the two figures there.
+
+    A pane lies loose in its pocket, its play round it, and can be anywhere in it: pushed one
+    way, its raised face goes that way too. Where the face has less room than the body that
+    way, it meets the lead first, and the frame's edge takes the pane's weight: so a face with
+    less play than its body's, at a corner most of all, where a body's sharp corner moves the
+    play over the sine of half the corner into it."""
+    body = curves["pane_2d"].simplify(CLOSE / 6.0)
+    pocket = curves["pocket_2d"].simplify(CLOSE / 6.0)
+    opening = curves["opening_2d"].simplify(CLOSE / 6.0)
+    face = face_2d.simplify(CLOSE / 6.0)
+    shapely.prepare(pocket)
+    shapely.prepare(opening)
+    most = 6.0 * play + 1.0
+    worst = (-math.inf, np.zeros(2), 0.0, 0.0)
+    for k in range(WAYS):
+        turn = 2.0 * math.pi * k / WAYS
+        way = np.array([math.cos(turn), math.sin(turn)])
+        moves = _free(body, pocket, way, most)
+        room = _free(face, opening, way, moves + 0.1)
+        if moves - room > worst[0]:
+            there = shapely.affinity.translate(face, *(way * room))
+            met = shapely.get_coordinates(shapely.shortest_line(there.boundary, opening.boundary))
+            worst = (moves - room, np.asarray(met[1]), moves, room)
+    return worst
+
+
+#: A raised face read from the files may be this far nearer the lead than its play, in mm:
+#: the mesh's chords on a curve, on the face and on the frame. A face is never nearer than its
+#: play as built.
+CHORDS = 2.0 * 0.002
+#: A body's edge read from the files may be this far further under its opening than the lip
+#: less the play: the chords, and what a pane and its own pocket may differ by.
+READ_OFF = CHORDS + TOUCH
+
+
+def flush_read(
+    frame_file: Path, pane_files: dict[str, dict[str, Any]], z: dict[str, float],
+    face_play: float, layer: float,
+) -> dict[str, Any]:  # fmt: skip
+    """A flush build read back from the files it wrote, by their meshes, with no curve the
+    build made (mqucifer/print-shop#287): each pane's face against the frame's, each raised
+    face against its opening at the lip's middle, each body against the lip over it, the
+    body's underside on the lip, and each laid file for anything in the air."""
+    from .shapes import flat_heights, load, slice_at
+
+    frame = load(str(frame_file))
+    frame_low = float(frame.fine().bounds[0][2])
+    lip_mid = z["pocket_floor_z"] / 2.0
+    lead_low = slice_at(frame.manifold(), lip_mid)
+    lead_high = slice_at(frame.manifold(), (z["pocket_top_z"] + float(frame.fine().bounds[1][2]))
+                         / 2.0)  # fmt: skip
+    level, faces, bodies, laid_air = [], [], [], []
+    least_face: tuple[float, Any] = (math.inf, None)
+    least_lip: tuple[float, Any] = (math.inf, None)
+    face_in_lead = 0.0
+    seated = []
+    for row in pane_files.values():
+        pane = load(row["file"])
+        low = float(pane.fine().bounds[0][2])
+        level.append(low - frame_low)
+        face = slice_at(pane.manifold(), lip_mid)
+        body = slice_at(pane.manifold(), z["pocket_z"])
+        face_in_lead += float(face.intersection(lead_low).area)
+        for part in piecemap.polygons(face):
+            faces.append(part)
+            ring = shapely.points(_ring_points(part.exterior, 0.05))
+            gaps = np.asarray(shapely.distance(ring, lead_low))
+            k = int(gaps.argmin())
+            if gaps[k] < least_face[0]:
+                least_face = (float(gaps[k]), shapely.get_coordinates(ring[k])[0])
+        for part in piecemap.polygons(body):
+            bodies.append(part)
+            # The lip over its edge: from each point of the body's edge to the nearest open
+            # place over it, the lead's section at the lip less nothing.
+            above = part.difference(lead_high)
+            if not above.is_empty:
+                ring = shapely.points(_ring_points(part.exterior, 0.05))
+                over = np.asarray(shapely.distance(ring, above))
+                k = int(over.argmin())
+                if over[k] < least_lip[0]:
+                    least_lip = (float(over[k]), shapely.get_coordinates(ring[k])[0])
+        # The body's underside, facing down at the lip's top: the body less its raised face.
+        under_lip = sum(
+            f["down"] for f in flat_heights(pane.fine(), 0.01)
+            if abs(f["z"] - z["pocket_floor_z"]) < 2e-3
+        )  # fmt: skip
+        seated.append((under_lip, float(body.area - face.area)))
+        laid = load(row["laid"])
+        laid_low = float(laid.fine().bounds[0][2])
+        laid_air.append(
+            sum(f["down"] for f in flat_heights(laid.fine(), 0.01) if f["z"] > laid_low + 2e-3)
+        )
+    return {
+        "level_mm": max(level, key=abs),
+        "face_play_least_mm": least_face[0],
+        "face_play_least_at": piecemap.xy(least_face[1]) if least_face[1] is not None else None,
+        "face_in_lead_mm2": face_in_lead,
+        "faces": len(faces),
+        "bodies": len(bodies),
+        "lip_over_body_least_mm": least_lip[0],
+        "lip_over_body_at": piecemap.xy(least_lip[1]) if least_lip[1] is not None else None,
+        "seated": seated,
+        "laid_in_air_mm2": max(laid_air),
+        "layer": layer,
+        "face_play": face_play,
+    }
+
+
+def say_flush(
+    rows: list[dict[str, Any]], z: dict[str, float], face_play: float, args: Any,
+    pane_files: dict[str, dict[str, Any]], report: Report,
+) -> None:  # fmt: skip
+    """What a flush build is, in its reply: the raised face and the body, the pause, the
+    files to print, and where a face stops short of a tip of its opening."""
+    report.numbers["flush"] = True
+    report.fact(
+        "face_mm", z["face_mm"], "mm",
+        f"each pane's raised face, from the bed to its body: the lip under the panes, so the "
+        f"pane's face and the lead's are one; {face_play:g} mm smaller than its opening all "
+        "round",
+    )  # fmt: skip
+    report.fact(
+        "body_mm", z["body_mm"], "mm",
+        f"each pane's body, on the lip at z={z['pocket_floor_z']:g} and under the lip printed "
+        "over it after the pause",
+    )  # fmt: skip
+    report.fact("face_play_mm", face_play, "mm", "the gap round each raised face, in its opening")
+    report.fact(
+        "pause_after_layer", z["pause_after_layer"],
+        how=f"the layer that tops out at z={z['pocket_top_z']:g}, the pocket's top, "
+        f"{z['room_over_pane_mm']:g} mm over the body, with every layer {args.layer:g} mm",
+    )  # fmt: skip
+    reach = max(float(r["face"]["reach_mm"]) for r in rows)
+    report.fact(
+        "face_reach_mm", reach, "mm",
+        "the furthest a raised face would reach past its opening's wall, of every way its body "
+        "can be pushed in its pocket, read every 5 degrees round each pane: at 0 or under it "
+        f"stays off the lead, and over {TOUCH:g} mm, what a pane and its pocket may differ by, "
+        "the build is refused",
+    )  # fmt: skip
+    report.line(
+        "to print the panes, the laid files, each body down and its raised face up: "
+        + ", ".join(v["laid"] for v in pane_files.values())
+        + ". The other pane files are where each pane sits, for the checks"
+    )
+    tips = [(r["piece"].id, tip) for r in rows for tip in r["face"]["tips"]]
+    report.numbers["face_tips"] = [{"piece": pid, **tip} for pid, tip in tips]
+    if tips:
+        said = ", ".join(
+            f"piece {pid} at {piecemap.said_at(t['at'])}, {t['mm']:g} mm short"
+            for pid, t in tips[:8]
+        )
+        report.note(
+            f"{len(tips)} raised face(s) stop short of a sharp corner of their opening, where "
+            f"the face's tip would be under a nozzle's width, {NOZZLE:g} mm, and a slicer "
+            f"would print it a line wide, into the lead: {said}"
+            + (f", and {len(tips) - 8} more" if len(tips) > 8 else "")
+            + f". There the pane's body shows, {z['face_mm']:g} mm down"
+        )
+
+
+def flush_checks(
+    read: dict[str, Any], rows: list[dict[str, Any]], z: dict[str, float], args: Any,
+    report: Report,
+) -> list[str]:  # fmt: skip
+    """A flush build's readings from its files held to what it was built to, each said: what
+    differs, for `DISAGREE`."""
+    differs = []
+    face_play = read["face_play"]
+    report.numbers["flush_read"] = {k: v for k, v in read.items() if k != "seated"}
+    report.second(
+        f"the files' meshes: each pane's lowest point {read['level_mm']:+.4f} mm from the "
+        f"frame's, its face against the lead's, within a layer, {args.layer:g} mm, as asked; "
+        f"each raised face, cut at z={z['pocket_floor_z'] / 2.0:g}, at least "
+        f"{read['face_play_least_mm']:.4f} mm from the lead at points round it, for a play of "
+        f"{face_play:g}; each body's edge under at least {read['lip_over_body_least_mm']:.4f} "
+        f"mm of the lip over it; and {read['laid_in_air_mm2']:.3f} mm² of a laid pane facing "
+        "down over the bed"
+    )
+    if abs(read["level_mm"]) > 2e-3:
+        differs.append(
+            f"a pane's face is {read['level_mm']:+.4f} mm from the lead's, read from the files, "
+            "where it was built level"
+        )
+    if read["faces"] != len(rows) or read["bodies"] != len(rows):
+        differs.append(
+            f"the pane files hold {read['faces']} raised face(s) and {read['bodies']} body(ies) "
+            f"at their heights, for {len(rows)} pane(s)"
+        )
+    if read["face_in_lead_mm2"] > 1e-4 or read["face_play_least_mm"] < face_play - CHORDS:
+        differs.append(
+            f"a raised face is {read['face_play_least_mm']:.4f} mm from the lead at "
+            f"{piecemap.said_at(read['face_play_least_at'])}, read from the files, where it "
+            f"was built {face_play:g} mm clear, and {read['face_in_lead_mm2']:.4f} mm² of faces "
+            "lie in the lead"
+        )
+    least_lip = min(float(r["lip_mm"]) for r in rows)
+    if read["lip_over_body_least_mm"] < least_lip - args.play - READ_OFF:
+        differs.append(
+            f"a pane's body is under {read['lip_over_body_least_mm']:.4f} mm of lip at "
+            f"{piecemap.said_at(read['lip_over_body_at'])}, read from the files, where it was "
+            f"built under {least_lip - args.play:g}, the lip less the play"
+        )
+    for under_lip, wanted in read["seated"]:
+        if abs(under_lip - wanted) > 0.01 * wanted + 0.05:
+            differs.append(
+                f"a pane file's bodies face down on the lip over {under_lip:.2f} mm², where "
+                f"they less their raised faces are {wanted:.2f}"
+            )
+    if read["laid_in_air_mm2"] > 0.01:
+        differs.append(
+            f"a laid pane file has {read['laid_in_air_mm2']:.3f} mm² facing down over the "
+            "bed: it was built with nothing in the air"
+        )
+    return differs
+
+
+def flush_section(
+    frame_file: Path, pane_files: dict[str, dict[str, Any]], found: Map,
+    openings: Any, z: dict[str, float], face_play: float, to: Path,
+) -> dict[str, Any]:  # fmt: skip
+    """The section through two flush panes and the lead between them, cut from the files'
+    meshes, as a picture: across the panel at the height of its first piece's middle, from the
+    first opening's far side to the next's near one and a little past, z up as it prints, the
+    bed at the bottom. Where the cut meets one opening only, it's across the frame's edge."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    from .shapes import load, slice_at
+
+    first = min(found.pieces, key=lambda p: p.id)
+    y = float(shapely.get_coordinates(first.shape.representative_point())[0][1])
+    x0, _, x1, _ = found.panel.bounds
+    across = shapely.LineString([(x0 - 50.0, y), (x1 + 50.0, y)]).intersection(openings)
+    spans = sorted(
+        (float(xs.min()), float(xs.max()))
+        for xs in (shapely.get_coordinates(part)[:, 0] for part in shapely.get_parts(across))
+        if len(xs) > 1
+    )
+    if len(spans) >= 2:
+        left, right = spans[0][1] - 3.0, spans[1][0] + 3.0
+    else:
+        left, right = x0 - 4.0, spans[0][0] + 3.0
+    cut: list[tuple[str, Any]] = []
+    for name, colour in [("frame", None), *[(v["file"], c) for c, v in pane_files.items()]]:
+        part = load(str(frame_file) if name == "frame" else name)
+        # Turned a quarter about x, so the plane y = `y` is a level one: (x, -z, y).
+        flat = slice_at(part.manifold().rotate((90.0, 0.0, 0.0)), y)
+        window = shapely.box(left, -10.0, right, 10.0)
+        cut.append((colour or "", shapely.affinity.scale(flat.intersection(window), 1.0, -1.0,
+                                                          origin=(0, 0))))  # fmt: skip
+    top = max(float(c.bounds[3]) for _, c in cut if not c.is_empty)
+    scale, margin = 90.0, 40
+    width = int((right - left) * scale) + 2 * margin
+    size = (width, int((top + 0.6) * scale) + 2 * margin + 110)
+
+    def px(points: Any) -> list[tuple[float, float]]:
+        return [
+            (margin + (x - left) * scale, margin + (top + 0.3 - zz) * scale) for x, zz in points
+        ]
+
+    picture = Image.new("RGB", size, "white")
+    draw = ImageDraw.Draw(picture)
+    font = ImageFont.load_default(size=14)
+    def shade(colour: str) -> tuple[int, ...]:
+        given = found.colours.get(colour, {}).get("rgb")
+        if given:
+            return tuple(int(v) for v in given)
+        try:
+            return colours.rgb(colour)
+        except colours.NotAColour:
+            return (150, 190, 210)
+
+    for colour, shape in cut:
+        for part in piecemap.polygons(shape):
+            if colour:
+                fill = shade(colour)
+                draw.polygon(px(part.exterior.coords), fill=fill, outline=(40, 40, 40))
+            else:
+                draw.polygon(px(part.exterior.coords), fill=(70, 70, 70))
+    bed = px([(left, 0.0), (right, 0.0)])
+    draw.line([bed[0], bed[1]], fill=(200, 40, 40), width=2)
+    pause = px([(left, z["pocket_top_z"]), (right, z["pocket_top_z"])])
+    draw.line([pause[0], pause[1]], fill=(40, 120, 200), width=2)
+    words = [
+        f"across the panel at y = {y:.2f} mm, x from {left:.2f} to {right:.2f}, z up as it "
+        "prints: the red line is the bed, the panel's face, where the lead and each pane's",
+        f"raised face end level. A raised face {z['face_mm']:g} mm tall, {face_play:g} mm clear "
+        f"of its opening; a body {z['body_mm']:g} mm on the lip; the blue line is the pause, "
+        f"after layer {z['pause_after_layer']}, z={z['pocket_top_z']:g}",
+    ]
+    for row, text in enumerate(words):
+        draw.text((12, size[1] - 96 + 20 * row), text, fill=(0, 0, 0), font=font)
+    picture.save(to)
+    return {"file": str(to), "y_mm": round(y, 3), "x_mm": [round(left, 3), round(right, 3)]}
+
+
+def _ring_points(ring: Any, step: float) -> np.ndarray:
+    """Points along a ring, `step` apart."""
+    count = max(8, int(math.ceil(ring.length / step)))
+    shares = np.linspace(0.0, 1.0, count, endpoint=False)
+    points = shapely.line_interpolate_point(ring, shares, normalized=True)
+    return np.asarray(shapely.get_coordinates(points))
+
+
 def _wires(rings: list[list[Arc]]) -> tuple[Any, list[Any]]:
     return _wire(rings[0]), [_wire(ring) for ring in rings[1:]]
 
@@ -1315,7 +1799,25 @@ def run_build(args: Any, report: Report) -> None:
         )
     if not args.fit > 0:
         raise NoAnswer("--fit is how far a curve may be from the map's outline, in mm, over 0")
-    z = heights(args.thickness, args.pane, args.layer)
+    flush = bool(getattr(args, "flush", False))
+    for name in ("face_play", "lip_thick", "body"):
+        if getattr(args, name, None) is not None and not flush:
+            raise NoAnswer(
+                f"--{name.replace('_', '-')} is a flush pane's, and there's no --flush: "
+                "`--flush` gives each pane a raised face level with the lead"
+            )
+    face_play = None
+    if flush:
+        face_play = args.face_play if getattr(args, "face_play", None) is not None else args.play
+        if not face_play > 0:
+            raise NoAnswer("--face-play is the gap round each raised face, in mm, over 0")
+        z = flush_heights(
+            args.thickness, args.pane, args.layer, getattr(args, "lip_thick", None),
+            getattr(args, "body", None),
+        )  # fmt: skip
+    else:
+        z = heights(args.thickness, args.pane, args.layer)
+    body_mm = z.get("body_mm", args.pane)
     border = args.border if args.border is not None else 2.0 * found.lead_mm
     if not border > 0:
         raise NoAnswer("--border is the frame round the panel's edge, in mm, over 0")
@@ -1327,7 +1829,7 @@ def run_build(args: Any, report: Report) -> None:
     seam = (
         seam_plan(found, args.map, args, z) if getattr(args, "seam", None) else None
     )
-    rows, wrong = plan(found, (full, least), args.play, args.fit, share)
+    rows, wrong = plan(found, (full, least), args.play, args.fit, share, face_play)
     report.numbers["unbuildable"] = wrong
     if wrong:
         for line in wrong[:12]:
@@ -1422,8 +1924,15 @@ def run_build(args: Any, report: Report) -> None:
             mine_open.append(openings[-1])
         narrow_parts += len(curves["opening_more"])
         solid = _prism(pane_outer, pane_inners, z["pocket_floor_z"], z["pane_top_z"])
+        pane_mm3 = curves["pane_2d"].area * body_mm
+        if row["face"] is not None:
+            # The raised face, from the bed up to the body: one solid with it.
+            face_outer, face_inners = _wires(row["face"]["face"])
+            raised = _prism(face_outer, face_inners, 0.0, z["pocket_floor_z"])
+            solid = solid.fuse(raised).clean()
+            pane_mm3 += row["face"]["face_2d"].area * z["pocket_floor_z"]
         panes.setdefault(piece.colour or "pane", []).append(solid)
-        pane_volumes.append((piece.id, float(solid.Volume()), curves["pane_2d"].area * args.pane))
+        pane_volumes.append((piece.id, float(solid.Volume()), pane_mm3))
         pocket_area = _face_area(pocket_outer, pocket_inners)
         open_area = sum(_face_area(*one) for one in mine_open)
         expected -= open_area * (args.thickness - pocket_tall) + pocket_area * pocket_tall
@@ -1446,6 +1955,20 @@ def run_build(args: Any, report: Report) -> None:
         cq.Compound.makeCompound(made).exportStep(str(target))
         report.wrote(str(target))
         pane_files[colour] = {"file": str(target), "panes": len(made)}
+        if flush:
+            # As it prints: turned over, its body on the bed and its raised face up, mirrored
+            # across the panel's middle so it lies where it did.
+            laid = out / f"pane_{_file_word(colour)}-laid.step"
+            mirror = float(found.panel.bounds[1] + found.panel.bounds[3])
+            turned = [
+                one.rotate(cq.Vector(0, 0, 0), cq.Vector(1, 0, 0), 180.0).moved(
+                    cq.Location(cq.Vector(0.0, mirror, z["pane_top_z"]))
+                )
+                for one in made
+            ]
+            cq.Compound.makeCompound(turned).exportStep(str(laid))
+            report.wrote(str(laid))
+            pane_files[colour]["laid"] = str(laid)
     volume = float(frame.Volume())
     report.fact(
         "frame", str(frame_file), how="the lead as one body: pockets, and a lip on both faces"
@@ -1471,6 +1994,8 @@ def run_build(args: Any, report: Report) -> None:
         f"{z['lower_lip_mm']:g} mm thick below and {z['upper_lip_mm']:g} mm above. `pause` "
         "reads the layer",
     )  # fmt: skip
+    if face_play is not None:
+        say_flush(rows, z, face_play, args, pane_files, report)
     lips = sorted({r["lip_mm"] for r in rows})
     narrow = [r for r in rows if r["lip_mm"] < full]
     report.numbers["lips"] = [
@@ -1554,16 +2079,16 @@ def run_build(args: Any, report: Report) -> None:
         "panes": [v["file"] for v in pane_files.values()],
         "pocket_z": z["pocket_z"],
         "clearance": args.play,
-        "pane_thickness": args.pane,
+        "pane_thickness": body_mm,
     }
     report.numbers["glass"] = glass
     q = " ".join(glass["panes"])
     report.line(
         f"to check it: `capture {frame_file} --pocket-z {z['pocket_z']:g} --clearance "
-        f"{args.play:g} --pane-thickness {args.pane:g} --panes {len(rows)}`, `pause {frame_file} "
-        f"--pocket-z {z['pocket_z']:g} --pane-thickness {args.pane:g}`, `light {frame_file} {q}` "
+        f"{args.play:g} --pane-thickness {body_mm:g} --panes {len(rows)}`, `pause {frame_file} "
+        f"--pocket-z {z['pocket_z']:g} --pane-thickness {body_mm:g}`, `light {frame_file} {q}` "
         f"and `thin` on each file. `done`'s `glass` takes pocket_z {z['pocket_z']:g}, clearance "
-        f"{args.play:g} and pane_thickness {args.pane:g}"
+        f"{args.play:g} and pane_thickness {body_mm:g}"
     )
     if refitted:
         report.note(
@@ -1611,6 +2136,17 @@ def run_build(args: Any, report: Report) -> None:
                 f"{asked - right} of {asked} point(s) round the grooves read otherwise in the "
                 "frame than they were cut"
             )
+    if flush:
+        assert face_play is not None
+        read = flush_read(frame_file, pane_files, z, face_play, args.layer)
+        differs += flush_checks(read, rows, z, args, report)
+        drawn = flush_section(
+            frame_file, pane_files, found,
+            shapely.union_all([row["curves"]["opening_2d"] for row in rows]), z, face_play,
+            out / "section.png",
+        )  # fmt: skip
+        report.numbers["section"] = drawn
+        report.wrote(drawn["file"])
     if len(solids) != 1:
         differs.append(f"the frame is {len(solids)} solids, not one body")
     if abs(volume - expected) > VOLUME_OFF * expected:
@@ -1640,6 +2176,13 @@ def run_build(args: Any, report: Report) -> None:
         f"{frame_file} and {len(pane_files)} pane file(s) holding {len(rows)} pane(s), from "
         f"{len(found.pieces)} piece(s): the frame {args.thickness:g} mm thick, the pause after "
         f"the layer that tops out at z={z['pocket_top_z']:g}"
+        + (
+            f", layer {z['pause_after_layer']}; each pane flush, its raised face level with the "
+            f"lead and {face_play:g} mm clear of its opening all round, and printed from its "
+            "`-laid` file"
+            if flush
+            else ""
+        )
         + (
             f"; its two long edges are seams, bevelled at each of "
             f"{len(seam.edges[0].lengths)} length(s), each face {seam.back:g} mm back from the "

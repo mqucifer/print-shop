@@ -126,6 +126,7 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "narrowest_band_mm",
         "narrowest_band_to",
         "panes",
+        "stepped",
     ),
     "thickness": ("files", "thickest_file", "thickest_mm", "thinnest_file", "thinnest_mm"),
     "pause": ("layers", "least_room_over_pane_mm", "openings", "openings_closing"),
@@ -384,6 +385,15 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "widened_along_mm",
         "widened_from_mm",
         "widened_to_mm",
+        "body_mm",
+        "face_mm",
+        "face_play_mm",
+        "face_reach_mm",
+        "face_tips",
+        "flush",
+        "flush_read",
+        "pause_after_layer",
+        "section",
     ),
     # Joined parts under a weight, and each part against the bed (mqucifer/print-shop#156).
     "load": (

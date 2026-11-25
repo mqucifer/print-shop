@@ -199,6 +199,23 @@ def test_two_neighbours_bent_and_placed_stand_face_to_face_a_web_apart(
     assert (bench.work / met.numbers["placed"]).exists(), "the two slices as placed, to look at"
 
 
+def test_a_slice_takes_flush_on_its_inner_face_and_its_seams_are_as_without_it(
+    bench: Any, pair: tuple[Answer, Answer]
+) -> None:
+    """mqucifer/print-shop#287: a slice prints on its inner face, so `--flush` levels its panes
+    with that face, the inside of the shade. Its seams, grooves and the lip over them are the
+    same as without it, with a 1 mm body on the same 0.8 mm of lip."""
+    flush = build(bench, 1, "one-flush", "--seam", "--flush")
+    assert flush.verdict == "OK" and flush.code == 0, flush.text
+    read = flush.numbers["flush_read"]
+    assert read["level_mm"] == pytest.approx(0.0, abs=1e-3) and read["faces"] == 6
+    assert read["face_play_least_mm"] >= PLAY - 0.016
+    plain = pair[0].numbers
+    for name in ("seam", "seam_wall_mm", "grooves", "groove_wall_mm", "lip_over_groove_mm"):
+        assert flush.numbers[name] == plain[name], name
+    assert flush.numbers["pocket_floor_z"] == plain["pocket_floor_z"] == 0.8
+
+
 def test_square_edges_dont_meet_face_to_face(bench: Any) -> None:
     """The control for the faces: two slices built with no seam are square-edged. Placed, their
     edges stand apart by the whole angle between the slices, and one passes into the other."""

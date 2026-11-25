@@ -22,6 +22,8 @@ held from the inside, and rings (mqucifer/print-shop#166, mqucifer/print-shop#19
     pieces move-line MAP A B --line ... the line between two neighbours, along new points
     pieces fix MAP STEPS                a file of those fixes, in order, in one call
     pieces build MAP --thickness T ...  the frame and a pane file for each colour
+    pieces build MAP ... --flush        each pane with a raised face down through its opening,
+                                        level with the lead: for a panel that's a surface
     pieces dome --diameter D --height H --repeats N --bands FILE
                                         a dome shade's pieces from rules, as a piece map
     pieces flatten MAP --slices N       a dome's map cut into flat slices, each its own map,
