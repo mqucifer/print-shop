@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -301,6 +301,59 @@ class Latch:
     arm: tuple[tuple[float, float, float], tuple[float, float, float]]
     #: The plane the tab is held at, where it joins the rest of its part: its axis and where.
     root: tuple[str, float]
+    #: Where `arm` and `root` are given (mqucifer/print-shop#295): the assembly's own axes, or,
+    #: with `own`, the tab's part's own file's, carried with that part by its `turn` and `at`:
+    #: `turn`, as one rotation, and `shift`, its `at`. A point of the assembly is in the box
+    #: where `turn`'s inverse takes it, less `shift`, inside `arm`.
+    own: bool = False
+    turn: tuple[tuple[float, float, float], ...] = (
+        (1.0, 0.0, 0.0),
+        (0.0, 1.0, 0.0),
+        (0.0, 0.0, 1.0),
+    )
+    shift: tuple[float, float, float] = (0.0, 0.0, 0.0)
+
+    @property
+    def placed(self) -> bool:
+        """Whether its box is anywhere but where `arm` says, in the assembly's axes."""
+        return bool(np.any(np.asarray(self.turn) != np.eye(3)) or any(self.shift))
+
+    def local(self, points: Any) -> np.ndarray:
+        """Points of the assembly in the box's own axes, a row each: themselves where it isn't
+        placed."""
+        at = np.asarray(points, dtype=float)
+        if not self.placed:
+            return at
+        return np.asarray((at - np.asarray(self.shift)) @ np.asarray(self.turn))
+
+    def way(self, vector: Any) -> np.ndarray:
+        """A way in the assembly, in the box's own axes."""
+        return np.asarray(np.asarray(vector, dtype=float) @ np.asarray(self.turn))
+
+    def inside(self, point: Any, by: float = 1e-6) -> bool:
+        """Whether a point of the assembly is in the box, within `by`."""
+        low, high = (np.asarray(c, dtype=float) for c in self.arm)
+        at = self.local(point)
+        return bool(np.all(at >= low - by) and np.all(at <= high + by))
+
+    def corners(self) -> np.ndarray:
+        """The box's eight corners, in the assembly."""
+        low, high = (np.asarray(c, dtype=float) for c in self.arm)
+        found = np.array([[(low, high)[(k >> a) & 1][a] for a in range(3)] for k in range(8)])
+        if not self.placed:
+            return found
+        return np.asarray(found @ np.asarray(self.turn).T + np.asarray(self.shift))
+
+    def bounds(self) -> tuple[np.ndarray, np.ndarray]:
+        """The least box of the assembly's axes round it: itself where it isn't placed."""
+        if not self.placed:
+            return np.array(self.arm[0], dtype=float), np.array(self.arm[1], dtype=float)
+        corners = self.corners()
+        return corners.min(axis=0), corners.max(axis=0)
+
+    def where(self) -> str:
+        """The words for where its `arm` and `root` are given."""
+        return f"in {self.on}'s own file's axes" if self.own else "in the assembly's axes"
 
 
 @dataclass(frozen=True)
@@ -541,6 +594,9 @@ def _through(entry: dict[str, Any], first: str, second: str) -> Joint:
 #: What a dovetail joint gives, and nothing else.
 DOVETAIL_FIELDS = {"between", "kind", "slides", "latch"}
 LATCH_FIELDS = {"on", "arm", "root"}
+#: Where a latch's `arm` and `root` are given: the assembly's axes unless said, or its tab's
+#: part's own file's (mqucifer/print-shop#295).
+LATCH_FRAMES = ("assembly", "part")
 
 
 def _dovetail(entry: dict[str, Any], first: str, second: str) -> Joint:
@@ -568,10 +624,16 @@ def _dovetail(entry: dict[str, Any], first: str, second: str) -> Joint:
     shape = (
         '{"on": PART, "arm": [[x0, y0, z0], [x1, y1, z1]], "root": "z=10"}: the part its tab is '
         "on, a box round the tab, hook and all, with one side on the tab's root, and the "
-        "root's plane, in the assembly's coordinates"
+        "root's plane, in the assembly's coordinates; or, with \"frame\": \"part\", in the "
+        "tab's part's own file's, carried with it by its `turn` and `at`"
     )
-    if not isinstance(latch, dict) or set(latch) != LATCH_FIELDS:
+    if (
+        not isinstance(latch, dict)
+        or not set(latch) >= LATCH_FIELDS
+        or set(latch) - LATCH_FIELDS - {"frame"}
+    ):
         raise NoAnswer(f"{what}'s `latch` is {shape}, not {latch!r}")
+    frame = _one_of(latch.get("frame", "assembly"), LATCH_FRAMES, f"{what}'s latch's `frame`")
     on = str(latch["on"])
     if on not in (first, second):
         raise NoAnswer(f"{what}'s latch is `on` {first} or {second}, not {on}")
@@ -594,7 +656,21 @@ def _dovetail(entry: dict[str, Any], first: str, second: str) -> Joint:
             f"runs from {box[0][k]:g} to {box[1][k]:g} along {root[0]}: one side of the box is "
             "on the tab's root, where it joins the rest of its part"
         )
-    return Joint((first, second), "dovetail", slides=slides, latch=Latch(on, box, root))
+    # A latch in its part's own axes is placed with that part once the parts are read.
+    return Joint(
+        (first, second), "dovetail", slides=slides, latch=Latch(on, box, root, frame == "part")
+    )
+
+
+def _carried(joint: Joint, parts: tuple[PartAt, ...]) -> Joint:
+    """A dovetail whose latch is given in its tab's part's own axes, with that latch carried
+    where the part's `turn` and `at` put it (mqucifer/print-shop#295)."""
+    if joint.latch is None or not joint.latch.own:
+        return joint
+    part = next(p for p in parts if p.name == joint.latch.on)
+    turn = tuple(tuple(float(v) for v in row) for row in part.matrix())
+    latch = replace(joint.latch, turn=turn, shift=part.at)  # type: ignore[arg-type]
+    return replace(joint, latch=latch)
 
 
 def _held(entry: Any, names: list[str]) -> Held:
@@ -631,7 +707,7 @@ def read(path: str) -> Assembly:
     twice = sorted({n for n in names if names.count(n) > 1})
     if twice:
         raise NoAnswer(f"each part has a name of its own: {', '.join(twice)}")
-    joints = tuple(_joint(entry, names) for entry in data.get("joints", ()))
+    joints = tuple(_carried(_joint(entry, names), parts) for entry in data.get("joints", ()))
     pairs = [frozenset(j.between) for j in joints]
     again = next((j.name for j in joints if pairs.count(frozenset(j.between)) > 1), None)
     if again:

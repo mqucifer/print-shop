@@ -1468,3 +1468,157 @@ def test_the_snap_on_check_and_bend_read_a_latch_on_a_dovetail(cae: Any) -> None
     by_strip = 100 * 1.5 * TAB_T * HOOK_IN / 18.0**2
     assert bent.numbers["across_layers_pct"] == pytest.approx(by_strip, rel=0.15)
     assert bent.numbers["worst"] == "near"
+
+
+# A whole furniture assembly (mqucifer/print-shop#295): a turned latch, a large assembly and a
+# glass frame
+
+
+#: The posts' ring in `make_fixtures.turned`, and a pull up on each post's top, 0.6 kg in all.
+POSTS_AT = 100.0
+
+
+def posts_up(first: float) -> tuple[str, ...]:
+    places: list[str] = []
+    for k in range(4):
+        angle = math.radians(first + 90 * k)
+        places += ["--at", f"{POSTS_AT * math.cos(angle):.4f},{POSTS_AT * math.sin(angle):.4f},100"]
+    return ("--weight", "0.6", *places, "--toward", "+z")
+
+
+def test_a_latch_named_in_its_part_s_own_axes_reads_as_the_assembly_s_names_it(cae: Any) -> None:
+    """The latched post of `play/edge.json`, unturned and in place, its latch named in the
+    upper's own file's axes, `"frame": "part"`: lifted, it reads every figure as the same latch
+    named in the assembly's does. Only `bend`'s command names the part's own file."""
+    assembly_s = cae("load", "play/edge.json", "--lift", "upper")
+    own = cae("load", "turned/own.json", "--lift", "upper")
+    assert own.verdict == assembly_s.verdict == "OK", own.text
+    assert own.numbers["joints"] == assembly_s.numbers["joints"]
+    assert own.numbers["parts"] == assembly_s.numbers["parts"]
+    mine, theirs = (a.numbers["ways_in"]["upper+lower"] for a in (own, assembly_s))
+    assert mine["latch"]["bend"]["command"].startswith("bend upper-edge.step --arm")
+    assert theirs["latch"]["bend"]["command"].startswith("bend upper.step --arm")
+    for found in (mine, theirs):
+        found["latch"]["bend"].pop("command")
+    assert mine == theirs
+
+
+@pytest.mark.parametrize("first", [0.0, 45.0])
+def test_four_posts_turned_round_a_table_s_middle_each_have_their_latch_named(
+    cae: Any, first: float
+) -> None:
+    """mqucifer/print-shop#295: a part made in its own frame and placed turned, as a table's
+    legs are at its corners, couldn't have its latch named in the assembly's axes, and read
+    `DISAGREE` and "Null shape" without it. The same latched post four times, each turned a
+    quarter turn on, from 0° and from 45°, each latch named once in the post's own axes, and
+    each post pulled up by 0.15 kg at its top: every latch holds what draws its tail out,
+    1.47 N, its hook passes 0.6 mm deep on the way in by both methods, and `bend` reads its
+    tab pushed that far, in the post's own axes, `OK`. At 45° each part round its dovetail is
+    cut in its own axes: a box of the assembly's takes in all of it."""
+    answer = cae("load", f"turned/{'quarter' if first == 0 else 'eighth'}.json", *posts_up(first))
+    assert answer.verdict == "OK", answer.text
+    for k in range(4):
+        name = f"upper{k}+lower{k}"
+        joint = answer.numbers["joints"][name]
+        assert joint["latch"]["holds_n"] == pytest.approx(0.6 * G / 4, rel=0.01), name
+        assert joint["latch"]["tab"]["across_layers_pct"] < 1.0
+        way = answer.numbers["ways_in"][name]
+        assert way["latch"]["depth_mm"] == pytest.approx(0.6, abs=1e-3)
+        assert way["latch"]["depth_rays_mm"] == pytest.approx(0.6, abs=0.05)
+        bent = way["latch"]["bend"]
+        assert bent["verdict"] == "OK" and bent["toward"] == "+y", bent
+        assert bent["command"].startswith("bend upper-edge.step --arm 11.4,-15.7,59.9")
+        if first == 45.0:
+            assert all("own axes" in c for c in joint["neck"]["cut_on"]), joint["neck"]
+    assert "in upper0's own file's axes" not in answer.record["why"]
+
+
+def test_a_table_of_24_parts_and_56_bolts_says_the_limit_it_met_and_what_is_left(
+    cae: Any,
+) -> None:
+    """mqucifer/print-shop#295: 24 parts held by 56 M5 through-bolts, round figures only. gmsh
+    sizes each bore by its curvature, 12 elements a turn, whatever --mesh is, so the bores make
+    most of a mesh past what CalculiX solves in the container's 3 GiB. The reply says so, from
+    the container's own count of what it held, and says that a coarser --mesh leaves those
+    elements as they are and that nothing is read: it doesn't tell anyone to coarsen the mesh."""
+    answer = cae(
+        "load", "large/table.json", "--weight", "20",
+        "--at", "100,100,310", "--at", "300,100,310", "--at", "100,300,310", "--at", "300,300,310",
+    )  # fmt: skip
+    assert answer.verdict == "NO ANSWER", answer.text
+    why = answer.record["why"]
+    assert "it met the container's memory, 3 GiB, all of it taken" in why, why
+    assert "a coarser --mesh leaves most of those as they are" in why
+    assert "every part, joint and bolt of the assembly is left unread" in why
+    assert "Give a coarser --mesh" not in why
+    ran = answer.record["ran"]
+    assert int(ran["memory_peak"]) == int(ran["memory_max"]) == 3 * 1024**3
+    assert answer.record["seconds"] < host.TIMEOUT
+
+
+def test_a_bolt_left_out_reads_its_joint_as_the_one_that_gives_first(cae: Any) -> None:
+    """The control (mqucifer/print-shop#295, the operator's comment there): a stool, a top on
+    four legs each held by one M5 through-bolt, its feet fixed, pushed sideways at the top by
+    5 kg. Each leg's joint carries a moment, which its bolt holds: `OK`. With leg2's bolt left
+    out, its joint is `touching`, and that joint is what gives: it tips open, `FAIL`, named.
+    The solve ties every joint's faces as a bolted joint is while its bolts hold, so a bolt
+    left out doesn't change how far anything moves: the loaded place moves the same."""
+    push = ("--weight", "5", "--at", "0,100,154", "--toward", "+x")
+    bolted = cae("load", "large/stool.json", *push)
+    assert bolted.verdict == "OK", bolted.text
+    one_out = cae("load", "large/stool-one-out.json", *push)
+    assert one_out.verdict == "FAIL", one_out.text
+    assert one_out.record["why"].startswith("the touching joint top+leg2"), one_out.record["why"]
+    assert "tips open" in one_out.record["why"]
+    assert one_out.numbers["moves_mm"] == pytest.approx(bolted.numbers["moves_mm"], rel=1e-6)
+
+
+#: The made-up glass panel's width, in mm (`cae_cases/glass_panel.py`), and how it's built: a
+#: frame 6 mm thick round panes 3 mm thick, two lips sized by --min-visible, a 12 mm border.
+GLASS_W = 160
+GLASS_BUILD = ("--thickness", "6", "--pane", "3", "--lip", "1.2,0.6", "--min-visible", "50",
+               "--play", "0.25", "--border", "12")  # fmt: skip
+
+
+@pytest.fixture(scope="module")
+def glass(cae: Any) -> Path:
+    """The made-up panel drawn, traced and built by `pieces build` in the first image, its map
+    fixed as the build's own refusals say, as a run does: each piece it says to split split
+    along the line it gives, and each it says to merge merged into the first neighbour that
+    takes it. Then the frame bored and laid on a block in the second image."""
+    if host.image_id() is None:
+        pytest.fail(f"{host.missing(host.IMAGE)} first")
+    work = cae.work
+    shutil.copy(CASES / "glass_panel.py", work / "glass_panel.py")
+    drawn = host.run(["glass_panel.py", str(GLASS_W)], work, python=True)
+    assert drawn.returncode == 0, drawn.stdout + drawn.stderr
+    traced = cae("pieces", "trace", "panel.png", "--width", str(GLASS_W), "--to", "panel-0.json")
+    assert traced.verdict == "OK", traced.text
+    current = "panel-0.json"
+    for step in range(1, 12):
+        built = cae("pieces", "build", current, *GLASS_BUILD, "--build-out", "glass-frame")
+        if built.verdict == "OK":
+            break
+        refused = built.numbers["unbuildable"][0]
+        piece = int(re.match(r"piece (\d+)", refused).group(1))  # type: ignore[union-attr]
+        split = re.search(r"`pieces split MAP \d+ --line (\S+)`", refused)
+        following = f"panel-{step}.json"
+        if split:
+            done = cae("pieces", "split", current, str(piece), "--line", split.group(1),
+                       "--to", following)  # fmt: skip
+        else:
+            for other in range(1, 100):
+                if other == piece:
+                    continue
+                done = cae("pieces", "merge", current, str(piece), str(other), "--to", following)
+                if done.verdict == "OK":
+                    break
+        assert done.verdict == "OK", done.text
+        current = following
+    assert built.verdict == "OK", built.text
+    shutil.copy(CASES / "glass_joined.py", work / "glass_joined.py")
+    made = host.run(
+        ["glass_joined.py", "glass-frame/frame.step"], work, python=True, image=host.CAE_IMAGE
+    )
+    assert made.returncode == 0, made.stdout + made.stderr
+    return work / "glass"

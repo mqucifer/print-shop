@@ -61,6 +61,9 @@ def how_it_ran() -> dict[str, Any]:
         "network_routes": len(routes.splitlines()) - 1 if routes else None,
         "cpu_max": read("/sys/fs/cgroup/cpu.max"),
         "memory_max": read("/sys/fs/cgroup/memory.max"),
+        # The most the container has held so far, in bytes (mqucifer/print-shop#295): read as
+        # the reply is saved, so the whole command's peak, where the kernel keeps one.
+        "memory_peak": read("/sys/fs/cgroup/memory.peak"),
         "user": os.getuid(),
     }
 
@@ -152,6 +155,7 @@ class Report:
             self.body()
             + f"\nran: {seconds} s, image {str(ran['image_id'])[:19]}, code {ran['code']}, "
             + f"cpu.max {ran['cpu_max']}, memory.max {ran['memory_max']}, "
+            + (f"memory.peak {ran['memory_peak']}, " if ran.get("memory_peak") else "")
             + f"network up: {','.join(ran['network_up']) or 'none'}, "
             + f"routes {ran['network_routes']}"
             + f"\nsaved: {out / stem}.txt and .json\n"

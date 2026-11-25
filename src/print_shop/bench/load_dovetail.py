@@ -38,7 +38,8 @@ from typing import Any
 import numpy as np
 
 from . import dovetail
-from .assembly import AXES, Assembly, Joint, PartAt
+from .assembly import AXES, Assembly, Joint, Latch, PartAt
+from .cae import tidy_mesh, tidy_solve
 from .report import NoAnswer
 
 #: A latch's ledge is over its hook within this, in mm, along the slide: the slide check's own
@@ -95,10 +96,42 @@ def _flat(face: Any, axis: int, at: float) -> bool:
     return bool(abs(low[axis] - at) < ON and abs(high[axis] - at) < ON)
 
 
-def _in_box(point: Any, box: tuple[Any, Any], by: float = ON) -> bool:
-    low, high = (np.asarray(c, dtype=float) for c in box)
-    at = np.asarray(point, dtype=float)
-    return bool(np.all(at >= low - by) and np.all(at <= high + by))
+def _matrix(latch: Latch) -> Any:
+    """FreeCAD's matrix that takes a latch's own axes to the assembly's."""
+    import FreeCAD as App
+
+    turn = np.asarray(latch.turn)
+    return App.Matrix(
+        *[v for row in range(3) for v in (*turn[row].tolist(), float(latch.shift[row]))],
+        0.0, 0.0, 0.0, 1.0,
+    )  # fmt: skip
+
+
+def box(arm: Any) -> Any:
+    """An axis-aligned box, two corners, as a solid."""
+    import FreeCAD as App
+    import Part
+
+    low, high = (np.array(c, dtype=float) for c in arm)
+    return Part.makeBox(*(high - low), App.Vector(*low))
+
+
+def local(shape: Any, latch: Latch) -> Any:
+    """A shape of the assembly in a latch's own axes: itself where the latch isn't placed."""
+    if not latch.placed:
+        return shape
+    moved = shape.copy()
+    moved.transformShape(_matrix(latch).inverse())
+    return moved
+
+
+def placed(shape: Any, latch: Latch) -> Any:
+    """A shape in a latch's own axes, where the assembly has it."""
+    if not latch.placed:
+        return shape
+    moved = shape.copy()
+    moved.transformShape(_matrix(latch))
+    return moved
 
 
 def _facets(face: Any) -> list[tuple[np.ndarray, np.ndarray, float]]:
@@ -122,7 +155,7 @@ def check(joint: Joint, faces: list[Any], tail: Any) -> None:
     slides = joint.slides_way()
     for face in faces:
         for centre, normal, _ in _facets(face):
-            if joint.latch is not None and _in_box(centre, joint.latch.arm):
+            if joint.latch is not None and joint.latch.inside(centre):
                 continue
             # Out of the tail's part.
             if not tail.isInside(App.Vector(*(centre - 1e-3 * normal)), 1e-6, False):
@@ -162,12 +195,13 @@ def catch(assembly: Assembly, joint: Joint, placed: list[Any]) -> dict[str, Any]
         for f in mine.Faces
         if type(f.Surface).__name__ == "Plane"
         and float(np.array(f.normalAt(0, 0)) @ faces) > 1 - SQUARE
-        and _in_box(np.array(f.CenterOfMass), latch.arm)
+        and latch.inside(np.array(f.CenterOfMass))
     ]
     if not hooks:
         raise NoAnswer(
             f"{what}: no flat face of {latch.on} inside its `arm`, from "
-            f"{_xyz(latch.arm[0])} to {_xyz(latch.arm[1])}, faces {_xyz(faces)}, the way a "
+            f"{_xyz(latch.arm[0])} to {_xyz(latch.arm[1])} {latch.where()}, faces "
+            f"{_xyz(faces)}, the way a "
             "hook has to face to stop the tail leaving. The box goes round the tab, hook and all"
         )
     ledges = [
@@ -297,7 +331,7 @@ def play(assembly: Assembly, joint: Joint, placed: list[Any]) -> list[dict[str, 
                 size = max(PIECE, math.sqrt(shared.Area / PIECES))
                 centres, areas = _small(shared, size)
                 if joint.latch is not None:
-                    keep = np.array([not _in_box(c, joint.latch.arm) for c in centres], bool)
+                    keep = np.array([not joint.latch.inside(c) for c in centres], bool)
                     centres, areas = centres[keep], areas[keep]
                 if not len(areas):
                     continue
@@ -365,7 +399,9 @@ def _solve(
         mesh.HighOrderOptimize = "Optimization"
         analysis.addObject(mesh)
         doc.recompute()
-        wrong = GmshTools(mesh).create_mesh()
+        tools = GmshTools(mesh)
+        wrong = tools.create_mesh()
+        tidy_mesh(tools)
         fem = mesh.FemMesh
         if wrong or not fem.VolumeCount:
             raise NoAnswer(f"gmsh made no mesh of {what}: {str(wrong)[:300]}")
@@ -407,6 +443,7 @@ def _solve(
             file.write(text[:outputs] + step + text[outputs:])
         fea.ccx_run()
         fea.load_results()
+        tidy_solve(fea)
         results = [o for o in analysis.Group if o.isDerivedFrom("Fem::FemResultObject")]
         if not results or not results[0].NodeStrainXX:
             raise NoAnswer(f"CalculiX gave no result for {what}, at a mesh of {size:g} mm")
@@ -465,8 +502,9 @@ def tab(
     latch = joint.latch
     assert latch is not None
     what = f"the dovetail joint {joint.name}'s latch"
-    low, high = (np.array(c) for c in latch.arm)
-    arms = [s for s in solid.common(Part.makeBox(*(high - low), App.Vector(*low))).Solids
+    # Read in the box's own axes, where `arm` and `root` are given (mqucifer/print-shop#295):
+    # the assembly's, unless the latch is given in its part's own.
+    arms = [s for s in local(solid, latch).common(box(latch.arm)).Solids
             if s.Volume > 1e-6]  # fmt: skip
     if len(arms) != 1:
         raise NoAnswer(
@@ -474,15 +512,14 @@ def tab(
             "box round the one tab, from its root to its tip, hook and all, and clear of the "
             "rest of the part"
         )
-    arm = arms[0]
     axis, at = AXES.index(latch.root[0]), latch.root[1]
-    roots = [f for f in arm.Faces if _flat(f, axis, at)]
+    roots = [f for f in arms[0].Faces if _flat(f, axis, at)]
     if not roots:
-        span = _span(arm.BoundBox)
+        span = _span(arms[0].BoundBox)
         raise NoAnswer(
-            f"{what}: the tab in its `arm` has no end on its `root`, {latch.root[0]}={at:g}: "
-            f"it runs from {span[0][axis]:g} to {span[1][axis]:g} along {latch.root[0]}. One "
-            "side of the box is on the tab's root, so the box cuts it there"
+            f"{what}: the tab in its `arm` has no end on its `root`, {latch.root[0]}={at:g} "
+            f"{latch.where()}: it runs from {span[0][axis]:g} to {span[1][axis]:g} along "
+            f"{latch.root[0]}. One side of the box is on the tab's root, so the box cuts it there"
         )
     sides = [
         float(extent)
@@ -490,6 +527,11 @@ def tab(
         for k, extent in enumerate(_span(face.BoundBox)[1] - _span(face.BoundBox)[0])
         if k != axis
     ]
+    arm = placed(arms[0], latch)
+
+    def rooted(face: Any) -> bool:
+        return _flat(local(face, latch), axis, at)
+
     thick = min(sides)
     size = min(TAB_MESH[1], max(TAB_MESH[0], thick / TAB_ACROSS)) * coarser
     faces = caught["faces"]
@@ -522,7 +564,7 @@ def tab(
         _spread(pushes, under, force)
         return pushes
 
-    solved = _solve(arm, lambda f: _flat(f, axis, at), part, size, loads, f"{what}'s tab")
+    solved = _solve(arm, rooted, part, size, loads, f"{what}'s tab")
     keep = np.ones(len(solved["points"]), dtype=bool)
     found = _strains(solved, keep, part, f"{what}'s tab")
     found.update(
@@ -531,24 +573,62 @@ def tab(
     return found
 
 
+def _square(part: PartAt) -> np.ndarray | None:
+    """A part's turn where it leaves its own axes off the assembly's, as one rotation: none
+    where it turns them onto them, as no turn or a quarter turn does."""
+    turn = part.matrix()
+    if np.all(np.isclose(np.abs(turn), np.round(np.abs(turn)), atol=1e-9)):
+        return None
+    return turn
+
+
+def _turned(shape: Any, turn: np.ndarray | None) -> Any:
+    """A shape turned by a rotation about the origin, as a copy: itself with none."""
+    import FreeCAD as App
+
+    if turn is None:
+        return shape
+    moved = shape.copy()
+    rows = [v for row in range(3) for v in (*turn[row].tolist(), 0.0)]
+    moved.transformShape(App.Matrix(*rows, 0.0, 0.0, 0.0, 1.0))
+    return moved
+
+
 def _piece(
     solid: Any, part: PartAt, joint: Joint, met: Any
-) -> tuple[Any, list[tuple[int, float]], float]:
+) -> tuple[Any, list[tuple[int, float]], float, np.ndarray | None]:
     """The part round a dovetail: what's within the cut of the joint's own box, with its
-    latch's, the planes it was cut on, each an axis and where, and how far off the cut is."""
+    latch's, the planes it was cut on, each an axis and where, and how far off the cut is.
+    A part turned off the assembly's axes, as a leg at a table's corner can be, is cut in
+    its own file's axes, turned back about the origin (mqucifer/print-shop#295): a box of the
+    assembly's axes round its joint takes in all of it, and cuts it nowhere. The last is that
+    turn, or none where the cut is in the assembly's axes."""
+    turn = _square(part)
+    back = None if turn is None else turn.T
+    piece, planes, reach = _cut(_turned(solid, back), part, joint, _turned(met, back), turn)
+    return _turned(piece, turn), planes, reach, turn
+
+
+def _cut(
+    solid: Any, part: PartAt, joint: Joint, met: Any, turn: np.ndarray | None
+) -> tuple[Any, list[tuple[int, float]], float]:
     import FreeCAD as App
     import Part
 
     low, high = _span(met.BoundBox)
-    slides = np.abs(joint.slides_way())
+    slides = np.abs(joint.slides_way() if turn is None else joint.slides_way() @ turn)
     across = float(((high - low) * (1 - slides)).max())
     reach = CUT * across
     middle = Part.Vertex(App.Vector(*((low + high) / 2)))
     for _ in range(TRIES + 1):
         corner, far = low - reach, high + reach
         if joint.latch is not None:
-            corner = np.minimum(corner, np.array(joint.latch.arm[0]) - ROUND_LATCH)
-            far = np.maximum(far, np.array(joint.latch.arm[1]) + ROUND_LATCH)
+            least, most = joint.latch.bounds()
+            if turn is not None:
+                corners = joint.latch.corners() @ turn
+                least, most = corners.min(axis=0), corners.max(axis=0)
+            corner = np.minimum(corner, least - ROUND_LATCH)
+            far = np.maximum(far, most + ROUND_LATCH)
         size = far - corner
         cut = solid.common(Part.makeBox(*size, App.Vector(*corner)))
         solids = [s for s in cut.Solids if s.Volume > 1e-6]
@@ -598,7 +678,7 @@ def around(
     played = played or []
     own = [p["tail_face" if is_tail else "socket_face"] for p in played]
     met = Part.Compound(list(faces) + own)
-    piece, planes, reach = _piece(solid, part, joint, met)
+    piece, planes, reach, turn = _piece(solid, part, joint, met)
     low, high = _span(met.BoundBox)
     least = float(min(e for e in high - low if e > 1e-6))
     size = max(LEAST, least / ACROSS, (8.5 * piece.Volume / ELEMENTS) ** (1 / 3)) * coarser
@@ -616,7 +696,7 @@ def around(
                 point = Part.Vertex(App.Vector(*centre))
                 if met.distToShape(point)[0] > ON:
                     continue
-                if joint.latch is not None and _in_box(centre, joint.latch.arm):
+                if joint.latch is not None and joint.latch.inside(centre):
                     continue
                 # Out of this piece.
                 if not shape.isInside(App.Vector(*(centre - 1e-3 * normal)), 1e-6, False):
@@ -671,22 +751,26 @@ def around(
         return pushes
 
     def held(face: Any) -> bool:
-        return any(_flat(face, axis, at) for axis, at in planes)
+        back = _turned(face, None if turn is None else turn.T)
+        return any(_flat(back, axis, at) for axis, at in planes)
 
     solved = _solve(piece, held, part, size, loads, what)
     points = solved["points"]
+    # Where it was cut, in the axes it was cut in.
+    cut = points if turn is None else points @ turn
     keep = np.ones(len(points), dtype=bool)
     for axis, at in planes:
-        keep &= np.abs(points[:, axis] - at) > (1 - READ) * reach
+        keep &= np.abs(cut[:, axis] - at) > (1 - READ) * reach
     if joint.latch is not None:
-        box = joint.latch.arm
-        keep &= ~np.array([_in_box(p, box, 1e-3) for p in points])
+        latch = joint.latch
+        keep &= ~np.array([latch.inside(p, 1e-3) for p in points])
     found = _strains(solved, keep, part, what)
     found.update(
         mesh_mm=round(size, 3),
         held_mm=reach,
         read_mm=READ * reach,
-        cut_on=[f"{AXES[axis]}={at:g}" for axis, at in planes],
+        cut_on=[f"{AXES[axis]}={at:g}" + ("" if turn is None else f" in {part.name}'s own axes")
+                for axis, at in planes],  # fmt: skip
         holds=said["holds"],
         latch_n=said["latch_n"],
     )

@@ -44,7 +44,7 @@ from typing import Any
 
 import numpy as np
 
-from .cae import freecad
+from .cae import freecad, tidy_mesh, tidy_solve
 from .limits import over, said
 from .report import NoAnswer, Report
 
@@ -192,7 +192,9 @@ def _solve(
         analysis.addObject(mesh)
         doc.recompute()
         began = time.time()
-        wrong = GmshTools(mesh).create_mesh()
+        tools = GmshTools(mesh)
+        wrong = tools.create_mesh()
+        tidy_mesh(tools)
         meshed = time.time() - began
         if wrong or not mesh.FemMesh.VolumeCount:
             raise NoAnswer(f"gmsh made no mesh of the arm: {str(wrong)[:300]}")
@@ -207,6 +209,7 @@ def _solve(
         fea.write_inp_file()
         fea.ccx_run()
         fea.load_results()
+        tidy_solve(fea)
         solved = time.time() - began
         results = [o for o in analysis.Group if o.isDerivedFrom("Fem::FemResultObject")]
         if not results or not results[0].NodeStrainXX:

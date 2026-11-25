@@ -63,6 +63,15 @@ held to `--friction` where that's given.
 
 **How far it moves:** each loaded place, along the load, and the most anywhere.
 
+**A whole assembly** (mqucifer/print-shop#295). A latch can be named in its tab's part's own
+axes and turns and moves with the part, and a part turned off the assembly's axes is cut round
+its dovetail in its own. Where gmsh can't curve every element onto the parts' faces without
+turning one inside out, as on a traced glass frame, the mesh is made again with straight sides,
+and the reply says why. CalculiX runs on one thread, as gmsh does, and each mesh's and solve's
+files are deleted from the container's /tmp, which is memory, once read. Where the solve still
+meets the container's memory, the reply says so from the container's own count, and what of the
+mesh is finer than --mesh asks.
+
 **Second methods.** The whole solve again on a mesh half as coarse again: each figure that's
 judged, on both. The held faces' reaction, which CalculiX prints, against the weight put on. And
 for a joint with every held face on one side of it, statics: what crosses it is the load beyond
@@ -93,7 +102,7 @@ import numpy as np
 
 from . import dovetail, load_dovetail, load_through, way_in
 from .assembly import AXES, DIAMETER, Assembly, Held, Joint, PartAt, read
-from .cae import freecad
+from .cae import ccx_one_thread, freecad, tidy_mesh, tidy_solve
 from .limits import over, said
 from .report import NoAnswer, Report
 from .through import lean_off, lean_share, peak_said, peak_saved
@@ -291,8 +300,12 @@ def _flat(shape: Any, axis: int, at: float) -> bool:
 class _Model:
     """The joined parts in one FreeCAD document, meshed and solved once."""
 
-    def __init__(self, assembly: Assembly, placed: list[Any], args: Any, size: float) -> None:
+    def __init__(
+        self, assembly: Assembly, placed: list[Any], args: Any, size: float, straight: bool = False
+    ) -> None:
         self.assembly, self.placed, self.args, self.size = assembly, placed, args, size
+        #: Whether its second-order elements are straight-sided (mqucifer/print-shop#295).
+        self.straight = straight
         self.toward = np.zeros(3)
         self.toward[AXES.index(args.toward[1])] = 1.0 if args.toward[0] == "+" else -1.0
 
@@ -453,18 +466,37 @@ class _Model:
         mesh.Shape = self.feature
         mesh.CharacteristicLengthMax = self.size
         mesh.ElementOrder = "2nd"
-        # A second-order element's curved side, on a bolt's hole far smaller than the mesh,
-        # can turn it inside out, and CalculiX then solves nothing: gmsh straightens those
-        # (mqucifer/print-shop#168). A part with flat sides only is meshed as it was.
-        mesh.HighOrderOptimize = "Optimization"
+        if self.straight:
+            # Each element's mid-side nodes halfway along its straight sides, so none is
+            # turned inside out: a curved face is followed by its elements' chords
+            # (mqucifer/print-shop#295).
+            mesh.SecondOrderLinear = True
+            mesh.HighOrderOptimize = "None"
+        else:
+            # A second-order element's curved side, on a bolt's hole far smaller than the
+            # mesh, can turn it inside out, and CalculiX then solves nothing: gmsh straightens
+            # those (mqucifer/print-shop#168). A part with flat sides only is meshed as it was.
+            mesh.HighOrderOptimize = "Optimization"
         analysis.addObject(mesh)
         doc.recompute()
         began = time.time()
-        wrong = GmshTools(mesh).create_mesh()
+        tools = GmshTools(mesh)
+        tools.create_mesh()
+        tidy_mesh(tools)
         self.mesh_s = round(time.time() - began, 2)
         self.fem = fem = mesh.FemMesh
-        if wrong or not fem.VolumeCount:
-            raise NoAnswer(f"gmsh made no mesh of the joined parts: {str(wrong)[:300]}")
+        if not fem.VolumeCount:
+            # FreeCAD keeps no mesh where gmsh ends with an error, and says nothing of it: its
+            # own words are in what it printed.
+            said = bytes(tools.process.readAllStandardOutput()).decode(errors="replace")
+            said += bytes(tools.process.readAllStandardError()).decode(errors="replace")
+            words = "; ".join(_gmsh_errors(said)) or "it gave no reason"
+            if not self.straight:
+                raise _Curved(f"gmsh made no curved mesh of the joined parts: {words[:300]}")
+            raise NoAnswer(
+                "gmsh made no mesh of the joined parts, with its elements' sides curved onto "
+                f"the parts' faces or straight: {words[:300]}"
+            )
         self.nodes = {n: np.array([p.x, p.y, p.z]) for n, p in fem.Nodes.items()}
         fea = ccxtools.FemToolsCcx(analysis, solver)
         fea.update_objects()
@@ -476,17 +508,27 @@ class _Model:
         began = time.time()
         fea.write_inp_file()
         self._add_to(fea.inp_file_name)
-        fea.ccx_run()
+        ccx_one_thread(fea)
         fea.load_results()
         self.solve_s = round(time.time() - began, 2)
         results = [o for o in analysis.Group if o.isDerivedFrom("Fem::FemResultObject")]
         if "nonpositive jacobian" in str(getattr(fea, "ccx_stdout", "")):
+            tidy_solve(fea)
+            if not self.straight:
+                raise _Curved(
+                    "CalculiX found an element of the curved mesh, at most "
+                    f"{self.size:g} mm, turned inside out"
+                )
             raise NoAnswer(
                 f"CalculiX solved nothing: an element of the mesh, at most {self.size:g} mm, is "
                 "turned inside out, as one with a curved side on a small hole or a tight round "
                 "can be. Give a finer --mesh"
             )
         if not results or not results[0].NodeStrainXX:
+            tidy_solve(fea)
+            full = _memory_full()
+            if full is not None:
+                raise NoAnswer(self._too_big(full))
             raise NoAnswer(
                 f"CalculiX gave no result for the {fem.VolumeCount} elements, at a mesh of "
                 f"{self.size:g} mm: it may have run out of the container's memory. Give a "
@@ -504,7 +546,33 @@ class _Model:
         self.moved = np.array([[v.x, v.y, v.z] for v in result.DisplacementVectors])
         self.points = np.array([self.nodes[n] for n in result.NodeNumbers])
         self.reaction, self.held_force = _reaction(os.path.splitext(fea.inp_file_name)[0] + ".dat")
+        tidy_solve(fea)
         self._balance()
+
+    def _too_big(self, limit: int) -> str:
+        """Why the solve met the container's memory (mqucifer/print-shop#295): the mesh's size,
+        against what its size alone would give, the rest being finer round the parts' small
+        features, which gmsh sizes by their own curvature and not by --mesh."""
+        fem = self.fem
+        # About 8.5 tetrahedra fill a cube of their own edge, as `_mesh_size` takes it.
+        alone = 8.5 * float(self.shape.Volume) / self.size**3
+        finer = fem.VolumeCount - alone
+        return (
+            f"CalculiX gave no result for the {fem.VolumeCount:,} elements ({fem.NodeCount:,} "
+            f"nodes) at a mesh of at most {self.size:g} mm: it met the container's memory, "
+            f"{limit / 2**30:g} GiB, all of it taken, as the container's own memory.peak says. "
+            f"The mesh's size alone would give about {alone:,.0f} elements over the parts' "
+            f"{self.shape.Volume / 1000:,.0f} cm³"
+            + (
+                f", and the other {finer:,.0f}, {100 * finer / fem.VolumeCount:.0f}%, are "
+                "finer, round the parts' small features, such as bolts' bores and rounds, "
+                "which gmsh sizes by their own curvature and not by --mesh: a coarser --mesh "
+                "leaves most of those as they are"
+                if finer > alone
+                else ": give a coarser --mesh"
+            )
+            + ". Nothing is read: every part, joint and bolt of the assembly is left unread"
+        )
 
     def _balance(self) -> None:
         """The force each part's elements put on each node, and what's put on each part's
@@ -889,6 +957,20 @@ def _reaction(path: str) -> tuple[np.ndarray, dict[int, np.ndarray]]:
     return np.array([float(v) for v in total.groups()]), nodes
 
 
+def _memory_full() -> int | None:
+    """The container's memory limit, in bytes, where what it has held at the most has reached
+    it: its cgroup's own `memory.peak` against `memory.max`. None where it hasn't, or where the
+    kernel keeps neither."""
+    try:
+        most = Path("/sys/fs/cgroup/memory.max").read_text().strip()
+        peak = Path("/sys/fs/cgroup/memory.peak").read_text().strip()
+    except OSError:
+        return None
+    if not most.isdigit() or not peak.isdigit() or int(peak) < int(most):
+        return None
+    return int(most)
+
+
 def _mesh_size(placed: list[Any], given: float | None) -> float:
     if given is not None:
         return float(given)
@@ -914,16 +996,48 @@ def _quiet() -> Iterator[None]:
         os.close(said_before)
 
 
+#: gmsh's lines that only sum up its errors.
+_SUMMED = re.compile(
+    r"^(-+|Mesh generation error summary|\d+ (warning|error)s?|Check the full log.*)$"
+)
+
+
+def _gmsh_errors(said: str) -> list[str]:
+    """gmsh's own error lines in what it printed, each once, less its summary of them."""
+    found = []
+    for line in said.splitlines():
+        if line.startswith("Error"):
+            text = line.split(":", 1)[-1].strip()
+            if text and not _SUMMED.match(text) and text not in found:
+                found.append(text)
+    return found
+
+
+class _Curved(NoAnswer):
+    """The mesh with its elements' sides curved onto the parts' faces has an element turned
+    inside out, or none at all: it's meshed again with them straight."""
+
+
 def _solved(assembly: Assembly, placed: list[Any], args: Any, size: float) -> dict[str, Any]:
-    """One solve at one mesh, and everything read from it."""
+    """One solve at one mesh, and everything read from it. Where gmsh can't curve every
+    element's sides onto the parts' faces without turning one inside out, as on a traced
+    glass frame's many small curves and sharp corners (mqucifer/print-shop#295), it's meshed
+    again with them straight, and `straight` says why: every mesh that solves curved is as it
+    was."""
     import FreeCAD as App
 
     # One thread, so the same parts are the same mesh, and the same figures, every time.
     App.ParamGet("User parameter:BaseApp/Preferences/Mod/Fem/Gmsh").SetInt("NumOfThreads", 1)
-    doc = App.newDocument("Load")
-    model = _Model(assembly, placed, args, size)
-    with _quiet():
-        return _read_solved(assembly, model, doc, size)
+    try:
+        doc = App.newDocument("Load")
+        with _quiet():
+            return _read_solved(assembly, _Model(assembly, placed, args, size), doc, size)
+    except _Curved as curved:
+        doc = App.newDocument("Load")
+        with _quiet():
+            found = _read_solved(assembly, _Model(assembly, placed, args, size, True), doc, size)
+        found["straight"] = str(curved)
+        return found
 
 
 def _read_solved(assembly: Assembly, model: _Model, doc: Any, size: float) -> dict[str, Any]:
@@ -951,9 +1065,20 @@ def _read_solved(assembly: Assembly, model: _Model, doc: Any, size: float) -> di
             "elements": model.fem.VolumeCount,
             "mesh_s": model.mesh_s,
             "solve_s": model.solve_s,
+            "straight": None,
         }
     finally:
         App.closeDocument(doc.Name)
+
+
+def _straight_said(solved: dict[str, Any]) -> str:
+    """Where a mesh's elements are straight-sided, why (mqucifer/print-shop#295)."""
+    if not solved.get("straight"):
+        return ""
+    return (
+        f", its elements' sides straight, each curved face followed by their chords: "
+        f"{solved['straight']}"
+    )
 
 
 def _bolts(joint: Joint, read: dict[str, Any], force: np.ndarray, moment: np.ndarray) -> list[Any]:
@@ -1058,6 +1183,7 @@ def run(args: Any, report: Report) -> None:
     meshed = (
         f"a mesh of at most {size:g} mm ({fine['nodes']} nodes, {fine['elements']} elements, "
         f"meshed in {fine['mesh_s']} s and solved in {fine['solve_s']} s)"
+        + _straight_said(fine)
     )
     start = (
         f"the assembly: {len(assembly.parts)} part(s) and {len(assembly.joints)} joint(s) from "
@@ -1138,7 +1264,8 @@ def run(args: Any, report: Report) -> None:
         for f, o in zip(fine["loads"], coarse["loads"], strict=True)
     )
     report.second(
-        f"the same solve on a mesh of at most {coarse['mesh_mm']:g} mm ({coarse['nodes']} nodes): "
+        f"the same solve on a mesh of at most {coarse['mesh_mm']:g} mm ({coarse['nodes']} nodes"
+        f"{_straight_said(coarse)}): "
         f"the loaded places move {moves}"
     )
     report.second(
@@ -1754,8 +1881,8 @@ def _dovetail(
         centres, normals, areas, of_face = pieces
         keep = np.ones(len(areas), dtype=bool)
         if joint.latch is not None:
-            keep = np.array([not load_dovetail._in_box(c, joint.latch.arm) for c in centres],
-                            dtype=bool)  # fmt: skip
+            latch = joint.latch
+            keep = np.array([not latch.inside(c) for c in centres], dtype=bool)
         touching = int(of_face.max()) + 1 if len(of_face) else 0
         every = [centres[keep]], [normals[keep]], [areas[keep]], [of_face[keep]]
         gaps = [np.zeros(int(keep.sum()))]

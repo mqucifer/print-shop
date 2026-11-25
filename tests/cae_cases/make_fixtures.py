@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import json
 import math
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -595,6 +596,234 @@ def plays() -> None:
         assembly(out / f"{name}.json", parts, latched(at), floor)
 
 
+#: The posts' ring (mqucifer/print-shop#295): each post this far from the middle, in mm.
+RING = 100.0
+
+
+def turned() -> None:
+    """The latched post of `play/` (`upper-edge.step` on `lower-edge.step`, its latch near the
+    edge) placed four times round the middle, as a table's legs are at its corners: each pair
+    turned about z by the same angle and moved out `RING` the way it then faces. A quarter turn
+    apart from 0, and from 45. Each latch is named once, in the upper's own file's axes, as
+    `play/edge.json` names it in the assembly's, and carried with the post."""
+    out = Path("turned")
+    out.mkdir(parents=True, exist_ok=True)
+    for name in ("upper-edge.step", "lower-edge.step"):
+        shutil.copyfile(Path("play") / name, out / name)
+    foot = LOWER_T - TAB_L
+    face = WALL_AT + TAB_CLEAR
+    latch = {
+        "on": "upper",
+        "arm": [[NEAR_EDGE - TAB_W / 2 - 0.1, WALL_AT - HOOK_IN - 0.1, foot - 0.1],
+                [NEAR_EDGE + TAB_W / 2 + 0.1, face + SLENDER + 0.1, LOWER_T]],
+        "root": f"z={LOWER_T:g}",
+        "frame": "part",
+    }  # fmt: skip
+    floor = [{"plane": "z=0", "how": "fixed"}]
+
+    def posts(first: float, count: int = 4, frame: str = "part") -> tuple[Rows, Rows]:
+        parts: Rows = []
+        joints: Rows = []
+        for k in range(count):
+            angle = first + 90.0 * k
+            at = [RING * math.cos(math.radians(angle)), RING * math.sin(math.radians(angle)), 0]
+            where = {"turn": [["z", angle]], "at": at, "layers": "z"}
+            parts += [
+                {"name": f"upper{k}", "file": "upper-edge.step", **where},
+                {"name": f"lower{k}", "file": "lower-edge.step", **where},
+            ]
+            joints.append({"between": [f"upper{k}", f"lower{k}"], "kind": "dovetail",
+                           "slides": "-z", "latch": {**latch, "on": f"upper{k}"}})  # fmt: skip
+        return parts, joints
+
+    for name, first in (("quarter", 0.0), ("eighth", 45.0)):
+        parts, joints = posts(first)
+        assembly(out / f"{name}.json", parts, joints, floor)
+    # One post, unturned and in place: its latch named in its own axes reads as `play/edge.json`
+    # names it in the assembly's.
+    one = [
+        {"name": "upper", "file": "upper-edge.step", "layers": "z"},
+        {"name": "lower", "file": "lower-edge.step", "layers": "z"},
+    ]
+    alone: Rows = [{"between": ["upper", "lower"], "kind": "dovetail", "slides": "-z",
+                    "latch": latch}]  # fmt: skip
+    assembly(out / "own.json", one, alone, floor)
+
+
+#: The large table (mqucifer/print-shop#295), in mm: `SIDE` square, its top `TOP_T` thick on
+#: aprons `APRON_T` thick and `APRON_H` tall, standing `HIGH` to the top's underside, on legs
+#: `LEG` square split at `SPLIT` and spliced by a plate `SPLICE_T` thick. Round figures only.
+SIDE, TOP_T, APRON_T, APRON_H, HIGH, LEG, SPLIT, SPLICE_T = 400, 10, 20, 40, 300, 40, 150, 10
+#: An M5 bolt's hole, a nut's slot 0.2 mm clear of its flats, and a washer's half width.
+HOLE_R, SLOT_W, SLOT_H = 2.75, 8.4, 5.0
+
+
+def _bore(start: tuple[float, float, float], way: tuple[float, float, float], long: float) -> Any:
+    return Part.makeCylinder(HOLE_R, long, App.Vector(*start), App.Vector(*way))
+
+
+def _slot(centre: tuple[float, float, float], way: str, out: float, deep: str) -> Any:
+    """A nut's slot round a bore's end: `SLOT_W` across its flats, `SLOT_H` tall along the
+    bore, and from the bore's axis out to `out` along `way`. `deep` is the bore's axis."""
+    half = SLOT_W / 2
+    low, high = [c - half for c in centre], [c + half for c in centre]
+    k, d = "xyz".index(way[1]), "xyz".index(deep)
+    if way[0] == "+":
+        low[k], high[k] = centre[k] - half, out
+    else:
+        low[k], high[k] = out, centre[k] + half
+    low[d], high[d] = centre[d] - SLOT_H, centre[d]
+    return box(tuple(low), tuple(high))  # type: ignore[arg-type]
+
+
+def large() -> None:
+    """A table of 24 parts held by 56 M5 through-bolts (mqucifer/print-shop#295): a top of four
+    tiles, each on its two aprons, its leg and a rib under it; each leg in two pieces end to end,
+    spliced by a plate bolted to both; each apron bolted to the legs it laps. One corner's six
+    parts are drawn, and each other corner's are the same turned a quarter turn about the
+    table's middle, so the aprons run round it as a pinwheel, each 1 mm short of the next.
+
+    A tile is bolted down through each apron and its rib, its washer under the apron or the rib,
+    and into its leg's top, the nut in a slot in the leg's side; an apron through its leg, the
+    nut on the leg's inner face; the plate through each piece of the leg, the nut on its outer
+    face; and an apron into its rib's end, the nut in a slot in the rib. The leg's two pieces
+    touch end to end, held by the plate."""
+    out = Path("large")
+    top, low = HIGH, HIGH - APRON_H
+    inner, half = LEG + 20, (SIDE - 1) / 2
+    # One corner's parts, where they sit: x and y from 0, the top's underside at z = HIGH.
+    tile = box((0, 0, top), (half, half, top + TOP_T))
+    apron = box((0, 0, low), (SIDE - 21, APRON_T, top))
+    upper = box((APRON_T, APRON_T, SPLIT), (inner, inner, top))
+    lower = box((APRON_T, APRON_T, 0), (inner, inner, SPLIT))
+    plate = box((inner, APRON_T, SPLIT - 50), (inner + SPLICE_T, inner, SPLIT + 50))
+    rib = box((120, APRON_T, low), (140, half - 0.5, top))
+    # Where each bolt is, a point on its axis.
+    along_y, along_x = (0, 1, 0), (1, 0, 0)
+    bolts: dict[str, list[tuple[float, float, float]]] = {
+        "tile+apron": [(100, 10, top), (170, 10, top)],
+        "tile+side": [(10, 100, top), (10, 170, top)],
+        "tile+rib": [(130, 90, top), (130, 170, top)],
+        "tile+upper": [(40, 40, top)],
+        "apron+upper": [(30, 0, 265)],
+        "side+upper": [(0, 30, 272)],
+        "plate+upper": [(inner + SPLICE_T, 40, 165), (inner + SPLICE_T, 40, 185)],
+        "plate+lower": [(inner + SPLICE_T, 40, 115), (inner + SPLICE_T, 40, 135)],
+        "apron+rib": [(130, 0, 280)],
+    }
+    for x, y, _ in bolts["tile+apron"]:
+        tile, apron = tile.cut(_bore((x, y, low), (0, 0, 1), 60)), apron.cut(
+            _bore((x, y, low), (0, 0, 1), 60))
+    for x, y, _ in bolts["tile+rib"]:
+        tile, rib = tile.cut(_bore((x, y, low), (0, 0, 1), 60)), rib.cut(
+            _bore((x, y, low), (0, 0, 1), 60))
+    for x, y, _ in bolts["tile+side"]:
+        # Through the next corner's tile too, which this apron is the side of: the same
+        # bolt a quarter turn on, (x, y) to (SIDE - y, x).
+        tile = tile.cut(_bore((x, y, low), (0, 0, 1), 60))
+        apron = apron.cut(_bore((SIDE - y, x, low), (0, 0, 1), 60))
+    # The leg's top: a bore 20 deep and the nut's slot, open to the leg's inner x face.
+    x, y, z = bolts["tile+upper"][0]
+    tile = tile.cut(_bore((x, y, top - 20), (0, 0, 1), 40))
+    upper = upper.cut(_bore((x, y, top - 20), (0, 0, 1), 40)).cut(
+        _slot((x, y, top - 20), "+x", inner, "z"))
+    for x, _, z in bolts["apron+upper"]:
+        apron, upper = (s.cut(_bore((x, -1, z), along_y, inner + 2)) for s in (apron, upper))
+    for _, y, z in bolts["side+upper"]:
+        upper = upper.cut(_bore((-1, y, z), along_x, inner + 2))
+        # And the next corner's leg's through this apron, a quarter turn on.
+        apron = apron.cut(_bore((SIDE - y, -1, z), along_y, APRON_T + 2))
+    for _, y, z in bolts["plate+upper"] + bolts["plate+lower"]:
+        plate, upper, lower = (s.cut(_bore((APRON_T - 1, y, z), along_x, LEG + SPLICE_T + 2))
+                               for s in (plate, upper, lower))  # fmt: skip
+    # The apron into its rib's end, the nut in a slot open to the rib's +x side, 40 mm in.
+    x, y, z = bolts["apron+rib"][0]
+    apron = apron.cut(_bore((x, -1, z), along_y, APRON_T + 2))
+    rib = rib.cut(_bore((x, APRON_T - 1, z), along_y, 41)).cut(
+        _slot((x, APRON_T + 40, z), "+x", 140, "y"))
+    corner = {"tile": tile, "apron": apron, "upper": upper, "lower": lower, "plate": plate,
+              "rib": rib}  # fmt: skip
+    middle = App.Vector(SIDE / 2, SIDE / 2, 0)
+    parts: Rows = []
+    for k in range(4):
+        for name, shape in corner.items():
+            turned = shape.copy()
+            turned.rotate(middle, App.Vector(0, 0, 1), 90 * k)
+            save(turned, out / f"{name}{k}.step")
+            parts.append({"name": f"{name}{k}", "file": f"{name}{k}.step", "layers": "z"})
+
+    def turn(point: tuple[float, float, float], k: int) -> list[float]:
+        x, y, z = point
+        for _ in range(k):
+            x, y = SIDE - y, x
+        return [x, y, z]
+
+    joints: Rows = []
+    for k in range(4):
+        side = (k + 3) % 4
+        names = {"tile": f"tile{k}", "apron": f"apron{k}", "side": f"apron{side}",
+                 "upper": f"upper{k}", "lower": f"lower{k}", "plate": f"plate{k}",
+                 "rib": f"rib{k}"}  # fmt: skip
+        for pair, at in bolts.items():
+            first, second = (names[n] for n in pair.split("+"))
+            joint: dict[str, Any] = {
+                "between": [first, second], "kind": "through", "bolt": "m5-8.8",
+                "nut": "m5-nut", "washer": "m5-washer", "at": [turn(p, k) for p in at],
+            }  # fmt: skip
+            if pair in ("tile+upper", "apron+rib"):
+                joint["pocket"] = 0.2
+            joints.append(joint)
+        joints.append({"between": [names["upper"], names["lower"]], "kind": "touching"})
+    standing = [{"plane": "z=0", "how": "standing"}]
+    assembly(out / "table.json", parts, joints, standing)
+    # The control: one bolt of the first tile's rib left out, the other still in.
+    fewer = [dict(j) for j in joints]
+    rib = next(j for j in fewer if j["between"] == ["tile0", "rib0"])
+    rib["at"] = rib["at"][1:]
+    assembly(out / "one-out.json", parts, fewer, standing)
+
+
+#: The stool (mqucifer/print-shop#295): a top `STOOL` square and `STOOL_T` thick on four legs
+#: `STOOL_LEG` square and `STOOL_H` tall, each held by one M5 through-bolt down through the top
+#: into the leg's top, `STOOL_BORE` deep, its nut in a slot open to the leg's inner side.
+STOOL, STOOL_T, STOOL_LEG, STOOL_H, STOOL_BORE = 200.0, 8.0, 30.0, 150.0, 20.0
+
+
+def stool() -> None:
+    """Four legs bolted under a top, one bolt each, fixed to the floor: the control for the
+    large table (mqucifer/print-shop#295), small enough to read. Pushed sideways at the top, each
+    leg's joint carries a moment, which its bolt holds; with leg2's bolt left out, that joint is
+    `touching`, held by nothing, and comes away."""
+    out = Path("large")
+    corners = [(0.0, 0.0), (STOOL - STOOL_LEG, 0.0), (STOOL - STOOL_LEG, STOOL - STOOL_LEG),
+               (0.0, STOOL - STOOL_LEG)]  # fmt: skip
+    top = box((0, 0, STOOL_H), (STOOL, STOOL, STOOL_H + STOOL_T))
+    parts: Rows = []
+    joints: Rows = []
+    for k, (x, y) in enumerate(corners):
+        axis = (x + STOOL_LEG / 2, y + STOOL_LEG / 2)
+        bore = _bore((*axis, STOOL_H - STOOL_BORE), (0, 0, 1), STOOL_BORE + STOOL_T + 1)
+        top = top.cut(bore)
+        inward = "+x" if x == 0 else "-x"
+        far = x + STOOL_LEG if x == 0 else x
+        leg = box((x, y, 0), (x + STOOL_LEG, y + STOOL_LEG, STOOL_H)).cut(bore).cut(
+            _slot((*axis, STOOL_H - STOOL_BORE), inward, far, "z"))
+        save(leg, out / f"stool-leg{k}.step")
+        parts.append({"name": f"leg{k}", "file": f"stool-leg{k}.step", "layers": "z"})
+        joints.append({"between": ["top", f"leg{k}"], "kind": "through", "bolt": "m5-8.8",
+                       "nut": "m5-nut", "washer": "m5-washer",
+                       "at": [[*axis, STOOL_H]], "pocket": 0.2})  # fmt: skip
+    save(top, out / "stool-top.step")
+    parts.insert(0, {"name": "top", "file": "stool-top.step", "layers": "z"})
+    # Its feet fixed to the floor, as a push along it needs.
+    fixed = [{"plane": "z=0", "how": "fixed"}]
+    assembly(out / "stool.json", parts, joints, fixed)
+    # The control: leg2's bolt left out, so its joint is held by nothing.
+    fewer = [dict(j) for j in joints]
+    fewer[2] = {"between": ["top", "leg2"], "kind": "touching"}
+    assembly(out / "stool-one-out.json", parts, fewer, fixed)
+
+
 def main() -> None:
     loads()
     throughs()
@@ -602,6 +831,9 @@ def main() -> None:
     shears()
     dovetails()
     plays()
+    turned()
+    large()
+    stool()
     out = Path("snap")
     seated = WALL_Y + ROOM
     save(base(seated), out / "box.step")
