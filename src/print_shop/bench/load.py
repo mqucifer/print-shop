@@ -550,6 +550,14 @@ class _Model:
                 f"the parts' faces or straight: {words[:300]}"
             )
         self.nodes = {n: np.array([p.x, p.y, p.z]) for n, p in fem.Nodes.items()}
+        if self.two_pass and len(self.solids) > 1:
+            # Each part has elements of its own, before anything is solved: a mesh that doesn't
+            # part them is refused at once in two passes (mqucifer/print-shop#301), which then
+            # leave time for a glass band's lower bound.
+            order = sorted(self.nodes)
+            row = {n: i for i, n in enumerate(order)}
+            corners = np.array([[row[n] for n in fem.getElementNodes(e)[:4]] for e in fem.Volumes])
+            self._owned(corners, row, np.array([self.nodes[n] for n in order]))
         fea = ccxtools.FemToolsCcx(analysis, solver)
         fea.update_objects()
         fea.setup_working_dir(tempfile.mkdtemp(prefix="load-"))

@@ -1673,7 +1673,7 @@ def stool(cae: Any) -> dict[str, Answer]:
 
 
 @pytest.mark.assembly
-def test_a_bolt_left_out_reads_its_joint_as_the_one_that_gives_first(
+def test_a_bolt_left_out_gives_first_and_two_passes_read_no_lower_than_one(
     stool: dict[str, Answer],
 ) -> None:
     """The control (mqucifer/print-shop#295, the operator's comment there): a stool, a top on
@@ -1683,9 +1683,14 @@ def test_a_bolt_left_out_reads_its_joint_as_the_one_that_gives_first(
     The solve ties every joint's faces as a bolted joint is while its bolts hold, so a bolt
     left out doesn't change how far anything moves: the loaded place moves the same. And the
     same in two passes (mqucifer/print-shop#301), but that there a bore with no bolt in it isn't
-    squared, so the first pass's mesh differs round it, and the place moves within 1e-3."""
-    for one, two, alike in (("one", "out", 1e-6), ("one/2", "out/2", 1e-3)):
-        bolted, one_out = stool[one], stool[two]
+    squared, so the first pass's mesh differs round it, and the place moves within 1e-3.
+
+    And the small bolted assembly that fits both ways (mqucifer/print-shop#301): two passes read
+    each part's worst strain, across its layers and any way, no lower than one pass within
+    their band, and the loaded place moves no less. One pass reads as it always has, with no
+    word of two. One test, so the four reads are made once a worker."""
+    for whole, left_out, alike in (("one", "out", 1e-6), ("one/2", "out/2", 1e-3)):
+        bolted, one_out = stool[whole], stool[left_out]
         assert bolted.verdict == "OK", bolted.text
         assert "straight sides" not in bolted.text, "its bores mesh curved, and stay so"
         assert one_out.verdict == "FAIL", one_out.text
@@ -1696,15 +1701,7 @@ def test_a_bolt_left_out_reads_its_joint_as_the_one_that_gives_first(
         assert one_out.numbers["moves_mm"] == moved
     assert "two_passes" in stool["out/2"].numbers
 
-
-@pytest.mark.assembly
-def test_two_passes_read_each_part_no_lower_and_the_movement_no_less_than_one(
-    stool: dict[str, Answer],
-) -> None:
-    """mqucifer/print-shop#301: a small bolted assembly that fits both ways. Two passes read
-    each part's worst strain, across its layers and any way, no lower than one pass within
-    their band, and the loaded place moves no less. One pass reads as it always has, with no
-    word of two."""
+    # The same stool both ways: two passes read each part no lower, and it moves no less.
     one, two = stool["one"], stool["one/2"]
     assert two.verdict == one.verdict == "OK", two.text
     assert "read in two passes (asked for with --parts)" in two.text
