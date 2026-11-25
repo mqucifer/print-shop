@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 import trimesh
 
@@ -3440,6 +3441,101 @@ def test_fit_bed_reads_a_peaked_bore_that_a_nut_s_slot_cuts_in_two(bench: Any) -
     assert split.verdict == "NO ANSWER" and "in two, the round face" in split.record["why"]
     flat = bench("fit-bed", "bore/flat.json")
     assert flat.verdict == "NO ANSWER" and "flatter than 45°" in flat.record["why"]
+
+
+# A through-bolt in a drop-in channel (mqucifer/print-shop#302)
+
+
+def channel_seat(radius: float = 2.75, washer: float = 10.0, hole: float = 5.3) -> float:
+    """A washer's ring on a channel's wall less the channel's cut, by summing thin rings: at r
+    from the axis, the round's walls 2.75 mm either side of the open way take 2 asin(2.75/r)."""
+    inner = max(radius, hole / 2)
+    edges = np.linspace(inner, washer / 2, 200_001)
+    r = (edges[:-1] + edges[1:]) / 2
+    return float(((2 * math.pi - 2 * np.arcsin(radius / r)) * r * np.diff(edges)).sum())
+
+
+def test_fit_bed_reads_two_halves_joined_by_a_bolt_in_a_drop_in_channel(bench: Any) -> None:
+    """Two halves of a panel, an M5 through-bolt across the join in a U 5.5 mm across, open
+    up: `fit-bed` read it as a slot's end and refused it. Declared a channel, each half's round
+    holds the 5 mm shank with 0.25 mm a side, each washer sits on 40.62 mm² of its wall, the
+    ring less the channel's cut, by the faces and the mesh, nothing is in the bolt's way in, and
+    printed on its bottom each half has its channel up. A half that could lie either way up is
+    laid with its channel up, though its top has more flat."""
+    seat = channel_seat()
+    assert seat == pytest.approx(40.62, abs=0.01)
+    for name in ("joined", "hollow"):
+        answer = bench("fit-bed", f"channel/{name}.json")
+        assert answer.verdict == "OK" and answer.code == 0, answer.text
+        assert "each of 1 bolt(s) in a drop-in channel drops in" in answer.record["why"]
+        bolt = answer.numbers["channels"]["left+right"][0]
+        assert bolt["fits"] is True and bolt["drops_in"] is True and bolt["shank_mm"] == 5
+        head, nut = bolt["ends"]
+        assert (head["part"], head["wall"], head["plane"]) == ("left", "head", "x=12")
+        assert (nut["part"], nut["wall"], nut["plane"]) == ("right", "nut", "x=28")
+        for end in (head, nut):
+            assert end["round_mm"] == pytest.approx(5.5) and end["play_mm"] == pytest.approx(0.25)
+            assert end["toward"] == [0, 0, 1] and end["round_deg"] == pytest.approx(180)
+            assert end["open_mm"] == pytest.approx(5.5) and end["length_mm"] == pytest.approx(8)
+            assert end["ring_mm2"] == pytest.approx(math.pi / 4 * (10**2 - 5.5**2))
+            assert end["seat_mm2"] == pytest.approx(seat, rel=1e-6)
+            assert end["bears_mm2"] == pytest.approx(seat, rel=1e-6)
+            assert end["bears_by_mesh_mm2"] == pytest.approx(seat, rel=1e-4)
+            assert end["seated"] is True and end["over_mm3"] == pytest.approx(0, abs=1e-9)
+            assert end["over_by_mesh_mm2"] == 0 and end["drops_in"] is True
+            assert (end["side"], end["faces_up"]) == ("-z", True)
+        assert reports.unlike("fit-bed", answer.numbers) == []
+    hollow = bench("fit-bed", "channel/hollow.json").numbers["parts"]["right"]
+    assert hollow["side"] == "-z" and hollow["flat_mm2"] == pytest.approx(96)
+    assert hollow["sides"][1]["side"] == "+z" and hollow["sides"][1]["flat_mm2"] > 96
+
+
+@pytest.mark.parametrize(
+    ("name", "said"),
+    [
+        ("down", "in right, laid on its +z face, its open side is toward (0, 0, 1) of right's own "
+                 "file, where up is (0, 0, -1): it needs support"),
+        ("narrow", "in right, the washer m5-washer under the nut sits on 37.7 mm² of the nut's "
+                   "wall at x=28, of its ring's 54.8 mm², and 40.6 mm² less the channel's cut: "
+                   "the wall is too narrow for it"),
+        ("bridged", "in right, 19.960 mm³ of the part is over the channel within the bolt's 5 mm"),
+        ("walls", "the nut's wall at x=30: the channel in right ends at x=28, not there"),
+    ],
+)  # fmt: skip
+def test_fit_bed_fails_a_channel_that_needs_support_or_doesn_t_take_its_bolt(
+    bench: Any, name: str, said: str
+) -> None:
+    """Laid open side down, a wall 9 mm wide under a 10 mm washer, a bridge over the channel,
+    and a wall declared where the channel doesn't end: each fails, naming the joint, the part
+    and the wall, and the other half still reads as it did."""
+    answer = bench("fit-bed", f"channel/{name}.json")
+    assert answer.verdict == "FAIL" and answer.code == 1, answer.text
+    why = answer.record["why"]
+    assert why.startswith("the channel of the through joint left+right's bolt at (20, 15, 10): ")
+    assert said in why, why
+    assert "; and " not in why, "nothing else fails"
+    bolt = answer.numbers["channels"]["left+right"][0]
+    head, nut = bolt["ends"]
+    assert bolt["fits"] is False and head["seated"] and head["faces_up"] and head["drops_in"]
+    assert all(p["fits"] for p in answer.numbers["parts"].values()), "the parts still fit"
+    assert reports.unlike("fit-bed", answer.numbers) == []
+    if name == "down":
+        assert answer.numbers["parts"]["right"]["side"] == "+z" and nut["faces_up"] is False
+    if name == "narrow":
+        assert nut["bears_mm2"] == pytest.approx(nut["bears_by_mesh_mm2"], rel=1e-4)
+    if name == "bridged":
+        assert nut["drops_in"] is False and nut["over_by_mesh_mm2"] > 1
+
+
+def test_fit_bed_still_refuses_a_channel_with_no_declaration(bench: Any) -> None:
+    """The same halves with no `channel`, and the nut stated in a pocket so `fit-bed` reads
+    the bolt: a slot's end, as on main."""
+    answer = bench("fit-bed", "channel/undeclared.json")
+    assert answer.verdict == "NO ANSWER" and answer.code == 2, answer.text
+    assert (
+        "in left, the round face there doesn't go all the way round: a slot's end, not a hole. "
+        "A through-bolt passes right through both parts"
+    ) in answer.record["why"]
 
 
 def test_a_round_bore_level_on_the_bed_still_needs_support_and_a_peaked_one_none(

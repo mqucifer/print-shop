@@ -1288,9 +1288,62 @@ def nut_rows() -> None:
         Path(f"bed/{name}.json").write_text(json.dumps({"parts": parts, "joints": [joint]}))
 
 
+
+def channels() -> None:
+    """Two halves of a panel joined by one M5 through-bolt in a drop-in channel
+    (mqucifer/print-shop#302), all made up: `left` x 0 to 20 and `right` x 20 to 40, each 30
+    wide and 20 tall, meeting at x 20. A U 5.5 mm across, its round about the axis through
+    (y 15, z 10) and its walls straight up to the top, open toward +z, runs from x 12 to 28.
+    Behind it in each half a recess open at the top, 8 long and 16 wide from z 3: the head's,
+    whose wall is at x 12, and the nut's, at x 28. A washer 10 mm across sits on each wall
+    with 3 mm to spare. Printed on its bottom, each half has its channel up; and against it:
+    `right` with a rod lying under it, so it can only lie on its top; with a hollow under it, so
+    its top has the most flat; 9 mm wide with no recess, its end the nut's wall; and with a
+    bridge over its channel."""
+    out = Path("channel")
+    out.mkdir(exist_ok=True)
+    solid, V = cq.Solid.makeBox, cq.Vector
+    u = cq.Solid.makeCylinder(2.75, 20, V(10, 15, 10), V(1, 0, 0)).fuse(
+        solid(20, 5.5, 11, V(10, 12.25, 10))
+    )
+    left = solid(20, 30, 20).cut(solid(8, 16, 18, V(4, 7, 3))).cut(u)
+    right = solid(20, 30, 20, V(20, 0, 0)).cut(solid(8, 16, 18, V(28, 7, 3)))
+    made = {
+        "left": left,
+        "right": right.cut(u),
+        "right-rod": right.cut(u).fuse(
+            cq.Solid.makeCylinder(1, 16, V(22, 15, -0.5), V(1, 0, 0))
+        ).clean(),
+        "right-hollow": right.cut(u).cut(solid(18, 28, 2, V(21, 1, 0))),
+        "right-narrow": solid(8, 9, 20, V(20, 10.5, 0)).cut(u),
+        "right-bridged": right.cut(u).fuse(solid(2, 6, 2, V(22, 12, 18))).clean(),
+    }
+    for name, shape in made.items():
+        save(cq.Workplane().add(shape), f"channel/{name}")
+    declared = {"axis": "x", "open": "+z", "head_wall": "x=12", "nut_wall": "x=28"}
+    joint = {"between": ["left", "right"], "kind": "through", "bolt": "m5-8.8", "nut": "m5-nut",
+             "washer": "m5-washer", "at": [[20, 15, 10]], "channel": declared}  # fmt: skip
+    walls = {**declared, "nut_wall": "x=30"}
+    for name, right_is, changed in (
+        ("joined", "right", {}),
+        ("down", "right-rod", {}),
+        ("hollow", "right-hollow", {}),
+        ("narrow", "right-narrow", {}),
+        ("bridged", "right-bridged", {}),
+        ("walls", "right", {"channel": walls}),
+        ("undeclared", "right", {"channel": None, "pocket": 0.2}),
+    ):
+        parts = [
+            {"name": "left", "file": "left.step", "layers": "z"},
+            {"name": "right", "file": f"{right_is}.step", "layers": "z"},
+        ]
+        stated = {k: v for k, v in {**joint, **changed}.items() if v is not None}
+        (out / f"{name}.json").write_text(json.dumps({"parts": parts, "joints": [stated]}))
+
 if __name__ == "__main__":
     beds()
     bores()
+    channels()
     unreadable()
     where()
     sections()

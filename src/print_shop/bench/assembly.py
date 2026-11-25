@@ -24,7 +24,9 @@ whoever designs the parts (`docs/bench.md` has it in full):
   is, a point on its axis. `through` (mqucifer/print-shop#168) names a bolt that passes right
   through both parts, its nut and the washer under each side, its head on the first part named
   and its nut on the second; with `pocket`, the nut sits in a pocket there that holds it by its
-  flats, at that play, with no washer under it. `dovetail` (mqucifer/print-shop#170) is a
+  flats, at that play, with no washer under it; with `channel` (mqucifer/print-shop#302), the
+  bolt lies in a drop-in channel open on one side, and its head and its nut bear on the walls
+  the channel names. `dovetail` (mqucifer/print-shop#170) is a
   tail on the first part named in a socket in the second: `slides` is the way the tail goes in,
   toward its seat, in the assembly's own axes, and `latch`, where it has one, is the flexing
   tab that holds it there: the part it's `on`, a box round it, `arm`, and the plane of its
@@ -319,6 +321,8 @@ class Joint:
     #: The play between each of the nut's flats and the wall of the pocket it sits in, in mm,
     #: where it sits in one, with no washer under it.
     pocket: float | None = None
+    #: Where a through-bolt lies in a drop-in channel open on one side (mqucifer/print-shop#302).
+    channel: Channel | None = None
     #: A dovetail's: the way its tail, on the first part, slides into its socket, in the second,
     #: toward its seat, as a sign and an axis of the assembly's, and its latch where it has one.
     slides: str | None = None
@@ -348,6 +352,40 @@ class Joint:
         if self.pull_n is not None:
             found.append((self.pull_n, f"the joint's own figure: {self.source}"))
         return min(found)
+
+
+@dataclass(frozen=True)
+class Channel:
+    """A through-bolt's seat as a drop-in channel (mqucifer/print-shop#302): a U with a round
+    bottom, open on one side, running across the join, that the bolt drops into from that side.
+    Its head bears on one wall and its nut on another, each square to the bolt."""
+
+    #: The axis of the assembly's the bolt runs along.
+    axis: str
+    #: The way the channel is open, square to it: one of `WAYS`.
+    open: str
+    #: Where the walls the head and the nut bear on are along `axis`, in the assembly.
+    head_wall: float
+    nut_wall: float
+
+    def axis_way(self) -> np.ndarray:
+        way = np.zeros(3)
+        way[AXES.index(self.axis)] = 1.0
+        return way
+
+    def open_way(self) -> np.ndarray:
+        way = np.zeros(3)
+        way[AXES.index(self.open[1])] = 1.0 if self.open[0] == "+" else -1.0
+        return way
+
+    def wall_said(self, wall: str) -> str:
+        """`the head's wall at x=-6`: a wall by whose it is and its plane."""
+        level = self.head_wall if wall == "head" else self.nut_wall
+        return f"the {wall}'s wall at {self.axis}={level:g}"
+
+
+#: What a channel gives, and nothing else.
+CHANNEL_FIELDS = {"axis", "open", "head_wall", "nut_wall"}
 
 
 @dataclass(frozen=True)
@@ -457,7 +495,9 @@ def _joint(entry: Any, names: list[str]) -> Joint:
     if kind == "dovetail":
         return _dovetail(entry, first, second)
     if kind != "bolted":
-        extra = sorted({"bolt", "insert", "at", "pull_n", "nut", "washer", "pocket"} & set(entry))
+        extra = sorted(
+            {"bolt", "insert", "at", "pull_n", "nut", "washer", "pocket", "channel"} & set(entry)
+        )
         if extra:
             raise NoAnswer(
                 f"the joint {first}+{second} is {kind} and gives {', '.join(extra)}: only a "
@@ -471,7 +511,7 @@ def _joint(entry: Any, names: list[str]) -> Joint:
                 + ("glued" if kind == "bonded" else kind)
             )
         return Joint((first, second), kind)
-    extra = sorted({"nut", "washer", "pocket"} & set(entry))
+    extra = sorted({"nut", "washer", "pocket", "channel"} & set(entry))
     if extra:
         raise NoAnswer(
             f"the joint {first}+{second} is bolted, into an insert, and gives "
@@ -533,9 +573,62 @@ def _through(entry: dict[str, Any], first: str, second: str) -> Joint:
                 f"{what}'s `pocket` is the play between each of the nut's flats and its "
                 f"pocket's wall, in mm, 0 or more, not {entry['pocket']!r}"
             )
+    channel = None if entry.get("channel") is None else _channel(entry["channel"], what)
+    if channel is not None and play is not None:
+        raise NoAnswer(
+            f"{what} gives a `pocket` and a `channel`: in a channel the nut bears on its wall "
+            "through a washer, as the head does, and isn't held in a pocket"
+        )
     return Joint(
-        (first, second), "through", bolt, None, points, nut=nut, washer=washer, pocket=play
+        (first, second),
+        "through",
+        bolt,
+        None,
+        points,
+        nut=nut,
+        washer=washer,
+        pocket=play,
+        channel=channel,
     )
+
+
+def _channel(given: Any, what: str) -> Channel:
+    """A through-bolt's drop-in channel: the axis it runs along, the way it's open, and the
+    planes of the walls its head and its nut bear on, each square to that axis."""
+    shape = (
+        f'{what}\'s `channel` is {{"axis": "x", "open": "+z", "head_wall": "x=-6", '
+        '"nut_wall": "x=6"}: the axis the bolt runs along, the way the channel is open, '
+        "square to it, and the planes of the walls the head and the nut bear on"
+    )
+    if not isinstance(given, dict) or set(given) != CHANNEL_FIELDS:
+        raise NoAnswer(f"{shape}, not {given!r}")
+    axis = given["axis"]
+    if axis not in AXES:
+        raise NoAnswer(f"{shape}: its `axis` is one of {', '.join(AXES)}, not {axis!r}")
+    opened = given["open"]
+    if opened not in WAYS or opened[1] == axis:
+        raise NoAnswer(
+            f"{shape}: its `open` is one of {', '.join(w for w in WAYS if w[1] != axis)}, "
+            f"square to its axis, not {opened!r}"
+        )
+    levels = []
+    for key in ("head_wall", "nut_wall"):
+        on, _, at = str(given[key]).partition("=")
+        try:
+            level = float(at)
+        except ValueError:
+            level = math.nan
+        if on.strip() != axis or not math.isfinite(level):
+            raise NoAnswer(
+                f"{shape}: its `{key}` is a plane square to its axis, {axis}=NUMBER, not "
+                f"{given[key]!r}"
+            )
+        levels.append(level)
+    if abs(levels[0] - levels[1]) <= 1e-3:
+        raise NoAnswer(
+            f"{shape}: its head's wall and its nut's are one plane, {axis}={levels[0]:g}"
+        )
+    return Channel(axis, opened, levels[0], levels[1])
 
 
 #: What a dovetail joint gives, and nothing else.
