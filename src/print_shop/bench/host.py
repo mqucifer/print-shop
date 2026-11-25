@@ -7,9 +7,9 @@ than two CPUs and 3 GiB. Standard library only: this runs outside the image.
 
 There are two images (mqucifer/print-shop#142). `print-shop/bench` holds CadQuery and the
 second-check libraries, and runs every command but two. `print-shop/cae` holds FreeCAD, gmsh and
-CalculiX, and runs `fit-on`, `bend` and `load` (mqucifer/print-shop#156), under the same
-limits. The disk guard counts both: a
-build leaves room for whichever of them isn't built yet.
+CalculiX, and runs `fit-on`, `bend`, `load` (mqucifer/print-shop#156) and `optimise`, with BESO
+(mqucifer/print-shop#286), under the same limits. The disk guard counts both: a build leaves room
+for whichever of them isn't built yet.
 """
 
 from __future__ import annotations
@@ -37,10 +37,10 @@ FLOOR_GB = 5.0
 #: conda-forge --override-channels freecad=1.1.3 calculix=2.23 gmsh=4.15.2 --dry-run --json`,
 #: and from each `actions.LINK` entry in order, its `subdir`, `name`, `v` and its `version`,
 #: `build`, the file type its `fn` ends in, and `md5`; `linux-64` for CI.
-CAE_IMAGE = "print-shop/cae:0.1"
+CAE_IMAGE = "print-shop/cae:0.2"
 CAE_LIMIT_GB = 4.0
 #: The commands that run in it. Every other runs in `IMAGE`.
-CAE_COMMANDS = ("fit-on", "bend", "load")
+CAE_COMMANDS = ("fit-on", "bend", "load", "optimise")
 #: Each image by the name `build` takes: its tag, its limit and its Dockerfile's folder.
 IMAGES = {
     "bench": (IMAGE, IMAGE_LIMIT_GB, "image"),
@@ -52,6 +52,9 @@ KILLED = 137
 MAX_FILE = str(2 * 1024**3)
 #: A command that runs longer than this has no answer, in seconds.
 TIMEOUT = 600
+#: Longer for a command that solves the part tens of times over: `optimise`, whose BESO
+#: iterations each solve the whole part (mqucifer/print-shop#286).
+TIMEOUTS = {"optimise": 3600}
 HERE = Path(__file__).resolve().parent
 REPOSITORY = HERE.parent.parent.parent
 #: The container's own mount of this package: read-only, so nothing in it can change the bench.
@@ -97,16 +100,21 @@ def code_version() -> str:
     return f"{commit}+changes" if changed else commit
 
 
-def image_for(args: list[str]) -> str:
-    """The image a bench command runs in: the second for `CAE_COMMANDS`, by the command's
-    own word, which follows the bench's `--out DIR` where that's given."""
+def command_word(args: list[str]) -> str | None:
+    """The command a bench call names, past `--out DIR`."""
     words = iter(args)
     for word in words:
         if word == "--out":
             next(words, None)
         elif not word.startswith("--out="):
-            return CAE_IMAGE if word in CAE_COMMANDS else IMAGE
-    return IMAGE
+            return word
+    return None
+
+
+def image_for(args: list[str]) -> str:
+    """The image a bench command runs in: the second for `CAE_COMMANDS`, by the command's
+    own word, which follows the bench's `--out DIR` where that's given."""
+    return CAE_IMAGE if command_word(args) in CAE_COMMANDS else IMAGE
 
 
 def container(
@@ -210,10 +218,15 @@ def helper(module: str, args: list[str]) -> list[str]:
     return ["python", "-I", "-c", entry, *args]
 
 
+def timeout_for(args: list[str]) -> int:
+    """How long a bench command may run: `TIMEOUT`, or its own in `TIMEOUTS`."""
+    return TIMEOUTS.get(command_word(args) or "", TIMEOUT)
+
+
 def run(
     args: list[str],
     work: Path,
-    timeout: int = TIMEOUT,
+    timeout: int | None = None,
     python: bool = False,
     image: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
@@ -221,6 +234,8 @@ def run(
     runs in its own image; a script in the first, or in `image`, where `CAE_IMAGE`'s Python has
     FreeCAD's modules on its path."""
     name = f"print-bench-{uuid.uuid4().hex[:12]}"
+    if timeout is None:
+        timeout = TIMEOUT if python else timeout_for(args)
     if python and image == CAE_IMAGE:
         start = "import sys, runpy; sys.path.append('/opt/conda/lib'); del sys.argv[0]; "
         start += "runpy.run_path(sys.argv[0], run_name='__main__')"
