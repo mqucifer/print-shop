@@ -68,9 +68,15 @@ AGREE = 0.05
 #: part's worst strain within 2% of one pass, some above and some below, where one pass's own
 #: two meshes are 1% to 24% apart on the same parts.
 BAND = 0.05
+#: Where across each triangle the first pass's push is sampled: its middle and three points
+#: halfway from it to each corner, as shares of the corners.
+SAMPLES = np.array(
+    [[1 / 3, 1 / 3, 1 / 3], [2 / 3, 1 / 6, 1 / 6], [1 / 6, 2 / 3, 1 / 6], [1 / 6, 1 / 6, 2 / 3]]
+)
 #: How much of what's put on a part from its neighbours `even_out` may move to make it add up
-#: to the first pass's, as a share of all of it: it moved 8.4% at the most on the stool, 13.4%
-#: on its control and 7.2% on the 24-part table, and past this nothing of the part is read.
+#: to the first pass's, as a share of all of it: on either of pass 2's meshes it moved 14.5% at
+#: the most on the stool, 10.4% on its control and 10.9% on the 24-part table, and past this
+#: nothing of the part is read.
 EVENED = 0.20
 #: Each joint's nearest figure to its limit (`nearest_share`, or a bolted joint's worst bolt
 #: over what it holds), read from the first pass's forces, is held this far below it, or it's
@@ -416,14 +422,20 @@ class _Alone(load._Model):
         triangles = [t for f in self.between for t in self._triangles(f)]
         if not triangles:
             raise NoAnswer(f"the mesh of {self.part.name} has no triangle where it meets another")
-        which = nearest(self.given["centres"], np.array([t[2] for t in triangles]))
+        # Each triangle's push per mm², the first pass's at the nearest of its own triangles to
+        # each of `SAMPLES` across it, averaged: so a triangle larger than the first pass's
+        # takes all those it covers, not the one at its middle.
+        corners = np.array([[self.nodes[n] for n in t[0][:3]] for t in triangles])
+        points = np.einsum("sk,tkd->tsd", SAMPLES, corners).reshape(-1, 3)
+        which = nearest(self.given["centres"], points).reshape(len(triangles), len(SAMPLES))
+        sampled = self.given["pushes"][which].mean(axis=1)
         shares: dict[int, float] = {}
         pushes: dict[int, np.ndarray] = {}
-        for (nodes, area, _), k in zip(triangles, which, strict=True):
+        for (nodes, area, _), push in zip(triangles, sampled, strict=True):
             # A uniform push on a second-order triangle is a third on each mid-side node.
             for node in nodes[3:]:
                 shares[node] = shares.get(node, 0.0) + area / 3
-                pushes[node] = pushes.get(node, 0) + self.given["pushes"][k] * area / 3
+                pushes[node] = pushes.get(node, 0) + push * area / 3
         order = sorted(pushes)
         places = np.array([self.nodes[n] for n in order])
         before = np.array([pushes[n] for n in order])
@@ -633,10 +645,11 @@ def second(
     args: Any,
     size: float,
     fine: dict[str, Any],
+    coarse: dict[str, Any],
     clock: Clock,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], dict[str, Any]]:
     """Each part on its own, at the mesh and the coarser one, under what the first pass found
-    on it: each read, and what's said of the pass."""
+    on it at the same mesh: each read, and what's said of the pass."""
     import FreeCAD as App
 
     began = time.time()
@@ -672,15 +685,24 @@ def second(
     reads: dict[str, dict[str, Any]] = {}
     rough: dict[str, dict[str, Any]] = {}
     for k, part in enumerate(assembly.parts):
-        for mesh, into in ((size, reads), (round(size * load.COARSER, 3), rough)):
+        for mesh, into, whole in (
+            (size, reads, fine),
+            (round(size * load.COARSER, 3), rough, coarse),
+        ):
             kind = f"part {mesh}"
             clock.check(kind, f"the second pass's part {part.name} at {mesh:g} mm")
             started = time.time()
 
-            def make(straight: bool, k: int = k, part: PartAt = part, mesh: float = mesh) -> Any:
+            def make(
+                straight: bool,
+                k: int = k,
+                part: PartAt = part,
+                mesh: float = mesh,
+                whole: dict[str, Any] = whole,
+            ) -> Any:
                 return _Alone(
                     assembly, part, solids[k], met[part.name], fine["planes"],
-                    fine["tractions"].get(part.name), places.get(part.name, []), args, mesh,
+                    whole["tractions"].get(part.name), places.get(part.name, []), args, mesh,
                     straight,
                 )  # fmt: skip
 

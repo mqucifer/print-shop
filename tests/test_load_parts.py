@@ -250,3 +250,4 @@ def test_a_part_that_meets_others_but_was_given_nothing_by_them_isn_t_read() -> 
     )
     with pytest.raises(NoAnswer, match="the first pass gave it nothing they put on it"):
         alone._joined()
+

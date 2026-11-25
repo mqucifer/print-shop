@@ -1584,7 +1584,9 @@ def _run(
         clock.start()
         try:
             fine, coarse, firsts = load_parts.first(assembly, placed, args, size, clock)
-            reads, rough, seconds = load_parts.second(assembly, placed, args, size, fine, clock)
+            reads, rough, seconds = load_parts.second(
+                assembly, placed, args, size, fine, coarse, clock
+            )
         except BaseException:
             clock.stop()
             raise
