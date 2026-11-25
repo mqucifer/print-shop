@@ -664,16 +664,12 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
         ),
         _spec(
             "fact",
-            "Keep one fact you've established, by name: a figure or a finding you measured, read "
-            "or were told, with where it came from, such as a part's size from `bench info`, or "
-            "the answer to a person's question. `record/FACTS.md` holds them, and each goes whole "
-            "into every compaction's note and every new conversation, so it's never worked out "
-            "again. Setting a name again replaces it, and an empty `text` removes it. A bought "
-            "part's fact is named for its file, such as `references/fan.step`, and gives its "
-            "`box`, `way_in` and `held_by`: one fact for each bought part. A given part fixed in "
-            "place and never fitted, such as a box your lid sits on, gives `box` and `fixed: "
-            "true` instead. One fitted loose, that nothing is meant to hold, gives `loose: true` "
-            "in place of `held_by`.",
+            "Keep a fact you've established, by name: a figure or finding you measured, read or "
+            "were told, such as a part's size from `bench info`, or the answer to a person's "
+            "question. `record/FACTS.md` holds them; each goes whole into every compaction's "
+            "note and new conversation. Setting a name again replaces it. A bought part's is "
+            "named for its file, such as `references/fan.step`, one for each, with `box`, "
+            "`way_in` and `held_by`, or `fixed` or `loose`.",
             {
                 "box": {
                     "type": "string",
@@ -694,7 +690,7 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
                 "fixed": {
                     "type": "boolean",
                     "description": "A given part's that's fixed in place and never fitted: true, "
-                    "in place of `way_in` and `held_by`. Nothing of yours holds it.",
+                    "in place of `way_in` and `held_by`.",
                 },
                 "loose": {
                     "type": "boolean",
@@ -707,6 +703,15 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
             **{
                 "from": "Where it came from: the call and what it was, such as `call 40, bench "
                 "info references/fan.step` or `the stand-in's note`."
+            },
+        ),
+        _spec(
+            "mark_facts",
+            "Mark the facts listed beside a person's word kept or changed.",
+            marks={
+                "type": "object",
+                "description": 'By name: {"is": "kept" or "changed", "why": "..."}, and '
+                "`text` if changed.",
             },
         ),
         _spec(
@@ -757,6 +762,7 @@ DESK = (
     "set_aside",
     "restate",
     "fact",
+    "mark_facts",
     "lessons",
     "blocked",
     "after_action",
@@ -775,6 +781,7 @@ class Desk(Protocol):
     def set_aside(self, args: dict[str, Any]) -> Judged: ...
     def restate(self, args: dict[str, Any]) -> Judged: ...
     def fact(self, args: dict[str, Any]) -> Judged: ...
+    def mark_facts(self, args: dict[str, Any]) -> Judged: ...
     def lessons(self, args: dict[str, Any]) -> Judged: ...
     def blocked(self, args: dict[str, Any]) -> Judged: ...
     def after_action(self, args: dict[str, Any]) -> Judged: ...
@@ -1054,6 +1061,7 @@ class WorkTools:
             "looks",
             "why_changed",
             "against_note",
+            "marks",
             "ways",
             "overlap",
             "lessons",
