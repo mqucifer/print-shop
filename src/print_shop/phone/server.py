@@ -50,11 +50,18 @@ from urllib.parse import parse_qs, urlsplit
 from print_shop import reprint
 from print_shop.arming import Armed
 from print_shop.core.contracts import Gate
+from print_shop.desk.read import OnHand
 from print_shop.orchestrator.daemon import PhoneStart, ReadyToStart
 from print_shop.orchestrator.print_queue import Asked, Line, Need
 from print_shop.phone.again import again_page, also_page, nozzle_typed
 from print_shop.phone.confirm import Confirm, Confirms, secret_hash
-from print_shop.phone.filaments import SwapJob, filaments_page, load_page, spools_for_job
+from print_shop.phone.filaments import (
+    SwapJob,
+    filaments_page,
+    load_button,
+    load_page,
+    spools_for_job,
+)
 from print_shop.phone.home import HOME_KEY, PORT_KEY, Home
 from print_shop.phone.needs import (
     change_page,
@@ -563,10 +570,22 @@ class _Handler(BaseHTTPRequestHandler):
             return
         said = parse_qs(query).get("said", [""])[0][:200]
         sliced = self.shop.prepared(line.job.copy_of or line.job.job_id).get("slice_reading")
+        on_hand = self.shop.on_hand()
         self._send(job_page(line, each_s=self.shop.each_s(line.job), said=_DONE.get(said, ""),
-                            sliced=sliced is not None,
-                            spools=spools_for_job(line, self.shop.on_hand()),
-                            alone=self.shop.alone))
+                            sliced=sliced is not None, spools=spools_for_job(line, on_hand),
+                            alone=self.shop.alone,
+                            loaded_it=self._loaded_it(line, on_hand) if said == "moved" else ""))
+
+    def _loaded_it(self, line: Line, on_hand: OnHand) -> str:
+        """After a move, "I loaded it": the stock's own load of the job's new spool, as
+        Filaments' Load is (mqucifer/print-shop#305). Not while a print runs, nor where it's
+        loaded already."""
+        assert self.shop is not None
+        spool = next((s for s in on_hand.spools if s.id == line.job.spool_id), None)
+        if spool is None or line.loaded or self.shop.printing():
+            return ""
+        return (f"<div class=\"buttons\">"
+                f"{load_button(spool, self.shop.stock_changes(), 'I loaded it')}</div>")
 
     def _r_remove_screen(self, held: dict[str, str], query: str) -> None:
         line = self._job_line(held)

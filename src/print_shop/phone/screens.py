@@ -237,7 +237,7 @@ def _button(action: str, words: str, *, kind: str = "", fields: dict[str, str] |
 
 
 def job_page(line: Line, *, each_s: int | None, said: str = "", sliced: bool = False,
-             spools: str = "", alone: bool = False) -> str:
+             spools: str = "", alone: bool = False, loaded_it: str = "") -> str:
     """A job's own page: where it is, what it needs, and the queue's actions on it."""
     job = line.job
     rows = [("Where", _step(line))]
@@ -249,7 +249,8 @@ def job_page(line: Line, *, each_s: int | None, said: str = "", sliced: bool = F
         rows.append(("Sent", f"{job.sent.said()[:1].upper()}{job.sent.said()[1:]}"))
     if job.since:
         rows.append(("Since", local_when(job.since)))
-    told = f"<div class=\"box\">{_e(said)}</div>" if said else ""
+    told = (f"<div class=\"box\">{_e(said)}{loaded_it}</div>" if said
+            else "")  # after a move, "I loaded it" goes with what was said (#305)
     told += _reprinted(job.given)
     listed = "".join(f"<dt>{_e(k)}</dt><dd>{_e(v)}</dd>" for k, v in rows)
     needs = ""

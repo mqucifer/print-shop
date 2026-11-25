@@ -19,7 +19,9 @@ the person picks, in any order.
     remove 3                   out of the queue, unprinted
     retry 3                    a stopped job prepared again, with what you gave it
     spool 3 2                  3 moved to spool #2: another colour at once; another filament
-                               prepared again, back to its review
+                               prepared again, back to its review. It asks once whether #2 is
+                               on the printer now: y records it loaded
+    load 2                     spool #2 is on the printer now, as `stock.py load 2` records it
     look 3                     what 3 prints, for a file sliced by hand that was sent to you:
                                ok lets it be ready, reject takes it out
     sent 3                     what came with 3, sent to you: who, when, the note, where the
@@ -39,6 +41,7 @@ import dataclasses
 import re
 import shlex
 import shutil
+import sqlite3
 import threading
 import time
 from collections.abc import Callable
@@ -47,12 +50,13 @@ from pathlib import Path
 from typing import TextIO
 
 from print_shop import reprint
-from print_shop.inventory import Inventory
+from print_shop.inventory import Inventory, InventoryError
 from print_shop.ledger import Ledger
 from print_shop.orchestrator.daemon import Daemon
 from print_shop.orchestrator.kept import Waits
 from print_shop.orchestrator.print_queue import Adding, Need, PrintQueue
 from print_shop.orchestrator.sending import loaded_from
+from print_shop.orchestrator.spools import load_said
 from print_shop.setup.intake import cli_asker, drop_typed
 from print_shop.setup.review import cli_reviewer
 from print_shop.setup.waiting import cli_waiting, terminal
@@ -73,6 +77,10 @@ FOLLOW_S = 3.0
 STARTED_WITHIN_S = 900.0
 #: How often the line above an open `queue>` is read again, and rewritten where it's changed.
 LIVE_EVERY_S = 0.5
+#: After a load, how long a moved job is waited for at the gate, to say it's ready to start.
+READY_WITHIN_S = 3.0
+#: A held Start's own words for loading a spool, which `queue>` names its `load` beside.
+_LOAD_IT = re.compile(r"`stock\.py load (\d+)`")
 #: What's said once a Start has come to something: started, held, ended or put back.
 _START_ENDS = ("Started:", "Not started", "Ended without printing", "Rejected", "Timed out")
 
@@ -156,7 +164,8 @@ def serve(
     queue: PrintQueue, daemon: Daemon, *, read: Callable[[str], str] = input,
     write: Callable[[str], None] = print, forget: Callable[[], None] = drop_typed,
     stock: Callable[[], str] | None = None, screen: Callable[[], TextIO | None] = terminal,
-    runs: Runs | None = None, phone_trouble: Callable[[], str] | None = None,
+    runs: Runs | None = None, phone: bool = False,
+    phone_trouble: Callable[[], str] | None = None,
 ) -> int:
     """The queue at the terminal until `quit`, Ctrl-D or Ctrl-C: every job waits where it is.
 
@@ -164,10 +173,11 @@ def serve(
     has just happened, rewritten in place as it changes, as the review's timer is
     (mqucifer/print-shop#260): what's being typed is left as it is. The whole of what happened
     is said at the next prompt. `runs` is where the finished runs are, for `runs` and `again`
-    (mqucifer/print-shop#216). `phone_trouble` says why the phone's page is off, for that line
-    (mqucifer/print-shop#312)."""
+    (mqucifer/print-shop#216). `phone` is whether the phone's Start page is on, for what a load
+    says once a job's ready to start (mqucifer/print-shop#305). `phone_trouble` says why the
+    phone's page is off, for that line (mqucifer/print-shop#312)."""
     term = _Terminal(queue, daemon, read, write, forget, stock)
-    term.runs = runs
+    term.runs, term.phone = runs, phone
     term.phone_trouble = phone_trouble
     term.show()
     while True:
@@ -231,15 +241,54 @@ class _Terminal:
         self.read, self.write, self.forget, self.stock = read, write, forget, stock
         self.told = 0
         self.runs: Runs | None = None
+        self.phone = False
+        #: Jobs loaded for here and not offered yet: each said ready to start with its offer.
+        self.ready_for: set[str] = set()
         self.phone_trouble: Callable[[], str] | None = None
 
     def drain(self) -> list[str]:
-        """What's happened since it was last said, said now."""
+        """What's happened since it was last said, said now, as of now (mqucifer/print-shop#305):
+        a line that asks for a spool to be loaded names the queue's own load on a line of its
+        own while it isn't loaded; once it is, an offer drops its "load it first", a refusal
+        the load has answered isn't said again, and a job waiting for it is said ready."""
         new = self.queue.said(self.told)
+        loaded = self._loaded_now() if any(_LOAD_IT.search(said) for said in new) else None
         for said in new:
+            load = _LOAD_IT.search(said)
+            spool = int(load.group(1)) if load is not None else None
+            if spool is not None and spool == loaded:
+                if said.startswith("Not started"):
+                    continue  # answered by the load since: not said again
+                said = said.replace(f": load it and record it (`stock.py load {spool}`) first",
+                                    "")
             self.write(f"  * {said}")
+            if spool is not None and spool != loaded:
+                self.write(f"    Here, type `load {spool}`.")
+            if said.startswith("Offered to print"):
+                self._said_ready(said)
         self.told += len(new)
         return new
+
+    def _loaded_now(self) -> int | None:
+        """The spool loaded now, as the stock says, or None."""
+        path = self.queue.stock_path
+        if path is None:
+            return None
+        try:
+            with Inventory(path) as stock:
+                if not stock.printers():
+                    return None
+                now = stock.loaded(stock.printer(None).id)
+        except (InventoryError, sqlite3.Error):
+            return None
+        return now.id if now is not None else None
+
+    def _said_ready(self, offered: str) -> None:
+        """A job loaded for here and offered since: said ready to start, once."""
+        for job_id in list(self.ready_for):
+            if f"job {job_id[:8]}" in offered:
+                self.ready_for.discard(job_id)
+                self._ready_now(job_id, wait_s=0.0)
 
     def live(self, since: int | None = None) -> str:
         """One line: what needs the person, and the last thing that happened since `since`, for
@@ -299,8 +348,8 @@ class _Terminal:
             "first": self._first, "place": self._place, "together": self._together,
             "hold": self._hold, "release": self._release, "remove": self._remove,
             "spool": self._spool, "add": self._add, "sent": self._sent, "look": self._look,
-            "stock": self._stock, "go": self._go, "retry": self._retry, "runs": self._runs,
-            "again": self._again,
+            "stock": self._stock, "load": self._load, "go": self._go, "retry": self._retry,
+            "runs": self._runs, "again": self._again,
         }.get(verb)
         if action is None:
             self.write(f"  Not a queue command: {verb}. `help` lists them.")
@@ -532,12 +581,112 @@ class _Terminal:
         if len(args) < 2 or not args[1].lstrip("#").isdigit():
             self.write("  `spool N S` moves N to spool S, its number in the stock (`stock`).")
             return
-        said = self.queue.move(job_id, int(args[1].lstrip("#")))
+        spool_id = int(args[1].lstrip("#"))
+        said = self.queue.move(job_id, spool_id)
         if isinstance(said, str):
             self.write(f"  Not moved: {said}.")
             return
         for line in said:
             self.write(f"  {line}")
+        self._ask_loaded(job_id, spool_id)
+
+    def _ask_loaded(self, job_id: str, spool_id: int) -> None:
+        """After a move: whether that spool is on the printer now, asked once, as the person's
+        word (mqucifer/print-shop#305). Where what's on isn't known since a swap print, both
+        halves, in the stock's own words. Nothing is asked while a print runs."""
+        path = self.queue.stock_path
+        if path is None:
+            return
+        try:
+            if any(line.startswith("printing now") for line in self.queue.printing()):
+                self.write(f"  A print is running now: once it's off and #{spool_id} is on, "
+                           f"type `load {spool_id}`.")
+                return
+            with Inventory(path) as stock:
+                if not stock.printers():
+                    return
+                printer = stock.printer(None)
+                now = stock.loaded(printer.id)
+                if now is not None and now.id == spool_id:
+                    return
+                stands = stock.asked(printer.id)  # before the question is drawn
+                spool = stock.spool(spool_id)
+                found = stands.not_known
+                if found is not None:
+                    question = (f"{found.over_and_on(spool.named())} y says both. Enter leaves "
+                                "the stock as it is.")
+                else:
+                    off = (f" (#{now.id}, {now.variety}, {now.colour}, comes off)"
+                           if now is not None else "")
+                    question = (f"Is {spool.named()}, on the printer now? y records it "
+                                f"loaded{off}. Enter leaves the stock as it is.")
+                self.write(f"  {question}")
+                self.forget()  # drawn only now: a y typed before it answers nothing
+                try:
+                    typed = self.read("loaded> ").strip().lower()
+                except EOFError:
+                    typed = ""
+                if typed not in ("y", "yes"):
+                    self.write("  Nothing recorded: the stock is as it was.")
+                    return
+                loaded = stock.load(spool_id, printer.id, over=found, asked=stands)
+        except (InventoryError, sqlite3.Error) as exc:
+            self.write(f"  Not recorded: {exc}.")
+            return
+        came = (f"; #{now.id}, {now.variety}, {now.colour}, came off" if now is not None
+                else "")
+        self.write(f"  Recorded: {loaded.named()} is loaded on {printer.id}{came}.")
+        self._ready_now(job_id)
+
+    def _ready_now(self, job_id: str, wait_s: float = READY_WITHIN_S) -> None:
+        """Once it's loaded, where the job sits at the gate, said once: the person needn't find
+        out by trying. Not offered yet, it's said when its offer is."""
+        end = time.monotonic() + wait_s
+        while True:
+            line = next((li for li in self.queue.lines() if li.job.job_id == job_id), None)
+            if line is None:
+                return
+            if line.offered:
+                on_phone = ", or Start on your phone" if self.phone else ""
+                self.write(f"  Job {line.number} is ready to start: `start {line.number}`"
+                           f"{on_phone}.")
+                self.ready_for.discard(job_id)
+                return
+            if time.monotonic() >= end:
+                self.ready_for.add(job_id)  # said with its offer, when that comes
+                return
+            time.sleep(0.1)
+
+    def _load(self, args: list[str]) -> None:
+        """`load S`: the stock's own load, as `stock.py load S` does it, questions and all."""
+        if not args or not args[0].lstrip("#").isdigit():
+            self.write("  `load S` records spool S as on the printer now, its number in the "
+                       "stock (`stock`).")
+            return
+        path = self.queue.stock_path
+        if path is None:
+            self.write("  The stock isn't set up.")
+            return
+        spool_id = int(args[0].lstrip("#"))
+        try:
+            with Inventory(path) as stock:
+                printer = stock.printer(None)
+                before = stock.loaded(printer.id)
+                lines = load_said(stock, spool_id, read=self.read, write=self.write,
+                                  forget=self.forget, asks=True)
+                loaded = stock.spool(spool_id)
+        except (InventoryError, sqlite3.Error) as exc:
+            self.write(f"  Not loaded: {exc}.")
+            return
+        # Said as `spool`'s y says it; what else the stock says follows (mqucifer/print-shop#305).
+        came = (f"; #{before.id}, {before.variety}, {before.colour}, came off"
+                if before is not None and before.id != spool_id else "")
+        self.write(f"  Recorded: {loaded.named()} is loaded on {printer.id}{came}.")
+        for line in lines[1:]:
+            self.write(f"  {line.strip()}")
+        for waiting in self.queue.lines():
+            if waiting.job.spool_id == spool_id:
+                self._ready_now(waiting.job.job_id, wait_s=0.0)
 
     def _add(self, args: list[str]) -> None:
         adding = parse_adding(args)

@@ -301,6 +301,10 @@ class PrintQueue:
         self._slot = threading.Semaphore(max(1, at_once))
         self._lock = threading.RLock()
         self._runs: dict[str, _Run] = {}
+        #: How often each job's been offered, and the jobs followed now: one follower a job, so
+        #: a job offered again (after a move, say) has nothing said twice (mqucifer/print-shop#305).
+        self._offers: dict[str, int] = {}
+        self._following: set[str] = set()
         #: Answers given alike for a job, by its question (`give_alike`).
         self._ahead: dict[str, dict[tuple[str, str, tuple[str, ...]], Answer]] = {}
         #: What happened, in order, for a screen to say: started, held, ended, offered.
@@ -343,6 +347,12 @@ class PrintQueue:
 
     def jobs(self) -> list[WaitingJob]:
         return self._jobs.all()
+
+    @property
+    def stock_path(self) -> Path | None:
+        """Where the stock is, for a load said at the queue (mqucifer/print-shop#305), or None
+        where there's no stock."""
+        return self._ledger.path if self._ledger is not None else None
 
     def lines(self) -> list[Line]:
         """Every job in the queue's order, with its step, what it needs and its spool."""
@@ -1163,32 +1173,54 @@ class PrintQueue:
                                                        else "")
                   + f", job {ready.job_id[:8]}" + (f", on {spool}" if spool else "")
                   + ". Start it here or on the card.", ready.job_id)
-        threading.Thread(target=self._followed, args=(ready.job_id, ready.part), daemon=True,
-                         name=f"follow-{ready.job_id}").start()
+        with self._lock:
+            self._offers[ready.job_id] = self._offers.get(ready.job_id, 0) + 1
+            followed = ready.job_id in self._following
+            self._following.add(ready.job_id)
+        if not followed:  # followed already, its follower follows this offer too
+            threading.Thread(target=self._followed, args=(ready.job_id, ready.part),
+                             daemon=True, name=f"follow-{ready.job_id}").start()
 
     def _followed(self, job_id: str, part: str) -> None:
-        """The offered job to its end: put back, started, rejected or failed, each said."""
-        try:
-            result = self._daemon.wait_for_finish(
-                job_id, self._finish_wait_s, tell=lambda said: self._say(said, job_id))
-        except TimeoutError:
-            if self._closing.is_set():
-                return  # put by: the job waits where it was, for the queue taken up again
-            self._say(self._daemon.abandon(job_id, "waiting for the job to finish",
-                                           self._finish_wait_s), job_id)
-            self._wake.set()
-            return
-        if result.withdrawn:
-            self._wake.set()
-            return  # back to wait, and its preparing is the queue's again
-        if result.printed:
-            self._say(f"Started: {part}, job {job_id[:8]}. Its outcome is asked on the card when "
-                      "it ends.", job_id)
-        elif result.error:
-            self._say(f"Ended without printing: {part}, job {job_id[:8]}: {result.error}",
-                      job_id)
-        else:
-            self._say(f"Rejected: {part}, job {job_id[:8]}. Nothing printed.", job_id)
+        """The offered job to its end: put back, started, rejected or failed, each said. Put back
+        and offered again meanwhile, it's followed on."""
         with self._lock:
-            self._runs.pop(job_id, None)
-        self._wake.set()
+            seen = self._offers.get(job_id, 0)
+        following = True
+        try:
+            while True:
+                try:
+                    result = self._daemon.wait_for_finish(
+                        job_id, self._finish_wait_s, tell=lambda said: self._say(said, job_id))
+                except TimeoutError:
+                    if self._closing.is_set():
+                        return  # put by: the job waits where it was, for the queue taken up again
+                    self._say(self._daemon.abandon(job_id, "waiting for the job to finish",
+                                                   self._finish_wait_s), job_id)
+                    self._wake.set()
+                    return
+                if not result.withdrawn:
+                    break
+                with self._lock:
+                    if self._offers.get(job_id, 0) != seen:  # offered again since: follow on
+                        seen = self._offers[job_id]
+                        continue
+                    self._following.discard(job_id)
+                    following = False
+                self._wake.set()
+                return  # back to wait, and its preparing is the queue's again
+            if result.printed:
+                self._say(f"Started: {part}, job {job_id[:8]}. Its outcome is asked on the card "
+                          "when it ends.", job_id)
+            elif result.error:
+                self._say(f"Ended without printing: {part}, job {job_id[:8]}: {result.error}",
+                          job_id)
+            else:
+                self._say(f"Rejected: {part}, job {job_id[:8]}. Nothing printed.", job_id)
+            with self._lock:
+                self._runs.pop(job_id, None)
+            self._wake.set()
+        finally:
+            if following:
+                with self._lock:
+                    self._following.discard(job_id)
