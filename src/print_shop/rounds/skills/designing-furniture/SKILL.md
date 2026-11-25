@@ -96,7 +96,7 @@ Each part is its own STEP file, one solid. Write the assembly file beside them, 
 - `at` moves a part to where it sits, after each `turn` about the origin's axes, in degrees. A part drawn where it sits needs neither.
 - `layers` is the axis of the part's own file that points up on the bed. It turns with the part, so a leg drawn lying along x and printed that way has `"layers": "z"` however it's turned in the assembly.
 - `held` is where it stands, `standing` on a plane, free to slide, or `fixed` to it, as a bracket is to a wall. With none it stands on its lowest level.
-- A `dovetail` joint and a latch's `arm` and `root` are in the assembly's coordinates, where the parts sit, not a part's own file's.
+- A `dovetail` joint's `slides`, and a latch's `arm` and `root`, are in the assembly's coordinates, where the parts sit, not a part's own file's. A latch given `"frame": "part"` has its `arm` and `root` in its tab's part's own file instead, and turns and moves with that part: name it that way on a part placed turned, such as a leg at 45° at a table's corner.
 
 ### 6. Each bench check
 

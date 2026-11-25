@@ -15,8 +15,17 @@ from typing import Any
 import numpy as np
 import pytest
 
-from print_shop.bench import assembly, dovetail, host, through
-from print_shop.bench.load import MIDS, beyond, bolt_pulls, element_forces
+from print_shop.bench import assembly, dovetail, host, through, way_in
+from print_shop.bench.load import (
+    MIDS,
+    _gmsh_errors,
+    band_refused,
+    beyond,
+    bolt_pulls,
+    element_forces,
+    memory_met,
+    oom_kills,
+)
 from print_shop.bench.report import NoAnswer
 from print_shop.rounds import needs, reports, skills, toolsets
 
@@ -840,6 +849,139 @@ def test_a_dovetail_joint_names_the_way_its_tail_slides_in_and_its_latch(tmp_pat
     assert again.latch == latched.latch
 
 
+def test_a_latch_named_in_its_part_s_own_axes_turns_and_moves_with_the_part(
+    tmp_path: Path,
+) -> None:
+    """mqucifer/print-shop#295: a part made in its own frame and placed turned, as a table's
+    legs are at its corners, has its latch named in that frame, `"frame": "part"`, and the
+    latch is carried by the part's `turn` and `at`. Here the tab is on b, turned 90° about z
+    and moved to (60, 0, 0): its own (1, 0, 20) is the assembly's (60, 1, 20), and its own +x
+    is the assembly's +y. Unturned, or in the assembly's axes, the box is where `arm` says."""
+    own = {**LATCH, "on": "b", "frame": "part"}
+    latch = assembly.read(written(tmp_path, joints=[{**DOVETAIL, "latch": own}])).joints[0].latch
+    assert latch is not None and latch.own and latch.placed
+    assert list(latch.shift) == [60, 0, 0]
+    assert latch.unplaced([60, 1, 20]) == pytest.approx([1, 0, 20])
+    assert latch.way([0, 1, 0]) == pytest.approx([1, 0, 0])
+    assert latch.inside([60, 1, 20]) and not latch.inside([1, 0, 20])
+    # The box's own x from -3 to 3 runs along the assembly's y, and its y from -1 to 2 along
+    # the assembly's -x, from 61 to 58.
+    low, high = latch.bounds()
+    assert low == pytest.approx([58, -3, 10]) and high == pytest.approx([61, 3, 30])
+    assert "in b's own file's axes" in latch.where()
+    # In the assembly's axes, the same box is where it's given, and nothing moves it.
+    plain = assembly.read(written(tmp_path, joints=[{**DOVETAIL, "latch": LATCH}])).joints[0]
+    assert plain.latch is not None and not plain.latch.placed and not plain.latch.own
+    assert plain.latch.unplaced([1, 0, 20]).tolist() == [1, 0, 20]
+    assert plain.latch.bounds()[0].tolist() == [-3, -1, 10]
+    said = {**LATCH, "frame": "assembly"}
+    again = assembly.read(written(tmp_path, joints=[{**DOVETAIL, "latch": said}])).joints[0]
+    assert again.latch == plain.latch
+
+
+def test_a_latch_turned_any_way_is_one_box_with_its_corners_where_the_turn_puts_them(
+    tmp_path: Path,
+) -> None:
+    """At 45° about z, as a leg at a table's corner, the box's corners are its own turned:
+    the far corner of a box 2 x 2 x 1 from the origin, (2, 2, 1), is at (0, 2√2, 1)."""
+    data = json.loads(Path(written(tmp_path)).read_text())
+    data["parts"][1].update(turn=[["z", 45]], at=[0, 0, 0])
+    latch = {"on": "b", "arm": [[0, 0, 0], [2, 2, 1]], "root": "z=0", "frame": "part"}
+    data["joints"] = [{**DOVETAIL, "latch": latch}]
+    path = tmp_path / "turned.json"
+    path.write_text(json.dumps(data))
+    found = assembly.read(str(path)).joints[0].latch
+    assert found is not None
+    corners = found.corners()
+    assert any(np.allclose(c, [0, 2 * math.sqrt(2), 1]) for c in corners)
+    assert found.inside([0, math.sqrt(2), 0.5]) and not found.inside([1.5, 0, 0.5])
+
+
+def test_rays_inside_a_turned_latch_s_box_are_read_as_its_turned_outline(tmp_path: Path) -> None:
+    """The way-in's second method sees the latch's box along the slide (mqucifer/print-shop#295).
+    A box 2 x 2 turned 45° about z, seen along z, is a square on its corner: its middle,
+    (0, √2), is in it, and (1.2, 0.2), inside the box's own unturned square, isn't. A ray
+    `pad` off a side is in."""
+    data = json.loads(Path(written(tmp_path)).read_text())
+    data["parts"][1].update(turn=[["z", 45]], at=[0, 0, 0])
+    latch = {"on": "b", "arm": [[0, 0, 0], [2, 2, 1]], "root": "z=0", "frame": "part"}
+    data["joints"] = [{**DOVETAIL, "latch": latch}]
+    path = tmp_path / "turned.json"
+    path.write_text(json.dumps(data))
+    found = assembly.read(str(path)).joints[0].latch
+    assert found is not None
+    at = np.array([[0, math.sqrt(2)], [1.2, 0.2], [0.75 + 0.05, 0.75]])
+    assert way_in._seen_in(found, 2, [0, 1], at, 0.0).tolist() == [True, False, False]
+    assert way_in._seen_in(found, 2, [0, 1], at, 0.1).tolist() == [True, False, True]
+
+
+def cgroup(tmp_path: Path, kills: int | None, peak: int, most: int = 3 * 1024**3) -> Path:
+    """A made-up container cgroup: its limit, what it held at the most, and its count of what
+    the kernel stopped for memory, where it keeps one."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "memory.max").write_text(f"{most}\n")
+    (tmp_path / "memory.peak").write_text(f"{peak}\n")
+    if kills is not None:
+        (tmp_path / "memory.events").write_text(
+            f"low 0\nhigh 0\nmax 3\noom {kills}\noom_kill {kills}\noom_group_kill 0\n"
+        )
+    return tmp_path
+
+
+def test_a_solve_is_said_to_meet_the_memory_limit_only_where_something_was_stopped_for_it(
+    tmp_path: Path,
+) -> None:
+    """mqucifer/print-shop#295, the operator's review: what the container held at the most
+    counts the files it read since it started, so a solve that fails for anything else in a
+    container that's been full is no memory failure. Only a process the kernel stopped for
+    memory while the solve ran says so: its count, before and after."""
+    most = 3 * 1024**3
+    killed = cgroup(tmp_path / "killed", 1, most)
+    assert memory_met(0, killed) == most
+    # Full, but nothing stopped: another failure.
+    full = cgroup(tmp_path / "full", 0, most)
+    assert memory_met(0, full) is None
+    # Stopped before this solve began, by an earlier one: not this solve's.
+    assert memory_met(1, killed) is None
+    # No count kept, as on a kernel without one: never said to be memory.
+    none = cgroup(tmp_path / "none", None, most)
+    assert oom_kills(none) is None and memory_met(None, none) is None
+    assert oom_kills(killed) == 1
+
+
+def test_a_lift_isn_t_read_without_a_band() -> None:
+    """mqucifer/print-shop#295, the operator's review: lifted, each part hangs by its own
+    weight, and read without its band a framed part would hang by less, so every strain would
+    be read under less than it carries: lower, and no lower bound. So a lift is refused there,
+    saying why, and a weight case is read."""
+    said = band_refused("top", ["frame"], "it met the container's memory")
+    assert said is not None
+    assert said.startswith("--lift top: the whole assembly couldn't be read (it met the")
+    assert "without its band it would hang by less" in said
+    assert band_refused(None, ["frame"], "it met the container's memory") is None
+
+
+def test_gmsh_s_own_errors_are_said_without_its_summary() -> None:
+    """FreeCAD keeps no mesh where gmsh ends with an error, and says only that there's none:
+    `load` says gmsh's own words (mqucifer/print-shop#295), as a traced frame's run printed
+    them, less the lines that only count them."""
+    said = "\n".join([
+        "Info    : Meshing 3D...",
+        "Error   : Failed to reach critical value in pass 1 for measure(s): ScaledJac",
+        "Error   : Optimization failed (some measures below critical value)",
+        "Error   : ------------------------------",
+        "Error   : Mesh generation error summary",
+        "Error   :     2 warnings",
+        "Error   :     2 errors",
+        "Error   : Check the full log for details",
+        "Error   : Optimization failed (some measures below critical value)",
+    ])  # fmt: skip
+    assert _gmsh_errors(said) == [
+        "Failed to reach critical value in pass 1 for measure(s): ScaledJac",
+        "Optimization failed (some measures below critical value)",
+    ]
+
+
 @pytest.mark.parametrize(
     ("joint", "said"),
     [
@@ -863,6 +1005,7 @@ def test_a_dovetail_joint_names_the_way_its_tail_slides_in_and_its_latch(tmp_pat
         ({**DOVETAIL, "latch": {**LATCH, "arm": [[-3, -1, 10], [3, -1, 30]]}}, "no room inside"),
         ({**DOVETAIL, "latch": {**LATCH, "root": "z=20"}}, "isn't a side of its `arm`"),
         ({**DOVETAIL, "latch": {**LATCH, "root": "w=30"}}, "`root` axis is one of"),
+        ({**DOVETAIL, "latch": {**LATCH, "frame": "leg"}}, "latch's `frame` is one of"),
     ],
 )  # fmt: skip
 def test_a_dovetail_joint_that_gives_anything_else_is_refused(
