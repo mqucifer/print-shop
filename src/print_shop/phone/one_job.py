@@ -26,6 +26,7 @@ from __future__ import annotations
 import select
 import sys
 import threading
+import unicodedata
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, TypeVar
@@ -84,6 +85,8 @@ class OneJob:
     _job_id: str = field(default="", init=False)
     _call: QuestionsCall | None = field(default=None, init=False)
     _go: threading.Event = field(default_factory=threading.Event, init=False)
+    #: The wait loop saw the phone's go: its next read is it.
+    _go_now: bool = field(default=False, init=False)
     #: The Mac's answers to the open ask's prompts, by their number, said if the phone's stand.
     _typed_here: list[str] = field(default_factory=list, init=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
@@ -118,10 +121,11 @@ class OneJob:
         return line
 
     def wait_read(self, prompt: str) -> str:
-        """The model's wait reads `go` from the phone as from the Mac."""
-        if self._go.is_set():
-            self._go.clear()
-            self.write(f"  {GO_ON}: on your phone{self._by(self._job_id)}.")
+        """The model's wait reads `go` from the phone as from the Mac: only once its loop has
+        seen it (`keys_or_go`), never at another prompt."""
+        if self._go_now:
+            self._go_now = False
+            self.write(printable(f"  {GO_ON}: on your phone{self._by(self._job_id)}."))
             return GO_ON
         return self.read(prompt) if self.races else input(prompt)
 
@@ -130,12 +134,14 @@ class OneJob:
         waited = 0.0
         while waited < timeout_s:
             if self._go.is_set():
+                self._go.clear()
+                self._go_now = True
                 return True
             step = min(LOOK_EVERY_S, timeout_s - waited)
             if self.keys_ready(step):
                 return True
             waited += step
-        return self._go.is_set()
+        return False
 
     def _by(self, job_id: str) -> str:
         name = self.who(job_id)
@@ -145,6 +151,8 @@ class OneJob:
               said: Callable[[Any], str]) -> _T:
         """The terminal's own code at the Mac, with the phone answering the same ask: whichever
         answers first stands."""
+        if not self.races:
+            return terminal()  # the page is off, or the answers are replayed: the Mac alone
         with self._lock:
             self._asked, self._typed_here = asked, []
         mine: Any = None
@@ -162,7 +170,7 @@ class OneJob:
             found: _T = mine
             return found
         theirs: _T = asked._answer
-        self.write(f"\n  {said(theirs)}")
+        self.write(f"\n  {printable(said(theirs))}")
         if self._typed_here:
             numbers = " and ".join(self._typed_here)
             self.write(f"  Your answers here to {numbers} aren't used: the phone's stand.")
@@ -209,6 +217,7 @@ class OneJob:
             started(call)
 
         def on_end(call: QuestionsCall, asked: Any) -> None:
+            self._go.clear()  # a go the wait never used goes with the call
             ended(call, asked)
 
         if closer is None:
@@ -319,6 +328,12 @@ class OneJob:
 
     def add(self, adding: Sequence[Adding]) -> tuple[list[str], list[str]]:
         return [], [QUEUES_ALONE]
+
+
+def printable(text: str) -> str:
+    """`text` with no control character: what the phone sent is told at the Mac as words, never
+    as the terminal's own codes (a cursor move, a title, the clipboard)."""
+    return "".join(c if c in "\n\t" or unicodedata.category(c) != "Cc" else "?" for c in text)
 
 
 def _short(question: Question, answer: Answer) -> str:

@@ -21,7 +21,7 @@ from typing import Any
 
 import pytest
 
-from print_shop.orchestrator.print_queue import Asked
+from print_shop.orchestrator.print_queue import Asked, Need
 from print_shop.phone.one_job import QUEUES_ALONE, OneJob
 from print_shop.phone.phones import Phones
 from print_shop.phone.server import handler_for
@@ -356,3 +356,73 @@ def test_with_the_page_off_the_lone_job_reads_as_input_does(
     asker = one.asker(cli_asker(read=one.read, write=lambda t: None, forget=lambda: None))
     assert asker((PURPOSE, SUPPORT)) == (Answer(choice=0), Answer(choice=1))
 
+
+
+# --------------------------------------------------------------------------
+# The cold security review of mqucifer/print-shop#290, and what came of it
+# --------------------------------------------------------------------------
+
+
+def test_with_answers_replayed_or_no_terminal_the_phone_answers_nothing(rig: Rig) -> None:
+    """Finding 1: not racing, the job's asks aren't the phone's at all."""
+    rig.one.races = False
+    seen: list[Any] = []
+
+    def terminal(questions: Any) -> tuple[Answer, ...]:
+        seen.append(rig.one.asked(JOB))
+        assert rig.one.give(JOB, (Answer(choice=1), Answer(choice=1))) != ""
+        return (Answer(choice=0), Answer(choice=0))
+
+    assert rig.one.asker(terminal)((PURPOSE, SUPPORT)) == (Answer(choice=0), Answer(choice=0))
+    assert seen == [None], "no ask is the phone's"
+
+
+def test_what_the_mac_is_told_has_no_control_codes(rig: Rig) -> None:
+    """Finding 2: the phone's words reach the Mac as words, never the terminal's own codes."""
+    thread, got = at_the_mac(rig, ask(rig))
+    wait_until(lambda: rig.one.asked(JOB) is not None)
+    words = Answer(other="x\x1b[1A\x1b[2K at the Mac\x1b]0;made-up\x07")
+    assert rig.one.give(JOB, (words, Answer(choice=1))) == ""
+    thread.join(5)
+    told = "\n".join(rig.said)
+    assert "\x1b" not in told and "\x07" not in told and "?[1A" in told
+
+
+def test_the_page_drops_control_codes_from_what_it_sends_on(rig: Rig) -> None:
+    thread, got = at_the_mac(rig, ask(rig))
+    wait_until(lambda: rig.one.asked(JOB) is not None)
+    asked = rig.one.asked(JOB)
+    assert asked is not None
+    rig.phone().post(f"/job/{JOB}/questions", {"since": since(asked), "q0": "o",
+                                               "w0": "holds\x1b[2K a lamp\x07", "q1": "2"})
+    thread.join(5)
+    assert got and got[0][0].other == "holds [2K a lamp"
+
+
+def test_a_form_never_begins_on_an_ask_after_the_one_it_was_checked_against(rig: Rig) -> None:
+    """Finding 3."""
+    thread, _ = at_the_mac(rig, ask(rig))
+    wait_until(lambda: rig.one.asked(JOB) is not None)
+    shown = rig.one.asked(JOB)
+    other = Asked(job_id=JOB, need=Need.QUESTIONS, questions=(SUPPORT,))
+    made = rig.shop.begin(JOB, {}, for_ask=other)
+    assert isinstance(made, str) and "moved on" in made
+    assert shown is not None and shown.open
+    rig.mac.type("1", "1")
+    thread.join(5)
+
+
+def test_a_go_the_wait_never_used_answers_no_other_prompt(rig: Rig) -> None:
+    """Finding 4: a go left over from a wait that ended by itself never reaches the closer."""
+    from print_shop.setup.waiting import Waiting  # noqa: PLC0415
+
+    waiting = rig.one.waiting(Waiting(started=lambda c: None, ended=lambda c, a: None,
+                                      wait=lambda c: True, closer=None))
+    call = Call()
+    waiting.started(call)  # type: ignore[arg-type]
+    assert rig.one.go(JOB) == ""
+    call.done.set()
+    waiting.ended(call, None)  # type: ignore[arg-type]
+    assert not rig.one.keys_or_go(0.3)
+    rig.mac.type("1")
+    assert rig.one.wait_read("1> ") == "1", "the closer reads what's typed, not the phone's go"

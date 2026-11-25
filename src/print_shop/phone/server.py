@@ -30,6 +30,7 @@ from __future__ import annotations
 import errno
 import logging
 import re
+import unicodedata
 from collections.abc import Callable
 from datetime import UTC, datetime
 from http import HTTPStatus
@@ -104,7 +105,7 @@ def _ahead(asked: Asked, form: dict[str, str]) -> dict[str, list[str]] | str:
         if i in noted and i not in change:
             continue
         picked = form.get(f"q{i}", "")
-        words = " ".join(form.get(f"w{i}", "").split())[:300]
+        words = _plain(form.get(f"w{i}", ""))[:300]
         if picked == "o" or (not picked and words):
             if not words:
                 return f"Say it in your words for \"{question.text}\", or pick one."
@@ -120,9 +121,16 @@ def _ahead(asked: Asked, form: dict[str, str]) -> dict[str, list[str]] | str:
     return ahead
 
 
+def _plain(text: str) -> str:
+    """Words as typed on one line: no line break and no control character, which the Mac's
+    terminal would read as its own codes (mqucifer/print-shop#288)."""
+    kept = "".join(" " if unicodedata.category(c) in ("Cc", "Zl", "Zp") else c for c in text)
+    return " ".join(kept.split())
+
+
 def _reason(text: str) -> str:
     """A reason as one answer's: on one line, and with no `;`, which would begin another."""
-    return " ".join(text.replace(";", ",").split())[:300]
+    return _plain(text.replace(";", ","))[:300]
 
 
 def _review_typed(asked: Asked, form: dict[str, str]) -> str:
@@ -146,7 +154,7 @@ def _review_typed(asked: Asked, form: dict[str, str]) -> str:
         return "; ".join(parts) or "!Tick what to take, or say why to turn one down."
     if do == "change":
         key = form.get("key", "").strip()
-        value = " ".join(form.get("value", "").split())[:60]
+        value = _plain(form.get("value", ""))[:60]
         reason = _reason(form.get("reason", ""))
         if not re.fullmatch(r"[a-z_0-9]{1,80}", key) or not value or ";" in value:
             return "!Give the setting a value."
@@ -642,14 +650,14 @@ class _Handler(BaseHTTPRequestHandler):
             ahead = made
             offered = {li.job.job_id for li in self.shop.alike(job_id)}
             alike_to = [j for j in form.get("alike", "").split() if j in offered]
-        self._begin(job_id, ahead, "questions", alike_to)
+        self._begin(job_id, ahead, "questions", alike_to, asked)
 
     def _begin(self, job_id: str, ahead: dict[str, list[str]], screen: str,
-               alike_to: list[str] | None = None) -> None:
+               alike_to: list[str] | None = None, asked: Asked | None = None) -> None:
         assert self.shop is not None
         phone, _ = self._signed_in()
         made = self.shop.begin(job_id, ahead, alike_to=alike_to or (),
-                               by=phone.name if phone is not None else "")
+                               by=phone.name if phone is not None else "", for_ask=asked)
         if isinstance(made, str):
             return self._send(message_page("Not taken", made, back_to=f"/job/{job_id}",
                                            back_words="Back to the job"),
@@ -665,7 +673,7 @@ class _Handler(BaseHTTPRequestHandler):
         job_id = line.job.job_id
         session = self.shop.session(job_id)
         stamp = form.get("version", "")[:40]
-        typed = form.get("typed", "").replace("\r", " ").replace("\n", " ")[:2000]
+        typed = _plain(form.get("typed", ""))[:2000]
         why = ("nothing waits for an answer here now: it was answered, or moved on"
                if session is None else session.reply(typed, stamp))
         if why:
@@ -682,7 +690,9 @@ class _Handler(BaseHTTPRequestHandler):
         line = self._job_line(held)
         if line is None or self.shop is None:
             return
-        why = self.shop.go(line.job.job_id, form.get("since", ""))
+        phone, _ = self._signed_in()
+        why = self.shop.go(line.job.job_id, form.get("since", ""),
+                           phone.name if phone is not None else "")
         if why:
             return self._send(message_page("Not done", f"{why[:1].upper()}{why[1:]}.",
                                            back_to=f"/job/{line.job.job_id}/questions",
@@ -712,7 +722,7 @@ class _Handler(BaseHTTPRequestHandler):
                                            back_to=f"/job/{line.job.job_id}/review",
                                            back_words="Back to the review"),
                               code=HTTPStatus.BAD_REQUEST)
-        self._begin(line.job.job_id, {"> ": [typed]}, "review")
+        self._begin(line.job.job_id, {"> ": [typed]}, "review", asked=asked)
 
     def _r_change(self, held: dict[str, str], query: str) -> None:
         found = self._need(held, (Need.REVIEW,))

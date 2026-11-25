@@ -417,7 +417,8 @@ class Shop:
         return found
 
     def begin(self, job_id: str, ahead: dict[str, list[str]], *,
-              alike_to: Sequence[str] = (), by: str = "") -> Session | str:
+              alike_to: Sequence[str] = (), by: str = "",
+              for_ask: Asked | None = None) -> Session | str:
         """The terminal's own screen for this job's need, begun with the form's answers to the
         prompts it answers. Returns the session, or why not."""
         queue = self.queue
@@ -425,6 +426,8 @@ class Shop:
         if queue is None or asked is None:
             return "it isn't waiting for you now"
         with self._lock:
+            if for_ask is not None and asked is not for_ask:
+                return "it moved on since the page was shown: nothing was taken. Look again"
             if self._session(job_id) is not None:
                 return "it's being answered on a phone already: look again"
             if by:
@@ -505,14 +508,16 @@ class Shop:
         before = shown[1]
         return what_moved(before, request) if before is not None else None
 
-    def go(self, job_id: str, since: str) -> str:
+    def go(self, job_id: str, since: str, by: str = "") -> str:
         """On without the model's questions: the queue's own `go` (mqucifer/print-shop#208),
         from the page of the questions there are now (`since`)."""
         asked = self.asked(job_id)
         if self.queue is None:
             return "the queue isn't running"
-        if asked is not None and repr(asked.since) != since:
+        if asked is None or repr(asked.since) != since:
             return "that page is out of date: look again"
+        if by:
+            self.by[job_id] = by
         return self.queue.go(job_id)
 
     def reading(self, job_id: str) -> float | None:
