@@ -74,7 +74,7 @@ import numpy as np
 from .assembly import AXES, read
 from .cae import freecad
 from .limits import apart, over, said
-from .load import REACTION, G, _Model, _placed, _quiet, _reaction, _xyz
+from .load import REACTION, G, _Curved, _Model, _placed, _quiet, _reaction, _xyz
 from .report import NoAnswer, Report
 
 #: BESO's files in the second image, as its Dockerfile puts them there.
@@ -625,13 +625,26 @@ def run(args: Any, report: Report) -> None:
     import Part
 
     App.ParamGet("User parameter:BaseApp/Preferences/Mod/Fem/Gmsh").SetInt("NumOfThreads", 1)
+    # As `load` meshes (mqucifer/print-shop#295): with each element's sides curved onto the
+    # part's faces, and where gmsh can't do that without turning one inside out, again with them
+    # straight, said in the reply.
+    straight = None
     doc = App.newDocument("Optimise")
     model = _Solved(assembly, placed, load_args, size)
     try:
         with _quiet():
             model.join(doc)
             model.hold()
-            model.solve(doc)
+            try:
+                model.solve(doc)
+            except _Curved as curved:
+                straight = str(curved)
+                App.closeDocument(doc.Name)
+                doc = App.newDocument("Optimise")
+                model = _Solved(assembly, placed, load_args, size, True)
+                model.join(doc)
+                model.hold()
+                model.solve(doc)
             mesh_s = model.mesh_s
         held_faces = [
             (f.CenterOfMass, set(model.fem.getNodesByFace(f)))
@@ -827,6 +840,12 @@ def run(args: Any, report: Report) -> None:
         f"{args.over:g} mm of it; a mesh of at most {size:g} mm ({len(nodes)} nodes, "
         f"{len(numbers)} second-order tetrahedra)"
     )
+    if straight is not None:
+        report.numbers["straight"] = straight
+        report.line(
+            "its elements are second-order with straight sides, mid-side nodes halfway along "
+            f"them, as `load` meshes where curving them fails: {straight}"
+        )
     kinds = ", ".join(f"{k} {len(v)}" for k, v in why.items() if v)
     report.line(
         f"kept solid: {len(kept_solid)} elements, {solid_share:.3f} of the part ({kinds}): under "

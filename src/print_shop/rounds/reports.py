@@ -410,6 +410,9 @@ REPORTS: dict[str, tuple[str, ...]] = {
         # (mqucifer/print-shop#170).
         "lift",
         "loads",
+        # Where the whole couldn't be read, the parts read with their glass band left out,
+        # and why (mqucifer/print-shop#295).
+        "lower_bound",
         "mesh_mm",
         "mesh_s",
         "most_moves_at",
@@ -455,6 +458,7 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "part",
         "reference_only",
         "stl_volume_mm3",
+        "straight",
         "toward",
         "up",
         "volume_kept",

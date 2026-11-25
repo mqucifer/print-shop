@@ -43,8 +43,8 @@ from typing import Any
 
 import numpy as np
 
-from . import bend, fit_on
-from .assembly import AXES, Assembly, Joint
+from . import bend, fit_on, load_dovetail
+from .assembly import AXES, Assembly, Joint, Latch
 from .report import NoAnswer, Report
 
 #: The six ways a part can be slid, as the assembly file names them.
@@ -90,7 +90,7 @@ def travel(moving: Any, other: Any, way: str) -> float:
 
 
 def sweep(
-    moving: Any, other: Any, way: str, latch: tuple[Any, Any] | None, latch_moves: bool
+    moving: Any, other: Any, way: str, latch: Latch | None, latch_moves: bool
 ) -> list[dict[str, Any]]:
     """What `moving` passes through in `other` as it slides out along `way` until it's clear:
     each of its faces drawn out along the way, cut with `other`. Each piece has its box, its
@@ -103,8 +103,10 @@ def sweep(
     vector = np.asarray(WAYS[way]) * travel(moving, other, way)
     room = None
     if latch is not None:
-        low, high = (np.asarray(c, dtype=float) for c in latch)
+        low, high = (np.asarray(c, dtype=float) for c in latch.arm)
         room = Part.makeBox(*(high - low).tolist(), App.Vector(*low.tolist()))
+        # Where its part's `turn` and `at` put it, given in its part's own axes.
+        room = load_dovetail.placed(room, latch)
     # What's the latch's on each side: the tab's faces where it moves, each face cut at the
     # latch's box, as a face of the tab can run on into the part it's on; and where the tab
     # stays put, the other part cut there the same way.
@@ -167,7 +169,7 @@ class _Way:
 
 
 def _by_rays(
-    moving: Any, other: Any, names: tuple[str, str], way: str, latch: tuple[Any, Any] | None
+    moving: Any, other: Any, names: tuple[str, str], way: str, latch: Latch | None
 ) -> dict[str, Any]:
     """The second method: rays along the way out at every step, and where they find an overlap
     two rays or more across that isn't the latch's, seen along the way."""
@@ -180,13 +182,15 @@ def _by_rays(
         at = met["at"]
         # Outside the latch's box, seen along the way, on either axis across it.
         lone = np.ones(len(at), dtype=bool)
-        if latch is not None:
+        if latch is not None and not latch.placed:
             inside = np.ones(len(at), dtype=bool)
             for column, axis in enumerate(across):
-                inside &= (at[:, column] >= latch[0][axis] - pad) & (
-                    at[:, column] <= latch[1][axis] + pad
+                inside &= (at[:, column] >= latch.arm[0][axis] - pad) & (
+                    at[:, column] <= latch.arm[1][axis] + pad
                 )
             lone = ~inside
+        elif latch is not None:
+            lone = ~_seen_in(latch, slid.axis, across, at, pad)
         if lone.any():
             where = at[lone]
             blocked.append(
@@ -201,6 +205,30 @@ def _by_rays(
         "readings": len(slid.offsets),
         "blocked": blocked,
     }
+
+
+def _seen_in(latch: Latch, axis: int, across: list[int], at: np.ndarray, pad: float) -> Any:
+    """Which points, each across `axis`, are inside a placed latch's box seen along that axis,
+    within `pad` (mqucifer/print-shop#295): inside every side of the box's outline seen that
+    way, a convex outline, each side moved out by `pad`."""
+    outline = fit_on.hull(latch.corners()[:, across])
+    inside = np.ones(len(at), dtype=bool)
+    turning = 1.0 if _area(outline) > 0 else -1.0
+    for k in range(len(outline)):
+        side = outline[(k + 1) % len(outline)] - outline[k]
+        length = float(np.linalg.norm(side))
+        if length < 1e-9:
+            continue
+        # Out of the outline, square to this side.
+        out = turning * np.array([side[1], -side[0]]) / length
+        inside &= (at - outline[k]) @ out <= pad
+    return inside
+
+
+def _area(outline: np.ndarray) -> float:
+    """An outline's area, more than 0 where it runs anticlockwise."""
+    x, y = outline[:, 0], outline[:, 1]
+    return float(np.dot(x, np.roll(y, -1)) - np.dot(np.roll(x, -1), y)) / 2
 
 
 def _rays_depth(rays: Any, slid: _Way, box: list[list[float]]) -> tuple[float | None, float]:
@@ -230,9 +258,10 @@ def _rays_depth(rays: Any, slid: _Way, box: list[list[float]]) -> tuple[float | 
     return fit_on.least_width(grid.centres(cells))[0] + grid.spacing, grid.spacing
 
 
-def _layers(part: Any) -> str | None:
-    """The axis a part's layers are stacked along, in the assembly, where it's one."""
-    way = part.layers_way()
+def _layers(part: Any, latch: Latch | None = None) -> str | None:
+    """The axis a part's layers are stacked along, in the assembly, or in a latch's own axes
+    where it's given, where it's one."""
+    way = part.layers_way() if latch is None else latch.way(part.layers_way())
     for axis, name in enumerate(AXES):
         if abs(abs(way[axis]) - 1) < SQUARE:
             return name
@@ -245,13 +274,15 @@ def _bend(
     """`bend` on the latch's tab, as anyone could call it: the tab's part where the assembly
     puts it, the latch's box and root, pushed `push` mm `toward` a way. Its verdict and why,
     its strain across the layers against the limit, its second check, and its words where it
-    has no answer."""
+    has no answer. A latch given in its part's own axes is read there, on the part as its own
+    file has it, with `toward` in those axes (mqucifer/print-shop#295)."""
     assert joint.latch is not None
     part = assembly.part(joint.latch.on)
-    layers = _layers(part)
+    layers = _layers(part, joint.latch)
     root = joint.latch.root
+    solid = load_dovetail.in_own_axes(solid, joint.latch)
     command = (
-        f"bend {part.name}.step --arm "
+        f"bend {part.file if joint.latch.own else part.name + '.step'} --arm "
         + ",".join(f"{c:g}" for c in (*joint.latch.arm[0], *joint.latch.arm[1]))
         + f" --root {root[0]}={root[1]:g} --push {push:.3f} --toward {toward}"
         + (f" --layers {layers}" if layers else "")
@@ -303,7 +334,7 @@ def read(assembly: Assembly, joint: Joint, placed: list[Any]) -> dict[str, Any]:
     tail, socket = placed[names.index(first)], placed[names.index(second)]
     assert joint.slides is not None
     out = _opposite(joint.slides)
-    latch = joint.latch.arm if joint.latch is not None else None
+    latch = joint.latch
     moves = joint.latch is not None and joint.latch.on == first
     pieces = sweep(tail, socket, out, latch, moves)
     blocking = [p for p in pieces if not p["latch"]]
@@ -380,7 +411,7 @@ def read(assembly: Assembly, joint: Joint, placed: list[Any]) -> dict[str, Any]:
     way = np.zeros(3)
     way[across_axes] = square
     centre = (np.array(piece["box"][0]) + np.array(piece["box"][1])) / 2
-    middle = (np.array(joint.latch.arm[0]) + np.array(joint.latch.arm[1])) / 2
+    middle = joint.latch.corners().mean(axis=0)
     if float((middle - centre) @ way) < 0:
         way = -way
     again, spacing = _rays_depth(by_rays["rays"], by_rays["way"], piece["box"])
@@ -403,21 +434,26 @@ def read(assembly: Assembly, joint: Joint, placed: list[Any]) -> dict[str, Any]:
             )
         )
         return found
-    named = [n for a, n in enumerate(AXES) if abs(abs(way[a]) - 1) < SQUARE]
+    # `bend` reads the tab in the latch's own axes, which are its part's own file's where
+    # the latch is given in them (mqucifer/print-shop#295).
+    own = joint.latch.way(way)
+    named = [n for a, n in enumerate(AXES) if abs(abs(own[a]) - 1) < SQUARE]
     if not named:
         found["latch"]["bend"] = None
         found["fails"].append(
             f"{latch_said}, has to move {depth:.3f} mm across {_xyz(way)} to let the tail in, "
-            "which isn't along x, y or z, so `bend` can't read it: the latch isn't shown to go "
-            "together, and is credited with nothing"
+            f"which isn't along x, y or z {joint.latch.where()}, so `bend` can't read it: the "
+            "latch isn't shown to go together, and is credited with nothing"
         )
         return found
-    toward = ("+" if way[AXES.index(named[0])] > 0 else "-") + named[0]
+    toward = ("+" if own[AXES.index(named[0])] > 0 else "-") + named[0]
     tab_part = placed[names.index(joint.latch.on)]
     read_bend = _bend(assembly, joint, tab_part, depth, toward)
     found["latch"]["bend"] = read_bend
     words = (
-        f"{latch_said}, has to move {depth:.3f} mm {toward} to let the tail in, where it "
+        f"{latch_said}, has to move {depth:.3f} mm {toward}"
+        + (f" {joint.latch.where()}" if joint.latch.own else "")
+        + " to let the tail in, where it "
         + (f"passes {second}" if moves else f"is passed by {first}")
         + f" from {_xyz(piece['box'][0])} to {_xyz(piece['box'][1])}"
     )

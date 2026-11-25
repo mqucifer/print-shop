@@ -40,6 +40,7 @@ import numpy as np
 
 from . import through
 from .assembly import DIAMETER, Assembly, Joint, PartAt
+from .cae import ccx_one_thread, tidy_mesh, tidy_solve
 from .report import NoAnswer
 
 #: A part round a bolt is cut off this many diameters of what bears on it there, the washer or
@@ -338,7 +339,9 @@ def round_bolt(
         mesh.HighOrderOptimize = "Optimization"
         analysis.addObject(mesh)
         doc.recompute()
-        wrong = GmshTools(mesh).create_mesh()
+        tools = GmshTools(mesh)
+        wrong = tools.create_mesh()
+        tidy_mesh(tools)
         fem = mesh.FemMesh
         if wrong or not fem.VolumeCount:
             raise NoAnswer(f"gmsh made no mesh of {part.name} round its bolt: {str(wrong)[:300]}")
@@ -419,8 +422,9 @@ def round_bolt(
         )
         with open(fea.inp_file_name, "w") as file:
             file.write(text[:outputs] + step + text[outputs:])
-        fea.ccx_run()
+        ccx_one_thread(fea)
         fea.load_results()
+        tidy_solve(fea)
         results = [o for o in analysis.Group if o.isDerivedFrom("Fem::FemResultObject")]
         if not results or not results[0].NodeStrainXX:
             raise NoAnswer(
