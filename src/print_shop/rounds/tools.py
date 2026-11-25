@@ -608,11 +608,7 @@ def specs(toolset: Toolset = toolsets.EVERY) -> list[dict[str, Any]]:
                 "description": "A flat list of the files you made to print, not the given "
                 'references: `["stand.step"]`. The sheet of the result draws a row of each, so '
                 "a test piece isn't taken for the part. Files seen together are one entry, "
-                '{"name": "wide", "files": ["base.step", "lid.step"]}. An assembly run, given '
-                "the approved parts to put together, names its assembly file instead, "
-                '`["table.json"]`: every file it places is a given reference, unchanged, and '
-                "the harness reads them as placed. Any file you made beside it is named too, "
-                "and read as a print.",
+                '{"name": "wide", "files": ["base.step", "lid.step"]}.',
                 "items": {},
             },
             fix_shape="What kind of change this round was, in your own words. It's kept, marked as "
