@@ -6,8 +6,16 @@
 #
 # Every package is conda-forge's, by name, version, build and MD5 (`lock-arm64.txt` on the Mac,
 # `lock-amd64.txt` in CI), so a build installs that list and solves nothing: FreeCAD 1.1.3, CalculiX 2.23, gmsh 4.15.2,
-# OCCT 7.9.3 and Python 3.14 among them. The base is micromamba 2.0.5, by its digest.
-FROM mambaorg/micromamba:2.0.5@sha256:8d0d4cad074afe3ac93b58dce88bd2659153d3fa6de3a6968f501710e8d3c832
+# OCCT 7.9.3 and Python 3.14 among them. The base is micromamba 2.0.7, by its digest.
+#
+# Not 2.0.5 or 2.0.6 (mqucifer/print-shop#307): their libcurl, 8.11.1, closes each eventfd of
+# its threaded resolver twice (curl/curl#15725), so the second close can take a descriptor
+# another thread has just been handed. When that's glibc's netlink socket in a `getaddrinfo`,
+# the install aborts with "Unexpected error 9 on netlink descriptor". curl 8.12.0's changelog
+# has the fix, "asyn-thread: avoid closing eventfd twice" (curl/curl#15727), and 2.0.7 is the
+# first micromamba with it: `micromamba info` says libcurl/8.12.1. Its Debian is 2.0.5's but for
+# libgnutls30 and libtasn1-6, which nothing in /opt/conda loads.
+FROM mambaorg/micromamba:2.0.7@sha256:5247f7fe17ceb08f0d874444793b7650dca78f976843d4ad533d7ff419431873
 
 ARG TARGETARCH
 ARG CHANNEL=https://conda.anaconda.org/conda-forge

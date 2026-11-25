@@ -274,6 +274,17 @@ def test_the_second_image_s_packages_are_each_by_version_build_and_md5() -> None
     assert "micromamba install -y -n base -f /tmp/packages.txt" in dockerfile, "no solve"
 
 
+def test_the_second_image_s_micromamba_is_past_libcurl_s_double_close() -> None:
+    """micromamba 2.0.5 and 2.0.6 carry libcurl 8.11.1, which closes an eventfd twice and so
+    can abort an install on glibc's netlink socket (mqucifer/print-shop#307): the base is 2.0.7,
+    the first with libcurl 8.12, or later."""
+    dockerfile = (host.HERE / host.IMAGES["cae"][2] / "Dockerfile").read_text()
+    base = dockerfile.split("\nFROM ")[1].split()[0]
+    name, _, rest = base.partition(":")
+    version = tuple(int(part) for part in rest.split("@")[0].split("."))
+    assert name == "mambaorg/micromamba" and version >= (2, 0, 7), base
+
+
 def test_a_rounds_run_without_the_second_image_is_told_and_goes_on(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
