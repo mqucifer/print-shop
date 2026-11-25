@@ -41,6 +41,7 @@ from print_shop.bench import overlap as overlap_module
 from print_shop.bench import usage as usage_module
 from print_shop.rounds import (
     after_action,
+    assembled,
     breakdown,
     descriptions,
     downward,
@@ -247,6 +248,17 @@ class State:
     # reading and the way the model said it took (`faults.py`, mqucifer/print-shop#175). What
     # was suggested with it isn't kept.
     faults: list[dict[str, Any]] = field(default_factory=list)
+    # Each reference as it was given, by the sha256 of its bytes at the start: what an assembly
+    # run's `done` holds a placed file to (`assembled.py`, mqucifer/print-shop#310). None for a
+    # run from before, which holds only the hashes a person states.
+    given: dict[str, str] | None = None
+    # The assembly file the latest `done` named in `part`, if it named one: a bench reading of a
+    # given file it places is given `--placed` with it.
+    assembly: str | None = None
+    # An assembly run, puts given parts together and makes none: set by whoever starts it, or a
+    # person at a resume, never by the model. Only such a run's `done` takes an assembly file in
+    # `part` (mqucifer/print-shop#310).
+    assembly_run: bool = False
 
 
 def repository_version() -> tuple[str, bool]:
@@ -433,8 +445,11 @@ class Run:
         limits: Limits | None = None,
         alias: str = ALIAS,
         sleep: Callable[[float], None] | None = None,
+        assembly_run: bool = False,
     ) -> Run:
-        """A new run's folder, made once, before any call."""
+        """A new run's folder, made once, before any call. `assembly_run` marks a run given
+        approved parts to put together, which finishes with its assembly file
+        (mqucifer/print-shop#310)."""
         if not NAME.fullmatch(name):
             raise Refused(f"a run's name is letters, digits, `.`, `_` and `-`: not {name!r}")
         resolved = root.expanduser().resolve()
@@ -469,6 +484,8 @@ class Run:
             form=form.plain(),
             kind=toolsets.key(form.kind) if form.kind else None,
             toolsets=True,
+            given=assembled.at_start(folder / "work"),
+            assembly_run=assembly_run,
         )
         if run.limits.trim_reasoning_at:
             run.state.trim_reasoning = {
@@ -501,6 +518,9 @@ class Run:
             reasoning_effort_from=effort_from,
         )
         run.ledger.request_read(name, form)
+        run.ledger.given_at_start(name, run.state.given or {})
+        if assembly_run:
+            run.session._record("assembly_run", by="start", at_call=0)
         run._give_lessons()
         run.save()
         run._listen()
@@ -770,6 +790,16 @@ class Run:
         self.state.notes_from.append(who)
         message = _answer_with_facts(f"A note from {from_words(who)}:\n\n{note}", note)
         self._relay("note", who, note, message)
+
+    def mark_assembly_run(self, who: str) -> None:
+        """A person's word that this run puts given parts together and makes none, for a run
+        started before it was said (mqucifer/print-shop#310): from here on its `done` takes its
+        assembly file in `part`. Kept in its state and its events, never the model's to set."""
+        if self.state.assembly_run:
+            return
+        self.state.assembly_run = True
+        self.session._record("assembly_run", by=who, at_call=self.session.requests)
+        self.save()
 
     def approve(self, by: str, note: str = "") -> Ending:
         """A person's yes. It ends the run: the refinement pass and the delivery come after this."""
@@ -3089,9 +3119,23 @@ class Run:
         missing = self.tools._existing("done", args, "script")
         if missing is not None:
             return missing
-        rows = self._part(args["part"])
+        # An assembly run names its assembly file in `part`, placing only given parts
+        # (`assembled.py`, mqucifer/print-shop#310). A run that names none reads as before.
+        taken = self._assembly_named(args["part"])
+        if isinstance(taken, Judged):
+            return taken
+        assembly, named = taken
+        rows = self._part(named) if named or assembly is None else []
         if isinstance(rows, Judged):
             return rows
+        given: assembled.Checked | None = None
+        if assembly is not None:
+            given = self._assembly_checked(self.work, assembly)
+            if given.wrong:
+                return Judged("done", "failed", given.refused(), _assembly_why(given))
+            if len(given.given) < assembled.FEWEST:
+                return Judged("done", "failed", given.too_few(), "assembly_too_few")
+        self.state.assembly = assembly
         part = list(dict.fromkeys(name for row in rows for name in row["files"]))
         self.state.part, self.state.part_at = part, self.session.requests
         looks = self._looks(args.get("looks"), part, "done")
@@ -3174,6 +3218,20 @@ class Run:
             on_bed,
             asks=self.folder / "asks",
         )
+        # The assembly as the clean run left it: placing the given parts, unchanged.
+        if assembly is not None:
+            judged = folder / "judged"
+            if paths.inside(judged, assembly) is None or not (judged / assembly).is_file():
+                judgement.part_missing.append(assembly)
+                given = None
+            else:
+                given = self._assembly_checked(judged, assembly)
+        assembly_wrong = given.refused() if given is not None and given.wrong else ""
+        placed_read: list[judge.Standing] = []
+        if judgement.met and given is not None and not given.wrong:
+            placed_read = self._placed_read(given, folder / "judged", folder / "standing")
+            for one in placed_read:
+                self._stood(one, "done", folder / "judged")
         standing: list[judge.Standing] = []
         panes_read: list[judge.Standing] = []
         strips: list[judge.Standing] = []
@@ -3200,7 +3258,8 @@ class Run:
             faces = self._downward(part, judged, folder / "standing", on_bed)
             for one in faces:
                 self._stood(one, "done", judged)
-            overlap = self._overlap(judged, part)
+            # An assembly run that made nothing has no printed files to read together.
+            overlap = self._overlap(judged, part) if part else {}
             clashes = _clashes(groups, part, overlap)
             (folder / "standing.json").write_text(
                 json.dumps(
@@ -3211,6 +3270,7 @@ class Run:
                         "downward": [{**one.plain(), "numbers": one.numbers} for one in faces],
                         "overlap": overlap,
                         "clashes": clashes,
+                        **({"placed": [one.plain() for one in placed_read]} if given else {}),
                     },
                     indent=1,
                 ),
@@ -3218,6 +3278,8 @@ class Run:
             )
         met = (
             judgement.met
+            and not assembly_wrong
+            and not any(one.failed for one in placed_read)
             and not clashes
             and not any(one.failed for one in standing)
             and not any(one.failed for one in panes_read)
@@ -3299,7 +3361,23 @@ class Run:
         )
         # Against the scenario's right answer, if it was started with one: mqucifer/print-shop#67.
         scores.after_round(self.ledger, self.folder)
+        if given is not None or assembly_wrong:
+            self.ledger.assembly_read(
+                self.state.name,
+                n,
+                at_call=self.session.requests,
+                assembly=assembly,
+                assembly_sha=given.assembly_sha if given else None,
+                given=[one.plain() for one in given.given] if given else [],
+                placed=[one.plain() for one in placed_read] if placed_read else None,
+                made=part,
+                met=met,
+            )
         reply = self._said_of(judgement, wanted, met, standing, clashes)
+        if assembly_wrong:
+            reply += "\n" + assembly_wrong
+        elif given is not None and judgement.met:
+            reply += "\n" + "\n".join(_assembly_said(given, placed_read))
         if only_faults:
             reply = reply.replace(OWN_CHECKS_DIDNT, "and a fault named to fix first still stands.")
         if faults_read:
@@ -3344,6 +3422,8 @@ class Run:
                 "held": held,
                 "end": (ends, ends_unread),
                 "unplaced": unplaced,
+                "assembly": given,
+                "placed": placed_read,
             }
             self.state.end_sent = None
             return self._stop_for_approval(
@@ -3542,7 +3622,16 @@ class Run:
         where it reads a given file beside a part the assembly places (`placing.py`)."""
         if not placing.wanted(argv):
             return argv
-        return placing.of_run(self.work, self._bench_rows()).argv(argv, where)
+        found = placing.of_run(self.work, self._bench_rows()).argv(argv, where)
+        # An assembly run's own assembly file places given parts alone, so a reading of the given
+        # parts it places reads them placed (mqucifer/print-shop#310).
+        state = getattr(self, "state", None)
+        assembly = state.assembly if state is not None else None
+        if found != argv or not assembly or not (where / assembly).is_file():
+            return found
+        if set(placing.named(argv)) & placing.placed_by(where, assembly):
+            return [*argv, placing.FLAG, assembly]
+        return argv
 
     def _bench_rows(self) -> list[tuple[int, list[str], dict[str, Any] | None]]:
         """Every bench call of this run, oldest first: its call, its argv and its numbers."""
@@ -3700,6 +3789,79 @@ class Run:
             groups.append({"name": name, "about": str(entry.get("about") or ""), "files": files})
         return groups
 
+    def _assembly_named(self, given: Any) -> tuple[str | None, Any] | Judged:
+        """The assembly file `part` names, if it names one, and the rest of `part`: the files
+        the run made, each read as a print (mqucifer/print-shop#310). Only an assembly run's:
+        any other run's `part` is passed on as it was given, and read as it always was."""
+        if not self.state.assembly_run or not isinstance(given, list):
+            return None, given
+        found = [e for e in given if isinstance(e, str) and assembled.is_assembly(e)]
+        if not found:
+            return None, given
+        if len(found) > 1:
+            named = ", ".join(f"`{f}`" for f in found)
+            reply = (
+                f"`part` names {named}: an assembly run names one assembly file, which places "
+                "every given part it puts together."
+            )
+            return Judged("done", "failed", reply, "assembly_twice")
+        name = _plain_name(found[0])
+        if paths.inside(self.work, name) is None or "," in name:
+            reply = "Only files inside your directory, and never through a link."
+            return Judged("done", "failed", reply, "outside")
+        return name, [e for e in given if e is not found[0]]
+
+    def _assembly_checked(self, where: Path, assembly: str) -> assembled.Checked:
+        """The assembly file in `where`, read against each given file's hash: the start's, or
+        the latest a person stated in the request or a note."""
+        request = (self.folder / "request.md").read_text(encoding="utf-8")
+        said = assembled.stated(request, list(self.state.notes))
+        return assembled.check(where, assembly, self.state.given, said, self.state.facts)
+
+    def _placed_read(
+        self, given: assembled.Checked, judged: Path, kept: Path
+    ) -> list[judge.Standing]:
+        """The harness's own reading of the given parts as placed: `clearance` on every pair,
+        with `--placed`, so nothing passes into anything, and which pairs touch
+        (mqucifer/print-shop#310). One file placed alone has no pair to read."""
+        files = given.files()
+        if len(files) < 2:
+            return []
+        argv = ["clearance", *files, placing.FLAG, given.assembly]
+        need = Need(
+            "placed-" + NOT_IN_A_NAME.sub("_", given.assembly)[:60],
+            "nothing placed passes into anything",
+            "derived",
+            "bench",
+            command=shlex.join(argv),
+            verdicts=["CLEAR", "TOUCHING"],
+        )
+        reading = judge.read_need(self.box, need, judged, kept)
+        numbers = dict((reading.record or {}).get("numbers") or {})
+        into, unsure, contacts = assembled.placed_reading(numbers)
+        if into:
+            why = "; ".join(into)
+        elif unsure:
+            why = "can't be told: " + "; ".join(unsure)
+        elif not numbers.get("pairs"):
+            why = f"not read: {reading.why}"
+        else:
+            why = "nothing passes into anything" + (
+                f"; {'; '.join(contacts)}" if contacts else "; no two parts touch"
+            )
+        return [
+            judge.Standing(
+                assembled.CHECK,
+                given.assembly,
+                need.command,
+                not into and not unsure and bool(numbers.get("pairs")),
+                not into and bool(unsure),
+                reading.verdict,
+                why,
+                {"contacts": contacts, "into": into, "unsure": unsure},
+            )
+        ]
+
     def _part(self, given: list[Any]) -> list[dict[str, Any]] | Judged:
         """The files that are the part, as `done` names them, each entry a row of the sheet. It's
         the model's word, and it's what the people's sheet draws: a test piece a script writes is
@@ -3773,7 +3935,8 @@ class Run:
         stop = self.folder / "approvals" / str(n)
         stop.mkdir(parents=True)
         looks = delivered["looks"]
-        image, why_not = self._final(rows, folder, looks)
+        given: assembled.Checked | None = delivered.get("assembly")
+        image, why_not = self._final(rows, folder, looks, given)
         part = list(dict.fromkeys(name for row in rows for name in row["files"]))
         made = review.write(
             stop / "review",
@@ -3815,11 +3978,19 @@ class Run:
         for need, reading in zip(wanted, judgement.readings, strict=True):
             limit = f" Limit: {need.limit()}." if need.by != "eye" else ""
             lines.append(f"- **{need.id}** ({need.what}): {reading.why}.{limit}")
+        if given is not None:
+            lines += ["", f"## {assembled.HEADING}", "", *assembled.said(given)]
+            if delivered.get("placed"):
+                lines += ["", f"## {assembled.PLACED_HEADING}", ""]
+                lines += [f"- `{one.command}`: {one.why}" for one in delivered["placed"]]
+            lines += ["", assembled.not_read_on_given(given)]
         lines += [
             "",
             "## Every file to be printed, by `thin`, whatever the needs say",
             "",
         ]
+        if given is not None and not delivered["standing"]:
+            lines.append("- none: this run made no file to print.")
         for one in delivered["standing"]:
             mark = "can't tell" if one.unsure else "ok"
             lines.append(f"- `{one.file}`, {mark}: {one.why}")
@@ -3859,11 +4030,19 @@ class Run:
             *descriptions.since_said(self.state.restated),
         ]
         groups = ", ".join(f"`{g['folder']}`" for g in made["groups"])
-        lines += [
-            "## The folder to print from",
-            "",
-            f"{self.folder / 'review'}: {groups}, with its README. Open one folder only.",
-        ]
+        if given is not None and not part:
+            lines += [
+                "## The folder to print from",
+                "",
+                "None: this run made no file to print. Its result is the assembly file, "
+                f"`{given.assembly}`, placing the given parts, each printed from its own run.",
+            ]
+        else:
+            lines += [
+                "## The folder to print from",
+                "",
+                f"{self.folder / 'review'}: {groups}, with its README. Open one folder only.",
+            ]
         (stop / "stop.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
         if self.state.swaps:
             self.ledger.swaps_shown(self.state.name, f"approval {n}")
@@ -3883,6 +4062,13 @@ class Run:
             closing=closing,
             review={"folder": str(self.folder / "review"), **made},
         )
+        if given is not None:
+            self.ledger.change(
+                "UPDATE assemblies SET approval=? WHERE run=? AND round=?",
+                n,
+                self.state.name,
+                self.state.round,
+            )
         self.state.stop = {"kind": MET, "n": n}
         self.save()
         reply += (
@@ -4015,6 +4201,10 @@ class Run:
                 if line[:1] in "+-" and line[:3] not in ("+++", "---")
             )
             lines.append(f"Lines changed in the round: {changed}. See `record/round-{n}.diff`.")
+            for one in self.ledger.rows(
+                "SELECT * FROM assemblies WHERE run=? AND round=?", run, n
+            ):
+                lines += assembled.recorded(one["assembly"], one["assembly_sha"], one["given"])
             found = self.ledger.rows(
                 "SELECT * FROM readings WHERE run=? AND round=? ORDER BY need", run, n
             )
@@ -4034,17 +4224,31 @@ class Run:
         paths.write_inside(self.work, f"record/round-{n}.diff", diff)
 
     def _final(
-        self, rows: list[dict[str, Any]], folder: Path, looks: dict[str, dict[str, str]]
+        self,
+        rows: list[dict[str, Any]],
+        folder: Path,
+        looks: dict[str, dict[str, str]],
+        given: assembled.Checked | None = None,
     ) -> tuple[bytes | None, str]:
         """A sheet of what passed, for the people who see the result: one part a row, not all of
         `part` in one scene. It decides nothing. It draws the part alone: what else a need names is
-        a test piece, which isn't what passed. It gives the picture, or why there's none."""
+        a test piece, which isn't what passed. It gives the picture, or why there's none. An
+        assembly run's sheet draws the placed whole first, as its assembly file places it, each
+        given part in its own colour and labelled with its hash (mqucifer/print-shop#310)."""
         judged = folder / "judged"
         args = ["render", "--renders-out", "final-render", "--size", ASK_SIZE]
+        if given is not None:
+            whole = assembled.row_name(given, [str(row["name"]) for row in rows])
+            args += ["--variant", f"{whole}={','.join(given.files())}"]
         for row in rows:
             args += ["--variant", f"{row['name']}={','.join(row['files'])}"]
         drawn = {name for row in rows for name in row["files"]}
-        args += _look_args({name: look for name, look in looks.items() if name in drawn})
+        shown = {name: look for name, look in looks.items() if name in drawn}
+        if given is not None:
+            shown.update(assembled.looks(given, looks))
+        args += _look_args(shown)
+        if given is not None:
+            args += [placing.FLAG, given.assembly]
         args += ["--views", *ASK_VIEWS]
         done = self.box.bench(args, where=judged)
         record = recorded(done.output, judged) or {}
@@ -5119,6 +5323,28 @@ def _description_key(of: str) -> str:
     if of in (descriptions.BREAKDOWN, descriptions.PLAN):
         return of
     return descriptions.need_key(of.removeprefix(descriptions.NEED).strip())
+
+
+def _assembly_why(checked: assembled.Checked) -> str:
+    """Why `done` refused an assembly file, for the ledger."""
+    if checked.unread:
+        return "assembly_unread"
+    if checked.empty:
+        return "assembly_empty"
+    if checked.not_given or checked.crooked:
+        return "assembly_not_given"
+    return "assembly_changed"
+
+
+def _assembly_said(given: assembled.Checked, placed: list[judge.Standing]) -> list[str]:
+    """What `done`'s reply says of an assembly run's result: what it places, the harness's
+    placed reading, and the printed-file readings it doesn't run on given parts."""
+    lines = assembled.said(given)
+    if placed:
+        lines += [f"{assembled.PLACED_HEADING}:"]
+        lines += [f"- `{one.command}`: {one.why}" for one in placed]
+    lines.append(assembled.not_read_on_given(given))
+    return lines
 
 
 def _plain_name(name: str) -> str:
