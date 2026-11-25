@@ -146,7 +146,9 @@ def test_a_strain_within_two_passes_band_of_its_limit_is_either_side_of_it() -> 
     for band, across, apart_said in (
         (0.0, 0.97, False),
         (load_parts.BAND, 0.97, True),
-        (load_parts.BAND, 0.90, False),
+        # Read exactly the band low, it's still either side (the operator's cold review).
+        (load_parts.BAND, 0.95, True),
+        (load_parts.BAND, 0.94, False),
     ):
         report = Report("load", [])
         fails: list[str] = []
@@ -196,3 +198,55 @@ def test_a_step_longer_than_any_yet_is_stopped_at_the_limit_saying_where(
     finally:
         clock.stop()
     assert "during the second pass's part tile0 at 10.459 mm" in str(stopped.value)
+
+
+def test_a_reading_exactly_the_band_below_its_limit_is_near_it() -> None:
+    """Read `band` low, a figure would be at its limit: so it's near it, and one a hair further
+    down isn't. `value * (1 + band)` missed it by up to `band` squared."""
+    assert load_parts.near(0.95, 1.0, 0.05)
+    assert load_parts.near(0.999, 1.0, 0.05)
+    assert not load_parts.near(0.9499, 1.0, 0.05)
+    assert not load_parts.near(1.01, 1.0, 0.05), "over is a failure, not near"
+
+
+def test_a_joint_s_nearest_figure_is_its_share_of_its_limit() -> None:
+    assert load_parts.joint_share({"nearest_share": 0.97}) == 0.97
+    assert load_parts.joint_share({"bolt_pull_n": 95.0, "holds_n": 100.0}) == 0.95
+    assert load_parts.joint_share({"kind": "touching"}) is None
+
+
+def test_only_a_hole_about_a_bolt_s_width_is_stood_in_by_a_square() -> None:
+    """An M5's 5.5 mm clearance bore and a 7 mm insert's hole are; a boss or collar round the
+    bolt (its outside away from the axis) isn't, nor a 10 mm counterbore, nor a hole narrower
+    than the bolt: they're left round, as one pass meshes them."""
+    assert load_parts.stood_in(2.75, True, 5.0)
+    assert load_parts.stood_in(3.5, True, 5.0)
+    assert not load_parts.stood_in(2.75, False, 5.0), "a boss is the part, not a hole"
+    assert not load_parts.stood_in(5.0, True, 5.0), "a counterbore wider than the bore"
+    assert not load_parts.stood_in(2.0, True, 5.0)
+
+
+def test_what_s_moved_to_add_up_is_a_share_of_what_was_put_on() -> None:
+    before = np.array([[1.0, 0, 0], [0, 2.0, 0]])
+    assert load_parts.moved_share(before, before) == 0.0
+    assert load_parts.moved_share(before, before + [[0.3, 0, 0], [0, 0, 0]]) == pytest.approx(0.1)
+    assert load_parts.moved_share(np.zeros((2, 3)), before) == float("inf")
+    assert load_parts.EVENED == 0.20
+
+
+def test_a_part_that_meets_others_but_was_given_nothing_by_them_isn_t_read() -> None:
+    """Its held faces' reaction would balance whatever was put on it, so the balance can't
+    catch a part whose neighbours' forces are missing: it's refused (the operator's cold
+    review)."""
+    import argparse
+
+    from print_shop.bench.assembly import Assembly, Material, PartAt
+
+    petg = Material("petg", 1500.0, 0.38, 1.0, 5.1, "made up")
+    part = PartAt("leg", "leg.step", (0.0, 0.0, 0.0), (), petg, "z")
+    args = argparse.Namespace(toward="-z", lift=None)
+    alone = load_parts._Alone(
+        Assembly("a.json", (part,)), part, None, [object()], [], None, [], args, 5.0
+    )
+    with pytest.raises(NoAnswer, match="the first pass gave it nothing they put on it"):
+        alone._joined()

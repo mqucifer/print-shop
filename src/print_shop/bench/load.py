@@ -106,7 +106,7 @@ import numpy as np
 from . import dovetail, load_dovetail, load_through, way_in
 from .assembly import AXES, DIAMETER, Assembly, Held, Joint, PartAt, read
 from .cae import ccx_one_thread, freecad, tidy_mesh, tidy_solve
-from .limits import over, said
+from .limits import over, said, under
 from .report import NoAnswer, Report
 from .through import channel_said, channel_saved, lean_off, lean_share, peak_said, peak_saved
 
@@ -1830,6 +1830,12 @@ def _tag(report: Report, lines: int, seconds: int, tag: str, starts: tuple[str, 
     ]
 
 
+def _near(value: float, limit: float, band: float) -> bool:
+    """Under `limit`, but within `band` of it as a share of it, the band's edge in it: read
+    `band` low, it would be at the limit or over it (mqucifer/print-shop#301)."""
+    return not over(value, limit) and not under(value / (1 - band), limit)
+
+
 def _share(value: float, against: float) -> str:
     return f"{100 * abs(value - against) / abs(against):.1f}%" if abs(against) > 1e-12 else "n/a"
 
@@ -1879,7 +1885,7 @@ def _parts(
                     f"{said(other[key], limit)}% on the coarser one, either side of its "
                     f"{limit:g}% limit"
                 )
-            elif band and not over(value, limit) and over(value * (1 + band), limit):
+            elif band and _near(value, limit, band):
                 apart.append(
                     f"pass 2 reads the part {name} {what} by {said(value, limit)}%, within the "
                     f"{100 * band:g}% two passes are held to of its {limit:g}% limit: read it "

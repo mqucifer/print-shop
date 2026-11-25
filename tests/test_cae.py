@@ -1656,6 +1656,32 @@ def test_a_table_of_24_parts_and_56_bolts_is_read_in_two_passes_until_the_contai
     assert int(ran["memory_peak"]) <= int(ran["memory_max"]) == 3 * 1024**3
 
 
+def test_two_passes_stand_in_only_a_bolt_s_bore_by_a_square_no_narrower_than_it(cae: Any) -> None:
+    """mqucifer/print-shop#301, the operator's cold review: the first of two passes stands in
+    each bolt's bore by a square one that holds it, so no stiffer than it; and only the bore. A
+    boss round the bolt is the part itself, and cutting it away would make its joint softer and
+    its bolt's readings lower: it's left round. Two blocks bolted through one M5 bore, the upper
+    with a boss of 6 mm radius round the bolt, made up in `cae_cases/square_boss.py`."""
+    shutil.copy(CASES / "square_boss.py", cae.work / "square_boss.py")
+    done = host.run(["square_boss.py"], cae.work, python=True, image=host.CAE_IMAGE)
+    assert done.returncode == 0, done.stdout + done.stderr
+    found = json.loads(done.stdout.strip().splitlines()[-1])
+    # The bore in each block squared, the boss left round, and no round face of the bore left.
+    assert found["squared"] == 2 and found["kept"] == 1, found
+    assert found["radii"] == {"upper": [6.0], "lower": []}, found
+    # The square holds the round bore: nothing of either block is nearer the bolt's axis than
+    # the bore's radius, and the square's flat sides are 0.1 mm further. An inscribed square
+    # would leave the round bore, and this would be 2.75 with its faces still there.
+    for name, apart in found["from_axis"].items():
+        assert apart == pytest.approx(2.75 + 0.1, abs=1e-6), (name, apart)
+    for name, long in (("upper", 13.0), ("lower", 10.0)):
+        # The square's corners, less the bore that was there, over the bore's length: the
+        # upper's runs through its boss too.
+        whole, squared = found["volumes"][name]
+        corners = ((2 * 2.85) ** 2 - math.pi * 2.75**2) * long
+        assert whole - squared == pytest.approx(corners, rel=1e-3), name
+
+
 #: The stool pushed sideways at its top (mqucifer/print-shop#295).
 PUSH = ("--weight", "5", "--at", "0,100,154", "--toward", "+x")
 

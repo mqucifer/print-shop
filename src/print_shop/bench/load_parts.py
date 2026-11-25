@@ -37,6 +37,7 @@ stop before a solve that wouldn't end inside it, and say which pass met it and w
 from __future__ import annotations
 
 import dataclasses
+import math
 import os
 import signal
 import time
@@ -45,14 +46,19 @@ from typing import Any
 import numpy as np
 
 from . import load
-from .assembly import AXES, Assembly, Held, PartAt
+from .assembly import AXES, DIAMETER, Assembly, Held, PartAt
 from .report import NoAnswer
 
 #: A square bore's half width over the round one's radius, in mm: so it holds the round one
 #: with room to spare, and no face of the round one is left.
 SQUARE = 0.1
-#: A cylinder is a bolt's bore where its axis passes this close to the bolt's point, in mm.
+#: A cylinder is a bolt's bore where its axis passes this close to the bolt's point, in mm,
+#: it's a hole, and it's no wider across than this many times the bolt's thread: an M5's 5.5 mm
+#: clearance bore and an insert's hole are, a washer's counterbore isn't.
 ON_AXIS = 1e-3
+BORE = 1.5
+#: How far toward its axis a round face is probed to tell a hole from a boss, in mm.
+INWARD = 0.05
 #: Each joint's force on the coarser of the first pass's meshes agrees with the finer within
 #: this share of the larger, or of `load.NOTHING` of the load where that's more: CalculiX's own
 #: spread from run to run is 2e-4 of a figure (mqucifer/print-shop#302), 250 times less.
@@ -62,6 +68,15 @@ AGREE = 0.05
 #: part's worst strain within 2% of one pass, some above and some below, where one pass's own
 #: two meshes are 1% to 24% apart on the same parts.
 BAND = 0.05
+#: How much of what's put on a part from its neighbours `even_out` may move to make it add up
+#: to the first pass's, as a share of all of it: it moved 8.4% at the most on the stool, 13.4%
+#: on its control and 7.2% on the 24-part table, and past this nothing of the part is read.
+EVENED = 0.20
+#: Each joint's nearest figure to its limit (`nearest_share`, or a bolted joint's worst bolt
+#: over what it holds), read from the first pass's forces, is held this far below it, or it's
+#: either side of it: on the stool each joint's force in two passes is within 0.40% of one
+#: pass's. This, like `BAND`, rests on the stool alone.
+JOINT_BAND = 0.05
 #: What's said of the movement in two passes.
 FINER_SAID = (
     "pass 1, the whole: how far each place moves is taken on from its two meshes to a finer "
@@ -79,21 +94,28 @@ MARGIN = 20.0
 # The first pass
 
 
-def squared(assembly: Assembly, placed: list[Any]) -> tuple[list[Any], int]:
+def squared(assembly: Assembly, placed: list[Any]) -> tuple[list[Any], int, int]:
     """Each part with each bolt's bore stood in by a square one: every cylindrical face whose
-    axis passes through a bolt's point of a joint of the part, cut away by a square prism on
-    the same axis and over the same length, `SQUARE` wider than it each side. The square's
-    sides are set by the axis alone, so where a bore passes from one part into the next, the
-    two squares are one. And how many bores were squared."""
+    axis passes through a bolt's point of a joint of the part, that is a hole (the part's
+    outside is toward its axis) and no wider across than `BORE` times the bolt's thread, cut
+    away by a square prism on the same axis and over the same length, `SQUARE` wider than its
+    radius each side, so it holds the round one. The square's sides are set by the axis alone,
+    so where a bore passes from one part into the next, the two squares are one. Any other round
+    face on a bolt's axis, a boss or a collar round it or a counterbore wider than the bore, is
+    left round, as one pass meshes it: cut away it would leave less of the part than there is.
+    And how many bores were squared, and how many round faces on bolts' axes were left round."""
     import FreeCAD as App
     import Part
 
-    points: dict[str, list[np.ndarray]] = {}
+    points: dict[str, list[tuple[np.ndarray, float]]] = {}
     for joint in assembly.joints:
-        if joint.kind in ("bolted", "through"):
+        if joint.kind in ("bolted", "through") and joint.bolt is not None:
+            thread = DIAMETER[joint.bolt.thread]
             for name in joint.between:
-                points.setdefault(name, []).extend(np.array(p, dtype=float) for p in joint.at)
-    found, count = [], 0
+                points.setdefault(name, []).extend(
+                    (np.array(p, dtype=float), thread) for p in joint.at
+                )
+    found, count, kept = [], 0, 0
     for part, solid in zip(assembly.parts, placed, strict=True):
         prisms = []
         for face in solid.Faces:
@@ -102,14 +124,19 @@ def squared(assembly: Assembly, placed: list[Any]) -> tuple[list[Any], int]:
                 continue
             centre, axis = np.array(surface.Center), np.array(surface.Axis)
             axis = axis / np.linalg.norm(axis)
-            if not any(
-                np.linalg.norm(np.cross(p - centre, axis)) < ON_AXIS
-                for p in points.get(part.name, [])
-            ):
+            threads = [
+                thread
+                for p, thread in points.get(part.name, [])
+                if np.linalg.norm(np.cross(p - centre, axis)) < ON_AXIS
+            ]
+            if not threads:
                 continue
             along = [float((np.array(v.Point) - centre) @ axis) for v in face.Vertexes]
             low, high = min(along), max(along)
             if high - low < load.ON:
+                continue
+            if not stood_in(surface.Radius, _inward(solid, face, centre, axis), max(threads)):
+                kept += 1
                 continue
             half = surface.Radius + SQUARE
             across, up = square_axes(axis)
@@ -135,7 +162,25 @@ def squared(assembly: Assembly, placed: list[Any]) -> tuple[list[Any], int]:
             )
         found.append(left[0])
         count += len(prisms)
-    return found, count
+    return found, count, kept
+
+
+def stood_in(radius: float, inward: bool, thread: float) -> bool:
+    """Whether a round face on a bolt's axis is its bore, to be stood in by a square: a hole,
+    from the bolt's own width to `BORE` times it across."""
+    return inward and thread / 2 - load.ON <= radius <= BORE * thread / 2
+
+
+def _inward(solid: Any, face: Any, centre: np.ndarray, axis: np.ndarray) -> bool:
+    """Whether the part's outside is toward the axis at a round face: a hole, not a boss."""
+    import FreeCAD as App
+
+    u0, u1, v0, v1 = face.ParameterRange
+    point = np.array(face.valueAt((u0 + u1) / 2, (v0 + v1) / 2))
+    on_axis = centre + ((point - centre) @ axis) * axis
+    toward = (on_axis - point) / np.linalg.norm(on_axis - point)
+    probe = point + INWARD * toward
+    return not solid.isInside(App.Vector(*probe), 1e-6, False)
 
 
 def square_axes(axis: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -166,6 +211,21 @@ def disagree(
         if apart > allowed:
             found.append((name, float(np.linalg.norm(first)), float(np.linalg.norm(second)), apart))
     return found
+
+
+def near(value: float, limit: float, band: float) -> bool:
+    """Whether `value` is under `limit` but within `band` of it, as a share of the limit: read
+    `band` low, it would be over."""
+    return load._near(value, limit, band)
+
+
+def joint_share(joint: dict[str, Any]) -> float | None:
+    """A joint's nearest figure to its limit, as a share of it, where it has one."""
+    if "nearest_share" in joint:
+        return float(joint["nearest_share"])
+    if joint.get("holds_n"):
+        return float(joint["bolt_pull_n"]) / float(joint["holds_n"])
+    return None
 
 
 def finer(fine: float, coarse: float) -> float:
@@ -212,6 +272,16 @@ def even_out(
     about = np.linalg.lstsq(spread, turn, rcond=None)[0]
     evened: np.ndarray = pushes + weights[:, None] * (short / total + np.cross(about, off))
     return evened
+
+
+def moved_share(before: np.ndarray, after: np.ndarray) -> float:
+    """How much of the pushes `before` were moved to make `after`, summed node by node, as a
+    share of them all: where there was nothing to move, any push is all of it moved."""
+    given = float(np.linalg.norm(before, axis=1).sum())
+    moved = float(np.linalg.norm(after - before, axis=1).sum())
+    if given > 0:
+        return moved / given
+    return 0.0 if moved == 0 else math.inf
 
 
 def pins(points: np.ndarray) -> list[tuple[int, list[int]]]:
@@ -336,6 +406,12 @@ class _Alone(load._Model):
         """What its neighbours put on it in the first pass, on the faces it meets them by."""
         self.joined_said: dict[str, Any] = {}
         if self.given is None:
+            if self.met_faces:
+                raise NoAnswer(
+                    f"pass 2, {self.part.name} on its own: it meets other parts over "
+                    f"{len(self.met_faces)} face(s), and the first pass gave it nothing they "
+                    "put on it, so nothing of it is read"
+                )
             return
         triangles = [t for f in self.between for t in self._triangles(f)]
         if not triangles:
@@ -361,12 +437,22 @@ class _Alone(load._Model):
         for node, push in zip(order, after, strict=True):
             self.pushed[node] = self.pushed.get(node, 0) + push
         mapped = before.sum(axis=0)
+        given = float(np.linalg.norm(before, axis=1).sum())
+        moved = float(np.linalg.norm(after - before, axis=1).sum())
+        share = moved_share(before, after)
+        if share > EVENED:
+            raise NoAnswer(
+                f"pass 2, {self.part.name} on its own: what its neighbours put on it in the "
+                f"first pass, carried over to its own mesh, had {100 * share:.1f}% of it moved "
+                f"to add up to the first pass's force and moment, more than the "
+                f"{100 * EVENED:g}% it's held to, so nothing of it is read"
+            )
         self.joined_said = {
             "force_n": load._list(self.given["force"]),
             "moment_nmm": load._list(self.given["moment"]),
             "mapped_force_n": load._list(mapped),
-            "evened_n": float(np.linalg.norm(after - before, axis=1).sum()),
-            "given_n": float(np.linalg.norm(before, axis=1).sum()),
+            "evened_n": moved,
+            "given_n": given,
         }
 
     def _balance(self) -> None:
@@ -511,7 +597,7 @@ def first(
     began = time.time()
     clock.now = "the first pass, the whole's bores squared"
     with load._quiet():
-        square, count = squared(assembly, placed)
+        square, count, kept = squared(assembly, placed)
     clock.now = f"the first pass, the whole at {size:g} mm"
     fine = load._solved(
         assembly, square, args, size, two_pass=True, weighed=placed, spread=False
@@ -524,6 +610,7 @@ def first(
     )
     said = {
         "squared_bores": count,
+        "round_kept": kept,
         "mesh_mm": size,
         "elements": fine["elements"],
         "nodes": fine["nodes"],
@@ -620,8 +707,15 @@ def pass_lines(report: Any, firsts: dict[str, Any], seconds: dict[str, Any], why
     nodes, time and the container's memory by its end."""
     report.line(
         f"read in two passes ({why}): the first reads the whole, each of its "
-        f"{firsts['squared_bores']} bolts' bores stood in by a square one as wide, to give "
-        "each joint's force and moment and how far each loaded place moves; the second reads "
+        f"{firsts['squared_bores']} bolts' bores stood in by a square one as wide"
+        + (
+            f" ({firsts['round_kept']} other round face(s) on bolts' axes, bosses, collars or "
+            "counterbores, left round as one pass meshes them)"
+            if firsts["round_kept"]
+            else ""
+        )
+        + ", to give each joint's force and moment and how far each loaded place moves; the "
+        "second reads "
         "each part on its own, its bores meshed round, under what the first found on it, to "
         "give each part's strain. Each figure below says which pass it's from"
     )
@@ -678,6 +772,14 @@ def checks(
         f"pass 1, each joint's force on both meshes: the furthest apart is {worst[1] or 'none'}, "
         f"{100 * worst[0]:.2f}% apart, against the {100 * AGREE:g}% they're held to"
     )
+    for name, joint in report.numbers.get("joints", {}).items():
+        share = joint_share(joint)
+        if share is not None and near(share, 1.0, JOINT_BAND):
+            apart.append(
+                f"pass 1 reads the joint {name}'s nearest figure at {100 * share:.1f}% of its "
+                f"limit, within the {100 * JOINT_BAND:g}% two passes are held to: read it in one "
+                "pass, or give it more margin"
+            )
     for name, alone in reads.items():
         for mesh, read in (("mesh", alone), ("coarser mesh", rough[name])):
             off = read["off_n"] > load.REACTION * read["scale_n"] or read["off_nmm"] > (
