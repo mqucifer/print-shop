@@ -255,6 +255,10 @@ class State:
     # The assembly file the latest `done` named in `part`, if it named one: a bench reading of a
     # given file it places is given `--placed` with it.
     assembly: str | None = None
+    # An assembly run, puts given parts together and makes none: set by whoever starts it, or a
+    # person at a resume, never by the model. Only such a run's `done` takes an assembly file in
+    # `part` (mqucifer/print-shop#310).
+    assembly_run: bool = False
 
 
 def repository_version() -> tuple[str, bool]:
@@ -441,8 +445,11 @@ class Run:
         limits: Limits | None = None,
         alias: str = ALIAS,
         sleep: Callable[[float], None] | None = None,
+        assembly_run: bool = False,
     ) -> Run:
-        """A new run's folder, made once, before any call."""
+        """A new run's folder, made once, before any call. `assembly_run` marks a run given
+        approved parts to put together, which finishes with its assembly file
+        (mqucifer/print-shop#310)."""
         if not NAME.fullmatch(name):
             raise Refused(f"a run's name is letters, digits, `.`, `_` and `-`: not {name!r}")
         resolved = root.expanduser().resolve()
@@ -478,6 +485,7 @@ class Run:
             kind=toolsets.key(form.kind) if form.kind else None,
             toolsets=True,
             given=assembled.at_start(folder / "work"),
+            assembly_run=assembly_run,
         )
         if run.limits.trim_reasoning_at:
             run.state.trim_reasoning = {
@@ -511,6 +519,8 @@ class Run:
         )
         run.ledger.request_read(name, form)
         run.ledger.given_at_start(name, run.state.given or {})
+        if assembly_run:
+            run.session._record("assembly_run", by="start", at_call=0)
         run._give_lessons()
         run.save()
         run._listen()
@@ -780,6 +790,16 @@ class Run:
         self.state.notes_from.append(who)
         message = _answer_with_facts(f"A note from {from_words(who)}:\n\n{note}", note)
         self._relay("note", who, note, message)
+
+    def mark_assembly_run(self, who: str) -> None:
+        """A person's word that this run puts given parts together and makes none, for a run
+        started before it was said (mqucifer/print-shop#310): from here on its `done` takes its
+        assembly file in `part`. Kept in its state and its events, never the model's to set."""
+        if self.state.assembly_run:
+            return
+        self.state.assembly_run = True
+        self.session._record("assembly_run", by=who, at_call=self.session.requests)
+        self.save()
 
     def approve(self, by: str, note: str = "") -> Ending:
         """A person's yes. It ends the run: the refinement pass and the delivery come after this."""
@@ -3113,6 +3133,8 @@ class Run:
             given = self._assembly_checked(self.work, assembly)
             if given.wrong:
                 return Judged("done", "failed", given.refused(), _assembly_why(given))
+            if len(given.given) < assembled.FEWEST:
+                return Judged("done", "failed", given.too_few(), "assembly_too_few")
         self.state.assembly = assembly
         part = list(dict.fromkeys(name for row in rows for name in row["files"]))
         self.state.part, self.state.part_at = part, self.session.requests
@@ -3769,9 +3791,9 @@ class Run:
 
     def _assembly_named(self, given: Any) -> tuple[str | None, Any] | Judged:
         """The assembly file `part` names, if it names one, and the rest of `part`: the files
-        the run made, each read as a print (mqucifer/print-shop#310). A `part` naming no JSON
-        file is passed on as it was given."""
-        if not isinstance(given, list):
+        the run made, each read as a print (mqucifer/print-shop#310). Only an assembly run's:
+        any other run's `part` is passed on as it was given, and read as it always was."""
+        if not self.state.assembly_run or not isinstance(given, list):
             return None, given
         found = [e for e in given if isinstance(e, str) and assembled.is_assembly(e)]
         if not found:
@@ -5309,7 +5331,7 @@ def _assembly_why(checked: assembled.Checked) -> str:
         return "assembly_unread"
     if checked.empty:
         return "assembly_empty"
-    if checked.not_given:
+    if checked.not_given or checked.crooked:
         return "assembly_not_given"
     return "assembly_changed"
 

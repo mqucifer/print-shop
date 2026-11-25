@@ -130,9 +130,18 @@ def _run(
     answers: tuple[Any, ...] = (TOUCH, TOUCH),
     assembly: dict[str, Any] | None = None,
     request: str = REQUEST,
+    assembly_run: bool = True,
 ) -> Run:
     model = Scripted(*[[t] for t in turns], [tool("blocked", reason="Out of turns.")])
-    run = Run.start(root / "runs", "r", request, given(root), model, sleep=lambda _: None)
+    run = Run.start(
+        root / "runs",
+        "r",
+        request,
+        given(root),
+        model,
+        sleep=lambda _: None,
+        assembly_run=assembly_run,
+    )
     (run.work / "make.py").write_text("print('placed')\n")
     (run.work / "table.json").write_text(json.dumps(assembly or ASSEMBLY))
     box: Any = Box(run.work, *answers)
@@ -327,6 +336,113 @@ def test_the_script_changing_a_given_part_in_the_clean_run_isnt_met(tmp_path: Pa
     assert done["outcome"] == "ok" and done["detail"]["met"] is False
     assert "- `references/left.step` has changed:" in done["reply"]
     assert (run.work / "references" / "left.step").read_bytes() == LEFT
+
+
+def _through_a_link(work: Path) -> None:
+    """What a script could do: a link under `references/` to a folder of its own, holding a
+    file of its own with a given file's name."""
+    (work / "made" / "x").mkdir(parents=True, exist_ok=True)
+    (work / "made" / "left.step").write_bytes(b"the model's own block")
+    (work / "references" / "sub").symlink_to("../made/x")
+
+
+#: `references/sub/../left.step`: cleaned as text it's the given block, and opened by the OS
+#: through the link, `references/sub` to `made/x`, it's `made/left.step`.
+CROOKED: dict[str, Any] = {
+    "parts": [
+        {"name": "left", "file": "references/sub/../left.step", "layers": "z", "at": [0, 0, 0]},
+        ASSEMBLY["parts"][1],
+    ]
+}
+
+
+def test_a_made_file_through_a_link_and_dots_isnt_taken_for_a_reference(tmp_path: Path) -> None:
+    """The review's probe: the OS reads the model's bytes where the name, cleaned, is a given
+    file's, so the name is refused as it's written."""
+    run = _run(
+        tmp_path, BROKEN_DOWN, tool("needs", needs=[MEET]), tool("done", **DONE), assembly=CROOKED
+    )
+    _through_a_link(run.work)
+    assert (run.work / "references/sub/../left.step").read_bytes() == b"the model's own block"
+    done = _refused(run)
+    assert done["why"] == "assembly_not_given"
+    assert "- `references/sub/../left.step` isn't a plain path to a given file" in done["reply"]
+
+
+@pytest.mark.parametrize(
+    "name", ["references/./left.step", "references//left.step", "/work/references/left.step"]
+)
+def test_a_placed_name_that_isnt_as_written_is_refused(tmp_path: Path, name: str) -> None:
+    (tmp_path / "references").mkdir()
+    (tmp_path / "references" / "left.step").write_bytes(LEFT)
+    (tmp_path / "a.json").write_text(json.dumps({"parts": [{"name": "l", "file": name}]}))
+    checked = assembled.check(tmp_path, "a.json", {"references/left.step": LEFT_SHA}, {}, {})
+    assert checked.crooked == [name] and checked.given == []
+
+
+def test_a_link_the_clean_run_makes_isnt_met(tmp_path: Path) -> None:
+    """`copy_plain` drops links, and a script can make them again in `judged/`."""
+    run = _run(tmp_path, BROKEN_DOWN, tool("needs", needs=[MEET]), tool("done", **DONE))
+    box: Any = run.box
+
+    def python(script: str, where: Path | None = None, timeout: int | None = None) -> Ran:
+        here = where or run.work
+        _through_a_link(here)
+        (here / "table.json").write_text(json.dumps(CROOKED))
+        return Ran(0, "ran\n", 0.1)
+
+    box.python = python
+    assert run.drive().name == "blocked"
+    done = done_reply(run)
+    assert done["outcome"] == "ok" and done["detail"]["met"] is False
+    assert "`references/sub/../left.step` isn't a plain path to a given file" in done["reply"]
+
+
+def test_one_given_part_placed_alone_is_no_assembly(tmp_path: Path) -> None:
+    run = _run(
+        tmp_path,
+        BROKEN_DOWN,
+        tool("needs", needs=[MEET]),
+        tool("done", **DONE),
+        assembly={"parts": [ASSEMBLY["parts"][0]]},
+    )
+    done = _refused(run)
+    assert done["why"] == "assembly_too_few"
+    assert "places `references/left.step`: an assembly puts 2 or more" in done["reply"]
+
+
+def test_a_part_run_naming_an_assembly_file_is_refused_as_on_main(tmp_path: Path) -> None:
+    """Only a run its starter or a person marked as an assembly run may finish with one: the
+    model can't make a part run finish having made nothing."""
+    run = _run(
+        tmp_path,
+        BROKEN_DOWN,
+        tool("needs", needs=[MEET]),
+        tool("done", **DONE),
+        assembly_run=False,
+    )
+    done = _refused(run)
+    assert (done["why"], done["reply"]) == (
+        "not_geometry", "`part` names STEP or STL files, and `table.json` isn't one."
+    )  # fmt: skip
+    assert run.ledger.rows("SELECT * FROM assemblies") == []
+
+
+def test_a_person_marks_a_run_already_started_as_an_assembly_run(tmp_path: Path) -> None:
+    run = _run(
+        tmp_path,
+        BROKEN_DOWN,
+        tool("needs", needs=[MEET]),
+        tool("done", **DONE),
+        assembly_run=False,
+    )
+    run.mark_assembly_run("sponsor")
+    assert run.drive().name == "met"
+    marked = [
+        e for e in transcript.events_of(run.session.events) if e["kind"] == "assembly_run"
+    ]
+    assert [e["by"] for e in marked] == ["sponsor"]
+    assert Run.load(run.folder, run.session.send).state.assembly_run is True
 
 
 # A reference replaced while the run goes on

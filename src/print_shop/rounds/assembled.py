@@ -32,17 +32,20 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import posixpath
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from print_shop.rounds import paths, placing
+from print_shop.rounds import paths
 from print_shop.rounds.needs import GEOMETRY
 
 REFERENCES = "references/"
 #: The fewest hex digits a stated hash has: 48 bits, plenty against an accident.
 SHORTEST = 12
+#: The fewest given parts an assembly places: one alone is no assembly.
+FEWEST = 2
 #: A file named in backticks, as a request or a note names a given part.
 NAMED = re.compile(r"`(?P<name>[^`\s]+)`")
 #: A stated hash: 12 to 64 hex digits standing alone.
@@ -157,11 +160,14 @@ class Checked:
     empty: bool = False
     unread: str = ""
     not_given: list[str] = field(default_factory=list)
+    crooked: list[str] = field(default_factory=list)
     changed: list[Given] = field(default_factory=list)
 
     @property
     def wrong(self) -> bool:
-        return bool(self.empty or self.unread or self.not_given or self.changed)
+        return bool(
+            self.empty or self.unread or self.not_given or self.crooked or self.changed
+        )
 
     def files(self) -> list[str]:
         return [one.file for one in self.given]
@@ -172,6 +178,14 @@ class Checked:
             "assembly_sha": self.assembly_sha,
             "given": [one.plain() for one in self.given],
         }
+
+    def too_few(self) -> str:
+        """Why one placed part isn't an assembly."""
+        named = ", ".join(f"`{f}`" for f in self.files()) or "nothing"
+        return (
+            f"`{self.assembly}` places {named}: an assembly puts {FEWEST} or more given parts "
+            "together."
+        )
 
     def refused(self) -> str:
         """Why `done` won't take it, each file named."""
@@ -184,6 +198,12 @@ class Checked:
                 '[], "at": [0, 0, 0]}.'
             )
         lines = [f"`{self.assembly}` places files that aren't the given parts as they were given:"]
+        for name in self.crooked:
+            lines.append(
+                f"- `{name}` isn't a plain path to a given file: it goes through `..` or a link, "
+                "or isn't as written once cleaned. Name each given file as it is, "
+                "`references/<name>`."
+            )
         for name in self.not_given:
             lines.append(
                 f"- `{name}` isn't given to you: an assembly in `part` places only the given "
@@ -251,11 +271,16 @@ def check(
     if not isinstance(entries, list):
         checked.unread = 'it has no `parts` list: {"parts": [{"name": ..., "file": ...}, ...]}'
         return checked
-    placed = sorted(placing.placed_by(where, assembly))
+    placed = _named(entries, assembly)
     if not placed:
         checked.empty = True
         return checked
     for name in placed:
+        if _crooked(where, name):
+            # The bench opens the name as written, following links: what's hashed has to be
+            # what it reads, so only a plain path is taken.
+            checked.crooked.append(name)
+            continue
         held = name in (start or {}) or name in said
         if not name.startswith(REFERENCES) or (start is not None and not held):
             # A file the run made, or wrote under `references/`: never given to it.
@@ -274,6 +299,27 @@ def check(
         if not given.same:
             checked.changed.append(given)
     return checked
+
+
+def _named(entries: list[Any], assembly: str) -> list[str]:
+    """Each file the assembly places, each part's `file` and its `with`, as the bench opens it:
+    beside the assembly file, by its words as written, nothing cleaned."""
+    folder = posixpath.dirname(assembly)
+    found: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        others = entry.get("with")
+        for file in [entry.get("file"), *(others if isinstance(others, list) else [])]:
+            if isinstance(file, str) and file:
+                found.append(f"{folder}/{file}" if folder else file)
+    return sorted(set(found))
+
+
+def _crooked(where: Path, name: str) -> bool:
+    """A placed path that isn't plain: not as it reads cleaned, through `..`, absolute, or
+    through a link anywhere along it."""
+    return name != posixpath.normpath(name) or paths.inside(where, name) is None
 
 
 def _sha_of(where: Path, name: str) -> str | None:

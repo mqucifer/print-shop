@@ -3,11 +3,14 @@
 
 scripts/rounds.py start NAME --request FILE [--reference FILE]... [--right FILE]
                   [--trim-reasoning] [--start-lessons-chars N]    intake, then rounds; a right
-                                                                  answer is the scenario's ranges;
+                  [--assembly-run]                                answer is the scenario's ranges;
                                                                   the trim is an eval arm's, off;
                                                                   the start's lessons fit N
-                                                                  characters, 6000 unless given
-scripts/rounds.py resume NAME [--note FILE] [--from WHO] [--reopen-needs]   go on after a stop
+                                                                  characters, 6000 unless given;
+                                                                  an assembly run puts the given
+                                                                  parts together, making none
+scripts/rounds.py resume NAME [--note FILE] [--from WHO] [--reopen-needs] [--assembly-run]
+                                                                  go on after a stop
 scripts/rounds.py resume NAME --approve --by WHO [--note FILE]      a person's yes, then the
                                                                   model's after-action review
 scripts/rounds.py resume NAME --send-back --by WHO --note FILE [--reopen-needs] [--fresh]
@@ -82,6 +85,12 @@ from print_shop.rounds.send import ALIAS, Sender
 from print_shop.rounds.session import TRIM_AT, TRIM_KEEP, Limits
 from print_shop.slicer.store import NoChoice
 
+#: Said of `--assembly-run`, at `start` and at `resume` (mqucifer/print-shop#310).
+ASSEMBLY_RUN = (
+    "an assembly run, given the approved parts to put together and making none: its `done` "
+    "takes its assembly file in `part`, placing two or more given parts, each unchanged. "
+    "Whoever starts the run or resumes it says so, never the model"
+)
 
 def _interrupted(_signal: int, _frame: FrameType | None) -> None:
     raise KeyboardInterrupt
@@ -366,8 +375,10 @@ def main() -> int:
         help="the characters of kept lessons its start holds, its kind's first and best-scored "
         f"first: {lessons.START_CHARS} unless given. The `lessons` tool finds the rest",
     )
+    start.add_argument("--assembly-run", action="store_true", help=ASSEMBLY_RUN)
     resume = sub.add_parser("resume")
     resume.add_argument("name")
+    resume.add_argument("--assembly-run", action="store_true", help=ASSEMBLY_RUN)
     resume.add_argument("--note", type=Path)
     resume.add_argument(
         "--from",
@@ -525,7 +536,15 @@ def main() -> int:
                     trim_reasoning_at=TRIM_AT if args.trim_reasoning else 0,
                     start_lessons_chars=args.start_lessons_chars,
                 )
-                run = Run.start(root, args.name, request, args.reference, send, limits)
+                run = Run.start(
+                    root,
+                    args.name,
+                    request,
+                    args.reference,
+                    send,
+                    limits,
+                    assembly_run=args.assembly_run,
+                )
                 if args.right:
                     scores.keep_right(run.folder, args.right, run.ledger)
             else:
@@ -534,6 +553,8 @@ def main() -> int:
                 note = args.note.read_text(encoding="utf-8") if args.note else ""
                 if args.fresh and not args.send_back:
                     raise Refused("--fresh goes with --send-back: it starts its conversation again")
+                if args.assembly_run:
+                    run.mark_assembly_run(args.by or args.note_from)
                 if args.send_back:
                     told = run.send_back(args.by, note, args.reopen_needs, args.fresh)
                 else:
