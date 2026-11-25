@@ -34,7 +34,15 @@ from print_shop.core.state import turn_words
 from print_shop.setup import pauses
 from print_shop.setup.context import SET_ASIDE
 from print_shop.setup.layout import WIDTH, wrap
-from print_shop.setup.names import Found, either, named, plain, switched, with_unit
+from print_shop.setup.names import (
+    ORCA_FORMS,
+    Found,
+    either,
+    named,
+    plain,
+    switched,
+    with_unit,
+)
 from print_shop.setup.offer import render as render_offer
 from print_shop.setup.proposal import (
     ORIENTATION,
@@ -54,6 +62,7 @@ from print_shop.setup.reading import (
     SliceReading,
 )
 from print_shop.setup.suggest import didnt_come, fell_back, turning, waited
+from print_shop.slicer.orca import sliced_by
 
 if TYPE_CHECKING:
     from print_shop.setup.review import ReviewRequest
@@ -471,6 +480,10 @@ def _print(request: ReviewRequest, width: int, marks: Moved) -> list[str]:
         ("  process", process),
         ("  filament", filament),
     ]
+    by = sliced_by(s.gcode_path)
+    if by and by != ORCA_FORMS:
+        # A value's form is checked against another Orca's definitions (mqucifer/print-shop#296).
+        rows.append(("  orca", f"setting forms read from Orca {ORCA_FORMS}"))
     lines = [line for name, value in rows for line in wrap(f"{name:<12}", value, width, " " * 12)]
     if request.plate is not None:
         # How the plate prints and where each part is (mqucifer/print-shop#109). Its map is drawn,

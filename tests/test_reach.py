@@ -27,6 +27,7 @@ from print_shop.runtime import describe
 from print_shop.setup import Proposer, lessons
 from print_shop.setup.bounds import MATERIAL, SETTINGS
 from print_shop.setup.intake import Intake, replay_asker
+from print_shop.setup.names import form
 from print_shop.setup.proposal import (
     Change,
     GivenLesson,
@@ -120,6 +121,12 @@ def _corrected(
     return parse_answer(answer, replace(_request(), process=process, filament=filament))
 
 
+def _of_form(key: str, value: str) -> str:
+    """`value` as `key`'s form has it, where the review checks it (mqucifer/print-shop#296): an
+    on/off setting's 1, any other's as given."""
+    return "1" if form(key).rstrip("s") == "bool" else value
+
+
 def _change(key: str, value: str, source: Source = Source.SPONSOR, **more: Any) -> Change:
     return Change(key=key, preset="", value=value, reason="made up", source=source, **more)
 
@@ -187,12 +194,12 @@ def test_every_stored_filament_key_that_can_be_corrected_is_written_to_the_filam
     keys = set(filament) - RECORDS
     assert keys, "the profile has settings"
     for key in sorted(keys - NOT_TYPED):
-        review = _corrected(f"{key}=7", process, filament)
+        review = _corrected(f"{key}={_of_form(key, '7')}", process, filament)
         assert isinstance(review, Review), (key, review)
     profiles = _profiles(tmp_path, process, filament)
-    changes = tuple(_change(key, "7") for key in sorted(keys))
+    changes = tuple(_change(key, _of_form(key, "7")) for key in sorted(keys))
     wrote, written = _written(apply(profiles, Proposal(changes=changes), tmp_path / "out"))
-    assert {key for key in keys if written[key] != ["7"]} == set()
+    assert {key for key in keys if written[key] != [_of_form(key, "7")]} == set()
     assert wrote == process, "none of them is written to the process"
     for key in sorted(set(filament) & RECORDS):
         assert isinstance(_corrected(f"{key}=7", process, filament), str), key
@@ -240,15 +247,16 @@ def test_a_declared_key_the_preset_doesnt_list_is_accepted_at_the_review(tmp_pat
 def test_a_key_declared_the_filaments_is_placed_there_whether_or_not_its_listed(
     key: str, tmp_path: Path
 ) -> None:
-    review = _corrected(f"{key}=20", PROCESS, SPARSE)
+    value = _of_form(key, "20")
+    review = _corrected(f"{key}={value}", PROCESS, SPARSE)
     assert isinstance(review, Review), review
-    [learned], _, [given] = from_lessons(_facts(PROCESS, SPARSE), (_lesson(key, "20"),))
+    [learned], _, [given] = from_lessons(_facts(PROCESS, SPARSE), (_lesson(key, value),))
     assert (given.applied, learned.preset) == (True, "")
     for n, change in enumerate((review.corrections[0], learned)):
         folder = tmp_path / str(n)
         applied = apply(_profiles(folder, PROCESS, SPARSE), Proposal(changes=(change,)),
                         folder / "out")
-        assert _written(applied) == (PROCESS, {**SPARSE, key: ["20"]})
+        assert _written(applied) == (PROCESS, {**SPARSE, key: [value]})
 
 
 def test_the_declared_profile_comes_before_the_one_that_has_the_key() -> None:
