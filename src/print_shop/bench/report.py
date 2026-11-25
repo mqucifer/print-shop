@@ -88,6 +88,13 @@ class Report:
         self.files: list[str] = []
         self.started = time.time()
 
+    def again(self) -> None:
+        """The answer started again from nothing, as when a command reads the same thing a
+        second way (mqucifer/print-shop#295), keeping when it started."""
+        started = self.started
+        self.__init__(self.command, self.argv)  # type: ignore[misc]
+        self.started = started
+
     def fact(self, name: str, value: Any, unit: str = "", how: str = "") -> None:
         """A line of the report and a number in its saved form."""
         shown = f"{value:.4f}" if isinstance(value, float) else str(_shown(value))

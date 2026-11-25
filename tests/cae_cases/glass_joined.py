@@ -1,12 +1,15 @@
 """A glass frame `pieces build` made, joined to a block (mqucifer/print-shop#295), in the bench's
 second image: nothing here is anyone's design.
 
-`python glass_joined.py FRAME` reads the frame, its border at least 12 mm wide on its +x side,
+`python glass_joined.py FRAME OUT` reads the frame, its border at least 12 mm wide on its +x side,
 and lays that border on a block 40 mm wide and 20 deep, the block from 17 mm inside the
 frame's +x edge to 23 past it and as long as the frame, bolted down through the border by three
-M5 through-bolts 6 mm in from the frame's edge. It writes `glass/frame-bored.step`,
-`glass/block.step` and two assembly files: `glass/alone.json`, the bare frame held by its -x
-edge, and `glass/joined.json`, the bored frame on the block, held by the block's far end.
+M5 through-bolts 6 mm in from the frame's edge. It writes, in the folder OUT,
+`frame-bored.step`, `block.step`, `band.step` and two assembly files: `alone.json`, the bare
+frame held by its -x edge, and `joined.json`, the bored frame on the block, held by the block's
+far end. The band is the panel inside the border, the leads and lips `pieces build` made, which
+`load` leaves out to read the frame as a lower bound where the whole can't be read: the panel
+is from the origin, so the border is as wide as the frame reaches below it.
 """
 
 from __future__ import annotations
@@ -26,7 +29,7 @@ WIDE, DEEP, IN, PAST, BORE = 40.0, 20.0, 6.0, 23.0, 2.75
 
 def main() -> None:
     frame_file = Path(sys.argv[1])
-    out = Path("glass")
+    out = Path(sys.argv[2])
     out.mkdir(exist_ok=True)
     frame = next(s for s in Part.read(str(frame_file)).Solids if s.Volume > 1e-6)
     box = frame.BoundBox
@@ -39,15 +42,22 @@ def main() -> None:
         bore = Part.makeCylinder(BORE, DEEP + 20, App.Vector(x, y, -DEEP - 5), App.Vector(0, 0, 1))
         bored, block = bored.cut(bore), block.cut(bore)
     bored.exportStep(str(out / "frame-bored.step"))
+    border = -box.XMin
+    band = Part.makeBox(
+        edge - border, high - border, box.ZLength + 2, App.Vector(0, 0, box.ZMin - 1)
+    )
+    band.exportStep(str(out / "band.step"))
     block.exportStep(str(out / "block.step"))
     alone = {
-        "parts": [{"name": "frame", "file": f"../{frame_file}", "layers": "z"}],
+        "parts": [
+            {"name": "frame", "file": f"../{frame_file}", "layers": "z", "band": "band.step"}
+        ],
         "held": [{"plane": f"x={box.XMin}", "how": "fixed"}],
     }
     (out / "alone.json").write_text(json.dumps(alone))
     joined = {
         "parts": [
-            {"name": "frame", "file": "frame-bored.step", "layers": "z"},
+            {"name": "frame", "file": "frame-bored.step", "layers": "z", "band": "band.step"},
             {"name": "block", "file": "block.step", "layers": "z"},
         ],
         "joints": [

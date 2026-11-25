@@ -274,6 +274,10 @@ class PartAt:
     #: Other files placed with it by the same `turn` and `at`, such as a frame's panes: each as
     #: the assembly names it, beside the assembly file.
     others: tuple[str, ...] = ()
+    #: A glass frame's lead band, a STEP file beside the assembly file in the part's own axes:
+    #: what of the part `load` leaves out to read it as a lower bound, where the whole can't be
+    #: read (mqucifer/print-shop#295).
+    band: str | None = None
 
     def matrix(self) -> np.ndarray:
         """Its turns as one rotation."""
@@ -474,7 +478,22 @@ def _part(entry: Any, folder: Path) -> PartAt:
         MATERIALS[material],
         str(_one_of(entry["layers"], AXES, f"{name}'s `layers`")),
         _with(entry.get("with", []), name, folder),
+        _band(entry.get("band"), name, folder),
     )
+
+
+def _band(given: Any, name: str, folder: Path) -> str | None:
+    """A part's glass band: a STEP file beside the assembly file, in the part's own axes."""
+    if given is None:
+        return None
+    if not isinstance(given, str) or not given.lower().endswith((".step", ".stp")):
+        raise NoAnswer(
+            f"the part {name}'s `band` is a STEP file, in the part's own axes, holding what of "
+            f"it is the glass band, its leads and lips: {given!r}"
+        )
+    if not (folder / given).is_file():
+        raise NoAnswer(f"the part {name}'s `band`, {given}, isn't beside the assembly file")
+    return given
 
 
 def _with(given: Any, name: str, folder: Path) -> tuple[str, ...]:

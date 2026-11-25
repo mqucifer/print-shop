@@ -1573,36 +1573,37 @@ def test_a_bolt_left_out_reads_its_joint_as_the_one_that_gives_first(cae: Any) -
     assert one_out.numbers["moves_mm"] == pytest.approx(bolted.numbers["moves_mm"], rel=1e-6)
 
 
-#: The made-up glass panel's width, in mm (`cae_cases/glass_panel.py`), and how it's built: a
-#: frame 6 mm thick round panes 3 mm thick, two lips sized by --min-visible, a 12 mm border.
-GLASS_W = 160
+#: How the made-up glass panel (`cae_cases/glass_panel.py`) is built: a frame 6 mm thick round
+#: panes 3 mm thick, two lips sized by --min-visible, a 12 mm border.
 GLASS_BUILD = ("--thickness", "6", "--pane", "3", "--lip", "1.2,0.6", "--min-visible", "50",
                "--play", "0.25", "--border", "12")  # fmt: skip
 
 
-@pytest.fixture(scope="module")
-def glass(cae: Any) -> Path:
-    """The made-up panel drawn, traced and built by `pieces build` in the first image, its map
-    fixed as the build's own refusals say, as a run does: each piece it says to split split
-    along the line it gives, and each it says to merge merged into the first neighbour that
-    takes it. Then the frame bored and laid on a block in the second image."""
+def glass_built(cae: Any, width: int) -> Path:
+    """The made-up panel `width` mm wide drawn, traced and built by `pieces build` in the first
+    image, its map fixed as the build's own refusals say, as a run does: each piece it says to
+    split split along the line it gives, and each it says to merge merged into the first
+    neighbour that takes it. Then the frame bored and laid on a block in the second image, all
+    in the folder `glass-WIDTH`."""
     if host.image_id() is None:
         pytest.fail(f"{host.missing(host.IMAGE)} first")
     work = cae.work
-    shutil.copy(CASES / "glass_panel.py", work / "glass_panel.py")
-    drawn = host.run(["glass_panel.py", str(GLASS_W)], work, python=True)
+    for script in ("glass_panel.py", "glass_joined.py"):
+        shutil.copy(CASES / script, work / script)
+    drawn = host.run(["glass_panel.py", str(width)], work, python=True)
     assert drawn.returncode == 0, drawn.stdout + drawn.stderr
-    traced = cae("pieces", "trace", "panel.png", "--width", str(GLASS_W), "--to", "panel-0.json")
+    stem = f"panel{width}"
+    traced = cae("pieces", "trace", "panel.png", "--width", str(width), "--to", f"{stem}-0.json")
     assert traced.verdict == "OK", traced.text
-    current = "panel-0.json"
+    current = f"{stem}-0.json"
     for step in range(1, 12):
-        built = cae("pieces", "build", current, *GLASS_BUILD, "--build-out", "glass-frame")
+        built = cae("pieces", "build", current, *GLASS_BUILD, "--build-out", f"{stem}-frame")
         if built.verdict == "OK":
             break
         refused = built.numbers["unbuildable"][0]
         piece = int(re.match(r"piece (\d+)", refused).group(1))  # type: ignore[union-attr]
         split = re.search(r"`pieces split MAP \d+ --line (\S+)`", refused)
-        following = f"panel-{step}.json"
+        following = f"{stem}-{step}.json"
         if split:
             done = cae("pieces", "split", current, str(piece), "--line", split.group(1),
                        "--to", following)  # fmt: skip
@@ -1616,9 +1617,65 @@ def glass(cae: Any) -> Path:
         assert done.verdict == "OK", done.text
         current = following
     assert built.verdict == "OK", built.text
-    shutil.copy(CASES / "glass_joined.py", work / "glass_joined.py")
+    folder = f"glass-{width}"
     made = host.run(
-        ["glass_joined.py", "glass-frame/frame.step"], work, python=True, image=host.CAE_IMAGE
-    )
+        ["glass_joined.py", f"{stem}-frame/frame.step", folder], work, python=True,
+        image=host.CAE_IMAGE,
+    )  # fmt: skip
     assert made.returncode == 0, made.stdout + made.stderr
-    return work / "glass"
+    return Path(work) / folder
+
+
+#: The panel's width, in mm, and the mesh its frame is read alone at: at the default, 3 mm,
+#: it's read whole within 60 MB of the container's 3 GiB on the Mac, too near to rely on.
+GLASS_W, ALONE_MESH = 160, "4"
+
+
+@pytest.fixture(scope="module")
+def glass(cae: Any) -> Path:
+    return glass_built(cae, GLASS_W)
+
+
+def test_a_traced_glass_frame_reads_alone_with_its_elements_straight(
+    cae: Any, glass: Path
+) -> None:
+    """mqucifer/print-shop#295: a stained-glass frame `pieces build` made from a traced picture,
+    with sharp V corners and lips sized piece by piece, read "gmsh made no mesh of the joined
+    parts: None". gmsh couldn't curve every element onto its many small curves without leaving
+    some inside out and ended with an error, and FreeCAD kept no mesh and said nothing. Now the
+    mesh is made again with its elements' sides straight, the reply says why in gmsh's own
+    words, and the frame alone, held by its -x edge with 1 kg on its +x border, reads whole:
+    no lower bound, and the coarser mesh agrees."""
+    answer = cae(
+        "load", f"{glass.name}/alone.json", "--weight", "1", "--at", f"{GLASS_W + 6},50,6",
+        "--mesh", ALONE_MESH,
+    )  # fmt: skip
+    assert answer.verdict == "OK", answer.text
+    assert "lower_bound" not in answer.numbers
+    assert "its elements' sides straight, each curved face followed by their chords" in answer.text
+    assert "gmsh made no curved mesh of the joined parts: " in answer.text
+    frame = answer.numbers["parts"]["frame"]
+    assert 0 < frame["across_layers_pct"] < 1.0
+    assert answer.record["seconds"] < host.TIMEOUT
+
+
+def test_a_glass_frame_bolted_to_a_block_reads_as_a_lower_bound_with_its_band_left_out(
+    cae: Any, glass: Path
+) -> None:
+    """The same frame bored and bolted down through its border onto a block by three M5
+    through-bolts. Whole, its mesh is past what the container's 3 GiB solves, and the reply says
+    so. The frame names its glass band, the panel inside its border, so it's read again with
+    the band left out, a lower bound: the reply leads with that, names the frame and says why,
+    and every bolt and the plastic round it is read as any through joint's is. The joint's
+    force is the load beyond it, by statics."""
+    answer = cae("load", f"{glass.name}/joined.json", "--weight", "1", "--at", "-6,50,6")
+    assert answer.verdict == "OK", answer.text
+    assert answer.record["why"].startswith("read as a lower bound, frame with its glass band left")
+    lower = answer.numbers["lower_bound"]
+    assert lower["parts"] == ["frame"]
+    assert "it met the container's memory, 3 GiB" in lower["why"]
+    assert "read as a lower bound: frame read with its glass band left out" in answer.text
+    joint = answer.numbers["joints"]["frame+block"]
+    assert joint["force_n"] == pytest.approx([0, 0, G], abs=0.01), "the block holds the weight up"
+    assert len(joint["bolts"]) == 3 and joint["bolt_pull_n"] > 0
+    assert answer.record["seconds"] < host.TIMEOUT

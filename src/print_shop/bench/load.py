@@ -250,8 +250,9 @@ def beyond(
     return (force, moment) if free_is_far else (-force, -moment)
 
 
-def _placed(assembly: Assembly) -> list[Any]:
-    """Each part's one solid, where the assembly puts it."""
+def _placed(assembly: Assembly, without_bands: bool = False) -> list[Any]:
+    """Each part's one solid, where the assembly puts it: with `without_bands`, less its glass
+    band where it names one (mqucifer/print-shop#295)."""
     import FreeCAD as App
     import Part
 
@@ -265,6 +266,15 @@ def _placed(assembly: Assembly) -> list[Any]:
                 "one solid, and each other piece is a part of its own"
             )
         solid = solids[0].copy()
+        if without_bands and part.band is not None:
+            band = [s for s in Part.read(str(folder / part.band)).Solids if s.Volume > 1e-6]
+            left = [s for s in solid.cut(Part.makeCompound(band)).Solids if s.Volume > 1e-6]
+            if len(left) != 1:
+                raise NoAnswer(
+                    f"the part {part.name} with its band, {part.band}, left out is "
+                    f"{len(left)} solids: a part read without its band is one solid still"
+                )
+            solid = left[0]
         for axis, degrees in part.turn:
             way = [0.0, 0.0, 0.0]
             way[AXES.index(axis)] = 1.0
@@ -493,7 +503,7 @@ class _Model:
             words = "; ".join(_gmsh_errors(said)) or "it gave no reason"
             if not self.straight:
                 raise _Curved(f"gmsh made no curved mesh of the joined parts: {words[:300]}")
-            raise NoAnswer(
+            raise _Unread(
                 "gmsh made no mesh of the joined parts, with its elements' sides curved onto "
                 f"the parts' faces or straight: {words[:300]}"
             )
@@ -528,7 +538,7 @@ class _Model:
             tidy_solve(fea)
             full = _memory_full()
             if full is not None:
-                raise NoAnswer(self._too_big(full))
+                raise _Unread(self._too_big(full))
             raise NoAnswer(
                 f"CalculiX gave no result for the {fem.VolumeCount} elements, at a mesh of "
                 f"{self.size:g} mm: it may have run out of the container's memory. Give a "
@@ -1013,6 +1023,11 @@ def _gmsh_errors(said: str) -> list[str]:
     return found
 
 
+class _Unread(NoAnswer):
+    """The whole assembly can't be read: it meets the container's memory, or no mesh of it
+    solves. A part that names its glass band is read again without it (mqucifer/print-shop#295)."""
+
+
 class _Curved(NoAnswer):
     """The mesh with its elements' sides curved onto the parts' faces has an element turned
     inside out, or none at all: it's meshed again with them straight."""
@@ -1091,6 +1106,33 @@ def _bolts(joint: Joint, read: dict[str, Any], force: np.ndarray, moment: np.nda
 
 
 def run(args: Any, report: Report) -> None:
+    """The assembly read whole; or, where it can't be, for memory or a mesh, and parts of it
+    name their glass band, read again with each band left out, as a lower bound
+    (mqucifer/print-shop#295). The reply leads with that, names the parts and says why."""
+    try:
+        _run(args, report)
+        return
+    except _Unread as whole:
+        banded = [p.name for p in read(args.assembly).parts if p.band is not None]
+        if not banded:
+            raise
+        # What it met, less its own "nothing is read": the rest is.
+        why = str(whole).split(". Nothing is read")[0]
+    report.again()
+    _run(args, report, without_bands=True)
+    names = ", ".join(banded)
+    report.facts.insert(
+        0,
+        f"read as a lower bound: {names} read with its glass band left out, the leads and lips "
+        "its `band` names, as the whole couldn't be read: "
+        f"{why}. The rest of each is read with no stiffness for its band, as it would be with "
+        "the band gone, never with a stiffness made up for it, and the band itself is unread",
+    )
+    report.numbers["lower_bound"] = {"parts": banded, "why": why}
+    report.why = f"read as a lower bound, {names} with its glass band left out: {report.why}"
+
+
+def _run(args: Any, report: Report, without_bands: bool = False) -> None:
     freecad("load")
     args.lift = getattr(args, "lift", None)
     if args.lift is not None and (args.weight is not None or args.at):
@@ -1116,7 +1158,7 @@ def run(args: Any, report: Report) -> None:
     stiff = {(p.material.modulus_mpa, p.material.poisson) for p in assembly.parts}
     if len(stiff) > 1:
         raise NoAnswer("parts of different stiffness aren't solved together yet: one material")
-    placed = _placed(assembly)
+    placed = _placed(assembly, without_bands)
     # Each through-bolt's way through both parts, before anything is solved.
     ways = load_through.ways(assembly, placed)
     # And each dovetail's latch as what it catches on.
