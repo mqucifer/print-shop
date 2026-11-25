@@ -1682,8 +1682,9 @@ def test_a_bolt_left_out_reads_its_joint_as_the_one_that_gives_first(
     out, its joint is `touching`, and that joint is what gives: it tips open, `FAIL`, named.
     The solve ties every joint's faces as a bolted joint is while its bolts hold, so a bolt
     left out doesn't change how far anything moves: the loaded place moves the same. And the
-    same in two passes (mqucifer/print-shop#301)."""
-    for one, two in (("one", "out"), ("one/2", "out/2")):
+    same in two passes (mqucifer/print-shop#301), but that there a bore with no bolt in it isn't
+    squared, so the first pass's mesh differs round it, and the place moves within 1e-3."""
+    for one, two, alike in (("one", "out", 1e-6), ("one/2", "out/2", 1e-3)):
         bolted, one_out = stool[one], stool[two]
         assert bolted.verdict == "OK", bolted.text
         assert "straight sides" not in bolted.text, "its bores mesh curved, and stay so"
@@ -1691,7 +1692,8 @@ def test_a_bolt_left_out_reads_its_joint_as_the_one_that_gives_first(
         why = one_out.record["why"]
         assert why.startswith("the touching joint top+leg2"), why
         assert "tips open" in why
-        assert one_out.numbers["moves_mm"] == pytest.approx(bolted.numbers["moves_mm"], rel=1e-6)
+        moved = pytest.approx(bolted.numbers["moves_mm"], rel=alike)
+        assert one_out.numbers["moves_mm"] == moved
     assert "two_passes" in stool["out/2"].numbers
 
 
