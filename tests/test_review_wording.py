@@ -22,7 +22,7 @@ from print_shop.setup.proposal import Change, Source
 from print_shop.setup.questions import PLATE_WORDS, SEEN
 from print_shop.setup.reading import read_slice
 from print_shop.setup.review import render
-from print_shop.setup.screen import _layer, found
+from print_shop.setup.screen import found, layer_time
 from tests.fakes import STORE_PROFILES
 from tests.test_plate_job import Rig, _caps
 from tests.test_setting_names import CONFIG, FILAMENT, GCODE, PROCESS, Person, _request
@@ -43,7 +43,7 @@ WIDTH = 100
 def test_a_layer_under_a_minute_reads_in_seconds_and_from_a_minute_in_m_ss(
     seconds: float, said: str,
 ) -> None:
-    assert _layer(seconds) == said
+    assert layer_time(seconds) == said
 
 
 def test_the_layers_line_reads_each_figure_by_its_own_size() -> None:
@@ -51,8 +51,8 @@ def test_the_layers_line_reads_each_figure_by_its_own_size() -> None:
     times = sorted(layer.time_s for layer in request.reading.layers)  # type: ignore[union-attr]
     line = " ".join(render(request, WIDTH).split())
     said = line.split(" layers 100, ")[1].split(" typical")[0]
-    assert said == (f"{_layer(times[0])} to {_layer(times[-1])} each, "
-                    f"{_layer(times[len(times) // 2])}")
+    assert said == (f"{layer_time(times[0])} to {layer_time(times[-1])} each, "
+                    f"{layer_time(times[len(times) // 2])}")
     assert "0:0" not in said, "no figure under a minute is m:ss"
 
 
@@ -181,3 +181,22 @@ def test_every_line_here_is_within_100_columns(tmp_path: Path) -> None:
     rig = _plate(tmp_path)
     assert all(len(line) <= WIDTH for text in rig.shown for line in text.splitlines()
                if "/" not in line), "a path may run past it, alone"
+
+
+# --------------------------------------------------------------------------
+# The phone says them as the review does (print-shop-ux, on mqucifer/print-shop#303)
+# --------------------------------------------------------------------------
+
+
+def test_the_phones_slice_page_says_layer_times_as_the_review_does() -> None:
+    from print_shop.phone.slice import layers_said  # noqa: PLC0415
+    from print_shop.setup.reading import LayerTime  # noqa: PLC0415
+
+    reading = read_slice(GCODE)
+    times = (11.6, 12.4, 35.0, 255.0)
+    short = reading.model_copy(update={"layers": tuple(
+        LayerTime(n=n, z=0.2 * n, time_s=t) for n, t in enumerate(times, 1))})
+    [line] = [said for said in layers_said(short) if " layers, " in said]
+    assert line.startswith("4 layers, 11.6 s to 4:15 each, 35 s typical."), line
+    assert "12 s" not in line, "a tenth under a minute is kept"
+

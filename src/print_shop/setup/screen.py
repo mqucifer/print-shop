@@ -67,7 +67,8 @@ from print_shop.slicer.orca import sliced_by
 if TYPE_CHECKING:
     from print_shop.setup.review import ReviewRequest
 
-__all__ = ["WIDTH", "Moved", "Said", "Section", "by_model", "clock", "found", "sections",
+__all__ = ["WIDTH", "Moved", "Said", "Section", "by_model", "clock", "found", "layer_time",
+           "sections",
            "what_moved", "warnings", "who_set", "wrap"]
 
 
@@ -157,7 +158,7 @@ def clock(seconds: float) -> str:
     return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
 
 
-def _layer(seconds: float) -> str:
+def layer_time(seconds: float) -> str:
     """A layer's time: under a minute in seconds, to Orca's tenth with a trailing .0 dropped
     ("12.4 s", "35 s"), and from a minute up as `clock` says it (mqucifer/print-shop#298). A
     tenth tells where a lesson turns on a layer having 12 s to cool."""
@@ -745,8 +746,9 @@ def _slice(request: ReviewRequest, width: int, marks: Moved, fits: _Fits) -> lis
     shortest = reading.shortest()
     if shortest is not None:
         times = sorted(layer.time_s for layer in reading.layers)
-        lines += wrap("    layers  ", f"{len(reading.layers)}, {_layer(times[0])} to "
-                      f"{_layer(times[-1])} each, {_layer(times[len(times) // 2])} typical; the "
+        lines += wrap("    layers  ", f"{len(reading.layers)}, {layer_time(times[0])} to "
+                      f"{layer_time(times[-1])} each, {layer_time(times[len(times) // 2])} "
+                      "typical; the "
                       f"shortest is layer {shortest.n} at z {shortest.z:g} mm", width, " " * 12)
     if reading.seam.seams:
         seam = reading.seam
