@@ -242,18 +242,53 @@ class _Terminal:
         self.told = 0
         self.runs: Runs | None = None
         self.phone = False
+        #: Jobs loaded for here and not offered yet: each said ready to start with its offer.
+        self.ready_for: set[str] = set()
         self.phone_trouble: Callable[[], str] | None = None
 
     def drain(self) -> list[str]:
-        """What's happened since it was last said, said now: a Start held for a spool that isn't
-        loaded names the queue's own load (mqucifer/print-shop#305)."""
+        """What's happened since it was last said, said now, as of now (mqucifer/print-shop#305):
+        a line that asks for a spool to be loaded names the queue's own load on a line of its
+        own while it isn't loaded; once it is, an offer drops its "load it first", a refusal
+        the load has answered isn't said again, and a job waiting for it is said ready."""
         new = self.queue.said(self.told)
+        loaded = self._loaded_now() if any(_LOAD_IT.search(said) for said in new) else None
         for said in new:
-            load = _LOAD_IT.search(said) if said.startswith("Not started") else None
-            here = f" Here, type `load {load.group(1)}`." if load is not None else ""
-            self.write(f"  * {said}{here}")
+            load = _LOAD_IT.search(said)
+            spool = int(load.group(1)) if load is not None else None
+            if spool is not None and spool == loaded:
+                if said.startswith("Not started"):
+                    continue  # answered by the load since: not said again
+                said = said.replace(f": load it and record it (`stock.py load {spool}`) first",
+                                    "")
+            self.write(f"  * {said}")
+            if spool is not None and spool != loaded:
+                self.write(f"    Here, type `load {spool}`.")
+            if said.startswith("Offered to print"):
+                self._said_ready(said)
         self.told += len(new)
         return new
+
+    def _loaded_now(self) -> int | None:
+        """The spool loaded now, as the stock says, or None."""
+        path = self.queue.stock_path
+        if path is None:
+            return None
+        try:
+            with Inventory(path) as stock:
+                if not stock.printers():
+                    return None
+                now = stock.loaded(stock.printer(None).id)
+        except (InventoryError, sqlite3.Error):
+            return None
+        return now.id if now is not None else None
+
+    def _said_ready(self, offered: str) -> None:
+        """A job loaded for here and offered since: said ready to start, once."""
+        for job_id in list(self.ready_for):
+            if f"job {job_id[:8]}" in offered:
+                self.ready_for.discard(job_id)
+                self._ready_now(job_id, wait_s=0.0)
 
     def live(self, since: int | None = None) -> str:
         """One line: what needs the person, and the last thing that happened since `since`, for
@@ -603,11 +638,11 @@ class _Terminal:
         self.write(f"  Recorded: {loaded.named()} is loaded on {printer.id}{came}.")
         self._ready_now(job_id)
 
-    def _ready_now(self, job_id: str) -> None:
+    def _ready_now(self, job_id: str, wait_s: float = READY_WITHIN_S) -> None:
         """Once it's loaded, where the job sits at the gate, said once: the person needn't find
-        out by trying."""
-        end = time.monotonic() + READY_WITHIN_S
-        while time.monotonic() < end:
+        out by trying. Not offered yet, it's said when its offer is."""
+        end = time.monotonic() + wait_s
+        while True:
             line = next((li for li in self.queue.lines() if li.job.job_id == job_id), None)
             if line is None:
                 return
@@ -615,6 +650,10 @@ class _Terminal:
                 on_phone = ", or Start on your phone" if self.phone else ""
                 self.write(f"  Job {line.number} is ready to start: `start {line.number}`"
                            f"{on_phone}.")
+                self.ready_for.discard(job_id)
+                return
+            if time.monotonic() >= end:
+                self.ready_for.add(job_id)  # said with its offer, when that comes
                 return
             time.sleep(0.1)
 
@@ -628,15 +667,26 @@ class _Terminal:
         if path is None:
             self.write("  The stock isn't set up.")
             return
+        spool_id = int(args[0].lstrip("#"))
         try:
             with Inventory(path) as stock:
-                lines = load_said(stock, int(args[0].lstrip("#")), read=self.read,
-                                  write=self.write, forget=self.forget, asks=True)
+                printer = stock.printer(None)
+                before = stock.loaded(printer.id)
+                lines = load_said(stock, spool_id, read=self.read, write=self.write,
+                                  forget=self.forget, asks=True)
+                loaded = stock.spool(spool_id)
         except (InventoryError, sqlite3.Error) as exc:
             self.write(f"  Not loaded: {exc}.")
             return
-        for line in lines:
+        # Said as `spool`'s y says it; what else the stock says follows (mqucifer/print-shop#305).
+        came = (f"; #{before.id}, {before.variety}, {before.colour}, came off"
+                if before is not None and before.id != spool_id else "")
+        self.write(f"  Recorded: {loaded.named()} is loaded on {printer.id}{came}.")
+        for line in lines[1:]:
             self.write(f"  {line.strip()}")
+        for waiting in self.queue.lines():
+            if waiting.job.spool_id == spool_id:
+                self._ready_now(waiting.job.job_id, wait_s=0.0)
 
     def _add(self, args: list[str]) -> None:
         adding = parse_adding(args)

@@ -19,7 +19,7 @@ from print_shop.orchestrator.print_queue import Adding, PrintQueue
 from print_shop.orchestrator.spools import load_said
 from print_shop.queue_terminal import serve
 from tests.test_ledger import record
-from tests.test_queue import BLACK, GREY, WHITE, Shop, wait_until
+from tests.test_queue import BLACK, GREY, WHITE, Shop
 
 
 @pytest.fixture
@@ -89,6 +89,17 @@ def at_queue(queue: PrintQueue, daemon: Daemon, person: At, *, phone: bool = Fal
 # --------------------------------------------------------------------------
 
 
+def after(said: str, line: str) -> str:
+    """What the queue said after `line`."""
+    assert line in said, line
+    return said.split(line, 1)[1]
+
+
+RECORDED = ("Recorded: spool #2, Elegoo PLA, black is loaded on cc1; #1, Elegoo PLA, white, "
+            "came off.")
+READY = "Job 1 is ready to start: `start 1`, or Start on your phone."
+
+
 def test_a_move_then_y_records_it_loaded_and_the_job_starts(
     shop: Shop, running: tuple[Daemon, PrintQueue],
 ) -> None:
@@ -98,29 +109,37 @@ def test_a_move_then_y_records_it_loaded_and_the_job_starts(
                     phone=True)
     assert ("Is spool #2, Elegoo PLA, black, on the printer now? y records it loaded "
             "(#1, Elegoo PLA, white, comes off). Enter leaves the stock as it is.") in said
-    assert "Recorded: spool #2, Elegoo PLA, black is loaded on cc1; #1, Elegoo PLA, white, " \
-           "came off." in said
     assert loaded(shop) == BLACK
-    assert "Job 1 is ready to start: `start 1`, or Start on your phone." in said
-    wait_until(lambda: any(s.startswith("Started:") for s in queue.said()))
-    assert "Not started" not in said, "Start isn't refused for its spool"
+    since = after(said, RECORDED)
+    assert READY in since
+    # print-shop-ux's must 1: nothing after it says to do what was just done.
+    assert "load it and record it" not in since and "Here, type" not in since
+    assert "Started: bracket.stl" in since and "Not started" not in said, \
+        "Start isn't refused for its spool"
+    assert said.count("Start taken") == 1, "the move's second offer says nothing twice"
 
 
-def test_a_move_then_enter_leaves_the_stock_and_start_names_load(
+def test_a_move_then_enter_then_start_names_load_and_load_answers_it(
     shop: Shop, running: tuple[Daemon, PrintQueue],
 ) -> None:
     """Done when: Enter leaves the stock as it was, Start is refused as now, and the refusal
-    names the queue's own load."""
+    names the queue's own load; `load 2` then says what `spool`'s y says, the job's ready, and
+    the refusal it answered isn't said again. All through the queue's own `start`."""
     daemon, queue = running
-    job_id = ready_job(shop, queue)
-    said = at_queue(queue, daemon, At("spool 1 2", answers={"loaded> ": [""]}))
-    assert "Nothing recorded: the stock is as it was." in said and loaded(shop) == WHITE
-    wait_until(lambda: shop.offered() == job_id)
-    assert daemon.start(job_id, bed_clear=True) == ""
-    wait_until(lambda: any(s.startswith("Not started") for s in queue.said()))
-    told = at_queue(queue, daemon, At())
-    assert "`stock.py load 2`" in told and "Here, type `load 2`." in told
-    assert loaded(shop) == WHITE
+    ready_job(shop, queue)
+    said = at_queue(queue, daemon, At("spool 1 2", "start 1", "load 2", "start 1",
+                                      answers={"loaded> ": [""]}), phone=True)
+    assert "Nothing recorded: the stock is as it was." in said
+    refused = after(said, "Nothing recorded: the stock is as it was.").split(RECORDED)[0]
+    assert refused.count("* Not started: this job was prepared for spool #2") == 1
+    assert "`stock.py load 2`" in refused
+    held = refused.split("* Not started:", 1)[1].split("\n")
+    assert held[1] == "    Here, type `load 2`.", "straight after the refusal, unclipped"
+    assert loaded(shop) == BLACK
+    since = after(said, RECORDED)
+    assert since.lstrip().startswith(READY.strip())
+    assert "Not started" not in since, "the refusal the load answered isn't said again"
+    assert "Started: bracket.stl" in since
 
 
 # --------------------------------------------------------------------------
@@ -194,10 +213,9 @@ def test_load_at_the_queue_is_the_stocks_own(
 ) -> None:
     daemon, queue = running
     said = at_queue(queue, daemon, At("load 2"))
-    assert loaded(shop) == BLACK
-    with Inventory(shop.ledger_path) as stock:
-        line = stock.spool(BLACK).line()
-    assert line in said, "the same line stock.py load says"
+    assert loaded(shop) == BLACK, "the stock's own load, as stock.py's"
+    # print-shop-ux's must 3: said as `spool`'s y says it, not as a stock row.
+    assert RECORDED in said
 
 
 def test_load_after_a_swap_asks_the_stocks_question(
