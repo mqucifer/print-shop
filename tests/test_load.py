@@ -8,14 +8,24 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pytest
 
-from print_shop.bench import assembly, dovetail, host, through
-from print_shop.bench.load import MIDS, beyond, bolt_pulls, element_forces
+from print_shop.bench import assembly, dovetail, host, through, way_in
+from print_shop.bench.load import (
+    MIDS,
+    _gmsh_errors,
+    band_refused,
+    beyond,
+    bolt_pulls,
+    element_forces,
+    memory_met,
+    oom_kills,
+)
 from print_shop.bench.report import NoAnswer
 from print_shop.rounds import needs, reports, skills, toolsets
 
@@ -361,6 +371,181 @@ def test_a_peak_takes_from_the_ring_and_from_what_a_shank_leans_on_by_arithmetic
     assert through.lean_share({**hole, "peak": None}, Z) == 1.0
 
 
+# A drop-in channel (mqucifer/print-shop#302)
+
+CHANNEL = {"axis": "x", "open": "+z", "head_wall": "x=52", "nut_wall": "x=68"}
+
+
+def test_a_through_joint_declares_its_bolt_s_seat_as_a_drop_in_channel(tmp_path: Path) -> None:
+    """Its axis, the way it's open, and the planes of the walls its head and its nut bear on.
+    A joint with no `channel` has none, as before."""
+    joint = assembly.read(written(tmp_path, joints=[{**M5, "channel": CHANNEL}])).joints[0]
+    found = joint.channel
+    assert found is not None and joint.pocket is None
+    assert (found.axis, found.open, found.head_wall, found.nut_wall) == ("x", "+z", 52, 68)
+    assert found.axis_way() == pytest.approx([1, 0, 0])
+    assert found.open_way() == pytest.approx([0, 0, 1])
+    assert found.wall_said("head") == "the head's wall at x=52"
+    assert found.wall_said("nut") == "the nut's wall at x=68"
+    assert assembly.read(written(tmp_path, joints=[M5])).joints[0].channel is None
+
+
+@pytest.mark.parametrize(
+    ("changed", "said"),
+    [
+        ({"channel": {**CHANNEL, "axis": "w"}}, "its `axis` is one of x, y, z"),
+        ({"channel": {**CHANNEL, "open": "+x"}}, "its `open` is one of"),
+        ({"channel": {**CHANNEL, "open": "up"}}, "square to its axis, not 'up'"),
+        ({"channel": {**CHANNEL, "head_wall": "y=52"}}, "its `head_wall` is a plane square"),
+        ({"channel": {**CHANNEL, "nut_wall": "x=far"}}, "its `nut_wall` is a plane square"),
+        ({"channel": {**CHANNEL, "nut_wall": "x=52"}}, "are one plane, x=52"),
+        ({"channel": {**CHANNEL, "play": 0.2}}, "`channel` is"),
+        ({"channel": {"axis": "x", "open": "+z"}}, "`channel` is"),
+        ({"channel": "x"}, "`channel` is"),
+        ({"channel": CHANNEL, "pocket": 0.2}, "gives a `pocket` and a `channel`"),
+        ({"kind": "bolted", "insert": "m5-heat-set", "channel": CHANNEL},
+         "a bolt with a nut is a `through` joint"),
+    ],
+)  # fmt: skip
+def test_a_channel_that_isn_t_one_is_refused(
+    tmp_path: Path, changed: dict[str, Any], said: str
+) -> None:
+    with pytest.raises(NoAnswer, match=re.escape(said)):
+        assembly.read(written(tmp_path, joints=[{**M5, **changed}]))
+
+
+def test_a_channel_on_a_joint_with_no_bolt_is_refused(tmp_path: Path) -> None:
+    touching = {"between": ["a", "b"], "kind": "touching", "channel": CHANNEL}
+    with pytest.raises(NoAnswer, match="only a bolted or a through joint has a bolt"):
+        assembly.read(written(tmp_path, joints=[touching]))
+
+
+#: The rows' way up: a channel about the axis z through (20, 20), open toward +y.
+Y = np.array([0.0, 1, 0])
+
+
+def u_channel(turns: float = math.pi, low: float = 0.0, high: float = 8.0) -> dict:  # type: ignore[type-arg]
+    """A channel's round as a row, its middle away from +y: half a round where `turns` is π."""
+    return arc(-math.pi / 2, turns, low, high)
+
+
+def test_a_drop_in_channel_is_read_only_where_declared() -> None:
+    """Half a round open toward +y is what `bore` refuses as a slot's end, undeclared or not.
+    Declared along z and open toward +y it's a channel 5.5 mm across and open as wide. Declared
+    any other way, a round hole, a round less than half, and a round open in two places or not
+    the same way along its stretch are refused."""
+    half = [u_channel()]
+    assert "slot's end" in through.bore(half, [20, 20, 8])
+    found = through.channel(half, [20, 20, 8], Z, Y)
+    assert isinstance(found, dict), found
+    assert (found["radius"], found["low"], found["high"], found["peak"]) == (2.75, 0, 8, None)
+    gap = found["channel"]
+    assert gap["toward"] == pytest.approx(Y) and gap["half"] == pytest.approx(math.pi / 2)
+    assert gap["open_mm"] == pytest.approx(5.5)
+    assert through.channel_saved(gap) == {
+        "toward": [0, 1, 0], "round_deg": pytest.approx(180), "open_mm": pytest.approx(5.5)
+    }  # fmt: skip
+    assert "a drop-in channel, 5.500 mm across its round, open toward (0, 1, 0)" in (
+        through.channel_said(found)
+    )
+    # Two quarters are one half; read the other way along the axis, the same.
+    quarters = [arc(-math.pi / 2 + s * math.pi / 4, math.pi / 2, 0, 8) for s in (-1, 1)]
+    assert isinstance(through.channel(quarters, [20, 20, 8], Z, Y), dict)
+    over = [{**half[0], "axis": -Z, "low": -8, "high": 0}]
+    assert isinstance(through.channel(over, [20, 20, 8], -Z, Y), dict)
+    # More than half a round, its walls nearer than its radius: open as wide as they are.
+    deep = through.channel([u_channel(1.2 * math.pi)], [20, 20, 8], Z, Y)
+    assert isinstance(deep, dict)
+    assert deep["channel"]["open_mm"] == pytest.approx(5.5 * math.sin(0.4 * math.pi))
+
+    def refused(rows: list, axis: Any = Z, toward: Any = Y) -> str:  # type: ignore[type-arg]
+        why = through.channel(rows, [20, 20, 8], axis, toward)
+        assert isinstance(why, str), why
+        return why
+
+    assert "not toward its declared open side, (0, -1, 0)" in refused(half, toward=-Y)
+    assert "not toward its declared open side" in refused(half, toward=np.array([1.0, 0, 0]))
+    assert "not along the channel's axis" in refused(half, axis=np.array([1.0, 0, 0]))
+    assert "goes all the way round: a hole" in refused([cylinder(2.75, 0, 8)])
+    assert "less than half" in refused([u_channel(0.8 * math.pi)])
+    assert "no round face has its axis through that point" in through.channel(
+        half, [20, 21, 8], Z, Y
+    )
+    two = [arc(0, 0.8 * math.pi, 0, 8), arc(math.pi, 0.8 * math.pi, 0, 8)]
+    assert "open in more than one place" in refused(two)
+    wider = [u_channel(math.pi, 0, 4), u_channel(1.2 * math.pi, 4, 8)]
+    assert "the same way and as wide along the whole stretch" in refused(wider)
+    part_way = [cylinder(2.75, 0, 4), u_channel(math.pi, 4, 8)]
+    assert "closes along some of the stretch" in refused(part_way)
+
+
+def test_a_channel_takes_from_the_ring_and_from_what_a_shank_leans_on_by_arithmetic() -> None:
+    """The ring less the round and the walls straight up from where it leaves off, against a
+    count of points on a fine grid; and the shank's bearing: none toward the open side, half
+    square to it, all away from it. A round or peaked hole's seat is cut as it always was."""
+    step = 0.005
+    x, y = np.meshgrid(*[np.arange(-5, 5, step) + step / 2] * 2)
+    off = np.hypot(x, y)
+    for turns in (math.pi, 1.2 * math.pi):
+        hole = through.channel([u_channel(turns)], [20, 20, 8], Z, Y)
+        assert isinstance(hole, dict)
+        wide = hole["channel"]["open_mm"] / 2
+        in_channel = (off <= 2.75) | ((np.abs(x) <= wide) & (y >= 0))
+        for inner, outer in ((2.75, 5.0), (2.75, 3.45), (3.0, 3.45)):
+            ring = (off >= inner) & (off <= outer)
+            cut = float((ring & in_channel).sum()) * step * step
+            assert through.channel_cut(hole, inner, outer) == pytest.approx(cut, abs=0.01)
+            assert through.seat_cut(hole, inner, outer) == through.channel_cut(hole, inner, outer)
+    hole = through.channel([u_channel()], [20, 20, 8], Z, Y)
+    assert isinstance(hole, dict)
+    assert through.lean_share(hole, Y) == pytest.approx(0, abs=1e-12)
+    assert through.lean_share(hole, np.array([1.0, 0, 0])) == pytest.approx(0.5)
+    assert through.lean_share(hole, -Y) == 1.0
+    assert math.degrees(through.lean_off(hole, -Y)) == pytest.approx(180)
+    peaked_hole = through.bore(*_at(peaked(47)))
+    round_hole = through.bore([cylinder(2.75, 0, 8)], [20, 20, 8])
+    assert isinstance(peaked_hole, dict) and isinstance(round_hole, dict)
+    for one in (peaked_hole, round_hole):
+        assert "channel" not in one
+        assert through.seat_cut(one, 2.75, 5.0) == through.peak_cut(one, 2.75, 5.0)
+        assert through.channel_cut(one, 2.75, 5.0) == 0.0
+
+
+def test_a_channel_s_walls_are_where_it_ends(tmp_path: Path) -> None:
+    """The joint's two parts each with half the channel, from z 0 to 8 and 8 to 20: the head
+    bears on the wall at z=0 and the nut on the wall at z=20. Declared anywhere else, it says
+    where the channel ends. A joint with no channel reads its bores as before."""
+    walls = {"axis": "z", "open": "+y", "head_wall": "z=0", "nut_wall": "z=20"}
+    entry: dict[str, Any] = {**M5, "channel": walls}
+    joint = assembly.read(written(tmp_path, joints=[entry])).joints[0]
+    lower, upper = [u_channel(math.pi, 0, 8)], [u_channel(math.pi, 8, 20)]
+    holes = [through.seat_of(joint, rows, [20, 20, 8], []) for rows in (lower, upper)]
+    assert all(isinstance(h, dict) and h["channel"] for h in holes), holes
+    way = through.meet(*holes)  # type: ignore[arg-type]
+    assert isinstance(way, dict)
+    assert through.walls_met(joint, way) == []
+    moved = {**walls, "head_wall": "z=-1"}
+    off = assembly.read(written(tmp_path, joints=[{**entry, "channel": moved}])).joints[0]
+    wrong = through.walls_met(off, way)
+    assert wrong == [
+        "the head's wall at z=-1: the channel in a ends at z=0, not there. The wall the head "
+        "bears on is where the channel ends, square to it"
+    ]
+    # Named the other way along the axis, the same walls.
+    back = through.meet(holes[1], holes[0])  # type: ignore[arg-type]
+    flipped = {"axis": "z", "open": "+y", "head_wall": "z=20", "nut_wall": "z=0"}
+    turned = assembly.read(written(tmp_path, joints=[{**entry, "channel": flipped}])).joints[0]
+    assert isinstance(back, dict) and through.walls_met(turned, back) == []
+    plain = assembly.read(written(tmp_path, joints=[M5])).joints[0]
+    why = through.seat_of(plain, lower, [20, 20, 8], [])
+    assert isinstance(why, str) and "slot's end, not a hole" in why
+    assert "or in a drop-in channel its joint declares" in why
+    assert through.walls_met(plain, way) == []
+    wrongly = through.seat_of(joint, [cylinder(2.75, 0, 8)], [20, 20, 8], [])
+    assert isinstance(wrongly, str) and "goes all the way round: a hole" in wrongly
+    assert "declares its bolt in a drop-in channel along z, open toward +y" in wrongly
+
+
 def test_two_holes_are_one_way_through_where_they_meet_end_to_end() -> None:
     """The first part's hole from z 0 to 8 and the second's from 8 to 20: the bolt runs from
     its head's seat at 0 to its nut's at 20. Named the other way round, the axis turns over.
@@ -664,6 +849,139 @@ def test_a_dovetail_joint_names_the_way_its_tail_slides_in_and_its_latch(tmp_pat
     assert again.latch == latched.latch
 
 
+def test_a_latch_named_in_its_part_s_own_axes_turns_and_moves_with_the_part(
+    tmp_path: Path,
+) -> None:
+    """mqucifer/print-shop#295: a part made in its own frame and placed turned, as a table's
+    legs are at its corners, has its latch named in that frame, `"frame": "part"`, and the
+    latch is carried by the part's `turn` and `at`. Here the tab is on b, turned 90° about z
+    and moved to (60, 0, 0): its own (1, 0, 20) is the assembly's (60, 1, 20), and its own +x
+    is the assembly's +y. Unturned, or in the assembly's axes, the box is where `arm` says."""
+    own = {**LATCH, "on": "b", "frame": "part"}
+    latch = assembly.read(written(tmp_path, joints=[{**DOVETAIL, "latch": own}])).joints[0].latch
+    assert latch is not None and latch.own and latch.placed
+    assert list(latch.shift) == [60, 0, 0]
+    assert latch.unplaced([60, 1, 20]) == pytest.approx([1, 0, 20])
+    assert latch.way([0, 1, 0]) == pytest.approx([1, 0, 0])
+    assert latch.inside([60, 1, 20]) and not latch.inside([1, 0, 20])
+    # The box's own x from -3 to 3 runs along the assembly's y, and its y from -1 to 2 along
+    # the assembly's -x, from 61 to 58.
+    low, high = latch.bounds()
+    assert low == pytest.approx([58, -3, 10]) and high == pytest.approx([61, 3, 30])
+    assert "in b's own file's axes" in latch.where()
+    # In the assembly's axes, the same box is where it's given, and nothing moves it.
+    plain = assembly.read(written(tmp_path, joints=[{**DOVETAIL, "latch": LATCH}])).joints[0]
+    assert plain.latch is not None and not plain.latch.placed and not plain.latch.own
+    assert plain.latch.unplaced([1, 0, 20]).tolist() == [1, 0, 20]
+    assert plain.latch.bounds()[0].tolist() == [-3, -1, 10]
+    said = {**LATCH, "frame": "assembly"}
+    again = assembly.read(written(tmp_path, joints=[{**DOVETAIL, "latch": said}])).joints[0]
+    assert again.latch == plain.latch
+
+
+def test_a_latch_turned_any_way_is_one_box_with_its_corners_where_the_turn_puts_them(
+    tmp_path: Path,
+) -> None:
+    """At 45° about z, as a leg at a table's corner, the box's corners are its own turned:
+    the far corner of a box 2 x 2 x 1 from the origin, (2, 2, 1), is at (0, 2√2, 1)."""
+    data = json.loads(Path(written(tmp_path)).read_text())
+    data["parts"][1].update(turn=[["z", 45]], at=[0, 0, 0])
+    latch = {"on": "b", "arm": [[0, 0, 0], [2, 2, 1]], "root": "z=0", "frame": "part"}
+    data["joints"] = [{**DOVETAIL, "latch": latch}]
+    path = tmp_path / "turned.json"
+    path.write_text(json.dumps(data))
+    found = assembly.read(str(path)).joints[0].latch
+    assert found is not None
+    corners = found.corners()
+    assert any(np.allclose(c, [0, 2 * math.sqrt(2), 1]) for c in corners)
+    assert found.inside([0, math.sqrt(2), 0.5]) and not found.inside([1.5, 0, 0.5])
+
+
+def test_rays_inside_a_turned_latch_s_box_are_read_as_its_turned_outline(tmp_path: Path) -> None:
+    """The way-in's second method sees the latch's box along the slide (mqucifer/print-shop#295).
+    A box 2 x 2 turned 45° about z, seen along z, is a square on its corner: its middle,
+    (0, √2), is in it, and (1.2, 0.2), inside the box's own unturned square, isn't. A ray
+    `pad` off a side is in."""
+    data = json.loads(Path(written(tmp_path)).read_text())
+    data["parts"][1].update(turn=[["z", 45]], at=[0, 0, 0])
+    latch = {"on": "b", "arm": [[0, 0, 0], [2, 2, 1]], "root": "z=0", "frame": "part"}
+    data["joints"] = [{**DOVETAIL, "latch": latch}]
+    path = tmp_path / "turned.json"
+    path.write_text(json.dumps(data))
+    found = assembly.read(str(path)).joints[0].latch
+    assert found is not None
+    at = np.array([[0, math.sqrt(2)], [1.2, 0.2], [0.75 + 0.05, 0.75]])
+    assert way_in._seen_in(found, 2, [0, 1], at, 0.0).tolist() == [True, False, False]
+    assert way_in._seen_in(found, 2, [0, 1], at, 0.1).tolist() == [True, False, True]
+
+
+def cgroup(tmp_path: Path, kills: int | None, peak: int, most: int = 3 * 1024**3) -> Path:
+    """A made-up container cgroup: its limit, what it held at the most, and its count of what
+    the kernel stopped for memory, where it keeps one."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "memory.max").write_text(f"{most}\n")
+    (tmp_path / "memory.peak").write_text(f"{peak}\n")
+    if kills is not None:
+        (tmp_path / "memory.events").write_text(
+            f"low 0\nhigh 0\nmax 3\noom {kills}\noom_kill {kills}\noom_group_kill 0\n"
+        )
+    return tmp_path
+
+
+def test_a_solve_is_said_to_meet_the_memory_limit_only_where_something_was_stopped_for_it(
+    tmp_path: Path,
+) -> None:
+    """mqucifer/print-shop#295, the operator's review: what the container held at the most
+    counts the files it read since it started, so a solve that fails for anything else in a
+    container that's been full is no memory failure. Only a process the kernel stopped for
+    memory while the solve ran says so: its count, before and after."""
+    most = 3 * 1024**3
+    killed = cgroup(tmp_path / "killed", 1, most)
+    assert memory_met(0, killed) == most
+    # Full, but nothing stopped: another failure.
+    full = cgroup(tmp_path / "full", 0, most)
+    assert memory_met(0, full) is None
+    # Stopped before this solve began, by an earlier one: not this solve's.
+    assert memory_met(1, killed) is None
+    # No count kept, as on a kernel without one: never said to be memory.
+    none = cgroup(tmp_path / "none", None, most)
+    assert oom_kills(none) is None and memory_met(None, none) is None
+    assert oom_kills(killed) == 1
+
+
+def test_a_lift_isn_t_read_without_a_band() -> None:
+    """mqucifer/print-shop#295, the operator's review: lifted, each part hangs by its own
+    weight, and read without its band a framed part would hang by less, so every strain would
+    be read under less than it carries: lower, and no lower bound. So a lift is refused there,
+    saying why, and a weight case is read."""
+    said = band_refused("top", ["frame"], "it met the container's memory")
+    assert said is not None
+    assert said.startswith("--lift top: the whole assembly couldn't be read (it met the")
+    assert "without its band it would hang by less" in said
+    assert band_refused(None, ["frame"], "it met the container's memory") is None
+
+
+def test_gmsh_s_own_errors_are_said_without_its_summary() -> None:
+    """FreeCAD keeps no mesh where gmsh ends with an error, and says only that there's none:
+    `load` says gmsh's own words (mqucifer/print-shop#295), as a traced frame's run printed
+    them, less the lines that only count them."""
+    said = "\n".join([
+        "Info    : Meshing 3D...",
+        "Error   : Failed to reach critical value in pass 1 for measure(s): ScaledJac",
+        "Error   : Optimization failed (some measures below critical value)",
+        "Error   : ------------------------------",
+        "Error   : Mesh generation error summary",
+        "Error   :     2 warnings",
+        "Error   :     2 errors",
+        "Error   : Check the full log for details",
+        "Error   : Optimization failed (some measures below critical value)",
+    ])  # fmt: skip
+    assert _gmsh_errors(said) == [
+        "Failed to reach critical value in pass 1 for measure(s): ScaledJac",
+        "Optimization failed (some measures below critical value)",
+    ]
+
+
 @pytest.mark.parametrize(
     ("joint", "said"),
     [
@@ -687,6 +1005,7 @@ def test_a_dovetail_joint_names_the_way_its_tail_slides_in_and_its_latch(tmp_pat
         ({**DOVETAIL, "latch": {**LATCH, "arm": [[-3, -1, 10], [3, -1, 30]]}}, "no room inside"),
         ({**DOVETAIL, "latch": {**LATCH, "root": "z=20"}}, "isn't a side of its `arm`"),
         ({**DOVETAIL, "latch": {**LATCH, "root": "w=30"}}, "`root` axis is one of"),
+        ({**DOVETAIL, "latch": {**LATCH, "frame": "leg"}}, "latch's `frame` is one of"),
     ],
 )  # fmt: skip
 def test_a_dovetail_joint_that_gives_anything_else_is_refused(

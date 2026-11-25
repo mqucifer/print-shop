@@ -82,7 +82,7 @@ def _coordinates_joined(given: list[str]) -> list[str]:
 #: Options whose value may start with `-`: a point, a way or a line left of or under the origin.
 JOINED = (
     "--close", "--centre", "--hole", "--slide", "--along", "--toward", "--arm",
-    "--at", "--line", "--aim",
+    "--at", "--line", "--aim", "--up", "--keep", "--keep-face",
 )  # fmt: skip
 
 
@@ -129,6 +129,19 @@ def _named_box(text: str) -> tuple[str, tuple[list[float], list[float]]]:
     low = [min(a, b) for a, b in zip(values[:3], values[3:], strict=True)]
     high = [max(a, b) for a, b in zip(values[:3], values[3:], strict=True)]
     return name, (low, high)
+
+
+def _fraction(text: str) -> float:
+    """`0.4`: a share, more than 0 and less than 1."""
+    try:
+        value = float(text)
+    except ValueError:
+        value = math.nan
+    if not 0 < value < 1:
+        raise argparse.ArgumentTypeError(
+            f"a share of the part's volume, more than 0 and less than 1, such as 0.4: not {text!r}"
+        )
+    return value
 
 
 def _box(text: str) -> tuple[list[float], list[float]]:
@@ -780,6 +793,79 @@ def parser() -> Parser:
         help="the largest element, in mm: half the thinnest part unless given, and no finer "
         "than the container solves in a minute or two",
     )
+    optimise = sub.add_parser(
+        "optimise",
+        help="where a part's load goes: BESO's topology optimisation on CalculiX, down to a "
+        "target volume, as a reference for a design round and never a part. Runs in the second "
+        "image",
+    )
+    optimise.add_argument(
+        "assembly",
+        help="an assembly file of one part, as `load` reads it: its STEP file, where it sits, "
+        "its material, the way its layers are stacked, and where it's held",
+    )
+    optimise.add_argument("--weight", type=float, metavar="KG", help="the load, in kg")
+    optimise.add_argument(
+        "--at",
+        action="append",
+        type=_point,
+        metavar="X,Y,Z",
+        help="a place on the part's surface the weight sits on; more than once to share it",
+    )
+    optimise.add_argument(
+        "--toward",
+        type=_way,
+        default="-z",
+        metavar="DIR",
+        help="the way the weight pulls, one of +x -x +y -y +z -z (-z, down, unless given)",
+    )
+    optimise.add_argument(
+        "--over",
+        type=float,
+        default=10.0,
+        metavar="MM",
+        help="how far round each place the weight is spread over the surface, in mm (10 unless "
+        "given)",
+    )
+    optimise.add_argument(
+        "--volume",
+        type=_fraction,
+        required=True,
+        metavar="FRACTION",
+        help="the share of the part's volume to keep, more than 0 and less than 1, the regions "
+        "kept solid in it",
+    )
+    optimise.add_argument(
+        "--keep",
+        action="append",
+        type=_box,
+        default=[],
+        metavar="X0,Y0,Z0,X1,Y1,Z1",
+        help="a box whose elements are kept solid: a boss, a pocket. More than once for several",
+    )
+    optimise.add_argument(
+        "--keep-face",
+        action="append",
+        type=_point,
+        default=[],
+        metavar="X,Y,Z",
+        help="the part's faces through this point are kept solid, an element deep: a face that "
+        "shows, a seat. More than once for several",
+    )
+    optimise.add_argument(
+        "--up",
+        type=_way,
+        metavar="DIR",
+        help="the way up on the bed, along the part's layers: material is then kept only on "
+        "material below it, so nothing hangs over air",
+    )
+    optimise.add_argument(
+        "--mesh",
+        type=float,
+        metavar="MM",
+        help="the largest element, in mm: about 12,000 elements in the part unless given",
+    )
+    optimise.add_argument("--optimised-out", dest="out_optimised", default="optimised")
     bed = sub.add_parser(
         "fit-bed",
         help="each part against the bed: the side it's laid on, its footprint turned to fit, "
@@ -1502,6 +1588,10 @@ def _dispatch(args: Any, report: Report) -> None:
         from .load import run as run_load
 
         run_load(args, report)
+    elif args.command == "optimise":
+        from .optimise import run as run_optimise
+
+        run_optimise(args, report)
     elif args.command == "fit-bed":
         from .fit_bed import run as run_fit_bed
 

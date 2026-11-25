@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from print_shop.bench import host
+from print_shop.bench import host, optimise
 from print_shop.bench.report import EXIT, Report
 
 
@@ -254,14 +254,26 @@ def test_check_passes_with_the_second_image_still_to_build(
     assert "scripts/bench.py build cae" in capsys.readouterr().out
 
 
+#: The commit of fandaL/beso the second image holds (mqucifer/print-shop#286): its last, of
+#: 2025-04-03, when it was pinned.
+BESO_COMMIT = "5056d301c2675df9ac1af771af4f1cbea642e4ad"
+
+
 def test_the_second_image_s_packages_are_each_by_version_build_and_md5() -> None:
     """Both platforms' lists: nothing is solved at a build, and the three the issue names are at
     the versions it names."""
     folder = host.HERE / host.IMAGES["cae"][2]
     for arch, platform in (("arm64", "linux-aarch64"), ("amd64", "linux-64")):
         lines = (folder / f"lock-{arch}.txt").read_text().splitlines()
-        packages = [line.split() for line in lines if line and not line.startswith("#")]
+        rows = [line.split() for line in lines if line and not line.startswith("#")]
+        packages = [row for row in rows if row[0] != "github"]
         assert len(packages) > 250
+        # BESO (mqucifer/print-shop#286): its files at one commit, each by its SHA-256.
+        beso = [row for row in rows if row[0] == "github"]
+        assert sorted(row[3] for row in beso) == sorted([*optimise.BESO_FILES, "LICENSE"])
+        for _, repo, commit, _file, kind, digest in beso:
+            assert repo == "fandaL/beso" and commit == f"v{BESO_COMMIT}"
+            assert kind == "sha256" and len(digest) == 64 and int(digest, 16) >= 0
         for subdir, _name, version, _build, kind, md5 in packages:
             assert subdir in (platform, "noarch") and kind in ("conda", "tar.bz2")
             assert version.startswith("v") and len(md5) == 32 and int(md5, 16) >= 0
@@ -272,6 +284,19 @@ def test_the_second_image_s_packages_are_each_by_version_build_and_md5() -> None
     assert "@sha256:" in dockerfile.split("FROM ")[1].splitlines()[0], "the base by its digest"
     assert "lock-${TARGETARCH}.txt" in dockerfile and "@EXPLICIT" in dockerfile
     assert "micromamba install -y -n base -f /tmp/packages.txt" in dockerfile, "no solve"
+    assert "sha256sum -c" in dockerfile and "/opt/beso" in dockerfile, "BESO checked by its sum"
+    assert str(optimise.BESO) == "/opt/beso"
+
+
+def test_the_second_image_s_micromamba_is_past_libcurl_s_double_close() -> None:
+    """micromamba 2.0.5 and 2.0.6 carry libcurl 8.11.1, which closes an eventfd twice and so
+    can abort an install on glibc's netlink socket (mqucifer/print-shop#307): the base is 2.0.7,
+    the first with libcurl 8.12, or later."""
+    dockerfile = (host.HERE / host.IMAGES["cae"][2] / "Dockerfile").read_text()
+    base = dockerfile.split("\nFROM ")[1].split()[0]
+    name, _, rest = base.partition(":")
+    version = tuple(int(part) for part in rest.split("@")[0].split("."))
+    assert name == "mambaorg/micromamba" and version >= (2, 0, 7), base
 
 
 def test_a_rounds_run_without_the_second_image_is_told_and_goes_on(

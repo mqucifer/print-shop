@@ -37,7 +37,10 @@ way, and it's judged by the worst of: the bolt against its proof load; the press
 washer, or under the nut in its pocket, and where the shank leans on its hole's wall, against
 what the plastic takes pressed that way to its layers; and the plastic round each hole, solved
 again by itself under the bolt's pull and shear and read as strain, as any part is. The reply
-names which is nearest its limit. It's never `OK` on the bolt alone.
+names which is nearest its limit. It's never `OK` on the bolt alone. Where the joint declares its
+bolt in a drop-in channel (mqucifer/print-shop#302), each washer bears on its wall less the
+channel's cut, and the channel's open side carries nothing: a push toward it fails, and the
+reply says so either way.
 
 **A dovetail joint** (mqucifer/print-shop#170, `dovetail.py` and `load_dovetail.py`) is a tail
 slid into a socket: a leg split for the bed. Its flanks and its seat only push, so what the
@@ -62,6 +65,15 @@ outside the faces that meet, which tips it open; the friction it needs to stay p
 held to `--friction` where that's given.
 
 **How far it moves:** each loaded place, along the load, and the most anywhere.
+
+**A whole assembly** (mqucifer/print-shop#295). A latch can be named in its tab's part's own
+axes and turns and moves with the part, and a part turned off the assembly's axes is cut round
+its dovetail in its own. Where gmsh can't curve every element onto the parts' faces without
+turning one inside out, as on a traced glass frame, the mesh is made again with straight sides,
+and the reply says why. CalculiX runs on one thread, as gmsh does, and each mesh's and solve's
+files are deleted from the container's /tmp, which is memory, once read. Where the solve still
+meets the container's memory, the reply says so from the container's own count, and what of the
+mesh is finer than --mesh asks.
 
 **Second methods.** The whole solve again on a mesh half as coarse again: each figure that's
 judged, on both. The held faces' reaction, which CalculiX prints, against the weight put on. And
@@ -93,10 +105,10 @@ import numpy as np
 
 from . import dovetail, load_dovetail, load_through, way_in
 from .assembly import AXES, DIAMETER, Assembly, Held, Joint, PartAt, read
-from .cae import freecad
+from .cae import ccx_one_thread, freecad, tidy_mesh, tidy_solve
 from .limits import over, said
 from .report import NoAnswer, Report
-from .through import lean_off, lean_share, peak_said, peak_saved
+from .through import channel_said, channel_saved, lean_off, lean_share, peak_said, peak_saved
 
 #: Standard gravity, in m/s²: a kilogram's weight in newtons.
 G = 9.80665
@@ -241,8 +253,9 @@ def beyond(
     return (force, moment) if free_is_far else (-force, -moment)
 
 
-def _placed(assembly: Assembly) -> list[Any]:
-    """Each part's one solid, where the assembly puts it."""
+def _placed(assembly: Assembly, without_bands: bool = False) -> list[Any]:
+    """Each part's one solid, where the assembly puts it: with `without_bands`, less its glass
+    band where it names one (mqucifer/print-shop#295)."""
     import FreeCAD as App
     import Part
 
@@ -256,6 +269,15 @@ def _placed(assembly: Assembly) -> list[Any]:
                 "one solid, and each other piece is a part of its own"
             )
         solid = solids[0].copy()
+        if without_bands and part.band is not None:
+            band = [s for s in Part.read(str(folder / part.band)).Solids if s.Volume > 1e-6]
+            left = [s for s in solid.cut(Part.makeCompound(band)).Solids if s.Volume > 1e-6]
+            if len(left) != 1:
+                raise NoAnswer(
+                    f"the part {part.name} with its band, {part.band}, left out is "
+                    f"{len(left)} solids: a part read without its band is one solid still"
+                )
+            solid = left[0]
         for axis, degrees in part.turn:
             way = [0.0, 0.0, 0.0]
             way[AXES.index(axis)] = 1.0
@@ -291,8 +313,12 @@ def _flat(shape: Any, axis: int, at: float) -> bool:
 class _Model:
     """The joined parts in one FreeCAD document, meshed and solved once."""
 
-    def __init__(self, assembly: Assembly, placed: list[Any], args: Any, size: float) -> None:
+    def __init__(
+        self, assembly: Assembly, placed: list[Any], args: Any, size: float, straight: bool = False
+    ) -> None:
         self.assembly, self.placed, self.args, self.size = assembly, placed, args, size
+        #: Whether its second-order elements are straight-sided (mqucifer/print-shop#295).
+        self.straight = straight
         self.toward = np.zeros(3)
         self.toward[AXES.index(args.toward[1])] = 1.0 if args.toward[0] == "+" else -1.0
 
@@ -453,18 +479,37 @@ class _Model:
         mesh.Shape = self.feature
         mesh.CharacteristicLengthMax = self.size
         mesh.ElementOrder = "2nd"
-        # A second-order element's curved side, on a bolt's hole far smaller than the mesh,
-        # can turn it inside out, and CalculiX then solves nothing: gmsh straightens those
-        # (mqucifer/print-shop#168). A part with flat sides only is meshed as it was.
-        mesh.HighOrderOptimize = "Optimization"
+        if self.straight:
+            # Each element's mid-side nodes halfway along its straight sides, so none is
+            # turned inside out: a curved face is followed by its elements' chords
+            # (mqucifer/print-shop#295).
+            mesh.SecondOrderLinear = True
+            mesh.HighOrderOptimize = "None"
+        else:
+            # A second-order element's curved side, on a bolt's hole far smaller than the
+            # mesh, can turn it inside out, and CalculiX then solves nothing: gmsh straightens
+            # those (mqucifer/print-shop#168). A part with flat sides only is meshed as it was.
+            mesh.HighOrderOptimize = "Optimization"
         analysis.addObject(mesh)
         doc.recompute()
         began = time.time()
-        wrong = GmshTools(mesh).create_mesh()
+        tools = GmshTools(mesh)
+        tools.create_mesh()
+        tidy_mesh(tools)
         self.mesh_s = round(time.time() - began, 2)
         self.fem = fem = mesh.FemMesh
-        if wrong or not fem.VolumeCount:
-            raise NoAnswer(f"gmsh made no mesh of the joined parts: {str(wrong)[:300]}")
+        if not fem.VolumeCount:
+            # FreeCAD keeps no mesh where gmsh ends with an error, and says nothing of it: its
+            # own words are in what it printed.
+            said = bytes(tools.process.readAllStandardOutput()).decode(errors="replace")
+            said += bytes(tools.process.readAllStandardError()).decode(errors="replace")
+            words = "; ".join(_gmsh_errors(said)) or "it gave no reason"
+            if not self.straight:
+                raise _Curved(f"gmsh made no curved mesh of the joined parts: {words[:300]}")
+            raise _Unread(
+                "gmsh made no mesh of the joined parts, with its elements' sides curved onto "
+                f"the parts' faces or straight: {words[:300]}"
+            )
         self.nodes = {n: np.array([p.x, p.y, p.z]) for n, p in fem.Nodes.items()}
         fea = ccxtools.FemToolsCcx(analysis, solver)
         fea.update_objects()
@@ -476,17 +521,28 @@ class _Model:
         began = time.time()
         fea.write_inp_file()
         self._add_to(fea.inp_file_name)
-        fea.ccx_run()
+        kills = oom_kills()
+        ccx_one_thread(fea)
         fea.load_results()
         self.solve_s = round(time.time() - began, 2)
         results = [o for o in analysis.Group if o.isDerivedFrom("Fem::FemResultObject")]
         if "nonpositive jacobian" in str(getattr(fea, "ccx_stdout", "")):
+            tidy_solve(fea)
+            if not self.straight:
+                raise _Curved(
+                    "CalculiX found an element of the curved mesh, at most "
+                    f"{self.size:g} mm, turned inside out"
+                )
             raise NoAnswer(
                 f"CalculiX solved nothing: an element of the mesh, at most {self.size:g} mm, is "
                 "turned inside out, as one with a curved side on a small hole or a tight round "
                 "can be. Give a finer --mesh"
             )
         if not results or not results[0].NodeStrainXX:
+            tidy_solve(fea)
+            full = memory_met(kills)
+            if full is not None:
+                raise self._too_big(full)
             raise NoAnswer(
                 f"CalculiX gave no result for the {fem.VolumeCount} elements, at a mesh of "
                 f"{self.size:g} mm: it may have run out of the container's memory. Give a "
@@ -504,7 +560,44 @@ class _Model:
         self.moved = np.array([[v.x, v.y, v.z] for v in result.DisplacementVectors])
         self.points = np.array([self.nodes[n] for n in result.NodeNumbers])
         self.reaction, self.held_force = _reaction(os.path.splitext(fea.inp_file_name)[0] + ".dat")
+        tidy_solve(fea)
         self._balance()
+
+    def _too_big(self, limit: int) -> _Unread:
+        """Why the solve met the container's memory (mqucifer/print-shop#295), led by what to
+        do: the mesh's size, against what its size alone would give, the rest being finer round
+        the parts' small features, which gmsh sizes by their own curvature and not by --mesh."""
+        fem = self.fem
+        # About 8.5 tetrahedra fill a cube of their own edge, as `_mesh_size` takes it.
+        alone = 8.5 * float(self.shape.Volume) / self.size**3
+        finer = fem.VolumeCount - alone
+        evidence = (
+            f"CalculiX gave no result for the {fem.VolumeCount:,} elements ({fem.NodeCount:,} "
+            f"nodes) at a mesh of at most {self.size:g} mm: it met the container's memory, "
+            f"{limit / 2**30:g} GiB, and the kernel stopped it there, as the container's own "
+            "count of what it stopped for memory says. "
+            f"The mesh's size alone would give about {alone:,.0f} elements over the parts' "
+            f"{self.shape.Volume / 1000:,.0f} cm³"
+            + (
+                f", and the other {finer:,.0f}, {100 * finer / fem.VolumeCount:.0f}%, are "
+                "finer, round the parts' small features, such as bolts' bores and rounds, "
+                "which gmsh sizes by their own curvature and not by --mesh: a coarser --mesh "
+                "leaves most of those as they are"
+                if finer > alone
+                else ""
+            )
+        )
+        to_do = (
+            "name each glass frame's `band` in the assembly file, and it's read as a lower "
+            "bound with its band left out, or read fewer of the parts at once"
+            if finer > alone
+            else "give a coarser --mesh, or read fewer of the parts at once"
+        )
+        return _Unread(
+            f"nothing of the assembly is read, as it's past what the container's memory solves: "
+            f"{to_do}. {evidence}. Every part, joint and bolt of it is left unread",
+            evidence,
+        )
 
     def _balance(self) -> None:
         """The force each part's elements put on each node, and what's put on each part's
@@ -889,6 +982,37 @@ def _reaction(path: str) -> tuple[np.ndarray, dict[int, np.ndarray]]:
     return np.array([float(v) for v in total.groups()]), nodes
 
 
+#: The container's own cgroup, where the kernel counts what it stopped for memory.
+CGROUP = Path("/sys/fs/cgroup")
+
+
+def oom_kills(cgroup: Path = CGROUP) -> int | None:
+    """How many processes the kernel has stopped in the container for memory: `oom_kill` in
+    its cgroup's `memory.events`. None where the kernel keeps no count."""
+    try:
+        text = (cgroup / "memory.events").read_text()
+    except OSError:
+        return None
+    found = re.search(r"^oom_kill (\d+)$", text, re.M)
+    return int(found.group(1)) if found else None
+
+
+def memory_met(before: int | None, cgroup: Path = CGROUP) -> int | None:
+    """The container's memory limit, in bytes, where the kernel stopped a process there for
+    memory since `before`, its `oom_kill` count then (mqucifer/print-shop#295): so a solve is
+    said to have met the limit only where something was stopped for it while it ran, and not
+    for what the container held at the most, which counts files read since it started. None
+    where nothing was, or the kernel keeps no count or limit."""
+    after = oom_kills(cgroup)
+    if before is None or after is None or after <= before:
+        return None
+    try:
+        most = (cgroup / "memory.max").read_text().strip()
+    except OSError:
+        return None
+    return int(most) if most.isdigit() else None
+
+
 def _mesh_size(placed: list[Any], given: float | None) -> float:
     if given is not None:
         return float(given)
@@ -914,16 +1038,58 @@ def _quiet() -> Iterator[None]:
         os.close(said_before)
 
 
+#: gmsh's lines that only sum up its errors.
+_SUMMED = re.compile(
+    r"^(-+|Mesh generation error summary|\d+ (warning|error)s?|Check the full log.*)$"
+)
+
+
+def _gmsh_errors(said: str) -> list[str]:
+    """gmsh's own error lines in what it printed, each once, less its summary of them."""
+    found = []
+    for line in said.splitlines():
+        if line.startswith("Error"):
+            text = line.split(":", 1)[-1].strip()
+            if text and not _SUMMED.match(text) and text not in found:
+                found.append(text)
+    return found
+
+
+class _Unread(NoAnswer):
+    """The whole assembly can't be read: it meets the container's memory, or no mesh of it
+    solves. A part that names its glass band is read again without it (mqucifer/print-shop#295).
+    `evidence` is what it met, without what to do."""
+
+    def __init__(self, said: str, evidence: str | None = None) -> None:
+        super().__init__(said)
+        self.evidence = said if evidence is None else evidence
+
+
+class _Curved(NoAnswer):
+    """The mesh with its elements' sides curved onto the parts' faces has an element turned
+    inside out, or none at all: it's meshed again with them straight."""
+
+
 def _solved(assembly: Assembly, placed: list[Any], args: Any, size: float) -> dict[str, Any]:
-    """One solve at one mesh, and everything read from it."""
+    """One solve at one mesh, and everything read from it. Where gmsh can't curve every
+    element's sides onto the parts' faces without turning one inside out, as on a traced
+    glass frame's many small curves and sharp corners (mqucifer/print-shop#295), it's meshed
+    again with them straight, and `straight` says why: every mesh that solves curved is as it
+    was."""
     import FreeCAD as App
 
     # One thread, so the same parts are the same mesh, and the same figures, every time.
     App.ParamGet("User parameter:BaseApp/Preferences/Mod/Fem/Gmsh").SetInt("NumOfThreads", 1)
-    doc = App.newDocument("Load")
-    model = _Model(assembly, placed, args, size)
-    with _quiet():
-        return _read_solved(assembly, model, doc, size)
+    try:
+        doc = App.newDocument("Load")
+        with _quiet():
+            return _read_solved(assembly, _Model(assembly, placed, args, size), doc, size)
+    except _Curved as curved:
+        doc = App.newDocument("Load")
+        with _quiet():
+            found = _read_solved(assembly, _Model(assembly, placed, args, size, True), doc, size)
+        found["straight"] = str(curved)
+        return found
 
 
 def _read_solved(assembly: Assembly, model: _Model, doc: Any, size: float) -> dict[str, Any]:
@@ -951,9 +1117,21 @@ def _read_solved(assembly: Assembly, model: _Model, doc: Any, size: float) -> di
             "elements": model.fem.VolumeCount,
             "mesh_s": model.mesh_s,
             "solve_s": model.solve_s,
+            "straight": None,
         }
     finally:
         App.closeDocument(doc.Name)
+
+
+def _straight_said(solved: dict[str, Any]) -> str:
+    """Where a mesh's elements are straight-sided, why (mqucifer/print-shop#295)."""
+    if not solved.get("straight"):
+        return ""
+    return (
+        f", its elements second-order with straight sides, mid-side nodes halfway along them, "
+        "so each curved face is read as their chords: "
+        f"{solved['straight']}"
+    )
 
 
 def _bolts(joint: Joint, read: dict[str, Any], force: np.ndarray, moment: np.ndarray) -> list[Any]:
@@ -966,6 +1144,60 @@ def _bolts(joint: Joint, read: dict[str, Any], force: np.ndarray, moment: np.nda
 
 
 def run(args: Any, report: Report) -> None:
+    """The assembly read whole; or, where it can't be, for memory or a mesh, and parts of it
+    name their glass band, read again with each band left out, as a lower bound
+    (mqucifer/print-shop#295). The reply leads with that, names the parts and says why."""
+    try:
+        _run(args, report)
+        return
+    except _Unread as whole:
+        banded = [p.name for p in read(args.assembly).parts if p.band is not None]
+        if not banded:
+            raise
+        why = whole.evidence
+    refused = band_refused(args.lift, banded, why)
+    if refused:
+        raise NoAnswer(refused)
+    report.again()
+    _run(args, report, without_bands=True)
+    names = ", ".join(banded)
+    report.facts.insert(
+        0,
+        f"read as a lower bound: {names} read with its glass band left out, the leads and lips "
+        "its `band` names, as the whole couldn't be read: "
+        f"{why}. The rest of each is read with no stiffness for its band, as it would be with "
+        "the band gone, never with a stiffness made up for it, and the band itself is unread. "
+        f"{BOUND}",
+    )
+    report.numbers["lower_bound"] = {"parts": banded, "why": why}
+    report.why = f"read as a lower bound, {names} with its glass band left out: {report.why}"
+
+
+#: Which figures read without a band are a bound, and which aren't (mqucifer/print-shop#295).
+BOUND = (
+    "Of what's read, how far the loaded places move along the load, taken together, is a "
+    "bound: with less in it the assembly gives more under the same weight, never less. Each "
+    "part's strain, and each joint's and bolt's share of the load, can be more or less than "
+    "with the band in, and isn't one"
+)
+
+
+def band_refused(lift: str | None, banded: list[str], why: str) -> str | None:
+    """Why the assembly isn't read without its bands, or None where it is: lifted, each part
+    hangs by its own weight, and without its band a part would hang by less, so every strain
+    would be read under less than it carries (mqucifer/print-shop#295)."""
+    if lift is None:
+        return None
+    return (
+        f"--lift {lift}: the whole assembly couldn't be read ({why}), and it isn't read with "
+        f"the glass band of {', '.join(banded)} left out, as lifted each part hangs by its own "
+        "weight, and without its band it would hang by less: every strain would be read under "
+        "less than it carries. Read a weight case, which is read without the band as a lower "
+        "bound"
+    )
+
+
+def _run(args: Any, report: Report, without_bands: bool = False) -> None:
     freecad("load")
     args.lift = getattr(args, "lift", None)
     if args.lift is not None and (args.weight is not None or args.at):
@@ -991,7 +1223,7 @@ def run(args: Any, report: Report) -> None:
     stiff = {(p.material.modulus_mpa, p.material.poisson) for p in assembly.parts}
     if len(stiff) > 1:
         raise NoAnswer("parts of different stiffness aren't solved together yet: one material")
-    placed = _placed(assembly)
+    placed = _placed(assembly, without_bands)
     # Each through-bolt's way through both parts, before anything is solved.
     ways = load_through.ways(assembly, placed)
     # And each dovetail's latch as what it catches on.
@@ -1058,6 +1290,7 @@ def run(args: Any, report: Report) -> None:
     meshed = (
         f"a mesh of at most {size:g} mm ({fine['nodes']} nodes, {fine['elements']} elements, "
         f"meshed in {fine['mesh_s']} s and solved in {fine['solve_s']} s)"
+        + _straight_said(fine)
     )
     start = (
         f"the assembly: {len(assembly.parts)} part(s) and {len(assembly.joints)} joint(s) from "
@@ -1138,7 +1371,8 @@ def run(args: Any, report: Report) -> None:
         for f, o in zip(fine["loads"], coarse["loads"], strict=True)
     )
     report.second(
-        f"the same solve on a mesh of at most {coarse['mesh_mm']:g} mm ({coarse['nodes']} nodes): "
+        f"the same solve on a mesh of at most {coarse['mesh_mm']:g} mm ({coarse['nodes']} nodes"
+        f"{_straight_said(coarse)}): "
         f"the loaded places move {moves}"
     )
     report.second(
@@ -1491,6 +1725,7 @@ def _through(
                 f"and {said(pull, limit, 1)} N {how}, either side of its {limit:.0f} N"
             )
     press_source = ""
+    lifted: list[str] = []
     for index, (bolt, way) in enumerate(zip(bolts, ways, strict=True)):
         ends = []
         for k, (side, part, solid) in enumerate(zip(way["sides"], parts, solids, strict=True)):
@@ -1517,13 +1752,17 @@ def _through(
             peaked = hole["peak"] is not None
             if peaked:
                 end["peak"] = peak_saved(hole["peak"])
+            gap = hole.get("channel")
+            if gap is not None:
+                end["channel"] = channel_saved(gap)
             shares.append(
                 (pressure / most, f"the pressure under {side['under']} on {part.name}, at "
                  f"{pressure:.2f} MPa of {most:g} MPa")
             )  # fmt: skip
             report.line(
                 f"  {side['under']} bears on {side['bears_mm2']:.2f} mm² of {part.name} round a "
-                f"hole {side['hole_mm']:.2f} mm across and {side['hole_length_mm']:.2f} mm long: "
+                f"{'channel' if gap is not None else 'hole'} {side['hole_mm']:.2f} mm across and "
+                f"{side['hole_length_mm']:.2f} mm long: "
                 f"{pressure:.3f} MPa under the bolt's {bolt['pull_n']:.1f} N, pressed {pressed}, "
                 f"against {most:g} MPa, as joints.{name}.bolts.{index}.ends.{k}.pressure_mpa"
             )
@@ -1544,8 +1783,34 @@ def _through(
                         f"part's faces, more than the {side['seat_mm2']:.3f} mm² its ring has "
                         "less the peak's cut"
                     )
+            if gap is not None:
+                assert joint.channel is not None
+                report.line(
+                    f"  the bolt lies in {part.name} in {channel_said(hole)}, as "
+                    f"joints.{name}.bolts.{index}.ends.{k}.channel, and {side['under']} bears "
+                    f"on {joint.channel.wall_said('nut' if k else 'head')}: its seat is the "
+                    f"ring less the channel's cut, {side['seat_mm2']:.2f} of "
+                    f"{side['ring_mm2']:.2f} mm²"
+                )
+                report.second(
+                    f"the seat at {where}, by arithmetic, the ring less the channel's cut: "
+                    f"{side['seat_mm2']:.3f} mm²; by the part's own faces, "
+                    f"{side['bears_mm2']:.3f}"
+                )
+                if side["bears_mm2"] * load_through.SEATED > side["seat_mm2"]:
+                    apart.append(
+                        f"{where}: {side['under']} bears on {side['bears_mm2']:.3f} mm² by the "
+                        f"part's faces, more than the {side['seat_mm2']:.3f} mm² its ring has "
+                        "less the channel's cut"
+                    )
             if not side["seated"]:
                 less = f", and {side['seat_mm2']:.1f} mm² less the peak's cut" if peaked else ""
+                if gap is not None:
+                    assert joint.channel is not None
+                    less = (
+                        f", and {side['seat_mm2']:.1f} mm² less the channel's cut, on "
+                        f"{joint.channel.wall_said('nut' if k else 'head')}"
+                    )
                 fails.append(
                     f"{where}: {side['under']} sits on {side['bears_mm2']:.1f} mm² of the part, "
                     f"of its ring's {side['ring_mm2']:.1f} mm²{less}: it overhangs an edge or a "
@@ -1567,6 +1832,29 @@ def _through(
                     )
             # Where the shank leans on the hole's wall.
             push = across if k == 0 else -across
+            if gap is not None:
+                # A channel's open side carries nothing (mqucifer/print-shop#302): what pushes
+                # the shank toward it lifts the part off the bolt, and only the rest bears.
+                lifts = max(float(push @ gap["toward"]), 0.0)
+                end["toward_open_n"] = lifts
+                report.line(
+                    f"  the channel's open side in {part.name} carries nothing: the shank is "
+                    + (
+                        f"pushed toward it by {lifts:.1f} N, as "
+                        f"joints.{name}.bolts.{index}.ends.{k}.toward_open_n"
+                        if lifts > NOTHING * force
+                        else "not pushed toward it"
+                    )
+                )
+                if lifts > NOTHING * force:
+                    lifted.append(part.name)
+                    fails.append(
+                        f"{where}: the shank is pushed toward the channel's open side by "
+                        f"{lifts:.1f} N, and nothing there holds it: the part comes off the "
+                        "bolt that way. Turn the channel's open side away from the push, or hold "
+                        "the parts that way by something else"
+                    )
+                push = push - lifts * np.asarray(gap["toward"], dtype=float)
             leans = float(np.linalg.norm(push))
             if leans > NOTHING * force:
                 wall_most, wall_pressed = part.material.press(push / leans, layers)
@@ -1587,10 +1875,12 @@ def _through(
                     f"  the shank leans on {part.name}'s hole with {leans:.1f} N over its "
                     f"{shank:g} mm by {side['hole_length_mm']:.2f} mm"
                     + (
-                        f", of which the peak leaves {100 * share_there:.1f}% for a lean "
-                        f"{math.degrees(lean_off(hole, push)):.0f}° from its point, "
+                        f", of which the {'peak' if peaked else 'channel'} leaves "
+                        f"{100 * share_there:.1f}% for a lean "
+                        f"{math.degrees(lean_off(hole, push)):.0f}° from its "
+                        f"{'point' if peaked else 'open side'}, "
                         f"{on_wall:.2f} mm² as joints.{name}.bolts.{index}.ends.{k}.wall_bears_mm2"
-                        if peaked
+                        if peaked or gap is not None
                         else ""
                     )
                     + f": {wall:.3f} MPa, pressed {wall_pressed}, against {wall_most:g} MPa"
@@ -1633,7 +1923,11 @@ def _through(
                     report.line(
                         f"  the solve round it puts the shear on {fine['sheared_mm2']:.2f} mm² "
                         f"of {part.name}'s round wall, the half leant on"
-                        + (", less the peak," if share_there < 1 else "")
+                        + (
+                            (", less the peak," if peaked else ", the channel's round,")
+                            if share_there < 1
+                            else ""
+                        )
                         + " of the "
                         f"{side['hole_length_mm']:.2f} mm from where the parts meet to the "
                         f"seat, and none past them, as "
@@ -1689,6 +1983,13 @@ def _through(
         f"  of the bolt, the washers, the nut and the plastic, the nearest its limit is "
         f"{nearest}: {100 * share:.1f}% of it, as joints.{name}.nearest_share"
     )
+    if lifted:
+        # Nothing holds a channel's open side, so that gives first, whatever the rest is at.
+        one["gives_first"] = f"the shank pushed toward the channel's open side in {lifted[0]}"
+        report.line(
+            f"  what gives first is the shank pushed toward the channel's open side in "
+            f"{' and '.join(lifted)}, which holds nothing, as joints.{name}.gives_first"
+        )
     if press_source:
         report.line(f"  what the plastic takes pressed is from {press_source}")
     report.note(
@@ -1754,8 +2055,8 @@ def _dovetail(
         centres, normals, areas, of_face = pieces
         keep = np.ones(len(areas), dtype=bool)
         if joint.latch is not None:
-            keep = np.array([not load_dovetail._in_box(c, joint.latch.arm) for c in centres],
-                            dtype=bool)  # fmt: skip
+            latch = joint.latch
+            keep = np.array([not latch.inside(c) for c in centres], dtype=bool)
         touching = int(of_face.max()) + 1 if len(of_face) else 0
         every = [centres[keep]], [normals[keep]], [areas[keep]], [of_face[keep]]
         gaps = [np.zeros(int(keep.sum()))]

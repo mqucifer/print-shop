@@ -20,6 +20,11 @@ Start's routes:
 - `GET /pair`, `POST /pair`: a phone types the code `phone.py pair` showed at the Mac, from the
   home Wi-Fi, and is signed in by a cookie (`phones.py`).
 
+Over HTTPS (mqucifer/print-shop#312), with `PHONE_NAME`, `PHONE_TLS_CERT` and `PHONE_TLS_KEY` set,
+every route is the same, served only over TLS with a certificate that names the page alone
+(`tls.py`), and the sign-in's cookie is `Secure` as well. A plain-HTTP request to the port is
+closed with no answer.
+
 Anything else is a 404, and a method a path doesn't take a 405. No page shows a setting, a
 token or an address but its own. Start opens in the phone's own browser: the sign-in's cookie is
 `SameSite=Strict`, and every page refuses to be framed, so it's never inside Home Assistant.
@@ -30,6 +35,9 @@ from __future__ import annotations
 import errno
 import logging
 import re
+import socket
+import sqlite3
+import ssl
 import unicodedata
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -86,11 +94,12 @@ from print_shop.phone.screens import (
 )
 from print_shop.phone.shop import AlsoDiffers, LoadAsk, Shop
 from print_shop.phone.slice import slice_page
+from print_shop.phone.tls import Certificate, CertificateRefused, ended, serving
 from print_shop.setup.intake import NOTES_PROMPT, first_number
 from print_shop.setup.review import filament_name, finding
 from print_shop.setup.suggest import agreeing, by_number
 
-__all__ = ["COOKIE", "PhoneOff", "Starts", "attach", "handler_for", "make_server"]
+__all__ = ["COOKIE", "PageServer", "PhoneOff", "Starts", "attach", "handler_for", "make_server"]
 
 logger = logging.getLogger(__name__)
 
@@ -225,25 +234,66 @@ class PhoneOff(RuntimeError):
     """The page couldn't listen: said, and the run goes on without the phone's Start."""
 
 
+class PageServer(ThreadingHTTPServer):
+    """The page's server: over HTTPS where it has a certificate (mqucifer/print-shop#312)."""
+
+    #: The page's certificate, read again as it's renewed; None over plain HTTP.
+    certificate: Certificate | None = None
+    #: What the run says as the page starts: pair again after the move to HTTPS, and a
+    #: certificate that runs out soon. Said once, by whoever started it.
+    said: tuple[str, ...] = ()
+
+    def get_request(self) -> tuple[socket.socket, Any]:
+        sock, address = super().get_request()
+        if self.certificate is None:
+            return sock, address
+        # An OSError here (nothing good to serve) closes it, and the server goes on: the
+        # standard library's loop ends on anything else, so nothing else leaves here.
+        try:
+            return serving(self.certificate, sock), address
+        except OSError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            sock.close()
+            raise OSError(f"the phone's page couldn't serve a connection ({exc!r})") from None
+
+    def shutdown_request(self, request: Any) -> None:
+        if isinstance(request, ssl.SSLSocket):
+            ended(request)
+        super().shutdown_request(request)
+
+    def trouble(self) -> str:
+        """Why the page answers nothing now, while it runs, or "": for the queue's live line."""
+        return self.certificate.trouble() if self.certificate is not None else ""
+
+
 def make_server(
     *, home: Home, phones: Phones, starts: Starts | None, confirms: Confirms | None = None,
     listen_on: str | None = None, clock: Callable[[], datetime] | None = None,
     shop: Shop | None = None,
-) -> ThreadingHTTPServer:
-    """The page's server on `home.address` at `home.port`. Not started.
+) -> PageServer:
+    """The page's server on `home.address` at `home.port`, over HTTPS where `home` has a
+    certificate. Not started.
 
     `starts` None serves pairing alone (`phone.py pair`, with no job running). `listen_on` is for
     tests, to listen on loopback: a request from there is refused as coming through the Mac.
 
     Raises:
-        PhoneOff: If it can't listen there, saying why.
+        PhoneOff: If it can't listen there, or its certificate can't be served, saying why.
     """
 
     handler = handler_for(home=home, phones=phones, starts=starts, confirms=confirms,
                           clock=clock, shop=shop)
+    certificate: Certificate | None = None
+    if home.tls is not None and home.name is not None:
+        certificate = Certificate(home.tls, home.name, clock=clock)
+        try:
+            certificate.load()
+        except CertificateRefused as exc:
+            raise PhoneOff(f"the phone's page is off: {exc}") from None
     address = listen_on or str(home.address)
     try:
-        return ThreadingHTTPServer((address, home.port), handler)
+        server = PageServer((address, home.port), handler)
     except OSError as exc:
         if exc.errno == errno.EADDRNOTAVAIL:
             raise PhoneOff(
@@ -255,6 +305,30 @@ def make_server(
                 f"the phone's Start is off: port {home.port} is in use on {home.address}. "
                 f"Set another with {PORT_KEY}") from exc
         raise PhoneOff(f"the phone's Start is off: it can't listen on {home.host} ({exc})") from exc
+    server.certificate = certificate
+    try:
+        server.said = _said(home, phones, certificate)
+    except sqlite3.Error as exc:
+        server.server_close()
+        raise PhoneOff(f"the phone's Start is off: the paired phones couldn't be read ({exc})"
+                       ) from exc
+    return server
+
+
+def _said(home: Home, phones: Phones, certificate: Certificate | None) -> tuple[str, ...]:
+    """What the run says as the page starts (print-shop-ux, on mqucifer/print-shop#312)."""
+    before, out = phones.served_at(home.origin)
+    said = []
+    if home.tls is not None and (out or (before is not None and before != home.origin)):
+        line = (f"The phone's page is now {home.origin}/: pair your phone again with "
+                "`phone.py pair`.")
+        if out:
+            line += (f" Signed out, as each sign-in went over plain HTTP: {', '.join(out)}.")
+        said.append(line)
+    ahead = certificate.ahead() if certificate is not None else ""
+    if ahead:
+        said.append(ahead)
+    return tuple(said)
 
 
 def handler_for(
@@ -303,6 +377,16 @@ class _Handler(BaseHTTPRequestHandler):
     timeout = 15
 
     # -- methods -------------------------------------------------------------
+
+    def handle(self) -> None:
+        try:
+            super().handle()
+        except ssl.SSLError as exc:
+            # Plain HTTP to the HTTPS port, a client that won't take the certificate, or one gone
+            # mid-reply: closed (mqucifer/print-shop#312).
+            logger.info("phone page, from %s: the HTTPS connection failed (%s); what was done "
+                        "before it, if anything, is said above", self._peer(),
+                        exc.reason or type(exc).__name__)
 
     def do_GET(self) -> None:  # noqa: N802 - the standard library's name
         if not self._own_host():
@@ -436,7 +520,7 @@ class _Handler(BaseHTTPRequestHandler):
         if away:
             self._refused(f"pairing refused: {away}")
             return self._send(away_page(part=None, why=away), code=HTTPStatus.FORBIDDEN)
-        paired = self.phones.pair(form.get("code", ""))
+        paired = self.phones.pair(form.get("code", ""), over_https=self.home.tls is not None)
         if isinstance(paired, str):
             self._refused(f"pairing refused: {paired}")
             return self._send(pair_page(paired), code=HTTPStatus.FORBIDDEN)
@@ -444,6 +528,8 @@ class _Handler(BaseHTTPRequestHandler):
         logger.warning("a phone was paired as %r from %s", name, self._peer())
         cookie = (f"{COOKIE}={secret}; HttpOnly; SameSite=Strict; Path=/; "
                   f"Max-Age={COOKIE_AGE_S}")
+        if self.home.tls is not None:
+            cookie += "; Secure"  # never sent but over HTTPS (mqucifer/print-shop#312)
         self._send(message_page("Signed in", f"This phone is signed in as {name}.",
                                 back_to="/", back_words="To the queue"),
                    cookies=(cookie,))
@@ -928,7 +1014,7 @@ class _Handler(BaseHTTPRequestHandler):
             return None, ""
         held = cookie.get(COOKIE)
         secret = held.value if held is not None else ""
-        phone = self.phones.signed_in(secret)
+        phone = self.phones.signed_in(secret, over_https=self.home.tls is not None)
         return (phone, secret) if phone is not None else (None, "")
 
     def _form(self) -> dict[str, str] | None:

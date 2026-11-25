@@ -300,3 +300,13 @@ linux-aarch64 vtk v9.6.2 py314h838aa08_7 conda d3f8674c7f65ef5382dc181d6aa6deb7
 linux-aarch64 smesh v9.9.0.0 h6dac382_25 conda 97c964c9ae5850c7abca9edf2ebf2ca7
 linux-aarch64 pcl v1.15.1 he0c7a87_14 conda 2e28b2f78770ce96a9e17705fe80bff6
 linux-aarch64 freecad v1.1.3 py314h0d242e6_0 conda fdce9339c33063dd9c8856e64c6be45a
+# BESO (mqucifer/print-shop#286), for `optimise`: fandaL/beso's files at one commit, each by its
+# SHA-256, which the Dockerfile fetches from raw.githubusercontent.com into /opt/beso and checks.
+# A line is `github`, the repository, the commit after a `v`, the file, `sha256` and the sum.
+# Not a conda package: neither conda-forge nor PyPI has one. LGPL-3.0, its LICENSE beside it.
+github fandaL/beso v5056d301c2675df9ac1af771af4f1cbea642e4ad beso_main.py sha256 f4cf3f65035e9ac00d4957c78f642c0188b06756cfcbdbad5da4a874d9be4d8f
+github fandaL/beso v5056d301c2675df9ac1af771af4f1cbea642e4ad beso_lib.py sha256 820792f678f96edf5cb034b5488bb394b7f3fb15ade326a5910cd3a3c12e7dab
+github fandaL/beso v5056d301c2675df9ac1af771af4f1cbea642e4ad beso_filters.py sha256 a95a268f9fd4a567ad4d91f22e64d5c08395cedf161e4543e6dab0ee159af47e
+github fandaL/beso v5056d301c2675df9ac1af771af4f1cbea642e4ad beso_plots.py sha256 0b030e91ad9ace24a57e5f9a053a4438f7a5fe2afa5e24a8ca24f9255eabdb2f
+github fandaL/beso v5056d301c2675df9ac1af771af4f1cbea642e4ad beso_separate.py sha256 c0ad3a83084ced92622f109a498742b0a61af5ac7838bdbd5300ceb41e635545
+github fandaL/beso v5056d301c2675df9ac1af771af4f1cbea642e4ad LICENSE sha256 da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768

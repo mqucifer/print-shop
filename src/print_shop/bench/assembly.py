@@ -24,7 +24,9 @@ whoever designs the parts (`docs/bench.md` has it in full):
   is, a point on its axis. `through` (mqucifer/print-shop#168) names a bolt that passes right
   through both parts, its nut and the washer under each side, its head on the first part named
   and its nut on the second; with `pocket`, the nut sits in a pocket there that holds it by its
-  flats, at that play, with no washer under it. `dovetail` (mqucifer/print-shop#170) is a
+  flats, at that play, with no washer under it; with `channel` (mqucifer/print-shop#302), the
+  bolt lies in a drop-in channel open on one side, and its head and its nut bear on the walls
+  the channel names. `dovetail` (mqucifer/print-shop#170) is a
   tail on the first part named in a socket in the second: `slides` is the way the tail goes in,
   toward its seat, in the assembly's own axes, and `latch`, where it has one, is the flexing
   tab that holds it there: the part it's `on`, a box round it, `arm`, and the plane of its
@@ -42,7 +44,7 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -274,6 +276,10 @@ class PartAt:
     #: Other files placed with it by the same `turn` and `at`, such as a frame's panes: each as
     #: the assembly names it, beside the assembly file.
     others: tuple[str, ...] = ()
+    #: A glass frame's lead band, a STEP file beside the assembly file in the part's own axes:
+    #: what of the part `load` leaves out to read it as a lower bound, where the whole can't be
+    #: read (mqucifer/print-shop#295).
+    band: str | None = None
 
     def matrix(self) -> np.ndarray:
         """Its turns as one rotation."""
@@ -301,6 +307,59 @@ class Latch:
     arm: tuple[tuple[float, float, float], tuple[float, float, float]]
     #: The plane the tab is held at, where it joins the rest of its part: its axis and where.
     root: tuple[str, float]
+    #: Where `arm` and `root` are given (mqucifer/print-shop#295): the assembly's own axes, or,
+    #: with `own`, the tab's part's own file's, carried with that part by its `turn` and `at`:
+    #: `turn`, as one rotation, and `shift`, its `at`. A point of the assembly is in the box
+    #: where `turn`'s inverse takes it, less `shift`, inside `arm`.
+    own: bool = False
+    turn: tuple[tuple[float, float, float], ...] = (
+        (1.0, 0.0, 0.0),
+        (0.0, 1.0, 0.0),
+        (0.0, 0.0, 1.0),
+    )
+    shift: tuple[float, float, float] = (0.0, 0.0, 0.0)
+
+    @property
+    def placed(self) -> bool:
+        """Whether its box is anywhere but where `arm` says, in the assembly's axes."""
+        return bool(np.any(np.asarray(self.turn) != np.eye(3)) or any(self.shift))
+
+    def unplaced(self, points: Any) -> np.ndarray:
+        """Points of the assembly in the box's own axes, a row each: themselves where it isn't
+        placed."""
+        at = np.asarray(points, dtype=float)
+        if not self.placed:
+            return at
+        return np.asarray((at - np.asarray(self.shift)) @ np.asarray(self.turn))
+
+    def way(self, vector: Any) -> np.ndarray:
+        """A way in the assembly, in the box's own axes."""
+        return np.asarray(np.asarray(vector, dtype=float) @ np.asarray(self.turn))
+
+    def inside(self, point: Any, by: float = 1e-6) -> bool:
+        """Whether a point of the assembly is in the box, within `by`."""
+        low, high = (np.asarray(c, dtype=float) for c in self.arm)
+        at = self.unplaced(point)
+        return bool(np.all(at >= low - by) and np.all(at <= high + by))
+
+    def corners(self) -> np.ndarray:
+        """The box's eight corners, in the assembly."""
+        low, high = (np.asarray(c, dtype=float) for c in self.arm)
+        found = np.array([[(low, high)[(k >> a) & 1][a] for a in range(3)] for k in range(8)])
+        if not self.placed:
+            return found
+        return np.asarray(found @ np.asarray(self.turn).T + np.asarray(self.shift))
+
+    def bounds(self) -> tuple[np.ndarray, np.ndarray]:
+        """The least box of the assembly's axes round it: itself where it isn't placed."""
+        if not self.placed:
+            return np.array(self.arm[0], dtype=float), np.array(self.arm[1], dtype=float)
+        corners = self.corners()
+        return corners.min(axis=0), corners.max(axis=0)
+
+    def where(self) -> str:
+        """The words for where its `arm` and `root` are given."""
+        return f"in {self.on}'s own file's axes" if self.own else "in the assembly's axes"
 
 
 @dataclass(frozen=True)
@@ -319,6 +378,8 @@ class Joint:
     #: The play between each of the nut's flats and the wall of the pocket it sits in, in mm,
     #: where it sits in one, with no washer under it.
     pocket: float | None = None
+    #: Where a through-bolt lies in a drop-in channel open on one side (mqucifer/print-shop#302).
+    channel: Channel | None = None
     #: A dovetail's: the way its tail, on the first part, slides into its socket, in the second,
     #: toward its seat, as a sign and an axis of the assembly's, and its latch where it has one.
     slides: str | None = None
@@ -348,6 +409,40 @@ class Joint:
         if self.pull_n is not None:
             found.append((self.pull_n, f"the joint's own figure: {self.source}"))
         return min(found)
+
+
+@dataclass(frozen=True)
+class Channel:
+    """A through-bolt's seat as a drop-in channel (mqucifer/print-shop#302): a U with a round
+    bottom, open on one side, running across the join, that the bolt drops into from that side.
+    Its head bears on one wall and its nut on another, each square to the bolt."""
+
+    #: The axis of the assembly's the bolt runs along.
+    axis: str
+    #: The way the channel is open, square to it: one of `WAYS`.
+    open: str
+    #: Where the walls the head and the nut bear on are along `axis`, in the assembly.
+    head_wall: float
+    nut_wall: float
+
+    def axis_way(self) -> np.ndarray:
+        way = np.zeros(3)
+        way[AXES.index(self.axis)] = 1.0
+        return way
+
+    def open_way(self) -> np.ndarray:
+        way = np.zeros(3)
+        way[AXES.index(self.open[1])] = 1.0 if self.open[0] == "+" else -1.0
+        return way
+
+    def wall_said(self, wall: str) -> str:
+        """`the head's wall at x=-6`: a wall by whose it is and its plane."""
+        level = self.head_wall if wall == "head" else self.nut_wall
+        return f"the {wall}'s wall at {self.axis}={level:g}"
+
+
+#: What a channel gives, and nothing else.
+CHANNEL_FIELDS = {"axis", "open", "head_wall", "nut_wall"}
 
 
 @dataclass(frozen=True)
@@ -421,7 +516,22 @@ def _part(entry: Any, folder: Path) -> PartAt:
         MATERIALS[material],
         str(_one_of(entry["layers"], AXES, f"{name}'s `layers`")),
         _with(entry.get("with", []), name, folder),
+        _band(entry.get("band"), name, folder),
     )
+
+
+def _band(given: Any, name: str, folder: Path) -> str | None:
+    """A part's glass band: a STEP file beside the assembly file, in the part's own axes."""
+    if given is None:
+        return None
+    if not isinstance(given, str) or not given.lower().endswith((".step", ".stp")):
+        raise NoAnswer(
+            f"the part {name}'s `band` is a STEP file, in the part's own axes, holding what of "
+            f"it is the glass band, its leads and lips: {given!r}"
+        )
+    if not (folder / given).is_file():
+        raise NoAnswer(f"the part {name}'s `band`, {given}, isn't beside the assembly file")
+    return given
 
 
 def _with(given: Any, name: str, folder: Path) -> tuple[str, ...]:
@@ -457,7 +567,9 @@ def _joint(entry: Any, names: list[str]) -> Joint:
     if kind == "dovetail":
         return _dovetail(entry, first, second)
     if kind != "bolted":
-        extra = sorted({"bolt", "insert", "at", "pull_n", "nut", "washer", "pocket"} & set(entry))
+        extra = sorted(
+            {"bolt", "insert", "at", "pull_n", "nut", "washer", "pocket", "channel"} & set(entry)
+        )
         if extra:
             raise NoAnswer(
                 f"the joint {first}+{second} is {kind} and gives {', '.join(extra)}: only a "
@@ -471,7 +583,7 @@ def _joint(entry: Any, names: list[str]) -> Joint:
                 + ("glued" if kind == "bonded" else kind)
             )
         return Joint((first, second), kind)
-    extra = sorted({"nut", "washer", "pocket"} & set(entry))
+    extra = sorted({"nut", "washer", "pocket", "channel"} & set(entry))
     if extra:
         raise NoAnswer(
             f"the joint {first}+{second} is bolted, into an insert, and gives "
@@ -533,14 +645,70 @@ def _through(entry: dict[str, Any], first: str, second: str) -> Joint:
                 f"{what}'s `pocket` is the play between each of the nut's flats and its "
                 f"pocket's wall, in mm, 0 or more, not {entry['pocket']!r}"
             )
+    channel = None if entry.get("channel") is None else _channel(entry["channel"], what)
+    if channel is not None and play is not None:
+        raise NoAnswer(
+            f"{what} gives a `pocket` and a `channel`: in a channel the nut bears on its wall "
+            "through a washer, as the head does, and isn't held in a pocket"
+        )
     return Joint(
-        (first, second), "through", bolt, None, points, nut=nut, washer=washer, pocket=play
+        (first, second),
+        "through",
+        bolt,
+        None,
+        points,
+        nut=nut,
+        washer=washer,
+        pocket=play,
+        channel=channel,
     )
+
+
+def _channel(given: Any, what: str) -> Channel:
+    """A through-bolt's drop-in channel: the axis it runs along, the way it's open, and the
+    planes of the walls its head and its nut bear on, each square to that axis."""
+    shape = (
+        f'{what}\'s `channel` is {{"axis": "x", "open": "+z", "head_wall": "x=-6", '
+        '"nut_wall": "x=6"}: the axis the bolt runs along, the way the channel is open, '
+        "square to it, and the planes of the walls the head and the nut bear on"
+    )
+    if not isinstance(given, dict) or set(given) != CHANNEL_FIELDS:
+        raise NoAnswer(f"{shape}, not {given!r}")
+    axis = given["axis"]
+    if axis not in AXES:
+        raise NoAnswer(f"{shape}: its `axis` is one of {', '.join(AXES)}, not {axis!r}")
+    opened = given["open"]
+    if opened not in WAYS or opened[1] == axis:
+        raise NoAnswer(
+            f"{shape}: its `open` is one of {', '.join(w for w in WAYS if w[1] != axis)}, "
+            f"square to its axis, not {opened!r}"
+        )
+    levels = []
+    for key in ("head_wall", "nut_wall"):
+        on, _, at = str(given[key]).partition("=")
+        try:
+            level = float(at)
+        except ValueError:
+            level = math.nan
+        if on.strip() != axis or not math.isfinite(level):
+            raise NoAnswer(
+                f"{shape}: its `{key}` is a plane square to its axis, {axis}=NUMBER, not "
+                f"{given[key]!r}"
+            )
+        levels.append(level)
+    if abs(levels[0] - levels[1]) <= 1e-3:
+        raise NoAnswer(
+            f"{shape}: its head's wall and its nut's are one plane, {axis}={levels[0]:g}"
+        )
+    return Channel(axis, opened, levels[0], levels[1])
 
 
 #: What a dovetail joint gives, and nothing else.
 DOVETAIL_FIELDS = {"between", "kind", "slides", "latch"}
 LATCH_FIELDS = {"on", "arm", "root"}
+#: Where a latch's `arm` and `root` are given: the assembly's axes unless said, or its tab's
+#: part's own file's (mqucifer/print-shop#295).
+LATCH_FRAMES = ("assembly", "part")
 
 
 def _dovetail(entry: dict[str, Any], first: str, second: str) -> Joint:
@@ -568,10 +736,16 @@ def _dovetail(entry: dict[str, Any], first: str, second: str) -> Joint:
     shape = (
         '{"on": PART, "arm": [[x0, y0, z0], [x1, y1, z1]], "root": "z=10"}: the part its tab is '
         "on, a box round the tab, hook and all, with one side on the tab's root, and the "
-        "root's plane, in the assembly's coordinates"
+        "root's plane, in the assembly's coordinates; or, with \"frame\": \"part\", in the "
+        "tab's part's own file's, carried with it by its `turn` and `at`"
     )
-    if not isinstance(latch, dict) or set(latch) != LATCH_FIELDS:
+    if (
+        not isinstance(latch, dict)
+        or not set(latch) >= LATCH_FIELDS
+        or set(latch) - LATCH_FIELDS - {"frame"}
+    ):
         raise NoAnswer(f"{what}'s `latch` is {shape}, not {latch!r}")
+    frame = _one_of(latch.get("frame", "assembly"), LATCH_FRAMES, f"{what}'s latch's `frame`")
     on = str(latch["on"])
     if on not in (first, second):
         raise NoAnswer(f"{what}'s latch is `on` {first} or {second}, not {on}")
@@ -594,7 +768,21 @@ def _dovetail(entry: dict[str, Any], first: str, second: str) -> Joint:
             f"runs from {box[0][k]:g} to {box[1][k]:g} along {root[0]}: one side of the box is "
             "on the tab's root, where it joins the rest of its part"
         )
-    return Joint((first, second), "dovetail", slides=slides, latch=Latch(on, box, root))
+    # A latch in its part's own axes is placed with that part once the parts are read.
+    return Joint(
+        (first, second), "dovetail", slides=slides, latch=Latch(on, box, root, frame == "part")
+    )
+
+
+def _carried(joint: Joint, parts: tuple[PartAt, ...]) -> Joint:
+    """A dovetail whose latch is given in its tab's part's own axes, with that latch carried
+    where the part's `turn` and `at` put it (mqucifer/print-shop#295)."""
+    if joint.latch is None or not joint.latch.own:
+        return joint
+    part = next(p for p in parts if p.name == joint.latch.on)
+    turn = tuple(tuple(float(v) for v in row) for row in part.matrix())
+    latch = replace(joint.latch, turn=turn, shift=part.at)  # type: ignore[arg-type]
+    return replace(joint, latch=latch)
 
 
 def _held(entry: Any, names: list[str]) -> Held:
@@ -631,7 +819,7 @@ def read(path: str) -> Assembly:
     twice = sorted({n for n in names if names.count(n) > 1})
     if twice:
         raise NoAnswer(f"each part has a name of its own: {', '.join(twice)}")
-    joints = tuple(_joint(entry, names) for entry in data.get("joints", ()))
+    joints = tuple(_carried(_joint(entry, names), parts) for entry in data.get("joints", ()))
     pairs = [frozenset(j.between) for j in joints]
     again = next((j.name for j in joints if pairs.count(frozenset(j.between)) > 1), None)
     if again:

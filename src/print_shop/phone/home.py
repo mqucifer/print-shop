@@ -18,6 +18,12 @@ request is refused, for Start and pairing, when it comes:
   starts: HA's remote access, an ingress proxy, or an automation's `rest_command`;
 - **carrying any proxy's mark** (`Forwarded`, `X-Forwarded-*`, `Via`, `X-Real-IP`, …).
 
+**Over HTTPS** (mqucifer/print-shop#312), once `PHONE_NAME`, `PHONE_TLS_CERT` and `PHONE_TLS_KEY`
+are all set (`tls.py`): the page is served over HTTPS at its name and `PHONE_PORT`, and its
+own `Host` and `Origin` are the name's, not the address's. Where it listens, and every check
+above, are the same. With one or two of them set, the page stays off and says which is
+missing: a half-done setup never falls back to plain HTTP.
+
 **Not covered** (the Sponsor, 2026-11-24, on mqucifer/print-shop#214): a VPN that hands its
 clients addresses on the home range (some routers' WireGuard or IPsec servers, bridged OpenVPN),
 and a machine on the home network relaying for one (a VPN's subnet router), look like a phone at
@@ -30,6 +36,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import re
 import socket
 import subprocess
 import sys
@@ -39,10 +46,11 @@ from pathlib import Path
 from urllib.parse import urlunsplit
 
 from print_shop.env import SETTINGS_PATH, load_env
+from print_shop.phone.tls import CERT_KEY, KEY_KEY, NAME_KEY, TlsFiles
 
 __all__ = [
-    "DEFAULT_PORT", "HA_KEY", "HOME_KEY", "Home", "HomeRefused", "PORT_KEY", "PROXY_HEADERS",
-    "ROUTER_KEY", "default_router",
+    "DEFAULT_PORT", "HA_KEY", "HOME_KEY", "HTTPS_KEYS", "Home", "HomeRefused", "PORT_KEY",
+    "PROXY_HEADERS", "ROUTER_KEY", "default_router",
 ]
 
 logger = logging.getLogger(__name__)
@@ -56,6 +64,10 @@ ROUTER_KEY = "PHONE_ROUTER"
 #: Home Assistant's host, where it isn't the broker's (`MQTT_HOST`).
 HA_KEY = "PHONE_HA_HOST"
 DEFAULT_PORT = 8765
+#: The settings that serve the page over HTTPS: all three, or none.
+HTTPS_KEYS = (NAME_KEY, CERT_KEY, KEY_KEY)
+#: A DNS name's label: letters, digits and hyphens, not at either end.
+_LABEL = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\Z")
 
 #: Headers a proxy adds. Any of them, or any `X-Forwarded-…` or `X-Original-…`, refuses Start.
 PROXY_HEADERS = frozenset({
@@ -89,6 +101,10 @@ class Home:
     router: ipaddress.IPv4Address | None = None
     #: Home Assistant's address, resolved once as the page starts, or None where none is named.
     ha: ipaddress.IPv4Address | None = None
+    #: The page's name (`PHONE_NAME`) and its certificate's files, over HTTPS; both None over
+    #: plain HTTP (mqucifer/print-shop#312).
+    name: str | None = None
+    tls: TlsFiles | None = None
 
     def __post_init__(self) -> None:
         where = ipaddress.IPv4Interface(f"{self.address}/{self.network.prefixlen}")
@@ -102,6 +118,15 @@ class Home:
         if self.port == 80:
             raise HomeRefused(f"{PORT_KEY} can't be 80: a browser leaves it out of the page's "
                               "address, which the page then can't tell is its own")
+        if (self.name is None) != (self.tls is None):
+            raise HomeRefused(f"HTTPS needs {', '.join(HTTPS_KEYS[:-1])} and {HTTPS_KEYS[-1]} "
+                              "together")
+        if self.name is not None:
+            _a_name(self.name)
+            if self.port == 443:
+                raise HomeRefused(f"{PORT_KEY} can't be 443 over HTTPS: a browser leaves it out "
+                                  "of the page's address, which the page then can't tell is its "
+                                  "own")
 
     @classmethod
     def from_settings(
@@ -109,12 +134,14 @@ class Home:
         resolve: Callable[[str], str] = socket.gethostbyname,
     ) -> Home | None:
         """The home, from `PHONE_HOME` (and `PHONE_PORT`, `PHONE_ROUTER`, `PHONE_HA_HOST` or
-        `MQTT_HOST`) in the settings; None if `PHONE_HOME` isn't set, which leaves the phone's
-        Start off. Home Assistant's host is resolved here, once.
+        `MQTT_HOST`, and `PHONE_NAME`, `PHONE_TLS_CERT` and `PHONE_TLS_KEY` for HTTPS) in the
+        settings; None if `PHONE_HOME` isn't set, which leaves the phone's Start off. Home
+        Assistant's host is resolved here, once.
 
         Raises:
             HomeRefused: If `PHONE_HOME` is malformed, public, loopback or link-local, the port is
-                80, or Home Assistant's host is named and can't be found.
+                80, Home Assistant's host is named and can't be found, or only some of the HTTPS
+                settings are set, or `PHONE_NAME` isn't a name.
         """
         env = load_env(path or SETTINGS_PATH)
         given = env.get(HOME_KEY, "").strip()
@@ -151,18 +178,22 @@ class Home:
                 raise HomeRefused(
                     f"Home Assistant's host ({HA_KEY}, or MQTT_HOST) couldn't be found, so a "
                     "request through it couldn't be told") from exc
-        return cls(address=where.ip, network=where.network, port=port, router=found, ha=ha)
+        name, tls = _https(env)
+        return cls(address=where.ip, network=where.network, port=port, router=found, ha=ha,
+                   name=name, tls=tls)
 
     @property
     def origin(self) -> str:
-        """The page's own origin: what `Host` and `Origin` must say."""
+        """The page's own origin: what `Origin` must say, and every link to the page begins with
+        (the run's line, the card's, and Home Assistant's notices)."""
         # Built, not written as a URL: it's the page's own address, which nothing calls, and
         # `tests/test_config_boundary.py` keeps written URLs to the model's proxy alone.
-        return urlunsplit(("http", self.host, "", "", ""))
+        return urlunsplit(("https" if self.tls is not None else "http", self.host, "", "", ""))
 
     @property
     def host(self) -> str:
-        return f"{self.address}:{self.port}"
+        """What `Host` must say: the page's name over HTTPS, else its address; and its port."""
+        return f"{self.name or self.address}:{self.port}"
 
     def why_not(self, peer: str, headers: Iterable[str]) -> str:
         """Why a request from `peer` (the socket's address) with `headers` (its headers' names)
@@ -202,6 +233,42 @@ def _private(address: ipaddress.IPv4Address, key: str) -> None:
     if not address.is_private:
         raise HomeRefused(f"{key} {address} is a public address: the page is for the home "
                           "network only, and listens on nothing else")
+
+
+def _https(env: dict[str, str]) -> tuple[str | None, TlsFiles | None]:
+    """`PHONE_NAME` and the certificate's files, all three or none (mqucifer/print-shop#312)."""
+    given = {key: env.get(key, "").strip() for key in HTTPS_KEYS}
+    if not any(given.values()):
+        return None, None
+    missing = [key for key in HTTPS_KEYS if not given[key]]
+    if missing:
+        have = [key for key in HTTPS_KEYS if given[key]]
+        raise HomeRefused(
+            f"{_and(missing)} {'is' if len(missing) == 1 else 'are'}n't set ({_and(have)} "
+            f"{'is' if len(have) == 1 else 'are'}): HTTPS needs all three, and the page isn't "
+            "served as plain HTTP for a half-done setup")
+    name = given[NAME_KEY].lower()
+    _a_name(name)
+    return name, TlsFiles(Path(given[CERT_KEY]).expanduser(), Path(given[KEY_KEY]).expanduser())
+
+
+def _a_name(name: str) -> None:
+    """`PHONE_NAME` is a DNS name, in lower case, with no port: not an address, nor a wildcard."""
+    try:
+        ipaddress.ip_address(name)
+    except ValueError:
+        pass
+    else:
+        raise HomeRefused(f"{NAME_KEY} is an address: it's the page's name, such as print.<domain>")
+    labels = name.split(".")
+    if (name != name.lower() or len(name) > 253 or len(labels) < 2
+            or not all(_LABEL.match(label) for label in labels) or labels[-1].isdigit()):
+        raise HomeRefused(f"{NAME_KEY}={name!r} isn't a name such as print.<domain>, in lower "
+                          "case, with no port")
+
+
+def _and(keys: list[str]) -> str:
+    return keys[0] if len(keys) == 1 else f"{', '.join(keys[:-1])} and {keys[-1]}"
 
 
 def _header(name: str) -> str:

@@ -165,6 +165,7 @@ def serve(
     write: Callable[[str], None] = print, forget: Callable[[], None] = drop_typed,
     stock: Callable[[], str] | None = None, screen: Callable[[], TextIO | None] = terminal,
     runs: Runs | None = None, phone: bool = False,
+    phone_trouble: Callable[[], str] | None = None,
 ) -> int:
     """The queue at the terminal until `quit`, Ctrl-D or Ctrl-C: every job waits where it is.
 
@@ -173,9 +174,11 @@ def serve(
     (mqucifer/print-shop#260): what's being typed is left as it is. The whole of what happened
     is said at the next prompt. `runs` is where the finished runs are, for `runs` and `again`
     (mqucifer/print-shop#216). `phone` is whether the phone's Start page is on, for what a load
-    says once a job's ready to start (mqucifer/print-shop#305)."""
+    says once a job's ready to start (mqucifer/print-shop#305). `phone_trouble` says why the
+    phone's page is off, for that line (mqucifer/print-shop#312)."""
     term = _Terminal(queue, daemon, read, write, forget, stock)
     term.runs, term.phone = runs, phone
+    term.phone_trouble = phone_trouble
     term.show()
     while True:
         live = _Live(term, screen())
@@ -239,6 +242,7 @@ class _Terminal:
         self.told = 0
         self.runs: Runs | None = None
         self.phone = False
+        self.phone_trouble: Callable[[], str] | None = None
 
     def drain(self) -> list[str]:
         """What's happened since it was last said, said now: a Start held for a spool that isn't
@@ -261,6 +265,9 @@ class _Terminal:
         offered = next((li for li in lines if li.offered), None)
         if offered is not None:
             said.append(f"offered to print: {offered.number} {offered.job.part}")
+        trouble = self.phone_trouble() if self.phone_trouble is not None else ""
+        if trouble:
+            said.append(trouble.rstrip("."))
         new = self.queue.said(self.told if since is None else since)
         if new:
             said.append(new[-1] + (f" (+{len(new) - 1} more)" if len(new) > 1 else ""))

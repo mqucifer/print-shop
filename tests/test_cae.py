@@ -886,6 +886,97 @@ def test_a_peaked_bore_s_seat_cut_by_anything_else_still_fails(cae: Any, name: s
     assert "less the peak's cut: it overhangs an edge or a step" in answer.record["why"]
 
 
+# A through-bolt in a drop-in channel (mqucifer/print-shop#302)
+
+#: Pulled apart along the bolt, pushed across it sideways, and pushed down, at the second
+#: half's far end, on the bolt's axis or under it.
+CHANNEL_APART = ("--weight", "5", "--at", "40,15,10", "--toward", "+x", "--mesh", "6")
+CHANNEL_ASIDE = ("--weight", "2", "--at", "40,15,10", "--toward", "+y", "--mesh", "6")
+CHANNEL_DOWN = ("--weight", "2", "--at", "40,15,10", "--toward", "-z", "--mesh", "6")
+
+
+def channel_seat() -> float:
+    """A washer's ring on a channel's wall less the channel's cut, by summing thin rings: at r
+    from the axis, its walls half the hole's width either side of the open way take
+    2 asin(R/r) of the ring."""
+    edges = np.linspace(HOLE / 2, WASHER / 2, 200_001)
+    r = (edges[:-1] + edges[1:]) / 2
+    return float(((2 * math.pi - 2 * np.arcsin(HOLE / 2 / r)) * r * np.diff(edges)).sum())
+
+
+def test_load_clamps_two_halves_through_a_bolt_in_a_drop_in_channel(cae: Any) -> None:
+    """`load` read a drop-in channel as a slot's end. Declared, its bolt clamps the two walls:
+    pulled apart with 5 kg, each washer presses 40.62 mm² of its wall, the ring less the
+    channel's cut, and nothing pushes the shank toward the open side, which the reply says
+    carries nothing. Pushed sideways, the shank leans on half its round, 5 x 8 / 2 mm²."""
+    seat = channel_seat()
+    apart = cae("load", "channel/joined.json", *CHANNEL_APART)
+    assert apart.verdict == "OK" and apart.code == 0, apart.text
+    joint = apart.numbers["joints"]["left+right"]
+    assert joint["bolt_pull_n"] == pytest.approx(5 * G, rel=0.1)
+    head, nut = joint["bolts"][0]["ends"]
+    assert (head["part"], nut["part"]) == ("left", "right")
+    for end in (head, nut):
+        assert end["under"] == "washer" and end["ring_mm2"] == pytest.approx(RING, rel=1e-9)
+        assert end["seat_mm2"] == pytest.approx(seat, rel=1e-6)
+        assert end["bears_mm2"] == pytest.approx(seat, rel=1e-4)
+        assert end["pressure_mpa"] == pytest.approx(joint["bolt_pull_n"] / seat, rel=1e-4)
+        assert end["channel"] == {"toward": [0, 0, 1], "round_deg": pytest.approx(180),
+                                  "open_mm": pytest.approx(HOLE)}  # fmt: skip
+        assert end["toward_open_n"] == pytest.approx(0, abs=0.05)
+        assert "wall_pressure_mpa" not in end, "a straight pull"
+    assert apart.text.count("carries nothing: the shank is not pushed toward it") == 2
+    assert "bears on the head's wall at x=12" in apart.text
+    assert "bears on the nut's wall at x=28" in apart.text
+    assert reports.unlike("load", apart.numbers) == []
+    aside = cae("load", "channel/joined.json", *CHANNEL_ASIDE)
+    assert aside.verdict == "OK", aside.text
+    for end in aside.numbers["joints"]["left+right"]["bolts"][0]["ends"]:
+        assert end["wall_bears_mm2"] == pytest.approx(5 * 8 / 2, rel=1e-4)
+        assert end["wall_pressure_mpa"] == pytest.approx(2 * G / 20, rel=2e-3)
+        assert end["round"]["wall_share"] == pytest.approx(0.5, rel=0.05)
+        assert end["sheared_mm2"] == pytest.approx(math.pi / 2 * HOLE / 2 * 8, rel=0.05)
+        assert end["toward_open_n"] == pytest.approx(0, abs=0.05)
+    assert "the channel leaves 50.0% for a lean 90° from its open side" in aside.text
+
+
+def test_a_channel_s_open_side_carries_nothing(cae: Any) -> None:
+    """Pushed down at the second half's end, its channel moves down off the bolt: the shank
+    is pushed toward that channel's open side with the whole 2 kg, which nothing holds. The
+    first half's shank presses its round's bottom, all of it."""
+    answer = cae("load", "channel/joined.json", *CHANNEL_DOWN)
+    assert answer.verdict == "FAIL" and answer.code == 1, answer.text
+    why = answer.record["why"]
+    assert "in right: the shank is pushed toward the channel's open side by 19.6 N" in why
+    assert "nothing there holds it" in why and "; and " not in why
+    joint = answer.numbers["joints"]["left+right"]
+    assert joint["gives_first"] == "the shank pushed toward the channel's open side in right"
+    head, nut = joint["bolts"][0]["ends"]
+    assert nut["toward_open_n"] == pytest.approx(2 * G, rel=1e-3)
+    assert head["toward_open_n"] == 0 and head["wall_bears_mm2"] == pytest.approx(5 * 8)
+    assert "wall_pressure_mpa" not in nut, "nothing's left to lean on its round"
+    assert reports.unlike("load", answer.numbers) == []
+
+
+def test_a_channel_s_wall_too_narrow_for_its_washer_fails_naming_the_wall(cae: Any) -> None:
+    """The second half 9 mm wide, its end the nut's wall, under a washer 10 mm across."""
+    answer = cae("load", "channel/narrow.json", *CHANNEL_APART[:2], "--at", "28,15,4",
+                 *CHANNEL_APART[4:])  # fmt: skip
+    assert answer.verdict == "FAIL", answer.text
+    why = answer.record["why"]
+    assert "in right: the washer m5-washer under the nut sits on 37.7 mm² of the part" in why
+    assert "less the channel's cut, on the nut's wall at x=28: it overhangs an edge" in why
+
+
+def test_a_channel_with_no_declaration_is_still_refused_by_load(cae: Any) -> None:
+    answer = cae("load", "channel/undeclared.json", *CHANNEL_APART)
+    assert answer.verdict == "NO ANSWER" and answer.code == 2, answer.text
+    assert (
+        "in left, the round face there doesn't go all the way round: a slot's end, not a hole"
+    ) in answer.record["why"]
+    assert answer.record["seconds"] < 10
+
+
 # The shank's shear, on its own stretch of the bore (mqucifer/print-shop#245)
 
 #: Beside where the blocks meet, so the bolt has the shear and little pull.
@@ -1468,3 +1559,246 @@ def test_the_snap_on_check_and_bend_read_a_latch_on_a_dovetail(cae: Any) -> None
     by_strip = 100 * 1.5 * TAB_T * HOOK_IN / 18.0**2
     assert bent.numbers["across_layers_pct"] == pytest.approx(by_strip, rel=0.15)
     assert bent.numbers["worst"] == "near"
+
+
+# A whole furniture assembly (mqucifer/print-shop#295): a turned latch, a large assembly and a
+# glass frame. Marked `assembly`, so CI runs them in a job of their own beside the rest of `cae`:
+# together they take about 23 minutes of solves, and the cae job has 30.
+
+
+#: The posts' ring in `make_fixtures.turned`, and a pull up on each post's top, 0.6 kg in all.
+POSTS_AT = 100.0
+
+
+def posts_up(first: float) -> tuple[str, ...]:
+    places: list[str] = []
+    for k in range(4):
+        angle = math.radians(first + 90 * k)
+        places += ["--at", f"{POSTS_AT * math.cos(angle):.4f},{POSTS_AT * math.sin(angle):.4f},100"]
+    return ("--weight", "0.6", *places, "--toward", "+z")
+
+
+@pytest.mark.assembly
+def test_a_latch_named_in_its_part_s_own_axes_reads_as_the_assembly_s_names_it(cae: Any) -> None:
+    """The latched post of `play/edge.json`, unturned and in place, its latch named in the
+    upper's own file's axes, `"frame": "part"`: lifted, it reads every figure as the same latch
+    named in the assembly's does. Only `bend`'s command names the part's own file."""
+    assembly_s = cae("load", "play/edge.json", "--lift", "upper")
+    own = cae("load", "turned/own.json", "--lift", "upper")
+    assert own.verdict == assembly_s.verdict == "OK", own.text
+    for answer in (own, assembly_s):
+        assert "straight sides" not in answer.text, "a mesh that curves stays curved"
+    assert own.numbers["joints"] == assembly_s.numbers["joints"]
+    assert own.numbers["parts"] == assembly_s.numbers["parts"]
+    mine, theirs = (a.numbers["ways_in"]["upper+lower"] for a in (own, assembly_s))
+    assert mine["latch"]["bend"]["command"].startswith("bend upper-edge.step --arm")
+    assert theirs["latch"]["bend"]["command"].startswith("bend upper.step --arm")
+    for found in (mine, theirs):
+        found["latch"]["bend"].pop("command")
+    assert mine == theirs
+
+
+@pytest.mark.assembly
+@pytest.mark.parametrize("first", [0.0, 45.0])
+def test_four_posts_turned_round_a_table_s_middle_each_have_their_latch_named(
+    cae: Any, first: float
+) -> None:
+    """mqucifer/print-shop#295: a part made in its own frame and placed turned, as a table's
+    legs are at its corners, couldn't have its latch named in the assembly's axes, and read
+    `DISAGREE` and "Null shape" without it. The same latched post four times, each turned a
+    quarter turn on, from 0° and from 45°, each latch named once in the post's own axes, and
+    each post pulled up by 0.15 kg at its top: every latch holds what draws its tail out,
+    1.47 N, its hook passes 0.6 mm deep on the way in by both methods, and `bend` reads its
+    tab pushed that far, in the post's own axes, `OK`. At 45° each part round its dovetail is
+    cut in its own axes: a box of the assembly's takes in all of it."""
+    answer = cae("load", f"turned/{'quarter' if first == 0 else 'eighth'}.json", *posts_up(first))
+    assert answer.verdict == "OK", answer.text
+    assert "straight sides" not in answer.text, "a mesh that curves stays curved"
+    for k in range(4):
+        name = f"upper{k}+lower{k}"
+        joint = answer.numbers["joints"][name]
+        assert joint["latch"]["holds_n"] == pytest.approx(0.6 * G / 4, rel=0.01), name
+        assert joint["latch"]["tab"]["across_layers_pct"] < 1.0
+        way = answer.numbers["ways_in"][name]
+        assert way["latch"]["depth_mm"] == pytest.approx(0.6, abs=1e-3)
+        assert way["latch"]["depth_rays_mm"] == pytest.approx(0.6, abs=0.05)
+        bent = way["latch"]["bend"]
+        assert bent["verdict"] == "OK" and bent["toward"] == "+y", bent
+        assert bent["command"].startswith("bend upper-edge.step --arm 11.4,-15.7,59.9")
+        if first == 45.0:
+            assert all("own axes" in c for c in joint["neck"]["cut_on"]), joint["neck"]
+    assert "in upper0's own file's axes" not in answer.record["why"]
+
+
+@pytest.mark.assembly
+def test_a_table_of_24_parts_and_56_bolts_says_the_limit_it_met_and_what_is_left(
+    cae: Any,
+) -> None:
+    """mqucifer/print-shop#295: 24 parts held by 56 M5 through-bolts, round figures only. gmsh
+    sizes each bore by its curvature, 12 elements a turn, whatever --mesh is, so the bores make
+    most of a mesh past what CalculiX solves in the container's 3 GiB. The reply leads with
+    what to do, then says what it met, from the container's own count of what it held, that a
+    coarser --mesh leaves those elements as they are, and that nothing is read: it doesn't tell
+    anyone to coarsen the mesh."""
+    answer = cae(
+        "load", "large/table.json", "--weight", "20",
+        "--at", "100,100,310", "--at", "300,100,310", "--at", "100,300,310", "--at", "300,300,310",
+    )  # fmt: skip
+    assert answer.verdict == "NO ANSWER", answer.text
+    why = answer.record["why"]
+    # What to do first, then what it met.
+    assert why.startswith("nothing of the assembly is read, as it's past what the container's "
+                          "memory solves: name each glass frame's `band`"), why  # fmt: skip
+    assert "it met the container's memory, 3 GiB, and the kernel stopped it there" in why, why
+    assert "a coarser --mesh leaves most of those as they are" in why
+    assert "Every part, joint and bolt of it is left unread" in why
+    assert "Give a coarser --mesh" not in why
+    ran = answer.record["ran"]
+    assert int(ran["memory_peak"]) == int(ran["memory_max"]) == 3 * 1024**3
+    assert answer.record["seconds"] < host.TIMEOUT
+
+
+@pytest.mark.assembly
+def test_a_bolt_left_out_reads_its_joint_as_the_one_that_gives_first(cae: Any) -> None:
+    """The control (mqucifer/print-shop#295, the operator's comment there): a stool, a top on
+    four legs each held by one M5 through-bolt, its feet fixed, pushed sideways at the top by
+    5 kg. Each leg's joint carries a moment, which its bolt holds: `OK`. With leg2's bolt left
+    out, its joint is `touching`, and that joint is what gives: it tips open, `FAIL`, named.
+    The solve ties every joint's faces as a bolted joint is while its bolts hold, so a bolt
+    left out doesn't change how far anything moves: the loaded place moves the same."""
+    push = ("--weight", "5", "--at", "0,100,154", "--toward", "+x")
+    bolted = cae("load", "large/stool.json", *push)
+    assert bolted.verdict == "OK", bolted.text
+    assert "straight sides" not in bolted.text, "its bores mesh curved, and stay so"
+    one_out = cae("load", "large/stool-one-out.json", *push)
+    assert one_out.verdict == "FAIL", one_out.text
+    assert one_out.record["why"].startswith("the touching joint top+leg2"), one_out.record["why"]
+    assert "tips open" in one_out.record["why"]
+    assert one_out.numbers["moves_mm"] == pytest.approx(bolted.numbers["moves_mm"], rel=1e-6)
+
+
+#: How the made-up glass panel (`cae_cases/glass_panel.py`) is built: a frame 6 mm thick round
+#: panes 3 mm thick, two lips sized by --min-visible, a 12 mm border.
+GLASS_BUILD = ("--thickness", "6", "--pane", "3", "--lip", "1.2,0.6", "--min-visible", "50",
+               "--play", "0.25", "--border", "12")  # fmt: skip
+
+
+def glass_built(cae: Any, width: int) -> Path:
+    """The made-up panel `width` mm wide drawn, traced and built by `pieces build` in the first
+    image, its map fixed as the build's own refusals say, as a run does: each piece it says to
+    split split along the line it gives, and each it says to merge merged into the first
+    neighbour that takes it. Then the frame bored and laid on a block in the second image, all
+    in the folder `glass-WIDTH`."""
+    if host.image_id() is None:
+        pytest.fail(f"{host.missing(host.IMAGE)} first")
+    work = cae.work
+    for script in ("glass_panel.py", "glass_joined.py"):
+        shutil.copy(CASES / script, work / script)
+    drawn = host.run(["glass_panel.py", str(width)], work, python=True)
+    assert drawn.returncode == 0, drawn.stdout + drawn.stderr
+    stem = f"panel{width}"
+    traced = cae("pieces", "trace", "panel.png", "--width", str(width), "--to", f"{stem}-0.json")
+    assert traced.verdict == "OK", traced.text
+    current = f"{stem}-0.json"
+    for step in range(1, 12):
+        built = cae("pieces", "build", current, *GLASS_BUILD, "--build-out", f"{stem}-frame")
+        if built.verdict == "OK":
+            break
+        refused = built.numbers["unbuildable"][0]
+        piece = int(re.match(r"piece (\d+)", refused).group(1))  # type: ignore[union-attr]
+        split = re.search(r"`pieces split MAP \d+ --line (\S+)`", refused)
+        following = f"{stem}-{step}.json"
+        if split:
+            done = cae("pieces", "split", current, str(piece), "--line", split.group(1),
+                       "--to", following)  # fmt: skip
+        else:
+            for other in range(1, 100):
+                if other == piece:
+                    continue
+                done = cae("pieces", "merge", current, str(piece), str(other), "--to", following)
+                if done.verdict == "OK":
+                    break
+        assert done.verdict == "OK", done.text
+        current = following
+    assert built.verdict == "OK", built.text
+    folder = f"glass-{width}"
+    made = host.run(
+        ["glass_joined.py", f"{stem}-frame/frame.step", folder], work, python=True,
+        image=host.CAE_IMAGE,
+    )  # fmt: skip
+    assert made.returncode == 0, made.stdout + made.stderr
+    return Path(work) / folder
+
+
+#: The panel's width, in mm, and the mesh its frame is read alone at: at the default, 3 mm,
+#: it's read whole within 60 MB of the container's 3 GiB on the Mac, too near to rely on.
+GLASS_W, ALONE_MESH = 160, "4"
+
+
+@pytest.fixture(scope="module")
+def glass(cae: Any) -> Path:
+    return glass_built(cae, GLASS_W)
+
+
+@pytest.mark.assembly
+def test_a_traced_glass_frame_reads_alone_with_its_elements_straight(
+    cae: Any, glass: Path
+) -> None:
+    """mqucifer/print-shop#295: a stained-glass frame `pieces build` made from a traced picture,
+    with sharp V corners and lips sized piece by piece, read "gmsh made no mesh of the joined
+    parts: None". gmsh couldn't curve every element onto its many small curves without leaving
+    some inside out and ended with an error, and FreeCAD kept no mesh and said nothing. Now the
+    mesh is made again with its elements' sides straight, the reply says why in gmsh's own
+    words, and the frame alone, held by its -x edge with 1 kg on its +x border, reads whole:
+    no lower bound, and the coarser mesh agrees."""
+    answer = cae(
+        "load", f"{glass.name}/alone.json", "--weight", "1", "--at", f"{GLASS_W + 6},50,6",
+        "--mesh", ALONE_MESH,
+    )  # fmt: skip
+    assert answer.verdict == "OK", answer.text
+    assert "lower_bound" not in answer.numbers
+    assert "its elements second-order with straight sides" in answer.text
+    assert answer.numbers["nodes"] > 1.5 * answer.numbers["elements"], "ten nodes each, shared"
+    assert "gmsh made no curved mesh of the joined parts: " in answer.text
+    frame = answer.numbers["parts"]["frame"]
+    assert 0 < frame["across_layers_pct"] < 1.0
+    assert answer.record["seconds"] < host.TIMEOUT
+    # The control for the lower bound (the operator's review): the same frame read without its
+    # band, as where the whole meets the memory limit, though here it doesn't. Less in it, it
+    # gives more under the same weight, never less: the loaded place moves further. Its strain
+    # isn't a bound, and isn't held to one here.
+    shutil.copy(CASES / "band_forced.py", cae.work / "band_forced.py")
+    args = ["load", f"{glass.name}/alone.json", "--weight", "1", "--at", f"{GLASS_W + 6},50,6",
+            "--mesh", ALONE_MESH]  # fmt: skip
+    done = host.run(["band_forced.py", *args], cae.work, python=True, image=host.CAE_IMAGE)
+    found = re.search(r"saved: (\S+)\.txt and \.json", done.stdout)
+    assert found, done.stdout + done.stderr
+    without = json.loads((cae.work / f"{found.group(1)}.json").read_text())
+    assert without["numbers"]["lower_bound"]["parts"] == ["frame"], without["why"]
+    assert without["numbers"]["moves_mm"] > answer.numbers["moves_mm"]
+
+
+@pytest.mark.assembly
+def test_a_glass_frame_bolted_to_a_block_reads_as_a_lower_bound_with_its_band_left_out(
+    cae: Any, glass: Path
+) -> None:
+    """The same frame bored and bolted down through its border onto a block by three M5
+    through-bolts. Whole, its mesh is past what the container's 3 GiB solves, and the reply says
+    so. The frame names its glass band, the panel inside its border, so it's read again with
+    the band left out, a lower bound: the reply leads with that, names the frame and says why,
+    and every bolt and the plastic round it is read as any through joint's is. The joint's
+    force is the load beyond it, by statics."""
+    answer = cae("load", f"{glass.name}/joined.json", "--weight", "1", "--at", "-6,50,6")
+    assert answer.verdict == "OK", answer.text
+    assert answer.record["why"].startswith("read as a lower bound, frame with its glass band left")
+    lower = answer.numbers["lower_bound"]
+    assert lower["parts"] == ["frame"]
+    assert "it met the container's memory, 3 GiB, and the kernel stopped it" in lower["why"]
+    assert "how far the loaded places move along the load, taken together, is a bound" in (
+        answer.text
+    )
+    assert "read as a lower bound: frame read with its glass band left out" in answer.text
+    joint = answer.numbers["joints"]["frame+block"]
+    assert joint["force_n"] == pytest.approx([0, 0, G], abs=0.01), "the block holds the weight up"
+    assert len(joint["bolts"]) == 3 and joint["bolt_pull_n"] > 0
+    assert answer.record["seconds"] < host.TIMEOUT

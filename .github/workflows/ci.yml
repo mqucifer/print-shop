@@ -97,13 +97,13 @@ jobs:
       - run: uv run python scripts/bench.py check
       - run: uv run pytest -q -m bench --shard ${{ matrix.shard }}/4 -n 3 -rps --durations=20
 
-  # The bench's second image, with FreeCAD, and the `-m cae` tests on it (mqucifer/print-shop#142).
-  # It's built here for amd64 from its own list of packages (arm64 on the Mac), through the
-  # bench's own `build`, so the disk guard runs too. Its one layer is about 3 GB, a third of what
-  # GitHub's cache holds for the whole repository, so it isn't cached: each run installs it again.
-  # The first image is loaded beside it, as one test follows `clearance --slide`'s reply into
-  # `fit-on` and `bend`.
-  cae:
+  # The bench's second image, with FreeCAD (mqucifer/print-shop#142), built once per run and
+  # handed on, as `image` hands on the first (mqucifer/print-shop#307): `cae` and `cae-assembly`
+  # each built it again before. It's built here for amd64 from its own list of packages (arm64 on
+  # the Mac), through the bench's own `build`, so the disk guard runs too, and that needs the
+  # first image loaded. Its one layer is about 3 GB, a third of what GitHub's cache holds for the
+  # whole repository, so it isn't cached: each run installs it again.
+  cae-image:
     needs: image
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -118,4 +118,58 @@ jobs:
           name: bench-image
       - run: zstd -d --stdout bench-image.tar.zst | docker load && rm bench-image.tar.zst
       - run: uv run python scripts/bench.py build cae
-      - run: uv run pytest -q -m cae -n 2 -rps --durations=20
+      - run: docker save "$(uv run python -c 'from print_shop.bench.host import CAE_IMAGE; print(CAE_IMAGE)')" | zstd -T0 -3 -o cae-image.tar.zst
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cae-image
+          path: cae-image.tar.zst
+          compression-level: 0
+          retention-days: 1
+
+  # The `-m cae` tests on that image. The first image is loaded beside it, as one test follows
+  # `clearance --slide`'s reply into `fit-on` and `bend`.
+  cae:
+    needs: [image, cae-image]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --locked
+      - uses: actions/download-artifact@v4
+        with:
+          name: bench-image
+      - run: zstd -d --stdout bench-image.tar.zst | docker load && rm bench-image.tar.zst
+      - uses: actions/download-artifact@v4
+        with:
+          name: cae-image
+      - run: zstd -d --stdout cae-image.tar.zst | docker load && rm cae-image.tar.zst
+      - run: uv run python scripts/bench.py check
+      - run: uv run pytest -q -m "cae and not assembly" -n 2 -rps --durations=20
+
+  # The `-m cae` tests of a whole furniture assembly (mqucifer/print-shop#295), in a job of their
+  # own beside `cae`: a traced glass frame alone and joined, posts with turned latches, a table
+  # of 24 parts and a bolt left out take about 23 minutes of solves, and with the rest they'd
+  # leave `cae` under 6 of its 30. The same steps as `cae`, on the same image.
+  cae-assembly:
+    needs: [image, cae-image]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --locked
+      - uses: actions/download-artifact@v4
+        with:
+          name: bench-image
+      - run: zstd -d --stdout bench-image.tar.zst | docker load && rm bench-image.tar.zst
+      - uses: actions/download-artifact@v4
+        with:
+          name: cae-image
+      - run: zstd -d --stdout cae-image.tar.zst | docker load && rm cae-image.tar.zst
+      - run: uv run python scripts/bench.py check
+      - run: uv run pytest -q -m "cae and assembly" -n 2 -rps --durations=20

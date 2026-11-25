@@ -32,6 +32,7 @@ dev = [
     "pyyaml>=6.0",
     "types-pyyaml>=6.0",
     "pytest-xdist>=3.6",
+    "cryptography>=43",
 ]
 
 [build-system]
@@ -52,6 +53,7 @@ markers = [
     "bench: runs the CAD bench in its Docker image, built by scripts/bench.py build (deselect with -m 'not bench')",
     "bench_local: runs the CAD bench on a file only the Mac holds, and skips where it's absent",
     "cae: runs the bench's second image, with FreeCAD, built by scripts/bench.py build cae (deselect with -m 'not cae')",
+    "assembly: a cae test of a whole furniture assembly, run by CI in a job of its own (mqucifer/print-shop#295)",
 ]
 
 [tool.ruff]
@@ -75,5 +77,5 @@ follow_imports = "skip"
 
 # The bench's second image (src/print_shop/bench/cae-image) has FreeCAD and its FEM workbench.
 [[tool.mypy.overrides]]
-module = ["FreeCAD", "Part", "ObjectsFem", "femmesh.*", "femtools", "femtools.*"]
+module = ["FreeCAD", "Part", "ObjectsFem", "femmesh.*", "femtools", "femtools.*", "matplotlib", "matplotlib.*", "mpl_toolkits.*"]
 ignore_missing_imports = true
