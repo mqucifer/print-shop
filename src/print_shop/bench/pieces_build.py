@@ -920,10 +920,11 @@ def plan(
                     need = face_play * moves / room if room > 0 else face_play + over
                     need = math.ceil((need - CLOSE) * 100.0) / 100.0
                     stops.append(
-                        f"{after}has a raised face that would touch the lead at "
-                        f"{piecemap.said_at(at)}: its body moves {moves:.3f} mm that way in its "
-                        f"pocket, and the face has {room:.3f} mm to its opening's wall there. "
-                        f"Give --face-play {need:g} or more"
+                        f"{after}is refused: the pane pushed to one side in its pocket would "
+                        f"put its raised face on the lead, here at {piecemap.said_at(at)}. "
+                        f"--face-play {need:g} keeps it off. Its body moves {moves:.3f} mm "
+                        f"that way in its pocket, and the face has {room:.3f} mm to its "
+                        "opening's wall there"
                     )
         if stops:
             wrong.append(f"piece {piece.id}, round {where}, " + ". And ".join(stops))

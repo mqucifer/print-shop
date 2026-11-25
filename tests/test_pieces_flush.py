@@ -10,9 +10,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-import platform
 import re
 import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -26,51 +26,42 @@ pytestmark = pytest.mark.bench
 CASES = Path(__file__).parent / "bench_cases"
 BUILD = ["--thickness", 3, "--pane", 1, "--lip", 1.2, "--play", 0.25]
 COLOURS = ("blue", "gold", "green")
-#: The STEP data `pieces build` wrote without `--flush` on main, dcf3391, before it was added,
-#: in `print-shop/bench:0.15` on the Mac (arm64): the hash of each file's data, past its header,
-#: which names the second it was written, as `paths.content_hash` reads it; and the same with
-#: every number to 9 figures, for an image built on another machine, whose last figures may
-#: differ. A new image whose OpenCascade writes other data is a new reference, made again from
-#: main's code. Saved, with how they were made: `~/print-shop/proofs/ux-287/`.
+#: The STEP data `pieces build` wrote without `--flush` on main, dcf3391, before it was added:
+#: the hash of each file's data, past its header, which names the second it was written, as
+#: `paths.content_hash` reads it. By the bench image's architecture, as each writes other
+#: last figures, from the same image's Dockerfile: arm64 in `print-shop/bench:0.15` built on
+#: the Mac, amd64 in the one CI built for mqucifer/print-shop#291, run on the Mac under
+#: emulation, twice the same. A new image whose OpenCascade writes other data is a new
+#: reference, made again from main's code. Saved, with how they were made:
+#: `~/print-shop/proofs/ux-287/`.
 BEFORE = {
-    "flat/frame.step": (
-        "d3cfe5c89b449d879b8823272fd1f09f0b55633ddf0e849312c42ef3aaa53feb",
-        "87c3e71982967d2441decf89ae6c6ae343829580a4d662536d912671a5cb3c56",
-    ),
-    "flat/pane_blue.step": (
-        "a3f293759d56115dba42a8c794a67339cd5804eafead48127217a3fc975a16d7",
-        "87225a0824ee002b89657081f955e4b55aa688421d2e15aa410bec51ebfac8a0",
-    ),
-    "flat/pane_gold.step": (
-        "188eb47809383514eba220bb41cfe9ac05482188a9ec9dda617dc8777dfe3fa5",
-        "ad789de9f2c0c8f5158299dea58b9f27c040e045d0eb604320325d1fe630ce79",
-    ),
-    "flat/pane_green.step": (
-        "33f6c3a554e0b393fe0c685c2243ce80bfe84cacafd6c3c9c29a35219dd1993a",
-        "729ae9c9eb2ea57fbf506546165e4e3679213081753dd0da69e5d7119c8cc706",
-    ),
-    "hills/frame.step": (
-        "a0f58681ed0bdeb39dd0b5e0a9cd289fae26524df1eb39607c8f95265a005c0d",
-        "7c281c92163d395da12fa828810a2d68808fc76f4847619de6a9cf174c23858b",
-    ),
-    "hills/pane_blue.step": (
-        "e4b4ac04fde9b88d9de9d6d28352d714e78bb190c831bbb1965ebdf74be59e53",
-        "bf992c81a07a3c69d8e62a425572d6beb73711572d5ad3481b894e85f79ce18b",
-    ),
-    "hills/pane_green.step": (
-        "f5daa7d0f0d4224a137d7f14a53721154d64558714be369de836ab9381f55da2",
-        "6b9ea00a42a8a21a03611d7953973be1a34430f92f05a5d3125c17e32565eac4",
-    ),
-    "hills/pane_white.step": (
-        "5e2519f58da5bd78721c8748b35b02884742bf49bcd429fa1b0ae5123a8217bb",
-        "e16cc28101e1abfcf62690d977f7d32e34a5476d5e936d8a31224fb936e11bda",
-    ),
-    "hills/pane_yellow.step": (
-        "0cc027861a2d14550549c98d995647d7b24b458f9cbaf6f04e43d89735487d54",
-        "72171e39a39faf9cf1763502d8acb194524cbf0d0eda1e35ae1c95e346187aa0",
-    ),
+    "arm64": {
+        "flat/frame.step": "d3cfe5c89b449d879b8823272fd1f09f0b55633ddf0e849312c42ef3aaa53feb",
+        "flat/pane_blue.step": "a3f293759d56115dba42a8c794a67339cd5804eafead48127217a3fc975a16d7",
+        "flat/pane_gold.step": "188eb47809383514eba220bb41cfe9ac05482188a9ec9dda617dc8777dfe3fa5",
+        "flat/pane_green.step": "33f6c3a554e0b393fe0c685c2243ce80bfe84cacafd6c3c9c29a35219dd1993a",
+        "hills/frame.step": "a0f58681ed0bdeb39dd0b5e0a9cd289fae26524df1eb39607c8f95265a005c0d",
+        "hills/pane_blue.step": "e4b4ac04fde9b88d9de9d6d28352d714e78bb190c831bbb1965ebdf74be59e53",
+        "hills/pane_green.step": "f5daa7d0f0d4224a137d7f14a53721154d64558714be369de836ab9381f55da2",
+        "hills/pane_white.step": "5e2519f58da5bd78721c8748b35b02884742bf49bcd429fa1b0ae5123a8217bb",
+        "hills/pane_yellow.step": (
+            "0cc027861a2d14550549c98d995647d7b24b458f9cbaf6f04e43d89735487d54"
+        ),
+    },
+    "amd64": {
+        "flat/frame.step": "f9f70a060c602c1353723106bb5ab09368e420fb7da6ce64f95fbb76da99ce51",
+        "flat/pane_blue.step": "f6b1aab7f3ea0612a66b8b7123d813940ade8476ab8c02cafd911bd7dabad570",
+        "flat/pane_gold.step": "188eb47809383514eba220bb41cfe9ac05482188a9ec9dda617dc8777dfe3fa5",
+        "flat/pane_green.step": "70de21fc78c01747e8c926d27d25a7d0ff8653042732e0ec344f68bc1714b3bf",
+        "hills/frame.step": "0b3da0921ba99eddc8d500276bb09236ee765bbe7189d7398b091d0ef03ccad3",
+        "hills/pane_blue.step": "bab0fac845bd1324d7d36e94444c0c73de7092732223d1edd86b8cd98e130695",
+        "hills/pane_green.step": "00b74a88f0d47298bc5178ff4e720db8b3a70575018c66ce17462e1b8726a2d2",
+        "hills/pane_white.step": "4bb34fb6cf7f8c04da5b1c5e1155284c601d4b7dece5eb4adba0635c4a5aba2e",
+        "hills/pane_yellow.step": (
+            "a02574957cd5a07886bb419128eab11e488d1567cd9c98e9608881c6ee5d5f8e"
+        ),
+    },
 }
-NUMBER = re.compile(rb"(?<![#\w])[-+]?\d+\.\d*(?:E[-+]?\d+)?")
 
 
 @pytest.fixture(scope="module")
@@ -202,10 +193,12 @@ def test_a_face_that_would_touch_the_lead_at_a_corner_is_refused_naming_the_plac
     said = answer.numbers["unbuildable"]
     square = next(line for line in said if line.startswith("piece 1,"))
     # The panel's bottom-left corner, the opening's corner 1.2 mm of lip in from the piece's.
-    assert "would touch the lead at (1.3, 1.5)" in square, square
-    assert "its body moves 0.354 mm that way in its pocket" in square
+    assert (
+        "the pane pushed to one side in its pocket would put its raised face on the lead, "
+        "here at (1.3, 1.5). --face-play 0.25 keeps it off."
+    ) in square, square
+    assert "Its body moves 0.354 mm that way in its pocket" in square
     assert "the face has 0.141 mm to its opening's wall there" in square
-    assert "Give --face-play 0.25 or more" in square
     assert not (bench.work / "touch" / "frame.step").exists()
     checked = bench("pieces", "check", "flush.json", "--lip", 1.2, "--flush", "--face-play", 0.1)
     flagged = {f["piece"]: f for f in checked.numbers["flagged"] if f["flag"] == "no-face"}
@@ -255,7 +248,8 @@ def test_a_thinner_lip_and_body_move_the_pause_to_the_bodys_top(bench: Any) -> N
 
 def test_a_panel_built_without_flush_is_unchanged_byte_for_byte(bench: Any) -> None:
     """The test panel, and the traced test scene as `test_pieces.py` builds it, without
-    `--flush`: each file's STEP data is what main wrote before `--flush` was added."""
+    `--flush`: each file's STEP data is byte for byte what main wrote before `--flush` was
+    added, in an image of the same architecture."""
     traced = bench("pieces", "trace", "hills.png", "--width", 100, "--to", "hills.json")
     assert traced.verdict == "OK", traced.text
     hills = bench(
@@ -265,17 +259,18 @@ def test_a_panel_built_without_flush_is_unchanged_byte_for_byte(bench: Any) -> N
     flat = bench("pieces", "build", "flush.json", *BUILD, "--build-out", "flat")
     assert hills.verdict == flat.verdict == "OK", hills.text + flat.text
     assert "flush" not in flat.numbers and not list((bench.work / "flat").glob("*-laid.step"))
-    exact = platform.machine() in ("arm64", "aarch64")
+    found = subprocess.run(
+        ["docker", "image", "inspect", "--format", "{{.Architecture}}", host.IMAGE],
+        capture_output=True, text=True, check=True,
+    )  # fmt: skip
+    arch = found.stdout.strip()
+    assert arch in BEFORE, f"no reference made from main for an {arch} image: make one"
     differ = []
-    for name, (data_hash, rounded_hash) in BEFORE.items():
+    for name, wanted in BEFORE[arch].items():
         made = (bench.work / name).read_bytes()
-        data = made[made.find(b"\nDATA;") :]
-        rounded = NUMBER.sub(lambda m: b"%.9g" % float(m.group()), data)
-        if hashlib.sha256(rounded).hexdigest() != rounded_hash:
-            differ.append(f"{name}, to 9 figures")
-        elif exact and hashlib.sha256(data).hexdigest() != data_hash:
+        if hashlib.sha256(made[made.find(b"\nDATA;") :]).hexdigest() != wanted:
             differ.append(name)
-    assert not differ, f"other STEP data than main's: {differ}"
+    assert not differ, f"other STEP data than main's, on {arch}: {differ}"
     assert sorted(p.name for p in (bench.work / "flat").iterdir()) == [
         "frame.step", "pane_blue.step", "pane_gold.step", "pane_green.step",
     ]  # fmt: skip

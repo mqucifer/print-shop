@@ -1655,9 +1655,9 @@ def fixes_said(flags: list[dict[str, Any]]) -> str:
         )
     if "no-face" in names:
         ways.append(
-            "a flush pane whose raised face isn't one, or would touch the lead as its body "
-            "moves in its pocket: its line says the place, and the --face-play that keeps it "
-            "off, or a narrower lip leaves it more"
+            "a flush pane whose raised face isn't one, or would be put on the lead by a push "
+            "to one side in its pocket: its line says the place, and the --face-play that keeps "
+            "it off, or a narrower lip leaves it more"
         )
     if "wide-lead" in names:
         ways.append(
