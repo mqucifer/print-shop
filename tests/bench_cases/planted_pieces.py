@@ -57,6 +57,8 @@ is a Sponsor's scene or anything from one (mqucifer/print-shop#152, mqucifer/pri
   0.7 mm wide down between them into the band, so its share of the band hangs off the stalk
 - `band.json`: three pieces of a 60 x 40 mm panel round a band of lead 12 mm tall, one above it
   and two below with a line between them.
+- `flush.json`: three pieces of a 60 x 40 mm panel, for `build --flush`: one square-cornered
+  with a curved side, one a triangle with a corner of about 30 degrees, and one between them.
 - `hairs.json`: two cuts two microns wide whose ends face each other, which the
   outline has and no pixel shows.
 """
@@ -813,6 +815,38 @@ def rules(slit: bool, depth: float = 8.0) -> dict[str, Any]:
     }
 
 
+def flush() -> dict[str, Any]:
+    """Three pieces of a 60 x 40 mm panel, its lines 1.2 mm wide: a curved line down it, from
+    x = 20 at its bottom and top bowing 2 mm right at its middle, and a straight one from
+    (25, 0) to (60, 20), so the piece under it is a triangle with a corner of 29.7 degrees."""
+    import shapely
+
+    half = 0.6
+    curve = shapely.LineString(
+        [(20 + 2 * math.sin(math.pi * y / 40), y) for y in [-2 + 0.25 * k for k in range(177)]]
+    )
+    way = (35 / math.hypot(35, 20), 20 / math.hypot(35, 20))
+    slant = shapely.LineString([(25 - 3 * way[0], -3 * way[1]), (60 + 3 * way[0], 20 + 3 * way[1])])
+    lead = shapely.union_all([line.buffer(half, cap_style="flat") for line in (curve, slant)])
+    glass = shapely.box(0, 0, 60, 40).difference(lead)
+    left, *right = sorted(shapely.get_parts(glass), key=lambda p: p.centroid.x)
+    under, over = sorted(right, key=lambda p: p.centroid.y)
+    pieces = []
+    for number, (shape, colour) in enumerate(
+        ((left, "blue"), (under, "gold"), (over, "green")), start=1
+    ):
+        ring = [[round(x, 4), round(y, 4)] for x, y in shape.exterior.coords[:-1]]
+        pieces.append({"id": number, "colour": colour, "outline": ring})
+    return {
+        "piece_map": 1,
+        "panel": {"width_mm": 60, "height_mm": 40},
+        "lead_mm": 2 * half,
+        "colours": {"blue": {"rgb": [40, 90, 220]}},
+        "pieces": pieces,
+        "source": {"by": "rules, in a test"},
+    }
+
+
 clean().save("clean.png")
 broken().save("broken.png")
 hills().save("hills.png")
@@ -858,6 +892,7 @@ for name, made in (
     ("edge.json", edge()),
     ("band.json", band()),
     ("stalk.json", stalk()),
+    ("flush.json", flush()),
 ):
     with open(name, "w") as fh:
         json.dump(made, fh)

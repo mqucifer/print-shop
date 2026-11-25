@@ -883,6 +883,18 @@ def parser() -> Parser:
             "--fit", type=float, metavar="MM", help="with --lip, the build's --fit (0.1)"
         )
         reads.add_argument(
+            "--flush",
+            action="store_true",
+            help="with --lip, the build's --flush: each piece whose raised face isn't one, or "
+            "would touch the lead as its body moves in its pocket, is flagged",
+        )
+        reads.add_argument(
+            "--face-play",
+            type=float,
+            metavar="MM",
+            help="with --flush, the build's --face-play (--play unless given)",
+        )
+        reads.add_argument(
             "--min-lead",
             type=float,
             metavar="MM",
@@ -1111,6 +1123,32 @@ def parser() -> Parser:
         metavar="MM",
         help="with --seam: how far apart two neighbours' faces stand, in mm (0.6 unless "
         "given). Nothing lies in it: a came strip holds from the inside",
+    )
+    build.add_argument(
+        "--flush",
+        action="store_true",
+        help="each pane stepped, so its face is level with the lead's: its body in the pocket "
+        "as now, and a raised face the shape of its opening, --face-play smaller all round, "
+        "from the body down through the opening to the bed. For a panel that's a surface",
+    )
+    build.add_argument(
+        "--face-play",
+        type=float,
+        metavar="MM",
+        help="with --flush: the gap round each raised face, in mm (--play unless given)",
+    )
+    build.add_argument(
+        "--lip-thick",
+        type=float,
+        metavar="MM",
+        help="with --flush: the lip under the panes, and so each raised face's height, in mm, "
+        "on a layer line and two layers or more (a flat pane's lower lip unless given)",
+    )
+    build.add_argument(
+        "--body",
+        type=float,
+        metavar="MM",
+        help="with --flush: each pane's body, in mm, two layers or more (--pane unless given)",
     )
     seam = action.add_parser(
         "seam",

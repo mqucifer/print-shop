@@ -67,6 +67,13 @@ sides of a limit, each beyond the other's resolution (`limits.apart`).
   lip from its edge, which hold at least what a build's opening holds. A run learned each
   only from a build's refusal (mqucifer/print-shop#161).
 
+- **`no-face`**, with `--lip` and `--flush`, the build's own: a flush pane whose raised face
+  (mqucifer/print-shop#287) its opening and `--face-play` leave no one face of, or that would
+  touch the lead as its body moves in its pocket, with the place and the play that keeps it
+  off. By `pieces build`'s own plan. And by the piece's pixels further than the lip and the
+  face's play from its edge, where a face can be; how a body moves in its pocket only the
+  build's curves read.
+
 And two readings with every answer: the glass share, the pieces' area over the panel's, by
 their outlines and by their pixels, against the share the map's source had; and the lead's
 widest point.
@@ -91,7 +98,7 @@ from .report import NoAnswer, Report
 #: The flags, in the order a reply says them.
 FLAGS = (
     "dead-end", "surrounds", "sliver", "small", "neck", "notch", "gradient", "wide-lead",
-    "thin-lead", "no-pane", "no-opening",
+    "thin-lead", "no-pane", "no-opening", "no-face",
 )  # fmt: skip
 #: The limits when none is given. A piece under 3 mm across or 25 mm² can't be handled, and a
 #: place under 1.2 mm leaves no pane once its play and lips are taken: the operator's tracer's
@@ -158,6 +165,10 @@ class Limits:
     fit: float = 0.1
     least_lip: float | None = None
     min_visible: float | None = None
+    #: With `flush`, each pane's raised face as `pieces build --flush` makes it, at
+    #: `face_play`: the build's --play unless given.
+    flush: bool = False
+    face_play: float | None = None
 
     def lead(self, usual: float) -> float:
         return self.max_lead if self.max_lead is not None else MAX_LEAD * usual
@@ -175,6 +186,13 @@ def limits_of(args: Any) -> Limits:
     neck = given("min_neck", MIN_NECK)
     if lip is not None and not lip > 0:
         raise NoAnswer("--lip is the lip a build will be given, in mm, over 0")
+    if getattr(args, "face_play", None) is not None and not getattr(args, "flush", False):
+        raise NoAnswer("--face-play is a flush pane's, and there's no --flush")
+    if getattr(args, "flush", False) and lip is None:
+        raise NoAnswer(
+            "--flush reads each raised face in its opening, which needs the lip a build will "
+            "be given: give --lip"
+        )
     return Limits(
         given("min_width", MIN_WIDTH),
         given("min_area", MIN_AREA),
@@ -188,6 +206,8 @@ def limits_of(args: Any) -> Limits:
         given("fit", 0.1),
         float(least) if least is not None else None,
         getattr(args, "min_visible", None),
+        bool(getattr(args, "flush", False)),
+        getattr(args, "face_play", None),
     )
 
 
@@ -828,6 +848,29 @@ def build_refuses(found: Map, limits: Limits) -> dict[int, str]:
     return found_wrong
 
 
+def face_refuses(found: Map, limits: Limits) -> dict[int, str]:
+    """Each piece `pieces build --flush` would refuse for its raised face, in the build's own
+    words (mqucifer/print-shop#287): no one face once its play is taken from its opening, or a
+    face that would touch the lead as its body moves in its pocket, with the place and the
+    play that keeps it off. Only pieces with an opening: one without is `no-opening`'s."""
+    import re
+
+    from .pieces_build import plan
+
+    assert limits.lip is not None
+    least = limits.least_lip if limits.least_lip is not None else limits.lip
+    face_play = limits.face_play if limits.face_play is not None else limits.play
+    _, wrong = plan(
+        found, (limits.lip, least), limits.play, limits.fit, limits.min_visible, face_play
+    )
+    said: dict[int, str] = {}
+    for line in wrong:
+        named = re.match(r"piece (\d+), ", line)
+        if named and "raised face" in line and "no one opening" not in line:
+            said[int(named.group(1))] = line
+    return said
+
+
 def no_pane_said(row: dict[str, Any], refusal: str, panes: int, limits: Limits, mm: float) -> str:
     """A piece a build refuses whatever its lip, in words: the build's own, and what the
     piece's pixels say of it. Where the play leaves no pane, the build's words say what cuts
@@ -1243,6 +1286,7 @@ def read_map(
     by_pixels = dict(zip(ids, np.atleast_1d(ndimage.maximum(far, drawn.ids, ids)), strict=True))
     counted = dict(zip(ids, np.atleast_1d(ndimage.sum(drawn.ids > 0, drawn.ids, ids)), strict=True))
     refused = build_refuses(found, limits) if limits.lip is not None else {}
+    faced = face_refuses(found, limits) if limits.flush else {}
     from .pieces_build import NOZZLE, pane_refused
 
     for row in rows:
@@ -1293,13 +1337,39 @@ def read_map(
                         "said": refusal,
                     }  # fmt: skip
                 )
-                if seen >= 1 and "leaves it no" in refusal:
-                    notes.append(
-                        f"piece {row['id']}: by true distance a lip of {limits.lip:g} mm "
-                        f"leaves {seen} opening(s) {LEAST_OPENING:g} mm wide. A build's lip "
-                        "keeps each corner a corner, so past the end of a slit in the piece's "
-                        "edge it covers more, and that's what leaves none"
+            face = faced.get(row["id"]) if refusal is None else None
+            if limits.flush and refusal is None:
+                # The pixels further than the lip and the face's play from the piece's edge:
+                # where a raised face can be, by true distance. They can't read a body moving
+                # in its pocket, which only the build's curves can.
+                play = limits.face_play if limits.face_play is not None else limits.play
+                faces = openings_by_pixels(drawn, far, row["id"], limits.lip + play - drawn.mm)
+                row["faces_by_pixels"] = faces
+                if face is None and faces == 0:
+                    differs.append(
+                        f"piece {row['id']} has a raised face at a lip of {limits.lip:g} mm "
+                        f"and a play of {play:g} as `pieces build --flush` would build it, and "
+                        "none by its pixels further than both from its edge"
                     )
+                if face is not None:
+                    row["no_face"] = True
+                    flags.append(
+                        {
+                            "flag": "no-face",
+                            "piece": row["id"],
+                            "figure": float(faces),
+                            "limit": 1.0,
+                            "at": row["centre"],
+                            "said": face,
+                        }  # fmt: skip
+                    )
+            if refusal is not None and seen >= 1 and "leaves it no" in refusal:
+                notes.append(
+                    f"piece {row['id']}: by true distance a lip of {limits.lip:g} mm "
+                    f"leaves {seen} opening(s) {LEAST_OPENING:g} mm wide. A build's lip "
+                    "keeps each corner a corner, so past the end of a slit in the piece's "
+                    "edge it covers more, and that's what leaves none"
+                )
         if abs(row["widest_by_pixels_mm"] - row["widest_mm"]) > PIXELS_OFF * drawn.mm:
             differs.append(
                 f"piece {row['id']} is {row['widest_mm']:.2f} mm at its widest by the largest "
@@ -1380,6 +1450,8 @@ def read_map(
             row["flags"].append("no-pane")
         if row.pop("no_opening", False):
             row["flags"].append("no-opening")
+        if row.pop("no_face", False):
+            row["flags"].append("no-face")
         flags += mine
         del row["notch"]
     by_id = {r["id"]: r for r in rows}
@@ -1580,6 +1652,12 @@ def fixes_said(flags: list[dict[str, Any]]) -> str:
             "a piece the lip leaves no one opening in: its line says which, `pieces split` "
             "along the line it gives, `pieces merge` a small one into a neighbour, or build "
             "with a narrower lip"
+        )
+    if "no-face" in names:
+        ways.append(
+            "a flush pane whose raised face isn't one, or would be put on the lead by a push "
+            "to one side in its pocket: its line says the place, and the --face-play that keeps "
+            "it off, or a narrower lip leaves it more"
         )
     if "wide-lead" in names:
         ways.append(
