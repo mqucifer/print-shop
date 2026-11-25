@@ -10,6 +10,10 @@ of Crockford's base32 (about 50 bits), valid for `CODE_LASTS_S`, used once, and 
 
 `forget` deletes a phone's row, and every request looks its sign-in up here, so a forgotten
 phone is signed out at once.
+
+The page's origin is kept too (`served_at`). When the page first serves over HTTPS
+(mqucifer/print-shop#312), every phone paired before is signed out: its sign-in went over plain
+HTTP, where a copy of it could be read, so a copy mustn't sign in over HTTPS.
 """
 
 from __future__ import annotations
@@ -66,6 +70,10 @@ CREATE TABLE IF NOT EXISTS pairing (
     code_sha256    TEXT NOT NULL,
     expires_at     REAL NOT NULL,
     wrong_tries    INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS page (
+    one            INTEGER PRIMARY KEY CHECK (one = 1),
+    origin         TEXT NOT NULL
 );
 """
 
@@ -187,3 +195,26 @@ class Phones:
         with self._lock, self._open() as conn:
             gone = conn.execute("DELETE FROM phones WHERE name = ?", (name,)).rowcount
         return gone > 0
+
+    def served_at(self, origin: str) -> tuple[str | None, list[str]]:
+        """The page serves at `origin` now: the origin it served at before (None if none was
+        kept), and the phones signed out by the move. Moving to HTTPS from plain HTTP, or from
+        before origins were kept, signs out every phone paired before: each sign-in went over
+        plain HTTP (mqucifer/print-shop#312)."""
+        with self._lock, self._open() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = conn.execute("SELECT origin FROM page WHERE one = 1").fetchone()
+                before: str | None = row["origin"] if row is not None else None
+                out: list[str] = []
+                if (origin != before and origin.startswith("https:")
+                        and not (before or "").startswith("https:")):
+                    out = [r["name"] for r in conn.execute(
+                        "SELECT name FROM phones ORDER BY paired_at").fetchall()]
+                    conn.execute("DELETE FROM phones")
+                conn.execute("INSERT OR REPLACE INTO page (one, origin) VALUES (1, ?)", (origin,))
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+        return before, out

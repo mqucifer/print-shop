@@ -241,3 +241,17 @@ def _refuse_live_services() -> Iterator[None]:
     finally:
         monkeypatch.undo()
 
+
+
+@pytest.fixture(params=["http", "https"])
+def phone_scheme(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch,
+                 tmp_path_factory: pytest.TempPathFactory) -> str:
+    """Every phone test, over plain HTTP and over HTTPS with a made-up certificate made here
+    (mqucifer/print-shop#312): `tests/test_phone_start.py`'s `home()` and `Browser` read it."""
+    from tests import test_phone_start as start  # noqa: PLC0415
+    from tests.tls_made_up import make  # noqa: PLC0415
+
+    monkeypatch.setattr(start, "SCHEME", request.param)
+    if request.param == "https" and start.TLS is None:
+        start.TLS = make(tmp_path_factory.mktemp("phone-tls"))
+    return str(request.param)

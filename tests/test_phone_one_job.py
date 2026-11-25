@@ -32,6 +32,9 @@ from tests.test_phone_needs import PURPOSE, SUPPORT, request
 from tests.test_phone_start import Browser, FakeStarts, home, signed_in
 from tests.test_queue import wait_until
 
+#: Over plain HTTP and over HTTPS (mqucifer/print-shop#312).
+pytestmark = pytest.mark.usefixtures("phone_scheme")
+
 JOB = "job-0001-made-up"
 
 

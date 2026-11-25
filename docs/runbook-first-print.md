@@ -548,7 +548,7 @@ A ready job can be armed and started from your phone, on the home Wi-Fi only (mq
 
 **Each print.**
 
-1. Run the job as before. Without the flag, the phone is how it starts; with it, the terminal and the card start it too (the table above). The run says `Your phone's page: http://…/ , and its Start: http://…/start , on the home Wi-Fi only`, and the card links to Start ("Start it on your phone"). It opens in the phone's browser, never inside Home Assistant.
+1. Run the job as before. Without the flag, the phone is how it starts; with it, the terminal and the card start it too (the table above). The run says `Your phone's page: http://…/ , and its Start: http://…/start , on the home Wi-Fi only` (`https://…` once it's on HTTPS, below), and the card links to Start ("Start it on your phone"). It opens in the phone's browser, never inside Home Assistant.
 2. At the gate, the phone's Start page shows the job, and what Start checks: time and plastic, the pause, the spool, the nozzle, the file and settings, and the printer. Each row says its result, and what to do where one fails.
 3. Look at the bed, tick **I can see the bed is clear**, and press **Start**. The same checks as `start` here run again. If one holds it, the phone says why, nothing is armed, and you Start again once it's mended (reload the page). Started, the phone says `Started by you. Disarmed again.`, once the printer has started it; a start that fails at the printer says `Not started: …`, and why. If sending the file takes longer than the phone waits, it says `Starting: …`, and the Start page says how it went once you reload. The ledger keeps who armed it, from where and when, with the print's row.
 
@@ -558,10 +558,39 @@ A ready job can be armed and started from your phone, on the home Wi-Fi only (mq
 - **anything that isn't a phone's own address on the home Wi-Fi:** the Mac itself (a tunnel or a script on it), the router (a port forward), Home Assistant's host (its remote access or an automation), another network, or any request carrying a proxy's headers. The phone shows `You're away from home`, and the job waits.
 
 **What it doesn't claim:**
-- **The page is plain HTTP.** Anyone who can read the home Wi-Fi's traffic, and copies a phone's sign-in, could arm a ready job from the home network. HTTPS would close that. The Sponsor deferred it on 2026-11-24 ("HTTP for now").
+- **Without HTTPS set up, the page is plain HTTP.** Anyone who can read the home Wi-Fi's traffic, and copies a phone's sign-in, could arm a ready job from the home network. Serving the page over HTTPS ("The page over HTTPS", below) closes that: the sign-in's cookie is then `Secure`, and sent over HTTPS only, and every sign-in made over plain HTTP is signed out the first time the page serves HTTPS.
 - **A copied sign-in works from any device on the home Wi-Fi,** for a year or until `phone.py forget`. Binding a phone to its Wi-Fi hardware address was weighed and left out: an iPhone rotates its private Wi-Fi address, and would be refused.
 - **A VPN that puts its clients on the home range isn't told from a phone at home:** some routers' WireGuard or IPsec servers, bridged OpenVPN, or a VPN's subnet router on a machine at home. There's no such VPN in the house (the Sponsor, 2026-11-24). **If one is ever added, change this check first,** before using it.
 - Another machine on the home network relaying raw traffic looks like that machine. What it carries is still your phone's own page and confirm, pressed by you.
+
+### The page over HTTPS
+
+The page can serve HTTPS itself, with a certificate for its own name (mqucifer/print-shop#312). It's for when print-shop moves to its own host, and is set up there once. Until then, the page is plain HTTP, as above.
+
+**What's needed, in general words:**
+- **A name for the page,** such as `print.<your domain>`, and a local DNS record (at the router, or the home network's DNS) pointing it at print-shop's host on the home Wi-Fi: the address in `PHONE_HOME`.
+- **A certificate for that name alone,** never a wildcard's and never one that names anything else: a certificate for more names than the page's puts their key on this host. The home network's ACME client issues it: a reverse proxy on the same host, which holds port 443, or any other. print-shop doesn't renew it and doesn't talk to the ACME client.
+- **A job that copies it after each renewal** into a folder of print-shop's own, readable by print-shop's user only: the certificate with its chain (PEM) and its key (PEM, not encrypted). The ACME client's own renewal hook, or a timer, does it. Copy the certificate and the key both: print-shop takes a new pair once both are there, and serves the one before until then.
+- **The page's own port, `PHONE_PORT`** (8765, not 80, and not 443, which the proxy holds). Allow it in the host's firewall on the home network only.
+- **print-shop runs straight on the host, never behind the proxy, a container's port forwarding, or anything else that relays.** The page tells a phone at home by the connection's own address. Behind anything that relays, every phone is refused as `You're away from home`, so nothing is weakened, but nothing works either.
+
+**Set it up.** Beside `PHONE_HOME` and `PHONE_PORT`, set all three of these:
+
+```
+PHONE_NAME=print.<your domain>
+PHONE_TLS_CERT=/path/to/print-shop/tls/fullchain.pem
+PHONE_TLS_KEY=/path/to/print-shop/tls/key.pem
+```
+
+With all three set, the page is HTTPS only, at `https://<PHONE_NAME>:<PHONE_PORT>/`. Plain HTTP to that port is closed without an answer, and `Host` and `Origin` must name the page's name, not its address. With one or two set, the page stays off and says which is missing (`PHONE_TLS_KEY isn't set (PHONE_NAME and PHONE_TLS_CERT are)`): it never falls back to plain HTTP. With none set, the page is as before. Every check above stays as it is.
+
+**The first time it serves HTTPS,** the run says `The phone's page is now https://…/: pair your phone again with phone.py pair`. Each phone paired before is signed out, because its sign-in went over plain HTTP, and the phone's browser keeps its cookie for the old address only. Pair each phone again (step 3 above), at the new address. Change the page's address in `ha-configs/print_shop_notices.yaml` to the https one too. The card's links follow the run's own.
+
+**Check that the page sees the phone itself.** Run `phone.py pair` and pair from the phone, on the home Wi-Fi. The run's log says `a phone was paired as "…" from A.B.C.D`. Compare that address with the phone's own (on an iPhone: Settings, Wi-Fi, the network's ⓘ, IP Address). It must be the phone's. If pairing says `You're away from home` with `this came through the Mac itself` or `this came from outside the home network`, the page is seeing something that relays (the proxy, or a container's forwarding), not the phone. Run print-shop on the host itself until it's the phone's own address.
+
+**The certificate is checked as the phone's browser will check it,** apart from who issued it, which the phone checks. The page stays off, saying why at the run's start, if the certificate doesn't name `PHONE_NAME`, is a wildcard's or names more than the page, is out of date or not valid yet, or if the key isn't its own. The files are read again for each connection, so a renewal is served without a restart. A renewal that fails its check is said once in the log, and the certificate before it is served while it lasts.
+
+**Running out.** A run's start says `The phone's certificate runs out on … and hasn't been renewed: check the job that copies it.` once fewer than 14 days are left. An ACME client renews well before that, so the copy isn't running. Once the certificate runs out, the page answers nothing. The phone shows only that it can't connect. The run's log, and the queue's live line, say `The phone's page is off: its certificate ran out on …, and no good renewal is in …`, until a good one is copied in. No restart is needed then either.
 
 The flag still works: in a run armed by it, `start` at the terminal and the card's **Yes, print it** start the print, as before. Without it, nothing in Home Assistant, no MQTT message, no setting and no test can arm a start.
 
@@ -635,6 +664,8 @@ Then open <http://127.0.0.1:8719/> in a browser on the Mac. `--port` picks anoth
 | `Not started: this run isn't armed …` | a Start here or on the card, in a run without `PRINT_AGENT_ALLOW_HARDWARE=1` (mqucifer/print-shop#214) | Start on your phone, on the home Wi-Fi; or stop, and `--resume` with the flag |
 | the phone says `You're away from home` | Start came from somewhere other than a phone's own address on the home Wi-Fi: the line under it says which | start it from the phone on the home Wi-Fi; the job waits |
 | `the phone's Start is off: this Mac doesn't have … now` | the Mac isn't on the home Wi-Fi, or its address changed | reserve the Mac's address at the router and set `PHONE_HOME` to it |
+| `The phone's page is off: its certificate …` | the page's certificate doesn't name `PHONE_NAME`, names more, is out of date, or its key isn't its own (mqucifer/print-shop#312) | copy in a certificate for the page's name alone, with its key ("The page over HTTPS") |
+| `The phone's certificate runs out on … and hasn't been renewed` | fewer than 14 days are left: the job that copies the renewal isn't running | check the ACME client's renewal and the copy job |
 | `print-shop doesn't know what's on cc1 since …` | a print with a swap was sent, and you haven't yet said that it's over and which spool is on | answer it where it's asked (before preparing, or `y` at the review), or `stock load <id>` and `y`, or pick on that print's outcome card; then approve |
 | `… still doesn't know what's on cc1, as nothing said … is over` | `stock load` recorded the load without a `y` to whether that print's over, or had no terminal to ask in | run `stock load <id>` in a terminal, and `y` once that print is over |
 | `… loaded on cc1, so nothing was uploaded or printed` | the stock changed between your Approve and the start | nothing was started; `stock load <id>`, then run the job again |

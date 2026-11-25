@@ -32,6 +32,7 @@ dev = [
     "pyyaml>=6.0",
     "types-pyyaml>=6.0",
     "pytest-xdist>=3.6",
+    "cryptography>=43",
 ]
 
 [build-system]

@@ -156,7 +156,7 @@ def serve(
     queue: PrintQueue, daemon: Daemon, *, read: Callable[[str], str] = input,
     write: Callable[[str], None] = print, forget: Callable[[], None] = drop_typed,
     stock: Callable[[], str] | None = None, screen: Callable[[], TextIO | None] = terminal,
-    runs: Runs | None = None,
+    runs: Runs | None = None, phone_trouble: Callable[[], str] | None = None,
 ) -> int:
     """The queue at the terminal until `quit`, Ctrl-D or Ctrl-C: every job waits where it is.
 
@@ -164,9 +164,11 @@ def serve(
     has just happened, rewritten in place as it changes, as the review's timer is
     (mqucifer/print-shop#260): what's being typed is left as it is. The whole of what happened
     is said at the next prompt. `runs` is where the finished runs are, for `runs` and `again`
-    (mqucifer/print-shop#216)."""
+    (mqucifer/print-shop#216). `phone_trouble` says why the phone's page is off, for that line
+    (mqucifer/print-shop#312)."""
     term = _Terminal(queue, daemon, read, write, forget, stock)
     term.runs = runs
+    term.phone_trouble = phone_trouble
     term.show()
     while True:
         live = _Live(term, screen())
@@ -229,6 +231,7 @@ class _Terminal:
         self.read, self.write, self.forget, self.stock = read, write, forget, stock
         self.told = 0
         self.runs: Runs | None = None
+        self.phone_trouble: Callable[[], str] | None = None
 
     def drain(self) -> list[str]:
         """What's happened since it was last said, said now."""
@@ -248,6 +251,9 @@ class _Terminal:
         offered = next((li for li in lines if li.offered), None)
         if offered is not None:
             said.append(f"offered to print: {offered.number} {offered.job.part}")
+        trouble = self.phone_trouble() if self.phone_trouble is not None else ""
+        if trouble:
+            said.append(trouble.rstrip("."))
         new = self.queue.said(self.told if since is None else since)
         if new:
             said.append(new[-1] + (f" (+{len(new) - 1} more)" if len(new) > 1 else ""))
