@@ -775,7 +775,10 @@ def _read_parts(parts: list[str | Left], request: ReviewRequest) -> Review | Sli
         if preset is None:
             slips.append((at, _refused(key, request)))
             continue
-        wrong = names.not_a_choice(key, value)
+        # Not one of the words Orca takes, or not the form its setting is (mqucifer/print-shop#296).
+        wrong = names.not_a_choice(key, value) or names.not_a_form(
+            key, value, _extruders(request), names.now(key, request.process, request.filament,
+                                                      _sliced_with(request), _today(request)))
         if wrong:
             # Not one of the words Orca takes: refused before anything slices, where it would
             # only be read back as not reaching the file (mqucifer/print-shop#279).
@@ -1742,6 +1745,14 @@ def finding(words: str, request: ReviewRequest) -> list[names.Found]:
 def filament_name(request: ReviewRequest) -> str:
     """The filament preset's name, as `find` says it."""
     return _filament_name(request)
+
+
+def _extruders(request: ReviewRequest) -> int:
+    """How many extruders the printer has, as the slice's config says by its nozzles; one where
+    it can't be read (mqucifer/print-shop#296)."""
+    config = _sliced_with(request) or {}
+    nozzles = [n for n in config.get("nozzle_diameter", "").split(",") if n.strip()]
+    return max(len(nozzles), 1)
 
 
 def _filament_name(request: ReviewRequest) -> str:

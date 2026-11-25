@@ -21,21 +21,30 @@ config block, was refused as if it weren't one. So:
   under it in `find`, with the line that turns it off where one does. A correction to another
   word is refused before anything slices (`not_a_choice`). The table is the one source: the
   shop's bound on the model's proposals (`support_type`'s tree only) is never said as Orca's.
+- **A value of the wrong form is refused before anything slices** (mqucifer/print-shop#296,
+  `not_a_form`): a whole number, a number, a percentage, mm or a percentage, on or off, as
+  Orca's own definitions type the setting (`orca_forms.json`, written by
+  `scripts/orca_forms.py` from the installed Orca's source). Only the form, never the range. A
+  number may be typed with the unit the review shows it in (`80%` of a fan is `80`), and a
+  per-extruder list has no more values than the printer has extruders.
 """
 
 from __future__ import annotations
 
 import difflib
+import json
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from print_shop.setup.bounds import MATERIAL, SETTINGS
 from print_shop.setup.reach import profile_of, unplaced
 from print_shop.sliced import NOT_SETTINGS, PROFILE_IDS
 
-__all__ = ["PLAIN", "STANDS_IN", "Found", "choices", "either", "find", "named", "not_a_choice",
+__all__ = ["ORCA_FORMS", "PLAIN", "STANDS_IN", "Found", "choices", "either", "find", "form",
+           "named", "not_a_choice", "not_a_form", "now",
            "off", "plain", "refused", "switched", "turns_off", "typed", "with_unit"]
 
 _PERCENT, _SPEED, _TEMP, _MM, _S = "%", " mm/s", " °C", " mm", " s"
@@ -220,14 +229,90 @@ def switched(key: str, value: str) -> str:
 
 def typed(key: str, value: str) -> str:
     """A switch's value typed as it's shown, `on` or `off` (or yes and no), as Orca writes it,
-    1 or 0; one of a setting's words in Orca's case (`No ironing` is `no ironing`); any other as
-    typed."""
+    1 or 0; one of a setting's words in Orca's case (`No ironing` is `no ironing`); a number with
+    the unit the review shows it in, as Orca takes it, without (`80%` of a fan is `80`,
+    mqucifer/print-shop#296); any other as typed."""
     word = next((c for c in choices(key) if c == value.strip().lower()), None)
     if word is not None:
         return word
-    if PLAIN.get(key, ("", ""))[1] != _SWITCH:
-        return value
-    return {"on": "1", "yes": "1", "off": "0", "no": "0"}.get(value.strip().lower(), value)
+    kind = form(key).rstrip("s")
+    if PLAIN.get(key, ("", ""))[1] == _SWITCH or kind == "bool":
+        return {"on": "1", "yes": "1", "off": "0", "no": "0"}.get(value.strip().lower(), value)
+    unit = PLAIN.get(key, ("", ""))[1].strip()
+    if unit and kind in ("int", "float"):
+        # Only where the form can't take a %: of a percentage, or mm or %, it means itself.
+        bare = re.fullmatch(rf"\s*({_A_NUMBER})\s*{re.escape(unit)}\s*", value)
+        if bare is not None:
+            return bare.group(1)
+    return value
+
+
+#: Each setting's form, as Orca's own definitions type it (`scripts/orca_forms.py`), and the Orca
+#: version they're from.
+_FORMS: dict[str, Any] = json.loads(Path(__file__).with_name("orca_forms.json").read_text())
+ORCA_FORMS: str = _FORMS["orca"]
+
+_A_NUMBER = r"-?(?:\d+(?:\.\d*)?|\.\d+)"
+#: Each form checked, its one item's pattern, and how it's said.
+_SAID = {
+    "int": (r"-?\d+", "a whole number", "takes one"),
+    "float": (_A_NUMBER, "a number", "takes one"),
+    "percent": (rf"{_A_NUMBER}%?", "a percentage", "takes one"),
+    "floatorpercent": (rf"{_A_NUMBER}%?", "mm or a percentage", "takes either"),
+    "bool": (r"[01]", "on or off", "takes on or off"),
+}
+_COUNTS = {1: "one", 2: "two", 3: "three", 4: "four"}
+
+
+def form(key: str) -> str:
+    """The form `key`'s value takes, as Orca's definitions type it: `int`, `floats`,
+    `floatorpercent`, `bool`, `enum` …; '' for a key they don't have."""
+    return str(_FORMS["forms"].get(key, ""))
+
+
+def not_a_form(key: str, value: str, extruders: int = 1, today: str = "") -> str:
+    """Why `key=value` is refused, before anything slices, where `value` isn't the form `key`
+    takes (mqucifer/print-shop#296), or ''. Only the form is checked, never the range. A
+    per-extruder list takes one value an extruder at most. `today` is its value now, for the
+    example where what was typed has no number of the form; a setting whose form isn't one of a
+    number's or on/off's reads as before."""
+    kind = form(key)
+    one = kind.removesuffix("s") if kind.endswith("s") and kind != "floatorpercent" else kind
+    if one not in _SAID:
+        return ""
+    pattern, said, takes = _SAID[one]
+    items = [item.strip() for item in value.split(",")] if one != kind else [value.strip()]
+
+    def example() -> str:
+        if one == "bool":
+            return "on" if today.split(",")[0].strip() in ("1", "true") else "off"
+        decimal = re.fullmatch(r"\s*(\d+),(\d+)\s*", value)
+        if one == "float" and decimal is not None:
+            return f"{decimal.group(1)}.{decimal.group(2)}"  # a decimal comma, as 0,8 is
+        typed_ = re.search(_A_NUMBER + ("%?" if one in ("percent", "floatorpercent") else ""),
+                           value)
+        if typed_ is not None and re.fullmatch(pattern, typed_.group(0)):
+            return typed_.group(0)
+        first = today.split(",")[0].strip()
+        return first if re.fullmatch(pattern, first) else ""
+
+    if len(items) > max(extruders, 1):
+        many = _COUNTS.get(extruders, str(extruders))
+        has = (f"this printer has {many} extruder" + ("s" if extruders > 1 else "")
+               + (": give one value" if extruders == 1 else f": give up to {many} values"))
+        shown = example()
+        return f"{has}, e.g. {key}={shown}" if shown else has
+    if all(re.fullmatch(pattern, item) for item in items):
+        return ""
+    shown = example()
+    refusal = f"'{value}' isn't {said}: {key} {takes}"
+    return f"{refusal}, e.g. {key}={shown}" if shown else refusal
+
+
+def now(key: str, process: Mapping[str, Any], filament: Mapping[str, Any],
+        config: Mapping[str, str] | None = None, changed: Mapping[str, str] | None = None) -> str:
+    """A setting's value today: as this review changes it, else as sliced, else the preset's."""
+    return _now(key, process, filament, config, changed or {})
 
 
 def choices(key: str) -> tuple[str, ...]:

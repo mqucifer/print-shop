@@ -291,9 +291,10 @@ def test_a_switch_may_be_typed_on_or_off() -> None:
     assert [(c.key, c.value) for c in review.corrections] == [("enable_support", "1")]
     review = parse_answer("enable_support=1 because the arch sags", _request())
     assert isinstance(review, Review) and review.corrections[0].value == "1", "as ever"
-    review = parse_answer("wall_loops=on", _request())
-    assert isinstance(review, Review) and review.corrections[0].value == "on", (
-        "only a switch's on is read as 1: the rest is checked as typed")
+    # Only an on/off setting's on is read as 1: a whole number's is refused as not its form
+    # (mqucifer/print-shop#296).
+    assert parse_answer("wall_loops=on", _request()) == (
+        "'on' isn't a whole number: wall_loops takes one, e.g. wall_loops=3")
 
 
 def test_a_refusal_at_the_prompt_is_wrapped_to_the_width() -> None:

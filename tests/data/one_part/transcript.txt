@@ -50,6 +50,7 @@ PRINT
   machine   CI Centauri Carbon 0.4 nozzle
   process   CI 0.20mm Standard
   filament  -
+  orca      setting forms read from Orca 2.4.2
 
 SETTINGS, over your presets
   No changes: your presets as they are.
