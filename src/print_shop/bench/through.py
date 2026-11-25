@@ -22,6 +22,14 @@ faces tangent to it that rise to a point, no flatter than `FLATTEST` degrees, al
 stretch. It's a bore, read by what's there: what bears on its end is the ring less the peak's
 cut, and a shank leaning toward the peak has only what's left of the round to lean on. A round
 face is read stretch by stretch, so two arcs apart along the axis never add up to a hole.
+
+**A drop-in channel** (mqucifer/print-shop#302) is a U with a round bottom, open on one side,
+that the bolt drops into from that side. It's what `bore` refuses as a slot's end, and it's read
+as one only where the assembly declares it, along the axis and open the way it says
+(`channel`): one round face about the axis whose one gap, the same along the whole stretch, is
+centred on the open side and no more than half the round. What bears on its end is the ring
+less the channel's cut, the round and the walls straight up from where it leaves off; and a
+shank leaning on it has the round to lean on, and nothing toward the open side.
 """
 
 from __future__ import annotations
@@ -60,6 +68,29 @@ def bore(
     its `radius`, `low` and `high`, where it runs along the axis, and its `peak`, None where
     it's round. Where holes of several sizes share the axis, a counterbore over a hole, it's
     the narrowest: the one the bolt's shank is in. Or, as words, why there's none."""
+    found = _on_axis(cylinders, point)
+    if isinstance(found, str):
+        return found
+    hole, arcs, missing = found
+    if not any(missing):
+        return hole
+    if any(len(gaps) != 1 for gaps in missing):
+        return NOT_ROUND
+    gap = _one_gap(hole, arcs, missing)
+    if gap is None:
+        return NOT_ROUND
+    middle, half = gap
+    peak = _peak(hole, middle, half, planes or [])
+    return peak if isinstance(peak, str) else {**hole, "peak": peak}
+
+
+def _on_axis(
+    cylinders: list[dict[str, Any]], point: Any
+) -> tuple[dict[str, Any], list[tuple[float, float, dict[str, Any]]], list[Any]] | str:
+    """The round faces of a hole whose axis passes through `point`, the narrowest where several
+    share it, on the stretch nearest the point: the hole, with its `peak` None; its arcs, each
+    with where it runs along the axis; and what they leave open at each level, as `_missing`
+    says. Or, as words, why there's none."""
     at = np.asarray(point, dtype=float)
     found = []
     for one in cylinders:
@@ -108,20 +139,165 @@ def bore(
         _missing([c for start, end, c in arcs if start <= (a + b) / 2 <= end], first)
         for a, b in levels
     ]
-    if not any(missing):
-        return hole
-    if any(len(gaps) != 1 for gaps in missing):
-        return NOT_ROUND
+    return hole, arcs, missing
+
+
+def _one_gap(
+    hole: dict[str, Any], arcs: list[tuple[float, float, dict[str, Any]]], missing: list[Any]
+) -> tuple[np.ndarray, float] | None:
+    """The one gap a hole's round faces leave at every level of its stretch, the same at each,
+    on faces about one axis: its middle and half how far round it goes. None where it isn't."""
+    radius, first, origin = hole["radius"], hole["axis"], hole["origin"]
     middle, half = missing[0][0]
     for other, wide in (gaps[0] for gaps in missing[1:]):
         if abs(wide - half) * radius > SLIP or np.linalg.norm(other - middle) * radius > SLIP:
-            return NOT_ROUND
+            return None
     for _, _, one in arcs:
         off = np.asarray(one["origin"], dtype=float) - origin
         if float(np.linalg.norm(off - (off @ first) * first)) > SAME:
-            return NOT_ROUND
-    peak = _peak(hole, middle, half, planes or [])
-    return peak if isinstance(peak, str) else {**hole, "peak": peak}
+            return None
+    return middle, half
+
+
+def channel(
+    cylinders: list[dict[str, Any]], point: Any, axis: Any, opened: Any
+) -> dict[str, Any] | str:
+    """The drop-in channel whose axis passes through `point`, declared along `axis` and open
+    toward `opened` (mqucifer/print-shop#302): the hole `bore` gives, its `peak` None, with its
+    `channel`: `toward`, the way it's open; `half`, half its gap round the axis in radians; and
+    `open_mm`, how wide it's open where the round leaves off. Or why it isn't that channel."""
+    found = _on_axis(cylinders, point)
+    if isinstance(found, str):
+        return found.replace("no round hole", "no round face")
+    hole, arcs, missing = found
+    way, toward = np.asarray(axis, dtype=float), np.asarray(opened, dtype=float)
+    radius = hole["radius"]
+    if abs(abs(float(hole["axis"] @ way)) - 1) > SQUARE:
+        return (
+            f"the round face there runs toward ({_way(hole['axis'])}), not along the channel's "
+            f"axis, ({_way(way)})"
+        )
+    if not any(missing):
+        return (
+            f"the round face there, {2 * radius:.3f} mm across, goes all the way round: a hole, "
+            "not a channel open on one side"
+        )
+    if not all(missing):
+        return (
+            "the round face there closes along some of the stretch and is open along the rest: "
+            "no channel along the whole of it"
+        )
+    if any(len(gaps) != 1 for gaps in missing):
+        return "the round face there is open in more than one place round the axis: no channel"
+    gap = _one_gap(hole, arcs, missing)
+    if gap is None:
+        return (
+            "the round face there isn't open the same way and as wide along the whole stretch: "
+            "no channel"
+        )
+    middle, half = gap
+    if float(np.linalg.norm(middle - toward)) * radius > SLIP:
+        return (
+            f"the round face there is open toward ({_way(middle)}), not toward its declared "
+            f"open side, ({_way(toward)})"
+        )
+    if half > math.pi / 2 + SLIP / radius:
+        return (
+            f"the round face there goes {math.degrees(2 * math.pi - 2 * half):.2f}° round, less "
+            "than half: a channel's bottom is at least a half round"
+        )
+    half = min(half, math.pi / 2)
+    gaps = {"toward": toward, "half": half, "open_mm": 2 * radius * math.sin(half)}
+    return {**hole, "channel": gaps}
+
+
+def seat_of(
+    joint: Any, cylinders: list[dict[str, Any]], point: Any, planes: list[dict[str, Any]]
+) -> dict[str, Any] | str:
+    """A through-bolt's seat in one part: its round or peaked hole, or, where the joint declares
+    one, its drop-in channel (mqucifer/print-shop#302). Or, as words, why there's none there."""
+    found = joint.channel
+    if found is None:
+        hole = bore(cylinders, point, planes)
+        if isinstance(hole, str):
+            return (
+                f"{hole}. A through-bolt passes right through both parts, in a round or peaked "
+                "hole in each, or in a drop-in channel its joint declares"
+            )
+        return hole
+    hole = channel(cylinders, point, found.axis_way(), found.open_way())
+    if isinstance(hole, str):
+        return (
+            f"{hole}. The joint declares its bolt in a drop-in channel along {found.axis}, open "
+            f"toward {found.open}, in each part"
+        )
+    return hole
+
+
+def walls_met(joint: Any, way: dict[str, Any]) -> list[str]:
+    """Where a channel's declared walls aren't where it ends in each part, square to the bolt:
+    the head's at the first part's seat, and the nut's at the second's."""
+    found = joint.channel
+    if found is None:
+        return []
+    wrong = []
+    sign = float(way["axis"] @ found.axis_way())
+    for k, (wall, part) in enumerate(zip(("head", "nut"), joint.between, strict=True)):
+        level = found.head_wall if wall == "head" else found.nut_wall
+        ends = way["seats"][k] * sign
+        if abs(ends - level) > 1e-3:
+            wrong.append(
+                f"{found.wall_said(wall)}: the channel in {part} ends at {found.axis}={ends:g}, "
+                f"not there. The wall the {wall} bears on is where the channel ends, square to it"
+            )
+    return wrong
+
+
+def _gap(hole: dict[str, Any]) -> dict[str, Any] | None:
+    """What's open of a hole's round, a peak's or a channel's: its `toward` and its `half`."""
+    found: dict[str, Any] | None = hole["peak"] or hole.get("channel")
+    return found
+
+
+def channel_cut(hole: dict[str, Any], inner: float, outer: float) -> float:
+    """The area a channel takes out of the ring between `inner` and `outer` round its axis,
+    `inner` no less than its radius, by arithmetic: the round, and the walls that rise straight
+    from where it leaves off, `w` from the axis. At r from it they're open for asin(w/r) either
+    side of the open way: that times 2r, summed along r."""
+    gap = hole.get("channel")
+    if gap is None:
+        return 0.0
+    wide = float(hole["radius"]) * math.sin(float(gap["half"]))
+
+    def taken(r: float) -> float:
+        return r * r * math.asin(min(wide / r, 1.0)) + wide * math.sqrt(max(r * r - wide**2, 0))
+
+    least = max(inner, float(hole["radius"]))
+    return taken(outer) - taken(least) if outer > least else 0.0
+
+
+def seat_cut(hole: dict[str, Any], inner: float, outer: float) -> float:
+    """What a hole's shape takes out of the ring round its end, past the round: a peak's cut,
+    a channel's, or none."""
+    return channel_cut(hole, inner, outer) if hole.get("channel") else peak_cut(hole, inner, outer)
+
+
+def channel_said(hole: dict[str, Any]) -> str:
+    """A channel, as words: its round, and which way and how wide it's open."""
+    gap = hole["channel"]
+    return (
+        f"a drop-in channel, {2 * hole['radius']:.3f} mm across its round, open toward "
+        f"({_way(gap['toward'])}), {gap['open_mm']:.3f} mm wide where the round leaves off"
+    )
+
+
+def channel_saved(gap: dict[str, Any]) -> dict[str, Any]:
+    """A channel as a reply's numbers."""
+    return {
+        "toward": [round(float(v), 6) + 0.0 for v in gap["toward"]],
+        "round_deg": math.degrees(2 * math.pi - 2 * gap["half"]),
+        "open_mm": gap["open_mm"],
+    }
 
 
 def _missing(arcs: list[dict[str, Any]], axis: np.ndarray) -> list[tuple[np.ndarray, float]]:
@@ -268,10 +444,12 @@ def lean_share(hole: dict[str, Any], leans: Any) -> float:
     """How much of a round hole's bearing is there for a shank leaning `leans`, square to the
     axis: 1 in a round hole. A shank bears on the half of the round it leans toward, each bit
     by how square it is to that, its diameter by its length in all. Of that a peak leaves what
-    of the half is still round, so least toward its point: 1 - sin h."""
-    if hole["peak"] is None:
+    of the half is still round, so least toward its point: 1 - sin h. A channel the same: none
+    toward its open side, half square to it, and all away from it."""
+    gap = _gap(hole)
+    if gap is None:
         return 1.0
-    half, turn = hole["peak"]["half"], lean_off(hole, leans)
+    half, turn = gap["half"], lean_off(hole, leans)
     low, high = max(-half, turn - math.pi / 2), min(half, turn + math.pi / 2)
     if high <= low:
         return 1.0
@@ -279,8 +457,11 @@ def lean_share(hole: dict[str, Any], leans: Any) -> float:
 
 
 def lean_off(hole: dict[str, Any], leans: Any) -> float:
-    """How far round from a peak's point a shank leans, in radians: 0 is right at it."""
-    toward, way = hole["peak"]["toward"], np.asarray(leans, dtype=float)
+    """How far round from a peak's point, or a channel's open side, a shank leans, in radians:
+    0 is right at it."""
+    gap = _gap(hole)
+    assert gap is not None
+    toward, way = np.asarray(gap["toward"], dtype=float), np.asarray(leans, dtype=float)
     return math.atan2(float(np.linalg.norm(np.cross(toward, way))), float(toward @ way))
 
 

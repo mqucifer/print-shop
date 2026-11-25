@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from pathlib import Path
 from typing import Any
 
@@ -359,6 +360,181 @@ def test_a_peak_takes_from_the_ring_and_from_what_a_shank_leans_on_by_arithmetic
         assert through.lean_share(hole, toward) == pytest.approx(left, abs=1e-3), lean
     assert through.lean_share(hole, np.array([0, 1.0, 0])) == pytest.approx(1 - math.sin(half))
     assert through.lean_share({**hole, "peak": None}, Z) == 1.0
+
+
+# A drop-in channel (mqucifer/print-shop#302)
+
+CHANNEL = {"axis": "x", "open": "+z", "head_wall": "x=52", "nut_wall": "x=68"}
+
+
+def test_a_through_joint_declares_its_bolt_s_seat_as_a_drop_in_channel(tmp_path: Path) -> None:
+    """Its axis, the way it's open, and the planes of the walls its head and its nut bear on.
+    A joint with no `channel` has none, as before."""
+    joint = assembly.read(written(tmp_path, joints=[{**M5, "channel": CHANNEL}])).joints[0]
+    found = joint.channel
+    assert found is not None and joint.pocket is None
+    assert (found.axis, found.open, found.head_wall, found.nut_wall) == ("x", "+z", 52, 68)
+    assert found.axis_way() == pytest.approx([1, 0, 0])
+    assert found.open_way() == pytest.approx([0, 0, 1])
+    assert found.wall_said("head") == "the head's wall at x=52"
+    assert found.wall_said("nut") == "the nut's wall at x=68"
+    assert assembly.read(written(tmp_path, joints=[M5])).joints[0].channel is None
+
+
+@pytest.mark.parametrize(
+    ("changed", "said"),
+    [
+        ({"channel": {**CHANNEL, "axis": "w"}}, "its `axis` is one of x, y, z"),
+        ({"channel": {**CHANNEL, "open": "+x"}}, "its `open` is one of"),
+        ({"channel": {**CHANNEL, "open": "up"}}, "square to its axis, not 'up'"),
+        ({"channel": {**CHANNEL, "head_wall": "y=52"}}, "its `head_wall` is a plane square"),
+        ({"channel": {**CHANNEL, "nut_wall": "x=far"}}, "its `nut_wall` is a plane square"),
+        ({"channel": {**CHANNEL, "nut_wall": "x=52"}}, "are one plane, x=52"),
+        ({"channel": {**CHANNEL, "play": 0.2}}, "`channel` is"),
+        ({"channel": {"axis": "x", "open": "+z"}}, "`channel` is"),
+        ({"channel": "x"}, "`channel` is"),
+        ({"channel": CHANNEL, "pocket": 0.2}, "gives a `pocket` and a `channel`"),
+        ({"kind": "bolted", "insert": "m5-heat-set", "channel": CHANNEL},
+         "a bolt with a nut is a `through` joint"),
+    ],
+)  # fmt: skip
+def test_a_channel_that_isn_t_one_is_refused(
+    tmp_path: Path, changed: dict[str, Any], said: str
+) -> None:
+    with pytest.raises(NoAnswer, match=re.escape(said)):
+        assembly.read(written(tmp_path, joints=[{**M5, **changed}]))
+
+
+def test_a_channel_on_a_joint_with_no_bolt_is_refused(tmp_path: Path) -> None:
+    touching = {"between": ["a", "b"], "kind": "touching", "channel": CHANNEL}
+    with pytest.raises(NoAnswer, match="only a bolted or a through joint has a bolt"):
+        assembly.read(written(tmp_path, joints=[touching]))
+
+
+#: The rows' way up: a channel about the axis z through (20, 20), open toward +y.
+Y = np.array([0.0, 1, 0])
+
+
+def u_channel(turns: float = math.pi, low: float = 0.0, high: float = 8.0) -> dict:  # type: ignore[type-arg]
+    """A channel's round as a row, its middle away from +y: half a round where `turns` is π."""
+    return arc(-math.pi / 2, turns, low, high)
+
+
+def test_a_drop_in_channel_is_read_only_where_declared() -> None:
+    """Half a round open toward +y is what `bore` refuses as a slot's end, undeclared or not.
+    Declared along z and open toward +y it's a channel 5.5 mm across and open as wide. Declared
+    any other way, a round hole, a round less than half, and a round open in two places or not
+    the same way along its stretch are refused."""
+    half = [u_channel()]
+    assert "slot's end" in through.bore(half, [20, 20, 8])
+    found = through.channel(half, [20, 20, 8], Z, Y)
+    assert isinstance(found, dict), found
+    assert (found["radius"], found["low"], found["high"], found["peak"]) == (2.75, 0, 8, None)
+    gap = found["channel"]
+    assert gap["toward"] == pytest.approx(Y) and gap["half"] == pytest.approx(math.pi / 2)
+    assert gap["open_mm"] == pytest.approx(5.5)
+    assert through.channel_saved(gap) == {
+        "toward": [0, 1, 0], "round_deg": pytest.approx(180), "open_mm": pytest.approx(5.5)
+    }  # fmt: skip
+    assert "a drop-in channel, 5.500 mm across its round, open toward (0, 1, 0)" in (
+        through.channel_said(found)
+    )
+    # Two quarters are one half; read the other way along the axis, the same.
+    quarters = [arc(-math.pi / 2 + s * math.pi / 4, math.pi / 2, 0, 8) for s in (-1, 1)]
+    assert isinstance(through.channel(quarters, [20, 20, 8], Z, Y), dict)
+    over = [{**half[0], "axis": -Z, "low": -8, "high": 0}]
+    assert isinstance(through.channel(over, [20, 20, 8], -Z, Y), dict)
+    # More than half a round, its walls nearer than its radius: open as wide as they are.
+    deep = through.channel([u_channel(1.2 * math.pi)], [20, 20, 8], Z, Y)
+    assert isinstance(deep, dict)
+    assert deep["channel"]["open_mm"] == pytest.approx(5.5 * math.sin(0.4 * math.pi))
+
+    def refused(rows: list, axis: Any = Z, toward: Any = Y) -> str:  # type: ignore[type-arg]
+        why = through.channel(rows, [20, 20, 8], axis, toward)
+        assert isinstance(why, str), why
+        return why
+
+    assert "not toward its declared open side, (0, -1, 0)" in refused(half, toward=-Y)
+    assert "not toward its declared open side" in refused(half, toward=np.array([1.0, 0, 0]))
+    assert "not along the channel's axis" in refused(half, axis=np.array([1.0, 0, 0]))
+    assert "goes all the way round: a hole" in refused([cylinder(2.75, 0, 8)])
+    assert "less than half" in refused([u_channel(0.8 * math.pi)])
+    assert "no round face has its axis through that point" in through.channel(
+        half, [20, 21, 8], Z, Y
+    )
+    two = [arc(0, 0.8 * math.pi, 0, 8), arc(math.pi, 0.8 * math.pi, 0, 8)]
+    assert "open in more than one place" in refused(two)
+    wider = [u_channel(math.pi, 0, 4), u_channel(1.2 * math.pi, 4, 8)]
+    assert "the same way and as wide along the whole stretch" in refused(wider)
+    part_way = [cylinder(2.75, 0, 4), u_channel(math.pi, 4, 8)]
+    assert "closes along some of the stretch" in refused(part_way)
+
+
+def test_a_channel_takes_from_the_ring_and_from_what_a_shank_leans_on_by_arithmetic() -> None:
+    """The ring less the round and the walls straight up from where it leaves off, against a
+    count of points on a fine grid; and the shank's bearing: none toward the open side, half
+    square to it, all away from it. A round or peaked hole's seat is cut as it always was."""
+    step = 0.005
+    x, y = np.meshgrid(*[np.arange(-5, 5, step) + step / 2] * 2)
+    off = np.hypot(x, y)
+    for turns in (math.pi, 1.2 * math.pi):
+        hole = through.channel([u_channel(turns)], [20, 20, 8], Z, Y)
+        assert isinstance(hole, dict)
+        wide = hole["channel"]["open_mm"] / 2
+        in_channel = (off <= 2.75) | ((np.abs(x) <= wide) & (y >= 0))
+        for inner, outer in ((2.75, 5.0), (2.75, 3.45), (3.0, 3.45)):
+            ring = (off >= inner) & (off <= outer)
+            cut = float((ring & in_channel).sum()) * step * step
+            assert through.channel_cut(hole, inner, outer) == pytest.approx(cut, abs=0.01)
+            assert through.seat_cut(hole, inner, outer) == through.channel_cut(hole, inner, outer)
+    hole = through.channel([u_channel()], [20, 20, 8], Z, Y)
+    assert isinstance(hole, dict)
+    assert through.lean_share(hole, Y) == pytest.approx(0, abs=1e-12)
+    assert through.lean_share(hole, np.array([1.0, 0, 0])) == pytest.approx(0.5)
+    assert through.lean_share(hole, -Y) == 1.0
+    assert math.degrees(through.lean_off(hole, -Y)) == pytest.approx(180)
+    peaked_hole = through.bore(*_at(peaked(47)))
+    round_hole = through.bore([cylinder(2.75, 0, 8)], [20, 20, 8])
+    assert isinstance(peaked_hole, dict) and isinstance(round_hole, dict)
+    for one in (peaked_hole, round_hole):
+        assert "channel" not in one
+        assert through.seat_cut(one, 2.75, 5.0) == through.peak_cut(one, 2.75, 5.0)
+        assert through.channel_cut(one, 2.75, 5.0) == 0.0
+
+
+def test_a_channel_s_walls_are_where_it_ends(tmp_path: Path) -> None:
+    """The joint's two parts each with half the channel, from z 0 to 8 and 8 to 20: the head
+    bears on the wall at z=0 and the nut on the wall at z=20. Declared anywhere else, it says
+    where the channel ends. A joint with no channel reads its bores as before."""
+    walls = {"axis": "z", "open": "+y", "head_wall": "z=0", "nut_wall": "z=20"}
+    entry: dict[str, Any] = {**M5, "channel": walls}
+    joint = assembly.read(written(tmp_path, joints=[entry])).joints[0]
+    lower, upper = [u_channel(math.pi, 0, 8)], [u_channel(math.pi, 8, 20)]
+    holes = [through.seat_of(joint, rows, [20, 20, 8], []) for rows in (lower, upper)]
+    assert all(isinstance(h, dict) and h["channel"] for h in holes), holes
+    way = through.meet(*holes)  # type: ignore[arg-type]
+    assert isinstance(way, dict)
+    assert through.walls_met(joint, way) == []
+    moved = {**walls, "head_wall": "z=-1"}
+    off = assembly.read(written(tmp_path, joints=[{**entry, "channel": moved}])).joints[0]
+    wrong = through.walls_met(off, way)
+    assert wrong == [
+        "the head's wall at z=-1: the channel in a ends at z=0, not there. The wall the head "
+        "bears on is where the channel ends, square to it"
+    ]
+    # Named the other way along the axis, the same walls.
+    back = through.meet(holes[1], holes[0])  # type: ignore[arg-type]
+    flipped = {"axis": "z", "open": "+y", "head_wall": "z=20", "nut_wall": "z=0"}
+    turned = assembly.read(written(tmp_path, joints=[{**entry, "channel": flipped}])).joints[0]
+    assert isinstance(back, dict) and through.walls_met(turned, back) == []
+    plain = assembly.read(written(tmp_path, joints=[M5])).joints[0]
+    why = through.seat_of(plain, lower, [20, 20, 8], [])
+    assert isinstance(why, str) and "slot's end, not a hole" in why
+    assert "or in a drop-in channel its joint declares" in why
+    assert through.walls_met(plain, way) == []
+    wrongly = through.seat_of(joint, [cylinder(2.75, 0, 8)], [20, 20, 8], [])
+    assert isinstance(wrongly, str) and "goes all the way round: a hole" in wrongly
+    assert "declares its bolt in a drop-in channel along z, open toward +y" in wrongly
 
 
 def test_two_holes_are_one_way_through_where_they_meet_end_to_end() -> None:
