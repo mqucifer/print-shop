@@ -3116,7 +3116,7 @@ class Run:
         # Every printed file's side is named, unless the request leaves it to the refinement pass
         # (mqucifer/print-shop#192): a refinement pass printed a lid skirt-down as `done` named
         # no side for it.
-        unnamed = self._no_bed_side(part, on_bed)
+        unnamed = self._no_bed_side(part, on_bed, args.get("glass"))
         if unnamed:
             return Judged("done", "failed", self._no_bed_side_refused(unnamed), "no_bed_side")
         # Each fault named to fix first has the way taken said, before anything runs: the next
@@ -3488,7 +3488,9 @@ class Run:
             {name: said for name, (_, said) in laid.items()},
         )
 
-    def _no_bed_side(self, part: list[str], on_bed: dict[str, str]) -> list[str]:
+    def _no_bed_side(
+        self, part: list[str], on_bed: dict[str, str], given_glass: Any = None
+    ) -> list[str]:
         """Each printed file of `part` that `on_bed` names no side for: none where the request
         leaves the side to the refinement pass, or the run is from before the request's form."""
         if self._form() is None:
@@ -3496,10 +3498,13 @@ class Run:
         request = (self.folder / "request.md").read_text(encoding="utf-8")
         if print_sides.left_to_the_pass(request):
             return []
+        # A flush pane where it sits isn't printed: its laid file is (mqucifer/print-shop#293).
+        placed = glass_checks.placed_panes(given_glass)
         return [
             name
             for name in part
             if name not in on_bed
+            and name not in placed
             and not name.startswith("references/")
             and Path(name).suffix.lower() in GEOMETRY
         ]
@@ -4499,6 +4504,12 @@ class Run:
         found = glass_checks.read(given, part, self.work, whole=tool == "done")
         if isinstance(found, str):
             return Judged(tool, "failed", found, "not_glass")
+        # A flush frame's thicknesses, against its files' steps (mqucifer/print-shop#293).
+        if any(one.flush for one in found):
+            steps = glass_checks.steps(self.box, found, self.work)
+            wrong = steps if isinstance(steps, str) else glass_checks.borne_out(found, steps)
+            if wrong:
+                return Judged(tool, "failed", wrong, "not_glass")
         self.state.glass = [one.plain() for one in found]
         self.save()
         return found

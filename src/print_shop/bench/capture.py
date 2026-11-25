@@ -1313,6 +1313,106 @@ def plays_say(found: list[dict[str, Any]], panes: list[dict[str, Any]], clearanc
     )
 
 
+#: A raised face read from the files may be this much nearer the lead than its play, in mm: the
+#: meshes' chords, on the face and on the frame.
+FACE_CHORDS = 0.004
+
+
+def raised_faces(
+    files: list[str], built: Any, low: float, floor: float, args: Any
+) -> tuple[list[dict[str, Any]], list[str], dict[str, Any]]:
+    """Each flush pane's raised face in its opening (mqucifer/print-shop#287,
+    mqucifer/print-shop#293): the pane files as they sit in the frame, cut half way up the lip
+    under the pockets, each face against the frame's section there. A face is in an opening,
+    nowhere nearer the lead than `--face-play` at points round it, and pushed `--clearance` any of
+    `SHIFTS` ways, as its body can be in its pocket, it doesn't go into the lead. Each file's
+    lowest point is read against the frame's: the pane's face and the lead's are level."""
+    z = (low + floor) / 2.0
+    lead = slice_at(built, z)
+    holes = [
+        shapely.Polygon(ring)
+        for part in getattr(lead, "geoms", [lead])
+        if not part.is_empty
+        for ring in part.interiors
+    ]
+    rows: list[dict[str, Any]] = []
+    problems: list[str] = []
+    for name in files:
+        pane = load(name)
+        bottom = float(np.asarray(pane.fine().bounds)[0][2])
+        cut = slice_at(pane.manifold(), z)
+        faces = [g for g in getattr(cut, "geoms", [cut]) if not g.is_empty]
+        if not faces:
+            problems.append(
+                f"{name} has no raised face at z={z:.3f}, half way up the lip under the pockets: "
+                "it isn't a flush pane where it sits in the frame"
+            )
+            continue
+        for k, face in enumerate(faces):
+            at = face.representative_point()
+            ring = face.exterior
+            count = max(FEWEST_RIM_POINTS, int(math.ceil(ring.length / 0.05)))
+            points = shapely.line_interpolate_point(
+                ring, np.linspace(0.0, 1.0, count, endpoint=False), normalized=True
+            )
+            gaps = np.asarray(shapely.distance(points, lead))
+            nearest = int(gaps.argmin())
+            near_at = shapely.get_coordinates(points[nearest])[0]
+            inside = any(hole.contains(at) for hole in holes)
+            in_lead = float(face.intersection(lead).area)
+            pushed: list[dict[str, Any]] = []
+            for j in range(SHIFTS):
+                turn = 2.0 * math.pi * j / SHIFTS
+                moved = shapely.affinity.translate(
+                    face, args.clearance * math.cos(turn), args.clearance * math.sin(turn)
+                )
+                into = moved.intersection(lead)
+                if float(into.area) > GRAZE * float(face.length):
+                    centre = shapely.get_coordinates(into.representative_point())[0]
+                    pushed.append(
+                        {"way_deg": round(math.degrees(turn), 1), "mm2": round(float(into.area), 4),
+                         "at": [round(float(v), 2) for v in centre]}
+                    )  # fmt: skip
+            row: dict[str, Any] = {
+                "file": name,
+                "face": k + 1,
+                "at": [round(float(at.x), 2), round(float(at.y), 2)],
+                "face_mm2": round(float(face.area), 3),
+                "in_an_opening": inside,
+                "in_lead_mm2": round(in_lead, 4),
+                "least_gap_mm": round(float(gaps[nearest]), 4),
+                "least_gap_at": [round(float(v), 2) for v in near_at],
+                "pushed_into_lead": pushed,
+                "face_low_z": round(bottom, 4),
+                "level_mm": round(bottom - low, 4),
+            }
+            rows.append(row)
+            label = f"{name}'s raised face at {row['at'][0]:g},{row['at'][1]:g}"
+            if not inside or in_lead > 1e-3:
+                problems.append(
+                    f"{label} isn't in an opening of the lip under the pockets: "
+                    f"{in_lead:.3f} mm² of it is in the lead at z={z:.3f}"
+                )
+            elif gaps[nearest] < args.face_play - FACE_CHORDS:
+                problems.append(
+                    f"{label} is {gaps[nearest]:.3f} mm from the lead at "
+                    f"{near_at[0]:.2f},{near_at[1]:.2f}, under its play of {args.face_play:g}"
+                )
+            elif pushed:
+                worst = max(pushed, key=lambda one: one["mm2"])
+                problems.append(
+                    f"{label}: the pane pushed {args.clearance:g} mm to one side in its pocket, "
+                    f"toward {worst['way_deg']:g}°, would put its raised face on the lead, here "
+                    f"at {worst['at'][0]:g},{worst['at'][1]:g}"
+                )
+            if abs(bottom - low) > args.layer:
+                problems.append(
+                    f"{label} ends {bottom - low:+.3f} mm from the frame's face, more than a "
+                    f"layer, {args.layer:g} mm: the pane's face and the lead's aren't level"
+                )
+    return rows, problems, {"face_z": round(z, 4), "faces": len(rows)}
+
+
 def run(args: Any, report: Report) -> None:
     part = load(args.frame)
     report.notes += part.notes
@@ -1468,6 +1568,40 @@ def run(args: Any, report: Report) -> None:
         )
     if not panes and not problems:
         raise NoAnswer("every opening is a plain hole, with nothing to hold a pane")
+    if getattr(args, "raised_faces", None):
+        floors = [float(p["pane_floor_z"]) for p in panes]
+        floor = min(floors) if floors else args.pocket_z - args.pane_thickness / 2.0
+        if floor - low < 2 * INWARD_STEP:
+            problems.append(
+                f"the panes' bodies sit at z={floor:.3f}, {floor - low:.3f} mm over the frame's "
+                "face: there's no lip under them for a raised face to come down through"
+            )
+        else:
+            faces_read, faces_wrong, faces_numbers = raised_faces(
+                args.raised_faces, built, low, floor, args
+            )
+            report.numbers["raised_faces"] = faces_read
+            report.numbers["face_z"] = faces_numbers["face_z"]
+            report.numbers["faces"] = faces_numbers["faces"]
+            problems += faces_wrong
+            report.line(
+                f"each flush pane's raised face, its file cut at z={faces_numbers['face_z']:g}, "
+                f"half way up the lip under the pockets: {len(faces_read)} face(s), each in an "
+                f"opening and at least {args.face_play:g} mm from the lead, and pushed "
+                f"{args.clearance:g} mm any of {SHIFTS} ways with its body, still off it"
+            )
+            if faces_read:
+                least = min(faces_read, key=lambda r: r["least_gap_mm"])
+                report.fact(
+                    "face_play_least_mm", least["least_gap_mm"], "mm",
+                    f"{least['file']}'s face at {least['least_gap_at'][0]:g},"
+                    f"{least['least_gap_at'][1]:g}, the nearest any raised face comes to the lead",
+                )  # fmt: skip
+                if args.panes is not None and len(faces_read) != len(panes):
+                    problems.append(
+                        f"{len(faces_read)} raised face(s) read in the pane files, for "
+                        f"{len(panes)} pane(s) held in the frame"
+                    )
     faces = [p[key] for p in panes for key in ("up", "down")]
     lips = [f["least_lip_mm"] for f in faces if f["least_lip_mm"] is not None]
     report.fact("panes_read", len(panes))

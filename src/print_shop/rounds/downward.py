@@ -30,6 +30,13 @@ is read with its panes under it, turned as it's turned, as `pause` already has t
 with a pane right under it is carried. None of a pane's own faces is read there, and the pane
 files are read alone as any printed file is.
 
+**A flush pane prints from its laid file** (mqucifer/print-shop#293). Where it sits in its
+frame, its raised face points down from its body, and read alone it would need support, though it
+prints the other way up. So a flush frame's pane is read as it prints: its laid file, the one
+`glass` names in `laid`, on its own side. The pane where it sits keeps a reading, its laid
+file's, said as such, so no file goes unread; and the frame is read with its panes in place as
+any frame is.
+
 **What it holds.** It's a reading, shown beside `thin` at each stop, for every file. Where the
 request, or a need on the file, says it prints with no supports, any area to support is a check
 that doesn't pass: at `done` the round isn't met, and at an `ask` it's listed with the checks that
@@ -283,6 +290,13 @@ def read(
     mine = [name for name in files if not name.startswith("references/")]
     if not mine:
         return []
+    # A flush pane where it sits prints from its laid file: that's what's laid on the bed.
+    prints_from = {
+        pane: laid
+        for one in glass or []
+        for pane, laid in getattr(one, "laid", ())
+        if pane in mine and laid in mine
+    }
     framed = {
         one.frame: one
         for one in glass or []
@@ -295,7 +309,7 @@ def read(
     copies: dict[str, str] = {}
     for i, name in enumerate(mine):
         source = where / name
-        if source.is_file():
+        if source.is_file() and name not in prints_from:
             copies[name] = f"{i}__{Path(name).name}"
             shutil.copyfile(source, scratch / copies[name])
     on_bed = {copy: laid.get(name, "-z") for name, copy in copies.items()}
@@ -328,6 +342,8 @@ def read(
             failed = str(exc)
     found = []
     for name in mine:
+        if name in prints_from:
+            continue
         side = laid.get(name, "-z")
         row = answer.get(copies.get(name, ""), {})
         stl = scratch / str(row.get("stl") or "")
@@ -354,7 +370,23 @@ def read(
                 found.append(reading(name, side, mesh, said, panes, count, why))
             else:
                 found.append(reading(name, side, mesh, said, whence=why))
-    return found
+    by_name = {one.file: one for one in found}
+    for pane, printed in prints_from.items():
+        theirs = by_name[printed]
+        found.append(
+            judge.Standing(
+                DOWNWARD,
+                pane,
+                f"downward faces of {pane}, as it prints: {printed}",
+                theirs.passed,
+                theirs.unsure,
+                theirs.verdict,
+                f"a flush pane, read as it prints, from its laid file `{printed}`: {theirs.why}",
+                {**theirs.numbers, "prints_from": printed},
+            )
+        )
+    order = {name: k for k, name in enumerate(mine)}
+    return sorted(found, key=lambda one: order[one.file])
 
 
 def _panes(scratch: Path, answer: dict[str, Any], copies: list[str]) -> trimesh.Trimesh | None:
