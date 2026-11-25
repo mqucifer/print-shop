@@ -25,6 +25,13 @@ and each goes whole into the restart message, every compaction's note and every 
   Its fact gives `loose: true` in place of `held_by`, with its `box` and `way_in`.
 - **A person's question is answered with a fact.** A note that asks something says so beneath
   it, naming what it asks, and the latest one's asks are in every compaction's note.
+- **A person's word is read against the facts** (mqucifer/print-shop#314). On a design run a fact
+  called a finer `--mesh` "coarser" and blamed the wrong part; a stand-in corrected both at a
+  questions stop, the model agreed, and the fact stood: two compactions later the claim was back,
+  and it was rewritten some 170 calls on. So when a person's answers, note or pick arrive, each
+  fact is listed beside them (`beside`), and `needs` and `done` wait until `mark_facts` marks each
+  kept or changed against what was said (`marked`). A changed fact is rewritten in that call, and
+  `record/FACTS.md` keeps its old words and who changed it. A run with no facts lists nothing.
 """
 
 from __future__ import annotations
@@ -50,6 +57,12 @@ NONE_YET = (
 )
 RECORD = "record/FACTS.md"
 RECORD_HEADING = "# Facts"
+#: Beneath the facts in `record/FACTS.md`, once a fact has been changed against a person's word.
+CHANGED_HEADING = "## Changed against a person's word"
+CHANGED_ABOUT = (
+    "Each fact rewritten with `mark_facts`, with its old words, which no longer hold. Only the "
+    "facts above go into a new conversation or a compaction's note."
+)
 RECORD_ABOUT = (
     "What the model established, each set with `fact` and replaced by setting its name again. "
     "Written by the harness: each goes whole into every new conversation and every compaction's "
@@ -126,11 +139,24 @@ def block(found: list[Fact], empty: str = "") -> str:
     return "\n".join([HEADING, *(one.line() for one in found)])
 
 
-def record(found: list[Fact]) -> str:
-    """`record/FACTS.md`."""
+def record(found: list[Fact], changed: list[dict[str, Any]] | None = None) -> str:
+    """`record/FACTS.md`: the facts, and each one changed against a person's word, if any was."""
     lines = [RECORD_HEADING, "", RECORD_ABOUT, ""]
     lines += [one.line() for one in found] or ["None yet."]
+    if changed:
+        lines += ["", CHANGED_HEADING, "", CHANGED_ABOUT, ""]
+        lines += [changed_line(one) for one in changed]
     return "\n".join(lines) + "\n"
+
+
+def changed_line(one: dict[str, Any]) -> str:
+    """One fact changed against a person's word, as `record/FACTS.md` keeps it."""
+    was = Fact(**one["was"]).line().removeprefix(f"- `{one['name']}`: ")
+    now = "removed" if one.get("now") is None else "rewritten"
+    return (
+        f"- `{one['name']}`, {now} at call {one['at_call']} against {one['against']} from "
+        f"{one['by']}: {one['why']} It was: {was}"
+    )
 
 
 #: What a fixed part's fact is, as a refusal says it.
@@ -302,3 +328,157 @@ def answer_line(text: str) -> str:
     """What goes beneath a person's note: nothing, unless it asks something."""
     found = asks(text)
     return ANSWER.format(asks=asked_said(found)) if found else ""
+
+
+# A person's word, read against the facts (mqucifer/print-shop#314)
+
+#: How a fact is marked against what a person said.
+MARKS = ("kept", "changed")
+#: What a person's word is, as the list beside it names it, by the kind it was relayed as.
+WHENCE = {
+    "answers": "the answers",
+    "pick": "the pick",
+    "note": "the note",
+    "send_back": "the send-back note",
+}
+#: What leads each compaction's note while the facts listed beside a person's word aren't marked.
+UNMARKED = (
+    "Your facts were listed beside what a person said; mark each kept or changed against it with "
+    "`mark_facts` before `needs` or `done`."
+)
+#: The fields a changed mark may give besides `text`: a bought part's, as `fact` takes them.
+SHAPE = ("box", "way_in", "held_by", "fixed", "loose")
+
+
+def whence(kinds: list[str]) -> str:
+    """What a person said, as one phrase: "the answers", or "the pick and the note"."""
+    said = list(dict.fromkeys(WHENCE.get(kind, "the message") for kind in kinds))
+    return said[0] if len(said) == 1 else ", ".join(said[:-1]) + f" and {said[-1]}"
+
+
+def beside(found: list[Fact], said: str) -> str:
+    """What the model's told after a person's word, when it has facts: each fact beside it, and
+    what to send. On a design run a stand-in corrected a fact and the model agreed, and the fact
+    stood, to come back after compaction."""
+    lines = [f"{said[0].upper()}{said[1:]} came while you hold these facts. Each, beside it:"]
+    lines += [one.line() for one in found]
+    example = ", ".join(f'"{one.name}": {{"is": "kept", "why": "..."}}' for one in found[:2])
+    example += ", ..." if len(found) > 2 else ""
+    lines += [
+        "",
+        f"Read each against {said}. Where they say different things, {said} is the newer word "
+        "from a person: change the fact to fit it, or, if you think the fact still holds, say "
+        "why. Send `mark_facts` with each of these marked kept or changed, with a line on why: "
+        f"{{{example}}}. A changed one gives its new words in `text`, and is rewritten there; "
+        "an empty `text` removes it. `needs` and `done` are refused until each is marked.",
+    ]
+    return "\n".join(lines)
+
+
+def unmarked_refused(tool: str, names: list[str], said: str) -> str:
+    """The refusal of `needs` or `done` while the facts beside a person's word aren't marked."""
+    named = ", ".join(f"`{n}`" for n in names)
+    return (
+        f"`{tool}` waits: your facts were listed beside {said}, and none is marked yet. Send "
+        f"`mark_facts` with each of {named} marked kept or changed against it, with a line on "
+        'why: {"name": {"is": "kept", "why": "..."}}, or {"is": "changed", "why": "...", "text": '
+        '"the fact in new words"}. Then send this again.'
+    )
+
+
+@dataclass(frozen=True)
+class Mark:
+    """One fact's mark against a person's word: kept, or changed to `args`, a `fact` call's
+    arguments, an empty `text` removing it."""
+
+    name: str
+    said: str
+    why: str
+    args: dict[str, Any] | None = None
+
+
+def marked(
+    marks: Any, listed: list[Fact], source: str, references: set[str]
+) -> tuple[list[Mark], list[str]]:
+    """Each listed fact's mark, read, and what's wrong with them, in words: one left unmarked,
+    marked with no reason, kept with new words, changed to its own words, or changed to a fact
+    `fact` would refuse. `source` is the `from` a changed fact is given."""
+    given = marks if isinstance(marks, dict) else {}
+    found, wrong = [], []
+    names = {one.name for one in listed}
+    shape = '{"is": "kept" or "changed", "why": "..."}'
+    for one in listed:
+        mark = given.get(one.name)
+        said = str(mark.get("is") or "").strip().lower() if isinstance(mark, dict) else ""
+        if said not in MARKS:
+            wrong.append(
+                f"`{one.name}` isn't marked: it says {one.line().removeprefix('- ')}. Read it "
+                f'against what was said, and mark it, {{"{one.name}": {shape}}}'
+            )
+            continue
+        assert isinstance(mark, dict)
+        why = str(mark.get("why") or "").strip()
+        if not why:
+            wrong.append(f"`{one.name}` is marked {said} with no reason: give a line on why")
+            continue
+        if said == "kept":
+            text = mark.get("text")
+            if isinstance(text, str) and " ".join(text.split()) != " ".join(one.text.split()):
+                wrong.append(
+                    f"`{one.name}` is marked kept, and gives new words: mark it changed, or "
+                    "leave `text` out"
+                )
+            else:
+                found.append(Mark(one.name, said, why))
+            continue
+        if "text" not in mark:
+            wrong.append(
+                f"`{one.name}` is marked changed, with no `text`: give the fact in new words, or "
+                "an empty `text` to remove it"
+            )
+            continue
+        old = one.plain()
+        if not str(mark["text"] or "").strip() and not any(k in mark for k in SHAPE):
+            # An empty `text` removes it, as `fact` does.
+            found.append(Mark(one.name, said, why, {"name": one.name, "text": "", "from": source}))
+            continue
+        args = {
+            # A bought part's fields it doesn't give stay as they were.
+            **{k: old[k] for k in SHAPE if k in old},
+            **{k: mark[k] for k in SHAPE if k in mark},
+            "name": one.name,
+            "text": mark["text"],
+            "from": source,
+        }
+        problem_said = problem(args, references)
+        if problem_said:
+            wrong.append(f"`{one.name}` can't be changed so: {problem_said}")
+            continue
+        text = str(args["text"]).strip()
+        now = {k: args.get(k) for k in SHAPE}
+        was = {k: old.get(k) for k in SHAPE}
+        if " ".join(text.split()) == " ".join(one.text.split()) and _same_shape(now, was):
+            wrong.append(
+                f"`{one.name}` is marked changed, and its words are as they were: change them, "
+                "or mark it kept, with why"
+            )
+            continue
+        found.append(Mark(one.name, said, why, args))
+    for name in given:
+        if name not in names:
+            wrong.append(
+                f"`{name}` isn't one of the facts listed beside what was said: a new fact is set "
+                "with `fact`"
+            )
+    return found, wrong
+
+
+def _same_shape(now: dict[str, Any], was: dict[str, Any]) -> bool:
+    def plain(value: Any) -> str:
+        return str(value or "").strip().lower()
+
+    flags = {"fixed": fixed_of, "loose": loose_of}
+    return all(
+        bool(flags[k](now[k])) == bool(was[k]) if k in flags else plain(now[k]) == plain(was[k])
+        for k in SHAPE
+    )
