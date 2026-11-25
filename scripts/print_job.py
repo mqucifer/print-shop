@@ -205,6 +205,7 @@ from print_shop.orchestrator.outcome import no_frames
 from print_shop.orchestrator.spools import ask_on_now
 from print_shop.phone.home import Home, HomeRefused
 from print_shop.phone.notices import Notices
+from print_shop.phone.one_job import OneJob
 from print_shop.phone.phones import Phones, phones_path
 from print_shop.phone.server import PhoneOff, attach, make_server
 from print_shop.phone.shop import Shop
@@ -593,7 +594,11 @@ def _runs(args: argparse.Namespace) -> int:
 
 def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
           job_log: JobLog | None = None, live: Live | None = None) -> int:
-    read: Callable[[str], str] = job_log.reader(input) if job_log is not None else input
+    # The run's one job, as the phone's queue of one (mqucifer/print-shop#288): its prompts
+    # read as `input` does until the phone's page is on.
+    one = OneJob(part="")
+    read: Callable[[str], str] = job_log.reader(one.read) if job_log is not None else one.read
+    wait_read = job_log.reader(one.wait_read) if job_log is not None else one.wait_read
     if args.filaments:
         print(describe_store(Store(STORE_DIR)))
         return 0
@@ -673,15 +678,20 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
         this.notes = choice.notes
         answering = Prompted(read)
         try:
-            asker = replay_asker(args.answers) if args.answers else cli_asker(read=answering)
+            asker = one.asker(replay_asker(args.answers) if args.answers
+                              else cli_asker(read=answering))
         except ValueError as exc:
             parser.error(str(exc))
-        waiting = cli_waiting(read=read, replayed=args.answers is not None,
-                              prompt=answering.prompt, several=len(args.stl) > 1)
+        waiting = one.waiting(cli_waiting(
+            read=wait_read, replayed=args.answers is not None, prompt=answering.prompt,
+            several=len(args.stl) > 1, typed=one.keys_or_go))
 
     recorder = FrameRecorder(recording_path()) if args.record else None
     a_job = bool(args.stl) or hand_sliced is not None
     phone = PhonePage(args.settings, recorder) if a_job else PhonePage.off()
+    one.answering_too(phone, part=(args.stl[0].name if args.stl else
+                                   hand_sliced.name if hand_sliced is not None else ""),
+                      replayed=bool(args.answers))
     printer, armed, recording = _arming(recorder, phone=phone.on) if a_job else (None, "", "")
     if this is not None:
         this.armed, this.recording = armed, recording
@@ -709,14 +719,14 @@ def _main(parser: argparse.ArgumentParser, args: argparse.Namespace,
         asker=asker,
         waiting=waiting,
         # A hand-sliced file is reviewed by nobody here: it's shown, and goes to the gate.
-        reviewer=cli_reviewer(read=read) if hand_sliced is None else None,
+        reviewer=one.reviewer(cli_reviewer(read=read)) if hand_sliced is None else None,
         show=print if hand_sliced is not None else None,
         store=Store(STORE_DIR) if hand_sliced is not None else None,
         on_step=live.at if live is not None else None,
     )
     job_id = ""
     try:
-        with run.daemon, phone.serving(run.daemon):
+        with run.daemon, phone.serving(run.daemon, one):
             if args.serve:
                 print("Serving the outcome gate. Ctrl-C to stop; open prints stay open.")
                 while True:
@@ -838,8 +848,9 @@ class PhonePage:
         return self._server is not None
 
     @contextlib.contextmanager
-    def serving(self, daemon: Daemon) -> Iterator[None]:
-        """The page served for `daemon`, for as long as the run lasts."""
+    def serving(self, daemon: Daemon, one: OneJob | None = None) -> Iterator[None]:
+        """The page served for `daemon`, for as long as the run lasts; with `one`, a lone job's
+        run, its job as the page's queue of one (mqucifer/print-shop#288)."""
         server = self._server
         if server is None:
             yield
@@ -847,6 +858,9 @@ class PhonePage:
         notices = None
         if self.shop is not None:
             self.shop.daemon = daemon
+            if one is not None:
+                one.daemon = daemon
+                self.shop.queue = one
             # A job that needs you, a pause near, a print ended: to the phone through Home
             # Assistant (mqucifer/print-shop#221).
             notices = Notices(self.shop, lambda n: daemon.notify(n.payload()))
@@ -883,7 +897,8 @@ def _stopped(run: Run, job_id: str) -> str:
 
 def _resume(args: argparse.Namespace, job_log: JobLog, live: Live) -> int:
     """A job that waits for the person, taken up at its step (mqucifer/print-shop#209)."""
-    read: Callable[[str], str] = job_log.reader(input)
+    lone = OneJob(part="")  # the phone's queue of one (mqucifer/print-shop#288)
+    read: Callable[[str], str] = job_log.reader(lone.read)
     jobs = WaitingJobs(WORK_DIR / "jobs.sqlite")
     kept: WaitingJob | None
     if args.resume:
@@ -911,10 +926,13 @@ def _resume(args: argparse.Namespace, job_log: JobLog, live: Live) -> int:
     waiting_on: Waiting | None = None
     if not kept.by_hand:
         answering = Prompted(read)
-        asker = cli_asker(read=answering)
-        waiting_on = cli_waiting(read=read, replayed=False, prompt=answering.prompt)
+        asker = lone.asker(cli_asker(read=answering))
+        waiting_on = lone.waiting(cli_waiting(
+            read=job_log.reader(lone.wait_read), replayed=False, prompt=answering.prompt,
+            typed=lone.keys_or_go))
     recorder = FrameRecorder(recording_path()) if args.record else None
     phone = PhonePage(args.settings, recorder)
+    lone.answering_too(phone, part=kept.part, replayed=False)
     printer = _armed(recorder, phone=phone.on)
     run = build_run(
         printer=printer,
@@ -926,13 +944,13 @@ def _resume(args: argparse.Namespace, job_log: JobLog, live: Live) -> int:
         settings=args.settings,
         asker=asker,
         waiting=waiting_on,
-        reviewer=cli_reviewer(read=read) if not kept.by_hand else None,
+        reviewer=lone.reviewer(cli_reviewer(read=read)) if not kept.by_hand else None,
         show=print if kept.by_hand else None,
         store=Store(STORE_DIR) if kept.by_hand else None,
         on_step=live.at,
     )
     try:
-        with run.daemon, phone.serving(run.daemon):
+        with run.daemon, phone.serving(run.daemon, lone):
             run.daemon.resume(job_id)
             return _follow(run, job_id, turned=not kept.by_hand, read=read,
                            armed=printer is not None, phone=phone.on)

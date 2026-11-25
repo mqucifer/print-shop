@@ -207,6 +207,9 @@ class Shop:
     sessions: dict[str, Session] = field(default_factory=dict)
     #: What the last answer from the phone came to, by job: given, or why not.
     answered: dict[str, str] = field(default_factory=dict)
+    #: Which phone began each job's last answer, by its paired name: a lone job's Mac says it
+    #: (mqucifer/print-shop#288).
+    by: dict[str, str] = field(default_factory=dict)
     #: Held while a session is looked up or begun: two posts at once begin one.
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     #: Each job's review as last shown, and the one before it, to say what moved since.
@@ -414,7 +417,7 @@ class Shop:
         return found
 
     def begin(self, job_id: str, ahead: dict[str, list[str]], *,
-              alike_to: Sequence[str] = ()) -> Session | str:
+              alike_to: Sequence[str] = (), by: str = "") -> Session | str:
         """The terminal's own screen for this job's need, begun with the form's answers to the
         prompts it answers. Returns the session, or why not."""
         queue = self.queue
@@ -424,6 +427,8 @@ class Shop:
         with self._lock:
             if self._session(job_id) is not None:
                 return "it's being answered on a phone already: look again"
+            if by:
+                self.by[job_id] = by
             return self._begin(queue, asked, job_id, ahead, alike_to)
 
     def _begin(self, q: Queueish, asked: Asked, job_id: str, ahead: dict[str, list[str]],
@@ -473,6 +478,11 @@ class Shop:
         self.answered.pop(job_id, None)
         made.start(ahead)
         return made
+
+    @property
+    def alone(self) -> bool:
+        """A lone job's run: its queue of one does none of the queue's own moves."""
+        return bool(getattr(self.queue, "alone", False))
 
     def give_now(self, job_id: str, since: float, answer: Any) -> str:
         """An answer that needs no screen of the terminal's: the mesh gate's or a look's, for

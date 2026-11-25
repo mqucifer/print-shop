@@ -433,7 +433,8 @@ class _Handler(BaseHTTPRequestHandler):
         self._send(main_page(
             printing=shop.printing(), sends=shop.sent(), lines=lines,
             to_record=shop.to_record(), ready=shop.ready(lines), queue_on=shop.queue is not None,
-            offered=offered, on_hand=shop.on_hand(), changes=shop.stock_changes()))
+            offered=offered, on_hand=shop.on_hand(), changes=shop.stock_changes(),
+            alone=shop.alone))
 
     def _job_line(self, held: dict[str, str]) -> Line | None:
         line = self.shop.line(held["id"]) if self.shop is not None else None
@@ -451,7 +452,8 @@ class _Handler(BaseHTTPRequestHandler):
         sliced = self.shop.prepared(line.job.copy_of or line.job.job_id).get("slice_reading")
         self._send(job_page(line, each_s=self.shop.each_s(line.job), said=_DONE.get(said, ""),
                             sliced=sliced is not None,
-                            spools=spools_for_job(line, self.shop.on_hand())))
+                            spools=spools_for_job(line, self.shop.on_hand()),
+                            alone=self.shop.alone))
 
     def _r_remove_screen(self, held: dict[str, str], query: str) -> None:
         line = self._job_line(held)
@@ -645,7 +647,9 @@ class _Handler(BaseHTTPRequestHandler):
     def _begin(self, job_id: str, ahead: dict[str, list[str]], screen: str,
                alike_to: list[str] | None = None) -> None:
         assert self.shop is not None
-        made = self.shop.begin(job_id, ahead, alike_to=alike_to or ())
+        phone, _ = self._signed_in()
+        made = self.shop.begin(job_id, ahead, alike_to=alike_to or (),
+                               by=phone.name if phone is not None else "")
         if isinstance(made, str):
             return self._send(message_page("Not taken", made, back_to=f"/job/{job_id}",
                                            back_words="Back to the job"),
