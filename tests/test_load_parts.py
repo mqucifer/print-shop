@@ -148,7 +148,9 @@ def test_a_strain_within_two_passes_band_of_its_limit_is_either_side_of_it() -> 
         (load_parts.BAND, 0.97, True),
         (load_parts.BAND, 0.90, False),
     ):
-        report, fails, apart = Report("load", []), [], []
+        report = Report("load", [])
+        fails: list[str] = []
+        apart: list[str] = []
         load._parts(
             report, {"parts": {"top": _part(across)}}, {"parts": {"top": _part(across)}},
             fails, apart, band,
