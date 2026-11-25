@@ -251,6 +251,9 @@ def typed(key: str, value: str) -> str:
 #: version they're from.
 _FORMS: dict[str, Any] = json.loads(Path(__file__).with_name("orca_forms.json").read_text())
 ORCA_FORMS: str = _FORMS["orca"]
+#: The settings that take `nil`, as Orca spells "not set here": a filament's override, put back
+#: to the printer's.
+_NULLABLE = frozenset(_FORMS.get("nullable", ()))
 
 _A_NUMBER = r"-?(?:\d+(?:\.\d*)?|\.\d+)"
 #: Each form checked, its one item's pattern, and how it's said.
@@ -302,7 +305,7 @@ def not_a_form(key: str, value: str, extruders: int = 1, today: str = "") -> str
                + (": give one value" if extruders == 1 else f": give up to {many} values"))
         shown = example()
         return f"{has}, e.g. {key}={shown}" if shown else has
-    if all(re.fullmatch(pattern, item) for item in items):
+    if all(re.fullmatch(pattern, item) or (item == "nil" and key in _NULLABLE) for item in items):
         return ""
     shown = example()
     refusal = f"'{value}' isn't {said}: {key} {takes}"

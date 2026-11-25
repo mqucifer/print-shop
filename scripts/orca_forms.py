@@ -28,6 +28,9 @@ OUT = Path(__file__).resolve().parent.parent / "src" / "print_shop" / "setup" / 
 
 #: `def = this->add("wall_loops", coInt);`, and its nullable twin.
 _ADD = re.compile(r'this->add(?:_nullable)?\("([a-z_0-9]+)",\s*co([A-Za-z]+)\)')
+#: A setting that takes `nil` too, Orca's word for "not set here": the filament's leaves the
+#: printer's to apply.
+_NULLABLE = re.compile(r'this->add_nullable\("([a-z_0-9]+)"')
 #: The filament's overrides of the printer's retraction, each typed as the setting it overrides.
 _OVERRIDES = re.compile(r"filament_extruder_override_keys\s*=\s*\{(.*?)\};", re.S)
 #: An old name read as a new one: `} else if (opt_key == "chamber_temperatures") { opt_key =
@@ -51,20 +54,31 @@ def forms(source: str) -> dict[str, str]:
     return dict(sorted(out.items()))
 
 
+def nullable(source: str) -> list[str]:
+    """The settings that take `nil`: each added nullable, and the filament's overrides of the
+    printer's retraction, which are."""
+    keys = set(_NULLABLE.findall(source))
+    found = _OVERRIDES.search(source)
+    if found is not None:
+        keys |= set(re.findall(r'"([a-z_0-9]+)"', found.group(1)))
+    return sorted(keys)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("source", type=Path, help="Orca's src/libslic3r/PrintConfig.cpp")
     parser.add_argument("--version", required=True, help="the Orca version it's from, e.g. 2.4.2")
     parser.add_argument("--out", type=Path, default=OUT)
     args = parser.parse_args(argv)
-    found = forms(args.source.read_text())
+    source = args.source.read_text()
+    found = forms(source)
     if len(found) < 500:
         print(f"only {len(found)} settings read: is this Orca's PrintConfig.cpp?", file=sys.stderr)
         return 1
     args.out.write_text(json.dumps(
         {"orca": args.version,
          "from": f"OrcaSlicer v{args.version}, src/libslic3r/PrintConfig.cpp",
-         "forms": found}, indent=1) + "\n")
+         "forms": found, "nullable": nullable(source)}, indent=1) + "\n")
     print(f"{len(found)} settings' forms, from Orca {args.version}, to {args.out}")
     return 0
 

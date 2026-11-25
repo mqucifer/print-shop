@@ -151,6 +151,17 @@ def test_a_list_longer_than_the_extruders_is_refused() -> None:
         "this printer has two extruders: give up to two values, e.g. nozzle_temperature=220")
 
 
+def test_nil_is_taken_where_orca_takes_it_and_only_there() -> None:
+    # Orca's word for "not set here": a filament's override put back to the printer's. No new
+    # check refuses what Orca takes (print-shop-ux, on mqucifer/print-shop#300).
+    assert taken("filament_retraction_length=nil because the printer's is right") == [
+        ("filament_retraction_length", "nil")]
+    assert parse_answer("wall_loops=nil because x", _request()) == (
+        "'nil' isn't a whole number: wall_loops takes one, e.g. wall_loops=3")
+    assert json.loads(FORMS.read_text())["nullable"][:2] == [
+        "filament_deretraction_speed", "filament_long_retractions_when_cut"]
+
+
 # --------------------------------------------------------------------------
 # Words, and a form that isn't known, read as before
 # --------------------------------------------------------------------------

@@ -912,5 +912,23 @@
   "zaa_min_z": "float",
   "zaa_minimize_perimeter_height": "float",
   "zhop": "float"
- }
+ },
+ "nullable": [
+  "filament_deretraction_speed",
+  "filament_long_retractions_when_cut",
+  "filament_retract_before_wipe",
+  "filament_retract_lift_above",
+  "filament_retract_lift_below",
+  "filament_retract_lift_enforce",
+  "filament_retract_restart_extra",
+  "filament_retract_when_changing_layer",
+  "filament_retraction_distances_when_cut",
+  "filament_retraction_length",
+  "filament_retraction_minimum_travel",
+  "filament_retraction_speed",
+  "filament_wipe",
+  "filament_wipe_distance",
+  "filament_z_hop",
+  "filament_z_hop_types"
+ ]
 }
