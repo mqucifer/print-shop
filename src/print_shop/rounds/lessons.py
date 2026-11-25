@@ -31,6 +31,15 @@ checking held until a check got in the way, and then the check was changed. So:
   scores. Folding a kind's lessons into its skill stays the main route: the listing names each
   kept lesson with no kind, for a reviewer to give one, and each kind's that its skill doesn't
   hold yet.
+- **A start's lessons are chosen by what the run will build** (mqucifer/print-shop#313). On the
+  side table's runs, lessons accepted just before a rerun were left out of it: they were unscored,
+  so they lost to older scored ones and fell to id order, and the runs that needed them made the
+  same faults again. So `to_give` orders each tier (the kind's, then general) by how many of the
+  features the request names a lesson is about (`FEATURES`: bolts, nut slots, bores, glass,
+  joints, by the lesson's words, keys and kind of part), then by its score as a share of the runs
+  that scored it, an unscored one starting at a half (`PRIOR_USED` of `PRIOR_RUNS`), not at
+  nothing. What's chosen is shown in the order a start showed it before (`shown`), so a ledger
+  whose lessons all fit reads as it did, and the start names each one it left out on a line.
 - **Each route is scored:** the model's by the run's own review, the others by the analysis after
   they're delivered (`promote`). A lesson's status follows each run's latest score on each route
   (`settle`): used is `held`, in the way `broken`, and a correction replaces that run's earlier
@@ -56,6 +65,8 @@ import json
 import re
 import sqlite3
 from collections.abc import Iterable
+from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import quote
@@ -130,6 +141,14 @@ UNUSED_TO_RETIRE = 2
 GENERAL = "general"
 #: The characters of lessons a start holds, unless the run's limits say (`Limits`).
 START_CHARS = START_LESSONS_CHARS
+#: An unscored lesson's prior (mqucifer/print-shop#313): a lesson's score is the share of the runs
+#: that scored its text that used it, counted as if `PRIOR_RUNS` more runs had scored it and
+#: `PRIOR_USED` of them had used it. That's Laplace's rule of succession: with no score, a half;
+#: used on every run that scored it, more than a half; not used on more runs than used, less. Before
+#: it, a lesson stood by how many runs had used it, which only grows by being given, so a new one,
+#: at nothing, was never given ahead of an old one and so was never scored.
+PRIOR_USED = 1
+PRIOR_RUNS = 2
 #: The most lessons one reply of the `lessons` tool lists, and the characters of each one's shape.
 FOUND_MOST = 30
 SHAPE_CHARS = 160
@@ -793,6 +812,90 @@ def _copy_evidence(row: dict[str, Any], held: dict[str, Any]) -> list[str]:
         ]
 
 
+# What a run will build: the features a request names, and those a lesson is about
+
+
+@dataclass(frozen=True)
+class Feature:
+    """Something a request names that a lesson can be about (mqucifer/print-shop#313): the words
+    that name it, in a request or a lesson's text and fix's shape, and the lesson's keys (a bench
+    command, or a verdict) and kinds of part that are about it. Words are matched whole, so `nut`
+    isn't `nutshell`."""
+
+    name: str
+    words: frozenset[str]
+    commands: frozenset[str] = frozenset()
+    verdicts: frozenset[str] = frozenset()
+    part_kinds: frozenset[str] = frozenset()
+
+
+def _feature(
+    name: str,
+    words: str,
+    commands: str = "",
+    verdicts: tuple[str, ...] = (),
+    part_kinds: str = "",
+) -> Feature:
+    return Feature(
+        name,
+        frozenset(words.split()),
+        frozenset(commands.split()),
+        frozenset(verdicts),
+        frozenset(part_kinds.split()),
+    )
+
+
+#: The features a start's lessons are chosen by, after their kind of part. A slide that reads
+#: `NOT HELD` is a joint's, and `load` reads each joint's force. `panes`, `light` and `pieces` are
+#: stained glass's own. `came` alone isn't glass's, as it's said of anything that came out wrong.
+#: Another is one line here.
+FEATURES = (
+    _feature("bolts", "bolt bolts bolted screw screws screwed"),
+    _feature("nut slots", "nut nuts"),
+    _feature("bores", "bore bores bored counterbore counterbores counterbored"),
+    _feature("glass", "glass pane panes cames", "panes light pieces", part_kinds="stained-glass"),
+    _feature(
+        "joints",
+        "joint joints jointed dovetail dovetails tenon tenons mortise mortises",
+        "load",
+        ("NOT HELD",),
+    ),
+)
+WORD = re.compile(r"[a-z0-9]+")
+
+
+def _words_in(said: str) -> set[str]:
+    return set(WORD.findall(said.casefold()))
+
+
+def features_named(request: str, part_kind: str | None = None) -> tuple[str, ...]:
+    """The features a run's request names, by its words or its kind of part, in `FEATURES`'
+    order."""
+    words = _words_in(request)
+    kind = part_kind_of(part_kind)
+    return tuple(
+        f.name for f in FEATURES if words & f.words or (kind is not None and kind in f.part_kinds)
+    )
+
+
+def features_of(ledger: Readable, found: dict[str, Any]) -> tuple[str, ...]:
+    """The features a lesson is about: by the words of its text and its fix's shape, the checks
+    it's keyed to, and its kind of part, in `FEATURES`' order."""
+    words = _words_in(f"{found.get('text') or ''} {found.get('fix_shape') or ''}")
+    keys = keys_of(ledger, int(found["id"]))
+    commands = {k["command"] for k in keys}
+    verdicts = {k["verdict"].strip().upper() for k in keys}
+    kind = part_kind_of(found.get("part_kind"))
+    return tuple(
+        f.name
+        for f in FEATURES
+        if words & f.words
+        or commands & f.commands
+        or verdicts & f.verdicts
+        or (kind is not None and kind in f.part_kinds)
+    )
+
+
 # Giving them to a run, and scoring them
 
 
@@ -810,31 +913,84 @@ def kept_for_model(ledger: DesignLedger) -> list[dict[str, Any]]:
     return [dict(r) for r in found]
 
 
+def _model_scores(ledger: DesignLedger, lesson: int) -> list[dict[str, Any]]:
+    """Each run's latest score of a lesson's text."""
+    return [s for (_, route), s in latest_scores(ledger, lesson).items() if route == "model"]
+
+
 def _standing(ledger: DesignLedger, lesson: int) -> tuple[int, int]:
-    """Where a lesson's scores put it among its like, lowest first: whether any run's latest
-    score of its text says it got in the way, then the runs whose latest says it was used, most
-    first."""
-    scores = [
-        s for (_, route), s in latest_scores(ledger, lesson).items() if route == "model"
-    ]
+    """Where a lesson stood among its like before mqucifer/print-shop#313, lowest first, and so
+    the order a start shows what it gives (`shown`): whether any run's latest score of its text
+    says it got in the way, then the runs whose latest says it was used, most first."""
+    scores = _model_scores(ledger, lesson)
     in_the_way = any(s["score"] == "in_the_way" for s in scores)
     return int(in_the_way), -sum(s["score"] == "used" for s in scores)
 
 
+def _rate(ledger: DesignLedger, lesson: int) -> tuple[int, Fraction]:
+    """Where a lesson's scores put it among its like for a start's choice, lowest first: whether
+    any run's latest score of its text says it got in the way, then the share of the runs that
+    scored it that used it, most first, an unscored one at `PRIOR_USED` of `PRIOR_RUNS`."""
+    scores = _model_scores(ledger, lesson)
+    in_the_way = any(s["score"] == "in_the_way" for s in scores)
+    used = sum(s["score"] == "used" for s in scores)
+    return int(in_the_way), -Fraction(used + PRIOR_USED, len(scores) + PRIOR_RUNS)
+
+
 def _ordered(ledger: DesignLedger, found: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    return sorted(found, key=lambda one: (*_standing(ledger, int(one["id"])), int(one["id"])))
+    return sorted(found, key=lambda one: (*_rate(ledger, int(one["id"])), int(one["id"])))
 
 
-def to_give(ledger: DesignLedger, part_kind: str | None = None) -> list[dict[str, Any]]:
-    """What a run's start draws from, in the order it takes them: each kept lesson for the model
-    whose text is still given, those for this kind of part first, then the general ones, and in
-    each those scored `used` on most runs first, any that got in the way last, and the oldest
-    first among equals. `within` holds them to the start's budget."""
+def _tiers(
+    ledger: DesignLedger, part_kind: str | None
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """A run's lessons to draw from: those for its kind of part, and the general ones."""
     kind = part_kind_of(part_kind)
     kept = kept_for_model(ledger)
     mine = [k for k in kept if not is_general(k) and part_kind_of(k["part_kind"]) == kind]
-    general = [k for k in kept if is_general(k)]
-    return _ordered(ledger, mine) + _ordered(ledger, general)
+    return mine, [k for k in kept if is_general(k)]
+
+
+def to_give(
+    ledger: DesignLedger, part_kind: str | None = None, named: Iterable[str] | None = None
+) -> list[dict[str, Any]]:
+    """What a run's start draws from, in the order it takes them: each kept lesson for the model
+    whose text is still given, those for this kind of part first, then the general ones. In each,
+    those about more of the features the request names first (`named`, `features_named`; the
+    kind's own when none are given), then the best share of runs that used it (`_rate`), any that
+    got in the way last, and the oldest first among equals. Each carries the features it's about,
+    as `about`. `within` holds them to the start's budget."""
+    wanted = set(features_named("", part_kind) if named is None else named)
+    order: list[dict[str, Any]] = []
+    for tier in _tiers(ledger, part_kind):
+        about = [{**one, "about": features_of(ledger, one)} for one in tier]
+        order += sorted(
+            about,
+            key=lambda one: (
+                -len(wanted.intersection(one["about"])),
+                *_rate(ledger, int(one["id"])),
+                int(one["id"]),
+            ),
+        )
+    return order
+
+
+def shown(
+    ledger: DesignLedger, given: Iterable[dict[str, Any]], part_kind: str | None = None
+) -> list[dict[str, Any]]:
+    """The lessons a start gives, in the order it shows them: as a start showed them before
+    mqucifer/print-shop#313, its kind's then general, in each the runs that used it most first,
+    any that got in the way last, oldest first. So a ledger whose lessons all fit reads as it
+    did, and only which are given changes when they don't."""
+    kind = part_kind_of(part_kind)
+
+    def tier(one: dict[str, Any]) -> int:
+        return int(is_general(one) or part_kind_of(one["part_kind"]) != kind)
+
+    return sorted(
+        given,
+        key=lambda one: (tier(one), *_standing(ledger, int(one["id"])), int(one["id"])),
+    )
 
 
 def within(
@@ -902,12 +1058,24 @@ def left_said(left: list[dict[str, Any]], part_kind: str | None = None) -> str:
             f" Lesson{'s' if many else ''} {', '.join(long)} {'are' if many else 'is'} too long "
             f"for the start: read {'each' if many else 'it'} with its `id`."
         )
-    return (
+    said = (
         f"{len(left)} more kept lesson{' isn' if one else 's aren'}'t here, to keep the start "
         f"short: {' and '.join(counts)}.{too_long} The `lessons` tool finds "
         f"{'it' if one else 'them'}: by `words`, by `kind` ({yours}), and one whole by its `id`. "
         "One you read whole, you'll be asked about at the end, as you will these."
     )
+    named = "\n".join(left_line(found) for found in left)
+    return f"{said}\n\nLeft out, each by its number, area and kind of part:\n{named}"
+
+
+def left_line(found: dict[str, Any]) -> str:
+    """One lesson a start left out, as it names it (mqucifer/print-shop#313): its number, area and
+    kind of part, and the features it's about, if any."""
+    kind = GENERAL if is_general(found) else _for_said(found)
+    about = found.get("about") or ()
+    said = f"; about {', '.join(about)}" if about else ""
+    long = "; too long for the start" if found.get("too_long") else ""
+    return f"- Lesson {found['id']} ({area(found['kind'])}, {kind}{said}){long}"
 
 
 def block(
@@ -996,14 +1164,19 @@ def _kinds_said(kept: list[dict[str, Any]]) -> str:
 
 
 def look_up(
-    ledger: DesignLedger, run: str, part_kind: str | None, args: dict[str, Any]
+    ledger: DesignLedger,
+    run: str,
+    part_kind: str | None,
+    args: dict[str, Any],
+    named: Iterable[str] | None = None,
 ) -> tuple[bool, str, dict[str, Any]]:
     """The `lessons` tool's answer: whether it's one, its words, and what the run's events keep.
     With `id`, that kept lesson whole, as a start gives one, and the run is given it
     (`run_lessons`, as `tool`), so its review scores it. Otherwise each kept lesson for the model
     that holds every one of `words`, or failing that any of them, and is for `kind`, in a line:
     its number, area, kind of part and fix's shape. With neither, the run's own: its kind's and
-    the general ones, as the start orders them. It reads, and changes no lesson's words."""
+    the general ones, as the start takes them, by the features the request names (`named`). It
+    reads, and changes no lesson's words."""
     kept = kept_for_model(ledger)
     had = {int(g["lesson"]): str(g["how"]) for g in given_to(ledger, run)}
     if args.get("id") is not None:
@@ -1030,7 +1203,7 @@ def look_up(
     words = re.findall(r"[\w'.-]+", str(args.get("words") or "").casefold())
     asked = part_kind_of(str(args.get("kind") or ""))
     if asked is None and not words:
-        found_all = to_give(ledger, part_kind)
+        found_all = to_give(ledger, part_kind, named)
         of = " for your part's kind, and general"
     elif asked is None:
         found_all, of = _ordered(ledger, kept), ""
