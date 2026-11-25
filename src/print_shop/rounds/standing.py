@@ -560,9 +560,11 @@ def _stepped_flat(name: str, one: Glass, numbers: dict[str, Any]) -> str:
     if not stepped:
         return ""
     said = ", ".join(f"`{f}`" for f in stepped)
+    one_pane = len(stepped) == 1
+    each, it = ("is stepped, a", "it") if one_pane else ("are stepped, each a", "them")
     return (
-        f"{said} is stepped, a body over a raised face, as a flush pane is, and `glass` declares "
-        f"`{one.frame}` flat, with no file for it to print from: declare it flush, each pane "
+        f"{said} {each} body over a raised face, as a flush pane is, and `glass` declares "
+        f"`{one.frame}` flat, with no file for {it} to print from: declare {it} flush, each pane "
         f"with its laid file. {FLUSH_SHAPE}"
     )
 

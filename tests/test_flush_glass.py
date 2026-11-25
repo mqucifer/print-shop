@@ -182,6 +182,12 @@ def test_a_stepped_pane_declared_flat_fails_light_naming_it() -> None:
     said = standing._stepped_flat(standing.LIGHT, _flat(), numbers)
     assert "`pane_blue.step` is stepped, a body over a raised face" in said
     assert "declare it flush, each pane with its laid file" in said
+    two = standing._stepped_flat(
+        standing.LIGHT, standing.Glass("frame.step", ("a.step", "b.step"), 1.3, 0.25, 1.0),
+        {"stepped": ["a.step", "b.step"]},
+    )
+    assert "`a.step`, `b.step` are stepped, each a body over a raised face" in two
+    assert "with no file for them to print from: declare them flush" in two
     assert standing._stepped_flat(standing.HOLD, _flat(), numbers) == ""
     flush = standing.Glass("frame.step", ("pane_blue.step",), 1.3, 0.25, 1.0,
                            laid=(("pane_blue.step", "pane_blue-laid.step"),), face_thickness=0.8,

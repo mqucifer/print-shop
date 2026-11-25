@@ -158,7 +158,8 @@ def test_a_flush_pane_declared_flat_is_refused_not_passed(
     assert not light.passed and not light.unsure and light.verdict == "OK", light.why
     for pane in flush["panes"]:
         assert f"`{pane}`" in light.why
-    assert "is stepped, a body over a raised face, as a flush pane is" in light.why
+    assert "are stepped, each a body over a raised face, as a flush pane is" in light.why
+    assert "with no file for them to print from: declare them flush" in light.why
     said = {name: SAID for name in _part(flat)}
     faces = downward.read(box, _part(flat), {}, work, tmp_path / "downward", said, glass)
     panes = [f for f in faces if f.file in flush["panes"]]
