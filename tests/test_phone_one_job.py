@@ -22,7 +22,7 @@ from typing import Any
 import pytest
 
 from print_shop.orchestrator.print_queue import Asked, Need
-from print_shop.phone.one_job import QUEUES_ALONE, OneJob
+from print_shop.phone.one_job import OneJob
 from print_shop.phone.phones import Phones
 from print_shop.phone.server import handler_for
 from print_shop.phone.shop import Shop
@@ -141,7 +141,9 @@ def test_main_on_a_lone_job_shows_the_job_and_its_need(rig: Rig) -> None:
     assert "The queue isn't running" not in shown.body
     assert "This job" in shown.body and "bracket.stl" in shown.body
     assert f'href="/job/{JOB}/questions"' in shown.raw and "Answer" in shown.body
-    assert QUEUES_ALONE[1:] in shown.body
+    assert "<code>print_job.py --queue</code>" in shown.raw, "the command as code"
+    assert "Sent to you" not in shown.body and "Nothing is waiting on you" not in shown.body, \
+        "nothing is sent to a lone job"
     page = phone.get(f"/job/{JOB}")
     assert "Hold" not in page.body and "Remove from the queue" not in page.body
     rig.mac.type("1", "1")

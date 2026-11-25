@@ -32,6 +32,9 @@ class Route:
     arms: bool = False
     #: Whether it's answered signed out, from the home Wi-Fi: only pairing.
     signed_out: bool = False
+    #: Its place in the menu bar (mqucifer/print-shop#289): "queue", "finished", "filaments" or
+    #: "start". Pairing has none: it's a signed-out page.
+    section: str = "queue"
 
     def match(self, path: str) -> dict[str, str] | None:
         found = re.fullmatch(self.path, path)
@@ -42,10 +45,10 @@ ROUTES: tuple[Route, ...] = (
     # Main: the queue (mqucifer/print-shop#221).
     Route("GET", r"/", "main"),
     # Start (mqucifer/print-shop#214): the only route that arms.
-    Route("GET", r"/start", "start_screen"),
-    Route("POST", r"/start", "start", arms=True),
-    Route("GET", r"/pair", "pair_screen", signed_out=True),
-    Route("POST", r"/pair", "pair", signed_out=True),
+    Route("GET", r"/start", "start_screen", section="start"),
+    Route("POST", r"/start", "start", arms=True, section="start"),
+    Route("GET", r"/pair", "pair_screen", signed_out=True, section=""),
+    Route("POST", r"/pair", "pair", signed_out=True, section=""),
     # A job in the queue, and the queue's own actions on it.
     Route("GET", rf"/job/{_ID}", "job"),
     Route("GET", rf"/job/{_ID}/remove", "remove_screen"),
@@ -53,8 +56,8 @@ ROUTES: tuple[Route, ...] = (
     # Print it in another spool: the queue's own move.
     Route("POST", rf"/job/{_ID}/spool", "move"),
     # Filaments: what's loaded and on the shelf, and the stock's own load.
-    Route("GET", r"/filaments", "filaments"),
-    Route("POST", r"/filaments/load", "load"),
+    Route("GET", r"/filaments", "filaments", section="filaments"),
+    Route("POST", r"/filaments/load", "load", section="filaments"),
     # What the job needs from the person: the terminal's own screens, answered from the phone
     # (`session.py`), and the queue's own `give` for a look and the mesh gate.
     Route("GET", rf"/job/{_ID}/questions", "questions"),
@@ -70,14 +73,14 @@ ROUTES: tuple[Route, ...] = (
     Route("POST", rf"/job/{_ID}/mesh", "meshed"),
     # What the slice shows, for a job that's prepared and for a finished run, a failed one too.
     Route("GET", rf"/job/{_ID}/slice", "job_slice"),
-    Route("GET", rf"/run/{_ID}/slice", "run_slice"),
+    Route("GET", rf"/run/{_ID}/slice", "run_slice", section="finished"),
     # Finished: the runs, a run, and its outcome by the card's own Record.
-    Route("GET", r"/runs", "runs"),
-    Route("GET", rf"/run/{_ID}", "run"),
-    Route("POST", rf"/run/{_ID}/outcome", "outcome"),
+    Route("GET", r"/runs", "runs", section="finished"),
+    Route("GET", rf"/run/{_ID}", "run", section="finished"),
+    Route("POST", rf"/run/{_ID}/outcome", "outcome", section="finished"),
     # Print again, as it was or with a change: the terminal's `again`. It only queues.
-    Route("GET", rf"/run/{_ID}/again", "again_screen"),
-    Route("POST", rf"/run/{_ID}/again", "again"),
+    Route("GET", rf"/run/{_ID}/again", "again_screen", section="finished"),
+    Route("POST", rf"/run/{_ID}/again", "again", section="finished"),
 )
 
 #: The routes that arm: #214's Start, alone.

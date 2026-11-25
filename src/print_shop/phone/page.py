@@ -13,8 +13,8 @@ from html import escape
 from print_shop.orchestrator.start import Checked
 
 __all__ = [
-    "away_page", "message_page", "nothing_ready_page", "page", "pair_page", "signed_out_page",
-    "start_page",
+    "away_page", "menu_bar", "message_page", "nothing_ready_page", "page", "pair_page",
+    "signed_out_page", "start_page",
 ]
 
 _STYLE = """
@@ -100,6 +100,14 @@ details.section > summary { font-size: 1.05em; font-weight: 600; color: var(--mu
 .row.setting .who { text-align: right; max-width: 40%; }
 .card.look .label, p .label { font-weight: 600; }
 label.turn-down { display: block; margin: 0.2em 0 0.6em; }
+nav.bar { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px;
+  margin: -8px 0 14px; padding: 0 0 8px; border-bottom: 1px solid var(--line); }
+nav.bar a { display: flex; align-items: center; justify-content: center; min-height: 44px;
+  padding: 0 4px; border-radius: 10px; text-decoration: none; color: var(--button);
+  font-size: 0.95em; overflow-wrap: anywhere; text-align: center; }
+nav.bar a.on { font-weight: 700; color: var(--fg); box-shadow: inset 0 -3px 0 var(--button); }
+nav.bar a.start { background: var(--button); color: var(--button-fg); font-weight: 600; }
+nav.bar a.start.on { box-shadow: inset 0 -3px 0 var(--button-fg); }
 pre.said { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.78em; line-height: 1.35;
   background: var(--box); border: 1px solid var(--line); border-radius: 10px; padding: 10px;
   margin: 0 0 1em; }
@@ -125,6 +133,27 @@ label.row input[type=checkbox] { width: 1.3em; height: 1.3em; flex: none; }
 .layer input { width: 5em; padding: 8px; font-size: 1em; }
 .layer button { width: auto; padding: 8px 14px; }
 """
+
+
+#: The menu bar's items, in their fixed places (mqucifer/print-shop#289): Start last, there only
+#: while a job waits at the gate, so the others never move under a thumb.
+_BAR = (("queue", "/", "Queue"), ("finished", "/runs", "Finished"),
+        ("filaments", "/filaments", "Filaments"))
+
+
+def menu_bar(current: str, start: bool) -> str:
+    """The bar at the top of every signed-in page: Queue · Finished · Filaments, and Start,
+    filled, while a job waits at the gate. The page you're on is marked. Links only."""
+    items = []
+    for key, href, words in _BAR:
+        on = ' class="on" aria-current="page"' if key == current else ""
+        items.append(f'<a href="{href}"{on}>{words}</a>')
+    if start:
+        on = ' aria-current="page"' if current == "start" else ""
+        items.append(f'<a href="/start" class="start{" on" if on else ""}"{on}>Start</a>')
+    else:
+        items.append('<span aria-hidden="true"></span>')
+    return f'<nav class="bar" aria-label="print-shop">{"".join(items)}</nav>'
 
 
 def page(title: str, body: str) -> str:
