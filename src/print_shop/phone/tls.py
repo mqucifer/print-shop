@@ -17,6 +17,7 @@ Nothing here writes or says a key, or what's in a file: only the files' paths.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import ssl
 import threading
@@ -47,12 +48,19 @@ CLOSE_WAIT_S = 2.0
 #: Why more names than the page's is refused (print-shop-ux, on mqucifer/print-shop#312).
 ONE_NAME = "a certificate for more names than the page's puts their key on this host"
 
+#: OpenSSL's X509_V_FLAG_NO_CHECK_TIME, which `ssl` doesn't name.
+_NO_CHECK_TIME = 0x200000
 _PEM_BEGIN = "-----BEGIN CERTIFICATE-----"
 _PEM_END = "-----END CERTIFICATE-----"
 
 
 class CertificateRefused(ValueError):
-    """The certificate can't be served: why, in words that follow "the phone's page is off: "."""
+    """The certificate can't be served: why, in words that follow "the phone's page is off: ".
+    `retry_at` is when the same files may pass: a certificate that isn't valid yet."""
+
+    def __init__(self, words: str, *, retry_at: datetime | None = None) -> None:
+        super().__init__(words)
+        self.retry_at = retry_at
 
 
 @dataclass(frozen=True)
@@ -78,11 +86,20 @@ class Loaded:
 
     context: ssl.SSLContext
     not_after: datetime
-    pair: tuple[bytes, bytes]
+    #: The two files' digest as they were checked: never the key itself.
+    pair: str
+
+
+def digest(pair: tuple[bytes, bytes]) -> str:
+    return hashlib.sha256(len(pair[0]).to_bytes(8, "big") + pair[0] + pair[1]).hexdigest()
 
 
 def day(when: datetime) -> str:
-    return f"{when.astimezone():%Y-%m-%d}"
+    """A day as the person reads it: their own, or UTC's where theirs can't be told."""
+    try:
+        return f"{when.astimezone():%Y-%m-%d}"
+    except (OverflowError, ValueError, OSError):
+        return f"{when:%Y-%m-%d} (UTC)"
 
 
 def check(files: TlsFiles, name: str, now: datetime) -> Loaded:
@@ -90,8 +107,19 @@ def check(files: TlsFiles, name: str, now: datetime) -> Loaded:
 
     Raises:
         CertificateRefused: If a file can't be read, the certificate is out of date, doesn't name
-            `name`, names anything else, or the key isn't its own.
+            `name`, names anything else, or the key isn't its own; or anything else about it
+            fails, said by its kind alone.
     """
+    try:
+        return _check(files, name, now)
+    except CertificateRefused:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a strange certificate is refused, never served
+        raise CertificateRefused(
+            f"its certificate couldn't be checked ({type(exc).__name__})") from None
+
+
+def _check(files: TlsFiles, name: str, now: datetime) -> Loaded:
     try:
         pair = files.read()
     except OSError as exc:
@@ -111,7 +139,8 @@ def check(files: TlsFiles, name: str, now: datetime) -> Loaded:
             f"its certificate ran out on {day(not_after)}, and no good renewal is in "
             f"{files.folder}")
     if now < not_before:
-        raise CertificateRefused(f"its certificate isn't valid until {day(not_before)}")
+        raise CertificateRefused(f"its certificate isn't valid until {day(not_before)}",
+                                 retry_at=not_before)
     server = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     server.minimum_version = ssl.TLSVersion.TLSv1_2
     try:
@@ -141,7 +170,7 @@ def check(files: TlsFiles, name: str, now: datetime) -> Loaded:
         raise CertificateRefused(
             f"its certificate names more than {name} ({', '.join(others)}): {ONE_NAME}: use one "
             f"for {name} alone")
-    return Loaded(server, not_after, pair)
+    return Loaded(server, not_after, digest(pair))
 
 
 def _names(server: ssl.SSLContext, leaf: str) -> list[str]:
@@ -151,7 +180,9 @@ def _names(server: ssl.SSLContext, leaf: str) -> list[str]:
     client = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     client.check_hostname = False  # each name is weighed below, more strictly than a browser
     client.load_verify_locations(cadata=leaf)
-    client.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
+    # Its dates are weighed by `check`, on the page's own clock, so a renewal not yet valid is
+    # taken the moment it is, and said in the same words either way.
+    client.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN | _NO_CHECK_TIME
     to_server, to_client = ssl.MemoryBIO(), ssl.MemoryBIO()
     from_server, from_client = ssl.MemoryBIO(), ssl.MemoryBIO()
     serving = server.wrap_bio(to_server, from_server, server_side=True)
@@ -242,8 +273,10 @@ class Certificate:
         self.now = clock or (lambda: datetime.now(UTC))
         self._lock = threading.Lock()
         self._loaded: Loaded | None = None
-        #: The pair on disk last refused, said once, and tried again only once it changes.
-        self._refused: tuple[bytes, bytes] | None = None
+        #: The pair on disk last refused (its digest), said once, and tried again once it
+        #: changes, or once it may pass (`_retry_at`: one that wasn't valid yet).
+        self._refused = ""
+        self._retry_at: datetime | None = None
         #: Why the page answers nothing now, said once; "" while it serves.
         self._off = ""
 
@@ -251,7 +284,7 @@ class Certificate:
         """Check the pair on disk, at start. Raises CertificateRefused, saying why."""
         loaded = check(self.files, self.name, self.now())
         with self._lock:
-            self._loaded, self._refused, self._off = loaded, None, ""
+            self._loaded, self._refused, self._retry_at, self._off = loaded, "", None, ""
 
     def context(self) -> ssl.SSLContext | None:
         """What serves the next connection: a renewal on disk once it's checked, or the one
@@ -297,18 +330,20 @@ class Certificate:
             pair = self.files.read()
         except OSError:
             return  # being copied, or moved: the one before is served while it lasts
-        if self._loaded is not None and pair == self._loaded.pair:
+        seen = digest(pair)
+        if self._loaded is not None and seen == self._loaded.pair:
             return
-        if pair == self._refused:
+        if seen == self._refused and (self._retry_at is None or self.now() < self._retry_at):
             return
         try:
             loaded = check(self.files, self.name, self.now())
         except CertificateRefused as exc:
-            self._refused = pair
-            logger.warning("A new certificate for the phone's page wasn't taken: %s. The one "
-                           "before is served while it lasts.", exc)
+            if seen != self._refused:
+                logger.warning("A new certificate for the phone's page wasn't taken: %s. The "
+                               "one before is served while it lasts.", exc)
+            self._refused, self._retry_at = seen, exc.retry_at
             return
-        self._loaded, self._refused = loaded, None
+        self._loaded, self._refused, self._retry_at = loaded, "", None
         logger.warning("The phone's page serves its renewed certificate, good until %s.",
                        day(loaded.not_after))
 
@@ -324,7 +359,11 @@ def serving(certificate: Certificate, sock: object) -> ssl.SSLSocket:
     import socket  # noqa: PLC0415 - typed loosely above, for a test's socketpair
 
     assert isinstance(sock, socket.socket)
-    context = certificate.context()
+    try:
+        context = certificate.context()
+    except Exception:  # noqa: BLE001 - never the accept loop's end: this connection is closed
+        logger.warning("the phone's page couldn't serve a connection", exc_info=True)
+        context = None
     if context is None:
         sock.close()
         raise OSError("the phone's page answers nothing now")

@@ -374,8 +374,8 @@ def test_a_certificate_running_out_within_14_days_is_said_at_the_start(
 # --------------------------------------------------------------------------
 
 
-def _pair(phones: Phones, name: str) -> None:
-    assert isinstance(phones.pair(phones.mint(name)), tuple)
+def _pair(phones: Phones, name: str, *, over_https: bool = False) -> None:
+    assert isinstance(phones.pair(phones.mint(name), over_https=over_https), tuple)
 
 
 def test_the_move_to_https_signs_out_sign_ins_made_over_plain_http_and_says_pair_again(
@@ -390,7 +390,7 @@ def test_the_move_to_https_signs_out_sign_ins_made_over_plain_http_and_says_pair
             f"The phone's page is now https://{NAME}:{port}/: pair your phone again with "
             "`phone.py pair`. Signed out, as each sign-in went over plain HTTP: Made-up phone.")
     assert phones.all() == []
-    _pair(phones, "Made-up phone")
+    _pair(phones, "Made-up phone", over_https=True)
     with running(https_home(files, port), phones) as server:
         assert server.said == (), "said once, the first time"
     assert [p.name for p in phones.all()] == ["Made-up phone"], "a sign-in over HTTPS is kept"
@@ -464,11 +464,13 @@ def test_a_half_done_setup_is_said_at_the_runs_start_and_on_the_live_line(
 ) -> None:
     settings = _settings(tmp_path, f"PHONE_NAME={NAME}\nPHONE_TLS_CERT={files.cert}\n")
     page = print_job.PhonePage(settings, None)
-    said = ("The phone's Start is off: PHONE_TLS_KEY isn't set (PHONE_NAME and PHONE_TLS_CERT "
+    said = ("The phone's page is off: PHONE_TLS_KEY isn't set (PHONE_NAME and PHONE_TLS_CERT "
             "are)")
     assert not page.on
     assert said in capsys.readouterr().out
     assert page.trouble().startswith(said)
+    assert page.trouble().endswith("HTTPS needs all three, and the page isn't served as plain "
+                                   "HTTP for a half-done setup.")
 
 
 def test_an_out_of_date_certificate_is_said_at_the_runs_start(
@@ -518,5 +520,107 @@ def test_logging_names_no_file_contents(phones: Phones, files: TlsFiles,
     port = free_port()
     with running(https_home(files, port), phones):
         assert _plain(port, b"GET / HTTP/1.1\r\n\r\n") == b""
-    assert "no HTTPS" in caplog.text
+    assert "the HTTPS connection failed" in caplog.text
     assert "PRIVATE KEY" not in caplog.text and "CERTIFICATE-----" not in caplog.text
+
+
+# --------------------------------------------------------------------------
+# The cold security review of mqucifer/print-shop#316
+# --------------------------------------------------------------------------
+
+
+def test_a_renewal_not_valid_yet_is_taken_once_it_is_without_the_files_changing(
+    phones: Phones, files: TlsFiles,
+) -> None:
+    """A clock a little behind the CA's: the copy job's renewal isn't valid for a few minutes.
+    It's tried again once it may pass, not left until the one before runs out."""
+    now = [datetime.now(UTC)]
+    port = free_port()
+    with running(https_home(files, port), phones, clock=lambda: now[0]):
+        first = serial(files)
+        make(files.folder, starts=timedelta(minutes=5), lasts=timedelta(days=90))
+        early = serial(files)
+        assert served_unchecked("127.0.0.1", port).serial_number == first
+        now[0] += timedelta(minutes=6)
+        # The phone's own check runs on the real clock: it trusts the certificate as served.
+        cert = served_unchecked("127.0.0.1", port)
+        assert cert.serial_number == early != first
+
+
+def served_unchecked(host: str, port: int) -> x509.Certificate:
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    with socket.create_connection((host, port), timeout=5) as raw, \
+            context.wrap_socket(raw, server_hostname=NAME) as conn:
+        der = conn.getpeercert(binary_form=True)
+    assert der is not None
+    return x509.load_der_x509_certificate(der)
+
+
+def test_anything_going_wrong_for_one_connection_leaves_the_page_serving(
+    phones: Phones, files: TlsFiles, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    port = free_port()
+    with running(https_home(files, port), phones) as server:
+        assert server.certificate is not None
+        real = server.certificate.context
+        calls = [0]
+
+        def once(*_: Any) -> Any:
+            calls[0] += 1
+            if calls[0] == 1:
+                raise OverflowError("a date it can't say")
+            return real()
+
+        monkeypatch.setattr(server.certificate, "context", once)
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as raw, \
+                pytest.raises((ssl.SSLError, ConnectionError)):
+            phone_context(files).wrap_socket(raw, server_hostname=NAME)
+        assert served("127.0.0.1", port, files).serial_number == serial(files)
+
+
+def test_a_far_future_certificate_is_served_and_said(phones: Phones, tmp_path: Path) -> None:
+    files = make(tmp_path / "tls", lasts=datetime(9999, 12, 31, tzinfo=UTC) - datetime.now(UTC))
+    port = free_port()
+    with running(https_home(files, port), phones) as server:
+        assert server.said == ()
+        make(files.folder, lasts=datetime(9999, 12, 31, tzinfo=UTC) - datetime.now(UTC))
+        assert served("127.0.0.1", port, files).serial_number == serial(files)
+    assert day(datetime(9999, 12, 31, 23, 59, tzinfo=UTC)).startswith("9999-12-31") or day(
+        datetime(9999, 12, 31, 23, 59, tzinfo=UTC)).startswith("10000")
+
+
+def test_a_sign_in_made_over_plain_http_never_signs_in_over_https(
+    phones: Phones, files: TlsFiles,
+) -> None:
+    """However the page's origin was kept: a rollback, or an HTTP page beside an HTTPS one."""
+    port = free_port()
+    with running(https_home(files, port), phones):
+        pass  # the origin kept is https now
+    paired = phones.pair(phones.mint("Made-up phone"), over_https=False)
+    assert isinstance(paired, tuple)
+    secret = paired[1]
+    assert phones.signed_in(secret) is not None, "over plain HTTP, as before"
+    assert phones.signed_in(secret, over_https=True) is None
+    with running(https_home(files, port), phones) as server:
+        assert "Signed out, as each sign-in went over plain HTTP: Made-up phone." in server.said[0]
+    assert phones.all() == []
+
+
+def test_a_phones_file_from_before_is_read_as_paired_over_plain_http(
+    tmp_path: Path, files: TlsFiles,
+) -> None:
+    import sqlite3  # noqa: PLC0415
+
+    path = tmp_path / "phones.sqlite"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE phones (name TEXT PRIMARY KEY, secret_sha256 TEXT NOT NULL "
+                     "UNIQUE, paired_at REAL NOT NULL)")
+        conn.execute("INSERT INTO phones VALUES ('Made-up phone', 'ab', 1.0)")
+    conn.close()
+    phones = Phones(path)
+    assert [p.name for p in phones.all()] == ["Made-up phone"]
+    with running(https_home(files, free_port()), phones) as server:
+        assert "pair your phone again" in server.said[0]
+    assert phones.all() == []

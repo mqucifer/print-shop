@@ -36,6 +36,7 @@ import errno
 import logging
 import re
 import socket
+import sqlite3
 import ssl
 import unicodedata
 from collections.abc import Callable
@@ -239,8 +240,15 @@ class PageServer(ThreadingHTTPServer):
         sock, address = super().get_request()
         if self.certificate is None:
             return sock, address
-        # An OSError here (nothing good to serve) closes it, and the server goes on.
-        return serving(self.certificate, sock), address
+        # An OSError here (nothing good to serve) closes it, and the server goes on: the
+        # standard library's loop ends on anything else, so nothing else leaves here.
+        try:
+            return serving(self.certificate, sock), address
+        except OSError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            sock.close()
+            raise OSError(f"the phone's page couldn't serve a connection ({exc!r})") from None
 
     def shutdown_request(self, request: Any) -> None:
         if isinstance(request, ssl.SSLSocket):
@@ -291,7 +299,12 @@ def make_server(
                 f"Set another with {PORT_KEY}") from exc
         raise PhoneOff(f"the phone's Start is off: it can't listen on {home.host} ({exc})") from exc
     server.certificate = certificate
-    server.said = _said(home, phones, certificate)
+    try:
+        server.said = _said(home, phones, certificate)
+    except sqlite3.Error as exc:
+        server.server_close()
+        raise PhoneOff(f"the phone's Start is off: the paired phones couldn't be read ({exc})"
+                       ) from exc
     return server
 
 
@@ -299,7 +312,7 @@ def _said(home: Home, phones: Phones, certificate: Certificate | None) -> tuple[
     """What the run says as the page starts (print-shop-ux, on mqucifer/print-shop#312)."""
     before, out = phones.served_at(home.origin)
     said = []
-    if home.tls is not None and before != home.origin and (before is not None or out):
+    if home.tls is not None and (out or (before is not None and before != home.origin)):
         line = (f"The phone's page is now {home.origin}/: pair your phone again with "
                 "`phone.py pair`.")
         if out:
@@ -362,10 +375,11 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             super().handle()
         except ssl.SSLError as exc:
-            # Plain HTTP to the HTTPS port, or a client that won't take the certificate: closed,
-            # with nothing answered (mqucifer/print-shop#312).
-            logger.info("phone page, from %s: no HTTPS (%s), so nothing was answered",
-                        self._peer(), exc.reason or type(exc).__name__)
+            # Plain HTTP to the HTTPS port, a client that won't take the certificate, or one gone
+            # mid-reply: closed (mqucifer/print-shop#312).
+            logger.info("phone page, from %s: the HTTPS connection failed (%s); what was done "
+                        "before it, if anything, is said above", self._peer(),
+                        exc.reason or type(exc).__name__)
 
     def do_GET(self) -> None:  # noqa: N802 - the standard library's name
         if not self._own_host():
@@ -499,7 +513,7 @@ class _Handler(BaseHTTPRequestHandler):
         if away:
             self._refused(f"pairing refused: {away}")
             return self._send(away_page(part=None, why=away), code=HTTPStatus.FORBIDDEN)
-        paired = self.phones.pair(form.get("code", ""))
+        paired = self.phones.pair(form.get("code", ""), over_https=self.home.tls is not None)
         if isinstance(paired, str):
             self._refused(f"pairing refused: {paired}")
             return self._send(pair_page(paired), code=HTTPStatus.FORBIDDEN)
@@ -981,7 +995,7 @@ class _Handler(BaseHTTPRequestHandler):
             return None, ""
         held = cookie.get(COOKIE)
         secret = held.value if held is not None else ""
-        phone = self.phones.signed_in(secret)
+        phone = self.phones.signed_in(secret, over_https=self.home.tls is not None)
         return (phone, secret) if phone is not None else (None, "")
 
     def _form(self) -> dict[str, str] | None:

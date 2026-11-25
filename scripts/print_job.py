@@ -811,7 +811,7 @@ class PhonePage:
         try:
             home = Home.from_settings(settings)
         except HomeRefused as exc:
-            self._off = f"The phone's Start is off: {exc}."
+            self._off = f"The phone's page is off: {exc}."
             print(self._off)
             return
         if home is None:

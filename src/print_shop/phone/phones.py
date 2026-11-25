@@ -11,9 +11,10 @@ of Crockford's base32 (about 50 bits), valid for `CODE_LASTS_S`, used once, and 
 `forget` deletes a phone's row, and every request looks its sign-in up here, so a forgotten
 phone is signed out at once.
 
-The page's origin is kept too (`served_at`). When the page first serves over HTTPS
-(mqucifer/print-shop#312), every phone paired before is signed out: its sign-in went over plain
-HTTP, where a copy of it could be read, so a copy mustn't sign in over HTTPS.
+Each phone's row says whether it was paired over HTTPS (mqucifer/print-shop#312). Over HTTPS,
+only those sign in: a sign-in made over plain HTTP went where a copy of it could be read, so a
+copy mustn't sign in over HTTPS. Each time the page starts over HTTPS, those rows are deleted and
+named (`served_at`), with the page's origin kept, to say when it's moved.
 """
 
 from __future__ import annotations
@@ -62,7 +63,8 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS phones (
     name           TEXT PRIMARY KEY,
     secret_sha256  TEXT NOT NULL UNIQUE,
-    paired_at      REAL NOT NULL
+    paired_at      REAL NOT NULL,
+    over_https     INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS pairing (
     one            INTEGER PRIMARY KEY CHECK (one = 1),
@@ -116,6 +118,7 @@ class Phones:
                 self.path.chmod(0o600)
             conn.row_factory = sqlite3.Row
             conn.executescript(SCHEMA)
+            _over_https_column(conn)
             yield conn
 
     def mint(self, name: str) -> str:
@@ -136,10 +139,11 @@ class Phones:
                 (name, _sha256(code), self._clock() + CODE_LASTS_S))
         return code
 
-    def pair(self, typed: str) -> tuple[str, str] | str:
+    def pair(self, typed: str, *, over_https: bool = False) -> tuple[str, str] | str:
         """Pair a phone with the code it typed: (its name, its new secret), to set in its cookie;
         or why not, in words. A right code is spent; a wrong one counts, and the code dies at
-        `WRONG_TRIES`."""
+        `WRONG_TRIES`. `over_https` is whether the page that took the code is served over HTTPS:
+        only such a sign-in signs in over HTTPS."""
         code = normal_code(typed)
         with self._lock, self._open() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -165,8 +169,9 @@ class Phones:
                     secret = secrets.token_urlsafe(32)  # 256 bits
                     conn.execute("DELETE FROM pairing")
                     conn.execute(
-                        "INSERT OR REPLACE INTO phones (name, secret_sha256, paired_at) "
-                        "VALUES (?, ?, ?)", (waiting["name"], _sha256(secret), self._clock()))
+                        "INSERT OR REPLACE INTO phones (name, secret_sha256, paired_at, "
+                        "over_https) VALUES (?, ?, ?, ?)",
+                        (waiting["name"], _sha256(secret), self._clock(), int(over_https)))
                     said = (waiting["name"], secret)
                 conn.execute("COMMIT")
             except BaseException:
@@ -174,13 +179,15 @@ class Phones:
                 raise
         return said
 
-    def signed_in(self, secret: str) -> Paired | None:
-        """The phone whose cookie holds `secret`, or None."""
+    def signed_in(self, secret: str, *, over_https: bool = False) -> Paired | None:
+        """The phone whose cookie holds `secret`, or None. `over_https`, for a page served over
+        HTTPS: only a phone paired over HTTPS."""
         if not secret or len(secret) > 200:
             return None
         with self._lock, self._open() as conn:
-            found = conn.execute("SELECT name, paired_at FROM phones WHERE secret_sha256 = ?",
-                                 (_sha256(secret),)).fetchone()
+            found = conn.execute(
+                "SELECT name, paired_at FROM phones WHERE secret_sha256 = ? AND over_https >= ?",
+                (_sha256(secret), int(over_https))).fetchone()
         return Paired(name=found["name"], paired_at=found["paired_at"]) if (
             found is not None) else None
 
@@ -198,23 +205,34 @@ class Phones:
 
     def served_at(self, origin: str) -> tuple[str | None, list[str]]:
         """The page serves at `origin` now: the origin it served at before (None if none was
-        kept), and the phones signed out by the move. Moving to HTTPS from plain HTTP, or from
-        before origins were kept, signs out every phone paired before: each sign-in went over
-        plain HTTP (mqucifer/print-shop#312)."""
+        kept), and the phones signed out. Over HTTPS, every phone paired over plain HTTP is
+        signed out: its sign-in went where a copy could be read (mqucifer/print-shop#312)."""
         with self._lock, self._open() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 row = conn.execute("SELECT origin FROM page WHERE one = 1").fetchone()
                 before: str | None = row["origin"] if row is not None else None
                 out: list[str] = []
-                if (origin != before and origin.startswith("https:")
-                        and not (before or "").startswith("https:")):
+                if origin.startswith("https:"):
                     out = [r["name"] for r in conn.execute(
-                        "SELECT name FROM phones ORDER BY paired_at").fetchall()]
-                    conn.execute("DELETE FROM phones")
+                        "SELECT name FROM phones WHERE over_https = 0 ORDER BY paired_at")]
+                    conn.execute("DELETE FROM phones WHERE over_https = 0")
                 conn.execute("INSERT OR REPLACE INTO page (one, origin) VALUES (1, ?)", (origin,))
                 conn.execute("COMMIT")
             except BaseException:
                 conn.execute("ROLLBACK")
                 raise
         return before, out
+
+
+def _over_https_column(conn: sqlite3.Connection) -> None:
+    """A file from before mqucifer/print-shop#312 gets `over_https`: each phone in it was paired
+    over plain HTTP."""
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(phones)")}
+    if "over_https" in columns:
+        return
+    try:
+        conn.execute("ALTER TABLE phones ADD COLUMN over_https INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError as exc:
+        if "duplicate column" not in str(exc):  # another process added it first
+            raise
