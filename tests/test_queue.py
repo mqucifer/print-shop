@@ -557,8 +557,8 @@ def test_moved_to_another_variety_a_temperature_or_fan_comes_back_unticked(
     job_id, _ = reviewed_ready(shop, queue, "unticked")
     said = queue.move(job_id, GREY)
     assert isinstance(said, list)
-    assert any("offered back unticked: nozzle_temperature=205, fan_max_speed=60" in s
-               for s in said), said
+    assert any("offered back unticked: Nozzle temperature (nozzle_temperature) 205 °C, Part "
+               "fan, fastest (fan_max_speed) 60%" in s for s in said), said
     asked = shop.need(queue, job_id, Need.REVIEW)
     assert "nozzle_temperature" not in keys(asked) or keys(asked)["nozzle_temperature"] != "205"
     assert "fan_max_speed" not in keys(asked) or keys(asked)["fan_max_speed"] != "60"

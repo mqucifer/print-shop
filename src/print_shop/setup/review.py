@@ -1395,11 +1395,41 @@ def _settled(
             # Looked up, and asked again: finding changes nothing (mqucifer/print-shop#222).
             write("\n".join(_finding(looked.group(1), request, width)))
             continue
+        if typed.strip().lower() in ("ok", "yes", "y", "approve"):
+            # Asked again, saying why (mqucifer/print-shop#298).
+            write("\n".join(wrap("  ", "ok isn't a fix here: type it corrected, drop, or back",
+                                  min(width, WIDTH), "    ")))
+            continue
         parts = read_.answered(typed)
         if not parts:
             return None
+        parts = _fix_stands(read_, parts, write, width)
         read_ = _read_parts(parts, request)
     return read_
+
+
+def _fix_stands(
+    slipped: Slipped, parts: list[str | Left], write: Callable[[str], None], width: int,
+) -> list[str | Left]:
+    """The answer as fixed, with what the fix sets of a setting the held answer set too said to
+    stand (mqucifer/print-shop#298): "wall_loops was 3 in this answer: 4 stands". Only words: it
+    stands as before, typed later, and both are kept as the answer gave them."""
+    at, _ = slipped.slips[0]
+    fixed = len(parts) - len(slipped.parts) + 1  # what the fix put in the slip's place
+    if fixed <= 0:
+        return parts
+    new: dict[str, str] = {}
+    for part in parts[at:at + fixed]:
+        match = _CORRECTION.match(part) if isinstance(part, str) else None
+        if match is not None:
+            new[match.group(1)] = match.group(2)
+    for n, part in enumerate(parts):
+        match = _CORRECTION.match(part) if isinstance(part, str) else None
+        if match is not None and not at <= n < at + fixed and match.group(1) in new:
+            key = match.group(1)
+            write("\n".join(wrap("  ", f"{key} was {match.group(2)} in this answer: {new[key]} "
+                                  "stands", min(width, WIDTH), "    ")))
+    return parts
 
 
 def _unset(answer: str) -> list[str]:

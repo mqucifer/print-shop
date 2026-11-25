@@ -52,6 +52,7 @@ from print_shop.setup.context import (
     read_context,
     seen_from_words,
 )
+from print_shop.setup.names import setting_said
 from print_shop.setup.proposal import PAUSE
 from print_shop.slicer.orca import SlicerProfiles
 
@@ -216,7 +217,8 @@ def queue_one(
             given, said = _part(one, path, copy, folder, sent.by)
             came += said
             suggestions, refused = _suggestions(one, profiles, sent.by)
-            came += [f"suggested, offered at the review unticked: {s.key}={s.value} ({s.reason})"
+            came += [f"suggested, offered at the review unticked: {setting_said(s.key, s.value)} "
+                     f"({s.reason})"
                      for s in suggestions]
             came += refused
     except BaseException:
@@ -336,7 +338,7 @@ def _suggestions(
         else:
             why = bounds.check(key, value, presets)
         if why:
-            refused.append(f"not taken: the suggestion {key}={value}: {why}")
+            refused.append(f"not taken: the suggestion {setting_said(key, value)}: {why}")
         else:
             kept.append(Suggestion(key=key, value=value, reason=plain_line(reason), by=by))
     return kept, refused

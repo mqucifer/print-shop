@@ -44,7 +44,7 @@ from print_shop.setup.reach import profile_of, unplaced
 from print_shop.sliced import NOT_SETTINGS, PROFILE_IDS
 
 __all__ = ["ORCA_FORMS", "PLAIN", "STANDS_IN", "Found", "choices", "either", "find", "form",
-           "named", "not_a_choice", "not_a_form", "now",
+           "named", "not_a_choice", "not_a_form", "now", "setting_said", "unset_said",
            "off", "plain", "refused", "switched", "turns_off", "typed", "with_unit"]
 
 _PERCENT, _SPEED, _TEMP, _MM, _S = "%", " mm/s", " °C", " mm", " s"
@@ -181,6 +181,14 @@ class Found:
     #: The words it takes, where they're all Orca's (`choices`), and the one that turns it off.
     choices: tuple[str, ...] = ()
     off: str = ""
+    #: Where it's Orca's `nil`, not set here: the printer's value that applies, as it's shown,
+    #: or '' where it isn't known (mqucifer/print-shop#298).
+    printer: str = ""
+
+    @property
+    def unset(self) -> bool:
+        """Whether it's not set here, so the printer's applies: Orca's `nil`."""
+        return _unset(self.now)
 
 
 #: print-shop's own answers that are typed as a key is, and aren't Orca's.
@@ -202,6 +210,12 @@ def plain(key: str) -> str:
 def named(key: str) -> str:
     """A setting as it's said in a sentence: its plain name, its key after."""
     return f"{plain(key)} ({key})"
+
+
+def setting_said(key: str, value: str) -> str:
+    """A setting and its value as the review says them, where a line names one: "Walls
+    (wall_loops) 4", "Supports (enable_support) off" (mqucifer/print-shop#298)."""
+    return f"{named(key)} {with_unit(key, value)}"
 
 
 def with_unit(key: str, value: str) -> str:
@@ -450,8 +464,33 @@ def find(
     whole = [r for r in ranked if -r[0] >= len(asked)]
     some = [r for r in ranked if -r[0] < len(asked)]
     out = [*whole, *some][:_LISTED]
-    return [Found(key=k, plain=plain(k), now=_now(k, process, filament, config, changed),
-                  stands_in=stands.get(k, ""), choices=choices(k), off=off(k)) for *_, k in out]
+    found = []
+    for *_, k in out:
+        today = _now(k, process, filament, config, changed)
+        found.append(Found(key=k, plain=plain(k), now=today, stands_in=stands.get(k, ""),
+                           choices=choices(k), off=off(k),
+                           printer=_printers(k, config) if _unset(today) else ""))
+    return found
+
+
+def _unset(value: str) -> bool:
+    """Whether a value is Orca's `nil`: a filament's override not set, so the printer's applies."""
+    return value.split(",")[0].strip() == "nil"
+
+
+def _printers(key: str, config: Mapping[str, str] | None) -> str:
+    """The printer's value of what a filament's `key` overrides, as it's shown, from the slice's
+    config: `filament_retraction_length`'s is the printer's `retraction_length`."""
+    value = (config or {}).get(key.removeprefix("filament_"), "").split(",")[0].strip()
+    return with_unit(key, value) if value and value != "nil" else ""
+
+
+def unset_said(key: str, config: Mapping[str, str] | None) -> str:
+    """A setting left to the printer's, said: "not set here, so the printer's 0.8 mm applies",
+    or without the value where it isn't known (mqucifer/print-shop#298)."""
+    value = _printers(key, config)
+    return f"not set here, so the printer's {value} applies" if value else (
+        "not set here, so the printer's applies")
 
 
 def _nearest(key: str, among: Iterable[str]) -> list[str]:
@@ -485,7 +524,10 @@ def refused(
     keys = _takes(process, filament)
 
     def said(k: str) -> str:
-        now = with_unit(k, _now(k, process, filament, config, changed))
+        today = _now(k, process, filament, config, changed)
+        if _unset(today):
+            return f"{k} ({plain(k)}, {unset_said(k, config)})"
+        now = with_unit(k, today)
         words = f"; {either(choices(k))}" if choices(k) else ""
         return f"{k} ({plain(k)}, now {now}{words})"
 

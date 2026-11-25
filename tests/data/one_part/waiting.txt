@@ -91,7 +91,7 @@ WHAT THE SLICE SHOWS
     Top surface            0:20.3  #                      381       1  20
     Skirt                  0:02.4  #                       42       1  0.2
 
-    layers  100, 0:08.6 to 0:36.9 each, 0:08.9 typical; the shortest is layer 4 at z 0.8 mm
+    layers  100, 8.6 s to 36.9 s each, 8.9 s typical; the shortest is layer 4 at z 0.8 mm
     seam    aligned: 100 loop starts, 99% on the one below, so a line up the wall, most at x 138 y
             138 (100 layers)
 
