@@ -15,7 +15,16 @@ import numpy as np
 import pytest
 
 from print_shop.bench import assembly, dovetail, host, through, way_in
-from print_shop.bench.load import MIDS, _gmsh_errors, beyond, bolt_pulls, element_forces
+from print_shop.bench.load import (
+    MIDS,
+    _gmsh_errors,
+    band_refused,
+    beyond,
+    bolt_pulls,
+    element_forces,
+    memory_met,
+    oom_kills,
+)
 from print_shop.bench.report import NoAnswer
 from print_shop.rounds import needs, reports, skills, toolsets
 
@@ -728,6 +737,52 @@ def test_rays_inside_a_turned_latch_s_box_are_read_as_its_turned_outline(tmp_pat
     at = np.array([[0, math.sqrt(2)], [1.2, 0.2], [0.75 + 0.05, 0.75]])
     assert way_in._seen_in(found, 2, [0, 1], at, 0.0).tolist() == [True, False, False]
     assert way_in._seen_in(found, 2, [0, 1], at, 0.1).tolist() == [True, False, True]
+
+
+def cgroup(tmp_path: Path, kills: int | None, peak: int, most: int = 3 * 1024**3) -> Path:
+    """A made-up container cgroup: its limit, what it held at the most, and its count of what
+    the kernel stopped for memory, where it keeps one."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "memory.max").write_text(f"{most}\n")
+    (tmp_path / "memory.peak").write_text(f"{peak}\n")
+    if kills is not None:
+        (tmp_path / "memory.events").write_text(
+            f"low 0\nhigh 0\nmax 3\noom {kills}\noom_kill {kills}\noom_group_kill 0\n"
+        )
+    return tmp_path
+
+
+def test_a_solve_is_said_to_meet_the_memory_limit_only_where_something_was_stopped_for_it(
+    tmp_path: Path,
+) -> None:
+    """mqucifer/print-shop#295, the operator's review: what the container held at the most
+    counts the files it read since it started, so a solve that fails for anything else in a
+    container that's been full is no memory failure. Only a process the kernel stopped for
+    memory while the solve ran says so: its count, before and after."""
+    most = 3 * 1024**3
+    killed = cgroup(tmp_path / "killed", 1, most)
+    assert memory_met(0, killed) == most
+    # Full, but nothing stopped: another failure.
+    full = cgroup(tmp_path / "full", 0, most)
+    assert memory_met(0, full) is None
+    # Stopped before this solve began, by an earlier one: not this solve's.
+    assert memory_met(1, killed) is None
+    # No count kept, as on a kernel without one: never said to be memory.
+    none = cgroup(tmp_path / "none", None, most)
+    assert oom_kills(none) is None and memory_met(None, none) is None
+    assert oom_kills(killed) == 1
+
+
+def test_a_lift_isn_t_read_without_a_band() -> None:
+    """mqucifer/print-shop#295, the operator's review: lifted, each part hangs by its own
+    weight, and read without its band a framed part would hang by less, so every strain would
+    be read under less than it carries: lower, and no lower bound. So a lift is refused there,
+    saying why, and a weight case is read."""
+    said = band_refused("top", ["frame"], "it met the container's memory")
+    assert said is not None
+    assert said.startswith("--lift top: the whole assembly couldn't be read (it met the")
+    assert "without its band it would hang by less" in said
+    assert band_refused(None, ["frame"], "it met the container's memory") is None
 
 
 def test_gmsh_s_own_errors_are_said_without_its_summary() -> None:

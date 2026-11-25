@@ -39,7 +39,7 @@ import numpy as np
 
 from . import dovetail
 from .assembly import AXES, Assembly, Joint, Latch, PartAt
-from .cae import tidy_mesh, tidy_solve
+from .cae import ccx_one_thread, tidy_mesh, tidy_solve
 from .report import NoAnswer
 
 #: A latch's ledge is over its hook within this, in mm, along the slide: the slide check's own
@@ -441,7 +441,7 @@ def _solve(
         )
         with open(fea.inp_file_name, "w") as file:
             file.write(text[:outputs] + step + text[outputs:])
-        fea.ccx_run()
+        ccx_one_thread(fea)
         fea.load_results()
         tidy_solve(fea)
         results = [o for o in analysis.Group if o.isDerivedFrom("Fem::FemResultObject")]

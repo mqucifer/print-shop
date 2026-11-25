@@ -1495,6 +1495,8 @@ def test_a_latch_named_in_its_part_s_own_axes_reads_as_the_assembly_s_names_it(c
     assembly_s = cae("load", "play/edge.json", "--lift", "upper")
     own = cae("load", "turned/own.json", "--lift", "upper")
     assert own.verdict == assembly_s.verdict == "OK", own.text
+    for answer in (own, assembly_s):
+        assert "straight sides" not in answer.text, "a mesh that curves stays curved"
     assert own.numbers["joints"] == assembly_s.numbers["joints"]
     assert own.numbers["parts"] == assembly_s.numbers["parts"]
     mine, theirs = (a.numbers["ways_in"]["upper+lower"] for a in (own, assembly_s))
@@ -1520,6 +1522,7 @@ def test_four_posts_turned_round_a_table_s_middle_each_have_their_latch_named(
     cut in its own axes: a box of the assembly's takes in all of it."""
     answer = cae("load", f"turned/{'quarter' if first == 0 else 'eighth'}.json", *posts_up(first))
     assert answer.verdict == "OK", answer.text
+    assert "straight sides" not in answer.text, "a mesh that curves stays curved"
     for k in range(4):
         name = f"upper{k}+lower{k}"
         joint = answer.numbers["joints"][name]
@@ -1555,7 +1558,7 @@ def test_a_table_of_24_parts_and_56_bolts_says_the_limit_it_met_and_what_is_left
     # What to do first, then what it met.
     assert why.startswith("nothing of the assembly is read, as it's past what the container's "
                           "memory solves: name each glass frame's `band`"), why  # fmt: skip
-    assert "it met the container's memory, 3 GiB, all of it taken" in why, why
+    assert "it met the container's memory, 3 GiB, and the kernel stopped it there" in why, why
     assert "a coarser --mesh leaves most of those as they are" in why
     assert "Every part, joint and bolt of it is left unread" in why
     assert "Give a coarser --mesh" not in why
@@ -1575,6 +1578,7 @@ def test_a_bolt_left_out_reads_its_joint_as_the_one_that_gives_first(cae: Any) -
     push = ("--weight", "5", "--at", "0,100,154", "--toward", "+x")
     bolted = cae("load", "large/stool.json", *push)
     assert bolted.verdict == "OK", bolted.text
+    assert "straight sides" not in bolted.text, "its bores mesh curved, and stay so"
     one_out = cae("load", "large/stool-one-out.json", *push)
     assert one_out.verdict == "FAIL", one_out.text
     assert one_out.record["why"].startswith("the touching joint top+leg2"), one_out.record["why"]
@@ -1668,6 +1672,19 @@ def test_a_traced_glass_frame_reads_alone_with_its_elements_straight(
     frame = answer.numbers["parts"]["frame"]
     assert 0 < frame["across_layers_pct"] < 1.0
     assert answer.record["seconds"] < host.TIMEOUT
+    # The control for the lower bound (the operator's review): the same frame read without its
+    # band, as where the whole meets the memory limit, though here it doesn't. Less in it, it
+    # gives more under the same weight, never less: the loaded place moves further. Its strain
+    # isn't a bound, and isn't held to one here.
+    shutil.copy(CASES / "band_forced.py", cae.work / "band_forced.py")
+    args = ["load", f"{glass.name}/alone.json", "--weight", "1", "--at", f"{GLASS_W + 6},50,6",
+            "--mesh", ALONE_MESH]  # fmt: skip
+    done = host.run(["band_forced.py", *args], cae.work, python=True, image=host.CAE_IMAGE)
+    found = re.search(r"saved: (\S+)\.txt and \.json", done.stdout)
+    assert found, done.stdout + done.stderr
+    without = json.loads((cae.work / f"{found.group(1)}.json").read_text())
+    assert without["numbers"]["lower_bound"]["parts"] == ["frame"], without["why"]
+    assert without["numbers"]["moves_mm"] > answer.numbers["moves_mm"]
 
 
 @pytest.mark.assembly
@@ -1685,7 +1702,10 @@ def test_a_glass_frame_bolted_to_a_block_reads_as_a_lower_bound_with_its_band_le
     assert answer.record["why"].startswith("read as a lower bound, frame with its glass band left")
     lower = answer.numbers["lower_bound"]
     assert lower["parts"] == ["frame"]
-    assert "it met the container's memory, 3 GiB" in lower["why"]
+    assert "it met the container's memory, 3 GiB, and the kernel stopped it" in lower["why"]
+    assert "how far the loaded places move along the load, taken together, is a bound" in (
+        answer.text
+    )
     assert "read as a lower bound: frame read with its glass band left out" in answer.text
     joint = answer.numbers["joints"]["frame+block"]
     assert joint["force_n"] == pytest.approx([0, 0, G], abs=0.01), "the block holds the weight up"

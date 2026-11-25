@@ -518,6 +518,7 @@ class _Model:
         began = time.time()
         fea.write_inp_file()
         self._add_to(fea.inp_file_name)
+        kills = oom_kills()
         ccx_one_thread(fea)
         fea.load_results()
         self.solve_s = round(time.time() - began, 2)
@@ -536,7 +537,7 @@ class _Model:
             )
         if not results or not results[0].NodeStrainXX:
             tidy_solve(fea)
-            full = _memory_full()
+            full = memory_met(kills)
             if full is not None:
                 raise self._too_big(full)
             raise NoAnswer(
@@ -570,7 +571,8 @@ class _Model:
         evidence = (
             f"CalculiX gave no result for the {fem.VolumeCount:,} elements ({fem.NodeCount:,} "
             f"nodes) at a mesh of at most {self.size:g} mm: it met the container's memory, "
-            f"{limit / 2**30:g} GiB, all of it taken, as the container's own memory.peak says. "
+            f"{limit / 2**30:g} GiB, and the kernel stopped it there, as the container's own "
+            "count of what it stopped for memory says. "
             f"The mesh's size alone would give about {alone:,.0f} elements over the parts' "
             f"{self.shape.Volume / 1000:,.0f} cm³"
             + (
@@ -977,18 +979,35 @@ def _reaction(path: str) -> tuple[np.ndarray, dict[int, np.ndarray]]:
     return np.array([float(v) for v in total.groups()]), nodes
 
 
-def _memory_full() -> int | None:
-    """The container's memory limit, in bytes, where what it has held at the most has reached
-    it: its cgroup's own `memory.peak` against `memory.max`. None where it hasn't, or where the
-    kernel keeps neither."""
+#: The container's own cgroup, where the kernel counts what it stopped for memory.
+CGROUP = Path("/sys/fs/cgroup")
+
+
+def oom_kills(cgroup: Path = CGROUP) -> int | None:
+    """How many processes the kernel has stopped in the container for memory: `oom_kill` in
+    its cgroup's `memory.events`. None where the kernel keeps no count."""
     try:
-        most = Path("/sys/fs/cgroup/memory.max").read_text().strip()
-        peak = Path("/sys/fs/cgroup/memory.peak").read_text().strip()
+        text = (cgroup / "memory.events").read_text()
     except OSError:
         return None
-    if not most.isdigit() or not peak.isdigit() or int(peak) < int(most):
+    found = re.search(r"^oom_kill (\d+)$", text, re.M)
+    return int(found.group(1)) if found else None
+
+
+def memory_met(before: int | None, cgroup: Path = CGROUP) -> int | None:
+    """The container's memory limit, in bytes, where the kernel stopped a process there for
+    memory since `before`, its `oom_kill` count then (mqucifer/print-shop#295): so a solve is
+    said to have met the limit only where something was stopped for it while it ran, and not
+    for what the container held at the most, which counts files read since it started. None
+    where nothing was, or the kernel keeps no count or limit."""
+    after = oom_kills(cgroup)
+    if before is None or after is None or after <= before:
         return None
-    return int(most)
+    try:
+        most = (cgroup / "memory.max").read_text().strip()
+    except OSError:
+        return None
+    return int(most) if most.isdigit() else None
 
 
 def _mesh_size(placed: list[Any], given: float | None) -> float:
@@ -1133,6 +1152,9 @@ def run(args: Any, report: Report) -> None:
         if not banded:
             raise
         why = whole.evidence
+    refused = band_refused(args.lift, banded, why)
+    if refused:
+        raise NoAnswer(refused)
     report.again()
     _run(args, report, without_bands=True)
     names = ", ".join(banded)
@@ -1141,10 +1163,35 @@ def run(args: Any, report: Report) -> None:
         f"read as a lower bound: {names} read with its glass band left out, the leads and lips "
         "its `band` names, as the whole couldn't be read: "
         f"{why}. The rest of each is read with no stiffness for its band, as it would be with "
-        "the band gone, never with a stiffness made up for it, and the band itself is unread",
+        "the band gone, never with a stiffness made up for it, and the band itself is unread. "
+        f"{BOUND}",
     )
     report.numbers["lower_bound"] = {"parts": banded, "why": why}
     report.why = f"read as a lower bound, {names} with its glass band left out: {report.why}"
+
+
+#: Which figures read without a band are a bound, and which aren't (mqucifer/print-shop#295).
+BOUND = (
+    "Of what's read, how far the loaded places move along the load, taken together, is a "
+    "bound: with less in it the assembly gives more under the same weight, never less. Each "
+    "part's strain, and each joint's and bolt's share of the load, can be more or less than "
+    "with the band in, and isn't one"
+)
+
+
+def band_refused(lift: str | None, banded: list[str], why: str) -> str | None:
+    """Why the assembly isn't read without its bands, or None where it is: lifted, each part
+    hangs by its own weight, and without its band a part would hang by less, so every strain
+    would be read under less than it carries (mqucifer/print-shop#295)."""
+    if lift is None:
+        return None
+    return (
+        f"--lift {lift}: the whole assembly couldn't be read ({why}), and it isn't read with "
+        f"the glass band of {', '.join(banded)} left out, as lifted each part hangs by its own "
+        "weight, and without its band it would hang by less: every strain would be read under "
+        "less than it carries. Read a weight case, which is read without the band as a lower "
+        "bound"
+    )
 
 
 def _run(args: Any, report: Report, without_bands: bool = False) -> None:

@@ -44,7 +44,7 @@ from typing import Any
 
 import numpy as np
 
-from .cae import freecad, tidy_mesh, tidy_solve
+from .cae import ccx_one_thread, freecad, tidy_mesh, tidy_solve
 from .limits import over, said
 from .report import NoAnswer, Report
 
@@ -207,7 +207,7 @@ def _solve(
             raise NoAnswer(f"the solve couldn't be set up: {wrong[:300]}")
         began = time.time()
         fea.write_inp_file()
-        fea.ccx_run()
+        ccx_one_thread(fea)
         fea.load_results()
         tidy_solve(fea)
         solved = time.time() - began
