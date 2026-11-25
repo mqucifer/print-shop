@@ -34,6 +34,7 @@ from typing import Any, TypeVar
 from print_shop.orchestrator.kept import WaitingJob, Waits
 from print_shop.orchestrator.print_queue import Adding, Asked, Line, Need
 from print_shop.setup.intake import Answer, Asker, Question, drop_typed
+from print_shop.setup.names import setting_said
 from print_shop.setup.review import Review, Reviewer, ReviewRequest
 from print_shop.setup.waiting import GO_ON, QuestionsCall, Waiting
 
@@ -247,7 +248,8 @@ class OneJob:
             return f"Stopped on your phone{by}."
         if answer.approved and not (answer.corrections or answer.taken):
             return f"Approved on your phone{by}."
-        changes = [f"{c.key}={c.value}" for c in (*answer.corrections, *answer.taken)]
+        # Said as the review says a setting (mqucifer/print-shop#298).
+        changes = [setting_said(c.key, c.value) for c in (*answer.corrections, *answer.taken)]
         if changes:
             return f"Changed on your phone{by}: {', '.join(changes)}; slicing again."
         return f"Answered on your phone{by}."

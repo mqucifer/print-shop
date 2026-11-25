@@ -95,6 +95,7 @@ from print_shop.setup.features import Feature, measure, resting_on
 from print_shop.setup.intake import Asker, Estimate, Intake, Question
 from print_shop.setup.loop import Part, PrintLoop
 from print_shop.setup.loop import run as run_loop
+from print_shop.setup.names import setting_said
 from print_shop.setup.offer import Offering, ThisPart, moved_items, suggested_items
 from print_shop.setup.offer import offering as offer_past_prints
 from print_shop.setup.proposal import (
@@ -755,7 +756,8 @@ def build_graph(
                         # What was taken of the model's is for the pose it was taken in.
                         left_behind += [
                             f"Taken at {pose_value(rotation_deg)} and left behind by the turn: "
-                            f"{c.key}={c.value}. Take it again if it's proposed here, or type it."
+                            f"{setting_said(c.key, c.value)}. Take it again if it's proposed "
+                            "here, or type it."
                             for c in {c.key: c for c in turned.taken}.values() if c.key in dropped]
                         if turned.to.taken:
                             chose = "you took the model's turn at this job"

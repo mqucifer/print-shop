@@ -901,8 +901,8 @@ def test_whats_taken_and_left_behind_by_a_turn_is_said(shop: Shop, tmp_path: Pat
     row = shop.run(write_stl("cube", tmp_path), settled(steps), Proposer(ask=proposing(WALLS)),
                    as_laid=True)
     assert row is not None and row.proposal is not None, shop.error
-    said = ("Taken at 0,0,0 and left behind by the turn: wall_loops=4. Take it again if it's "
-            "proposed here, or type it.")
+    said = ("Taken at 0,0,0 and left behind by the turn: Walls (wall_loops) 4. Take it again if "
+            "it's proposed here, or type it.")
     assert said in row.proposal.notes
     assert "note: " + said in flat(render_review(steps.seen[2]))
     assert "wall_loops=4 (taken, then left behind by a turn)" in describe(row)

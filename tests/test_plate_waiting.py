@@ -365,7 +365,7 @@ def test_sent_back_to_the_pose_asked_of_the_answer_holds_again(
         rig.press("reject", rig.gated(_caps(tmp_path), as_laid=False))
     assert "Seen as it now prints" in rig.shown[0]
     assert "Seen as it now prints" not in screen(rig.shown)
-    assert "every part: Seen as it prints: the walls and the top" in screen(rig.shown)
+    assert "every part: the walls and the top, as it prints" in screen(rig.shown)
     assert "seam_seen" in [f.id for f in rig.reviews[-1].flags]
 
 

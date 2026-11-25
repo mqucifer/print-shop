@@ -238,10 +238,10 @@ def test_a_suggestion_untaken_reaches_neither_the_slice_the_corrections_nor_a_le
                        suggested=(("wall_loops", "7", why),)))
     assert done.refused == []
     came = done.queued[0].came
-    assert f"suggested, offered at the review unticked: wall_loops=7 ({why})" in came
-    assert "not taken: the suggestion wall_loops=99: outside 1-10" in came
-    assert any(c.startswith("not taken: the suggestion pause_at=3: a pause is set at the review")
-               for c in came)
+    assert f"suggested, offered at the review unticked: Walls (wall_loops) 7 ({why})" in came
+    assert "not taken: the suggestion Walls (wall_loops) 99: outside 1-10" in came
+    assert any(c.startswith("not taken: the suggestion Pause (pause_at) 3: a pause is set at "
+                            "the review") for c in came)
     untaken, taken = (q.job_id for q in done.queued)
     wait_until(lambda: shop.waits(untaken) is not Waits.SENT and shop.waits(taken)
                is not Waits.SENT)
@@ -397,7 +397,7 @@ def test_the_person_sees_sent_to_you_with_who_when_the_note_and_what_each_needs(
     assert "SENT TO YOU" in shown
     assert f"  Sent by {BY}, " in shown and " today: 'the box set': jobs 1, 2" in shown
     assert "lid.stl: sent by" in shown and "the queue prints its own copy" in shown
-    assert "suggested, offered at the review unticked: wall_loops=4 (it clips on)" in shown
+    assert "suggested, offered at the review unticked: Walls (wall_loops) 4 (it clips on)" in shown
 
 
 # --------------------------------------------------------------------------

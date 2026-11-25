@@ -258,10 +258,10 @@ def answered_on_phone(rig: Rig, form: dict[str, str]) -> Review:
 @pytest.mark.parametrize(("form", "typed", "said"), [
     ({"do": "ok"}, "ok", "Approved on your phone (Made-up phone)."),
     ({"do": "use", "use": "2"}, "use 2",
-     "Changed on your phone (Made-up phone): enable_support=0; slicing again."),
+     "Changed on your phone (Made-up phone): Supports (enable_support) off; slicing again."),
     ({"do": "change", "key": "wall_loops", "value": "4", "reason": "the walls carry it"},
      "wall_loops=4 because the walls carry it",
-     "Changed on your phone (Made-up phone): wall_loops=4; slicing again."),
+     "Changed on your phone (Made-up phone): Walls (wall_loops) 4; slicing again."),
 ])
 def test_a_lone_jobs_review_is_answered_on_the_phone(
     rig: Rig, form: dict[str, str], typed: str, said: str,

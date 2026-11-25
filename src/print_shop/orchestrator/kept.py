@@ -52,6 +52,7 @@ from print_shop.inventory import Material
 from print_shop.setup.bounds import MATERIAL
 from print_shop.setup.intake import Answer, Asker, Intake, Question
 from print_shop.setup.loop import LoopResult
+from print_shop.setup.names import setting_said
 from print_shop.setup.proposal import Change, Ending, Proposal, Suggested
 from print_shop.setup.review import Review, Reviewer, ReviewRequest
 from print_shop.sliced import SlicedJob
@@ -585,7 +586,7 @@ class Kept:
                 if back:
                     reviews.append(_Reviewed(corrections=tuple(back)))
                     said.append("given back, set for " + now.variety + ": "
-                                + ", ".join(f"{c.key}={c.value}" for c in back))
+                                + ", ".join(setting_said(c.key, c.value) for c in back))
             for kept in record.reviews:
                 if kept.approved:
                     continue  # the review's ok: it comes back to the person
@@ -604,7 +605,8 @@ class Kept:
             unticked = [m for m in moved if m not in record.moved]
             if unticked:
                 said.append(f"set for {unticked[0].variety}, offered back unticked: "
-                            + ", ".join(f"{m.change.key}={m.change.value}" for m in unticked))
+                            + ", ".join(setting_said(m.change.key, m.change.value)
+                                        for m in unticked))
             record.reviews, record.moved = reviews, moved
             if other_filament:
                 record.proposals, record.suggested, record.loop = {}, {}, None
@@ -626,5 +628,5 @@ def _said(kept: _Reviewed) -> str:
         return "ok"
     changes = [*kept.corrections, *kept.taken]
     if changes:
-        return ", ".join(f"{c.key}={c.value}" for c in changes)
+        return ", ".join(setting_said(c.key, c.value) for c in changes)
     return "the turn taken" if kept.turn_taken else "no change"
