@@ -1073,7 +1073,8 @@ def _queue(args: argparse.Namespace, live: Live) -> int:
                 for why in refused:
                     print(f"Not added: {why}")
             return serve(queue, run.daemon, read=input,
-                         stock=stock_listing(ledger_path(args.settings)), runs=runs)
+                         stock=stock_listing(ledger_path(args.settings)), runs=runs,
+                         phone=phone.on)
     except KeyboardInterrupt:
         print("\nPut by: every job waits where it was, and `--queue` takes them up again. Any "
               "print without an answer stays open in the ledger.")

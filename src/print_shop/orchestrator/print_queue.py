@@ -344,6 +344,12 @@ class PrintQueue:
     def jobs(self) -> list[WaitingJob]:
         return self._jobs.all()
 
+    @property
+    def stock_path(self) -> Path | None:
+        """Where the stock is, for a load said at the queue (mqucifer/print-shop#305), or None
+        where there's no stock."""
+        return self._ledger.path if self._ledger is not None else None
+
     def lines(self) -> list[Line]:
         """Every job in the queue's order, with its step, what it needs and its spool."""
         jobs = self._jobs.all()

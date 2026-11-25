@@ -21,11 +21,19 @@ import re
 import sqlite3
 from collections.abc import Callable
 
-from print_shop.inventory import Inventory, InventoryError, NotKnown, Pick, Spool, spool_lines
+from print_shop.inventory import (
+    Inventory,
+    InventoryError,
+    NotKnown,
+    Pick,
+    Spool,
+    SpoolState,
+    spool_lines,
+)
 from print_shop.ledger import Ledger, Row
 from print_shop.plate import plate_job
 
-__all__ = ["ask_on_now", "ask_over", "choices", "said"]
+__all__ = ["ask_on_now", "ask_over", "choices", "load_said", "said"]
 
 #: Answers that leave it for later.
 LATER = ("", "n", "no", "later", "back")
@@ -87,6 +95,37 @@ def ask_on_now(
         # Saying one's over says nothing of another.
         ask_on_now(stock, printer_id, read=read, write=write, forget=forget, asks=asks)
         return
+
+
+def load_said(
+    stock: Inventory, spool_id: int, printer_id: str | None = None, *,
+    read: Callable[[str], str], write: Callable[[str], None], forget: Callable[[], None],
+    asks: bool, ask: Callable[..., NotKnown | None] | None = None,
+) -> list[str]:
+    """A spool loaded, as a person says: `stock.py load`'s, and the queue's `load S`
+    (mqucifer/print-shop#305), one path. Where what's on isn't known since a print, it asks
+    whether that's over first, which says both halves (`ask_over`); `asks` is whether there's
+    a terminal to ask in, and `ask` the question (`ask_over`, the caller's own where it's given).
+    Returns what was recorded, a line each.
+
+    Raises:
+        InventoryError: If it can't be loaded, or the stock has changed since it was asked.
+    """
+    printer = stock.printer(printer_id)
+    stands = stock.asked(printer.id)  # before what the question names is read
+    spool = stock.spool(spool_id)
+    found = stands.not_known
+    over = asked = None
+    if found is not None and spool.state is not SpoolState.EMPTY and asks:
+        asked = stands
+        over = (ask or ask_over)(found, spool, read=read, write=write, forget=forget)
+    # A no too only counts for what was asked: the phone can have said since.
+    lines = [stock.load(spool.id, printer.id, over=over, asked=asked).line()]
+    if (still := stock.unknown(printer.id)) is not None:
+        lines.append(f"  print-shop still doesn't know what's on {printer.id}, as nothing said "
+                     f"{still.print_named()} is over: jobs don't start. `stock load {spool.id}` "
+                     "in a terminal asks.")
+    return lines
 
 
 def ask_over(

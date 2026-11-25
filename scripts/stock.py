@@ -40,9 +40,9 @@ import sys
 from pathlib import Path
 
 from print_shop.env import SETTINGS_PATH
-from print_shop.inventory import Inventory, InventoryError, SpoolState
+from print_shop.inventory import Inventory, InventoryError
 from print_shop.ledger import ledger_path
-from print_shop.orchestrator.spools import ask_over
+from print_shop.orchestrator.spools import ask_over, load_said
 from print_shop.setup.intake import drop_typed
 from print_shop.setup.waiting import can_ask
 from print_shop.slicer.store import STORE_DIR, Store, StoredProfile
@@ -118,21 +118,9 @@ def edit(inventory: Inventory, args: argparse.Namespace) -> str:
 
 
 def load(inventory: Inventory, args: argparse.Namespace) -> str:
-    printer = inventory.printer(args.printer)
-    stands = inventory.asked(printer.id)  # before what the question names is read
-    spool = inventory.spool(args.spool)
-    found = stands.not_known
-    over = asked = None
-    if found is not None and spool.state is not SpoolState.EMPTY and can_ask():
-        asked = stands
-        over = ask_over(found, spool, read=input, write=print, forget=drop_typed)
-    # A no too only counts for what was asked: the phone can have said since.
-    lines = [inventory.load(spool.id, printer.id, over=over, asked=asked).line()]
-    if (still := inventory.unknown(printer.id)) is not None:
-        lines.append(f"  print-shop still doesn't know what's on {printer.id}, as nothing said "
-                     f"{still.print_named()} is over: jobs don't start. `stock load {spool.id}` "
-                     "in a terminal asks.")
-    return "\n".join(lines)
+    # The queue's `load S` is this same path (mqucifer/print-shop#305).
+    return "\n".join(load_said(inventory, args.spool, args.printer, read=input, write=print,
+                               forget=drop_typed, asks=can_ask(), ask=ask_over))
 
 
 def main(argv: list[str] | None = None) -> int:
