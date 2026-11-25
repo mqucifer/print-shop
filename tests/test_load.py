@@ -676,7 +676,7 @@ def test_a_latch_named_in_its_part_s_own_axes_turns_and_moves_with_the_part(
     latch = assembly.read(written(tmp_path, joints=[{**DOVETAIL, "latch": own}])).joints[0].latch
     assert latch is not None and latch.own and latch.placed
     assert list(latch.shift) == [60, 0, 0]
-    assert latch.local([60, 1, 20]) == pytest.approx([1, 0, 20])
+    assert latch.unplaced([60, 1, 20]) == pytest.approx([1, 0, 20])
     assert latch.way([0, 1, 0]) == pytest.approx([1, 0, 0])
     assert latch.inside([60, 1, 20]) and not latch.inside([1, 0, 20])
     # The box's own x from -3 to 3 runs along the assembly's y, and its y from -1 to 2 along
@@ -687,7 +687,7 @@ def test_a_latch_named_in_its_part_s_own_axes_turns_and_moves_with_the_part(
     # In the assembly's axes, the same box is where it's given, and nothing moves it.
     plain = assembly.read(written(tmp_path, joints=[{**DOVETAIL, "latch": LATCH}])).joints[0]
     assert plain.latch is not None and not plain.latch.placed and not plain.latch.own
-    assert plain.latch.local([1, 0, 20]).tolist() == [1, 0, 20]
+    assert plain.latch.unplaced([1, 0, 20]).tolist() == [1, 0, 20]
     assert plain.latch.bounds()[0].tolist() == [-3, -1, 10]
     said = {**LATCH, "frame": "assembly"}
     again = assembly.read(written(tmp_path, joints=[{**DOVETAIL, "latch": said}])).joints[0]

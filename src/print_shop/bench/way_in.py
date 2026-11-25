@@ -280,7 +280,7 @@ def _bend(
     part = assembly.part(joint.latch.on)
     layers = _layers(part, joint.latch)
     root = joint.latch.root
-    solid = load_dovetail.local(solid, joint.latch)
+    solid = load_dovetail.in_own_axes(solid, joint.latch)
     command = (
         f"bend {part.file if joint.latch.own else part.name + '.step'} --arm "
         + ",".join(f"{c:g}" for c in (*joint.latch.arm[0], *joint.latch.arm[1]))

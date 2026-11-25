@@ -1471,7 +1471,8 @@ def test_the_snap_on_check_and_bend_read_a_latch_on_a_dovetail(cae: Any) -> None
 
 
 # A whole furniture assembly (mqucifer/print-shop#295): a turned latch, a large assembly and a
-# glass frame
+# glass frame. Marked `assembly`, so CI runs them in a job of their own beside the rest of `cae`:
+# together they take about 23 minutes of solves, and the cae job has 30.
 
 
 #: The posts' ring in `make_fixtures.turned`, and a pull up on each post's top, 0.6 kg in all.
@@ -1486,6 +1487,7 @@ def posts_up(first: float) -> tuple[str, ...]:
     return ("--weight", "0.6", *places, "--toward", "+z")
 
 
+@pytest.mark.assembly
 def test_a_latch_named_in_its_part_s_own_axes_reads_as_the_assembly_s_names_it(cae: Any) -> None:
     """The latched post of `play/edge.json`, unturned and in place, its latch named in the
     upper's own file's axes, `"frame": "part"`: lifted, it reads every figure as the same latch
@@ -1503,6 +1505,7 @@ def test_a_latch_named_in_its_part_s_own_axes_reads_as_the_assembly_s_names_it(c
     assert mine == theirs
 
 
+@pytest.mark.assembly
 @pytest.mark.parametrize("first", [0.0, 45.0])
 def test_four_posts_turned_round_a_table_s_middle_each_have_their_latch_named(
     cae: Any, first: float
@@ -1533,29 +1536,35 @@ def test_four_posts_turned_round_a_table_s_middle_each_have_their_latch_named(
     assert "in upper0's own file's axes" not in answer.record["why"]
 
 
+@pytest.mark.assembly
 def test_a_table_of_24_parts_and_56_bolts_says_the_limit_it_met_and_what_is_left(
     cae: Any,
 ) -> None:
     """mqucifer/print-shop#295: 24 parts held by 56 M5 through-bolts, round figures only. gmsh
     sizes each bore by its curvature, 12 elements a turn, whatever --mesh is, so the bores make
-    most of a mesh past what CalculiX solves in the container's 3 GiB. The reply says so, from
-    the container's own count of what it held, and says that a coarser --mesh leaves those
-    elements as they are and that nothing is read: it doesn't tell anyone to coarsen the mesh."""
+    most of a mesh past what CalculiX solves in the container's 3 GiB. The reply leads with
+    what to do, then says what it met, from the container's own count of what it held, that a
+    coarser --mesh leaves those elements as they are, and that nothing is read: it doesn't tell
+    anyone to coarsen the mesh."""
     answer = cae(
         "load", "large/table.json", "--weight", "20",
         "--at", "100,100,310", "--at", "300,100,310", "--at", "100,300,310", "--at", "300,300,310",
     )  # fmt: skip
     assert answer.verdict == "NO ANSWER", answer.text
     why = answer.record["why"]
+    # What to do first, then what it met.
+    assert why.startswith("nothing of the assembly is read, as it's past what the container's "
+                          "memory solves: name each glass frame's `band`"), why  # fmt: skip
     assert "it met the container's memory, 3 GiB, all of it taken" in why, why
     assert "a coarser --mesh leaves most of those as they are" in why
-    assert "every part, joint and bolt of the assembly is left unread" in why
+    assert "Every part, joint and bolt of it is left unread" in why
     assert "Give a coarser --mesh" not in why
     ran = answer.record["ran"]
     assert int(ran["memory_peak"]) == int(ran["memory_max"]) == 3 * 1024**3
     assert answer.record["seconds"] < host.TIMEOUT
 
 
+@pytest.mark.assembly
 def test_a_bolt_left_out_reads_its_joint_as_the_one_that_gives_first(cae: Any) -> None:
     """The control (mqucifer/print-shop#295, the operator's comment there): a stool, a top on
     four legs each held by one M5 through-bolt, its feet fixed, pushed sideways at the top by
@@ -1636,6 +1645,7 @@ def glass(cae: Any) -> Path:
     return glass_built(cae, GLASS_W)
 
 
+@pytest.mark.assembly
 def test_a_traced_glass_frame_reads_alone_with_its_elements_straight(
     cae: Any, glass: Path
 ) -> None:
@@ -1652,13 +1662,15 @@ def test_a_traced_glass_frame_reads_alone_with_its_elements_straight(
     )  # fmt: skip
     assert answer.verdict == "OK", answer.text
     assert "lower_bound" not in answer.numbers
-    assert "its elements' sides straight, each curved face followed by their chords" in answer.text
+    assert "its elements second-order with straight sides" in answer.text
+    assert answer.numbers["nodes"] > 1.5 * answer.numbers["elements"], "ten nodes each, shared"
     assert "gmsh made no curved mesh of the joined parts: " in answer.text
     frame = answer.numbers["parts"]["frame"]
     assert 0 < frame["across_layers_pct"] < 1.0
     assert answer.record["seconds"] < host.TIMEOUT
 
 
+@pytest.mark.assembly
 def test_a_glass_frame_bolted_to_a_block_reads_as_a_lower_bound_with_its_band_left_out(
     cae: Any, glass: Path
 ) -> None:

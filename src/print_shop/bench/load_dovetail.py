@@ -116,7 +116,7 @@ def box(arm: Any) -> Any:
     return Part.makeBox(*(high - low), App.Vector(*low))
 
 
-def local(shape: Any, latch: Latch) -> Any:
+def in_own_axes(shape: Any, latch: Latch) -> Any:
     """A shape of the assembly in a latch's own axes: itself where the latch isn't placed."""
     if not latch.placed:
         return shape
@@ -504,7 +504,7 @@ def tab(
     what = f"the dovetail joint {joint.name}'s latch"
     # Read in the box's own axes, where `arm` and `root` are given (mqucifer/print-shop#295):
     # the assembly's, unless the latch is given in its part's own.
-    arms = [s for s in local(solid, latch).common(box(latch.arm)).Solids
+    arms = [s for s in in_own_axes(solid, latch).common(box(latch.arm)).Solids
             if s.Volume > 1e-6]  # fmt: skip
     if len(arms) != 1:
         raise NoAnswer(
@@ -530,7 +530,7 @@ def tab(
     arm = placed(arms[0], latch)
 
     def rooted(face: Any) -> bool:
-        return _flat(local(face, latch), axis, at)
+        return _flat(in_own_axes(face, latch), axis, at)
 
     thick = min(sides)
     size = min(TAB_MESH[1], max(TAB_MESH[0], thick / TAB_ACROSS)) * coarser

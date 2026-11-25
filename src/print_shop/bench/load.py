@@ -538,7 +538,7 @@ class _Model:
             tidy_solve(fea)
             full = _memory_full()
             if full is not None:
-                raise _Unread(self._too_big(full))
+                raise self._too_big(full)
             raise NoAnswer(
                 f"CalculiX gave no result for the {fem.VolumeCount} elements, at a mesh of "
                 f"{self.size:g} mm: it may have run out of the container's memory. Give a "
@@ -559,15 +559,15 @@ class _Model:
         tidy_solve(fea)
         self._balance()
 
-    def _too_big(self, limit: int) -> str:
-        """Why the solve met the container's memory (mqucifer/print-shop#295): the mesh's size,
-        against what its size alone would give, the rest being finer round the parts' small
-        features, which gmsh sizes by their own curvature and not by --mesh."""
+    def _too_big(self, limit: int) -> _Unread:
+        """Why the solve met the container's memory (mqucifer/print-shop#295), led by what to
+        do: the mesh's size, against what its size alone would give, the rest being finer round
+        the parts' small features, which gmsh sizes by their own curvature and not by --mesh."""
         fem = self.fem
         # About 8.5 tetrahedra fill a cube of their own edge, as `_mesh_size` takes it.
         alone = 8.5 * float(self.shape.Volume) / self.size**3
         finer = fem.VolumeCount - alone
-        return (
+        evidence = (
             f"CalculiX gave no result for the {fem.VolumeCount:,} elements ({fem.NodeCount:,} "
             f"nodes) at a mesh of at most {self.size:g} mm: it met the container's memory, "
             f"{limit / 2**30:g} GiB, all of it taken, as the container's own memory.peak says. "
@@ -579,9 +579,19 @@ class _Model:
                 "which gmsh sizes by their own curvature and not by --mesh: a coarser --mesh "
                 "leaves most of those as they are"
                 if finer > alone
-                else ": give a coarser --mesh"
+                else ""
             )
-            + ". Nothing is read: every part, joint and bolt of the assembly is left unread"
+        )
+        to_do = (
+            "name each glass frame's `band` in the assembly file, and it's read as a lower "
+            "bound with its band left out, or read fewer of the parts at once"
+            if finer > alone
+            else "give a coarser --mesh, or read fewer of the parts at once"
+        )
+        return _Unread(
+            f"nothing of the assembly is read, as it's past what the container's memory solves: "
+            f"{to_do}. {evidence}. Every part, joint and bolt of it is left unread",
+            evidence,
         )
 
     def _balance(self) -> None:
@@ -1025,7 +1035,12 @@ def _gmsh_errors(said: str) -> list[str]:
 
 class _Unread(NoAnswer):
     """The whole assembly can't be read: it meets the container's memory, or no mesh of it
-    solves. A part that names its glass band is read again without it (mqucifer/print-shop#295)."""
+    solves. A part that names its glass band is read again without it (mqucifer/print-shop#295).
+    `evidence` is what it met, without what to do."""
+
+    def __init__(self, said: str, evidence: str | None = None) -> None:
+        super().__init__(said)
+        self.evidence = said if evidence is None else evidence
 
 
 class _Curved(NoAnswer):
@@ -1091,7 +1106,8 @@ def _straight_said(solved: dict[str, Any]) -> str:
     if not solved.get("straight"):
         return ""
     return (
-        f", its elements' sides straight, each curved face followed by their chords: "
+        f", its elements second-order with straight sides, mid-side nodes halfway along them, "
+        "so each curved face is read as their chords: "
         f"{solved['straight']}"
     )
 
@@ -1116,8 +1132,7 @@ def run(args: Any, report: Report) -> None:
         banded = [p.name for p in read(args.assembly).parts if p.band is not None]
         if not banded:
             raise
-        # What it met, less its own "nothing is read": the rest is.
-        why = str(whole).split(". Nothing is read")[0]
+        why = whole.evidence
     report.again()
     _run(args, report, without_bands=True)
     names = ", ".join(banded)

@@ -322,7 +322,7 @@ class Latch:
         """Whether its box is anywhere but where `arm` says, in the assembly's axes."""
         return bool(np.any(np.asarray(self.turn) != np.eye(3)) or any(self.shift))
 
-    def local(self, points: Any) -> np.ndarray:
+    def unplaced(self, points: Any) -> np.ndarray:
         """Points of the assembly in the box's own axes, a row each: themselves where it isn't
         placed."""
         at = np.asarray(points, dtype=float)
@@ -337,7 +337,7 @@ class Latch:
     def inside(self, point: Any, by: float = 1e-6) -> bool:
         """Whether a point of the assembly is in the box, within `by`."""
         low, high = (np.asarray(c, dtype=float) for c in self.arm)
-        at = self.local(point)
+        at = self.unplaced(point)
         return bool(np.all(at >= low - by) and np.all(at <= high + by))
 
     def corners(self) -> np.ndarray:
