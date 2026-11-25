@@ -15,8 +15,10 @@ pairing page itself until the phone is paired or the code dies.
 
 The page is set up by `PHONE_HOME` in the settings: the Mac's address on the home Wi-Fi with its
 network, such as `A.B.C.D/24` (reserve it at the router). Optional: `PHONE_PORT` (8765), and
-`PHONE_ROUTER` where the default route can't say the router's address. Nothing here arms: a
-signed-in phone's Start does, for one start, on the home Wi-Fi (`docs/runbook-first-print.md`).
+`PHONE_ROUTER` where the default route can't say the router's address. Over HTTPS
+(mqucifer/print-shop#312), `PHONE_NAME`, `PHONE_TLS_CERT` and `PHONE_TLS_KEY`, all three.
+Nothing here arms: a signed-in phone's Start does, for one start, on the home Wi-Fi
+(`docs/runbook-first-print.md`).
 """
 
 from __future__ import annotations
@@ -119,6 +121,8 @@ def _pair(phones: Phones, name: str, settings: Path | None) -> int:
             return 0
         print(f"{exc}.", file=sys.stderr)
         return 1
+    for said in server.said:  # pair again after the move to HTTPS; renew it soon
+        print(said)
     print("Serving the pairing page until the phone is paired or the code dies. Ctrl-C stops.")
     threading.Thread(target=server.serve_forever, daemon=True).start()
     began = time.time()
