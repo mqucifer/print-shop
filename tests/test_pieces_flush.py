@@ -9,10 +9,12 @@ square corners and a curved side, one a triangle with a corner of 29.7 degrees, 
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import re
 import shutil
 import subprocess
+import tarfile
 from pathlib import Path
 from typing import Any
 
@@ -24,16 +26,24 @@ from tests.test_bench import Answer
 
 pytestmark = pytest.mark.bench
 CASES = Path(__file__).parent / "bench_cases"
+ROOT = Path(__file__).resolve().parents[1]
 BUILD = ["--thickness", 3, "--pane", 1, "--lip", 1.2, "--play", 0.25]
 COLOURS = ("blue", "gold", "green")
-#: The STEP data `pieces build` wrote without `--flush` on main, dcf3391, before it was added:
-#: the hash of each file's data, past its header, which names the second it was written, as
-#: `paths.content_hash` reads it. By the bench image's architecture, as each writes other
-#: last figures, from the same image's Dockerfile: arm64 in `print-shop/bench:0.15` built on
-#: the Mac, amd64 in the one CI built for mqucifer/print-shop#291, run on the Mac under
-#: emulation, twice the same. A new image whose OpenCascade writes other data is a new
-#: reference, made again from main's code. Saved, with how they were made:
+#: The STEP data `pieces build` wrote without `--flush` on main, dcf3391, before it was added,
+#: in `print-shop/bench:0.15` built on the Mac (arm64): the hash of each file's data, past its
+#: header, which names the second it was written, as `paths.content_hash` reads it. Held where
+#: the bench image is arm64, beside the reference made in the test itself, below, which holds on
+#: every machine. An amd64 reference can't be kept: on a GitHub runner 7 of these 9 files come
+#: out other than in the same image run on the Mac under Rosetta, which has no AVX, as the
+#: libraries pick their code by the CPU. Saved, with how they were made:
 #: `~/print-shop/proofs/ux-287/`.
+#: The script that runs a bench command with another commit's bench package, copied into the
+#: work folder: it stands where the container's own mount of this one does.
+REFERENCE_RUN = """import sys
+sys.path.insert(0, "/work/reference")
+from bench.cli import main
+sys.exit(main(sys.argv[1:]))
+"""
 BEFORE = {
     "arm64": {
         "flat/frame.step": "d3cfe5c89b449d879b8823272fd1f09f0b55633ddf0e849312c42ef3aaa53feb",
@@ -46,19 +56,6 @@ BEFORE = {
         "hills/pane_white.step": "5e2519f58da5bd78721c8748b35b02884742bf49bcd429fa1b0ae5123a8217bb",
         "hills/pane_yellow.step": (
             "0cc027861a2d14550549c98d995647d7b24b458f9cbaf6f04e43d89735487d54"
-        ),
-    },
-    "amd64": {
-        "flat/frame.step": "f9f70a060c602c1353723106bb5ab09368e420fb7da6ce64f95fbb76da99ce51",
-        "flat/pane_blue.step": "f6b1aab7f3ea0612a66b8b7123d813940ade8476ab8c02cafd911bd7dabad570",
-        "flat/pane_gold.step": "188eb47809383514eba220bb41cfe9ac05482188a9ec9dda617dc8777dfe3fa5",
-        "flat/pane_green.step": "70de21fc78c01747e8c926d27d25a7d0ff8653042732e0ec344f68bc1714b3bf",
-        "hills/frame.step": "0b3da0921ba99eddc8d500276bb09236ee765bbe7189d7398b091d0ef03ccad3",
-        "hills/pane_blue.step": "bab0fac845bd1324d7d36e94444c0c73de7092732223d1edd86b8cd98e130695",
-        "hills/pane_green.step": "00b74a88f0d47298bc5178ff4e720db8b3a70575018c66ce17462e1b8726a2d2",
-        "hills/pane_white.step": "4bb34fb6cf7f8c04da5b1c5e1155284c601d4b7dece5eb4adba0635c4a5aba2e",
-        "hills/pane_yellow.step": (
-            "a02574957cd5a07886bb419128eab11e488d1567cd9c98e9608881c6ee5d5f8e"
         ),
     },
 }
@@ -246,31 +243,82 @@ def test_a_thinner_lip_and_body_move_the_pause_to_the_bodys_top(bench: Any) -> N
     assert refused.verdict == "NO ANSWER" and "there's no --flush" in refused.record["why"]
 
 
+def _git(*args: str) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
+        ["git", "-C", str(ROOT), *args], capture_output=True, check=False, timeout=300
+    )
+
+
+def reference_commit() -> str:
+    """The commit this one is held to: its merge base with origin's main, fetched as needed (CI
+    checks out one commit deep). Fails, saying why, where it can't be had: a test that can't
+    read main's build never passes for want of it."""
+    shallow = _git("rev-parse", "--is-shallow-repository")
+    if shallow.stdout.strip() == b"true":
+        deeper = _git("fetch", "--no-tags", "--unshallow", "origin")
+        if deeper.returncode != 0:
+            pytest.fail(f"this commit's history can't be fetched: {deeper.stderr.decode()}")
+    main = _git("fetch", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main")
+    if main.returncode != 0:
+        pytest.fail(f"origin's main can't be fetched, to build it: {main.stderr.decode()}")
+    base = _git("merge-base", "HEAD", "refs/remotes/origin/main")
+    if base.returncode != 0:
+        pytest.fail(f"no merge base with origin's main: {base.stderr.decode()}")
+    return base.stdout.decode().strip()
+
+
 def test_a_panel_built_without_flush_is_unchanged_byte_for_byte(bench: Any) -> None:
     """The test panel, and the traced test scene as `test_pieces.py` builds it, without
-    `--flush`: each file's STEP data is byte for byte what main wrote before `--flush` was
-    added, in an image of the same architecture."""
+    `--flush`: each file's STEP data is byte for byte what main writes, past the header, which
+    names the second it was written. Main's is built here and now, in the same image on the
+    same machine, by the bench package of this commit's merge base with origin's main: the
+    libraries pick their code by the CPU, so a reference kept from one machine needn't hold on
+    another. Where the image is arm64, each is also held to main's as it was before `--flush`."""
+    commit = reference_commit()
+    package = _git("archive", "--format=tar", commit, "src/print_shop/bench")
+    assert package.returncode == 0, f"{commit}'s bench package: {package.stderr.decode()}"
+    reference = bench.work / "reference"
+    shutil.rmtree(reference, ignore_errors=True)
+    with tarfile.open(fileobj=io.BytesIO(package.stdout)) as tar:
+        tar.extractall(reference / "unpacked", filter="data")
+    (reference / "unpacked" / "src" / "print_shop" / "bench").rename(reference / "bench")
+    (bench.work / "reference_run.py").write_text(REFERENCE_RUN)
     traced = bench("pieces", "trace", "hills.png", "--width", 100, "--to", "hills.json")
     assert traced.verdict == "OK", traced.text
-    hills = bench(
-        "pieces", "build", "hills.json", "--thickness", 3, "--pane", 1, "--lip", "1.2,0.6",
-        "--play", 0.25, "--build-out", "hills",
-    )  # fmt: skip
-    flat = bench("pieces", "build", "flush.json", *BUILD, "--build-out", "flat")
-    assert hills.verdict == flat.verdict == "OK", hills.text + flat.text
-    assert "flush" not in flat.numbers and not list((bench.work / "flat").glob("*-laid.step"))
+    builds = {
+        "hills": ["hills.json", "--thickness", 3, "--pane", 1, "--lip", "1.2,0.6", "--play", 0.25],
+        "flat": ["flush.json", *BUILD],
+    }
+    for out, given in builds.items():
+        built = bench("pieces", "build", *given, "--build-out", out)
+        assert built.verdict == "OK", built.text
+        made = host.run(
+            ["reference_run.py", "pieces", "build", *map(str, given), "--build-out", f"main-{out}"],
+            bench.work,
+            python=True,
+        )  # fmt: skip
+        assert made.returncode == 0, f"{commit}'s build: {made.stdout[-2000:]}{made.stderr}"
+    assert not list((bench.work / "flat").glob("*-laid.step"))
+    differ, read = [], 0
+    for out in builds:
+        mine = sorted(p.name for p in (bench.work / out).iterdir())
+        theirs = sorted(p.name for p in (bench.work / f"main-{out}").iterdir())
+        assert mine == theirs, f"{out}: this commit wrote {mine}, {commit} wrote {theirs}"
+        for name in mine:
+            a = (bench.work / out / name).read_bytes()
+            b = (bench.work / f"main-{out}" / name).read_bytes()
+            read += 1
+            if a[a.find(b"\nDATA;") :] != b[b.find(b"\nDATA;") :]:
+                differ.append(f"{out}/{name}")
+    assert read == 9 and not differ, f"other STEP data than {commit}'s, main's: {differ}"
     found = subprocess.run(
         ["docker", "image", "inspect", "--format", "{{.Architecture}}", host.IMAGE],
         capture_output=True, text=True, check=True,
     )  # fmt: skip
-    arch = found.stdout.strip()
-    assert arch in BEFORE, f"no reference made from main for an {arch} image: make one"
-    differ = []
-    for name, wanted in BEFORE[arch].items():
-        made = (bench.work / name).read_bytes()
-        if hashlib.sha256(made[made.find(b"\nDATA;") :]).hexdigest() != wanted:
-            differ.append(name)
-    assert not differ, f"other STEP data than main's, on {arch}: {differ}"
-    assert sorted(p.name for p in (bench.work / "flat").iterdir()) == [
-        "frame.step", "pane_blue.step", "pane_gold.step", "pane_green.step",
-    ]  # fmt: skip
+    if found.stdout.strip() == "arm64":
+        kept = []
+        for name, wanted in BEFORE["arm64"].items():
+            made_now = (bench.work / name).read_bytes()
+            if hashlib.sha256(made_now[made_now.find(b"\nDATA;") :]).hexdigest() != wanted:
+                kept.append(name)
+        assert not kept, f"other STEP data than main dcf3391's on arm64: {kept}"
