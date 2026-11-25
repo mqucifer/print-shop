@@ -203,8 +203,6 @@ def main_page(
                              f"<span class=\"part\">{_e(_named(line))}</span>"
                              f"{_small(_getting(line))}"))
         body.append("</ul>")
-    body.append("<div class=\"foot\"><a href=\"/runs\">Finished</a>"
-                "<a href=\"/filaments\">Filaments</a></div>")
     return page("Printing", "".join(body))
 
 

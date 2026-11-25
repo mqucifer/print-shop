@@ -41,6 +41,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from print_shop import reprint
 from print_shop.arming import Armed
+from print_shop.core.contracts import Gate
 from print_shop.orchestrator.daemon import PhoneStart, ReadyToStart
 from print_shop.orchestrator.print_queue import Asked, Line, Need
 from print_shop.phone.again import again_page, also_page, nozzle_typed
@@ -60,6 +61,7 @@ from print_shop.phone.needs import (
 )
 from print_shop.phone.page import (
     away_page,
+    menu_bar,
     message_page,
     nothing_ready_page,
     pair_page,
@@ -285,6 +287,8 @@ class _Handler(BaseHTTPRequestHandler):
     confirms: Confirms
     now: Callable[[], datetime]
     server_version = "print-shop-phone"
+    #: This request's place in the menu bar, once it's a signed-in phone's at home; else "".
+    _section = ""
     sys_version = ""
     #: A slow client doesn't hold a thread.
     timeout = 15
@@ -325,7 +329,11 @@ class _Handler(BaseHTTPRequestHandler):
         route, held = found
         answer: Callable[[dict[str, str], Any], None] = getattr(self, f"_r_{route.name}")
         if route.signed_out or route.arms or route.name == "start_screen":
-            # Pairing, and #214's Start, check for themselves, in their own order.
+            # Pairing, and #214's Start, check for themselves, in their own order. Start's page
+            # has the menu bar where it's a signed-in phone's at home (mqucifer/print-shop#289).
+            if route.name == "start_screen" and self._signed_in()[0] is not None \
+                    and not self._away():
+                self._section = route.section
             return answer(held, split.query)
         phone, _ = self._signed_in()
         if phone is None:
@@ -337,12 +345,24 @@ class _Handler(BaseHTTPRequestHandler):
                 self._refused(f"{split.path} refused: {away}")
             return self._send(away_page(part=None, why=away),
                               code=HTTPStatus.OK if method == "GET" else HTTPStatus.FORBIDDEN)
+        # Signed in, on the home Wi-Fi: its pages have the menu bar.
+        self._section = route.section
         if method == "POST":
             form = self._form()
             if form is None:
                 return
             return answer(held, form)
         return answer(held, split.query)
+
+    def _waits_at_gate(self) -> bool:
+        """Whether a job waits at the gate before printing, for Start's place in the bar: the
+        gate as the daemon holds it, never the printer."""
+        starts = self.starts
+        gate = getattr(starts, "pending_gate", None)
+        if callable(gate):
+            found = gate()
+            return bool(found and found.get("gate") == Gate.BEFORE_PRINT)
+        return starts is not None and starts.ready_to_start() is not None
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002
         pass  # a request is logged only where it's refused, without its cookie or code
@@ -934,6 +954,9 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _send(self, body: str, *, code: int = HTTPStatus.OK, cookies: tuple[str, ...] = ()) -> None:
+        if self._section and "<body>" in body:
+            body = body.replace("<body>", "<body>" + menu_bar(self._section,
+                                                              self._waits_at_gate()), 1)
         data = body.encode()
         self.send_response(code)
         self.send_header("Content-Type", "text/html; charset=utf-8")
