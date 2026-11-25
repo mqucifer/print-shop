@@ -205,23 +205,19 @@ def test_a_bought_parts_fact_changed_keeps_the_fields_it_doesnt_give(tmp_path: P
     fan = tmp_path / "given" / "fan.step"
     fan.parent.mkdir(parents=True)
     fan.write_text("made up\n")
-    model = Scripted(
-        [
-            tool(
-                "fact",
-                name="references/fan.step",
-                text="",
-                box="x 0-30, y 0-30, z 0-10",
-                way_in="+z",
-                held_by="the lid",
-                **{"from": "call 1"},
-            )
-        ],
-        [tool("questions", questions="What holds the fan?")],
-    )
-    run = Run.start(tmp_path / "runs", "r", "A block.", [fan], model, sleep=lambda _: None)
-    assert run.drive().name == "questions"
-    run, _ = answered(run, "The base holds the fan, not the lid.")
+    # No stop: a note brings the list, so nothing draws the given files' sheet in a container.
+    run = Run.start(tmp_path / "runs", "r", "A block.", [fan], Scripted(), sleep=lambda _: None)
+    bought = {
+        "name": "references/fan.step",
+        "text": "",
+        "box": "x 0-30, y 0-30, z 0-10",
+        "way_in": "+z",
+        "held_by": "the lid",
+        "from": "call 1",
+    }
+    assert run.fact(bought).outcome == "ok"
+    run.resume("The base holds the fan, not the lid.", False, WHO)
+    assert run.state.facts_beside is not None
     mark = {"is": "changed", "why": "The base holds it.", "text": "", "held_by": "the base"}
     assert run.mark_facts({"marks": {"references/fan.step": mark}}).outcome == "ok"
     (now,) = facts.load(run.state.facts)
