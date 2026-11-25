@@ -428,6 +428,43 @@ REPORTS: dict[str, tuple[str, ...]] = {
     # `pockets`: each nut's pocket of a through joint that states one (mqucifer/print-shop#168).
     # `channels`: each bolt of a through joint that declares a drop-in channel
     # (mqucifer/print-shop#302).
+    # Where a part's load goes, a reference for a design round and never a part
+    # (mqucifer/print-shop#286): a need can't name it (`needs.REFERENCE`), and these are said.
+    "optimise": (
+        "across_limit_mpa",
+        "after",
+        "before",
+        "beso_mises_after_mpa",
+        "beso_mises_before_mpa",
+        "beso_s",
+        "elements",
+        "elements_dropped",
+        "elements_kept",
+        "force_n",
+        "islands_dropped",
+        "iterations",
+        "kept_digest",
+        "kept_solid",
+        "kept_solid_kept",
+        "layers",
+        "mesh_digest",
+        "mesh_mm",
+        "mesh_s",
+        "nodes",
+        "overhang",
+        "part",
+        "reference_only",
+        "stl_volume_mm3",
+        "toward",
+        "up",
+        "volume_kept",
+        "volume_kept_mm3",
+        "volume_kept_solid",
+        "volume_part_mm3",
+        "volume_target",
+        "weight_kg",
+        "yield_mpa",
+    ),
     "fit-bed": ("bed_mm", "channels", "parts", "pockets"),
 }
 
@@ -1175,6 +1212,7 @@ VERDICTS: dict[str, tuple[str, ...]] = {
     "fit-on": ("CLEAR", "BLOCKED"),
     "bend": ("OK", "FAIL"),
     "load": ("OK", "FAIL"),
+    "optimise": ("OK", "FAIL"),
     "fit-bed": ("OK", "FAIL"),
 }
 

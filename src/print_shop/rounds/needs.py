@@ -48,8 +48,13 @@ COMMANDS = (
     "bend",
     "pieces",
     "load",
+    "optimise",
     "fit-bed",
 )
+#: A bench command that's a reference for a design round, never a part: `optimise`, where a part's
+#: load goes (mqucifer/print-shop#286). No need is checked by it: the part a run makes is read by
+#: `load` and the other checks, and what `optimise` keeps passes nothing.
+REFERENCE = ("optimise",)
 #: Verdicts that are no answer: they never pass a need, whatever it says.
 UNSURE = ("DISAGREE", "NO ANSWER", "UNREAD")
 #: The bench saying that what it checks is wrong. On `cup-1` a need passed on `capture`'s FAIL:
@@ -349,7 +354,7 @@ def readable(need: Need, toolset: Toolset | None = None) -> bool:
         words = need.argv()
     except ValueError:
         return False
-    if not words or words[0] not in COMMANDS:
+    if not words or words[0] not in COMMANDS or words[0] in REFERENCE:
         return False
     return toolset is None or toolset.legacy or words[0] in toolset.commands
 
@@ -474,6 +479,12 @@ def _bench_check(need: Need, check: dict[str, Any], wrong: list[str], shown: str
         return
     if not words or words[0] not in COMMANDS:
         wrong.append(f"{shown}: `command` is a bench command: {', '.join(COMMANDS)}")
+    elif words[0] in REFERENCE:
+        wrong.append(
+            f"{shown}: `{words[0]}` is a reference for a design round, never a part, so no need "
+            "is checked by it: what it keeps shows where the load goes, and the part a run makes "
+            "is read by `load` and the other checks"
+        )
     verdicts = check.get("verdicts") or []
     if isinstance(verdicts, str):
         verdicts = [verdicts]

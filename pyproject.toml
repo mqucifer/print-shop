@@ -75,5 +75,5 @@ follow_imports = "skip"
 
 # The bench's second image (src/print_shop/bench/cae-image) has FreeCAD and its FEM workbench.
 [[tool.mypy.overrides]]
-module = ["FreeCAD", "Part", "ObjectsFem", "femmesh.*", "femtools", "femtools.*"]
+module = ["FreeCAD", "Part", "ObjectsFem", "femmesh.*", "femtools", "femtools.*", "matplotlib", "matplotlib.*", "mpl_toolkits.*"]
 ignore_missing_imports = true

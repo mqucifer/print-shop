@@ -1,8 +1,8 @@
 """What the second image's commands share (mqucifer/print-shop#142): FreeCAD, loaded in order.
 
-`fit-on`, `bend` and `load` (mqucifer/print-shop#156) run in `print-shop/cae`, where FreeCAD's
-modules are beside its libraries
-(`host.CAE_ENTRY` puts them on the path). The first image has no FreeCAD, and a script there that
+`fit-on`, `bend`, `load` (mqucifer/print-shop#156) and `optimise` (mqucifer/print-shop#286) run
+in `print-shop/cae`, where FreeCAD's modules are beside its libraries (`host.CAE_ENTRY` puts them
+on the path). The first image has no FreeCAD, and a script there that
 calls one of them is told so, not left with an import's traceback.
 """
 
