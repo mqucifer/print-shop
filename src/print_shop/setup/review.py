@@ -775,7 +775,10 @@ def _read_parts(parts: list[str | Left], request: ReviewRequest) -> Review | Sli
         if preset is None:
             slips.append((at, _refused(key, request)))
             continue
-        wrong = names.not_a_choice(key, value)
+        # Not one of the words Orca takes, or not the form its setting is (mqucifer/print-shop#296).
+        wrong = names.not_a_choice(key, value) or names.not_a_form(
+            key, value, _extruders(request), names.now(key, request.process, request.filament,
+                                                      _sliced_with(request), _today(request)))
         if wrong:
             # Not one of the words Orca takes: refused before anything slices, where it would
             # only be read back as not reaching the file (mqucifer/print-shop#279).
@@ -1392,11 +1395,41 @@ def _settled(
             # Looked up, and asked again: finding changes nothing (mqucifer/print-shop#222).
             write("\n".join(_finding(looked.group(1), request, width)))
             continue
+        if typed.strip().lower() in ("ok", "yes", "y", "approve"):
+            # Asked again, saying why (mqucifer/print-shop#298).
+            write("\n".join(wrap("  ", "ok isn't a fix here: type it corrected, drop, or back",
+                                  min(width, WIDTH), "    ")))
+            continue
         parts = read_.answered(typed)
         if not parts:
             return None
+        parts = _fix_stands(read_, parts, write, width)
         read_ = _read_parts(parts, request)
     return read_
+
+
+def _fix_stands(
+    slipped: Slipped, parts: list[str | Left], write: Callable[[str], None], width: int,
+) -> list[str | Left]:
+    """The answer as fixed, with what the fix sets of a setting the held answer set too said to
+    stand (mqucifer/print-shop#298): "wall_loops was 3 in this answer: 4 stands". Only words: it
+    stands as before, typed later, and both are kept as the answer gave them."""
+    at, _ = slipped.slips[0]
+    fixed = len(parts) - len(slipped.parts) + 1  # what the fix put in the slip's place
+    if fixed <= 0:
+        return parts
+    new: dict[str, str] = {}
+    for part in parts[at:at + fixed]:
+        match = _CORRECTION.match(part) if isinstance(part, str) else None
+        if match is not None:
+            new[match.group(1)] = match.group(2)
+    for n, part in enumerate(parts):
+        match = _CORRECTION.match(part) if isinstance(part, str) else None
+        if match is not None and not at <= n < at + fixed and match.group(1) in new:
+            key = match.group(1)
+            write("\n".join(wrap("  ", f"{key} was {match.group(2)} in this answer: {new[key]} "
+                                  "stands", min(width, WIDTH), "    ")))
+    return parts
 
 
 def _unset(answer: str) -> list[str]:
@@ -1742,6 +1775,14 @@ def finding(words: str, request: ReviewRequest) -> list[names.Found]:
 def filament_name(request: ReviewRequest) -> str:
     """The filament preset's name, as `find` says it."""
     return _filament_name(request)
+
+
+def _extruders(request: ReviewRequest) -> int:
+    """How many extruders the printer has, as the slice's config says by its nozzles; one where
+    it can't be read (mqucifer/print-shop#296)."""
+    config = _sliced_with(request) or {}
+    nozzles = [n for n in config.get("nozzle_diameter", "").split(",") if n.strip()]
+    return max(len(nozzles), 1)
 
 
 def _filament_name(request: ReviewRequest) -> str:

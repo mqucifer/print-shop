@@ -14,7 +14,10 @@ meeting end to end where the parts meet; and each hole's far end, its seat, with
 washer or the nut bears on there. What it bears on is the ring between the hole and the washer's
 outside, or the nut's bearing face, cut to the part's own faces, so a washer that overhangs an edge
 bears on less. At a peaked bore (mqucifer/print-shop#237) its whole seat is that ring less the
-peak's cut, and nothing else.
+peak's cut, and nothing else. Where the joint declares a drop-in channel (mqucifer/print-shop#302),
+the bolt lies in that in each part instead, read as `through.channel` reads one, and its seats
+are the walls the joint names, or it's said where the channel ends; each seat is the ring less
+the channel's cut.
 
 **Round each bolt** (`round_bolt`), in each of the two parts: the part alone, cut off two
 diameters of what bears on it, the washer or the nut's face, from the bolt's axis and held where
@@ -172,7 +175,7 @@ def _side(
     ring = _ring(centre, axis, inner, outer)
     bears = float(sum(ring.common(f).Area for f in flats)) if flats else 0.0
     whole = math.pi * (outer**2 - inner**2)
-    expected = whole - through.peak_cut(hole, inner, outer)
+    expected = whole - through.seat_cut(hole, inner, outer)
     if bears <= 1e-6:
         raise NoAnswer(
             f"{what}: {part.name} has no flat face round its hole's end, at {_xyz(centre)}, "
@@ -211,16 +214,16 @@ def ways(assembly: Assembly, placed: list[Any]) -> dict[str, list[dict[str, Any]
             what = f"the through joint {joint.name}'s bolt at {_xyz(point)}"
             holes = []
             for part, (cylinders, planes) in zip(parts, faces, strict=True):
-                hole = through.bore(cylinders, point, planes)
+                hole = through.seat_of(joint, cylinders, point, planes)
                 if isinstance(hole, str):
-                    raise NoAnswer(
-                        f"{what}: in {part.name}, {hole}. A through-bolt passes right through "
-                        "both parts, in a round or peaked hole in each"
-                    )
+                    raise NoAnswer(f"{what}: in {part.name}, {hole}")
                 holes.append(hole)
             way = through.meet(holes[0], holes[1])
             if isinstance(way, str):
                 raise NoAnswer(f"{what}: {way}")
+            wrong = through.walls_met(joint, way)
+            if wrong:
+                raise NoAnswer(f"{what}: " + "; and ".join(wrong))
             sides = [_side(joint, parts[k], solids[k], holes[k], way, k) for k in range(2)]
             bolts.append({"axis": way["axis"], "meet": way["meet"], "sides": sides})
         found[joint.name] = bolts
@@ -458,7 +461,7 @@ def round_bolt(
             "held_mm": reach,
             "read_mm": READ * reach,
         }
-        if hole["peak"] is not None and by_mesh is not None:
+        if (hole["peak"] is not None or hole.get("channel")) and by_mesh is not None:
             found["wall_share"] = by_mesh
         return found
     finally:

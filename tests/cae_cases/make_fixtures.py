@@ -28,6 +28,11 @@ the second's bore carrying on past its nut's slot for the bolt's tip; the same w
 stretch longer; with the first's bore counterbored at the head's end; and one where the shear
 rules, the bore 4 mm long to a washer's slot and 5.2 mm above the part's bottom.
 
+`channel/` (mqucifer/print-shop#302): two halves of a panel 20 x 30 x 20 end to end along x on
+one M5 bolt in a drop-in channel open up, a U 5.5 mm across running from the head's wall at x 12
+to the nut's at x 28, each wall with a recess behind it; the second half 9 mm wide, too narrow
+for the washer; and the same with no channel declared.
+
 `dovetail/` (mqucifer/print-shop#170): two bars 30 mm wide that lap over 40 mm, joined by a
 tapered dovetail: a tail 6 mm proud of the upper bar's lap face, 6 mm wide at its neck where
 it's lowest and 10 at its top, each flank undercut by 2 mm, in a socket in the lower bar that's
@@ -367,6 +372,42 @@ def shears() -> None:
         joint: dict[str, Any] = {"between": ["one", "two"], **M5, **more, "at": [[20, 15, z]]}
         assembly(out / f"{name}.json", parts, [joint], [{"plane": f"x={end}", "how": "fixed"}])
 
+
+#: The drop-in channel's halves (mqucifer/print-shop#302), as the tests' arithmetic reads them:
+#: the U's round about the axis through (y 15, z 10), and its walls up to the top at z 20.
+CHANNEL_AXIS_YZ, CHANNEL_TOP = (15.0, 10.0), 20.0
+CHANNEL_DECLARED = {"axis": "x", "open": "+z", "head_wall": "x=12", "nut_wall": "x=28"}
+
+
+def channels() -> None:
+    """Two halves of a panel on one M5 bolt in a drop-in channel open up, from x 12 to 28 across
+    the join at x 20, each with a recess behind its wall for the head or the nut; the second
+    9 mm wide with no recess, its end the nut's wall; and the same with no declaration."""
+    out = Path("channel")
+    y, z = CHANNEL_AXIS_YZ
+    radius = HOLE / 2
+    u = Part.makeCylinder(radius, 20, App.Vector(10, y, z), App.Vector(1, 0, 0)).fuse(
+        box((10, y - radius, z), (30, y + radius, CHANNEL_TOP + 1))
+    )
+    left = box((0, 0, 0), (20, 30, CHANNEL_TOP)).cut(box((4, 7, 3), (12, 23, 21))).cut(u)
+    right = box((20, 0, 0), (40, 30, CHANNEL_TOP)).cut(box((28, 7, 3), (36, 23, 21))).cut(u)
+    narrow = box((20, 10.5, 0), (28, 19.5, CHANNEL_TOP)).cut(u)
+    for name, shape in (("left", left), ("right", right), ("right-narrow", narrow)):
+        save(shape.removeSplitter(), out / f"{name}.step")
+    held = [{"plane": "x=0", "how": "fixed"}]
+    joint: dict[str, Any] = {"between": ["left", "right"], **M5, "at": [[20, y, z]],
+                             "channel": CHANNEL_DECLARED}  # fmt: skip
+    for name, right_is, changed in (
+        ("joined", "right", {}),
+        ("narrow", "right-narrow", {}),
+        ("undeclared", "right", {"channel": None}),
+    ):
+        parts: Rows = [
+            {"name": "left", "file": "left.step", "layers": "z"},
+            {"name": "right", "file": f"{right_is}.step", "layers": "z"},
+        ]
+        stated = {k: v for k, v in {**joint, **changed}.items() if v is not None}
+        assembly(out / f"{name}.json", parts, [stated], held)
 
 #: The dovetailed bars (mqucifer/print-shop#170), as the tests' arithmetic reads them. Both are
 #: `BAR_W` wide along x and meet on the plane y 0: the socket's bar behind it, the tail's in
@@ -829,6 +870,7 @@ def main() -> None:
     throughs()
     peaks()
     shears()
+    channels()
     dovetails()
     plays()
     turned()

@@ -886,6 +886,97 @@ def test_a_peaked_bore_s_seat_cut_by_anything_else_still_fails(cae: Any, name: s
     assert "less the peak's cut: it overhangs an edge or a step" in answer.record["why"]
 
 
+# A through-bolt in a drop-in channel (mqucifer/print-shop#302)
+
+#: Pulled apart along the bolt, pushed across it sideways, and pushed down, at the second
+#: half's far end, on the bolt's axis or under it.
+CHANNEL_APART = ("--weight", "5", "--at", "40,15,10", "--toward", "+x", "--mesh", "6")
+CHANNEL_ASIDE = ("--weight", "2", "--at", "40,15,10", "--toward", "+y", "--mesh", "6")
+CHANNEL_DOWN = ("--weight", "2", "--at", "40,15,10", "--toward", "-z", "--mesh", "6")
+
+
+def channel_seat() -> float:
+    """A washer's ring on a channel's wall less the channel's cut, by summing thin rings: at r
+    from the axis, its walls half the hole's width either side of the open way take
+    2 asin(R/r) of the ring."""
+    edges = np.linspace(HOLE / 2, WASHER / 2, 200_001)
+    r = (edges[:-1] + edges[1:]) / 2
+    return float(((2 * math.pi - 2 * np.arcsin(HOLE / 2 / r)) * r * np.diff(edges)).sum())
+
+
+def test_load_clamps_two_halves_through_a_bolt_in_a_drop_in_channel(cae: Any) -> None:
+    """`load` read a drop-in channel as a slot's end. Declared, its bolt clamps the two walls:
+    pulled apart with 5 kg, each washer presses 40.62 mm² of its wall, the ring less the
+    channel's cut, and nothing pushes the shank toward the open side, which the reply says
+    carries nothing. Pushed sideways, the shank leans on half its round, 5 x 8 / 2 mm²."""
+    seat = channel_seat()
+    apart = cae("load", "channel/joined.json", *CHANNEL_APART)
+    assert apart.verdict == "OK" and apart.code == 0, apart.text
+    joint = apart.numbers["joints"]["left+right"]
+    assert joint["bolt_pull_n"] == pytest.approx(5 * G, rel=0.1)
+    head, nut = joint["bolts"][0]["ends"]
+    assert (head["part"], nut["part"]) == ("left", "right")
+    for end in (head, nut):
+        assert end["under"] == "washer" and end["ring_mm2"] == pytest.approx(RING, rel=1e-9)
+        assert end["seat_mm2"] == pytest.approx(seat, rel=1e-6)
+        assert end["bears_mm2"] == pytest.approx(seat, rel=1e-4)
+        assert end["pressure_mpa"] == pytest.approx(joint["bolt_pull_n"] / seat, rel=1e-4)
+        assert end["channel"] == {"toward": [0, 0, 1], "round_deg": pytest.approx(180),
+                                  "open_mm": pytest.approx(HOLE)}  # fmt: skip
+        assert end["toward_open_n"] == pytest.approx(0, abs=0.05)
+        assert "wall_pressure_mpa" not in end, "a straight pull"
+    assert apart.text.count("carries nothing: the shank is not pushed toward it") == 2
+    assert "bears on the head's wall at x=12" in apart.text
+    assert "bears on the nut's wall at x=28" in apart.text
+    assert reports.unlike("load", apart.numbers) == []
+    aside = cae("load", "channel/joined.json", *CHANNEL_ASIDE)
+    assert aside.verdict == "OK", aside.text
+    for end in aside.numbers["joints"]["left+right"]["bolts"][0]["ends"]:
+        assert end["wall_bears_mm2"] == pytest.approx(5 * 8 / 2, rel=1e-4)
+        assert end["wall_pressure_mpa"] == pytest.approx(2 * G / 20, rel=2e-3)
+        assert end["round"]["wall_share"] == pytest.approx(0.5, rel=0.05)
+        assert end["sheared_mm2"] == pytest.approx(math.pi / 2 * HOLE / 2 * 8, rel=0.05)
+        assert end["toward_open_n"] == pytest.approx(0, abs=0.05)
+    assert "the channel leaves 50.0% for a lean 90° from its open side" in aside.text
+
+
+def test_a_channel_s_open_side_carries_nothing(cae: Any) -> None:
+    """Pushed down at the second half's end, its channel moves down off the bolt: the shank
+    is pushed toward that channel's open side with the whole 2 kg, which nothing holds. The
+    first half's shank presses its round's bottom, all of it."""
+    answer = cae("load", "channel/joined.json", *CHANNEL_DOWN)
+    assert answer.verdict == "FAIL" and answer.code == 1, answer.text
+    why = answer.record["why"]
+    assert "in right: the shank is pushed toward the channel's open side by 19.6 N" in why
+    assert "nothing there holds it" in why and "; and " not in why
+    joint = answer.numbers["joints"]["left+right"]
+    assert joint["gives_first"] == "the shank pushed toward the channel's open side in right"
+    head, nut = joint["bolts"][0]["ends"]
+    assert nut["toward_open_n"] == pytest.approx(2 * G, rel=1e-3)
+    assert head["toward_open_n"] == 0 and head["wall_bears_mm2"] == pytest.approx(5 * 8)
+    assert "wall_pressure_mpa" not in nut, "nothing's left to lean on its round"
+    assert reports.unlike("load", answer.numbers) == []
+
+
+def test_a_channel_s_wall_too_narrow_for_its_washer_fails_naming_the_wall(cae: Any) -> None:
+    """The second half 9 mm wide, its end the nut's wall, under a washer 10 mm across."""
+    answer = cae("load", "channel/narrow.json", *CHANNEL_APART[:2], "--at", "28,15,4",
+                 *CHANNEL_APART[4:])  # fmt: skip
+    assert answer.verdict == "FAIL", answer.text
+    why = answer.record["why"]
+    assert "in right: the washer m5-washer under the nut sits on 37.7 mm² of the part" in why
+    assert "less the channel's cut, on the nut's wall at x=28: it overhangs an edge" in why
+
+
+def test_a_channel_with_no_declaration_is_still_refused_by_load(cae: Any) -> None:
+    answer = cae("load", "channel/undeclared.json", *CHANNEL_APART)
+    assert answer.verdict == "NO ANSWER" and answer.code == 2, answer.text
+    assert (
+        "in left, the round face there doesn't go all the way round: a slot's end, not a hole"
+    ) in answer.record["why"]
+    assert answer.record["seconds"] < 10
+
+
 # The shank's shear, on its own stretch of the bore (mqucifer/print-shop#245)
 
 #: Beside where the blocks meet, so the bolt has the shear and little pull.

@@ -21,21 +21,30 @@ config block, was refused as if it weren't one. So:
   under it in `find`, with the line that turns it off where one does. A correction to another
   word is refused before anything slices (`not_a_choice`). The table is the one source: the
   shop's bound on the model's proposals (`support_type`'s tree only) is never said as Orca's.
+- **A value of the wrong form is refused before anything slices** (mqucifer/print-shop#296,
+  `not_a_form`): a whole number, a number, a percentage, mm or a percentage, on or off, as
+  Orca's own definitions type the setting (`orca_forms.json`, written by
+  `scripts/orca_forms.py` from the installed Orca's source). Only the form, never the range. A
+  number may be typed with the unit the review shows it in (`80%` of a fan is `80`), and a
+  per-extruder list has no more values than the printer has extruders.
 """
 
 from __future__ import annotations
 
 import difflib
+import json
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from print_shop.setup.bounds import MATERIAL, SETTINGS
 from print_shop.setup.reach import profile_of, unplaced
 from print_shop.sliced import NOT_SETTINGS, PROFILE_IDS
 
-__all__ = ["PLAIN", "STANDS_IN", "Found", "choices", "either", "find", "named", "not_a_choice",
+__all__ = ["ORCA_FORMS", "PLAIN", "STANDS_IN", "Found", "choices", "either", "find", "form",
+           "named", "not_a_choice", "not_a_form", "now", "setting_said", "unset_said",
            "off", "plain", "refused", "switched", "turns_off", "typed", "with_unit"]
 
 _PERCENT, _SPEED, _TEMP, _MM, _S = "%", " mm/s", " °C", " mm", " s"
@@ -172,6 +181,14 @@ class Found:
     #: The words it takes, where they're all Orca's (`choices`), and the one that turns it off.
     choices: tuple[str, ...] = ()
     off: str = ""
+    #: Where it's Orca's `nil`, not set here: the printer's value that applies, as it's shown,
+    #: or '' where it isn't known (mqucifer/print-shop#298).
+    printer: str = ""
+
+    @property
+    def unset(self) -> bool:
+        """Whether it's not set here, so the printer's applies: Orca's `nil`."""
+        return _unset(self.now)
 
 
 #: print-shop's own answers that are typed as a key is, and aren't Orca's.
@@ -193,6 +210,12 @@ def plain(key: str) -> str:
 def named(key: str) -> str:
     """A setting as it's said in a sentence: its plain name, its key after."""
     return f"{plain(key)} ({key})"
+
+
+def setting_said(key: str, value: str) -> str:
+    """A setting and its value as the review says them, where a line names one: "Walls
+    (wall_loops) 4", "Supports (enable_support) off" (mqucifer/print-shop#298)."""
+    return f"{named(key)} {with_unit(key, value)}"
 
 
 def with_unit(key: str, value: str) -> str:
@@ -220,14 +243,93 @@ def switched(key: str, value: str) -> str:
 
 def typed(key: str, value: str) -> str:
     """A switch's value typed as it's shown, `on` or `off` (or yes and no), as Orca writes it,
-    1 or 0; one of a setting's words in Orca's case (`No ironing` is `no ironing`); any other as
-    typed."""
+    1 or 0; one of a setting's words in Orca's case (`No ironing` is `no ironing`); a number with
+    the unit the review shows it in, as Orca takes it, without (`80%` of a fan is `80`,
+    mqucifer/print-shop#296); any other as typed."""
     word = next((c for c in choices(key) if c == value.strip().lower()), None)
     if word is not None:
         return word
-    if PLAIN.get(key, ("", ""))[1] != _SWITCH:
-        return value
-    return {"on": "1", "yes": "1", "off": "0", "no": "0"}.get(value.strip().lower(), value)
+    kind = form(key).rstrip("s")
+    if PLAIN.get(key, ("", ""))[1] == _SWITCH or kind == "bool":
+        return {"on": "1", "yes": "1", "off": "0", "no": "0"}.get(value.strip().lower(), value)
+    unit = PLAIN.get(key, ("", ""))[1].strip()
+    if unit and kind in ("int", "float"):
+        # Only where the form can't take a %: of a percentage, or mm or %, it means itself.
+        bare = re.fullmatch(rf"\s*({_A_NUMBER})\s*{re.escape(unit)}\s*", value)
+        if bare is not None:
+            return bare.group(1)
+    return value
+
+
+#: Each setting's form, as Orca's own definitions type it (`scripts/orca_forms.py`), and the Orca
+#: version they're from.
+_FORMS: dict[str, Any] = json.loads(Path(__file__).with_name("orca_forms.json").read_text())
+ORCA_FORMS: str = _FORMS["orca"]
+#: The settings that take `nil`, as Orca spells "not set here": a filament's override, put back
+#: to the printer's.
+_NULLABLE = frozenset(_FORMS.get("nullable", ()))
+
+_A_NUMBER = r"-?(?:\d+(?:\.\d*)?|\.\d+)"
+#: Each form checked, its one item's pattern, and how it's said.
+_SAID = {
+    "int": (r"-?\d+", "a whole number", "takes one"),
+    "float": (_A_NUMBER, "a number", "takes one"),
+    "percent": (rf"{_A_NUMBER}%?", "a percentage", "takes one"),
+    "floatorpercent": (rf"{_A_NUMBER}%?", "mm or a percentage", "takes either"),
+    "bool": (r"[01]", "on or off", "takes on or off"),
+}
+_COUNTS = {1: "one", 2: "two", 3: "three", 4: "four"}
+
+
+def form(key: str) -> str:
+    """The form `key`'s value takes, as Orca's definitions type it: `int`, `floats`,
+    `floatorpercent`, `bool`, `enum` …; '' for a key they don't have."""
+    return str(_FORMS["forms"].get(key, ""))
+
+
+def not_a_form(key: str, value: str, extruders: int = 1, today: str = "") -> str:
+    """Why `key=value` is refused, before anything slices, where `value` isn't the form `key`
+    takes (mqucifer/print-shop#296), or ''. Only the form is checked, never the range. A
+    per-extruder list takes one value an extruder at most. `today` is its value now, for the
+    example where what was typed has no number of the form; a setting whose form isn't one of a
+    number's or on/off's reads as before."""
+    kind = form(key)
+    one = kind.removesuffix("s") if kind.endswith("s") and kind != "floatorpercent" else kind
+    if one not in _SAID:
+        return ""
+    pattern, said, takes = _SAID[one]
+    items = [item.strip() for item in value.split(",")] if one != kind else [value.strip()]
+
+    def example() -> str:
+        if one == "bool":
+            return "on" if today.split(",")[0].strip() in ("1", "true") else "off"
+        decimal = re.fullmatch(r"\s*(\d+),(\d+)\s*", value)
+        if one == "float" and decimal is not None:
+            return f"{decimal.group(1)}.{decimal.group(2)}"  # a decimal comma, as 0,8 is
+        typed_ = re.search(_A_NUMBER + ("%?" if one in ("percent", "floatorpercent") else ""),
+                           value)
+        if typed_ is not None and re.fullmatch(pattern, typed_.group(0)):
+            return typed_.group(0)
+        first = today.split(",")[0].strip()
+        return first if re.fullmatch(pattern, first) else ""
+
+    if len(items) > max(extruders, 1):
+        many = _COUNTS.get(extruders, str(extruders))
+        has = (f"this printer has {many} extruder" + ("s" if extruders > 1 else "")
+               + (": give one value" if extruders == 1 else f": give up to {many} values"))
+        shown = example()
+        return f"{has}, e.g. {key}={shown}" if shown else has
+    if all(re.fullmatch(pattern, item) or (item == "nil" and key in _NULLABLE) for item in items):
+        return ""
+    shown = example()
+    refusal = f"'{value}' isn't {said}: {key} {takes}"
+    return f"{refusal}, e.g. {key}={shown}" if shown else refusal
+
+
+def now(key: str, process: Mapping[str, Any], filament: Mapping[str, Any],
+        config: Mapping[str, str] | None = None, changed: Mapping[str, str] | None = None) -> str:
+    """A setting's value today: as this review changes it, else as sliced, else the preset's."""
+    return _now(key, process, filament, config, changed or {})
 
 
 def choices(key: str) -> tuple[str, ...]:
@@ -362,8 +464,33 @@ def find(
     whole = [r for r in ranked if -r[0] >= len(asked)]
     some = [r for r in ranked if -r[0] < len(asked)]
     out = [*whole, *some][:_LISTED]
-    return [Found(key=k, plain=plain(k), now=_now(k, process, filament, config, changed),
-                  stands_in=stands.get(k, ""), choices=choices(k), off=off(k)) for *_, k in out]
+    found = []
+    for *_, k in out:
+        today = _now(k, process, filament, config, changed)
+        found.append(Found(key=k, plain=plain(k), now=today, stands_in=stands.get(k, ""),
+                           choices=choices(k), off=off(k),
+                           printer=_printers(k, config) if _unset(today) else ""))
+    return found
+
+
+def _unset(value: str) -> bool:
+    """Whether a value is Orca's `nil`: a filament's override not set, so the printer's applies."""
+    return value.split(",")[0].strip() == "nil"
+
+
+def _printers(key: str, config: Mapping[str, str] | None) -> str:
+    """The printer's value of what a filament's `key` overrides, as it's shown, from the slice's
+    config: `filament_retraction_length`'s is the printer's `retraction_length`."""
+    value = (config or {}).get(key.removeprefix("filament_"), "").split(",")[0].strip()
+    return with_unit(key, value) if value and value != "nil" else ""
+
+
+def unset_said(key: str, config: Mapping[str, str] | None) -> str:
+    """A setting left to the printer's, said: "not set here, so the printer's 0.8 mm applies",
+    or without the value where it isn't known (mqucifer/print-shop#298)."""
+    value = _printers(key, config)
+    return f"not set here, so the printer's {value} applies" if value else (
+        "not set here, so the printer's applies")
 
 
 def _nearest(key: str, among: Iterable[str]) -> list[str]:
@@ -397,7 +524,10 @@ def refused(
     keys = _takes(process, filament)
 
     def said(k: str) -> str:
-        now = with_unit(k, _now(k, process, filament, config, changed))
+        today = _now(k, process, filament, config, changed)
+        if _unset(today):
+            return f"{k} ({plain(k)}, {unset_said(k, config)})"
+        now = with_unit(k, today)
         words = f"; {either(choices(k))}" if choices(k) else ""
         return f"{k} ({plain(k)}, now {now}{words})"
 

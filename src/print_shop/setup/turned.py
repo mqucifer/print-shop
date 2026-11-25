@@ -26,7 +26,7 @@ from print_shop.setup.intake import Intake, Question
 from print_shop.setup.proposal import Proposal, Source, pose_value
 from print_shop.setup.reading import TURNED_SINCE
 
-__all__ = ["ANY_POSE", "FOR_A_POSE", "Held", "after_turn", "as_posed", "held"]
+__all__ = ["ANY_POSE", "FOR_A_POSE", "Held", "after_turn", "as_posed", "held", "summary"]
 
 #: The questions an answer to which holds however the part is turned.
 ANY_POSE = frozenset({"purpose", "volume", "section"})
@@ -125,13 +125,13 @@ def as_posed(
     if not kept.aside:
         return kept.intake, ""
     return kept.intake, (
-        f"{_summary(kept, asked_in, now)}. These were said of the part as it lay when asked, so "
+        f"{summary(kept, asked_in, now)}. These were said of the part as it lay when asked, so "
         f"they aren't used now: {'; '.join(kept.aside)}. Send it back with orientation, or say "
         "what you want with a correction"
     )
 
 
-def _summary(kept: Held, asked_in: tuple[float, float, float],
+def summary(kept: Held, asked_in: tuple[float, float, float],
              now: tuple[float, float, float]) -> str:
     """The note's first sentence: the first answer set aside, how many more, and what decides
     in its place. Within `SUMMARY_CHARS`, the answer's words shortened if they must be, down to

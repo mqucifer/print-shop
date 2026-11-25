@@ -34,7 +34,15 @@ from print_shop.core.state import turn_words
 from print_shop.setup import pauses
 from print_shop.setup.context import SET_ASIDE
 from print_shop.setup.layout import WIDTH, wrap
-from print_shop.setup.names import Found, either, named, plain, switched, with_unit
+from print_shop.setup.names import (
+    ORCA_FORMS,
+    Found,
+    either,
+    named,
+    plain,
+    switched,
+    with_unit,
+)
 from print_shop.setup.offer import render as render_offer
 from print_shop.setup.proposal import (
     ORIENTATION,
@@ -54,11 +62,13 @@ from print_shop.setup.reading import (
     SliceReading,
 )
 from print_shop.setup.suggest import didnt_come, fell_back, turning, waited
+from print_shop.slicer.orca import sliced_by
 
 if TYPE_CHECKING:
     from print_shop.setup.review import ReviewRequest
 
-__all__ = ["WIDTH", "Moved", "Said", "Section", "by_model", "clock", "found", "sections",
+__all__ = ["WIDTH", "Moved", "Said", "Section", "by_model", "clock", "found", "layer_time",
+           "sections",
            "what_moved", "warnings", "who_set", "wrap"]
 
 
@@ -148,6 +158,15 @@ def clock(seconds: float) -> str:
     return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
 
 
+def layer_time(seconds: float) -> str:
+    """A layer's time: under a minute in seconds, to Orca's tenth with a trailing .0 dropped
+    ("12.4 s", "35 s"), and from a minute up as `clock` says it (mqucifer/print-shop#298). A
+    tenth tells where a lesson turns on a layer having 12 s to cool."""
+    if seconds >= 60:
+        return clock(seconds)
+    return f"{seconds:.1f}".removesuffix(".0") + " s"
+
+
 def _signed(seconds: float) -> str:
     return ("+" if seconds >= 0 else "-") + clock(abs(seconds))
 
@@ -177,7 +196,8 @@ def found(words: str, settings: Sequence[Found], filament: str, width: int = WID
         return wrap("  ", f"Nothing this filament or process has fits '{typed}'. Finding changes "
                     "nothing: try other words, such as bridge fan, bed or wall speed.", width,
                     "    ")
-    rows = [(f.plain, f"now {with_unit(f.key, f.now)}", f.key) for f in settings]
+    rows = [(f.plain, "not set here" if f.unset else f"now {with_unit(f.key, f.now)}", f.key)
+            for f in settings]
     wide = [max(len(r[i]) for r in rows) for i in range(2)]
     lines = [f"  Settings that fit '{typed}', best first:"]
     for n, (f, row) in enumerate(zip(settings, rows, strict=True)):
@@ -187,6 +207,10 @@ def found(words: str, settings: Sequence[Found], filament: str, width: int = WID
         if n == 0 and f.stands_in:
             lines += wrap("      ", f"{filament or 'This filament'} uses this one for "
                           f"{f.stands_in}.", width)
+        if f.unset:
+            # Orca's nil: the printer's applies (mqucifer/print-shop#298).
+            lines += wrap("      ", f"the printer's {f.printer} applies" if f.printer
+                          else "the printer's applies", width, "      ")
         if f.choices:
             # Every word Orca takes for it, and the line that turns it off, its value last
             # (mqucifer/print-shop#279).
@@ -284,7 +308,7 @@ def _seen(note: str) -> bool:
 
 #: A note on what's seen, as one part has it or a plate names the part it's of.
 _SEEN = re.compile(rf"^(?:every part: |part \d+, [^:]+: )?(?:{re.escape(PRINTS)}|"
-                   rf"{re.escape(NOW_PRINTS)})")
+                   rf"{re.escape(NOW_PRINTS)})|^every part: .*, as it prints$")
 
 
 def _upper_head(text: str) -> str:
@@ -471,6 +495,10 @@ def _print(request: ReviewRequest, width: int, marks: Moved) -> list[str]:
         ("  process", process),
         ("  filament", filament),
     ]
+    by = sliced_by(s.gcode_path)
+    if by and by != ORCA_FORMS:
+        # A value's form is checked against another Orca's definitions (mqucifer/print-shop#296).
+        rows.append(("  orca", f"setting forms read from Orca {ORCA_FORMS}"))
     lines = [line for name, value in rows for line in wrap(f"{name:<12}", value, width, " " * 12)]
     if request.plate is not None:
         # How the plate prints and where each part is (mqucifer/print-shop#109). Its map is drawn,
@@ -718,8 +746,9 @@ def _slice(request: ReviewRequest, width: int, marks: Moved, fits: _Fits) -> lis
     shortest = reading.shortest()
     if shortest is not None:
         times = sorted(layer.time_s for layer in reading.layers)
-        lines += wrap("    layers  ", f"{len(reading.layers)}, {clock(times[0])} to "
-                      f"{clock(times[-1])} each, {clock(times[len(times) // 2])} typical; the "
+        lines += wrap("    layers  ", f"{len(reading.layers)}, {layer_time(times[0])} to "
+                      f"{layer_time(times[-1])} each, {layer_time(times[len(times) // 2])} "
+                      "typical; the "
                       f"shortest is layer {shortest.n} at z {shortest.z:g} mm", width, " " * 12)
     if reading.seam.seams:
         seam = reading.seam

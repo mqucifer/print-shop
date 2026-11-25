@@ -60,6 +60,10 @@ REPORTS: dict[str, tuple[str, ...]] = {
     "panes": ("*_section_mm2", "openings", "panes", "plain_holes"),
     "capture": (
         "*_section_mm2",
+        "face_play_least_mm",
+        "face_z",
+        "faces",
+        "raised_faces",
         "least_lip_mm",
         "openings",
         "panes",
@@ -425,7 +429,9 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "weight_kg",
     ),
     # `pockets`: each nut's pocket of a through joint that states one (mqucifer/print-shop#168).
-    "fit-bed": ("bed_mm", "parts", "pockets"),
+    # `channels`: each bolt of a through joint that declares a drop-in channel
+    # (mqucifer/print-shop#302).
+    "fit-bed": ("bed_mm", "channels", "parts", "pockets"),
 }
 
 
@@ -651,10 +657,17 @@ LOW_HIGH = Row({"min": NUMBER, "max": NUMBER}, closed=True)
 #: A peaked bore's point (mqucifer/print-shop#237): which way, how far from the axis, and how
 #: steeply its flat faces rise to it.
 PEAK = Row({"toward": XYZ, "rises_deg": NUMBER, "point_mm": NUMBER}, closed=True)
+#: A drop-in channel (mqucifer/print-shop#302): which way it's open, how far round its round goes,
+#: and how wide it's open where the round leaves off.
+CHANNEL = Row({"toward": XYZ, "round_deg": NUMBER, "open_mm": NUMBER}, closed=True)
 #: One end of a through-bolt: what bears on its seat, and on its hole's wall.
 THROUGH_END = Row(
     {
         "bears_mm2": NUMBER,
+        # A drop-in channel's, and how hard the shank is pushed toward its open side, which
+        # carries nothing (mqucifer/print-shop#302).
+        "channel": CHANNEL,
+        "toward_open_n": NUMBER,
         "hole_length_mm": NUMBER,
         "hole_mm": NUMBER,
         "part": TEXT,
@@ -1060,6 +1073,47 @@ SHAPES: dict[str, dict[str, Any]] = {
     },
     "fit-bed": {
         "bed_mm": XYZ,
+        # Each bolt of a through joint in a drop-in channel (mqucifer/print-shop#302), and each
+        # part's stretch of it: its round, its wall's seat, its way in and which way it faces.
+        "channels": Keyed(
+            Rows(
+                Row(
+                    {
+                        "at": XYZ,
+                        "bolt": TEXT,
+                        "drops_in": FLAG,
+                        "ends": Rows(
+                            Row(
+                                {
+                                    "bears_by_mesh_mm2": NUMBER,
+                                    "bears_mm2": NUMBER,
+                                    "faces_up": FLAG,
+                                    "length_mm": NUMBER,
+                                    "open_mm": NUMBER,
+                                    "over_by_mesh_mm2": NUMBER,
+                                    "over_mm3": NUMBER,
+                                    "part": TEXT,
+                                    "plane": TEXT,
+                                    "play_mm": NUMBER,
+                                    "ring_mm2": NUMBER,
+                                    "round_deg": NUMBER,
+                                    "round_mm": NUMBER,
+                                    "seat_mm2": NUMBER,
+                                    "seated": FLAG,
+                                    "side": TEXT,
+                                    "toward": XYZ,
+                                    "wall": TEXT,
+                                }
+                            )
+                        ),
+                        "fits": FLAG,
+                        "shank_mm": NUMBER,
+                        "washer": TEXT,
+                    },
+                    closed=True,
+                )
+            )
+        ),
         "parts": Keyed(Row({"box_mm": XYZ, "file": TEXT, "fits": FLAG})),
         "pockets": Keyed(
             Rows(

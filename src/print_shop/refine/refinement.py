@@ -283,6 +283,10 @@ class Pass:
             if frame is None:
                 frame, panes = self._roles_by_place(group)
         others = [f for f in group.files if f is not frame and f not in panes]
+        # A flush pane sits in its frame for the pause, and prints from its laid file, among the
+        # others: the pane where it sits isn't printed (mqucifer/print-shop#293).
+        sits_only = self._flush_placed(group)
+        printed = [f for f in panes if f not in sits_only]
         # A frame a pause is read on prints as stored: its pockets are where the panes sit.
         self._lay(group, pinned=[frame] if frame is not None else [])
         self._bed_needs(group)
@@ -300,7 +304,7 @@ class Pass:
                 )
             )
         by_colour: dict[str, list[File]] = {}
-        for f in panes + others:
+        for f in printed + others:
             by_colour.setdefault(f.colour, []).append(f)
         for colour, files in by_colour.items():
             name = f"{group.folder}-{colour or 'no-colour'}".replace(" ", "-")
@@ -361,6 +365,20 @@ class Pass:
                 self.mesh(context)
             return frame, panes, context
         return None, [], []
+
+    def _flush_placed(self, group: Group) -> list[File]:
+        """The group's flush panes where they sit in their frame, as the run's last `glass`
+        names them in `laid`: each prints from its laid file, and isn't printed itself."""
+        names = {
+            str(name)
+            for entry in self.approved.glass
+            for name in (entry.get("laid") or {})
+        }
+        return [
+            f
+            for f in group.files
+            if any(f.was in (n, Path(n).name) or f.name == Path(n).name for n in names)
+        ]
 
     def _given(self, group: Group, name: str) -> File | None:
         """A file the run was given, by its name in the run, as context only: from the run's

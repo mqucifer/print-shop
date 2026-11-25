@@ -29,10 +29,17 @@ from print_shop.setup.features import Feature, measure
 from print_shop.setup.intake import Asker, Intake, OfPlate
 from print_shop.setup.proposal import ORIENTATION, Change, GivenLesson, Proposal, Source, pose_value
 from print_shop.setup.questions import PLATE_WORDS, SEEN, pose_words
-from print_shop.setup.reading import NOW_PRINTS, TURNED_SINCE, carried, seen_across, seen_said
+from print_shop.setup.reading import (
+    NOW_PRINTS,
+    PRINTS,
+    TURNED_SINCE,
+    carried,
+    seen_across,
+    seen_said,
+)
 from print_shop.setup.skill import WARPS_MM2
 from print_shop.setup.traits import traits
-from print_shop.setup.turned import held
+from print_shop.setup.turned import held, summary
 from print_shop.slicer.arrange import ToPlace, object_file
 from print_shop.slicer.orca import SlicerProfiles
 
@@ -154,10 +161,14 @@ def still_holds(
     if not kept.aside:
         return kept.intake, ""
     who = "; ".join(f"part {part.n}, {part.name}, to {pose_value(turn)}" for part, turn in moved)
+    # It opens as one part's does, naming the answer (mqucifer/print-shop#278,
+    # mqucifer/print-shop#298): by the first part turned, which part each is after.
+    first, now = moved[0]
+    was = asked_in[parts.index(first)]
     note = (
-        f"{TURNED_SINCE}: {who}. These were said of the parts as they lay when asked, so they "
-        f"aren't used now: {'; '.join(kept.aside)}. Send a part back with orientation, or say what "
-        "you want with a correction"
+        f"{summary(kept, was, now)} ({who}). These were said of the parts as they lay when "
+        f"asked, so they aren't used now: {'; '.join(kept.aside)}. Send a part back with "
+        "orientation, or say what you want with a correction"
     )
     return kept.intake, note
 
@@ -184,8 +195,15 @@ def seen_of(
     bodies = {line.split(": ", 1)[1] for line in lines}
     if len(lines) == len(parts) and len(bodies) == 1 and not any(
             TURNED_SINCE in line or NOW_PRINTS in line for line in lines):
-        lines = [f"every part: {bodies.pop()}"]
-    return seen_across(each), tuple(lines)
+        body = bodies.pop()
+        # "Seen as it prints" said once (mqucifer/print-shop#298): the faces, then the pose.
+        faces = body.removeprefix(f"{PRINTS}: ")
+        lines = [f"every part: {faces}, as it prints" if faces != body and not
+                 faces.startswith("none is judged") else f"every part: {body}"]
+    across = seen_across(each)
+    # Its reasons quote the answer as the plate's question showed it (mqucifer/print-shop#298).
+    return (across.model_copy(update={"said": _as_shown(across.said)}) if across is not None
+            else None), tuple(lines)
 
 
 def asked_of(intake: Intake, part: PlatePart) -> Intake:

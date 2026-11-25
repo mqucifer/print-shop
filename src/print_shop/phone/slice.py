@@ -18,7 +18,7 @@ from print_shop.bench.pausing import TOPS_OUT
 from print_shop.phone.page import page
 from print_shop.setup.names import named, switched
 from print_shop.setup.reading import PAUSE_PAST_FIT, Flag, LayerTime, SliceReading
-from print_shop.setup.screen import clock
+from print_shop.setup.screen import clock, layer_time
 
 __all__ = ["features_html", "layers_said", "seam_said", "slice_page", "worth"]
 
@@ -63,7 +63,7 @@ def _picked(reading: SliceReading, picked: LayerTime, here: str) -> str:
     after = next((p for p in reading.pauses if p.before_layer == picked.n), None)
     on = [f.kind for f in reading.features
           if f.kind != "travel" and f.from_z - TOPS_OUT <= picked.z <= f.to_z + TOPS_OUT]
-    said = [f"Layer {picked.n}, z {picked.z:g} mm: {_took(picked.time_s)}."]
+    said = [f"Layer {picked.n}, z {picked.z:g} mm: {layer_time(picked.time_s)}."]
     if after is not None:
         said.append("The first layer after the pause.")
     if on:
@@ -128,8 +128,11 @@ def layers_said(reading: SliceReading) -> list[str]:
     shortest = reading.shortest()
     if shortest is not None:
         times = sorted(layer.time_s for layer in reading.layers)
-        out.append(f"{len(reading.layers)} layers, {_took(times[0])} to {_took(times[-1])} "
-                   f"each, {_took(times[len(times) // 2])} typical. The shortest is layer "
+        # The review's words for a layer's time, a tenth kept under a minute
+        # (mqucifer/print-shop#298).
+        out.append(f"{len(reading.layers)} layers, {layer_time(times[0])} to "
+                   f"{layer_time(times[-1])} each, {layer_time(times[len(times) // 2])} typical. "
+                   "The shortest is layer "
                    f"{shortest.n} at z {shortest.z:g} mm.")
     for p in reading.pauses:
         out.append(f"It {p.line()}.")

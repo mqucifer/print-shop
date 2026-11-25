@@ -392,6 +392,13 @@ that leaves no flag the request doesn't keep will do:
   play, the pane's thickness, and how many panes there are. A pane file holds every pane of its
   colour, so `--panes` is the panes, never the files. A piece it can't build is named, with why:
   fix it in the map and build again. Then run step 6's checks on what it built.
+- **Where the request wants the lead and the panes level,** a panel that's a surface, build
+  with `pieces build ... --flush`. Each pane is then two files: `pane_COLOUR.step`, where it
+  sits in the frame, and `pane_COLOUR-laid.step`, body down and raised face up, which is the
+  file that prints. Put both in `part`, and give `done` the build's own `glass` number whole:
+  `panes` where they sit, `laid` each pane's laid file, `pane_thickness` the body's and
+  `face_thickness` the raised face's. The checks of the pane in its frame read `panes`; the
+  print readings read `laid`. Name a side in `on_bed` for each laid file, not the panes.
 - **Your script is the list of fixes,** so `done`'s clean run makes the part again from the
   picture. It calls the bench's own commands, with the steps file you ran. Each command it
   runs is recorded as a bench call of yours, and a `FAIL` inside it is held as any failing

@@ -37,11 +37,18 @@ hole. Second method: the fine mesh cut square to the bolt half way up the pocket
 that outline comes to the axis, and how far it reaches into the nut's hexagon placed the same.
 The bolt's bore may be round or peaked (mqucifer/print-shop#237): a peaked one is said, and its
 point is read again from the mesh.
+
+**A drop-in channel** (mqucifer/print-shop#302). Where a `through` joint declares its bolt in
+one, `fit_channel.py` reads it in both parts: its round against the shank, each wall the head
+and the nut bear on against the washer, its open side clear for the bolt to drop in, and its
+open side up as the part is laid on the bed. Laid any other way it needs support, and fails; a
+part that could lie either way up is laid with its channels up, where that side fits.
 """
 
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +58,7 @@ from shapely.geometry import MultiPoint
 from . import through
 from .assembly import AXES, DIAMETER, Assembly, Joint, read
 from .faces import _flat_by_mesh, _flats, bore_rows, facing
+from .fit_channel import prefers, read_channels
 from .limits import over, said
 from .report import NoAnswer, Report
 from .shapes import Part, load
@@ -159,8 +167,15 @@ def _side(part: Part, plane: dict[str, Any], bed: list[float]) -> dict[str, Any]
     }
 
 
-def _sides(part: Part, bed: list[float], layers: str | None) -> list[dict[str, Any]]:
-    """Each side a part could lie on, the best first: one that fits, then the most flat."""
+def _sides(
+    part: Part,
+    bed: list[float],
+    layers: str | None,
+    prefer: Callable[[str], bool] | None = None,
+) -> list[dict[str, Any]]:
+    """Each side a part could lie on, the best first: one that fits, then, where `prefer` is
+    given, one it prefers (every drop-in channel up, mqucifer/print-shop#302), then the most
+    flat."""
     found = []
     for plane in _flats(part):
         if plane["area"] < LEAST_FLAT:
@@ -171,7 +186,15 @@ def _sides(part: Part, bed: list[float], layers: str | None) -> list[dict[str, A
         side = _side(part, plane, bed)
         if side is not None:
             found.append(side)
-    return sorted(found, key=lambda s: (not s["fits"], -s["flat_mm2"], s["height_mm"]))
+    return sorted(
+        found,
+        key=lambda s: (
+            not s["fits"],
+            prefer is not None and not prefer(s["side"]),
+            -s["flat_mm2"],
+            s["height_mm"],
+        ),
+    )
 
 
 def _in_place(assembly: Assembly, name: str, part: Part) -> dict[str, Any]:
@@ -206,7 +229,15 @@ def _in_place(assembly: Assembly, name: str, part: Part) -> dict[str, Any]:
         corners.append(one["corners"] @ turn.T + move)
     mesh = part.fine()
     triangles = np.asarray(mesh.triangles, dtype=float) @ turn.T + move
-    return {"cylinders": cylinders, "planes": planes, "corners": corners, "triangles": triangles}
+    return {
+        "cylinders": cylinders,
+        "planes": planes,
+        "corners": corners,
+        "triangles": triangles,
+        "part": part,
+        "turn": turn,
+        "move": move,
+    }
 
 
 def _section(triangles: np.ndarray, centre: np.ndarray, axis: np.ndarray) -> np.ndarray:
@@ -238,11 +269,8 @@ def _nearest_by_mesh(segments: np.ndarray) -> float | None:
     return least
 
 
-def _pockets(
-    assembly: Assembly, folder: Path, report: Report, fails: list[str], apart: list[str]
-) -> None:
-    """Each nut's pocket against its nut, for the through joints that state one."""
-    saved: dict[str, Any] = {}
+def _faces(assembly: Assembly, folder: Path) -> Callable[[str], dict[str, Any]]:
+    """Each part's faces where the assembly puts it, read once."""
     read_parts: dict[str, dict[str, Any]] = {}
 
     def faces_of(name: str) -> dict[str, Any]:
@@ -252,6 +280,18 @@ def _pockets(
             )
         return read_parts[name]
 
+    return faces_of
+
+
+def _pockets(
+    assembly: Assembly,
+    faces_of: Callable[[str], dict[str, Any]],
+    report: Report,
+    fails: list[str],
+    apart: list[str],
+) -> None:
+    """Each nut's pocket against its nut, for the through joints that state one."""
+    saved: dict[str, Any] = {}
     for joint in assembly.joints:
         if joint.kind != "through" or joint.pocket is None:
             continue
@@ -521,11 +561,14 @@ def run(args: Any, report: Report) -> None:
     saved: dict[str, Any] = {}
     fails: list[str] = []
     apart: list[str] = []
+    whole = len(args.parts) == 1 and args.parts[0].lower().endswith(".json")
+    assembly = read(args.parts[0]) if whole else None
+    prefer = prefers(assembly) if assembly is not None else {}
     for name, file, layers in _parts(args):
         part = load(file)
         if not part.is_brep or len(part.shape.Solids()) != 1:
             raise NoAnswer(f"{file} isn't one solid: each part to print is a file of its own")
-        sides = _sides(part, bed, layers)
+        sides = _sides(part, bed, layers, prefer.get(name))
         box = np.ptp(part.extent(), axis=0)
         saved[name] = {"file": file, "layers": layers, "box_mm": [float(v) for v in box]}
         asked = f", printed with its layers stacked along {layers}" if layers else ""
@@ -584,8 +627,12 @@ def run(args: Any, report: Report) -> None:
             )
     report.numbers["bed_mm"] = bed
     report.numbers["parts"] = saved
-    if len(args.parts) == 1 and args.parts[0].lower().endswith(".json"):
-        _pockets(read(args.parts[0]), Path(args.parts[0]).parent, report, fails, apart)
+    channels = 0
+    if assembly is not None:
+        faces_of = _faces(assembly, Path(args.parts[0]).parent)
+        _pockets(assembly, faces_of, report, fails, apart)
+        sides_laid = {n: p.get("side") for n, p in saved.items()}
+        channels = read_channels(assembly, faces_of, sides_laid, report, fails, apart)
     if apart:
         report.verdict("DISAGREE", "; and ".join(apart) + ": read both, and don't pick one")
     elif fails:
@@ -596,7 +643,12 @@ def run(args: Any, report: Report) -> None:
         report.verdict(
             "OK",
             f"every part fits the bed, {size}: {laid}"
-            + f"; and each of {pockets} nut's pocket(s) holds its nut by its flats" * bool(pockets),
+            + f"; and each of {pockets} nut's pocket(s) holds its nut by its flats" * bool(pockets)
+            + (
+                f"; and each of {channels} bolt(s) in a drop-in channel drops in from its open "
+                "side, faces up as it's laid, and has its washers on its walls"
+            )
+            * bool(channels),
         )
 
 

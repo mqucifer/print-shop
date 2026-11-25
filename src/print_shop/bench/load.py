@@ -37,7 +37,10 @@ way, and it's judged by the worst of: the bolt against its proof load; the press
 washer, or under the nut in its pocket, and where the shank leans on its hole's wall, against
 what the plastic takes pressed that way to its layers; and the plastic round each hole, solved
 again by itself under the bolt's pull and shear and read as strain, as any part is. The reply
-names which is nearest its limit. It's never `OK` on the bolt alone.
+names which is nearest its limit. It's never `OK` on the bolt alone. Where the joint declares its
+bolt in a drop-in channel (mqucifer/print-shop#302), each washer bears on its wall less the
+channel's cut, and the channel's open side carries nothing: a push toward it fails, and the
+reply says so either way.
 
 **A dovetail joint** (mqucifer/print-shop#170, `dovetail.py` and `load_dovetail.py`) is a tail
 slid into a socket: a leg split for the bed. Its flanks and its seat only push, so what the
@@ -105,7 +108,7 @@ from .assembly import AXES, DIAMETER, Assembly, Held, Joint, PartAt, read
 from .cae import ccx_one_thread, freecad, tidy_mesh, tidy_solve
 from .limits import over, said
 from .report import NoAnswer, Report
-from .through import lean_off, lean_share, peak_said, peak_saved
+from .through import channel_said, channel_saved, lean_off, lean_share, peak_said, peak_saved
 
 #: Standard gravity, in m/s²: a kilogram's weight in newtons.
 G = 9.80665
@@ -1722,6 +1725,7 @@ def _through(
                 f"and {said(pull, limit, 1)} N {how}, either side of its {limit:.0f} N"
             )
     press_source = ""
+    lifted: list[str] = []
     for index, (bolt, way) in enumerate(zip(bolts, ways, strict=True)):
         ends = []
         for k, (side, part, solid) in enumerate(zip(way["sides"], parts, solids, strict=True)):
@@ -1748,13 +1752,17 @@ def _through(
             peaked = hole["peak"] is not None
             if peaked:
                 end["peak"] = peak_saved(hole["peak"])
+            gap = hole.get("channel")
+            if gap is not None:
+                end["channel"] = channel_saved(gap)
             shares.append(
                 (pressure / most, f"the pressure under {side['under']} on {part.name}, at "
                  f"{pressure:.2f} MPa of {most:g} MPa")
             )  # fmt: skip
             report.line(
                 f"  {side['under']} bears on {side['bears_mm2']:.2f} mm² of {part.name} round a "
-                f"hole {side['hole_mm']:.2f} mm across and {side['hole_length_mm']:.2f} mm long: "
+                f"{'channel' if gap is not None else 'hole'} {side['hole_mm']:.2f} mm across and "
+                f"{side['hole_length_mm']:.2f} mm long: "
                 f"{pressure:.3f} MPa under the bolt's {bolt['pull_n']:.1f} N, pressed {pressed}, "
                 f"against {most:g} MPa, as joints.{name}.bolts.{index}.ends.{k}.pressure_mpa"
             )
@@ -1775,8 +1783,34 @@ def _through(
                         f"part's faces, more than the {side['seat_mm2']:.3f} mm² its ring has "
                         "less the peak's cut"
                     )
+            if gap is not None:
+                assert joint.channel is not None
+                report.line(
+                    f"  the bolt lies in {part.name} in {channel_said(hole)}, as "
+                    f"joints.{name}.bolts.{index}.ends.{k}.channel, and {side['under']} bears "
+                    f"on {joint.channel.wall_said('nut' if k else 'head')}: its seat is the "
+                    f"ring less the channel's cut, {side['seat_mm2']:.2f} of "
+                    f"{side['ring_mm2']:.2f} mm²"
+                )
+                report.second(
+                    f"the seat at {where}, by arithmetic, the ring less the channel's cut: "
+                    f"{side['seat_mm2']:.3f} mm²; by the part's own faces, "
+                    f"{side['bears_mm2']:.3f}"
+                )
+                if side["bears_mm2"] * load_through.SEATED > side["seat_mm2"]:
+                    apart.append(
+                        f"{where}: {side['under']} bears on {side['bears_mm2']:.3f} mm² by the "
+                        f"part's faces, more than the {side['seat_mm2']:.3f} mm² its ring has "
+                        "less the channel's cut"
+                    )
             if not side["seated"]:
                 less = f", and {side['seat_mm2']:.1f} mm² less the peak's cut" if peaked else ""
+                if gap is not None:
+                    assert joint.channel is not None
+                    less = (
+                        f", and {side['seat_mm2']:.1f} mm² less the channel's cut, on "
+                        f"{joint.channel.wall_said('nut' if k else 'head')}"
+                    )
                 fails.append(
                     f"{where}: {side['under']} sits on {side['bears_mm2']:.1f} mm² of the part, "
                     f"of its ring's {side['ring_mm2']:.1f} mm²{less}: it overhangs an edge or a "
@@ -1798,6 +1832,29 @@ def _through(
                     )
             # Where the shank leans on the hole's wall.
             push = across if k == 0 else -across
+            if gap is not None:
+                # A channel's open side carries nothing (mqucifer/print-shop#302): what pushes
+                # the shank toward it lifts the part off the bolt, and only the rest bears.
+                lifts = max(float(push @ gap["toward"]), 0.0)
+                end["toward_open_n"] = lifts
+                report.line(
+                    f"  the channel's open side in {part.name} carries nothing: the shank is "
+                    + (
+                        f"pushed toward it by {lifts:.1f} N, as "
+                        f"joints.{name}.bolts.{index}.ends.{k}.toward_open_n"
+                        if lifts > NOTHING * force
+                        else "not pushed toward it"
+                    )
+                )
+                if lifts > NOTHING * force:
+                    lifted.append(part.name)
+                    fails.append(
+                        f"{where}: the shank is pushed toward the channel's open side by "
+                        f"{lifts:.1f} N, and nothing there holds it: the part comes off the "
+                        "bolt that way. Turn the channel's open side away from the push, or hold "
+                        "the parts that way by something else"
+                    )
+                push = push - lifts * np.asarray(gap["toward"], dtype=float)
             leans = float(np.linalg.norm(push))
             if leans > NOTHING * force:
                 wall_most, wall_pressed = part.material.press(push / leans, layers)
@@ -1818,10 +1875,12 @@ def _through(
                     f"  the shank leans on {part.name}'s hole with {leans:.1f} N over its "
                     f"{shank:g} mm by {side['hole_length_mm']:.2f} mm"
                     + (
-                        f", of which the peak leaves {100 * share_there:.1f}% for a lean "
-                        f"{math.degrees(lean_off(hole, push)):.0f}° from its point, "
+                        f", of which the {'peak' if peaked else 'channel'} leaves "
+                        f"{100 * share_there:.1f}% for a lean "
+                        f"{math.degrees(lean_off(hole, push)):.0f}° from its "
+                        f"{'point' if peaked else 'open side'}, "
                         f"{on_wall:.2f} mm² as joints.{name}.bolts.{index}.ends.{k}.wall_bears_mm2"
-                        if peaked
+                        if peaked or gap is not None
                         else ""
                     )
                     + f": {wall:.3f} MPa, pressed {wall_pressed}, against {wall_most:g} MPa"
@@ -1864,7 +1923,11 @@ def _through(
                     report.line(
                         f"  the solve round it puts the shear on {fine['sheared_mm2']:.2f} mm² "
                         f"of {part.name}'s round wall, the half leant on"
-                        + (", less the peak," if share_there < 1 else "")
+                        + (
+                            (", less the peak," if peaked else ", the channel's round,")
+                            if share_there < 1
+                            else ""
+                        )
                         + " of the "
                         f"{side['hole_length_mm']:.2f} mm from where the parts meet to the "
                         f"seat, and none past them, as "
@@ -1920,6 +1983,13 @@ def _through(
         f"  of the bolt, the washers, the nut and the plastic, the nearest its limit is "
         f"{nearest}: {100 * share:.1f}% of it, as joints.{name}.nearest_share"
     )
+    if lifted:
+        # Nothing holds a channel's open side, so that gives first, whatever the rest is at.
+        one["gives_first"] = f"the shank pushed toward the channel's open side in {lifted[0]}"
+        report.line(
+            f"  what gives first is the shank pushed toward the channel's open side in "
+            f"{' and '.join(lifted)}, which holds nothing, as joints.{name}.gives_first"
+        )
     if press_source:
         report.line(f"  what the plastic takes pressed is from {press_source}")
     report.note(

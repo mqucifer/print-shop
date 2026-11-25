@@ -398,6 +398,20 @@ def parser() -> Parser:
     capture.add_argument(
         "--panes", type=int, help="how many panes there must be: any other count is FAIL"
     )
+    capture.add_argument(
+        "--raised-faces",
+        nargs="+",
+        metavar="FILE",
+        help="flush panes' files, where they sit in the frame (`pieces build --flush`): each "
+        "raised face is read in its opening, with --face-play round it, and pushed --clearance "
+        "any way with its body, and level with the frame's face",
+    )
+    capture.add_argument(
+        "--face-play",
+        type=float,
+        help="with --raised-faces: the play round each raised face, in mm (--clearance unless "
+        "given)",
+    )
 
     thin = sub.add_parser("thin", help="features narrower than the nozzle, and tiny pieces")
     thin.add_argument("file")
@@ -1534,6 +1548,12 @@ def rims_given(args: Any, top: Parser) -> None:
             top.error("capture: --min-visible is a share in percent, between 0 and 100")
     elif args.min_lip is None:
         args.min_lip = MIN_LIP
+    if args.face_play is not None and not args.raised_faces:
+        top.error("capture: --face-play is the play round flush panes' faces: give --raised-faces")
+    if args.face_play is None:
+        args.face_play = args.clearance
+    if not args.face_play > 0:
+        top.error("capture: --face-play is the play round each raised face, in mm, over 0")
 
 
 def gaps_given(args: Any, top: Parser) -> None:
