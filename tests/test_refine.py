@@ -577,3 +577,50 @@ def test_the_wall_lines_are_the_profiles(tmp_path: Path) -> None:
     assert found is not None and found["outer_from"] == "the profile's `line_width`"
     profile.write_text(json.dumps({}))
     assert wall_lines(profile, 0.4) is None
+
+
+def test_a_flush_pane_sits_in_its_frame_for_the_pause_and_prints_from_its_laid_file(
+    tmp_path: Path,
+) -> None:
+    """mqucifer/print-shop#293: `glass` names a flush frame's pane where it sits and the laid
+    file it prints from. The frame's plate has its pause read with the pane in place; the
+    colour's plate prints the laid file, and the pane where it sits isn't printed."""
+    import subprocess
+    import sys
+
+    from tests.refine_fixtures import SCRIPT, approve
+
+    folder = tmp_path / "fx"
+    judged = folder / "rounds" / "001" / "judged"
+    judged.mkdir(parents=True)
+    (judged / "make_frame.py").write_text(
+        SCRIPT.format(ceiling=2.6, pane=1.0, panes=1, bar=0.0), encoding="utf-8"
+    )
+    subprocess.run([sys.executable, "-I", "make_frame.py"], cwd=judged, check=True)
+    shutil.copyfile(judged / "pane_1.stl", judged / "pane_1-laid.stl")
+    files = ["frame.stl", "pane_1.stl", "pane_1-laid.stl"]
+    looks = {
+        "frame.stl": {"colour": "grey", "label": "frame"},
+        "pane_1.stl": {"colour": "amber", "label": "pane"},
+        "pane_1-laid.stl": {"colour": "amber", "label": "pane"},
+    }
+    state = {
+        "form": {"kind": "stained-glass"},
+        "glass": [
+            {
+                "frame": "frame.stl", "panes": ["pane_1.stl"], "with": [], "pocket_z": 2.0,
+                "clearance": 0.25, "pane_thickness": 1.0,
+                "laid": {"pane_1.stl": "pane_1-laid.stl"}, "face_thickness": 0.8,
+                "face_clearance": 0.25,
+            }
+        ],
+    }  # fmt: skip
+    folder, ledger = approve(tmp_path, "fx", folder, judged, files, looks, "make_frame.py", state)
+    orca = FakeOrca(closes_at=14)
+    p = _passing(folder, ledger, pause_record(13, 0.1, 2.6), orca)
+    p.run()
+    frame_plate, *others = orca.plates
+    assert [o.stl.name for o in frame_plate["objects"]] == ["A-with-pause__frame.stl"]
+    assert [x.print_z for x in frame_plate["pauses"]] == [2.8], "read with the pane in place"
+    printed = [o.stl.name for plate in others for o in plate["objects"]]
+    assert printed == ["A-with-pause__pane_1-laid.stl"], printed

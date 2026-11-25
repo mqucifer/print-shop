@@ -2082,15 +2082,32 @@ def run_build(args: Any, report: Report) -> None:
         "clearance": args.play,
         "pane_thickness": body_mm,
     }
+    if face_play is not None:
+        # A flush frame's declaration, as `done`'s `glass` takes it (mqucifer/print-shop#293):
+        # each pane's file where it sits and the one it prints from, and the face's figures.
+        glass["laid"] = {v["file"]: v["laid"] for v in pane_files.values()}
+        glass["face_thickness"] = z["face_mm"]
+        glass["face_clearance"] = face_play
     report.numbers["glass"] = glass
     q = " ".join(glass["panes"])
-    report.line(
-        f"to check it: `capture {frame_file} --pocket-z {z['pocket_z']:g} --clearance "
-        f"{args.play:g} --pane-thickness {body_mm:g} --panes {len(rows)}`, `pause {frame_file} "
-        f"--pocket-z {z['pocket_z']:g} --pane-thickness {body_mm:g}`, `light {frame_file} {q}` "
-        f"and `thin` on each file. `done`'s `glass` takes pocket_z {z['pocket_z']:g}, clearance "
-        f"{args.play:g} and pane_thickness {body_mm:g}"
-    )
+    if face_play is None:
+        report.line(
+            f"to check it: `capture {frame_file} --pocket-z {z['pocket_z']:g} --clearance "
+            f"{args.play:g} --pane-thickness {body_mm:g} --panes {len(rows)}`, `pause "
+            f"{frame_file} --pocket-z {z['pocket_z']:g} --pane-thickness {body_mm:g}`, `light "
+            f"{frame_file} {q}` and `thin` on each file. `done`'s `glass` takes pocket_z "
+            f"{z['pocket_z']:g}, clearance {args.play:g} and pane_thickness {body_mm:g}"
+        )
+    else:
+        report.line(
+            f"to check it: `capture {frame_file} --pocket-z {z['pocket_z']:g} --clearance "
+            f"{args.play:g} --pane-thickness {body_mm:g} --panes {len(rows)} --raised-faces {q} "
+            f"--face-play {face_play:g}`, `pause {frame_file} --pocket-z {z['pocket_z']:g} "
+            f"--pane-thickness {body_mm:g}`, `light {frame_file} {q}` and `thin` on each file. "
+            f"`done`'s `glass` takes this frame as `glass` in the numbers has it, flush: each "
+            "pane's file where it sits in `panes`, the one it prints from in `laid`, "
+            f"pane_thickness {body_mm:g}, its body's, and face_thickness {z['face_mm']:g}"
+        )
     if refitted:
         report.note(
             f"piece {piecemap.numbered(refitted)}: its pocket isn't its pane's arcs moved "

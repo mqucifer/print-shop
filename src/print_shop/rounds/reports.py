@@ -60,6 +60,10 @@ REPORTS: dict[str, tuple[str, ...]] = {
     "panes": ("*_section_mm2", "openings", "panes", "plain_holes"),
     "capture": (
         "*_section_mm2",
+        "face_play_least_mm",
+        "face_z",
+        "faces",
+        "raised_faces",
         "least_lip_mm",
         "openings",
         "panes",
