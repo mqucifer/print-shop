@@ -56,6 +56,9 @@ from tests.test_phone_start import (
 from tests.test_queue import Shop as QueueShop
 from tests.test_queue import wait_until
 
+#: Over plain HTTP and over HTTPS (mqucifer/print-shop#312).
+pytestmark = pytest.mark.usefixtures("phone_scheme")
+
 # --------------------------------------------------------------------------
 # A made-up shop, its queue, and the phone's page over them
 # --------------------------------------------------------------------------

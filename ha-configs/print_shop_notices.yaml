@@ -11,7 +11,8 @@
 # To use: Settings -> Automations & Scenes -> + Create Automation -> three-dot menu ->
 # Edit in YAML, and paste this. Then change three things:
 #   - `http://A.B.C.D:8765` to the address the run says (`Your phone's page: ...`), with no
-#     slash at the end;
+#     slash at the end. Once the page serves HTTPS (mqucifer/print-shop#312), that's its name,
+#     `https://print.<domain>:<PHONE_PORT>`: change it here then, or every link opens nothing;
 #   - `3dprint-dev` to your MQTT_TOPIC_PREFIX, if you set one;
 #   - `notify.mobile_app_your_phone` to your phone's notify action (Settings -> Companion
 #     App, or Developer Tools -> Actions, "notify.mobile_app_...").

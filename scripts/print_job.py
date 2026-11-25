@@ -185,7 +185,6 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
-from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 from print_shop import reprint, sliced
@@ -207,7 +206,7 @@ from print_shop.phone.home import Home, HomeRefused
 from print_shop.phone.notices import Notices
 from print_shop.phone.one_job import OneJob
 from print_shop.phone.phones import Phones, phones_path
-from print_shop.phone.server import PhoneOff, attach, make_server
+from print_shop.phone.server import PageServer, PhoneOff, attach, make_server
 from print_shop.phone.shop import Shop
 from print_shop.printer.centauri import FrameRecorder, PrinterClient, live_printer
 from print_shop.queue_terminal import Runs, parse_adding, serve, stock_listing
@@ -801,7 +800,9 @@ class PhonePage:
 
     def __init__(self, settings: Path | None, recorder: FrameRecorder | None) -> None:
         self.one_start: OneStart | None = None
-        self._server: ThreadingHTTPServer | None = None
+        self._server: PageServer | None = None
+        #: Why the page is off though it's set up, for the queue's live line; or "".
+        self._off = ""
         #: The Start page's address, and the page's own (the queue), for the card, or "".
         self.address = ""
         self.main = ""
@@ -810,7 +811,8 @@ class PhonePage:
         try:
             home = Home.from_settings(settings)
         except HomeRefused as exc:
-            print(f"The phone's Start is off: {exc}.")
+            self._off = f"The phone's page is off: {exc}."
+            print(self._off)
             return
         if home is None:
             return  # not set up: the terminal's Start, as before
@@ -818,7 +820,8 @@ class PhonePage:
             self._server = make_server(home=home, phones=Phones(phones_path(settings)),
                                        starts=None)
         except PhoneOff as exc:
-            print(f"{exc}.")
+            self._off = f"{str(exc)[:1].upper()}{str(exc)[1:]}."
+            print(self._off)
             return
 
         def build(armed: Armed) -> PrinterClient:
@@ -832,6 +835,8 @@ class PhonePage:
         self.main = f"{home.origin}/"
         print(f"Your phone's page: {home.origin}/ , and its Start: {home.origin}/start , on the "
               "home Wi-Fi only (`scripts/phone.py pair` signs a phone in).")
+        for said in self._server.said:  # pair again after the move to HTTPS; renew it soon
+            print(said)
 
     @classmethod
     def off(cls) -> PhonePage:
@@ -841,7 +846,16 @@ class PhonePage:
         page.address = ""
         page.main = ""
         page.shop = None
+        page._off = ""
         return page
+
+    def trouble(self) -> str:
+        """Why the page is off though it's set up, or answers nothing now (its certificate ran
+        out), for the queue's live line (mqucifer/print-shop#312); or ""."""
+        if self._server is None:
+            return self._off
+        now = self._server.trouble()
+        return f"The phone's page is off: {now}." if now else ""
 
     @property
     def on(self) -> bool:
@@ -1073,7 +1087,8 @@ def _queue(args: argparse.Namespace, live: Live) -> int:
                 for why in refused:
                     print(f"Not added: {why}")
             return serve(queue, run.daemon, read=input,
-                         stock=stock_listing(ledger_path(args.settings)), runs=runs)
+                         stock=stock_listing(ledger_path(args.settings)), runs=runs,
+                         phone_trouble=phone.trouble)
     except KeyboardInterrupt:
         print("\nPut by: every job waits where it was, and `--queue` takes them up again. Any "
               "print without an answer stays open in the ledger.")

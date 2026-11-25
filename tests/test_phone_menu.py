@@ -20,6 +20,9 @@ from tests import test_phone_screens as screens
 from tests.test_phone_screens import Page, _finished, _paths, _ready
 from tests.test_phone_start import AWAY, Browser, FakeStarts, home, signed_in
 
+#: Over plain HTTP and over HTTPS (mqucifer/print-shop#312).
+pytestmark = pytest.mark.usefixtures("phone_scheme")
+
 #: `test_phone_screens`'s made-up shop and its page, as fixtures here.
 made, phone_page = screens.made, screens.page
 

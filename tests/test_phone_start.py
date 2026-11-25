@@ -6,6 +6,11 @@ through a fake socket, so the peer address is the socket's, as on the Mac. The a
 made-up private ones, built from numbers so no address is written in this public repository. No
 test arms: `tests/conftest.py` refuses every armed connection, and `live_printer` is reached only
 to show it refuses, or that what it builds can't connect.
+
+Every phone test runs twice (`phone_scheme`, in `tests/conftest.py`): over plain HTTP, and over
+HTTPS with a made-up certificate made in the test (mqucifer/print-shop#312), where the phone's
+browser does a real TLS handshake with the page's handler over a socket pair, checking the
+certificate's name, and the peer is still the made-up phone's address.
 """
 
 from __future__ import annotations
@@ -53,6 +58,7 @@ from print_shop.phone.home import (
 )
 from print_shop.phone.phones import ALPHABET, CODE_LASTS_S, CODE_LENGTH, WRONG_TRIES, Phones
 from print_shop.phone.server import COOKIE, PhoneOff, handler_for, make_server
+from print_shop.phone.tls import Certificate, TlsFiles, ended, serving
 from print_shop.printer import centauri
 from print_shop.printer.centauri import PrinterConfig, PrinterSnapshot, live_printer
 from print_shop.setup import Proposer
@@ -63,6 +69,7 @@ from tests.fakes import FramePrinter
 from tests.test_job_e2e import CFG
 from tests.test_review import _model
 from tests.test_waits_for_you import WAIT_S, Shop, _script, _top_question, wait_until
+from tests.tls_made_up import NAME, phone_context
 
 
 def ip(*parts: int) -> str:
@@ -88,11 +95,22 @@ def _resolve(name: str) -> str:
     raise OSError(f"no such host {name}")
 
 
+#: The scheme the test running serves: "http", or "https" with `TLS` (`phone_scheme`).
+SCHEME = "http"
+#: The made-up certificate the HTTPS runs serve, made once a session.
+TLS: TlsFiles | None = None
+
+pytestmark = pytest.mark.usefixtures("phone_scheme")
+
+
 def home(**changes: Any) -> Home:
     given: dict[str, Any] = {
         "address": ipaddress.IPv4Address(MAC), "network": ipaddress.IPv4Network(NETWORK),
         "port": PORT, "router": ipaddress.IPv4Address(ROUTER), "ha": ipaddress.IPv4Address(HA),
     }
+    if SCHEME == "https":
+        assert TLS is not None
+        given |= {"name": NAME, "tls": TLS}
     return Home(**{**given, **changes})
 
 
@@ -149,17 +167,29 @@ def _parse(raw: bytes) -> Reply:
     return Reply(status, [(k, v) for k, v in headers], body.decode())
 
 
+#: A POST's `Origin` as the page's own, whatever its scheme.
+OWN = "the page's own"
+
+
 class Browser:
-    """A phone's browser, at `peer`, keeping its sign-in's cookie as Safari would."""
+    """A phone's browser, at `peer`, keeping its sign-in's cookie as Safari would. Over HTTPS
+    where the page serves it, through a real handshake that checks the page's name."""
 
     def __init__(self, handler: type, peer: str = PHONE) -> None:
         self.handler = handler
         self.peer = peer
         self.cookie = ""
+        self._certificate: Certificate | None = None
+
+    @property
+    def home(self) -> Home:
+        found: Home = self.handler.home  # type: ignore[attr-defined]
+        return found
 
     def send(self, method: str, path: str, *, body: bytes = b"",
              headers: dict[str, str] | None = None) -> Reply:
-        sent = {"Host": HOST, **({"Cookie": f"{COOKIE}={self.cookie}"} if self.cookie else {}),
+        sent = {"Host": self.home.host,
+                **({"Cookie": f"{COOKIE}={self.cookie}"} if self.cookie else {}),
                 **(headers or {})}
         sent = {k: v for k, v in sent.items() if v is not None}
         if body:
@@ -167,19 +197,52 @@ class Browser:
             sent["Content-Length"] = str(len(body))
         raw = f"{method} {path} HTTP/1.1\r\n" + "".join(
             f"{k}: {v}\r\n" for k, v in sent.items()) + "\r\n"
-        conn = _Conn(raw.encode("latin-1") + body)
-        self.handler(conn, (self.peer, 50123), SimpleNamespace())
-        reply = _parse(bytes(conn.out))
+        if self.home.tls is not None:
+            reply = _parse(self._over_tls(raw.encode("latin-1") + body))
+        else:
+            conn = _Conn(raw.encode("latin-1") + body)
+            self.handler(conn, (self.peer, 50123), SimpleNamespace())
+            reply = _parse(bytes(conn.out))
         for key, value in reply.headers:
             if key.lower() == "set-cookie" and value.startswith(f"{COOKIE}="):
                 self.cookie = value.split(";")[0].split("=", 1)[1]
         return reply
 
+    def _over_tls(self, data: bytes) -> bytes:
+        """The request over HTTPS: the page's own handler, on a socket the page's certificate
+        serves (`serving`, as the server's), with this browser's peer address."""
+        home = self.home
+        assert home.tls is not None and home.name is not None
+        if self._certificate is None:
+            self._certificate = Certificate(home.tls, home.name)
+            self._certificate.load()
+        ours, theirs = socket.socketpair()
+        conn = serving(self._certificate, ours)
+
+        def serve() -> None:
+            try:
+                self.handler(conn, (self.peer, 50123), SimpleNamespace())
+            finally:
+                ended(conn)
+                conn.close()
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        theirs.settimeout(30)
+        with phone_context(home.tls).wrap_socket(theirs, server_hostname=home.name) as tls:
+            tls.sendall(data)
+            out = b""
+            while chunk := tls.recv(65536):
+                out += chunk
+        thread.join(10)
+        return out
+
     def get(self, path: str = "/", **kw: Any) -> Reply:
         return self.send("GET", path, **kw)
 
-    def post(self, path: str, form: dict[str, str], *, origin: str | None = ORIGIN,
+    def post(self, path: str, form: dict[str, str], *, origin: str | None = OWN,
              headers: dict[str, str] | None = None) -> Reply:
+        origin = self.home.origin if origin == OWN else origin
         extra = {**({"Origin": origin} if origin is not None else {}), **(headers or {})}
         return self.send("POST", path, body=urlencode(form).encode(), headers=extra)
 
@@ -625,15 +688,17 @@ def test_the_page_listens_only_on_its_home_address_and_loopback_is_refused_on_a_
     with socket.socket() as free:
         free.bind(("127.0.0.1", 0))
         port = free.getsockname()[1]
-    server = make_server(home=home(port=port), phones=phones, starts=starts,
-                         listen_on="127.0.0.1")
+    served = home(port=port)
+    server = make_server(home=served, phones=phones, starts=starts, listen_on="127.0.0.1")
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         code = phones.mint("Made-up phone")
-        with socket.create_connection(("127.0.0.1", port), timeout=5) as conn:
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as raw:
+            conn = raw if served.tls is None else phone_context(served.tls).wrap_socket(
+                raw, server_hostname=served.name)
             body = urlencode({"code": code}).encode()
             conn.sendall(
-                f"POST /pair HTTP/1.1\r\nHost: {MAC}:{port}\r\nOrigin: http://{MAC}:{port}\r\n"
+                f"POST /pair HTTP/1.1\r\nHost: {served.host}\r\nOrigin: {served.origin}\r\n"
                 "Content-Type: application/x-www-form-urlencoded\r\n"
                 f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode() + body)
             reply = b""
@@ -1050,6 +1115,9 @@ def test_the_sign_in_cookie_is_http_only_and_strict(page: type, phones: Phones) 
     cookie = reply.header("Set-Cookie")
     assert "HttpOnly" in cookie and "SameSite=Strict" in cookie and "Path=/" in cookie
     assert len(cookie.split(";")[0].split("=", 1)[1]) >= 43, "256 bits"
+    # Secure over HTTPS, so it's never sent but over it (mqucifer/print-shop#312); over plain
+    # HTTP a phone would refuse a Secure cookie, so it's as before.
+    assert ("; Secure" in cookie) == (SCHEME == "https")
 
 
 # --------------------------------------------------------------------------

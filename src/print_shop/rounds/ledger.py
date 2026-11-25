@@ -777,6 +777,33 @@ CREATE TABLE IF NOT EXISTS round_scores (
     ranges TEXT NOT NULL,
     PRIMARY KEY (run, round, right_sha)
 );
+CREATE TABLE IF NOT EXISTS given_files (
+    -- Each file a run was given under `references/`, by the sha256 of its bytes at the run's
+    -- start: what an assembly run's `done` holds a placed file to (mqucifer/print-shop#310).
+    run TEXT NOT NULL REFERENCES runs(run),
+    file TEXT NOT NULL,
+    sha TEXT NOT NULL,
+    at TEXT NOT NULL,
+    PRIMARY KEY (run, file)
+);
+CREATE TABLE IF NOT EXISTS assemblies (
+    -- An assembly run's result at each `done` (mqucifer/print-shop#310): its assembly file and
+    -- each given part it places, with its hash, where that hash was stated, each change a note
+    -- stated, and the run that approved it. `approval` is the stop it went to, if it did.
+    run TEXT NOT NULL REFERENCES runs(run),
+    round INTEGER NOT NULL,
+    at_call INTEGER NOT NULL,
+    assembly TEXT NOT NULL,
+    assembly_sha TEXT,
+    given TEXT NOT NULL,
+    -- The harness's own placed reading: each pair passing into another, the contacts.
+    placed TEXT,
+    made TEXT NOT NULL,
+    met INTEGER NOT NULL,
+    approval INTEGER,
+    at TEXT NOT NULL,
+    PRIMARY KEY (run, round)
+);
 CREATE VIEW IF NOT EXISTS round_kinds AS
 SELECT r.run, r.round, c.phase,
        CASE WHEN p.round IS NULL THEN 'first'
@@ -1344,6 +1371,32 @@ class DesignLedger:
 
     def swaps_shown(self, run: str, where: str) -> None:
         self.change("UPDATE need_swaps SET shown_at=? WHERE run=? AND shown_at IS NULL", where, run)
+
+    def given_at_start(self, run: str, given: dict[str, str]) -> None:
+        """Each reference as the run was given it, by its hash (mqucifer/print-shop#310)."""
+        for file, sha in given.items():
+            self.add("given_files", run=run, file=file, sha=sha, at=now())
+
+    def assembly_read(self, run: str, round_n: int, **facts: Any) -> None:
+        """An assembly run's result at `done`: its assembly file and the given parts it places
+        (mqucifer/print-shop#310)."""
+        with self._open() as db:
+            db.execute(
+                "INSERT OR REPLACE INTO assemblies (run, round, at_call, assembly, assembly_sha, "
+                "given, placed, made, met, at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (
+                    run,
+                    round_n,
+                    facts["at_call"],
+                    facts["assembly"],
+                    facts["assembly_sha"],
+                    _json(facts["given"]),
+                    _json(facts["placed"]) if facts.get("placed") is not None else None,
+                    _json(facts["made"]),
+                    int(bool(facts["met"])),
+                    now(),
+                ),
+            )
 
     def approval_asked(self, run: str, n: int, **facts: Any) -> None:
         self.add(
