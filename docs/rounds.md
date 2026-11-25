@@ -662,7 +662,7 @@ A run is given the lessons of the ledger beside it. The Sponsor's design runs re
 
 | Route | Delivered as | Scored by |
 |---|---|---|
-| `model` | text the next run is given: at the start, under its budget, its kind's lessons first and then general ones, the rest by the `lessons` tool, and a kind's lessons in its skill once folded in | that run's own review, as before |
+| `model` | text the next run is given: at the start, under its budget, its kind's lessons first and then general ones, each chosen by what the request names and then by score, the rest by the `lessons` tool, and a kind's lessons in its skill once folded in | that run's own review, as before |
 | `harness` | an issue in the next batch, `promote`d when merged | the next analysis |
 | `request` | a line in the request template the operator writes from | the analysis |
 | `operator` | a line in the checklist below, for the operator and stand-in | the analysis |
@@ -694,11 +694,11 @@ For the operator, at each review and each ask (mqucifer/print-shop#40). It's the
 
 Before this, `start` gave a run every kept lesson for the model, oldest first, filtered only by kind of part, and almost none had a kind. In the design runs' ledger on 2026-11-17, 34 of the 35 kept for the model had none, so every design run started with all 34, about 16,500 characters, and the list only grew.
 
-- **The order** (`lessons.to_give`): those for the run's kind of part first, then the general ones. Within each, the lessons scored `used` on most runs come first, by each run's latest score of the lesson's text, and any a run's latest score says got `in_the_way` come last. Among equals, the oldest first.
+- **The order** (`lessons.to_give`): those for the run's kind of part first, then the general ones. Within each, they're chosen by what the run will build, then by score, as below (mqucifer/print-shop#313). Before that, the lessons scored `used` on most runs came first, and among equals the oldest.
 - **The budget** is `Limits.start_lessons_chars`, in characters of the lessons' lines as given, each with its number, area, run and writer. Its default is 6000, about a dozen lessons at the 485 characters those 34 average. `start --start-lessons-chars N` sets it for a run, and it's recorded with the run's other limits.
 - **They're taken in order** while each fits in what's left (`lessons.within`). The first that doesn't fit ends them, so none is given ahead of a better one.
 - **A lesson longer than the whole budget is never given at a start,** and the filling goes on past it: one such lesson mustn't empty a start. It's the only one passed over. The start's left-out line names it ("Lesson 12 is too long for the start: read it with its `id`"), its row of `run_lessons_left` says so with its length, and the listing names each under "Too long for a start", by the default budget, for a reviewer to shorten with `edit ID --text FILE`.
-- **The start says how many it left out, and how to find them,** after the lessons: "2 more kept lessons aren't here, to keep the start short: 1 for stained-glass parts and 1 general. The `lessons` tool finds them...". `lessons.md` holds it as given.
+- **The start says how many it left out, and how to find them,** after the lessons: "2 more kept lessons aren't here, to keep the start short: 1 for stained-glass parts and 1 general. The `lessons` tool finds them...". Then it names each on a line, in the order it would have taken them (mqucifer/print-shop#313): "- Lesson 12 (verification, for furniture parts; about bolts, joints)". `lessons.md` holds it as given.
 - **A lesson is never dropped to fit.** One left out isn't given, so its status and scores stay as they were, and it's a row of `run_lessons_left` with why. `lessons RUN` lists them under "Left out of its start".
 - **The model's `lessons` tool finds a kept lesson** (`lessons.look_up`). It only reads.
   - With `words`, each kept lesson for the model that holds every word, in its text, its fix's shape, its area or its kind of part; if none holds every word, those that hold any, most first.
@@ -707,6 +707,20 @@ Before this, `start` gave a run every kept lesson for the model, oldest first, f
   - With `id`, that lesson whole, as a start gives one.
 - **A lesson read whole is given to the run:** a row of `run_lessons` whose `how` is `tool`, so the after-action review lists it to score with the start's, and a reviewer can score it (`lessons score RUN ID`). Listing a lesson gives nothing. The call is in `calls` and the events like any tool's, with the lessons it found, or the one it read.
 - **Folding a kind's lessons into its skill stays the main route.** The budget and the tool stop a run starting with everything; they don't replace the review. The listing ends with "To fold into a kind's skill": each kind's kept lessons its skill doesn't hold yet, by kind, with the skill's name. Once one is in the skill, `promote ID --as skill --where PATH` takes it out of the start and the tool, as before.
+
+### How a start's lessons are chosen (mqucifer/print-shop#313)
+
+On the side table's eight runs, lessons accepted just before a run started weren't in it. They were new, so unscored, and they lost to older scored ones and fell to id order. An assembly run made 13 hold slides on bolted joints after three part runs had each learned that a bolted joint reads `NOT HELD` and is read with `load`, and a rerun repeated a nut-pocket fault its first run had a lesson for. The `lessons` tool, which finds what a start leaves out, was never called in those runs. So a start's lessons are chosen by what the run will build:
+
+1. **Its kind of part:** those for the request's kind first, then the general ones, as before.
+2. **The features its request names,** in each of those: the lessons about more of them first. A feature is one of `lessons.FEATURES`: bolts, nut slots, bores, glass and joints. A request names one by its words, whole (`nut`, not `nutshell`), or by its kind of part (`stained-glass` is glass). A lesson is about one by the words of its text and its fix's shape, by the checks it's keyed to (a slide's `NOT HELD` and `load` are a joint's; `panes`, `light` and `pieces` are glass's), or by its kind of part. Another feature is one line in `FEATURES`.
+3. **Its score:** any a run's latest score says got `in_the_way` last, as before. Then the share of the runs that scored its text that used it, most first, with a prior: it's counted as if two more runs had scored it and one had used it (`PRIOR_USED` of `PRIOR_RUNS`, Laplace's rule of succession). So an unscored lesson starts at a half, not at nothing. One used on every run that scored it is ahead of it, and one that more runs didn't use than did is behind it. Before, a lesson stood by how many runs had used it, which only grows by being given: a new one could never get ahead, so it was never given, and never scored.
+4. **The oldest first** among equals.
+
+- **What's chosen is shown as before:** its kind's then general, used on most runs first, any in the way last, oldest first (`lessons.shown`). So a ledger whose lessons all fit reads as it did, word for word, and only which are given changes when they don't.
+- **The budget isn't raised:** 6,000 characters of the lessons' lines, as before. The left-out list is outside it, as the sentence before it was: about 60 characters a lesson.
+- **What can be cut that was given before,** on a ledger over its budget: a lesson about none of the features the request names, when ones about them fill the start, and one used on many runs but not on most of those that scored it, when a newer one or one used every time it was scored comes first. Each is still kept, named on the start's left-out list and in `run_lessons_left`, and found by the `lessons` tool.
+- **The `lessons` tool with nothing asked** gives the run's own in the start's order, by the same features, and its searches by `words` or `kind` list by the same score.
 
 **Scoring and retiring.** Each run's latest score moves a lesson, as above. A reviewer can score again (`lessons score RUN ID`), and the latest counts. A lesson given twice and not used, or that got in the way, is listed for the reviewer under "To retire", and `retire ID --why` takes it out. Nothing retires one by code.
 

@@ -561,16 +561,20 @@ class Run:
 
     def _give_lessons(self) -> None:
         """The lessons a reviewer kept for the model, into the first message: its kind's first,
-        then the general ones, best-scored first, up to the start's budget
-        (`Limits.start_lessons_chars`), with how many were left out and how to find them
-        (mqucifer/print-shop#155). A row of `run_lessons` for each given, and of
+        then the general ones, chosen in each by the features the request names and then by
+        score, an unscored one on a prior (mqucifer/print-shop#313), up to the start's budget
+        (`Limits.start_lessons_chars`), with how many were left out, each by its number, and how
+        to find them (mqucifer/print-shop#155). What's given is shown in the order a start showed
+        it before (`lessons.shown`). A row of `run_lessons` for each given, and of
         `run_lessons_left` for each left out. `lessons.md` holds them as given, so a conversation
         started again from the record has the same."""
         kind = self._part_kind()
         budget = self.limits.start_lessons_chars
-        kept, left = lessons.within(lessons.to_give(self.ledger, kind), budget)
+        found = lessons.to_give(self.ledger, kind, self._features())
+        kept, left = lessons.within(found, budget)
         if not kept and not left:
             return
+        kept = lessons.shown(self.ledger, kept, kind)
         said = lessons.block(kept, left, kind)
         (self.folder / "lessons.md").write_text(said + "\n", encoding="utf-8")
         lessons.give(self.ledger, self.state.name, kept)
@@ -581,12 +585,18 @@ class Run:
         form = self._form()
         return form.kind if form is not None else None
 
+    def _features(self) -> tuple[str, ...]:
+        """The features the request names, by its words and its kind of part
+        (`lessons.features_named`), that a start's lessons are chosen by."""
+        request = (self.folder / "request.md").read_text(encoding="utf-8")
+        return lessons.features_named(request, self._part_kind())
+
     def lessons(self, args: dict[str, Any]) -> Judged:
         """The model's `lessons` tool: a kept lesson found by words or by kind, or one whole by
         its number, which this run is then given (`lessons.look_up`). It changes nothing of the
         part, and no lesson's words."""
         found, reply, detail = lessons.look_up(
-            self.ledger, self.state.name, self._part_kind(), args
+            self.ledger, self.state.name, self._part_kind(), args, self._features()
         )
         if not found:
             return Judged("lessons", "failed", reply, "no_lesson", detail=detail)

@@ -372,8 +372,9 @@ def main() -> int:
         "--start-lessons-chars",
         type=int,
         default=lessons.START_CHARS,
-        help="the characters of kept lessons its start holds, its kind's first and best-scored "
-        f"first: {lessons.START_CHARS} unless given. The `lessons` tool finds the rest",
+        help="the characters of kept lessons its start holds, its kind's first, then those "
+        "about what the request names, then best-scored: "
+        f"{lessons.START_CHARS} unless given. The `lessons` tool finds the rest",
     )
     start.add_argument("--assembly-run", action="store_true", help=ASSEMBLY_RUN)
     resume = sub.add_parser("resume")
