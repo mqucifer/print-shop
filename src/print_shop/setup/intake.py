@@ -632,9 +632,9 @@ def cli_asker(
     terminal's (mqucifer/print-shop#266).
 
     What the notes give is read back first, at one prompt, and only what they leave is asked
-    (mqucifer/print-shop#236). What was typed before a read-back, or a question after one or
-    added, was shown is forgotten, as each is written and before it's read: Enter confirms
-    there, and mustn't confirm what nobody saw.
+    (mqucifer/print-shop#236). What was typed before the questions, a read-back, or a question
+    after one was shown is forgotten, as each is written and before it's read: a number or an
+    Enter typed before it's drawn mustn't answer what nobody saw (mqucifer/print-shop#297).
     """
 
     def ask(questions: Sequence[Question]) -> tuple[Answer, ...]:
@@ -645,8 +645,9 @@ def cli_asker(
 
         def asked(places: list[int]) -> None:
             write(render(questions, places, width()))
-            if noted or _are_added(questions):
-                forget()  # shown only now, so what was typed while it drew is no answer to it
+            # Shown only now, so what was typed before or while it drew is no answer to it:
+            # every set, the first too (mqucifer/print-shop#297), as the review's screens do.
+            forget()
             for i in places:
                 typed = read(f"{first + i}> ")
                 while True:
