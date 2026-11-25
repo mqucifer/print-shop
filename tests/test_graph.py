@@ -26,12 +26,12 @@ from print_shop.core.state import EntryPath, PrintStatus
 from print_shop.ledger import Ledger
 from print_shop.orchestrator.graph import build_graph, graph_edges, new_job
 from print_shop.slicer.naming import job_id_from_filename
-from print_shop.slicer.orca import SlicerProfiles
+from print_shop.slicer.orca import SlicerProfiles, default_binary
 from tests.fakes import STORE_FILAMENT, STORE_MACHINE, STORE_PROCESS, installed_or_ci
 from tests.fixtures import write_stl
 from tests.test_print_node import FakePrinter, idle
 
-ORCA = Path("/Applications/OrcaSlicer.app/Contents/MacOS/OrcaSlicer")
+ORCA = default_binary()
 MACHINE = STORE_MACHINE
 PROCESS = STORE_PROCESS
 FILAMENT = STORE_FILAMENT

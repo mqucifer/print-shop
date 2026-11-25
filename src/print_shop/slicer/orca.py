@@ -10,6 +10,7 @@ import contextlib
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import tempfile
@@ -24,8 +25,11 @@ from print_shop.materials import material_name
 from print_shop.slicer.store import ProfilesUsed
 
 __all__ = [
+    "LINUX_COMMAND",
+    "MAC_APP_BINARY",
     "PauseAt",
     "PlateObject",
+    "default_binary",
     "PlateSlice",
     "pause_items",
     "slice_plate",
@@ -44,7 +48,25 @@ __all__ = [
     "with_bed_type",
 ]
 
-_DEFAULT_BINARY = Path("/Applications/OrcaSlicer.app/Contents/MacOS/OrcaSlicer")
+#: The macOS app's CLI, where Orca is on the Mac.
+MAC_APP_BINARY = Path("/Applications/OrcaSlicer.app/Contents/MacOS/OrcaSlicer")
+#: The name a Linux install puts on PATH (an extracted AppImage linked as `orca-slicer`).
+LINUX_COMMAND = "orca-slicer"
+
+
+def default_binary() -> Path:
+    """Where Orca is on this machine: the macOS app, else `orca-slicer` on PATH.
+
+    Neither found, it's the macOS app's path, so the FileNotFoundError names where we looked
+    first. There's no setting for it: the machine's install decides, as it does on the Mac.
+    """
+    if MAC_APP_BINARY.exists():
+        return MAC_APP_BINARY
+    found = shutil.which(LINUX_COMMAND)
+    return Path(found) if found else MAC_APP_BINARY
+
+
+_DEFAULT_BINARY = default_binary()
 
 _DURATION_RE = re.compile(r"(\d+)\s*(d|h|m|s)")
 
@@ -301,7 +323,7 @@ def slice_model(
         profiles: Slicer profile paths (machine, process, optional filament),
             each a whole profile, as print-shop's store keeps them.
         outdir: Directory where OrcaSlicer will write the G-code.
-        binary: Path to the OrcaSlicer binary. Defaults to the macOS app path.
+        binary: Path to the OrcaSlicer binary. Defaults to `default_binary()`.
         timeout_s: Seconds to wait for the slicer before giving up.
 
     Returns:

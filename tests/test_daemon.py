@@ -35,6 +35,7 @@ from print_shop.orchestrator.daemon import (
     parse_command,
     state_payload,
 )
+from print_shop.slicer.orca import default_binary
 from tests.live import broker_config, opted_in
 from tests.test_print_node import FakePrinter, idle
 
@@ -138,7 +139,7 @@ def _env_present() -> bool:
 
 needs_broker = pytest.mark.skipif(not _env_present(), reason="no MQTT credentials")
 
-ORCA = Path("/Applications/OrcaSlicer.app/Contents/MacOS/OrcaSlicer")
+ORCA = default_binary()
 needs_orca = pytest.mark.skipif(not ORCA.exists(), reason="OrcaSlicer not installed")
 
 

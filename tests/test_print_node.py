@@ -54,11 +54,11 @@ from print_shop.printer.centauri import (
     preflight,
 )
 from print_shop.slicer.naming import gcode_filename
-from print_shop.slicer.orca import SlicerProfiles
+from print_shop.slicer.orca import SlicerProfiles, default_binary
 from tests.fakes import STORE_FILAMENT, STORE_MACHINE, STORE_PROCESS
 from tests.fixtures import write_stl
 
-ORCA = Path("/Applications/OrcaSlicer.app/Contents/MacOS/OrcaSlicer")
+ORCA = default_binary()
 MACHINE = STORE_MACHINE
 PROCESS = STORE_PROCESS
 FILAMENT = STORE_FILAMENT

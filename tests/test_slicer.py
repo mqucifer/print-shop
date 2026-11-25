@@ -17,11 +17,18 @@ from pathlib import Path
 
 import pytest
 
-from print_shop.slicer.orca import SliceResult, SlicerProfiles, parse_duration, slice_model
+from print_shop.slicer import orca
+from print_shop.slicer.orca import (
+    SliceResult,
+    SlicerProfiles,
+    default_binary,
+    parse_duration,
+    slice_model,
+)
 from tests.fakes import STORE_FILAMENT, STORE_MACHINE, STORE_PROCESS
 from tests.fixtures import write_stl
 
-ORCA = Path("/Applications/OrcaSlicer.app/Contents/MacOS/OrcaSlicer")
+ORCA = default_binary()
 MACHINE, PROCESS, FILAMENT = STORE_MACHINE, STORE_PROCESS, STORE_FILAMENT
 
 needs_orca = pytest.mark.skipif(not ORCA.exists(), reason="OrcaSlicer is not installed")
@@ -148,6 +155,33 @@ def test_missing_binary_raises_clearly(profiles: SlicerProfiles, tmp_path: Path)
 def test_orca_is_findable_if_installed() -> None:
     """Documents where we look, so a missing binary is diagnosable."""
     assert ORCA.exists() or shutil.which("orca-slicer") is None
+
+
+def test_off_the_mac_orca_is_the_orca_slicer_on_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On a machine without the macOS app (the desktop's WSL), Orca is `orca-slicer` on PATH;
+    with neither, it's the macOS app's path, so the error names where we looked first."""
+    monkeypatch.setattr(orca, "MAC_APP_BINARY", tmp_path / "no-app" / "OrcaSlicer")
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    assert orca.default_binary() == tmp_path / "no-app" / "OrcaSlicer"
+
+    (tmp_path / "bin").mkdir()
+    linux = tmp_path / "bin" / "orca-slicer"
+    linux.write_text("#!/bin/sh\n")
+    linux.chmod(0o755)
+    assert orca.default_binary() == linux
+
+
+def test_the_mac_app_wins_where_it_is(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    app = tmp_path / "OrcaSlicer"
+    app.write_text("")
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin" / "orca-slicer").write_text("#!/bin/sh\n")
+    (tmp_path / "bin" / "orca-slicer").chmod(0o755)
+    monkeypatch.setattr(orca, "MAC_APP_BINARY", app)
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    assert orca.default_binary() == app
 
 
 # --------------------------------------------------------------------------

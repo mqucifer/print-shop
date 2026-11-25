@@ -23,11 +23,11 @@ from print_shop.core.checkpoint import open_checkpointer
 from print_shop.core.contracts import Gate, ungated_edges
 from print_shop.core.state import EntryPath
 from print_shop.orchestrator.graph import build_graph, graph_edges, new_job
-from print_shop.slicer.orca import SlicerProfiles
+from print_shop.slicer.orca import SlicerProfiles, default_binary
 from tests.fakes import STORE_FILAMENT, STORE_MACHINE, STORE_PROCESS, installed_or_ci
 from tests.fixtures import write_stl
 
-ORCA = Path("/Applications/OrcaSlicer.app/Contents/MacOS/OrcaSlicer")
+ORCA = default_binary()
 MACHINE = STORE_MACHINE
 PROCESS = STORE_PROCESS
 FILAMENT = STORE_FILAMENT

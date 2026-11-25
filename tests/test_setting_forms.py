@@ -19,12 +19,12 @@ import pytest
 
 from print_shop.setup.names import ORCA_FORMS, form, not_a_form, typed
 from print_shop.setup.review import Review, parse_answer, render
-from print_shop.slicer.orca import sliced_by, version
+from print_shop.slicer.orca import default_binary, sliced_by, version
 from tests.test_setting_names import GCODE, Person, _request
 
 ROOT = Path(__file__).resolve().parent.parent
 FORMS = ROOT / "src" / "print_shop" / "setup" / "orca_forms.json"
-ORCA_APP = Path("/Applications/OrcaSlicer.app/Contents/MacOS/OrcaSlicer")
+ORCA_APP = default_binary()
 
 
 def taken(answer: str) -> list[tuple[str, str]]:

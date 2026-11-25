@@ -18,12 +18,12 @@ from print_shop.refine import approved
 from print_shop.refine.context import Context
 from print_shop.refine.refinement import Outcome, Pass
 from print_shop.slicer import gcode
-from print_shop.slicer.orca import _DEFAULT_BINARY
+from print_shop.slicer.orca import default_binary
 from tests.refine_fixtures import make_run
 
 pytestmark = [
     pytest.mark.slicer,
-    pytest.mark.skipif(not _DEFAULT_BINARY.exists(), reason="no OrcaSlicer on this machine"),
+    pytest.mark.skipif(not default_binary().exists(), reason="no OrcaSlicer on this machine"),
 ]
 
 

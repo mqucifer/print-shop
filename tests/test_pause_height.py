@@ -40,7 +40,7 @@ from print_shop.setup.reading import (
 )
 from print_shop.setup.review import ReviewRequest, parse_answer, render
 from print_shop.setup.screen import warnings
-from print_shop.slicer.orca import _DEFAULT_BINARY, slice_model
+from print_shop.slicer.orca import default_binary, slice_model
 from tests.fakes import CI_PROFILES, STORE_PROFILES, FramePrinter, MemoryBridge
 from tests.reviewing import flat
 from tests.test_job_e2e import CFG
@@ -243,7 +243,7 @@ def test_no_fit_and_no_height_to_compare_say_nothing() -> None:
 
 
 @pytest.mark.slicer
-@pytest.mark.skipif(not _DEFAULT_BINARY.exists(), reason="no OrcaSlicer on this machine")
+@pytest.mark.skipif(not default_binary().exists(), reason="no OrcaSlicer on this machine")
 @pytest.mark.parametrize("room", [0.0, 0.1, 0.2, 0.4])
 def test_real_orcas_slice_says_only_the_pause_that_is_too_late(
     room: float, tmp_path: Path
@@ -316,7 +316,7 @@ def _m600(gcode: str) -> list[tuple[int, float, int, float, bool]]:
 
 
 @pytest.mark.slicer
-@pytest.mark.skipif(not _DEFAULT_BINARY.exists(), reason="no OrcaSlicer on this machine")
+@pytest.mark.skipif(not default_binary().exists(), reason="no OrcaSlicer on this machine")
 @pytest.mark.parametrize(("first", "height", "ceiling", "base", "layer"), [
     (0.2, 0.2, 2.6, 0.0, 13),
     (0.25, 0.16, 2.65, 5.0, 16),  # a thicker first layer, and the file's underside at z 5
