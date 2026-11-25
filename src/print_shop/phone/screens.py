@@ -20,6 +20,7 @@ from print_shop.orchestrator.kept import Waits, local_when
 from print_shop.orchestrator.print_queue import Line, Need, SentTo
 from print_shop.outcome_words import outcome_words
 from print_shop.phone.filaments import load_button
+from print_shop.phone.one_job import QUEUES_ALONE
 from print_shop.phone.page import page
 from print_shop.phone.shop import NowPrinting, ReadyGroup, ToRecord, spool_words
 
@@ -153,7 +154,7 @@ def _ready_rows(groups: Sequence[ReadyGroup], on_hand: OnHand | None, changes: i
 def main_page(
     *, printing: Sequence[NowPrinting], sends: Sequence[SentTo], lines: Sequence[Line],
     to_record: Sequence[ToRecord], ready: Sequence[ReadyGroup], queue_on: bool,
-    offered: str = "", on_hand: OnHand | None = None, changes: int = 0,
+    offered: str = "", on_hand: OnHand | None = None, changes: int = 0, alone: bool = False,
 ) -> str:
     """Main: what's printing, what's sent to or waits on the person, what's ready by spool, and
     what's getting ready. `offered` is the part offered at the gate in a run without a queue,
@@ -162,6 +163,23 @@ def main_page(
     body += [_now_card(now) for now in printing]
     if not printing:
         body.append("<p class=\"small\">Nothing is printing.</p>")
+    if alone:
+        # A lone job's run: its one job, and what it needs (mqucifer/print-shop#288).
+        body.append("<h2>This job</h2><ul class=\"rows\">")
+        for line in lines:
+            what = f"<span class=\"part\">{_e(_named(line))}</span>{_small(_step(line))}"
+            if line.needs is not None:
+                body.append(_row(_need_href(line), what, _ACTION[line.needs]))
+            elif line.offered:
+                body.append(_row(f"/job/{line.job.job_id}", what, "Start", act_href="/start"))
+            else:
+                body.append(_row(f"/job/{line.job.job_id}", what))
+        body.append("</ul>")
+        if not lines:
+            body.append("<p class=\"small\">Its job hasn't begun yet, or has ended.</p>")
+        body.append(f"<p class=\"small\">{_e(QUEUES_ALONE[:1].upper() + QUEUES_ALONE[1:])}."
+                    "</p>")
+        lines, ready = [], []
     waiting = _waiting_rows(sends, lines, to_record)
     body.append("<h2>Sent to you, or waiting on you</h2>")
     body.append(f"<ul class=\"rows\">{''.join(waiting)}</ul>" if waiting
@@ -211,7 +229,7 @@ def _button(action: str, words: str, *, kind: str = "", fields: dict[str, str] |
 
 
 def job_page(line: Line, *, each_s: int | None, said: str = "", sliced: bool = False,
-             spools: str = "") -> str:
+             spools: str = "", alone: bool = False) -> str:
     """A job's own page: where it is, what it needs, and the queue's actions on it."""
     job = line.job
     rows = [("Where", _step(line))]
@@ -240,6 +258,10 @@ def job_page(line: Line, *, each_s: int | None, said: str = "", sliced: bool = F
     buttons = (f"<div class=\"buttons\">{hold}"
                f"{_button(f'/job/{job.job_id}/first', 'First', kind='second')}</div>"
                f"<p><a href=\"/job/{_e(job.job_id)}/remove\">Remove from the queue</a></p>")
+    if alone:
+        buttons = (f"<p class=\"small\">{_e(QUEUES_ALONE[:1].upper() + QUEUES_ALONE[1:])}."
+                   "</p>")
+        spools = ""
     return page(_named(line), (
         "<a class=\"back\" href=\"/\">Back to queue</a>"
         f"<h1>{_e(_named(line))}</h1>{told}<dl>{listed}</dl>{needs}{start}{buttons}"
