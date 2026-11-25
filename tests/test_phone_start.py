@@ -204,6 +204,12 @@ class FakeStarts:
     def last_phone_start(self) -> str:
         return "Started by you. Disarmed again." if self.calls else ""
 
+    def pending_gate(self) -> dict[str, Any] | None:
+        """The gate as the daemon holds it: open before printing while a job is ready."""
+        if self.ready is None:
+            return None
+        return {"gate": "gate.before_print", "job_id": self.ready.job_id}
+
     def start_from_phone(self, job_id: str, *, armed: Armed, press: str,
                          gcode_sha256: str) -> PhoneStart:
         self.calls.append((job_id, armed, press, gcode_sha256))

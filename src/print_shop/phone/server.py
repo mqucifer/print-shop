@@ -207,6 +207,8 @@ class Starts(Protocol):
 
     def last_phone_start(self) -> str: ...
 
+    def pending_gate(self) -> dict[str, Any] | None: ...
+
     def start_from_phone(
         self, job_id: str, *, armed: Armed, press: str, gcode_sha256: str,
     ) -> PhoneStart: ...
@@ -318,6 +320,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _dispatch(self, method: str) -> None:
         """The request, answered by its route in the table, and by nothing else."""
+        self._section = ""  # this request's own: never one before it on the connection
         split = urlsplit(self.path)
         found = route_for(method, split.path)
         if found is None:
@@ -357,12 +360,8 @@ class _Handler(BaseHTTPRequestHandler):
     def _waits_at_gate(self) -> bool:
         """Whether a job waits at the gate before printing, for Start's place in the bar: the
         gate as the daemon holds it, never the printer."""
-        starts = self.starts
-        gate = getattr(starts, "pending_gate", None)
-        if callable(gate):
-            found = gate()
-            return bool(found and found.get("gate") == Gate.BEFORE_PRINT)
-        return starts is not None and starts.ready_to_start() is not None
+        found = self.starts.pending_gate() if self.starts is not None else None
+        return bool(found and found.get("gate") == Gate.BEFORE_PRINT)
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002
         pass  # a request is logged only where it's refused, without its cookie or code

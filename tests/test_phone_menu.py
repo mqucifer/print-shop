@@ -107,3 +107,30 @@ def test_starts_own_page_marks_start(tmp_path: Path) -> None:
     phone = signed_in(handler_for(home=home(), phones=phones, starts=FakeStarts()), phones)
     raw = phone.get("/start").raw
     assert marked(raw) == ["/start"] and 'class="start on"' in raw
+
+
+def test_a_lone_job_at_its_questions_has_no_start_in_the_bar(tmp_path: Path) -> None:
+    """print-shop-ux's check: a lone job can't be at its questions and at the gate at once, so
+    the bar has no Start while it asks. It reads the run's own gate, which is shut."""
+    from print_shop.phone.one_job import OneJob  # noqa: PLC0415
+    from print_shop.phone.shop import Shop  # noqa: PLC0415
+    from tests.test_phone_one_job import JOB, Daemonish, Mac, ask, at_the_mac  # noqa: PLC0415
+    from tests.test_phone_one_job import Rig as OneRig  # noqa: PLC0415
+    from tests.test_queue import wait_until  # noqa: PLC0415
+
+    mac = Mac()
+    said: list[str] = []
+    one = OneJob(part="bracket.stl", write=said.append, races=True, keys_ready=mac.keys_ready,
+                 read_line=mac.read_line, forget=mac.forget)
+    daemon = Daemonish()  # its gate is None: nothing waits at it
+    one.daemon = daemon
+    shop = Shop(tmp_path / "ledger.sqlite", queue=one, daemon=daemon)
+    phones = Phones(tmp_path / "phones.sqlite")
+    handler = handler_for(home=home(), phones=phones, starts=daemon, shop=shop)  # type: ignore[arg-type]
+    lone = OneRig(one, mac, said, shop, handler, phones)
+    thread, _ = at_the_mac(lone, ask(lone))
+    wait_until(lambda: one.asked(JOB) is not None)
+    raw = signed_in(handler, phones).get("/").raw
+    assert "Answer" in raw and 'href="/start"' not in raw.split("</nav>")[0]
+    mac.type("1", "1")
+    thread.join(5)

@@ -8,6 +8,7 @@ setting, a token, or an address but its own.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from datetime import datetime
 from html import escape
@@ -44,6 +45,11 @@ def _need_href(line: Line) -> str:
 
 def _e(value: object) -> str:
     return escape(str(value))
+
+
+def _code(text: str) -> str:
+    """`text` escaped, with what's between backticks as code, as the pages show a command."""
+    return re.sub(r"`([^`]+)`", r"<code>\1</code>", _e(text))
 
 
 def _minutes(seconds: float) -> str:
@@ -177,13 +183,17 @@ def main_page(
         body.append("</ul>")
         if not lines:
             body.append("<p class=\"small\">Its job hasn't begun yet, or has ended.</p>")
-        body.append(f"<p class=\"small\">{_e(QUEUES_ALONE[:1].upper() + QUEUES_ALONE[1:])}."
+        body.append(f"<p class=\"small\">{_code(QUEUES_ALONE[:1].upper() + QUEUES_ALONE[1:])}."
                     "</p>")
         lines, ready = [], []
     waiting = _waiting_rows(sends, lines, to_record)
-    body.append("<h2>Sent to you, or waiting on you</h2>")
-    body.append(f"<ul class=\"rows\">{''.join(waiting)}</ul>" if waiting
-                else "<p class=\"small\">Nothing is waiting on you.</p>")
+    if not alone:
+        body.append("<h2>Sent to you, or waiting on you</h2>")
+        body.append(f"<ul class=\"rows\">{''.join(waiting)}</ul>" if waiting
+                    else "<p class=\"small\">Nothing is waiting on you.</p>")
+    elif waiting:
+        # Nothing is sent to a lone job: only a finished print's outcome waits here.
+        body.append(f"<h2>Waiting on you</h2><ul class=\"rows\">{''.join(waiting)}</ul>")
     if not queue_on:
         body.append("<div class=\"box\"><strong>The queue isn't running</strong>It runs at the "
                     "Mac: <code>print_job.py --queue</code>. What's printing and what's "
@@ -257,7 +267,7 @@ def job_page(line: Line, *, each_s: int | None, said: str = "", sliced: bool = F
                f"{_button(f'/job/{job.job_id}/first', 'First', kind='second')}</div>"
                f"<p><a href=\"/job/{_e(job.job_id)}/remove\">Remove from the queue</a></p>")
     if alone:
-        buttons = (f"<p class=\"small\">{_e(QUEUES_ALONE[:1].upper() + QUEUES_ALONE[1:])}."
+        buttons = (f"<p class=\"small\">{_code(QUEUES_ALONE[:1].upper() + QUEUES_ALONE[1:])}."
                    "</p>")
         spools = ""
     return page(_named(line), (
