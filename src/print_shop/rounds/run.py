@@ -317,7 +317,7 @@ def _who_decides(by: str, path: object) -> None:
 
 def _sheet_line(line: str) -> bool:
     """A line of `render`'s answer that says what's on its sheet."""
-    if line.startswith(("verdict:", "drawn:", "variant ")):
+    if line.startswith(("verdict:", "drawn:", "variant ", "scratch/")):
         return True
     return "not seen in any view" in line or "overlap by" in line
 
@@ -3129,6 +3129,8 @@ class Run:
         missing = self.tools._existing("done", args, "script")
         if missing is not None:
             return missing
+        if paths.in_scratch(_plain_name(str(args["script"]))):
+            return Judged("done", "failed", _scratch_refused("script", args["script"]), "scratch")
         # An assembly run names its assembly file in `part`, placing only given parts
         # (`assembled.py`, mqucifer/print-shop#310). A run that names none reads as before.
         taken = self._assembly_named(args["part"])
@@ -3819,6 +3821,8 @@ class Run:
         if paths.inside(self.work, name) is None or "," in name:
             reply = "Only files inside your directory, and never through a link."
             return Judged("done", "failed", reply, "outside")
+        if paths.in_scratch(name):
+            return Judged("done", "failed", _scratch_refused("part", found[0]), "scratch")
         return name, [e for e in given if e is not found[0]]
 
     def _assembly_checked(self, where: Path, assembly: str) -> assembled.Checked:
@@ -3918,6 +3922,9 @@ class Run:
                 if paths.inside(self.work, name) is None or "," in name:
                     reply = "Only files inside your directory, and never through a link."
                     return Judged("done", "failed", reply, "outside")
+                if paths.in_scratch(_plain_name(name)):
+                    reply = f"{_scratch_refused('part', name)} {shape}"
+                    return Judged("done", "failed", reply, "scratch")
             taken = [r["name"] for r in rows]
             row["name"] = next(
                 candidate
@@ -4381,7 +4388,9 @@ class Run:
         declared = self._glass_declared(args.get("glass"), drawn, "ask")
         if isinstance(declared, Judged):
             return declared
-        standing = self._standing_at_ask(drawn, declared) if drawn else []
+        # A file in `scratch/` is drawn, and never read as the part (mqucifer/print-shop#315).
+        of_part = [f for f in drawn if not paths.in_scratch(_plain_name(f))]
+        standing = self._standing_at_ask(of_part, declared) if of_part else []
         self.state.draft = {
             "question": question,
             "need": need,
@@ -4424,6 +4433,8 @@ class Run:
         ]
         if bench_said:
             lines += ["What the bench says it drew:", *[f"- {line}" for line in bench_said]]
+        if len(of_part) < len(drawn):
+            lines.append(SCRATCH_DRAWN)
         if pictures:
             lines.append(f"Your pictures go as they are: {', '.join(f'`{p}`' for p in pictures)}.")
         undrawn = [name for name in looks if name not in drawn]
@@ -4479,7 +4490,7 @@ class Run:
         # What's printed is what the sheet shows and the part `done` last named. With neither,
         # as at the plan, each need checked on a file the model made is listed: `done` holds
         # each to the part.
-        printed = [*drawn, *(self.state.part or [])]
+        printed = [*of_part, *(self.state.part or [])]
         off = self._off_part(printed)
         if off:
             what = (
@@ -5209,6 +5220,20 @@ class Run:
                 f'them if they help: "variants": [{{"name": "A", "files": {files}}}], "need": '
                 f"{named}."
             )
+        drawn = [v.get("files") for v in variants if isinstance(v, dict)]
+        scratch = [
+            f
+            for files in drawn
+            for f in (files if isinstance(files, list) else [files])
+            if isinstance(f, str) and paths.in_scratch(_plain_name(f))
+        ]
+        if scratch:
+            named = ", ".join(f"`{f}`" for f in scratch)
+            return "eye_on_scratch", (
+                f"An eye need passes on a pick of the part's own files, and {named} "
+                f"{'is' if len(scratch) == 1 else 'are'} in `scratch/`, which isn't the part. "
+                "Show scratch files at an ask with no `need`, or leave them off this sheet."
+            )
         if not isinstance(later, dict) or not all(
             isinstance(k, str) and isinstance(v, str) for k, v in later.items()
         ):
@@ -5287,6 +5312,11 @@ class Run:
         return None
 
 
+#: What an ask's reply says when its sheet draws files in `scratch/` (mqucifer/print-shop#315).
+SCRATCH_DRAWN = (
+    "Files in `scratch/` are on this sheet, and each picture of them says so: they're drawn, "
+    "and no check reads them as the part."
+)
 EYES_LATER = (
     "say in `later` why it needs another sheet, by its id: "
     '{"hang-hole": "a close-up of the hole, once it\'s cut"}. The person reads it.'
@@ -5355,6 +5385,15 @@ def _assembly_said(given: assembled.Checked, placed: list[judge.Standing]) -> li
         lines += [f"- `{one.command}`: {one.why}" for one in placed]
     lines.append(assembled.not_read_on_given(given))
     return lines
+
+
+def _scratch_refused(key: str, name: Any) -> str:
+    """`done` naming a file in `scratch/` as its part or its script (mqucifer/print-shop#315)."""
+    return (
+        f"`{key}` names `{name}`, in `scratch/`, which is for what isn't the part and which a "
+        "clean run doesn't copy: nothing there is printed or made from a clean start. Write it "
+        "outside `scratch/`, from your script, to name it."
+    )
 
 
 def _plain_name(name: str) -> str:

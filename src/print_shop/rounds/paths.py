@@ -25,6 +25,11 @@ from pathlib import Path, PurePosixPath
 MAX_PATH = 200
 #: Made by the bench or by a run, never part of what a clean run starts from.
 MADE = ("bench-out", "renders", "panes", "pieces", ".pictures", "record", "__pycache__")
+#: A run's own folder for what isn't its part (mqucifer/print-shop#315): a placed or exploded
+#: compound to draw, a turned copy to cut, a gauge. Only at the top of the working directory. Its
+#: files are never read as the part, never described, and never part of a clean run, and they count
+#: toward the folder's size as any file does.
+SCRATCH = "scratch"
 #: What counts as text for a round's diff.
 TEXT = (".py", ".md", ".txt", ".json", ".csv", ".yaml", ".yml", ".toml")
 #: What's geometry, for what a pick saw and what a clean run left.
@@ -113,15 +118,24 @@ def write_inside(directory: Path, path: str, text: str) -> None:
         fh.write(text)
 
 
+def in_scratch(name: str | PurePosixPath | Path) -> bool:
+    """Whether a path under the working directory is in its `scratch/`, as a run names it."""
+    parts = PurePosixPath(str(name).removeprefix("/work/")).parts
+    return bool(parts) and parts[0].lower() == SCRATCH
+
+
 def walk_plain(source: Path, skip_made: bool = False) -> list[Path]:
-    """The directory's regular files, as paths under it: never a link, to a file or a folder."""
+    """The directory's regular files, as paths under it: never a link, to a file or a folder.
+    `skip_made` leaves out what runs make and the run's `scratch/`: what a clean run starts from."""
     found: list[Path] = []
     for root, folders, files in os.walk(source, followlinks=False):
         here = Path(root)
+        top = here == source
         folders[:] = sorted(
             f
             for f in folders
-            if not (here / f).is_symlink() and not (skip_made and f.lower() in MADE)
+            if not (here / f).is_symlink()
+            and not (skip_made and (f.lower() in MADE or (top and f.lower() == SCRATCH)))
         )
         for name in sorted(files):
             path = here / name
@@ -161,10 +175,11 @@ def content_hash(name: str, data: bytes) -> str:
 
 
 def geometry_hashes(directory: Path) -> dict[str, str]:
-    """Each piece of geometry under a folder, by what it holds: what a pick is held to."""
+    """Each piece of geometry under a folder, by what it holds: what a pick is held to. A file in
+    `scratch/` isn't the part, so a copy kept there can't hold a pick for a part that changed."""
     found: dict[str, str] = {}
     for name in walk_plain(directory):
-        if name.suffix.lower() in HASHED:
+        if name.suffix.lower() in HASHED and not in_scratch(name):
             found[str(name)] = content_hash(str(name), read_bytes_inside(directory, str(name)))
     return found
 
