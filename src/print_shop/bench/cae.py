@@ -47,6 +47,18 @@ def tidy_solve(fea: Any) -> None:
         shutil.rmtree(folder, ignore_errors=True)
 
 
+def first_to_go() -> None:
+    """In a solver's own process, before it starts: it's the first the kernel stops where the
+    container runs out of memory (mqucifer/print-shop#301), not the command that started it,
+    which can then say so, and read the same mesh another way. Any process may raise its own
+    `oom_score_adj`; where there's none, as off Linux, nothing changes."""
+    try:
+        with open("/proc/self/oom_score_adj", "w") as score:
+            score.write("1000")
+    except OSError:
+        pass
+
+
 def ccx_one_thread(fea: Any) -> None:
     """CalculiX on one thread, where FreeCAD's own run starts it on as many as the host has
     CPUs, not the container's 2 (mqucifer/print-shop#295): its solver's memory grows with
@@ -62,6 +74,7 @@ def ccx_one_thread(fea: Any) -> None:
         capture_output=True,
         env={**os.environ, "OMP_NUM_THREADS": "1"},
         check=False,
+        preexec_fn=first_to_go,
     )
     fea.ccx_stdout = done.stdout.decode(errors="replace")
     fea.ccx_stderr = done.stderr.decode(errors="replace")

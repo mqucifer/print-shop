@@ -242,7 +242,15 @@ def run(
         command = [CAE_PYTHON, "-c", start, *args]
     else:
         command = ["python", *args] if python else bench_command(args)
-    argv = container(work, command, name, image=image or (IMAGE if python else image_for(args)))
+    # The command's own limit, so a command that can see it coming stops before it and says
+    # where it got to (`load` in two passes, mqucifer/print-shop#301).
+    argv = container(
+        work,
+        command,
+        name,
+        image=image or (IMAGE if python else image_for(args)),
+        env={"BENCH_TIMEOUT": str(timeout)},
+    )
     try:
         done = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False)
     except subprocess.TimeoutExpired:

@@ -314,11 +314,32 @@ class _Model:
     """The joined parts in one FreeCAD document, meshed and solved once."""
 
     def __init__(
-        self, assembly: Assembly, placed: list[Any], args: Any, size: float, straight: bool = False
+        self,
+        assembly: Assembly,
+        placed: list[Any],
+        args: Any,
+        size: float,
+        straight: bool = False,
+        two_pass: bool = False,
+        spread: bool = True,
     ) -> None:
         self.assembly, self.placed, self.args, self.size = assembly, placed, args, size
         #: Whether its second-order elements are straight-sided (mqucifer/print-shop#295).
         self.straight = straight
+        #: Whether, where CalculiX's direct solver meets the container's memory, it's solved
+        #: again by its iterative one and corrected (`_iterated`): in two passes only
+        #: (mqucifer/print-shop#301). None, or what the direct solver met, once it has.
+        self.two_pass = two_pass
+        #: Whether gmsh spreads a small element's size from the faces' edges across them, as
+        #: it does unless told: the first of two passes isn't, so its bores' squares are
+        #: meshed at --mesh and no finer round them (mqucifer/print-shop#301).
+        self.spread = spread
+        self.iterated: str | None = None
+        #: Each node's axes held, as CalculiX is told them, by `_add_to`.
+        self.constrained: dict[int, set[int]] = {}
+        #: The solids each part's own weight is taken from, where they aren't `placed`: in
+        #: the first of two passes, the parts as they are, not with their bores squared.
+        self.weighed: list[Any] = placed
         self.toward = np.zeros(3)
         self.toward[AXES.index(args.toward[1])] = 1.0 if args.toward[0] == "+" else -1.0
 
@@ -395,6 +416,8 @@ class _Model:
         elif not held:
             low = self.shape.BoundBox.ZMin
             held = [Held("z", low, "standing")]
+        #: The planes it's held by, as read: two passes hold each part by them alone.
+        self.planes = held
         self.fixed: list[Any] = []
         self.standing: dict[int, list[Any]] = {}
         self.held_parts: set[str] = set()
@@ -494,6 +517,22 @@ class _Model:
         doc.recompute()
         began = time.time()
         tools = GmshTools(mesh)
+        if not self.spread:
+            written = tools.write_geo
+
+            def write_geo() -> None:
+                written()
+                path = Path(tools.temp_file_geo)
+                text = path.read_text()
+                if "// meshing" not in text:
+                    raise NoAnswer("FreeCAD's gmsh input has no `// meshing` to set its sizes by")
+                path.write_text(
+                    text.replace(
+                        "// meshing", "Mesh.MeshSizeExtendFromBoundary = 0;\n// meshing", 1
+                    )
+                )
+
+            tools.write_geo = write_geo
         tools.create_mesh()
         tidy_mesh(tools)
         self.mesh_s = round(time.time() - began, 2)
@@ -515,7 +554,7 @@ class _Model:
         fea.update_objects()
         fea.setup_working_dir(tempfile.mkdtemp(prefix="load-"))
         fea.setup_ccx()
-        wrong = fea.check_prerequisites()
+        wrong = self._prerequisites(fea.check_prerequisites())
         if wrong:
             raise NoAnswer(f"the solve couldn't be set up: {wrong[:300]}")
         began = time.time()
@@ -538,6 +577,14 @@ class _Model:
                 "turned inside out, as one with a curved side on a small hole or a tight round "
                 "can be. Give a finer --mesh"
             )
+        if (not results or not results[0].NodeStrainXX) and self.two_pass:
+            full = memory_met(kills)
+            if full is not None:
+                self._iterated(fea, analysis, full)
+                tidy_solve(fea)
+                self.solve_s = round(time.time() - began, 2)
+                self._balance()
+                return
         if not results or not results[0].NodeStrainXX:
             tidy_solve(fea)
             full = memory_met(kills)
@@ -548,20 +595,105 @@ class _Model:
                 f"{self.size:g} mm: it may have run out of the container's memory. Give a "
                 "coarser --mesh"
             )
-        result = results[0]
-        self.row = {n: i for i, n in enumerate(result.NodeNumbers)}
-        count = len(result.NodeNumbers)
-        self.strain, self.stress = np.zeros((count, 3, 3)), np.zeros((count, 3, 3))
-        for (i, j), name in {
-            (0, 0): "XX", (1, 1): "YY", (2, 2): "ZZ", (0, 1): "XY", (0, 2): "XZ", (1, 2): "YZ"
-        }.items():  # fmt: skip
-            self.strain[:, i, j] = self.strain[:, j, i] = getattr(result, f"NodeStrain{name}")
-            self.stress[:, i, j] = self.stress[:, j, i] = getattr(result, f"NodeStress{name}")
-        self.moved = np.array([[v.x, v.y, v.z] for v in result.DisplacementVectors])
-        self.points = np.array([self.nodes[n] for n in result.NodeNumbers])
+        self.row, self.strain, self.stress, self.moved = _arrays(results[0])
+        self.points = np.array([self.nodes[n] for n in results[0].NodeNumbers])
         self.reaction, self.held_force = _reaction(os.path.splitext(fea.inp_file_name)[0] + ".dat")
         tidy_solve(fea)
         self._balance()
+
+    def _iterated(self, fea: Any, analysis: Any, limit: int) -> None:
+        """Solved by CalculiX's iterative solver, where its direct one met the container's
+        memory (mqucifer/print-shop#301), and corrected: the iterative solver stops at a fixed
+        residual, which moves a strain by a percent or so, so what's left unbalanced at each
+        node, the load less what the elements carry (`element_forces`), is solved for again and
+        added, until it's under `RESIDUAL` of the load. Each solve is linear, so the movement,
+        the strain, the stress and the held faces' reaction add."""
+        path = Path(fea.inp_file_name)
+        text = path.read_text()
+        static = re.search(r"^\*STATIC\s*$", text, re.M)
+        if static is None:
+            raise NoAnswer("FreeCAD's CalculiX input has no *STATIC step to solve iteratively")
+        text = text[: static.start()] + ITERATIVE + text[static.end() :]
+        loaded = sum(float(np.linalg.norm(p)) for p in self.pushed.values())
+        runs: list[float] = []
+        for run in range(1 + CORRECTIONS):
+            job = path if run == 0 else path.with_name(f"{path.stem}_{run}.inp")
+            job.write_text(text)
+            fea.inp_file_name = str(job)
+            ccx_one_thread(fea)
+            fea.load_results()
+            results = [o for o in analysis.Group if o.isDerivedFrom("Fem::FemResultObject")]
+            if not results or not results[-1].NodeStrainXX:
+                raise self._too_big(limit)
+            row, strain, stress, moved = _arrays(results[-1])
+            reaction, held = _reaction(str(job.with_suffix(".dat")))
+            if run == 0:
+                self.row, self.strain, self.stress, self.moved = row, strain, stress, moved
+                self.points = np.array([self.nodes[n] for n in results[-1].NodeNumbers])
+                self.reaction, self.held_force = reaction, held
+            else:
+                # The same mesh, its nodes taken in the first solve's order.
+                same = [row[n] for n in self.row]
+                self.strain += strain[same]
+                self.stress += stress[same]
+                self.moved += moved[same]
+                self.reaction = self.reaction + reaction
+                for node, force in held.items():
+                    self.held_force[node] = self.held_force.get(node, 0) + force
+            for result in results:
+                analysis.Document.removeObject(result.Name)
+            left = self._unbalanced()
+            runs.append(float(np.abs(left).sum()) / loaded if loaded else 0.0)
+            if runs[-1] <= RESIDUAL:
+                break
+            text = _cload(text, left, self.row)
+        self.residuals = runs
+        self.iterated = (
+            f"CalculiX's direct solver met the container's memory, {limit / 2**30:g} GiB, as the "
+            "container's own count of what it stopped for memory says, so it's solved by its "
+            f"iterative solver and corrected {len(runs) - 1} time(s), each time for what was "
+            f"left unbalanced, to {runs[-1]:.1e} of the load"
+        )
+        if runs[-1] > RESIDUAL:
+            raise NoAnswer(
+                f"{self.iterated}: more than the {RESIDUAL:g} it's held to, so nothing is read"
+            )
+
+    def _wired(self) -> np.ndarray:
+        """Each element's nodes as rows, its corners first and then `MIDS`' mid-side nodes.
+        FreeCAD gives them in that order already (SMESH's for a ten-node tetrahedron). The one
+        pass finds each mid-side node by where it lies, as it always has, which on a curved
+        element can take one side's for another's; two passes (mqucifer/print-shop#301) take
+        FreeCAD's order, as correcting an iterative solve needs each element's own stiffness."""
+        ids = self.fem.Volumes
+        wired = np.array([[self.row[n] for n in self.fem.getElementNodes(e)] for e in ids])
+        if self.two_pass:
+            return wired
+        places = self.points[wired]
+        between = np.stack([(places[:, i] + places[:, j]) / 2 for i, j in MIDS], axis=1)
+        apart = np.linalg.norm(between[:, :, None, :] - places[:, None, 4:, :], axis=3)
+        order = apart.argmin(axis=2)
+        return np.concatenate([wired[:, :4], np.take_along_axis(wired[:, 4:], order, axis=1)], 1)
+
+    def _unbalanced(self) -> np.ndarray:
+        """What's left unbalanced at each node, as rows: the load put on it less what the
+        elements carry there, on each axis CalculiX isn't told to hold."""
+        wired = self._wired()
+        material = self.assembly.parts[0].material
+        forces = element_forces(
+            self.points[wired], self.moved[wired], material.modulus_mpa, material.poisson
+        )
+        left = np.zeros((len(self.points), 3))
+        np.add.at(left, wired, -forces)
+        for node, push in self.pushed.items():
+            left[self.row[node]] += push
+        for node, axes in self.constrained.items():
+            left[self.row[node], sorted(axes)] = 0.0
+        return left
+
+    def _prerequisites(self, wrong: str) -> str:
+        """What FreeCAD says is missing before it solves."""
+        return wrong
 
     def _too_big(self, limit: int) -> _Unread:
         """Why the solve met the container's memory (mqucifer/print-shop#295), led by what to
@@ -597,20 +729,14 @@ class _Model:
             f"nothing of the assembly is read, as it's past what the container's memory solves: "
             f"{to_do}. {evidence}. Every part, joint and bolt of it is left unread",
             evidence,
+            memory=True,
         )
 
     def _balance(self) -> None:
         """The force each part's elements put on each node, and what's put on each part's
         nodes from outside: its loads and its held faces' reaction."""
         names = [p.name for p in self.assembly.parts]
-        ids = self.fem.Volumes
-        wired = np.array([[self.row[n] for n in self.fem.getElementNodes(e)] for e in ids])
-        places = self.points[wired]
-        # The mid-side nodes in `MIDS`' order, each found by where it lies.
-        between = np.stack([(places[:, i] + places[:, j]) / 2 for i, j in MIDS], axis=1)
-        apart = np.linalg.norm(between[:, :, None, :] - places[:, None, 4:, :], axis=3)
-        order = apart.argmin(axis=2)
-        wired = np.concatenate([wired[:, :4], np.take_along_axis(wired[:, 4:], order, axis=1)], 1)
+        wired = self._wired()
         material = self.assembly.parts[0].material
         forces = element_forces(
             self.points[wired], self.moved[wired], material.modulus_mpa, material.poisson
@@ -634,6 +760,37 @@ class _Model:
                 if node in self.held_force:
                     self.outside[name][self.row[node]] += self.held_force.pop(node)
         # A pin's reaction, on no held face of its own: it's nothing where the load is square.
+
+    def tractions(self) -> dict[str, dict[str, np.ndarray]]:
+        """What each part's neighbours put on it, for the second of two passes
+        (mqucifer/print-shop#301): on each triangle of every face it meets another part by, the
+        push per mm² there, and all of it as one force, and its moment about the origin. It's
+        each node's own balance, what the part's elements carry less what's put on it from
+        outside, shared between the triangles the node is a corner or a side of; so what its
+        neighbours put on a part balances its loads and its held faces' reaction exactly."""
+        found: dict[str, dict[str, np.ndarray]] = {}
+        for name in [p.name for p in self.assembly.parts]:
+            faces = [f for pair, met in self.met.items() if name in pair for f in met]
+            triangles = [t for f in faces for t in self._triangles(f)]
+            if not triangles:
+                continue
+            carried = self.within[name] - self.outside[name]
+            count = np.zeros(len(self.points))
+            for nodes, _, _ in triangles:
+                np.add.at(count, [self.row[n] for n in nodes], 1)
+            centres, pushes = [], []
+            for nodes, area, centre in triangles:
+                rows = [self.row[n] for n in nodes]
+                centres.append(centre)
+                pushes.append((carried[rows] / count[rows][:, None]).sum(axis=0) / area)
+            met_at = np.flatnonzero(count)
+            found[name] = {
+                "centres": np.array(centres),
+                "pushes": np.array(pushes),
+                "force": carried[met_at].sum(axis=0),
+                "moment": np.cross(self.points[met_at], carried[met_at]).sum(axis=0),
+            }
+        return found
 
     def _owned(self, wired: np.ndarray, row: dict[int, int], points: np.ndarray) -> np.ndarray:
         """Which part each element is in, as a row of flags for each part: `wired` is each
@@ -679,6 +836,13 @@ class _Model:
             if part is None:
                 raise NoAnswer("an element of the mesh is in none of the parts")
             owned[part, reached] = True
+        parts = self.assembly.parts
+        empty = [p.name for p, mine in zip(parts, owned, strict=True) if not mine.any()]
+        if empty:
+            raise NoAnswer(
+                f"the mesh gives {', '.join(empty)} no element of its own: it isn't parted from "
+                "the parts it meets at the faces they meet by, so nothing of it is read"
+            )
         return owned
 
     def _triangles(self, face: Any) -> list[tuple[tuple[int, ...], float, np.ndarray]]:
@@ -695,15 +859,20 @@ class _Model:
     def _patches(self) -> None:
         """Each place `--at` names as the triangles of the surface within `--over` of it, and
         the force on each of their nodes."""
+
+        each = self.args.weight * G / len(self.args.at)
+        self._put([(tuple(float(c) for c in place), each) for place in self.args.at])
+
+    def _put(self, places: list[tuple[tuple[float, ...], float]]) -> None:
+        """Each place's weight, `each` N, spread over the surface within `--over` of it."""
         import FreeCAD as App
         import Part
 
         names = [p.name for p in self.assembly.parts]
         outer = [f for f in self.shape.Faces if not any(f.isSame(b) for b in self.between)]
-        each = self.args.weight * G / len(self.args.at)
         self.loads: list[dict[str, Any]] = []
         self.pushed: dict[int, np.ndarray] = {}
-        for place in self.args.at:
+        for place, each in places:
             point = np.asarray(place, dtype=float)
             vertex = Part.Vertex(App.Vector(*place))
             near = [(f.distToShape(vertex)[0], f) for f in outer]
@@ -763,7 +932,7 @@ class _Model:
         volume = np.abs(np.linalg.det(corners[:, 1:] - corners[:, :1])) / 6
         self.loads = []
         self.pushed = {}
-        for k, (part, solid) in enumerate(zip(self.assembly.parts, self.placed, strict=True)):
+        for k, (part, solid) in enumerate(zip(self.assembly.parts, self.weighed, strict=True)):
             if part.name == self.args.lift:
                 continue
             grams = solid.Volume * part.material.density_g_cm3 / 1000
@@ -801,6 +970,29 @@ class _Model:
             self._weights()
         else:
             self._patches()
+        self._write(path)
+
+    def _pins(self, held: list[int]) -> tuple[str, list[int]]:
+        """What stops the body moving that its held faces don't, as CalculiX's lines, and the
+        nodes they hold beside its held faces' own."""
+        if self.fixed:
+            return "", []
+        # Standing holds it square to each plane only. Two nodes stop the rest: one held
+        # along the other axes, and the furthest from it held from turning about it. With
+        # a load square to the plane they carry nothing.
+        free = [a for a in range(3) if a not in self.standing]
+        first = held[0]
+        last = max(held, key=lambda n: float(np.linalg.norm(self.nodes[n] - self.nodes[first])))
+        lines = "*BOUNDARY\n" + "".join(f"{first},{a + 1},{a + 1}\n" for a in free)
+        self.constrained.setdefault(first, set()).update(free)
+        if len(free) == 2:
+            apart = np.abs(self.nodes[last] - self.nodes[first])
+            steer = min(free, key=lambda a: float(apart[a]))
+            lines += f"{last},{steer + 1},{steer + 1}\n"
+            self.constrained.setdefault(last, set()).add(steer)
+        return lines, []
+
+    def _write(self, path: str) -> None:
         held = sorted(
             {
                 n
@@ -808,24 +1000,22 @@ class _Model:
                 for n in self.fem.getNodesByFace(f)
             }
         )
+        for face in self.fixed:
+            for node in self.fem.getNodesByFace(face):
+                self.constrained.setdefault(node, set()).update(range(3))
+        for axis, faces in self.standing.items():
+            for face in faces:
+                for node in self.fem.getNodesByFace(face):
+                    self.constrained.setdefault(node, set()).add(axis)
         step = "*CLOAD\n" + "".join(
             f"{node},{axis + 1},{push[axis]:.9g}\n"
             for node, push in sorted(self.pushed.items())
             for axis in range(3)
             if abs(push[axis]) > 0
         )
-        if not self.fixed:
-            # Standing holds it square to each plane only. Two nodes stop the rest: one held
-            # along the other axes, and the furthest from it held from turning about it. With
-            # a load square to the plane they carry nothing.
-            free = [a for a in range(3) if a not in self.standing]
-            first = held[0]
-            last = max(held, key=lambda n: float(np.linalg.norm(self.nodes[n] - self.nodes[first])))
-            step += "*BOUNDARY\n" + "".join(f"{first},{a + 1},{a + 1}\n" for a in free)
-            if len(free) == 2:
-                apart = np.abs(self.nodes[last] - self.nodes[first])
-                steer = min(free, key=lambda a: float(apart[a]))
-                step += f"{last},{steer + 1},{steer + 1}\n"
+        pins, more = self._pins(held)
+        step += pins
+        held = sorted({*held, *more})
         step += "*NODE PRINT, NSET=HELDALL, TOTALS=YES\nRF\n"
         text = Path(path).read_text()
         start, outputs = text.find("\n*STEP"), text.find("** Outputs")
@@ -982,6 +1172,43 @@ def _reaction(path: str) -> tuple[np.ndarray, dict[int, np.ndarray]]:
     return np.array([float(v) for v in total.groups()]), nodes
 
 
+def _arrays(result: Any) -> tuple[dict[int, int], np.ndarray, np.ndarray, np.ndarray]:
+    """A CalculiX result as each node's row, and its strain, stress and movement by row."""
+    row = {n: i for i, n in enumerate(result.NodeNumbers)}
+    count = len(result.NodeNumbers)
+    strain, stress = np.zeros((count, 3, 3)), np.zeros((count, 3, 3))
+    for (i, j), name in {
+        (0, 0): "XX", (1, 1): "YY", (2, 2): "ZZ", (0, 1): "XY", (0, 2): "XZ", (1, 2): "YZ"
+    }.items():  # fmt: skip
+        strain[:, i, j] = strain[:, j, i] = getattr(result, f"NodeStrain{name}")
+        stress[:, i, j] = stress[:, j, i] = getattr(result, f"NodeStress{name}")
+    moved = np.array([[v.x, v.y, v.z] for v in result.DisplacementVectors])
+    return row, strain, stress, moved
+
+
+#: CalculiX's iterative solver, for a mesh its direct one can't hold (mqucifer/print-shop#301).
+ITERATIVE = "*STATIC, SOLVER=ITERATIVE CHOLESKY"
+#: It's corrected at most this many times, until what's left unbalanced, summed over the nodes,
+#: is under this share of the load summed the same way.
+CORRECTIONS = 4
+RESIDUAL = 1e-7
+
+
+def _cload(text: str, left: np.ndarray, row: dict[int, int]) -> str:
+    """A CalculiX input with its loads replaced by what's left unbalanced at each node."""
+    start = text.find("*CLOAD\n")
+    end = text.find("\n*", start + 1)
+    if start < 0 or end < 0:
+        raise NoAnswer("the CalculiX input has no *CLOAD to correct")
+    lines = "".join(
+        f"{node},{axis + 1},{left[r, axis]:.12g}\n"
+        for node, r in sorted(row.items())
+        for axis in range(3)
+        if left[r, axis] != 0
+    )
+    return text[:start] + "*CLOAD\n" + lines + text[end + 1 :]
+
+
 #: The container's own cgroup, where the kernel counts what it stopped for memory.
 CGROUP = Path("/sys/fs/cgroup")
 
@@ -1060,9 +1287,12 @@ class _Unread(NoAnswer):
     solves. A part that names its glass band is read again without it (mqucifer/print-shop#295).
     `evidence` is what it met, without what to do."""
 
-    def __init__(self, said: str, evidence: str | None = None) -> None:
+    def __init__(self, said: str, evidence: str | None = None, memory: bool = False) -> None:
         super().__init__(said)
         self.evidence = said if evidence is None else evidence
+        #: Whether it met the container's memory, which two passes read within
+        #: (mqucifer/print-shop#301).
+        self.memory = memory
 
 
 class _Curved(NoAnswer):
@@ -1070,7 +1300,15 @@ class _Curved(NoAnswer):
     inside out, or none at all: it's meshed again with them straight."""
 
 
-def _solved(assembly: Assembly, placed: list[Any], args: Any, size: float) -> dict[str, Any]:
+def _solved(
+    assembly: Assembly,
+    placed: list[Any],
+    args: Any,
+    size: float,
+    two_pass: bool = False,
+    weighed: list[Any] | None = None,
+    spread: bool = True,
+) -> dict[str, Any]:
     """One solve at one mesh, and everything read from it. Where gmsh can't curve every
     element's sides onto the parts' faces without turning one inside out, as on a traced
     glass frame's many small curves and sharp corners (mqucifer/print-shop#295), it's meshed
@@ -1080,14 +1318,20 @@ def _solved(assembly: Assembly, placed: list[Any], args: Any, size: float) -> di
 
     # One thread, so the same parts are the same mesh, and the same figures, every time.
     App.ParamGet("User parameter:BaseApp/Preferences/Mod/Fem/Gmsh").SetInt("NumOfThreads", 1)
+    def model(straight: bool) -> _Model:
+        made = _Model(assembly, placed, args, size, straight, two_pass, spread)
+        if weighed is not None:
+            made.weighed = weighed
+        return made
+
     try:
         doc = App.newDocument("Load")
         with _quiet():
-            return _read_solved(assembly, _Model(assembly, placed, args, size), doc, size)
+            return _read_solved(assembly, model(False), doc, size)
     except _Curved as curved:
         doc = App.newDocument("Load")
         with _quiet():
-            found = _read_solved(assembly, _Model(assembly, placed, args, size, True), doc, size)
+            found = _read_solved(assembly, model(True), doc, size)
         found["straight"] = str(curved)
         return found
 
@@ -1118,6 +1362,9 @@ def _read_solved(assembly: Assembly, model: _Model, doc: Any, size: float) -> di
             "mesh_s": model.mesh_s,
             "solve_s": model.solve_s,
             "straight": None,
+            "iterated": model.iterated,
+            "planes": model.planes,
+            **({"tractions": model.tractions()} if model.two_pass else {}),
         }
     finally:
         App.closeDocument(doc.Name)
@@ -1144,17 +1391,49 @@ def _bolts(joint: Joint, read: dict[str, Any], force: np.ndarray, moment: np.nda
 
 
 def run(args: Any, report: Report) -> None:
-    """The assembly read whole; or, where it can't be, for memory or a mesh, and parts of it
-    name their glass band, read again with each band left out, as a lower bound
-    (mqucifer/print-shop#295). The reply leads with that, names the parts and says why."""
+    """The assembly read whole; or, where it meets the container's memory, in two passes
+    (mqucifer/print-shop#301); or, where neither reads it, and parts of it name their glass
+    band, read again with each band left out, as a lower bound (mqucifer/print-shop#295). The
+    reply leads with that, names the parts and says why."""
+    try:
+        _read(args, report)
+    finally:
+        # Two passes' clock rings no more once there's an answer.
+        clock = _clock["now"]
+        if clock is not None:
+            clock.stop()
+        _clock["now"] = None
+
+
+def _read(args: Any, report: Report) -> None:
+    if getattr(args, "parts", False):
+        _run(args, report, two_pass="asked for with --parts")
+        return
     try:
         _run(args, report)
         return
     except _Unread as whole:
-        banded = [p.name for p in read(args.assembly).parts if p.band is not None]
-        if not banded:
+        unread = whole
+    failed: NoAnswer | None = None
+    if unread.memory:
+        # Read in two passes, inside the container's limits as they are
+        # (mqucifer/print-shop#301), before any part is read without its band.
+        from .load_parts import OutOfTime
+
+        _give_back()
+        report.again()
+        try:
+            _run(args, report, two_pass="the whole, read at once, met the container's memory")
+            report.numbers["two_passes"]["whole_met"] = unread.evidence
+            return
+        except OutOfTime:
             raise
-        why = whole.evidence
+        except NoAnswer as again:
+            failed = again
+    banded = [p.name for p in read(args.assembly).parts if p.band is not None]
+    if not banded:
+        raise failed or unread
+    why = unread.evidence + (f"; and in two passes, {failed}" if failed else "")
     refused = band_refused(args.lift, banded, why)
     if refused:
         raise NoAnswer(refused)
@@ -1197,7 +1476,9 @@ def band_refused(lift: str | None, banded: list[str], why: str) -> str | None:
     )
 
 
-def _run(args: Any, report: Report, without_bands: bool = False) -> None:
+def _run(
+    args: Any, report: Report, without_bands: bool = False, two_pass: str | None = None
+) -> None:
     freecad("load")
     args.lift = getattr(args, "lift", None)
     if args.lift is not None and (args.weight is not None or args.at):
@@ -1284,13 +1565,38 @@ def _run(args: Any, report: Report, without_bands: bool = False) -> None:
             )
             return
     size = _mesh_size(placed, args.mesh)
-    fine = _solved(assembly, placed, args, size)
-    coarse = _solved(assembly, placed, args, round(size * COARSER, 3))
+    if two_pass is not None:
+        # Two passes (mqucifer/print-shop#301): the first is the whole, read as the one pass
+        # reads it but for its bolts' bores, and the parts are read in the second.
+        # Here, as it builds on this module's own model.
+        from . import load_parts
+
+        clock = load_parts.Clock(report.started)
+        _clock["now"] = clock
+        clock.start()
+        try:
+            fine, coarse, firsts = load_parts.first(assembly, placed, args, size, clock)
+            reads, rough, seconds = load_parts.second(assembly, placed, args, size, fine, clock)
+        except BaseException:
+            clock.stop()
+            raise
+        fine = {
+            **fine,
+            "whole_parts": fine["parts"],
+            "parts": {n: r["part"] for n, r in reads.items()},
+        }
+        coarse = {**coarse, "parts": {n: r["part"] for n, r in rough.items()}}
+    else:
+        _clock["now"] = None
+        fine = _solved(assembly, placed, args, size)
+        coarse = _solved(assembly, placed, args, round(size * COARSER, 3))
     force = float(sum(np.linalg.norm(one["force"]) for one in fine["raw_loads"]))
     meshed = (
         f"a mesh of at most {size:g} mm ({fine['nodes']} nodes, {fine['elements']} elements, "
         f"meshed in {fine['mesh_s']} s and solved in {fine['solve_s']} s)"
         + _straight_said(fine)
+        if two_pass is None
+        else "in two passes, each one's meshes below"
     )
     start = (
         f"the assembly: {len(assembly.parts)} part(s) and {len(assembly.joints)} joint(s) from "
@@ -1319,6 +1625,9 @@ def _run(args: Any, report: Report, without_bands: bool = False) -> None:
             f"--toward {args.toward}, shared between {len(args.at)} place(s), each over the "
             f"surface within {args.over:g} mm of it; {meshed}"
         )
+    if two_pass is not None:
+        load_parts.pass_lines(report, firsts, seconds, two_pass)
+        report.numbers["two_passes"] = {"why": two_pass, "first": firsts, "second": seconds}
     off = float(np.linalg.norm(fine["reaction"] + force * fine["toward"]))
     if off > REACTION * force:
         raise NoAnswer(
@@ -1338,13 +1647,24 @@ def _run(args: Any, report: Report, without_bands: bool = False) -> None:
     report.numbers["held"] = fine["held"]
     fails: list[str] = []
     apart: list[str] = []
-    _parts(report, fine, coarse, fails, apart)
+    lines, seconds_said = len(report.facts), len(report.second_check)
+    _parts(
+        report, fine, coarse, fails, apart, 0.0 if two_pass is None else load_parts.BAND
+    )
+    if two_pass is not None:
+        _tag(report, lines, seconds_said, "pass 2, on its own: ", ("the part ",))
+        lines, seconds_said = len(report.facts), len(report.second_check)
     _joints(assembly, args, report, fine, coarse, fails, apart, (ways, placed, catches, plays))
     unread = [n for n, j in report.numbers["joints"].items() if j.get("insert_unread")]
     glued = [n for n, j in report.numbers["joints"].items() if j.get("glue_unread")]
     report.numbers["loads"] = fine["loads"]
     for one, other in zip(fine["loads"], coarse["loads"], strict=True):
         one["coarse_moves_mm"] = other["moves_mm"]
+        if two_pass is not None:
+            # Read on the whole, without its bolts' bores meshed round: taken on to a finer
+            # mesh, so it's no less than one pass reads (mqucifer/print-shop#301).
+            one["mesh_moves_mm"] = one["moves_mm"]
+            one["moves_mm"] = load_parts.finer(one["moves_mm"], other["moves_mm"])
         if one["patch_mm2"] is None:
             report.line(
                 f"the part {one['part']} hangs by its own weight: {one['volume_mm3']:.1f} mm³ "
@@ -1356,10 +1676,21 @@ def _run(args: Any, report: Report, without_bands: bool = False) -> None:
             f"the place at {_xyz(one['at'])}, on {one['part']}: it moves {one['moves_mm']:.3f} mm "
             f"{args.toward} under its {np.linalg.norm(one['force_n']):.2f} N, spread over "
             f"{one['patch_mm2']:.1f} mm² whose middle is {_xyz(one['middle'])}"
+            + (
+                f" ({one['mesh_moves_mm']:.3f} mm on the mesh and {one['coarse_moves_mm']:.3f} "
+                "on the coarser one)"
+                if "mesh_moves_mm" in one
+                else ""
+            )
         )
     report.numbers["moves_mm"] = moves_most = max(one["moves_mm"] for one in fine["loads"])
+    if two_pass is not None:
+        fine["most_moves_mm"] = load_parts.finer(fine["most_moves_mm"], coarse["most_moves_mm"])
+        report.line(load_parts.FINER_SAID)
     report.numbers["most_moves_mm"] = fine["most_moves_mm"]
     report.numbers["most_moves_at"] = fine["most_moves_at"]
+    if two_pass is not None:
+        load_parts.checks(report, fine, coarse, reads, rough, force, apart)
     report.line(
         f"the most any point moves is {fine['most_moves_mm']:.3f} mm, at "
         f"{_xyz(fine['most_moves_at'])}, as most_moves_mm; the loaded place that moves most, "
@@ -1379,6 +1710,13 @@ def _run(args: Any, report: Report, without_bands: bool = False) -> None:
         f"the held faces' reaction, as CalculiX sums it: {_xyz(fine['reaction'])} N, against the "
         f"{force:.4g} N put on --toward {args.toward}, {off:.4f} N apart"
     )
+    if two_pass is not None:
+        clock.stop()
+        _tag(
+            report, lines, seconds_said, "pass 1, the whole: ",
+            ("the joint ", "its ", "the place at ", "the part ", "the most any point",
+             "the same solve", "the held faces'"),
+        )  # fmt: skip
     sources = sorted({p.material.source for p in assembly.parts})
     report.line("the limits are from " + "; ".join(sources))
     if args.lift is not None:
@@ -1444,14 +1782,61 @@ def _run(args: Any, report: Report, without_bands: bool = False) -> None:
         )
 
 
+def _give_back() -> None:
+    """What the solve that met the container's memory held, given back to the kernel: FreeCAD's
+    mesh of it is freed once its document's closed, but the C library keeps the freed memory
+    for the process unless told to return it (mqucifer/print-shop#301)."""
+    import ctypes
+    import gc
+
+    gc.collect()
+    with contextlib.suppress(OSError, AttributeError):
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+
+
+#: Two passes' clock (mqucifer/print-shop#301), or None in one pass, where nothing stops early.
+_clock: dict[str, Any] = {"now": None}
+
+
+def _in_time(kind: str, what: str) -> None:
+    """In two passes, stop before a step that wouldn't end inside the container's time."""
+    clock = _clock["now"]
+    if clock is not None:
+        clock.check(kind, what)
+
+
+def _timed(kind: str, seconds: float) -> None:
+    clock = _clock["now"]
+    if clock is not None:
+        clock.time(kind, seconds)
+
+
+def _tag(report: Report, lines: int, seconds: int, tag: str, starts: tuple[str, ...]) -> None:
+    """Which pass each figure is from, put before each line since `lines` and each second
+    check since `seconds` that starts with one of `starts` (mqucifer/print-shop#301)."""
+    report.facts[lines:] = [
+        tag + f if f.startswith(starts) else f for f in report.facts[lines:]
+    ]
+    report.second_check[seconds:] = [
+        tag + f if f.startswith(starts) else f for f in report.second_check[seconds:]
+    ]
+
+
 def _share(value: float, against: float) -> str:
     return f"{100 * abs(value - against) / abs(against):.1f}%" if abs(against) > 1e-12 else "n/a"
 
 
 def _parts(
-    report: Report, fine: dict[str, Any], coarse: dict[str, Any], fails: list[str], apart: list[str]
+    report: Report,
+    fine: dict[str, Any],
+    coarse: dict[str, Any],
+    fails: list[str],
+    apart: list[str],
+    band: float = 0.0,
 ) -> None:
-    """Each part against its material: pulled across its layers, and stretched any way."""
+    """Each part against its material: pulled across its layers, and stretched any way. In
+    two passes (mqucifer/print-shop#301), a strain within `band` of its share below its limit
+    is either side of it."""
     report.numbers["parts"] = fine["parts"]
     for name, one in fine["parts"].items():
         other = coarse["parts"][name]
@@ -1485,6 +1870,12 @@ def _parts(
                     f"the part {name} is {what} by {said(value, limit)}% on the mesh and "
                     f"{said(other[key], limit)}% on the coarser one, either side of its "
                     f"{limit:g}% limit"
+                )
+            elif band and not over(value, limit) and over(value * (1 + band), limit):
+                apart.append(
+                    f"pass 2 reads the part {name} {what} by {said(value, limit)}%, within the "
+                    f"{100 * band:g}% two passes are held to of its {limit:g}% limit: read it "
+                    "in one pass, or give it more margin"
                 )
             elif over(value, limit):
                 fails.append(
@@ -1893,6 +2284,8 @@ def _through(
                     )
             # The plastic round the hole, solved by itself under this bolt.
             if bolt["pull_n"] > NOTHING * force or leans > NOTHING * force:
+                _in_time("bolt", f"the reading round {where}")
+                began = time.time()
                 with _quiet():
                     solves = [
                         load_through.round_bolt(
@@ -1900,6 +2293,7 @@ def _through(
                         )
                         for coarser in (1.0, COARSER)
                     ]  # fmt: skip
+                _timed("bolt", time.time() - began)
                 fine, rough = solves
                 end["round"] = {**fine, "coarse": rough}
                 if "wall_share" in fine and leans > NOTHING * force:

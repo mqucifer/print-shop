@@ -1631,50 +1631,97 @@ def test_four_posts_turned_round_a_table_s_middle_each_have_their_latch_named(
 
 
 @pytest.mark.assembly
-def test_a_table_of_24_parts_and_56_bolts_says_the_limit_it_met_and_what_is_left(
+def test_a_table_of_24_parts_and_56_bolts_is_read_in_two_passes_until_the_container_s_time(
     cae: Any,
 ) -> None:
-    """mqucifer/print-shop#295: 24 parts held by 56 M5 through-bolts, round figures only. gmsh
-    sizes each bore by its curvature, 12 elements a turn, whatever --mesh is, so the bores make
-    most of a mesh past what CalculiX solves in the container's 3 GiB. The reply leads with
-    what to do, then says what it met, from the container's own count of what it held, that a
-    coarser --mesh leaves those elements as they are, and that nothing is read: it doesn't tell
-    anyone to coarsen the mesh."""
+    """mqucifer/print-shop#295's table, 24 parts held by 56 M5 through-bolts, round figures only,
+    under 20 kg. Whole, gmsh sizes each bore by its curvature, 12 elements a turn, past what
+    CalculiX solves in the container's 3 GiB. So it's read in two passes (mqucifer/print-shop#301),
+    inside the 3 GiB: the whole with each bore squared, then each part on its own. That's past
+    the container's 600 s with every bolt read round its hole as well, so the two passes stop
+    themselves before the limit and say which pass they were in and what was read, never
+    killed and never silent. Read with the limit lifted, in `~/print-shop/proofs/ux-301/`, it's
+    read to the end."""
     answer = cae(
         "load", "large/table.json", "--weight", "20",
         "--at", "100,100,310", "--at", "300,100,310", "--at", "100,300,310", "--at", "300,300,310",
     )  # fmt: skip
     assert answer.verdict == "NO ANSWER", answer.text
     why = answer.record["why"]
-    # What to do first, then what it met.
-    assert why.startswith("nothing of the assembly is read, as it's past what the container's "
-                          "memory solves: name each glass frame's `band`"), why  # fmt: skip
-    assert "it met the container's memory, 3 GiB, and the kernel stopped it there" in why, why
-    assert "a coarser --mesh leaves most of those as they are" in why
-    assert "Every part, joint and bolt of it is left unread" in why
-    assert "Give a coarser --mesh" not in why
-    ran = answer.record["ran"]
-    assert int(ran["memory_peak"]) == int(ran["memory_max"]) == 3 * 1024**3
+    assert why.startswith(f"two passes met the container's time, {host.TIMEOUT} s, after "), why
+    assert "the first pass read the whole in" in why, why
+    assert "Nothing is judged on part of an assembly" in why
     assert answer.record["seconds"] < host.TIMEOUT
+    ran = answer.record["ran"]
+    assert int(ran["memory_peak"]) <= int(ran["memory_max"]) == 3 * 1024**3
+
+
+#: The stool pushed sideways at its top (mqucifer/print-shop#295).
+PUSH = ("--weight", "5", "--at", "0,100,154", "--toward", "+x")
+
+
+@pytest.fixture(scope="module")
+def stool(cae: Any) -> dict[str, Answer]:
+    """The stool, and the stool with leg2's bolt left out, each read in one pass and in two
+    (mqucifer/print-shop#301): read once, for the tests below."""
+    return {
+        "one": cae("load", "large/stool.json", *PUSH),
+        "out": cae("load", "large/stool-one-out.json", *PUSH),
+        "one/2": cae("load", "large/stool.json", *PUSH, "--parts"),
+        "out/2": cae("load", "large/stool-one-out.json", *PUSH, "--parts"),
+    }
 
 
 @pytest.mark.assembly
-def test_a_bolt_left_out_reads_its_joint_as_the_one_that_gives_first(cae: Any) -> None:
+def test_a_bolt_left_out_reads_its_joint_as_the_one_that_gives_first(
+    stool: dict[str, Answer],
+) -> None:
     """The control (mqucifer/print-shop#295, the operator's comment there): a stool, a top on
     four legs each held by one M5 through-bolt, its feet fixed, pushed sideways at the top by
     5 kg. Each leg's joint carries a moment, which its bolt holds: `OK`. With leg2's bolt left
     out, its joint is `touching`, and that joint is what gives: it tips open, `FAIL`, named.
     The solve ties every joint's faces as a bolted joint is while its bolts hold, so a bolt
-    left out doesn't change how far anything moves: the loaded place moves the same."""
-    push = ("--weight", "5", "--at", "0,100,154", "--toward", "+x")
-    bolted = cae("load", "large/stool.json", *push)
-    assert bolted.verdict == "OK", bolted.text
-    assert "straight sides" not in bolted.text, "its bores mesh curved, and stay so"
-    one_out = cae("load", "large/stool-one-out.json", *push)
-    assert one_out.verdict == "FAIL", one_out.text
-    assert one_out.record["why"].startswith("the touching joint top+leg2"), one_out.record["why"]
-    assert "tips open" in one_out.record["why"]
-    assert one_out.numbers["moves_mm"] == pytest.approx(bolted.numbers["moves_mm"], rel=1e-6)
+    left out doesn't change how far anything moves: the loaded place moves the same. And the
+    same in two passes (mqucifer/print-shop#301)."""
+    for one, two in (("one", "out"), ("one/2", "out/2")):
+        bolted, one_out = stool[one], stool[two]
+        assert bolted.verdict == "OK", bolted.text
+        assert "straight sides" not in bolted.text, "its bores mesh curved, and stay so"
+        assert one_out.verdict == "FAIL", one_out.text
+        why = one_out.record["why"]
+        assert why.startswith("the touching joint top+leg2"), why
+        assert "tips open" in why
+        assert one_out.numbers["moves_mm"] == pytest.approx(bolted.numbers["moves_mm"], rel=1e-6)
+    assert "two_passes" in stool["out/2"].numbers
+
+
+@pytest.mark.assembly
+def test_two_passes_read_each_part_no_lower_and_the_movement_no_less_than_one(
+    stool: dict[str, Answer],
+) -> None:
+    """mqucifer/print-shop#301: a small bolted assembly that fits both ways. Two passes read
+    each part's worst strain, across its layers and any way, no lower than one pass within
+    their band, and the loaded place moves no less. One pass reads as it always has, with no
+    word of two."""
+    one, two = stool["one"], stool["one/2"]
+    assert two.verdict == one.verdict == "OK", two.text
+    assert "read in two passes (asked for with --parts)" in two.text
+    assert "two passes" not in one.text and "two_passes" not in one.numbers
+    band = 1 - 0.05
+    for name, read in one.numbers["parts"].items():
+        again = two.numbers["parts"][name]
+        for key in ("across_layers_pct", "stretch_pct"):
+            assert again[key] >= band * read[key], (name, key, read[key], again[key])
+    assert two.numbers["moves_mm"] >= one.numbers["moves_mm"]
+    assert two.numbers["most_moves_mm"] >= one.numbers["most_moves_mm"]
+    # Each figure says its pass, and the passes their own second checks.
+    assert re.search(r"^pass 1, the whole: a mesh of at most 5\.662 mm", two.text, re.M)
+    assert re.search(r"^pass 2, on its own: the part leg2 ", two.text, re.M)
+    assert re.search(r"^pass 1, the whole: the joint top\+leg2, through", two.text, re.M)
+    assert "pass 1, each joint's force on both meshes" in two.text
+    assert "second check: pass 2, top on its own: its three pins carry 0.0000 N" in two.text
+    first = two.numbers["two_passes"]["first"]
+    assert first["squared_bores"] == 8 and first["memory_peak"] > 0
 
 
 #: How the made-up glass panel (`cae_cases/glass_panel.py`) is built: a frame 6 mm thick round
@@ -1787,13 +1834,16 @@ def test_a_glass_frame_bolted_to_a_block_reads_as_a_lower_bound_with_its_band_le
     so. The frame names its glass band, the panel inside its border, so it's read again with
     the band left out, a lower bound: the reply leads with that, names the frame and says why,
     and every bolt and the plastic round it is read as any through joint's is. The joint's
-    force is the load beyond it, by statics."""
+    force is the load beyond it, by statics. Two passes are tried first
+    (mqucifer/print-shop#301): with its band in, gmsh gives the block no element of its own, so
+    they can't read it, and the reply says that too."""
     answer = cae("load", f"{glass.name}/joined.json", "--weight", "1", "--at", "-6,50,6")
     assert answer.verdict == "OK", answer.text
     assert answer.record["why"].startswith("read as a lower bound, frame with its glass band left")
     lower = answer.numbers["lower_bound"]
     assert lower["parts"] == ["frame"]
     assert "it met the container's memory, 3 GiB, and the kernel stopped it" in lower["why"]
+    assert "; and in two passes, the mesh gives block no element of its own" in lower["why"]
     assert "how far the loaded places move along the load, taken together, is a bound" in (
         answer.text
     )

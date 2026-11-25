@@ -423,6 +423,9 @@ REPORTS: dict[str, tuple[str, ...]] = {
         "reaction_n",
         "solve_s",
         "toward",
+        # Where it's read in two passes, why, and each pass's meshes, time and memory
+        # (mqucifer/print-shop#301).
+        "two_passes",
         # Each dovetail taken apart the way it went together, before anything is solved
         # (mqucifer/print-shop#184 and mqucifer/print-shop#185).
         "ways_in",

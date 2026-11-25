@@ -793,6 +793,14 @@ def parser() -> Parser:
         help="the largest element, in mm: half the thinnest part unless given, and no finer "
         "than the container solves in a minute or two",
     )
+    load.add_argument(
+        "--parts",
+        action="store_true",
+        help="read in two passes (mqucifer/print-shop#301): the whole, each bolt's bore stood "
+        "in by a square one, for each joint's force and the movement; then each part on its "
+        "own, its bores meshed, for its strain. Without it, two passes run only where the "
+        "whole meets the container's memory",
+    )
     optimise = sub.add_parser(
         "optimise",
         help="where a part's load goes: BESO's topology optimisation on CalculiX, down to a "
