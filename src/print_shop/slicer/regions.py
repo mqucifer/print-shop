@@ -120,10 +120,6 @@ FILLED = 0.1
 LEAST_MM2 = 2.0
 #: The orca CLI's object index, from 1, for the one part in each project.
 _OBJECT = "1"
-_CORE = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
-_PROD = "http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
-_BBS = "http://schemas.bambulab.com/package/2021"
-_MODEL_TYPE = "http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"
 _REGIONS_MODEL = "3D/Objects/regions.model"
 #: A setting a region writes on the plate that isn't one of `Settings`'s.
 _PLATE_ANGLE = "infill_direction"
@@ -422,18 +418,21 @@ def _add_regions(src: Path, out: Path, volumes: list[tuple[Region, trimesh.Trime
                 f"{meta}</part>")
         model = model.replace("</components>", "".join(components) + "</components>")
         settings = settings.replace("</object>", "".join(parts) + "</object>")
-        files[_REGIONS_MODEL] = (
-            f'<?xml version="1.0" encoding="UTF-8"?><model unit="millimeter" xml:lang="en-US" '
-            f'xmlns="{_CORE}" xmlns:BambuStudio="{_BBS}" xmlns:p="{_PROD}" '
-            f'requiredextensions="p"><metadata name="BambuStudio:3mfVersion">1</metadata>'
-            f'<resources>{"".join(objects)}</resources></model>').encode()
-        relation = (f'<Relationship Target="/{_REGIONS_MODEL}" Id="rel-regions" '
-                    f'Type="{_MODEL_TYPE}"/>')
-        files["3D/_rels/3dmodel.model.rels"] = (
-            rels.replace("</Relationships>", relation + "</Relationships>") if rels else
-            '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.'
-            f'openxmlformats.org/package/2006/relationships">{relation}</Relationships>'
-        ).encode()
+        # The regions' model file and its relationship are written as Orca wrote the part's:
+        # its own header, namespaces and all, and its own relationship, pointed at them.
+        part_path = re.search(r'<component\b[^>]*\bp:path="/([^"]+)"', model)
+        relation = re.search(r"<Relationship\b[^>]*/>", rels)
+        if part_path is None or part_path.group(1) not in files or relation is None:
+            raise RuntimeError("Orca's project keeps the part's mesh in no model file of its "
+                               f"own, as Orca {ORCA_VERSION} does: its regions can't be added")
+        part_model = files[part_path.group(1)].decode()
+        header = part_model[:part_model.index("<resources>") + len("<resources>")]
+        files[_REGIONS_MODEL] = (header + "".join(objects) + "</resources></model>").encode()
+        ours = re.sub(r'\bId="[^"]*"', 'Id="rel-regions"',
+                      re.sub(r'\bTarget="[^"]*"', f'Target="/{_REGIONS_MODEL}"',
+                             relation.group(0)))
+        files["3D/_rels/3dmodel.model.rels"] = rels.replace(
+            "</Relationships>", ours + "</Relationships>").encode()
     if ranges:
         lines = []
         for region, own in ranges:

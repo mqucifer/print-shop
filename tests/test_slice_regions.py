@@ -132,11 +132,17 @@ def _exported(path: Path) -> Path:
              'printable="1"/></build></model>')
     settings = ('<?xml version="1.0" encoding="UTF-8"?>\n<config>\n  <object id="2">\n'
                 '    <part id="1" subtype="normal_part"></part>\n  </object>\n</config>\n')
+    part = ('<?xml version="1.0" encoding="UTF-8"?><model unit="millimeter" xmlns="core" '
+            'xmlns:p="production" requiredextensions="p"><resources><object id="1" '
+            'type="model"><mesh/></object></resources></model>')
+    rels = ('<Relationships xmlns="relationships"><Relationship Target="/3D/Objects/bar.model" '
+            'Id="rel-1" Type="model"/></Relationships>')
     with zipfile.ZipFile(path, "w") as z:
         z.writestr("3D/3dmodel.model", model)
+        z.writestr("3D/Objects/bar.model", part)
         z.writestr("Metadata/model_settings.config", settings)
         z.writestr("Metadata/project_settings.config", "{}")
-        z.writestr("3D/_rels/3dmodel.model.rels", '<Relationships></Relationships>')
+        z.writestr("3D/_rels/3dmodel.model.rels", rels)
     return path
 
 
@@ -159,8 +165,12 @@ def test_each_region_is_added_to_orcas_project_as_orca_stores_a_modifier(tmp_pat
     # A component of the part's object, its mesh centred in its own model file, moved to place.
     assert ('<component p:path="/3D/Objects/regions.model" objectid="3" '
             'transform="1 0 0 0 1 0 0 0 1 10 10 2"/></components>') in model
-    assert '<object id="3" type="model"><mesh>' in meshes
-    assert 'Target="/3D/Objects/regions.model"' in rels
+    # Written as Orca wrote the part's: its header and its relationship's type.
+    assert meshes.startswith('<?xml version="1.0" encoding="UTF-8"?><model unit="millimeter" '
+                             'xmlns="core" xmlns:p="production" requiredextensions="p">'
+                             '<resources><object id="3" type="model"><mesh>')
+    assert ('<Relationship Target="/3D/Objects/regions.model" Id="rel-regions" Type="model"/>'
+            "</Relationships>") in rels
     # The modifier's part, with its settings as Orca's own keys.
     assert ('<part id="3" subtype="modifier_part"><metadata key="name" value="dense"/>'
             '<metadata key="matrix" value="1 0 0 10 0 1 0 10 0 0 1 2 0 0 0 1"/>'
