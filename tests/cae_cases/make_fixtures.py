@@ -51,8 +51,8 @@ top, its hook in a window in the pocket's wall 0.2 mm under its ledge: near the 
 seat beside it all round, or at the middle with the window's sides drawn touching the hook's.
 And the socket 1.5 mm clear, more play than a tilt closes, and 2.5 mm clear, more than is read.
 
-`turns/` (mqucifer/print-shop#319): a shelf bracket, an L 5 mm thick and 20 wide, its upright
-50 tall bolted to a wall 10 thick at x 0 and its arm 60 long along x at the top, its inside
+`turns/` (mqucifer/print-shop#319): a shelf bracket, an L 5 mm thick and 10 wide, its upright
+25 tall bolted to a wall 10 thick at x 0 and its arm 30 long along x at the top, its inside
 corner rounded 3 mm, printed on its side; and two wall slices of a ring, 50 to 56 mm from its
 axis and 80 tall, with a 2° seam between them, and a rib across the seam: a cap 4 thick curved
 round the slices' outsides, and a fin under it that fills the seam, touching both. Each is drawn
@@ -873,7 +873,7 @@ def stool() -> None:
 
 
 #: The shelf bracket and the ribbed slices (mqucifer/print-shop#319), in mm and degrees.
-SHELF_T, SHELF_W, SHELF_H, SHELF_L, SHELF_WALL, SHELF_ROUND = 5.0, 20.0, 50.0, 60.0, 10.0, 3.0
+SHELF_T, SHELF_W, SHELF_H, SHELF_L, SHELF_WALL, SHELF_ROUND = 5.0, 10.0, 25.0, 30.0, 10.0, 3.0
 RIB_IN, RIB_OUT, RIB_CAP, RIB_TALL, RIB_LOW, RIB_HIGH = 50.0, 56.0, 4.0, 80.0, 30.0, 40.0
 #: Each slice's angles, the seam's between them, and the cap's.
 RIB_SLICES, RIB_SEAM, RIB_SPAN = ((0.0, 29.0), (31.0, 60.0)), (29.0, 31.0), (10.0, 50.0)

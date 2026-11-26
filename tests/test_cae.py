@@ -1563,9 +1563,9 @@ def test_the_snap_on_check_and_bend_read_a_latch_on_a_dovetail(cae: Any) -> None
 
 # Parts placed by their turns (mqucifer/print-shop#319): `make_fixtures.turns`.
 
-#: The shelf bracket's arm, pushed down near its end; and the rib's cap, pushed along x at its
-#: far end, 60 mm out at 50°, half way up its 10.
-SHELF_AT = ("--weight", "1", "--at", "57,10,50")
+#: The shelf bracket's arm, pushed down near its end, on a mesh four elements across its 5 mm;
+#: and the rib's cap, pushed along x at its far end, 60 mm out at 50°, half way up its 10.
+SHELF_AT = ("--weight", "1", "--at", "28,5,25", "--mesh", "1")
 RIB_AT = ("--weight", "0.5", "--at", "38.5673,45.9627,35", "--toward", "+x")
 #: main's own run-to-run spread in `load`'s figures, relative (mqucifer/print-shop#302).
 RUN_TO_RUN = 2e-4
@@ -1585,7 +1585,9 @@ def reads_as(turned: Answer, placed: Answer) -> None:
     """Every figure judged reads turned as it does in place, within the bench's second check:
     each reading is worth what its own coarser mesh moves it, so the two are the same where
     they're no further apart than that, both added, and main's own run-to-run spread. A turn
-    meshes the parts afresh, as another mesh would. And the layers are the same."""
+    meshes the parts afresh, as another mesh would, and one coarser mesh is a sample of what
+    that moves a figure, not a bound: so within `SAME` too, the tolerance here for one
+    geometry meshed two ways. And the layers are the same."""
     assert turned.verdict == placed.verdict, turned.text
 
     def near(pair: tuple[Any, Any], coarse: tuple[Any, Any], what: str) -> None:
@@ -1593,6 +1595,7 @@ def reads_as(turned: Answer, placed: Answer) -> None:
             (np.asarray(a, dtype=float), np.asarray(b, dtype=float)) for a, b in (pair, coarse)
         )
         spread = float(np.linalg.norm(against - against_c) + np.linalg.norm(found - found_c))
+        spread = max(spread, SAME * float(np.linalg.norm(against)))
         spread += RUN_TO_RUN * float(np.linalg.norm(against))
         assert np.linalg.norm(found - against) <= spread, (what, pair, coarse)
 
