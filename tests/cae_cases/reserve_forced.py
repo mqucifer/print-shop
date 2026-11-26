@@ -2,15 +2,18 @@
 bench's second image (mqucifer/print-shop#301): the control for the band's fallback. Nothing here
 changes how the bench reads anything else.
 
-`python reserve_forced.py load ASSEMBLY ...` runs `load` as the bench does, with the whole
-assembly's one-pass reading replaced by "met the container's memory", and two passes given no
-time but two seconds, as if what's kept for the band took the rest: so they're stopped by their
-clock, whatever the machine, and each part that names its band is read without it.
+`python reserve_forced.py [--offered S] load ASSEMBLY ...` runs `load` as the bench does, with
+the whole assembly's one-pass reading replaced by "met the container's memory", and two passes
+given no time but two seconds, as if what's kept for the band took the rest: so they're stopped
+by their clock, whatever the machine, and each part that names its band is read without it.
+`--offered S` offers it a longer limit, S s, as the host offers a plain `load`
+(mqucifer/print-shop#325), which two passes take up.
 """
 
 from __future__ import annotations
 
 import importlib
+import os
 import sys
 import time
 from typing import Any
@@ -56,4 +59,8 @@ class Late(CLOCK):  # type: ignore[misc, valid-type]
 
 load._run = met_memory_first
 load_parts.Clock = Late
-sys.exit(main(sys.argv[1:]))
+argv = sys.argv[1:]
+if argv[:1] == ["--offered"]:
+    os.environ[load_parts.OFFER] = argv[1]
+    argv = argv[2:]
+sys.exit(main(argv))

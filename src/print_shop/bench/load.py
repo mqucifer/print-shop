@@ -1434,6 +1434,9 @@ def _read(args: Any, report: Report) -> None:
 
         _give_back()
         report.again()
+        # Two passes run under the hour the host offered (mqucifer/print-shop#325), and so does
+        # what follows them here.
+        load_parts.take_longer()
         try:
             _run(
                 args,

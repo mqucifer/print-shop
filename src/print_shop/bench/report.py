@@ -65,7 +65,15 @@ def how_it_ran() -> dict[str, Any]:
         # the reply is saved, so the whole command's peak, where the kernel keeps one.
         "memory_peak": read("/sys/fs/cgroup/memory.peak"),
         "user": os.getuid(),
+        # The limit the host gave the command, in s, as it stood at the end: `load` in two
+        # passes takes up a longer one as it runs (mqucifer/print-shop#325). None where no host
+        # said.
+        "limit_s": _seconds(os.environ.get("BENCH_TIMEOUT")),
     }
+
+
+def _seconds(text: str | None) -> int | None:
+    return int(text) if text is not None and text.isdigit() else None
 
 
 class NoAnswer(Exception):
@@ -160,7 +168,9 @@ class Report:
         (out / f"{stem}.json").write_text(json.dumps(record, indent=1, default=_plain) + "\n")
         text = (
             self.body()
-            + f"\nran: {seconds} s, image {str(ran['image_id'])[:19]}, code {ran['code']}, "
+            + f"\nran: {seconds} s"
+            + (f" of its {ran['limit_s']} s limit" if ran["limit_s"] is not None else "")
+            + f", image {str(ran['image_id'])[:19]}, code {ran['code']}, "
             + f"cpu.max {ran['cpu_max']}, memory.max {ran['memory_max']}, "
             + (f"memory.peak {ran['memory_peak']}, " if ran.get("memory_peak") else "")
             + f"network up: {','.join(ran['network_up']) or 'none'}, "

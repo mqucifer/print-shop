@@ -162,23 +162,117 @@ def test_a_strain_within_two_passes_band_of_its_limit_is_either_side_of_it() -> 
     assert "within the 5% two passes are held to of its 1% limit" in apart[0] if apart else True
 
 
-def test_the_container_is_told_its_own_time_limit(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    ran: list[list[str]] = []
+def _ran_under(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, args: list[str], **more: Any
+) -> dict[str, str]:
+    """The environment `host.run` gives a bench command's container, read off its `docker run`,
+    and the limit it was waited for under; nothing is run."""
+    waited: list[tuple[int, int | None]] = []
 
-    def run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-        ran.append(argv)
-        return subprocess.CompletedProcess(argv, 0, "", "")
+    def wait(argv: list[str], timeout: int, longer: int | None) -> tuple[Any, int]:
+        waited.append((timeout, longer))
+        return subprocess.CompletedProcess(argv, 0, "", ""), timeout
 
     monkeypatch.setattr(host, "image_id", lambda image=host.IMAGE: "sha256:x")
     monkeypatch.setattr(host, "code_version", lambda: "abc")
-    monkeypatch.setattr(subprocess, "run", run)
-    host.run(["load", "a.json"], tmp_path)
-    host.run(["load", "a.json"], tmp_path, timeout=3600)
-    docker = [argv for argv in ran if argv[0] == "docker"]
-    assert f"BENCH_TIMEOUT={host.TIMEOUT}" in docker[0]
-    assert "BENCH_TIMEOUT=3600" in docker[1]
+    monkeypatch.setattr(host, "_waited", wait)
+    done = host.run(args, tmp_path, **more)
+    env = dict(w.split("=", 1) for a, w in zip(done.args, done.args[1:], strict=False) if a == "-e")
+    (timeout, longer), = waited
+    assert env["BENCH_TIMEOUT"] == str(timeout), "the container is told the limit it's waited for"
+    assert env.get(host.OFFER) == (None if longer is None else str(longer))
+    return env
+
+
+def test_a_load_in_two_passes_is_given_the_hour_and_one_pass_keeps_its_limit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """mqucifer/print-shop#325, the Sponsor's "Yes an hour": `--parts` is given 3600 s from the
+    start. A plain `load` runs under 600 s, offered the hour for two passes, which it takes up
+    only where the whole meets the container's memory. Every other command, a script, and a
+    limit the caller gives keep theirs, with nothing offered."""
+    assert host.TWO_PASSES == 3600 and host.TIMEOUT == 600
+    parts = _ran_under(monkeypatch, tmp_path, ["load", "a.json", "--weight", "1", "--parts"])
+    assert parts["BENCH_TIMEOUT"] == "3600" and host.OFFER not in parts
+    out = _ran_under(monkeypatch, tmp_path, ["--out", "o", "load", "a.json", "--parts"])
+    assert out["BENCH_TIMEOUT"] == "3600"
+    one = _ran_under(monkeypatch, tmp_path, ["load", "a.json", "--weight", "1"])
+    assert one["BENCH_TIMEOUT"] == "600" and one[host.OFFER] == "3600"
+    for args in (["optimise", "p.step"], ["bend", "c.step"], ["info", "parts.step"]):
+        other = _ran_under(monkeypatch, tmp_path, args)
+        assert other["BENCH_TIMEOUT"] == str(host.TIMEOUTS.get(args[0], host.TIMEOUT)), args
+        assert host.OFFER not in other, args
+    # `--parts` as a word of another command isn't `load`'s.
+    assert host.OFFER not in _ran_under(monkeypatch, tmp_path, ["clearance", "--parts"])
+    script = _ran_under(monkeypatch, tmp_path, ["load", "a.json"], python=True)
+    assert script["BENCH_TIMEOUT"] == "600" and host.OFFER not in script
+    given = _ran_under(monkeypatch, tmp_path, ["load", "a.json"], timeout=600)
+    assert given["BENCH_TIMEOUT"] == "600" and host.OFFER not in given
+
+
+def _child(code: str) -> list[str]:
+    import sys
+
+    return [sys.executable, "-c", code]
+
+
+def test_the_host_waits_the_hour_only_once_two_passes_take_it_up() -> None:
+    """A command offered a longer limit is stopped at its own unless it says it took it up, on
+    its stderr; then it's waited for under the longer one, and that line isn't passed on. Real
+    processes, with limits of seconds, not the bench's."""
+    taken = f"import sys, time; print({load_parts.TAKEN!r}, file=sys.stderr, flush=True); "
+    late = "time.sleep(3); print('read'); print('said', file=sys.stderr)"
+    done, limit = host._waited(_child(taken + late), 1, 30)
+    assert done is not None and limit == 30
+    assert done.returncode == 0 and done.stdout == "read\n" and done.stderr == "said\n"
+    stopped, limit = host._waited(_child("import time; " + late), 1, 30)
+    assert stopped is None and limit == 1, "not taken up, it's stopped at its own"
+    stopped, limit = host._waited(_child(taken + "time.sleep(30)"), 1, 2)
+    assert stopped is None and limit == 2, "taken up, it's stopped at the longer"
+
+
+def test_a_command_past_the_limit_it_took_up_says_that_limit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    killed: list[list[str]] = []
+    monkeypatch.setattr(host, "image_id", lambda image=host.IMAGE: "sha256:x")
+    monkeypatch.setattr(host, "code_version", lambda: "abc")
+    monkeypatch.setattr(host, "_waited", lambda argv, timeout, longer: (None, longer))
+    monkeypatch.setattr(subprocess, "run", lambda argv, **_: killed.append(argv))
+    done = host.run(["load", "a.json"], tmp_path)
+    assert done.stdout == "verdict: NO ANSWER: it ran past the 3600 s limit and was stopped\n"
+    assert killed[0][:2] == ["docker", "kill"]
+
+
+def test_two_passes_take_up_the_hour_offered_and_the_clock_and_the_ran_line_read_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """In the container: two passes take up the host's offer, saying so on stderr, and from
+    there the container's limit is the hour, for the clock (so the glass band's reserve comes
+    out of the hour) and for the reply's `ran:` line. Not offered, nothing changes."""
+    assert (load_parts.OFFER, load_parts.TAKEN) == (host.OFFER, host.TAKEN)
+    monkeypatch.setenv(load_parts.TIMEOUT, "600")
+    monkeypatch.delenv(load_parts.OFFER, raising=False)
+    load_parts.take_longer()
+    assert capsys.readouterr().err == ""
+    assert load_parts.Clock(0.0).limit == 600
+    monkeypatch.setenv(load_parts.OFFER, "3600")
+    load_parts.take_longer()
+    assert capsys.readouterr().err == host.TAKEN + "\n"
+    assert load_parts.OFFER not in __import__("os").environ, "taken up once"
+    import time
+
+    clock = load_parts.Clock(time.time(), reserve=100.0)
+    assert clock.limit == 3600
+    left = clock.left()
+    assert left is not None and left == pytest.approx(3600 - load_parts.MARGIN - 100.0, abs=1.0)
+    report = Report("load", ["a.json"])
+    report.verdict("NO ANSWER", "made up")
+    report.save(tmp_path)
+    assert "\nran: " in report.text and " s of its 3600 s limit, image " in report.text
+    monkeypatch.delenv(load_parts.TIMEOUT)
+    report.save(tmp_path)
+    assert " limit" not in report.text.split("\nran: ")[1].split(", image")[0]
 
 
 def test_time_kept_for_a_glass_band_is_left_out_of_two_passes_and_its_read_says_so(

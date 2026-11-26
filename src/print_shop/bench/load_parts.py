@@ -31,7 +31,11 @@ same mesh is solved by its iterative solver and corrected (`load._Model._iterate
 reply says so. Every other solve is the direct solver's, as in one pass.
 
 **Time.** The container's limit is read from `BENCH_TIMEOUT`, which the host sets. Two passes
-stop before a solve that wouldn't end inside it, and say which pass met it and what's read.
+stop before a solve that wouldn't end inside it, and say which pass met it and what's read. They
+run under an hour (mqucifer/print-shop#325): with `--parts` the host gives it from the start;
+where the whole met the container's memory, `load` takes up the hour the host offered as two
+passes start (`take_longer`), and the clock, the glass band's reserve and the reply's `ran:`
+line all read it from there.
 """
 
 from __future__ import annotations
@@ -39,6 +43,7 @@ from __future__ import annotations
 import dataclasses
 import math
 import os
+import sys
 import time
 from typing import Any
 
@@ -94,6 +99,11 @@ FINER_SAID = (
 #: written.
 TIMEOUT = "BENCH_TIMEOUT"
 MARGIN = 20.0
+#: The longer limit the host offers a `load` that may come to two passes, and the line on
+#: stderr that takes it up: the same as `host.OFFER` and `host.TAKEN`, which run outside the
+#: image (mqucifer/print-shop#325).
+OFFER = "BENCH_TIMEOUT_TWO_PASSES"
+TAKEN = "bench: two passes take the longer limit"
 #: Where a part names its glass band, two passes are given the container's time less this many
 #: times what the one pass's try took, held back for the band's lower bound: on the traced frame
 #: bolted to a block its read took 0.41 of the try on CI's amd64 runner, and 0.37 on the Mac.
@@ -541,6 +551,18 @@ def peak() -> int | None:
         return int((load.CGROUP / "memory.peak").read_text().strip())
     except (OSError, ValueError):
         return None
+
+
+def take_longer() -> None:
+    """Two passes take up the longer limit the host offered, where it offered one: it's said to
+    the host on stderr, which then waits for it, and is the container's limit from here on,
+    `TIMEOUT`, for the clock and the reply's `ran:` line. Where it wasn't offered, as with
+    `--parts`, which is given it from the start, or a script, nothing changes."""
+    longer = os.environ.pop(OFFER, "")
+    if not longer.isdigit():
+        return
+    print(TAKEN, file=sys.stderr, flush=True)
+    os.environ[TIMEOUT] = longer
 
 
 class Clock:

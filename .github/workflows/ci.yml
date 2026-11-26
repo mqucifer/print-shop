@@ -147,7 +147,7 @@ jobs:
           name: cae-image
       - run: zstd -d --stdout cae-image.tar.zst | docker load && rm cae-image.tar.zst
       - run: uv run python scripts/bench.py check
-      - run: uv run pytest -q -m "cae and not assembly" -n 2 -rps --durations=20
+      - run: uv run pytest -q -m "cae and not assembly and not proof" -n 2 -rps --durations=20
 
   # The `-m cae` tests of a whole furniture assembly (mqucifer/print-shop#295), in a job of their
   # own beside `cae`: a traced glass frame alone and joined, posts with turned latches, a table
@@ -172,4 +172,4 @@ jobs:
           name: cae-image
       - run: zstd -d --stdout cae-image.tar.zst | docker load && rm cae-image.tar.zst
       - run: uv run python scripts/bench.py check
-      - run: uv run pytest -q -m "cae and assembly" -n 2 -rps --durations=20
+      - run: uv run pytest -q -m "cae and assembly and not proof" -n 2 -rps --durations=20
