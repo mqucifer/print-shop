@@ -35,12 +35,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NamedTuple
 
+import numpy as np
+
 __all__ = [
+    "Built",
+    "Grid",
     "Layer",
     "Line",
     "Move",
     "Sliced",
     "Warning",
+    "built",
+    "loops",
     "read",
     "warnings",
 ]
@@ -506,3 +512,321 @@ def warnings(log: str) -> list[Warning]:
             seen.add(item.text)
             found.append(item)
     return found
+
+
+# --------------------------------------------------------------------------
+# What Orca built inside a region (mqucifer/print-shop#338)
+# --------------------------------------------------------------------------
+
+#: Orca's labels for walls, for sparse infill, and for what fills a layer solid.
+WALLS = ("Outer wall", "Inner wall")
+SPARSE = "Sparse infill"
+SOLID = ("Internal solid infill", "Top surface", "Bottom surface", "Internal Bridge", "Bridge",
+         "Gap infill")
+#: A raster's cell, in mm, unless the region is so big that more than `CELLS` would be needed.
+CELL = 0.1
+CELLS = 600_000
+#: A layer is solid where its solid lines cover this much of what's inside its walls.
+SOLID_SHARE = 0.8
+#: Walls are counted along a ray from the outer wall inward, as far as this, in mm.
+REACH = 8.0
+#: Two walls are neighbours where the ray meets the next within this many line widths.
+NEXT_WALL = 1.6
+#: Samples are taken this far apart along each line, in mm.
+STEP = 0.05
+
+
+@dataclass(frozen=True)
+class Grid:
+    """A raster of the plate: its lower corner, its cell and its size in cells."""
+
+    x0: float
+    y0: float
+    cell: float
+    nx: int
+    ny: int
+
+    @classmethod
+    def round(cls, x0: float, y0: float, x1: float, y1: float, margin: float = 1.0) -> Grid:
+        """A grid covering a rectangle and `margin` round it, as fine as `CELL` allows."""
+        width, depth = x1 - x0 + 2 * margin, y1 - y0 + 2 * margin
+        cell = max(CELL, math.sqrt(max(width * depth, 0.0) / CELLS))
+        return cls(x0 - margin, y0 - margin, cell, max(1, math.ceil(width / cell)),
+                   max(1, math.ceil(depth / cell)))
+
+    def empty(self) -> np.ndarray:
+        return np.zeros((self.ny, self.nx), dtype=bool)
+
+    def cells(self, x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Each point's row and column, and whether it's on the grid."""
+        col = np.floor((x - self.x0) / self.cell).astype(np.int64)
+        row = np.floor((y - self.y0) / self.cell).astype(np.int64)
+        on = (col >= 0) & (col < self.nx) & (row >= 0) & (row < self.ny)
+        return row, col, on
+
+    @property
+    def cell_mm2(self) -> float:
+        return self.cell * self.cell
+
+    def fill(self, segments: np.ndarray) -> np.ndarray:
+        """What closed loops of segments, (x0, y0, x1, y1) a row, hold, even-odd: a part's
+        outline less its holes, or a shape's section."""
+        found = self.empty()
+        if len(segments) == 0:
+            return found
+        seg = np.asarray(segments, dtype=float)
+        ys = self.y0 + (np.arange(self.ny) + 0.5) * self.cell
+        xs = self.x0 + (np.arange(self.nx) + 0.5) * self.cell
+        ya, yb = seg[:, 1], seg[:, 3]
+        lo, hi = np.minimum(ya, yb), np.maximum(ya, yb)
+        for r, y in enumerate(ys):
+            crossing = (lo <= y) & (hi > y)
+            if not crossing.any():
+                continue
+            s = seg[crossing]
+            t = (y - s[:, 1]) / (s[:, 3] - s[:, 1])
+            at = np.sort(s[:, 0] + t * (s[:, 2] - s[:, 0]))
+            count = np.searchsorted(at, xs, side="right")
+            found[r] = count % 2 == 1
+        return found
+
+    def stamp(self, samples: np.ndarray, half_width: float) -> np.ndarray:
+        """The cells within `half_width` of any sample point, (x, y) a row."""
+        found = self.empty()
+        if len(samples) == 0:
+            return found
+        reach = max(0, math.ceil(half_width / self.cell))
+        d = np.arange(-reach, reach + 1)
+        dr, dc = np.meshgrid(d, d, indexing="ij")
+        near = (dr * dr + dc * dc) * self.cell_mm2 <= half_width * half_width + 1e-12
+        dr, dc = dr[near], dc[near]
+        row, col, _ = self.cells(samples[:, 0], samples[:, 1])
+        rows = (row[:, None] + dr[None, :]).ravel()
+        cols = (col[:, None] + dc[None, :]).ravel()
+        keep = (rows >= 0) & (rows < self.ny) & (cols >= 0) & (cols < self.nx)
+        found[rows[keep], cols[keep]] = True
+        return found
+
+
+def _inner(mask: np.ndarray) -> np.ndarray:
+    """The cells of `mask` whose four neighbours are in it too."""
+    inner = mask.copy()
+    inner[1:, :] &= mask[:-1, :]
+    inner[:-1, :] &= mask[1:, :]
+    inner[:, 1:] &= mask[:, :-1]
+    inner[:, :-1] &= mask[:, 1:]
+    inner[0, :] = inner[-1, :] = False
+    inner[:, 0] = inner[:, -1] = False
+    return inner
+
+
+def _samples(lines: list[Line]) -> tuple[np.ndarray, np.ndarray]:
+    """Points every `STEP` along lines, with each one's line: (x, y) and its index a row."""
+    if not lines:
+        return np.zeros((0, 2)), np.zeros(0, dtype=np.int64)
+    ends = np.array([(ln.x0, ln.y0, ln.x1, ln.y1) for ln in lines], dtype=float)
+    lengths = np.hypot(ends[:, 2] - ends[:, 0], ends[:, 3] - ends[:, 1])
+    counts = np.maximum(1, np.ceil(lengths / STEP).astype(np.int64))
+    which = np.repeat(np.arange(len(lines)), counts)
+    first = np.repeat(np.cumsum(counts) - counts, counts)
+    t = (np.arange(len(which)) - first + 0.5) / counts[which]
+    x = ends[which, 0] + t * (ends[which, 2] - ends[which, 0])
+    y = ends[which, 1] + t * (ends[which, 3] - ends[which, 1])
+    return np.column_stack([x, y]), which
+
+
+def loops(lines: list[Line], kind: str = OUTER_WALL) -> np.ndarray:
+    """Each run of `kind` lines laid one after another, closed: the outer walls' loops round the
+    outline and each hole, as segments, (x0, y0, x1, y1) a row."""
+    found: list[tuple[float, float, float, float]] = []
+    run: list[Line] = []
+
+    def close() -> None:
+        if run:
+            found.extend((ln.x0, ln.y0, ln.x1, ln.y1) for ln in run)
+            found.append((run[-1].x1, run[-1].y1, run[0].x0, run[0].y0))
+
+    for line in lines:
+        if line.kind != kind:
+            continue
+        if run and (abs(line.x0 - run[-1].x1) > 1e-6 or abs(line.y0 - run[-1].y1) > 1e-6):
+            close()
+            run = []
+        run.append(line)
+    close()
+    return np.array(found, dtype=float).reshape(-1, 4)
+
+
+@dataclass
+class Built:
+    """What Orca laid on one layer inside a region, read from its lines."""
+
+    n: int
+    z: float
+    height: float
+    #: The part's area inside the region on this layer, and of that, what's inside its walls.
+    area_mm2: float
+    core_mm2: float
+    #: How much of what's inside the walls solid lines cover, 0 to 1.
+    solid: float
+    #: The sparse infill's plastic as a share of the space left for it, in percent: its lines'
+    #: length times their section, over that area. None where no space is left.
+    infill: float | None
+    #: The walls round each outline in the region, as most samples along it count them, and the
+    #: share of those samples whose walls run into another outline's: walls that fill the space.
+    walls: int | None
+    walls_meet: float
+    #: The sparse infill's lines' length by the way they run, in 15 degree steps from +x.
+    angles: dict[int, float]
+    #: The plastic laid inside the region on this layer, mm3.
+    volume_mm3: float
+
+
+def _section(width: float, height: float) -> float:
+    """A line's cross-section over its height: Orca's flow, a rectangle with round ends."""
+    return max(width - height * (1 - math.pi / 4), 0.0)
+
+
+def _walls_counted(
+    samples: np.ndarray, normals: np.ndarray, others: np.ndarray, kinds: np.ndarray,
+    width: float,
+) -> tuple[list[int], list[bool]]:
+    """Each sample's walls: itself and each inner wall a ray from it meets in turn, each within
+    `NEXT_WALL` widths of the last, the way more walls are met. And whether the walls ran into
+    another outline's outer wall."""
+    counts: list[int] = []
+    meets: list[bool] = []
+    if len(samples) == 0 or len(others) == 0:
+        return counts, meets
+    ax, ay = others[:, 0], others[:, 1]
+    ex, ey = others[:, 2] - ax, others[:, 3] - ay
+    for (px, py), (nx_, ny_) in zip(samples, normals, strict=True):
+        best = (1, False)
+        for sign in (1.0, -1.0):
+            dx, dy = sign * nx_, sign * ny_
+            den = dx * ey - dy * ex
+            ok = np.abs(den) > 1e-12
+            qx, qy = ax - px, ay - py
+            with np.errstate(divide="ignore", invalid="ignore"):
+                t = np.where(ok, (qx * ey - qy * ex) / den, -1.0)
+                u = np.where(ok, (qx * dy - qy * dx) / den, -1.0)
+            hit = (t > width * 0.25) & (t <= REACH) & (u >= 0) & (u <= 1)
+            order = np.argsort(t[hit])
+            ts, ks = t[hit][order], kinds[hit][order]
+            count, last, meet = 1, 0.0, False
+            for tt, kk in zip(ts, ks, strict=True):
+                if tt - last > NEXT_WALL * width:
+                    break
+                if kk == 1:  # an outer wall: another outline's
+                    meet = True
+                    break
+                if kk == 2:  # infill or solid: the walls end here
+                    break
+                if tt - last > width * 0.25:
+                    count += 1
+                    last = tt
+            if count > best[0]:
+                best = (count, meet)
+        counts.append(best[0])
+        meets.append(best[1])
+    return counts, meets
+
+
+def built(layer: Layer, grid: Grid, region: np.ndarray) -> Built:
+    """What Orca laid on `layer` inside `region`, a mask of `grid`: the part's area, its walls,
+    how solid it is, its sparse infill's share and direction, and the plastic laid. `layer` is
+    read with its lines kept (`read(keep_lines=True)`)."""
+    lines = layer.lines
+    width = max((ln.width for ln in lines if ln.kind in WALLS), default=0.45)
+    half = width / 2
+    by_kind: dict[str, list[Line]] = defaultdict(list)
+    for line in lines:
+        by_kind[line.kind].append(line)
+
+    def stamped(kinds: tuple[str, ...]) -> np.ndarray:
+        chosen = [ln for k in kinds for ln in by_kind.get(k, [])]
+        points, _ = _samples(chosen)
+        return grid.stamp(points, half)
+
+    walls = stamped(WALLS)
+    solid = stamped(SOLID)
+    outline = grid.fill(loops(lines)) | stamped((OUTER_WALL,))
+    inside = region & outline
+    core = inside & ~walls
+    space = core & ~solid
+    cell = grid.cell_mm2
+    # The infill's share is read a line's width clear of the walls, of solid fill and of the
+    # region's own edge: Orca anchors its sparse lines along the walls (`infill_anchor`) and
+    # joins them along the edge of the space they fill, and those runs aren't the pattern.
+    wall_points, _ = _samples([ln for k in (*WALLS, *SOLID) for ln in by_kind.get(k, [])])
+    edge = region & ~_inner(region)
+    rows, cols = np.nonzero(edge)
+    edge_points = np.column_stack([grid.x0 + (cols + 0.5) * grid.cell,
+                                   grid.y0 + (rows + 0.5) * grid.cell])
+    clear = (space & ~grid.stamp(wall_points, half + width)
+             & ~grid.stamp(edge_points, width))
+
+    sparse_points, which = _samples(by_kind.get(SPARSE, []))
+    infill: float | None = None
+    angles: dict[int, float] = {}
+    if clear.sum() * cell >= 1.0:
+        row, col, on = grid.cells(sparse_points[:, 0], sparse_points[:, 1])
+        sparse_lines = by_kind.get(SPARSE, [])
+        if on.any():
+            keep = np.zeros(len(sparse_points), dtype=bool)
+            keep[on] = clear[row[on], col[on]]
+            laid = 0.0
+            for k in np.flatnonzero(keep):
+                ln = sparse_lines[int(which[k])]
+                laid += STEP * _section(ln.width, layer.height)
+                step = round(math.degrees(math.atan2(ln.y1 - ln.y0, ln.x1 - ln.x0)) % 180 / 15)
+                angle = int(step * 15 % 180)
+                angles[angle] = angles.get(angle, 0.0) + STEP
+            infill = 100.0 * laid / (clear.sum() * cell)
+        else:
+            infill = 0.0
+
+    volume = 0.0
+    all_points, all_which = _samples(lines)
+    if len(all_points):
+        row, col, on = grid.cells(all_points[:, 0], all_points[:, 1])
+        keep = np.zeros(len(all_points), dtype=bool)
+        keep[on] = region[row[on], col[on]]
+        sections = np.array([_section(ln.width, layer.height) for ln in lines])
+        volume = float(STEP * sections[all_which[keep]].sum() * layer.height)
+
+    outer = by_kind.get(OUTER_WALL, [])
+    wall_count: int | None = None
+    meet = 0.0
+    if outer:
+        points, which_outer = _samples(outer)
+        row, col, on = grid.cells(points[:, 0], points[:, 1])
+        keep = np.zeros(len(points), dtype=bool)
+        keep[on] = region[row[on], col[on]]
+        keep &= (np.arange(len(points)) % max(1, round(0.5 / STEP))) == 0
+        if keep.any():
+            ends = np.array([(ln.x0, ln.y0, ln.x1, ln.y1) for ln in outer])[which_outer[keep]]
+            d = np.column_stack([ends[:, 2] - ends[:, 0], ends[:, 3] - ends[:, 1]])
+            d /= np.maximum(np.hypot(d[:, 0], d[:, 1]), 1e-12)[:, None]
+            normals = np.column_stack([-d[:, 1], d[:, 0]])
+            near = [ln for ln in lines if ln.kind in WALLS or ln.kind in SOLID
+                    or ln.kind == SPARSE]
+            others = np.array([(ln.x0, ln.y0, ln.x1, ln.y1) for ln in near])
+            kinds = np.array([0 if ln.kind == "Inner wall" else 1 if ln.kind == OUTER_WALL
+                              else 2 for ln in near])
+            counts, meets = _walls_counted(points[keep], normals, others, kinds, width)
+            if counts:
+                values, times = np.unique(counts, return_counts=True)
+                wall_count = int(values[np.argmax(times)])
+                meet = float(np.mean(meets))
+
+    return Built(
+        n=layer.n, z=layer.z, height=layer.height,
+        area_mm2=round(float(inside.sum() * cell), 3),
+        core_mm2=round(float(core.sum() * cell), 3),
+        solid=round(float((core & solid).sum() / core.sum()), 3) if core.any() else 0.0,
+        infill=None if infill is None else round(infill, 2),
+        walls=wall_count, walls_meet=round(meet, 3),
+        angles={k: round(v, 2) for k, v in sorted(angles.items())},
+        volume_mm3=round(volume, 4),
+    )
