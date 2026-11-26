@@ -233,10 +233,15 @@ def helper(module: str, args: list[str]) -> list[str]:
 def timeout_for(args: list[str]) -> int:
     """How long a bench command may run: `TIMEOUT`, or its own in `TIMEOUTS`, or `TWO_PASSES`
     for a `load` that asks for two passes with `--parts`."""
-    word = command_word(args)
-    if word == "load" and "--parts" in args[args.index(word) + 1 :]:
+    if asks_two_passes(args):
         return TWO_PASSES
-    return TIMEOUTS.get(word or "", TIMEOUT)
+    return TIMEOUTS.get(command_word(args) or "", TIMEOUT)
+
+
+def asks_two_passes(args: list[str]) -> bool:
+    """Whether a bench command is a `load` that asks for two passes with `--parts`."""
+    word = command_word(args)
+    return word == "load" and "--parts" in args[args.index(word) + 1 :]
 
 
 def offered(args: list[str]) -> int | None:

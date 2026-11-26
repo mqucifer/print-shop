@@ -244,6 +244,73 @@ def test_a_command_past_the_limit_it_took_up_says_that_limit(
     assert killed[0][:2] == ["docker", "kill"]
 
 
+def _box(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, child: str, timeout: int = 600
+) -> tuple[Any, list[dict[str, str]]]:
+    """A design round's `Box`, its `docker run` stood in by `child`, a real Python process on
+    this machine, so its own wait, its reading of the output and its stopping are what run; and
+    each container's environment as `host.container` was given it."""
+    import sys
+
+    from print_shop.rounds import box
+
+    told: list[dict[str, str]] = []
+
+    def container(work: Path, command: list[str], name: str, **more: Any) -> list[str]:
+        told.append(dict(more.get("env") or {}))
+        return [sys.executable, "-c", child]
+
+    monkeypatch.setattr(host, "image_id", lambda image=host.IMAGE: "sha256:x")
+    monkeypatch.setattr(host, "container", container)
+    # `docker kill`: the child ends of itself soon after its limit.
+    monkeypatch.setattr(subprocess, "run", lambda argv, **_: None)
+    return box.Box(tmp_path, timeout), told
+
+
+def test_a_design_round_s_load_in_two_passes_is_given_the_hour_as_host_run_gives_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """mqucifer/print-shop#325, the operator: a design round's bench calls go through
+    `rounds/box.py`, and the side table's load cases are read there. Each container is told its
+    limit; `load --parts` is given the hour, and a plain `load` the run's own limit and the
+    hour offered; every other command, a script, and a limit the caller gives, nothing more."""
+    box, told = _box(monkeypatch, tmp_path, "pass", timeout=300)
+    box.bench(["load", "a.json", "--weight", "1", "--parts"])
+    box.bench(["load", "a.json", "--weight", "1"])
+    box.bench(["optimise", "a.json"])
+    box.bench(["info", "a.step"])
+    box.python("make.py")
+    box.bench(["load", "a.json"], timeout=600)
+    limits = [(one["BENCH_TIMEOUT"], one.get(host.OFFER)) for one in told]
+    assert limits == [
+        ("3600", None), ("300", "3600"), ("300", None), ("300", None), ("300", None),
+        ("600", None),
+    ]  # fmt: skip
+
+
+def test_a_design_round_waits_the_hour_only_once_two_passes_take_it_up(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The harness's own wait for the call: past the run's limit only where the command's
+    output says two passes took the hour up, a line the model isn't shown; and stopped at the
+    hour where it runs past that. Limits of seconds here, not the bench's."""
+    taken = f"import sys, time; print('a'); print({host.TAKEN!r}, flush=True); "
+    box, _ = _box(monkeypatch, tmp_path, taken + "time.sleep(3); print('read')", timeout=1)
+    done = box.bench(["load", "a.json"])
+    assert not done.timed_out and done.code == 0, done.output
+    assert done.output == "a\nread\n", "the line that took it up isn't the answer's"
+    box, _ = _box(monkeypatch, tmp_path, "import time; time.sleep(3)", timeout=1)
+    stopped = box.bench(["load", "a.json"])
+    assert stopped.timed_out and "ran past the 1 s limit" in stopped.output
+    # A script, which isn't offered the hour, can't take it up by saying so.
+    box, _ = _box(monkeypatch, tmp_path, taken + "time.sleep(3)", timeout=1)
+    assert box.python("make.py").timed_out
+    monkeypatch.setattr(host, "offered", lambda args: 2)
+    box, _ = _box(monkeypatch, tmp_path, taken + "time.sleep(5)", timeout=1)
+    late = box.bench(["load", "a.json"])
+    assert late.timed_out and "ran past the 2 s limit" in late.output
+
+
 def test_two_passes_take_up_the_hour_offered_and_the_clock_and_the_ran_line_read_it(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
