@@ -24,7 +24,7 @@ import json
 import re
 import time
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -164,6 +164,15 @@ NOTE_AS_TEXT = (
 SHOWN_BEFORE = (
     "(A picture was here. Only the latest turn's pictures stay in the conversation: `read` shows "
     "any of them again.)"
+)
+#: A line the session writes where it took text out: a compaction's note in each of its forms
+#: (`COMPACTED`, `EARLIER_NOTE`, `COPY`), or where a picture was. A file's text never has one, and
+#: words the model means are never only these (mqucifer/print-shop#329).
+NOTES = re.compile(rf"{NOTE_LINE.pattern}|^\s*{re.escape(SHOWN_BEFORE)}\s*$", re.MULTILINE)
+NOTE_AS_WORDS = (
+    "Not taken: `{key}` holds only a compaction note, `{note}`, not your words. Earlier calls "
+    "show notes like it where their text was taken out of the conversation to save room. "
+    "`{name}` did nothing and nothing went to anyone: call it again with what you mean, in full."
 )
 NOT_CARRIED_OUT = "Not carried out: an earlier call in this turn stopped the turn."
 #: The calls whose latest arguments are what stands: each earlier one is replaced by it, and
@@ -1193,24 +1202,34 @@ class Session:
     def _refused(self, name: Any, args: dict[str, Any]) -> Judged | None:
         """What the session refuses before a tool sees it: any tool but the asking ones while only
         they're offered, beyond the lock's one build, run and check (mqucifer/print-shop#86), and a
-        `write` or `edit` whose text holds a compaction's note. On
-        `eval-tip-1` at call 109 the model wrote a file whose whole text was a note, as earlier
-        `write` calls looked after compaction (mqucifer/print-shop#47)."""
+        call that sends a compaction's note as its text (`noted`).
+
+        - A `write` or `edit` whose text holds a note on any line. On `eval-tip-1` at call 109
+          the model wrote a file whose whole text was a note, as earlier `write` calls looked
+          after compaction (mqucifer/print-shop#47).
+        - Any tool with a text argument, at any depth, that's only notes. On a lamp run the model
+          sent `questions` as `(compacted: 1659 characters)`, and the run stopped for a person
+          with an empty question (mqucifer/print-shop#329). Every tool gets it, so a new one
+          does by default."""
         if not self._open(name, args):
             kind = ALLOWANCE.get(name) if isinstance(name, str) else None
             if kind is not None:
                 spent = SPENT.format(what=SPENT_WHAT[kind]) + self._open_said()
                 return Judged(str(name), "failed", spent, "ask_only_spent")
             return Judged(str(name), "failed", NOT_NOW + self._open_said(), "ask_only")
-        if name not in ("write", "edit"):
-            return None
-        for key in ("content", "new", "old"):
-            said = args.get(key)
-            found = NOTE_LINE.search(said) if isinstance(said, str) else None
-            if found is not None:
-                done = "written" if name == "write" else "changed"
-                note = _cut(found.group(0).strip())
-                reply = NOTE_AS_TEXT.format(done=done, key=key, note=note, path=args.get("path"))
+        if name in ("write", "edit"):
+            for key in ("content", "new", "old"):
+                said = args.get(key)
+                note = noted(said, anywhere=True) if isinstance(said, str) else None
+                if note is not None:
+                    done = "written" if name == "write" else "changed"
+                    path = args.get("path")
+                    reply = NOTE_AS_TEXT.format(done=done, key=key, note=note, path=path)
+                    return Judged(str(name), "failed", reply, "compaction_note")
+        for key, said in _texts(args):
+            note = noted(said, anywhere=False)
+            if note is not None:
+                reply = NOTE_AS_WORDS.format(key=key, note=note, name=name)
                 return Judged(str(name), "failed", reply, "compaction_note")
         return None
 
@@ -1281,6 +1300,28 @@ def _noted_call(called: dict[str, Any], why: str) -> dict[str, Any]:
     if short == args:
         return called
     return {**called, "function": {**function, "arguments": json.dumps(short)}}
+
+
+def noted(said: str, *, anywhere: bool) -> str | None:
+    """The compaction's note `said` was sent as, cut short, or None. `anywhere` is for a file's
+    text, which never has a note's line; otherwise it's words, which are a note only where
+    nothing but notes is said. Words that quote a note among others are words."""
+    found = NOTES.search(said)
+    if found is None or (not anywhere and NOTES.sub("", said).strip()):
+        return None
+    return _cut(found.group(0).strip())
+
+
+def _texts(value: Any, key: str = "") -> Iterator[tuple[str, str]]:
+    """Each text in a call's arguments, at any depth, named as `variants[0].about`."""
+    if isinstance(value, str):
+        yield key, value
+    elif isinstance(value, dict):
+        for k, v in value.items():
+            yield from _texts(v, f"{key}.{k}" if key else str(k))
+    elif isinstance(value, list):
+        for n, v in enumerate(value):
+            yield from _texts(v, f"{key}[{n}]")
 
 
 def _and(said: list[str]) -> str:
