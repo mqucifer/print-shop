@@ -55,6 +55,9 @@ CLOSE_EDGE = 2
 TEST_PIECE_COLOUR = (0.6, 0.6, 0.6)
 TEST_PIECE_OPACITY = 0.35
 TEST_PIECE_MARK = "grey: a test piece, not the part"
+#: The run's folder for what isn't its part (mqucifer/print-shop#315), as `rounds/paths.py` has it.
+SCRATCH = "scratch"
+SCRATCH_MARK = "shows scratch/ files: not the part"
 
 
 @dataclass
@@ -255,6 +258,26 @@ def _stamped(pixels: np.ndarray, *lines: str) -> np.ndarray:
     for k, line in enumerate(reversed(lines)):
         draw.text((8, picture.height - 16 * (k + 1)), line, fill=(20, 20, 20))
     return np.asarray(picture)
+
+
+def _scratch(files: list[str]) -> list[str]:
+    """The files drawn from the run's `scratch/`, which each picture of them says it shows."""
+    found = []
+    for name in dict.fromkeys(files):
+        parts = Path(name.removeprefix("/work/")).parts
+        if parts and parts[0].lower() == SCRATCH:
+            found.append(name)
+    return found
+
+
+def _say_scratch(report: Report, files: list[str]) -> tuple[str, ...]:
+    """A line naming the scratch files drawn, and the mark for their pictures: none without."""
+    scratch = _scratch(files)
+    if not scratch:
+        return ()
+    report.line(f"scratch/ files drawn, not the part: {', '.join(scratch)}")
+    report.numbers["scratch"] = scratch
+    return (SCRATCH_MARK,)
 
 
 def _aim(points: np.ndarray, view: str, close: Close | None = None) -> tuple[np.ndarray, float]:
@@ -716,6 +739,7 @@ def run_variants(args: Any, report: Report) -> None:
     sitting = _placed(everyone, placed)
     drawn_rows = _rows(variants, placed)
     marks = (TEST_PIECE_MARK,) if pieces else ()
+    _say_scratch(report, [*every_file, *args.test_pieces])
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     size = args.size
@@ -735,6 +759,7 @@ def run_variants(args: Any, report: Report) -> None:
         shades = [one.shade for one in shown for _ in one.meshes]
         points = np.vstack([np.asarray(m.vertices) for m in [*meshes, *pieces]])
         seen: dict[str, dict[str, int]] = {}
+        scratch = (SCRATCH_MARK,) if _scratch([*files, *args.test_pieces]) else ()
         for k, close in enumerate(closes):
             column = len(args.views) + k
             drawn = _render_view(meshes, close.view, size, pieces, close, shades)
@@ -743,7 +768,7 @@ def run_variants(args: Any, report: Report) -> None:
             )
             views[f"{name} close {k + 1}"] = facts
             where = _marks(shown, close.view, size, points, close)
-            numbered = _numbered(_stamped(drawn, *marks), where)
+            numbered = _numbered(_stamped(drawn, *marks, *scratch), where)
             sheet.paste(Image.fromarray(numbered), (column * size, row * size))
             draw.text((column * size + 8, row * size + 8), f"{name}: {close.label}", fill=(20,) * 3)
             report.second(_close_second(f"{name} close {k + 1}", facts))
@@ -756,7 +781,9 @@ def run_variants(args: Any, report: Report) -> None:
             )
             views[f"{name} {view}"] = facts
             seen[view] = _seen(shown, view, size, pieces)
-            numbered = _numbered(_stamped(pixels, *marks), _marks(shown, view, size, points))
+            numbered = _numbered(
+                _stamped(pixels, *marks, *scratch), _marks(shown, view, size, points)
+            )
             sheet.paste(Image.fromarray(numbered), (column * size, row * size))
             draw.text((column * size + 8, row * size + 8), f"{name}: {view}", fill=(20, 20, 20))
             report.second(
@@ -770,6 +797,7 @@ def run_variants(args: Any, report: Report) -> None:
             column = len(args.views) + len(closes) + k
             pixels, found = _cut_column(shown, cut, size, report, f"{name} ")
             problems += found
+            pixels = _stamped(pixels, *scratch) if scratch else pixels
             sheet.paste(Image.fromarray(pixels), (column * size, row * size))
             draw.text((column * size + 8, row * size + 8), f"{name}: {cut.label}", fill=(20,) * 3)
         seen_all[name] = seen
@@ -829,7 +857,8 @@ def run(args: Any, report: Report) -> None:
     drawn_all = [*meshes, *pieces]
     points = np.vstack([np.asarray(m.vertices) for m in drawn_all])
     seen: dict[str, dict[str, int]] = {}
-    marks = (TEST_PIECE_MARK,) if pieces else ()
+    scratch = _say_scratch(report, [*args.files, *args.test_pieces])
+    marks = ((TEST_PIECE_MARK,) if pieces else ()) + scratch
     names = slug("+".join(Path(f).stem for f in args.files))[:60]
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -859,7 +888,7 @@ def run(args: Any, report: Report) -> None:
     for z in args.section:
         pixels = _section_picture(parts[0], z, args.size)
         path = out / f"{names}-section-z{z:g}.png"
-        Image.fromarray(pixels).save(path)
+        Image.fromarray(_stamped(pixels, *scratch) if scratch else pixels).save(path)
         report.wrote(str(path))
         share, _ = painted(pixels)
         section = slice_at(parts[0].manifold(), z)
@@ -886,7 +915,7 @@ def run(args: Any, report: Report) -> None:
                 f"section z={z:g}: {drawn:.1f} mm² drawn, {area:.1f} mm² in the mesh"
                 + (f": not drawn, {'; '.join(missing[:5])}" if missing else "")
             )
-        pictures.append((f"z={z:g}", pixels))
+        pictures.append((f"z={z:g}", _stamped(pixels, *scratch) if scratch else pixels))
     close_ups = []
     for k, close in enumerate(closes):
         pixels = _render_view(meshes, close.view, args.size, pieces, close, shades)
@@ -909,6 +938,7 @@ def run(args: Any, report: Report) -> None:
     for cut in cuts:
         pixels, found = _cut_column(shown, cut, args.size, report, "")
         problems += found
+        pixels = _stamped(pixels, *scratch) if scratch else pixels
         path = out / f"{names}-{slug(cut.name)}.png"
         Image.fromarray(pixels).save(path)
         report.wrote(str(path))
