@@ -1707,6 +1707,41 @@ def test_what_load_cant_read_is_no_answer_naming_the_part_and_the_step(cae: Any)
         assert "Traceback" not in answer.text
 
 
+#: The sleeved core pushed down, on a mesh that leaves its sleeve one element thick
+#: (mqucifer/print-shop#320).
+SLEEVED = ("load", "order/sleeved.json", "--weight", "1", "--at", "0,0,8", "--mesh", "5")
+
+
+def test_a_joint_on_curved_slivers_reads_as_statics_says_in_freecad_s_order_not_by_the_guess(
+    cae: Any,
+) -> None:
+    """mqucifer/print-shop#320: a core in a sleeve 0.5 mm thick in a ring, bonded, the ring
+    held at its foot and the core pushed down by 1 kg. Meshed curved at 5 mm, the sleeve is
+    one element thick: each a sliver between its two curved faces, every node on a joint's
+    faces, and many of them with one side's mid-side node nearer another side's straight
+    midpoint than its own, so the guess by position took it for that side's. All that's beyond
+    each joint is the core and its weight, so statics gives each joint's force exactly. In
+    FreeCAD's order, as `load` takes it now, both joints read it, on both meshes, and their
+    moment too. By the guess, as the one pass read before, the sleeve's joint with the ring
+    read 6.6 N of the 9.8 N, and the joint inside it, read from the core's own elements,
+    was right."""
+    weight = [0, 0, G]
+    now, old = cae(*SLEEVED), forced(cae, "guess", *SLEEVED)
+    for answer in (now, old):
+        assert answer.verdict == "UNREAD", answer.text
+        assert "straight sides" not in answer.text, "its sleeve meshes curved"
+    for name in ("core+sleeve", "sleeve+ring"):
+        joint = now.numbers["joints"][name]
+        assert joint["statics_force_n"] == pytest.approx(weight, abs=1e-3), name
+        for key in ("force_n", "coarse_force_n"):
+            assert joint[key] == pytest.approx(joint["statics_force_n"], abs=1e-3), (name, key)
+        assert joint["moment_nmm"] == pytest.approx(joint["statics_moment_nmm"], abs=1e-3)
+    inside, outside = old.numbers["joints"]["core+sleeve"], old.numbers["joints"]["sleeve+ring"]
+    assert inside["force_n"] == pytest.approx(inside["statics_force_n"], abs=1e-3)
+    apart = np.linalg.norm(np.subtract(outside["force_n"], outside["statics_force_n"]))
+    assert apart > 0.2 * G, outside["force_n"]
+
+
 def test_an_element_whose_nodes_aren_t_in_freecad_s_order_is_no_answer_naming_its_part(
     cae: Any,
 ) -> None:
