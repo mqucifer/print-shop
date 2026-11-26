@@ -643,7 +643,8 @@ class _Model:
         for name, solid in zip(names, self.solids, strict=True):
             mine = [f for f in [*self.fixed, *sum(self.standing.values(), [])]
                     if any(f.isSame(g) for g in solid.Faces)]  # fmt: skip
-            for node in {n for f in mine for n in self._face_nodes(f)}:
+            # The held faces' nodes as FreeCAD holds them, and as CalculiX sums their reaction.
+            for node in {n for f in mine for n in self.fem.getNodesByFace(f)}:
                 if node in self.held_force:
                     self.outside[name][self.row[node]] += self.held_force.pop(node)
         # A pin's reaction, on no held face of its own: it's nothing where the load is square.
@@ -727,7 +728,9 @@ class _Model:
         crossed as if it weren't there, the parts it parts were taken for one, and the part
         left with no element of its own stopped the reading with "attempt to get argmax of an
         empty sequence" (mqucifer/print-shop#319). Its corners are on the face still, so there
-        a triangle is one whose corners are. A mesh whose sides are curved is read as it was."""
+        a triangle is one whose corners are. So too on a flat face along a curved edge, where a
+        mid-side node is on the edge's chord, just past the face. A mesh whose sides are curved
+        is read as it was."""
         if not self.straight:
             return [self.fem.getElementNodes(e) for e in self.fem.getFacesByFace(face)]
         on = set(self.fem.getNodesByFace(face))
@@ -740,8 +743,9 @@ class _Model:
         return self._surface_nodes
 
     def _face_nodes(self, face: Any) -> list[int]:
-        """The mesh's nodes on a face: on a straight-sided mesh, with its triangles' mid-side
-        nodes on it, which are off a curved face (`_on_face`)."""
+        """The mesh's nodes on a face where two parts meet: on a straight-sided mesh, with its
+        triangles' mid-side nodes, which are off a curved face, or past a curved edge of a flat
+        one (`_on_face`). A held face's are FreeCAD's own, as its constraint holds those."""
         found = self.fem.getNodesByFace(face)
         if not self.straight:
             return list(found)
@@ -865,7 +869,8 @@ class _Model:
             {
                 n
                 for f in [*self.fixed, *sum(self.standing.values(), [])]
-                for n in self._face_nodes(f)
+                # As FreeCAD holds them: its own constraint's nodes.
+                for n in self.fem.getNodesByFace(f)
             }
         )
         step = "*CLOAD\n" + "".join(
