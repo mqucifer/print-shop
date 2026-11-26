@@ -1582,26 +1582,34 @@ def forced(cae: Any, mode: str, *args: str) -> Answer:
 
 
 def reads_as(turned: Answer, placed: Answer) -> None:
-    """Every figure judged reads turned as it does in place, within what the second check's
-    coarser mesh moves it, and main's own run-to-run spread; and the layers are the same."""
+    """Every figure judged reads turned as it does in place, within the bench's second check:
+    each reading is worth what its own coarser mesh moves it, so the two are the same where
+    they're no further apart than that, both added, and main's own run-to-run spread. A turn
+    meshes the parts afresh, as another mesh would. And the layers are the same."""
     assert turned.verdict == placed.verdict, turned.text
 
-    def near(found: Any, against: Any, coarse: Any, what: str) -> None:
-        found, against, coarse = (np.asarray(v, dtype=float) for v in (found, against, coarse))
-        spread = np.linalg.norm(against - coarse) + RUN_TO_RUN * np.linalg.norm(against)
-        assert np.linalg.norm(found - against) <= spread, (what, found, against, coarse)
+    def near(pair: tuple[Any, Any], coarse: tuple[Any, Any], what: str) -> None:
+        (found, against), (found_c, against_c) = (
+            (np.asarray(a, dtype=float), np.asarray(b, dtype=float)) for a, b in (pair, coarse)
+        )
+        spread = float(np.linalg.norm(against - against_c) + np.linalg.norm(found - found_c))
+        spread += RUN_TO_RUN * float(np.linalg.norm(against))
+        assert np.linalg.norm(found - against) <= spread, (what, pair, coarse)
 
     for name, part in placed.numbers["parts"].items():
         other = turned.numbers["parts"][name]
         assert other["layers"] == pytest.approx(part["layers"], abs=1e-9), name
         for key in ("across_layers_pct", "stretch_pct"):
-            near(other[key], part[key], part[f"coarse_{key}"], f"{name}.{key}")
+            near((other[key], part[key]), (other[f"coarse_{key}"], part[f"coarse_{key}"]),
+                 f"{name}.{key}")  # fmt: skip
     for one, other in zip(placed.numbers["loads"], turned.numbers["loads"], strict=True):
-        near(other["moves_mm"], one["moves_mm"], one["coarse_moves_mm"], "moves_mm")
+        near((other["moves_mm"], one["moves_mm"]),
+             (other["coarse_moves_mm"], one["coarse_moves_mm"]), "moves_mm")  # fmt: skip
     for name, joint in placed.numbers["joints"].items():
         other = turned.numbers["joints"][name]
-        near(other["force_n"], joint["force_n"], joint["coarse_force_n"], f"{name}.force_n")
-        near(other["moment_nmm"], joint["moment_nmm"], joint["coarse_moment_nmm"], name)
+        for key in ("force_n", "moment_nmm"):
+            coarse = f"coarse_{key}"
+            near((other[key], joint[key]), (other[coarse], joint[coarse]), f"{name}.{key}")
 
 
 def test_a_bracket_drawn_on_its_side_and_placed_by_its_turns_reads_as_drawn_in_place(

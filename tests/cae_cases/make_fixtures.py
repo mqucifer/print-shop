@@ -52,11 +52,11 @@ seat beside it all round, or at the middle with the window's sides drawn touchin
 And the socket 1.5 mm clear, more play than a tilt closes, and 2.5 mm clear, more than is read.
 
 `turns/` (mqucifer/print-shop#319): a shelf bracket, an L 5 mm thick and 20 wide, its upright
-50 tall bolted to a wall 10 thick at x 0 and its arm 60 long along x at the top, printed on its
-side; and two wall slices of a ring, 50 to 56 mm from its axis and 80 tall, with a 2° seam
-between them, and a rib across the seam: a cap 4 thick curved round the slices' outsides, and a
-fin under it that fills the seam, touching both. Each is drawn in place, and again in its print
-pose and placed by its turns: about x, y or z, and two combined.
+50 tall bolted to a wall 10 thick at x 0 and its arm 60 long along x at the top, its inside
+corner rounded 3 mm, printed on its side; and two wall slices of a ring, 50 to 56 mm from its
+axis and 80 tall, with a 2° seam between them, and a rib across the seam: a cap 4 thick curved
+round the slices' outsides, and a fin under it that fills the seam, touching both. Each is drawn
+in place, and again in its print pose and placed by its turns: about x, y or z, and two combined.
 """
 
 from __future__ import annotations
@@ -873,7 +873,7 @@ def stool() -> None:
 
 
 #: The shelf bracket and the ribbed slices (mqucifer/print-shop#319), in mm and degrees.
-SHELF_T, SHELF_W, SHELF_H, SHELF_L, SHELF_WALL = 5.0, 20.0, 50.0, 60.0, 10.0
+SHELF_T, SHELF_W, SHELF_H, SHELF_L, SHELF_WALL, SHELF_ROUND = 5.0, 20.0, 50.0, 60.0, 10.0, 3.0
 RIB_IN, RIB_OUT, RIB_CAP, RIB_TALL, RIB_LOW, RIB_HIGH = 50.0, 56.0, 4.0, 80.0, 30.0, 40.0
 #: Each slice's angles, the seam's between them, and the cap's.
 RIB_SLICES, RIB_SEAM, RIB_SPAN = ((0.0, 29.0), (31.0, 60.0)), (29.0, 31.0), (10.0, 50.0)
@@ -925,6 +925,12 @@ def turns() -> None:
     upright = box((0, 0, 0), (SHELF_T, SHELF_W, SHELF_H))
     arm = box((0, 0, SHELF_H - SHELF_T), (SHELF_L, SHELF_W, SHELF_H))
     bracket = upright.fuse(arm).removeSplitter()
+    # Its inside corner rounded, so no figure is a sharp corner's, which no mesh reads alike.
+    inside = [e for e in bracket.Edges
+              if abs(e.BoundBox.XMin - SHELF_T) < 1e-6 and abs(e.BoundBox.XMax - SHELF_T) < 1e-6
+              and abs(e.BoundBox.ZMin - (SHELF_H - SHELF_T)) < 1e-6 and e.BoundBox.ZLength < 1e-6]
+    assert len(inside) == 1, inside
+    bracket = bracket.makeFillet(SHELF_ROUND, inside)
     save(box((-SHELF_WALL, 0, 0), (0, SHELF_W, SHELF_H)), out / "wall.step")
     save(bracket, out / "bracket.step")
     middle = [[0, SHELF_W / 2, SHELF_H / 2]]
