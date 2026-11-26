@@ -295,8 +295,8 @@ def _arguments() -> dict[str, list[tuple[str, bool]]]:
 
 def test_each_role_a_need_follows_the_part_by_is_the_parsers_own_argument() -> None:
     """A settled need's frame, panes and count follow the part (mqucifer/print-shop#59): each is
-    read by the parser's name, and every option of those commands takes one value, as
-    `needs.on_part` reads them."""
+    read by the parser's name, and every option of those commands takes a value: how many,
+    `needs.on_part` reads from the parser itself (mqucifer/print-shop#327)."""
     arguments = _arguments()
     for command, roles in reports.ROLES.items():
         names = [name for name, _ in arguments[command]]

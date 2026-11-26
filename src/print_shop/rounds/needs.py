@@ -9,7 +9,9 @@ this: writing and running are open throughout intake.
 
 from __future__ import annotations
 
+import argparse
 import contextlib
+import functools
 import json
 import math
 import re
@@ -17,7 +19,7 @@ import shlex
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
-from print_shop.bench import limits
+from print_shop.bench import cli, limits
 from print_shop.rounds import reports, toolsets
 from print_shop.rounds.toolsets import Toolset
 
@@ -578,21 +580,70 @@ def echoes_wrong(found: list[Need]) -> list[str]:
     return wrong
 
 
-def _split(words: list[str]) -> tuple[list[str], list[tuple[str, str]]]:
-    """A command's positional words and its options, each option with its one value: every
-    option of the commands whose files follow the part takes one (`reports.ROLES`)."""
+@functools.cache
+def takes(command: str) -> dict[str, tuple[int, int | None]]:
+    """How many values each of a bench command's options takes, by each name it goes by, as the
+    command's own parser reads them (`bench/cli.py`): the least and the most, None for no most.
+    `capture --raised-faces` takes a file per pane (mqucifer/print-shop#294), where every other
+    option its needs carry takes one: read as one, a carried need kept the first pane's file and
+    lost the rest (mqucifer/print-shop#327). Empty for a command the bench doesn't have."""
+    sub = next(
+        (a for a in cli.parser()._actions if isinstance(a, argparse._SubParsersAction)), None
+    )
+    parser = sub.choices.get(command) if sub is not None else None
+    if parser is None:
+        return {}
+    found: dict[str, tuple[int, int | None]] = {}
+    for action in parser._actions:
+        nargs = action.nargs
+        count: tuple[int, int | None]
+        if nargs is None:
+            count = (1, 1)
+        elif isinstance(nargs, int):
+            count = (nargs, nargs)
+        elif nargs == argparse.OPTIONAL:
+            count = (0, 1)
+        elif nargs == argparse.ONE_OR_MORE:
+            count = (1, None)
+        else:
+            count = (0, None)
+        for name in action.option_strings:
+            found[name] = count
+    return found
+
+
+def _split(command: str, words: list[str]) -> tuple[list[str], list[tuple[str, list[str]]]]:
+    """A command's positional words and its options, each option with its values, as many as the
+    command's parser has it take (`takes`): a fixed number, the next one whatever it is as main
+    read every option, or, where it may take more or fewer, each word up to the next `--`
+    option. An option the parser doesn't name takes one, as one given with `=` does."""
+    counts = takes(command)
     positional: list[str] = []
-    options: list[tuple[str, str]] = []
+    options: list[tuple[str, list[str]]] = []
     k = 0
     while k < len(words):
         word = words[k]
         if word.startswith("--"):
             if "=" in word:
                 name, value = word.split("=", 1)
-                options.append((name, value))
+                options.append((name, [value]))
             else:
-                options.append((word, words[k + 1] if k + 1 < len(words) else ""))
-                k += 1
+                least, most = counts.get(word, (1, 1))
+                if least == most:
+                    values = words[k + 1 : k + 1 + least]
+                    k += len(values)
+                    if least and not values:
+                        values = [""]  # the last word, with none after it, as on main
+                else:
+                    values = []
+                    while (
+                        k + 1 < len(words)
+                        and not words[k + 1].startswith("--")
+                        and (most is None or len(values) < most)
+                    ):
+                        values.append(words[k + 1])
+                        k += 1
+                options.append((word, values))
         else:
             positional.append(word)
         k += 1
@@ -611,7 +662,7 @@ def on_part(need: Need, glass: list[Any]) -> tuple[Need, str]:
     if not roles or not glass:
         return need, ""
     command = words[0]
-    positional, options = _split(words[1:])
+    positional, options = _split(command, words[1:])
     names = reports.POSITIONAL[command]
     given: dict[str, list[str]] = {name: [] for name in names}
     for k, word in enumerate(positional):
@@ -631,22 +682,22 @@ def on_part(need: Need, glass: list[Any]) -> tuple[Need, str]:
         panes = list(one.panes) if one is not None else [p for g in glass for p in g.panes]
         if roles.get("panes") == reports.PANES and panes:
             given["panes"] = panes
-    moved: list[tuple[str, str]] = []
-    for name, value in options:
+    moved: list[tuple[str, list[str]]] = []
+    for name, values in options:
         role = roles.get(name)
         if role == reports.COUNT and one is not None:
             # The bodies in the pane files, not the files: one file may hold a colour's panes
             # (mqucifer/print-shop#153).
-            moved.append((name, str(one.count())))
+            moved.append((name, [str(one.count())]))
         elif role == reports.WITH and one is not None:
             continue  # put back from the declaration below
         else:
-            moved.append((name, value))
+            moved.append((name, values))
     if one is not None and roles.get("--with") == reports.WITH:
-        moved += [("--with", other) for other in one.others]
+        moved += [("--with", [other]) for other in one.others]
     rebuilt = [command, *[w for name in names for w in given[name]]]
-    for name, value in moved:
-        rebuilt += [name, value]
+    for name, values in moved:
+        rebuilt += [name, *values]
     text = shlex.join(rebuilt)
     if shlex.split(text) == words or text == need.command:
         return need, ""
